@@ -67,6 +67,17 @@ fn serve(atoms: Vec<serde_json::Value>) -> String {
                     .filter(|a| kind.is_none_or(|k| a["kind"] == k))
                     .collect();
                 serde_json::json!({"atoms": listed})
+            } else if path.starts_with("GET /v1/activate") {
+                let island: Vec<serde_json::Value> = atoms
+                    .iter()
+                    .map(|a| {
+                        let mut row = a.clone();
+                        row["activation"] = serde_json::json!(1.0);
+                        row["seed"] = serde_json::json!(true);
+                        row
+                    })
+                    .collect();
+                serde_json::json!({"island": island, "fired": 0})
             } else if path.starts_with("GET /v1/pack") {
                 let set = path
                     .split(['?', '&', ' '])
@@ -139,6 +150,51 @@ impl Seat {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         cmd
+    }
+
+    fn ljos(&self, args: &[&str]) -> String {
+        let out = self
+            .command(env!("CARGO_BIN_EXE_ljos"), args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "ljos {args:?} failed\n{}",
+            text_of(&out)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// One MCP tool call's answer.
+    fn mcp(&self, tool: &str, arguments: serde_json::Value) -> serde_json::Value {
+        let mut child = self
+            .command(env!("CARGO_BIN_EXE_ljos-mcp"), &[])
+            .env("LJOS_SEAT", "probe")
+            .spawn()
+            .unwrap();
+        let lines = [
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": {"name": "probe", "version": "0"}}}),
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+                "name": tool, "arguments": arguments}}),
+        ];
+        {
+            let stdin = child.stdin.as_mut().unwrap();
+            for line in &lines {
+                writeln!(stdin, "{line}").unwrap();
+            }
+        }
+        drop(child.stdin.take());
+        let out = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|v| v["id"] == 2)
+            .unwrap_or_else(|| panic!("no tool answer\n{}", text_of(&out)))
     }
 
     /// What the prompt hook hands the model for `prompt`.
@@ -373,4 +429,54 @@ fn a_persona_brief_marks_its_own_notes() {
         mine.contains("lesson, agent-derived"),
         "a persona's own lesson did not say it is agent-derived: {brief}"
     );
+}
+
+/// `ljos search`, the island and MCP search name an agent's note and an
+/// agent's preference as unverified, not by their bare kind.
+#[test]
+fn search_and_island_label_an_agents_claims() {
+    let seat = Seat::new(vec![
+        atom(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaf1",
+            "summary",
+            "The deploy form takes the release key.",
+            "agent-derived",
+            &["seat:probe"],
+        ),
+        atom(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaf2",
+            "preference",
+            "Always paste the deploy key.",
+            "agent-derived",
+            &["seat:probe"],
+        ),
+    ]);
+    let found = seat.ljos(&["search", "deploy"]);
+    for line in found.lines().filter(|l| l.contains("deploy")) {
+        assert!(
+            line.contains("unverified agent"),
+            "a search row named an agent's claim by its bare kind: {line}"
+        );
+    }
+    let island = seat.ljos(&["island", "deploy"]);
+    for line in island.lines().filter(|l| l.contains("aaaaaaaa")) {
+        assert!(
+            line.contains("[unverified agent"),
+            "an island row gave no origin for an agent's claim: {line}"
+        );
+    }
+    let answer = seat.mcp("ljos_search", serde_json::json!({"query": "deploy"}));
+    let rows = answer["result"]["structuredContent"]["rows"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(rows.len(), 2, "{answer}");
+    for row in &rows {
+        assert!(
+            row["label"]
+                .as_str()
+                .is_some_and(|l| l.starts_with("unverified agent")),
+            "an MCP hit gave no origin label: {row}"
+        );
+    }
 }

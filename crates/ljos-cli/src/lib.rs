@@ -23913,7 +23913,7 @@ pub fn format_island(body: &Value) -> String {
         .filter(|a| reviewable(a))
     {
         out.push_str(&format!(
-            "{:.3}\t{}\t{}\t{}\t{}\n",
+            "{:.3}\t{}\t{}\t{}\t[{}] {}\n",
             atom["activation"].as_f64().unwrap_or(0.0),
             if atom["seed"].as_bool().unwrap_or(false) {
                 "seed"
@@ -23922,6 +23922,7 @@ pub fn format_island(body: &Value) -> String {
             },
             atom["id"].as_str().unwrap_or("-"),
             age_of(atom["ts"].as_str(), &now),
+            atom_label(atom),
             atom["text"].as_str().unwrap_or("")
         ));
     }
@@ -25118,7 +25119,7 @@ fn timeline_of(issue: &str, limit: usize) -> Result<(String, Vec<Event>)> {
                     source: "memory",
                     text: format!(
                         "[{}] {}",
-                        atom["kind"].as_str().unwrap_or("claim"),
+                        atom_label(atom),
                         atom["text"].as_str().unwrap_or("").trim()
                     ),
                 });
@@ -27576,7 +27577,7 @@ pub fn format_hits(hits: &[Hit], explain: bool) -> String {
             "{:.4}\t{}\t{}\t{}\t{}{}\t{}\n",
             h.score,
             named,
-            h.kind,
+            kind_label(h),
             id,
             age_of(h.ts.as_deref(), &now),
             from,
@@ -27807,9 +27808,11 @@ fn note_kind_label() -> &'static str {
 
 /// The kind a recalled line names. A note is marked an unverified agent
 /// note by its true origin, a lesson in the person's words says so, and a
-/// lesson that is not says it is agent-derived, so a standing lesson the
-/// agent wrote never reads like one the person stated.
-fn kind_label(h: &Hit) -> String {
+/// lesson the pack did not store as the person's says it is agent-derived,
+/// so a standing lesson the agent wrote never reads like one the person
+/// stated. `ljos search`, the island, the timeline and MCP name it the same.
+#[must_use]
+pub fn kind_label(h: &Hit) -> String {
     if agent_preference(h) {
         return "unverified agent preference (origin agent-derived)".to_string();
     }
@@ -27823,11 +27826,17 @@ fn kind_label(h: &Hit) -> String {
     };
     if said_by_person(h) {
         format!("{kind}, the person's words")
-    } else if kind == "lesson" {
+    } else if kind == "lesson" && !person_origin(h) {
         "lesson, agent-derived".to_string()
     } else {
         kind.to_string()
     }
+}
+
+/// [`kind_label`] for an atom the pack returned whole, as the island does.
+#[must_use]
+pub fn atom_label(atom: &Value) -> String {
+    atom_as_hit(atom).map_or_else(|| "claim".to_string(), |h| kind_label(&h))
 }
 
 /// `, N days ago` for a bracket, empty when the stamp is missing.
@@ -31256,9 +31265,9 @@ mod tests {
             })
             .collect();
         atoms.push(
-            serde_json::json!({"id": "lesson", "kind": "lesson", "text": "tagged lesson",
+            serde_json::json!({"id": "lesson-0lm4", "kind": "lesson", "text": "tagged lesson",
             "ts": "2026-10-18T23:00:00.000Z", "valid_from": "2026-10-18T09:00:00.000Z",
-            "entities": ["issue:probe-0lm4"]}),
+            "origin": "agent-derived", "entities": ["issue:probe-0lm4"]}),
         );
         atoms.push(
             serde_json::json!({"id": "gone", "kind": "note", "text": "retracted",
@@ -31277,7 +31286,7 @@ mod tests {
         assert_eq!(ids.len(), 23, "{ids:?}");
         assert_eq!(ids[0], "own21");
         assert_eq!(ids[21], "own00");
-        assert_eq!(ids[22], "lesson");
+        assert_eq!(ids[22], "lesson-0lm4");
         let hit = |id: &str, kind: &str, text: &str| packset_client::Hit {
             id: Some(id.into()),
             text: text.into(),
@@ -41509,10 +41518,13 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "{printed}"
         );
         assert!(
-            printed.contains("1.000\tseed\ta\ttoday\tone\n"),
+            printed.contains("1.000\tseed\ta\ttoday\t[lesson] one\n"),
             "{printed}"
         );
-        assert!(printed.contains("0.250\t    \tb\t\ttwo\n"), "{printed}");
+        assert!(
+            printed.contains("0.250\t    \tb\t\t[lesson] two\n"),
+            "{printed}"
+        );
         assert!(format_island(&serde_json::json!({})).is_empty());
         let persona = serde_json::json!({
             "as": "reviewer",
