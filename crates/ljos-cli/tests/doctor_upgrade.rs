@@ -29,13 +29,11 @@ struct Home {
 impl Home {
     fn new() -> Self {
         static N: AtomicU64 = AtomicU64::new(0);
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/doctor-upgrade-tests")
-            .join(format!(
-                "{}-{}",
-                std::process::id(),
-                N.fetch_add(1, Ordering::Relaxed)
-            ));
+        let root = std::env::temp_dir().join(format!(
+            "doctor-upgrade-tests-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::create_dir_all(&root).unwrap();
         Self { root }
     }
@@ -65,6 +63,7 @@ impl Home {
                 self.root.join("gitconfig").display().to_string(),
             ),
             ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ("LJOS_GUARD".into(), "on".into()),
             ("PACKSET_URL".into(), "off".into()),
         ]
     }
