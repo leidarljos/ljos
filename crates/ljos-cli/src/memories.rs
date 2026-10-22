@@ -1,8 +1,9 @@
 //! An agent's memories, written first and reviewed afterwards.
 //!
-//! An agent's `ljos remember` writes at once, with origin `agent-derived`
-//! and a `source` naming the seat, the harness, the session, the time and,
-//! when there is one, the reason. `ljos finish --lesson`, `ljos findings
+//! An agent's `ljos remember` of its own words is an unreviewed note, with
+//! origin `agent-derived` and a `source` naming the seat, the harness, the
+//! session, the time and, when there is one, the reason. The prompt does
+//! not treat that note as a fact. `ljos finish --lesson`, `ljos findings
 //! --remember` and the prompt hook's correction file a proposal instead,
 //! and `ljos accept` is what writes that claim. A person, or a seat they
 //! ask, reviews afterwards: `ljos memories review` lists the unreviewed ones

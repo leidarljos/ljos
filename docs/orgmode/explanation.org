@@ -46,8 +46,10 @@ what an earlier one refused, so the first refusal wins.
    row says whether it runs the table built into it or phronesis after
    that table. Without the binary nothing is refused here, unless
    =POLICYD_REQUIRED= is set to 1, which refuses everything instead.
-   A binary that is there but crashes, prints no verdict or takes more
-   than five seconds refuses the line.
+   A =POLICYD_BIN= that names a file which is not there is the same
+   absence: the line is allowed and the note says the guard did not
+   start, unless that switch is set. A binary that is there but crashes,
+   prints no verdict or takes more than five seconds refuses the line.
 - *Seat rules.* =ljos rule= writes a rule (a pattern, and a verdict of
    deny or ask) into the pack, and the seat tries it against each command
    of the line. A quoted sentence or a heredoc body counts as data.

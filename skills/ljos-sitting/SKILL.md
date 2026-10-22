@@ -24,7 +24,9 @@ agent, in Cursor or any other tool, can see who has it and what it taught.
 ## During
 
 - Record progress on the ticket: `ljos note ISSUE "what is done, what is left"`.
-- Save a lesson as soon as you learn it: `ljos remember "..."`.
+- Save a lesson of your own as soon as you learn it: `ljos note ISSUE "..."`.
+  The prompt does not treat that note as a fact. The person's own words
+  are `ljos remember "..."`.
 - File new work you find instead of doing it on the side (ljos-file skill).
 - A choice with more than one defensible answer goes to a vote (ljos-decide skill).
 

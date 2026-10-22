@@ -200,9 +200,10 @@ fn a_remembered_lesson_reaches_the_prompt_hook_onboard_writes() {
     let (home, _daemon, hook) = seat();
     let remembered = home.ljos(&["remember", LESSON], None);
     assert!(remembered.status.success(), "{}", text(&remembered));
-    if text(&remembered).contains("episode:") {
-        // This test runs under an agent runner, so the lesson is an
-        // episode by design. The person's path needs a plain shell.
+    if text(&remembered).contains("episode:") || text(&remembered).contains("unreviewed note:") {
+        // This test runs under an agent runner, so the words are the
+        // agent's and are not a standing lesson. The person's path needs
+        // a plain shell.
         eprintln!("skipped: cargo test ran under an agent runner");
         return;
     }
