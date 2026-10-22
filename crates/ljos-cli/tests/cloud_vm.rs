@@ -1655,6 +1655,21 @@ fn cloud_guard_reads_git_env_and_env_chdir_context() {
 }
 
 #[test]
+fn cloud_guard_refuses_prune_and_mirror_when_they_can_delete_heads() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-prune", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let repo = clone_of(root.path(), &origin, "probe-prune");
+
+    refused("git push --prune origin 'refs/heads/*:refs/heads/*'", &repo);
+    refused("git push --mirror origin", &repo);
+}
+
+#[test]
 fn cloud_guard_reads_the_gh_pr_verb_and_never_its_arguments() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
@@ -1746,12 +1761,7 @@ fn cloud_guard_allows_pushes_that_leave_cursor_refs_alone() {
     ] {
         allowed(line, &develop);
     }
-    for line in [
-        "git push --all",
-        "git push --branches",
-        "git push --mirror",
-        "git push --tags",
-    ] {
+    for line in ["git push --all", "git push --branches", "git push --tags"] {
         allowed(line, &clean);
     }
     let elsewhere = root.path();
