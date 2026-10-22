@@ -204,6 +204,12 @@ pub fn require_tracker_history(root: &Path) -> std::result::Result<(), String> {
         return Err(format!("{HISTORY_INCOMPLETE}: {why}"));
     }
     let key = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    // A second caller waits for the first one's fetch, then reads the
+    // cache and the checkout again, rather than losing git's shallow.lock.
+    let gate = history_gate(&key);
+    let _held = gate
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (ready, deepened) = {
         let cache = history_cache();
         (
@@ -240,16 +246,31 @@ pub fn require_tracker_history(root: &Path) -> std::result::Result<(), String> {
 struct HistoryCache {
     ready: Vec<std::path::PathBuf>,
     deepened: Vec<std::path::PathBuf>,
+    gates: Vec<(std::path::PathBuf, std::sync::Arc<std::sync::Mutex<()>>)>,
 }
 
 fn history_cache() -> std::sync::MutexGuard<'static, HistoryCache> {
     static CACHE: std::sync::Mutex<HistoryCache> = std::sync::Mutex::new(HistoryCache {
         ready: Vec::new(),
         deepened: Vec::new(),
+        gates: Vec::new(),
     });
     CACHE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The lock held across the gap check and deepen of the tracker at `key`.
+fn history_gate(key: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    let mut cache = history_cache();
+    if let Some((_, gate)) = cache.gates.iter().find(|(path, _)| path == key) {
+        return std::sync::Arc::clone(gate);
+    }
+    let gate = std::sync::Arc::default();
+    cache
+        .gates
+        .push((key.to_path_buf(), std::sync::Arc::clone(&gate)));
+    gate
 }
 
 /// Shallow history, missing objects, or parents rewritten by a replace
@@ -1286,6 +1307,52 @@ mod tests {
         if let Some(root) = std::env::var_os("LJOS_TEST_HISTORY_ROOT") {
             require_tracker_history(Path::new(&root)).unwrap();
         }
+    }
+
+    /// Two checks of one shallow tracker at once fetch one at a time, and
+    /// the one that waited finds the checkout whole. The remote's
+    /// upload-pack marks a fetch that starts while another is in flight.
+    #[test]
+    fn two_checks_of_one_tracker_do_not_deepen_at_once() {
+        let _lock = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin");
+        pinned_before_slots(&origin);
+        let shallow = shallow_of(root.path(), &origin);
+        let busy = root.path().join("busy");
+        let overlap = root.path().join("overlap");
+        // git appends the repository path to this line.
+        let upload_pack = format!(
+            "mkdir '{}' 2>/dev/null || touch '{}'; sleep 1; rmdir '{}'; git-upload-pack",
+            busy.display(),
+            overlap.display(),
+            busy.display()
+        );
+        git_ok(
+            &shallow,
+            &["config", "remote.origin.uploadpack", &upload_pack],
+        );
+        let start = std::sync::Barrier::new(2);
+        let results: Vec<_> = std::thread::scope(|s| {
+            let checks: Vec<_> = (0..2)
+                .map(|_| {
+                    s.spawn(|| {
+                        start.wait();
+                        require_tracker_history(&shallow)
+                    })
+                })
+                .collect();
+            checks.into_iter().map(|c| c.join().unwrap()).collect()
+        });
+        assert!(!overlap.exists(), "two fetches of one tracker ran at once");
+        for result in results {
+            result.unwrap();
+        }
+        assert_eq!(
+            git_ok(&shallow, &["rev-parse", "--is-shallow-repository"]).trim(),
+            "false",
+            "the clone stayed shallow"
+        );
     }
 
     #[test]
