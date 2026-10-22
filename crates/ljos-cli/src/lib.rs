@@ -28861,6 +28861,9 @@ pub(crate) fn atom_now(id: &str) -> std::result::Result<Option<Value>, String> {
         .append_pair("workspace", &client.workspace());
     match ureq::get(url.as_str()).timeout(left()).call() {
         Err(ureq::Error::Status(401, _)) => {}
+        Err(ureq::Error::Transport(err)) => {
+            return Err(format!("the pack did not answer for {id}: {err}"));
+        }
         _ => {
             return Err(format!(
                 "the listener at {} answers for {id} without this seat's token",
