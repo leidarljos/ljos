@@ -1033,6 +1033,8 @@ fn runner_from(
     runner_of_file(&script, home, store, person, (meta.dev(), meta.ino()))
 }
 
+/// Off Linux there is no `/proc/<pid>/exe` to read nor a descriptor
+/// walk ([`pinned_walk`]), so no process is an installed runner.
 #[cfg(not(target_os = "linux"))]
 #[must_use]
 pub fn exe_runner(_pid: u32) -> Option<&'static str> {
@@ -1458,6 +1460,7 @@ mod tests {
     use super::*;
 
     /// [`runner_of_file`] for the file `path` names now.
+    #[cfg(target_os = "linux")]
     fn runner_here(
         path: &Path,
         home: Option<&Path>,
@@ -1549,6 +1552,7 @@ mod tests {
     /// that home into another, and a file anyone may rewrite or reach
     /// through a directory anyone may write are not installed copies; the
     /// same file kept by the person is.
+    #[cfg(target_os = "linux")]
     #[test]
     fn an_install_root_holds_only_what_resolves_inside_it() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1601,6 +1605,7 @@ mod tests {
     /// the root, so that directory is judged as the root is: each root
     /// under the person's home is refused once its own directory is
     /// writable by anyone or by a group the person shares.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_root_in_a_directory_others_may_write_is_refused() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1668,6 +1673,7 @@ mod tests {
     /// path resolved, for a link or for another directory holding a file
     /// of the same name, is not walked through, and a file that is not
     /// the one the process runs is not its runner.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_parent_swapped_after_the_path_resolved_is_refused() {
         use std::os::unix::fs::MetadataExt as _;
@@ -1794,6 +1800,7 @@ mod tests {
     /// no one else may write it; a root's store must be closed to the
     /// person, sticky when its group may write it, and hold root's
     /// entries.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_nix_entry_is_a_runner_only_in_a_store_nix_keeps() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1871,6 +1878,7 @@ mod tests {
 
     /// One user `u`, the name and members of whatever group is asked
     /// for, and the uids whose primary group it is.
+    #[cfg(target_os = "linux")]
     struct FakeAccounts {
         user: Option<&'static str>,
         group: Option<&'static str>,
@@ -1878,6 +1886,7 @@ mod tests {
         primary: Option<Vec<u32>>,
     }
 
+    #[cfg(target_os = "linux")]
     impl Accounts for FakeAccounts {
         fn user_name(&self, _uid: u32) -> Option<std::ffi::OsString> {
             self.user.map(Into::into)
@@ -1899,6 +1908,7 @@ mod tests {
     /// when that group is: named for them, listing no one else, and no
     /// other account's primary group. An account lookup that fails is
     /// not such a group.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_group_write_counts_only_from_a_group_the_person_has_alone() {
         use std::os::unix::fs::PermissionsExt as _;
