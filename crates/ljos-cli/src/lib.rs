@@ -9760,11 +9760,13 @@ pub fn decision_member_task(brief: &str, persona: &str, issue: &str) -> String {
 /// Fork the panel opener and return at once. The opener files or reuses the
 /// decision, writes the briefs, and starts one headless member per persona.
 /// A second call for the same prompt in this session does not fork again.
-/// A panel member (`LJOS_PANEL_CHILD`) does not fork one of its own.
+/// A panel member (`LJOS_PANEL_CHILD`) does not fork one of its own, and a
+/// seat that may not write the tracker forks nothing.
 ///
 /// # Errors
 ///
-/// The runtime directory cannot be written, or the opener did not start.
+/// The seat may not write the tracker, the runtime directory cannot be
+/// written, or the opener did not start.
 pub fn start_decision_panel(
     prompt: &str,
     session: Option<&str>,
@@ -9773,6 +9775,7 @@ pub fn start_decision_panel(
     if std::env::var_os("LJOS_PANEL_CHILD").is_some() {
         return Ok(decision_hold());
     }
+    write_seat("open-panel")?;
     let key: String = prompt.chars().take(80).collect();
     let seen_key = format!("panel-open:{key}");
     if seen_ids(session).contains(&seen_key) {
@@ -10047,6 +10050,7 @@ fn file_yes_no(parent: Option<&str>, prompt: &str) -> Result<String> {
     argv.push(title);
     let out = std::process::Command::new(which::which("vissue").context("vissue not on PATH")?)
         .args(&argv)
+        .env("VISSUE_AGENT", seat_name())
         .stdin(std::process::Stdio::null())
         .output()
         .context("vissue create")?;
@@ -42748,6 +42752,19 @@ mod tests {
         let argv_path = dir.path().join("argv.txt");
         unsafe { std::env::set_var("LJOS_PANEL_BIN", &opener) };
         unsafe { std::env::set_var("LJOS_TEST_ARGV", &argv_path) };
+        let unnamed = start_decision_panel(
+            "so what do we think? is this the right answer?",
+            Some("sess-open"),
+            Some(dir.path().to_str().unwrap()),
+        )
+        .expect_err("an unnamed seat opens no panel");
+        assert!(
+            format!("{unnamed:#}").contains("no seat is named"),
+            "{unnamed:#}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!argv_path.exists(), "an unnamed seat forked an opener");
+        unsafe { std::env::set_var("LJOS_SEAT", "saddle") };
         let said = start_decision_panel(
             "so what do we think? is this the right answer?",
             Some("sess-open"),
@@ -42762,6 +42779,7 @@ mod tests {
             })
             .unwrap_or_default();
         assert!(argv.contains("open-panel"), "{argv}");
+        unsafe { std::env::remove_var("LJOS_SEAT") };
         unsafe { std::env::remove_var("LJOS_PANEL_BIN") };
         unsafe { std::env::remove_var("LJOS_TEST_ARGV") };
         unsafe { std::env::remove_var("LJOS_IN_HOOK") };

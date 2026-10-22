@@ -3628,6 +3628,7 @@ fn tracker_write(cmd: &Cmd) -> Option<&'static str> {
         } if choice.is_some() || *jev || *withdraw => "vote",
         Cmd::Predict { .. } => "predict",
         Cmd::Slot { .. } => "slot",
+        Cmd::OpenPanel { .. } => "open-panel",
         _ => return None,
     })
 }

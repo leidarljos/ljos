@@ -235,6 +235,56 @@ fn a_filed_issue_is_created_as_the_seat_the_check_named() {
     assert!(create.ends_with("VISSUE_AGENT=saddle"), "{create}");
 }
 
+fn open_panel(b: &Bench, env: &[(&str, &str)]) -> Output {
+    let prompt = b.root.join("prompt.txt");
+    std::fs::write(&prompt, "so what do we think? is this the right answer?").unwrap();
+    let log = b.root.join("run/panel-open.log");
+    let mut env = env.to_vec();
+    env.push(("LJOS_PROJECT", "proj"));
+    b.ljos_env(
+        &env,
+        &[
+            "open-panel",
+            "--prompt-file",
+            prompt.to_str().unwrap(),
+            "--log",
+            log.to_str().unwrap(),
+        ],
+    )
+}
+
+#[test]
+fn a_panel_opened_by_an_unnamed_or_unlisted_seat_files_nothing() {
+    let b = Bench::new();
+    let unnamed = open_panel(&b, &[]);
+    let err = String::from_utf8_lossy(&unnamed.stderr);
+    assert!(!unnamed.status.success(), "{unnamed:?}");
+    assert!(err.contains("open-panel: no seat is named"), "{err}");
+    assert_eq!(b.calls(), "", "nothing reached the tracker");
+
+    b.seats("seats = [\"saddle\"]\n");
+    let unlisted = open_panel(&b, &[("LJOS_SEAT", "stranger")]);
+    let err = String::from_utf8_lossy(&unlisted.stderr);
+    assert!(!unlisted.status.success(), "{unlisted:?}");
+    assert!(err.contains("no seat named stranger"), "{err}");
+    assert_eq!(b.calls(), "", "nothing reached the tracker");
+}
+
+#[test]
+fn a_panel_decision_is_filed_as_the_seat_the_check_named() {
+    let b = Bench::new();
+    b.seats("seats = [\"saddle\", \"inky\"]\n");
+    open_panel(&b, &[("LJOS_SEAT", "saddle"), ("VISSUE_AGENT", "inky")]);
+    let calls = b.calls();
+    // The body spans lines, so the agent is on the record's last line.
+    let create = calls
+        .split_once("vissue create")
+        .and_then(|(_, rest)| rest.split_once(" VISSUE_AGENT="))
+        .and_then(|(_, rest)| rest.lines().next())
+        .unwrap_or_else(|| panic!("no create: {calls}"));
+    assert_eq!(create, "saddle", "{calls}");
+}
+
 #[test]
 fn a_conversation_the_seats_file_maps_votes_as_that_seat() {
     let b = Bench::new();
