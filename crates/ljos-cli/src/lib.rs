@@ -31576,6 +31576,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_guard_shim_refuses_a_deny_and_runs_the_rest() {
+        let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let guard = dir.path().join("guard-bin");
         let fake = dir.path().join("fake");
