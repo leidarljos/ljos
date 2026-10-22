@@ -32437,15 +32437,17 @@ pub(crate) fn path_without(bins: &[&str]) -> std::ffi::OsString {
 }
 
 /// Serialises every test that reads or writes the process environment.
-/// Each holder gets a private `XDG_RUNTIME_DIR`. The environment this test
-/// found is put back while the mutex is still held, so the next test cannot
-/// observe a cleared runtime directory or a variable this one set.
+/// Each holder gets a private `XDG_RUNTIME_DIR` and an empty global and
+/// system git config. The environment this test found is put back while
+/// the mutex is still held, so the next test cannot observe a cleared
+/// runtime directory or a variable this one set.
 #[cfg(test)]
 #[must_use = "the environment is restored when this guard drops"]
 pub(crate) struct EnvLock {
     _guard: std::sync::MutexGuard<'static, ()>,
     snapshot: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     runtime: tempfile::TempDir,
+    _git_config: tempfile::NamedTempFile,
 }
 
 #[cfg(test)]
@@ -32564,7 +32566,7 @@ pub(crate) fn test_env_lock() -> EnvLock {
     let guard = ENV
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (snapshot, runtime) = with_env_mutation(|| {
+    let (snapshot, runtime, git_config) = with_env_mutation(|| {
         // The runner that launched the suite is not put back: a test sees
         // only the runner it sets itself, whatever shell ran `cargo test`.
         let snapshot: Vec<_> = std::env::vars_os()
@@ -32577,12 +32579,20 @@ pub(crate) fn test_env_lock() -> EnvLock {
         }
         let runtime = tempfile::tempdir().expect("private runtime dir");
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", runtime.path()) };
-        (snapshot, runtime)
+        // The login's git config would hand every git this test starts,
+        // and every git its children start, the machine's signing, hooks
+        // and identity.
+        let git_config = tempfile::NamedTempFile::new().expect("empty git config");
+        for key in ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"] {
+            unsafe { std::env::set_var(key, git_config.path()) };
+        }
+        (snapshot, runtime, git_config)
     });
     EnvLock {
         _guard: guard,
         snapshot,
         runtime,
+        _git_config: git_config,
     }
 }
 
