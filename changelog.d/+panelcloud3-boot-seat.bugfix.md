@@ -1,0 +1,1 @@
+`ljos panel --cloud` refuses two personas that boot as one seat, not only two whose names slug alike: `inky` and `inky-n9o`, `inky` and `inky@n9o`, and `ljos-bot` and `ljosbot` each name one seat, with no run id or with a short one that strips back off. `eessi` and `eessi-bot` stay two seats.

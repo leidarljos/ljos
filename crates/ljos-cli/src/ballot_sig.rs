@@ -463,14 +463,83 @@ pub fn recorded_at(issue: &str, voter: &str, choice: &str) -> Option<i64> {
 pub fn recorded_at_in(root: &Path, issue: &str, voter: &str, choice: &str) -> Option<i64> {
     let pattern = format!(":ID:[[:space:]]+{issue}[[:space:]]*$");
     let files = git_in(root, &["grep", "-l", "-E", &pattern])?;
-    let file = files.lines().next()?.to_string();
     let needle = format!("] {}: {}", voter.trim(), choice.trim());
+    for file in files.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let file_path = root.join(file);
+        let Ok(text) = std::fs::read_to_string(&file_path) else {
+            continue;
+        };
+        let Some((start, end)) = issue_range(&text, issue) else {
+            continue;
+        };
+        let Some(line) = ballot_line_in(&text, start, end, &needle) else {
+            continue;
+        };
+        if let Some(epoch) = line_epoch(root, file, line) {
+            return Some(epoch);
+        }
+    }
+    None
+}
+
+fn line_epoch(root: &Path, file: &str, line: usize) -> Option<i64> {
+    let line = line.to_string();
+    let range = format!("{line},{line}");
     git_in(
         root,
-        &["log", "-1", "--format=%ct", "-S", &needle, "--", &file],
+        &["blame", "--porcelain", "-L", &range, "--", file.trim()],
     )?
-    .parse()
-    .ok()
+    .lines()
+    .find_map(|row| {
+        row.trim_start()
+            .strip_prefix("committer-time ")?
+            .parse()
+            .ok()
+    })
+}
+
+fn ballot_line_in(text: &str, start: usize, end: usize, needle: &str) -> Option<usize> {
+    text.lines().enumerate().find_map(|(idx, line)| {
+        let line_no = idx + 1;
+        (start <= line_no && line_no <= end && line.contains(needle)).then_some(line_no)
+    })
+}
+
+fn issue_range(text: &str, issue: &str) -> Option<(usize, usize)> {
+    let mut start = None;
+    let mut matched = false;
+    let mut in_entry = false;
+    let mut line_no = 0usize;
+    for line in text.lines() {
+        line_no += 1;
+        if is_heading(line) {
+            if matched {
+                return Some((start?, line_no.saturating_sub(1)));
+            }
+            start = Some(line_no);
+            matched = false;
+            in_entry = true;
+        }
+        if in_entry && id_line(line, issue) {
+            matched = true;
+        }
+    }
+    matched.then_some((start?, line_no))
+}
+
+fn is_heading(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let Some(rest) = trimmed.strip_prefix('*') else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with(['*', ' ', '\t'])
+}
+
+fn id_line(line: &str, issue: &str) -> bool {
+    let Some(rest) = line.trim().strip_prefix(":ID:") else {
+        return false;
+    };
+    rest.trim() == issue
 }
 
 fn env_root() -> Option<PathBuf> {
@@ -483,6 +552,23 @@ fn env_root() -> Option<PathBuf> {
 /// it succeeds.
 pub(crate) fn tracker_git(args: &[&str]) -> Option<String> {
     git_in(&env_root()?, args)
+}
+
+/// Whether `VISSUE_ROOT` names a git checkout. `None` when no tracker root is
+/// configured or git could not run.
+#[must_use]
+pub fn tracker_is_git_checkout() -> Option<bool> {
+    let root = env_root()?;
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return Some(false);
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim() == "true")
 }
 
 fn git_in(root: &Path, args: &[&str]) -> Option<String> {
@@ -972,7 +1058,11 @@ fn signing_key(voter: &str) -> Result<(SigningKey, String)> {
         Some(p) if !pins().contains_key(voter.trim()) => pin_first(&p, voter.trim(), &mine)?,
         _ => pins(),
     };
-    if let Some(k) = pinned.get(voter.trim()).filter(|k| **k != mine) {
+    let mine_fp = key_fingerprint(&mine);
+    if let Some(k) = pinned
+        .get(voter.trim())
+        .filter(|k| key_fingerprint(k) != mine_fp)
+    {
         bail!(
             "seat {voter} is pinned to key {}…, and this key is {}…; the ballot is unsigned and no gate counts it",
             &k[..12.min(k.len())],
@@ -1326,7 +1416,7 @@ pub fn seat_check(
                 out.push(format!("{voter}'s signature does not verify"));
             }
             Some(n) => match pins.get(*voter) {
-                Some(k) if *k == n.key => {}
+                Some(k) if key_fingerprint(k) == key_fingerprint(&n.key) => {}
                 Some(_) => out.push(format!(
                     "{voter}'s ballot is signed by a key other than its pinned one"
                 )),
@@ -1358,9 +1448,59 @@ pub fn unsigned_allowed() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::process::Command;
 
     fn key(b: u8) -> SigningKey {
         SigningKey::from_bytes(&[b; 32])
+    }
+
+    fn git(dir: &Path, args: &[&str], env: &[(&str, String)]) {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(dir).args(args);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn read_epoch(dir: &Path, rev: &str) -> i64 {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["show", "-s", "--format=%ct", rev])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git show failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+    }
+
+    fn with_issue_root<R>(root: &Path, f: impl FnOnce() -> R) -> R {
+        crate::with_env_mutation(|| {
+            let was = std::env::var_os("VISSUE_ROOT");
+            std::env::set_var("VISSUE_ROOT", root);
+            struct Reset(Option<std::ffi::OsString>);
+            impl Drop for Reset {
+                fn drop(&mut self) {
+                    match &self.0 {
+                        Some(v) => std::env::set_var("VISSUE_ROOT", v),
+                        None => std::env::remove_var("VISSUE_ROOT"),
+                    }
+                }
+            }
+            let _reset = Reset(was);
+            f()
+        })
     }
 
     #[test]
@@ -1550,6 +1690,57 @@ mod tests {
         let pins: BTreeMap<String, String> = [(
             "alice".to_string(),
             hex::encode(alice.verifying_key().to_bytes()),
+        )]
+        .into();
+        assert!(seat_problems("d-1", &[("alice", "ship")], &[note], &pins).is_empty());
+    }
+
+    #[test]
+    fn recorded_at_dates_the_ballot_line_on_its_own_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("issues.org");
+        let stamp = |s: &str| {
+            [
+                ("GIT_AUTHOR_DATE", s.to_string()),
+                ("GIT_COMMITTER_DATE", s.to_string()),
+            ]
+        };
+        git(dir.path(), &["init"], &[]);
+        git(dir.path(), &["config", "user.name", "Rohit Goswami"], &[]);
+        git(
+            dir.path(),
+            &["config", "user.email", "rgoswami@ieee.org"],
+            &[],
+        );
+        std::fs::write(
+            &file,
+            "* TODO [#C] old\n:PROPERTIES:\n:ID:         probe-old\n:END:\n- [X] elder: rail\n",
+        )
+        .unwrap();
+        let old = stamp("2026-10-01T00:00:00Z");
+        git(dir.path(), &["add", "issues.org"], &old);
+        git(dir.path(), &["commit", "-m", "old ballot"], &old);
+        std::fs::write(
+            &file,
+            "* TODO [#C] old\n:PROPERTIES:\n:ID:         probe-old\n:END:\n- [X] elder: rail\n\
+             * TODO [#C] new\n:PROPERTIES:\n:ID:         probe-new\n:END:\n- [X] elder: rail\n",
+        )
+        .unwrap();
+        let new = stamp("2026-10-20T00:00:00Z");
+        git(dir.path(), &["add", "issues.org"], &new);
+        git(dir.path(), &["commit", "-m", "new ballot"], &new);
+        let old_epoch = read_epoch(dir.path(), "HEAD~1");
+        let got = with_issue_root(dir.path(), || recorded_at("probe-old", "elder", "rail"));
+        assert_eq!(got, Some(old_epoch));
+    }
+
+    #[test]
+    fn seat_check_accepts_the_same_key_in_uppercase_hex() {
+        let alice = key(8);
+        let note = sign_with(&alice, "d-1", "alice", "ship");
+        let pins: BTreeMap<String, String> = [(
+            "alice".to_string(),
+            hex::encode(alice.verifying_key().to_bytes()).to_ascii_uppercase(),
         )]
         .into();
         assert!(seat_problems("d-1", &[("alice", "ship")], &[note], &pins).is_empty());

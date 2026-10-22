@@ -47,8 +47,12 @@ comes from the launcher \
 as LJOS_TRACKER_REMOTE and is not written here. When that variable is set, \
 `cloud up` turns push mode on.
 
-Cast the ballot as {persona} (`ljos vote {issue} --for OPTION --as \
-{persona}`). The seat that signs it is the one `cloud up` wrote.
+Cast the ballot as the seat `cloud up` wrote, not as {persona}. Load \
+that seat with `set -a; . \"$HOME/.config/ljos/env\"; set +a`, then run \
+the brief's `ljos vote {issue}` line with `--as \"$LJOS_SEAT\"` in place \
+of `--as {persona}`. That seat's key signs the ballot, and it is the \
+seat the slot below names. A ballot cast `--as {persona}` is signed \
+with {persona}'s own key, and no slot names it.
 
 == slot
 slot: {seat} model={family}
@@ -66,27 +70,44 @@ force-push.
     )
 }
 
+/// The seats a run from `persona`'s file can boot as, read the way
+/// `whoami` reads `LJOS_SEAT`. A run id that stays on makes the slug's own
+/// seat. With no run id, or a short one that reads as an old pid tag and
+/// strips back off, the seat is what [`crate::seat_for_env`] makes of the
+/// slug: `inky-n9o`, `inky@n9o`, `inky-ab1c` and `inky-n9o-ab1c` are all
+/// `inky`, and `ljos-bot` is `ljosbot`.
+fn boot_seats(persona: &str) -> Vec<String> {
+    let slug = crate::seat_slug(persona);
+    let bare = crate::seat_for_env(&slug);
+    if bare == slug {
+        vec![slug]
+    } else {
+        vec![slug, bare]
+    }
+}
+
 /// Write one prompt file per seated persona under `out`.
 ///
 /// Files are named `<persona>.md`. Families rotate in persona name order.
 ///
 /// # Errors
 ///
-/// As [`crate::panel_roster`], two personas make the same seat, or a
-/// prompt file cannot be written. A shared seat is refused before any
-/// file is written.
+/// As [`crate::panel_roster`], two personas can boot as the same seat
+/// ([`boot_seats`]), or a prompt file cannot be written. A shared seat is
+/// refused before any file is written.
 pub fn panel_cloud(issue: &str, out: &Path) -> Result<String> {
     let (all, mut personas) = crate::panel_roster(issue)?;
     personas.sort_by(|a, b| a.name.cmp(&b.name));
     let mut seats = std::collections::BTreeMap::new();
     for persona in &personas {
-        let seat = crate::seat_slug(&persona.name);
-        if let Some(first) = seats.insert(seat.clone(), persona.name.as_str()) {
-            bail!(
-                "panel --cloud: personas {first} and {} both make seat {seat}; rename one so each \
-                 prompt file names its own seat",
-                persona.name
-            );
+        for seat in boot_seats(&persona.name) {
+            if let Some(first) = seats.insert(seat.clone(), persona.name.as_str()) {
+                bail!(
+                    "panel --cloud: personas {first} and {} both boot as seat {seat}; rename one so \
+                     each prompt file names its own seat",
+                    persona.name
+                );
+            }
         }
     }
     std::fs::create_dir_all(out).with_context(|| format!("panel --cloud: {}", out.display()))?;
@@ -125,6 +146,25 @@ mod tests {
     }
 
     #[test]
+    fn a_short_run_id_strips_back_to_the_seat_without_one() {
+        for run in ["inky-ab1c", "inky-n9o-ab1c"] {
+            assert_eq!(crate::seat_for_env(run), "inky", "{run}");
+        }
+        assert_eq!(
+            crate::seat_for_env("inky-n9o-cafebabe0001abcd"),
+            "inky-n9o-cafebabe0001abcd"
+        );
+        for persona in ["inky", "inky-n9o", "inky@n9o"] {
+            assert!(
+                boot_seats(persona).contains(&"inky".to_string()),
+                "{persona}"
+            );
+        }
+        assert_eq!(boot_seats("ljos-bot"), ["ljos-bot", "ljosbot"]);
+        assert_eq!(boot_seats("eessi-bot"), ["eessi-bot"]);
+    }
+
+    #[test]
     fn a_prompt_names_the_seat_the_slot_and_the_push_rules() {
         let text = prompt("Ada Rider", "probe-l0g0", "opus");
         assert!(text.contains("You are Ada Rider on probe-l0g0."), "{text}");
@@ -137,9 +177,15 @@ mod tests {
         assert!(text.contains("recorded for the launcher to sign"), "{text}");
         assert!(!text.contains("counts only under"), "{text}");
         assert!(
-            text.contains("ljos vote probe-l0g0 --for OPTION --as Ada Rider"),
+            text.contains("set -a; . \"$HOME/.config/ljos/env\"; set +a"),
             "{text}"
         );
+        assert!(
+            text.contains("`ljos vote probe-l0g0` line with `--as \"$LJOS_SEAT\"`"),
+            "{text}"
+        );
+        assert!(!text.contains("--for OPTION --as Ada Rider"), "{text}");
+        assert!(!text.contains("The seat that signs it"), "{text}");
         assert!(text.contains("vissue vote probe-l0g0"), "{text}");
         assert!(text.contains("vissue show probe-l0g0"), "{text}");
         assert!(text.contains("ljos consensus probe-l0g0"), "{text}");
