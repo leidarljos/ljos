@@ -1,1 +1,0 @@
-`ljos search`, `ljos island`, the timeline and a sitting's copies of them, and MCP `ljos_search` and `ljos_island` now name each claim by who stands behind it, as recall does, so an agent's note or preference reads as unverified there too; a lesson the pack stored as the person's no longer reads as agent-derived. MCP hit rows gain a `label` field.

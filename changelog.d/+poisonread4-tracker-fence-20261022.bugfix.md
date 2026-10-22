@@ -1,1 +1,0 @@
-Tracker recall, the brief and the timeline fence tracker text with a nonce that is fresh on each call, and quote every line inside it. A logbook note that writes the closer, or a rule after it, now stays inside the fence.

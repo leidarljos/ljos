@@ -1,1 +1,0 @@
-File order no longer decides which key holds a seat in the record. `ljos record check` now fails when one seat signs under two unpinned keys, whichever file comes first, and the tally counts that seat under neither key on the question instead of keeping the first one it read.
