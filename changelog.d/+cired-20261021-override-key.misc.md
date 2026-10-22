@@ -1,0 +1,1 @@
+The shared-override record test signs both runs while it holds the environment lock, hides `GITHUB_RUN_ID` for that span, and restores the previous values when the guard drops. Record tests also clear a leaked `CURSOR_AGENT_ID`.
