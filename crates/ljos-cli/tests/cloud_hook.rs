@@ -1196,6 +1196,85 @@ fn a_wget_command_line_that_moves_the_target_may_be_github() {
     fs::remove_file(home.join(".wgetrc")).unwrap();
 }
 
+/// Curl and wget follow a symlinked config and load what it reaches, so
+/// the guard judges that file. A config either would load and the guard
+/// cannot read may add any URL, even beside a host that is not GitHub.
+#[test]
+fn a_config_the_client_may_load_is_judged_beside_another_host() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let curl = "curl -X POST https://example.com/x";
+    let wget = "wget --method=POST https://example.com/x";
+    let target = root.path().join("target.rc");
+    let link = |name: &str| {
+        let path = home.join(name);
+        let _ = fs::remove_file(&path);
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+    };
+
+    fs::write(&target, "url = https://api.github.com/user\n").unwrap();
+    link(".curlrc");
+    refused(curl, here);
+    fs::write(&target, "silent\n").unwrap();
+    allowed(curl, here);
+    allowed("curl -s https://api.github.com/user", here);
+    fs::remove_file(home.join(".curlrc")).unwrap();
+
+    fs::write(&target, "input = /tmp/urls\n").unwrap();
+    link(".wgetrc");
+    refused(wget, here);
+    fs::remove_file(home.join(".wgetrc")).unwrap();
+    let named = root.path().join("named.link");
+    std::os::unix::fs::symlink(&target, &named).unwrap();
+    refused(
+        &format!(
+            "wget --config={} --method=POST https://example.com/x",
+            named.display()
+        ),
+        here,
+    );
+    fs::write(&target, "quiet = on\n").unwrap();
+    link(".wgetrc");
+    allowed("wget -q https://api.github.com/user", here);
+    fs::remove_file(home.join(".wgetrc")).unwrap();
+
+    let dir = root.path().join("a-dir");
+    fs::create_dir(&dir).unwrap();
+    for (name, line) in [(".curlrc", curl), (".wgetrc", wget)] {
+        fs::create_dir(home.join(name)).unwrap();
+        refused(line, here);
+        fs::remove_dir(home.join(name)).unwrap();
+        std::os::unix::fs::symlink(&dir, home.join(name)).unwrap();
+        refused(line, here);
+        fs::remove_file(home.join(name)).unwrap();
+    }
+    refused(&format!("SYSTEM_WGETRC={} {wget}", dir.display()), here);
+    refused(&format!("WGETRC={} {wget}", dir.display()), here);
+    refused(
+        &format!("curl -K {} -X POST https://example.com/x", dir.display()),
+        here,
+    );
+
+    fs::write(home.join(".wgetrc"), "header = \"unterminated\n").unwrap();
+    refused("wget -q https://example.com/x", here);
+    fs::remove_file(home.join(".wgetrc")).unwrap();
+
+    use std::os::unix::fs::PermissionsExt;
+    let root_user = Command::new("id").arg("-u").output().unwrap().stdout == b"0\n";
+    if !root_user {
+        fs::write(home.join(".curlrc"), "silent\n").unwrap();
+        fs::set_permissions(home.join(".curlrc"), fs::Permissions::from_mode(0o000)).unwrap();
+        refused(curl, here);
+        fs::set_permissions(home.join(".curlrc"), fs::Permissions::from_mode(0o644)).unwrap();
+        allowed(curl, here);
+        fs::remove_file(home.join(".curlrc")).unwrap();
+    }
+}
+
 /// A curl option that names a proxy, a resolver, a socket, an address
 /// map, or a `Host:` header sends the request somewhere the URL does not
 /// say. So does an address for a host, and an option the guard does not

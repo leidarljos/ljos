@@ -3673,15 +3673,9 @@ fn script_mentions_ref_write(text: &str) -> bool {
             && lower.contains("github.com"))
 }
 
-fn http_targets_github(words: &[String]) -> bool {
-    http_hosts(words).0
-}
-
-/// `(treat as GitHub, saw a host that is not GitHub)`.
-///
 /// A hidden host counts as GitHub: the line does not show where it goes.
 /// A visible other host does not, so cargo and npm stay allowed.
-fn http_hosts(words: &[String]) -> (bool, bool) {
+fn http_targets_github(words: &[String]) -> bool {
     let cmd = words
         .first()
         .map(|word| word.rsplit('/').next().unwrap_or(word.as_str()))
@@ -3723,15 +3717,9 @@ fn http_hosts(words: &[String]) -> (bool, bool) {
             hidden = true;
         }
     }
-    if github {
-        return (true, other);
-    }
     // A visible host that is not GitHub stays out of this allowlist, even
     // when the path or a header still has a substitution.
-    if other {
-        return (false, true);
-    }
-    (hidden, false)
+    github || (hidden && !other)
 }
 
 fn curl_proto_default(words: &[String]) -> Option<String> {
@@ -4070,21 +4058,18 @@ fn curl_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) ->
     } else {
         finish_http(tune.method.as_deref(), tune.body, tune.query, tune.upload)
     };
-    (shape, curl_config_github(words, &tune))
+    (shape, curl_config_github(&tune))
 }
 
-fn curl_config_github(words: &[String], tune: &Tune) -> bool {
-    if tune.github
+/// A config that applies and could not be read may add any URL, whatever
+/// host the command line shows.
+fn curl_config_github(tune: &Tune) -> bool {
+    tune.github
+        || tune.unreadable
         || tune
             .urls
             .iter()
             .any(|url| curl_url_github(url, tune.globoff))
-    {
-        return true;
-    }
-    // The file was not readable, so the host it would request is unknown
-    // unless the command already shows a host that is not GitHub.
-    tune.unreadable && !http_hosts(words).1
 }
 
 /// Curl skips its default curlrc when `-q` or `--disable` is argv[1].
@@ -4124,18 +4109,11 @@ fn curl_named_file(
     tune: &mut Tune,
     seen: &mut HashSet<PathBuf>,
 ) -> Option<HttpShape> {
-    // A named config can add any URL, so one that cannot be read leaves
-    // the target unknown even beside a host that is not GitHub.
     if value.is_empty() || value == "-" {
         tune.unreadable = true;
-        tune.github = true;
         return Some(HttpShape::Opaque);
     }
-    let shape = read_curl_file(&resolve_cfg(value, cwd), cwd, tune, seen, true);
-    if tune.unreadable {
-        tune.github = true;
-    }
-    shape
+    read_curl_file(&resolve_cfg(value, cwd), cwd, tune, seen, true)
 }
 
 /// Default curlrc search. `CURL_HOME` replaces the others: a missing file
@@ -4502,23 +4480,30 @@ fn cfg_key(path: &Path) -> PathBuf {
     out
 }
 
-/// Only a missing path is no config. Anything else at that path that is
-/// not a regular file is opaque: a directory, a fifo, a device, or a
-/// symlink. `O_NONBLOCK` keeps a fifo from waiting for a writer, and
+/// Only a missing path is no config. A symlink is followed, as curl and
+/// wget follow it. What it reaches must be a regular file this user or
+/// root owns; a directory, a fifo, a device, or another user's file is
+/// opaque. `O_NONBLOCK` keeps a fifo from waiting for a writer, and
 /// `fstat` judges what was opened, not what the path named a moment ago.
 fn open_cfg(path: &Path) -> Result<Option<String>, ()> {
     use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let mut file = match std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)
     {
         Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(()),
     };
-    if !file.metadata().is_ok_and(|meta| meta.is_file()) {
+    // SAFETY: geteuid has no arguments and only reads the process identity.
+    let me = unsafe { libc::geteuid() };
+    let owned = |meta: &std::fs::Metadata| meta.uid() == me || meta.uid() == 0;
+    if !file
+        .metadata()
+        .is_ok_and(|meta| meta.is_file() && owned(&meta))
+    {
         return Err(());
     }
     let mut text = String::new();
@@ -4550,7 +4535,7 @@ fn wget_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) ->
     } else {
         finish_http(method.as_deref(), body, false, false)
     };
-    (shape, curl_config_github(words, &tune))
+    (shape, curl_config_github(&tune))
 }
 
 /// Wget options the guard reads, each `long` or `long/short`. Wget takes
@@ -4734,7 +4719,10 @@ fn apply_wget_text(text: &str, tune: &mut Tune) -> Option<HttpShape> {
     for line in text.lines() {
         match curl_cfg_line(line) {
             CfgLine::Blank => {}
-            CfgLine::Bad => opaque = true,
+            CfgLine::Bad => {
+                opaque = true;
+                tune.github = true;
+            }
             CfgLine::Item { name, value } => {
                 let key = name.replace(['_', '-'], "");
                 if wget_key_moves_target(&key, value.as_deref().unwrap_or("")) {
