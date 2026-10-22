@@ -4,18 +4,23 @@
 //! A preference written before that has no basis, so it stopped showing.
 //! The old store cannot tell a person's preference from an agent's soft
 //! prose, so only a mark an old person-path writer actually left is
-//! promoted, and only when the atom is older than the cutoff recorded in
-//! the pack. Anything else stays unverified until the person keeps it.
+//! promoted, and only when the atom is older than the cutoff this machine
+//! recorded. Anything else stays unverified until the person keeps it.
 //!
 //! The cutoff is one receipt, entity `receipt:pref-basis-cutoff`, written
-//! once by the first person-side run. Its server `ts` is the bound. An
-//! atom at that time or after is not an older preference, whatever marks
-//! it carries. `via:prompt` alone never promotes: the hook runs under the
-//! runner, and a direct post can wear the tag. Search, the island, the
-//! command gate and session start do not write the receipt and do not
-//! stamp a basis, and neither does any run [`person_present`] does not
-//! prove: a runner, a pipe, the doctor or `ljos prefer` from a tool call
-//! only report.
+//! once by the first person-side run, and a record of that receipt in the
+//! person's state directory, keyed by the pack's address and workspace.
+//! The record holds the receipt's id and the bound: the run's own clock,
+//! or the receipt's server stamp when the pack answered with an older
+//! receipt. Any process with the seat token can post a receipt, so one
+//! the record does not name is not a cutoff, and with no record nothing
+//! is older. An atom at the bound or after is not an older preference,
+//! whatever marks it carries. `via:prompt` alone never promotes: the hook
+//! runs under the runner, and a direct post can wear the tag. Search, the
+//! island, the command gate and session start do not write the receipt
+//! or the record and do not stamp a basis, and neither does any run
+//! [`person_present`] does not prove: a runner, a pipe, the doctor or
+//! `ljos prefer` from a tool call only report.
 //!
 //! One atom the pack refuses does not stop the rest. The receipt is
 //! written before any stamp. A permanent refusal is recorded on it as
@@ -64,14 +69,18 @@
 //!   `session:`. None of those read as the person before, and they are
 //!   not promoted.
 
+use std::path::PathBuf;
+
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, FixedOffset, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::admit::ORIGIN_USER;
 use crate::{atoms_lean, pack, person_present, under_a_runner};
 
-/// The receipt that records the cutoff. Its server `ts` is the bound.
+/// The receipt that records the cutoff. The bound is in [`Local`].
 const CUTOFF_ENTITY: &str = "receipt:pref-basis-cutoff";
 
 /// Stable text, so a second post of the same receipt is the first one.
@@ -125,12 +134,29 @@ pub(crate) fn legacy(atom: &Value) -> Option<Legacy> {
     }
 }
 
-/// Preferences and lessons with no basis, older than the pack's cutoff,
-/// that the upgrade did not promote. No cutoff means nothing is older yet.
+/// Preferences and lessons with no basis, older than the cutoff this
+/// machine recorded, that the upgrade did not promote. No recorded cutoff
+/// means nothing is older yet.
 /// Each row is (id, kind, text).
 #[must_use]
 pub(crate) fn awaiting(atoms: &[Value]) -> Vec<(String, String, String)> {
-    let Some(cutoff) = earliest_cutoff(atoms) else {
+    held_before(atoms, recorded_cutoff(atoms))
+}
+
+/// The bound this machine recorded, when the pack still holds its receipt.
+fn recorded_cutoff(atoms: &[Value]) -> Option<DateTime<FixedOffset>> {
+    pack()
+        .ok()
+        .and_then(|client| our_bound(&client, atoms))
+        .map(|bound| bound.at)
+}
+
+/// [`awaiting`] against a cutoff already found.
+fn held_before(
+    atoms: &[Value],
+    cutoff: Option<DateTime<FixedOffset>>,
+) -> Vec<(String, String, String)> {
+    let Some(cutoff) = cutoff else {
         return Vec::new();
     };
     atoms
@@ -183,11 +209,13 @@ pub(crate) fn review_sentence(held: &[(String, String, String)]) -> String {
 ///
 /// The cutoff is a receipt written once, by the first run of this the
 /// person makes at a terminal of their own ([`person_present`]), the
-/// check `keep` makes. Anything else returns before reading the pack. A
-/// later run finds that receipt and does not write another. Search, the
-/// island, the command gate and session start do not call this. A pack
-/// that does not answer is left for the next run. One refused update
-/// does not stop the receipt or the atoms after it.
+/// check `keep` makes, and recorded in the person's state directory.
+/// Anything else returns before reading the pack. A later run finds that
+/// record and does not write another. A record whose receipt the pack no
+/// longer holds stops the migration. Search, the island, the command
+/// gate and session start do not call this. A pack that does not answer
+/// is left for the next run. One refused update does not stop the
+/// receipt or the atoms after it.
 pub fn migrate_once() {
     if !person_present() {
         return;
@@ -206,7 +234,7 @@ pub fn list() -> Result<String> {
     migrate_once();
     let atoms = live()?;
     let rows = awaiting(&atoms);
-    if rows.is_empty() && earliest_cutoff(&atoms).is_none() && !person_present() {
+    if rows.is_empty() && recorded_cutoff(&atoms).is_none() && !person_present() {
         return Ok("older preferences are read at a terminal of your own: \
                    run `ljos prefer --review` there\n"
             .to_string());
@@ -465,18 +493,29 @@ fn stamp_marked() -> Result<usize> {
     let mut atoms = atoms_lean(&client, &client.workspace())?;
     // The receipt is written before any stamp, so a later refusal cannot
     // move the window. Atoms read above are the ones this run may stamp;
-    // one posted after the receipt is newer than it.
-    let mut bound = match earliest_bound(&atoms) {
-        Some(bound) => bound,
-        None => bound_of(&record_cutoff(&client)?)
-            .context("prefer: the preference cutoff has no time")?,
+    // one posted after the receipt is newer than it. A receipt this
+    // machine did not record is not a cutoff, whatever time it carries.
+    let mut bound = match Local::load(&client) {
+        Some(local) => match local.bound(&atoms) {
+            Some(bound) => bound,
+            None => return Ok(0),
+        },
+        None => {
+            let Some(_lock) = cutoff_lock() else {
+                bail!("prefer: could not lock the preference cutoff to record it");
+            };
+            if Local::load(&client).is_some() {
+                return Ok(0);
+            }
+            record_local(&client)?
+        }
     };
     // A previous run may have closed an atom and stopped before the
     // replacement was stored. Finish that before reading the live set
     // again, or the closed preference is no longer there to migrate.
     if replay_pending(&client, &bound)? {
         atoms = atoms_lean(&client, &client.workspace())?;
-        bound = earliest_bound(&atoms).context("prefer: the preference cutoff has no time")?;
+        bound = our_bound(&client, &atoms).context("prefer: the preference cutoff is gone")?;
     }
     let already = refused_ids(&bound.source);
     let mut fresh = Vec::new();
@@ -513,40 +552,130 @@ fn permanent(code: u16) -> bool {
     (400..500).contains(&code) && !matches!(code, 401 | 408 | 429)
 }
 
-/// The cutoff receipt this run stamps against: its time, its id, and the
-/// source object that lists atoms the pack has already refused.
+/// The cutoff receipt this run stamps against: the time this machine
+/// recorded, the receipt's id, and the source object that lists atoms the
+/// pack has already refused.
 struct Bound {
     at: DateTime<FixedOffset>,
     id: String,
     source: Value,
 }
 
-/// The earliest cutoff receipt in `atoms`, compared as a time. A `Z`
-/// stamp and a millisecond stamp are the same instant either way; a
-/// string compare is not.
-fn earliest_cutoff(atoms: &[Value]) -> Option<DateTime<FixedOffset>> {
-    earliest_bound(atoms).map(|bound| bound.at)
+/// The cutoff this machine recorded for one pack and workspace, in the
+/// person's state directory. Only the receipt named here is a cutoff.
+///
+/// The pack answers to anyone holding the seat token, so a receipt there
+/// says nothing about who wrote it. This file is written only by a run
+/// that is not under a runner. Anything running as the person's user
+/// can still write it; that is trusted.
+#[derive(Debug, Serialize, Deserialize)]
+struct Local {
+    base: String,
+    workspace: String,
+    id: String,
+    at: String,
 }
 
-fn earliest_bound(atoms: &[Value]) -> Option<Bound> {
-    atoms
-        .iter()
-        .filter_map(bound_of)
-        .min_by_key(|bound| bound.at)
-}
-
-fn bound_of(atom: &Value) -> Option<Bound> {
-    if !is_cutoff(atom) {
-        return None;
+impl Local {
+    fn path(base: &str, workspace: &str) -> PathBuf {
+        let mut hash = Sha256::new();
+        hash.update(base.as_bytes());
+        hash.update([0]);
+        hash.update(workspace.as_bytes());
+        let hex = format!("{:x}", hash.finalize());
+        crate::note_queue::state_dir()
+            .join("pref-cutoff")
+            .join(format!("{}.json", &hex[..16]))
     }
-    let at = instant_of(atom)?;
-    let id = atom_id(atom)?;
-    let source = atom
-        .get("source")
+
+    fn load(client: &crate::PacksetClient) -> Option<Self> {
+        let (base, workspace) = (base_of(client), client.workspace());
+        let raw = std::fs::read_to_string(Self::path(&base, &workspace)).ok()?;
+        let local: Self = serde_json::from_str(&raw).ok()?;
+        (local.base == base && local.workspace == workspace).then_some(local)
+    }
+
+    fn save(&self) -> Result<()> {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let path = Self::path(&self.base, &self.workspace);
+        let dir = path
+            .parent()
+            .context("prefer: the cutoff path has no parent")?;
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .with_context(|| format!("write {}", tmp.display()))?;
+        file.write_all(serde_json::to_string(self)?.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, &path).with_context(|| format!("write {}", path.display()))
+    }
+
+    /// The receipt this record names, at the time this record holds.
+    fn bound(&self, atoms: &[Value]) -> Option<Bound> {
+        let at = DateTime::parse_from_rfc3339(&self.at).ok()?;
+        let atom = atoms
+            .iter()
+            .find(|atom| atom_id(atom).as_deref() == Some(self.id.as_str()) && is_cutoff(atom))?;
+        Some(Bound {
+            at,
+            id: self.id.clone(),
+            source: source_of(atom),
+        })
+    }
+}
+
+fn base_of(client: &crate::PacksetClient) -> String {
+    client.base().trim_end_matches('/').to_string()
+}
+
+fn source_of(atom: &Value) -> Value {
+    atom.get("source")
         .cloned()
         .filter(Value::is_object)
-        .unwrap_or_else(|| json!({}));
-    Some(Bound { at, id, source })
+        .unwrap_or_else(|| json!({}))
+}
+
+/// The cutoff this machine recorded, when the pack still holds its receipt.
+fn our_bound(client: &crate::PacksetClient, atoms: &[Value]) -> Option<Bound> {
+    Local::load(client)?.bound(atoms)
+}
+
+/// Write the receipt and record it here. The time is this machine's
+/// clock before the post, or the pack's own stamp on the receipt when
+/// that is earlier: the pack answers a repeat of the text with the
+/// receipt it holds, and an older receipt is a tighter bound. Neither
+/// is later than now, so a receipt dated ahead moves nothing.
+fn record_local(client: &crate::PacksetClient) -> Result<Bound> {
+    let now = Utc::now().fixed_offset();
+    let posted = record_cutoff(client)?;
+    let id = atom_id(&posted).context("prefer: the preference cutoff has no id")?;
+    let at = ["updated", "ts"]
+        .into_iter()
+        .find_map(|key| stamp_of(&posted, key))
+        .map_or(now, |stamp| stamp.min(now));
+    Local {
+        base: base_of(client),
+        workspace: client.workspace(),
+        id: id.clone(),
+        at: at.to_rfc3339(),
+    }
+    .save()?;
+    Ok(Bound {
+        at,
+        id,
+        source: source_of(&posted),
+    })
+}
+
+fn stamp_of(atom: &Value, key: &str) -> Option<DateTime<FixedOffset>> {
+    let raw = atom.get(key).and_then(Value::as_str)?.trim();
+    DateTime::parse_from_rfc3339(raw).ok()
 }
 
 fn atom_id(atom: &Value) -> Option<String> {
@@ -635,7 +764,7 @@ fn remember_refusals(client: &crate::PacksetClient, bound: &Bound, ids: &[String
 
 fn cutoff_source(client: &crate::PacksetClient) -> Result<Option<Value>> {
     let atoms = atoms_lean(client, &client.workspace())?;
-    Ok(earliest_bound(&atoms).map(|bound| bound.source))
+    Ok(our_bound(client, &atoms).map(|bound| bound.source))
 }
 
 fn stamp_basis(client: &crate::PacksetClient, atom: &Value) -> Update {
@@ -903,7 +1032,7 @@ fn alter_cutoff(client: &crate::PacksetClient, change: impl FnOnce(&mut Value)) 
         Ok(atoms) => atoms,
         Err(_) => return Update::Later,
     };
-    let Some(mut bound) = earliest_bound(&atoms) else {
+    let Some(mut bound) = our_bound(client, &atoms) else {
         return Update::Later;
     };
     change(&mut bound.source);
@@ -1144,7 +1273,7 @@ mod tests {
         assert_eq!((promote, hold, left), (4, 8, 5), "fixture split");
         runner["id"] = json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         // No cutoff receipt: nothing is older yet, so nothing awaits.
-        assert!(awaiting(&[hook.clone(), typed.clone(), runner.clone()]).is_empty());
+        assert!(held_before(&[hook.clone(), typed.clone(), runner.clone()], None).is_empty());
         let mut late = runner.clone();
         late["id"] = json!("cccccccccccccccccccccccccccccccc");
         late["ts"] = json!("2026-10-22T00:00:00Z");
@@ -1162,16 +1291,19 @@ mod tests {
             "ts": "2026-10-21T00:00:00Z",
         });
         assert!("2026-10-21T00:00:00.100Z" < "2026-10-21T00:00:00Z");
-        let waiting = awaiting(&[
-            hook,
-            typed,
-            runner,
-            runner_lesson.clone(),
-            old_lesson.clone(),
-            late,
-            fraction,
-            cutoff,
-        ]);
+        let waiting = held_before(
+            &[
+                hook,
+                typed,
+                runner,
+                runner_lesson.clone(),
+                old_lesson.clone(),
+                late,
+                fraction,
+                cutoff.clone(),
+            ],
+            instant_of(&cutoff),
+        );
         assert_eq!(waiting.len(), 3, "{waiting:?}");
         assert_eq!(waiting[0].0, "0123456789abcdef0123456789abcdef");
         assert_eq!(waiting[0].1, "preference");
@@ -1384,6 +1516,25 @@ mod tests {
         })
     }
 
+    /// Record [`cutoff_atom`] as the cutoff this machine wrote for `url`.
+    fn record_here(url: &str) {
+        with_pack(url, || {
+            let client = pack_client();
+            Local {
+                base: base_of(&client),
+                workspace: client.workspace(),
+                id: CUTOFF_ID.to_string(),
+                at: "2026-10-21T00:00:00Z".to_string(),
+            }
+            .save()
+            .unwrap();
+        });
+    }
+
+    fn pack_client() -> crate::PacksetClient {
+        pack().unwrap()
+    }
+
     fn older(id: &str, text: &str) -> Value {
         json!({
             "id": id,
@@ -1421,7 +1572,8 @@ mod tests {
             pack.later_posts.extend(texts.map(String::from));
             pack.gather = 2;
         }
-        let state = tempfile::tempdir().unwrap();
+        // Both processes run on the machine that recorded the cutoff.
+        record_here(&url);
         // Each child starts from the environment another test is not
         // halfway through changing.
         let env = crate::test_env_lock();
@@ -1440,7 +1592,7 @@ mod tests {
                     .env("PACKSET_WORKSPACE", "seat")
                     .env("PACKSET_AUTH", "off")
                     .env("PACKSET_TIMEOUT_MS", "5000")
-                    .env("XDG_STATE_HOME", state.path())
+                    .env("XDG_STATE_HOME", state_home())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
                     .spawn()
@@ -1561,6 +1713,67 @@ mod tests {
         assert!(cutoff.pointer("/source/pending").is_none(), "{cutoff}");
     }
 
+    /// A cutoff receipt a tool call posted is not the bound. Before a
+    /// person-side run records one here, nothing is older and nothing is
+    /// held. After it, a receipt dated ahead widens nothing: the bound is
+    /// no later than the run that recorded it.
+    #[test]
+    fn a_cutoff_receipt_this_machine_did_not_record_is_not_the_bound() {
+        const EARLY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const AHEAD: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const HELD: &str = "cccccccccccccccccccccccccccccccc";
+        let pref = |id: &str, text: &str, source: Value, ts: &str| {
+            json!({
+                "id": id,
+                "kind": "preference",
+                "text": text,
+                "origin": "user-declared",
+                "entities": ["seat:person", "horizon:standing"],
+                "source": source,
+                "ts": ts,
+            })
+        };
+        let (url, pack) = serve(vec![
+            json!({
+                "id": "99999999999999999999999999999999",
+                "kind": "receipt",
+                "text": CUTOFF_TEXT,
+                "origin": "user-declared",
+                "entities": ["seat:person", CUTOFF_ENTITY],
+                "ts": "2099-01-01T00:00:00Z",
+            }),
+            pref(
+                EARLY,
+                "Keep the early note.",
+                terminal_source(),
+                "2020-01-01T00:00:00Z",
+            ),
+            pref(
+                AHEAD,
+                "Keep the ahead note.",
+                terminal_source(),
+                "2098-01-01T00:00:00Z",
+            ),
+            pref(
+                HELD,
+                "Keep the held note.",
+                runner_source(),
+                "2020-01-01T00:00:00Z",
+            ),
+        ]);
+
+        with_pack(&url, || {
+            assert!(awaiting(&live().unwrap()).is_empty());
+            assert_eq!(stamp_marked().expect("the run records its own bound"), 1);
+            let held = awaiting(&live().unwrap());
+            assert_eq!(held.len(), 1, "{held:?}");
+            assert_eq!(held[0].0, HELD);
+        });
+        let pack = pack.lock().unwrap();
+        assert_eq!(basis_of(by_id(&pack.atoms, EARLY)), Some("person"));
+        assert!(basis_of(by_id(&pack.atoms, AHEAD)).is_none());
+    }
+
     fn by_id<'a>(atoms: &'a [Value], id: &str) -> &'a Value {
         atoms
             .iter()
@@ -1584,13 +1797,12 @@ mod tests {
                 .iter()
                 .map(|key| (*key, std::env::var(key).ok()))
                 .collect();
-            let state = tempfile::tempdir().unwrap();
             unsafe {
                 std::env::set_var("PACKSET_URL", url);
                 std::env::set_var("PACKSET_WORKSPACE", "seat");
                 std::env::set_var("PACKSET_AUTH", "off");
                 std::env::set_var("PACKSET_TIMEOUT_MS", "2000");
-                std::env::set_var("XDG_STATE_HOME", state.path());
+                std::env::set_var("XDG_STATE_HOME", state_home());
             }
             struct Put(Vec<(&'static str, Option<String>)>);
             impl Drop for Put {
@@ -1608,6 +1820,13 @@ mod tests {
             let _put = Put(prev);
             f();
         });
+    }
+
+    /// One state directory for every test: a record is keyed by the
+    /// pack's address, and each test serves its own port.
+    fn state_home() -> &'static std::path::Path {
+        static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        HOME.get_or_init(|| tempfile::tempdir().unwrap()).path()
     }
 
     struct Pack {
@@ -1775,6 +1994,17 @@ mod tests {
             if let Some(at) = pack.later_posts.iter().position(|seen| seen == text) {
                 pack.later_posts.remove(at);
                 return reply(503, r#"{"error":"later"}"#);
+            }
+            let same = pack.atoms.iter().find(|held| {
+                held.get("text") == atom.get("text")
+                    && held.get("kind") == atom.get("kind")
+                    && held
+                        .get("valid_to")
+                        .and_then(Value::as_str)
+                        .is_none_or(|until| until.is_empty())
+            });
+            if let Some(held) = same {
+                return reply(200, &held.to_string());
             }
             let id = if atom.get("text").and_then(Value::as_str) == Some(CUTOFF_TEXT) {
                 "dddddddddddddddddddddddddddddddd".to_string()
