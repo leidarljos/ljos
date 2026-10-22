@@ -474,7 +474,8 @@ The ballot gets recorded as `judge:<model>`, not as the persona.
 `ljos due --judge` names a claim the judges find still true; `ljos graded`
 marks it recalled. `ljos judge-score` reads the judge log against outcomes.
 The local answer stays as the fallback, and a machine without the file runs
-as before. A prompt costs about $0.00004, and `ljos doctor` prints the
+as before. A prompt costs about $0.00004, the arithmetic of about 900
+input tokens at $0.042 per million with output free, and `ljos doctor` prints the
 month's spend. A chat backend has to name `usd_per_mtok_in`. The section on
 judgment in the explanation says how Jev fits with what the seat already
 does; the how-to has the setup.
