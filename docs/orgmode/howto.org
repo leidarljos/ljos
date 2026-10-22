@@ -362,7 +362,8 @@ on, the hook never loads the cross-encoder, so its memory stays free.
 A prompt past 2,000 characters goes out cut to that length.
 
 A prompt with ten candidates takes about 900 input tokens. At $0.042 per
-million input tokens, with output free, a prompt costs $0.00004. The
+million input tokens, with output free, that arithmetic is a prompt cost
+of $0.00004. The
 hook records each call's tokens at =usd_per_mtok_in=, or the API's own
 figure when OpenRouter sends one, in =$XDG_STATE_HOME/ljos/jev-cost.toml=.
 For OpenRouter, set =endpoint = "https://openrouter.ai/api/alpha/decisions"=
