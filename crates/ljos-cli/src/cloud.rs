@@ -758,14 +758,13 @@ fn toml_table_name(line: &str) -> Option<&str> {
     let header = trimmed.split('#').next().unwrap_or(trimmed).trim();
     let inner = if let Some(rest) = header.strip_prefix("[[") {
         rest.strip_suffix("]]")?
-    } else if let Some(rest) = header.strip_prefix('[') {
+    } else {
+        let rest = header.strip_prefix('[')?;
         let rest = rest.strip_suffix(']')?;
         if rest.contains('[') {
             return None;
         }
         rest
-    } else {
-        return None;
     };
     let name = inner.trim();
     (!name.is_empty()).then_some(name)
