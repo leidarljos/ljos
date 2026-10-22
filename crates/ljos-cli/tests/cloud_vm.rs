@@ -665,12 +665,30 @@ HISTCONTROL=ignoreboth
 #[test]
 fn cloud_up_inserts_path_before_ubuntu_skel_interactive_case() {
     let _g = Guard::new();
+    assert_path_before_guard(UBUNTU_SKEL_BASHRC, "case $- in");
+}
+
+/// The same guard as an `if` whose test, `return` and `fi` are on lines
+/// of their own.
+#[test]
+fn cloud_up_inserts_path_before_a_multi_line_if_guard() {
+    let _g = Guard::new();
+    assert_path_before_guard(
+        "# rc\nif [ -z \"$PS1\" ]; then\n    return\nfi\necho prompt\n",
+        "if [ -z",
+    );
+}
+
+/// Cloud up over a home whose `.bashrc` is `rc` puts the PATH export
+/// before `guard`, and a non-interactive bash that sources the file finds
+/// this install's `ljos-mcp`.
+fn assert_path_before_guard(rc: &str, guard: &str) {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     let rel = root.path().join("rel");
     fs::create_dir_all(&rel).unwrap();
     fs::create_dir_all(&home).unwrap();
-    fs::write(home.join(".bashrc"), UBUNTU_SKEL_BASHRC).unwrap();
+    fs::write(home.join(".bashrc"), rc).unwrap();
     for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
         executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
     }
@@ -694,9 +712,7 @@ fn cloud_up_inserts_path_before_ubuntu_skel_interactive_case() {
     let bashrc = fs::read_to_string(home.join(".bashrc")).unwrap();
     let line = format!("export PATH=\"{}:$PATH\"", bin.display());
     let path_at = bashrc.find(&line).unwrap_or_else(|| panic!("{bashrc}"));
-    let guard_at = bashrc
-        .find("case $- in")
-        .unwrap_or_else(|| panic!("{bashrc}"));
+    let guard_at = bashrc.find(guard).unwrap_or_else(|| panic!("{bashrc}"));
     assert!(path_at < guard_at, "{bashrc}");
     let out = Command::new("bash")
         .arg("-c")
