@@ -2883,7 +2883,16 @@ fn run_slug(id: &str) -> Option<String> {
     if slug.is_empty() || slug == "runner" {
         return None;
     }
-    Some(slug.chars().take(16).collect())
+    // A 16-character cut that keeps the hyphens ends an id such as
+    // `bc-ada4e131-7ec2-5fbf-...` on `-7ec2`. A later command reads that
+    // tail as a process tag and sits as a different seat than `cloud up`
+    // wrote. Drop the hyphens first, then keep 16 characters. A numeric
+    // run id has none, so it is only shortened.
+    let compact: String = slug.chars().filter(|c| *c != '-').take(16).collect();
+    if compact.is_empty() {
+        return None;
+    }
+    Some(compact)
 }
 
 fn harness_kind() -> &'static str {

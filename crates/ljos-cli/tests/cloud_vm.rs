@@ -4186,6 +4186,33 @@ fn a_run_id_suffixes_an_explicit_seat() {
     );
 }
 
+/// A Cursor id is cut to 16 characters after the hyphens are dropped, so
+/// `cloud up` and a later command name one seat. A numeric GitHub run id
+/// is only shortened.
+#[test]
+fn a_dashed_run_id_and_a_numeric_run_id_stay_one_seat() {
+    let _g = Guard::new();
+    clear_agent_ids();
+    std::env::set_var("LJOS_SEAT", "vmhooks");
+    std::env::set_var("CURSOR_AGENT_ID", "bc-ada4e131-7ec2-5fbf-8a2f-cbe669f39f7d");
+    let cursor = ljos_cli::cloud::default_seat();
+    assert_eq!(cursor, "vmhooks-bcada4e1317ec25f");
+    let (later, tag) = ljos_cli::holder_parts(&cursor);
+    assert_eq!(tag, None);
+    assert_eq!(later, cursor);
+
+    clear_agent_ids();
+    std::env::set_var("GITHUB_ACTIONS", "true");
+    std::env::set_var("GITHUB_RUN_ID", "181234567890123456");
+    std::env::set_var("CURSOR_AGENT_ID", "bc-ada4e131-7ec2-5fbf-should-not-win");
+    std::env::set_var("LJOS_SEAT", "ridley-ci-a");
+    let run = ljos_cli::cloud::default_seat();
+    assert_eq!(run, "ridley-ci-a-1812345678901234");
+    let (later, tag) = ljos_cli::holder_parts(&run);
+    assert_eq!(tag, None);
+    assert_eq!(later, run);
+}
+
 fn sig_key(text: &str) -> String {
     text.split_whitespace()
         .find(|word| word.len() == 64 && word.bytes().all(|b| b.is_ascii_hexdigit()))
