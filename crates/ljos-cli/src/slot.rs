@@ -363,8 +363,9 @@ fn deepen(root: &Path, remote: &str) -> bool {
 }
 
 fn git_fetch(root: &Path, args: &[&str]) -> bool {
-    std::process::Command::new("git")
-        .arg("-c")
+    let mut cmd = std::process::Command::new("git");
+    crate::clear_git_repo_env(&mut cmd);
+    cmd.arg("-c")
         .arg("protocol.file.allow=always")
         .arg("-C")
         .arg(root)
@@ -1244,6 +1245,47 @@ mod tests {
             "false",
             "the clone stayed shallow"
         );
+    }
+
+    /// `GIT_DIR` names a repository in place of `-C`. Exported toward a
+    /// complete repository, it must not make a shallow tracker ready. It
+    /// is set only on a child run of this binary, so no other test
+    /// thread's git follows it.
+    #[test]
+    fn a_git_dir_naming_a_complete_repo_does_not_make_a_shallow_tracker_ready() {
+        let _lock = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin");
+        pinned_before_slots(&origin);
+        let shallow = shallow_of(root.path(), &origin);
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "slot::tests::history_check_in_a_child",
+                "--test-threads=1",
+            ])
+            .env("GIT_DIR", origin.join(".git"))
+            .env("LJOS_TEST_HISTORY_ROOT", &shallow)
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).into_owned()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{said}");
+        assert!(said.contains("1 passed"), "{said}");
+        assert_eq!(
+            git_ok(&shallow, &["rev-parse", "--is-shallow-repository"]).trim(),
+            "false",
+            "the shallow tracker was ready without a deepen"
+        );
+    }
+
+    /// The history check on the tracker a parent test names. A run with
+    /// no tracker named checks nothing.
+    #[test]
+    fn history_check_in_a_child() {
+        if let Some(root) = std::env::var_os("LJOS_TEST_HISTORY_ROOT") {
+            require_tracker_history(Path::new(&root)).unwrap();
+        }
     }
 
     #[test]
