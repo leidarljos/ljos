@@ -98,7 +98,7 @@ fn show_drops_hidden_html_lists_attachments_and_shows_links_as_text() {
     assert_eq!(pdf.content_type, "application/pdf");
     let bytes = b"Invoice 7 for October\n";
     assert_eq!(pdf.size, bytes.len() as u64);
-    assert_eq!(pdf.sha256, hex::encode(Sha256::digest(bytes)));
+    assert_eq!(pdf.sha256, Some(hex::encode(Sha256::digest(bytes))));
 
     let json = serde_json::to_string(&shown).unwrap();
     assert!(!json.contains(&mailbox.maildir().display().to_string()));
@@ -181,6 +181,42 @@ fn a_notmuch_that_hangs_is_stopped_at_the_deadline() {
     ] {
         assert!(err.to_string().contains("did not finish"), "{err:#}");
     }
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn an_attachment_over_the_cap_is_listed_without_a_hash() {
+    let mailbox = maildir::mailbox();
+    let thread = mailbox.thread_of("hidden-html-1@shop.example.test");
+    let shown = reader(&mailbox)
+        .with_attachment_max(8)
+        .show(&thread)
+        .unwrap();
+    let pdf = &shown.messages[0].attachments[0];
+    assert_eq!(pdf.sha256, None);
+    assert!(pdf.size > 8, "{pdf:?}");
+}
+
+#[test]
+fn an_endless_attachment_does_not_stall_show() {
+    let dir = tempfile::tempdir().unwrap();
+    let json = r#"[[[{"id":"big@example.test","timestamp":0,"tags":[],"headers":{},"body":[{"id":1,"content-type":"multipart/mixed","content":[{"id":2,"content-type":"application/octet-stream","filename":"big.bin"}]}]},[]]]]"#;
+    let reader = fake(
+        &dir,
+        &format!(
+            "case \"$*\" in *--format=raw*) exec yes attachment ;; *) printf '%s' '{json}' ;; esac"
+        ),
+    )
+    .with_attachment_max(1 << 20);
+    let start = Instant::now();
+    let shown = reader.show("0000000000000001").unwrap();
+    let big = &shown.messages[0].attachments[0];
+    assert_eq!(big.sha256, None);
+    assert!(big.size > 1 << 20);
     assert!(
         start.elapsed() < Duration::from_secs(10),
         "{:?}",

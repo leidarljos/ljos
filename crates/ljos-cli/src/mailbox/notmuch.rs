@@ -35,6 +35,8 @@ const MESSAGES_MAX: usize = 50;
 const ATTACHMENTS_MAX: usize = 20;
 /// The longest one notmuch run may take before it is killed.
 pub const TIMEOUT: Duration = Duration::from_secs(30);
+/// The most bytes of one attachment that are read to hash it.
+pub const ATTACHMENT_HASH_MAX: u64 = 64 << 20;
 /// Tags left out of a search unless the query names them.
 const EXCLUDED: &[&str] = &["spam", "deleted"];
 
@@ -93,10 +95,11 @@ pub struct Message {
 pub struct Attachment {
     pub name: String,
     pub content_type: String,
-    /// Decoded bytes.
+    /// Decoded bytes; a lower bound when `sha256` is null.
     pub size: u64,
-    /// sha256 of the decoded bytes, hex.
-    pub sha256: String,
+    /// sha256 of the decoded bytes, hex. Null when the part is larger
+    /// than the hashing cap and was not read to the end.
+    pub sha256: Option<String>,
 }
 
 pub struct Reader {
@@ -104,6 +107,7 @@ pub struct Reader {
     config: PathBuf,
     nonce: String,
     timeout: Duration,
+    attachment_max: u64,
 }
 
 impl Reader {
@@ -123,6 +127,7 @@ impl Reader {
             config: notmuch_config,
             nonce: hex::encode(seed),
             timeout: TIMEOUT,
+            attachment_max: ATTACHMENT_HASH_MAX,
         })
     }
 
@@ -130,6 +135,14 @@ impl Reader {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// The same reader with a different cap on the bytes one attachment
+    /// digest reads.
+    #[must_use]
+    pub fn with_attachment_max(mut self, bytes: u64) -> Self {
+        self.attachment_max = bytes;
         self
     }
 
@@ -330,8 +343,9 @@ impl Reader {
         Ok(())
     }
 
-    /// Size and sha256 of one part's decoded bytes, streamed.
-    fn digest(&self, id: &str, part: u64) -> Result<(u64, String)> {
+    /// Size and sha256 of one part's decoded bytes, streamed. Past the
+    /// cap notmuch is stopped and there is no hash.
+    fn digest(&self, id: &str, part: u64) -> Result<(u64, Option<String>)> {
         if id.is_empty() || id.chars().any(char::is_control) {
             bail!("mail: a message id notmuch gave cannot be quoted");
         }
@@ -350,8 +364,11 @@ impl Reader {
                     }
                     hash.update(&buf[..n]);
                     size += n as u64;
+                    if size > self.attachment_max {
+                        return Ok(((size, None), false));
+                    }
                 }
-                Ok(((size, hex::encode(hash.finalize())), true))
+                Ok(((size, Some(hex::encode(hash.finalize()))), true))
             },
         )
         .with_context(|| format!("mail: notmuch could not read part {part}"))
