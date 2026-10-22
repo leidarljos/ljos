@@ -343,7 +343,8 @@ fn latest_prompt_path() -> std::path::PathBuf {
 /// runtime directory, readable by its owner only, and each prompt
 /// replaces it. Off when [`capture_mode`] is off. A bind beside the file
 /// records the hash, mtime and session, and [`said_in_latest_prompt`]
-/// requires it: a plain write of the prompt file does not count.
+/// requires it: a plain write of the prompt file does not count, and
+/// neither does a prompt bound to another session or to none.
 pub fn note_latest_prompt(prompt: &str) {
     note_latest_prompt_for(prompt, None);
 }
@@ -420,7 +421,9 @@ fn write_prompt_bind(
     f.write_all(body.as_bytes())
 }
 
-/// Whether the prompt file still matches the bind the hook wrote.
+/// Whether the prompt file still matches the bind the hook wrote, and the
+/// bind names the runner session this process belongs to. A bind with
+/// any other session, or none, is a prompt from somewhere else.
 fn prompt_bind_matches(path: &std::path::Path) -> bool {
     let Ok(bytes) = std::fs::read(path) else {
         return false;
@@ -437,7 +440,8 @@ fn prompt_bind_matches(path: &std::path::Path) -> bool {
     else {
         return false;
     };
-    if session.is_empty() {
+    let current = crate::ballot_sig::harness_session();
+    if current.is_empty() || current == "-" || crate::ballot_sig::field(session) != current {
         return false;
     }
     hash == hex::encode(sha2::Sha256::digest(bytes)) && stored == mtime.to_string()
@@ -455,8 +459,9 @@ fn words_only(text: &str) -> String {
 
 /// Whether `text` is the person's words: it appears in the prompt they
 /// sent last, within [`LATEST_PROMPT_SECS`], and the file still matches
-/// the bind the hook wrote. Four words or more, so "use bun" alone is
-/// not taken as a quote. A file written without that bind does not count.
+/// the bind the hook wrote for this runner session. Four words or more,
+/// so "use bun" alone is not taken as a quote. A file written without
+/// that bind does not count.
 #[must_use]
 pub fn said_in_latest_prompt(text: &str) -> bool {
     let want = words_only(text);

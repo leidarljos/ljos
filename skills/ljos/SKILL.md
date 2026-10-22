@@ -173,6 +173,11 @@ recipients and its own log, `<host>+<scope>.jsonl.age`
 (`cloud = ["age1..."]`). The sitting pulls and takes
 the other machines' logs before the island is walked; finish writes and
 pushes this machine's. `commit` skips that pull and that push.
+Each log's first line, inside the seal, names its host and scope;
+a log naming another host or scope is left unread, and a log from
+before that line opens only with a key other than this machine's own.
+A symlink at `.ljos`, `.ljos/atoms`, `.ljos/user-rules` or the state
+directory's `sync/` is refused.
 `ljos sync --key` prints this machine's public key
 for a scope's recipients, and `ljos sync` runs the pull and the push by hand.
 `ljos sync --adopt HOST` reposts that host's live atoms as this
