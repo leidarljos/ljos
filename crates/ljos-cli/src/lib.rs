@@ -19,6 +19,7 @@ pub mod bookkeep;
 pub mod capture;
 pub mod cloud;
 mod cloud_guard;
+mod cloud_hook;
 pub mod command_prefs;
 pub mod converge;
 mod deedbag;
@@ -49,6 +50,7 @@ pub mod sync;
 pub mod tools;
 mod tracker_push;
 pub mod tree_cleanup;
+pub mod turn_record;
 pub mod upgrade;
 pub mod user_rules;
 pub mod wake;
@@ -10433,8 +10435,10 @@ pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<(Vec<Hit>, bool)>
 
 /// What `/v1/search` answers for `cue`, with at most `limit` hits chosen
 /// by relevance alone, and how many of them the writer chose. A writer
-/// that honours `rank=relevance` picks them by lexical, BM25 and cosine
-/// with no half-life, and echoes the rank. An older writer cuts its
+/// that lists `rank=relevance` ([`ranks_by_relevance`]) is asked for it,
+/// picks them by lexical, BM25 and cosine with no half-life, and echoes
+/// the rank; an answer without the echo is read as fused. An older writer
+/// is not asked, and cuts its
 /// fused list, which decays with age, so rank 21 of a pack full of fresh
 /// lookalikes never arrives: the stored atoms that best match the cue
 /// then follow its hits, so a relevant old memory still gets in. So they
@@ -10453,8 +10457,10 @@ fn search_relevant(
         .query("workspace", &client.workspace())
         .query("q", &recall_query(cue))
         .query("limit", &limit.to_string())
-        .query("rank", "relevance")
         .timeout(timeout);
+    if ranks_by_relevance(client, timeout) {
+        req = req.query("rank", "relevance");
+    }
     if rerank {
         req = req.query("rerank", "1");
     }
@@ -10480,6 +10486,38 @@ fn search_relevant(
         }
     }
     Ok((body, chosen))
+}
+
+/// Whether the writer at `client` takes `rank=relevance`: its
+/// `/v1/status` lists it under `search.ranks`. An older writer omits
+/// `search`, and one that does not answer is taken as older. Its crate
+/// version did not move with the rank, so it is not read. Asked once a
+/// process per writer.
+fn ranks_by_relevance(client: &PacksetClient, timeout: std::time::Duration) -> bool {
+    static KNOWN: std::sync::Mutex<Option<(String, bool)>> = std::sync::Mutex::new(None);
+    let base = client.base().trim_end_matches('/').to_string();
+    let mut known = KNOWN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((at, ranks)) = known.as_ref() {
+        if *at == base {
+            return *ranks;
+        }
+    }
+    let Some(status) = packset_client::authorize(ureq::get(&format!("{base}/v1/status")))
+        .timeout(timeout)
+        .call()
+        .ok()
+        .and_then(|r| r.into_json::<Value>().ok())
+    else {
+        return false;
+    };
+    let ranks = status
+        .pointer("/search/ranks")
+        .and_then(Value::as_array)
+        .is_some_and(|r| r.iter().any(|v| v.as_str() == Some("relevance")));
+    *known = Some((base, ranks));
+    ranks
 }
 
 /// The stored atoms that best match `cue` on [`lexical_match_scores`],
@@ -10557,7 +10595,8 @@ fn merge_by_lexical(judged: Vec<Hit>, mut extra: Vec<Hit>, cue: &str) -> Vec<Hit
 
 /// The search with the cross-encoder asked for, and whether it ordered
 /// the hits. A writer without one says `absent` and returns the fused
-/// order, which carries age. Hits that carry a `rerank_score` are read
+/// order, which carries age. When every hit the writer chose carries a
+/// `rerank_score`, which is null on a hit it did not rerank, they are read
 /// by it. An atom [`search_relevant`] added, which the cross-encoder did
 /// not read, goes in ahead of the first hit its lexical match beats.
 fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> {
@@ -10578,9 +10617,10 @@ fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> 
                 Some((hit, v["rerank_score"].as_f64()))
             })
             .collect();
-        let scored_all = !scored.is_empty() && scored.iter().all(|(_, s)| s.is_some());
+        let chosen = chosen.min(scored.len());
+        let scored_all = chosen > 0 && scored[..chosen].iter().all(|(_, s)| s.is_some());
         if scored_all {
-            scored.sort_by(|a, b| b.1.unwrap_or(0.0).total_cmp(&a.1.unwrap_or(0.0)));
+            scored[..chosen].sort_by(|a, b| b.1.unwrap_or(0.0).total_cmp(&a.1.unwrap_or(0.0)));
         }
         let ran = scored_all || body["rerank"].as_str() == Some("cross-encoder");
         let mut hits: Vec<Hit> = scored.into_iter().map(|(h, _)| h).collect();
@@ -20073,6 +20113,19 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         if matches!(first, "cd" | "pushd") {
             cwd = kept_prompt::after_cd(&words, cwd.as_deref());
             continue;
+        }
+        // `ljos hook` keeps the prompt it is handed as the person's, so a
+        // tool call that runs it writes their words, whatever it reads.
+        let plugin = usize::from(first == "ljos-plugin");
+        let program = words.get(plugin).map(|w| w.rsplit('/').next().unwrap_or(w));
+        if program == Some("ljos") && words.get(plugin + 1).map(String::as_str) == Some("hook") {
+            return Some(Rule {
+                pattern: "seat-guard".into(),
+                verdict: "deny".into(),
+                reason: "`ljos hook` keeps the prompt it is handed as the person's words, and \
+                         only the runner runs it. Say what you need and stop."
+                    .into(),
+            });
         }
         let reads = READERS.contains(&first) || first == "ljos" || kept_prompt::reads_only(first);
         if let Some(t) = kept_prompt::reached(&words, cwd.as_deref(), reads)
@@ -35283,17 +35336,17 @@ mod tests {
     fn doctor_names_adopt_legacy_for_a_headerless_log() {
         let row = Habitat {
             name: "sync",
-            state: "`ljos sync --adopt-legacy alice`; `ljos sync --adopt-legacy bob`".into(),
+            state: "`ljos sync --adopt-legacy=alice`; `ljos sync --adopt-legacy=bob`".into(),
             ok: false,
         };
         assert_eq!(doctor_word(&row), "warn");
         assert!(healthy(std::slice::from_ref(&row)));
         let short = format_doctor_short(std::slice::from_ref(&row));
         assert!(
-            short.contains("`ljos sync --adopt-legacy alice`"),
+            short.contains("`ljos sync --adopt-legacy=alice`"),
             "{short}"
         );
-        assert!(short.contains("`ljos sync --adopt-legacy bob`"), "{short}");
+        assert!(short.contains("`ljos sync --adopt-legacy=bob`"), "{short}");
     }
 
     #[test]
@@ -37515,6 +37568,63 @@ mod tests {
             (200, body.to_string())
         });
         url
+    }
+
+    /// A writer whose status lists `relevance` under `search.ranks` is
+    /// asked for it and its echo read; one whose status has no `search`
+    /// is never sent a rank, here by refusing any.
+    #[test]
+    fn the_relevance_rank_is_asked_only_of_a_writer_that_lists_it() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap())]);
+        let hits = serde_json::json!([{
+            "id": "a", "text": "The registry rejected the token", "score": 1.0,
+            "kind": "lesson", "ts": "2026-01-14T09:00:00.000Z",
+            "entities": ["horizon:standing"], "rerank_score": null
+        }]);
+        let writer = |ranks: bool| {
+            let hits = hits.clone();
+            serve_http(move |req| {
+                let first = req.lines().next().unwrap_or("");
+                if first.contains("/v1/status") {
+                    let status = if ranks {
+                        serde_json::json!({"search": {"ranks": ["fused", "relevance"]}})
+                    } else {
+                        serde_json::json!({})
+                    };
+                    return (200, status.to_string());
+                }
+                if !first.contains("/v1/search") {
+                    return (404, r#"{"error":"missing"}"#.into());
+                }
+                match (
+                    ranks,
+                    first.contains("rank=relevance"),
+                    first.contains("rank="),
+                ) {
+                    (true, true, _) => (
+                        200,
+                        serde_json::json!({"hits": hits, "rank": "relevance"}).to_string(),
+                    ),
+                    (_, _, true) => (400, r#"{"error":"unknown rank"}"#.into()),
+                    _ => (200, serde_json::json!({"hits": hits}).to_string()),
+                }
+            })
+        };
+        for ranks in [true, false] {
+            let (url, seen) = writer(ranks);
+            let _url = PackUrl::set(&url);
+            let found = packset_search_relevant("the registry rejected my token", 12)
+                .unwrap_or_else(|e| panic!("ranks={ranks}: {e:#}"));
+            assert_eq!(found.len(), 1, "ranks={ranks}");
+            let asked = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.lines().next().unwrap_or("").contains("rank=relevance"));
+            assert_eq!(asked, ranks, "{:?}", seen.lock().unwrap());
+        }
     }
 
     /// Every hit names the subject. The one that covers the whole prompt
@@ -45655,6 +45765,38 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "ssh localhost ljos recall paste",
             "ljos prefer --user --why x always paste it",
             "ssh localhost echo ljos prefer",
+        ] {
+            assert!(seat_guard(line).is_none(), "refused: {line}");
+        }
+    }
+
+    /// `ljos hook` keeps the prompt it reads as the person's, so a tool
+    /// call never runs it, here, through the plugin launcher or over ssh;
+    /// reading the kept prompt and running ljos otherwise still pass.
+    #[test]
+    fn a_tool_call_running_ljos_hook_is_denied() {
+        let _g = env_guard();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
+        for line in [
+            "ljos hook < plant.json",
+            "printf '%s' \"$payload\" | ljos hook",
+            "~/.cargo/bin/ljos hook < /tmp/p.json",
+            "env LJOS_CAPTURE=save ljos hook < plant.json",
+            "\"$CLAUDE_PLUGIN_ROOT/bin/ljos-plugin\" ljos hook < plant.json",
+            "ssh localhost ljos hook < plant.json",
+            "ssh localhost 'ljos hook' < plant.json",
+            "sh -c 'ljos hook < plant.json'",
+        ] {
+            let rule = seat_guard(line).unwrap_or_else(|| panic!("allowed: {line}"));
+            assert!(rule.reason.contains("ljos hook"), "{line}: {}", rule.reason);
+        }
+        for line in [
+            "cat /run/user/1000/ljos/latest-prompt",
+            "ljos status",
+            "ljos recall hook",
+            "ljos doctor",
+            "rg -n 'ljos hook' hooks/",
+            "printf x > notes.txt",
         ] {
             assert!(seat_guard(line).is_none(), "refused: {line}");
         }
