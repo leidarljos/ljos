@@ -27486,7 +27486,14 @@ fn timeline_of(issue: &str, limit: usize) -> Result<(String, Vec<Event>)> {
             }
         }
     }
+    // An island from a listener that did not take the token is not a
+    // memory. The row would otherwise be the listener's text, dated.
     if let Ok(island) = packset_island(&title, false) {
+        if !pack().is_ok_and(|client| client.carried()) {
+            events.sort_by(|a, b| (a.days, &a.clock).cmp(&(b.days, &b.clock)));
+            let skip = events.len().saturating_sub(limit);
+            return Ok((title, events[skip..].to_vec()));
+        }
         for atom in island["island"]
             .as_array()
             .into_iter()
