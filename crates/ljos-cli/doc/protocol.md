@@ -52,8 +52,10 @@ does not check that the person asserted the claim. Tightening that match
 is more than a one-line change, so it is left as it is. Prompt recall reads
 preferences first,
 then the person's words, then other claims, and leaves working notes out of
-the prompt fact block. `ljos recall` still lists notes as unverified agent
-notes, with provenance where known.
+the prompt fact block, whether the prompt names the issue or the seat
+already holds it. `ljos recall` lists those working notes apart from the
+facts, under an `unverified logbook notes` heading, each labelled by its
+agent-derived origin.
 `finish` takes the lesson, releases the claim, syncs, and pushes the
 tracker. The server also claims on the first write and finishes on
 shutdown or when the session goes idle.

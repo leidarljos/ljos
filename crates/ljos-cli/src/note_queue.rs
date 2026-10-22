@@ -12,7 +12,6 @@
 //! issue and text with the claim it already holds, so a resend after a
 //! lost answer stores nothing new.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -148,12 +147,9 @@ pub fn push_in(dir: &Path, note: Queued) -> Result<bool> {
         return Ok(false);
     }
     let path = queue_file(dir);
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .with_context(|| format!("open {}", path.display()))?;
-    writeln!(file, "{}", serde_json::to_string(&note)?)
+    let mut line = serde_json::to_string(&note)?;
+    line.push('\n');
+    crate::append_locked_row(&path, line.as_bytes())
         .with_context(|| format!("append {}", path.display()))?;
     Ok(true)
 }
@@ -274,6 +270,48 @@ mod tests {
         other.supersedes = vec!["atom-new".into()];
         assert!(push_in(&dir, other).unwrap());
         assert_eq!(pending_in(&dir).len(), 2);
+    }
+
+    /// The queue is one JSON line per copy. writeln! of that line is two
+    /// write calls, and the sidecar lock is skipped when it cannot be
+    /// taken, so two copies can still land on one line.
+    #[test]
+    fn concurrent_queue_rows_each_parse() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = dir("concurrent");
+        const THREADS: usize = 32;
+        const EACH: usize = 4;
+        let mut handles = Vec::with_capacity(THREADS);
+        for thread in 0..THREADS {
+            let dir = dir.clone();
+            handles.push(std::thread::spawn(move || {
+                for n in 0..EACH {
+                    let mut queued = note(&format!("p-{thread}"), &format!("text {thread}-{n}"));
+                    queued.at = (thread * EACH + n) as u64;
+                    push_in(&dir, queued).unwrap();
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("queue writer");
+        }
+        let path = dir.join("note-queue.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rows: Vec<Queued> = text
+            .lines()
+            .map(|line| {
+                serde_json::from_str(line).unwrap_or_else(|err| {
+                    panic!("queue row does not parse ({err}): {line}");
+                })
+            })
+            .collect();
+        assert_eq!(rows.len(), THREADS * EACH, "{text}");
+        let mode = std::fs::symlink_metadata(&path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "queue mode {mode:o}");
     }
 
     #[test]
