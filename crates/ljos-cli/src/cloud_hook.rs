@@ -40,7 +40,7 @@ fn allow_path() -> Option<PathBuf> {
 /// refuses that flag.
 pub(crate) fn ensure(repoint: bool) -> Result<String> {
     let dir = install_script()?;
-    let existing = recorded_code_keys();
+    let existing = read_lists();
     let new_key = origin_url().as_deref().and_then(key_or_empty);
     let code_owned = code_keys(&existing, new_key.as_deref(), repoint)?;
     let tracker = std::env::var("LJOS_TRACKER_REMOTE")
@@ -55,20 +55,42 @@ pub(crate) fn ensure(repoint: bool) -> Result<String> {
         }
         Err(_) => (Vec::new(), true),
     };
+    // A cargo test of this package keeps the workspace checkout out of
+    // the seat record. Recording it would make doctor read this repo's
+    // own hooksPath, which is not the cloud hook.
+    let seat = if invoked_from_package_under_test() {
+        existing.seat.clone()
+    } else {
+        work_tree()
+            .map(|path| path.display().to_string())
+            .or(existing.seat.clone())
+    };
+    let home = crate::home()
+        .ok()
+        .map(|path| path.display().to_string())
+        .or(existing.home.clone());
     let code_ref = code_owned.iter().map(String::as_str).collect::<Vec<_>>();
     let tracker_ref = tracker.as_deref().into_iter().collect::<Vec<_>>();
     let branch_ref = branches.iter().map(String::as_str).collect::<Vec<_>>();
-    write_lists(&code_ref, &tracker_ref, &branch_ref, closed)?;
+    write_lists(
+        &code_ref,
+        &tracker_ref,
+        &branch_ref,
+        closed,
+        home.as_deref(),
+        seat.as_deref(),
+    )?;
     point_hooks(&dir)?;
     Ok(format!("hook: {} is the pre-push allowlist", dir.display()))
 }
 
-fn code_keys(existing: &[String], new_key: Option<&str>, repoint: bool) -> Result<Vec<String>> {
+fn code_keys(existing: &StoredLists, new_key: Option<&str>, repoint: bool) -> Result<Vec<String>> {
     let Some(new_key) = new_key else {
-        return Ok(existing.to_vec());
+        return Ok(existing.code.clone());
     };
-    if !repoint && !existing.is_empty() && !existing.iter().any(|key| key == new_key) {
+    if !repoint && !existing.code.is_empty() && !existing.code.iter().any(|key| key == new_key) {
         let kept = existing
+            .code
             .first()
             .map(String::as_str)
             .unwrap_or("another repository");
@@ -77,30 +99,122 @@ fn code_keys(existing: &[String], new_key: Option<&str>, repoint: bool) -> Resul
     Ok(vec![new_key.to_string()])
 }
 
-fn recorded_code_keys() -> Vec<String> {
-    let Some(path) = allow_path() else {
-        return Vec::new();
-    };
-    let Ok(text) = fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    text.lines()
-        .filter_map(|line| {
-            let (tag, val) = line.split_once('\t')?;
-            (tag == "code" && !val.is_empty()).then(|| val.to_string())
-        })
-        .collect()
-}
-
-/// Replace the allowlist. `code` and `tracker` are remote URLs as git
-/// would be given them. Branch names are the short names (`develop`, not
-/// `refs/heads/develop`).
+/// Replace the allowlist's repositories and branches. A repository
+/// recorded by `cloud up` is not pinned here: tests and a repaired
+/// allowlist rewrite the code lines. The seat and home lines stay.
 pub(crate) fn write_push_allowlist(
     code: &[&str],
     tracker: &[&str],
     branches: &[&str],
 ) -> Result<()> {
-    write_lists(code, tracker, branches, false)
+    let existing = read_lists();
+    let home = crate::home()
+        .ok()
+        .map(|path| path.display().to_string())
+        .or(existing.home);
+    write_lists(
+        code,
+        tracker,
+        branches,
+        false,
+        home.as_deref(),
+        existing.seat.as_deref(),
+    )
+}
+
+/// The work tree `cloud up` recorded. Absent while a cargo test of this
+/// package is still sitting in the workspace.
+pub(crate) fn recorded_seat() -> Option<PathBuf> {
+    let seat = read_lists().seat?;
+    let path = PathBuf::from(seat);
+    (!path.as_os_str().is_empty()).then_some(path)
+}
+
+/// Whether `dir` is the recorded seat, or a directory inside it.
+pub(crate) fn dir_is_recorded_seat(dir: &Path) -> bool {
+    let Some(seat) = recorded_seat() else {
+        return false;
+    };
+    let dir = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        let Ok(cwd) = std::env::current_dir() else {
+            return false;
+        };
+        cwd.join(dir)
+    };
+    let top = work_tree_of(&dir).unwrap_or(dir);
+    paths_same(&top, &seat)
+}
+
+struct StoredLists {
+    code: Vec<String>,
+    home: Option<String>,
+    seat: Option<String>,
+}
+
+fn read_lists() -> StoredLists {
+    let mut out = StoredLists {
+        code: Vec::new(),
+        home: None,
+        seat: None,
+    };
+    let Some(path) = allow_path() else {
+        return out;
+    };
+    let Ok(text) = fs::read_to_string(path) else {
+        return out;
+    };
+    for line in text.lines() {
+        let Some((tag, val)) = line.split_once('\t') else {
+            continue;
+        };
+        if val.is_empty() {
+            continue;
+        }
+        match tag {
+            "code" => out.code.push(val.to_string()),
+            "home" if out.home.is_none() => out.home = Some(val.to_string()),
+            "seat" if out.seat.is_none() => out.seat = Some(val.to_string()),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Cargo sets `CARGO_MANIFEST_DIR` while it runs this package's tests.
+/// The test process's cwd is the workspace, a parent of the manifest, or
+/// a directory inside it. A test that `set_current_dir`s into a fixture
+/// is a seat and is recorded. The installed hook never reads this.
+fn invoked_from_package_under_test() -> bool {
+    let (Ok(manifest), Ok(cwd)) = (std::env::var("CARGO_MANIFEST_DIR"), std::env::current_dir())
+    else {
+        return false;
+    };
+    let manifest = PathBuf::from(manifest);
+    cwd == manifest || cwd.starts_with(&manifest) || manifest.starts_with(&cwd)
+}
+
+fn work_tree() -> Option<PathBuf> {
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| work_tree_of(&cwd))
+}
+
+fn work_tree_of(dir: &Path) -> Option<PathBuf> {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(out.stdout).ok()?;
+    let path = path.trim();
+    (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
 fn install_script() -> Result<PathBuf> {
@@ -162,7 +276,14 @@ fn origin_url() -> Option<String> {
     (!url.is_empty()).then(|| url.to_string())
 }
 
-fn write_lists(code: &[&str], tracker: &[&str], branches: &[&str], closed: bool) -> Result<()> {
+fn write_lists(
+    code: &[&str],
+    tracker: &[&str],
+    branches: &[&str],
+    closed: bool,
+    home: Option<&str>,
+    seat: Option<&str>,
+) -> Result<()> {
     let path = allow_path().context("cloud up: no config home for the push allowlist")?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -183,6 +304,16 @@ fn write_lists(code: &[&str], tracker: &[&str], branches: &[&str], closed: bool)
     branch_names.sort_unstable();
     branch_names.dedup();
     let mut body = String::from("# ljos cloud push allowlist\n");
+    if let Some(home) = home.filter(|home| !home.is_empty() && !home.contains(['\n', '\t'])) {
+        body.push_str("home\t");
+        body.push_str(home);
+        body.push('\n');
+    }
+    if let Some(seat) = seat.filter(|seat| !seat.is_empty() && !seat.contains(['\n', '\t'])) {
+        body.push_str("seat\t");
+        body.push_str(seat);
+        body.push('\n');
+    }
     for key in &code_keys {
         body.push_str("code\t");
         body.push_str(key);
@@ -241,37 +372,106 @@ pub(crate) fn hook_line() -> std::result::Result<String, String> {
             path.display()
         ));
     }
-    let configured = global_hooks_path().map_err(|err| {
-        format!("pre-push hook not named by core.hooksPath ({err}); run `ljos cloud up`")
-    })?;
-    if !paths_same(Path::new(&configured), &dir) {
-        return Err(format!(
-            "pre-push hook not named by core.hooksPath ({configured}); run `ljos cloud up`"
-        ));
-    }
+    effective_hook_ok(&dir)?;
     Ok(format!("pre-push hook at {}", path.display()))
 }
 
-fn global_hooks_path() -> std::result::Result<String, String> {
-    let out = Command::new("git")
-        .args(["config", "--global", "--get", "core.hooksPath"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|err| err.to_string())?;
+fn effective_hook_ok(our_dir: &Path) -> std::result::Result<(), String> {
+    let (value, base) = effective_hooks_value()?;
+    let resolved = resolve_hooks_value(&value, &base);
+    if paths_same(&resolved, our_dir) {
+        return Ok(());
+    }
+    let pre = resolved.join("pre-push");
+    let text = fs::read(&pre).map_err(|_| {
+        format!("pre-push hook not named by core.hooksPath ({value}); run `ljos cloud up`")
+    })?;
+    if text == HOOK_SCRIPT.as_bytes() {
+        return Ok(());
+    }
+    let marker = format!(
+        "# ljos-cloud-chain {}",
+        canonical_hook_path(our_dir).display()
+    );
+    let body = String::from_utf8_lossy(&text);
+    if body.lines().any(|line| line == marker) {
+        return Ok(());
+    }
+    Err(format!(
+        "pre-push hook not named by core.hooksPath ({value}); run `ljos cloud up`"
+    ))
+}
+
+/// The hooks directory git would use for the recorded seat, or, when no
+/// seat is recorded, the value visible outside this process's checkout.
+fn effective_hooks_value() -> std::result::Result<(String, PathBuf), String> {
+    let seat = recorded_seat().filter(|path| path.is_dir());
+    let probe = if seat.is_none() {
+        Some(probe_dir()?)
+    } else {
+        None
+    };
+    let mut cmd = Command::new("git");
+    cmd.args(["config", "--show-origin", "--get", "core.hooksPath"]);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+    let base = if let Some(seat) = &seat {
+        cmd.current_dir(seat);
+        seat.clone()
+    } else {
+        let probe = probe.clone().expect("probe");
+        cmd.current_dir(&probe);
+        probe
+    };
+    let out = cmd.output().map_err(|err| err.to_string())?;
+    if let Some(probe) = &probe {
+        let _ = fs::remove_dir_all(probe);
+    }
     if !out.status.success() {
         return Err("unset".to_string());
     }
-    let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let line = text.lines().next().unwrap_or("").trim();
+    let value = line
+        .split_once('\t')
+        .map(|(_, value)| value.trim())
+        .unwrap_or(line);
     if value.is_empty() {
         Err("unset".to_string())
     } else {
-        Ok(value)
+        Ok((value.to_string(), base))
     }
+}
+
+fn probe_dir() -> std::result::Result<PathBuf, String> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path =
+        std::env::temp_dir().join(format!("ljos-hooks-probe-{}-{nanos}", std::process::id()));
+    fs::create_dir_all(&path).map_err(|err| err.to_string())?;
+    Ok(path)
+}
+
+fn resolve_hooks_value(value: &str, base: &Path) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
+    }
+}
+
+fn canonical_hook_path(our_dir: &Path) -> PathBuf {
+    let path = our_dir.join("pre-push");
+    fs::canonicalize(&path).unwrap_or(path)
 }
 
 /// The hook directory, the hook file, the allowlist, and the gitconfig
 /// files that can name `core.hooksPath`. A write to one of these disarms
-/// the hook.
+/// the hook. The recorded seat's `.git/config` is included. Any other
+/// `.git/config` or `.gitconfig` is matched by name in `names_protected`.
 pub(crate) fn protected_write_targets() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(dir) = hooks_dir() {
@@ -300,6 +500,9 @@ pub(crate) fn protected_write_targets() -> Vec<PathBuf> {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
         out.push(PathBuf::from(&xdg).join("git/config"));
     }
+    if let Some(seat) = recorded_seat() {
+        out.push(seat.join(".git/config"));
+    }
     out
 }
 
@@ -307,6 +510,9 @@ pub(crate) fn names_protected(target: &str, cwd: Option<&Path>) -> bool {
     let Some(expanded) = expand_target(target) else {
         return false;
     };
+    if config_file_name(&expanded) {
+        return true;
+    }
     let mut candidates = vec![PathBuf::from(&expanded)];
     if let Some(cwd) = cwd {
         if !Path::new(&expanded).is_absolute() {
@@ -315,6 +521,9 @@ pub(crate) fn names_protected(target: &str, cwd: Option<&Path>) -> bool {
     }
     let protected = protected_write_targets();
     for cand in &candidates {
+        if config_file_name(&cand.display().to_string()) {
+            return true;
+        }
         for have in &protected {
             if paths_same(cand, have) || path_under(cand, have) {
                 return true;
@@ -322,6 +531,49 @@ pub(crate) fn names_protected(target: &str, cwd: Option<&Path>) -> bool {
         }
     }
     false
+}
+
+/// A word that names a protected file, including a path inside a quoted
+/// program argument.
+pub(crate) fn word_hits_protected(word: &str, cwd: Option<&Path>) -> bool {
+    if names_protected(word, cwd) {
+        return true;
+    }
+    if let Some((_, rest)) = word.split_once('=') {
+        if names_protected(rest, cwd) {
+            return true;
+        }
+    }
+    for part in word.split(|c: char| {
+        matches!(
+            c,
+            '"' | '\'' | ' ' | ',' | '(' | ')' | ';' | '`' | '{' | '}'
+        )
+    }) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if names_protected(part, cwd) || config_file_name(part) {
+            return true;
+        }
+    }
+    for have in protected_write_targets() {
+        let text = have.display().to_string();
+        if text.len() > 3 && word.contains(&text) {
+            return true;
+        }
+    }
+    false
+}
+
+fn config_file_name(path: &str) -> bool {
+    let path = path.trim().trim_matches(|c| c == '"' || c == '\'');
+    let path = path.trim_end_matches([')', ';', ',', '\\']);
+    path == ".gitconfig"
+        || path.ends_with("/.gitconfig")
+        || path == ".git/config"
+        || path.ends_with(".git/config")
 }
 
 fn path_under(path: &Path, dir: &Path) -> bool {

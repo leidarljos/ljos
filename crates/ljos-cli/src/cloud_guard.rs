@@ -487,6 +487,9 @@ fn hook_disarm(seg: &str, cwd: Option<&Path>) -> Option<String> {
     if let Some(why) = file_tool_disarm(cmd, &words[at..], cwd) {
         return Some(why);
     }
+    if let Some(why) = protected_path_write(cmd, &words[at..], cwd) {
+        return Some(why);
+    }
     let shell_wide = cmd == Some("export") || at == words.len();
     let git = cmd == Some("git");
     // A prefix assignment applies to this command. `export`, and a segment
@@ -502,9 +505,167 @@ fn hook_disarm(seg: &str, cwd: Option<&Path>) -> Option<String> {
         }
     }
     if git {
-        return git_hook_disarm(&words[at..]);
+        return git_hook_disarm(&words[at..], cwd);
     }
     None
+}
+
+fn protected_path_write(cmd: Option<&str>, words: &[String], cwd: Option<&Path>) -> Option<String> {
+    let cmd = cmd?;
+    if command_is_pure_read(cmd, words) || (cmd == "git" && git_invocation_is_read(words)) {
+        return None;
+    }
+    let hit = words
+        .iter()
+        .find(|word| crate::cloud_hook::word_hits_protected(word, cwd))?;
+    Some(disarm_why(&format!(
+        "`{cmd}` writes {hit}, which can replace the pre-push hook or the config that names it"
+    )))
+}
+
+fn command_is_pure_read(cmd: &str, words: &[String]) -> bool {
+    let cmd = cmd.rsplit('/').next().unwrap_or(cmd);
+    if matches!(
+        cmd,
+        "cat"
+            | "head"
+            | "tail"
+            | "less"
+            | "more"
+            | "wc"
+            | "stat"
+            | "ls"
+            | "file"
+            | "grep"
+            | "rg"
+            | "diff"
+            | "cmp"
+            | "od"
+            | "hexdump"
+            | "strings"
+            | "echo"
+            | "printf"
+            | "true"
+            | "false"
+    ) {
+        return true;
+    }
+    if matches!(cmd, "sed" | "perl" | "awk" | "ruby") {
+        return !inplace_edit(cmd, words);
+    }
+    false
+}
+
+fn inplace_edit(cmd: &str, words: &[String]) -> bool {
+    words.iter().any(|word| {
+        if word == "--in-place" || word.starts_with("--in-place=") {
+            return true;
+        }
+        if cmd == "perl" {
+            if let Some(cluster) = word.strip_prefix('-') {
+                if !cluster.is_empty() && !word.starts_with("--") && cluster.contains('i') {
+                    return true;
+                }
+            }
+            return false;
+        }
+        word == "-i" || (word.starts_with("-i") && !word.starts_with("--"))
+    })
+}
+
+fn git_invocation_is_read(words: &[String]) -> bool {
+    let mut i = 1usize;
+    while i < words.len() {
+        let word = words[i].as_str();
+        if GIT_VALUED.contains(&word) {
+            i += 2;
+            continue;
+        }
+        if word.starts_with('-') && word.len() > 1 {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    let sub = words.get(i).map(String::as_str).unwrap_or("");
+    if matches!(
+        sub,
+        "status"
+            | "log"
+            | "diff"
+            | "show"
+            | "rev-parse"
+            | "grep"
+            | "blame"
+            | "ls-files"
+            | "cat-file"
+            | "rev-list"
+            | "merge-base"
+            | "symbolic-ref"
+            | "describe"
+            | "fetch"
+            | "version"
+            | "help"
+    ) {
+        return true;
+    }
+    sub == "config" && git_config_is_read(&words[i + 1..])
+}
+
+fn git_config_is_read(args: &[String]) -> bool {
+    let mut positional = 0usize;
+    let mut i = 0usize;
+    while i < args.len() {
+        let word = args[i].as_str();
+        if matches!(
+            word,
+            "--get"
+                | "--get-all"
+                | "--get-regexp"
+                | "--get-urlmatch"
+                | "--list"
+                | "-l"
+                | "--show-origin"
+                | "--show-scope"
+                | "--get-color"
+                | "--get-colorbool"
+                | "--global"
+                | "--system"
+                | "--local"
+        ) {
+            i += 1;
+            continue;
+        }
+        if matches!(
+            word,
+            "--file" | "-f" | "--blob" | "--default" | "--comment" | "--type" | "--name" | "--id"
+        ) {
+            i += 2;
+            continue;
+        }
+        if matches!(
+            word,
+            "--unset"
+                | "--unset-all"
+                | "--replace-all"
+                | "--add"
+                | "--edit"
+                | "--remove-section"
+                | "--rename-section"
+        ) {
+            return false;
+        }
+        if word.starts_with('-') && word.len() > 1 {
+            i += 1;
+            continue;
+        }
+        if word.contains('=') {
+            return false;
+        }
+        positional += 1;
+        i += 1;
+    }
+    positional < 2
 }
 
 fn disarm_why(what: &str) -> String {
@@ -647,7 +808,7 @@ fn config_env_disarm(words: &[String]) -> Option<String> {
     None
 }
 
-fn git_hook_disarm(words: &[String]) -> Option<String> {
+fn git_hook_disarm(words: &[String], cwd: Option<&Path>) -> Option<String> {
     // `--no-verify` is a push option, so it follows the subcommand.
     // `-c core.hooksPath` is refused wherever it sits on the git command.
     if let Some(why) = git_hook_switches(words) {
@@ -696,7 +857,7 @@ fn git_hook_disarm(words: &[String]) -> Option<String> {
         break;
     }
     if words.get(i).map(String::as_str) == Some("config") {
-        return git_config_hooks_disarm(&words[i + 1..]);
+        return git_config_hooks_disarm(words, &words[i + 1..], cwd);
     }
     None
 }
@@ -708,7 +869,7 @@ fn git_hook_switches(words: &[String]) -> Option<String> {
         if word == "--no-verify" || word.starts_with("--no-verify=") {
             return Some(disarm_why("`git --no-verify` skips the pre-push hook"));
         }
-        if word == "-c" || word == "--config-env" {
+        if word == "-c" || word == "--config-env" || word == "--config" {
             let value = words.get(i + 1).map(String::as_str).unwrap_or("");
             if hooks_path_setting(value) {
                 return Some(disarm_why(
@@ -717,6 +878,13 @@ fn git_hook_switches(words: &[String]) -> Option<String> {
             }
             i += 2;
             continue;
+        }
+        if let Some(value) = word.strip_prefix("--config=") {
+            if hooks_path_setting(value) {
+                return Some(disarm_why(
+                    "`git -c` names core.hooksPath and skips the pre-push hook",
+                ));
+            }
         }
         if let Some(value) = word.strip_prefix("--config-env=") {
             if hooks_path_setting(value) {
@@ -742,13 +910,30 @@ fn hooks_path_setting(value: &str) -> bool {
     key.eq_ignore_ascii_case("core.hooksPath")
 }
 
-fn git_config_hooks_disarm(args: &[String]) -> Option<String> {
+fn git_config_hooks_disarm(
+    git_words: &[String],
+    args: &[String],
+    cwd: Option<&Path>,
+) -> Option<String> {
     let mut i = 0;
     let mut read = false;
     let mut write = false;
+    let mut edit = false;
+    let mut global = false;
+    let mut file: Option<String> = None;
+    let mut section: Option<String> = None;
     let mut positional: Vec<&str> = Vec::new();
     while i < args.len() {
         let word = args[i].as_str();
+        if matches!(word, "--global" | "--system") {
+            global = true;
+            i += 1;
+            continue;
+        }
+        if word == "--local" {
+            i += 1;
+            continue;
+        }
         if matches!(
             word,
             "--get"
@@ -771,9 +956,29 @@ fn git_config_hooks_disarm(args: &[String]) -> Option<String> {
             i += 1;
             continue;
         }
+        if word == "--edit" {
+            edit = true;
+            i += 1;
+            continue;
+        }
+        if word == "--remove-section" || word == "--rename-section" {
+            section = args.get(i + 1).cloned();
+            i += 2;
+            continue;
+        }
+        if word == "--file" || word == "-f" {
+            file = args.get(i + 1).cloned();
+            i += 2;
+            continue;
+        }
+        if let Some(rest) = word.strip_prefix("--file=") {
+            file = Some(rest.to_string());
+            i += 1;
+            continue;
+        }
         if matches!(
             word,
-            "--file" | "-f" | "--blob" | "--default" | "--comment" | "--type" | "--name" | "--id"
+            "--blob" | "--default" | "--comment" | "--type" | "--name" | "--id"
         ) {
             i += 2;
             continue;
@@ -785,9 +990,24 @@ fn git_config_hooks_disarm(args: &[String]) -> Option<String> {
         positional.push(word);
         i += 1;
     }
+    if !config_scope_guarded(global, file.as_deref(), git_words, cwd) {
+        return None;
+    }
+    if edit {
+        return Some(disarm_why(
+            "`git config --edit` can set core.hooksPath and skip the pre-push hook",
+        ));
+    }
+    if let Some(section) = section.as_deref() {
+        if section_disarms(section) {
+            return Some(disarm_why(
+                "`git config --remove-section` can drop core.hooksPath and skip the pre-push hook",
+            ));
+        }
+    }
     let key = positional.first().copied().unwrap_or("");
     let key = key.split_once('=').map(|(key, _)| key).unwrap_or(key);
-    if !key.eq_ignore_ascii_case("core.hooksPath") {
+    if !key_disarms(key) {
         return None;
     }
     let sets =
@@ -799,8 +1019,73 @@ fn git_config_hooks_disarm(args: &[String]) -> Option<String> {
         return None;
     }
     Some(disarm_why(
-        "`git config` writes core.hooksPath and skips the pre-push hook",
+        "`git config` writes a key that skips the pre-push hook",
     ))
+}
+
+/// Global and system config, a named gitconfig, and the recorded seat's
+/// local config can turn the hook off. A throwaway repository's local
+/// `core.hooksPath` is how the bookkeeping fixtures run.
+fn config_scope_guarded(
+    global: bool,
+    file: Option<&str>,
+    git_words: &[String],
+    cwd: Option<&Path>,
+) -> bool {
+    if global {
+        return true;
+    }
+    if let Some(file) = file {
+        return crate::cloud_hook::names_protected(file, cwd);
+    }
+    let dir = git_dash_c(git_words).unwrap_or_else(|| PathBuf::from("."));
+    let dir = if dir.is_absolute() {
+        dir
+    } else {
+        match cwd {
+            Some(cwd) => cwd.join(dir),
+            None => dir,
+        }
+    };
+    crate::cloud_hook::dir_is_recorded_seat(&dir)
+}
+
+fn git_dash_c(words: &[String]) -> Option<PathBuf> {
+    let mut i = 1usize;
+    while i < words.len() {
+        let word = words.get(i).map(String::as_str)?;
+        if word == "-C" {
+            return words.get(i + 1).map(PathBuf::from);
+        }
+        if let Some(rest) = word.strip_prefix("-C") {
+            if !rest.is_empty() && !word.starts_with("--") {
+                return Some(PathBuf::from(rest));
+            }
+        }
+        if GIT_VALUED.contains(&word) {
+            i += 2;
+            continue;
+        }
+        if word.starts_with('-') && word.len() > 1 {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    None
+}
+
+fn key_disarms(key: &str) -> bool {
+    if key.eq_ignore_ascii_case("core.hooksPath") {
+        return true;
+    }
+    let lower = key.to_ascii_lowercase();
+    lower == "include.path" || lower.starts_with("include.") || lower.starts_with("includeif.")
+}
+
+fn section_disarms(section: &str) -> bool {
+    let lower = section.to_ascii_lowercase();
+    lower == "core" || lower == "include" || lower.starts_with("includeif")
 }
 
 fn walk_child(

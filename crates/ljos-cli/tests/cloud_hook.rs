@@ -463,9 +463,11 @@ fn shell_guard_refuses_disarming_the_hook() {
         "git -c core.hooksPath=/dev/null push origin develop",
         "git -c core.hooksPath=/tmp/keep push origin develop",
         "git --config-env core.hooksPath=HOOK push origin develop",
-        "git config core.hooksPath /dev/null",
+        "git clone --config core.hooksPath=/dev/null https://example.invalid/a.git",
         "git config --global --unset core.hooksPath",
-        "git config --replace-all core.hooksPath /dev/null",
+        "git config --global --replace-all core.hooksPath /dev/null",
+        "git config --global include.path /tmp/evil-hooks.cfg",
+        "git config --global --remove-section core",
         "export GIT_CONFIG_GLOBAL=/tmp/other-gitconfig",
         "export GIT_CONFIG_SYSTEM=/tmp/other-system",
         "export GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null",
@@ -478,6 +480,11 @@ fn shell_guard_refuses_disarming_the_hook() {
         &format!("chmod 644 {}", hook.display()),
         &format!("cp /etc/hostname {}", hook.display()),
         &format!("tee {} >/dev/null", hooks.join("pre-push").display()),
+        "sed -i 's/a/b/' ~/.gitconfig",
+        "perl -pi -e 's/a/b/' ~/.gitconfig",
+        "printf '[core]\\nhooksPath = /dev/null\\n' >| ~/.gitconfig",
+        "printf '[core]\\nhooksPath = /dev/null\\n' >> .git/config",
+        "dd of=.git/config",
     ] {
         let hit = refused(line, &repo);
         assert!(
@@ -491,6 +498,9 @@ fn shell_guard_refuses_disarming_the_hook() {
 
     allowed("git config core.hooksPath", &repo);
     allowed("git config --get core.hooksPath", &repo);
+    allowed("git config core.hooksPath /dev/null", &repo);
+    allowed("git config --replace-all core.hooksPath /dev/null", &repo);
+    allowed("git -C /tmp config core.hooksPath /dev/null", &repo);
     allowed("git config --list", &repo);
     allowed("git config user.email seat@example.invalid", &repo);
     allowed("git config --global user.name seat", &repo);
@@ -759,4 +769,35 @@ fn cloud_up_keeps_the_recorded_repository() {
     let after = fs::read_to_string(xdg.join("ljos/push-allow")).unwrap();
     assert_eq!(allow, after, "a second cloud up rewrote the allowlist");
     refused("ljos cloud up --repoint", root.path());
+}
+
+#[test]
+fn doctor_reads_the_hooks_path_git_would_use() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    let (_origin, repo) = bare_repo(root.path(), "seat");
+    let (_other_origin, other) = bare_repo(root.path(), "other");
+    std::env::set_current_dir(&repo).unwrap();
+    ljos_cli::cloud::up(false).unwrap();
+    std::env::set_current_dir(root.path()).unwrap();
+    let row = ljos_cli::cloud::guard_row();
+    assert!(row.ok, "{row:?}");
+
+    refused("git config core.hooksPath /dev/null", &repo);
+    refused("git config include.path /tmp/evil-hooks.cfg", &repo);
+    refused("git config --local --remove-section core", &repo);
+    let other_cfg = format!("git -C {} config core.hooksPath /dev/null", other.display());
+    allowed(&other_cfg, &repo);
+
+    let evil = root.path().join("evil.cfg");
+    fs::write(&evil, "[core]\n\thooksPath = /dev/null\n").unwrap();
+    sh_ok(
+        &repo,
+        &format!("git config --local include.path {}", evil.display()),
+    );
+    let moved = ljos_cli::cloud::guard_row();
+    assert!(!moved.ok, "{moved:?}");
+    assert!(moved.state.contains("core.hooksPath"), "{moved:?}");
 }
