@@ -94,19 +94,19 @@ here.
   or comment is not an at-rule. When the HTML does what the reducer
   cannot follow (`@import`, a concealing rule on an element or other
   selector, a rule nested in a style rule or blocks nested more than 8
-  deep, a stylesheet color within 16 of a background set
-  anywhere in the part, or of white when its rule sets no background, a
-  stylesheet background within 16 of black when its rule sets no color,
-  a linked stylesheet, or a `style`, `class`, `id` or `hidden` attribute
-  holding a reference the reducer cannot decode), the part's text is
-  replaced by a note that it was withheld. Links are shown as text with
-  their target, never followed. A `multipart/alternative` with a
-  `text/plain` part and an HTML part (the last `text/html` or multipart
-  alternative) shows the plain text when both have the same words. When
-  they differ, the body holds both, each under a label that carries the
-  nonce, and `alternatives_differ` is true: a mail client shows the
-  owner the HTML.
-  Attachments are listed by name, type, size and sha256, with no content
+  deep, a stylesheet color within 16 of a background set anywhere in the
+  part or, when its rule sets no background, of white, a stylesheet
+  background within 16 of a color set anywhere in the part or, when its
+  rule sets no color, of black, a linked stylesheet, or a `style`,
+  `class`, `id` or `hidden` attribute holding a reference the reducer
+  cannot decode), the part's text is replaced by a note that it was
+  withheld. Links are shown as text with their target, never followed.
+  A `multipart/alternative` with a `text/plain` part and an HTML part
+  (the last `text/html` or multipart alternative) shows the plain text
+  when both have the same words. When they differ, the body holds both,
+  each under a label that carries the nonce, and `alternatives_differ`
+  is true: a mail client shows the owner the HTML. Attachments are
+  listed by name, type, size and sha256, with no content
   and no path. Hashing reads at most 64 MiB of one attachment; past that
   notmuch is stopped, `sha256` is null and `size` is a lower bound.
 
