@@ -372,25 +372,73 @@ fn one_component(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Put `scratch` at `dest`. The old bag stays until a finished tree has been
+/// staged beside it: a copy that fails, including one across filesystems,
+/// leaves `dest` as it was.
 fn publish(scratch: &Path, dest: &Path) -> Result<()> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("could not create {}", parent.display()))?;
+    let parent = dest.parent().context("the deed bag has no directory")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("could not create {}", parent.display()))?;
+    let name = dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("the deed bag has no name")?;
+    let staged = parent.join(format!(".{name}.incoming"));
+    let backup = parent.join(format!(".{name}.previous"));
+    clear_dir(&staged)?;
+    // A crash after dest moved aside and before the new tree took its place
+    // leaves the published bag at `backup`. Put it back before touching it.
+    if !dest.exists() && backup.exists() {
+        std::fs::rename(&backup, dest)
+            .with_context(|| format!("could not restore {}", dest.display()))?;
     }
-    if dest.exists() {
-        std::fs::remove_dir_all(dest)
-            .with_context(|| format!("could not replace {}", dest.display()))?;
+    clear_dir(&backup)?;
+
+    stage_into(scratch, &staged)?;
+
+    let replacing = dest.exists();
+    if replacing {
+        if let Err(e) = std::fs::rename(dest, &backup) {
+            let _ = std::fs::remove_dir_all(&staged);
+            return Err(e).with_context(|| format!("could not move {} aside", dest.display()));
+        }
     }
-    // The scratch dir may sit on another filesystem than the tracker.
-    if std::fs::rename(scratch, dest).is_ok() {
-        return Ok(());
-    }
-    if let Err(e) = copy_tree(scratch, dest) {
-        let _ = std::fs::remove_dir_all(dest);
+    if let Err(e) = std::fs::rename(&staged, dest) {
+        if replacing {
+            let _ = std::fs::rename(&backup, dest);
+        }
+        let _ = std::fs::remove_dir_all(&staged);
         return Err(e).with_context(|| format!("could not place {}", dest.display()));
+    }
+    if replacing {
+        let _ = std::fs::remove_dir_all(&backup);
     }
     let _ = std::fs::remove_dir_all(scratch);
     Ok(())
+}
+
+fn clear_dir(path: &Path) -> Result<()> {
+    if path.exists() {
+        std::fs::remove_dir_all(path)
+            .with_context(|| format!("could not clear {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn stage_into(scratch: &Path, staged: &Path) -> Result<()> {
+    // Same filesystem: the rename is the stage. Across filesystems the
+    // copy has to finish before dest is touched, or a failure would
+    // publish nothing.
+    if std::fs::rename(scratch, staged).is_ok() {
+        return Ok(());
+    }
+    match copy_tree(scratch, staged) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(staged);
+            Err(e).context("could not stage the deed bag")
+        }
+    }
 }
 
 fn copy_tree(from: &Path, to: &Path) -> Result<()> {
