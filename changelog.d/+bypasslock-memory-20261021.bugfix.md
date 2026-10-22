@@ -1,0 +1,1 @@
+Concurrent memory reviews used to split one `memory-reviews.jsonl` row across two writes, so a keep, edit, or drop could no longer be read back. Each verdict is now one locked write, and the file is mode 0600.
