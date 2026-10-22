@@ -49,6 +49,7 @@ pub(crate) fn cursor_push(line: &str, cwd: Option<&Path>) -> Option<String> {
         .flat_map(|l| crate::raw_segments(l))
     {
         let words = argv(&seg);
+        let run = prefix_context(&seg, here.clone());
         match words.first().map(String::as_str) {
             Some("cd" | "pushd") => here = moved(here, &words[1..]),
             Some("popd") => here = None,
@@ -56,8 +57,8 @@ pub(crate) fn cursor_push(line: &str, cwd: Option<&Path>) -> Option<String> {
                 if let Some(alias) = git_alias_write(&words[1..]) {
                     line_aliases.push(alias);
                 }
-                if let Some(why) =
-                    git_push(&words[1..], here.clone(), &line_aliases).and_then(|p| p.cursor_ref())
+                if let Some(why) = git_push(&words[1..], run.dir, &line_aliases, &run.env)
+                    .and_then(|p| p.cursor_ref())
                 {
                     return Some(why);
                 }
@@ -140,15 +141,83 @@ fn moved(here: Option<PathBuf>, args: &[String]) -> Option<PathBuf> {
     Some(here?.join(to))
 }
 
+#[derive(Default)]
+struct PrefixContext {
+    dir: Option<PathBuf>,
+    env: Vec<(String, String)>,
+}
+
+fn assignment(word: &str) -> Option<(&str, &str)> {
+    let (name, value) = word.split_once('=')?;
+    let valid = !name.is_empty()
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    valid.then_some((name, value))
+}
+
+fn prefix_context(segment: &str, here: Option<PathBuf>) -> PrefixContext {
+    let words = crate::shell_words(segment);
+    let mut ctx = PrefixContext {
+        dir: here,
+        ..PrefixContext::default()
+    };
+    let mut i = 0;
+    while let Some(word) = words.get(i).map(String::as_str) {
+        if let Some((name, value)) = assignment(word) {
+            ctx.env.push((name.to_string(), value.to_string()));
+            i += 1;
+            continue;
+        }
+        if word != "env" {
+            break;
+        }
+        i += 1;
+        while let Some(arg) = words.get(i).map(String::as_str) {
+            if arg == "--" {
+                i += 1;
+                break;
+            }
+            if arg == "-C" || arg == "--chdir" {
+                let next = words.get(i + 1).cloned();
+                ctx.dir = next.and_then(|value| moved(ctx.dir, &[value]));
+                i += 2;
+                continue;
+            }
+            if let Some(path) = arg.strip_prefix("--chdir=") {
+                ctx.dir = moved(ctx.dir, &[path.to_string()]);
+                i += 1;
+                continue;
+            }
+            if matches!(arg, "-u" | "--unset") {
+                i += 2;
+                continue;
+            }
+            if let Some((name, value)) = assignment(arg) {
+                ctx.env.push((name.to_string(), value.to_string()));
+                i += 1;
+                continue;
+            }
+            if arg.starts_with('-') && arg.len() > 1 {
+                i += 1;
+                continue;
+            }
+            break;
+        }
+    }
+    ctx
+}
+
 /// The push `args` (the words after `git`) make, or `None` when they run
 /// another subcommand. An alias set with `-c alias.NAME=push` is a push.
 fn git_push(
     args: &[String],
     dir: Option<PathBuf>,
     line_aliases: &[(String, String)],
+    env: &[(String, String)],
 ) -> Option<Push> {
     let mut at = Checkout {
         dir,
+        env: env.to_vec(),
         ..Checkout::default()
     };
     let mut i = 0;
@@ -343,6 +412,8 @@ struct Checkout {
     /// Where the line is when the push runs; `None` when a `cd` on the
     /// way cannot be followed.
     dir: Option<PathBuf>,
+    /// Environment assignments the shell applies to this git command.
+    env: Vec<(String, String)>,
     /// The push's `-C`, `--git-dir` and `--work-tree`, given to each read.
     place: Vec<String>,
     /// The push's `-c NAME=VALUE`, given to the config read.
@@ -356,6 +427,7 @@ impl Checkout {
     fn git(&self, extra: &[String], args: &[&str]) -> Option<Output> {
         Command::new("git")
             .current_dir(self.dir.as_ref()?)
+            .envs(self.env.iter().map(|(k, v)| (k, v)))
             .args(&self.place)
             .args(extra)
             .args(args)
@@ -492,6 +564,13 @@ impl Checkout {
             Some((src, dst)) => (src, dst, false),
             None => (spec, spec, true),
         };
+        if bare && !under_cursor(dst) {
+            if let Some(landed) = self.map_bare_destination(src, remote) {
+                if landed != dst && under_cursor(&landed) {
+                    return Some(format!("`{spec}` pushes {src} to {landed}"));
+                }
+            }
+        }
         if CURRENT_BRANCH.contains(&dst) || (bare && matches!(dst, "HEAD" | "@")) {
             return match self.branch() {
                 None => Some(UNREAD.into()),
@@ -518,13 +597,6 @@ impl Checkout {
                 })?;
                 under_cursor(&landed).then(|| format!("`{spec}` pushes {r} to {landed}"))
             });
-        }
-        if bare && !under_cursor(dst) {
-            if let Some(landed) = self.map_bare_destination(src, remote) {
-                if landed != dst && under_cursor(&landed) {
-                    return Some(format!("`{spec}` pushes {src} to {landed}"));
-                }
-            }
         }
         under_cursor(dst).then(|| format!("this push updates {dst}"))
     }
