@@ -1,1 +1,0 @@
-`ljos remember` under a runner now stores the agent's own words as an unreviewed note. The prompt does not treat that note as a fact. Words from the person's latest prompt stay a standing lesson. Briefs no longer tell the agent to store its own lesson with `ljos remember --as ROLE`.

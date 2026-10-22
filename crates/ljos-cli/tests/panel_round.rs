@@ -143,6 +143,8 @@ else:
             .env("VISSUE_ROOT", self.home.join("tracker"))
             .env("PACKSET_URL", "off")
             .env("LJOS_TRACKER_GIT", "off")
+            // A consensus that may file a dissent is a tracker write.
+            .env("LJOS_SEAT", "saddle")
             // The stub tracker holds no signature notes; signed ballots
             // have their own suite.
             .env("LJOS_UNSIGNED_BALLOTS", "allow")

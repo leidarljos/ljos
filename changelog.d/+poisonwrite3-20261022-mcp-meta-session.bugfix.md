@@ -1,1 +1,0 @@
-The MCP server now counts the session a call's `_meta` names, as Codex sends it under `x-runner-turn-metadata`, among the runner's sessions when it checks the bind beside the kept prompt. A Codex MCP server, whose environment named no session, refused the person's real words. With no runner above the server, nothing counts, as before.

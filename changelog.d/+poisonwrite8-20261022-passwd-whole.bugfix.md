@@ -1,0 +1,1 @@
+`ljos hook` and `prefer --user` read who else has the person's primary group from `/etc/passwd` itself, and only when `nsswitch.conf` sends passwd to that file alone; a source such as `systemd`, `sss` or `ldap`, or a line that cannot be read, now means the group is not the person's alone, where a short enumeration used to read as no one else.

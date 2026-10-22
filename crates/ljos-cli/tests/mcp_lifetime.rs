@@ -1,28 +1,34 @@
 //! An ljos-mcp ends when its input does or its parent dies, and answers
 //! what it already read first.
 //!
-//! The pack here takes seven seconds to answer a search, longer than the
-//! five seconds rmcp waits for a handler once the input ends. The client
-//! sends the search and closes stdin at once; the answer still arrives
-//! and the server exits cleanly.
+//! The pack here says when a search reaches it and answers seven seconds
+//! later, longer than the five seconds rmcp waits for a handler once the
+//! input ends. The client closes stdin as soon as the search is in
+//! flight; the answer still arrives and the server exits cleanly.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-fn slow_pack() -> String {
+/// Past rmcp's five-second drain after the end of input.
+const SLOW_SEARCH: Duration = Duration::from_secs(7);
+
+fn slow_pack(arrived: mpsc::Sender<()>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { break };
+            let arrived = arrived.clone();
             std::thread::spawn(move || {
                 let mut head = [0u8; 4096];
                 let n = stream.read(&mut head).unwrap_or(0);
                 let line = String::from_utf8_lossy(&head[..n]);
                 let payload = if line.starts_with("GET /v1/search") {
-                    std::thread::sleep(Duration::from_secs(7));
+                    let _ = arrived.send(());
+                    std::thread::sleep(SLOW_SEARCH);
                     r#"{"hits":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","text":"Pin the review set before a release.","kind":"preference","score":1.0}]}"#
                 } else {
                     "{}"
@@ -67,17 +73,20 @@ fn initialize() -> [serde_json::Value; 2] {
 #[test]
 fn stdin_eof_answers_the_call_in_flight_then_exits() {
     let home = tempfile::tempdir().unwrap();
+    let (arrived, search_arrived) = mpsc::channel();
     let mut child = server(home.path())
-        .env("PACKSET_URL", slow_pack())
+        .env("PACKSET_URL", slow_pack(arrived))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
     let pid = child.id();
+    let (exited, watchdog) = mpsc::channel::<()>();
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(60));
-        let _ = Command::new("kill").arg(pid.to_string()).status();
+        if watchdog.recv_timeout(Duration::from_secs(60)).is_err() {
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+        }
     });
     let mut stdin = child.stdin.take().unwrap();
     for line in initialize() {
@@ -86,10 +95,14 @@ fn stdin_eof_answers_the_call_in_flight_then_exits() {
     let search = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
         "params": {"name": "ljos_search", "arguments": {"query": "review set"}}});
     writeln!(stdin, "{search}").unwrap();
+    search_arrived
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the search never reached the pack");
     let started = Instant::now();
     drop(stdin);
     let out = child.wait_with_output().unwrap();
     let took = started.elapsed();
+    let _ = exited.send(());
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(out.status.success(), "{:?}\n{stdout}", out.status);
     assert!(took < Duration::from_secs(45), "took {took:?}");

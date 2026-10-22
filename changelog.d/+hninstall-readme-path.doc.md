@@ -1,1 +1,0 @@
-The README's five-minute paste runs `export PATH="$HOME/.local/bin:$PATH"` after the install, so the `ljos` lines after it find the program in the same shell. It says the installer adds that line to the shell profiles from the next release on, and that `--no-modify-path` leaves them alone.

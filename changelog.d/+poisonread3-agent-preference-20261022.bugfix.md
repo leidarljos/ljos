@@ -1,1 +1,0 @@
-A preference the pack stored as agent-derived is no longer handed to a prompt as a standing rule, named in the session-start line, or shown before a command it names; recall labels it an unverified agent preference.

@@ -278,6 +278,8 @@ const TRACKER_WRITES: &[&str] = &[
     "ljos_file",
     "ljos_options",
     "ljos_deed",
+    "ljos_playbook",
+    "ljos_predict",
 ];
 
 fn writes_tracker(name: &str, args: Option<&serde_json::Map<String, serde_json::Value>>) -> bool {
@@ -286,7 +288,21 @@ fn writes_tracker(name: &str, args: Option<&serde_json::Map<String, serde_json::
             .and_then(|a| a.get("add"))
             .is_some_and(|add| !add.is_null());
     }
+    if name == "ljos_vote" {
+        let set = |key| {
+            args.and_then(|a| a.get(key))
+                .is_some_and(|v| !v.is_null() && *v != serde_json::Value::Bool(false))
+        };
+        return set("choice") || set("jev") || set("withdraw");
+    }
     TRACKER_WRITES.contains(&name)
+}
+
+/// The name a tracker write under this call's seat records: the call's
+/// own holder, or the `assignee` it passed when that is the same seat.
+fn call_assignee(verb: &str, passed: Option<&str>) -> Result<String, McpError> {
+    let checked = ljos_cli::write_seat(verb).map_err(refused)?;
+    ljos_cli::write_assignee(verb, &checked, resolve_assignee(passed), false).map_err(refused)
 }
 
 fn runs_without_seat(name: &str) -> bool {
@@ -2013,8 +2029,8 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<TakeArgs>,
     ) -> Result<Json<Said>, McpError> {
-        let text =
-            claim(&args.node, &resolve_assignee(args.assignee.as_deref())).map_err(refused)?;
+        let assignee = call_assignee("claim", args.assignee.as_deref())?;
+        let text = claim(&args.node, &assignee).map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
     }
 
@@ -2034,7 +2050,7 @@ impl LjosServer {
     ) -> Result<Json<Said>, McpError> {
         let text = sitting_gated(
             &args.issue,
-            &resolve_assignee(args.assignee.as_deref()),
+            &call_assignee("sitting", args.assignee.as_deref())?,
             &self.cards_dir,
             args.anyway,
             args.playbook.as_deref(),
@@ -2070,7 +2086,7 @@ impl LjosServer {
             args.outcome.as_deref(),
             args.new_option,
             LEARN_BETA,
-            &resolve_assignee(args.assignee.as_deref()),
+            &call_assignee("finish", args.assignee.as_deref())?,
             args.gen,
             args.close,
         )
@@ -2119,8 +2135,8 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<TakeArgs>,
     ) -> Result<Json<Said>, McpError> {
-        let mut text =
-            release(&args.node, &resolve_assignee(args.assignee.as_deref())).map_err(refused)?;
+        let assignee = call_assignee("release", args.assignee.as_deref())?;
+        let mut text = release(&args.node, &assignee).map_err(refused)?;
         text.push_str(&ljos_cli::persist_tracker(&args.node, "released"));
         Ok(Json(Said { text, aside: None }))
     }
@@ -2142,7 +2158,7 @@ impl LjosServer {
         let text = complete(
             &args.node,
             args.status.as_deref(),
-            &resolve_assignee(args.assignee.as_deref()),
+            &call_assignee("complete", args.assignee.as_deref())?,
             args.gen,
         )
         .map_err(refused)?;
@@ -3341,9 +3357,9 @@ async fn acquire_call_order(order: Order, id: &RequestId) -> OrderPermit {
     }
 }
 
-/// One JSON-RPC line from the client. A tool call that reads or writes the
-/// seat's notes joins the queue here, on the task that reads stdin, before
-/// rmcp spawns the call.
+/// One JSON-RPC line from the client. Every tool call counts as in flight
+/// from here, and one that reads or writes the seat's notes joins the
+/// queue, on the task that reads stdin, before rmcp spawns the call.
 fn register_inbound_line(line: &[u8]) {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
         return;
@@ -3358,10 +3374,6 @@ fn register_inbound_line(line: &[u8]) {
     else {
         return;
     };
-    let order = call_order(name);
-    if order == Order::Free {
-        return;
-    }
     let Some(id) = value
         .get("id")
         .cloned()
@@ -3369,7 +3381,11 @@ fn register_inbound_line(line: &[u8]) {
     else {
         return;
     };
-    ensure_queued(&id, order);
+    crate::lifetime::call_read(&id);
+    let order = call_order(name);
+    if order != Order::Free {
+        ensure_queued(&id, order);
+    }
 }
 
 /// Stdin, with ordered tool calls queued as each line arrives. Its end
@@ -3521,7 +3537,7 @@ impl ServerHandler for LjosServer {
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, McpError> {
-        let _in_flight = crate::lifetime::call_in_flight();
+        let _in_flight = crate::lifetime::call_in_flight(&context.id);
         // Queued when the line was read. This waits for the ordered calls
         // ahead of it and holds the place until the answer is built. A free
         // tool, the guard and approval included, waits for nothing.
@@ -3591,7 +3607,11 @@ impl ServerHandler for LjosServer {
         let seated = seat.is_some();
         if let Some(seat) = &seat {
             if writes_tracker(&name, request.arguments.as_ref()) {
-                if let Err(e) = ljos_cli::registered_seat(&seat.seat) {
+                let verb = name.trim_start_matches("ljos_");
+                let checked =
+                    ljos_cli::with_call_seat(seat.clone(), async { ljos_cli::write_seat(verb) })
+                        .await;
+                if let Err(e) = checked {
                     return Ok(attach_next(&name, as_tool_error(refused(e))?));
                 }
             }
@@ -4197,6 +4217,45 @@ mod tests {
             );
         });
         clear_call_queue();
+    }
+
+    /// The client writes a search and closes stdin at once. rmcp has the
+    /// line but its handler has not run yet; the end of input still waits
+    /// for the answer.
+    #[test]
+    fn the_end_of_input_waits_for_a_call_whose_handler_has_not_started() {
+        use tokio::io::AsyncRead as _;
+
+        let _guard = CALL_QUEUE_TEST
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        clear_call_queue();
+        crate::lifetime::forget_calls();
+        let line = tool_line(21, "ljos_search");
+        let mut inbound = InboundOrder::new(line.as_bytes());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let mut storage = [0u8; 256];
+            let mut read = || {
+                let mut buf = tokio::io::ReadBuf::new(&mut storage);
+                let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+                match std::pin::Pin::new(&mut inbound).poll_read(&mut cx, &mut buf) {
+                    std::task::Poll::Ready(read) => Some(read.map(|()| buf.filled().len())),
+                    std::task::Poll::Pending => None,
+                }
+            };
+            assert_eq!(read().expect("the line").expect("read"), line.len());
+            assert!(read().is_none(), "the end reached rmcp before the call ran");
+            let call = crate::lifetime::call_in_flight(&RequestId::Number(21));
+            assert!(read().is_none(), "the end reached rmcp during the call");
+            drop(call);
+            assert_eq!(read().expect("the end").expect("read"), 0);
+        });
+        clear_call_queue();
+        crate::lifetime::forget_calls();
     }
 
     /// A tool that runs with no seat only reads, or is the consent form
