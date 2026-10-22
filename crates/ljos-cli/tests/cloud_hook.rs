@@ -1149,6 +1149,64 @@ fn a_curl_config_that_hides_the_target_may_be_github() {
     );
 }
 
+/// A curl option that names a proxy, a resolver, a socket, an address
+/// map, or a `Host:` header sends the request somewhere the URL does not
+/// say. So does an address for a host, and an option the guard does not
+/// know may be one of those.
+#[test]
+fn a_curl_command_line_that_moves_the_target_may_be_github() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+
+    for moved in [
+        "--resolve example.com:443:140.82.112.6",
+        "--connect-to example.com:443:api.github.com:443",
+        "--connect-t example.com:443:api.github.com:443",
+        "-x http://relay.example:3128",
+        "-xhttp://relay.example:3128",
+        "--proxy=http://relay.example:3128",
+        "--preproxy socks5://relay.example",
+        "--socks5-hostname relay.example:1080",
+        "--doh-url https://dns.example/q",
+        "--dns-servers 10.0.0.1",
+        "--unix-socket /tmp/relay.sock",
+        "--abstract-unix-socket relay",
+        "--alt-svc /tmp/altsvc",
+        "-H 'Host: api.github.com'",
+        "--header=host:api.github.com",
+        "--frobnicate",
+    ] {
+        refused(
+            &format!("curl -k -X POST {moved} https://example.com/x"),
+            here,
+        );
+        allowed(&format!("curl -k {moved} https://example.com/x"), here);
+    }
+    refused("curl -k -X POST 140.82.112.6/zen", here);
+    refused("curl -k -X POST -W https://example.com/x", here);
+    refused("curl -X POST api.github.com/user", here);
+    refused("curl -G -d x --no-get https://api.github.com/user", here);
+    allowed(
+        "curl -X POST -H 'X-Host: api.github.com' https://example.com/x",
+        here,
+    );
+
+    for moved in [
+        "connect-to = example.com:443:api.github.com:443",
+        "header = \"Host: api.github.com\"",
+        "-H \"Host: api.github.com\"",
+        "socks5 = relay.example:1080",
+    ] {
+        fs::write(home.join(".curlrc"), format!("request = POST\n{moved}\n")).unwrap();
+        refused("curl -s https://example.com/x", here);
+    }
+    fs::remove_file(home.join(".curlrc")).unwrap();
+}
+
 /// An address names a peer, not a host. GitHub answers there for the
 /// name in a `Host:` header or the TLS name, so the request may be
 /// GitHub's.
