@@ -301,3 +301,19 @@ fn any_cloud_marker_refuses_the_mail_tools() {
         );
     }
 }
+
+#[test]
+fn calling_a_mail_tool_that_was_not_asked_for_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let mailbox = maildir::mailbox();
+    configure(home.path(), &mailbox);
+    let ran = session(
+        home.path(),
+        None,
+        &[call("ljos_mail_search", json!({"query": "lunch"}))],
+    );
+    let answer = ran.by_id(2);
+    let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
+    assert!(refused, "{answer}");
+    assert!(!answer.to_string().contains("Lunch"), "{answer}");
+}
