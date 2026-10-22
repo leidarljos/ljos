@@ -987,6 +987,60 @@ fn a_curl_config_is_a_write_without_a_token_on_the_command() {
     refused(&format!("curl --config {}", named.display()), here);
 }
 
+/// A wgetrc can carry both the method and the token. The command line
+/// shows neither. `--no-config` is the switch that leaves the files unread.
+#[test]
+fn a_wget_config_is_a_write_without_a_token_on_the_command() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let rc = "method = DELETE\nheader = Authorization: Bearer x\n";
+
+    fs::write(home.join(".wgetrc"), rc).unwrap();
+    refused("wget -q https://api.github.com/user", here);
+    allowed(
+        "wget --no-config -q --header \"Authorization: Bearer x\" https://api.github.com/user",
+        here,
+    );
+
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(home.join(".wgetrc")).unwrap().permissions();
+    perms.set_mode(0o000);
+    fs::set_permissions(home.join(".wgetrc"), perms.clone()).unwrap();
+    refused("wget -q https://api.github.com/user", here);
+    allowed("wget --no-config -q https://api.github.com/user", here);
+    perms.set_mode(0o644);
+    fs::set_permissions(home.join(".wgetrc"), perms).unwrap();
+    fs::remove_file(home.join(".wgetrc")).unwrap();
+
+    let file = root.path().join("wgetrc");
+    fs::write(&file, rc).unwrap();
+    refused(
+        &format!(
+            "WGETRC={} wget -q https://api.github.com/user",
+            file.display()
+        ),
+        here,
+    );
+    refused(
+        &format!(
+            "wget --config={} -q https://api.github.com/user",
+            file.display()
+        ),
+        here,
+    );
+    refused(
+        &format!(
+            "SYSTEM_WGETRC={} wget -q https://api.github.com/user",
+            file.display()
+        ),
+        here,
+    );
+}
+
 #[test]
 fn send_pack_checks_the_destination_repository() {
     let _g = Guard::new();
