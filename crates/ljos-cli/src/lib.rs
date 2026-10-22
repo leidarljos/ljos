@@ -21022,6 +21022,38 @@ pub fn bypass_log_path() -> Option<PathBuf> {
     Some(data_base()?.join("ljos").join("bypass.jsonl"))
 }
 
+/// Append `bytes` as one row. The caller includes the trailing newline.
+///
+/// `writeln!` of a JSON value issues a `write(2)` per token, and those
+/// calls interleave when two processes append together. An exclusive
+/// advisory lock and one `write_all` keep the row whole. The file is
+/// created mode 0600, and a symlink is not followed: the row would
+/// otherwise land in whatever the link names. A row that cannot be
+/// written is the caller's to skip.
+pub(crate) fn append_locked_row(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::io::AsRawFd;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    // SAFETY: this descriptor stays open until the matching unlock. The
+    // lock is advisory, so the row is written on this same descriptor
+    // while it is held, or not at all.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let wrote = file.write_all(bytes);
+    // SAFETY: the same descriptor, still open. Close would drop the lock
+    // as well; unlock first so the next writer can take it.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+    wrote
+}
+
 /// Write a row when the guard is passed over on a command it would have
 /// stopped: `approval` when a one-use grant let an asked command run, and
 /// `switch` when a setting such as `LJOS_ASK_PACK=off` turned off the rule
@@ -21041,15 +21073,12 @@ pub fn log_bypass(kind: &str, how: &str, command: &str, rule: &Rule) {
         "reason": rule.reason.split(':').next().unwrap_or(""),
         "seat": std::env::var("LJOS_SEAT").ok(),
     });
+    let Ok(mut line) = serde_json::to_string(&row) else {
+        return;
+    };
+    line.push('\n');
     let _ = path.parent().map(std::fs::create_dir_all);
-    use std::io::Write as _;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        let _ = writeln!(f, "{row}");
-    }
+    let _ = append_locked_row(&path, line.as_bytes());
 }
 
 /// The doctor's line on the bypass log: how many commands ran past the
@@ -38949,6 +38978,39 @@ mod tests {
         commands.sort_unstable();
         commands.dedup();
         assert_eq!(commands.len(), THREADS * EACH, "{text}");
+    }
+
+    /// The bypass file is the record of commands the guard let through, so
+    /// it stays mode 0600 and a swapped symlink is not written through.
+    #[test]
+    fn a_bypass_log_is_private_and_ignores_a_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", dir.path().to_str().unwrap())]);
+        let rule = Rule {
+            pattern: "ask pack: cloud".into(),
+            verdict: "ask".into(),
+            reason: "infra-destroy: this tears down infrastructure".into(),
+        };
+        log_bypass("switch", "LJOS_ASK_PACK=off", "terraform destroy", &rule);
+        let path = bypass_log_path().unwrap();
+        let mode = std::fs::symlink_metadata(&path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "bypass log mode {mode:o}");
+        let outside = dir.path().join("outside");
+        std::fs::write(&outside, "kept\n").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        log_bypass("approval", "grant 0a1b", "terraform destroy", &rule);
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "kept\n");
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]
