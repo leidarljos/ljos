@@ -7554,7 +7554,13 @@ fn is_refresher(hit: &Hit) -> bool {
 /// as the person's and it carries [`SAID_ENTITY`]. The entity alone is the
 /// writer's, and a direct post can carry it.
 fn said_by_person(hit: &Hit) -> bool {
-    person_origin(hit) && hit.entities.iter().any(|e| e == SAID_ENTITY)
+    person_origin(hit) && hit.entities.iter().any(|e| said_tag(e))
+}
+
+/// Whether `tag` is [`SAID_ENTITY`] as [`tag_skeleton`] reads it, so the
+/// import that strips it and the reader that honours it agree.
+fn said_tag(tag: &str) -> bool {
+    tag_skeleton(tag) == SAID_ENTITY
 }
 
 /// Where a recalled claim sits in a memory list: preferences first, then
@@ -12558,9 +12564,9 @@ pub const SAID_ENTITY: &str = "via:prompt";
 /// a basis that is already absent is a no-op, so a second pass is safe.
 pub(crate) fn strip_person_basis(atom: &mut Value) {
     if let Some(entities) = atom.get_mut("entities").and_then(Value::as_array_mut) {
-        entities.retain(|entity| entity.as_str() != Some(SAID_ENTITY));
+        entities.retain(|entity| !entity.as_str().is_some_and(said_tag));
     }
-    if atom.pointer("/source/basis").and_then(Value::as_str) == Some(Basis::Person.as_str()) {
+    if person_basis(atom) {
         if let Some(source) = atom.get_mut("source").and_then(Value::as_object_mut) {
             source.remove("basis");
         }
@@ -28289,21 +28295,83 @@ fn hit_line(h: &Hit, now: &str) -> String {
 /// not read.
 #[must_use]
 pub fn person_stored(atom: &Value) -> bool {
+    stored_by(atom) == StoredBy::Person
+}
+
+/// Who the pack's stored record says stands behind a claim. Origin and
+/// basis are read trimmed and without case, so `Person` is `person` to
+/// every reader and to the import that strips it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoredBy {
+    /// `user-declared` with a `person` basis.
+    Person,
+    /// Imported from another seat or machine.
+    Peer,
+    /// The echo of a tool's output.
+    ToolEcho,
+    /// An outside source.
+    External,
+    /// An agent, and any record that is not one of the above: a
+    /// `user-declared` one without the person basis among them.
+    Agent,
+}
+
+impl StoredBy {
+    /// The origin a label names.
+    fn origin(self) -> &'static str {
+        match self {
+            Self::Person => admit::ORIGIN_USER,
+            Self::Peer => admit::ORIGIN_PEER,
+            Self::ToolEcho => "tool-echo",
+            Self::External => "external",
+            Self::Agent => admit::ORIGIN_AGENT,
+        }
+    }
+
+    /// Who a label says wrote a claim that is not the person's.
+    fn writer(self) -> &'static str {
+        match self {
+            Self::Peer => "peer",
+            Self::ToolEcho => "tool",
+            Self::External => "external",
+            Self::Person | Self::Agent => "agent",
+        }
+    }
+}
+
+/// Whether `atom` carries `source.basis` `person`, read trimmed and
+/// without case.
+fn person_basis(atom: &Value) -> bool {
+    atom.pointer("/source/basis")
+        .and_then(Value::as_str)
+        .is_some_and(|b| b.trim().eq_ignore_ascii_case(Basis::Person.as_str()))
+}
+
+/// [`StoredBy`] of `atom`, an atom or a search hit. A missing origin reads
+/// as `user-declared`, as the pack reads it. Entities are never read.
+pub(crate) fn stored_by(atom: &Value) -> StoredBy {
     let origin = atom
         .get("origin")
         .and_then(Value::as_str)
+        .map(|o| o.trim().to_ascii_lowercase())
         .filter(|o| !o.is_empty())
-        .unwrap_or(admit::ORIGIN_USER);
-    origin == admit::ORIGIN_USER
-        && atom.pointer("/source/basis").and_then(Value::as_str) == Some(Basis::Person.as_str())
+        .unwrap_or_else(|| admit::ORIGIN_USER.to_string());
+    match origin.as_str() {
+        admit::ORIGIN_USER if person_basis(atom) => StoredBy::Person,
+        admit::ORIGIN_PEER => StoredBy::Peer,
+        "tool-echo" => StoredBy::ToolEcho,
+        "external" => StoredBy::External,
+        _ => StoredBy::Agent,
+    }
 }
 
-/// [`person_stored`] for each atom id this process read. A
+/// [`stored_by`] for each atom id this process read. A
 /// [`packset_client::Hit`] has no origin field, so the readers that parse
 /// the pack's answer record it here by id.
-fn stored_origins() -> &'static std::sync::Mutex<std::collections::BTreeMap<String, bool>> {
-    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeMap<String, bool>>> =
-        std::sync::OnceLock::new();
+fn stored_origins() -> &'static std::sync::Mutex<std::collections::BTreeMap<String, StoredBy>> {
+    static SEEN: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<String, StoredBy>>,
+    > = std::sync::OnceLock::new();
     SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
 }
 
@@ -28317,7 +28385,7 @@ pub(crate) fn keep_origin(atom: &Value) {
         stored_origins()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id.to_string(), person_stored(atom));
+            .insert(id.to_string(), stored_by(atom));
     }
 }
 
@@ -28343,11 +28411,18 @@ fn keep_origins_of(client: &PacksetClient, hits: &[Hit]) {
 /// Whether the pack stored `h` as the person's. A hit whose origin no
 /// reader recorded is not.
 fn person_origin(h: &Hit) -> bool {
-    h.id.as_deref()
-        .is_some_and(|id| recorded_origin(id).unwrap_or(false))
+    hit_stored_by(h) == StoredBy::Person
 }
 
-fn recorded_origin(id: &str) -> Option<bool> {
+/// [`StoredBy`] of `h` as a reader recorded it; [`StoredBy::Agent`] when
+/// none did.
+fn hit_stored_by(h: &Hit) -> StoredBy {
+    h.id.as_deref()
+        .and_then(recorded_origin)
+        .unwrap_or(StoredBy::Agent)
+}
+
+fn recorded_origin(id: &str) -> Option<StoredBy> {
     stored_origins()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -28358,8 +28433,8 @@ fn recorded_origin(id: &str) -> Option<bool> {
 /// What this seat's pack holds for one atom id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Stored {
-    /// The pack holds it; [`person_stored`] of its record.
-    Origin(bool),
+    /// The pack holds it; [`stored_by`] of its record.
+    Origin(StoredBy),
     /// The pack answered and does not hold it.
     Absent,
     /// The pack did not answer.
@@ -28406,19 +28481,14 @@ pub(crate) fn stored_origin_of(id: &str) -> Stored {
 
 /// Whether a recalled hit is an unverified working note. Any claim the
 /// pack did not store as the person's is one, unless it is a lesson, which
-/// reads as agent-derived instead. A note is one whatever its origin, and so
-/// is a hit carrying note provenance, which a refused note downgraded to
-/// another kind keeps. The kind and entities are compared as
-/// [`tag_skeleton`] reads them, so a lookalike letter or a zero-width
-/// character does not slip past.
+/// reads as unverified by its origin instead. A note is one whatever its
+/// origin. Entities, note provenance among them, are the writer's and
+/// decide nothing either way: the note writers store an agent basis. The
+/// kind is compared as [`tag_skeleton`] reads it, so a lookalike letter or
+/// a zero-width character does not slip past.
 fn unverified_note_hit(h: &Hit) -> bool {
     let kind = tag_skeleton(&h.kind);
-    kind == packset_core::record::NOTE_KIND
-        || (kind != "lesson" && !person_origin(h))
-        || h.entities
-            .iter()
-            .map(|e| tag_skeleton(e))
-            .any(|e| e.starts_with(NOTE_BASIS_ENTITY) || e.starts_with(NOTE_SOURCE_ENTITY))
+    kind == packset_core::record::NOTE_KIND || (kind != "lesson" && !person_origin(h))
 }
 
 /// `tag` as a reader compares it: NFKC, with format, zero-width and space
@@ -28502,26 +28572,31 @@ fn agent_preference(h: &Hit) -> bool {
     h.kind == "preference" && !person_origin(h)
 }
 
-/// The bracket label for a working note. A note's real origin is
-/// agent-derived: only session output writes it, with `source.basis`
-/// `agent`. The `note-basis:`/`note-source:` entities are forgeable, so the
-/// label does not echo them as a claim; it names the note's true origin.
-fn note_kind_label() -> &'static str {
-    "unverified agent note (origin agent-derived)"
+/// The label for a claim that is not the person's, `kind` naming what it
+/// is, by the origin the pack stored. A note the person's record holds is
+/// still session output, which only an agent writes. The
+/// `note-basis:`/`note-source:` entities are forgeable, so the label does
+/// not echo them.
+fn unverified_label(h: &Hit, kind: &str) -> String {
+    let by = match hit_stored_by(h) {
+        StoredBy::Person => StoredBy::Agent,
+        other => other,
+    };
+    format!("unverified {} {kind} (origin {})", by.writer(), by.origin())
 }
 
-/// The kind a recalled line names. A note is marked an unverified agent
-/// note by its true origin, a lesson in the person's words says so, and a
-/// lesson the pack did not store as the person's says it is agent-derived,
-/// so a standing lesson the agent wrote never reads like one the person
-/// stated. `ljos search`, the island, the timeline and MCP name it the same.
+/// The kind a recalled line names. A note is marked unverified by its
+/// stored origin, a lesson in the person's words says so, and a lesson the
+/// pack did not store as the person's names its origin, so a standing
+/// lesson an agent or a peer wrote never reads like one the person stated.
+/// `ljos search`, the island, the timeline and MCP name it the same.
 #[must_use]
 pub fn kind_label(h: &Hit) -> String {
     if agent_preference(h) {
-        return "unverified agent preference (origin agent-derived)".to_string();
+        return unverified_label(h, "preference");
     }
     if unverified_note_hit(h) {
-        return note_kind_label().to_string();
+        return unverified_label(h, "note");
     }
     let kind = if h.kind.is_empty() {
         "claim"
@@ -28531,7 +28606,7 @@ pub fn kind_label(h: &Hit) -> String {
     if said_by_person(h) {
         format!("{kind}, the person's words")
     } else if kind == "lesson" && !person_origin(h) {
-        "lesson, agent-derived".to_string()
+        format!("lesson, {}", hit_stored_by(h).origin())
     } else {
         kind.to_string()
     }
@@ -32466,6 +32541,102 @@ mod tests {
         let lesson = tagged("lesson", vec!["horizon:standing".into()]);
         assert!(super::shown_on_prompt(&lesson));
         assert_eq!(super::recall_rank(&lesson), 2);
+    }
+
+    /// Basis and origin are read without case by the reader and by the
+    /// import that strips the person's basis, and tags move a stored
+    /// origin in neither direction.
+    #[test]
+    fn one_stored_origin_decides_every_label() {
+        let stored = |id: &str, kind: &str, origin: &str, basis: &str, tags: &[&str]| {
+            let atom = serde_json::json!({
+                "id": id, "kind": kind, "text": "t", "origin": origin,
+                "source": {"basis": basis}, "entities": tags,
+            });
+            keep_origin(&atom);
+            packset_client::Hit {
+                id: Some(id.into()),
+                text: "t".into(),
+                score: 1.0,
+                kind: kind.into(),
+                ts: None,
+                entities: tags.iter().map(|t| (*t).to_string()).collect(),
+                ballots: None,
+                of: None,
+            }
+        };
+        let cased = serde_json::json!({"origin": "User-Declared", "source": {"basis": " Person "}});
+        assert!(person_stored(&cased));
+        let mut imported = cased.clone();
+        strip_person_basis(&mut imported);
+        assert!(!person_stored(&imported), "{imported}");
+        assert!(!person_stored(
+            &serde_json::json!({"origin": "user-declared", "source": {"basis": "Agent"}})
+        ));
+
+        let pref = stored(
+            "0r1g1n00000000000000000000000001",
+            "preference",
+            "user-declared",
+            "PERSON",
+            &[],
+        );
+        assert_eq!(kind_label(&pref), "preference");
+        assert!(shown_on_prompt(&pref));
+        let tagged = stored(
+            "0r1g1n00000000000000000000000002",
+            "summary",
+            "user-declared",
+            "person",
+            &["note-basis:agent", "note-source:ljos-note"],
+        );
+        assert_eq!(kind_label(&tagged), "summary");
+        assert!(!unverified_note_hit(&tagged));
+        let said = stored(
+            "0r1g1n00000000000000000000000003",
+            "lesson",
+            "agent-derived",
+            "agent",
+            &["Via:Prompt"],
+        );
+        assert_eq!(kind_label(&said), "lesson, agent-derived");
+
+        let peer_pref = stored(
+            "0r1g1n00000000000000000000000004",
+            "preference",
+            "peer",
+            "",
+            &[],
+        );
+        assert_eq!(
+            kind_label(&peer_pref),
+            "unverified peer preference (origin peer)"
+        );
+        assert!(!shown_on_prompt(&peer_pref));
+        let peer_lesson = stored(
+            "0r1g1n00000000000000000000000005",
+            "lesson",
+            "peer",
+            "",
+            &[],
+        );
+        assert_eq!(kind_label(&peer_lesson), "lesson, peer");
+        let peer_fact = stored(
+            "0r1g1n00000000000000000000000006",
+            "summary",
+            "Peer",
+            "",
+            &[],
+        );
+        assert_eq!(kind_label(&peer_fact), "unverified peer note (origin peer)");
+        let echo = stored(
+            "0r1g1n00000000000000000000000007",
+            "summary",
+            "tool-echo",
+            "",
+            &[],
+        );
+        assert_eq!(kind_label(&echo), "unverified tool note (origin tool-echo)");
     }
 
     /// A note's bracket label reads its true origin, not the forgeable
@@ -47583,7 +47754,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             (200, r#"{"atoms":[]}"#.into())
         });
         let _pack = HoldEnv::set(&[("PACKSET_URL", &url), ("PACKSET_WORKSPACE", "seat")]);
-        assert_eq!(stored_origin_of(id), Stored::Origin(true));
+        assert_eq!(stored_origin_of(id), Stored::Origin(StoredBy::Person));
         assert_eq!(
             stored_origin_of("5707ed0000000000000000000000d0e6"),
             Stored::Absent
