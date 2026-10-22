@@ -1,1 +1,0 @@
-The latest-prompt file is now a guarded path, and a prompt counts only when the hook's bind matches its bytes and mtime. A shell write to that file is denied, and a file written beside the hook does not make a sentence the person's words.

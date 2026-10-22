@@ -1,1 +1,0 @@
-The skill, the sitting's `== panel` step and the howto say that each persona brief goes to its own subagent or run, which casts `ljos vote --as NAME` itself, and that the seat does not cast `--as` for its personas.

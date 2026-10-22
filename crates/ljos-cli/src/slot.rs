@@ -176,7 +176,7 @@ pub fn stands(
 }
 
 /// The refusal when pin order cannot be read. Names the cause: the
-/// deepen a caller runs, a `refs/replace` ref, or a grafts file.
+/// fetch a caller runs, a `refs/replace` ref, or a grafts file.
 pub const HISTORY_INCOMPLETE: &str = "tracker history incomplete";
 
 /// Make `root`'s history readable for pin order. A shallow checkout, or
@@ -190,7 +190,9 @@ pub const HISTORY_INCOMPLETE: &str = "tracker history incomplete";
 ///
 /// History is still incomplete, or parents are rewritten. The error is
 /// [`HISTORY_INCOMPLETE`]. A shallow checkout names `git fetch
-/// --unshallow`. A replace ref or a grafts file names that cause.
+/// --unshallow`. A checkout that is not shallow and still misses
+/// objects, as a partial clone does, names `git fetch --refetch
+/// --no-filter`. A replace ref or a grafts file names that cause.
 /// Missing history is not "stood".
 pub fn require_tracker_history(root: &Path) -> std::result::Result<(), String> {
     if ballot_sig::git_in(root, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true")
@@ -204,6 +206,12 @@ pub fn require_tracker_history(root: &Path) -> std::result::Result<(), String> {
         return Err(format!("{HISTORY_INCOMPLETE}: {why}"));
     }
     let key = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    // A second caller waits for the first one's fetch, then reads the
+    // cache and the checkout again, rather than losing git's shallow.lock.
+    let gate = history_gate(&key);
+    let _held = gate
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (ready, deepened) = {
         let cache = history_cache();
         (
@@ -224,12 +232,21 @@ pub fn require_tracker_history(root: &Path) -> std::result::Result<(), String> {
         if let Some(remote) = remote_name(root) {
             if deepen(root, &remote) {
                 history_cache().deepened.push(key.clone());
-                if !history_gap(root) {
-                    history_cache().ready.push(key);
-                    return Ok(());
-                }
+            }
+            // A fetch that failed may have lost to another process that
+            // completed the checkout, so read it again either way.
+            if !history_gap(root) {
+                history_cache().ready.push(key);
+                return Ok(());
             }
         }
+    }
+    if shallow_repo(root) == Some(false) && missing_objects(root) == Some(true) {
+        return Err(format!(
+            "{HISTORY_INCOMPLETE}: this checkout is not shallow, but objects its history names are missing, \
+             as a partial clone leaves them. Run `git fetch --refetch --no-filter` in the tracker, \
+             or clone the tracker again without --filter, then retry"
+        ));
     }
     Err(format!(
         "{HISTORY_INCOMPLETE}: this checkout does not hold the commits a pin's order is read from. \
@@ -240,16 +257,31 @@ pub fn require_tracker_history(root: &Path) -> std::result::Result<(), String> {
 struct HistoryCache {
     ready: Vec<std::path::PathBuf>,
     deepened: Vec<std::path::PathBuf>,
+    gates: Vec<(std::path::PathBuf, std::sync::Arc<std::sync::Mutex<()>>)>,
 }
 
 fn history_cache() -> std::sync::MutexGuard<'static, HistoryCache> {
     static CACHE: std::sync::Mutex<HistoryCache> = std::sync::Mutex::new(HistoryCache {
         ready: Vec::new(),
         deepened: Vec::new(),
+        gates: Vec::new(),
     });
     CACHE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The lock held across the gap check and deepen of the tracker at `key`.
+fn history_gate(key: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    let mut cache = history_cache();
+    if let Some((_, gate)) = cache.gates.iter().find(|(path, _)| path == key) {
+        return std::sync::Arc::clone(gate);
+    }
+    let gate = std::sync::Arc::default();
+    cache
+        .gates
+        .push((key.to_path_buf(), std::sync::Arc::clone(&gate)));
+    gate
 }
 
 /// Shallow history, missing objects, or parents rewritten by a replace
@@ -363,8 +395,9 @@ fn deepen(root: &Path, remote: &str) -> bool {
 }
 
 fn git_fetch(root: &Path, args: &[&str]) -> bool {
-    std::process::Command::new("git")
-        .arg("-c")
+    let mut cmd = std::process::Command::new("git");
+    crate::clear_git_repo_env(&mut cmd);
+    cmd.arg("-c")
         .arg("protocol.file.allow=always")
         .arg("-C")
         .arg(root)
@@ -507,6 +540,7 @@ pub fn sign(
 pub fn write(issue: &str, seat: &str, model: &str, run: &str, run_key: &str) -> Result<String> {
     let launcher = ballot_sig::own_voter()
         .context("slot: no seat to sign as; set LJOS_SEAT to the launching seat")?;
+    crate::registered_seat(&launcher).map_err(|e| anyhow::anyhow!("slot: {e:#}"))?;
     let run_key = run_key.trim().to_ascii_lowercase();
     let public = hex::decode(&run_key)
         .ok()
@@ -1244,6 +1278,162 @@ mod tests {
             "false",
             "the clone stayed shallow"
         );
+    }
+
+    /// `GIT_DIR` names a repository in place of `-C`. Exported toward a
+    /// complete repository, it must not make a shallow tracker ready. It
+    /// is set only on a child run of this binary, so no other test
+    /// thread's git follows it.
+    #[test]
+    fn a_git_dir_naming_a_complete_repo_does_not_make_a_shallow_tracker_ready() {
+        let _lock = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin");
+        pinned_before_slots(&origin);
+        let shallow = shallow_of(root.path(), &origin);
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "slot::tests::history_check_in_a_child",
+                "--test-threads=1",
+            ])
+            .env("GIT_DIR", origin.join(".git"))
+            .env("LJOS_TEST_HISTORY_ROOT", &shallow)
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).into_owned()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{said}");
+        assert!(said.contains("1 passed"), "{said}");
+        assert_eq!(
+            git_ok(&shallow, &["rev-parse", "--is-shallow-repository"]).trim(),
+            "false",
+            "the shallow tracker was ready without a deepen"
+        );
+    }
+
+    /// The history check on the tracker a parent test names. A run with
+    /// no tracker named checks nothing.
+    #[test]
+    fn history_check_in_a_child() {
+        if let Some(root) = std::env::var_os("LJOS_TEST_HISTORY_ROOT") {
+            require_tracker_history(Path::new(&root)).unwrap();
+        }
+    }
+
+    /// Two checks of one shallow tracker at once fetch one at a time, and
+    /// the one that waited finds the checkout whole. The remote's
+    /// upload-pack marks a fetch that starts while another is in flight.
+    #[test]
+    fn two_checks_of_one_tracker_do_not_deepen_at_once() {
+        let _lock = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin");
+        pinned_before_slots(&origin);
+        let shallow = shallow_of(root.path(), &origin);
+        let busy = root.path().join("busy");
+        let overlap = root.path().join("overlap");
+        // git appends the repository path to this line.
+        let upload_pack = format!(
+            "mkdir '{}' 2>/dev/null || touch '{}'; sleep 1; rmdir '{}'; git-upload-pack",
+            busy.display(),
+            overlap.display(),
+            busy.display()
+        );
+        git_ok(
+            &shallow,
+            &["config", "remote.origin.uploadpack", &upload_pack],
+        );
+        let start = std::sync::Barrier::new(2);
+        let results: Vec<_> = std::thread::scope(|s| {
+            let checks: Vec<_> = (0..2)
+                .map(|_| {
+                    s.spawn(|| {
+                        start.wait();
+                        require_tracker_history(&shallow)
+                    })
+                })
+                .collect();
+            checks.into_iter().map(|c| c.join().unwrap()).collect()
+        });
+        assert!(!overlap.exists(), "two fetches of one tracker ran at once");
+        for result in results {
+            result.unwrap();
+        }
+        assert_eq!(
+            git_ok(&shallow, &["rev-parse", "--is-shallow-repository"]).trim(),
+            "false",
+            "the clone stayed shallow"
+        );
+    }
+
+    /// A deepen whose fetch failed reads the checkout again. Here the
+    /// remote's upload-pack completes the checkout, as another process's
+    /// fetch would, and then fails this one.
+    #[test]
+    fn a_checkout_completed_while_the_deepen_failed_is_ready() {
+        let _lock = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin");
+        pinned_before_slots(&origin);
+        let shallow = shallow_of(root.path(), &origin);
+        let git = shallow.join(".git");
+        // git appends the repository path, which `false` ignores.
+        let upload_pack = format!(
+            "echo '{}' > '{}'; rm '{}'; false",
+            origin.join(".git").join("objects").display(),
+            git.join("objects")
+                .join("info")
+                .join("alternates")
+                .display(),
+            git.join("shallow").display()
+        );
+        git_ok(
+            &shallow,
+            &["config", "remote.origin.uploadpack", &upload_pack],
+        );
+        require_tracker_history(&shallow).unwrap();
+    }
+
+    /// A depth-1 partial clone unshallows and still misses the blobs its
+    /// filter left out. The refusal names those objects and a fetch that
+    /// brings them, and that fetch makes the checkout ready.
+    #[test]
+    fn a_partial_clone_names_its_missing_objects_and_not_unshallow() {
+        let _lock = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin");
+        pinned_before_slots(&origin);
+        git_ok(&origin, &["config", "uploadpack.allowFilter", "true"]);
+        let partial = root.path().join("partial");
+        let url = format!("file://{}", origin.display());
+        git_ok(
+            root.path(),
+            &[
+                "clone",
+                "-q",
+                "--depth",
+                "1",
+                "--filter=blob:none",
+                &url,
+                partial.to_str().unwrap(),
+            ],
+        );
+        let err = require_tracker_history(&partial).unwrap_err();
+        assert!(err.contains(HISTORY_INCOMPLETE), "{err}");
+        assert!(err.contains("missing"), "{err}");
+        assert!(err.contains("git fetch --refetch --no-filter"), "{err}");
+        assert!(!err.contains("git fetch --unshallow"), "{err}");
+        assert_eq!(
+            git_ok(&partial, &["rev-parse", "--is-shallow-repository"]).trim(),
+            "false",
+            "the partial clone was not unshallowed"
+        );
+        git_ok(
+            &partial,
+            &["fetch", "-q", "--refetch", "--no-filter", "origin"],
+        );
+        require_tracker_history(&partial).unwrap();
     }
 
     #[test]

@@ -609,14 +609,29 @@ names the holder. `VISSUE_AGENT` is
 the tracker's own name for the same thing; `--as` names a persona over
 both; a person at a terminal is their login user.
 
-A tracker write (`note`, `claim`, `sitting`, `finish`, `release`, `file`,
-`deed --add`) needs a seat somebody named, as a ballot does. A seat taken
-only from the program above the shell, or from the login user under a
-runner, is refused and nothing is written: `export LJOS_SEAT=NAME` and run
-it again. When `~/.config/ljos/seats.toml` (or `$LJOS_SEATS`) lists seats,
-a write from a seat it does not list is refused too; with no such file,
-any named seat writes. Reads need no seat. `ljos doctor` shows the
-`seat source` row, a warning when the seat is derived.
+A tracker write needs a seat somebody named, as a ballot does: `note`,
+`claim`, `sitting`, `finish`, `release`, `complete`, `file`, `options`,
+`deed --add/--remove`, `workflow --start/--round`, `consensus` when it may
+file, `playbook`, `reap --apply`, `vote` (a ballot, `--jev` or
+`--withdraw`), `predict`, `slot`, the matching MCP tools, and what a
+runner hook or a git hook books. The seat is the one `ljos seat` prints,
+so a conversation id the seats file maps writes as that seat. A seat
+taken only from the program above the shell, or from the login user
+under a runner, is refused and nothing is written: `export LJOS_SEAT=NAME`
+and run it again. A hook that has no seat it may write as books nothing.
+
+Every write records the seat that was checked. An `--assignee` (or MCP
+`assignee`) that names another seat is refused; only `ljos release HEX
+--assignee NAME` hands an issue to another seat, and NAME must itself be
+a seat the seats file lists.
+
+The seats file is `$LJOS_SEATS`, else `~/.config/ljos/seats.toml`. Its
+seats are every string value at the top level, `"CONVERSATION-ID" =
+"NAME"` lines, and the strings of a `seats = ["NAME", ...]` array. With
+no file, any named seat writes. A file that lists no seat refuses every
+write, and a file that is not TOML refuses every write until it is
+fixed. Reads need no seat. `ljos doctor` shows the `seat source` row, a
+warning, never a failure, when the seat is derived.
 
 ## One-command consent
 

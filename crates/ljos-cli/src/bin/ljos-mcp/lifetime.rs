@@ -5,16 +5,18 @@
 //! server ends the input the same way, since a client that dies can leave
 //! stdin open in a grandchild.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::task::Waker;
 use std::time::Duration;
+
+use rmcp::model::RequestId;
 
 /// How long the end of input waits for calls in flight. A pack request
 /// gives up at 30 s unless `PACKSET_TIMEOUT_MS` says otherwise.
 pub const SETTLE: Duration = Duration::from_secs(35);
 
-static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+static IN_FLIGHT: Mutex<Vec<RequestId>> = Mutex::new(Vec::new());
 static READER: Mutex<Option<Waker>> = Mutex::new(None);
 static CLOSING: AtomicBool = AtomicBool::new(false);
 
@@ -124,12 +126,32 @@ fn parent_exit(parent: libc::pid_t) -> bool {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn watch_parent() {}
 
+fn in_flight() -> std::sync::MutexGuard<'static, Vec<RequestId>> {
+    IN_FLIGHT.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+/// A tool call's line was read. rmcp starts the handler on a task of its
+/// own, which may run after the reader has already seen the end of input,
+/// so the call counts from here rather than from the handler.
+pub fn call_read(id: &RequestId) {
+    let mut calls = in_flight();
+    if !calls.contains(id) {
+        calls.push(id.clone());
+    }
+}
+
 /// One tool call between the line being read and its answer being built.
-pub struct InFlight(());
+pub struct InFlight(RequestId);
 
 impl Drop for InFlight {
     fn drop(&mut self) {
-        if IN_FLIGHT.fetch_sub(1, Ordering::AcqRel) == 1 {
+        let mut calls = in_flight();
+        if let Some(pos) = calls.iter().position(|id| *id == self.0) {
+            calls.swap_remove(pos);
+        }
+        let settled = calls.is_empty();
+        drop(calls);
+        if settled {
             wake_reader();
         }
     }
@@ -137,14 +159,19 @@ impl Drop for InFlight {
 
 /// Hold for the length of one tool call.
 #[must_use]
-pub fn call_in_flight() -> InFlight {
-    IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
-    InFlight(())
+pub fn call_in_flight(id: &RequestId) -> InFlight {
+    call_read(id);
+    InFlight(id.clone())
 }
 
-/// No tool call is running.
+/// No tool call is read and unanswered.
 pub fn settled() -> bool {
-    IN_FLIGHT.load(Ordering::Acquire) == 0
+    in_flight().is_empty()
+}
+
+#[cfg(test)]
+pub fn forget_calls() {
+    in_flight().clear();
 }
 
 /// Wake `waker` when the last call in flight ends.

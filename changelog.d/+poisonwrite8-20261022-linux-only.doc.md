@@ -1,0 +1,1 @@
+The explanation says that finding the runner is Linux only: on macOS and other systems no process counts as an installed runner, so `ljos hook` keeps no prompt as the person's and `prefer --user` refuses.

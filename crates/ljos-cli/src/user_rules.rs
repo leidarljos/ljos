@@ -1796,7 +1796,7 @@ mod tests {
             std::env::set_var("PACKSET_URL", &url);
             std::env::set_var("PACKSET_WORKSPACE", "seat");
         }
-        let client = packset_client::PacksetClient::new(url.as_str());
+        let client = crate::PacksetClient::new(url.as_str());
         let stored = client
             .post_atom(&serde_json::json!({
                 "workspace": "seat", "kind": "lesson",
@@ -1857,7 +1857,7 @@ mod tests {
             std::env::set_var("PACKSET_URL", &url);
             std::env::set_var("PACKSET_WORKSPACE", "seat");
         }
-        let client = packset_client::PacksetClient::new(url.as_str());
+        let client = crate::PacksetClient::new(url.as_str());
         let stored = client
             .post_atom(&serde_json::json!({
                 "workspace": "seat", "kind": "lesson",
@@ -1902,7 +1902,7 @@ mod tests {
         unsafe { std::env::set_var("PACKSET_URL", &url) };
         workspace("seat");
         let id = "lessonid0000000000000000000003";
-        let client = packset_client::PacksetClient::new(url.as_str());
+        let client = crate::PacksetClient::new(url.as_str());
         let seat = client
             .post_atom(&serde_json::json!({
                 "id": id, "workspace": "seat", "kind": "lesson",

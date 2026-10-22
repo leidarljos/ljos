@@ -589,7 +589,7 @@ fn instant_of(atom: &Value) -> Option<DateTime<FixedOffset>> {
     }
 }
 
-fn record_cutoff(client: &packset_client::PacksetClient) -> Result<Value> {
+fn record_cutoff(client: &crate::PacksetClient) -> Result<Value> {
     let seat = crate::seat_name();
     let atom = json!({
         "schema": "inside.atom/v1",
@@ -610,11 +610,7 @@ fn record_cutoff(client: &packset_client::PacksetClient) -> Result<Value> {
 ///
 /// The source is read again first. A rewrite may have noted `pending`
 /// on the receipt since `bound` was taken, and this must not wipe it.
-fn remember_refusals(
-    client: &packset_client::PacksetClient,
-    bound: &Bound,
-    ids: &[String],
-) -> Result<()> {
+fn remember_refusals(client: &crate::PacksetClient, bound: &Bound, ids: &[String]) -> Result<()> {
     let Some(_lock) = cutoff_lock() else {
         bail!("prefer: could not lock the preference cutoff to record a refused preference");
     };
@@ -637,12 +633,12 @@ fn remember_refusals(
     }
 }
 
-fn cutoff_source(client: &packset_client::PacksetClient) -> Result<Option<Value>> {
+fn cutoff_source(client: &crate::PacksetClient) -> Result<Option<Value>> {
     let atoms = atoms_lean(client, &client.workspace())?;
     Ok(earliest_bound(&atoms).map(|bound| bound.source))
 }
 
-fn stamp_basis(client: &packset_client::PacksetClient, atom: &Value) -> Update {
+fn stamp_basis(client: &crate::PacksetClient, atom: &Value) -> Update {
     let Some(id) = atom_id(atom) else {
         return Update::Later;
     };
@@ -671,7 +667,7 @@ fn basis_rose(body: &str) -> bool {
 /// The cutoff records the new body before the close. A killed process
 /// leaves that note, and the next person-side run finishes the write
 /// instead of losing the preference.
-fn bear_person(client: &packset_client::PacksetClient, atom: &Value) -> Update {
+fn bear_person(client: &crate::PacksetClient, atom: &Value) -> Update {
     let Some(id) = atom_id(atom) else {
         return Update::Later;
     };
@@ -689,7 +685,7 @@ fn bear_person(client: &packset_client::PacksetClient, atom: &Value) -> Update {
 /// Finish one note on the cutoff: the person atom is live, and the
 /// unmarked one is not. The note goes only once the copy is stored or
 /// the original is live again.
-fn finish_born(client: &packset_client::PacksetClient, id: &str, successor: &Value) -> Update {
+fn finish_born(client: &crate::PacksetClient, id: &str, successor: &Value) -> Update {
     let atoms = match atoms_lean(client, &client.workspace()) {
         Ok(atoms) => atoms,
         Err(_) => return Update::Later,
@@ -734,7 +730,7 @@ fn finish_born(client: &packset_client::PacksetClient, id: &str, successor: &Val
 /// note goes, and `code` stands, once it is live: `live` says it still
 /// is, or this reopens it. A reopen the pack does not take keeps the
 /// note and is not a refusal, so the next run tries again.
-fn give_back(client: &packset_client::PacksetClient, id: &str, live: bool, code: u16) -> Update {
+fn give_back(client: &crate::PacksetClient, id: &str, live: bool, code: u16) -> Update {
     if !live && !matches!(reopen(client, id), Update::Stamped) {
         return Update::Later;
     }
@@ -781,7 +777,7 @@ fn copy_of(atom: &Value, successor: &Value) -> bool {
 /// The same claim, born with basis `person`. No id and no floor: those
 /// belong to the record the pack already holds. The clock stays, so a
 /// lesson hash still names this claim.
-fn successor_of(client: &packset_client::PacksetClient, atom: &Value) -> Value {
+fn successor_of(client: &crate::PacksetClient, atom: &Value) -> Value {
     let mut source = atom
         .get("source")
         .cloned()
@@ -828,33 +824,36 @@ fn closed_stamp(atom: &Value) -> String {
         .unwrap_or_else(|| "1970-01-01T00:00:00.000Z".to_string())
 }
 
-fn close_predecessor(client: &packset_client::PacksetClient, atom: &Value) -> Update {
+fn close_predecessor(client: &crate::PacksetClient, atom: &Value) -> Update {
     let Some(id) = atom_id(atom) else {
         return Update::Later;
     };
     post_fields(client, &id, json!({ "valid_to": closed_stamp(atom) }))
 }
 
-fn reopen(client: &packset_client::PacksetClient, id: &str) -> Update {
+fn reopen(client: &crate::PacksetClient, id: &str) -> Update {
     post_fields(client, id, json!({ "valid_to": Value::Null }))
 }
 
-fn post_successor(client: &packset_client::PacksetClient, successor: &Value) -> Update {
-    let url = format!("{}/v1/atoms", client.base());
-    match packset_client::authorize(ureq::post(&url))
-        .timeout(http_timeout())
-        .send_json(successor)
-    {
-        Ok(resp) => match resp.into_json::<Value>() {
-            Ok(body) if copy_of(body.get("atom").unwrap_or(&body), successor) => Update::Stamped,
-            // Another record answered for the copy.
-            Ok(body) if body.get("atom").unwrap_or(&body).get("id").is_some() => {
-                Update::Refused(SHADOWED)
+fn post_successor(client: &crate::PacksetClient, successor: &Value) -> Update {
+    let Ok(bytes) = serde_json::to_vec(successor) else {
+        return Update::Later;
+    };
+    match client.roundtrip("POST", "/v1/atoms", &[], Some(&bytes), true, http_timeout()) {
+        Ok(answer) if (200..300).contains(&answer.status) => {
+            match serde_json::from_str::<Value>(&answer.body) {
+                Ok(body) if copy_of(body.get("atom").unwrap_or(&body), successor) => {
+                    Update::Stamped
+                }
+                // Another record answered for the copy.
+                Ok(body) if body.get("atom").unwrap_or(&body).get("id").is_some() => {
+                    Update::Refused(SHADOWED)
+                }
+                _ => Update::Later,
             }
-            _ => Update::Later,
-        },
-        Err(ureq::Error::Status(code, _)) if permanent(code) => Update::Refused(code),
-        Err(_) => Update::Later,
+        }
+        Ok(answer) if permanent(answer.status) => Update::Refused(answer.status),
+        _ => Update::Later,
     }
 }
 
@@ -867,7 +866,7 @@ fn pending_of(source: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-fn note_pending(client: &packset_client::PacksetClient, id: &str, successor: &Value) -> Update {
+fn note_pending(client: &crate::PacksetClient, id: &str, successor: &Value) -> Update {
     alter_cutoff(client, |source| {
         let mut list = pending_of(source);
         if !list
@@ -880,7 +879,7 @@ fn note_pending(client: &packset_client::PacksetClient, id: &str, successor: &Va
     })
 }
 
-fn drop_pending(client: &packset_client::PacksetClient, id: &str) -> Update {
+fn drop_pending(client: &crate::PacksetClient, id: &str) -> Update {
     alter_cutoff(client, |source| {
         let list: Vec<Value> = pending_of(source)
             .into_iter()
@@ -899,7 +898,7 @@ fn drop_pending(client: &packset_client::PacksetClient, id: &str) -> Update {
 
 /// Read the cutoff, change its `source`, write it back. The caller holds
 /// [`cutoff_lock`].
-fn alter_cutoff(client: &packset_client::PacksetClient, change: impl FnOnce(&mut Value)) -> Update {
+fn alter_cutoff(client: &crate::PacksetClient, change: impl FnOnce(&mut Value)) -> Update {
     let atoms = match atoms_lean(client, &client.workspace()) {
         Ok(atoms) => atoms,
         Err(_) => return Update::Later,
@@ -913,7 +912,7 @@ fn alter_cutoff(client: &packset_client::PacksetClient, change: impl FnOnce(&mut
 
 /// Finish cutoff notes from a run that closed an atom and did not get to
 /// post its replacement. Nothing owed is not a change.
-fn replay_pending(client: &packset_client::PacksetClient, bound: &Bound) -> Result<bool> {
+fn replay_pending(client: &crate::PacksetClient, bound: &Bound) -> Result<bool> {
     let pending = pending_of(&bound.source);
     if pending.is_empty() {
         return Ok(false);
@@ -939,11 +938,11 @@ fn replay_pending(client: &packset_client::PacksetClient, bound: &Bound) -> Resu
     Ok(true)
 }
 
-fn post_source(client: &packset_client::PacksetClient, id: &str, source: Value) -> Update {
+fn post_source(client: &crate::PacksetClient, id: &str, source: Value) -> Update {
     post_fields(client, id, json!({ "source": source }))
 }
 
-fn post_fields(client: &packset_client::PacksetClient, id: &str, fields: Value) -> Update {
+fn post_fields(client: &crate::PacksetClient, id: &str, fields: Value) -> Update {
     match send_update(client, id, fields) {
         Sent::Stored => Update::Stamped,
         Sent::Permanent(code, _) => Update::Refused(code),
@@ -959,23 +958,26 @@ enum Sent {
     Retry,
 }
 
-fn send_update(client: &packset_client::PacksetClient, id: &str, fields: Value) -> Sent {
-    let url = format!("{}/v1/atoms/update", client.base());
+fn send_update(client: &crate::PacksetClient, id: &str, fields: Value) -> Sent {
     let body = json!({
         "workspace": client.workspace(),
         "id": id,
         "fields": fields,
     });
-    match packset_client::authorize(ureq::post(&url))
-        .timeout(http_timeout())
-        .send_json(body)
-    {
-        Ok(_) => Sent::Stored,
-        Err(ureq::Error::Status(code, resp)) if permanent(code) => {
-            let text = resp.into_string().unwrap_or_default();
-            Sent::Permanent(code, text)
-        }
-        Err(_) => Sent::Retry,
+    let Ok(bytes) = serde_json::to_vec(&body) else {
+        return Sent::Retry;
+    };
+    match client.roundtrip(
+        "POST",
+        "/v1/atoms/update",
+        &[],
+        Some(&bytes),
+        true,
+        http_timeout(),
+    ) {
+        Ok(answer) if (200..300).contains(&answer.status) => Sent::Stored,
+        Ok(answer) if permanent(answer.status) => Sent::Permanent(answer.status, answer.body),
+        _ => Sent::Retry,
     }
 }
 

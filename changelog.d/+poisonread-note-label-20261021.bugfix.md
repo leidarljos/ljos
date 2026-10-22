@@ -1,1 +1,0 @@
-A recalled note is now labelled by its true agent-derived origin rather than its forgeable provenance entities, a recalled lesson says whether it is the person's words or agent-derived, and `ljos recall` lists working notes apart from the facts under their own heading.

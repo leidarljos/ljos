@@ -1,0 +1,1 @@
+The guard's fault budget is eight times a measured policyd spawn, and at least two seconds. A fixed 200 ms was shorter than a slow CI spawn, so an allow was read as a timeout. A policyd that sleeps past the budget is still a fault.
