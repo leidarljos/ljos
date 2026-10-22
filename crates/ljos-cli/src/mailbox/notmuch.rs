@@ -8,9 +8,13 @@
 //! guess, with control and bidirectional characters replaced. No path to
 //! a message file and no attachment content leaves this module.
 
-use std::io::Read as _;
+use std::io::Read;
+use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{bail, Context as _, Result};
 use schemars::JsonSchema;
@@ -29,6 +33,8 @@ const OUTPUT_MAX: u64 = 16 << 20;
 const BODY_MAX: usize = 32 * 1024;
 const MESSAGES_MAX: usize = 50;
 const ATTACHMENTS_MAX: usize = 20;
+/// The longest one notmuch run may take before it is killed.
+pub const TIMEOUT: Duration = Duration::from_secs(30);
 /// Tags left out of a search unless the query names them.
 const EXCLUDED: &[&str] = &["spam", "deleted"];
 
@@ -97,6 +103,7 @@ pub struct Reader {
     bin: PathBuf,
     config: PathBuf,
     nonce: String,
+    timeout: Duration,
 }
 
 impl Reader {
@@ -115,7 +122,15 @@ impl Reader {
             bin: config.notmuch_bin().to_path_buf(),
             config: notmuch_config,
             nonce: hex::encode(seed),
+            timeout: TIMEOUT,
         })
+    }
+
+    /// The same reader with a different deadline for each notmuch run.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     fn note(&self) -> String {
@@ -322,27 +337,24 @@ impl Reader {
         }
         let query = format!("id:\"{}\"", id.replace('"', "\"\""));
         let part_arg = format!("--part={part}");
-        let mut child = self
-            .command(&["show", "--format=raw", &part_arg, "--", &query])
-            .stderr(Stdio::null())
-            .spawn()
-            .context("mail: cannot run notmuch")?;
-        let mut stdout = child.stdout.take().context("mail: no notmuch output")?;
-        let mut hash = Sha256::new();
-        let mut size = 0u64;
-        let mut buf = [0u8; 64 * 1024];
-        loop {
-            let n = stdout.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            hash.update(&buf[..n]);
-            size += n as u64;
-        }
-        if !child.wait()?.success() {
-            bail!("mail: notmuch could not read part {part}");
-        }
-        Ok((size, hex::encode(hash.finalize())))
+        self.run(
+            &["show", "--format=raw", &part_arg, "--", &query],
+            |stdout| {
+                let mut hash = Sha256::new();
+                let mut size = 0u64;
+                let mut buf = [0u8; 64 * 1024];
+                loop {
+                    let n = stdout.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    hash.update(&buf[..n]);
+                    size += n as u64;
+                }
+                Ok(((size, hex::encode(hash.finalize())), true))
+            },
+        )
+        .with_context(|| format!("mail: notmuch could not read part {part}"))
     }
 
     fn command(&self, args: &[&str]) -> Command {
@@ -359,36 +371,90 @@ impl Reader {
     }
 
     fn json(&self, args: &[&str]) -> Result<Value> {
+        let out = self.run(args, |stdout| {
+            let mut out = Vec::new();
+            stdout.take(OUTPUT_MAX + 1).read_to_end(&mut out)?;
+            if out.len() as u64 > OUTPUT_MAX {
+                bail!("mail: notmuch said more than {OUTPUT_MAX} bytes");
+            }
+            Ok((out, true))
+        })?;
+        serde_json::from_slice(&out).context("mail: notmuch output is not JSON")
+    }
+
+    /// One notmuch run under the deadline. `read` takes stdout and says
+    /// whether it read to the end; if not, or on an error or the
+    /// deadline, notmuch and anything it started are killed.
+    fn run<T>(
+        &self,
+        args: &[&str],
+        read: impl FnOnce(&mut dyn Read) -> Result<(T, bool)>,
+    ) -> Result<T> {
         let mut child = self
             .command(args)
             .stderr(Stdio::piped())
+            .process_group(0)
             .spawn()
             .with_context(|| format!("mail: cannot run {}", self.bin.display()))?;
+        let mut stdout = child.stdout.take().context("mail: no notmuch output")?;
         let mut stderr = child.stderr.take().context("mail: no notmuch stderr")?;
         let errors = std::thread::spawn(move || {
             let mut text = String::new();
             let _ = stderr.by_ref().take(4096).read_to_string(&mut text);
+            let _ = std::io::copy(&mut stderr, &mut std::io::sink());
             text
         });
-        let mut out = Vec::new();
-        child
-            .stdout
-            .take()
-            .context("mail: no notmuch output")?
-            .take(OUTPUT_MAX + 1)
-            .read_to_end(&mut out)?;
-        if out.len() as u64 > OUTPUT_MAX {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("mail: notmuch said more than {OUTPUT_MAX} bytes");
+        let child = Arc::new(Mutex::new(child));
+        let late = Arc::new(AtomicBool::new(false));
+        let (done, wait) = mpsc::channel::<()>();
+        let watchdog = {
+            let (child, late, timeout) = (Arc::clone(&child), Arc::clone(&late), self.timeout);
+            std::thread::spawn(move || {
+                if wait.recv_timeout(timeout) == Err(mpsc::RecvTimeoutError::Timeout) {
+                    late.store(true, Ordering::SeqCst);
+                    kill_group(&child);
+                }
+            })
+        };
+        let got = read(&mut stdout);
+        drop(stdout);
+        if !matches!(got, Ok((_, true))) {
+            kill_group(&child);
         }
-        let status = child.wait()?;
+        let _ = done.send(());
+        let _ = watchdog.join();
+        let status = child
+            .lock()
+            .map_err(|_| anyhow::anyhow!("mail: notmuch lock"))?
+            .wait()?;
         let said = errors.join().unwrap_or_default();
-        if !status.success() {
+        if late.load(Ordering::SeqCst) {
+            bail!(
+                "mail: notmuch did not finish within {} s and was stopped",
+                self.timeout.as_secs_f32()
+            );
+        }
+        let (value, finished) = got?;
+        if finished && !status.success() {
             let first = said.lines().next().unwrap_or("no message");
             bail!("mail: notmuch failed: {}", clean(first));
         }
-        serde_json::from_slice(&out).context("mail: notmuch output is not JSON")
+        Ok(value)
+    }
+}
+
+/// SIGKILL to the process group a notmuch run leads, so a helper it
+/// started cannot hold the pipe open.
+fn kill_group(child: &Mutex<Child>) {
+    if let Ok(mut child) = child.lock() {
+        if let Ok(pid) = i32::try_from(child.id()) {
+            // SAFETY: kill only sends a signal; the group is the one this
+            // run created with process_group(0) and has not reaped yet.
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+        let _ = child.kill();
     }
 }
 

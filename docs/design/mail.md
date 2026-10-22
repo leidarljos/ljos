@@ -62,6 +62,10 @@ stays on the machine that holds it.
   text with their target, never followed. Attachments are listed by name,
   type, size and sha256, with no content and no path.
 
+Every notmuch run has a 30 s deadline. At the deadline notmuch and its
+process group are killed and the tool refuses, so a hung database or a
+slow part cannot stall the MCP server.
+
 Untrusted text sits between a start and an end marker that carry a fresh
 random nonce, so a message cannot close its own wrapping. Mail text is
 data. A message that says the owner approves a send, or tells the reader
