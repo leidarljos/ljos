@@ -10581,7 +10581,7 @@ fn search_relevant(
     };
     let mut answer = ask(ranked)?;
     if matches!(&answer, Err((400, why)) if ranked && names_the_rank(why)) {
-        refuses_relevance(client);
+        refuses_relevance(client, !open);
         answer = ask(false)?;
     }
     let mut body: Value = match answer {
@@ -10652,8 +10652,10 @@ fn say_search_miss(err: &ProofMiss) {
 /// search here was refused it since. An older writer omits `search`, and
 /// one that does not answer is taken as older. Its crate version did not
 /// move with the rank, so it is not read. Asked once per writer and
-/// workspace each [`RANKS_FOR`]. `with_token` is false for a listener
-/// that did not ask, so the token is not handed to it.
+/// workspace and auth mode each [`RANKS_FOR`]. `with_token` is false for
+/// a listener that did not ask, so the token is not handed to it. An
+/// unauthenticated read is not reused for an authenticated one: the two
+/// listeners are not the same seat.
 fn ranks_by_relevance(
     client: &PacksetClient,
     timeout: std::time::Duration,
@@ -10664,12 +10666,12 @@ fn ranks_by_relevance(
     let mut known = RANKS_KNOWN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    known.retain(|(.., at, _)| at.elapsed() < RANKS_FOR);
-    if let Some((.., ranks)) = known
+    known.retain(|row| row.at.elapsed() < RANKS_FOR);
+    if let Some(row) = known
         .iter()
-        .find(|(b, w, ..)| *b == base && *w == workspace)
+        .find(|row| row.base == base && row.workspace == workspace && row.with_token == with_token)
     {
-        return *ranks;
+        return row.ranks;
     }
     let req = ureq::get(&format!("{base}/v1/status"));
     let req = if with_token {
@@ -10689,7 +10691,13 @@ fn ranks_by_relevance(
         .pointer("/search/ranks")
         .and_then(Value::as_array)
         .is_some_and(|r| r.iter().any(|v| v.as_str() == Some("relevance")));
-    known.push((base, workspace, std::time::Instant::now(), ranks));
+    known.push(RankSeen {
+        base,
+        workspace,
+        with_token,
+        at: std::time::Instant::now(),
+        ranks,
+    });
     ranks
 }
 
@@ -10698,10 +10706,18 @@ fn ranks_by_relevance(
 /// writer that lists the rank is asked for it.
 const RANKS_FOR: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// The writer and workspace [`ranks_by_relevance`] asked about, when it
-/// read the status, and whether that workspace is asked for the rank.
-type RanksKnown = Vec<(String, String, std::time::Instant, bool)>;
-static RANKS_KNOWN: std::sync::Mutex<RanksKnown> = std::sync::Mutex::new(Vec::new());
+/// One answer [`ranks_by_relevance`] is still willing to reuse: the
+/// writer, the workspace, whether the read carried the token, when it
+/// was read, and whether that mode is asked for the rank.
+struct RankSeen {
+    base: String,
+    workspace: String,
+    with_token: bool,
+    at: std::time::Instant,
+    ranks: bool,
+}
+
+static RANKS_KNOWN: std::sync::Mutex<Vec<RankSeen>> = std::sync::Mutex::new(Vec::new());
 
 /// Whether a 400's body names the `rank` parameter, as packset's `rank
 /// must be fused or relevance` does. `rerank` is another parameter and
@@ -10712,19 +10728,21 @@ fn names_the_rank(body: &str) -> bool {
 }
 
 /// The writer at `client` answered a ranked search 400 naming `rank`
-/// though its status lists it: this workspace is asked as an older writer
-/// until [`ranks_by_relevance`] reads the status again.
-fn refuses_relevance(client: &PacksetClient) {
+/// though its status lists it: this workspace, in the auth mode
+/// `with_token` that was asked, is asked as an older writer until
+/// [`ranks_by_relevance`] reads the status again. The other mode keeps
+/// the answer it cached.
+fn refuses_relevance(client: &PacksetClient, with_token: bool) {
     let base = client.base().trim_end_matches('/');
     let workspace = client.workspace();
     let mut known = RANKS_KNOWN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((.., ranks)) = known
+    if let Some(row) = known
         .iter_mut()
-        .find(|(b, w, ..)| b == base && *w == workspace)
+        .find(|row| row.base == base && row.workspace == workspace && row.with_token == with_token)
     {
-        *ranks = false;
+        row.ranks = false;
     }
 }
 
@@ -38698,9 +38716,12 @@ mod tests {
         assert_eq!(ranked("refused"), 1, "{:?}", seen.lock().unwrap());
         search("other");
         assert_eq!(ranked("other"), 1, "{:?}", seen.lock().unwrap());
-        for (base, workspace, at, _) in RANKS_KNOWN.lock().unwrap().iter_mut() {
-            if base == url.trim_end_matches('/') && workspace == "refused" {
-                *at = at.checked_sub(RANKS_FOR).expect("up longer than RANKS_FOR");
+        for row in RANKS_KNOWN.lock().unwrap().iter_mut() {
+            if row.base == url.trim_end_matches('/') && row.workspace == "refused" {
+                row.at = row
+                    .at
+                    .checked_sub(RANKS_FOR)
+                    .expect("up longer than RANKS_FOR");
             }
         }
         search("refused");
@@ -38708,6 +38729,63 @@ mod tests {
         let seen = seen.lock().unwrap();
         let reads = seen.iter().filter(|r| r.contains("/v1/status")).count();
         assert_eq!(reads, 3, "{seen:?}");
+    }
+
+    /// An unauthenticated status is not reused for an authenticated read,
+    /// and a refusal clears only the auth mode that was refused.
+    #[test]
+    fn the_rank_cache_is_kept_per_auth_mode() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("PACKSET_TOKEN", "rank-cache-token"),
+            ("PACKSET_WORKSPACE", "seat"),
+        ]);
+        let (url, seen) = serve_http(|req| {
+            let first = req.lines().next().unwrap_or("");
+            if !first.contains("/v1/status") {
+                return (404, r#"{"error":"missing"}"#.into());
+            }
+            let authed = req.lines().any(|line| {
+                line.split_once(':').is_some_and(|(name, value)| {
+                    name.eq_ignore_ascii_case("authorization")
+                        && value.trim() == "Bearer rank-cache-token"
+                })
+            });
+            if authed {
+                return (200, r#"{"search":{"ranks":["relevance"]}}"#.into());
+            }
+            (200, r#"{"search":{"ranks":["fused"]}}"#.into())
+        });
+        let client = PacksetClient::new(&url).with_workspace("seat");
+        let timeout = std::time::Duration::from_secs(2);
+        let status_reads = || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.contains("/v1/status"))
+                .count()
+        };
+        assert!(!ranks_by_relevance(&client, timeout, false));
+        assert!(ranks_by_relevance(&client, timeout, true));
+        assert_eq!(status_reads(), 2, "{:?}", seen.lock().unwrap());
+        assert!(!ranks_by_relevance(&client, timeout, false));
+        assert!(ranks_by_relevance(&client, timeout, true));
+        assert_eq!(status_reads(), 2, "{:?}", seen.lock().unwrap());
+
+        let (same, _) = serve_http(|req| {
+            if req.lines().next().unwrap_or("").contains("/v1/status") {
+                return (200, r#"{"search":{"ranks":["relevance"]}}"#.into());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let both = PacksetClient::new(&same).with_workspace("seat");
+        assert!(ranks_by_relevance(&both, timeout, false));
+        assert!(ranks_by_relevance(&both, timeout, true));
+        refuses_relevance(&both, true);
+        assert!(ranks_by_relevance(&both, timeout, false));
+        assert!(!ranks_by_relevance(&both, timeout, true));
     }
 
     /// The hits the writer chose are read by their `rerank_score`, highest
