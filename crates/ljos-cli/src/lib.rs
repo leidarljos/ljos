@@ -2501,6 +2501,38 @@ thread_local! {
         const { std::cell::Cell::new(false) };
 }
 
+/// Whether a person's terminal drives this process.
+///
+/// On Linux that is the controlling terminal, the foreground group and
+/// the chain to pid 1. On macOS it is a controlling terminal plus the
+/// process the kernel holds responsible, which must not be a runner; if
+/// that process cannot be named the check fails closed. Anywhere else
+/// there is no check, and [`person_at_terminal`] is false.
+fn person_at_terminal() -> bool {
+    #[cfg(test)]
+    if PERSON_AT_TERMINAL.with(std::cell::Cell::get) {
+        return true;
+    }
+    host_at_terminal()
+}
+
+/// `Some` when the terminal question could be answered. The person is
+/// there only when `tty` is the controlling terminal and `responsible` is
+/// not a runner. `None` means the responsible process could not be named,
+/// which the caller treats as absent.
+#[cfg(any(test, target_os = "macos"))]
+fn at_terminal_with_responsible(
+    tty: bool,
+    responsible: Option<&str>,
+    runners: &[String],
+) -> Option<bool> {
+    if !tty {
+        return Some(false);
+    }
+    let name = responsible?;
+    Some(!segment_names_runner(name, runners))
+}
+
 /// Whether the kernel says a person's terminal drives this process. Stdin
 /// is this process's controlling terminal, a pseudo-terminal, and its
 /// foreground group is ours. The session leader is this process or one
@@ -2511,11 +2543,7 @@ thread_local! {
 /// reparented, which a process outside its own session with a parent in
 /// another shows. Names prove nothing here; a tool call picks its own.
 #[cfg(target_os = "linux")]
-fn person_at_terminal() -> bool {
-    #[cfg(test)]
-    if PERSON_AT_TERMINAL.with(std::cell::Cell::get) {
-        return true;
-    }
+fn host_at_terminal() -> bool {
     // SAFETY: isatty reads one descriptor's mode and cannot fail.
     if unsafe { libc::isatty(0) } != 1 {
         return false;
@@ -2582,9 +2610,47 @@ fn person_at_terminal() -> bool {
     !reparented && !runner && holds_pty(holder.pid, index)
 }
 
-#[cfg(not(target_os = "linux"))]
-fn person_at_terminal() -> bool {
+/// macOS: a controlling terminal, and the process the kernel names as
+/// responsible for this one. A runner there is not the person. No name
+/// for that process fails closed. A login with no terminal is absent,
+/// which is an answer, not a failed check.
+#[cfg(target_os = "macos")]
+fn host_at_terminal() -> bool {
+    match at_terminal_with_responsible(
+        controlling_tty(),
+        responsible_comm().as_deref(),
+        &runner_names(),
+    ) {
+        Some(present) => present,
+        None => false,
+    }
+}
+
+/// Stdin is this process's controlling terminal and its foreground group.
+#[cfg(target_os = "macos")]
+fn controlling_tty() -> bool {
+    // SAFETY: isatty, tcgetpgrp and getpgrp only read process state.
+    unsafe { libc::isatty(0) == 1 && libc::tcgetpgrp(0) == libc::getpgrp() }
+}
+
+/// No terminal check. [`person_present`] stays false, and the doctor says so.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn host_at_terminal() -> bool {
     false
+}
+
+/// Linux and macOS can say whether the person is at the terminal. Any
+/// other host cannot, and must not pretend a typed command is theirs.
+fn host_lacks_person_check() -> bool {
+    !cfg!(target_os = "linux") && !cfg!(target_os = "macos")
+}
+
+fn person_absent_row() -> Habitat {
+    Habitat {
+        name: "person",
+        state: "attribution is absent on this host: a terminal cannot be checked, so a typed command is not the person's".to_string(),
+        ok: false,
+    }
 }
 
 /// Path components that name a place, not a program.
@@ -23376,6 +23442,9 @@ pub fn doctor_seat() -> Vec<Habitat> {
         state: format_seat_row(),
         ok: true,
     });
+    if host_lacks_person_check() {
+        out.push(person_absent_row());
+    }
     out.push(cloud::mcp_row());
     out.push(cloud::guard_row());
     // Scope cloud is readable here when cloud up wrote its age identity.
@@ -24183,6 +24252,10 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     }
     // Older user rules awaiting confirmation are the same kind of warning.
     if row.name == "user rules" && !row.ok {
+        return "warn";
+    }
+    // A host with no terminal check says so. The seat still starts.
+    if row.name == "person" && !row.ok {
         return "warn";
     }
     if row.ok && row.name == "mcp" && row.state.starts_with("warning:") {
@@ -47104,6 +47177,42 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(!super::cgroup_text_is_transient(
             "0::/system.slice/pod/cursor-agent/workload\n"
         ));
+    }
+
+    /// macOS asks whether the controlling terminal's responsible process
+    /// is a runner. The name is passed in, so the decision is tested here
+    /// without a Mac. No name fails closed. No terminal is an answer.
+    #[test]
+    fn a_responsible_process_decides_the_terminal() {
+        let runners = vec!["cursor".to_string(), "claude".to_string()];
+        assert_eq!(
+            super::at_terminal_with_responsible(true, Some("Terminal"), &runners),
+            Some(true)
+        );
+        assert_eq!(
+            super::at_terminal_with_responsible(true, Some("cursor-agent"), &runners),
+            Some(false)
+        );
+        assert_eq!(
+            super::at_terminal_with_responsible(true, None, &runners),
+            None
+        );
+        assert_eq!(
+            super::at_terminal_with_responsible(false, Some("Terminal"), &runners),
+            Some(false)
+        );
+        assert_eq!(
+            super::at_terminal_with_responsible(false, None, &runners),
+            Some(false)
+        );
+        let row = super::person_absent_row();
+        assert_eq!(super::doctor_word(&row), "warn");
+        assert!(super::failing(std::slice::from_ref(&row)).is_empty());
+        assert!(super::healthy(std::slice::from_ref(&row)));
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert!(!super::host_lacks_person_check());
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        assert!(super::host_lacks_person_check());
     }
 
     /// The test process is not a detached shell, so a runner-shaped cgroup
