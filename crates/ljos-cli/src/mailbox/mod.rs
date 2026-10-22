@@ -14,9 +14,10 @@ use anyhow::{bail, Context as _, Result};
 
 /// A reader over the mailbox the `[mail]` table names. A cloud seat is
 /// refused: it has no mailbox, and the owner's mail stays on the machine
-/// that holds it.
+/// that holds it. Any cloud marker counts, so a guard file with an extra
+/// or unknown rule still refuses.
 pub fn open() -> Result<notmuch::Reader> {
-    if crate::cloud::cloud_seat() {
+    if crate::cloud::any_cloud_marker() {
         bail!("mail: a cloud seat has no mailbox; mail is read only on the machine that holds it");
     }
     let config = config::load()?.context("mail: no [mail] table in ljos config")?;
