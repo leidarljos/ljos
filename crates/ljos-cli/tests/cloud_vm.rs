@@ -1876,6 +1876,7 @@ fn cloud_guard_reads_git_env_and_env_chdir_context() {
     let body = board(&[issue_block("probe-git-env", "TODO", "", &[])]);
     seed(root.path(), &origin, &body);
     let dev = clone_of(root.path(), &origin, "dev");
+    git(&dev, &["branch", "-M", "develop"]);
     let oncur = clone_of(root.path(), &origin, "oncur");
     git(&oncur, &["checkout", "-q", "-b", "cursor/probe"]);
 
@@ -2193,6 +2194,10 @@ fn cloud_guard_refuses_gh_api_ref_writes() {
         "gh api graphql -F query=@delete-ref.graphql",
         "gh api graphql -F query=@force-update.graphql",
         "gh api graphql -F query=@update-refs.graphql",
+        "gh api --method POST repos/acme/widgets/git/refs -f ref=refs/heads/feature/safe -f sha=0123456789012345678901234567890123456789",
+        "gh api --method PATCH repos/acme/widgets/git/refs/heads/main -f sha=0123456789012345678901234567890123456789",
+        "gh api graphql -f query='mutation { createRef(input: {repositoryId: \"R\", name: \"refs/heads/feature/safe\", oid: \"O\"}) { clientMutationId } }'",
+        "gh api graphql -F query=@safe-create.graphql",
     ] {
         let hit = refused(line, here);
         assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {hit:?}");
@@ -2201,14 +2206,167 @@ fn cloud_guard_refuses_gh_api_ref_writes() {
     for line in [
         "gh api repos/acme/widgets/git/refs/heads/main",
         "gh api --method GET repos/acme/widgets/git/refs/heads/main",
-        "gh api --method POST repos/acme/widgets/git/refs -f ref=refs/heads/feature/safe -f sha=0123456789012345678901234567890123456789",
-        "gh api --method PATCH repos/acme/widgets/git/refs/heads/main -f sha=0123456789012345678901234567890123456789",
-        "gh api graphql -f query='mutation { createRef(input: {repositoryId: \"R\", name: \"refs/heads/feature/safe\", oid: \"O\"}) { clientMutationId } }'",
+        "gh api --paginate repos/acme/widgets/git/matching-refs/heads/develop",
+        "gh api --method PATCH repos/acme/widgets/git/refs/heads/develop -f sha=0123456789012345678901234567890123456789",
+        "gh api --method POST repos/acme/widgets/git/refs -f ref=refs/heads/develop -f sha=0123456789012345678901234567890123456789",
+        "gh api graphql -f query='mutation { createRef(input: {repositoryId: \"R\", name: \"refs/heads/develop\", oid: \"O\"}) { clientMutationId } }'",
         "gh api graphql -f query='query { viewer { login } }'",
-        "gh api graphql -F query=@safe-create.graphql",
+        "gh api graphql -f query='mutation { addComment(input: {body: \"deleteRef\"}) { clientMutationId } }'",
     ] {
         allowed(line, here);
     }
+}
+
+/// The seat's `ljos.toml` names `branches` beside `develop`.
+fn write_seat_branches(home: &Path, branches: &[&str]) {
+    let seat = std::env::var("LJOS_SEAT").expect("LJOS_SEAT");
+    let dir = home.join(".config/ljos/seats").join(seat);
+    fs::create_dir_all(&dir).unwrap();
+    let items = branches
+        .iter()
+        .map(|name| format!("  \"{name}\""))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    fs::write(
+        dir.join("ljos.toml"),
+        format!("[cloud]\nbranches = [\n{items}\n]\n"),
+    )
+    .unwrap();
+}
+
+/// Forms the guard used to miss, against a bare origin. A destination off
+/// the seat list is refused, and so is a write whose destination the line
+/// does not show. Everyday pushes of the named branch and of develop stay.
+#[test]
+fn cloud_guard_judges_ref_writes_by_the_seat_allowlist() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    write_seat_branches(&home, &["feature-x"]);
+    let (_origin, repo) = bare_checkout(root.path());
+    let here = repo.as_path();
+
+    git(&repo, &["config", "alias.hi", "!echo hi"]);
+    git(&repo, &["config", "alias.tg", "!tig"]);
+    git(&repo, &["config", "alias.view", "!gh pr view"]);
+    git(
+        &repo,
+        &["config", "alias.bad", "!git -C . push origin main"],
+    );
+    git(&repo, &["checkout", "-q", "feature-x"]);
+    git(
+        &repo,
+        &["branch", "--set-upstream-to", "origin/develop", "feature-x"],
+    );
+
+    for line in [
+        "git push origin feature-x",
+        "git push -u origin feature-x",
+        "git push origin develop",
+        "git push",
+        "git push --dry-run origin main",
+        "git fetch origin",
+        "git pull origin develop",
+        "git hi",
+        "git tg",
+        "git view",
+        "gh pr view 7",
+        "gh pr list",
+        "git send-pack --dry-run origin develop",
+        "gh repo sync -b develop",
+        "gh repo sync -b feature-x",
+    ] {
+        allowed(line, here);
+    }
+
+    git(&repo, &["branch", "cursor/local"]);
+    let push_main = root.path().join("push-main.sh");
+    let push_dev = root.path().join("push-dev.sh");
+    fs::write(&push_main, "git push origin main\n").unwrap();
+    fs::write(&push_dev, "git push origin develop\n").unwrap();
+    let ref_file = root.path().join("refname.txt");
+    fs::write(&ref_file, "refs/heads/cursor/from-file\n").unwrap();
+    let develop_file = root.path().join("develop-ref.txt");
+    fs::write(&develop_file, "refs/heads/develop\n").unwrap();
+    let missing = root.path().join("no-such-script.sh");
+    let unread = root.path().join("unread.sh");
+    fs::write(&unread, "git push origin main\n").unwrap();
+    let _ = std::fs::set_permissions(&unread, std::os::unix::fs::PermissionsExt::from_mode(0o000));
+
+    let ref_at = format!(
+        "gh api --method POST repos/acme/widgets/git/refs -F ref=@{} -F sha=0123456789012345678901234567890123456789",
+        ref_file.display()
+    );
+    let develop_at = format!(
+        "gh api --method POST repos/acme/widgets/git/refs -F ref=@{} -F sha=0123456789012345678901234567890123456789",
+        develop_file.display()
+    );
+    let source_main = format!("source {}", push_main.display());
+    let source_dev = format!("bash {}", push_dev.display());
+    let source_missing = format!("source {}", missing.display());
+    let source_unread = format!("bash {}", unread.display());
+    let bash_env = format!("BASH_ENV={} bash -c true", push_main.display());
+
+    for line in [
+        "git bad",
+        "git send-pack origin --all",
+        "git send-pack origin --stdin",
+        "git send-pack origin --force develop",
+        "git send-pack origin :develop",
+        "gh api --method PATCH repos/acme/widgets/git/refs/heads/cursor/probe -f sha=0123456789012345678901234567890123456789",
+        "gh api --method PATCH repos/acme/widgets/git/refs/heads/develop --input -",
+        ref_at.as_str(),
+        "gh api graphql -f query='mutation { updateRef(input: {refId: \"R\", oid: \"O\", force: $force}) { clientMutationId } }'",
+        "gh api graphql -f query='mutation { updateRefs(input: {refUpdates: [{name: \"refs/heads/develop\", afterOid: \"A\"}]}) { clientMutationId } }'",
+        "git config remote.origin.push refs/heads/*:refs/heads/* && git push origin develop",
+        "gh api --method POST \"$EP\"",
+        "printf x | xargs gh api repos/acme/widgets/git/refs",
+        "gh alias set poke 'api --method POST repos/acme/widgets/git/refs -f ref=refs/heads/cursor/z -f sha=0123456789012345678901234567890123456789' && gh poke",
+        "curl -s -X POST -H \"Authorization: Bearer $GH_TOKEN\" https://api.github.com/repos/acme/widgets/git/refs",
+        "gh release create v9",
+        "gh api --method POST repos/acme/widgets/releases -f tag_name=v9",
+        "gh api --method POST repos/acme/widgets/branches/develop/rename -f new_name=main",
+        "gh api --method POST repos/acme/widgets/merges -f base=main -f head=develop",
+        "gh api --method POST repos/acme/widgets/merges -f head=develop",
+        "gh api --method PUT repos/acme/widgets/contents/README.md -f message=m -f content=eQ==",
+        "gh api --method PUT repos/acme/widgets/contents/README.md -f message=m -f content=eQ== -f branch=main",
+        "gh api graphql -f query='mutation { createCommitOnBranch(input: {branch: {branchName: \"main\"}}) { clientMutationId } }'",
+        "gh api graphql -f query='mutation { mergeBranch(input: {base: \"main\", head: \"feature-x\"}) { clientMutationId } }'",
+        "gh repo sync",
+        "gh repo sync -b main",
+        source_main.as_str(),
+        source_unread.as_str(),
+        bash_env.as_str(),
+        "git config alias.ship '!git push origin main' && git ship",
+    ] {
+        let hit = refused(line, here);
+        assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {hit:?}");
+    }
+    allowed(&develop_at, here);
+    allowed(&source_dev, here);
+    allowed(&source_missing, here);
+    allowed(
+        "curl -s -H \"Authorization: Bearer $GH_TOKEN\" https://api.github.com/user",
+        here,
+    );
+    allowed(
+        "gh api --method POST repos/acme/widgets/merges -f base=develop -f head=feature-x",
+        here,
+    );
+    allowed(
+        "gh api --method PUT repos/acme/widgets/contents/README.md -f message=m -f content=eQ== -f branch=develop",
+        here,
+    );
+    allowed(
+        "gh api graphql -f query='mutation { createCommitOnBranch(input: {branch: {branchName: \"develop\"}}) { clientMutationId } }'",
+        here,
+    );
+    allowed(
+        "gh api graphql -f query='mutation { mergeBranch(input: {base: \"develop\", head: \"feature-x\"}) { clientMutationId } }'",
+        here,
+    );
+    let _ = std::fs::set_permissions(&unread, std::os::unix::fs::PermissionsExt::from_mode(0o644));
 }
 
 fn gh_bin_dir() -> PathBuf {
@@ -2263,8 +2421,9 @@ fn bare_checkout(root: &Path) -> (PathBuf, PathBuf) {
 fn cloud_guard_allows_resolved_destinations_toplevel_and_tags() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
-    seat_env(root.path());
+    let home = seat_env(root.path());
     ljos_cli::cloud::up(false).unwrap();
+    write_seat_branches(&home, &["feature-x"]);
     let (origin, repo) = bare_checkout(root.path());
     let sub = repo.join("sub");
     fs::create_dir(&sub).unwrap();
@@ -2345,12 +2504,22 @@ fn cloud_guard_allows_resolved_destinations_toplevel_and_tags() {
     assert!(!remote_has("refs/heads/cursor/probe"));
 
     git(&repo, &["tag", "v1"]);
-    allowed("git push --tags", &repo);
-    sh_ok(&repo, "git push --tags");
-    assert!(remote_has("refs/tags/v1"));
+    let tagged_v1 = refused("git push --tags", &repo);
+    assert!(
+        tagged_v1.reason.contains("refs/tags/v1"),
+        "{}",
+        tagged_v1.reason
+    );
     assert!(
         !remote_has("refs/heads/cursor/probe"),
         "--tags pushed the branch"
+    );
+    git(&repo, &["branch", "side"]);
+    let side = refused(r#"B=side; git push origin "$B""#, &repo);
+    assert!(
+        side.reason.contains("this push updates side"),
+        "{}",
+        side.reason
     );
     let followed = refused("git push --follow-tags", &repo);
     assert!(
@@ -2555,7 +2724,6 @@ fn cloud_guard_allows_pushes_that_leave_cursor_refs_alone() {
         "git push origin develop",
         "git push origin cursor/probe:develop",
         "git push origin refs/heads/cursor/probe:refs/heads/develop",
-        "git push origin +cursor/probe:develop",
         "git push git@github.com:cursor/ljos.git develop",
         "git push --repo git@github.com:cursor/ljos.git develop",
         "git push --repo=git@github.com:cursor/ljos.git develop",
@@ -2581,9 +2749,7 @@ fn cloud_guard_allows_pushes_that_leave_cursor_refs_alone() {
     ] {
         allowed(line, &develop);
     }
-    for line in ["git push --all", "git push --branches", "git push --tags"] {
-        allowed(line, &clean);
-    }
+    allowed("git push --tags", &clean);
     let elsewhere = root.path();
     for line in [
         format!(
@@ -2591,12 +2757,16 @@ fn cloud_guard_allows_pushes_that_leave_cursor_refs_alone() {
             develop.display()
         ),
         format!("git -C '{}' push", develop.display()),
-        "git -C clean push --all".to_string(),
         format!("cd {} && git push -u origin HEAD", develop.display()),
         format!("FOO=1 git -C \"{}\" push origin HEAD", develop.display()),
     ] {
         allowed(&line, elsewhere);
     }
+    refused("git push origin +cursor/probe:develop", &develop);
+    for line in ["git push --all", "git push --branches"] {
+        refused(line, &clean);
+    }
+    refused("git -C clean push --all", elsewhere);
 }
 
 #[test]
