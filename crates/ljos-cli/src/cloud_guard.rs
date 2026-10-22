@@ -4531,51 +4531,109 @@ fn wget_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) ->
     // `--no-config` before any `--config` reads nothing. A named
     // `--config` replaces the system and user files. Otherwise both
     // the system wgetrc and the user file apply, and either can set
-    // the method.
-    if let Some(shape) = wget_files(words, env, cwd, &mut tune) {
-        return (shape, curl_config_github(words, &tune));
-    }
+    // the method. The command line is read after an opaque file too.
+    let opaque = wget_files(words, env, cwd, &mut tune).is_some();
     let mut method = tune.method.clone();
     let mut body = tune.body;
+    for (name, value) in wget_args(words) {
+        match name {
+            "method" => method = Some(value.to_ascii_uppercase()),
+            "execute" => note_wget_exec(&value, &mut method, &mut body, &mut tune.github),
+            "input-file" | "input-metalink" | "base" => tune.github = true,
+            "header" if header_sets_host(&value) => tune.github = true,
+            "post-data" | "post-file" | "body-data" | "body-file" => body = true,
+            _ => {}
+        }
+    }
+    let shape = if opaque {
+        HttpShape::Opaque
+    } else {
+        finish_http(method.as_deref(), body, false, false)
+    };
+    (shape, curl_config_github(words, &tune))
+}
+
+/// Wget options the guard reads, each `long` or `long/short`. Wget takes
+/// any prefix that names one option, so a wget option that is a prefix
+/// of one listed here must be listed too.
+const WGET_READ: &str = "\
+    method execute/e input-file/i input-metalink base/B config no-config header post-data \
+    post-file body-data body-file";
+/// Wget shorts that take a value the guard does not read. `-n` takes the
+/// letters after it.
+const WGET_SHORT_VALUE: &str = "oatOTwQPUlARDIXn";
+
+fn wget_opts() -> impl Iterator<Item = (&'static str, Option<char>)> {
+    WGET_READ.split_ascii_whitespace().map(|entry| {
+        let (long, short) = entry.split_once('/').unwrap_or((entry, ""));
+        (long, short.chars().next())
+    })
+}
+
+fn wget_long_name(word: &str) -> Option<&'static str> {
+    let hits: Vec<_> = wget_opts()
+        .map(|(long, _)| long)
+        .filter(|long| !word.is_empty() && long.starts_with(word))
+        .collect();
+    match hits.iter().find(|long| **long == word) {
+        Some(long) => Some(long),
+        None if hits.len() == 1 => Some(hits[0]),
+        None => None,
+    }
+}
+
+/// The options in `words` the guard reads, by long name, each with its
+/// value, split or attached, in a short cluster or abbreviated.
+fn wget_args(words: &[String]) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
     let mut i = 1usize;
     while i < words.len() {
-        let lower = words[i].to_ascii_lowercase();
-        if lower == "--method" {
-            method = words.get(i + 1).map(|value| value.to_ascii_uppercase());
-            i += 2;
+        let word = words[i].as_str();
+        i += 1;
+        if word == "--" {
+            break;
+        }
+        if let Some(long) = word.strip_prefix("--") {
+            let (name, attached) = match long.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None => (long, None),
+            };
+            let Some(name) = wget_long_name(&name.to_ascii_lowercase()) else {
+                continue;
+            };
+            let value = match attached {
+                _ if name == "no-config" => String::new(),
+                Some(value) => value.to_string(),
+                None => {
+                    i += 1;
+                    words.get(i - 1).cloned().unwrap_or_default()
+                }
+            };
+            out.push((name, value));
             continue;
         }
-        if let Some(value) = lower.strip_prefix("--method=") {
-            method = Some(value.to_ascii_uppercase());
-            i += 1;
+        let Some(cluster) = word.strip_prefix('-').filter(|rest| !rest.is_empty()) else {
             continue;
-        }
-        if lower == "-e" || lower == "--execute" {
-            if let Some(value) = words.get(i + 1) {
-                note_wget_exec(value, &mut method, &mut body, &mut tune.github);
-            }
-            i += 2;
-            continue;
-        }
-        if let Some(value) = lower.strip_prefix("--execute=") {
-            note_wget_exec(value, &mut method, &mut body, &mut tune.github);
-            i += 1;
-            continue;
-        }
-        if let Some(value) = lower.strip_prefix("-e") {
-            if !value.is_empty() && !lower.starts_with("--") {
-                note_wget_exec(value, &mut method, &mut body, &mut tune.github);
-                i += 1;
+        };
+        for (at, c) in cluster.char_indices() {
+            let read = wget_opts().find(|(_, short)| *short == Some(c));
+            if read.is_none() && !WGET_SHORT_VALUE.contains(c) {
                 continue;
             }
+            let rest = &cluster[at + c.len_utf8()..];
+            let value = if rest.is_empty() {
+                i += 1;
+                words.get(i - 1).cloned().unwrap_or_default()
+            } else {
+                rest.to_string()
+            };
+            if let Some((long, _)) = read {
+                out.push((long, value));
+            }
+            break;
         }
-        if lower.starts_with("--post-") || lower.starts_with("--body-") {
-            body = true;
-        }
-        i += 1;
     }
-    let shape = finish_http(method.as_deref(), body, false, false);
-    (shape, curl_config_github(words, &tune))
+    out
 }
 
 enum WgetFiles {
@@ -4588,24 +4646,12 @@ enum WgetFiles {
 /// does when it scans the command before reading a file.
 fn wget_files_plan(words: &[String]) -> WgetFiles {
     let mut named = Vec::new();
-    let mut i = 1usize;
-    while i < words.len() {
-        let lower = words[i].to_ascii_lowercase();
-        if lower == "--no-config" && named.is_empty() {
-            return WgetFiles::Off;
+    for (name, value) in wget_args(words) {
+        match name {
+            "no-config" if named.is_empty() => return WgetFiles::Off,
+            "config" => named.push(PathBuf::from(value)),
+            _ => {}
         }
-        if lower == "--config" {
-            let value = words.get(i + 1).cloned().unwrap_or_default();
-            named.push(PathBuf::from(value));
-            i += 2;
-            continue;
-        }
-        if let Some(value) = lower.strip_prefix("--config=") {
-            named.push(PathBuf::from(value));
-            i += 1;
-            continue;
-        }
-        i += 1;
     }
     if named.is_empty() {
         WgetFiles::Defaults
