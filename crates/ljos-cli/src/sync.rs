@@ -686,6 +686,16 @@ fn export_all(root: &Path, scope: &Scope, atoms: &[Value]) -> Result<String> {
     }
     let mut out = String::new();
     for named_scope in scope.all_scopes() {
+        // An extra scope with no recipients used to fail here, after the
+        // primary log was already sealed, and the commit never ran. Skip
+        // it. An empty primary still errors in `seal`.
+        if named_scope.name != scope.name && named_scope.recipients.is_empty() {
+            out.push_str(&format!(
+                "sync: scope `{}` names no recipients; skipped\n",
+                named_scope.name
+            ));
+            continue;
+        }
         let said = export_named_scope(
             root,
             &scope.name,
@@ -3028,6 +3038,90 @@ mod tests {
         assert!(!stale.exists(), "own stale log remains\n{said}");
         assert!(!stale_digest.exists(), "own stale digest remains");
         assert!(theirs.exists(), "another host's log was deleted");
+    }
+
+    /// `[scopes] cloud = []` used to fail `export_all` after the primary
+    /// log was sealed, so `sync_one` never reached the commit.
+    #[test]
+    fn an_empty_extra_scope_is_skipped_and_the_primary_still_commits() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(config.join("ljos")).unwrap();
+        // SAFETY: this test holds the process env lock.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config) };
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "seat@example.invalid"]);
+        git(&["config", "user.name", "seat"]);
+        git(&["config", "core.hooksPath", "/dev/null"]);
+        std::fs::write(root.join("README"), "seed\n").unwrap();
+        git(&["add", "README"]);
+        git(&["commit", "-q", "-m", "seed"]);
+        let scope: Scope = toml::from_str(
+            "name = \"grokbot\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = []\n",
+        )
+        .unwrap();
+        let atoms = vec![atom("a", "box only", &["scope:grokbot"])];
+        let said = with_fake_age(dir.path(), || export_all(&root, &scope, &atoms)).unwrap();
+        assert!(
+            said.contains("scope `cloud` names no recipients; skipped"),
+            "{said}"
+        );
+        let me = host();
+        let [primary_rel, _] = host_log_rels_for_scope(&me, "grokbot", "grokbot");
+        let [cloud_rel, _] = host_log_rels_for_scope(&me, "grokbot", "cloud");
+        let primary = std::fs::read_to_string(root.join(&primary_rel)).unwrap();
+        assert!(primary.contains("box only"), "{primary}");
+        assert!(
+            !root.join(&cloud_rel).exists(),
+            "an empty extra scope was sealed"
+        );
+        let committed = commit_if_sealed_scopes(&root, &scope, &said, false);
+        assert!(committed.contains("committed"), "{committed}");
+        let tracked = git(&["ls-files"]);
+        assert!(tracked.contains(&format!("{me}.jsonl.age")), "{tracked}");
+        assert!(!tracked.contains("+cloud"), "{tracked}");
+    }
+
+    #[test]
+    fn an_empty_primary_scope_still_refuses_to_export() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(config.join("ljos")).unwrap();
+        // SAFETY: this test holds the process env lock.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config) };
+        let scope: Scope = toml::from_str(
+            "name = \"grokbot\"\nrecipients = []\n[scopes]\ncloud = [\"age1cloud\"]\n",
+        )
+        .unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let err = export_all(&root, &scope, &[atom("a", "box only", &[])])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no recipients"), "{err}");
+        let [cloud_rel, _] = host_log_rels_for_scope(&host(), "grokbot", "cloud");
+        assert!(
+            !root.join(cloud_rel).exists(),
+            "the extra scope was sealed after the primary refused"
+        );
     }
 
     #[test]
