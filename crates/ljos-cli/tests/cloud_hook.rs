@@ -801,3 +801,37 @@ fn doctor_reads_the_hooks_path_git_would_use() {
     assert!(!moved.ok, "{moved:?}");
     assert!(moved.state.contains("core.hooksPath"), "{moved:?}");
 }
+
+#[test]
+fn cloud_up_chains_a_pre_push_already_booked() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    let (_origin, repo) = bare_repo(root.path(), "seat");
+    let booked = root.path().join("booked-hooks");
+    fs::create_dir_all(&booked).unwrap();
+    executable(
+        &booked.join("pre-push"),
+        "#!/bin/sh\necho booked-hook >&2\nexit 1\n",
+    );
+    git(
+        &repo,
+        &["config", "core.hooksPath", booked.to_str().unwrap()],
+    );
+    std::env::set_current_dir(&repo).unwrap();
+    ljos_cli::cloud::up(false).unwrap();
+    std::env::set_current_dir(root.path()).unwrap();
+    let now = fs::read_to_string(booked.join("pre-push")).unwrap();
+    assert!(now.contains("# ljos-cloud-chain "), "{now}");
+    let prev = fs::read_to_string(booked.join("pre-push.ljos-previous")).unwrap();
+    assert!(prev.contains("booked-hook"), "{prev}");
+    let configured = git(&repo, &["config", "--local", "--get", "core.hooksPath"]);
+    assert_eq!(configured.trim(), booked.to_str().unwrap());
+    let row = ljos_cli::cloud::guard_row();
+    assert!(row.ok, "{row:?}");
+    let out = sh_at(&repo, "git push origin develop");
+    let text = text_of(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("booked-hook"), "{text}");
+}

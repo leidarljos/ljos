@@ -80,7 +80,12 @@ pub(crate) fn ensure(repoint: bool) -> Result<String> {
         home.as_deref(),
         seat.as_deref(),
     )?;
-    point_hooks(&dir)?;
+    let seat_path = if invoked_from_package_under_test() {
+        None
+    } else {
+        seat.as_deref().map(PathBuf::from)
+    };
+    point_hooks(&dir, seat_path.as_deref())?;
     Ok(format!("hook: {} is the pre-push allowlist", dir.display()))
 }
 
@@ -233,22 +238,90 @@ fn install_script() -> Result<PathBuf> {
             removed.with_context(|| format!("remove {}", path.display()))?;
         }
     }
-    let tmp = dir.join(".pre-push.tmp");
-    {
-        let mut file =
-            fs::File::create(&tmp).with_context(|| format!("write {}", tmp.display()))?;
-        file.write_all(HOOK_SCRIPT.as_bytes())?;
-    }
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
-    fs::rename(&tmp, &path).with_context(|| format!("install {}", path.display()))?;
+    write_executable(&path, HOOK_SCRIPT)?;
     Ok(dir)
 }
 
-fn point_hooks(dir: &Path) -> Result<()> {
+fn write_executable(path: &Path, body: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("cloud up: hook path has no directory")?;
+    fs::create_dir_all(parent)?;
+    let tmp = parent.join(".pre-push.tmp");
+    {
+        let mut file =
+            fs::File::create(&tmp).with_context(|| format!("write {}", tmp.display()))?;
+        file.write_all(body.as_bytes())?;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
+    fs::rename(&tmp, path).with_context(|| format!("install {}", path.display()))?;
+    Ok(())
+}
+
+fn point_hooks(our_dir: &Path, seat: Option<&Path>) -> Result<()> {
+    if let Some(seat) = seat {
+        if let Some(local) = local_hooks_path(seat) {
+            let local_path = resolve_hooks_value(&local, seat);
+            if paths_same(&local_path, our_dir) {
+                return Ok(());
+            }
+            if local_path.is_dir() {
+                chain_into(&local_path, our_dir)?;
+                return Ok(());
+            }
+        }
+        if let Ok(global) = global_hooks_path() {
+            let global_path = PathBuf::from(&global);
+            if paths_same(&global_path, our_dir) {
+                return set_local(seat, our_dir);
+            }
+            if global_path.is_dir() {
+                chain_into(&global_path, our_dir)?;
+                return set_local(seat, &global_path);
+            }
+        }
+        set_local(seat, our_dir)?;
+        match global_hooks_path() {
+            Err(_) => set_global(our_dir)?,
+            Ok(value) => {
+                let path = PathBuf::from(&value);
+                if !paths_same(&path, our_dir) && !path.is_dir() {
+                    set_global(our_dir)?;
+                }
+            }
+        }
+        return Ok(());
+    }
+    match global_hooks_path() {
+        Ok(value) => {
+            let path = PathBuf::from(&value);
+            if paths_same(&path, our_dir) {
+                return Ok(());
+            }
+            if path.is_dir() {
+                return chain_into(&path, our_dir);
+            }
+            set_global(our_dir)
+        }
+        Err(_) => set_global(our_dir),
+    }
+}
+
+fn set_global(dir: &Path) -> Result<()> {
     let value = dir.display().to_string();
+    git_config(&["config", "--global", "core.hooksPath", &value])
+}
+
+fn set_local(seat: &Path, dir: &Path) -> Result<()> {
+    let seat_s = seat.display().to_string();
+    let value = dir.display().to_string();
+    git_config(&["-C", &seat_s, "config", "--local", "core.hooksPath", &value])
+}
+
+fn git_config(args: &[&str]) -> Result<()> {
     let out = Command::new("git")
-        .args(["config", "--global", "core.hooksPath", &value])
+        .args(args)
         .stdin(std::process::Stdio::null())
         .output()
         .context("git config core.hooksPath")?;
@@ -259,6 +332,89 @@ fn point_hooks(dir: &Path) -> Result<()> {
         "git config core.hooksPath: {}",
         String::from_utf8_lossy(&out.stderr).trim()
     );
+}
+
+fn local_hooks_path(seat: &Path) -> Option<String> {
+    let seat_s = seat.display().to_string();
+    let out = Command::new("git")
+        .args([
+            "-C",
+            &seat_s,
+            "config",
+            "--local",
+            "--get",
+            "core.hooksPath",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(out.stdout).ok()?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn global_hooks_path() -> std::result::Result<String, String> {
+    let out = Command::new("git")
+        .args(["config", "--global", "--get", "core.hooksPath"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|err| err.to_string())?;
+    if !out.status.success() {
+        return Err("unset".to_string());
+    }
+    let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if value.is_empty() {
+        Err("unset".to_string())
+    } else {
+        Ok(value)
+    }
+}
+
+/// Run the hook that already occupies `hooks_dir`, then the hook this
+/// binary installs. A directory with no pre-push gets this script under
+/// the name git already looks up, so the other hook files stay.
+fn chain_into(hooks_dir: &Path, our_dir: &Path) -> Result<()> {
+    fs::create_dir_all(hooks_dir).with_context(|| format!("create {}", hooks_dir.display()))?;
+    let dest = hooks_dir.join("pre-push");
+    let canon = canonical_hook_path(our_dir);
+    let marker = format!("# ljos-cloud-chain {}", canon.display());
+    if let Ok(text) = fs::read_to_string(&dest) {
+        if text.lines().any(|line| line == marker) || text.as_bytes() == HOOK_SCRIPT.as_bytes() {
+            return Ok(());
+        }
+    } else if !dest.exists() {
+        return write_executable(&dest, HOOK_SCRIPT);
+    }
+    let prev = hooks_dir.join("pre-push.ljos-previous");
+    if !prev.exists() {
+        fs::rename(&dest, &prev).with_context(|| format!("keep {}", dest.display()))?;
+    }
+    write_executable(&dest, &chain_script(&prev, &canon, &marker))
+}
+
+fn chain_script(prev: &Path, canon: &Path, marker: &str) -> String {
+    let prev_q = crate::tools::sh_quote(&prev.display().to_string());
+    let canon_q = crate::tools::sh_quote(&canon.display().to_string());
+    format!(
+        r#"#!/bin/sh
+{marker}
+PATH=/usr/bin:/bin
+export PATH
+unset IFS
+set -eu
+prev={prev_q}
+canon={canon_q}
+tmp=$(/usr/bin/mktemp -p /tmp)
+trap '/bin/rm -f "$tmp"' EXIT
+/bin/cat > "$tmp"
+"$prev" "${{1-}}" "${{2-}}" < "$tmp"
+"$canon" "${{1-}}" "${{2-}}" < "$tmp"
+"#
+    )
 }
 
 fn origin_url() -> Option<String> {
