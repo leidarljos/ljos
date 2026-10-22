@@ -2328,7 +2328,8 @@ impl LjosServer {
                 .map(|rule| object(ljos_cli::user_rules::to_value(&rule)))
                 .map_err(refused);
         }
-        write_rule(&rule).map(object).map_err(refused)
+        let basis = ljos_cli::Basis::of(&rule.reason);
+        write_rule(&rule, basis).map(object).map_err(refused)
     }
 
     #[tool(

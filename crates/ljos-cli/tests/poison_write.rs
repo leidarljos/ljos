@@ -759,6 +759,57 @@ fn mcp_call_meta(
         })
 }
 
+fn stored_rule(seat: &Seat, said: &str) -> serde_json::Value {
+    let atoms = seat.atoms.lock().unwrap().clone();
+    atoms
+        .iter()
+        .find(|atom| atom["kind"] == "rule")
+        .cloned()
+        .unwrap_or_else(|| panic!("no rule stored\n{atoms:?}\n{said}"))
+}
+
+/// A rule whose reason came from a tool's output is the agent's, from the
+/// shell under a runner and from MCP `ljos_rule`. A rule sent with no
+/// origin is filed by the pack as `user-declared`.
+#[test]
+fn an_agent_rule_of_a_plant_is_agent_derived() {
+    let args = ["rule", "*deploy-form*", "--verdict", "ask", "--why", PLANT];
+    let seat = Seat::new();
+    let out = seat.command(&args, true).output().unwrap();
+    assert!(out.status.success(), "rule failed\n{}", text_of(&out));
+    let from_shell = stored_rule(&seat, &text_of(&out));
+
+    let seat = Seat::new();
+    let answer = mcp_call(
+        &seat,
+        "ljos_rule",
+        serde_json::json!({"pattern": "*deploy-form*", "verdict": "ask", "why": PLANT}),
+    );
+    let from_mcp = stored_rule(&seat, &answer.to_string());
+
+    for rule in [from_shell, from_mcp] {
+        assert_eq!(rule["origin"], "agent-derived", "{rule}");
+        assert_eq!(rule["source"]["basis"], "agent", "{rule}");
+    }
+}
+
+/// The person typing `ljos rule` stands behind it.
+#[test]
+fn a_person_rule_from_the_terminal_is_theirs() {
+    let seat = Seat::new();
+    let out = seat
+        .command(
+            &["rule", "*deploy-form*", "--verdict", "ask", "--why", PLANT],
+            false,
+        )
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "rule failed\n{}", text_of(&out));
+    let rule = stored_rule(&seat, &text_of(&out));
+    assert_eq!(rule["origin"], "user-declared", "{rule}");
+    assert_eq!(rule["source"]["basis"], "person", "{rule}");
+}
+
 /// A file written beside the hook is not the person's prompt. Remember
 /// refuses the plant.
 #[test]
