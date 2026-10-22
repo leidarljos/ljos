@@ -30,6 +30,13 @@
 //!   `tool-echo`. Session-end extraction stamps `via:session-end` and
 //!   `session:`. None of those read as the person before, and they are
 //!   not promoted.
+//!
+//! packset refuses an update that raises `source.basis` from none to
+//! `person`, and accept takes only a write the pack itself held as a
+//! proposal. A promoted atom is raised by storing a copy as the person's
+//! and retiring the original. The copy keeps the text, kind, entities,
+//! `ts` and `valid_from`, so a rule that cites the text and a lesson hash
+//! read it as the same claim. Its id is new.
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -166,7 +173,7 @@ pub fn list() -> Result<String> {
 /// # Errors
 ///
 /// The id is not a held-back preference, this process is under a runner
-/// or not a terminal, or the pack refused the update.
+/// or not a terminal, or the pack refused the person's copy.
 pub fn keep(id: &str) -> Result<String> {
     if under_a_runner() {
         bail!(
@@ -197,8 +204,11 @@ pub fn keep(id: &str) -> Result<String> {
         bail!("prefer: {id} is not an older preference awaiting review");
     }
     let client = pack()?;
-    stamp_basis(&client, atom).with_context(|| format!("prefer: could not keep {id}"))?;
-    Ok(format!("kept {id} as the person's preference\n"))
+    let stored =
+        stamp_basis(&client, atom).with_context(|| format!("prefer: could not keep {id}"))?;
+    Ok(format!(
+        "kept {id} as the person's preference, now {stored}\n"
+    ))
 }
 
 fn prompt_hook(atom: &Value) -> bool {
@@ -244,9 +254,9 @@ fn field<'a>(source: &'a serde_json::Map<String, Value>, key: &str) -> &'a str {
     source.get(key).and_then(Value::as_str).unwrap_or("").trim()
 }
 
-/// How long one update may take. A hook is killed at 10s, so the listing
-/// and this update stop at the hook's bound. `PACKSET_TIMEOUT_MS` still
-/// shortens it.
+/// How long one request may take. A hook is killed at 10s, so the listing
+/// and each request of a raise stop at the hook's bound.
+/// `PACKSET_TIMEOUT_MS` still shortens it.
 fn http_timeout() -> std::time::Duration {
     let from_env = std::env::var("PACKSET_TIMEOUT_MS")
         .ok()
@@ -299,36 +309,70 @@ fn stamp_marked() -> Result<usize> {
     Ok(n)
 }
 
-fn stamp_basis(client: &packset_client::PacksetClient, atom: &Value) -> Result<()> {
-    let id = atom
-        .get("id")
+/// Store `atom` again as the person's and retire the original. Returns
+/// the id the person's copy is stored under.
+///
+/// The pack runs its checks on a post before it answers a live text with
+/// the record that already holds it, so the first post is the dry run: a
+/// refusal there leaves the original as it was.
+fn stamp_basis(client: &packset_client::PacksetClient, atom: &Value) -> Result<String> {
+    let id = id_of(atom).context("legacy preference has no id")?;
+    let mut copy = atom.clone();
+    if let Some(map) = copy.as_object_mut() {
+        for key in ["id", "embedding", "links", "provenance_floor", "tombstone"] {
+            map.remove(key);
+        }
+        if !map.get("source").is_some_and(Value::is_object) {
+            map.insert("source".into(), json!({}));
+        }
+        map.insert("workspace".into(), json!(client.workspace()));
+    }
+    crate::admit::stamp_person(&mut copy);
+    let held = post(client, "/v1/atoms", &copy)?;
+    post(
+        client,
+        "/v1/atoms/delete",
+        &json!({"workspace": client.workspace(), "id": id}),
+    )?;
+    let stored = if crate::person_stored(&held) && id_of(&held) != Some(id) {
+        held
+    } else {
+        post(client, "/v1/atoms", &copy)
+            .with_context(|| format!("{id} was retired before its copy was stored"))?
+    };
+    if !crate::person_stored(&stored) {
+        bail!("the pack holds {id}'s text under a record that is not the person's");
+    }
+    id_of(&stored)
+        .map(str::to_string)
+        .with_context(|| format!("the pack stored the copy of {id} without an id"))
+}
+
+fn id_of(atom: &Value) -> Option<&str> {
+    atom.get("id")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|id| !id.is_empty())
-        .context("legacy preference has no id")?;
-    let mut source = atom
-        .get("source")
-        .cloned()
-        .filter(Value::is_object)
-        .unwrap_or_else(|| json!({}));
-    source["basis"] = json!("person");
-    let url = format!("{}/v1/atoms/update", client.base());
-    let body = json!({
-        "workspace": client.workspace(),
-        "id": id,
-        "fields": {"source": source},
-    });
-    let timeout = http_timeout();
+}
+
+fn post(client: &packset_client::PacksetClient, path: &str, body: &Value) -> Result<Value> {
+    let url = format!("{}{path}", client.base());
     match packset_client::authorize(ureq::post(&url))
-        .timeout(timeout)
+        .timeout(http_timeout())
         .send_json(body)
     {
-        Ok(_) => Ok(()),
+        Ok(resp) => resp
+            .into_json()
+            .with_context(|| format!("POST {path}: the answer is not JSON")),
         Err(ureq::Error::Status(code, resp)) => {
             let text = resp.into_string().unwrap_or_default();
-            bail!("POST /v1/atoms/update failed: {code}: {text}");
+            let why = serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v.get("error")?.as_str().map(str::to_string))
+                .unwrap_or(text);
+            bail!("POST {path} failed: {code}: {}", why.trim());
         }
-        Err(e) => bail!("POST /v1/atoms/update failed: {e}"),
+        Err(e) => bail!("POST {path} failed: {e}"),
     }
 }
 
