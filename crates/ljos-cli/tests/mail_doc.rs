@@ -28,6 +28,9 @@ fn the_mail_doc_names_the_tools_the_gate_and_the_approval_file() {
         "sha256",
         "display:none",
         "NFKC",
+        "sendmail -i -t",
+        "hidden_content",
+        "not in ljos yet",
     ] {
         assert!(doc.contains(want), "the mail doc does not name {want}");
     }

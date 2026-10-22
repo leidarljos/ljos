@@ -355,7 +355,7 @@ pub(crate) fn config_paths(own: Option<&str>) -> Vec<PathBuf> {
     paths
 }
 
-fn config_base() -> Option<PathBuf> {
+pub(crate) fn config_base() -> Option<PathBuf> {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
