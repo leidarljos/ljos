@@ -402,12 +402,14 @@ pub fn recorded_before_pin(issue: &str, note: &str, seat: &str, key: &str) -> Op
 }
 
 /// Commits that added the exact pin line `seat key`, whose parent trees
-/// do not already hold it.
+/// do not already hold it. Every branch is read: a merge that kept the
+/// same line from both sides would otherwise hide one introduction.
 fn pin_introductions(seat: &str, key: &str) -> Vec<String> {
     let pick = format!("-S{seat} {key}");
     let log = ballot_sig::tracker_git(&[
         "--no-pager",
         "log",
+        "--full-history",
         "--format=%H %P",
         pick.as_str(),
         "--",
