@@ -130,10 +130,11 @@ struct RepoBook {
     /// filed or one it adopted from a hold record, is that conversation's.
     #[serde(default)]
     started: bool,
-    /// A hook filed this row's issue for the sitting's first edit or
-    /// commit: no one asked for that ticket by name. A commit naming another
-    /// open issue before any deed lands here takes the row over, and this
-    /// issue is cancelled.
+    /// This sitting filed the issue: a hook on the first edit or commit, or
+    /// `ljos_start` with no ticket named. A commit naming another open issue
+    /// before any deed lands here takes the row over, and this issue is
+    /// cancelled. Starting again on the same issue leaves `filed` as it is.
+    /// A rebind sets it for the issue that start claims.
     #[serde(default)]
     filed: bool,
     /// Commit shas already cited. The id is `deed-file-commit-<sha>`, so a
@@ -189,6 +190,8 @@ struct RepoBook {
     /// The issue is one a commit named, not one this sitting filed. The
     /// sweep hands it back with a release instead of closing it: the
     /// commit cited work on someone's open ticket, it did not accept it.
+    /// Starting again on the same issue keeps `named`. Only a rebind to a
+    /// different issue clears it.
     #[serde(default)]
     named: bool,
     /// Other open issues this row's commits named while it held `issue`.
@@ -1049,11 +1052,16 @@ pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result
     }
     let row = book.repos.entry(place.clone()).or_default();
     row.last_unix = now;
-    let rebound = row.issue.as_deref().is_some_and(|old| old != issue_id);
+    let same_issue = row.issue.as_deref() == Some(issue_id.as_str());
+    let rebound = row.issue.is_some() && !same_issue;
     clear_issue_fields_if_issue_changes(row, &issue_id);
     row.issue = Some(issue_id.clone());
-    row.filed = filed_here;
-    row.named = false;
+    // A later start on the issue this row already holds does not change
+    // how the sitting got it. Only a rebind resets `named` and `filed`.
+    if !same_issue {
+        row.filed = filed_here;
+        row.named = false;
+    }
     row.finished = false;
     row.started = true;
     row.claim_failed = false;
@@ -5599,6 +5607,112 @@ mod tests {
             "adopt cited the previous issue's commit: {:?}",
             row.deeds
         );
+    }
+
+    /// Starting the issue a sitting already holds must not clear `named`
+    /// or `filed`. Finish then releases a named ticket instead of closing
+    /// it DONE. A real rebind still resets both flags.
+    #[test]
+    fn start_work_on_the_same_issue_keeps_named_and_filed() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+            "LJOS_SEAT",
+            "LJOS_HARNESS_SESSION",
+        ]);
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let session = "zdnr4a-same-issue";
+        unsafe {
+            std::env::set_var("LJOS_SESSION_ID", session);
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("LJOS_HARNESS_SESSION");
+        }
+        let proj = tracker.join("Software/probe");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("issues.org"),
+            "\
+* TODO [#C] Named ticket
+:PROPERTIES:
+:ID:         probe-00aa
+:END:
+* TODO [#C] Other ticket
+:PROPERTIES:
+:ID:         probe-00ab
+:END:
+",
+        )
+        .unwrap();
+        let repo_s = git_toplevel(&repo).expect("toplevel");
+        let mut book = Book::default();
+        book.repos.insert(
+            repo_s.clone(),
+            RepoBook {
+                issue: Some("probe-00aa".into()),
+                named: true,
+                filed: true,
+                started: true,
+                ..RepoBook::default()
+            },
+        );
+        store_book(&book_path(session), &book);
+        start_work(
+            Some("probe-00aa"),
+            Some(repo.to_str().unwrap()),
+            "Keep working on the named ticket",
+        )
+        .expect("start the same issue");
+        let row = load_book(&book_path(session))
+            .repos
+            .get(&repo_s)
+            .cloned()
+            .expect("row");
+        assert!(row.named, "same-issue start cleared named");
+        assert!(row.filed, "same-issue start cleared filed");
+        let mut book = load_book(&book_path(session));
+        finish_open(&mut book);
+        assert_ne!(
+            issue_state(&tracker, "probe-00aa"),
+            "DONE",
+            "a named ticket was closed instead of handed back"
+        );
+
+        let mut again = Book::default();
+        again.repos.insert(
+            repo_s.clone(),
+            RepoBook {
+                issue: Some("probe-00aa".into()),
+                named: true,
+                filed: true,
+                started: true,
+                ..RepoBook::default()
+            },
+        );
+        store_book(&book_path(session), &again);
+        start_work(
+            Some("probe-00ab"),
+            Some(repo.to_str().unwrap()),
+            "Move the sitting to the other ticket",
+        )
+        .expect("rebind");
+        let row = load_book(&book_path(session))
+            .repos
+            .get(&repo_s)
+            .cloned()
+            .expect("rebound row");
+        assert!(!row.named, "a rebind kept named");
+        assert!(!row.filed, "a rebind kept filed");
     }
 
     /// A fresh claim on a row that had no issue clears stale lesson linkage
