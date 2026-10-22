@@ -1093,15 +1093,11 @@ mod tests {
 
     fn isolated() -> (super::super::EnvLock, tempfile::TempDir) {
         let lock = super::super::test_env_lock();
-        // A home under `/tmp` suspends the guard. The scratch directory
-        // sits beside the build output so these rules are actually judged.
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/user-rule-homes");
-        std::fs::create_dir_all(&root).unwrap();
-        let dir = tempfile::TempDir::new_in(&root).unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
         unsafe {
             std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
             std::env::set_var("HOME", dir.path());
+            std::env::set_var("LJOS_GUARD", "on");
             std::env::set_var("LJOS_HOLD", "rohit");
             std::env::set_var("LJOS_SEAT", "claude");
             std::env::set_var("PACKSET_URL", "off");
@@ -1478,10 +1474,7 @@ mod tests {
 
         fn with_scope(scoped: bool) -> Self {
             let lock = super::super::test_env_lock();
-            let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../target/user-rule-homes");
-            std::fs::create_dir_all(&base).unwrap();
-            let root = tempfile::TempDir::new_in(&base).unwrap();
+            let root = tempfile::TempDir::new().unwrap();
             let seed = root.path().join("seed");
             std::fs::create_dir_all(&seed).unwrap();
             git_ok(&seed, &["init", "-q", "-b", "main"]);
@@ -1537,6 +1530,7 @@ mod tests {
             unsafe {
                 std::env::set_var("LJOS_USER_RULES_SYNC", "off");
                 std::env::set_var("LJOS_HOLD", "rohit");
+                std::env::set_var("LJOS_GUARD", "on");
                 std::env::set_var("PACKSET_URL", "off");
                 std::env::set_var("HOME", root.path());
                 std::env::remove_var("LJOS_USER_RULES_TRACKER");
