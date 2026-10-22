@@ -27,6 +27,7 @@ pub mod gates;
 pub mod git_hooks;
 pub mod hud;
 pub mod jev;
+mod kept_prompt;
 pub mod mail;
 pub mod memories;
 pub mod note_queue;
@@ -19040,47 +19041,14 @@ pub const SEAT_PATHS: &[&str] = &[
     "/.omp/agent/extensions/ljos.ts",
     "/ljos/approvals",
     "/ljos/approvals/",
-    // The prompt the hook kept, and the bind the gate checks. A plain
-    // write would make a sentence count as the person's words.
-    "/ljos/latest-prompt",
-    "/ljos/latest-prompt.bind",
 ];
 
-/// The file names of the prompt the hook kept and its bind, guarded by
-/// name wherever they are spelled: a relative name is the runtime one
-/// once a shell stands in that directory.
-const KEPT_PROMPT_NAMES: &[&str] = &["latest-prompt", "latest-prompt.bind"];
-
-/// Whether a shell word names the runtime ljos directory itself, as
-/// written or through `$XDG_RUNTIME_DIR`. Renaming, removing or linking
-/// it replaces the kept prompt along with everything else in it.
-fn names_runtime_dir(word: &str) -> bool {
-    let word = word.trim_end_matches('/');
-    if let Some(rest) = ["${XDG_RUNTIME_DIR}", "$XDG_RUNTIME_DIR"]
-        .iter()
-        .find_map(|v| word.strip_prefix(v))
-    {
-        return rest.trim_end_matches('/') == "/ljos";
-    }
-    let per_uid = word
-        .strip_prefix("/run/user/")
-        .and_then(|r| r.strip_suffix("/ljos"))
-        .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()));
-    per_uid || (word.starts_with('/') && Path::new(word) == runtime_dir_path())
-}
-
 /// Whether a path names one of [`SEAT_PATHS`]; a backup beside a binary
-/// (`ljos.bak`) is not the binary.
+/// (`ljos.bak`) is not the binary. The kept prompt is judged apart, by
+/// the path a word resolves to.
 #[must_use]
 pub fn is_seat_path(path: &str) -> bool {
     let p = path.trim_matches(|c| c == '"' || c == '\'');
-    let (parent, name) = p.trim_end_matches('/').rsplit_once('/').unwrap_or(("", p));
-    if KEPT_PROMPT_NAMES.contains(&name)
-        || names_runtime_dir(p)
-        || (name.contains(['*', '?', '[']) && names_runtime_dir(parent))
-    {
-        return true;
-    }
     SEAT_PATHS.iter().any(|s| {
         if s.ends_with('/') {
             p.contains(s)
@@ -19305,9 +19273,19 @@ fn assigns_session(words: &[String]) -> bool {
 /// itself write them, run by the person.
 #[must_use]
 pub fn seat_guard(line: &str) -> Option<Rule> {
+    seat_guard_in(line, None)
+}
+
+/// [`seat_guard`] for a command that starts in `cwd`, absent the process
+/// directory. A `cd` on the line moves it for the commands after.
+#[must_use]
+pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if bookkeep::guard_suspended() {
         return None;
     }
+    let mut cwd = cwd
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok());
     let refuse = |what: &str| {
         Rule {
         pattern: "seat-guard".into(),
@@ -19346,6 +19324,14 @@ pub fn seat_guard(line: &str) -> Option<Rule> {
                          the person's words are checked against. Run ljos without it."
                     .into(),
             });
+        }
+        if matches!(first, "cd" | "pushd") {
+            cwd = kept_prompt::after_cd(&words, cwd.as_deref());
+            continue;
+        }
+        let reads = READERS.contains(&first) || first == "ljos";
+        if let Some(t) = kept_prompt::reached(&words, cwd.as_deref(), reads) {
+            return Some(refuse(&t));
         }
         if first == "ljos" {
             // `ljos approve` is the person's, typed in a terminal of their
@@ -19418,7 +19404,7 @@ pub fn seat_guard(line: &str) -> Option<Rule> {
         if first == "ssh" {
             let refs: Vec<&str> = words.iter().map(String::as_str).collect();
             if let Some(remote) = ssh_remote_command(&refs) {
-                if let Some(r) = seat_guard(&remote) {
+                if let Some(r) = seat_guard_in(&remote, home().ok().as_deref()) {
                     return Some(r);
                 }
                 continue;
@@ -28752,7 +28738,7 @@ pub fn static_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if line.is_empty() || bookkeep::guard_suspended() {
         return None;
     }
-    if let Some(rule) = seat_guard(line) {
+    if let Some(rule) = seat_guard_in(line, cwd) {
         return Some(rule);
     }
     if let Some(rule) = destructive_delete(line) {
