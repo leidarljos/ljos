@@ -2210,13 +2210,28 @@ fn open_log(
     scope_name: &str,
     label: &str,
 ) -> Result<Opened> {
+    open_log_inner(root, bytes, host, scope_name, label, true)
+}
+
+/// `record` is false when doctor is only looking. Import notes that `host`
+/// writes headers; a read must not.
+fn open_log_inner(
+    root: &Path,
+    bytes: &[u8],
+    host: &str,
+    scope_name: &str,
+    label: &str,
+    record: bool,
+) -> Result<Opened> {
     let identities = identities_for_open(scope_name);
     let Some(plain) = open_sealed_bytes(bytes, &identities)? else {
         return Ok(Opened::Miss);
     };
     if let Some((named_host, named_scope, body)) = split_header(&plain) {
         if named_host == host && named_scope == scope_name {
-            mark_headed(root, scope_name, host)?;
+            if record {
+                mark_headed(root, scope_name, host)?;
+            }
             return Ok(Opened::Atoms(body.to_string()));
         }
         return Ok(Opened::Refused(format!(
@@ -3460,7 +3475,7 @@ pub(crate) fn legacy_adopt_commands(root: &Path) -> Result<Vec<String>> {
             continue;
         };
         let Ok(Opened::Refused(line)) =
-            open_log(root, &bytes, &log.host, &log.scope_name, &log.rel)
+            open_log_inner(root, &bytes, &log.host, &log.scope_name, &log.rel, false)
         else {
             continue;
         };
@@ -9388,6 +9403,56 @@ mod tests {
             );
         }
         assert_eq!(fix.held(), vec!["Alice wrote this."]);
+    }
+
+    /// Doctor reads logs to name an adopt command. That read used to record
+    /// the headed mark, and a scope dropped from the config was still named.
+    #[test]
+    fn doctor_does_not_record_a_headed_log_or_name_a_removed_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let fix = Shared::new(dir.path());
+        fix.pull();
+        let cloud = [fix.cloud.as_str()];
+        let headed = fix.sealed(
+            Some(("alice", CLOUD_SCOPE)),
+            &lesson_line("Alice wrote this.", "cloud"),
+            &cloud,
+        );
+        let gone = fix.sealed(
+            None,
+            &lesson_line("From a scope that is gone.", "retired"),
+            &cloud,
+        );
+        let atoms = fix.root.join(".ljos/atoms");
+        std::fs::create_dir_all(&atoms).unwrap();
+        std::fs::write(atoms.join("alice+cloud.jsonl.age"), &headed).unwrap();
+        std::fs::write(atoms.join("mallory+retired.jsonl.age"), &gone).unwrap();
+        let files = || -> Vec<String> {
+            let mut out = Vec::new();
+            let mut stack = vec![state_base()];
+            while let Some(dir) = stack.pop() {
+                let Ok(read) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                for entry in read.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else {
+                        out.push(path.display().to_string());
+                    }
+                }
+            }
+            out.sort();
+            out
+        };
+        let before = files();
+        let cmds = legacy_adopt_commands(&fix.root).unwrap();
+        assert_eq!(files(), before, "doctor wrote state: {cmds:?}");
+        assert!(
+            cmds.is_empty(),
+            "a headed log or a removed scope was named: {cmds:?}"
+        );
     }
 
     /// Headed logs still import through a symlinked `$HOME`, a checkout
