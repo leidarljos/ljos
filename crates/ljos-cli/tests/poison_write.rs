@@ -2,6 +2,8 @@
 
 #[path = "common/runner.rs"]
 mod runner;
+#[path = "common/terminal.rs"]
+mod terminal;
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -491,7 +493,7 @@ fn a_runner_remember_of_the_persons_words_stays_a_lesson() {
 #[test]
 fn a_person_remember_from_the_terminal_stands() {
     let seat = Seat::new();
-    let out = seat.command(&["remember", PLANT], false).output().unwrap();
+    let out = shaped(&seat, "terminal", &["remember", PLANT]);
     assert!(out.status.success(), "{}", text_of(&out));
     let atoms = seat.atoms.lock().unwrap().clone();
     let kept = atoms
@@ -803,76 +805,12 @@ fn an_agent_rule_of_a_plant_is_agent_derived() {
     }
 }
 
-/// Runs `argv` on a fresh pty in the shape `mode` names: `terminal`, a
-/// parent renamed (`renamed:NAME`), or below a process left by a double
-/// fork (`double-fork`) or reparented without one (`reparented`).
-const SHAPE_PY: &str = r#"import ctypes, os, pty, sys, time
-mode, argv = sys.argv[1], sys.argv[2:]
-
-def run():
-    pid, fd = pty.fork()
-    if pid == 0:
-        os.execv(argv[0], argv)
-    out = []
-    while True:
-        try:
-            data = os.read(fd, 4096)
-        except OSError:
-            break
-        if not data:
-            break
-        out.append(data)
-    _, status = os.waitpid(pid, 0)
-    return b"".join(out), os.waitstatus_to_exitcode(status)
-
-def orphan(setsid):
-    r, w = os.pipe()
-    if os.fork() == 0:
-        os.close(r)
-        if setsid:
-            os.setsid()
-        parent = os.getpid()
-        if os.fork() != 0:
-            os._exit(0)
-        while os.getppid() == parent:
-            time.sleep(0.01)
-        said, code = run()
-        os.write(w, bytes([code & 0xff]) + said)
-        os._exit(0)
-    os.close(w)
-    os.wait()
-    got = b""
-    while True:
-        chunk = os.read(r, 65536)
-        if not chunk:
-            break
-        got += chunk
-    return got[1:], (got[0] if got else 99)
-
-if mode.startswith("renamed:"):
-    libc = ctypes.CDLL(None)
-    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_char_p]
-    libc.prctl.restype = ctypes.c_int
-    if libc.prctl(15, mode.split(":", 1)[1].encode()) != 0:
-        raise SystemExit(91)
-    said, code = run()
-elif mode == "double-fork":
-    said, code = orphan(True)
-elif mode == "reparented":
-    said, code = orphan(False)
-else:
-    said, code = run()
-sys.stdout.buffer.write(said)
-raise SystemExit(code)
-"#;
-
 const RULE_ARGS: [&str; 6] = ["rule", "*deploy-form*", "--verdict", "ask", "--why", PLANT];
 
 /// `ljos ARGS` in the shape `mode`, with no runner above.
 fn shaped(seat: &Seat, mode: &str, args: &[&str]) -> std::process::Output {
-    let mut cmd = Command::new("python3");
-    cmd.args(["-c", SHAPE_PY, mode, env!("CARGO_BIN_EXE_ljos")])
-        .args(args);
+    let mut cmd = Command::new(terminal::PYTHON);
+    cmd.args(terminal::shape(mode, env!("CARGO_BIN_EXE_ljos"), args));
     seat.seat_env(&mut cmd);
     cmd.output().unwrap()
 }
@@ -880,9 +818,8 @@ fn shaped(seat: &Seat, mode: &str, args: &[&str]) -> std::process::Output {
 /// `ljos ARGS` in the shape `mode`, in a tool call of the runner `name`
 /// started with a clean environment.
 fn shaped_under(seat: &Seat, name: &str, mode: &str, args: &[&str]) -> std::process::Output {
-    let mut all = vec!["-c", SHAPE_PY, mode, env!("CARGO_BIN_EXE_ljos")];
-    all.extend_from_slice(args);
-    seat.under_bin(name, &[], "", "/usr/bin/python3", &all)
+    let all = terminal::shape(mode, env!("CARGO_BIN_EXE_ljos"), args);
+    seat.under_bin(name, &[], "", terminal::PYTHON, &all)
         .output()
         .unwrap()
 }
@@ -946,6 +883,30 @@ fn a_reparented_process_on_a_pty_is_not_the_person() {
             "{mode}\n{}",
             text_of(&out)
         );
+    }
+}
+
+/// `ljos prefer` and `ljos remember` from a pipe, or below a parent named
+/// like a session, are the agent's.
+#[test]
+fn a_prefer_or_remember_the_person_is_not_at_is_the_agents() {
+    for (verb, kind) in [("prefer", "preference"), ("remember", "")] {
+        for shape in ["pipe", "renamed:systemd"] {
+            let seat = Seat::new();
+            let out = if shape == "pipe" {
+                seat.command(&[verb, PLANT], false).output().unwrap()
+            } else {
+                shaped_under(&seat, "claude", shape, &[verb, PLANT])
+            };
+            assert!(out.status.success(), "{verb} {shape}\n{}", text_of(&out));
+            let atoms = seat.atoms.lock().unwrap().clone();
+            let kept = atoms
+                .iter()
+                .find(|a| a["text"] == PLANT && (kind.is_empty() || a["kind"] == kind))
+                .unwrap_or_else(|| panic!("{verb} {shape}: nothing stored\n{atoms:?}"));
+            assert_eq!(kept["origin"], "agent-derived", "{verb} {shape}: {kept}");
+            assert_eq!(kept["source"]["basis"], "agent", "{verb} {shape}: {kept}");
+        }
     }
 }
 
@@ -1218,7 +1179,7 @@ fn a_forged_prompt_and_bind_do_not_make_prefer_the_persons() {
 
 /// A lesson the person typed at the terminal, so promote has one to copy.
 fn remembered_lesson(seat: &Seat) -> String {
-    let out = seat.command(&["remember", PLANT], false).output().unwrap();
+    let out = shaped(seat, "terminal", &["remember", PLANT]);
     assert!(out.status.success(), "{}", text_of(&out));
     let atoms = seat.atoms.lock().unwrap().clone();
     atoms

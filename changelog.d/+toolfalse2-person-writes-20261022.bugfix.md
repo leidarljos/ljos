@@ -1,0 +1,1 @@
+`ljos prefer`, `ljos remember` and the lesson `ljos finish` keeps are the person's only when the person is at the terminal, by the same check `ljos rule` now makes. From a pipe, or below a parent named like a session, a preference is stored `agent-derived` and a remember is an unreviewed note.

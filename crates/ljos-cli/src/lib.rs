@@ -4,7 +4,6 @@
 //! on write. Consensus is a different crate, then the tracker verb. Policyd
 //! is argv law: this process does not reload a pack as a check.
 
-use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -14316,13 +14315,13 @@ pub fn packset_write_remember_note(text: &str, persona: Option<&str>) -> Result<
 }
 
 pub fn packset_prefer(text: &str, persona: Option<&str>) -> Result<Value> {
-    if under_a_runner() {
-        if capture::said_in_latest_prompt(text) {
-            return packset_write_mcp("Prefer", text, persona, Some(false));
-        }
-        return packset_write_agent("Prefer", text, persona, Some(false));
+    if person_present() {
+        return packset_write_as("Prefer", text, persona, Some(false));
     }
-    packset_write_as("Prefer", text, persona, Some(false))
+    if capture::said_in_latest_prompt(text) {
+        return packset_write_mcp("Prefer", text, persona, Some(false));
+    }
+    packset_write_agent("Prefer", text, persona, Some(false))
 }
 
 /// [`packset_write`] for a lesson learned on an issue: it carries an
@@ -27793,7 +27792,7 @@ pub fn not_assignee_message(
 }
 
 /// Whether a lesson given to `ljos finish` is the person's own: no agent
-/// runner above the process and a terminal on its input. Such a lesson is
+/// runner above the process and [`person_present`]. Such a lesson is
 /// written at once; one an agent gives waits for `ljos accept`.
 #[must_use]
 pub fn lesson_is_the_persons(under_runner: bool, terminal: bool) -> bool {
@@ -27862,7 +27861,7 @@ pub fn lesson_claims(text: &str) -> Vec<String> {
 fn finish_lesson(issue: &str, text: &str) -> String {
     let filed = (|| -> Result<String> {
         let scope = sync::scope_for_lesson(sync::scope_for_issue(issue));
-        let persons = lesson_is_the_persons(under_a_runner(), std::io::stdin().is_terminal());
+        let persons = lesson_is_the_persons(under_a_runner(), person_present());
         let prefix = "finish: POST /v1/atoms failed for the lesson";
         let client = pack()?;
         let workspace = client.workspace();
@@ -53874,7 +53873,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             said.contains("completed the session node for probe-f1n5 as done"),
             "{said}"
         );
-        let persons = lesson_is_the_persons(under_a_runner(), std::io::stdin().is_terminal());
+        let persons = lesson_is_the_persons(under_a_runner(), person_present());
         if persons {
             assert!(said.contains("the lesson was not kept"), "{said}");
             assert!(
