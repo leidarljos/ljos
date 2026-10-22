@@ -26,6 +26,7 @@ const RELEASE_BASE: &str = "https://github.com/leidarljos/ljos/releases/download
 struct Daemon {
     child: std::process::Child,
     url: String,
+    token: String,
     _home: tempfile::TempDir,
 }
 
@@ -38,9 +39,12 @@ impl Daemon {
             .unwrap()
             .port();
         let dir = home.path().to_str().unwrap().to_string();
+        // The pack asks for its token. A migrated preference is this
+        // seat's only when a read without the token is refused; v0.32.1
+        // and this ljos share the file the daemon writes.
         let mut child = Command::new("packsetd")
             .args(["--port", &port.to_string(), "--home", &dir])
-            .env("PACKSET_AUTH", "off")
+            .env_remove("PACKSET_AUTH")
             .env("PACKSET_HOME", &dir)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -70,9 +74,13 @@ impl Daemon {
             );
             thread::sleep(Duration::from_millis(50));
         }
+        let token = std::fs::read_to_string(home.path().join("token")).expect("pack token");
+        let token = token.lines().next().unwrap_or("").trim().to_string();
+        assert!(!token.is_empty(), "packsetd wrote an empty token");
         Self {
             child,
             url: format!("http://127.0.0.1:{port}"),
+            token,
             _home: home,
         }
     }
@@ -89,14 +97,16 @@ struct Seat {
     home: tempfile::TempDir,
     run: tempfile::TempDir,
     url: String,
+    token: String,
 }
 
 impl Seat {
-    fn on(url: String) -> Self {
+    fn on(url: String, token: String) -> Self {
         Self {
             home: tempfile::tempdir().unwrap(),
             run: tempfile::tempdir().unwrap(),
             url,
+            token,
         }
     }
 
@@ -113,6 +123,7 @@ impl Seat {
             .env("XDG_STATE_HOME", self.home.path().join("state"))
             .env("XDG_RUNTIME_DIR", self.run.path())
             .env("PACKSET_URL", &self.url)
+            .env("PACKSET_TOKEN", &self.token)
             .env("PACKSET_WORKSPACE", "seat")
             .env("PACKSET_TIMEOUT_MS", "5000")
             .env("LJOS_USER_RULES_SYNC", "off")
@@ -188,8 +199,9 @@ fn succeeded(out: &Output, what: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-fn atoms(url: &str) -> Vec<Value> {
+fn atoms(url: &str, token: &str) -> Vec<Value> {
     let got: Value = ureq::get(&format!("{url}/v1/atoms"))
+        .set("Authorization", &format!("Bearer {token}"))
         .query("workspace", "seat")
         .query("embedding", "omit")
         .call()
@@ -366,7 +378,7 @@ fn preferences_from_v0_32_1_follow_the_writer_that_stored_them() {
     assert!(version.contains("0.32.1"), "{version}");
 
     let daemon = Daemon::start();
-    let seat = Seat::on(daemon.url.clone());
+    let seat = Seat::on(daemon.url.clone(), daemon.token.clone());
     let old = old.display().to_string();
     let old_mcp = old_mcp.display().to_string();
     let new = env!("CARGO_BIN_EXE_ljos");
@@ -420,7 +432,7 @@ fn preferences_from_v0_32_1_follow_the_writer_that_stored_them() {
         text_of(&hook)
     );
 
-    let stored = atoms(&daemon.url);
+    let stored = atoms(&daemon.url, &daemon.token);
     let hook_atom = by_text(&stored, "use bun");
     assert_eq!(hook_atom["kind"], "preference", "{hook_atom}");
     assert_eq!(hook_atom["origin"], "user-declared", "{hook_atom}");
@@ -453,7 +465,7 @@ fn preferences_from_v0_32_1_follow_the_writer_that_stored_them() {
         "mcp agent prefer\n{agent}"
     );
 
-    let before = atoms(&daemon.url);
+    let before = atoms(&daemon.url, &daemon.token);
     let terminal = by_text(&before, "release notes");
     assert_eq!(terminal["origin"], "user-declared", "{terminal}");
     assert!(basis(terminal).is_none(), "{terminal}");
@@ -508,7 +520,7 @@ fn preferences_from_v0_32_1_follow_the_writer_that_stored_them() {
     assert!(!prefs.contains("release key"), "{start}");
     assert!(!prefs.contains("beside the tag"), "{start}");
 
-    let after = atoms(&daemon.url);
+    let after = atoms(&daemon.url, &daemon.token);
     assert_eq!(basis(by_text(&after, "release notes")), Some("person"));
     assert_eq!(basis(by_text(&after, "use bun")), Some("person"));
     assert!(basis(by_text(&after, "release key")).is_none());
@@ -586,7 +598,7 @@ fn preferences_from_v0_32_1_follow_the_writer_that_stored_them() {
     assert!(!review.contains("release notes"), "{review}");
     assert!(!review.contains("beside the tag"), "{review}");
     assert!(!review.contains("use bun"), "{review}");
-    let held_id = by_text(&atoms(&daemon.url), "release key")["id"]
+    let held_id = by_text(&atoms(&daemon.url, &daemon.token), "release key")["id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -624,9 +636,9 @@ fn preferences_from_v0_32_1_follow_the_writer_that_stored_them() {
         "{}",
         text_of(&piped)
     );
-    assert!(basis(by_text(&atoms(&daemon.url), "release key")).is_none());
+    assert!(basis(by_text(&atoms(&daemon.url, &daemon.token), "release key")).is_none());
 
-    let snapshot = atoms(&daemon.url);
+    let snapshot = atoms(&daemon.url, &daemon.token);
     for path in marker_files(&seat) {
         std::fs::remove_file(path).unwrap();
     }
@@ -639,7 +651,7 @@ fn preferences_from_v0_32_1_follow_the_writer_that_stored_them() {
         again_out.contains("1 older preference awaits review"),
         "{again_out}"
     );
-    let second = atoms(&daemon.url);
+    let second = atoms(&daemon.url, &daemon.token);
     assert_eq!(snapshot.len(), second.len());
     for left in &snapshot {
         let id = left["id"].as_str().unwrap();
@@ -656,7 +668,7 @@ fn preferences_from_v0_32_1_follow_the_writer_that_stored_them() {
     let kept_out = succeeded(&kept, "keep");
     assert!(kept_out.contains("kept"), "{kept_out}");
     assert_eq!(
-        basis(by_text(&atoms(&daemon.url), "release key")),
+        basis(by_text(&atoms(&daemon.url, &daemon.token), "release key")),
         Some("person")
     );
 
