@@ -34413,6 +34413,7 @@ mod tests {
     /// master`.
     #[test]
     fn paths_head_already_holds_are_committed_already() {
+        let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         seeded_tracker(dir.path());
         let probe = dir.path().join("Software/probe");
