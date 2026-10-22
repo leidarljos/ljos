@@ -1,1 +1,0 @@
-An explicit `LJOS_SEAT_KEY` is used as given again. When neither `LJOS_SEAT` nor `VISSUE_AGENT` was set and a run or conversation id was in the environment, signing swapped it for a fresh key minted beside it, so the ballot was signed under a key its caller never saw.
