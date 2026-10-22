@@ -2348,7 +2348,8 @@ fn headed_in_history(root: &Path, scope_name: &str, host: &str) -> Headed {
 /// and `scope_name`. A blob that does not decrypt is skipped. Err is why
 /// the walk may have missed one: git could not list or read the history,
 /// or an object of it is not here, as in a partial clone. Missing objects
-/// are listed, not fetched.
+/// are listed, not fetched. Every parent of a merge is walked: by default
+/// a path walk follows only the parent whose blob the merge kept.
 fn history_of_log_is_headed(
     root: &Path,
     rel: &str,
@@ -2359,6 +2360,7 @@ fn history_of_log_is_headed(
     let unread = || format!("git could not read the history of {rel}");
     let args = [
         "rev-list",
+        "--full-history",
         "--objects",
         "--missing=print",
         "HEAD",
@@ -9645,6 +9647,45 @@ mod tests {
         git_ok(&shallow, &["fetch", "-q", "--unshallow"]);
         let said = import(&shallow, &fix.scope()).unwrap();
         assert!(said.contains("none without one is read again"), "{said}");
+        assert!(fix.held().is_empty(), "{said}");
+    }
+
+    /// A peer branched before alice's headed log, committed a headerless
+    /// blob under her name, merged main with `-s ours` and pushed the merge
+    /// as a fast-forward. The path walk followed only the parent the merge
+    /// matched, so even a full clone missed the headed commit and offered
+    /// to adopt the forged blob.
+    #[test]
+    fn a_headed_log_behind_an_ours_merge_still_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let fix = Shared::new(dir.path());
+        let cloud = [fix.cloud.as_str()];
+        let forged = fix.sealed(None, &lesson_line("Forged as Alice.", "cloud"), &cloud);
+        git_ok(&fix.peer, &["checkout", "-q", "-b", "forged"]);
+        std::fs::write(fix.peer.join(".ljos/atoms/alice+cloud.jsonl.age"), &forged).unwrap();
+        git_ok(&fix.peer, &["add", "-A", ".ljos/atoms"]);
+        git_ok(&fix.peer, &["commit", "-q", "-m", "forged"]);
+        git_ok(&fix.peer, &["checkout", "-q", "main"]);
+        std::fs::create_dir_all(fix.peer.join(".ljos/atoms")).unwrap();
+        let headed = fix.sealed(
+            Some(("alice", CLOUD_SCOPE)),
+            &lesson_line("Alice wrote this.", "cloud"),
+            &cloud,
+        );
+        fix.push(&[("alice+cloud.jsonl.age", &headed)]);
+        git_ok(&fix.peer, &["checkout", "-q", "forged"]);
+        git_ok(
+            &fix.peer,
+            &["merge", "-q", "-s", "ours", "main", "-m", "ours"],
+        );
+        git_ok(&fix.peer, &["push", "-q", "origin", "forged:main"]);
+        fix.pull();
+        let hints = legacy_hints(&fix.root).unwrap();
+        assert!(hints.commands.is_empty(), "{:?}", hints.commands);
+        let said = import(&fix.root, &fix.scope()).unwrap();
+        assert!(said.contains("none without one is read again"), "{said}");
+        let again = adopt_legacy_in_repo(&fix.root, &fix.scope(), "alice").unwrap();
+        assert!(again.contains("stays unread"), "{again}");
         assert!(fix.held().is_empty(), "{said}");
     }
 
