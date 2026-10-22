@@ -153,19 +153,22 @@ The tracker pin file is `.ljos-seat-keys` at `$VISSUE_ROOT`, one
   zero-width space before a voter fails the check instead of leaving
   that pin unread.
 - every voter id is pinned to one key, including a question's `opened_by`
-- a pin file row for the voter id wins over a seat row
+- a pin file row for a voter id also pins the seat after its `/`:
+  beside `inky <key1>`, a row `mallory/inky <key9>` fails the check
+  rather than letting a second key vote as `inky`
 - seat cross-check: a voter id with any other spelling of its seat is
   refused before this check (see [Voter ids](#voter-ids)), so the part
-  after `/` is looked up as written. Each bare row pins the seat it
-  reads as under the same rules: `inky` and `inky@39u` both pin
-  `inky`, while `inky-10` pins `inky-10`; `ljos-bot` pins `ljosbot`;
-  `judge:model-1.5` pins `judge-model-1-5`; and `run-101` pins
-  `run-101`. A run or a judge
-  keeps its id whole, so `run-inky` and `judge-inky` pin themselves,
-  not `inky`. Rows that pin one seat must pin one key, up to hex
-  case and a small-order part: `inky <key1>` beside `inky@39u <key2>`
-  fails the check, since one seat would vote under two keys. When rows
-  pin the voter's seat, the entry must be signed under that key.
+  after `/` is looked up as written. A voter id row pins the seat after
+  its `/`, and each bare row pins the seat it reads as under the same
+  rules: `inky` and `inky@39u` both pin `inky`, while `inky-10` pins
+  `inky-10`; `ljos-bot` pins `ljosbot`; `judge:model-1.5` pins
+  `judge-model-1-5`; and `run-101` pins `run-101`. A run or a judge
+  keeps its id whole, so `run-inky` and `judge-inky` pin themselves, not
+  `inky`. Rows that pin one seat must pin one key, whatever their
+  spelling, up to hex case and a small-order part: `inky <key1>` beside
+  `inky@39u <key2>` or `alpha/inky <key2>` fails the check, since one
+  seat would vote under two keys. When rows pin the voter's seat, the
+  entry must be signed under that key.
 - with no pin file row for the voter id and none for its seat, the first
   key seen in this check is the pin for this check only
 - ingesting pins durably is what makes that pin persist across checks
