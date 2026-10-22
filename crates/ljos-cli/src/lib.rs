@@ -42803,6 +42803,45 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
     }
 
+    /// The bare name `latest-prompt` says where a write lands only when a
+    /// command writes what it is given. Searching for it, printing it or
+    /// testing for it touches nothing.
+    #[test]
+    fn the_bare_kept_prompt_name_is_denied_only_to_writers() {
+        let _g = env_guard();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
+        for line in [
+            "git grep latest-prompt",
+            "git log -S latest-prompt",
+            "echo latest-prompt",
+            "find . -name latest-prompt",
+            "test -f latest-prompt",
+            "[ -e latest-prompt.bind ]",
+            "cargo test latest-prompt",
+            "rg -n latest-prompt crates/",
+        ] {
+            assert!(seat_guard(line).is_none(), "refused: {line}");
+        }
+        for line in [
+            "printf x > latest-prompt",
+            "mv /tmp/p latest-prompt",
+            "rm -f latest-prompt.bind",
+            "ln -sf /tmp/p latest-prompt",
+            "cp /tmp/p latest-prompt",
+            "install -m 600 /tmp/p latest-prompt",
+            "rsync /tmp/p latest-prompt",
+            "echo x | tee latest-prompt",
+            "dd if=/tmp/p of=latest-prompt",
+            "sed -i s/a/b/ latest-prompt",
+            "vim latest-prompt.bind",
+            "touch latest-prompt",
+            "find . -name latest-prompt -delete",
+            "python3 plant.py latest-prompt",
+        ] {
+            assert!(seat_guard(line).is_some(), "allowed: {line}");
+        }
+    }
+
     /// A tool call that names a runner session for the ljos it runs is
     /// choosing the session the person's words are checked against.
     #[test]
