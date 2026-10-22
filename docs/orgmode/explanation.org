@@ -364,8 +364,14 @@ agrees with the runner's own record of the turn:
 |--------+----------------|
 | Claude Code | the transcript the payload names, under =~/.claude/projects= or =$CLAUDE_CONFIG_DIR/projects=; required |
 | Codex | the rollout the payload names, under =~/.codex/sessions= or =$CODEX_HOME/sessions=; required |
-| Cursor | the agent transcript of the conversation, under =~/.cursor/projects=, when one is found |
-| Grok, OpenCode, Gemini, Antigravity | none; only the bind and the time |
+| Cursor | the agent transcript under =~/.cursor/projects=, when one is found and it holds the prompt. With no such transcript the prompt is unverified: it is not stored as the person's, and a stated choice is not saved |
+| Grok, OpenCode, Gemini, Antigravity | none. A typed prompt is unverified, the same as Cursor without a transcript: it is not stored as the person's, and a stated choice is not saved |
+
+Claude Code and Codex still keep a typed prompt. Their transcript is
+required before a later prefer calls those words the person's, and a
+standing choice in the prompt is still saved when the hook runs. The
+other runners lose that. The hook may still note the prompt, and the
+refusal says the record is unverified.
 
 The seat guard also denies a tool call that writes, moves, links or
 touches either file or the runtime ljos directory, however its path is

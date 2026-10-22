@@ -886,23 +886,29 @@ fn a_rewritten_prompt_that_disagrees_with_the_runners_record_is_refused() {
     assert!(!rules_text(&seat).contains("release key"));
 }
 
-/// Where the runner keeps no record ljos reads, a rewrite that keeps the
-/// hook's time is refused by the ctime the kernel gave the files, and the
-/// person's real words, unchanged since the hook, still store.
+/// A rewrite that keeps the hook's time is refused by the ctime the
+/// kernel gave the files, even when Claude Code's transcript is rewritten
+/// to agree with the plant. The person's real words, unchanged since the
+/// hook, still store.
 #[test]
 fn a_prompt_changed_after_the_hooks_time_is_refused() {
     let said = "Always build the release with the checked fuse never a guessed one.";
-    let env = [("GROK_SESSION_ID", RUNNER_SESSION)];
+    let env = [("CLAUDE_CODE_SESSION_ID", RUNNER_SESSION)];
     let seat = Seat::new();
     hook_stdout_under(
         &seat,
-        "grok",
+        "claude",
         &plant_payload(&format!("From now on: {said}")),
     );
     let prefer = |text: &str| {
-        seat.under("grok", &env, "", &["prefer", "--user", "--why", "x", text])
-            .output()
-            .unwrap()
+        seat.under(
+            "claude",
+            &env,
+            "",
+            &["prefer", "--user", "--why", "x", text],
+        )
+        .output()
+        .unwrap()
     };
     let out = prefer(said);
     assert!(out.status.success(), "{}", text_of(&out));
@@ -911,15 +917,92 @@ fn a_prompt_changed_after_the_hooks_time_is_refused() {
     let script = seat.home.path().join("plant.py");
     std::fs::write(&script, PLANT_PY).unwrap();
     let line = format!("python3 {} '{PLANT}' kept", script.display());
-    let out = tool_call(&seat, "grok", &env, &line);
+    let out = tool_call(&seat, "claude", &env, &line);
     assert!(out.status.success(), "{}", text_of(&out));
+    // The transcript now holds the plant, so only the ctime can refuse it.
+    let transcript = seat
+        .home
+        .path()
+        .join(".claude/projects/-seat/session.jsonl");
+    std::fs::write(
+        &transcript,
+        format!(
+            "{}\n",
+            serde_json::json!({"type": "user", "message": {"role": "user", "content": PLANT}})
+        ),
+    )
+    .unwrap();
     let out = prefer(PLANT);
+    let said_err = combined(&out);
     assert!(
-        combined(&out).contains("only the person's own words"),
+        said_err.contains("only the person's own words"),
         "a prompt changed after the hook was the person's\n{}",
         text_of(&out)
     );
+    assert!(
+        !said_err.contains("unverified"),
+        "the ctime refusal was called unverified\n{said_err}"
+    );
     assert!(!rules_text(&seat).contains("release key"));
+}
+
+/// Cursor without a transcript, and the runners that keep no record ljos
+/// reads, do not attribute a typed prompt. The hook still notes it. A
+/// prefer of those words says the record is unverified, and a stated
+/// choice is not saved.
+#[test]
+fn a_runner_without_a_record_does_not_attribute_the_prompt() {
+    let said = "Always build the release with the checked fuse never a guessed one.";
+    let prompt = format!("From now on: {said}");
+    for (name, var, payload) in [
+        (
+            "cursor-agent",
+            "CURSOR_CONVERSATION_ID",
+            serde_json::json!({
+                "cursor_version": "2.4.0",
+                "hook_event_name": "beforeSubmitPrompt",
+                "conversation_id": RUNNER_SESSION,
+                "session_id": "cursor-sess-0002bbbb",
+                "generation_id": "gen-0001",
+                "prompt": prompt,
+            })
+            .to_string(),
+        ),
+        ("grok", "GROK_SESSION_ID", plant_payload(&prompt)),
+        ("opencode", "OPENCODE_SESSION_ID", plant_payload(&prompt)),
+        ("gemini", "GEMINI_SESSION_ID", plant_payload(&prompt)),
+        ("agy", "AGY_SESSION_ID", plant_payload(&prompt)),
+    ] {
+        let seat = Seat::new();
+        let out = fed(seat.hook_under(name), &payload);
+        assert!(out.status.success(), "{name}: {}", text_of(&out));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !stdout.contains("Saved the person's preference"),
+            "{name}: a stated choice was saved without a record: {stdout}"
+        );
+        let kept =
+            std::fs::read_to_string(seat.run.path().join("ljos/latest-prompt")).unwrap_or_default();
+        assert_eq!(kept, prompt, "{name}: the hook did not note the prompt");
+        let out = seat
+            .under(
+                name,
+                &[(var, RUNNER_SESSION)],
+                "",
+                &["prefer", "--user", "--why", "x", said],
+            )
+            .output()
+            .unwrap();
+        let body = combined(&out);
+        assert!(
+            !out.status.success()
+                && body.contains("unverified")
+                && body.contains("only the person's own words"),
+            "{name}: prefer attributed the prompt\n{}",
+            text_of(&out)
+        );
+        assert!(!rules_text(&seat).contains("checked fuse"), "{name}");
+    }
 }
 
 /// A forged prompt and bind naming a session other than the runner's is
@@ -1339,8 +1422,20 @@ fn every_runner_takes_a_real_quote_and_refuses_a_forged_session() {
             r.meta.clone(),
         );
         let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
-        assert!(!refused, "{who}: mcp refused the person's words: {answer}");
-        assert!(rules_text(&seat).contains("checked fuse"), "{who}");
+        // Grok keeps no record ljos reads, so the words stay unverified.
+        // Claude Code, Codex and Cursor name one, and `recorded` wrote it.
+        if r.name == "grok" {
+            assert!(refused, "{who}: mcp stored an unverified prompt: {answer}");
+            let body = answer.to_string();
+            assert!(
+                body.contains("unverified") && body.contains("only the person's own words"),
+                "{who}: {body}"
+            );
+            assert!(!rules_text(&seat).contains("checked fuse"), "{who}");
+        } else {
+            assert!(!refused, "{who}: mcp refused the person's words: {answer}");
+            assert!(rules_text(&seat).contains("checked fuse"), "{who}");
+        }
 
         if !r.env.is_empty() {
             let seat = Seat::new();
@@ -1354,12 +1449,24 @@ fn every_runner_takes_a_real_quote_and_refuses_a_forged_session() {
                 )
                 .output()
                 .unwrap();
-            assert!(
-                out.status.success(),
-                "{who}: cli refused\n{}",
-                text_of(&out)
-            );
-            assert!(rules_text(&seat).contains("checked fuse"), "{who}");
+            if r.name == "grok" {
+                let body = combined(&out);
+                assert!(
+                    !out.status.success()
+                        && body.contains("unverified")
+                        && body.contains("only the person's own words"),
+                    "{who}: cli stored an unverified prompt\n{}",
+                    text_of(&out)
+                );
+                assert!(!rules_text(&seat).contains("checked fuse"), "{who}");
+            } else {
+                assert!(
+                    out.status.success(),
+                    "{who}: cli refused\n{}",
+                    text_of(&out)
+                );
+                assert!(rules_text(&seat).contains("checked fuse"), "{who}");
+            }
         }
 
         let seat = Seat::new();
