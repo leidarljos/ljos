@@ -1,6 +1,6 @@
 # A fresh machine
 
-`ljos cloud up` installs `ljos`, `ljos-mcp`, `ljos-policyd`, and `packsetd` when the release lists it, into `~/.local/bin`, and on a cloud VM the encoder `packset-embed`. It checks the SHA-256 sums, puts that directory on PATH for this process and in `~/.profile` and `~/.bashrc`, then writes `~/.cursor/mcp.json` so the command is `ljos-mcp` on PATH, and clones `LJOS_TRACKER_REMOTE`. Run it again and it only refreshes the clone and the MCP command.
+`ljos cloud up` installs `ljos`, `ljos-mcp`, `ljos-policyd`, and `packsetd` when the release lists it, into `~/.local/bin`, and on a cloud VM the encoder `packset-embed`. It checks the SHA-256 sums, puts that directory on PATH for this process and in `~/.profile` and `~/.bashrc`, then writes `~/.cursor/mcp.json` so the command is `ljos-mcp` on PATH, and clones `LJOS_TRACKER_REMOTE`. Run it again and it refreshes the clone and the MCP command, rewrites env-owned wake entries from `LJOS_WAKE_<SEAT>_URL`, and refreshes the scope `cloud` age identity from the named secret.
 
 `sh scripts/install.sh --cloud` is the same bootstrap. When the binaries are already installed and `ljos cloud up` answers, that command is all that runs. `--force` downloads again. From this repository, if the installed `ljos` has no `cloud up`, the script builds this tree's `ljos` and `ljos-mcp` and leaves them in place.
 
