@@ -213,3 +213,14 @@ runs. It cannot tell that a file was deleted. A deleted withdrawal revives
 the earlier ballot: with the withdrawal file gone, the ballot it replaced
 is again the latest under its key and counts. Keep the record under version
 control and review deletions there.
+
+A ballot is not bound to a tracker. Nothing in the entry names the
+tracker, repository or pin file it was cast for, so a signed ballot
+copied into another record verifies there too, and is held only to the
+pins of the check that reads it.
+
+The check cannot tell people apart, only keys. A voter is a key and a
+seat is held to one key, but a new identity and seat signed with a new
+key is a new voter: anyone who can mint keys can cast as many voters as
+they mint seats. Only the pin file limits that, by naming the seats and
+keys that may vote; seats it does not name take the first key seen.

@@ -1574,6 +1574,20 @@ mod tests {
     }
 
     #[test]
+    fn docs_name_the_tracker_and_key_minting_limits() {
+        let doc = include_str!("../doc/record-v1.md");
+        let normalized = doc.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            normalized.contains("A ballot is not bound to a tracker"),
+            "record-v1.md must say a ballot names no tracker"
+        );
+        assert!(
+            normalized.contains("a new identity and seat signed with a new key is a new voter"),
+            "record-v1.md must say a newly minted key is a new voter"
+        );
+    }
+
+    #[test]
     fn docs_name_voter_pin_precedence_and_ambiguity_drop() {
         let doc = include_str!("../doc/record-v1.md");
         let normalized = doc.split_whitespace().collect::<Vec<_>>().join(" ");
