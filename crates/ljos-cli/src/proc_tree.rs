@@ -469,14 +469,27 @@ fn nix_entry(path: &Path, store: &Path) -> Option<PathBuf> {
     (hashed && rest.len() > 1 && rest.starts_with('-')).then(|| store.join(name))
 }
 
-/// The runner `path` names when it sits strictly below one of `roots` or
-/// in an entry of the Nix store `store`, and that root: the nearest component that is not
-/// packing layout ([`layout_component`]), read from the file up to the
-/// root's own name, so `share/claude/versions/2.1.3` is Claude Code. The
-/// path must be absolute and plain, since a `..` after the root would
-/// leave it. A path the kernel marks ` (deleted)` is not the file that
-/// was installed.
+/// The runner `path` names when it sits below a root ([`root_below`]),
+/// and that root: the nearest component that is not packing layout
+/// ([`layout_component`]), read from the file up to the root's own name,
+/// so `share/claude/versions/2.1.3` is Claude Code.
 fn runner_below(path: &Path, roots: &[PathBuf], store: &Path) -> Option<(&'static str, PathBuf)> {
+    let root = root_below(path, roots, store)?;
+    let parts = root
+        .file_name()
+        .into_iter()
+        .chain(path.strip_prefix(&root).ok()?.iter())
+        .map(std::ffi::OsStr::to_str)
+        .collect::<Option<Vec<_>>>()?;
+    let name = parts.iter().rev().find(|part| !layout_component(part))?;
+    Some((hook_name(name)?, root))
+}
+
+/// The one of `roots`, or the entry of the Nix store `store`, that
+/// `path` sits strictly below. The path must be absolute and plain,
+/// since a `..` after the root would leave it. A path the kernel marks
+/// ` (deleted)` is not the file that was installed.
+fn root_below(path: &Path, roots: &[PathBuf], store: &Path) -> Option<PathBuf> {
     let plain = path.is_absolute()
         && path.components().all(|c| {
             matches!(
@@ -487,19 +500,11 @@ fn runner_below(path: &Path, roots: &[PathBuf], store: &Path) -> Option<(&'stati
     if !plain || path.to_str()?.contains(" (deleted)") {
         return None;
     }
-    let root = roots
+    roots
         .iter()
         .cloned()
         .chain(nix_entry(path, store))
-        .find(|root| path != root.as_path() && path.starts_with(root))?;
-    let parts = root
-        .file_name()
-        .into_iter()
-        .chain(path.strip_prefix(&root).ok()?.iter())
-        .map(std::ffi::OsStr::to_str)
-        .collect::<Option<Vec<_>>>()?;
-    let name = parts.iter().rev().find(|part| !layout_component(part))?;
-    Some((hook_name(name)?, root))
+        .find(|root| path != root.as_path() && path.starts_with(root))
 }
 
 /// A group as the group database lists it.
@@ -883,19 +888,36 @@ fn runner_at(
     person: &Person,
     expect: (u64, u64),
 ) -> Option<&'static str> {
-    if crate::bookkeep::resolved_path_is_temp(file) {
-        return None;
-    }
-    let roots: Vec<PathBuf> = install_roots(home)
+    let (roots, store) = resolved_roots(home, store);
+    let (runner, root) = runner_below(file, &roots, &store)?;
+    kept_below(file, &root, &store, person, expect).then_some(runner)
+}
+
+/// The install roots for `home` ([`install_roots`]) and the Nix store
+/// `store`, resolved.
+fn resolved_roots(home: Option<&Path>, store: &Path) -> (Vec<PathBuf>, PathBuf) {
+    let roots = install_roots(home)
         .iter()
         .filter_map(|root| std::fs::canonicalize(root).ok())
         .collect();
     let store = std::fs::canonicalize(store).unwrap_or_else(|_| store.to_path_buf());
-    let (runner, root) = runner_below(file, &roots, &store)?;
-    let owners = pinned_walk(file, expect)?;
-    let at = root.components().count().checked_sub(1)?;
-    let in_store = root.parent() == Some(store.as_path());
-    walk_kept(&owners, at, in_store, person).then_some(runner)
+    (roots, store)
+}
+
+/// Whether `file`, a resolved path below install root `root`, is the
+/// file `expect` and left to the person ([`walk_kept`]) as the walk
+/// reads it ([`pinned_walk`]). A file in a temp directory never is.
+fn kept_below(file: &Path, root: &Path, store: &Path, person: &Person, expect: (u64, u64)) -> bool {
+    if crate::bookkeep::resolved_path_is_temp(file) {
+        return false;
+    }
+    let (Some(owners), Some(at)) = (
+        pinned_walk(file, expect),
+        root.components().count().checked_sub(1),
+    ) else {
+        return false;
+    };
+    walk_kept(&owners, at, root.parent() == Some(store), person)
 }
 
 /// Whether the owners [`pinned_walk`] read leave a file to the person,
