@@ -33,6 +33,14 @@ fn panel_help_offers_cloud_and_refuses_to_mix_it_with_a_local_spawn() {
     assert!(!dry.status.success(), "{err}");
     assert!(err.contains("--dry-run"), "{err}");
 
+    let designers = ljos(&["panel", "probe-l0g0", "--cloud", "--designers", "5"]);
+    let err = String::from_utf8_lossy(&designers.stderr);
+    assert!(!designers.status.success(), "{err}");
+    assert!(
+        err.contains("cannot be used with") && err.contains("--designers"),
+        "{err}"
+    );
+
     let run = ljos(&["panel", "run", "probe-l0g0", "--cloud"]);
     let err = String::from_utf8_lossy(&run.stderr);
     assert!(!run.status.success(), "{err}");
