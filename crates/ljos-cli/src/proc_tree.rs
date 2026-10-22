@@ -423,7 +423,10 @@ pub fn own_home() -> Option<std::path::PathBuf> {
 
 /// Where a runner is installed under the person's home ([`own_home`]):
 /// a user `bin`, and the prefix npm's own guide gives a user for global
-/// packages.
+/// packages. These are trusted because the person owns them, which
+/// also lets any process of the person's uid, a tool call among them,
+/// replace what they hold: the check keeps out other users and copies
+/// placed elsewhere, not the person's own account.
 const HOME_ROOTS: &[&str] = &[".local/bin", ".cargo/bin", ".npm-global"];
 
 /// Where a runner is installed for every user, and where npm keeps a
@@ -826,7 +829,9 @@ fn pinned_walk(_file: &Path, _expect: (u64, u64)) -> Option<Vec<Owner>> {
 /// the person cannot write it, and it is sticky if its group or anyone
 /// may write it; the entry is then root's, as the daemon builds it. On
 /// a single-user install the store is the person's and no one else may
-/// write it, and the entry is the person's or root's.
+/// write it, and the entry is the person's or root's. Such a store, like
+/// a home root ([`HOME_ROOTS`]), is writable by a tool call of the
+/// person's uid, and is trusted only because the person owns it.
 fn store_keeps(store: Owner, entry: Owner, person: &Person) -> bool {
     let group = store.mode & 0o020 != 0;
     let anyone = store.mode & 0o002 != 0;
