@@ -11697,7 +11697,7 @@ pub fn atom_body(kind: &str, text: &str, workspace: &str) -> Value {
     if let Some(citation) = citation {
         source["citation"] = Value::String(citation);
     }
-    serde_json::json!({
+    let mut atom = serde_json::json!({
         "schema": "inside.atom/v1",
         "kind": kind,
         "level": "explicit",
@@ -11705,7 +11705,19 @@ pub fn atom_body(kind: &str, text: &str, workspace: &str) -> Value {
         "workspace": workspace,
         "entities": entities,
         "source": source,
-    })
+    });
+    // A VM `cloud up` prepared tags memory explicitly. Other atoms stay
+    // unscoped, and a box with the variable unset is unchanged.
+    if memory_write(kind) {
+        if let Some(scope) = sync::machine_write_scope() {
+            add_entities(&mut atom, [format!("scope:{scope}")]);
+        }
+    }
+    atom
+}
+
+fn memory_write(kind: &str) -> bool {
+    kind == "lesson" || kind == "preference" || kind == packset_core::record::NOTE_KIND
 }
 
 /// Take citation tails off `text`. The claim is unchanged when nothing
@@ -25333,7 +25345,7 @@ pub fn lesson_claims(text: &str) -> Vec<String> {
 
 fn finish_lesson(issue: &str, text: &str) -> String {
     let filed = (|| -> Result<String> {
-        let scope = sync::scope_for_issue(issue);
+        let scope = sync::scope_for_lesson(sync::scope_for_issue(issue));
         let persons = lesson_is_the_persons(under_a_runner(), std::io::stdin().is_terminal());
         let prefix = "finish: POST /v1/atoms failed for the lesson";
         let client = pack()?;
