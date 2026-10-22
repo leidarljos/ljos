@@ -117,7 +117,8 @@ its process group are killed and the tool refuses, so a hung database or
 a slow part cannot stall the MCP server.
 
 Untrusted text sits between a start and an end marker that carry a fresh
-random nonce, so a message cannot close its own wrapping. Mail text is
+random nonce, so a message cannot close its own wrapping. Inside, every
+character the exporter refuses below becomes U+FFFD. Mail text is
 data. A message that says the owner approves a send, or tells the reader
 to call a tool, is a message, not an approval or an instruction.
 
@@ -177,8 +178,11 @@ precondition, not an option.
    checks them and spends the nonce. `reachbook-hash` must equal `H`,
    so the outbox and the file name the same bytes; any other value is
    refused. The exporter refuses control characters other than tab and
-   newline, and the bidirectional overrides, anywhere in the message, so
-   a terminal cannot hide text from the person reading it.
+   newline, the bidirectional marks, overrides and isolates, the
+   invisible format characters (U+00AD, U+180E, U+200B to U+200F, U+2060
+   to U+2064, U+FEFF) and the line and paragraph separators U+2028 and
+   U+2029, anywhere in the message, so a terminal cannot hide, reorder
+   or break text the person reading it sees.
 3. Consensus. The draft's send issue carries the option `send H`. It
    passes with ballots from at least two seats of at least two model
    families, each verified against the seat keys the tracker pins.

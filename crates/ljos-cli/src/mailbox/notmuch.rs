@@ -5,7 +5,7 @@
 //! element after `--`, so it is never an option. Everything a message
 //! supplies (subject, authors, addresses, text, attachment names) comes
 //! back between markers that carry a random nonce the message cannot
-//! guess, with control and bidirectional characters replaced. No path to
+//! guess, with every character `hiding` names replaced. No path to
 //! a message file and no attachment content leaves this module.
 
 use std::io::Read;
@@ -669,8 +669,7 @@ fn media_type(kind: &str) -> String {
     }
 }
 
-/// Control characters other than tab and newline, and the bidirectional
-/// overrides and isolates, become U+FFFD so a terminal cannot hide text.
+/// Every `hiding` character becomes U+FFFD so a terminal cannot hide text.
 pub(crate) fn clean(text: &str) -> String {
     text.replace("\r\n", "\n")
         .chars()
@@ -678,9 +677,15 @@ pub(crate) fn clean(text: &str) -> String {
         .collect()
 }
 
+/// Control characters other than tab and newline, the bidirectional
+/// marks, overrides and isolates, the invisible format characters `fold`
+/// strips, and the line and paragraph separators: each can hide,
+/// reorder or break text a person reads.
 pub(crate) fn hiding(c: char) -> bool {
     (c.is_control() && c != '\t' && c != '\n')
-        || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+        || matches!(c,
+            '\u{00AD}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
 }
 
 #[cfg(test)]
@@ -716,6 +721,19 @@ mod tests {
         let mut shallow = Vec::new();
         assert!(!walk(&two, 0, &mut shallow));
         assert_eq!(shallow.len(), 2);
+    }
+
+    #[test]
+    fn clean_replaces_what_could_hide_reorder_or_break_a_line() {
+        for c in [
+            '\u{1b}', '\u{85}', '\u{ad}', '\u{180e}', '\u{200b}', '\u{200c}', '\u{200d}',
+            '\u{200e}', '\u{200f}', '\u{2028}', '\u{2029}', '\u{202e}', '\u{2060}', '\u{2064}',
+            '\u{2068}', '\u{feff}',
+        ] {
+            assert_eq!(clean(&format!("a{c}b")), "a\u{FFFD}b", "U+{:04X}", c as u32);
+        }
+        let kept = "tab\there\nno\u{a0}break, caf\u{e9}";
+        assert_eq!(clean(kept), kept);
     }
 
     #[test]
