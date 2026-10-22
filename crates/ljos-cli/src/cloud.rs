@@ -183,9 +183,24 @@ pub fn default_seat() -> String {
 
 /// The seat a run with id `run` takes when it boots with `LJOS_SEAT` set
 /// to `base`, as [`default_seat`] names it there.
-#[must_use]
-pub fn run_seat(base: &str, run: &str) -> String {
-    with_run(&crate::seat_slug(base), run_slug(run).as_deref())
+///
+/// # Errors
+///
+/// `base` already ends with the run id. [`default_seat`] keeps such a
+/// seat as it is, so a boot that runs `cloud up` again does not append
+/// the id twice, and the bare name on that run boots as the same seat.
+pub fn run_seat(base: &str, run: &str) -> Result<String> {
+    let base = crate::seat_slug(base);
+    let id = run_slug(run);
+    if let Some(id) = id.as_deref() {
+        if let Some(bare) = base.strip_suffix(id).and_then(|b| b.strip_suffix('-')) {
+            bail!(
+                "{base} already ends with run id {id}, and {bare} on that run boots as {base} \
+                 too; name the seat as LJOS_SEAT holds it before `cloud up` appends the id"
+            );
+        }
+    }
+    Ok(with_run(&base, id.as_deref()))
 }
 
 fn with_run(base: &str, id: Option<&str>) -> String {
