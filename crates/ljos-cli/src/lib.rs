@@ -11523,11 +11523,56 @@ struct RankSeen {
 static RANKS_KNOWN: std::sync::Mutex<Vec<RankSeen>> = std::sync::Mutex::new(Vec::new());
 
 /// Whether a 400's body names the `rank` parameter, as packset's `rank
-/// must be fused or relevance` does. `rerank` is another parameter and
-/// another word.
+/// must be fused or relevance` does, or carries a JSON field of that
+/// name. A sentence that merely uses the word does not: `rerank` is
+/// another parameter, and "the lesson rank is stale" is not a refusal
+/// of this one.
 fn names_the_rank(body: &str) -> bool {
-    body.split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|w| w.eq_ignore_ascii_case("rank"))
+    match serde_json::from_str::<Value>(body) {
+        Ok(value) => value_names_the_rank(&value),
+        Err(_) => text_names_the_rank(body),
+    }
+}
+
+fn value_names_the_rank(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .any(|(key, child)| key.eq_ignore_ascii_case("rank") || value_names_the_rank(child)),
+        Value::Array(items) => items.iter().any(value_names_the_rank),
+        Value::String(text) => text_names_the_rank(text),
+        _ => false,
+    }
+}
+
+/// The parameter's name, not the word in a sentence. Packset puts it
+/// first (`rank must be fused or relevance`) or after `unknown`. A JSON
+/// string that is only `rank` is the name too.
+fn text_names_the_rank(text: &str) -> bool {
+    let words: Vec<&str> = text
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    if words
+        .first()
+        .is_some_and(|word| word.eq_ignore_ascii_case("rank"))
+    {
+        return true;
+    }
+    words.windows(2).any(|pair| {
+        pair[1].eq_ignore_ascii_case("rank")
+            && matches!(
+                pair[0].to_ascii_lowercase().as_str(),
+                "unknown"
+                    | "invalid"
+                    | "bad"
+                    | "unsupported"
+                    | "unexpected"
+                    | "unrecognized"
+                    | "parameter"
+                    | "param"
+            )
+    })
 }
 
 /// The writer at `client` answered a ranked search 400 naming `rank`
@@ -39773,6 +39818,52 @@ mod tests {
         assert_eq!(ranked(), 4);
         assert_eq!(search(), ["fused", "old"]);
         assert_eq!(ranked(), 4, "{:?}", seen.lock().unwrap());
+    }
+
+    /// A 400 names `rank` when the body has that field or names the
+    /// parameter, as packset does. A sentence that only uses the word
+    /// does not refuse the rank, so the next search still asks for it.
+    #[test]
+    fn prose_that_mentions_rank_does_not_refuse_it() {
+        assert!(names_the_rank(
+            r#"{"error":"rank must be fused or relevance"}"#
+        ));
+        assert!(names_the_rank(r#"{"error":"unknown rank"}"#));
+        assert!(names_the_rank(r#"{"error":"nope","rank":true}"#));
+        assert!(names_the_rank(r#"{"param":"rank"}"#));
+        assert!(names_the_rank("rank must be fused or relevance"));
+        assert!(!names_the_rank(r#"{"error":"the lesson rank is stale"}"#));
+        assert!(!names_the_rank(r#"{"error":"cannot rank these hits"}"#));
+        assert!(!names_the_rank(r#"{"error":"rerank must be on or off"}"#));
+
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap())]);
+        let (url, seen) = serve_http(|req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/status") {
+                return (200, r#"{"search":{"ranks":["fused","relevance"]}}"#.into());
+            }
+            if first.contains("/v1/search") && first.contains("rank=") {
+                return (400, r#"{"error":"the lesson rank is stale"}"#.into());
+            }
+            if first.contains("/v1/search") {
+                return (200, r#"{"hits":[]}"#.into());
+            }
+            (200, r#"{"atoms":[]}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let ranked = || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.contains("rank=relevance"))
+                .count()
+        };
+        let search = || packset_search_relevant("the registry rejected my token", 20).unwrap();
+        search();
+        search();
+        assert_eq!(ranked(), 2, "{:?}", seen.lock().unwrap());
     }
 
     /// A refused rank holds for the workspace whose search was refused,
