@@ -219,6 +219,9 @@ enum CloudCmd {
         /// Download the release again.
         #[arg(long)]
         force: bool,
+        /// Replace the repository an earlier `cloud up` recorded.
+        #[arg(long)]
+        repoint: bool,
     },
 }
 
@@ -1596,7 +1599,9 @@ fn run_command() -> Result<()> {
             ljos_cli::cloud::merge_org_cli(&base, &ours, &theirs)?;
         }
         Cmd::Cloud { cmd } => match cmd {
-            CloudCmd::Up { force } => print!("{}", ljos_cli::cloud::up(force)?),
+            CloudCmd::Up { force, repoint } => {
+                print!("{}", ljos_cli::cloud::up_at(force, repoint)?)
+            }
         },
         Cmd::Sync {
             key,

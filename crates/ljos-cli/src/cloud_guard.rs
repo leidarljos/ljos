@@ -425,17 +425,45 @@ fn judge_depth(line: &str, cwd: Option<&Path>, incoming: &WalkIn) -> Verdict {
                     if http_targets_github(&words) {
                         verdict.saw_ref = true;
                     }
-                    if let Some(why) = http_ref_write(&words) {
+                    if let Some(why) = http_ref_write(&words, &run.env) {
                         if verdict.push.is_none() {
                             verdict.push = Some(why);
                         }
                     }
                 }
-                _ => {}
+                _ => {
+                    if cloud_repoint(cmd, &words) {
+                        verdict.saw_ref = true;
+                        if verdict.push.is_none() {
+                            verdict.push = Some(format!(
+                                "`ljos cloud up --repoint` would retarget the repository this seat may push; {ALLOW_RULE}"
+                            ));
+                        }
+                    }
+                }
             }
         }
     }
     verdict
+}
+
+/// `ljos cloud up --repoint` rewrites the repository the hook allows.
+fn cloud_repoint(cmd: &str, words: &[String]) -> bool {
+    if cmd.rsplit('/').next().unwrap_or(cmd) != "ljos" {
+        return false;
+    }
+    let mut cloud = false;
+    let mut up = false;
+    let mut repoint = false;
+    for word in words.iter().skip(1) {
+        match word.as_str() {
+            "cloud" => cloud = true,
+            "up" => up = true,
+            "--repoint" => repoint = true,
+            _ => {}
+        }
+    }
+    cloud && up && repoint
 }
 
 /// Why `seg` disarms the pre-push hook, or `None` when it does not.
@@ -459,6 +487,9 @@ fn hook_disarm(seg: &str, cwd: Option<&Path>) -> Option<String> {
     if let Some(why) = file_tool_disarm(cmd, &words[at..], cwd) {
         return Some(why);
     }
+    if let Some(why) = protected_path_write(cmd, &words[at..], cwd) {
+        return Some(why);
+    }
     let shell_wide = cmd == Some("export") || at == words.len();
     let git = cmd == Some("git");
     // A prefix assignment applies to this command. `export`, and a segment
@@ -474,9 +505,167 @@ fn hook_disarm(seg: &str, cwd: Option<&Path>) -> Option<String> {
         }
     }
     if git {
-        return git_hook_disarm(&words[at..]);
+        return git_hook_disarm(&words[at..], cwd);
     }
     None
+}
+
+fn protected_path_write(cmd: Option<&str>, words: &[String], cwd: Option<&Path>) -> Option<String> {
+    let cmd = cmd?;
+    if command_is_pure_read(cmd, words) || (cmd == "git" && git_invocation_is_read(words)) {
+        return None;
+    }
+    let hit = words
+        .iter()
+        .find(|word| crate::cloud_hook::word_hits_protected(word, cwd))?;
+    Some(disarm_why(&format!(
+        "`{cmd}` writes {hit}, which can replace the pre-push hook or the config that names it"
+    )))
+}
+
+fn command_is_pure_read(cmd: &str, words: &[String]) -> bool {
+    let cmd = cmd.rsplit('/').next().unwrap_or(cmd);
+    if matches!(
+        cmd,
+        "cat"
+            | "head"
+            | "tail"
+            | "less"
+            | "more"
+            | "wc"
+            | "stat"
+            | "ls"
+            | "file"
+            | "grep"
+            | "rg"
+            | "diff"
+            | "cmp"
+            | "od"
+            | "hexdump"
+            | "strings"
+            | "echo"
+            | "printf"
+            | "true"
+            | "false"
+    ) {
+        return true;
+    }
+    if matches!(cmd, "sed" | "perl" | "awk" | "ruby") {
+        return !inplace_edit(cmd, words);
+    }
+    false
+}
+
+fn inplace_edit(cmd: &str, words: &[String]) -> bool {
+    words.iter().any(|word| {
+        if word == "--in-place" || word.starts_with("--in-place=") {
+            return true;
+        }
+        if cmd == "perl" {
+            if let Some(cluster) = word.strip_prefix('-') {
+                if !cluster.is_empty() && !word.starts_with("--") && cluster.contains('i') {
+                    return true;
+                }
+            }
+            return false;
+        }
+        word == "-i" || (word.starts_with("-i") && !word.starts_with("--"))
+    })
+}
+
+fn git_invocation_is_read(words: &[String]) -> bool {
+    let mut i = 1usize;
+    while i < words.len() {
+        let word = words[i].as_str();
+        if GIT_VALUED.contains(&word) {
+            i += 2;
+            continue;
+        }
+        if word.starts_with('-') && word.len() > 1 {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    let sub = words.get(i).map(String::as_str).unwrap_or("");
+    if matches!(
+        sub,
+        "status"
+            | "log"
+            | "diff"
+            | "show"
+            | "rev-parse"
+            | "grep"
+            | "blame"
+            | "ls-files"
+            | "cat-file"
+            | "rev-list"
+            | "merge-base"
+            | "symbolic-ref"
+            | "describe"
+            | "fetch"
+            | "version"
+            | "help"
+    ) {
+        return true;
+    }
+    sub == "config" && git_config_is_read(&words[i + 1..])
+}
+
+fn git_config_is_read(args: &[String]) -> bool {
+    let mut positional = 0usize;
+    let mut i = 0usize;
+    while i < args.len() {
+        let word = args[i].as_str();
+        if matches!(
+            word,
+            "--get"
+                | "--get-all"
+                | "--get-regexp"
+                | "--get-urlmatch"
+                | "--list"
+                | "-l"
+                | "--show-origin"
+                | "--show-scope"
+                | "--get-color"
+                | "--get-colorbool"
+                | "--global"
+                | "--system"
+                | "--local"
+        ) {
+            i += 1;
+            continue;
+        }
+        if matches!(
+            word,
+            "--file" | "-f" | "--blob" | "--default" | "--comment" | "--type" | "--name" | "--id"
+        ) {
+            i += 2;
+            continue;
+        }
+        if matches!(
+            word,
+            "--unset"
+                | "--unset-all"
+                | "--replace-all"
+                | "--add"
+                | "--edit"
+                | "--remove-section"
+                | "--rename-section"
+        ) {
+            return false;
+        }
+        if word.starts_with('-') && word.len() > 1 {
+            i += 1;
+            continue;
+        }
+        if word.contains('=') {
+            return false;
+        }
+        positional += 1;
+        i += 1;
+    }
+    positional < 2
 }
 
 fn disarm_why(what: &str) -> String {
@@ -619,7 +808,7 @@ fn config_env_disarm(words: &[String]) -> Option<String> {
     None
 }
 
-fn git_hook_disarm(words: &[String]) -> Option<String> {
+fn git_hook_disarm(words: &[String], cwd: Option<&Path>) -> Option<String> {
     // `--no-verify` is a push option, so it follows the subcommand.
     // `-c core.hooksPath` is refused wherever it sits on the git command.
     if let Some(why) = git_hook_switches(words) {
@@ -668,7 +857,7 @@ fn git_hook_disarm(words: &[String]) -> Option<String> {
         break;
     }
     if words.get(i).map(String::as_str) == Some("config") {
-        return git_config_hooks_disarm(&words[i + 1..]);
+        return git_config_hooks_disarm(words, &words[i + 1..], cwd);
     }
     None
 }
@@ -680,7 +869,7 @@ fn git_hook_switches(words: &[String]) -> Option<String> {
         if word == "--no-verify" || word.starts_with("--no-verify=") {
             return Some(disarm_why("`git --no-verify` skips the pre-push hook"));
         }
-        if word == "-c" || word == "--config-env" {
+        if word == "-c" || word == "--config-env" || word == "--config" {
             let value = words.get(i + 1).map(String::as_str).unwrap_or("");
             if hooks_path_setting(value) {
                 return Some(disarm_why(
@@ -689,6 +878,13 @@ fn git_hook_switches(words: &[String]) -> Option<String> {
             }
             i += 2;
             continue;
+        }
+        if let Some(value) = word.strip_prefix("--config=") {
+            if hooks_path_setting(value) {
+                return Some(disarm_why(
+                    "`git -c` names core.hooksPath and skips the pre-push hook",
+                ));
+            }
         }
         if let Some(value) = word.strip_prefix("--config-env=") {
             if hooks_path_setting(value) {
@@ -714,13 +910,30 @@ fn hooks_path_setting(value: &str) -> bool {
     key.eq_ignore_ascii_case("core.hooksPath")
 }
 
-fn git_config_hooks_disarm(args: &[String]) -> Option<String> {
+fn git_config_hooks_disarm(
+    git_words: &[String],
+    args: &[String],
+    cwd: Option<&Path>,
+) -> Option<String> {
     let mut i = 0;
     let mut read = false;
     let mut write = false;
+    let mut edit = false;
+    let mut global = false;
+    let mut file: Option<String> = None;
+    let mut section: Option<String> = None;
     let mut positional: Vec<&str> = Vec::new();
     while i < args.len() {
         let word = args[i].as_str();
+        if matches!(word, "--global" | "--system") {
+            global = true;
+            i += 1;
+            continue;
+        }
+        if word == "--local" {
+            i += 1;
+            continue;
+        }
         if matches!(
             word,
             "--get"
@@ -743,9 +956,29 @@ fn git_config_hooks_disarm(args: &[String]) -> Option<String> {
             i += 1;
             continue;
         }
+        if word == "--edit" {
+            edit = true;
+            i += 1;
+            continue;
+        }
+        if word == "--remove-section" || word == "--rename-section" {
+            section = args.get(i + 1).cloned();
+            i += 2;
+            continue;
+        }
+        if word == "--file" || word == "-f" {
+            file = args.get(i + 1).cloned();
+            i += 2;
+            continue;
+        }
+        if let Some(rest) = word.strip_prefix("--file=") {
+            file = Some(rest.to_string());
+            i += 1;
+            continue;
+        }
         if matches!(
             word,
-            "--file" | "-f" | "--blob" | "--default" | "--comment" | "--type" | "--name" | "--id"
+            "--blob" | "--default" | "--comment" | "--type" | "--name" | "--id"
         ) {
             i += 2;
             continue;
@@ -757,9 +990,24 @@ fn git_config_hooks_disarm(args: &[String]) -> Option<String> {
         positional.push(word);
         i += 1;
     }
+    if !config_scope_guarded(global, file.as_deref(), git_words, cwd) {
+        return None;
+    }
+    if edit {
+        return Some(disarm_why(
+            "`git config --edit` can set core.hooksPath and skip the pre-push hook",
+        ));
+    }
+    if let Some(section) = section.as_deref() {
+        if section_disarms(section) {
+            return Some(disarm_why(
+                "`git config --remove-section` can drop core.hooksPath and skip the pre-push hook",
+            ));
+        }
+    }
     let key = positional.first().copied().unwrap_or("");
     let key = key.split_once('=').map(|(key, _)| key).unwrap_or(key);
-    if !key.eq_ignore_ascii_case("core.hooksPath") {
+    if !key_disarms(key) {
         return None;
     }
     let sets =
@@ -771,8 +1019,73 @@ fn git_config_hooks_disarm(args: &[String]) -> Option<String> {
         return None;
     }
     Some(disarm_why(
-        "`git config` writes core.hooksPath and skips the pre-push hook",
+        "`git config` writes a key that skips the pre-push hook",
     ))
+}
+
+/// Global and system config, a named gitconfig, and the recorded seat's
+/// local config can turn the hook off. A throwaway repository's local
+/// `core.hooksPath` is how the bookkeeping fixtures run.
+fn config_scope_guarded(
+    global: bool,
+    file: Option<&str>,
+    git_words: &[String],
+    cwd: Option<&Path>,
+) -> bool {
+    if global {
+        return true;
+    }
+    if let Some(file) = file {
+        return crate::cloud_hook::names_protected(file, cwd);
+    }
+    let dir = git_dash_c(git_words).unwrap_or_else(|| PathBuf::from("."));
+    let dir = if dir.is_absolute() {
+        dir
+    } else {
+        match cwd {
+            Some(cwd) => cwd.join(dir),
+            None => dir,
+        }
+    };
+    crate::cloud_hook::dir_is_recorded_seat(&dir)
+}
+
+fn git_dash_c(words: &[String]) -> Option<PathBuf> {
+    let mut i = 1usize;
+    while i < words.len() {
+        let word = words.get(i).map(String::as_str)?;
+        if word == "-C" {
+            return words.get(i + 1).map(PathBuf::from);
+        }
+        if let Some(rest) = word.strip_prefix("-C") {
+            if !rest.is_empty() && !word.starts_with("--") {
+                return Some(PathBuf::from(rest));
+            }
+        }
+        if GIT_VALUED.contains(&word) {
+            i += 2;
+            continue;
+        }
+        if word.starts_with('-') && word.len() > 1 {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    None
+}
+
+fn key_disarms(key: &str) -> bool {
+    if key.eq_ignore_ascii_case("core.hooksPath") {
+        return true;
+    }
+    let lower = key.to_ascii_lowercase();
+    lower == "include.path" || lower.starts_with("include.") || lower.starts_with("includeif.")
+}
+
+fn section_disarms(section: &str) -> bool {
+    let lower = section.to_ascii_lowercase();
+    lower == "core" || lower == "include" || lower.starts_with("includeif")
 }
 
 fn walk_child(
@@ -850,7 +1163,13 @@ fn gh_command(
         "issue" => gh_read_verb(noun, gh_word(&mut rest), &["view", "list", "status"]),
         "repo" => gh_read_verb(noun, gh_word(&mut rest), &["view", "list", "clone"]),
         "release" => gh_release(rest),
-        "run" => gh_read_verb(noun, gh_word(&mut rest), &["view", "list", "watch"]),
+        "run" => gh_read_verb(
+            noun,
+            gh_word(&mut rest),
+            &["view", "list", "watch", "download"],
+        ),
+        "label" => gh_read_verb(noun, gh_word(&mut rest), &["list"]),
+        "cache" => gh_read_verb(noun, gh_word(&mut rest), &["list"]),
         "workflow" => gh_read_verb(noun, gh_word(&mut rest), &["view", "list"]),
         "gist" => gh_read_verb(noun, gh_word(&mut rest), &["view", "list"]),
         "api" => gh_api(rest, cwd),
@@ -1177,7 +1496,7 @@ fn gh_api<'a>(words: impl Iterator<Item = &'a str>, cwd: Option<&Path>) -> Verdi
             ..Verdict::default()
         };
     }
-    if api_is_safe_read(&call) {
+    if api_is_safe_read(&call, cwd) {
         return Verdict::default();
     }
     if let Some(why) = classify_api_cursor_ref(
@@ -1200,11 +1519,14 @@ fn gh_api<'a>(words: impl Iterator<Item = &'a str>, cwd: Option<&Path>) -> Verdi
 }
 
 /// A resolved GET or HEAD. No method and no field is gh's GET. An explicit
-/// GET may carry `-f` query fields. `--input` and a field read from a file
-/// are not resolved.
-fn api_is_safe_read(call: &ApiCall) -> bool {
+/// GET may carry `-f` query fields. A GraphQL query is a read; a mutation
+/// is not. `--input` and a field read from a file are not resolved.
+fn api_is_safe_read(call: &ApiCall, cwd: Option<&Path>) -> bool {
     if call.opaque || call.input.is_some() {
         return false;
+    }
+    if graphql_path(&api_path(&call.endpoint)) {
+        return graphql_is_query(call, cwd);
     }
     match call.method.as_deref() {
         Some(method)
@@ -1215,6 +1537,22 @@ fn api_is_safe_read(call: &ApiCall) -> bool {
         Some(_) => false,
         None => call.fields.is_empty(),
     }
+}
+
+fn graphql_is_query(call: &ApiCall, cwd: Option<&Path>) -> bool {
+    if let Some(method) = call.method.as_deref() {
+        let upper = method.to_ascii_uppercase();
+        if upper != "GET" && upper != "HEAD" && upper != "POST" {
+            return false;
+        }
+    }
+    let (texts, opaque) = graphql_texts(&call.fields, call.input.as_deref(), cwd);
+    if opaque || texts.is_empty() {
+        return false;
+    }
+    texts
+        .iter()
+        .all(|text| !has_ident(&without_strings(text), "mutation"))
 }
 
 fn parse_api_call<'a>(words: impl Iterator<Item = &'a str>, cwd: Option<&Path>) -> Option<ApiCall> {
@@ -1269,6 +1607,20 @@ fn parse_api_call<'a>(words: impl Iterator<Item = &'a str>, cwd: Option<&Path>) 
                 continue;
             }
         }
+        if let Some(cluster) = word.strip_prefix('-') {
+            if !word.starts_with("--") && !cluster.is_empty() && !API_VALUED.contains(&word) {
+                take_api_cluster(
+                    cluster,
+                    &mut it,
+                    cwd,
+                    &mut method,
+                    &mut method_unreadable,
+                    &mut fields,
+                    &mut opaque,
+                );
+                continue;
+            }
+        }
         if API_VALUED.contains(&word) {
             let Some(value) = it.next() else {
                 continue;
@@ -1305,6 +1657,54 @@ fn parse_api_call<'a>(words: impl Iterator<Item = &'a str>, cwd: Option<&Path>) 
         method_unreadable,
         endpoint_unreadable,
     })
+}
+
+/// gh shorts stuck to their values: `-fbase=main`, `-Fk=@file`, `-if title=x`.
+/// `i` is boolean. `f`, `F`, and `X` take the rest of the cluster or the next word.
+fn take_api_cluster<'a>(
+    cluster: &str,
+    it: &mut impl Iterator<Item = &'a str>,
+    cwd: Option<&Path>,
+    method: &mut Option<String>,
+    method_unreadable: &mut bool,
+    fields: &mut Vec<(String, String)>,
+    opaque: &mut bool,
+) {
+    const VALUE: &str = "fFXHqpt";
+    const BOOL: &str = "i";
+    let chars: Vec<char> = cluster.chars().collect();
+    let mut k = 0usize;
+    while k < chars.len() {
+        let c = chars[k];
+        if BOOL.contains(c) {
+            k += 1;
+            continue;
+        }
+        if VALUE.contains(c) {
+            let attached: String = chars[k + 1..].iter().collect();
+            let value = if attached.is_empty() {
+                it.next().unwrap_or("").to_string()
+            } else {
+                attached
+            };
+            match c {
+                'X' => {
+                    if unreadable_token(&value) {
+                        *method_unreadable = true;
+                    }
+                    *method = Some(value);
+                }
+                'f' => fields.push(field_pair(&value)),
+                'F' => match resolve_typed_field(&value, cwd) {
+                    Ok(pair) => fields.push(pair),
+                    Err(()) => *opaque = true,
+                },
+                _ => {}
+            }
+            return;
+        }
+        k += 1;
+    }
 }
 
 /// `-F` / `--field` reads `@file` as the field's value. `-f` does not.
@@ -2455,12 +2855,14 @@ fn send_pack_push(words: &[String], at: Checkout) -> Push {
         );
     }
     let mut pushed = Vec::new();
+    let repo_why = remote.as_deref().map(|name| send_pack_repo_why(&at, name));
     if let Some(name) = remote {
         pushed.push(name);
     }
     pushed.extend(specs);
-    Push {
+    let mut push = Push {
         reason: None,
+        repo_why: None,
         at,
         words: pushed,
         repo: None,
@@ -2469,7 +2871,50 @@ fn send_pack_push(words: &[String], at: Checkout) -> Push {
         dry_run: dry,
         force,
         delete: false,
+    };
+    if let Some(Err(why)) = repo_why {
+        push.repo_why = Some(why);
     }
+    push
+}
+
+/// `git send-pack` does not run the pre-push hook, so the destination has
+/// to be on the allowlist here. A name git cannot resolve fails closed.
+fn send_pack_repo_why(at: &Checkout, remote: &str) -> Result<(), String> {
+    let url = if remote_is_explicit(remote) {
+        remote.to_string()
+    } else {
+        let out = at.git(&[], &["remote", "get-url", remote]).ok_or_else(|| {
+            format!("git send-pack destination {remote} could not be read; {ALLOW_RULE}")
+        })?;
+        if !out.status.success() {
+            return Err(format!(
+                "git send-pack destination {remote} could not be read; {ALLOW_RULE}"
+            ));
+        }
+        let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if url.is_empty() {
+            return Err(format!(
+                "git send-pack destination {remote} could not be read; {ALLOW_RULE}"
+            ));
+        }
+        url
+    };
+    match crate::cloud_hook::repo_on_allowlist(&url) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!(
+            "git send-pack destination is not a repository this seat may push; {ALLOW_RULE}"
+        )),
+        Err(why) => Err(format!("git send-pack {why}; {ALLOW_RULE}")),
+    }
+}
+
+fn remote_is_explicit(remote: &str) -> bool {
+    remote.contains("://")
+        || remote.starts_with('/')
+        || remote.starts_with('.')
+        || remote.starts_with('~')
+        || remote.contains(':')
 }
 
 fn subtree_push_cursor_ref(words: &[String], at: &Checkout) -> Option<String> {
@@ -2525,6 +2970,9 @@ fn submodule_foreach_cursor_ref(words: &[String], at: &Checkout) -> Option<Strin
 struct Push {
     /// A refusal reason for non-`git push` forms that still write refs.
     reason: Option<String>,
+    /// `git send-pack` names a repository the allowlist does not have.
+    /// Ordinary `git push` leaves this empty: the hook is the backstop.
+    repo_why: Option<String>,
     at: Checkout,
     /// The words past the options: the remote, then the refspecs.
     words: Vec<String>,
@@ -2548,6 +2996,7 @@ impl Push {
     fn read(args: &[String], at: Checkout) -> Self {
         let mut push = Push {
             reason: None,
+            repo_why: None,
             at,
             words: Vec::new(),
             repo: None,
@@ -2593,6 +3042,7 @@ impl Push {
     fn refuse(at: Checkout, reason: String) -> Self {
         Self {
             reason: Some(reason),
+            repo_why: None,
             at,
             words: Vec::new(),
             repo: None,
@@ -2608,6 +3058,9 @@ impl Push {
     fn cursor_ref(&self) -> Option<String> {
         if self.dry_run {
             return None;
+        }
+        if let Some(why) = &self.repo_why {
+            return Some(why.clone());
         }
         if let Some(reason) = &self.reason {
             return Some(reason.clone());
@@ -3221,6 +3674,16 @@ fn script_mentions_ref_write(text: &str) -> bool {
 }
 
 fn http_targets_github(words: &[String]) -> bool {
+    let cmd = words
+        .first()
+        .map(|word| word.rsplit('/').next().unwrap_or(word.as_str()))
+        .unwrap_or("");
+    let proto = if cmd == "curl" {
+        curl_proto_default(words)
+    } else {
+        None
+    };
+    let httpie = cmd == "http" || cmd == "https";
     let mut github = false;
     let mut other = false;
     let mut hidden = false;
@@ -3235,6 +3698,16 @@ fn http_targets_github(words: &[String]) -> bool {
                 other = true;
             }
             continue;
+        }
+        if httpie || proto.is_some() {
+            if let Some(host) = schemeless_host(word) {
+                if is_github_host(&host) {
+                    github = true;
+                } else {
+                    other = true;
+                }
+                continue;
+            }
         }
         // `$URL` and `https://$HOST/...` do not name a host. A header that
         // happens to hold a token has a colon or a space and is not a URL.
@@ -3253,25 +3726,86 @@ fn http_targets_github(words: &[String]) -> bool {
     hidden
 }
 
+fn curl_proto_default(words: &[String]) -> Option<String> {
+    let mut i = 1usize;
+    while i < words.len() {
+        let word = words[i].as_str();
+        if let Some(value) = word.strip_prefix("--proto-default=") {
+            return (!value.is_empty()).then(|| value.to_string());
+        }
+        if word == "--proto-default" {
+            return words.get(i + 1).cloned();
+        }
+        i += 1;
+    }
+    None
+}
+
 fn literal_http_host(word: &str) -> Option<String> {
-    let rest = word
-        .strip_prefix("https://")
-        .or_else(|| word.strip_prefix("http://"))?;
-    let host = rest.split(['/', '?', ':']).next().unwrap_or("");
+    host_in_url(word)
+}
+
+fn schemeless_host(word: &str) -> Option<String> {
+    if word.contains("://") || word.contains('=') || word.contains([' ', '\t']) {
+        return None;
+    }
+    let host = host_in_url(&format!("https://{word}"))?;
+    host.contains('.').then_some(host)
+}
+
+/// Authority host. The scheme's case does not matter. Userinfo is the last
+/// `@` before the path, so a token is not the host and a port stays with
+/// the host. One trailing dot is not a different host.
+fn host_in_url(word: &str) -> Option<String> {
+    let word = word
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'' || c == '<' || c == '>');
+    let idx = word.find("://")?;
+    let scheme = &word[..idx];
+    if scheme.is_empty() || !scheme.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let rest = &word[idx + 3..];
+    let auth = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if auth.is_empty() {
+        return None;
+    }
+    let hostport = auth.rsplit_once('@').map(|(_, host)| host).unwrap_or(auth);
+    if hostport.is_empty() || unreadable_token(hostport) {
+        return None;
+    }
+    let host = strip_host_port(hostport).trim_end_matches('.');
     if host.is_empty() || unreadable_token(host) {
         return None;
     }
     Some(host.to_ascii_lowercase())
 }
 
+fn strip_host_port(hostport: &str) -> &str {
+    if let Some(inner) = hostport.strip_prefix('[') {
+        return inner.split(']').next().unwrap_or(inner);
+    }
+    if let Some((host, port)) = hostport.rsplit_once(':') {
+        if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
+            return host;
+        }
+    }
+    hostport
+}
+
 fn is_github_host(host: &str) -> bool {
     host == "github.com"
         || host == "github.ghe.com"
+        || host == "ghcr.io"
+        || host == "githubusercontent.com"
         || host.ends_with(".github.com")
         || host.ends_with(".github.ghe.com")
+        || host.ends_with(".ghcr.io")
+        || host.ends_with(".githubusercontent.com")
+        || host.ends_with(".pkg.github.com")
 }
 
-fn http_ref_write(words: &[String]) -> Option<String> {
+fn http_ref_write(words: &[String], env: &[(String, String)]) -> Option<String> {
     let cmd = words.first()?.rsplit('/').next()?;
     if !matches!(cmd, "curl" | "wget" | "http" | "https") {
         return None;
@@ -3281,7 +3815,7 @@ fn http_ref_write(words: &[String]) -> Option<String> {
     if !http_targets_github(words) {
         return None;
     }
-    match http_shape(cmd, words) {
+    match http_shape(cmd, words, env) {
         HttpShape::Get => None,
         HttpShape::Write | HttpShape::Opaque => Some(format!(
             "an HTTP client can write refs on GitHub and the destination is not limited to this seat; {ALLOW_RULE}"
@@ -3295,10 +3829,10 @@ enum HttpShape {
     Opaque,
 }
 
-fn http_shape(cmd: &str, words: &[String]) -> HttpShape {
+fn http_shape(cmd: &str, words: &[String], env: &[(String, String)]) -> HttpShape {
     match cmd {
-        "curl" => curl_shape(words),
-        "wget" => wget_shape(words),
+        "curl" => curl_shape(words, env),
+        "wget" => wget_shape(words, env),
         "http" | "https" => httpie_shape(words),
         _ => HttpShape::Opaque,
     }
@@ -3306,13 +3840,17 @@ fn http_shape(cmd: &str, words: &[String]) -> HttpShape {
 
 /// Boolean curl shorts. `G` is `--get` and `I` is `--head`. `n` is
 /// `--netrc` and is not in this set.
-const CURL_BOOL: &str = "sSfkLvgGI";
+const CURL_BOOL: &str = "sSfkLvgGIOJi4";
 /// Curl shorts that take a value. `K` is a config file.
 const CURL_VALUE: &str = "XdHuKoTFAbcemwExUrPQDyYztC";
 
-fn curl_shape(words: &[String]) -> HttpShape {
+fn curl_shape(words: &[String], env: &[(String, String)]) -> HttpShape {
+    if !curl_disabled(words) && carries_token(words, env) && curl_config_applies(words, env) {
+        return HttpShape::Opaque;
+    }
     let mut method: Option<String> = None;
     let mut body = false;
+    let mut upload = false;
     let mut query = false;
     let mut i = 1usize;
     while i < words.len() {
@@ -3321,7 +3859,14 @@ fn curl_shape(words: &[String]) -> HttpShape {
             break;
         }
         if word.starts_with("--") {
-            match curl_long(words, &mut i, &mut method, &mut body, &mut query) {
+            match curl_long(
+                words,
+                &mut i,
+                &mut method,
+                &mut body,
+                &mut upload,
+                &mut query,
+            ) {
                 Some(shape) => return shape,
                 None => continue,
             }
@@ -3331,19 +3876,29 @@ fn curl_shape(words: &[String]) -> HttpShape {
                 i += 1;
                 continue;
             }
-            if let Some(shape) =
-                curl_cluster(cluster, words, &mut i, &mut method, &mut body, &mut query)
-            {
+            if let Some(shape) = curl_cluster(
+                cluster,
+                words,
+                &mut i,
+                &mut method,
+                &mut body,
+                &mut upload,
+                &mut query,
+            ) {
                 return shape;
             }
             continue;
         }
         i += 1;
     }
-    finish_http(method.as_deref(), body, query)
+    finish_http(method.as_deref(), body, query, upload)
 }
 
-fn finish_http(method: Option<&str>, body: bool, query: bool) -> HttpShape {
+fn finish_http(method: Option<&str>, body: bool, query: bool, upload: bool) -> HttpShape {
+    // `-G` moves `-d` into the query string. An upload (`-T`, `-F`) stays a body.
+    if upload {
+        return HttpShape::Write;
+    }
     match method {
         Some("GET" | "HEAD") if !body || query => HttpShape::Get,
         Some("GET" | "HEAD") => HttpShape::Write,
@@ -3353,11 +3908,101 @@ fn finish_http(method: Option<&str>, body: bool, query: bool) -> HttpShape {
     }
 }
 
+fn curl_disabled(words: &[String]) -> bool {
+    words.iter().any(|word| word == "-q" || word == "--disable")
+}
+
+fn carries_token(words: &[String], env: &[(String, String)]) -> bool {
+    words.iter().any(|word| token_mark(word)) || env_has_token(env)
+}
+
+fn token_mark(word: &str) -> bool {
+    let lower = word.to_ascii_lowercase();
+    lower.contains("$gh_token")
+        || lower.contains("${gh_token}")
+        || lower.contains("$github_token")
+        || lower.contains("${github_token}")
+        || lower.contains("$github_pat")
+        || lower.contains("${github_pat}")
+        || lower.contains("authorization")
+        || lower.contains("bearer")
+        || lower.contains("x-access-token")
+        || (word.contains("://") && word.contains('@'))
+        || word == "-u"
+        || word == "--user"
+        || word == "--oauth2-bearer"
+        || word == "--netrc"
+        || word == "--netrc-optional"
+        || word == "--netrc-file"
+        || word == "-n"
+}
+
+fn env_has_token(env: &[(String, String)]) -> bool {
+    for key in ["GH_TOKEN", "GITHUB_TOKEN", "GITHUB_PAT"] {
+        if let Some((_, value)) = env.iter().rev().find(|(name, _)| name == key) {
+            if !value.is_empty() {
+                return true;
+            }
+            continue;
+        }
+        if std::env::var(key)
+            .ok()
+            .is_some_and(|value| !value.is_empty())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn prefixed_or_process(env: &[(String, String)], key: &str) -> Option<String> {
+    if let Some((_, value)) = env.iter().rev().find(|(name, _)| name == key) {
+        return Some(value.clone());
+    }
+    std::env::var(key).ok()
+}
+
+fn curl_config_applies(words: &[String], env: &[(String, String)]) -> bool {
+    if curl_disabled(words) {
+        return false;
+    }
+    if prefixed_or_process(env, "CURL_HOME").is_some_and(|value| !value.is_empty()) {
+        return true;
+    }
+    if let Ok(home) = crate::home() {
+        if home.join(".curlrc").is_file() {
+            return true;
+        }
+    }
+    if let Some(xdg) = prefixed_or_process(env, "XDG_CONFIG_HOME") {
+        if !xdg.is_empty() && Path::new(&xdg).join("curlrc").is_file() {
+            return true;
+        }
+    }
+    false
+}
+
+fn wget_config_applies(words: &[String], env: &[(String, String)]) -> bool {
+    if words
+        .iter()
+        .any(|word| word == "--config" || word.starts_with("--config="))
+    {
+        return true;
+    }
+    if prefixed_or_process(env, "WGETRC").is_some_and(|value| !value.is_empty()) {
+        return true;
+    }
+    crate::home()
+        .map(|home| home.join(".wgetrc").is_file())
+        .unwrap_or(false)
+}
+
 fn curl_long(
     words: &[String],
     i: &mut usize,
     method: &mut Option<String>,
     body: &mut bool,
+    upload: &mut bool,
     query: &mut bool,
 ) -> Option<HttpShape> {
     let word = words[*i].as_str();
@@ -3379,10 +4024,15 @@ fn curl_long(
             | "--json"
             | "--upload-file"
             | "--form"
+            | "--form-string"
     ) {
         let value = flag_value(words, i, attached);
+        let uploading = matches!(lower.as_str(), "--upload-file" | "--form" | "--form-string");
         return if value.starts_with('@') {
             Some(HttpShape::Opaque)
+        } else if uploading {
+            *upload = true;
+            None
         } else {
             *body = true;
             None
@@ -3435,6 +4085,8 @@ fn curl_long(
             | "--create-dirs"
             | "--ipv4"
             | "--ipv6"
+            | "--retry-all-errors"
+            | "--remote-header-name"
     ) {
         *i += 1;
         return None;
@@ -3462,11 +4114,15 @@ fn curl_long(
             | "--speed-time"
             | "--limit-rate"
             | "--output-dir"
+            | "--write-out"
     ) {
         let _value = flag_value(words, i, attached);
         return None;
     }
-    Some(HttpShape::Opaque)
+    // A long flag this seat has not named is still a read. A write flag
+    // is listed above.
+    *i += 1;
+    None
 }
 
 fn flag_value(words: &[String], i: &mut usize, attached: &str) -> String {
@@ -3486,6 +4142,7 @@ fn curl_cluster(
     i: &mut usize,
     method: &mut Option<String>,
     body: &mut bool,
+    upload: &mut bool,
     query: &mut bool,
 ) -> Option<HttpShape> {
     let chars: Vec<char> = cluster.chars().collect();
@@ -3524,8 +4181,11 @@ fn curl_cluster(
             'd' | 'T' | 'F' => {
                 if value.starts_with('@') {
                     Some(HttpShape::Opaque)
-                } else {
+                } else if c == 'd' {
                     *body = true;
+                    None
+                } else {
+                    *upload = true;
                     None
                 }
             }
@@ -3537,7 +4197,10 @@ fn curl_cluster(
     None
 }
 
-fn wget_shape(words: &[String]) -> HttpShape {
+fn wget_shape(words: &[String], env: &[(String, String)]) -> HttpShape {
+    if carries_token(words, env) && wget_config_applies(words, env) {
+        return HttpShape::Opaque;
+    }
     let mut method: Option<String> = None;
     let mut body = false;
     let mut i = 1usize;
@@ -3553,12 +4216,42 @@ fn wget_shape(words: &[String]) -> HttpShape {
             i += 1;
             continue;
         }
+        if lower == "-e" || lower == "--execute" {
+            if let Some(value) = words.get(i + 1) {
+                note_wget_exec(value, &mut method, &mut body);
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(value) = lower.strip_prefix("--execute=") {
+            note_wget_exec(value, &mut method, &mut body);
+            i += 1;
+            continue;
+        }
+        if let Some(value) = lower.strip_prefix("-e") {
+            if !value.is_empty() && !lower.starts_with("--") {
+                note_wget_exec(value, &mut method, &mut body);
+                i += 1;
+                continue;
+            }
+        }
         if lower.starts_with("--post-") || lower.starts_with("--body-") {
             body = true;
         }
         i += 1;
     }
-    finish_http(method.as_deref(), body, false)
+    finish_http(method.as_deref(), body, false, false)
+}
+
+fn note_wget_exec(value: &str, method: &mut Option<String>, body: &mut bool) {
+    let lower = value.to_ascii_lowercase();
+    let (key, val) = lower.split_once('=').unwrap_or((lower.as_str(), ""));
+    let key = key.trim();
+    match key {
+        "method" => *method = Some(val.trim().to_ascii_uppercase()),
+        "body_data" | "body_file" | "post_data" | "post_file" | "header" => *body = true,
+        _ => {}
+    }
 }
 
 fn httpie_shape(words: &[String]) -> HttpShape {
@@ -3587,5 +4280,5 @@ fn httpie_shape(words: &[String]) -> HttpShape {
             body = true;
         }
     }
-    finish_http(method.as_deref(), body, false)
+    finish_http(method.as_deref(), body, false, false)
 }
