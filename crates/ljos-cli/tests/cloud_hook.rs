@@ -1149,6 +1149,53 @@ fn a_curl_config_that_hides_the_target_may_be_github() {
     );
 }
 
+/// Wget fetches each URL in an input file and resolves a relative one
+/// against a base, so either may send the request to GitHub whatever
+/// the command line names. So does a `Host:` header.
+#[test]
+fn a_wget_command_line_that_moves_the_target_may_be_github() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let cfg = root.path().join("named.wgetrc");
+    fs::write(&cfg, "input = /tmp/urls\n").unwrap();
+
+    for moved in [
+        "-i /tmp/urls".to_string(),
+        "-i/tmp/urls".to_string(),
+        "-qi /tmp/urls".to_string(),
+        "--input-file /tmp/urls".to_string(),
+        "--input-file=/tmp/urls".to_string(),
+        "--input-f=/tmp/urls".to_string(),
+        "-B https://api.github.com/".to_string(),
+        "-Bhttps://api.github.com/".to_string(),
+        "--base https://example.org/".to_string(),
+        "--base=https://api.github.com/".to_string(),
+        "--header 'Host: api.github.com'".to_string(),
+        "--header=host:api.github.com".to_string(),
+        "-qebase=https://api.github.com/".to_string(),
+        format!("--conf={}", cfg.display()),
+        format!("--config {}", cfg.display()),
+    ] {
+        refused(
+            &format!("wget --method=POST {moved} https://example.invalid/x"),
+            here,
+        );
+        allowed(&format!("wget {moved} https://example.invalid/x"), here);
+    }
+    allowed(
+        "wget --method=POST -O /tmp/i -nv https://example.invalid/x",
+        here,
+    );
+
+    fs::write(home.join(".wgetrc"), "header = @/tmp/h\n").unwrap();
+    refused("wget -i /tmp/urls https://example.invalid/x", here);
+    fs::remove_file(home.join(".wgetrc")).unwrap();
+}
+
 /// A curl option that names a proxy, a resolver, a socket, an address
 /// map, or a `Host:` header sends the request somewhere the URL does not
 /// say. So does an address for a host, and an option the guard does not
