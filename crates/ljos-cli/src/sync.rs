@@ -5764,7 +5764,7 @@ mod tests {
             atom("a", "from the primary log", &["scope:grokbot"])
         );
         seal(
-            &box_plain,
+            &framed("gonehost", "grokbot", &box_plain),
             std::slice::from_ref(&box_public),
             &atoms.join("gonehost.jsonl.age"),
         )
@@ -5822,6 +5822,150 @@ mod tests {
         let tracked = git(&["ls-files", ".ljos/atoms"]);
         assert!(!tracked.contains("gonehost.jsonl.age"), "{tracked}");
         assert!(tracked.contains("gonehost+cloud.jsonl.age"), "{tracked}");
+    }
+
+    /// `body` as `host` seals its log of `scope_name`: the header first.
+    fn framed(host: &str, scope_name: &str, body: &str) -> String {
+        format!(
+            "{}\n{body}",
+            serde_json::json!({ "ljos_log": 1, "host": host, "scope": scope_name })
+        )
+    }
+
+    struct Laundered {
+        _env: crate::EnvLock,
+        root: PathBuf,
+        scope: Scope,
+        posted: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+    }
+
+    /// A box that holds its machine key and the cloud identity. A peer has
+    /// committed, as `gonehost+cloud.jsonl.age`, a log sealed only to the
+    /// machine key: this host's own grokbot log, or one with no header.
+    fn laundered(dir: &Path, legacy: bool) -> Laundered {
+        let env = begin(dir);
+        let machine = make_key();
+        let cloud_public = age_keygen(&cloud_identity_path());
+        let root = tracker(dir);
+        std::fs::write(
+            root.join(".ljos/sync.toml"),
+            format!(
+                "name = \"grokbot\"\nrecipients = [\"{machine}\"]\n[scopes]\ncloud = [\"{cloud_public}\"]\n"
+            ),
+        )
+        .unwrap();
+        let body = format!("{}\n", atom("a", "machine-only secret", &[]));
+        let plain = if legacy {
+            body
+        } else {
+            framed(&host(), "grokbot", &body)
+        };
+        let rel = ".ljos/atoms/gonehost+cloud.jsonl.age";
+        seal(&plain, std::slice::from_ref(&machine), &root.join(rel)).unwrap();
+        commit_dated(
+            &root,
+            &[".ljos/sync.toml", rel],
+            "peer log",
+            Some(OLD_COMMIT),
+        );
+        let scope = scope_of_repo(&root).unwrap().unwrap();
+        let posted = std::sync::Arc::default();
+        point_pack(&serve_pack(std::sync::Arc::clone(&posted)));
+        Laundered {
+            _env: env,
+            root,
+            scope,
+            posted,
+        }
+    }
+
+    #[test]
+    fn a_machine_only_log_named_as_scope_cloud_is_not_adopted() {
+        for legacy in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let fix = laundered(dir.path(), legacy);
+            let said = adopt_in_repo(&fix.root, &fix.scope, "gonehost", opts(true, false)).unwrap();
+            assert!(said.contains("left unread"), "legacy {legacy}: {said}");
+            assert!(
+                posted_texts(&fix.posted).is_empty(),
+                "legacy {legacy}: {said}"
+            );
+            let mine = fix
+                .root
+                .join(format!(".ljos/atoms/{}+cloud.jsonl.age", host()));
+            assert!(
+                !mine.exists(),
+                "legacy {legacy}: resealed to the cloud recipients: {said}"
+            );
+            assert!(in_head(&fix.root, ".ljos/atoms/gonehost+cloud.jsonl.age"));
+        }
+    }
+
+    #[test]
+    fn a_machine_only_log_named_as_scope_cloud_is_not_imported() {
+        for legacy in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let fix = laundered(dir.path(), legacy);
+            let said = import(&fix.root, &fix.scope).unwrap();
+            assert!(said.contains("left unread"), "legacy {legacy}: {said}");
+            assert!(
+                posted_texts(&fix.posted).is_empty(),
+                "legacy {legacy}: {said}"
+            );
+        }
+    }
+
+    /// A box with no cloud identity whose machine key is a cloud recipient
+    /// reads a peer's cloud log that names itself.
+    #[test]
+    fn a_cloud_log_with_its_header_opens_with_the_machine_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let machine = make_key();
+        let root = tracker(dir.path());
+        let scope: Scope = toml::from_str(&format!(
+            "name = \"grokbot\"\nrecipients = [\"{machine}\"]\n[scopes]\ncloud = [\"{machine}\"]\n"
+        ))
+        .unwrap();
+        let body = format!("{}\n", atom("a", "cloud words", &["scope:cloud"]));
+        seal(
+            &framed("gonehost", CLOUD_SCOPE, &body),
+            std::slice::from_ref(&machine),
+            &root.join(".ljos/atoms/gonehost+cloud.jsonl.age"),
+        )
+        .unwrap();
+        let posted = std::sync::Arc::default();
+        point_pack(&serve_pack(std::sync::Arc::clone(&posted)));
+        let said = import(&root, &scope).unwrap();
+        assert!(said.contains("gonehost: 1 cloud atoms taken"), "{said}");
+        assert_eq!(posted_texts(&posted), vec!["cloud words"]);
+    }
+
+    /// A cloud log written before the header, sealed to the cloud
+    /// recipient, still opens with the cloud identity beside a machine key.
+    #[test]
+    fn a_legacy_cloud_log_opens_with_the_cloud_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let machine = make_key();
+        let cloud_public = age_keygen(&cloud_identity_path());
+        let root = tracker(dir.path());
+        let scope: Scope = toml::from_str(&format!(
+            "name = \"grokbot\"\nrecipients = [\"{machine}\"]\n[scopes]\ncloud = [\"{cloud_public}\"]\n"
+        ))
+        .unwrap();
+        let body = format!("{}\n", atom("a", "old cloud words", &["scope:cloud"]));
+        seal(
+            &body,
+            std::slice::from_ref(&cloud_public),
+            &root.join(".ljos/atoms/gonehost+cloud.jsonl.age"),
+        )
+        .unwrap();
+        let posted = std::sync::Arc::default();
+        point_pack(&serve_pack(std::sync::Arc::clone(&posted)));
+        let said = import(&root, &scope).unwrap();
+        assert!(said.contains("gonehost: 1 cloud atoms taken"), "{said}");
+        assert_eq!(posted_texts(&posted), vec!["old cloud words"]);
     }
 
     const OLD_COMMIT: &str = "100000000 +0000";
@@ -5937,7 +6081,7 @@ mod tests {
         .unwrap();
         let age = ".ljos/atoms/gone.jsonl.age";
         seal(
-            &cloud_plain(),
+            &framed("gone", "cloud", &cloud_plain()),
             std::slice::from_ref(&public),
             &root.join(age),
         )
@@ -6074,7 +6218,11 @@ mod tests {
         assert!(!private_log.contains("ljos-b"), "{private_log}");
         let mine = log_dir(&fix.root).join(format!("{}.jsonl.age", host()));
         let opened = open(&mine, &identity_path()).unwrap().unwrap();
-        assert_eq!(opened.lines().count(), 3, "{opened}");
+        let atoms = opened
+            .lines()
+            .filter(|line| line.contains("\"text\""))
+            .count();
+        assert_eq!(atoms, 3, "{opened}");
         assert!(opened.contains("scope:cloud"), "{opened}");
         assert!(!opened.contains("sync:"), "{opened}");
         assert!(!in_head(&fix.root, ".ljos/atoms/gone.jsonl.age"));
@@ -6115,7 +6263,11 @@ mod tests {
         let opened = open_sealed_bytes(&sealed, &[identity_path()])
             .unwrap()
             .unwrap();
-        assert_eq!(opened.lines().count(), 3, "{opened}");
+        let atoms = opened
+            .lines()
+            .filter(|line| line.contains("\"text\""))
+            .count();
+        assert_eq!(atoms, 3, "{opened}");
         let raw = log_dir(&fix.root).join("bad host.jsonl.age");
         assert!(!raw.exists());
         assert_eq!(require_host_name(&host()).unwrap(), host());
@@ -6333,7 +6485,11 @@ mod tests {
         let public = make_key();
         let root = tracker(dir.path());
         let rel = ".ljos/atoms/gone.jsonl.age";
-        let plain = "{\"text\":\"back\",\"kind\":\"lesson\",\"entities\":[]}\n";
+        let plain = &framed(
+            "gone",
+            "cloud",
+            "{\"text\":\"back\",\"kind\":\"lesson\",\"entities\":[]}\n",
+        );
         seal(plain, std::slice::from_ref(&public), &root.join(rel)).unwrap();
         commit_dated(&root, &[rel], "log", None);
         let out = git(&root, &["rm", "-q", "--", rel]).unwrap();
@@ -6392,7 +6548,8 @@ mod tests {
         assert_ne!(host(), "peer", "the log's host would be this machine");
         let public = make_key();
         let root = tracker(dir);
-        let plain: String = rows.iter().map(|row| format!("{row}\n")).collect();
+        let body: String = rows.iter().map(|row| format!("{row}\n")).collect();
+        let plain = framed("peer", "cloud", &body);
         let rel = ".ljos/atoms/peer.jsonl.age";
         seal(&plain, std::slice::from_ref(&public), &root.join(rel)).unwrap();
         commit_dated(&root, &[rel], "log", None);
@@ -6516,7 +6673,7 @@ mod tests {
         std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
         std::fs::rename(&own, &shared).unwrap();
         let log = root.join(".ljos/atoms/peer.jsonl.age");
-        seal("", &scope.recipients, &log).unwrap();
+        seal(&framed("peer", "cloud", ""), &scope.recipients, &log).unwrap();
         let said = import(&root, &scope).unwrap();
         assert!(
             said.contains("sync: peer: 0 cloud atoms taken, 0 refused, 1 retired\n"),
@@ -6616,13 +6773,21 @@ mod tests {
         )
         .unwrap();
         seal(
-            "{\"text\":\"box-live\",\"kind\":\"lesson\",\"entities\":[\"scope:box\"]}\n",
+            &framed(
+                "gone",
+                "box",
+                "{\"text\":\"box-live\",\"kind\":\"lesson\",\"entities\":[\"scope:box\"]}\n",
+            ),
             std::slice::from_ref(&public),
             &root.join(".ljos/atoms/gone.jsonl.age"),
         )
         .unwrap();
         seal(
-            "{\"text\":\"cloud-live\",\"kind\":\"lesson\",\"entities\":[\"scope:cloud\"]}\n",
+            &framed(
+                "gone",
+                "cloud",
+                "{\"text\":\"cloud-live\",\"kind\":\"lesson\",\"entities\":[\"scope:cloud\"]}\n",
+            ),
             std::slice::from_ref(&public),
             &root.join(".ljos/atoms/gone+cloud.jsonl.age"),
         )
@@ -6789,7 +6954,7 @@ mod tests {
         let (root, scope) = two_scope_logs(dir.path());
         let public = identity_recipient(&identity_path()).unwrap();
         seal(
-            "\n",
+            &framed("gone", "cloud", "\n"),
             std::slice::from_ref(&public),
             &root.join(".ljos/atoms/gone+cloud.jsonl.age"),
         )
@@ -6834,7 +6999,11 @@ mod tests {
         assert!(public.status.success());
         let public = String::from_utf8_lossy(&public.stdout).trim().to_string();
         seal(
-            "{\"text\":\"cloud-live\",\"kind\":\"lesson\",\"entities\":[\"scope:cloud\",\"seat:again\"]}\n",
+            &framed(
+                "gone",
+                "cloud",
+                "{\"text\":\"cloud-live\",\"kind\":\"lesson\",\"entities\":[\"scope:cloud\",\"seat:again\"]}\n",
+            ),
             std::slice::from_ref(&public),
             &root.join(".ljos/atoms/gone+cloud.jsonl.age"),
         )
@@ -7403,8 +7572,12 @@ mod tests {
             ),
         )
         .unwrap();
-        let box_line = lesson_line("Kept on the box.", "grokbot");
-        let cloud_line = lesson_line("Kept on the cloud.", "cloud");
+        let box_line = framed(
+            "peer",
+            "grokbot",
+            &lesson_line("Kept on the box.", "grokbot"),
+        );
+        let cloud_line = framed("peer", "cloud", &lesson_line("Kept on the cloud.", "cloud"));
         seal_for(
             &root.join(".ljos/atoms/peer+cloud.jsonl.age"),
             &public,
@@ -7505,11 +7678,12 @@ mod tests {
             let scope = scope_of_repo(&root).unwrap().unwrap();
             for name in ["grokbot", "cloud"] {
                 let [rel, _] = host_log_rels_for_scope("peer", "grokbot", name);
-                let plain = if name == to_scope {
+                let body = if name == to_scope {
                     lesson_line(text, name)
                 } else {
                     String::new()
                 };
+                let plain = framed("peer", name, &body);
                 seal_for(&root.join(rel), &public, &plain);
             }
             let said = import(&root, &scope).unwrap();
@@ -7578,7 +7752,7 @@ mod tests {
         seal_for(
             &root.join(".ljos/atoms/peer+cloud.jsonl.age"),
             &public,
-            &lesson_line(text, "cloud"),
+            &framed("peer", "cloud", &lesson_line(text, "cloud")),
         );
         let scope = scope_of_repo(&root).unwrap().unwrap();
         let said = import(&root, &scope).unwrap();
