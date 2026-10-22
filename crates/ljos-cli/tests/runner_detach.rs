@@ -457,11 +457,17 @@ fn detaching_does_not_make_this_process_the_person() {
 
     let hook = forged_hook(&seat);
     assert!(hook.status.success(), "hook\n{}", text_of(&hook));
-    let saved = atoms(&seat.url);
-    let saved = by_text(&saved, "use bun");
-    assert_ne!(basis(saved), Some("person"), "forged hook: {saved}");
+    let err = String::from_utf8_lossy(&hook.stderr);
     assert!(
-        !saved["entities"].to_string().contains("via:prompt"),
-        "forged hook carried via:prompt: {saved}"
+        err.contains("not kept as the person's"),
+        "a detached hook was kept\n{}",
+        text_of(&hook)
     );
+    let saved = atoms(&seat.url);
+    let saved = saved.iter().find(|atom| {
+        atom.get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|text| text.contains("use bun"))
+    });
+    assert!(saved.is_none(), "forged hook stored {saved:?}");
 }
