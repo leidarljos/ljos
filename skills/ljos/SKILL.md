@@ -586,6 +586,9 @@ travels in the machine's default scope, the same way an unscoped lesson does.
 receipt. `ljos read ID` writes one, kind `receipt`, and the sender sees it
 on a later `ljos inbox`. `ljos reply ID TEXT` writes back to the sender,
 keeps the issue, and carries `reply:ID`, so the thread stays on the work.
+`ljos inbox --sync [COMMIT]` fetches until that commit is present, or
+the remote head when it is not, imports the sealed logs, and then
+lists. With no remote the flag changes nothing.
 
 `ljos group NAME --add SEAT` records a member. `--remove SEAT` records the
 drop. Membership is atoms of kind `group`, so it travels in the same log.

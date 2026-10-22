@@ -3,8 +3,10 @@
 //! Two clones of one bare remote stand in for two machines. `ljos send`
 //! and `ljos reply` return while a pre-push hook is still asleep, and the
 //! wake command finds the log already on the remote, and `LJOS_WAKE_COMMIT`
-//! is that commit. A remote that refuses the push still gets the wake, the
-//! refusal is a line in the wake log, and the commit is the local one.
+//! is that commit. The other clone's `ljos inbox --sync` then lists the
+//! letter. A remote that refuses the push still gets the wake, the refusal
+//! is a line in the wake log, and the commit is the local one. A checkout
+//! with no remote only lists.
 
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
@@ -344,6 +346,18 @@ impl World {
     /// `ljos` as `seat` with this machine's hostname. The detached wake
     /// inherits the namespace, so the log is named after `host`.
     fn ljos(&self, home: &Path, host: &str, seat: &str, args: &[&str]) -> Output {
+        self.run(home, host, seat, self.port, &[], args)
+    }
+
+    fn run(
+        &self,
+        home: &Path,
+        host: &str,
+        seat: &str,
+        port: u16,
+        extra: &[(&str, &str)],
+        args: &[&str],
+    ) -> Output {
         let mut cmd = Command::new("/usr/bin/unshare");
         cmd.args([
             "--uts",
@@ -356,7 +370,11 @@ impl World {
         cmd.arg("ljos").arg(host).arg(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args);
         self.env(&mut cmd, home);
+        cmd.env("PACKSET_PORT", port.to_string());
         cmd.env("LJOS_SEAT", seat);
+        for (key, value) in extra {
+            cmd.env(key, value);
+        }
         let child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -373,6 +391,44 @@ impl World {
     fn recipient(&self, seat: &str, args: &[&str]) -> Output {
         self.ljos(&self.recipient_home, RECIPIENT_HOST, seat, args)
     }
+}
+
+fn wait_port(port: u16) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "packsetd did not listen on {port}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A pack of its own, so a letter that was pushed is not already local.
+fn extra_pack(world: &World, label: &str) -> (Daemon, u16) {
+    let port = free_port();
+    let pack_home = world.root.path().join(label);
+    std::fs::create_dir_all(&pack_home).expect("pack home");
+    let mut daemon = Command::new(packsetd_bin());
+    daemon.args([
+        "--port",
+        &port.to_string(),
+        "--home",
+        pack_home.to_str().expect("utf-8"),
+    ]);
+    world.env(&mut daemon, &world.recipient_home);
+    let daemon = Daemon(
+        daemon
+            .env("PACKSET_PORT", port.to_string())
+            .env("PACKSET_HOME", &pack_home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn packsetd"),
+    );
+    wait_port(port);
+    (daemon, port)
 }
 
 fn text(out: &Output) -> String {
@@ -644,4 +700,202 @@ fn a_refused_push_still_wakes_and_is_logged() {
         .expect("git");
     assert!(!remote.success(), "a refused push still updated the remote");
     assert_commit_holds(&world, &world.sender_home, &world.sender_repo, SENDER_HOST);
+}
+
+#[test]
+fn a_recipients_inbox_sync_reads_the_pushed_letter() {
+    let (world, _daemon) = world(false, false);
+    let joined = world.sender(RECIPIENT, &["group", "crew", "--add", RECIPIENT]);
+    assert!(joined.status.success(), "{}", text(&joined));
+    let sender_script = script(&world.sender_home);
+    let set = world.sender(
+        RECIPIENT,
+        &[
+            "wake",
+            RECIPIENT,
+            "--command",
+            &format!("sh {}", sender_script.display()),
+        ],
+    );
+    assert!(set.status.success(), "{}", text(&set));
+    let sent = world.sender(SENDER, &["send", RECIPIENT, LETTER]);
+    assert!(sent.status.success(), "{}", text(&sent));
+    wait_for(&world.sender_home.join("woke"), Duration::from_secs(30)).unwrap_or_else(|| {
+        panic!(
+            "the wake did not run after the push: {}",
+            wake_log(&world.sender_home)
+        )
+    });
+    let commit = recorded_commit(&world.sender_home);
+
+    let (_pack, port) = extra_pack(&world, "recipient-pack");
+    let bare = world.run(
+        &world.recipient_home,
+        RECIPIENT_HOST,
+        RECIPIENT,
+        port,
+        &[],
+        &["inbox"],
+    );
+    assert!(bare.status.success(), "{}", text(&bare));
+    assert_eq!(
+        String::from_utf8_lossy(&bare.stdout),
+        "inbox: nothing unread\n",
+        "the letter was already in the other pack: {}",
+        text(&bare)
+    );
+
+    let synced = world.run(
+        &world.recipient_home,
+        RECIPIENT_HOST,
+        RECIPIENT,
+        port,
+        &[],
+        &["inbox", "--sync", &commit],
+    );
+    assert!(synced.status.success(), "{}", text(&synced));
+    let inbox = String::from_utf8_lossy(&synced.stdout);
+    assert!(
+        inbox.contains(LETTER),
+        "inbox --sync did not show the letter: {}",
+        text(&synced)
+    );
+    assert!(
+        !String::from_utf8_lossy(&synced.stderr).contains("not on the remote"),
+        "{}",
+        text(&synced)
+    );
+
+    let (_other, other_port) = extra_pack(&world, "fallback-pack");
+    let missing = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let fell = world.run(
+        &world.recipient_home,
+        RECIPIENT_HOST,
+        RECIPIENT,
+        other_port,
+        &[("LJOS_WAKE_COMMIT", missing)],
+        &["inbox", "--sync"],
+    );
+    assert!(fell.status.success(), "{}", text(&fell));
+    let err = String::from_utf8_lossy(&fell.stderr);
+    assert!(
+        err.contains("not on the remote"),
+        "a missing commit was not named: {err}"
+    );
+    assert!(
+        String::from_utf8_lossy(&fell.stdout).contains(LETTER),
+        "the remote head was not imported: {}",
+        text(&fell)
+    );
+
+    let reply_script = script(&world.recipient_home);
+    let set = world.run(
+        &world.recipient_home,
+        RECIPIENT_HOST,
+        SENDER,
+        port,
+        &[],
+        &[
+            "wake",
+            SENDER,
+            "--command",
+            &format!("sh {}", reply_script.display()),
+        ],
+    );
+    assert!(set.status.success(), "{}", text(&set));
+    let id = inbox
+        .lines()
+        .find(|line| line.contains(LETTER))
+        .and_then(|line| line.split('\t').next())
+        .expect("message id")
+        .to_string();
+    let reply = world.run(
+        &world.recipient_home,
+        RECIPIENT_HOST,
+        RECIPIENT,
+        port,
+        &[],
+        &["reply", &id, REPLY],
+    );
+    assert!(reply.status.success(), "{}", text(&reply));
+    assert!(
+        text(&reply).contains(&format!("waking {SENDER}")),
+        "{}",
+        text(&reply)
+    );
+    wait_for(&world.recipient_home.join("woke"), Duration::from_secs(30)).unwrap_or_else(|| {
+        panic!(
+            "the reply's wake did not run: {}",
+            wake_log(&world.recipient_home)
+        )
+    });
+    let reply_commit = recorded_commit(&world.recipient_home);
+    let seen = world.run(
+        &world.sender_home,
+        SENDER_HOST,
+        SENDER,
+        world.port,
+        &[],
+        &["inbox", "--sync", &reply_commit],
+    );
+    assert!(seen.status.success(), "{}", text(&seen));
+    assert!(
+        String::from_utf8_lossy(&seen.stdout).contains(REPLY),
+        "the sender did not see the reply: {}",
+        text(&seen)
+    );
+}
+
+#[test]
+fn inbox_sync_with_no_remote_only_lists() {
+    let (world, _daemon) = world(false, false);
+    let local = world.root.path().join("local-repo");
+    std::fs::create_dir_all(local.join(".ljos")).expect("ljos");
+    git(&world.gitconfig, &local, &["init", "-q", "-b", "main"]);
+    identity(
+        &world.gitconfig,
+        &local,
+        &world.root.path().join("no-hooks"),
+    );
+    std::fs::copy(
+        world.root.path().join("seed/.ljos/sync.toml"),
+        local.join(".ljos/sync.toml"),
+    )
+    .expect("scope");
+    std::fs::write(local.join("README"), "local\n").expect("readme");
+    git(&world.gitconfig, &local, &["add", "."]);
+    git(&world.gitconfig, &local, &["commit", "-q", "-m", "local"]);
+    let head = git(&world.gitconfig, &local, &["rev-parse", "HEAD"]);
+
+    std::fs::write(
+        world.recipient_home.join(".config/ljos/sync.toml"),
+        format!("repos = [\"{}\"]\n", local.display()),
+    )
+    .expect("repos");
+    let joined = world.sender(RECIPIENT, &["group", "crew", "--add", RECIPIENT]);
+    assert!(joined.status.success(), "{}", text(&joined));
+    let sent = world.sender(SENDER, &["send", RECIPIENT, LETTER]);
+    assert!(sent.status.success(), "{}", text(&sent));
+
+    let listed = world.recipient(RECIPIENT, &["inbox", "--sync"]);
+    assert!(listed.status.success(), "{}", text(&listed));
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains(LETTER),
+        "{}",
+        text(&listed)
+    );
+    assert!(
+        !String::from_utf8_lossy(&listed.stderr).contains("fetch failed"),
+        "{}",
+        text(&listed)
+    );
+    assert_eq!(
+        git(&world.gitconfig, &local, &["rev-parse", "HEAD"]),
+        head,
+        "inbox --sync committed on a repo with no remote"
+    );
+    assert_eq!(
+        git(&world.gitconfig, &local, &["status", "--porcelain"]).trim(),
+        ""
+    );
 }

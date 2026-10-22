@@ -24,7 +24,9 @@
 //!
 //! The envelope carries the tracker commit that holds the log, when push
 //! mode made one. A command sees `LJOS_WAKE_COMMIT`, and a webhook's JSON
-//! has `commit`. The field is absent when no log commit was made.
+//! has `commit`. The field is absent when no log commit was made. The
+//! other machine fetches that commit with `ljos inbox --sync`, imports
+//! the sealed logs, and then lists. With no remote the flag only lists.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -297,9 +299,14 @@ pub fn spawn(events: &[Event]) -> Vec<String> {
     woken
 }
 
-/// The envelope a webhook gets. The body stays in the pack.
+/// The envelope a webhook gets. The body stays in the pack. When the
+/// log's commit is known, `read` names `ljos inbox --sync COMMIT`.
 #[must_use]
 pub fn envelope(event: &Event) -> serde_json::Value {
+    let read = match &event.commit {
+        Some(commit) => format!("LJOS_SEAT={} ljos inbox --sync {commit}", event.seat),
+        None => format!("LJOS_SEAT={} ljos inbox", event.seat),
+    };
     let mut v = serde_json::json!({
         "event": "ljos-mail",
         "seat": event.seat,
@@ -307,7 +314,7 @@ pub fn envelope(event: &Event) -> serde_json::Value {
         "msg": event.msg,
         "issue": event.issue,
         "interrupt": event.interrupt,
-        "read": format!("LJOS_SEAT={} ljos inbox", event.seat),
+        "read": read,
     });
     if let Some(commit) = &event.commit {
         v["commit"] = serde_json::Value::String(commit.clone());
@@ -501,14 +508,20 @@ mod tests {
         assert_eq!(v["msg"], "m1");
         assert_eq!(v["interrupt"], true);
         assert!(v.get("commit").is_none(), "{v}");
+        assert_eq!(v["read"], "LJOS_SEAT=grok ljos inbox");
         assert!(v.get("body").is_none() && v.get("text").is_none(), "{v}");
         let named = Event {
             commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
             ..event
         };
+        let named_v = envelope(&named);
         assert_eq!(
-            envelope(&named)["commit"],
+            named_v["commit"],
             "0123456789abcdef0123456789abcdef01234567"
+        );
+        assert_eq!(
+            named_v["read"],
+            "LJOS_SEAT=grok ljos inbox --sync 0123456789abcdef0123456789abcdef01234567"
         );
         assert!(check_webhook("http://example.com/hook").is_err());
         assert!(check_webhook("https://api2.cursor.sh/automations/webhook/x").is_ok());

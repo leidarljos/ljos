@@ -531,6 +531,18 @@ enum Cmd {
         /// Include mail this seat has already read.
         #[arg(long)]
         all: bool,
+        /// Fetch the tracker and import its sealed logs before listing.
+        /// `COMMIT` waits until that commit is present. Without it, use
+        /// `LJOS_WAKE_COMMIT` when that is set, otherwise the remote head.
+        /// A commit the remote does not have imports the remote head. No
+        /// remote: list only.
+        #[arg(
+            long,
+            value_name = "COMMIT",
+            num_args = 0..=1,
+            default_missing_value = ""
+        )]
+        sync: Option<String>,
     },
     /// Write a read receipt for one message.
     Read {
@@ -1772,7 +1784,9 @@ fn run_command() -> Result<()> {
                 })?
             );
         }
-        Cmd::Inbox { all } => print!("{}", ljos_cli::mail::inbox(all)?),
+        Cmd::Inbox { all, sync } => {
+            print!("{}", ljos_cli::mail::inbox_sync(all, sync.as_deref())?)
+        }
         Cmd::Read { id } => print!("{}", ljos_cli::mail::read(&id)?),
         Cmd::Reply {
             id,
