@@ -138,6 +138,18 @@ That tag is explicit. `cloud up` does not set `default_scope`.
 No issue yet? `vissue q -p PROJECT "TITLE"` mints one and prints its id.
 Every piece of work has an issue before it has a claim.
 
+Under a runner, git waits for the sitting. `git commit`, `merge`,
+`rebase`, `cherry-pick`, `revert`, `am`, `pull` and `push` are refused
+until this conversation holds a live claim on an open ticket, and the
+refusal names `ljos sitting ID`. A push onto `develop` or `main` (the
+`consensus_branches`) also waits for that ticket's seats: run
+`ljos consensus ID --no-file`, and push once its `protected push:` line
+says the ticket clears it, with the `quorum` of seats (2) from two model
+families. A push onto your own topic branch needs only the sitting. The
+`pre-commit` and `pre-push` hooks `ljos git-hooks install` writes hold a
+script's commit and push the same way. `ljos doctor` says whether the gate
+is active for this seat. The person at their own terminal is never gated.
+
 ## During the work
 
 - Every artefact the work produces is a deed, then a citation:

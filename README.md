@@ -101,7 +101,10 @@ and asks the same way for `--force-with-lease` onto `main`, `master`,
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"git-force-push: it rewrites shared history, so the agent asks you first (ljos rule `git-force-push`)"}}
 ```
 
-`sh -c "cd repo && git push -f origin main"` gets the same answer. A command
+`sh -c "cd repo && git push -f origin main"` gets the same answer. Under a
+runner, a push onto `main` first needs a sitting whose ticket the seats
+cleared (`ljos consensus ID --no-file`); until then the sitting gate
+denies it. A command
 only your own rule covers, such as `terraform destroy -auto-approve`, meets
 that rule:
 
