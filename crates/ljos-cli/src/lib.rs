@@ -28165,97 +28165,109 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if let Some(rule) = static_guard_in(line, cwd) {
         return Some(rule);
     }
-    let mut answered = false;
-    let mut opened = false;
-    // The whole shell line is judged as one call. The substitutions and
-    // scripts inside the line run too, so each of their pipelines is judged
-    // as well: `echo $(git push -f)` is a push.
-    // A here-document fed to `python3 -` or `node` is that program, sent
-    // as `python3 -c BODY`, so a shell call inside it is judged.
-    // A download and each later pipeline go once more as one call, so a
-    // file `curl -o i.sh URL` saves and `sh i.sh` then runs is judged as
-    // the pair it is.
-    let mut argvs = Vec::new();
-    let words = shell_words(line);
-    if !words.is_empty() {
-        argvs.push(words);
+    let Some(t) = tcb_line_in(line, cwd) else {
+        return policyd_required().then(|| Rule {
+            pattern: "ljos-policyd".into(),
+            verdict: "deny".into(),
+            reason: policyd_required_reason(),
+        });
+    };
+    if !t.starts_with("deny") {
+        // Only the fail-open marker is a fault the switch let through. An
+        // unready token is an allow with a note and is not a bypass.
+        if t.trim().starts_with("allow\tfail-open\t") {
+            log_bypass(
+                "switch",
+                "LJOS_GUARD_FAIL_OPEN=1",
+                line,
+                &Rule {
+                    pattern: "ljos-policyd".into(),
+                    verdict: "deny".into(),
+                    reason: "guard-fault".into(),
+                },
+            );
+        }
+        if let Some(note) = guard_note_of(&t) {
+            set_guard_note(note);
+        }
+        return None;
     }
+    let token = policyd_token(&t);
+    let token = if token.is_empty() { "tcb" } else { token };
+    // A force push asks, whether the table or the phronesis law
+    // (`git-force-push: ...`) refused it. The other checks still deny.
+    let code = token.split(':').next().unwrap_or(token).trim();
+    let ask = code == "git-force-push";
+    Some(Rule {
+        pattern: if ask {
+            code.to_string()
+        } else {
+            "ljos-policyd".into()
+        },
+        verdict: if ask { "ask" } else { "deny" }.into(),
+        reason: policyd_reason(token),
+    })
+}
+
+/// What ljos-policyd is asked about `line`: the line itself as `bash -c
+/// LINE`, so it reads the line with its own shell lexer, subshells,
+/// substitutions and separators with no space around them included.
+/// A here-document fed to `python3 -` or `node` is that program, sent as
+/// `python3 -c BODY`, so a shell call inside it is judged. A download and
+/// each later pipeline go once more as one call, so a file `curl -o i.sh
+/// URL` saves and `sh i.sh` then runs is judged as the pair it is.
+fn tcb_argvs(line: &str) -> Vec<Vec<String>> {
+    let mut argvs = vec![vec!["bash".to_string(), "-c".to_string(), line.to_string()]];
     argvs.extend(stdin_programs(line));
     argvs.extend(fetch_pairs(line));
-    for argv in argvs {
-        if argv.is_empty() {
-            continue;
+    argvs.retain(|argv| !argv.is_empty());
+    argvs
+}
+
+/// ljos-policyd's answer on `line` run from `cwd`, over each call of
+/// [`tcb_argvs`]: the first deny, or else an allow, the fail-open one or
+/// one with a note when any was. None when no ljos-policyd answered. A
+/// lease push the checkout clears is not a deny: ljos-policyd cannot read
+/// where a bare one goes. Nor is a faulted guard on a [`repair_line`],
+/// which is let through with the fault as its note.
+fn tcb_line_in(line: &str, cwd: Option<&Path>) -> Option<String> {
+    let weight = |t: &str| {
+        if t.trim().starts_with("allow\tfail-open\t") {
+            2
+        } else {
+            u8::from(guard_note_of(t).is_some())
         }
-        match tcb_check_in(&argv, cwd) {
-            Some(t) if t.starts_with("deny") => {
-                clear_guard_note();
-                let token = policyd_token(&t);
-                let token = if token.is_empty() { "tcb" } else { token };
-                // A force push asks, whether the table or the phronesis
-                // law (`git-force-push: ...`) refused it. The other checks
-                // still deny. A lease push the checkout clears runs:
-                // ljos-policyd cannot read where a bare one goes.
-                let code = token.split(':').next().unwrap_or(token).trim();
-                let ask = code == "git-force-push";
-                if ask && lease_cleared(&argv, cwd) {
-                    answered = true;
-                    continue;
-                }
+    };
+    let mut answer: Option<String> = None;
+    for (i, argv) in tcb_argvs(line).into_iter().enumerate() {
+        let Some(mut t) = tcb_check_in(&argv, cwd) else {
+            continue;
+        };
+        if t.starts_with("deny") {
+            let token = policyd_token(&t);
+            let code = token.split(':').next().unwrap_or(token).trim();
+            let words = if i == 0 { shell_words(line) } else { argv };
+            if code == "git-force-push" && lease_cleared(&words, cwd) {
+                t = "allow".to_string();
+            } else if code == "guard-fault" && repair_line(line) {
                 // A faulted guard still lets the repair through: `ljos
                 // doctor` and `ljos onboard`, and nothing else on the line.
-                // A real deny is not a fault and still stands.
-                if code == "guard-fault" && repair_line(line) {
-                    let why = token
-                        .split_once(':')
-                        .map(|(_, detail)| detail.trim())
-                        .filter(|detail| !detail.is_empty())
-                        .unwrap_or("did not start");
-                    set_guard_note(unhealthy_note(why));
-                    answered = true;
-                    continue;
-                }
-                return Some(Rule {
-                    pattern: if ask {
-                        code.to_string()
-                    } else {
-                        "ljos-policyd".into()
-                    },
-                    verdict: if ask { "ask" } else { "deny" }.into(),
-                    reason: policyd_reason(token),
-                });
+                let why = token
+                    .split_once(':')
+                    .map(|(_, detail)| detail.trim())
+                    .filter(|detail| !detail.is_empty())
+                    .unwrap_or("did not start");
+                t = format!("allow\t{}", unhealthy_note(why));
+            } else {
+                clear_guard_note();
+                return Some(t);
             }
-            Some(t) => {
-                // Only the fail-open marker is a fault the switch let
-                // through. An unready token is an allow with a note and
-                // is not a bypass.
-                if t.trim().starts_with("allow\tfail-open\t") {
-                    opened = true;
-                }
-                if let Some(note) = guard_note_of(&t) {
-                    set_guard_note(note);
-                }
-                answered = true;
-            }
-            None => {}
+        }
+        if answer.as_deref().is_none_or(|a| weight(&t) > weight(a)) {
+            answer = Some(t);
         }
     }
-    if opened {
-        log_bypass(
-            "switch",
-            "LJOS_GUARD_FAIL_OPEN=1",
-            line,
-            &Rule {
-                pattern: "ljos-policyd".into(),
-                verdict: "deny".into(),
-                reason: "guard-fault".into(),
-            },
-        );
-    }
-    (!answered && policyd_required()).then(|| Rule {
-        pattern: "ljos-policyd".into(),
-        verdict: "deny".into(),
-        reason: policyd_required_reason(),
-    })
+    answer
 }
 
 /// A line whose every pipeline is `ljos doctor` or `ljos onboard`,
