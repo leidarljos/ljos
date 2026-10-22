@@ -1524,6 +1524,49 @@ fn a_write_to_a_config_the_line_names_is_refused() {
     );
 }
 
+/// A `WGETRC` or `SYSTEM_WGETRC` set on the line names a file wget reads
+/// once the line reaches it, so a write to that file on the same line is
+/// refused. A missing `SYSTEM_WGETRC` is `/etc/wgetrc`, as wget reads it.
+#[test]
+fn a_wgetrc_the_line_sets_is_a_protected_target() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let sys = root.path().join("sys.rc");
+    let user = root.path().join("user.rc");
+    fs::write(&user, "quiet = on\n").unwrap();
+    let (sys, user) = (sys.display(), user.display());
+    let post = "wget --max-redirect=0 --method=POST https://example.com/x";
+    let get = "wget -q https://api.github.com/user";
+    let input = "printf 'input = https://api.github.com/user\\n'";
+    let delete = "printf 'method = DELETE\\n'";
+
+    allowed(&format!("SYSTEM_WGETRC={sys} {post}"), here);
+    allowed(&format!("WGETRC={user} {get}"), here);
+    allowed(&format!("export WGETRC={user}; {get}"), here);
+    allowed(&format!("{delete} > {user}"), here);
+    for line in [
+        format!("{input} > {sys} && SYSTEM_WGETRC={sys} {post}"),
+        format!("{delete} > {user} && WGETRC={user} {get}"),
+        format!("env WGETRC={user} {get} & cp /tmp/other {user}"),
+        format!("export SYSTEM_WGETRC={sys}; {input} >> {sys}; {post}"),
+        format!("WGETRC={user}; {delete} | tee {user}; {get}"),
+    ] {
+        refused(&line, here);
+    }
+
+    let sub = root.path().join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join("rel.rc"), "method = DELETE\n").unwrap();
+    refused(
+        &format!("cd {} && SYSTEM_WGETRC=rel.rc {get}", sub.display()),
+        here,
+    );
+}
+
 /// A curl option that names a proxy, a resolver, a socket, an address
 /// map, or a `Host:` header sends the request somewhere the URL does not
 /// say. So does an address for a host, and an option the guard does not

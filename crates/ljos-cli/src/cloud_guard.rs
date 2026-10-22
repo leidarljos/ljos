@@ -560,6 +560,7 @@ fn command_is_pure_read(cmd: &str, words: &[String]) -> bool {
             | "printf"
             | "true"
             | "false"
+            | "export"
     ) {
         return true;
     }
@@ -4185,8 +4186,10 @@ fn http_config_args(words: &[String]) -> Vec<(String, usize)> {
         .collect()
 }
 
-/// Config files a curl or wget on `line` names. The guard reads one
-/// before the client does, so a write to it on the same line is refused.
+/// Config files a curl or wget on `line` names, and each `WGETRC` or
+/// `SYSTEM_WGETRC` the line sets, as a prefix, an `env` or `export`
+/// argument, or a bare assignment. The guard reads one before the client
+/// does, so a write to it on the same line is refused.
 fn named_http_configs(line: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for l in crate::nested_lines(line, 0) {
@@ -4194,6 +4197,13 @@ fn named_http_configs(line: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
             let words = argv(&seg);
             for (value, _) in http_config_args(&words) {
                 out.push(resolve_cfg(&value, cwd));
+            }
+            for word in crate::shell_words(&seg) {
+                if let Some(("WGETRC" | "SYSTEM_WGETRC", value)) = assignment(&word) {
+                    if !value.is_empty() {
+                        out.push(resolve_cfg(value, cwd));
+                    }
+                }
             }
         }
     }
@@ -4824,7 +4834,7 @@ fn wget_files(
             opaque.then_some(HttpShape::Opaque)
         }
         WgetFiles::Defaults => {
-            if let Some(shape) = wget_system(env, tune) {
+            if let Some(shape) = wget_system(env, cwd, tune) {
                 return Some(shape);
             }
             wget_user(env, cwd, tune)
@@ -4832,10 +4842,12 @@ fn wget_files(
     }
 }
 
-fn wget_system(env: &[(String, String)], tune: &mut Tune) -> Option<HttpShape> {
+/// Wget reads `SYSTEM_WGETRC` when that file exists and `/etc/wgetrc`
+/// when it does not. A relative path is the command's, as for `WGETRC`.
+fn wget_system(env: &[(String, String)], cwd: Option<&Path>, tune: &mut Tune) -> Option<HttpShape> {
     if let Some(path) = prefixed_or_process(env, "SYSTEM_WGETRC") {
         if !path.is_empty() {
-            let path = PathBuf::from(path);
+            let path = resolve_cfg(&path, cwd);
             match open_cfg(&path) {
                 Ok(None) => {}
                 Err(()) => {
