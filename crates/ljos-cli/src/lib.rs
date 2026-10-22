@@ -119,6 +119,14 @@ pub struct Harness {
     /// A JSON config file the runner reads its MCP servers from, for a
     /// runner an appended snippet cannot serve.
     pub config_json: Option<String>,
+    /// That file on macOS, for a runner that keeps it somewhere else there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_json_macos: Option<String>,
+    /// On macOS the runner is an app launchd starts from the Dock or
+    /// Finder, so the servers it spawns search [`LAUNCHD_PATH`], not a
+    /// shell's PATH.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub launchd: bool,
     /// Where in that file the entry goes, as a JSON pointer (`/mcp/ljos`).
     pub json_pointer: Option<String>,
     /// The entry to set there, as JSON text; `{server}` and `{name}` are
@@ -213,6 +221,34 @@ pub struct Harness {
     /// as `<name>.env`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_file: Option<String>,
+}
+
+impl Harness {
+    /// The JSON config this runner reads on `os`, a
+    /// [`std::env::consts::OS`] name.
+    fn config_json_on(&self, os: &str) -> Option<&str> {
+        match (os, &self.config_json_macos) {
+            ("macos", Some(path)) => Some(path),
+            _ => self.config_json.as_deref(),
+        }
+    }
+
+    /// The JSON config this runner reads on this machine.
+    pub(crate) fn json_config(&self) -> Option<&str> {
+        self.config_json_on(std::env::consts::OS)
+    }
+
+    /// The PATH this runner starts its MCP server with on `os`, when that
+    /// is not a shell's.
+    fn launch_path_on(&self, os: &str) -> Option<&'static str> {
+        (os == "macos" && self.launchd).then_some(LAUNCHD_PATH)
+    }
+
+    /// The PATH this runner starts its MCP server with on this machine,
+    /// when that is not a shell's.
+    pub(crate) fn launch_path(&self) -> Option<&'static str> {
+        self.launch_path_on(std::env::consts::OS)
+    }
 }
 
 fn is_false(value: &bool) -> bool {
@@ -654,8 +690,9 @@ pub const HARNESSES_EXAMPLE: &str = r#"# ~/.config/ljos/harnesses.toml: runners 
 # Optional: `ljos onboard` alone prints the one entry any runner takes.
 # {server} is ljos-mcp when that name on PATH is this install, and the
 # absolute path when it is not. {name} is the runner's name. An absolute
-# path is kept while the file exists here, and rewritten when a synced
-# config names a missing file.
+# path is kept while it is this install, and rewritten when it names a
+# missing file or another binary. A bare ljos-mcp that PATH does not
+# resolve to this install becomes the absolute path.
 # Paths may start with ~. The seat names itself after the client that
 # connects; nothing is passed in env.
 
@@ -862,6 +899,8 @@ skills = "~/.config/Code/User/skills"
 [[harness]]
 name = "claude-desktop"
 config_json = "~/.config/Claude/claude_desktop_config.json"
+config_json_macos = "~/Library/Application Support/Claude/claude_desktop_config.json"
+launchd = true
 json_pointer = "/mcpServers/ljos"
 json_entry = '{"command": "{server}", "args": []}'
 skills = "~/.config/Claude/skills"
@@ -1203,6 +1242,10 @@ pub fn shipped_differences(path: &Path) -> Vec<String> {
 /// binary.
 pub(crate) const MCP_SERVER_COMMAND: &str = "ljos-mcp";
 
+/// The PATH launchd gives a macOS app opened from the Dock or Finder, and
+/// so every server that app starts.
+pub(crate) const LAUNCHD_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
 #[derive(Debug, Clone)]
 pub(crate) struct ServerCommandPlan {
     pub(crate) command: String,
@@ -1238,7 +1281,20 @@ fn same_binary(a: &Path, b: &Path) -> bool {
 }
 
 pub(crate) fn server_command_plan(server: &Path, who: &str) -> ServerCommandPlan {
-    match which::which(MCP_SERVER_COMMAND) {
+    server_command_plan_in(server, who, None)
+}
+
+/// [`server_command_plan`] for a client that searches `search` for a bare
+/// command instead of this process's PATH.
+fn server_command_plan_in(server: &Path, who: &str, search: Option<&str>) -> ServerCommandPlan {
+    let (found, path) = match search {
+        Some(dirs) => (
+            which::which_in(MCP_SERVER_COMMAND, Some(dirs), "/"),
+            format!("PATH {dirs}"),
+        ),
+        None => (which::which(MCP_SERVER_COMMAND), "PATH".to_string()),
+    };
+    match found {
         Ok(found) if same_binary(&found, server) => ServerCommandPlan {
             command: MCP_SERVER_COMMAND.to_string(),
             note: None,
@@ -1246,7 +1302,7 @@ pub(crate) fn server_command_plan(server: &Path, who: &str) -> ServerCommandPlan
         Ok(found) => ServerCommandPlan {
             command: server.display().to_string(),
             note: Some(format!(
-                "PATH resolves {MCP_SERVER_COMMAND} to {}, so {who} wrote {}",
+                "{path} resolves {MCP_SERVER_COMMAND} to {}, so {who} wrote {}",
                 found.display(),
                 server.display()
             )),
@@ -1254,7 +1310,7 @@ pub(crate) fn server_command_plan(server: &Path, who: &str) -> ServerCommandPlan
         Err(_) => ServerCommandPlan {
             command: server.display().to_string(),
             note: Some(format!(
-                "PATH does not resolve {MCP_SERVER_COMMAND}, so {who} wrote {}",
+                "{path} does not resolve {MCP_SERVER_COMMAND}, so {who} wrote {}",
                 server.display()
             )),
         },
@@ -3503,7 +3559,7 @@ fn is_registered(h: &Harness, server: &Path) -> Option<bool> {
     if let (Some(config), Some(marker)) = (&h.config, &h.marker) {
         return Some(std::fs::read_to_string(expand(config)).is_ok_and(|t| t.contains(marker)));
     }
-    if let (Some(config), Some(pointer)) = (&h.config_json, &h.json_pointer) {
+    if let (Some(config), Some(pointer)) = (h.json_config(), &h.json_pointer) {
         return Some(
             std::fs::read_to_string(expand(config))
                 .ok()
@@ -3595,24 +3651,32 @@ fn heal_detail(base: &str, healed: &Result<Option<String>>) -> String {
 }
 
 /// An absolute path whose file name is the MCP server. It may name another
-/// machine. A path that is a file here is this install and is left alone.
+/// machine, or a stale copy on this one.
 fn is_absolute_ljos_mcp(value: &str) -> bool {
     let path = Path::new(value);
     path.is_absolute() && path.file_name().and_then(|n| n.to_str()) == Some(MCP_SERVER_COMMAND)
 }
 
-fn needs_portable_rewrite(value: &str) -> bool {
-    is_absolute_ljos_mcp(value) && !Path::new(value).is_file()
+/// An `ljos-mcp` command that would not start `server`: an absolute path
+/// that is missing here or is another binary, or the bare name when PATH
+/// does not resolve it to this install, which is when `replacement` is
+/// not the bare name. A path to this install, or a link to it, is left
+/// alone.
+fn needs_portable_rewrite(value: &str, server: &Path, replacement: &str) -> bool {
+    if value == MCP_SERVER_COMMAND {
+        return replacement != MCP_SERVER_COMMAND;
+    }
+    is_absolute_ljos_mcp(value) && !same_binary(Path::new(value), server)
 }
 
-fn command_made_portable(command: &mut Value, replacement: &str) -> bool {
+fn command_made_portable(command: &mut Value, server: &Path, replacement: &str) -> bool {
     match command {
-        Value::String(text) if needs_portable_rewrite(text) => {
+        Value::String(text) if needs_portable_rewrite(text, server, replacement) => {
             *text = replacement.to_string();
             true
         }
         Value::Array(args) => match args.first_mut() {
-            Some(Value::String(text)) if needs_portable_rewrite(text) => {
+            Some(Value::String(text)) if needs_portable_rewrite(text, server, replacement) => {
                 *text = replacement.to_string();
                 true
             }
@@ -3622,13 +3686,13 @@ fn command_made_portable(command: &mut Value, replacement: &str) -> bool {
     }
 }
 
-/// Rewrite an existing JSON entry whose command is an absolute `ljos-mcp`
-/// that is not a file here. The replacement is the bare name, or this
-/// install's path when the bare name would not run it. A path that exists
-/// is left alone.
+/// Rewrite an existing JSON entry whose `ljos-mcp` command would not start
+/// `server`. The replacement is the bare name, or this install's path when
+/// the bare name would not run it.
 fn heal_json_command(
     path: &Path,
     pointer: &str,
+    server: &Path,
     replacement: &str,
     dry: bool,
 ) -> Result<Option<String>> {
@@ -3646,7 +3710,7 @@ fn heal_json_command(
     let Some(command) = entry.get_mut("command") else {
         return Ok(None);
     };
-    if !command_made_portable(command, replacement) {
+    if !command_made_portable(command, server, replacement) {
         return Ok(None);
     }
     let note = format!("set the command in {} to {replacement}", path.display());
@@ -3704,27 +3768,33 @@ fn command_value_span(line: &str) -> Option<(usize, usize)> {
     None
 }
 
+/// The end of the entry that starts at `start`: the next table for a TOML
+/// marker, and for YAML the next line indented no deeper than the
+/// marker's own, which is a sibling or the parent's next key.
 fn marker_section_end(text: &str, start: usize, marker: &str) -> usize {
     let marker_toml = marker.trim_start().starts_with('[');
-    let mut lines = 0usize;
     let mut end = start;
-    let mut first = true;
+    let mut indent = None;
     for line in text[start..].split_inclusive('\n') {
         let trimmed = line.trim_start();
-        if marker_toml && !first && trimmed.starts_with('[') {
-            break;
+        let depth = line.len() - trimmed.len();
+        match indent {
+            None => indent = Some(depth),
+            Some(_) if marker_toml && trimmed.starts_with('[') => break,
+            Some(first) if !marker_toml && !trimmed.trim().is_empty() && depth <= first => break,
+            Some(_) => {}
         }
         end += line.len();
-        lines += 1;
-        first = false;
-        if !marker_toml && lines >= 24 {
-            break;
-        }
     }
     end
 }
 
-fn rewrite_marker_command(text: &str, marker: &str, replacement: &str) -> (String, bool) {
+fn rewrite_marker_command(
+    text: &str,
+    marker: &str,
+    server: &Path,
+    replacement: &str,
+) -> (String, bool) {
     let Some(found) = text.find(marker) else {
         return (text.to_string(), false);
     };
@@ -3744,7 +3814,7 @@ fn rewrite_marker_command(text: &str, marker: &str, replacement: &str) -> (Strin
             let value_start = at + value_start;
             let value_end = at + value_end;
             let value = &text[value_start..value_end];
-            if needs_portable_rewrite(value) {
+            if needs_portable_rewrite(value, server, replacement) {
                 let mut out = String::with_capacity(
                     text.len()
                         .saturating_sub(value.len())
@@ -3765,6 +3835,7 @@ fn rewrite_marker_command(text: &str, marker: &str, replacement: &str) -> (Strin
 fn heal_text_command(
     path: &Path,
     marker: &str,
+    server: &Path,
     replacement: &str,
     dry: bool,
 ) -> Result<Option<String>> {
@@ -3775,7 +3846,7 @@ fn heal_text_command(
         return Ok(None);
     }
     let text = std::fs::read_to_string(path).with_context(|| path.display().to_string())?;
-    let (rewritten, changed) = rewrite_marker_command(&text, marker, replacement);
+    let (rewritten, changed) = rewrite_marker_command(&text, marker, server, replacement);
     if !changed {
         return Ok(None);
     }
@@ -3789,12 +3860,18 @@ fn heal_text_command(
     )))
 }
 
-fn heal_registered(h: &Harness, replacement: &str, dry: bool) -> Result<Option<String>> {
+fn heal_registered(
+    h: &Harness,
+    server: &Path,
+    replacement: &str,
+    dry: bool,
+) -> Result<Option<String>> {
     let mut notes = Vec::new();
-    if let Some(config) = &h.config_json {
+    if let Some(config) = h.json_config() {
         if let Some(note) = heal_json_command(
             &expand(config),
             h.json_pointer.as_deref().unwrap_or(""),
+            server,
             replacement,
             dry,
         )? {
@@ -3805,6 +3882,7 @@ fn heal_registered(h: &Harness, replacement: &str, dry: bool) -> Result<Option<S
         if let Some(note) = heal_text_command(
             &expand(config),
             h.marker.as_deref().unwrap_or(""),
+            server,
             replacement,
             dry,
         )? {
@@ -3818,6 +3896,7 @@ fn heal_registered(h: &Harness, replacement: &str, dry: bool) -> Result<Option<S
             if let Some(note) = heal_json_command(
                 &home.join(".claude.json"),
                 "/mcpServers/ljos",
+                server,
                 replacement,
                 dry,
             )? {
@@ -3837,10 +3916,10 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             ok: false,
         };
     }
-    let plan = server_command_plan(server, "onboard");
+    let plan = server_command_plan_in(server, "onboard", h.launch_path());
     match is_registered(h, server) {
         Some(true) => {
-            let healed = heal_registered(h, &plan.command, dry);
+            let healed = heal_registered(h, server, &plan.command, dry);
             let config = expand(h.config.as_deref().unwrap_or_default());
             match bump_ljos_mcp_generation(&config, env!("CARGO_PKG_VERSION"), dry) {
                 Ok(Some(v)) => Step {
@@ -3896,8 +3975,8 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
                 },
             }
         }
-        Some(false) if h.config_json.is_some() => {
-            let config = expand(h.config_json.as_deref().unwrap_or_default());
+        Some(false) if h.json_config().is_some() => {
+            let config = expand(h.json_config().unwrap_or_default());
             let pointer = h.json_pointer.clone().unwrap_or_default();
             let entry_text = h
                 .json_entry
@@ -4097,11 +4176,16 @@ pub fn detect_runners(
             .find(|(name, _)| *name == h.name)
             .map_or(&[][..], |(_, cmds)| *cmds);
         let by_command = on_path(&h.name) || extra.iter().any(|c| on_path(c));
-        let by_dir = [&h.config, &h.config_json, &h.hooks, &h.hooks_named]
-            .into_iter()
-            .flatten()
-            .filter_map(|p| under_home(p))
-            .any(|p| p.parent().is_some_and(Path::is_dir));
+        let by_dir = [
+            h.config.as_deref(),
+            h.json_config(),
+            h.hooks.as_deref(),
+            h.hooks_named.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(under_home)
+        .any(|p| p.parent().is_some_and(Path::is_dir));
         if by_command || by_dir {
             found.push(h.name.clone());
         }
@@ -30014,31 +30098,22 @@ mod tests {
             "#!/bin/sh\ncase \"$*\" in\n*push*--force*) printf 'deny\\tgit-force-push\\n'; exit 2;;\n*) printf 'allow\\n';;\nesac\n",
         );
         let real_git = which::which("git").expect("git on PATH");
-        // Dropping GIT_DIR and GIT_WORK_TREE is not enough. Git also
-        // follows GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_COMMON_DIR,
-        // GIT_NAMESPACE and the config-count variables, and a global
-        // hooks path exits 1. A parallel test that exports any of those
-        // makes rev-parse leave this fixture, so a protected branch is
-        // pushed and git exits 1 instead of the guard's 126. Start from
-        // an empty environment and name only this fixture.
-        let gitconfig = root.path().join("gitconfig");
-        std::fs::write(&gitconfig, "[core]\n\thooksPath = /dev/null\n").unwrap();
-        let real_path = format!("{}:/usr/bin:/bin", real_git.parent().unwrap().display());
-        let seal = |cmd: &mut std::process::Command| {
-            cmd.env_clear()
-                .env("HOME", &home)
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_CONFIG_GLOBAL", &gitconfig)
+        // A parallel test may set GIT_DIR on this process. These git
+        // commands have to see this checkout, not that one.
+        let scrub = |cmd: &mut std::process::Command| {
+            cmd.env_remove("GIT_DIR");
+            cmd.env_remove("GIT_WORK_TREE");
+        };
+        let plain = |args: &[&str]| {
+            let mut cmd = std::process::Command::new(&real_git);
+            cmd.arg("-C")
+                .arg(&repo)
+                .args(args)
                 .env("GIT_AUTHOR_NAME", "Rohit Goswami")
                 .env("GIT_AUTHOR_EMAIL", "rgoswami@ieee.org")
                 .env("GIT_COMMITTER_NAME", "Rohit Goswami")
                 .env("GIT_COMMITTER_EMAIL", "rgoswami@ieee.org");
-        };
-        let plain = |args: &[&str]| {
-            let mut cmd = std::process::Command::new(&real_git);
-            cmd.arg("-C").arg(&repo).args(args);
-            seal(&mut cmd);
-            cmd.env("PATH", &real_path);
+            scrub(&mut cmd);
             let out = cmd.output().unwrap();
             assert!(
                 out.status.success(),
@@ -30050,12 +30125,23 @@ mod tests {
         plain(&["config", "commit.gpgsign", "false"]);
         plain(&["commit", "-q", "--allow-empty", "-m", "seed"]);
         plain(&["checkout", "-q", "-b", "feature"]);
-        let shim_path = format!("{}:{}:{real_path}", guard.display(), fake.display());
         let shim = |args: &[&str]| {
             let mut cmd = std::process::Command::new(guard.join("git"));
-            cmd.args(args).current_dir(&repo);
-            seal(&mut cmd);
-            cmd.env("PATH", &shim_path).env("LJOS_GUARD", "on");
+            cmd.args(args)
+                .current_dir(&repo)
+                .env("HOME", &home)
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}:{}",
+                        guard.display(),
+                        fake.display(),
+                        real_git.parent().unwrap().display()
+                    ),
+                )
+                .env_remove("LJOS_OFF")
+                .env("LJOS_GUARD", "on");
+            scrub(&mut cmd);
             cmd.output().unwrap()
         };
         // There is no remote, so git itself fails once the shim lets the
@@ -37352,6 +37438,56 @@ mod tests {
         assert!(!step.ok, "an unknown template writes nothing: {step:?}");
     }
 
+    /// Claude Desktop keeps its config under ~/Library/Application Support
+    /// on macOS and under ~/.config on Linux. A runner with one place
+    /// keeps it on both.
+    #[test]
+    fn claude_desktop_config_is_where_the_os_keeps_it() {
+        let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
+        let find = |name: &str| all.harness.iter().find(|h| h.name == name).expect(name);
+        let desktop = find("claude-desktop");
+        assert_eq!(
+            desktop.config_json_on("macos"),
+            Some("~/Library/Application Support/Claude/claude_desktop_config.json")
+        );
+        assert_eq!(
+            desktop.config_json_on("linux"),
+            Some("~/.config/Claude/claude_desktop_config.json")
+        );
+        let cursor = find("cursor");
+        assert_eq!(cursor.config_json_on("macos"), Some("~/.cursor/mcp.json"));
+    }
+
+    /// Claude Desktop opened from the Dock or Finder starts its servers
+    /// with launchd's PATH, which holds no user bin directory. Onboard
+    /// writes this install's path there unless that PATH runs it.
+    #[test]
+    fn a_launchd_app_gets_the_absolute_server_unless_its_path_runs_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
+        let find = |name: &str| all.harness.iter().find(|h| h.name == name).expect(name);
+        let desktop = find("claude-desktop");
+        assert_eq!(desktop.launch_path_on("macos"), Some(super::LAUNCHD_PATH));
+        assert_eq!(desktop.launch_path_on("linux"), None);
+        assert_eq!(find("cursor").launch_path_on("macos"), None);
+
+        let scratch = tempfile::tempdir().unwrap();
+        let bin = scratch.path().join("bin");
+        let empty = scratch.path().join("empty");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&empty).unwrap();
+        let server = bin.join("ljos-mcp");
+        std::fs::write(&server, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let elsewhere = empty.to_str().unwrap();
+        let plan = super::server_command_plan_in(&server, "onboard", Some(elsewhere));
+        assert_eq!(plan.command, server.display().to_string());
+        let note = plan.note.unwrap_or_default();
+        assert!(note.contains(elsewhere), "{note}");
+        let plan = super::server_command_plan_in(&server, "onboard", bin.to_str());
+        assert_eq!(plan.command, super::MCP_SERVER_COMMAND);
+    }
+
     /// The deny a failed gate writes exits 2, and omp still blocks on it.
     #[test]
     fn the_omp_plugin_reads_a_deny_on_any_exit() {
@@ -40074,6 +40210,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             marker: None,
             snippet: None,
             config_json: Some(config.display().to_string()),
+            config_json_macos: None,
+            launchd: false,
             json_pointer: Some("/mcp/ljos".into()),
             json_entry: None,
             skills: None,
@@ -48458,6 +48596,12 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// is installed on PATH the way CI installs deedar. A failed build
     /// fails the test.
     fn deedimport_deedar() -> std::path::PathBuf {
+        // Two tests call this at once, and one would clear the cache the
+        // other is still building in.
+        static BUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _build = BUILD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let sha = deedar_pin();
         let cache = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/deedimport2-deedar");
