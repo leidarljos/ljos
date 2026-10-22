@@ -64,9 +64,10 @@ impl Reply {
     }
 }
 
-/// [`serve`], with `script` asked first with each request line. Every
-/// request is answered on its own thread, so a slow answer holds up only
-/// the client that asked for it.
+/// [`serve`], with `script` asked first with each request. A request the
+/// script leaves is refused without [`TOKEN`], as packsetd refuses it,
+/// `/health` aside. Every request is answered on its own thread, so a
+/// slow answer holds up only the client that asked for it.
 fn serve_scripted(
     atoms: Vec<serde_json::Value>,
     script: impl Fn(&str) -> Option<Reply> + Send + Sync + 'static,
@@ -82,12 +83,15 @@ fn serve_scripted(
             thread::spawn(move || {
                 let req = read_http(&mut stream);
                 let path = req.lines().next().unwrap_or("");
-                let (status, payload) = match script(path) {
+                let (status, payload) = match script(&req) {
                     Some(answer) => {
                         thread::sleep(answer.after);
                         (answer.status, answer.body.to_string())
                     }
-                    None => answer(&atoms, path),
+                    None if path.starts_with("GET /health") || authorized(&req) => {
+                        answer(&atoms, path)
+                    }
+                    None => ("401 Unauthorized", r#"{"error":"token"}"#.to_string()),
                 };
                 let resp = format!(
                     "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
@@ -100,9 +104,23 @@ fn serve_scripted(
     format!("http://{addr}")
 }
 
-/// Whether request line `line` reads atom `id` by id.
-fn reads_atom(line: &str, id: &str) -> bool {
-    line.strip_prefix("GET /v1/atoms/")
+/// The token every seat here shows its pack, in the form packsetd keeps.
+const TOKEN: &str = "0e1d2c3b4a59687706f5e4d3c2b1a0900e1d2c3b4a59687706f5e4d3c2b1a090";
+
+/// Whether request `req` carries [`TOKEN`] as its bearer.
+fn authorized(req: &str) -> bool {
+    req.lines().any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("authorization") && value.trim() == format!("Bearer {TOKEN}")
+        })
+    })
+}
+
+/// Whether request `req` reads atom `id` by id.
+fn reads_atom(req: &str, id: &str) -> bool {
+    req.lines()
+        .next()
+        .and_then(|line| line.strip_prefix("GET /v1/atoms/"))
         .and_then(|rest| rest.split(['?', ' ']).next())
         == Some(id)
 }
@@ -217,6 +235,7 @@ impl Seat {
             .env("XDG_STATE_HOME", self.home.path().join("state"))
             .env("XDG_RUNTIME_DIR", self.run.path())
             .env("PACKSET_URL", &self.url)
+            .env("PACKSET_TOKEN", TOKEN)
             .env("PACKSET_WORKSPACE", "seat")
             .env("PACKSET_TIMEOUT_MS", "2000")
             .env("LJOS_USER_RULES_SYNC", "off")
@@ -621,8 +640,8 @@ fn a_slow_or_hung_lesson_read_does_not_state_the_rule() {
         (Reply::after(3000, "404 Not Found", gone.clone()), false),
     ] {
         let (after, status) = (reply.after, reply.status);
-        let seat = Seat::on(serve_scripted(vec![], move |line| {
-            reads_atom(line, ID).then(|| reply.clone())
+        let seat = Seat::on(serve_scripted(vec![], move |req| {
+            (reads_atom(req, ID) && authorized(req)).then(|| reply.clone())
         }));
         promoted_rule(&seat, &lesson);
         let note = seat.prompt("tidy the changelog fragments");
@@ -652,8 +671,8 @@ fn a_lesson_read_without_an_origin_does_not_state_the_rule() {
             None => drop(body.as_object_mut().unwrap().remove("origin")),
             Some(origin) => body["origin"] = origin.clone(),
         }
-        let seat = Seat::on(serve_scripted(vec![], move |line| {
-            reads_atom(line, ID).then(|| Reply::now("200 OK", body.clone()))
+        let seat = Seat::on(serve_scripted(vec![], move |req| {
+            (reads_atom(req, ID) && authorized(req)).then(|| Reply::now("200 OK", body.clone()))
         }));
         promoted_rule(&seat, &lesson);
         let note = seat.prompt("tidy the changelog fragments");
@@ -662,6 +681,48 @@ fn a_lesson_read_without_an_origin_does_not_state_the_rule() {
             "a by-id body with origin {origin:?} stated the rule: {note}"
         );
     }
+}
+
+/// The review's repro: a listener on the pack URL that answers the by-id
+/// read without asking for the seat's token, as a stand-in for packsetd
+/// does, confirms no lesson, where the same answer from one that asks for
+/// the token does. A packsetd run with `PACKSET_AUTH=off` asks for none
+/// either.
+#[test]
+fn a_pack_that_does_not_ask_for_the_token_confirms_no_rule() {
+    const ID: &str = "lessonid0000000000000000000006";
+    let lesson = persons_lesson(ID, RELEASE_KEY);
+    for asks in [true, false] {
+        let body = lesson.clone();
+        let seat = Seat::on(serve_scripted(vec![], move |req| {
+            (reads_atom(req, ID) && (authorized(req) || !asks))
+                .then(|| Reply::now("200 OK", body.clone()))
+        }));
+        promoted_rule(&seat, &lesson);
+        let note = seat.prompt("tidy the changelog fragments");
+        assert_eq!(
+            states_rule(&note, RELEASE_KEY),
+            asks,
+            "a listener that asks for the token: {asks}: {note}"
+        );
+    }
+
+    let open = Daemon::open();
+    let seat = Seat::on(open.url.clone());
+    post(
+        &open,
+        "/v1/atoms",
+        serde_json::json!({
+            "id": ID, "workspace": "seat", "kind": "lesson", "text": RELEASE_KEY,
+            "origin": "user-declared", "source": {"basis": "person"},
+        }),
+    );
+    promote(&seat, ID);
+    let note = seat.prompt_anew("tidy the changelog fragments");
+    assert!(
+        !states_rule(&note, RELEASE_KEY),
+        "a packsetd that asks for no token stated the rule: {note}"
+    );
 }
 
 /// A `vissue` that answers every call with `body`, so a brief reads a
@@ -916,7 +977,17 @@ struct Daemon {
 }
 
 impl Daemon {
+    /// packsetd asking for [`TOKEN`], as it does by default.
     fn start() -> Self {
+        Self::spawn(false)
+    }
+
+    /// packsetd run with `PACKSET_AUTH=off`, answering anyone.
+    fn open() -> Self {
+        Self::spawn(true)
+    }
+
+    fn spawn(open: bool) -> Self {
         let home = tempfile::tempdir().unwrap();
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
@@ -924,10 +995,16 @@ impl Daemon {
             .unwrap()
             .port();
         let dir = home.path().to_str().unwrap().to_string();
-        let mut child = Command::new("packsetd")
+        std::fs::write(home.path().join("token"), format!("{TOKEN}\n")).unwrap();
+        let mut command = Command::new("packsetd");
+        command
             .args(["--port", &port.to_string(), "--home", &dir])
-            .env("PACKSET_AUTH", "off")
-            .env("PACKSET_HOME", &dir)
+            .env_remove("PACKSET_AUTH")
+            .env("PACKSET_HOME", &dir);
+        if open {
+            command.env("PACKSET_AUTH", "off");
+        }
+        let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1057,6 +1134,7 @@ fn a_long_lived_search_reads_the_origin_the_pack_holds_now() {
     let daemon = Daemon::start();
     let seat = Seat::on(daemon.url.clone());
     let stored: serde_json::Value = ureq::post(&format!("{}/v1/atoms", daemon.url))
+        .set("Authorization", &format!("Bearer {TOKEN}"))
         .send_json(serde_json::json!({
             "workspace": "seat", "kind": "preference", "text": KEEP_SHORT,
             "origin": "user-declared", "source": {"basis": "person"},
@@ -1076,6 +1154,7 @@ fn a_long_lived_search_reads_the_origin_the_pack_holds_now() {
     assert_eq!(label(&mcp.search("deploy form")), "preference");
 
     ureq::post(&format!("{}/v1/atoms/update", daemon.url))
+        .set("Authorization", &format!("Bearer {TOKEN}"))
         .send_json(serde_json::json!({
             "workspace": "seat", "id": stored["id"],
             "fields": {"origin": "agent-derived"},
@@ -1101,8 +1180,8 @@ fn an_island_lesson_is_the_persons_only_on_a_fresh_read() {
     let gone = serde_json::json!({"error": "no atom"});
     let next = std::sync::Arc::new(std::sync::Mutex::new(Reply::now("200 OK", person.clone())));
     let script = next.clone();
-    let seat = Seat::on(serve_scripted(vec![agents.clone()], move |line| {
-        reads_atom(line, ID).then(|| script.lock().unwrap().clone())
+    let seat = Seat::on(serve_scripted(vec![agents.clone()], move |req| {
+        (reads_atom(req, ID) && authorized(req)).then(|| script.lock().unwrap().clone())
     }));
     let mut mcp = Mcp::start(&seat);
     let mut label = |reply: Reply| {
@@ -1153,6 +1232,7 @@ fn promote(seat: &Seat, id: &str) {
 /// POST `body` to `path` on `daemon` and return what it answers.
 fn post(daemon: &Daemon, path: &str, body: serde_json::Value) -> serde_json::Value {
     ureq::post(&format!("{}{path}", daemon.url))
+        .set("Authorization", &format!("Bearer {TOKEN}"))
         .send_json(body)
         .unwrap()
         .into_json()
