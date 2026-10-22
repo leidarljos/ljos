@@ -641,23 +641,36 @@ fn cloud_up_writes_custom_ljos_bin_dir_into_shell_profiles() {
     assert!(line_at < guard_at, "{bashrc}");
 }
 
+/// The head of Ubuntu's `/etc/skel/.bashrc`, carried here because the
+/// host's own copy depends on its distribution.
+const UBUNTU_SKEL_BASHRC: &str = "\
+# ~/.bashrc: executed by bash(1) for non-login shells.
+# see /usr/share/doc/bash/examples/startup-files (in the package bash-doc)
+# for examples
+
+# If not running interactively, don't do anything
+case $- in
+    *i*) ;;
+      *) return;;
+esac
+
+# don't put duplicate lines or lines starting with space in the history.
+# See bash(1) for more options
+HISTCONTROL=ignoreboth
+";
+
 /// Ubuntu's skel bashrc returns from a `case $-` before any later PATH
 /// export. A non-interactive `bash -c '. ~/.bashrc'` never sees a line
 /// appended after that case.
 #[test]
 fn cloud_up_inserts_path_before_ubuntu_skel_interactive_case() {
     let _g = Guard::new();
-    let skel = fs::read_to_string("/etc/skel/.bashrc").unwrap();
-    assert!(
-        skel.contains("case $- in\n    *i*) ;;\n      *) return;;\n"),
-        "expected the Ubuntu skel case guard, got:\n{skel}"
-    );
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     let rel = root.path().join("rel");
     fs::create_dir_all(&rel).unwrap();
     fs::create_dir_all(&home).unwrap();
-    fs::write(home.join(".bashrc"), &skel).unwrap();
+    fs::write(home.join(".bashrc"), UBUNTU_SKEL_BASHRC).unwrap();
     for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
         executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
     }
