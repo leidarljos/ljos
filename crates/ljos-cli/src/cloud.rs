@@ -121,6 +121,12 @@ pub fn up(force: bool) -> Result<String> {
         ("LJOS_SEAT", seat.clone()),
         ("VISSUE_AGENT", seat.clone()),
         ("LJOS_SEAT_KEY", key.display().to_string()),
+        // Tag this VM's memory and lessons scope:cloud. Not default_scope:
+        // an unscoped box atom must not follow a default into the cloud log.
+        (
+            crate::sync::WRITE_SCOPE_KEY,
+            crate::sync::CLOUD_SCOPE.to_string(),
+        ),
     ];
     if std::env::var("DEEDAR_HOST_SIGNING_KEY").ok().as_deref() != Some("off") {
         pairs.push(("DEEDAR_HOST_SIGNING_KEY", key.display().to_string()));
@@ -143,8 +149,10 @@ pub fn up(force: bool) -> Result<String> {
         }
     });
     lines.push(ensure_cloud_guard_rules()?);
-    lines.push(ensure_cloud_age()?);
+    // Retire env-owned wakes before any later step can fail, so a removed
+    // `LJOS_WAKE_<SEAT>_URL` cannot leave a stale URL that still sees a new key.
     lines.extend(ensure_wakes()?);
+    lines.push(ensure_cloud_age()?);
     let reaped = reap_gone_owners(crate::lease_secs());
     if !reaped.trim().is_empty() {
         lines.push(reaped.trim_end().to_string());
