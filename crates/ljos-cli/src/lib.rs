@@ -5850,35 +5850,83 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
 }
 
 /// The directory the tool executes in, including an explicit tool override.
-/// Relative overrides are resolved against the hook's directory.
+/// Relative overrides are resolved lexically against the hook's directory.
 pub fn hook_directory(input: &str) -> Result<PathBuf> {
     let value = serde_json::from_str::<Value>(input).unwrap_or(Value::Null);
-    let base = value["cwd"]
-        .as_str()
-        .or_else(|| value["workspacePaths"][0].as_str())
+    let base = session_path_raw(&value)
         .map(PathBuf::from)
         .map(Ok)
         .unwrap_or_else(std::env::current_dir)?;
     if !base.is_absolute() {
         bail!("hook working directory must be absolute");
     }
+    let base = std::fs::canonicalize(base).context("hook working directory is unavailable")?;
+    if !base.is_dir() {
+        bail!("hook working directory is not a directory");
+    }
     let args = value
         .get("tool_input")
         .filter(|v| !v.is_null())
         .or_else(|| value.get("toolInput"));
     let override_dir = args
-        .and_then(|v| v.get("workdir").or_else(|| v.get("cwd")))
+        .and_then(|v| {
+            v.get("workdir")
+                .or_else(|| v.get("cwd"))
+                .or_else(|| v.get("dir_path"))
+                .or_else(|| v.get("directory"))
+        })
         .filter(|v| !v.is_null());
     let directory = match override_dir {
-        Some(v) => base.join(v.as_str().context("invalid tool working directory")?),
+        Some(v) => {
+            let raw = v.as_str().context("invalid tool working directory")?;
+            std::fs::canonicalize(resolve_tool_directory(&base, raw))
+                .context("tool working directory is unavailable")?
+        }
         None => base,
     };
-    let directory =
-        std::fs::canonicalize(directory).context("tool working directory is unavailable")?;
     if !directory.is_dir() {
         bail!("tool working directory is not a directory");
     }
     Ok(directory)
+}
+
+/// Resolve one tool workdir the way opencode does: lexical path resolution.
+fn resolve_tool_directory(base: &Path, raw: &str) -> PathBuf {
+    let expanded = if raw == "~" {
+        home().unwrap_or_else(|_| PathBuf::from(raw))
+    } else {
+        expand(raw)
+    };
+    let joined = if expanded.is_absolute() {
+        expanded
+    } else {
+        base.join(expanded)
+    };
+    lexical_path(&joined)
+}
+
+/// Lexical path normalization (`path.resolve` semantics).
+fn lexical_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(part.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let pop = out
+                    .components()
+                    .next_back()
+                    .is_some_and(|tail| matches!(tail, Component::Normal(_)));
+                if pop {
+                    out.pop();
+                }
+            }
+            Component::Normal(piece) => out.push(piece),
+        }
+    }
+    out
 }
 
 /// Directory a tool command is judged in.
@@ -5900,9 +5948,7 @@ pub fn command_directory(input: &str) -> Option<PathBuf> {
 /// session directory when the hook was started there.
 fn session_directory(input: &str) -> Option<PathBuf> {
     let value = serde_json::from_str::<Value>(input).ok()?;
-    let raw = value["cwd"]
-        .as_str()
-        .or_else(|| value["workspacePaths"][0].as_str())?;
+    let raw = session_path_raw(&value)?;
     let path = Path::new(raw);
     let joined = if path.is_absolute() {
         path.to_path_buf()
@@ -5912,6 +5958,14 @@ fn session_directory(input: &str) -> Option<PathBuf> {
     std::fs::canonicalize(joined)
         .ok()
         .filter(|path| path.is_dir())
+}
+
+/// The payload directory, with agy's tool-call cwd before workspace paths.
+fn session_path_raw(value: &Value) -> Option<&str> {
+    value["cwd"]
+        .as_str()
+        .or_else(|| value["toolCall"]["args"]["Cwd"].as_str())
+        .or_else(|| value["workspacePaths"][0].as_str())
 }
 
 /// What the runner's hook hands the seat: the event, and the text worth
@@ -26708,6 +26762,11 @@ pub fn policy_line(argv: &[String]) -> Result<String> {
 /// policy layer injects beside its verdict. The line prints even when the
 /// pack is down; the memory is the part that may be empty.
 pub fn policy_with_memory(argv: &[String]) -> Result<String> {
+    policy_with_memory_in(argv, None)
+}
+
+/// [`policy_with_memory`] for a command that runs in `cwd`.
+pub fn policy_with_memory_in(argv: &[String], cwd: Option<&Path>) -> Result<String> {
     let line = policy_line(argv)?;
     let call = HookCall {
         event: "argv".into(),
@@ -26721,17 +26780,30 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
     // already judged does not wait on policyd, which can hang. A guard that
     // is switched off judges nothing, policyd included.
     let off = bookkeep::guard_suspended();
-    let fast = if off { None } else { static_guard(&line) };
+    let fast = if off {
+        None
+    } else {
+        static_guard_in(&line, cwd)
+    };
     let judged = fast.is_some();
     let rules = if off { Vec::new() } else { rules_for_gate() };
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|d| d.display().to_string());
+    let cwd_text = cwd
+        .filter(|path| path.is_dir())
+        .map(|d| d.display().to_string())
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|d| d.display().to_string())
+        });
     let gated = if off {
         None
     } else {
         redirect_seat_verb(
-            gate_push(ruled_verdict(&rules, &line).as_ref(), &line, cwd.as_deref()),
+            gate_push(
+                ruled_verdict(&rules, &line).as_ref(),
+                &line,
+                cwd_text.as_deref(),
+            ),
             &line,
         )
     };
@@ -26747,7 +26819,7 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
     let tcb = if judged || off {
         None
     } else {
-        match tcb_check(argv) {
+        match tcb_check_in(argv, cwd) {
             // `git-force-push` asks, the same way the push gate does. The raw
             // `deny` line would read as a refusal beside that ask.
             Some(tcb) if policyd_token(&tcb) == "git-force-push" => None,
@@ -26853,13 +26925,22 @@ pub struct GuardReport {
 ///
 /// The command is empty, or the rules deny it.
 pub fn guard_report(line: &str) -> Result<GuardReport> {
+    guard_report_in(line, None)
+}
+
+/// [`guard_report`] for a command that would run in `cwd`.
+///
+/// # Errors
+///
+/// The command is empty, or the rules deny it.
+pub fn guard_report_in(line: &str, cwd: Option<&Path>) -> Result<GuardReport> {
     let line = line.trim();
     if line.is_empty() {
         bail!("guard: pass the command to check");
     }
     // Judge the line as written. Splitting it into argv and joining the
     // words again drops the quotes a commit message needs.
-    if let Some(rule) = static_guard(line) {
+    if let Some(rule) = static_guard_in(line, cwd) {
         // The push ran into an ask or a deny. Drop the evidence warning so
         // the next allowed command does not inherit it.
         let _ = gates::take_push_warning();
@@ -26880,7 +26961,7 @@ pub fn guard_report(line: &str) -> Result<GuardReport> {
         bail!("guard: pass the command to check");
     }
     let warning = gates::take_push_warning();
-    let mut text = policy_with_memory(&argv)?;
+    let mut text = policy_with_memory_in(&argv, cwd)?;
     let verdict = policy_verdict(&text);
     if verdict == "deny" {
         bail!("{text}");
@@ -26995,17 +27076,22 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     // A download and each later pipeline go once more as one call, so a
     // file `curl -o i.sh URL` saves and `sh i.sh` then runs is judged as
     // the pair it is.
-    let argvs = nested_lines(line, 0)
-        .into_iter()
-        .flat_map(|l| pipelines(&l))
-        .map(|seg| shell_words(&seg))
-        .chain(stdin_programs(line))
-        .chain(fetch_pairs(line));
-    for argv in argvs {
+    let mut argvs = pipeline_argvs(line, cwd);
+    argvs.extend(
+        stdin_programs(line)
+            .into_iter()
+            .map(|argv| (argv, cwd.map(Path::to_path_buf))),
+    );
+    argvs.extend(
+        fetch_pairs(line)
+            .into_iter()
+            .map(|argv| (argv, cwd.map(Path::to_path_buf))),
+    );
+    for (argv, at) in argvs {
         if argv.is_empty() {
             continue;
         }
-        match tcb_check_in(&argv, cwd) {
+        match tcb_check_in(&argv, at.as_deref()) {
             Some(t) if t.starts_with("deny") => {
                 clear_guard_note();
                 let token = policyd_token(&t);
@@ -27046,6 +27132,56 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
                  shell command runs until `cargo install --locked ljos-policyd` puts it on PATH"
             .to_string(),
     })
+}
+
+/// Each command line the TCB checks, with the directory that command runs in.
+///
+/// A `cd` or `pushd` in one pipeline changes where the next one runs.
+fn pipeline_argvs(line: &str, cwd: Option<&Path>) -> Vec<(Vec<String>, Option<PathBuf>)> {
+    let mut out = Vec::new();
+    for nested in nested_lines(line, 0) {
+        let mut at = cwd.filter(|path| path.is_dir()).map(Path::to_path_buf);
+        for seg in pipelines(&nested) {
+            let words = shell_words(&seg);
+            if words.is_empty() {
+                continue;
+            }
+            let here = at.clone();
+            if let Some(next) = cd_segment_target(&words, here.as_deref()) {
+                at = Some(next);
+            }
+            out.push((words, here));
+        }
+    }
+    out
+}
+
+/// Where a `cd` or `pushd` segment moves the next segment.
+fn cd_segment_target(words: &[String], cwd: Option<&Path>) -> Option<PathBuf> {
+    let (at, _) = prefix_end(words);
+    let command = words.get(at)?;
+    let name = base_name(command);
+    if name != "cd" && name != "pushd" {
+        return None;
+    }
+    let raw = match words.get(at + 1).map(String::as_str) {
+        Some(d) if d != "-" && !d.starts_with('-') => d,
+        None if name == "cd" => "~",
+        _ => return None,
+    };
+    let moved = if raw == "~" {
+        home().ok()?
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        home().ok()?.join(rest)
+    } else {
+        PathBuf::from(raw)
+    };
+    if moved.is_absolute() {
+        return Some(moved);
+    }
+    cwd.map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .map(|base| base.join(moved))
 }
 
 /// Most pairs [`fetch_pairs`] hands the TCB for one line.
@@ -27457,17 +27593,23 @@ pub fn tcb_check(argv: &[String]) -> Option<String> {
 /// [`tcb_check`] for a command that will run in `cwd`.
 fn tcb_check_in(argv: &[String], cwd: Option<&Path>) -> Option<String> {
     let bin = policyd_bin()?;
-    Some(tcb_answer(&bin, argv, guard_timeout(), cwd))
+    Some(tcb_answer_in(&bin, argv, guard_timeout(), cwd))
 }
 
 /// What `bin check -- argv` says within `deadline`, as a verdict line.
+#[must_use]
+pub fn tcb_answer(bin: &Path, argv: &[String], deadline: std::time::Duration) -> String {
+    tcb_answer_in(bin, argv, deadline, None)
+}
+
+/// [`tcb_answer`] for a command that will run in `cwd`.
 ///
 /// `cwd` is the directory the checked command will run in. The binary
 /// starts there, so it reads that tree's Makefile or package.json. When
 /// `cwd` is missing or not a directory, the binary keeps this process's
 /// directory.
 #[must_use]
-pub fn tcb_answer(
+pub fn tcb_answer_in(
     bin: &Path,
     argv: &[String],
     deadline: std::time::Duration,
@@ -27490,7 +27632,7 @@ pub fn tcb_answer(
         // ljos-policyd reads a Makefile or package.json from the directory
         // the command will run in. The hook already has that directory.
         // A missing path, or one that is not a directory, leaves this
-        // process's directory, which is what the spawn did before.
+        // process's directory.
         if let Some(dir) = cwd.filter(|path| path.is_dir()) {
             cmd.current_dir(dir);
         }
@@ -40870,7 +41012,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// directory, which is where the hook's command will run. A fake
     /// policyd that prints `pwd -P` shows that directory reached it. A
     /// missing path, or a path that is not a directory, leaves the process
-    /// directory, which is what the spawn did before.
+    /// directory.
     #[test]
     fn the_hook_directory_is_where_policyd_runs() {
         let _g = env_guard();
@@ -40916,12 +41058,42 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     #[test]
+    fn a_cd_or_pushd_pipeline_is_checked_in_its_entered_directory() {
+        let _g = env_guard();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("danger")).unwrap();
+        let bin = fake_policyd(
+            root.path(),
+            "ljos-policyd",
+            "if [ \"$(basename \"$(/bin/pwd -P)\")\" = \"danger\" ]; then\n\
+             printf 'deny\\tmake-clean-all\\n'\n\
+             exit 2\n\
+             fi\n\
+             printf 'allow\\n'\n",
+        );
+        let _env = HoldEnv::set(&[
+            ("POLICYD_BIN", bin.to_str().unwrap()),
+            ("LJOS_GUARD", "on"),
+            ("LJOS_OFF", "0"),
+        ]);
+        for line in [
+            "cd danger && make clean-all",
+            "(cd danger; make clean-all)",
+            "pushd danger && make clean-all",
+        ] {
+            let rule = tcb_verdict_in(line, Some(root.path())).expect(line);
+            assert_eq!(rule.verdict, "deny", "{line}: {}", rule.reason);
+            assert_eq!(rule.pattern, "ljos-policyd", "{line}: {}", rule.reason);
+        }
+    }
+
+    #[test]
     fn a_tcb_that_crashes_or_times_out_allows_the_line() {
         let dir = tempfile::tempdir().unwrap();
         let argv = vec!["git".to_string(), "status".to_string()];
         let quick = std::time::Duration::from_millis(200);
         let answer = |name: &str, body: &str| {
-            tcb_answer(&fake_policyd(dir.path(), name, body), &argv, quick, None)
+            tcb_answer_in(&fake_policyd(dir.path(), name, body), &argv, quick, None)
         };
         assert_eq!(answer("allows", "echo allow"), "allow");
         assert_eq!(
@@ -40964,7 +41136,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             );
             assert!(!said.contains("refused unchecked"), "{name}: {said}");
         }
-        let gone = tcb_answer(&dir.path().join("missing"), &argv, quick, None);
+        let gone = tcb_answer_in(&dir.path().join("missing"), &argv, quick, None);
         assert!(
             gone.starts_with("allow\t") && gone.contains("did not start"),
             "{gone}"
@@ -45994,7 +46166,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let child = root.path().join("checkout");
         std::fs::create_dir(&child).unwrap();
         for tool in ["tool_input", "toolInput"] {
-            for field in ["workdir", "cwd"] {
+            for field in ["workdir", "cwd", "dir_path", "directory"] {
                 for directory in [child.to_str().unwrap(), "checkout"] {
                     let input = serde_json::json!({"cwd":root.path(), tool:{field:directory}});
                     assert_eq!(hook_directory(&input.to_string()).unwrap(), child);
@@ -46021,6 +46193,23 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         .is_err());
     }
 
+    #[test]
+    fn agy_tool_call_cwd_precedes_workspace_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let agy = root.path().join("agy");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&agy).unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        let input = serde_json::json!({
+            "workspacePaths":[workspace],
+            "toolCall":{"args":{"Cwd":agy}},
+        });
+        assert_eq!(
+            hook_directory(&input.to_string()).unwrap(),
+            agy.canonicalize().unwrap()
+        );
+    }
+
     /// A relative workdir resolves against the session directory. A missing
     /// workdir is the session directory, so the command is still judged.
     #[test]
@@ -46043,6 +46232,37 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(
             command_directory(&missing.to_string()).unwrap(),
             root.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn opencode_workdir_resolves_lexically_and_expands_tilde() {
+        let _g = env_guard();
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("base");
+        let elsewhere = root.path().join("elsewhere/leaf");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, base.join("lnk")).unwrap();
+        let lexical = serde_json::json!({
+            "cwd": base,
+            "tool_input": {"command": "git status", "workdir": "lnk/.."}
+        });
+        assert_eq!(
+            hook_directory(&lexical.to_string()).unwrap(),
+            base.canonicalize().unwrap()
+        );
+
+        let home = root.path().join("home");
+        std::fs::create_dir_all(home.join("proj")).unwrap();
+        let _env = HoldEnv::set(&[("HOME", home.to_str().unwrap())]);
+        let tilde = serde_json::json!({
+            "cwd": root.path(),
+            "tool_input": {"command":"git status", "workdir":"~/proj"}
+        });
+        assert_eq!(
+            hook_directory(&tilde.to_string()).unwrap(),
+            home.join("proj").canonicalize().unwrap()
         );
     }
 
