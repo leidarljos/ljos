@@ -359,6 +359,272 @@ fn an_encoder_checksum_mismatch_installs_neither_archive() {
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn repack(rel: &Path, archive: &str, work: &Path, top: &str, transform: Option<&str>) {
+    let dest = rel.join(archive);
+    let mut cmd = Command::new("tar");
+    cmd.arg("-C").arg(work);
+    if let Some(expr) = transform {
+        cmd.args(["--transform", expr]);
+    }
+    let out = cmd.arg("-czf").arg(&dest).arg(top).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let line = format!("{}  {archive}\n", sha256(&dest));
+    fs::write(rel.join(format!("{archive}.sha256")), line).unwrap();
+}
+
+/// Replace one release archive with a member `cloud up` must not install.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn plant_hostile(root: &Path, case: &str) -> (PathBuf, PathBuf) {
+    let (home, rel) = encoder_machine(root);
+    let outside = root.join("outside-secret");
+    fs::write(&outside, b"secret").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o644)).unwrap();
+    let work = root.join("work");
+    let embed = "packset-embed-x86_64-unknown-linux-gnu.tar.gz";
+    let runtime = "onnxruntime-x86_64-unknown-linux-gnu.tar.gz";
+    match case {
+        "symlink" => {
+            fs::create_dir_all(work.join("bin")).unwrap();
+            std::os::unix::fs::symlink(&outside, work.join("bin/packset-embed")).unwrap();
+            repack(&rel, embed, &work, "bin", None);
+        }
+        "runtime-symlink" => {
+            fs::create_dir_all(work.join("lib/onnxruntime")).unwrap();
+            std::os::unix::fs::symlink(&outside, work.join("lib/onnxruntime/libonnxruntime.so.1"))
+                .unwrap();
+            repack(&rel, runtime, &work, "lib", None);
+        }
+        "hardlink" => {
+            fs::create_dir_all(work.join("bin")).unwrap();
+            fs::write(work.join("bin/packset-embed"), b"#!/bin/sh\nexit 0\n").unwrap();
+            fs::hard_link(work.join("bin/packset-embed"), work.join("bin/also")).unwrap();
+            repack(&rel, embed, &work, "bin", None);
+        }
+        "absolute" => {
+            fs::create_dir_all(work.join("bin")).unwrap();
+            executable(&work.join("bin/packset-embed"), "#!/bin/sh\nexit 0\n");
+            repack(&rel, embed, &work, "bin", Some("s,^,/,"));
+        }
+        "dotdot" => {
+            fs::create_dir_all(work.join("bin")).unwrap();
+            executable(&work.join("bin/packset-embed"), "#!/bin/sh\nexit 0\n");
+            repack(&rel, embed, &work, "bin", Some("s,^bin,..,"));
+        }
+        "fifo" => {
+            fs::create_dir_all(work.join("bin")).unwrap();
+            let made = Command::new("mkfifo")
+                .arg(work.join("bin/packset-embed"))
+                .status()
+                .unwrap();
+            assert!(made.success(), "mkfifo");
+            repack(&rel, embed, &work, "bin", None);
+        }
+        other => panic!("unknown archive case {other}"),
+    }
+    (home, outside)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn a_hostile_encoder_archive_installs_nothing() {
+    for (case, needle) in [
+        ("symlink", "is a symlink"),
+        ("runtime-symlink", "is a symlink"),
+        ("hardlink", "is a hard link"),
+        ("absolute", "absolute path"),
+        ("dotdot", "absolute path"),
+        ("fifo", "not a regular file"),
+    ] {
+        let _g = Guard::new();
+        let root = tempfile::tempdir().unwrap();
+        let (home, outside) = plant_hostile(root.path(), case);
+        let err = ljos_cli::cloud::up(false).expect_err(case).to_string();
+        assert!(err.contains(needle), "{case}: {err}");
+        assert!(err.contains("nothing was installed"), "{case}: {err}");
+        assert!(
+            !home.join(".local/bin/packset-embed").exists(),
+            "{case}: encoder installed: {err}"
+        );
+        assert!(
+            !home.join(".local/lib/onnxruntime").exists(),
+            "{case}: runtime installed: {err}"
+        );
+        if case == "symlink" || case == "runtime-symlink" {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&outside).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o644, "{case} changed the link target: {err}");
+        }
+    }
+}
+
+/// Replace one release archive and rewrite its `.sha256`.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn replace_archive(rel: &Path, base: &str, top: &str, files: &[(&str, &[u8])]) {
+    let work = rel.join(format!("rebuild-{base}"));
+    let _ = fs::remove_dir_all(&work);
+    for (rel_path, bytes) in files {
+        let path = work.join(rel_path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
+    }
+    let archive = format!("{base}-x86_64-unknown-linux-gnu.tar.gz");
+    repack(rel, &archive, &work, top, None);
+}
+
+/// `0o555` lets the owner chmod the directory back and blocks a rename into it.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn lock_bin_dir(home: &Path) -> PathBuf {
+    let bin_dir = home.join(".local/bin");
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&bin_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    bin_dir
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn unlock_bin_dir(bin_dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(bin_dir, fs::Permissions::from_mode(0o755));
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn a_failed_encoder_swap_keeps_the_previous_pair() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, rel) = encoder_machine(root.path());
+    let said = ljos_cli::cloud::up(false).unwrap();
+    assert!(said.contains("encoder: installed"), "{said}");
+    let bin = home.join(".local/bin/packset-embed");
+    let soname = home.join(".local/lib/onnxruntime/libonnxruntime.so.1");
+    let old_bin = fs::read(&bin).unwrap();
+    assert_eq!(fs::read(&soname).unwrap(), b"runtime");
+    replace_archive(
+        &rel,
+        "onnxruntime",
+        "lib",
+        &[("lib/onnxruntime/libonnxruntime.so.1", b"runtime-new")],
+    );
+    replace_archive(
+        &rel,
+        "packset-embed",
+        "bin",
+        &[("bin/packset-embed", b"#!/bin/sh\nexit 7\n")],
+    );
+    let bin_dir = lock_bin_dir(&home);
+    let err = ljos_cli::cloud::up(true).unwrap_err().to_string();
+    unlock_bin_dir(&bin_dir);
+    assert_eq!(fs::read(&soname).unwrap(), b"runtime", "{err}");
+    assert_eq!(fs::read(&bin).unwrap(), old_bin, "{err}");
+    assert!(err.contains("nothing was installed"), "{err}");
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn a_failed_first_encoder_install_leaves_no_runtime() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, rel) = encoder_machine(root.path());
+    let bin_dir = home.join(".local/bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        fs::copy(rel.join(name), bin_dir.join(name)).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(bin_dir.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    lock_bin_dir(&home);
+    let err = ljos_cli::cloud::up(false).unwrap_err().to_string();
+    unlock_bin_dir(&bin_dir);
+    assert!(
+        !home.join(".local/lib/onnxruntime").exists(),
+        "a failed first install left the runtime: {err}"
+    );
+    assert!(!bin_dir.join("packset-embed").exists(), "{err}");
+    assert!(bin_dir.join("ljos").is_file());
+    assert!(err.contains("nothing was installed"), "{err}");
+}
+
+#[test]
+fn the_cloud_vm_doc_matches_the_encoder_install() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let docs = fs::read_to_string(root.join("docs/cloud-vm.md")).unwrap();
+    assert!(
+        !docs.contains("is built from source"),
+        "docs still say an off-cloud cloud up builds packset-embed"
+    );
+    assert!(
+        docs.contains("WITH_EMBED=0"),
+        "docs omit that install.sh --cloud sets WITH_EMBED=0"
+    );
+    let src = fs::read_to_string(root.join("crates/ljos-cli/src/cloud.rs")).unwrap();
+    assert!(
+        !src.contains("from source"),
+        "cloud.rs still says the encoder is built from source"
+    );
+}
+
+#[test]
+fn a_release_build_does_not_reuse_another_onnx_runtime() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/release.yml");
+    let yml = fs::read_to_string(&path).unwrap();
+    assert!(
+        yml.contains("github.ref_type != 'tag'"),
+        "a tag run restores the ONNX Runtime cache"
+    );
+    assert!(
+        yml.contains("github.event_name != 'workflow_dispatch'"),
+        "a dispatched release restores the ONNX Runtime cache"
+    );
+    assert!(
+        yml.contains("github.ref_type == 'tag'"),
+        "a tag run can skip the source build"
+    );
+    assert!(
+        yml.lines()
+            .any(|line| line.contains("sha256sum") && line.contains("libonnxruntime")),
+        "the release sums omit the built library"
+    );
+    assert!(
+        yml.contains("cp -L"),
+        "the runtime archive still packs soname symlinks"
+    );
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn an_encoder_directory_is_not_already_installed() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, rel) = encoder_machine(root.path());
+    let bin_dir = home.join(".local/bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        fs::copy(rel.join(name), bin_dir.join(name)).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(bin_dir.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let encoder = bin_dir.join("packset-embed");
+    fs::create_dir(&encoder).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&encoder, fs::Permissions::from_mode(0o755)).unwrap();
+    let soname = home.join(".local/lib/onnxruntime/libonnxruntime.so.1");
+    fs::create_dir_all(soname.parent().unwrap()).unwrap();
+    fs::write(&soname, b"planted").unwrap();
+    let name = "packset-embed-x86_64-unknown-linux-gnu.tar.gz";
+    let forged = format!("{}  {name}\n", "ab".repeat(32));
+    fs::write(rel.join(format!("{name}.sha256")), forged).unwrap();
+    let err = ljos_cli::cloud::up(false).unwrap_err().to_string();
+    assert!(err.contains("checksum mismatch"), "{err}");
+    assert!(err.contains("nothing was installed"), "{err}");
+    assert_eq!(fs::read(&soname).unwrap(), b"planted", "{err}");
+    assert!(encoder.is_dir(), "the directory was replaced: {err}");
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn a_ci_job_downloads_no_encoder() {
     let _g = Guard::new();
@@ -368,6 +634,22 @@ fn a_ci_job_downloads_no_encoder() {
     std::env::set_var("GITHUB_RUN_ID", "555001");
     let said = ljos_cli::cloud::up(false).unwrap();
     assert!(said.contains("encoder: not a cloud VM"), "{said}");
+    assert!(!home.join(".local/bin/packset-embed").exists());
+    assert!(!home.join(".local/lib/onnxruntime").exists());
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn a_generic_ci_job_downloads_no_encoder() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _rel) = encoder_machine(root.path());
+    std::env::set_var("CI", "true");
+    let said = ljos_cli::cloud::up(false).unwrap();
+    assert!(
+        said.contains("encoder: not a cloud VM"),
+        "CI=true is not a cloud VM: {said}"
+    );
     assert!(!home.join(".local/bin/packset-embed").exists());
     assert!(!home.join(".local/lib/onnxruntime").exists());
 }
@@ -1060,6 +1342,67 @@ key_env = \"SADDLE_HAND_KEY\"
 }
 
 #[test]
+fn cloud_up_retires_env_wakes_even_when_cloud_age_fails() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let config = home.join(".config");
+    let rel = root.path().join("rel");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(config.join("ljos")).unwrap();
+    for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
+    }
+    fs::write(
+        rel.join("SHA256SUMS"),
+        sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
+    )
+    .unwrap();
+    let wakes = config.join("ljos/wake.toml");
+    fs::write(
+        &wakes,
+        "\
+[inky]
+webhook = \"https://old.example/inky\"
+key_env = \"LJOS_WAKE_INKY_KEY\"
+source = \"env\"
+
+[saddle]
+command = \"true\"
+",
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", &config);
+    std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::remove_var("LJOS_BIN_DIR");
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    clear_agent_ids();
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("LJOS_WAKE_") {
+            std::env::remove_var(&key);
+        }
+    }
+    std::env::set_var("LJOS_WAKE_INKY_KEY", "rotated-key");
+    std::env::set_var("LJOS_CLOUD_AGE_SECRET", "LJOS_FAKE_AGE_KEY");
+    std::env::set_var("LJOS_FAKE_AGE_KEY", "definitely-not-an-age-identity");
+
+    let err = ljos_cli::cloud::up(false).expect_err("bad cloud age must abort cloud up");
+    let said = format!("{err:#}");
+    assert!(said.contains("not an age identity"), "{said}");
+    let table = ljos_cli::wake::load();
+    assert!(!table.contains_key("inky"), "{table:?}");
+    assert_eq!(table["saddle"].command.as_deref(), Some("true"));
+    let text = fs::read_to_string(&wakes).unwrap();
+    assert!(!text.contains("old.example/inky"), "{text}");
+}
+
+#[test]
 fn cloud_up_refuses_to_overwrite_a_broken_wake_toml() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
@@ -1574,6 +1917,15 @@ fn cloud_up_writes_the_scope_cloud_identity_from_a_named_secret() {
     fs::write(&outside, b"keep\n").unwrap();
     std::os::unix::fs::symlink(&outside, &path).unwrap();
     std::env::set_var("LJOS_CLOUD_AGE_KEY", &identity);
+    let linked = ljos_cli::cloud::up(false).unwrap_err().to_string();
+    assert!(linked.contains("is a symlink"), "{linked}");
+    assert!(!linked.contains(&secret_line), "{linked}");
+    assert_eq!(fs::read(&outside).unwrap(), b"keep\n");
+    assert!(fs::symlink_metadata(&path)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    fs::remove_file(&path).unwrap();
     let wrote = ljos_cli::cloud::up(false).unwrap();
     assert!(wrote.contains("wrote"), "{wrote}");
     assert!(wrote.contains("0600"), "{wrote}");
@@ -2111,6 +2463,71 @@ fn doctor_advises_cloud_up_only_on_a_cloud_vm() {
     std::env::set_var("GITLAB_CI", "true");
     let ci = ljos_cli::cloud::missing_mcp_line().unwrap();
     assert!(ci.contains("ljos cloud up"), "{ci}");
+}
+
+/// `CURSOR_AGENT=1` is the desktop agent terminal. A CI variable counts
+/// only when its value says so: `false` is not a job, and Buildkite,
+/// Azure Pipelines, CircleCI, Jenkins, and `CI=true` are.
+#[test]
+fn desktop_cursor_and_ci_values_choose_cloud_up() {
+    let _g = Guard::new();
+    clear_agent_ids();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    fs::create_dir_all(home.join(".cursor")).unwrap();
+    fs::write(
+        home.join(".cursor/mcp.json"),
+        "{\"mcpServers\":{\"ljos\":{\"command\":\"/no/such/ljos-mcp\",\"args\":[]}}}\n",
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::remove_var("LJOS_MCP_CONFIG");
+
+    std::env::set_var("CURSOR_AGENT", "1");
+    let desktop = ljos_cli::cloud::missing_mcp_line().unwrap();
+    assert!(
+        desktop.contains("ljos onboard --harness cursor"),
+        "{desktop}"
+    );
+    assert!(
+        !desktop.contains("ljos cloud up"),
+        "CURSOR_AGENT=1 without a cloud id is the desktop agent: {desktop}"
+    );
+
+    std::env::remove_var("CURSOR_AGENT");
+    for (key, value) in [("GITHUB_ACTIONS", "false"), ("CI", "false")] {
+        clear_agent_ids();
+        std::env::set_var("HOME", &home);
+        std::env::set_var(key, value);
+        let line = ljos_cli::cloud::missing_mcp_line().unwrap();
+        assert!(
+            !line.contains("ljos cloud up"),
+            "{key}={value} is not a CI job: {line}"
+        );
+    }
+
+    for (key, value) in [
+        ("GITHUB_ACTIONS", "true"),
+        ("GITLAB_CI", "true"),
+        ("CI", "true"),
+        ("BUILDKITE", "true"),
+        ("TF_BUILD", "True"),
+        ("CIRCLECI", "true"),
+        ("JENKINS_URL", "https://jenkins.example/"),
+    ] {
+        clear_agent_ids();
+        std::env::set_var("HOME", &home);
+        std::env::set_var(key, value);
+        let line = ljos_cli::cloud::missing_mcp_line().unwrap();
+        assert!(
+            line.contains("ljos cloud up"),
+            "{key}={value} should be CI: {line}"
+        );
+        assert!(
+            !line.contains("onboard --harness cursor"),
+            "{key}={value}: {line}"
+        );
+    }
 }
 
 #[test]
@@ -2686,6 +3103,48 @@ fn install_sh_cloud_reuses_binaries_that_already_answer() {
     assert!(!said.contains("Installing ljos"), "{said}");
 }
 
+#[test]
+fn cloud_up_tags_vm_writes_scope_cloud_without_a_default_scope() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let rel = root.path().join("rel");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
+    }
+    fs::write(
+        rel.join("SHA256SUMS"),
+        sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::remove_var("LJOS_BIN_DIR");
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::remove_var("LJOS_WRITE_SCOPE");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    clear_agent_ids();
+    let said = ljos_cli::cloud::up(false).unwrap();
+    let env = fs::read_to_string(home.join(".config/ljos/env")).unwrap();
+    assert!(env.contains("LJOS_WRITE_SCOPE=cloud\n"), "{env}\n{said}");
+    assert!(
+        !env.contains("default_scope"),
+        "cloud up set a default scope:\n{env}"
+    );
+    let sync_toml = home.join(".config/ljos/sync.toml");
+    if sync_toml.exists() {
+        let text = fs::read_to_string(&sync_toml).unwrap();
+        assert!(!text.contains("default_scope"), "{text}");
+    }
+    assert_eq!(std::env::var("LJOS_WRITE_SCOPE").unwrap(), "cloud");
+}
+
 fn clear_agent_ids() {
     for key in [
         "CURSOR_AGENT_ID",
@@ -2698,6 +3157,11 @@ fn clear_agent_ids() {
         "GITHUB_RUN_ID",
         "GITHUB_ACTIONS",
         "GITLAB_CI",
+        "CI",
+        "BUILDKITE",
+        "TF_BUILD",
+        "CIRCLECI",
+        "JENKINS_URL",
         "CODESPACES",
         "LJOS_SEAT",
         "LJOS_SEAT_KEY",
