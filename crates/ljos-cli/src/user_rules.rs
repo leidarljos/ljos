@@ -606,7 +606,7 @@ fn persons_rule(rule: &UserRule) -> bool {
         return true;
     };
     match super::stored_origin_of(id) {
-        super::Stored::Origin(person) => person,
+        super::Stored::Origin(by) => by == super::StoredBy::Person,
         super::Stored::Absent => false,
         super::Stored::Unreachable => rule.origin.as_deref() == Some(super::admit::ORIGIN_USER),
     }
