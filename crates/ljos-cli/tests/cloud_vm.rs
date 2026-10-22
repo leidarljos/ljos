@@ -1550,6 +1550,25 @@ fn cloud_guard_reads_valued_push_options_before_the_subcommand() {
 }
 
 #[test]
+fn cloud_guard_denies_heads_and_tags_shortcuts_under_cursor() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-short-refs", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let repo = clone_of(root.path(), &origin, "probe-short-refs");
+
+    for line in [
+        "git push origin HEAD:heads/cursor/existing",
+        "git push origin HEAD:tags/cursor/probe-tag",
+    ] {
+        refused(line, &repo);
+    }
+}
+
+#[test]
 fn cloud_guard_reads_the_gh_pr_verb_and_never_its_arguments() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
