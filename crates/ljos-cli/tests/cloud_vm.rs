@@ -1832,6 +1832,30 @@ fn cloud_guard_refuses_shell_trick_push_forms() {
 }
 
 #[test]
+fn cloud_guard_refuses_send_pack_bulk_flags_for_cursor_refs() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-send-pack-bulk", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let repo = clone_of(root.path(), &origin, "probe-send-pack-bulk");
+
+    git(&repo, &["branch", "cursor/local"]);
+    git(&repo, &["tag", "cursor/local-tag"]);
+
+    for line in [
+        "git send-pack --all origin",
+        "git send-pack --mirror origin",
+        "git send-pack --tags origin",
+    ] {
+        let hit = refused(line, &repo);
+        assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {hit:?}");
+    }
+}
+
+#[test]
 fn cloud_guard_reads_the_gh_pr_verb_and_never_its_arguments() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
