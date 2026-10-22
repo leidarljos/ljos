@@ -1,0 +1,1 @@
+A held proposal used to be appended to `proposals.jsonl` with a plain open, so the file kept the default mode and a symlink in its place was written through. Each proposal is now one locked write, and the file is mode 0600.

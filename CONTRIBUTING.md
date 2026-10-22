@@ -9,6 +9,13 @@ A change with no pull request yet can use `+<branch>.<type>.md`.
 Write the entry as one Markdown bullet body, one sentence per line, with no leading dash.
 At release time `towncrier build --version X.Y.Z` collects the fragments into `CHANGELOG.md` and removes them.
 
+## Tests
+
+`cargo test --locked --workspace` runs the real programs ljos drives, so put them on `PATH` first, as the `cargo test` job in `.github/workflows/ci.yml` does:
+`age` and `age-keygen` from your package manager, `packset` and `packsetd` built from the `develop` branch of [packset](https://github.com/leidarljos/packset) with `cargo build -p packset --bin packset --bin packsetd`, and `deedar` built from the [deedar](https://github.com/leidarljos/deedar) commit named in `.github/deedar-pin`.
+A test that finds one missing panics with its name; that run does not count.
+Run the suite from a shell with no `LJOS_OFF` set and outside an agent runner.
+
 ## Commit identity
 
 CI checks only the commits a push or a pull request adds. A push

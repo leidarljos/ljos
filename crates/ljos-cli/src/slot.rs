@@ -51,25 +51,40 @@ const SLOT_LINE: &str = "Note: \"slot: ";
 
 /// Where slots began in this tracker, by commit order: the parents of each
 /// commit that brought a slot note into a tree none of its parents held
-/// one in. Empty when no slot is committed yet. `None` when the tracker is
-/// not a git repository.
-#[must_use]
-pub fn starts() -> Option<Vec<Vec<String>>> {
-    if ballot_sig::tracker_git(&["rev-parse", "--is-inside-work-tree"])? != "true" {
-        return None;
+/// one in. Empty when no slot is committed yet. `Ok(None)` when the
+/// tracker is not a git repository.
+///
+/// # Errors
+///
+/// The tracker's history is incomplete after a deepen was tried
+/// ([`require_tracker_history`]). Missing parents are not "no slots".
+pub fn starts() -> std::result::Result<Option<Vec<Vec<String>>>, String> {
+    let Some(root) = ballot_sig::env_root() else {
+        return Ok(None);
+    };
+    if ballot_sig::git_in(&root, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true")
+    {
+        return Ok(None);
     }
+    require_tracker_history(&root)?;
     let pick = format!("-S{SLOT_LINE}");
-    let log = ballot_sig::tracker_git(&[
-        "--no-pager",
-        "log",
-        "--full-history",
-        "--format=%H %P",
-        pick.as_str(),
-    ])
+    let log = ballot_sig::git_in(
+        &root,
+        &[
+            "--no-pager",
+            "log",
+            "--full-history",
+            "--format=%H %P",
+            pick.as_str(),
+        ],
+    )
     .unwrap_or_default();
     let held = |commit: &str| {
-        ballot_sig::tracker_git(&["--no-pager", "grep", "-q", "-F", "-e", SLOT_LINE, commit])
-            .is_some()
+        ballot_sig::git_in(
+            &root,
+            &["--no-pager", "grep", "-q", "-F", "-e", SLOT_LINE, commit],
+        )
+        .is_some()
     };
     let mut out = Vec::new();
     for line in log.lines() {
@@ -82,21 +97,35 @@ pub fn starts() -> Option<Vec<Vec<String>>> {
             out.push(parents);
         }
     }
-    Some(out)
+    Ok(Some(out))
 }
 
 /// Whether `seat`'s pin `key` was committed before slots began: its line
 /// is in the pin file of every parent in `starts`. A slot in a root commit
 /// leaves nothing before it. With no slot committed yet, a pin committed at
-/// `HEAD` stood.
-#[must_use]
-pub fn stood(starts: &[Vec<String>], seat: &str, key: &str) -> bool {
+/// `HEAD` stood. A missing parent is not a pin that was absent.
+///
+/// # Errors
+///
+/// [`require_tracker_history`] could not make the history readable.
+pub fn stood(starts: &[Vec<String>], seat: &str, key: &str) -> std::result::Result<bool, String> {
+    if let Some(root) = ballot_sig::env_root() {
+        require_tracker_history(&root)?;
+    }
     if starts.is_empty() {
         return pin_line_at("HEAD", seat, key);
     }
-    starts
-        .iter()
-        .all(|parents| !parents.is_empty() && parents.iter().all(|p| pin_line_at(p, seat, key)))
+    for parents in starts {
+        if parents.is_empty() {
+            return Ok(false);
+        }
+        for parent in parents {
+            if !pin_line_at(parent, seat, key)? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// Whether `seat`, pinned to `key`, needs no slot and may sign one: its
@@ -104,12 +133,139 @@ pub fn stood(starts: &[Vec<String>], seat: &str, key: &str) -> bool {
 /// first writer to sign as an unpinned name pins it. `starts` is `None` on
 /// a tracker that is not a git repository, which keeps no order, and there
 /// the list stands.
-#[must_use]
-pub fn stands(seat: &str, key: Option<&str>, starts: Option<&[Vec<String>]>) -> bool {
+///
+/// # Errors
+///
+/// [`require_tracker_history`] could not make the history readable.
+pub fn stands(
+    seat: &str,
+    key: Option<&str>,
+    starts: Option<&[Vec<String>]>,
+) -> std::result::Result<bool, String> {
     match starts {
-        None => standing(seat),
-        Some(at) => key.is_some_and(|key| stood(at, seat, key)),
+        None => Ok(standing(seat)),
+        Some(at) => match key {
+            Some(key) => stood(at, seat, key),
+            None => Ok(false),
+        },
     }
+}
+
+/// The refusal when pin order cannot be read. Names the deepen a caller runs.
+pub const HISTORY_INCOMPLETE: &str = "tracker history incomplete";
+
+/// Make `root`'s history readable for pin order. A shallow checkout, or
+/// one whose objects are missing, is deepened with `git fetch --unshallow`
+/// when it has a remote, then with a deepen of that remote if it is still
+/// shallow. A tracker that is not a git repository is left alone.
+///
+/// # Errors
+///
+/// History is still incomplete. The error is [`HISTORY_INCOMPLETE`] and
+/// names `git fetch --unshallow`. Missing history is not "stood".
+pub fn require_tracker_history(root: &Path) -> std::result::Result<(), String> {
+    if ballot_sig::git_in(root, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true")
+    {
+        return Ok(());
+    }
+    let key = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let (ready, deepened) = {
+        let cache = history_cache();
+        (
+            cache.ready.iter().any(|path| path == &key),
+            cache.deepened.iter().any(|path| path == &key),
+        )
+    };
+    if ready {
+        return Ok(());
+    }
+    if !history_gap(root) {
+        history_cache().ready.push(key);
+        return Ok(());
+    }
+    if !deepened {
+        if let Some(remote) = remote_name(root) {
+            history_cache().deepened.push(key.clone());
+            deepen(root, &remote);
+            if !history_gap(root) {
+                history_cache().ready.push(key);
+                return Ok(());
+            }
+        }
+    }
+    Err(format!(
+        "{HISTORY_INCOMPLETE}: this checkout does not hold the commits a pin's order is read from. \
+         Add the tracker remote if it has none and run `git fetch --unshallow` in the tracker, then retry"
+    ))
+}
+
+struct HistoryCache {
+    ready: Vec<std::path::PathBuf>,
+    deepened: Vec<std::path::PathBuf>,
+}
+
+fn history_cache() -> std::sync::MutexGuard<'static, HistoryCache> {
+    static CACHE: std::sync::Mutex<HistoryCache> = std::sync::Mutex::new(HistoryCache {
+        ready: Vec::new(),
+        deepened: Vec::new(),
+    });
+    CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn history_gap(root: &Path) -> bool {
+    shallow_repo(root) || missing_objects(root)
+}
+
+fn shallow_repo(root: &Path) -> bool {
+    ballot_sig::git_in(root, &["rev-parse", "--is-shallow-repository"]).as_deref() == Some("true")
+}
+
+fn missing_objects(root: &Path) -> bool {
+    git_stdout(root, &["rev-list", "--objects", "--all", "--missing=print"])
+        .lines()
+        .any(|line| line.starts_with('?'))
+}
+
+fn remote_name(root: &Path) -> Option<String> {
+    ballot_sig::git_in(root, &["remote"]).and_then(|text| {
+        text.lines()
+            .find(|line| !line.trim().is_empty())
+            .map(|line| line.trim().to_string())
+    })
+}
+
+fn deepen(root: &Path, remote: &str) {
+    git_fetch(root, &["fetch", "--unshallow", remote]);
+    if shallow_repo(root) {
+        git_fetch(root, &["fetch", "--deepen=2147483647", remote]);
+    }
+}
+
+fn git_fetch(root: &Path, args: &[&str]) {
+    let _ = std::process::Command::new("git")
+        .arg("-c")
+        .arg("protocol.file.allow=always")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+fn git_stdout(root: &Path, args: &[&str]) -> String {
+    let Ok(out) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+    else {
+        return String::new();
+    };
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 /// A slot note's fields.
@@ -277,7 +433,8 @@ pub fn write(issue: &str, seat: &str, model: &str, run: &str, run_key: &str) -> 
             &mine[..12]
         );
     }
-    if !stands(&launcher, Some(pinned), starts().as_deref()) {
+    let began = starts().map_err(anyhow::Error::msg)?;
+    if !stands(&launcher, Some(pinned), began.as_deref()).map_err(anyhow::Error::msg)? {
         bail!(
             "slot: {launcher} is not a standing seat, so no slot it signs counts; a standing seat launches"
         );
@@ -385,36 +542,52 @@ pub fn problems(
 }
 
 /// Whether `note` was already in `issue`'s own entry when `seat`'s pin
-/// `key` was introduced. `None` when the tracker is not a git repository.
-/// `Some(false)` when the pin is not committed, or when any commit that
-/// introduced it lacks `note` in this issue's entry. The same text on
-/// another issue is not this entry. No author or committer date is read.
-#[must_use]
-pub fn recorded_before_pin(issue: &str, note: &str, seat: &str, key: &str) -> Option<bool> {
-    if ballot_sig::tracker_git(&["rev-parse", "--is-inside-work-tree"])? != "true" {
-        return None;
+/// `key` was introduced. `Ok(None)` when the tracker is not a git
+/// repository. `Ok(Some(false))` when the pin is not committed, or when
+/// any commit that introduced it lacks `note` in this issue's entry. The
+/// same text on another issue is not this entry. No author or committer
+/// date is read.
+///
+/// # Errors
+///
+/// [`require_tracker_history`] could not make the history readable. A
+/// missing parent is not "the note was absent".
+pub fn recorded_before_pin(
+    issue: &str,
+    note: &str,
+    seat: &str,
+    key: &str,
+) -> std::result::Result<Option<bool>, String> {
+    if ballot_sig::tracker_git(&["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true") {
+        return Ok(None);
+    }
+    if let Some(root) = ballot_sig::env_root() {
+        require_tracker_history(&root)?;
     }
     let note = note.trim();
     if note.is_empty() || seat.trim().is_empty() || key.trim().is_empty() {
-        return Some(false);
+        return Ok(Some(false));
     }
-    let found = pin_introductions(seat, key);
+    let found = pin_introductions(seat, key)?;
     // No introduction means the pin is not in history. `all` of an empty
     // set is true, and an uncommitted pin would then count.
     if found.is_empty() {
-        return Some(false);
+        return Ok(Some(false));
     }
-    Some(
+    Ok(Some(
         found
             .iter()
             .all(|commit| note_on_issue_at(commit, issue, note)),
-    )
+    ))
 }
 
 /// Commits that added the exact pin line `seat key`, whose parent trees
 /// do not already hold it. Every branch is read: a merge that kept the
 /// same line from both sides would otherwise hide one introduction.
-fn pin_introductions(seat: &str, key: &str) -> Vec<String> {
+fn pin_introductions(seat: &str, key: &str) -> std::result::Result<Vec<String>, String> {
+    if let Some(root) = ballot_sig::env_root() {
+        require_tracker_history(&root)?;
+    }
     let pick = format!("-S{seat} {key}");
     let log = ballot_sig::tracker_git(&[
         "--no-pager",
@@ -432,12 +605,18 @@ fn pin_introductions(seat: &str, key: &str) -> Vec<String> {
         let Some(commit) = parts.next() else {
             continue;
         };
-        let held_by_parent = parts.clone().any(|parent| pin_line_at(parent, seat, key));
-        if pin_line_at(commit, seat, key) && !held_by_parent {
+        let mut held_by_parent = false;
+        for parent in parts {
+            if pin_line_at(parent, seat, key)? {
+                held_by_parent = true;
+                break;
+            }
+        }
+        if pin_line_at(commit, seat, key)? && !held_by_parent {
             out.push(commit.to_string());
         }
     }
-    out
+    Ok(out)
 }
 
 /// The pin lines some commit in this tracker's history held that `pins`
@@ -474,14 +653,17 @@ pub fn dropped_pins(pins: &BTreeMap<String, String>) -> Vec<String> {
     out.into_iter().collect()
 }
 
-fn pin_line_at(commit: &str, seat: &str, key: &str) -> bool {
+fn pin_line_at(commit: &str, seat: &str, key: &str) -> std::result::Result<bool, String> {
+    if let Some(root) = ballot_sig::env_root() {
+        require_tracker_history(&root)?;
+    }
     let Some(text) = file_at(commit, ballot_sig::PIN_FILE) else {
-        return false;
+        return Ok(false);
     };
-    text.lines().any(|line| {
+    Ok(text.lines().any(|line| {
         let mut words = line.split_whitespace();
         words.next() == Some(seat) && words.next() == Some(key) && words.next().is_none()
-    })
+    }))
 }
 
 fn file_at(commit: &str, path: &str) -> Option<String> {
@@ -813,5 +995,146 @@ mod tests {
         );
         assert_eq!(parse("slot: review m r ljosbot ab cd"), None);
         assert_eq!(parse("ballot-sig: a ship ab cd"), None);
+    }
+
+    fn git_ok(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} in {}: {}\n{}",
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr),
+            String::from_utf8_lossy(&out.stdout)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn init_repo(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        git_ok(dir, &["init", "-q", "-b", "main"]);
+        git_ok(dir, &["config", "user.email", "seat@example.invalid"]);
+        git_ok(dir, &["config", "user.name", "seat"]);
+        git_ok(dir, &["config", "commit.gpgsign", "false"]);
+        let hooks = dir.join("no-hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        git_ok(dir, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    }
+
+    fn commit_all(dir: &std::path::Path, message: &str) {
+        git_ok(dir, &["add", "."]);
+        git_ok(dir, &["commit", "-q", "-m", message]);
+    }
+
+    /// A ballot, then `eessi`'s pin, then the first slot note. A depth-1
+    /// clone can see the slot and the pin at `HEAD`, and not the parent
+    /// the pin was introduced in.
+    fn pinned_before_slots(dir: &std::path::Path) {
+        init_repo(dir);
+        let board = "\
+* TODO [#C] old
+:PROPERTIES:
+:ID:         probe-old
+:END:
+- [X] elder: rail
+";
+        std::fs::write(dir.join("issues.org"), board).unwrap();
+        commit_all(dir, "ballot");
+        std::fs::write(dir.join(".ljos-seat-keys"), "eessi aa\n").unwrap();
+        commit_all(dir, "pin");
+        let with_slot =
+            format!("{board}- Note: \"slot: eessi model=m run=r key=k ljosbot aa bb\"\n");
+        std::fs::write(dir.join("issues.org"), with_slot).unwrap();
+        commit_all(dir, "slot");
+    }
+
+    fn shallow_of(root: &std::path::Path, origin: &std::path::Path) -> std::path::PathBuf {
+        let dest = root.join("shallow");
+        let url = format!("file://{}", origin.display());
+        git_ok(
+            root,
+            &["clone", "-q", "--depth", "1", &url, dest.to_str().unwrap()],
+        );
+        let hooks = dest.join("no-hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        git_ok(&dest, &["config", "commit.gpgsign", "false"]);
+        git_ok(
+            &dest,
+            &["config", "core.hooksPath", hooks.to_str().unwrap()],
+        );
+        dest
+    }
+
+    fn quiet_git_config(root: &std::path::Path) {
+        let cfg = root.join("gitconfig");
+        std::fs::write(&cfg, b"").unwrap();
+        std::env::set_var("GIT_CONFIG_GLOBAL", &cfg);
+        std::env::set_var("GIT_CONFIG_SYSTEM", &cfg);
+    }
+
+    #[test]
+    fn a_shallow_clone_deepens_and_a_seat_pinned_before_slots_stands() {
+        let _lock = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        quiet_git_config(root.path());
+        let origin = root.path().join("origin");
+        pinned_before_slots(&origin);
+        let shallow = shallow_of(root.path(), &origin);
+        assert_eq!(
+            git_ok(&shallow, &["rev-parse", "--is-shallow-repository"]).trim(),
+            "true"
+        );
+        std::env::set_var("VISSUE_ROOT", &shallow);
+
+        let at = starts().unwrap().expect("a git tracker");
+        assert!(
+            stood(&at, "eessi", "aa").unwrap(),
+            "a seat pinned before slots did not stand after deepen: {at:?}"
+        );
+        assert_eq!(
+            git_ok(&shallow, &["rev-parse", "--is-shallow-repository"]).trim(),
+            "false",
+            "the clone stayed shallow"
+        );
+        assert!(
+            crate::ballot_sig::recorded_before_signing_in(&shallow, "probe-old", "elder", "rail")
+                .unwrap(),
+            "a ballot recorded before the pin was not dated"
+        );
+    }
+
+    #[test]
+    fn a_shallow_clone_with_no_remote_names_incomplete_history() {
+        let _lock = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        quiet_git_config(root.path());
+        let origin = root.path().join("origin");
+        pinned_before_slots(&origin);
+        let shallow = shallow_of(root.path(), &origin);
+        git_ok(&shallow, &["remote", "remove", "origin"]);
+        std::env::set_var("VISSUE_ROOT", &shallow);
+
+        let err = starts().unwrap_err();
+        assert!(err.contains("tracker history incomplete"), "{err}");
+        assert!(err.contains("git fetch --unshallow"), "{err}");
+        let err = stood(&[], "eessi", "aa").unwrap_err();
+        assert!(
+            err.contains("tracker history incomplete"),
+            "missing history stood: {err}"
+        );
+        let err =
+            crate::ballot_sig::recorded_before_signing_in(&shallow, "probe-old", "elder", "rail")
+                .unwrap_err();
+        assert!(err.contains("tracker history incomplete"), "{err}");
+        assert_eq!(
+            git_ok(&shallow, &["rev-parse", "--is-shallow-repository"]).trim(),
+            "true",
+            "a clone with no remote was deepened"
+        );
     }
 }
