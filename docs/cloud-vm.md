@@ -36,7 +36,7 @@ A `STARTED` claim whose process is gone, older than the lease (`LJOS_LEASE_SECS`
 
 `cloud up` fetches both archives from the release of its own version and checks both sums before it unpacks either. A sum that does not match installs nothing and stops `cloud up`. The runtime goes to `~/.local/lib/onnxruntime`, beside the binary directory. A release without the archives leaves search lexical.
 
-A cloud VM is a run with `CURSOR_AGENT_ID` or `CLOUD_AGENT_ID` set, or a machine with `/run/cursor/api.sock`. A GitHub Actions job is not one. Anywhere else `cloud up` downloads no encoder, and `packset-embed` is built from source against a source-built ONNX Runtime, as packset's howto says.
+A cloud VM is a run with `CURSOR_AGENT_ID` or `CLOUD_AGENT_ID` set, or a machine with `/run/cursor/api.sock`. A GitHub Actions job is not one. Anywhere else `cloud up` downloads no encoder and installs none. `sh scripts/install.sh --cloud` sets `WITH_EMBED=0` and does not build `packset-embed`. Search stays lexical.
 
 ## A job step
 

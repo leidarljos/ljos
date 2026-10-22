@@ -1133,7 +1133,7 @@ fn sha256_file(path: &Path) -> Result<String> {
 }
 
 /// `packset-embed` and the ONNX Runtime it links, from this version's
-/// release, on a cloud VM only. Elsewhere the encoder is built from source.
+/// release, on a cloud VM only. Elsewhere nothing is downloaded.
 /// A release without them leaves search lexical. Both sums are checked
 /// before either archive is unpacked.
 fn ensure_encoder(bin_dir: &Path, force: bool) -> Result<String> {
@@ -1317,8 +1317,8 @@ fn swap_encoder(
     Ok(())
 }
 
-/// A cloud VM. A CI job is not one, and the box and a laptop build
-/// packset-embed from source.
+/// A cloud VM. A CI job is not one. Anywhere else the encoder is not
+/// installed.
 fn cloud_vm() -> bool {
     if github_actions() {
         return false;
