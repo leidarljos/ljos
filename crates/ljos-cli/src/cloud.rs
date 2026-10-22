@@ -6,8 +6,10 @@
 //! writes a webhook wake for each `LJOS_WAKE_<SEAT>_URL`. Entries this
 //! command writes are marked `source = "env"`; any other wake stays. When
 //! `LJOS_CLOUD_AGE_SECRET` names an environment variable, it writes that
-//! variable's age identity for scope `cloud` to a mode 0600 file. A later
-//! boot with the binaries already installed only refreshes the clone.
+//! variable's age identity for scope `cloud` to a mode 0600 file. On a
+//! cloud VM it also installs the release's `packset-embed` and the ONNX
+//! Runtime it links. A later boot with the binaries already installed only
+//! refreshes the clone.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -39,6 +41,12 @@ const CURSOR_PUSH: &str = "cloud-cursor-push";
 const GH_PR_CREATE: &str = "cloud-gh-pr-create";
 /// The rule that refuses `gh pr merge`, read the same way.
 const GH_PR_MERGE: &str = "cloud-gh-pr-merge";
+/// The release workflow's encoder archives, the runtime before the binary
+/// that links it. Each unpacks into the prefix above the binary directory.
+const ENCODER_ARCHIVES: &[&str] = &["onnxruntime", "packset-embed"];
+/// Where the encoder's rpath, `$ORIGIN/../lib/onnxruntime`, finds the runtime.
+const ENCODER_LIB: &str = "lib/onnxruntime";
+const ENCODER_SONAME: &str = "libonnxruntime.so.1";
 
 /// Names the environment variable that holds the age identity for scope
 /// `cloud`. The value is an identity file as `age-keygen` writes it, not a
@@ -63,6 +71,7 @@ pub fn up(force: bool) -> Result<String> {
     let bin_dir = bin_dir(&home);
     let mut lines = Vec::new();
     lines.push(ensure_binaries(&bin_dir, force)?);
+    lines.push(ensure_encoder(&bin_dir, force)?);
     // The config names a bare `ljos-mcp`. The directory has to be on PATH
     // before anything reads that file, including a later step in this process.
     lines.push(ensure_process_path(&bin_dir));
@@ -971,6 +980,173 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(hash.to_ascii_lowercase())
 }
 
+/// `packset-embed` and the ONNX Runtime it links, from this version's
+/// release, on a cloud VM only. Elsewhere the encoder is built from source.
+/// A release without them leaves search lexical. Both sums are checked
+/// before either archive is unpacked.
+fn ensure_encoder(bin_dir: &Path, force: bool) -> Result<String> {
+    if !cloud_vm() {
+        return Ok("encoder: not a cloud VM, so packset-embed is not downloaded".into());
+    }
+    let Some(target) = encoder_target() else {
+        return Ok(format!(
+            "encoder: no release build of packset-embed for {}-{}; search stays lexical",
+            std::env::consts::ARCH,
+            std::env::consts::OS
+        ));
+    };
+    let lib = bin_dir
+        .parent()
+        .context("cloud up: the binary directory has no parent for lib/")?
+        .join(ENCODER_LIB);
+    let bin = bin_dir.join("packset-embed");
+    if !force && executable(&bin) && lib.join(ENCODER_SONAME).is_file() {
+        return Ok(format!(
+            "encoder: packset-embed already in {}",
+            bin_dir.display()
+        ));
+    }
+    let parent = lib.parent().context("cloud up: no lib directory")?;
+    let stage = parent.join(format!(".onnxruntime-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&stage);
+    fs::create_dir_all(&stage).with_context(|| format!("create {}", stage.display()))?;
+    let said = install_encoder(&stage, target, bin_dir, &lib);
+    let _ = fs::remove_dir_all(&stage);
+    said
+}
+
+fn install_encoder(stage: &Path, target: &str, bin_dir: &Path, lib: &Path) -> Result<String> {
+    let mut archives = Vec::new();
+    for base in ENCODER_ARCHIVES {
+        let name = format!("{base}-{target}.tar.gz");
+        let file = stage.join(&name);
+        let sums = stage.join(format!("{name}.sha256"));
+        match release_asset(&name, &file) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(format!(
+                    "encoder: {} has no {name}; search stays lexical",
+                    release_source()
+                ))
+            }
+            Err(e) => return Ok(format!("encoder: {e}; search stays lexical")),
+        }
+        match release_asset(&format!("{name}.sha256"), &sums) {
+            Ok(true) => {}
+            Ok(false) => bail!("{name} has no published checksum; nothing was installed"),
+            Err(e) => return Ok(format!("encoder: {e}; nothing was installed")),
+        }
+        let want = crate::upgrade::digest_of(&fs::read_to_string(&sums)?).with_context(|| {
+            format!("{name}.sha256 is not a sha256 line; nothing was installed")
+        })?;
+        let got = sha256_file(&file)?;
+        if got != want {
+            bail!(
+                "{name}: checksum mismatch (published {want}, file {got}); nothing was installed"
+            );
+        }
+        archives.push(file);
+    }
+    let tree = stage.join("tree");
+    fs::create_dir_all(&tree)?;
+    for file in &archives {
+        let out = Command::new("tar")
+            .arg("-xzf")
+            .arg(file)
+            .arg("-C")
+            .arg(&tree)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .context("tar")?;
+        if !out.status.success() {
+            bail!(
+                "tar {}: {}; nothing was installed",
+                file.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    }
+    let new_lib = tree.join(ENCODER_LIB);
+    let new_bin = tree.join("bin/packset-embed");
+    if !new_lib.join(ENCODER_SONAME).is_file() || !new_bin.is_file() {
+        bail!("the encoder archives lack bin/packset-embed or {ENCODER_LIB}/{ENCODER_SONAME}; nothing was installed");
+    }
+    // A running encoder keeps the files it opened; the new ones are renamed in.
+    let old = stage.join("old");
+    if lib.exists() {
+        fs::rename(lib, &old).with_context(|| format!("move {} aside", lib.display()))?;
+    }
+    if let Err(e) = fs::rename(&new_lib, lib) {
+        let _ = fs::rename(&old, lib);
+        return Err(e).with_context(|| format!("install {}", lib.display()));
+    }
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&new_bin, fs::Permissions::from_mode(0o755))?;
+    fs::create_dir_all(bin_dir)?;
+    let bin = bin_dir.join("packset-embed");
+    fs::rename(&new_bin, &bin).with_context(|| format!("install {}", bin.display()))?;
+    Ok(format!(
+        "encoder: installed {} and ONNX Runtime in {} (checksums match)",
+        bin.display(),
+        lib.display()
+    ))
+}
+
+/// A cloud VM. A CI job is not one, and the box and a laptop build
+/// packset-embed from source.
+fn cloud_vm() -> bool {
+    if github_actions() {
+        return false;
+    }
+    nonempty_var("CURSOR_AGENT_ID").is_some()
+        || nonempty_var("CLOUD_AGENT_ID").is_some()
+        || Path::new("/run/cursor/api.sock").exists()
+}
+
+fn encoder_target() -> Option<&'static str> {
+    match (std::env::consts::ARCH, std::env::consts::OS) {
+        ("x86_64", "linux") => Some("x86_64-unknown-linux-gnu"),
+        _ => None,
+    }
+}
+
+fn release_source() -> String {
+    match std::env::var_os("LJOS_RELEASE_DIR").filter(|p| !p.is_empty()) {
+        Some(dir) => Path::new(&dir).display().to_string(),
+        None => format!("release v{}", env!("CARGO_PKG_VERSION")),
+    }
+}
+
+/// An asset of this version's release into `to`, from `LJOS_RELEASE_DIR`
+/// when it is set. `Ok(false)` when the release has no such asset.
+fn release_asset(name: &str, to: &Path) -> Result<bool> {
+    if let Some(dir) = std::env::var_os("LJOS_RELEASE_DIR").filter(|p| !p.is_empty()) {
+        let src = Path::new(&dir).join(name);
+        if !src.is_file() {
+            return Ok(false);
+        }
+        fs::copy(&src, to).with_context(|| format!("copy {}", src.display()))?;
+        return Ok(true);
+    }
+    let url = format!(
+        "https://github.com/{}/releases/download/v{}/{name}",
+        crate::upgrade::RELEASE_REPO,
+        env!("CARGO_PKG_VERSION")
+    );
+    let resp = match ureq::get(&url).timeout(Duration::from_secs(300)).call() {
+        Ok(resp) => resp,
+        Err(ureq::Error::Status(404, _)) => return Ok(false),
+        Err(e) => bail!("{url}: {e}"),
+    };
+    let mut file = fs::File::create(to).with_context(|| format!("write {}", to.display()))?;
+    std::io::copy(
+        &mut std::io::Read::take(resp.into_reader(), 512 * 1024 * 1024),
+        &mut file,
+    )
+    .with_context(|| format!("read {url}"))?;
+    Ok(true)
+}
+
 fn run_installer(bin_dir: &Path) -> Result<()> {
     let script = installer_script()?;
     let mut cmd = Command::new("sh");
@@ -1844,10 +2020,7 @@ fn nonempty_var(key: &str) -> Option<String> {
 fn agent_id() -> Option<String> {
     // A GitHub Actions job is one run, including when a cloud-agent id is
     // also present in the environment. The run id is the suffix.
-    if std::env::var("GITHUB_ACTIONS").ok().is_some_and(|v| {
-        let v = v.trim();
-        !v.is_empty() && !matches!(v, "0" | "false")
-    }) {
+    if github_actions() {
         if let Some(id) = id_slug("GITHUB_RUN_ID") {
             return Some(id);
         }
@@ -1866,6 +2039,13 @@ fn agent_id() -> Option<String> {
         }
     }
     None
+}
+
+fn github_actions() -> bool {
+    std::env::var("GITHUB_ACTIONS").ok().is_some_and(|v| {
+        let v = v.trim();
+        !v.is_empty() && !matches!(v, "0" | "false")
+    })
 }
 
 fn id_slug(key: &str) -> Option<String> {
