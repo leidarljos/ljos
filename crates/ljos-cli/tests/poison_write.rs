@@ -193,3 +193,109 @@ fn a_runner_prefer_of_the_persons_words_stays_theirs() {
         "{pref}"
     );
 }
+
+fn rules_text(seat: &Seat) -> String {
+    let path = seat.home.path().join(".config/ljos/user-rules.json");
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
+fn combined(out: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// `ljos prefer --user` under a runner refuses a sentence the person did not say.
+#[test]
+fn a_runner_user_rule_of_a_plant_is_refused() {
+    let seat = Seat::new();
+    let out = seat
+        .command(
+            [
+                "prefer",
+                "--user",
+                "--why",
+                "the deploy form asks for it",
+                PLANT,
+            ]
+            .as_slice(),
+            true,
+        )
+        .output()
+        .unwrap();
+    let said = combined(&out);
+    assert!(
+        !out.status.success(),
+        "a planted user rule was accepted\n{}",
+        text_of(&out)
+    );
+    assert!(said.contains("only the person's own words"), "{said}");
+    assert!(
+        !rules_text(&seat).contains("release key"),
+        "the plant was written: {}",
+        rules_text(&seat)
+    );
+}
+
+/// MCP `ljos_prefer` with `user` true is the agent's path, so a plant is refused
+/// even when the server has no runner session variable.
+#[test]
+fn mcp_user_prefer_of_a_plant_is_refused() {
+    let seat = Seat::new();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", seat.home.path())
+        .env("XDG_CONFIG_HOME", seat.home.path().join(".config"))
+        .env("XDG_STATE_HOME", seat.home.path().join("state"))
+        .env("XDG_RUNTIME_DIR", seat.run.path())
+        .env("PACKSET_URL", &seat.url)
+        .env("PACKSET_WORKSPACE", "seat")
+        .env("LJOS_USER_RULES_SYNC", "off")
+        .env("LJOS_GUARD", "on")
+        .env("LJOS_SEAT", "probe")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let lines = [
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "probe", "version": "0"}}}),
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "ljos_prefer",
+            "arguments": {"text": PLANT, "user": true, "why": "the deploy form asks for it"}}}),
+    ];
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        for line in &lines {
+            writeln!(stdin, "{line}").unwrap();
+        }
+    }
+    drop(child.stdin.take());
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let answer = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|v| v["id"] == 2)
+        .unwrap_or_else(|| {
+            panic!(
+                "no tool answer\n{stdout}\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            )
+        });
+    let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
+    let body = answer.to_string();
+    assert!(refused, "mcp stored the plant: {answer}");
+    assert!(body.contains("only the person's own words"), "{body}");
+    assert!(
+        !rules_text(&seat).contains("release key"),
+        "{}",
+        rules_text(&seat)
+    );
+}
