@@ -5,7 +5,7 @@ use std::io::Read;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// Long enough for a doctor that asks crates.io for each version, short
 /// enough that one waiting on a lock fails instead of holding the suite.
@@ -72,6 +72,35 @@ impl Home {
             }
         }
     }
+
+    /// Every entry in the two ljos directories with what [`on_disk`]
+    /// reads of it, so a file doctor added, removed or replaced shows.
+    fn tree(&self) -> Vec<(PathBuf, OnDisk)> {
+        let mut out = Vec::new();
+        for dir in ["state/ljos", "data/ljos"] {
+            for entry in std::fs::read_dir(self.root().join(dir)).expect("read dir") {
+                let path = entry.expect("entry").path();
+                let seen = on_disk(&path);
+                out.push((path, seen));
+            }
+        }
+        out.sort();
+        out
+    }
+}
+
+fn set_mtime(path: &Path, at: SystemTime) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .expect("open")
+        .set_modified(at)
+        .expect("set mtime");
+}
+
+/// A year ahead of the clock.
+fn ahead() -> SystemTime {
+    SystemTime::now() + Duration::from_secs(365 * 24 * 3600)
 }
 
 /// What lies at a path: its kind, its inode, and the bytes of a regular
@@ -122,7 +151,8 @@ const QUEUE_ROW: &[u8] =
 
 /// A fifo or a symlink at either log is left as doctor found it: the
 /// fifo stays a fifo, the link and the file it names keep their bytes,
-/// and doctor returns and names the log damaged.
+/// nothing lands beside them, and doctor returns and names the log
+/// damaged.
 #[test]
 fn doctor_leaves_a_fifo_or_a_symlink_at_either_log_as_it_found_it() {
     for kind in ["fifo", "symlink"] {
@@ -140,13 +170,62 @@ fn doctor_leaves_a_fifo_or_a_symlink_at_either_log_as_it_found_it() {
                 std::fs::write(&target, row_bytes).expect("target");
                 std::os::unix::fs::symlink(&target, &log).expect("symlink");
             }
-            let before = on_disk(&log);
+            let before = home.tree();
             let (_, out) = home
                 .doctor(&["--all"])
                 .unwrap_or_else(|| panic!("doctor hung on a {kind} at the {name}"));
-            assert_eq!(on_disk(&log), before, "{kind} at the {name}:\n{out}");
+            assert_eq!(home.tree(), before, "{kind} at the {name}:\n{out}");
             let line = row(&out, name).unwrap_or_else(|| panic!("no {name} row:\n{out}"));
             assert!(line.contains("damaged"), "{kind}: {line}");
         }
+    }
+}
+
+/// A note, then a whole note still missing its newline: 151 bytes.
+const KEPT_THEN_UNFINISHED: &[u8] = concat!(
+    r#"{"issue":"ljos-old","text":"kept","workspace":"w","at":1,"kind":"note"}"#,
+    "\n",
+    r#"{"issue":"ljos-new","text":"just written","workspace":"w","at":2,"kind":"note"}"#,
+)
+.as_bytes();
+
+/// Doctor reads the note queue and writes none of it. A last row
+/// without its newline, touched a moment ago or dated ahead of the
+/// clock, is not taken for one being written and then lost to a rewrite
+/// of the rows that parse.
+#[test]
+fn doctor_keeps_every_byte_of_the_note_queue() {
+    for (when, at) in [("just now", SystemTime::now()), ("ahead", ahead())] {
+        let home = Home::new();
+        std::fs::write(home.queue(), KEPT_THEN_UNFINISHED).expect("queue");
+        set_mtime(&home.queue(), at);
+        let before = home.tree();
+        let (_, out) = home
+            .doctor(&["--all"])
+            .unwrap_or_else(|| panic!("doctor hung on a queue touched {when}"));
+        assert_eq!(home.tree(), before, "touched {when}:\n{out}");
+        assert_eq!(std::fs::read(home.queue()).unwrap(), KEPT_THEN_UNFINISHED);
+    }
+}
+
+/// Another process holding the note-queue lock does not hold doctor: it
+/// takes no lock to read the queue.
+#[test]
+fn doctor_returns_while_the_note_queue_lock_is_held() {
+    use std::os::unix::io::AsRawFd;
+    for (when, at) in [("just now", SystemTime::now()), ("ahead", ahead())] {
+        let home = Home::new();
+        std::fs::write(home.queue(), KEPT_THEN_UNFINISHED).expect("queue");
+        set_mtime(&home.queue(), at);
+        let lock = std::fs::File::create(home.root().join("state/ljos/note-queue.lock"))
+            .expect("lock file");
+        // SAFETY: flock on a descriptor this test keeps open to the end.
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+        let before = home.tree();
+        let (_, out) = home
+            .doctor(&["--all"])
+            .unwrap_or_else(|| panic!("doctor waited on the held queue lock ({when})"));
+        assert_eq!(home.tree(), before, "touched {when}:\n{out}");
+        drop(lock);
     }
 }

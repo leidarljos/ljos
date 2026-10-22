@@ -1855,7 +1855,7 @@ fn run_command() -> Result<()> {
                     }
                     match mem.queued {
                         Some(true) => println!(
-                            "memory: queued the copy; the next note, finish or doctor that reaches the pack sends it"
+                            "memory: queued the copy; the next note or finish that reaches the pack, or a session start, sends it"
                         ),
                         Some(false) => println!("memory: the same note is already queued"),
                         None => {}
