@@ -26995,17 +26995,22 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     // A download and each later pipeline go once more as one call, so a
     // file `curl -o i.sh URL` saves and `sh i.sh` then runs is judged as
     // the pair it is.
-    let argvs = nested_lines(line, 0)
-        .into_iter()
-        .flat_map(|l| pipelines(&l))
-        .map(|seg| shell_words(&seg))
-        .chain(stdin_programs(line))
-        .chain(fetch_pairs(line));
-    for argv in argvs {
+    let mut argvs = pipeline_argvs(line, cwd);
+    argvs.extend(
+        stdin_programs(line)
+            .into_iter()
+            .map(|argv| (argv, cwd.map(Path::to_path_buf))),
+    );
+    argvs.extend(
+        fetch_pairs(line)
+            .into_iter()
+            .map(|argv| (argv, cwd.map(Path::to_path_buf))),
+    );
+    for (argv, at) in argvs {
         if argv.is_empty() {
             continue;
         }
-        match tcb_check_in(&argv, cwd) {
+        match tcb_check_in(&argv, at.as_deref()) {
             Some(t) if t.starts_with("deny") => {
                 clear_guard_note();
                 let token = policyd_token(&t);
@@ -27046,6 +27051,56 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
                  shell command runs until `cargo install --locked ljos-policyd` puts it on PATH"
             .to_string(),
     })
+}
+
+/// Each command line the TCB checks, with the directory that command runs in.
+///
+/// A `cd` or `pushd` in one pipeline changes where the next one runs.
+fn pipeline_argvs(line: &str, cwd: Option<&Path>) -> Vec<(Vec<String>, Option<PathBuf>)> {
+    let mut out = Vec::new();
+    for nested in nested_lines(line, 0) {
+        let mut at = cwd.filter(|path| path.is_dir()).map(Path::to_path_buf);
+        for seg in pipelines(&nested) {
+            let words = shell_words(&seg);
+            if words.is_empty() {
+                continue;
+            }
+            let here = at.clone();
+            if let Some(next) = cd_segment_target(&words, here.as_deref()) {
+                at = Some(next);
+            }
+            out.push((words, here));
+        }
+    }
+    out
+}
+
+/// Where a `cd` or `pushd` segment moves the next segment.
+fn cd_segment_target(words: &[String], cwd: Option<&Path>) -> Option<PathBuf> {
+    let (at, _) = prefix_end(words);
+    let command = words.get(at)?;
+    let name = base_name(command);
+    if name != "cd" && name != "pushd" {
+        return None;
+    }
+    let raw = match words.get(at + 1).map(String::as_str) {
+        Some(d) if d != "-" && !d.starts_with('-') => d,
+        None if name == "cd" => "~",
+        _ => return None,
+    };
+    let moved = if raw == "~" {
+        home().ok()?
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        home().ok()?.join(rest)
+    } else {
+        PathBuf::from(raw)
+    };
+    if moved.is_absolute() {
+        return Some(moved);
+    }
+    cwd.map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .map(|base| base.join(moved))
 }
 
 /// Most pairs [`fetch_pairs`] hands the TCB for one line.
@@ -40913,6 +40968,36 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         std::fs::write(&file, "x").unwrap();
         assert_eq!(printed(Some(&file)), process.display().to_string());
         assert_eq!(printed(None), process.display().to_string());
+    }
+
+    #[test]
+    fn a_cd_or_pushd_pipeline_is_checked_in_its_entered_directory() {
+        let _g = env_guard();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("danger")).unwrap();
+        let bin = fake_policyd(
+            root.path(),
+            "ljos-policyd",
+            "if [ \"$(basename \"$(/bin/pwd -P)\")\" = \"danger\" ]; then\n\
+             printf 'deny\\tmake-clean-all\\n'\n\
+             exit 2\n\
+             fi\n\
+             printf 'allow\\n'\n",
+        );
+        let _env = HoldEnv::set(&[
+            ("POLICYD_BIN", bin.to_str().unwrap()),
+            ("LJOS_GUARD", "on"),
+            ("LJOS_OFF", "0"),
+        ]);
+        for line in [
+            "cd danger && make clean-all",
+            "(cd danger; make clean-all)",
+            "pushd danger && make clean-all",
+        ] {
+            let rule = tcb_verdict_in(line, Some(root.path())).expect(line);
+            assert_eq!(rule.verdict, "deny", "{line}: {}", rule.reason);
+            assert_eq!(rule.pattern, "ljos-policyd", "{line}: {}", rule.reason);
+        }
     }
 
     #[test]
