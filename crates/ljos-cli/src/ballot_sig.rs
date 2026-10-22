@@ -260,8 +260,9 @@ pub fn signed_hex(key: &SigningKey, message: &[u8]) -> (String, String) {
 ///
 /// `voter` is already pinned to another key.
 pub fn observe_pin(pins: &mut BTreeMap<String, String>, voter: &str, key: &str) -> Result<()> {
+    let fingerprint = key_fingerprint(key);
     match pins.get(voter) {
-        Some(pinned) if pinned != key => bail!(
+        Some(pinned) if key_fingerprint(pinned) != fingerprint => bail!(
             "{voter} is pinned to key {}…, got {}…",
             key_prefix(pinned),
             key_prefix(key)
@@ -302,10 +303,39 @@ pub fn seat_key_path(seat: &str) -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("LJOS_SEAT_KEY").filter(|p| !p.is_empty()) {
         let path = PathBuf::from(p);
         if !is_box_host_key(&path) && seat_may_use_override(seat) {
-            return Some(path);
+            return Some(scoped_override_path(path));
         }
     }
     seat_key_file(seat)
+}
+
+/// A shared override key (`LJOS_SEAT_KEY`) is scoped to the current run or
+/// conversation when no seat name was exported, so one runner session does
+/// not collapse another into its key.
+fn scoped_override_path(path: PathBuf) -> PathBuf {
+    if !unnamed_seat_override() {
+        return path;
+    }
+    let mut scope = Vec::new();
+    let harness = harness_session();
+    if !harness.is_empty() && harness != "-" {
+        scope.push(harness);
+    }
+    if let Some(run) = run_session() {
+        if !run.is_empty() && !scope.iter().any(|seen| seen == &run) {
+            scope.push(run);
+        }
+    }
+    if scope.is_empty() {
+        return path;
+    }
+    let tag = crate::work_id(&scope.join("|"));
+    let tag = &tag[..12.min(tag.len())];
+    let file = path.file_name().and_then(|name| name.to_str()).map_or_else(
+        || format!("ballot.key.{tag}"),
+        |name| format!("{name}.{tag}"),
+    );
+    path.with_file_name(file)
 }
 
 /// The per-seat key file, ignoring `LJOS_SEAT_KEY`.
@@ -384,6 +414,16 @@ fn seat_may_use_override(seat: &str) -> bool {
     }
 }
 
+fn unnamed_seat_override() -> bool {
+    let named = |key: &str| {
+        std::env::var(key)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    named("LJOS_SEAT").is_none() && named("VISSUE_AGENT").is_none()
+}
+
 /// The key at `path`, made on first use: 32 random bytes, mode 0600.
 ///
 /// # Errors
@@ -415,22 +455,40 @@ pub fn load_or_create(path: &std::path::Path) -> Result<SigningKey> {
 /// or the ballot is not committed yet.
 #[must_use]
 pub fn recorded_at(issue: &str, voter: &str, choice: &str) -> Option<i64> {
+    recorded_at_in(&env_root()?, issue, voter, choice)
+}
+
+/// [`recorded_at`] in the tracker at `root`.
+#[must_use]
+pub fn recorded_at_in(root: &Path, issue: &str, voter: &str, choice: &str) -> Option<i64> {
     let pattern = format!(":ID:[[:space:]]+{issue}[[:space:]]*$");
-    let files = tracker_git(&["grep", "-l", "-E", &pattern])?;
+    let files = git_in(root, &["grep", "-l", "-E", &pattern])?;
     let file = files.lines().next()?.to_string();
     let needle = format!("] {}: {}", voter.trim(), choice.trim());
-    tracker_git(&["log", "-1", "--format=%ct", "-S", &needle, "--", &file])?
-        .parse()
-        .ok()
+    git_in(
+        root,
+        &["log", "-1", "--format=%ct", "-S", &needle, "--", &file],
+    )?
+    .parse()
+    .ok()
+}
+
+fn env_root() -> Option<PathBuf> {
+    std::env::var_os("VISSUE_ROOT")
+        .filter(|r| !r.is_empty())
+        .map(PathBuf::from)
 }
 
 /// What `git ARGS` prints in the tracker at `VISSUE_ROOT`, trimmed, when
 /// it succeeds.
 pub(crate) fn tracker_git(args: &[&str]) -> Option<String> {
-    let root = std::env::var_os("VISSUE_ROOT").filter(|r| !r.is_empty())?;
+    git_in(&env_root()?, args)
+}
+
+fn git_in(root: &Path, args: &[&str]) -> Option<String> {
     let out = std::process::Command::new("git")
         .arg("-C")
-        .arg(&root)
+        .arg(root)
         .args(args)
         .output()
         .ok()?;
@@ -491,8 +549,7 @@ pub fn verifies(issue: &str, note: &SigNote) -> bool {
 
 /// The tracker root the pins live at.
 fn pin_path() -> Option<PathBuf> {
-    let root = std::env::var_os("VISSUE_ROOT").filter(|r| !r.is_empty())?;
-    Some(PathBuf::from(root).join(PIN_FILE))
+    Some(env_root()?.join(PIN_FILE))
 }
 
 /// `voter keyhex` lines.
@@ -536,17 +593,24 @@ fn parse_pins_strict(text: &str) -> Result<BTreeMap<String, String>> {
 /// `none: first-seen in this check`. A link to a missing file is a pin file
 /// that cannot be read, not an absent one.
 pub fn pins_for_check() -> Result<(BTreeMap<String, String>, String)> {
-    let none = "none: first-seen in this check".to_string();
-    let Some(path) = pin_path() else {
-        return Ok((BTreeMap::new(), none));
-    };
+    match env_root() {
+        Some(root) => pins_for_check_in(&root),
+        None => Ok((BTreeMap::new(), NO_PIN_FILE.into())),
+    }
+}
+
+const NO_PIN_FILE: &str = "none: first-seen in this check";
+
+/// [`pins_for_check`] for the tracker at `root`.
+pub fn pins_for_check_in(root: &Path) -> Result<(BTreeMap<String, String>, String)> {
+    let path = root.join(PIN_FILE);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             if std::fs::symlink_metadata(&path).is_ok() {
                 bail!("pin file {} is a link to a missing file", path.display());
             }
-            return Ok((BTreeMap::new(), none));
+            return Ok((BTreeMap::new(), NO_PIN_FILE.into()));
         }
         Err(err) => return Err(err).with_context(|| format!("pin file {}", path.display())),
     };
