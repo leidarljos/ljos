@@ -167,6 +167,12 @@ fn seat_env(root: &Path) -> (PathBuf, PathBuf) {
         "GITHUB_PAT",
         "CURL_HOME",
         "WGETRC",
+        "http_proxy",
+        "HTTP_PROXY",
+        "https_proxy",
+        "HTTPS_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
     ] {
         std::env::remove_var(key);
     }
@@ -1039,6 +1045,659 @@ fn a_wget_config_is_a_write_without_a_token_on_the_command() {
         ),
         here,
     );
+}
+
+/// A wgetrc line or `-e` command that supplies or changes the target
+/// (an input file, a base, a proxy, a Host header) means the URL on the
+/// command line is not where the request goes, so it may be GitHub.
+#[test]
+fn a_wget_config_that_moves_the_target_may_be_github() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let line = "wget -q https://example.com/x";
+
+    fs::write(home.join(".wgetrc"), "method = POST\nmax_redirect = 0\n").unwrap();
+    allowed(line, here);
+    for moved in [
+        "input = /tmp/urls",
+        "input_metalink = /tmp/urls.meta4",
+        "base = https://api.github.com/",
+        "https_proxy = https://api.github.com/",
+        "http-proxy = api.github.com:443",
+        "ftp_proxy = api.github.com",
+        "use_proxy = on",
+        "header = Host: api.github.com",
+        "header = host:api.github.com",
+    ] {
+        fs::write(
+            home.join(".wgetrc"),
+            format!("method = POST\nmax_redirect = 0\n{moved}\n"),
+        )
+        .unwrap();
+        let hit = cloud_refusal(line, here);
+        assert!(
+            hit.is_some_and(|hit| hit.pattern == "cloud-cursor-push"),
+            "`{moved}` in ~/.wgetrc was allowed"
+        );
+    }
+    fs::write(
+        home.join(".wgetrc"),
+        "method = POST\nmax_redirect = 0\nheader = X-Host: a\n",
+    )
+    .unwrap();
+    allowed(line, here);
+    fs::remove_file(home.join(".wgetrc")).unwrap();
+
+    allowed(
+        "wget --max-redirect=0 --method=DELETE https://example.com/x",
+        here,
+    );
+    refused(
+        "wget -e https_proxy=https://api.github.com/ --method=DELETE https://example.com/x",
+        here,
+    );
+    refused(
+        "wget --execute=input=/tmp/urls --method=DELETE https://example.com/x",
+        here,
+    );
+    refused(
+        "wget -ebase=https://api.github.com/ --method=DELETE https://example.com/x",
+        here,
+    );
+}
+
+/// A curlrc line the guard cannot read, a `variable` or `expand-`
+/// option, or a config it cannot open may add a URL, so the host on the
+/// command line is not the whole target.
+#[test]
+fn a_curl_config_that_hides_the_target_may_be_github() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let line = "curl -s https://example.com/x";
+
+    fs::write(home.join(".curlrc"), "request = POST\nsilent\n").unwrap();
+    allowed(line, here);
+    for hidden in [
+        "url = \"https://example.com/\" \\\nhttps://api.github.com/user",
+        "url = \"https://api.git\\\nhub.com/user\"",
+        "variable = %HOST\nexpand-url = \"https://{{HOST}}/user\"",
+        "--variable HOST@/tmp/host",
+        "url = \"https://{{HOST}}/user\"",
+        "proxy = https://api.github.com/",
+        "resolve = example.com:443:140.82.112.6",
+    ] {
+        fs::write(home.join(".curlrc"), format!("request = POST\n{hidden}\n")).unwrap();
+        let hit = cloud_refusal(line, here);
+        assert!(
+            hit.is_some_and(|hit| hit.pattern == "cloud-cursor-push"),
+            "`{hidden}` in ~/.curlrc was allowed"
+        );
+    }
+    fs::remove_file(home.join(".curlrc")).unwrap();
+
+    let inner = root.path().join("inner.cfg");
+    let outer = root.path().join("outer.cfg");
+    fs::write(&inner, "url = https://api.github.com/user\n").unwrap();
+    fs::write(&outer, format!("config = \"{}\"\n", inner.display())).unwrap();
+    refused(
+        &format!("curl -X POST -K {} https://example.com/x", outer.display()),
+        here,
+    );
+    allowed("curl -X POST https://example.com/x", here);
+    refused("curl -X POST -K - https://example.com/x", here);
+    refused(
+        &format!(
+            "curl -X POST --config {} https://example.com/x",
+            root.path().join("missing.cfg").display()
+        ),
+        here,
+    );
+    refused(
+        "curl --variable HOST=api.github.com --expand-url \"https://{{HOST}}/user\" -X POST",
+        here,
+    );
+}
+
+/// Wget fetches each URL in an input file and resolves a relative one
+/// against a base, so either may send the request to GitHub whatever
+/// the command line names. So does a `Host:` header.
+#[test]
+fn a_wget_command_line_that_moves_the_target_may_be_github() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let cfg = root.path().join("named.wgetrc");
+    fs::write(&cfg, "input = /tmp/urls\n").unwrap();
+
+    for moved in [
+        "-i /tmp/urls".to_string(),
+        "-i/tmp/urls".to_string(),
+        "-qi /tmp/urls".to_string(),
+        "--input-file /tmp/urls".to_string(),
+        "--input-file=/tmp/urls".to_string(),
+        "--input-f=/tmp/urls".to_string(),
+        "-B https://api.github.com/".to_string(),
+        "-Bhttps://api.github.com/".to_string(),
+        "--base https://example.org/".to_string(),
+        "--base=https://api.github.com/".to_string(),
+        "--header 'Host: api.github.com'".to_string(),
+        "--header=host:api.github.com".to_string(),
+        "-qebase=https://api.github.com/".to_string(),
+        format!("--conf={}", cfg.display()),
+        format!("--config {}", cfg.display()),
+    ] {
+        refused(
+            &format!("wget --method=POST --max-redirect=0 {moved} https://example.invalid/x"),
+            here,
+        );
+        allowed(&format!("wget {moved} https://example.invalid/x"), here);
+    }
+    allowed(
+        "wget --method=POST --max-redirect=0 -O /tmp/i -nv https://example.invalid/x",
+        here,
+    );
+
+    fs::write(home.join(".wgetrc"), "header = @/tmp/h\n").unwrap();
+    refused("wget -i /tmp/urls https://example.invalid/x", here);
+    fs::remove_file(home.join(".wgetrc")).unwrap();
+}
+
+/// Curl and wget follow a symlinked config and load what it reaches, so
+/// the guard judges that file. A config either would load and the guard
+/// cannot read may add any URL, even beside a host that is not GitHub.
+#[test]
+fn a_config_the_client_may_load_is_judged_beside_another_host() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let curl = "curl -X POST https://example.com/x";
+    let wget = "wget --method=POST --max-redirect=0 https://example.com/x";
+    let target = root.path().join("target.rc");
+    let link = |name: &str| {
+        let path = home.join(name);
+        let _ = fs::remove_file(&path);
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+    };
+
+    fs::write(&target, "url = https://api.github.com/user\n").unwrap();
+    link(".curlrc");
+    refused(curl, here);
+    fs::write(&target, "silent\n").unwrap();
+    allowed(curl, here);
+    allowed("curl -s https://api.github.com/user", here);
+    fs::remove_file(home.join(".curlrc")).unwrap();
+
+    fs::write(&target, "input = /tmp/urls\n").unwrap();
+    link(".wgetrc");
+    refused(wget, here);
+    fs::remove_file(home.join(".wgetrc")).unwrap();
+    let named = root.path().join("named.link");
+    std::os::unix::fs::symlink(&target, &named).unwrap();
+    refused(
+        &format!(
+            "wget --config={} --method=POST --max-redirect=0 https://example.com/x",
+            named.display()
+        ),
+        here,
+    );
+    fs::write(&target, "quiet = on\n").unwrap();
+    link(".wgetrc");
+    allowed("wget -q https://api.github.com/user", here);
+    fs::remove_file(home.join(".wgetrc")).unwrap();
+
+    let dir = root.path().join("a-dir");
+    fs::create_dir(&dir).unwrap();
+    for (name, line) in [(".curlrc", curl), (".wgetrc", wget)] {
+        fs::create_dir(home.join(name)).unwrap();
+        refused(line, here);
+        fs::remove_dir(home.join(name)).unwrap();
+        std::os::unix::fs::symlink(&dir, home.join(name)).unwrap();
+        refused(line, here);
+        fs::remove_file(home.join(name)).unwrap();
+    }
+    refused(&format!("SYSTEM_WGETRC={} {wget}", dir.display()), here);
+    refused(&format!("WGETRC={} {wget}", dir.display()), here);
+    refused(
+        &format!("curl -K {} -X POST https://example.com/x", dir.display()),
+        here,
+    );
+
+    fs::write(home.join(".wgetrc"), "header = \"unterminated\n").unwrap();
+    refused("wget -q https://example.com/x", here);
+    fs::remove_file(home.join(".wgetrc")).unwrap();
+
+    use std::os::unix::fs::PermissionsExt;
+    let root_user = Command::new("id").arg("-u").output().unwrap().stdout == b"0\n";
+    if !root_user {
+        fs::write(home.join(".curlrc"), "silent\n").unwrap();
+        fs::set_permissions(home.join(".curlrc"), fs::Permissions::from_mode(0o000)).unwrap();
+        refused(curl, here);
+        fs::set_permissions(home.join(".curlrc"), fs::Permissions::from_mode(0o644)).unwrap();
+        allowed(curl, here);
+        fs::remove_file(home.join(".curlrc")).unwrap();
+    }
+}
+
+/// A redirect can lead anywhere, and a 307 or 308 keeps the method.
+/// Curl follows one with `-L`. Wget follows one unless `max_redirect`
+/// is 0.
+#[test]
+fn a_followed_redirect_may_lead_to_github() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+
+    for follow in [
+        "-L",
+        "-sL",
+        "--location",
+        "--location-trusted",
+        "-L --no-location",
+    ] {
+        refused(
+            &format!("curl {follow} -X POST https://example.com/x"),
+            here,
+        );
+        allowed(&format!("curl {follow} https://example.com/x"), here);
+    }
+    allowed("curl -X POST https://example.com/x", here);
+    fs::write(home.join(".curlrc"), "location\n").unwrap();
+    refused("curl -X POST https://example.com/x", here);
+    fs::write(home.join(".curlrc"), "-L\n").unwrap();
+    refused("curl -X POST https://example.com/x", here);
+    fs::remove_file(home.join(".curlrc")).unwrap();
+
+    refused("wget --method=POST https://example.com/x", here);
+    refused("wget --post-data=a=b https://example.com/x", here);
+    refused(
+        "wget --max-redirect=0 --max-redirect=5 --method=POST https://example.com/x",
+        here,
+    );
+    allowed("wget https://example.com/x", here);
+    for stay in [
+        "--max-redirect=0",
+        "--max-redirect 0",
+        "--max-r=0",
+        "-e max_redirect=0",
+    ] {
+        allowed(
+            &format!("wget {stay} --method=POST https://example.com/x"),
+            here,
+        );
+    }
+    fs::write(home.join(".wgetrc"), "max_redirect = 0\n").unwrap();
+    allowed("wget --method=POST https://example.com/x", here);
+    fs::remove_file(home.join(".wgetrc")).unwrap();
+}
+
+/// A proxy can forward a request anywhere. The clients take one from
+/// the environment, and the guard reads the environment the command
+/// gets: the process, an `export` on the line, and a prefix.
+#[test]
+fn a_proxy_in_the_environment_may_reach_github() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let curl = "curl -X POST https://example.com/x";
+    let wget = "wget --max-redirect=0 --method=POST http://example.com/x";
+    let relay = "http://relay.example:3128";
+
+    for key in [
+        "http_proxy",
+        "HTTP_PROXY",
+        "https_proxy",
+        "HTTPS_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
+    ] {
+        refused(&format!("{key}={relay} {curl}"), here);
+        refused(&format!("env {key}={relay} {wget}"), here);
+        refused(&format!("export {key}={relay}; {curl}"), here);
+        refused(&format!("NO_PROXY='*' {key}={relay} {curl}"), here);
+        allowed(&format!("{key}={relay} curl https://example.com/x"), here);
+        allowed(&format!("{key}= {curl}"), here);
+        std::env::set_var(key, relay);
+        refused(curl, here);
+        refused("http --ignore-stdin POST https://example.com/x a=b", here);
+        std::env::remove_var(key);
+    }
+    allowed(curl, here);
+    allowed(wget, here);
+}
+
+/// An ordinary curl option that changes neither the request nor where it
+/// goes, in a curlrc or on the command line, leaves a GitHub GET and a
+/// write to another host allowed.
+#[test]
+fn an_ordinary_curl_option_is_not_a_refusal() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    for rc in [
+        "tlsv1.2",
+        "continue-at = -",
+        "http1.0",
+        "--tlsv1.3\ntls-max = 1.3\nciphers = ECDHE-RSA-AES128-GCM-SHA256",
+        "remote-time\nmax-filesize = 10M\nfail-early\nno-buffer\ntcp-nodelay",
+        "keepalive-time = 30\nretry-connrefused\nurl-query = a=b\nrange = 0-99",
+        "etag-save = /tmp/etag\nparallel\ntrace-ascii = /tmp/t\nstderr = /tmp/e",
+        "digest\npost301\nnoproxy = example.com\ndisallow-username-in-url",
+    ] {
+        fs::write(home.join(".curlrc"), format!("{rc}\n")).unwrap();
+        allowed("curl -s https://api.github.com/user", here);
+        allowed("curl -X POST https://example.com/x", here);
+    }
+    fs::remove_file(home.join(".curlrc")).unwrap();
+    allowed(
+        "curl --proto '=https' --tlsv1.2 -sSf -X POST https://example.com/x",
+        here,
+    );
+    allowed("curl -Z -R -N -0 -X POST https://example.com/x", here);
+    refused(
+        "curl --tlsv1.2 --keepalive https://api.github.com/user -X POST",
+        here,
+    );
+}
+
+/// The guard reads a config before the client does. A write on the same
+/// line to `SYSTEM_WGETRC` or to a config a curl or wget there names
+/// could change it in between, so that write is refused.
+#[test]
+fn a_write_to_a_config_the_line_names_is_refused() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let cfg = root.path().join("k.cfg");
+    fs::write(&cfg, "silent\n").unwrap();
+    let cfg = cfg.display();
+    let url = "printf 'url = https://api.github.com/user\\n'";
+
+    allowed(&format!("curl -K {cfg} -s https://example.com/x"), here);
+    allowed(&format!("{url} > {cfg}"), here);
+    for client in [
+        format!("curl -K {cfg} -s https://example.com/x"),
+        format!("curl -sK{cfg} https://example.com/x"),
+        format!("curl --config {cfg} https://example.com/x"),
+        format!("wget --config={cfg} -q https://example.com/x"),
+    ] {
+        refused(&format!("{client} & {url} > {cfg}"), here);
+        refused(&format!("{url} >> {cfg} & {client}"), here);
+        refused(&format!("{client} & cp /tmp/other {cfg}"), here);
+    }
+
+    refused(
+        &format!("curl -K {cfg} -o {cfg} https://example.com/x"),
+        here,
+    );
+    fs::write(home.join(".curlrc"), "silent\n").unwrap();
+    allowed(
+        &format!(
+            "curl -K {} -s https://example.com/x",
+            home.join(".curlrc").display()
+        ),
+        here,
+    );
+    fs::remove_file(home.join(".curlrc")).unwrap();
+
+    let system = root.path().join("system.wgetrc");
+    std::env::set_var("SYSTEM_WGETRC", &system);
+    refused(
+        &format!("echo input=/tmp/urls > {}", system.display()),
+        here,
+    );
+    std::env::remove_var("SYSTEM_WGETRC");
+    allowed(
+        &format!("echo input=/tmp/urls > {}", system.display()),
+        here,
+    );
+}
+
+/// A curl option that names a proxy, a resolver, a socket, an address
+/// map, or a `Host:` header sends the request somewhere the URL does not
+/// say. So does an address for a host, and an option the guard does not
+/// know may be one of those.
+#[test]
+fn a_curl_command_line_that_moves_the_target_may_be_github() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+
+    for moved in [
+        "--resolve example.com:443:140.82.112.6",
+        "--connect-to example.com:443:api.github.com:443",
+        "--connect-t example.com:443:api.github.com:443",
+        "-x http://relay.example:3128",
+        "-xhttp://relay.example:3128",
+        "--proxy=http://relay.example:3128",
+        "--preproxy socks5://relay.example",
+        "--socks5-hostname relay.example:1080",
+        "--doh-url https://dns.example/q",
+        "--dns-servers 10.0.0.1",
+        "--unix-socket /tmp/relay.sock",
+        "--abstract-unix-socket relay",
+        "--alt-svc /tmp/altsvc",
+        "-H 'Host: api.github.com'",
+        "--header=host:api.github.com",
+        "--frobnicate",
+    ] {
+        refused(
+            &format!("curl -k -X POST {moved} https://example.com/x"),
+            here,
+        );
+        allowed(&format!("curl -k {moved} https://example.com/x"), here);
+    }
+    refused("curl -k -X POST 140.82.112.6/zen", here);
+    refused("curl -k -X POST -W https://example.com/x", here);
+    refused("curl -X POST api.github.com/user", here);
+    refused("curl -G -d x --no-get https://api.github.com/user", here);
+    allowed(
+        "curl -X POST -H 'X-Host: api.github.com' https://example.com/x",
+        here,
+    );
+
+    for moved in [
+        "connect-to = example.com:443:api.github.com:443",
+        "header = \"Host: api.github.com\"",
+        "-H \"Host: api.github.com\"",
+        "socks5 = relay.example:1080",
+    ] {
+        fs::write(home.join(".curlrc"), format!("request = POST\n{moved}\n")).unwrap();
+        refused("curl -s https://example.com/x", here);
+    }
+    fs::remove_file(home.join(".curlrc")).unwrap();
+}
+
+/// Curl expands `{a,b}` and `[1-3]` in a URL into several URLs unless
+/// `-g` is given, so a host with those may be GitHub.
+#[test]
+fn a_curl_glob_in_the_host_may_be_github() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    for url in [
+        "https://git{hub,xxx}.com/",
+        "https://api.git{hub}.com/user",
+        "https://github.co[l-m]/",
+        "git{hub,xxx}.com/",
+    ] {
+        refused(&format!("curl -X POST '{url}'"), here);
+        refused(&format!("curl -X POST --url '{url}'"), here);
+        allowed(&format!("curl -s '{url}'"), here);
+    }
+    allowed("curl -X POST 'https://example.com/{a,b}'", here);
+    allowed("curl -g -X POST 'https://git{hub,xxx}.com/'", here);
+    allowed("curl -X POST --globoff 'https://git{hub,xxx}.com/'", here);
+    refused(
+        "curl -g --no-globoff -X POST 'https://git{hub,xxx}.com/'",
+        here,
+    );
+
+    fs::write(
+        home.join(".curlrc"),
+        "request = POST\nurl = \"https://git{hub,xxx}.com/\"\n",
+    )
+    .unwrap();
+    refused("curl -s https://example.com/x", here);
+    fs::write(
+        home.join(".curlrc"),
+        "request = POST\ngloboff\nurl = \"https://git{hub,xxx}.com/\"\n",
+    )
+    .unwrap();
+    allowed("curl -s https://example.com/x", here);
+    fs::remove_file(home.join(".curlrc")).unwrap();
+}
+
+/// An address names a peer, not a host. GitHub answers there for the
+/// name in a `Host:` header or the TLS name, so the request may be
+/// GitHub's.
+#[test]
+fn an_address_for_a_host_may_be_github() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    for addr in [
+        "https://140.82.112.6/zen",
+        "https://2354278406/zen",
+        "https://0x8c.0x52.0x70.0x6/zen",
+        "https://[2606:50c0:8000::154]/zen",
+    ] {
+        refused(&format!("curl -k -X POST {addr}"), here);
+        refused(&format!("wget --method=POST {addr}"), here);
+        allowed(&format!("curl -k {addr}"), here);
+    }
+    allowed("curl -X POST http://localhost:8080/x", here);
+}
+
+/// Windows curl also loads `.curlrc` or `_curlrc` from `USERPROFILE`,
+/// `APPDATA`, and `USERPROFILE\Application Data` after `HOME`. A seat that
+/// sets those variables is judged as Windows curl would be.
+#[test]
+fn a_windows_curlrc_is_judged_where_its_variable_is_set() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let rc = "request = DELETE\nheader = Authorization: Bearer x\n";
+    let win = root.path().join("win");
+    let legacy = win.join("Application Data");
+    fs::create_dir_all(&legacy).unwrap();
+    let line = |key: &str| {
+        format!(
+            "{key}={} curl -s https://api.github.com/user",
+            win.display()
+        )
+    };
+
+    allowed(&line("APPDATA"), here);
+    allowed(&line("USERPROFILE"), here);
+    for (dir, name, key) in [
+        (&win, "_curlrc", "APPDATA"),
+        (&win, ".curlrc", "APPDATA"),
+        (&win, "_curlrc", "USERPROFILE"),
+        (&win, ".curlrc", "USERPROFILE"),
+        (&legacy, "_curlrc", "USERPROFILE"),
+    ] {
+        fs::write(dir.join(name), rc).unwrap();
+        refused(&line(key), here);
+        allowed(
+            &format!(
+                "{key}={} curl -q -s https://api.github.com/user",
+                win.display()
+            ),
+            here,
+        );
+        fs::remove_file(dir.join(name)).unwrap();
+    }
+
+    fs::write(win.join("_curlrc"), rc).unwrap();
+    fs::write(home.join(".curlrc"), "silent\n").unwrap();
+    allowed(&line("APPDATA"), here);
+    fs::remove_file(home.join(".curlrc")).unwrap();
+    fs::remove_file(win.join("_curlrc")).unwrap();
+
+    #[cfg(not(windows))]
+    {
+        fs::write(home.join("_curlrc"), rc).unwrap();
+        allowed("curl -s https://api.github.com/user", here);
+        fs::remove_file(home.join("_curlrc")).unwrap();
+    }
+}
+
+/// Only a missing default config is no config. A directory, a fifo, or a
+/// symlink there could not be read, so the request is judged a write. A
+/// fifo must not hold the guard waiting for a writer.
+#[test]
+fn a_default_config_that_is_not_a_regular_file_is_a_write() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let curl = "curl -s https://api.github.com/user";
+    let wget = "wget -q https://api.github.com/user";
+    let real = root.path().join("real-dir");
+    fs::create_dir_all(&real).unwrap();
+
+    for (name, line) in [(".curlrc", curl), (".wgetrc", wget)] {
+        let path = home.join(name);
+        fs::create_dir(&path).unwrap();
+        refused(line, here);
+        fs::remove_dir(&path).unwrap();
+
+        let made = Command::new("mkfifo").arg(&path).status().unwrap();
+        assert!(made.success());
+        refused(line, here);
+        fs::remove_file(&path).unwrap();
+
+        std::os::unix::fs::symlink(&real, &path).unwrap();
+        refused(line, here);
+        fs::remove_file(&path).unwrap();
+    }
+
+    fs::create_dir(xdg.join("curlrc")).unwrap();
+    refused(curl, here);
+    allowed("curl -q -s https://api.github.com/user", here);
+    fs::remove_dir(xdg.join("curlrc")).unwrap();
+    allowed(curl, here);
+    allowed(wget, here);
 }
 
 #[test]

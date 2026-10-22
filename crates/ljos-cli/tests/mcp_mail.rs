@@ -117,6 +117,11 @@ fn configure(home: &Path, mailbox: &maildir::Mailbox) {
         ),
     )
     .unwrap();
+    std::fs::set_permissions(
+        dir.join("mail.toml"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -164,7 +169,7 @@ fn search_and_show_read_the_configured_mailbox() {
     let shown = &ran.by_id(3)["result"];
     assert_ne!(shown["isError"], true, "{shown}");
     let msg = &shown["structuredContent"]["messages"][0];
-    assert_eq!(msg["hidden_text_dropped"], true, "{shown}");
+    assert_eq!(msg["hidden_content"], true, "{shown}");
     assert!(!msg["body"]
         .as_str()
         .unwrap()
@@ -186,6 +191,48 @@ fn no_mail_table_is_a_refusal() {
     );
     assert_eq!(ran.by_id(2)["result"]["isError"], true);
     assert!(ran.text(2).contains("[mail]"), "{}", ran.text(2));
+}
+
+#[test]
+fn an_empty_mail_table_does_not_open_the_default_database() {
+    let home = tempfile::tempdir().unwrap();
+    let mailbox = maildir::mailbox();
+    std::fs::write(
+        home.path().join(".notmuch-config"),
+        std::fs::read(&mailbox.config).unwrap(),
+    )
+    .unwrap();
+    let dir = home.path().join("config/ljos");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("mail.toml"), "[mail]\n").unwrap();
+    let ran = session(
+        home.path(),
+        Some("mail_search"),
+        &[call("ljos_mail_search", json!({"query": "lunch"}))],
+    );
+    assert_eq!(ran.by_id(2)["result"]["isError"], true);
+    assert!(ran.text(2).contains("notmuch_config"), "{}", ran.text(2));
+    assert!(!ran.text(2).contains("Lunch"), "{}", ran.text(2));
+}
+
+#[test]
+fn a_workspace_ljos_toml_cannot_set_the_mail_table() {
+    let home = tempfile::tempdir().unwrap();
+    let mailbox = maildir::mailbox();
+    configure(home.path(), &mailbox);
+    std::fs::write(
+        home.path().join("ljos.toml"),
+        "[mail]\nidentity = \"seat@example.test\"\ndeny_file = \"/dev/null\"\n",
+    )
+    .unwrap();
+    let ran = session(
+        home.path(),
+        Some("mail_search"),
+        &[call("ljos_mail_search", json!({"query": "lunch"}))],
+    );
+    assert_eq!(ran.by_id(2)["result"]["isError"], true);
+    assert!(ran.text(2).contains("ljos.toml"), "{}", ran.text(2));
+    assert!(!ran.text(2).contains("Lunch"), "{}", ran.text(2));
 }
 
 #[test]
@@ -220,4 +267,53 @@ fn a_cloud_seat_is_refused_even_with_a_mailbox() {
         assert!(ran.text(id).contains("cloud seat"), "{}", ran.text(id));
         assert!(!ran.text(id).contains("Lunch"), "{}", ran.text(id));
     }
+}
+
+#[test]
+fn any_cloud_marker_refuses_the_mail_tools() {
+    let mailbox = maildir::mailbox();
+    let extra = serde_json::to_string(&json!([
+        ["cloud-cursor-push", "deny", "r"],
+        ["cloud-gh-pr-create", "deny", "r"],
+        ["cloud-gh-pr-merge", "deny", "r"],
+        ["rm -rf *", "deny", "an extra rule"]
+    ]))
+    .unwrap();
+    for (name, text) in [
+        ("cloud-guard-rules.json", extra.as_str()),
+        ("cloud-guard-rules.json", "not json"),
+        ("cloud-guard-rules.json", "[]"),
+        ("push-allow", ""),
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        configure(home.path(), &mailbox);
+        std::fs::write(home.path().join("config/ljos").join(name), text).unwrap();
+        let ran = session(
+            home.path(),
+            Some("mail_search"),
+            &[call("ljos_mail_search", json!({"query": "lunch"}))],
+        );
+        assert_eq!(ran.by_id(2)["result"]["isError"], true, "{name} {text}");
+        assert!(
+            ran.text(2).contains("cloud seat"),
+            "{name}: {}",
+            ran.text(2)
+        );
+    }
+}
+
+#[test]
+fn calling_a_mail_tool_that_was_not_asked_for_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let mailbox = maildir::mailbox();
+    configure(home.path(), &mailbox);
+    let ran = session(
+        home.path(),
+        None,
+        &[call("ljos_mail_search", json!({"query": "lunch"}))],
+    );
+    let answer = ran.by_id(2);
+    let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
+    assert!(refused, "{answer}");
+    assert!(!answer.to_string().contains("Lunch"), "{answer}");
 }

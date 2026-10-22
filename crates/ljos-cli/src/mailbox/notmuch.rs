@@ -1,16 +1,20 @@
 //! A read-only notmuch reader for search and show.
 //!
 //! notmuch runs with a fixed argv and a cleared environment: PATH, HOME
-//! and the configured `NOTMUCH_CONFIG` only. The query is one argv
+//! and the configured `NOTMUCH_CONFIG` only, which is required. The query is one argv
 //! element after `--`, so it is never an option. Everything a message
 //! supplies (subject, authors, addresses, text, attachment names) comes
 //! back between markers that carry a random nonce the message cannot
 //! guess, with control and bidirectional characters replaced. No path to
 //! a message file and no attachment content leaves this module.
 
-use std::io::Read as _;
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::io::Read;
+use std::os::unix::process::CommandExt as _;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{bail, Context as _, Result};
 use schemars::JsonSchema;
@@ -29,6 +33,14 @@ const OUTPUT_MAX: u64 = 16 << 20;
 const BODY_MAX: usize = 32 * 1024;
 const MESSAGES_MAX: usize = 50;
 const ATTACHMENTS_MAX: usize = 20;
+const PART_DEPTH_MAX: usize = 16;
+const THREAD_DEPTH_MAX: usize = 64;
+/// The longest one notmuch run may take before it is killed.
+pub const TIMEOUT: Duration = Duration::from_secs(30);
+/// The most bytes of one attachment that are read to hash it.
+pub const ATTACHMENT_HASH_MAX: u64 = 64 << 20;
+/// What an HTML part becomes when its hidden text cannot be told apart.
+const WITHHELD: &str = "[ljos: this HTML part hides text in a way the reader cannot follow, so its text is withheld; read it in a mail client]";
 /// Tags left out of a search unless the query names them.
 const EXCLUDED: &[&str] = &["spam", "deleted"];
 
@@ -76,8 +88,11 @@ pub struct Message {
     pub subject: String,
     /// Text parts, with HTML reduced to its visible text.
     pub body: String,
-    /// HTML hid text from a reader, and that text was dropped.
-    pub hidden_text_dropped: bool,
+    /// HTML in the message has a style block or concealment, so it hid,
+    /// or may have hidden, text from a reader. Text the reader could tell
+    /// was hidden is dropped; when it could not tell, the HTML part's
+    /// text is replaced by a note.
+    pub hidden_content: bool,
     pub body_truncated: bool,
     pub attachments: Vec<Attachment>,
 }
@@ -87,29 +102,55 @@ pub struct Message {
 pub struct Attachment {
     pub name: String,
     pub content_type: String,
-    /// Decoded bytes.
+    /// Decoded bytes; a lower bound when `sha256` is null.
     pub size: u64,
-    /// sha256 of the decoded bytes, hex.
-    pub sha256: String,
+    /// sha256 of the decoded bytes, hex. Null when the part is larger
+    /// than the hashing cap and was not read to the end.
+    pub sha256: Option<String>,
 }
 
 pub struct Reader {
     bin: PathBuf,
-    config: Option<PathBuf>,
+    config: PathBuf,
     nonce: String,
+    timeout: Duration,
+    attachment_max: u64,
 }
 
 impl Reader {
+    /// A reader over the database `notmuch_config` names. Without it the
+    /// reader refuses rather than open notmuch's default database.
     pub fn new(config: &MailConfig) -> Result<Self> {
+        let notmuch_config = config
+            .notmuch_config
+            .clone()
+            .context("mail: [mail] notmuch_config is not set, so there is no mailbox to read")?;
         let mut seed = [0u8; 8];
         std::fs::File::open("/dev/urandom")
             .and_then(|mut f| f.read_exact(&mut seed))
             .context("mail: no randomness for the untrusted markers")?;
         Ok(Self {
             bin: config.notmuch_bin().to_path_buf(),
-            config: config.notmuch_config.clone(),
+            config: notmuch_config,
             nonce: hex::encode(seed),
+            timeout: TIMEOUT,
+            attachment_max: ATTACHMENT_HASH_MAX,
         })
+    }
+
+    /// The same reader with a different deadline for each notmuch run.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// The same reader with a different cap on the bytes one attachment
+    /// digest reads.
+    #[must_use]
+    pub fn with_attachment_max(mut self, bytes: u64) -> Self {
+        self.attachment_max = bytes;
+        self
     }
 
     fn note(&self) -> String {
@@ -189,7 +230,8 @@ impl Reader {
         })
     }
 
-    /// Every message in one thread, by its 16-digit id.
+    /// Every message in one thread, by its 16-digit id, except those
+    /// tagged spam or deleted.
     pub fn show(&self, thread: &str) -> Result<Show> {
         let thread = thread_id(thread.trim().trim_start_matches("thread:"))?;
         let query = format!("thread:{thread}");
@@ -204,12 +246,16 @@ impl Reader {
             &query,
         ])?;
         let mut raw = Vec::new();
+        let mut cut = false;
         for nodes in found.as_array().map(Vec::as_slice).unwrap_or_default() {
-            walk(nodes, &mut raw);
+            cut |= walk(nodes, 0, &mut raw);
         }
-        let truncated = raw.len() > MESSAGES_MAX;
+        raw.retain(|msg| !tags(msg).iter().any(|t| EXCLUDED.contains(&t.as_str())));
+        let truncated = cut || raw.len() > MESSAGES_MAX;
+        let root = self.mail_root()?;
         let mut messages = Vec::new();
         for msg in raw.into_iter().take(MESSAGES_MAX) {
+            confined(&root, msg)?;
             messages.push(self.message(msg)?);
         }
         Ok(Show {
@@ -218,6 +264,33 @@ impl Reader {
             messages,
             truncated,
         })
+    }
+
+    /// The mail root notmuch reads, resolved: `database.mail_root`, or
+    /// `database.path` when notmuch has no such key.
+    fn mail_root(&self) -> Result<PathBuf> {
+        let said = match self.config_get("database.mail_root") {
+            Ok(root) if !root.is_empty() => root,
+            _ => self.config_get("database.path")?,
+        };
+        let root = PathBuf::from(said);
+        if !root.is_absolute() {
+            bail!("mail: the notmuch mail root is not an absolute path");
+        }
+        root.canonicalize()
+            .context("mail: the notmuch mail root cannot be resolved")
+    }
+
+    fn config_get(&self, key: &str) -> Result<String> {
+        let said = self.run(&["config", "get", key], |stdout| {
+            let mut out = Vec::new();
+            stdout.take(4097).read_to_end(&mut out)?;
+            if out.len() > 4096 {
+                bail!("mail: notmuch said more than 4096 bytes for {key}");
+            }
+            Ok((String::from_utf8(out)?, true))
+        })?;
+        Ok(said.trim_end_matches('\n').to_string())
     }
 
     fn message(&self, msg: &Value) -> Result<Message> {
@@ -230,7 +303,7 @@ impl Reader {
             .map(Vec::as_slice)
             .unwrap_or_default()
         {
-            self.part(id, part, &mut text, &mut hidden, &mut attachments)?;
+            self.part(id, part, 0, &mut text, &mut hidden, &mut attachments)?;
         }
         let mut body = text.join("\n\n");
         let body_truncated = body.chars().count() > BODY_MAX;
@@ -246,7 +319,7 @@ impl Reader {
             cc: self.wrap(&header("Cc")),
             subject: self.wrap(&header("Subject")),
             body: self.wrap(&body),
-            hidden_text_dropped: hidden,
+            hidden_content: hidden,
             body_truncated,
             attachments,
         })
@@ -256,10 +329,14 @@ impl Reader {
         &self,
         id: &str,
         part: &Value,
+        depth: usize,
         text: &mut Vec<String>,
         hidden: &mut bool,
         attachments: &mut Vec<Attachment>,
     ) -> Result<()> {
+        if depth > PART_DEPTH_MAX {
+            bail!("mail: a message nests parts more than {PART_DEPTH_MAX} deep");
+        }
         let kind = part["content-type"]
             .as_str()
             .unwrap_or("")
@@ -276,7 +353,7 @@ impl Reader {
                     })
                     .flatten();
                 for child in pick.map_or(children.as_slice(), std::slice::from_ref) {
-                    self.part(id, child, text, hidden, attachments)?;
+                    self.part(id, child, depth + 1, text, hidden, attachments)?;
                 }
             }
             Value::String(plain) if !attached && kind == "text/plain" => {
@@ -284,8 +361,12 @@ impl Reader {
             }
             Value::String(markup) if !attached && kind == "text/html" => {
                 let seen = html::visible_text(markup);
-                *hidden |= seen.hidden_dropped;
-                text.push(seen.text);
+                *hidden |= seen.hidden_content;
+                text.push(if seen.withheld {
+                    WITHHELD.to_string()
+                } else {
+                    seen.text
+                });
             }
             _ => {
                 if attachments.len() < ATTACHMENTS_MAX {
@@ -309,34 +390,35 @@ impl Reader {
         Ok(())
     }
 
-    /// Size and sha256 of one part's decoded bytes, streamed.
-    fn digest(&self, id: &str, part: u64) -> Result<(u64, String)> {
+    /// Size and sha256 of one part's decoded bytes, streamed. Past the
+    /// cap notmuch is stopped and there is no hash.
+    fn digest(&self, id: &str, part: u64) -> Result<(u64, Option<String>)> {
         if id.is_empty() || id.chars().any(char::is_control) {
             bail!("mail: a message id notmuch gave cannot be quoted");
         }
-        let query = format!("id:\"{}\"", id.replace('"', "\"\""));
+        let query = id_term(id);
         let part_arg = format!("--part={part}");
-        let mut child = self
-            .command(&["show", "--format=raw", &part_arg, "--", &query])
-            .stderr(Stdio::null())
-            .spawn()
-            .context("mail: cannot run notmuch")?;
-        let mut stdout = child.stdout.take().context("mail: no notmuch output")?;
-        let mut hash = Sha256::new();
-        let mut size = 0u64;
-        let mut buf = [0u8; 64 * 1024];
-        loop {
-            let n = stdout.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            hash.update(&buf[..n]);
-            size += n as u64;
-        }
-        if !child.wait()?.success() {
-            bail!("mail: notmuch could not read part {part}");
-        }
-        Ok((size, hex::encode(hash.finalize())))
+        self.run(
+            &["show", "--format=raw", &part_arg, "--", &query],
+            |stdout| {
+                let mut hash = Sha256::new();
+                let mut size = 0u64;
+                let mut buf = [0u8; 64 * 1024];
+                loop {
+                    let n = stdout.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    hash.update(&buf[..n]);
+                    size += n as u64;
+                    if size > self.attachment_max {
+                        return Ok(((size, None), false));
+                    }
+                }
+                Ok(((size, Some(hex::encode(hash.finalize()))), true))
+            },
+        )
+        .with_context(|| format!("mail: notmuch could not read part {part}"))
     }
 
     fn command(&self, args: &[&str]) -> Command {
@@ -347,54 +429,158 @@ impl Reader {
                 cmd.env(key, value);
             }
         }
-        if let Some(config) = &self.config {
-            cmd.env("NOTMUCH_CONFIG", config);
-        }
+        cmd.env("NOTMUCH_CONFIG", &self.config);
         cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped());
         cmd
     }
 
     fn json(&self, args: &[&str]) -> Result<Value> {
+        let out = self.run(args, |stdout| {
+            let mut out = Vec::new();
+            stdout.take(OUTPUT_MAX + 1).read_to_end(&mut out)?;
+            if out.len() as u64 > OUTPUT_MAX {
+                bail!("mail: notmuch said more than {OUTPUT_MAX} bytes");
+            }
+            Ok((out, true))
+        })?;
+        serde_json::from_slice(&out).context("mail: notmuch output is not JSON")
+    }
+
+    /// One notmuch run under the deadline. `read` takes stdout and says
+    /// whether it read to the end; if not, or on an error or the
+    /// deadline, notmuch and anything it started are killed.
+    fn run<T>(
+        &self,
+        args: &[&str],
+        read: impl FnOnce(&mut dyn Read) -> Result<(T, bool)>,
+    ) -> Result<T> {
         let mut child = self
             .command(args)
             .stderr(Stdio::piped())
+            .process_group(0)
             .spawn()
             .with_context(|| format!("mail: cannot run {}", self.bin.display()))?;
+        let mut stdout = child.stdout.take().context("mail: no notmuch output")?;
         let mut stderr = child.stderr.take().context("mail: no notmuch stderr")?;
         let errors = std::thread::spawn(move || {
             let mut text = String::new();
             let _ = stderr.by_ref().take(4096).read_to_string(&mut text);
+            let _ = std::io::copy(&mut stderr, &mut std::io::sink());
             text
         });
-        let mut out = Vec::new();
-        child
-            .stdout
-            .take()
-            .context("mail: no notmuch output")?
-            .take(OUTPUT_MAX + 1)
-            .read_to_end(&mut out)?;
-        if out.len() as u64 > OUTPUT_MAX {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("mail: notmuch said more than {OUTPUT_MAX} bytes");
+        let child = Arc::new(Mutex::new(child));
+        let late = Arc::new(AtomicBool::new(false));
+        let (done, wait) = mpsc::channel::<()>();
+        let watchdog = {
+            let (child, late, timeout) = (Arc::clone(&child), Arc::clone(&late), self.timeout);
+            std::thread::spawn(move || {
+                if wait.recv_timeout(timeout) == Err(mpsc::RecvTimeoutError::Timeout) {
+                    late.store(true, Ordering::SeqCst);
+                    kill_group(&child);
+                }
+            })
+        };
+        let got = read(&mut stdout);
+        drop(stdout);
+        if !matches!(got, Ok((_, true))) {
+            kill_group(&child);
         }
-        let status = child.wait()?;
+        let _ = done.send(());
+        let _ = watchdog.join();
+        let status = child
+            .lock()
+            .map_err(|_| anyhow::anyhow!("mail: notmuch lock"))?
+            .wait()?;
         let said = errors.join().unwrap_or_default();
-        if !status.success() {
+        if late.load(Ordering::SeqCst) {
+            bail!(
+                "mail: notmuch did not finish within {} s and was stopped",
+                self.timeout.as_secs_f32()
+            );
+        }
+        let (value, finished) = got?;
+        if finished && !status.success() {
             let first = said.lines().next().unwrap_or("no message");
             bail!("mail: notmuch failed: {}", clean(first));
         }
-        serde_json::from_slice(&out).context("mail: notmuch output is not JSON")
+        Ok(value)
     }
 }
 
+/// SIGKILL to the process group a notmuch run leads, so a helper it
+/// started cannot hold the pipe open.
+fn kill_group(child: &Mutex<Child>) {
+    if let Ok(mut child) = child.lock() {
+        if let Ok(pid) = i32::try_from(child.id()) {
+            // SAFETY: kill only sends a signal; the group is the one this
+            // run created with process_group(0) and has not reaped yet.
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+        let _ = child.kill();
+    }
+}
+
+/// Every file notmuch has for `msg` is a regular file, not a symlink,
+/// whose real path is under `root`. The error names no path.
+fn confined(root: &Path, msg: &Value) -> Result<()> {
+    let files: Vec<&str> = match &msg["filename"] {
+        Value::String(one) => vec![one.as_str()],
+        Value::Array(many) => many.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+    if files.is_empty() {
+        bail!("mail: notmuch named no file for a message");
+    }
+    for file in files {
+        let path = Path::new(file);
+        let meta = path
+            .symlink_metadata()
+            .context("mail: a message file cannot be read")?;
+        if meta.file_type().is_symlink() {
+            bail!("mail: a message file is a symlink, so the thread is not shown");
+        }
+        let real = path
+            .canonicalize()
+            .context("mail: a message file cannot be resolved")?;
+        if !real.starts_with(root) || !meta.is_file() {
+            bail!("mail: a message file is outside the mail root, so the thread is not shown");
+        }
+    }
+    Ok(())
+}
+
 /// Messages of one thread in thread order. A node is `[message, replies]`.
-fn walk<'a>(nodes: &'a Value, out: &mut Vec<&'a Value>) {
-    for node in nodes.as_array().map(Vec::as_slice).unwrap_or_default() {
+/// Replies deeper than `THREAD_DEPTH_MAX` are left out; the return says
+/// whether any were.
+fn walk<'a>(nodes: &'a Value, depth: usize, out: &mut Vec<&'a Value>) -> bool {
+    let nodes = nodes.as_array().map(Vec::as_slice).unwrap_or_default();
+    if depth > THREAD_DEPTH_MAX {
+        return !nodes.is_empty();
+    }
+    let mut cut = false;
+    for node in nodes {
         if node[0].is_object() {
             out.push(&node[0]);
         }
-        walk(&node[1], out);
+        cut |= walk(&node[1], depth + 1, out);
+    }
+    cut
+}
+
+/// `id:` and the id as notmuch's own `make_boolean_term` writes it: bare
+/// unless it is empty or has a space, a control byte, `(`, `)`, `"` or a
+/// non-ASCII byte, and otherwise in double quotes with each `"` doubled.
+fn id_term(id: &str) -> String {
+    let quote = id.is_empty()
+        || id
+            .bytes()
+            .any(|b| b <= b' ' || b == b'(' || b == b')' || b == b'"' || b > 127);
+    if quote {
+        format!("id:\"{}\"", id.replace('"', "\"\""))
+    } else {
+        format!("id:{id}")
     }
 }
 
@@ -449,4 +635,78 @@ pub(crate) fn clean(text: &str) -> String {
 pub(crate) fn hiding(c: char) -> bool {
     (c.is_control() && c != '\t' && c != '\n')
         || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn ids_are_quoted_the_way_notmuch_quotes_them() {
+        assert_eq!(id_term("a.b@example.test"), "id:a.b@example.test");
+        assert_eq!(
+            id_term("\"q\"@example.test"),
+            "id:\"\"\"q\"\"@example.test\""
+        );
+        assert_eq!(id_term("a(b)@example.test"), "id:\"a(b)@example.test\"");
+        assert_eq!(
+            id_term("caf\u{e9}@example.test"),
+            "id:\"caf\u{e9}@example.test\""
+        );
+        assert_eq!(id_term(""), "id:\"\"");
+    }
+
+    #[test]
+    fn walk_stops_at_the_thread_depth_cap() {
+        let mut nodes = json!([]);
+        for n in 0..THREAD_DEPTH_MAX + 10 {
+            nodes = json!([[{"id": n}, nodes]]);
+        }
+        let mut out = Vec::new();
+        assert!(walk(&nodes, 0, &mut out));
+        assert_eq!(out.len(), THREAD_DEPTH_MAX + 1);
+        let two = json!([[{"id": 1}, [[{"id": 2}, []]]]]);
+        let mut shallow = Vec::new();
+        assert!(!walk(&two, 0, &mut shallow));
+        assert_eq!(shallow.len(), 2);
+    }
+
+    #[test]
+    fn part_refuses_nesting_past_the_cap() {
+        let reader = Reader::new(&MailConfig {
+            notmuch_config: Some(PathBuf::from("/nonexistent/notmuch-config")),
+            ..MailConfig::default()
+        })
+        .unwrap();
+        let nest = |depth: usize| {
+            let mut part = json!({"content-type": "text/plain", "content": "hi"});
+            for _ in 0..depth {
+                part = json!({"content-type": "multipart/mixed", "content": [part]});
+            }
+            part
+        };
+        let (mut text, mut hidden, mut attachments) = (Vec::new(), false, Vec::new());
+        let deep = reader.part(
+            "",
+            &nest(PART_DEPTH_MAX + 1),
+            0,
+            &mut text,
+            &mut hidden,
+            &mut attachments,
+        );
+        assert!(deep.unwrap_err().to_string().contains("deep"));
+        text.clear();
+        reader
+            .part(
+                "",
+                &nest(PART_DEPTH_MAX),
+                0,
+                &mut text,
+                &mut hidden,
+                &mut attachments,
+            )
+            .unwrap();
+        assert_eq!(text, ["hi"]);
+    }
 }

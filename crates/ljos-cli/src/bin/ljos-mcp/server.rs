@@ -265,6 +265,30 @@ const SEAT_FREE_TOOLS: &[&str] = &[
     "ljos_mail_show",
 ];
 
+/// Tools that write the tracker under the call's seat. `ljos_deed`
+/// without an accession lists what an issue cites, which is a read.
+const TRACKER_WRITES: &[&str] = &[
+    "ljos_start",
+    "ljos_sitting",
+    "ljos_claim",
+    "ljos_note",
+    "ljos_finish",
+    "ljos_release",
+    "ljos_complete",
+    "ljos_file",
+    "ljos_options",
+    "ljos_deed",
+];
+
+fn writes_tracker(name: &str, args: Option<&serde_json::Map<String, serde_json::Value>>) -> bool {
+    if name == "ljos_deed" {
+        return args
+            .and_then(|a| a.get("add"))
+            .is_some_and(|add| !add.is_null());
+    }
+    TRACKER_WRITES.contains(&name)
+}
+
 fn runs_without_seat(name: &str) -> bool {
     SEAT_FREE_TOOLS.contains(&name)
 }
@@ -3348,10 +3372,13 @@ fn register_inbound_line(line: &[u8]) {
     ensure_queued(&id, order);
 }
 
-/// Stdin, with ordered tool calls queued as each line arrives.
+/// Stdin, with ordered tool calls queued as each line arrives. Its end
+/// reaches rmcp once the calls in flight have answered.
 pub struct InboundOrder<R> {
     inner: R,
     pending: Vec<u8>,
+    ended: bool,
+    settle: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
 }
 
 impl<R> InboundOrder<R> {
@@ -3359,6 +3386,8 @@ impl<R> InboundOrder<R> {
         Self {
             inner,
             pending: Vec::new(),
+            ended: false,
+            settle: None,
         }
     }
 
@@ -3386,10 +3415,30 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for InboundOrder<R> {
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         let this = self.get_mut();
-        let before = buf.filled().len();
-        std::task::ready!(std::pin::Pin::new(&mut this.inner).poll_read(cx, buf))?;
-        this.push_bytes(&buf.filled()[before..]);
-        std::task::Poll::Ready(Ok(()))
+        crate::lifetime::park_reader(cx.waker());
+        if crate::lifetime::closing() {
+            this.ended = true;
+        }
+        if !this.ended {
+            let before = buf.filled().len();
+            let room = buf.remaining();
+            std::task::ready!(std::pin::Pin::new(&mut this.inner).poll_read(cx, buf))?;
+            if buf.filled().len() > before || room == 0 {
+                this.push_bytes(&buf.filled()[before..]);
+                return std::task::Poll::Ready(Ok(()));
+            }
+            this.ended = true;
+        }
+        if crate::lifetime::settled() {
+            return std::task::Poll::Ready(Ok(()));
+        }
+        let settle = this
+            .settle
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep(crate::lifetime::SETTLE)));
+        if std::future::Future::poll(settle.as_mut(), cx).is_ready() {
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::task::Poll::Pending
     }
 }
 
@@ -3472,6 +3521,7 @@ impl ServerHandler for LjosServer {
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, McpError> {
+        let _in_flight = crate::lifetime::call_in_flight();
         // Queued when the line was read. This waits for the ordered calls
         // ahead of it and holds the place until the answer is built. A free
         // tool, the guard and approval included, waits for nothing.
@@ -3506,7 +3556,7 @@ impl ServerHandler for LjosServer {
             ));
         }
         let name = request.name.to_string();
-        ljos_cli::bookkeep::touch_activity();
+        let _activity = ljos_cli::idle_drop::call_started();
         let seat_text = match seat_argument(request.arguments.as_ref()) {
             Ok(text) => text,
             Err(e) => {
@@ -3540,6 +3590,11 @@ impl ServerHandler for LjosServer {
         };
         let seated = seat.is_some();
         if let Some(seat) = &seat {
+            if writes_tracker(&name, request.arguments.as_ref()) {
+                if let Err(e) = ljos_cli::registered_seat(&seat.seat) {
+                    return Ok(attach_next(&name, as_tool_error(refused(e))?));
+                }
+            }
             bind_seat_env(&seat.seat);
         }
         // A server spawned per call has no idle thread left running. The

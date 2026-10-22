@@ -1061,6 +1061,10 @@ fn a_kept_preference_keeps_its_clock() {
     let new_id = new["id"].as_str().unwrap();
     assert_ne!(new_id, id, "{new}");
     assert!(
+        !after.iter().any(|a| a["id"] == held["id"]),
+        "the original is still live: {after:?}"
+    );
+    assert!(
         said.contains(&format!(
             "kept {id} as the person's preference, now {new_id}"
         )),
@@ -1082,4 +1086,163 @@ fn a_kept_preference_keeps_its_clock() {
         quiet.contains("no older preferences await review"),
         "{quiet}"
     );
+}
+
+/// Another live record making the same claim would answer the successor
+/// once the original is closed, and would be taken for the person's copy.
+/// The raise is refused and written on the cutoff, and the original stays
+/// live.
+#[test]
+fn a_raise_another_record_would_answer_closes_nothing() {
+    let daemon = Daemon::start();
+    let seat = Seat::on(daemon.url.clone(), daemon.token.clone());
+    let typed = post_atom(
+        &daemon.url,
+        &daemon.token,
+        json!({
+            "schema": "inside.atom/v1",
+            "workspace": "seat",
+            "kind": "preference",
+            "level": "explicit",
+            "origin": "user-declared",
+            "text": TERMINAL,
+            "entities": ["seat:person", "horizon:standing"],
+            "source": {"harness": "person", "seat": "person", "session": "person", "via": "ljos"},
+        }),
+    );
+    let other = post_atom(
+        &daemon.url,
+        &daemon.token,
+        json!({
+            "schema": "inside.atom/v1",
+            "workspace": "seat",
+            "kind": "preference",
+            "level": "derived",
+            "origin": "agent-derived",
+            "text": "Keep the release notes somewhere.",
+            "entities": ["seat:claude"],
+            "source": {"via": "ljos", "basis": "agent"},
+        }),
+    );
+    ureq::post(&format!("{}/v1/atoms/update", daemon.url))
+        .set("Authorization", &format!("Bearer {}", daemon.token))
+        .send_json(json!({"workspace": "seat", "id": other["id"], "fields": {"text": TERMINAL}}))
+        .expect("POST /v1/atoms/update");
+
+    succeeded(
+        &seat.output(env!("CARGO_BIN_EXE_ljos"), &["prefer", "--review"]),
+        "review",
+    );
+    let after = atoms(&daemon.url, &daemon.token);
+    let original = after
+        .iter()
+        .find(|a| a["id"] == typed["id"])
+        .unwrap_or_else(|| panic!("the original was closed: {after:?}"));
+    assert!(basis(original).is_none(), "{original}");
+    let kept = after
+        .iter()
+        .find(|a| a["id"] == other["id"])
+        .unwrap_or_else(|| panic!("the other record is gone: {after:?}"));
+    assert_eq!(basis(kept), Some("agent"), "{kept}");
+    let cutoff = cutoffs(&after);
+    assert_eq!(cutoff.len(), 1, "{after:?}");
+    let refused = cutoff[0]["source"]["refused"].as_array().cloned();
+    assert!(
+        refused.unwrap_or_default().contains(&typed["id"]),
+        "{}",
+        cutoff[0]
+    );
+    assert!(
+        cutoff[0]["source"].get("pending").is_none(),
+        "{}",
+        cutoff[0]
+    );
+}
+
+/// A program that opens a pty, starts a new session and lets init or the
+/// service manager adopt it has no runner above it and a terminal on its
+/// input. Neither shows a person, so the keep is refused and the
+/// preference still waits.
+#[test]
+fn a_reparented_pty_cannot_keep_a_preference() {
+    const DETACHED: &str = r#"
+import os, pty, sys, time
+ljos, id, done = sys.argv[1:4]
+if os.fork() == 0:
+    os.setsid()
+    mid = os.getpid()
+    if os.fork() == 0:
+        while os.getppid() == mid:
+            time.sleep(0.01)
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.execv(ljos, [ljos, "prefer", "--review", "--keep", id])
+        chunks = []
+        while True:
+            try:
+                data = os.read(fd, 4096)
+            except OSError:
+                break
+            if not data:
+                break
+            chunks.append(data)
+        _, status = os.waitpid(pid, 0)
+        with open(done + ".out", "wb") as f:
+            f.write(b"".join(chunks))
+        with open(done + ".tmp", "w") as f:
+            f.write(str(os.waitstatus_to_exitcode(status)))
+        os.rename(done + ".tmp", done)
+    os._exit(0)
+os.wait()
+for _ in range(600):
+    if os.path.exists(done):
+        break
+    time.sleep(0.05)
+sys.stdout.buffer.write(open(done + ".out", "rb").read())
+raise SystemExit(int(open(done).read()))
+"#;
+    let daemon = Daemon::start();
+    let seat = Seat::on(daemon.url.clone(), daemon.token.clone());
+    let bin = env!("CARGO_BIN_EXE_ljos");
+    let held = post_atom(
+        &daemon.url,
+        &daemon.token,
+        json!({
+            "schema": "inside.atom/v1",
+            "workspace": "seat",
+            "kind": "preference",
+            "level": "explicit",
+            "origin": "user-declared",
+            "text": TERMINAL,
+            "entities": ["seat:claude", "horizon:standing"],
+            "source": {"harness": "claude", "seat": "claude", "session": "claude@4f1c", "via": "ljos"},
+        }),
+    );
+    let id = held["id"].as_str().unwrap();
+    succeeded(&seat.output(bin, &["prefer", "--review"]), "review");
+    let before = atoms(&daemon.url, &daemon.token);
+
+    let done = seat.run.path().join("kept");
+    let out = seat
+        .command(
+            "/usr/bin/python3",
+            &["-c", DETACHED, bin, id, done.to_str().unwrap()],
+        )
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{}", text_of(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("needs a terminal"),
+        "{}",
+        text_of(&out)
+    );
+    assert_eq!(
+        atoms(&daemon.url, &daemon.token),
+        before,
+        "{}",
+        text_of(&out)
+    );
+    let listed = succeeded(&seat.output(bin, &["prefer", "--review"]), "review");
+    assert!(listed.contains(id), "{listed}");
 }
