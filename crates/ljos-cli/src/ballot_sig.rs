@@ -967,10 +967,10 @@ pub(crate) fn fake_runner_sessions(ids: &[&str]) -> impl Drop {
 /// The sessions the runner above this process gave the process it
 /// started, read from that process's environment and never from this
 /// one's: `LJOS_HARNESS_SESSION=forged ljos ...` sets ours, not that.
-/// Every id there is the runner's, so a bind may name any of them, and
-/// so is the session an MCP call's `_meta` names: the runner writes that,
-/// not the agent's arguments. An MCP server the runner started with none
-/// of them is its connection. Empty when no runner is above this process.
+/// Every id there is the runner's, so a bind may name any of them. The
+/// session an MCP call's `_meta` names is not: any client of the server
+/// writes it, so it scopes a call ([`call_session`]) and never vouches
+/// for one. Empty when no runner is above this process.
 #[must_use]
 pub fn runner_sessions() -> Vec<String> {
     #[cfg(test)]
@@ -984,18 +984,13 @@ pub fn runner_sessions() -> Vec<String> {
     let Some(started) = crate::proc_tree::started_by_runner() else {
         return Vec::new();
     };
-    let mut ids: Vec<String> = crate::proc_tree::environ(started)
+    crate::proc_tree::environ(started)
         .unwrap_or_default()
         .into_iter()
         .filter(|(k, v)| k == "LJOS_HARNESS_SESSION" || crate::runner_session_var(k, v))
         .map(|(_, v)| field(v.trim()))
         .filter(|v| !v.is_empty() && v != "-")
-        .collect();
-    ids.extend(call_session().filter(|s| !ids.contains(s)));
-    if ids.is_empty() {
-        ids.extend(connection_session());
-    }
-    ids
+        .collect()
 }
 
 /// The run this process belongs to, when no conversation id was stamped:
