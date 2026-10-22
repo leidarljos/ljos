@@ -577,15 +577,46 @@ fn validate_voter_id(voter: &str) -> Result<()> {
             "voter id must be `<identity>/<seat-or-run>` using ascii letters, digits, '-', '_' or '.'"
         );
     }
+    let canonical = canonical_voter(identity, seat_or_run)
+        .ok_or_else(|| anyhow!("voter id `{voter}` needs a letter or digit on each side of `/`"))?;
     // `run/<id>` names no identity. A run carries one: `<identity>/run-<id>`.
-    if identity == "run" {
+    if canonical.starts_with("run/") {
         bail!("voter id `{voter}` has no identity; a run is `<identity>/run-<id>`");
     }
-    let seat = crate::seat_slug(seat_or_run);
-    if seat_or_run != seat {
-        bail!("voter id `{voter}` must use seat slug `{identity}/{seat}`");
+    if canonical != voter {
+        bail!("voter id `{voter}` must be written `{canonical}`; sign the entry under that id");
     }
     Ok(())
+}
+
+/// A voter id written one way: the identity as its slug and the rest as
+/// [`voter_seat`]. `None` when a part has no letter or digit.
+fn canonical_voter(identity: &str, seat_or_run: &str) -> Option<String> {
+    Some(format!(
+        "{}/{}",
+        slug_of(identity)?,
+        voter_seat(seat_or_run)?
+    ))
+}
+
+/// The seat `name` sits as, read the way the tracker reads a holder: a
+/// `@TAG`, an old pid suffix and an old seat name fold to the seat, so
+/// `Inky`, `inky@39u` and `inky-n9o` are all `inky` and `ljos-bot` is
+/// `ljosbot`. A run keeps its id and a judge its model, version and all:
+/// `run-101` stays, and `judge:model-1.5` is `judge-model-1-5`. `None`
+/// when the name has no letter or digit.
+fn voter_seat(name: &str) -> Option<String> {
+    let seat = slug_of(name.split_once('@').map_or(name, |(seat, _)| seat))?;
+    if seat.starts_with("run-") || seat.starts_with("judge-") {
+        return Some(seat);
+    }
+    Some(crate::seat_slug(&crate::holder_parts(&seat).0))
+}
+
+fn slug_of(part: &str) -> Option<String> {
+    part.bytes()
+        .any(|b| b.is_ascii_alphanumeric())
+        .then(|| crate::seat_slug(part))
 }
 
 fn parse_hour_timestamp(text: &str) -> Result<DateTime<FixedOffset>> {
@@ -981,16 +1012,72 @@ mod tests {
     }
 
     #[test]
-    fn sign_entry_refuses_a_voter_seat_that_is_not_its_slug() {
+    fn sign_entry_refuses_a_voter_id_in_another_spelling() {
         let _home = test_home();
-        let err = sign_entry(
-            ballot_entry("alpha/Seat-a", "accept", "2026-10-21T10:00:00Z"),
-            "alpha/Seat-a",
-        )
-        .expect_err("non-slug seat");
-        let text = err_chain(&err);
-        assert!(text.contains("seat slug"), "{text}");
-        assert!(text.contains("alpha/seat-a"), "{text}");
+        let at = "2026-10-21T10:00:00Z";
+        for (written, canonical) in [
+            ("Alpha/seat-a", "alpha/seat-a"),
+            ("alpha./seat-a", "alpha/seat-a"),
+            ("alpha_/seat-a", "alpha/seat-a"),
+            ("alpha/Seat-a", "alpha/seat-a"),
+            ("Alpha/run-101", "alpha/run-101"),
+            ("alpha./run-101", "alpha/run-101"),
+            ("alpha_/run-101", "alpha/run-101"),
+            ("alpha/Run-101", "alpha/run-101"),
+            ("alpha/run-101.", "alpha/run-101"),
+            ("alpha/run--101", "alpha/run-101"),
+            ("alpha/Inky", "alpha/inky"),
+            ("alpha/inky-39u", "alpha/inky"),
+            ("alpha/inky-n9o", "alpha/inky"),
+            ("alpha/disk-saver-t4t", "alpha/disk-saver"),
+            ("alpha/ljos-bot", "alpha/ljosbot"),
+            ("alpha/judge-Model-1.5", "alpha/judge-model-1-5"),
+        ] {
+            let err = sign_entry(ballot_entry(written, "accept", at), written).expect_err(written);
+            let text = err_chain(&err);
+            assert!(
+                text.contains(&format!("must be written `{canonical}`")),
+                "{written}: {text}"
+            );
+            sign_entry(ballot_entry(canonical, "accept", at), canonical)
+                .unwrap_or_else(|err| panic!("{canonical}: {err:#}"));
+        }
+        for (voter, said) in [
+            ("Run/run-101", "no identity"),
+            ("run./run-101", "no identity"),
+            ("alpha/...", "letter or digit"),
+            ("_/seat-a", "letter or digit"),
+        ] {
+            let err = sign_entry(ballot_entry(voter, "accept", at), voter).expect_err(voter);
+            assert!(err_chain(&err).contains(said), "{voter}: {err:#}");
+        }
+    }
+
+    #[test]
+    fn a_stored_ballot_in_another_spelling_names_its_voter_id() {
+        let _home = test_home();
+        // One seed stands in for the key file `Alpha/seat-a` and
+        // `alpha/seat-a` share on a case-insensitive volume.
+        for (written, canonical) in [
+            ("Alpha/seat-a", "alpha/seat-a"),
+            ("alpha./seat-a", "alpha/seat-a"),
+            ("alpha_/run-101", "alpha/run-101"),
+            ("alpha/Run-101", "alpha/run-101"),
+            ("alpha/inky-39u", "alpha/inky"),
+            ("alpha/ljos-bot", "alpha/ljosbot"),
+        ] {
+            let kept = sign_as(ballot_entry(canonical, "accept", "2026-10-21T10:00:00Z"), 1);
+            let stored = sign_unchecked(ballot_entry(written, "accept", "2026-10-21T11:00:00Z"), 1);
+            let entries = [kept, stored];
+            let Err(err) = check_entries(&entries) else {
+                panic!("{written} passed beside {canonical}: {:?}", tally(&entries));
+            };
+            let text = err_chain(&err);
+            assert!(
+                text.contains(&format!("`{written}` must be written `{canonical}`")),
+                "{text}"
+            );
+        }
     }
 
     #[test]
@@ -1841,7 +1928,13 @@ mod tests {
         );
         let key = &pinned.signature.key;
         let pin_path = root.path().join(crate::ballot_sig::PIN_FILE);
-        for voter in ["\u{feff}seat-a", "\u{200b}seat-a", "Seat-a", "seat_a"] {
+        for voter in [
+            "\u{feff}seat-a",
+            "\u{200b}seat-a",
+            "Seat-a",
+            "seat_a",
+            "Alpha/run-101",
+        ] {
             std::fs::write(&pin_path, format!("{voter} {key}\n")).expect("pin");
             let Err(err) = check_entries(std::slice::from_ref(&entry)) else {
                 panic!("the {voter:?} pin row was skipped");
@@ -1914,8 +2007,7 @@ mod tests {
             ),
             Err(err) => {
                 let text = err_chain(&err);
-                assert!(text.contains("seat slug"), "{text}");
-                assert!(text.contains("alpha/seat-a"), "{text}");
+                assert!(text.contains("must be written `alpha/seat-a`"), "{text}");
             }
         }
     }
