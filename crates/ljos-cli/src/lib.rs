@@ -3336,6 +3336,67 @@ pub fn write_seat(verb: &str) -> Result<Seat> {
     Ok(who)
 }
 
+thread_local! {
+    static SEATED: std::cell::RefCell<Option<Seat>> = const { std::cell::RefCell::new(None) };
+}
+
+/// While this guard is alive, [`seat_name`] and [`holder_name`] are the
+/// seat [`write_seat`] checked, so everything a write records names that
+/// seat and not the one the process tree would give.
+pub struct Seated {
+    previous: Option<Seat>,
+}
+
+impl Seated {
+    #[must_use]
+    pub fn enter(seat: &Seat) -> Self {
+        let previous = SEATED.with(|slot| slot.replace(Some(seat.clone())));
+        Self { previous }
+    }
+}
+
+impl Drop for Seated {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        SEATED.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+fn seated() -> Option<Seat> {
+    SEATED.with(|slot| slot.borrow().clone())
+}
+
+/// The name a write under `checked` records for an assignee a caller
+/// passed, already resolved to `assignee`. This seat's own name or holder
+/// is kept. Another name is refused, unless the verb hands work to
+/// another name (`delegates`), and then it has to be a seat the seats
+/// file lists.
+///
+/// # Errors
+///
+/// `assignee` is another seat and the verb does not delegate, or the
+/// seats file does not list it.
+pub fn write_assignee(
+    verb: &str,
+    checked: &Seat,
+    assignee: String,
+    delegates: bool,
+) -> Result<String> {
+    let slug = canonical_seat_name(&assignee);
+    if same_holder(&assignee, &checked.holder) || slug == canonical_seat_name(&checked.seat) {
+        return Ok(assignee);
+    }
+    if !delegates {
+        bail!(
+            "{verb}: {assignee} is not this seat, {}; a write is recorded as the seat that makes it. \
+             Drop --assignee, or run it as that seat (`export LJOS_SEAT={slug}`); nothing was written",
+            checked.seat
+        );
+    }
+    registered_seat(&assignee).map_err(|e| anyhow::anyhow!("{verb}: {e}"))?;
+    Ok(assignee)
+}
+
 /// Refuse a tracker write from a seat the seats file does not list. A
 /// file that lists no seat, or is missing as on a fresh single-user
 /// install, refuses nothing.
@@ -3418,7 +3479,9 @@ pub fn log_recall_in(dir: &Path, verb: &str, what: &str) {
 /// A git hook that resolved a seat passes that name, not the process tree.
 #[must_use]
 pub fn seat_name() -> String {
-    hook_actor().unwrap_or_else(|| whoami().seat)
+    hook_actor()
+        .or_else(|| seated().map(|s| s.seat))
+        .unwrap_or_else(|| whoami().seat)
 }
 
 /// Whether a conversation under a runner may accept a proposal: only one
@@ -3433,7 +3496,9 @@ pub fn accepts_another_conversation(proposer: Option<&str>, holder: &str) -> boo
 /// A git hook that resolved a seat passes that name, not the process tree.
 #[must_use]
 pub fn holder_name() -> String {
-    hook_holder().unwrap_or_else(|| whoami().holder)
+    hook_holder()
+        .or_else(|| seated().map(|s| s.holder))
+        .unwrap_or_else(|| whoami().holder)
 }
 
 /// Resolve an `--assignee` / MCP field for a claim. Empty, a pronoun
