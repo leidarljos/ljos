@@ -570,3 +570,68 @@ fn a_closed_seat_still_lets_the_tracker_fast_forward() {
     assert!(has_ref(&tracker, "refs/heads/main"));
     push_fails(&tracker_repo, "git push origin :main");
 }
+
+/// gh, curl, wget, and httpie are an allowlist against GitHub. A resolved
+/// GET passes. A write, and a flag whose meaning is not on the command,
+/// does not. Another host is not GitHub.
+#[test]
+fn github_clients_allow_only_a_resolved_get() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+
+    for line in [
+        "curl -sXDELETE https://api.github.com/user",
+        "curl -s -d'{a:1}' https://api.github.com/user",
+        "curl --data-ascii dumped https://api.github.com/repos/acme/widgets",
+        "curl --oauth2-bearer tok -X POST https://api.github.com/user",
+        "curl -u x:$TOKEN -X DELETE https://api.github.com/repos/acme/widgets/git/refs/heads/develop",
+        "curl -H @headers https://api.github.com/user",
+        "curl --netrc https://api.github.com/user",
+        "curl -n https://api.github.com/user",
+        "curl -K curlrc https://api.github.com/user",
+        "curl -sXDELETE \"$URL\"",
+        "wget --method DELETE https://api.github.com/user",
+        "wget --method=delete https://api.github.com/repos/acme/widgets",
+        "http DELETE https://api.github.com/user",
+        "https --form POST https://api.github.com/user name=a",
+        "gh workflow run ci.yml --ref main",
+        "gh pr edit 7 --base develop",
+        "gh api --method PATCH repos/acme/widgets -f default_branch=develop",
+        "gh api --method POST repos/acme/widgets/actions/workflows/ci.yml/dispatches -f ref=main",
+        "gh api repos/acme/widgets/pulls/7/update-branch -X POST",
+    ] {
+        let hit = refused(line, here);
+        assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {}", hit.reason);
+    }
+
+    for line in [
+        "curl --oauth2-bearer tok https://api.github.com/user",
+        "curl -u x:$TOKEN https://api.github.com/user",
+        "curl -fsSL https://api.github.com/user",
+        "curl -s -H \"Authorization: Bearer $GH_TOKEN\" https://api.github.com/user",
+        "curl -sXDELETE https://example.com/build",
+        "curl -s --netrc https://example.com/build",
+        "wget -q https://api.github.com/user",
+        "http GET https://api.github.com/user",
+        "https https://api.github.com/user",
+        "gh api user --jq .login",
+        "gh api repos/acme/widgets --jq .permissions.push",
+        "gh api -X GET repos/acme/widgets/pulls -f per_page=5",
+        "gh api --method HEAD repos/acme/widgets",
+        "gh pr list",
+        "gh pr diff 7",
+        "gh auth status",
+        "gh help api",
+        "gh repo view acme/widgets",
+        "python3 -c 'import urllib.request'",
+        "cargo build",
+        "make",
+        "npm test",
+    ] {
+        allowed(line, here);
+    }
+}
