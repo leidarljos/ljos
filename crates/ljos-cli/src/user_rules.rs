@@ -58,7 +58,7 @@ pub struct UserRule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
     /// The origin the pack stored on that lesson when it was promoted, for
-    /// a seat whose pack does not hold it.
+    /// a read whose pack does not answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
     /// Absent on every row the commands write. Present only so a sweep can
@@ -598,14 +598,18 @@ pub fn preface() -> String {
 
 /// Whether the preface may state `rule` as the person's. A rule written
 /// as words is. A rule promoted from a lesson is only when this seat's pack
-/// stored that lesson as the person's, or, when the pack does not hold it,
-/// when the origin kept on the row at promote time is the person's.
+/// stored that lesson as the person's. A pack that answers without the
+/// lesson has dropped it, and the rule with it; only a pack that does not
+/// answer leaves the origin kept on the row at promote time to decide.
 fn persons_rule(rule: &UserRule) -> bool {
     let Some(id) = rule.from.as_deref() else {
         return true;
     };
-    super::stored_origin_of(id)
-        .unwrap_or_else(|| rule.origin.as_deref() == Some(super::admit::ORIGIN_USER))
+    match super::stored_origin_of(id) {
+        super::Stored::Origin(by) => by == super::StoredBy::Person,
+        super::Stored::Absent => false,
+        super::Stored::Unreachable => rule.origin.as_deref() == Some(super::admit::ORIGIN_USER),
+    }
 }
 
 fn render(rules: &[UserRule], budget: usize) -> String {
@@ -1384,7 +1388,14 @@ mod tests {
     #[test]
     fn a_promoted_agent_lesson_stays_out_of_the_preface() {
         let (_lock, _dir) = isolated();
-        let lesson = |id: &str, text: &str, origin: &str| serde_json::json!({"id": id, "kind": "lesson", "text": text, "origin": origin});
+        let lesson = |id: &str, text: &str, origin: &str| {
+            let basis = if origin == "user-declared" {
+                "person"
+            } else {
+                "agent"
+            };
+            serde_json::json!({"id": id, "kind": "lesson", "text": text, "origin": origin, "source": {"basis": basis}})
+        };
         let planted = promote_atom(
             &lesson(
                 "lesson-planted-ur",
