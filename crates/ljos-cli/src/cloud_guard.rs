@@ -3621,6 +3621,16 @@ fn script_mentions_ref_write(text: &str) -> bool {
 }
 
 fn http_targets_github(words: &[String]) -> bool {
+    let cmd = words
+        .first()
+        .map(|word| word.rsplit('/').next().unwrap_or(word.as_str()))
+        .unwrap_or("");
+    let proto = if cmd == "curl" {
+        curl_proto_default(words)
+    } else {
+        None
+    };
+    let httpie = cmd == "http" || cmd == "https";
     let mut github = false;
     let mut other = false;
     let mut hidden = false;
@@ -3635,6 +3645,16 @@ fn http_targets_github(words: &[String]) -> bool {
                 other = true;
             }
             continue;
+        }
+        if httpie || proto.is_some() {
+            if let Some(host) = schemeless_host(word) {
+                if is_github_host(&host) {
+                    github = true;
+                } else {
+                    other = true;
+                }
+                continue;
+            }
         }
         // `$URL` and `https://$HOST/...` do not name a host. A header that
         // happens to hold a token has a colon or a space and is not a URL.
@@ -3653,15 +3673,71 @@ fn http_targets_github(words: &[String]) -> bool {
     hidden
 }
 
+fn curl_proto_default(words: &[String]) -> Option<String> {
+    let mut i = 1usize;
+    while i < words.len() {
+        let word = words[i].as_str();
+        if let Some(value) = word.strip_prefix("--proto-default=") {
+            return (!value.is_empty()).then(|| value.to_string());
+        }
+        if word == "--proto-default" {
+            return words.get(i + 1).cloned();
+        }
+        i += 1;
+    }
+    None
+}
+
 fn literal_http_host(word: &str) -> Option<String> {
-    let rest = word
-        .strip_prefix("https://")
-        .or_else(|| word.strip_prefix("http://"))?;
-    let host = rest.split(['/', '?', ':']).next().unwrap_or("");
+    host_in_url(word)
+}
+
+fn schemeless_host(word: &str) -> Option<String> {
+    if word.contains("://") || word.contains('=') || word.contains([' ', '\t']) {
+        return None;
+    }
+    let host = host_in_url(&format!("https://{word}"))?;
+    host.contains('.').then_some(host)
+}
+
+/// Authority host. The scheme's case does not matter. Userinfo is the last
+/// `@` before the path, so a token is not the host and a port stays with
+/// the host. One trailing dot is not a different host.
+fn host_in_url(word: &str) -> Option<String> {
+    let word = word
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'' || c == '<' || c == '>');
+    let idx = word.find("://")?;
+    let scheme = &word[..idx];
+    if scheme.is_empty() || !scheme.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let rest = &word[idx + 3..];
+    let auth = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if auth.is_empty() {
+        return None;
+    }
+    let hostport = auth.rsplit_once('@').map(|(_, host)| host).unwrap_or(auth);
+    if hostport.is_empty() || unreadable_token(hostport) {
+        return None;
+    }
+    let host = strip_host_port(hostport).trim_end_matches('.');
     if host.is_empty() || unreadable_token(host) {
         return None;
     }
     Some(host.to_ascii_lowercase())
+}
+
+fn strip_host_port(hostport: &str) -> &str {
+    if let Some(inner) = hostport.strip_prefix('[') {
+        return inner.split(']').next().unwrap_or(inner);
+    }
+    if let Some((host, port)) = hostport.rsplit_once(':') {
+        if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
+            return host;
+        }
+    }
+    hostport
 }
 
 fn is_github_host(host: &str) -> bool {
