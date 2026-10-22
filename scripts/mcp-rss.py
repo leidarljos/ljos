@@ -116,7 +116,7 @@ def main():
         "PACKSET_WORKSPACE": "probe",
         "PACKSET_URL": os.environ.get("PACKSET_URL", "http://127.0.0.1:9"),
     }
-    for key in ("PACKSET_TOKEN", "LJOS_MCP_IDLE_SECS"):
+    for key in ("PACKSET_TOKEN", "LJOS_MCP_IDLE_DROP"):
         if key in os.environ:
             env[key] = os.environ[key]
 

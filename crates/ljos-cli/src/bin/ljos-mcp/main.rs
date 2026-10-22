@@ -45,6 +45,7 @@ async fn serve() -> anyhow::Result<()> {
     ljos_cli::runner_skills::refresh_on_new_version();
     ljos_cli::runner_env::refresh_on_new_version();
     ljos_cli::bookkeep::spawn_idle_finish();
+    ljos_cli::idle_drop::spawn_idle_drop();
     // Dropped when the process returns, including after the client closes.
     // A name, not `let _`, so the finish runs at the end of main.
     let _book_finish = ljos_cli::bookkeep::ShutdownFinish;

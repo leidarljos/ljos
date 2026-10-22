@@ -3504,7 +3504,7 @@ impl ServerHandler for LjosServer {
             ));
         }
         let name = request.name.to_string();
-        ljos_cli::bookkeep::touch_activity();
+        let _activity = ljos_cli::idle_drop::call_started();
         let seat_text = match seat_argument(request.arguments.as_ref()) {
             Ok(text) => text,
             Err(e) => {
