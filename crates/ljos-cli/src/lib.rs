@@ -30191,6 +30191,35 @@ pub(crate) fn apply_git_command_env(cmd: &mut std::process::Command) {
     let _ = cmd;
 }
 
+/// Whether `key` is a variable an agent runner stamps on its shell, or one
+/// ljos reads to tell which runner and session it is in.
+#[cfg(test)]
+fn runner_detection_var(key: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "CURSOR_",
+        "CLAUDE",
+        "CODEX_",
+        "GROK_",
+        "GEMINI_CLI",
+        "OPENCODE_",
+        "AMP_",
+    ];
+    const KEYS: &[&str] = &[
+        "CLOUD_AGENT_ID",
+        "AGENT_TOOL_NAME",
+        "LJOS_HARNESS_SESSION",
+        "LJOS_SESSION_ID",
+        "LJOS_SHELL_SESSION",
+        "LJOS_PANEL_HARNESS",
+    ];
+    PREFIXES.iter().any(|p| key.starts_with(p))
+        || KEYS.contains(&key)
+        || (key != "XDG_SESSION_ID"
+            && ["_SESSION_ID", "_THREAD_ID", "_CONVERSATION_ID"]
+                .iter()
+                .any(|s| key.ends_with(s)))
+}
+
 /// The lock every test that changes the process environment takes.
 /// Bookkeeping tests live in another module and take the same one.
 #[cfg(test)]
@@ -30200,7 +30229,16 @@ pub(crate) fn test_env_lock() -> EnvLock {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (snapshot, runtime) = with_env_mutation(|| {
-        let snapshot: Vec<_> = std::env::vars_os().collect();
+        // The runner that launched the suite is not put back: a test sees
+        // only the runner it sets itself, whatever shell ran `cargo test`.
+        let snapshot: Vec<_> = std::env::vars_os()
+            .filter(|(key, _)| !key.to_str().is_some_and(runner_detection_var))
+            .collect();
+        for (key, _) in std::env::vars_os() {
+            if key.to_str().is_some_and(runner_detection_var) {
+                unsafe { std::env::remove_var(&key) };
+            }
+        }
         let runtime = tempfile::tempdir().expect("private runtime dir");
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", runtime.path()) };
         (snapshot, runtime)

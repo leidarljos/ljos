@@ -66,6 +66,34 @@ fn fixture_pack() -> (String, Arc<Mutex<Vec<String>>>) {
     (format!("http://{addr}"), seen)
 }
 
+/// A variable an agent runner stamps on its shell, or one ljos reads to
+/// tell which runner and session it is in. The person at a terminal has
+/// none, whatever shell ran `cargo test`.
+fn runner_var(key: &str) -> bool {
+    [
+        "CURSOR_",
+        "CLAUDE",
+        "CODEX_",
+        "GROK_",
+        "GEMINI_CLI",
+        "OPENCODE_",
+        "AMP_",
+    ]
+    .iter()
+    .any(|p| key.starts_with(p))
+        || [
+            "CLOUD_AGENT_ID",
+            "AGENT_TOOL_NAME",
+            "LJOS_HARNESS_SESSION",
+            "LJOS_SESSION_ID",
+        ]
+        .contains(&key)
+        || (key != "XDG_SESSION_ID"
+            && ["_SESSION_ID", "_THREAD_ID", "_CONVERSATION_ID"]
+                .iter()
+                .any(|s| key.ends_with(s)))
+}
+
 struct Home {
     root: tempfile::TempDir,
 }
@@ -94,6 +122,11 @@ impl Home {
             .env_remove("POLICYD_REQUIRED")
             .env_remove("LJOS_SEAT")
             .stdin(Stdio::null());
+        for (key, _) in std::env::vars_os() {
+            if key.to_str().is_some_and(runner_var) {
+                cmd.env_remove(key);
+            }
+        }
         let _ = std::fs::create_dir_all(self.root.path().join("run"));
         cmd
     }
