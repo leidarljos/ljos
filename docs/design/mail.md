@@ -28,7 +28,9 @@ error too, and the checks refuse every draft when either is unset.
 
 ```toml
 [mail]
-# NOTMUCH_CONFIG for every read. Unset reads notmuch's own default.
+# NOTMUCH_CONFIG for every read. Required: without it the reader refuses
+# and never opens notmuch's default database, so an empty [mail] table
+# turns nothing on.
 notmuch_config = "/srv/mail/notmuch-config"
 # The notmuch binary. Unset is `notmuch` on PATH.
 notmuch = "/usr/bin/notmuch"
