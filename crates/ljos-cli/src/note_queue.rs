@@ -99,9 +99,21 @@ fn queue_file(dir: &Path) -> PathBuf {
     dir.join("note-queue.jsonl")
 }
 
+fn lock_file(dir: &Path) -> PathBuf {
+    dir.join("note-queue.lock")
+}
+
 fn lock(dir: &Path) -> crate::CommitLock {
     let _ = std::fs::create_dir_all(dir);
-    crate::CommitLock::acquire_private(&dir.join("note-queue.lock"))
+    crate::CommitLock::acquire_private(&lock_file(dir))
+}
+
+/// The queue lock in `dir` when another ljos holds it now, queueing or
+/// sending; tried without waiting for it.
+#[must_use]
+pub fn busy_in(dir: &Path) -> Option<PathBuf> {
+    let lock = lock_file(dir);
+    crate::CommitLock::is_held_private(&lock).then_some(lock)
 }
 
 fn read(dir: &Path) -> Vec<Queued> {

@@ -13659,12 +13659,19 @@ fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Resu
     with_writer(|| admit::write_agent_one(client, atom.clone()))
 }
 
+/// How the note queue row opens while another process holds the queue
+/// lock. The row is `warn`: a lock held for good stops every send too.
+const QUEUE_BUSY: &str = "busy: ";
+
 /// The doctor row for the note queue: how many memory copies wait for the
 /// pack. It only reads the queue, without its lock: sending would rewrite
 /// the queue, and wait on a lock another ljos may hold. The next note or
-/// finish that reaches the pack, or a session start, sends them.
+/// finish that reaches the pack, or a session start, sends them. A lock
+/// another process holds is tried once, not waited on, and the row says
+/// the queue is busy.
 fn note_queue_row() -> Habitat {
-    let queue = note_queue::state_dir().join("note-queue.jsonl");
+    let dir = note_queue::state_dir();
+    let queue = dir.join("note-queue.jsonl");
     let bytes = match doctor_state_log("note queue", &queue) {
         Ok(bytes) => bytes,
         Err(state) => {
@@ -13675,11 +13682,18 @@ fn note_queue_row() -> Habitat {
             }
         }
     };
-    let state = match complete_rows::<note_queue::Queued>(&bytes).len() {
-        0 => "empty".to_string(),
-        waiting => format!(
+    let waiting = complete_rows::<note_queue::Queued>(&bytes).len();
+    let state = if let Some(lock) = note_queue::busy_in(&dir) {
+        format!(
+            "{QUEUE_BUSY}another process holds {}, so a note may be landing or leaving; {waiting} note(s) wait. Run `ljos doctor` again once it lets go",
+            lock.display()
+        )
+    } else if waiting == 0 {
+        "empty".to_string()
+    } else {
+        format!(
             "{waiting} note(s) wait for the pack; the next `ljos note` or `ljos finish` that reaches it, or a session start, sends them"
-        ),
+        )
     };
     Habitat {
         name: "note queue",
@@ -23390,8 +23404,9 @@ fn optional_bin(name: &str) -> bool {
 
 /// `ok` when the row answers, `warn` when the policy row names an
 /// `ljos-policyd` without phronesis, a runner skill or runner env ljos
-/// wrote is stale or edited by hand, or the cloud guard file is a known
-/// older version or differs from the seat refusals, `info` when the row
+/// wrote is stale or edited by hand, the note queue is busy, or the cloud
+/// guard file is a known older version or differs from the seat
+/// refusals, `info` when the row
 /// is optional and absent, `no` when a required row failed. A stale skill,
 /// env or cloud guard file ljos wrote is a warning `ljos doctor --fix`
 /// rewrites, not a failure. A cloud guard file that differs is a warning
@@ -23414,6 +23429,9 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
         return "warn";
     }
     if row.ok && row.name == "mcp" && row.state.starts_with("warning:") {
+        return "warn";
+    }
+    if row.ok && row.name == "note queue" && row.state.starts_with(QUEUE_BUSY) {
         return "warn";
     }
     if row.ok && row.name == "policy" && row.state.ends_with(POLICY_TABLE_ONLY) {
@@ -27644,6 +27662,24 @@ impl CommitLock {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    /// Whether another process holds the private lock at `path` now. It
+    /// does not wait and does not create the file: a missing lock is not
+    /// held, and one that cannot be opened is no lock to
+    /// [`Self::acquire_private`] either.
+    pub(crate) fn is_held_private(path: &std::path::Path) -> bool {
+        use std::os::unix::io::AsRawFd;
+        let Ok((dir, name)) = open_state_dir(path) else {
+            return false;
+        };
+        let Ok(file) = open_regular_at(&dir, &name, path, libc::O_RDONLY, 0) else {
+            return false;
+        };
+        // SAFETY: flock on a descriptor this function owns. A shared lock
+        // taken here goes when `file` closes, at the end of this call.
+        let taken = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0;
+        !taken && std::io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK)
     }
 }
 
