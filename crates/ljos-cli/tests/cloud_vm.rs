@@ -1631,6 +1631,30 @@ fn cloud_guard_resolves_push_aliases_from_config_and_line_state() {
 }
 
 #[test]
+fn cloud_guard_reads_git_env_and_env_chdir_context() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-git-env", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let dev = clone_of(root.path(), &origin, "dev");
+    let oncur = clone_of(root.path(), &origin, "oncur");
+    git(&oncur, &["checkout", "-q", "-b", "cursor/probe"]);
+
+    for line in [
+        "GIT_DIR=../oncur/.git git push origin HEAD",
+        "env -C ../oncur git push origin HEAD",
+        "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0=HEAD:cursor/from-env git push origin HEAD",
+    ] {
+        refused(line, &dev);
+    }
+
+    allowed("GIT_DIR=../dev/.git git push origin HEAD", &oncur);
+}
+
+#[test]
 fn cloud_guard_reads_the_gh_pr_verb_and_never_its_arguments() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
