@@ -13668,21 +13668,28 @@ const QUEUE_BUSY: &str = "busy: ";
 /// the queue, and wait on a lock another ljos may hold. The next note or
 /// finish that reaches the pack, or a session start, sends them. A lock
 /// another process holds is tried once, not waited on, and the row says
-/// the queue is busy.
+/// the queue is busy. A whole line that is not a note is damage, as a
+/// torn last row is: a send moves it out of the queue.
 fn note_queue_row() -> Habitat {
     let dir = note_queue::state_dir();
     let queue = dir.join("note-queue.jsonl");
+    let damaged = |state| Habitat {
+        name: "note queue",
+        ok: false,
+        state,
+    };
     let bytes = match doctor_state_log("note queue", &queue) {
         Ok(bytes) => bytes,
-        Err(state) => {
-            return Habitat {
-                name: "note queue",
-                ok: false,
-                state,
-            }
-        }
+        Err(state) => return damaged(state),
     };
-    let waiting = complete_rows::<note_queue::Queued>(&bytes).len();
+    let (notes, unread): (Vec<note_queue::Queued>, usize) = complete_rows_counted(&bytes);
+    let waiting = notes.len();
+    if unread > 0 {
+        return damaged(format!(
+            "the note queue at {} is damaged: {unread} row(s) are not a note; {waiting} note(s) wait. `ljos finish` or the next session start moves those rows to a dated `.damaged` file beside it",
+            queue.display()
+        ));
+    }
     let state = if let Some(lock) = note_queue::busy_in(&dir) {
         format!(
             "{QUEUE_BUSY}another process holds {}, so a note may be landing or leaving; {waiting} note(s) wait. Run `ljos doctor` again once it lets go",
@@ -22434,7 +22441,7 @@ pub fn bypass_summary(bytes: &[u8], path: &str) -> String {
     };
     let damaged = if dropped > 0 {
         format!(
-            "; {dropped} row{} could not be read",
+            "; the log is damaged: {dropped} row{} could not be read",
             if dropped == 1 { "" } else { "s" }
         )
     } else {
@@ -42198,7 +42205,7 @@ mod tests {
         let said = bypass_summary(&mixed, "LOG");
         assert!(
             said.starts_with("1 command ran past the guard")
-                && said.contains("1 row could not be read"),
+                && said.contains("damaged: 1 row could not be read"),
             "{said}"
         );
     }

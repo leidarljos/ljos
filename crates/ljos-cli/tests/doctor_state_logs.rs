@@ -252,6 +252,35 @@ fn doctor_keeps_every_byte_of_the_note_queue() {
     }
 }
 
+/// A row cut short and then ended with a newline, which is what a writer
+/// that caps a torn tail leaves, is damage in either log, alone or after
+/// a whole row: the short doctor shows it and the bytes stay.
+#[test]
+fn doctor_names_a_cut_row_with_its_newline_damaged() {
+    for (name, whole) in [("guard bypass", BYPASS_ROW), ("note queue", QUEUE_ROW)] {
+        for first in [&b""[..], whole] {
+            let home = Home::new();
+            let log = if name == "guard bypass" {
+                home.bypass()
+            } else {
+                home.queue()
+            };
+            let mut bytes = first.to_vec();
+            bytes.extend_from_slice(b"{\"issue\":\"ljos-new\",\"te\n");
+            std::fs::write(&log, &bytes).expect("log");
+            let before = home.tree();
+            let (_, out) = home.doctor(&[]).expect("doctor hung");
+            assert_eq!(home.tree(), before, "{name}:\n{out}");
+            let word = if name == "guard bypass" { "warn" } else { "no" };
+            let line = row(&out, name).unwrap_or_else(|| panic!("no {name} row:\n{out}"));
+            assert!(
+                line.starts_with(word) && line.contains("damaged"),
+                "{name}: {line}"
+            );
+        }
+    }
+}
+
 /// Another process holding the note-queue lock does not hold doctor: it
 /// tries the lock once, says the queue is busy in a row the short doctor
 /// shows, and says so no longer once the lock is let go. A queue dated a
