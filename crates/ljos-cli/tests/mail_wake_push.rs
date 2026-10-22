@@ -203,9 +203,11 @@ fn world(slow_push: bool, reject: bool) -> (World, Daemon) {
         &["remote", "add", "origin", origin.to_str().unwrap()],
     );
     std::fs::create_dir_all(seed.join(".ljos")).expect("ljos");
+    // `cloud` is reserved for the shared extra scope. These letters are
+    // unscoped, so they stay on the primary log under another name.
     std::fs::write(
         seed.join(".ljos/sync.toml"),
-        format!("name = \"cloud\"\nrecipients = [\"{public}\"]\n"),
+        format!("name = \"mail\"\nrecipients = [\"{public}\"]\n"),
     )
     .expect("sync.toml");
     std::fs::write(
