@@ -3147,14 +3147,15 @@ fn holder_seat(holder: &str) -> Option<(String, Option<String>)> {
 /// apart; this does not. The bookkeeping that asks already looks only at
 /// one checkout, where a git hook (`SEAT@TAG`, or `SEAT-TAG` from ljos
 /// 0.31 and earlier) and the MCP server (the bare seat, or its own tag)
-/// are one conversation booking under two names. A `SEAT-TAG` whose seat
-/// part is this seat counts when the tag is one to six lowercase letters
-/// and digits, a pid in base 36 (`free-claude-8h`, `free-opencode-1v8am`),
-/// and the whole name is not itself a seat in `known`, so `eessi-bot`
-/// stays apart from `eessi`.
+/// are one conversation booking under two names. Past what
+/// [`holder_parts`] folds, a `SEAT-TAG` whose seat part is this seat
+/// counts when the tag is a pid in base 36 that may be all letters
+/// (`free-agy-aak`, `free-opencode-nrv`) and the whole name is not itself
+/// a seat in `known`, so `eessi-bot` stays apart from `eessi`. A tag of
+/// digits alone is a number and never folds, and a run, judge or
+/// subagent keeps its id whole.
 #[must_use]
 pub fn same_seat(held: &str, holder: &str, known: &std::collections::BTreeSet<String>) -> bool {
-    let _ = known;
     let (held, holder) = (held.trim(), holder.trim());
     if held.is_empty() || holder.is_empty() {
         return false;
@@ -3162,7 +3163,17 @@ pub fn same_seat(held: &str, holder: &str, known: &std::collections::BTreeSet<St
     let (Some((seat_a, _)), Some((seat_b, _))) = (holder_seat(held), holder_seat(holder)) else {
         return false;
     };
-    seat_a == seat_b
+    if seat_a == seat_b {
+        return true;
+    }
+    let suffixed = |name: &str, seat: &str| {
+        !known.contains(name)
+            && name
+                .strip_prefix(seat)
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|tag| pid_shaped(seat, tag))
+    };
+    suffixed(&seat_a, &seat_b) || suffixed(&seat_b, &seat_a)
 }
 
 /// [`same_seat`] against the seats this tracker lists.
@@ -3200,7 +3211,10 @@ pub fn holder_parts(holder: &str) -> (String, Option<String>) {
     (seat, tag)
 }
 
-fn legacy_tag(head: &str, tag: &str) -> bool {
+/// Whether `tag` after `head` has the shape of a pid in base 36: one to
+/// six lower-case letters and digits with at least one letter. A run,
+/// judge or subagent name keeps every part.
+fn pid_shaped(head: &str, tag: &str) -> bool {
     if head.starts_with("run-")
         || head == "run"
         || head.starts_with("judge-")
@@ -3209,16 +3223,17 @@ fn legacy_tag(head: &str, tag: &str) -> bool {
     {
         return false;
     }
-    if !(1..=6).contains(&tag.len())
-        || !tag
+    (1..=6).contains(&tag.len())
+        && tag
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-        || !tag.bytes().any(|b| b.is_ascii_digit())
-        || !tag.bytes().any(|b| b.is_ascii_lowercase())
-    {
-        return false;
-    }
-    true
+        && tag.bytes().any(|b| b.is_ascii_lowercase())
+}
+
+/// An old pid tag [`holder_parts`] drops whatever seats exist: a
+/// [`pid_shaped`] tag with a digit, so `eessi-bot` keeps its last part.
+fn legacy_tag(head: &str, tag: &str) -> bool {
+    pid_shaped(head, tag) && tag.bytes().any(|b| b.is_ascii_digit())
 }
 
 /// Drop a pid-shaped suffix (`n9o`, `1vmow`) from a seat. A name that has
@@ -34703,7 +34718,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "an all-letter pid tag did not fold")]
     fn an_all_letter_pid_tag_folds_to_a_known_seat() {
         let known: std::collections::BTreeSet<String> = ["free-agy", "eessi", "eessi-bot"]
             .iter()
@@ -34764,9 +34778,9 @@ mod tests {
                 .collect();
         assert!(same_seat("free-claude-8h", "free-claude", &known));
         assert!(same_seat("free-claude", "free-claude-8h", &known));
-        assert!(!same_seat("free-agy-aak", "free-agy@q4s23e2cxd", &known));
+        assert!(same_seat("free-agy-aak", "free-agy@q4s23e2cxd", &known));
         assert!(same_seat("free-opencode@abc", "free-opencode@xyz", &known));
-        assert!(!same_seat("free-opencode-nrv", "free-opencode", &known));
+        assert!(same_seat("free-opencode-nrv", "free-opencode", &known));
         assert!(!same_seat("eessi-bot", "eessi", &known));
         assert!(!same_seat("free-claude-8h", "free-codex", &known));
         assert!(same_seat("free-opencode-1v8am", "free-opencode", &known));
