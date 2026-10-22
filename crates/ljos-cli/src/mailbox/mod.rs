@@ -4,6 +4,7 @@
 //! mail, so nothing here sends, and every byte read from a message is
 //! untrusted. `docs/design/mail.md` has the whole shape.
 
+pub mod checks;
 pub mod config;
 pub mod export;
 pub mod html;
