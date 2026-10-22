@@ -3700,7 +3700,7 @@ fn http_hosts(words: &[String]) -> (bool, bool) {
             continue;
         }
         if let Some(host) = literal_http_host(word) {
-            if is_github_host(&host) {
+            if is_github_host(&host) || address_host(&host) {
                 github = true;
             } else {
                 other = true;
@@ -3709,7 +3709,7 @@ fn http_hosts(words: &[String]) -> (bool, bool) {
         }
         if httpie || proto.is_some() {
             if let Some(host) = schemeless_host(word) {
-                if is_github_host(&host) {
+                if is_github_host(&host) || address_host(&host) {
                     github = true;
                 } else {
                     other = true;
@@ -3811,6 +3811,20 @@ fn is_github_host(host: &str) -> bool {
         || host.ends_with(".ghcr.io")
         || host.ends_with(".githubusercontent.com")
         || host.ends_with(".pkg.github.com")
+}
+
+/// An IP address in a form curl and wget take: dotted, one number, hex
+/// parts, or IPv6. A DNS name does not end in a number, so a peer named
+/// this way may be GitHub behind a `Host:` header.
+fn address_host(host: &str) -> bool {
+    if host.contains(':') {
+        return true;
+    }
+    let last = host.rsplit('.').next().unwrap_or(host);
+    let hex = last
+        .strip_prefix("0x")
+        .is_some_and(|digits| digits.chars().all(|c| c.is_ascii_hexdigit()));
+    !last.is_empty() && (hex || last.chars().all(|c| c.is_ascii_digit()))
 }
 
 fn http_ref_write(

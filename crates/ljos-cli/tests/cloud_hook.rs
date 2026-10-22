@@ -1149,6 +1149,30 @@ fn a_curl_config_that_hides_the_target_may_be_github() {
     );
 }
 
+/// An address names a peer, not a host. GitHub answers there for the
+/// name in a `Host:` header or the TLS name, so the request may be
+/// GitHub's.
+#[test]
+fn an_address_for_a_host_may_be_github() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    for addr in [
+        "https://140.82.112.6/zen",
+        "https://2354278406/zen",
+        "https://0x8c.0x52.0x70.0x6/zen",
+        "https://[2606:50c0:8000::154]/zen",
+    ] {
+        refused(&format!("curl -k -X POST {addr}"), here);
+        refused(&format!("wget --method=POST {addr}"), here);
+        allowed(&format!("curl -k {addr}"), here);
+    }
+    allowed("curl -X POST http://localhost:8080/x", here);
+}
+
 /// Windows curl also loads `.curlrc` or `_curlrc` from `USERPROFILE`,
 /// `APPDATA`, and `USERPROFILE\Application Data` after `HOME`. A seat that
 /// sets those variables is judged as Windows curl would be.
