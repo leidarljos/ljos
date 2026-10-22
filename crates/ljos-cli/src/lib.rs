@@ -3398,12 +3398,12 @@ pub fn write_assignee(
 }
 
 /// Refuse a tracker write from a seat the seats file does not list. A
-/// file that lists no seat, or is missing as on a fresh single-user
-/// install, refuses nothing.
+/// missing file, as on a fresh single-user install, refuses nothing; a
+/// file that is there and lists no seat refuses every write.
 ///
 /// # Errors
 ///
-/// The seats file lists seats and `seat` is not one of them, or the file
+/// The seats file is there and `seat` is not one it lists, or the file
 /// cannot be read as TOML.
 pub fn registered_seat(seat: &str) -> Result<()> {
     let path = seats_file();
@@ -3414,6 +3414,13 @@ pub fn registered_seat(seat: &str) -> Result<()> {
     if listed.contains(&slug) {
         return Ok(());
     }
+    if listed.is_empty() {
+        bail!(
+            "the seats file {} lists no seat, so no seat may write. \
+             Add `seats = [\"{slug}\"]` or a `\"CONVERSATION-ID\" = \"{slug}\"` line to it; nothing was written",
+            path.display()
+        );
+    }
     bail!(
         "no seat named {slug} in {}, which lists {}. \
          Set LJOS_SEAT to a seat it lists, or add yours to it; nothing was written",
@@ -3422,8 +3429,9 @@ pub fn registered_seat(seat: &str) -> Result<()> {
     )
 }
 
-/// The seat names `path` maps conversations to, slugged. `None` when the
-/// file is missing or names no seat.
+/// The seats `path` lists, slugged: every name it maps a conversation to
+/// (`"ID" = "NAME"`) and every name in a `seats = [...]` array. `None`
+/// only when the file is missing.
 fn listed_seats(path: &Path) -> Result<Option<std::collections::BTreeSet<String>>> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -3432,13 +3440,19 @@ fn listed_seats(path: &Path) -> Result<Option<std::collections::BTreeSet<String>
     };
     let table: toml::Table = toml::from_str(&text)
         .map_err(|e| anyhow::anyhow!("the seats file {} is not TOML: {e}", path.display()))?;
-    let listed: std::collections::BTreeSet<String> = table
+    let roster = table
+        .get("seats")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten();
+    let listed = table
         .values()
+        .chain(roster)
         .filter_map(toml::Value::as_str)
         .map(canonical_seat_name)
         .filter(|slug| !slug.is_empty())
         .collect();
-    Ok((!listed.is_empty()).then_some(listed))
+    Ok(Some(listed))
 }
 
 /// Append one line, `ts seat verb what`, to the state dir's recall.log, so
