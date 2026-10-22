@@ -28,6 +28,7 @@ pub mod git_hooks;
 pub mod hud;
 pub mod jev;
 mod kept_prompt;
+pub mod legacy_pref;
 pub mod mail;
 pub mod memories;
 pub mod note_queue;
@@ -336,13 +337,19 @@ pub fn session_start_for(session: Option<&str>) -> String {
     // Other machines' rules arrive before the preface is built. A tracker
     // that does not answer leaves the local file, and the hook does not wait.
     user_rules::sync_for_hook();
+    // A preference stored before a basis existed is stamped first, so this
+    // line still shows the ones the person wrote.
+    legacy_pref::migrate_once();
     let mut atoms = session_atoms(400);
     if atoms.is_err() {
         wake_for_recall();
         atoms = session_atoms(2_000);
     }
-    let mut line =
-        session_start_line_from(atoms.ok().as_deref(), &now_utc(), on_path("ljos-policyd"));
+    let mut line = session_start_line_from(
+        atoms.as_ref().ok().map(|v| v.as_slice()),
+        &now_utc(),
+        on_path("ljos-policyd"),
+    );
     // A guard that switched itself off says so where the session starts,
     // not only in `ljos doctor`.
     if let Some(off) = bookkeep::guard_off_reason() {
@@ -351,6 +358,14 @@ pub fn session_start_for(session: Option<&str>) -> String {
     if let Some(issue) = bookkeep::session_issue(session) {
         if !line.contains(&issue) {
             line.push_str(&format!(" This session's issue is {issue}."));
+        }
+    }
+    if let Ok(got) = &atoms {
+        let n = legacy_pref::awaiting(got).len();
+        if n > 0 {
+            line.push(' ');
+            line.push_str(&legacy_pref::review_sentence(n));
+            line.push('.');
         }
     }
     user_rules::prepend(line)
@@ -13646,14 +13661,12 @@ fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Resu
 /// doctor run after the pack comes back empties the queue.
 fn note_queue_row() -> Habitat {
     let queue = note_queue::state_dir().join("note-queue.jsonl");
-    if let Err(err) = read_state_file(&queue) {
-        if let Some(state) = state_log_damage("note queue", &queue, &err) {
-            return Habitat {
-                name: "note queue",
-                ok: false,
-                state,
-            };
-        }
+    if let Err(state) = doctor_state_log("note queue", &queue) {
+        return Habitat {
+            name: "note queue",
+            ok: false,
+            state,
+        };
     }
     let (ok, state) = match flush_note_queue() {
         Ok(done) if done == note_queue::Drained::default() => (true, "empty".to_string()),
@@ -17070,6 +17083,7 @@ pub fn rules_for_gate() -> Vec<Rule> {
 /// empty when the pack does not answer: a reminder is not worth a wait.
 #[must_use]
 pub fn gate_read() -> (Vec<Rule>, Vec<(String, String)>) {
+    legacy_pref::migrate_once();
     let kept = rules_cache_path();
     let listed = pack().and_then(|client| {
         atoms_lean(&client, &client.workspace()).context("rules: GET /v1/atoms failed")
@@ -17151,21 +17165,29 @@ pub fn preferences_line(enforced: usize, could: usize, total: usize) -> String {
 }
 
 fn preferences_row() -> Habitat {
+    legacy_pref::migrate_once();
     let listed = pack().and_then(|client| {
         atoms_lean(&client, &client.workspace()).context("preferences: GET /v1/atoms failed")
     });
-    let state = match listed {
+    let (state, held) = match listed {
         Ok(atoms) => {
+            let held = legacy_pref::awaiting(&atoms).len();
             let (enforced, could, total) =
                 preferences_enforced(&preferences_of(&atoms), &rules_of(&atoms));
-            preferences_line(enforced, could, total)
+            let mut line = preferences_line(enforced, could, total);
+            if held > 0 {
+                line.push_str(&format!("; {}", legacy_pref::review_sentence(held)));
+            }
+            (line, held)
         }
-        Err(e) => format!("not counted: {e:#}"),
+        Err(e) => (format!("not counted: {e:#}"), 0),
     };
     Habitat {
         name: "preferences",
         state,
-        ok: true,
+        // Held-back preferences are a warning the short doctor shows.
+        // They do not mean the seat failed to start.
+        ok: held == 0,
     }
 }
 
@@ -21973,16 +21995,24 @@ fn clear_nonblock(fd: std::os::unix::io::RawFd) -> std::io::Result<()> {
 /// `O_NONBLOCK` would wait, and reading a device such as `/dev/zero`
 /// would not end.
 pub(crate) fn read_state_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    read_state_file_dated(path).map(|(bytes, _)| bytes)
+}
+
+/// [`read_state_file`] with the log's mtime, taken from the same
+/// descriptor once the read is done, so a row appended during the read
+/// leaves the time no older than its bytes. A missing log has none.
+fn read_state_file_dated(path: &Path) -> std::io::Result<(Vec<u8>, Option<std::time::SystemTime>)> {
     use std::io::Read;
     let (dir, name) = open_state_dir(path)?;
     let mut file = match open_regular_at(&dir, &name, path, libc::O_RDONLY, 0) {
         Ok(file) => file,
-        Err(err) if err.raw_os_error() == Some(libc::ENOENT) => return Ok(Vec::new()),
+        Err(err) if err.raw_os_error() == Some(libc::ENOENT) => return Ok((Vec::new(), None)),
         Err(err) => return Err(err),
     };
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
-    Ok(bytes)
+    let modified = file.metadata()?.modified().ok();
+    Ok((bytes, modified))
 }
 
 /// Replace `path` with `bytes` through the directory ljos made, refusing a
@@ -22276,10 +22306,9 @@ fn bypass_skip_note(path: &Path, err: &std::io::Error) -> String {
 fn bypass_row() -> Habitat {
     let state = match bypass_log_path() {
         None => "no command has run past the guard".to_string(),
-        Some(path) => match read_state_file(&path) {
+        Some(path) => match doctor_state_log("guard bypass log", &path) {
             Ok(bytes) => bypass_summary(&bytes, &path.display().to_string()),
-            Err(err) => state_log_damage("guard bypass log", &path, &err)
-                .unwrap_or_else(|| "no command has run past the guard".to_string()),
+            Err(state) => state,
         },
     };
     Habitat {
@@ -22289,13 +22318,37 @@ fn bypass_row() -> Habitat {
     }
 }
 
-/// A doctor row's text for a state log [`read_state_file`] could not
-/// read, or `None` when the log is simply not there. Only `NotFound` is
-/// an empty log: a symlink, a fifo, a socket, a directory or a log ljos
-/// may not read is damaged, since calling it empty would hide the swap.
-fn state_log_damage(what: &str, path: &Path, err: &std::io::Error) -> Option<String> {
-    (err.kind() != std::io::ErrorKind::NotFound)
-        .then(|| format!("the {what} at {} is damaged: {err}", path.display()))
+/// How long a state log's last row may sit without its newline before
+/// the doctor calls it damaged. A writer puts a row down in one
+/// `write_all` under the lock, so a live append ends well inside this.
+const UNFINISHED_ROW_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A state log's bytes for a doctor row, or the row's text when the log
+/// is damaged. A missing log is empty. Any other refusal from
+/// [`read_state_file`], a symlink, a fifo, a socket, a directory or a log
+/// ljos may not read, is damaged, since calling it empty would hide the
+/// swap. So is a last row without its newline that has not been written
+/// to for [`UNFINISHED_ROW_GRACE`]: [`complete_rows`] leaves it for a
+/// live writer to finish, and nobody is finishing it.
+fn doctor_state_log(what: &str, path: &Path) -> std::result::Result<Vec<u8>, String> {
+    let damaged =
+        |why: &dyn std::fmt::Display| format!("the {what} at {} is damaged: {why}", path.display());
+    let (bytes, modified) = match read_state_file_dated(path) {
+        Ok(read) => read,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(damaged(&err)),
+    };
+    let unfinished = bytes.last().is_some_and(|&b| b != b'\n');
+    let idle = modified
+        .and_then(|at| at.elapsed().ok())
+        .is_some_and(|age| age >= UNFINISHED_ROW_GRACE);
+    if unfinished && idle {
+        return Err(damaged(&format_args!(
+            "an unfinished last row, unchanged for over {}s",
+            UNFINISHED_ROW_GRACE.as_secs()
+        )));
+    }
+    Ok(bytes)
 }
 
 /// [`bypass_row`]'s text from the log's rows.
@@ -23330,6 +23383,10 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     // A headerless log is left unread until someone pins it. The row names
     // the command; it does not mean the seat failed to start.
     if row.name == "sync" && !row.ok {
+        return "warn";
+    }
+    // Older preferences awaiting review are named, not a failed seat.
+    if row.name == "preferences" && !row.ok {
         return "warn";
     }
     if row.ok && row.name == "mcp" && row.state.starts_with("warning:") {
@@ -24680,6 +24737,7 @@ pub fn packset_island(cue: &str, fire: bool) -> Result<Value> {
 /// weights that persona fired, and a fire writes its weights and not the
 /// seat's. The seat's own island is the one with no lens.
 pub fn packset_island_as(cue: &str, fire: bool, lens: Option<&str>) -> Result<Value> {
+    legacy_pref::migrate_once();
     let cue = cue.trim();
     if cue.is_empty() {
         bail!("island: pass the task or question at hand");
@@ -25006,6 +25064,7 @@ pub fn packset_search_as_of(
     as_of: Option<&str>,
     rerank: bool,
 ) -> Result<Vec<Hit>> {
+    legacy_pref::migrate_once();
     let q = query.trim();
     if q.is_empty() {
         bail!("search: empty query");
@@ -37116,16 +37175,23 @@ mod tests {
         let _url = PackUrl::set(&url);
         let found = packset_search_as_of("tag the release", 3, Some("2026-01-01"), true).unwrap();
         assert_eq!(found[0].id.as_deref(), Some("other"));
-        let lines: Vec<String> = seen
-            .lock()
-            .unwrap()
+        // The upgrade lists the pack before the query. That listing is
+        // not a search: a dated search is still asked once, for the
+        // writer's order, and not again for the encoder's signals.
+        let all = seen.lock().unwrap().clone();
+        assert!(
+            all.iter()
+                .any(|l| l.contains("/v1/atoms") && l.contains("embedding=omit")),
+            "{all:?}"
+        );
+        let lines: Vec<String> = all
             .iter()
             .filter(|l| l.contains("/v1/search"))
             .cloned()
             .collect();
-        assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0].contains("rerank=1"), "{lines:?}");
-        assert!(lines[0].contains("as_of="), "{lines:?}");
+        assert_eq!(lines.len(), 1, "{all:?}");
+        assert!(lines[0].contains("rerank=1"), "{all:?}");
+        assert!(lines[0].contains("as_of="), "{all:?}");
     }
 
     /// A pack whose search sends the encoder's rank and cosine on each hit.
@@ -42018,6 +42084,106 @@ mod tests {
                 && said.contains("1 row could not be read"),
             "{said}"
         );
+    }
+
+    /// A last row without its newline is left for the writer while the
+    /// log was touched within the grace period. Once it has sat longer,
+    /// nobody is finishing it, and the doctor says the log is damaged.
+    /// A healthy, an empty, a missing and a v0.32.1-written log are not.
+    #[test]
+    fn doctor_names_a_stale_unfinished_last_row_damaged() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("bypass.jsonl");
+        let row =
+            b"{\"kind\":\"switch\",\"command\":\"ok\",\"how\":\"h\",\"rule\":\"r\",\"ts\":\"t\"}\n";
+        let mut torn = row.to_vec();
+        torn.extend_from_slice(b"{\"kind\":\"switch\",\"command\":\"to");
+        let v0_32_1 = concat!(
+            r#"{"ts":"2026-10-21T09:00:00Z","kind":"switch","how":"LJOS_ASK_PACK=off","command":"terraform destroy","rule":"ask pack: cloud","verdict":"ask","reason":"infra-destroy","seat":null}"#,
+            "\n",
+            r#"{"issue":"ljos-abc","text":"kept","workspace":"w","at":1792573200}"#,
+            "\n",
+        );
+        let cases: [(&str, &[u8], bool, bool); 6] = [
+            ("stale unfinished", &torn, true, true),
+            ("fresh unfinished", &torn, false, false),
+            ("healthy", row, true, false),
+            ("empty", b"", true, false),
+            ("v0.32.1", v0_32_1.as_bytes(), true, false),
+            ("missing", b"", true, false),
+        ];
+        for (case, bytes, stale, damaged) in cases {
+            let _ = std::fs::remove_file(&log);
+            if case != "missing" {
+                std::fs::write(&log, bytes).unwrap();
+                if stale {
+                    age_by(&log, std::time::Duration::from_secs(60));
+                }
+            }
+            let said = doctor_state_log("guard bypass log", &log);
+            if damaged {
+                let said = said.expect_err(case);
+                assert!(
+                    said.contains(&log.display().to_string())
+                        && said.contains("an unfinished last row"),
+                    "{case}: {said}"
+                );
+            } else {
+                assert_eq!(said.as_deref(), Ok(bytes), "{case}");
+            }
+        }
+    }
+
+    /// Both doctor rows that read a state log go through the same check,
+    /// so a stale unfinished row in either is named damaged.
+    #[test]
+    fn both_doctor_state_log_rows_name_a_stale_unfinished_row() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let state = dir.path().join("state");
+        let home = dir.path().join("home");
+        for path in [&data.join("ljos"), &state.join("ljos"), &home] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let _env = HoldEnv::set(&[
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_DATA_HOME", data.to_str().unwrap()),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+        ]);
+        let bypass = bypass_log_path().unwrap();
+        let queue = note_queue::state_dir().join("note-queue.jsonl");
+        std::fs::write(&bypass, b"{\"kind\":\"switch\",\"command\":\"to").unwrap();
+        std::fs::write(&queue, b"{\"issue\":\"ljos-abc\",\"te").unwrap();
+        for log in [&bypass, &queue] {
+            age_by(log, std::time::Duration::from_secs(60));
+        }
+        let row = bounded("doctor bypass", bypass_row);
+        assert!(
+            row.state.contains("damaged") && row.state.contains("an unfinished last row"),
+            "{}",
+            row.state
+        );
+        let row = bounded("doctor note queue", note_queue_row);
+        assert!(
+            row.state.contains("damaged") && row.state.contains("an unfinished last row"),
+            "{}",
+            row.state
+        );
+        assert!(!row.ok, "{}", row.state);
+        assert_eq!(
+            std::fs::read(&queue).unwrap(),
+            b"{\"issue\":\"ljos-abc\",\"te"
+        );
+    }
+
+    fn age_by(path: &std::path::Path, by: std::time::Duration) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - by)
+            .unwrap();
     }
 
     /// The `ljos` directory is ljos's own, so a symlink put there is not
