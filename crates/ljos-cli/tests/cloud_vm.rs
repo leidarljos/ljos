@@ -3367,7 +3367,11 @@ fn a_launcher_slots_the_seat_its_run_takes() {
     assert_eq!(slot.run_key, run_key("ridley-review", "cafebabe0001abcd"));
     assert_eq!(slot.launcher, "ljosbot");
     assert_eq!(slot.key, public);
-    assert!(ljos_cli::slot::verifies("probe-slot", &slot));
+    assert!(ljos_cli::slot::verifies(
+        &ljos_cli::slot::tracker_id(),
+        "probe-slot",
+        &slot
+    ));
     let err = ljos_cli::slot::write(
         "probe-slot",
         "ridley-review",
@@ -3466,6 +3470,50 @@ fn a_seat_pinned_first_under_another_key_does_not_vote_as_the_run() {
             run.clone(),
             format!("{run} is pinned to a key other than the one its slot names")
         )]
+    );
+}
+
+/// A slot signed on another tracker, for an issue with the same id under
+/// a launcher pinned to the same key, does not count here: the slot
+/// signs the tracker's root commits.
+#[test]
+fn a_slot_copied_from_another_tracker_does_not_count() {
+    let _g = Guard::new();
+    let other = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let (origin, repo) = slot_world(other.path(), &["probe-e", "probe-a"]);
+    std::env::set_var("XDG_DATA_HOME", root.path().join("box-data"));
+    pin_standing(&repo, "ljosbot");
+    slot_run("probe-e", "ridley-review", "cafebabe0001abcd").unwrap();
+    let pushed = ljos_cli::persist_tracker("probe-e", "slotted");
+    assert!(pushed.contains("pushed"), "{pushed}");
+    let text = show(&origin, "Software/probe/issues.org");
+    let note = text
+        .lines()
+        .find_map(|line| line.split('"').find(|part| part.starts_with("slot: ")))
+        .unwrap_or_else(|| panic!("no slot on the other tracker: {text}"))
+        .to_string();
+
+    let (_origin, repo) = slot_world(root.path(), &["probe-e"]);
+    pin_standing(&repo, "ljosbot");
+    let layout = vissue_core::Layout::resolve(None, None).unwrap();
+    vissue_core::ops::note(&layout, "probe-e", &note).unwrap();
+    let pushed = ljos_cli::persist_tracker("probe-e", "copied the slot");
+    assert!(pushed.contains("pushed"), "{pushed}");
+    std::env::set_var("XDG_DATA_HOME", other.path().join("vm-data"));
+    let run = ljos_cli::cloud::run_seat("ridley-review", "cafebabe0001abcd");
+    cast(&run, "probe-e", "hold");
+
+    std::env::set_var("LJOS_SEAT", "ljosbot");
+    std::env::set_var("VISSUE_AGENT", "ljosbot");
+    let rows = [serde_json::json!({"agent": run, "choice": "hold"})];
+    let left =
+        ljos_cli::check_seat_signatures("probe-e", &rows, &std::collections::BTreeSet::new())
+            .unwrap()
+            .left_out;
+    assert_eq!(
+        left,
+        vec![(run.clone(), format!("{run}'s slot does not verify"))]
     );
 }
 
@@ -3775,6 +3823,7 @@ fn a_slot_line_replayed_from_another_issue_does_not_backdate_it() {
     let (public, _) = ljos_cli::ballot_sig::signed_hex(&run_key, b"pin");
     let note = ljos_cli::slot::sign(
         &launcher,
+        &ljos_cli::slot::tracker_id(),
         "probe-slot",
         run,
         "grok",
