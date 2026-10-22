@@ -96,7 +96,7 @@ same everywhere and the envelope differs:
 +==========================+==================================================================================================+============================================================================================+======================================================================+==================================================================================================+
 | Claude Code              | ``UserPromptSubmit`` context, skills, ``ljos://protocol``                                        | ``PreToolUse`` deny blocks                                                                 | native permission prompt                                             | plugin ``ljos@leidarljos``; sitting and finish commands are in the repo                          |
 +--------------------------+--------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+----------------------------------------------------------------------+--------------------------------------------------------------------------------------------------+
-| Codex                    | hooks plus MCP server list                                                                       | hook deny blocks                                                                           | runner prompt or ``ljos approve``                                    | prompt and ``PreToolUse``; ``exec_command`` omits ``workdir`` in hook payloads, so ljos cannot read it |
+| Codex                    | hooks plus MCP server list                                                                       | hook deny blocks                                                                           | runner prompt or ``ljos approve``                                    | prompt and ``PreToolUse``; ``shell_command`` payloads carry the command and session ``cwd`` only, so ljos cannot read a ``workdir`` override |
 +--------------------------+--------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+----------------------------------------------------------------------+--------------------------------------------------------------------------------------------------+
 | Grok Build               | ``PostToolUse`` ``additionalContext`` after the first tool (``UserPromptSubmit`` stdout is       | ``PreToolUse``, 10 seconds, the Trusted Computing Base (TCB) check's budget                | ``ask`` rewritten to deny where stdin carries ``turn_id``            | frozen file ``crates/ljos-cli/assets/grok/ljos.json``; ``LJOS_MCP_GENERATION`` bump respawns the |
 |                          | discarded, so ``ljos hook`` keeps the text and emits it once)                                    |                                                                                            |                                                                      | server; the full page is Grok Build                                                              |
@@ -153,8 +153,10 @@ The runners from Copilot down call ``ljos hook --runner NAME``. That
 command reads the runner's payload as Claude Code's, runs the same hook,
 and writes the answer back in the runner's field names and exit code.
 The relay denies when the inner hook crashes, exits non-zero without
-an answer, or runs past 12 seconds. The reason names the failure and
-says to run ``ljos doctor``.
+an answer, reports an unhealthy guard, or runs past
+``LJOS_GUARD_TIMEOUT`` (5 seconds by default). The reason names the
+failure and says to run ``ljos doctor``. ``LJOS_GUARD_FAIL_OPEN=1``
+restores the old allow-with-note behavior while the seat is repaired.
 
 When a hook fails
 -----------------
@@ -191,15 +193,17 @@ ahead unchecked.
 | Crush                    | runs; only exit 2 blocks                                                                                                 | runs           | not read; the exit code decides                | `hooks <https://github.com/charmbracelet/crush/blob/main/docs/hooks/README.md>`__                                                                                                                    |
 +--------------------------+--------------------------------------------------------------------------------------------------------------------------+----------------+------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
-Three things on the seat's side close part of the gap. ``POLICYD_REQUIRED=1``
-makes a missing ``ljos-policyd`` a deny instead of an allow. The hook
-files the seat writes give the runner a timeout of 10 to 20 seconds; a
-check that takes longer meets the "times out" column. On the runners
-from Copilot down, ``ljos hook --runner`` denies when the hook it runs
-crashes, exits non-zero without an answer, or runs past 12 seconds, so
-those failures reach the runner as a deny. None of these helps when
-the ``ljos`` binary itself is gone: on Copilot and Kiro that blocks every
-shell command, and on every other runner the commands run unchecked.
+Three things on the seat's side close part of the gap. On the runners
+from Copilot down, ``ljos hook --runner`` fails closed on guard faults,
+including a missing or unresponsive ``ljos-policyd`` and a guard timeout
+past ``LJOS_GUARD_TIMEOUT``. ``LJOS_GUARD_FAIL_OPEN=1`` restores the old
+allow-with-note behavior while that is repaired. ``POLICYD_REQUIRED=1``
+still makes shell-line checks refuse when ``ljos-policyd`` is absent
+outside the relay. The hook files the seat writes give each runner a
+timeout of 10 to 20 seconds; a check that takes longer meets the
+"times out" column. None of these helps when the ``ljos`` binary itself
+is gone: on Copilot and Kiro that blocks every shell command, and on
+every other runner the commands run unchecked.
 
 When the seat's own hook fails on a permission event, with an error, a
 panic, or on Cursor no verdict in 8 seconds, it does not leave the
