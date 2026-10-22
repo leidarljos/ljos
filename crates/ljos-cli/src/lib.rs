@@ -5958,6 +5958,11 @@ pub fn hook_directory(input: &str) -> Result<PathBuf> {
     if !base.is_absolute() {
         bail!("hook working directory must be absolute");
     }
+    tool_directory_from(&value, &base)
+}
+
+/// [`hook_directory`] from the payload `value` and its absolute `base`.
+fn tool_directory_from(value: &Value, base: &Path) -> Result<PathBuf> {
     let base = std::fs::canonicalize(base).context("hook working directory is unavailable")?;
     if !base.is_dir() {
         bail!("hook working directory is not a directory");
@@ -5985,7 +5990,20 @@ pub fn hook_directory(input: &str) -> Result<PathBuf> {
     if !directory.is_dir() {
         bail!("tool working directory is not a directory");
     }
+    if !enterable(&directory) {
+        bail!("tool working directory cannot be entered");
+    }
     Ok(directory)
+}
+
+/// Whether this process may enter `dir`, as a command started there must.
+fn enterable(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    let Ok(path) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `path` is a NUL-terminated string that outlives the call.
+    unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 }
 }
 
 /// Resolve one tool workdir the way opencode does: lexical path resolution.
@@ -6030,14 +6048,31 @@ fn lexical_path(path: &Path) -> PathBuf {
 /// Directory a tool command is judged in.
 ///
 /// A relative workdir resolves against the session directory, as opencode's
-/// shell tool does with `path.resolve(directory, workdir)`. A directory that
-/// cannot be resolved is not a refusal: the session directory is used when
-/// it exists, and otherwise the process directory.
+/// shell tool does with `path.resolve(directory, workdir)`, and a relative
+/// session directory against the process directory.
+///
+/// # Errors
+///
+/// The directory does not resolve: it is missing, not a directory, a
+/// symlink loop, or one this process cannot enter. The command does not
+/// run in [`fallback_directory`], so it is not judged there.
+pub fn command_directory(input: &str) -> Result<PathBuf> {
+    let value = serde_json::from_str::<Value>(input).unwrap_or(Value::Null);
+    let here = || std::env::current_dir().context("hook working directory is unavailable");
+    let base = match session_path_raw(&value).map(Path::new) {
+        Some(path) if path.is_absolute() => path.to_path_buf(),
+        Some(path) => here()?.join(path),
+        None => here()?,
+    };
+    tool_directory_from(&value, &base)
+}
+
+/// Where a call whose [`command_directory`] does not resolve is read: the
+/// session directory when it exists, and otherwise the process directory.
+/// A prompt is read there, and so is a command with
+/// `LJOS_GUARD_FAIL_OPEN=1`.
 #[must_use]
-pub fn command_directory(input: &str) -> Option<PathBuf> {
-    if let Ok(dir) = hook_directory(input) {
-        return Some(dir);
-    }
+pub fn fallback_directory(input: &str) -> Option<PathBuf> {
     session_directory(input).or_else(|| std::env::current_dir().ok().filter(|path| path.is_dir()))
 }
 
@@ -28011,6 +28046,9 @@ fn guard_start_directory(cwd: Option<&Path>) -> Result<PathBuf> {
     if !directory.is_dir() {
         bail!("guard cwd is not a directory: {}", directory.display());
     }
+    if !enterable(&directory) {
+        bail!("guard cwd cannot be entered: {}", directory.display());
+    }
     Ok(directory)
 }
 
@@ -49720,7 +49758,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     /// A relative workdir resolves against the session directory. A missing
-    /// workdir is the session directory, so the command is still judged.
+    /// workdir does not resolve, and its fallback is the session directory.
     #[test]
     fn a_relative_workdir_resolves_against_the_session_directory() {
         let root = tempfile::tempdir().unwrap();
@@ -49738,8 +49776,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "cwd": root.path(),
             "tool_input": {"command": "git status", "workdir": "/path/to/git/repo"}
         });
+        assert!(command_directory(&missing.to_string()).is_err());
         assert_eq!(
-            command_directory(&missing.to_string()).unwrap(),
+            fallback_directory(&missing.to_string()).unwrap(),
             root.path().canonicalize().unwrap()
         );
     }
