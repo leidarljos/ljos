@@ -21,11 +21,25 @@
 //! id wakes the launcher. An exact key wins, and the longest prefix wins
 //! when several match. The envelope still names the run's seat and carries
 //! the matched prefix as `via`.
+//!
+//! In push mode the letter is in this machine's pack and not yet on the
+//! tracker the other machine reads. The detached wake pushes the sealed
+//! log before it runs the command or posts the webhook, so the send
+//! itself does not wait. A refused push is a line in the wake log. The
+//! wake still runs, and the send still stands.
+//!
+//! The envelope carries the tracker commit that holds the log, when push
+//! mode made one. A command sees `LJOS_WAKE_COMMIT`, and a webhook's JSON
+//! has `commit`. The field is absent when no log commit was made. The
+//! other machine fetches that commit with `ljos inbox --sync`, imports
+//! the sealed logs, and then lists. With no remote the flag only lists.
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -35,6 +49,9 @@ pub const WAKE_TIMEOUT_SECS: u64 = 30;
 
 /// How long a webhook post may take, in seconds.
 const WEBHOOK_TIMEOUT_SECS: u64 = 10;
+
+/// `source` on a wake `ljos cloud up` wrote from `LJOS_WAKE_<SEAT>_URL`.
+pub(crate) const ENV_SOURCE: &str = "env";
 
 /// One seat's wake: a command or a webhook.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +72,10 @@ pub struct Wake {
     /// Seconds before a command is stopped. Absent: [`WAKE_TIMEOUT_SECS`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
+    /// Who wrote this entry. [`ENV_SOURCE`] is `ljos cloud up`. Absent means
+    /// a person set it, and a later `cloud up` leaves it alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// The message a wake is about.
@@ -65,6 +86,9 @@ pub struct Event {
     pub msg: String,
     pub issue: Option<String>,
     pub interrupt: bool,
+    /// The tracker commit whose tree holds the sealed log, when push
+    /// mode made one. Absent otherwise.
+    pub commit: Option<String>,
 }
 
 /// Where the wakes are kept: `wake.toml` beside `harnesses.toml`.
@@ -83,17 +107,108 @@ pub fn load() -> BTreeMap<String, Wake> {
         .unwrap_or_default()
 }
 
-fn save(table: &BTreeMap<String, Wake>) -> Result<()> {
-    let path = path();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let text = format!(
+#[cfg(test)]
+fn load_for_write() -> Result<BTreeMap<String, Wake>> {
+    load_path_for_write(&path())
+}
+
+fn load_path_for_write(wake_path: &Path) -> Result<BTreeMap<String, Wake>> {
+    let text = match std::fs::read_to_string(wake_path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(err) => {
+            return Err(err).with_context(|| format!("wake: {}", wake_path.display()));
+        }
+    };
+    toml::from_str(&text).with_context(|| format!("wake: parse {}", wake_path.display()))
+}
+
+fn render(table: &BTreeMap<String, Wake>) -> Result<String> {
+    Ok(format!(
         "# Wakes `ljos send` starts when mail reaches a seat. A name ending in -\n\
          # matches every longer seat that starts with it. `ljos wake --help` sets them.\n{}",
         toml::to_string(table)?
-    );
-    std::fs::write(&path, text).with_context(|| format!("wake: {}", path.display()))
+    ))
+}
+
+fn lock_path(wake_path: &Path) -> PathBuf {
+    let mut name = wake_path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_else(|| "wake.toml".into());
+    name.push(".lock");
+    wake_path.with_file_name(name)
+}
+
+#[cfg(unix)]
+fn lock_exclusive(file: &std::fs::File) -> std::io::Result<()> {
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn lock_exclusive(_file: &std::fs::File) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn save_atomic(wake_path: &Path, table: &BTreeMap<String, Wake>) -> Result<()> {
+    let text = render(table)?;
+    let dir = wake_path
+        .parent()
+        .context("wake: no directory for wake.toml")?;
+    std::fs::create_dir_all(dir)?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut tmp_name = wake_path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_else(|| "wake.toml".into());
+    tmp_name.push(format!(".tmp-{}-{stamp}", std::process::id()));
+    let tmp = dir.join(tmp_name);
+    {
+        let mut out = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp)
+            .with_context(|| format!("wake: {}", tmp.display()))?;
+        out.write_all(text.as_bytes())
+            .with_context(|| format!("wake: {}", tmp.display()))?;
+        out.sync_all()
+            .with_context(|| format!("wake: {}", tmp.display()))?;
+    }
+    if let Err(err) = std::fs::rename(&tmp, wake_path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err).with_context(|| format!("wake: {}", wake_path.display()));
+    }
+    Ok(())
+}
+
+fn edit_table<T>(edit: impl FnOnce(&mut BTreeMap<String, Wake>) -> Result<(T, bool)>) -> Result<T> {
+    let wake_path = path();
+    if let Some(dir) = wake_path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let lock_file_path = lock_path(&wake_path);
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_file_path)
+        .with_context(|| format!("wake: {}", lock_file_path.display()))?;
+    lock_exclusive(&lock).with_context(|| format!("wake: lock {}", lock_file_path.display()))?;
+    let mut table = load_path_for_write(&wake_path)?;
+    let (out, changed) = edit(&mut table)?;
+    if changed {
+        save_atomic(&wake_path, &table)?;
+    }
+    Ok(out)
 }
 
 /// The guard's verdict on a wake command: the seat's own guard, the
@@ -114,14 +229,35 @@ fn refusal(command: &str, rule: &super::Rule) -> String {
     )
 }
 
+/// `https`, or `http` whose host is exactly `localhost`, an IPv4 loopback
+/// address, or `::1`. The host is parsed, so a name that only begins with
+/// one of those (such as `localhost.attacker.invalid`) is not loopback.
 pub(crate) fn check_webhook(url: &str) -> Result<()> {
-    let loopback = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
-        .iter()
-        .any(|p| url.starts_with(p));
-    if !url.starts_with("https://") && !loopback {
+    if !webhook_host_allowed(url) {
         bail!("wake: {url} is not https, nor http on this machine");
     }
     Ok(())
+}
+
+fn webhook_host_allowed(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    match parsed.scheme() {
+        "https" => parsed.host().is_some(),
+        "http" => http_host_is_loopback(parsed.host()),
+        _ => false,
+    }
+}
+
+fn http_host_is_loopback(host: Option<url::Host<&str>>) -> bool {
+    match host {
+        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(addr)) => addr.is_loopback(),
+        // `Ipv6Addr::is_loopback` is `::1` only, not an IPv4-mapped address.
+        Some(url::Host::Ipv6(addr)) => addr.is_loopback(),
+        None => false,
+    }
 }
 
 /// Set a seat's wake command, after the guard passes it.
@@ -137,16 +273,18 @@ pub fn set_command(seat: &str, command: &str, timeout: Option<u64>) -> Result<St
     if let Some(rule) = judge(command) {
         bail!("wake: {}", refusal(command, &rule));
     }
-    let mut table = load();
-    table.insert(
-        seat.to_string(),
-        Wake {
-            command: Some(command.to_string()),
-            timeout,
-            ..Wake::default()
-        },
-    );
-    save(&table)?;
+    let next = Wake {
+        command: Some(command.to_string()),
+        timeout,
+        ..Wake::default()
+    };
+    edit_table(|table| {
+        let changed = table.get(seat) != Some(&next);
+        if changed {
+            table.insert(seat.to_string(), next.clone());
+        }
+        Ok(((), changed))
+    })?;
     Ok(format!("wake {seat}: runs `{command}` {}\n", reaches(seat)))
 }
 
@@ -154,7 +292,8 @@ pub fn set_command(seat: &str, command: &str, timeout: Option<u64>) -> Result<St
 ///
 /// # Errors
 ///
-/// The URL is not https or loopback, or `wake.toml` cannot be written.
+/// The URL is not https, and not http on localhost or a loopback
+/// address, or `wake.toml` cannot be written.
 pub fn set_webhook(
     seat: &str,
     url: &str,
@@ -163,18 +302,68 @@ pub fn set_webhook(
 ) -> Result<String> {
     let url = url.trim();
     check_webhook(url)?;
-    let mut table = load();
-    table.insert(
-        seat.to_string(),
-        Wake {
-            webhook: Some(url.to_string()),
-            key_file: key_file.map(str::to_string),
-            key_env: key_env.map(str::to_string),
-            ..Wake::default()
-        },
-    );
-    save(&table)?;
+    let next = Wake {
+        webhook: Some(url.to_string()),
+        key_file: key_file.map(str::to_string),
+        key_env: key_env.map(str::to_string),
+        ..Wake::default()
+    };
+    edit_table(|table| {
+        let changed = table.get(seat) != Some(&next);
+        if changed {
+            table.insert(seat.to_string(), next.clone());
+        }
+        Ok(((), changed))
+    })?;
     Ok(format!("wake {seat}: posts to {url} {}\n", reaches(seat)))
+}
+
+/// Write the webhook `ljos cloud up` owns for `seat`.
+///
+/// A later run may replace it. [`set_webhook`] leaves `source` empty, so
+/// a wake set by hand is not this one.
+///
+/// # Errors
+///
+/// The URL is not https, and not http on localhost or a loopback
+/// address, or `wake.toml` cannot be written.
+pub(crate) fn set_env_webhook(seat: &str, url: &str, key_env: &str) -> Result<bool> {
+    let url = url.trim();
+    check_webhook(url)?;
+    let next = Wake {
+        webhook: Some(url.to_string()),
+        key_env: Some(key_env.to_string()),
+        source: Some(ENV_SOURCE.to_string()),
+        ..Wake::default()
+    };
+    edit_table(|table| {
+        let hand_set = table
+            .get(seat)
+            .is_some_and(|wake| wake.source.as_deref() != Some(ENV_SOURCE));
+        if hand_set {
+            return Ok((false, false));
+        }
+        let changed = table.get(seat) != Some(&next);
+        if changed {
+            table.insert(seat.to_string(), next.clone());
+        }
+        Ok((true, changed))
+    })
+}
+
+/// Remove one env-owned wake entry.
+///
+/// Returns whether an env-owned entry was present and removed.
+pub(crate) fn clear_env_webhook(seat: &str) -> Result<bool> {
+    edit_table(|table| {
+        let remove = table
+            .get(seat)
+            .is_some_and(|wake| wake.source.as_deref() == Some(ENV_SOURCE));
+        if remove {
+            table.remove(seat);
+        }
+        Ok((remove, remove))
+    })
 }
 
 /// Remove a seat's wake.
@@ -183,19 +372,20 @@ pub fn set_webhook(
 ///
 /// `wake.toml` cannot be written.
 pub fn clear(seat: &str) -> Result<String> {
-    let mut table = load();
-    if table.remove(seat).is_none() {
-        if let Some((key, _)) = resolve(&table, seat) {
-            if key != seat {
-                return Ok(format!(
-                    "wake {seat}: none set; matches {key}. clear {key} to remove it\n"
-                ));
+    edit_table(|table| {
+        if table.remove(seat).is_none() {
+            if let Some((key, _)) = resolve(table, seat) {
+                if key != seat {
+                    return Ok((
+                        format!("wake {seat}: none set; matches {key}. clear {key} to remove it\n"),
+                        false,
+                    ));
+                }
             }
+            return Ok((format!("wake {seat}: none set\n"), false));
         }
-        return Ok(format!("wake {seat}: none set\n"));
-    }
-    save(&table)?;
-    Ok(format!("wake {seat}: removed\n"))
+        Ok((format!("wake {seat}: removed\n"), true))
+    })
 }
 
 /// What a seat's wake is, in one line. A seat with no entry of its own
@@ -291,6 +481,12 @@ fn wake_target(seat: &str, key: &str) -> String {
     }
 }
 
+/// `LJOS_TRACKER_GIT=push`, the mode a cloud seat uses. Commit-only and
+/// off leave the log where the sitting's own sync puts it.
+fn push_mode() -> bool {
+    std::env::var("LJOS_TRACKER_GIT").as_deref() == Ok("push")
+}
+
 fn log_path() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -370,21 +566,28 @@ pub fn spawn(events: &[Event]) -> Vec<String> {
     woken
 }
 
-/// The envelope a webhook gets. The body stays in the pack.
+/// The envelope a webhook gets. The body stays in the pack. When the
+/// log's commit is known, `read` names `ljos inbox --sync COMMIT`.
 #[must_use]
 pub fn envelope(event: &Event) -> serde_json::Value {
-    serde_json::json!({
+    let seat = crate::tools::sh_quote(&event.seat);
+    let read = match &event.commit {
+        Some(commit) => format!("LJOS_SEAT={seat} ljos inbox --sync {commit}"),
+        None => format!("LJOS_SEAT={seat} ljos inbox"),
+    };
+    let mut v = serde_json::json!({
         "event": "ljos-mail",
         "seat": event.seat,
         "from": event.from,
         "msg": event.msg,
         "issue": event.issue,
         "interrupt": event.interrupt,
-        "read": format!(
-            "LJOS_SEAT={} ljos inbox",
-            crate::tools::sh_quote(&event.seat)
-        ),
-    })
+        "read": read,
+    });
+    if let Some(commit) = &event.commit {
+        v["commit"] = serde_json::Value::String(commit.clone());
+    }
+    v
 }
 
 fn webhook_key(wake: &Wake) -> Option<String> {
@@ -418,6 +621,14 @@ fn run_command(command: &str, event: &Event, timeout: Duration) -> Result<String
             if event.interrupt { "1" } else { "0" },
         )
         .stdin(std::process::Stdio::null());
+    match &event.commit {
+        Some(commit) => {
+            cmd.env("LJOS_WAKE_COMMIT", commit);
+        }
+        None => {
+            cmd.env_remove("LJOS_WAKE_COMMIT");
+        }
+    }
     // What the command prints goes to the wake log, above the line that
     // says how it ended.
     let path = log_path();
@@ -456,6 +667,7 @@ fn post(url: &str, wake: &Wake, event: &Event, via: Option<&str>) -> Result<Stri
     check_webhook(url)?;
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(WEBHOOK_TIMEOUT_SECS))
+        .redirects(0)
         .build();
     let mut req = agent.post(url).set("Content-Type", "application/json");
     if let Some(key) = webhook_key(wake) {
@@ -469,6 +681,12 @@ fn post(url: &str, wake: &Wake, event: &Event, via: Option<&str>) -> Result<Stri
     let resp = req.send_string(&envelope.to_string()).map_err(|e| {
         anyhow::anyhow!("POST {url}: {}", e.to_string().replace(url, "the webhook"))
     })?;
+    if (300..400).contains(&resp.status()) {
+        bail!(
+            "POST the webhook: refused redirect status {}",
+            resp.status()
+        );
+    }
     Ok(format!(
         "posted, {} in {} ms",
         resp.status(),
@@ -479,6 +697,12 @@ fn post(url: &str, wake: &Wake, event: &Event, via: Option<&str>) -> Result<Stri
 /// Run one seat's wake now and say what happened. A prefix entry matches
 /// a longer seat that starts with it. The outcome is also a line in the
 /// wake log, since a detached wake has nobody to tell.
+///
+/// In push mode the sealed log is pushed first, from this process, which
+/// `send` and `reply` have already detached. The other machine can then
+/// read the letter. A push that does not land is recorded here and does
+/// not stop the wake. The envelope then names the commit that holds the
+/// log, including when the push was refused and the commit stayed local.
 ///
 /// # Errors
 ///
@@ -491,21 +715,32 @@ pub fn fire(event: &Event) -> Result<String> {
     };
     let via = matched_prefix(key, &event.seat);
     let named = wake_target(&event.seat, key);
+    // The letter is already in the pack. Pushing here, rather than in
+    // `send`, keeps the sender's wait to the detach. The other host's
+    // inbox stays empty until this push is on the remote. The commit is
+    // read after the push, so a refusal still names the local log.
+    let mut carried = event.clone();
+    if push_mode() {
+        if let Err(why) = super::sync::push_sealed_log() {
+            log(&format!("{}: {why:#}", carried.seat));
+        }
+        carried.commit = super::sync::log_commit();
+    }
     let outcome = if let Some(command) = &wake.command {
         let timeout = Duration::from_secs(wake.timeout.unwrap_or(WAKE_TIMEOUT_SECS).max(1));
-        run_command(command, event, timeout)
+        run_command(command, &carried, timeout)
     } else if let Some(url) = &wake.webhook {
-        post(url, wake, event, via)
+        post(url, wake, &carried, via)
     } else {
         Err(anyhow::anyhow!("neither a command nor a webhook"))
     };
     match outcome {
         Ok(said) => {
-            log(&format!("{named} {}: {said}", event.msg));
+            log(&format!("{named} {}: {said}", carried.msg));
             Ok(format!("wake {named}: {said}\n"))
         }
         Err(e) => {
-            log(&format!("{named} {}: {e:#}", event.msg));
+            log(&format!("{named} {}: {e:#}", carried.msg));
             Err(e).context(format!("wake {named}"))
         }
     }
@@ -556,16 +791,62 @@ mod tests {
             msg: "m1".into(),
             issue: Some("Software-d9n6".into()),
             interrupt: true,
+            commit: None,
         };
         let v = envelope(&event);
         assert_eq!(v["seat"], "grok");
         assert_eq!(v["msg"], "m1");
         assert_eq!(v["interrupt"], true);
+        assert!(v.get("commit").is_none(), "{v}");
         assert_eq!(v["read"], "LJOS_SEAT='grok' ljos inbox");
         assert!(v.get("body").is_none() && v.get("text").is_none(), "{v}");
+        let named = Event {
+            commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            ..event
+        };
+        let named_v = envelope(&named);
+        assert_eq!(
+            named_v["commit"],
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        assert_eq!(
+            named_v["read"],
+            "LJOS_SEAT='grok' ljos inbox --sync 0123456789abcdef0123456789abcdef01234567"
+        );
         assert!(check_webhook("http://example.com/hook").is_err());
         assert!(check_webhook("https://api2.cursor.sh/automations/webhook/x").is_ok());
         assert!(check_webhook("http://127.0.0.1:9/hook").is_ok());
+    }
+
+    #[test]
+    fn http_is_loopback_only_and_an_attacker_suffix_is_refused() {
+        for url in [
+            "http://localhost.attacker.invalid/hook",
+            "http://127.0.0.1.attacker.invalid/hook",
+            "http://localhost@attacker.invalid/hook",
+            "http://127.0.0.1@attacker.invalid/hook",
+            "http://example.com/hook",
+            "http://169.254.169.254/latest/meta-data",
+            "http://0.0.0.0/hook",
+            "http://[::2]/hook",
+        ] {
+            assert!(check_webhook(url).is_err(), "{url}");
+        }
+        for url in [
+            "https://api2.cursor.sh/automations/webhook/x",
+            "https://localhost.attacker.invalid/hook",
+            "http://127.0.0.1:9/hook",
+            "http://127.0.0.2/hook",
+            "http://2130706433/hook",
+            "http://localhost/hook",
+            "http://localhost:9/hook",
+            "http://[::1]/hook",
+            "http://[::1]:9/hook",
+            "http://[0:0:0:0:0:0:0:1]/hook",
+            "http://user:secret@127.0.0.1/hook",
+        ] {
+            assert!(check_webhook(url).is_ok(), "{url}");
+        }
     }
 
     #[test]
@@ -706,6 +987,103 @@ mod tests {
         (port, rx)
     }
 
+    #[test]
+    fn a_webhook_redirect_is_refused_and_not_followed() {
+        let (_lock, _dir) = isolated();
+        let (target_port, target_rx) = serve_one();
+        let redirect = std::net::TcpListener::bind("127.0.0.1:0").expect("redirect bind");
+        let redirect_port = redirect.local_addr().expect("redirect addr").port();
+        let (first_tx, first_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut sock, _)) = redirect.accept() else {
+                return;
+            };
+            let req = read_http(&mut sock);
+            let _ = first_tx.send(req);
+            let location = format!("http://127.0.0.1:{target_port}/next");
+            let reply = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let _ = std::io::Write::write_all(&mut sock, reply.as_bytes());
+        });
+        let hook = format!("http://127.0.0.1:{redirect_port}/hook");
+        set_webhook("inky", &hook, None, None).expect("set webhook");
+        let err = fire(&Event {
+            seat: "inky".into(),
+            from: "vm-seat".into(),
+            msg: "m1".into(),
+            ..Event::default()
+        })
+        .expect_err("redirected webhook must fail");
+        let said = format!("{err:#}");
+        assert!(said.contains("302"), "{said}");
+        let first = first_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("redirect request");
+        assert!(first.starts_with("POST /hook"), "{first}");
+        assert!(
+            target_rx.recv_timeout(Duration::from_millis(700)).is_err(),
+            "redirect target was called"
+        );
+    }
+
+    #[test]
+    fn concurrent_writers_and_reader_keep_every_entry() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let (_lock, _dir) = isolated();
+        set_command("seed", "true", None).expect("seed");
+        let left_payload = "a".repeat(40_000);
+        let right_payload = "b".repeat(40_000);
+
+        let done = Arc::new(AtomicBool::new(false));
+        let parse_errors = Arc::new(AtomicUsize::new(0));
+        let done_reader = Arc::clone(&done);
+        let parse_reader = Arc::clone(&parse_errors);
+        let reader = std::thread::spawn(move || {
+            while !done_reader.load(Ordering::Relaxed) {
+                if let Ok(text) = std::fs::read_to_string(path()) {
+                    if !text.is_empty() && toml::from_str::<BTreeMap<String, Wake>>(&text).is_err()
+                    {
+                        parse_reader.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                std::hint::spin_loop();
+            }
+        });
+
+        for round in 0..40 {
+            let gate = Arc::new(Barrier::new(2));
+            let left_gate = Arc::clone(&gate);
+            let right_gate = Arc::clone(&gate);
+            let left_cmd = format!("{left_payload}{round}");
+            let right_cmd = format!("{right_payload}{round}");
+            let left = std::thread::spawn(move || {
+                left_gate.wait();
+                set_command("alpha", &left_cmd, None).expect("left write");
+            });
+            let right = std::thread::spawn(move || {
+                right_gate.wait();
+                set_command("beta", &right_cmd, None).expect("right write");
+            });
+            left.join().expect("left join");
+            right.join().expect("right join");
+            let table = load_for_write().expect("table parse");
+            assert!(
+                table.contains_key("alpha") && table.contains_key("beta"),
+                "lost wake entry on round {round}: {table:?}"
+            );
+        }
+        done.store(true, Ordering::Relaxed);
+        reader.join().expect("reader join");
+        assert_eq!(
+            parse_errors.load(Ordering::Relaxed),
+            0,
+            "reader saw torn writes"
+        );
+    }
+
     fn body_of(raw: &str) -> serde_json::Value {
         let body = raw
             .split_once("\r\n\r\n")
@@ -724,6 +1102,24 @@ mod tests {
             std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
         }
         (lock, dir)
+    }
+
+    #[test]
+    fn set_webhook_refuses_to_overwrite_a_broken_wake_toml() {
+        let (_lock, _dir) = isolated();
+        let wake_file = path();
+        std::fs::create_dir_all(wake_file.parent().expect("wake dir")).expect("wake dir");
+        let broken = "[inky\nwebhook = \"https://old.example/hook\"\n";
+        std::fs::write(&wake_file, broken).expect("seed broken wake");
+        let err = set_webhook("inky", "http://127.0.0.1:9/hook", None, None)
+            .expect_err("broken wake.toml should refuse writes");
+        let said = format!("{err:#}");
+        assert!(said.contains("wake"), "{said}");
+        assert!(
+            said.contains("parse"),
+            "the refusal should say this is a parse error: {said}"
+        );
+        assert_eq!(std::fs::read_to_string(&wake_file).unwrap(), broken);
     }
 
     #[test]
@@ -777,6 +1173,7 @@ mod tests {
             msg: "m1".into(),
             issue: Some("Software-d9n6".into()),
             interrupt: true,
+            commit: None,
         };
         let said = fire(&run).expect("fire run");
         assert!(
@@ -901,6 +1298,7 @@ mod tests {
             msg: "m1".into(),
             issue: Some("Software-d9n6".into()),
             interrupt: false,
+            commit: None,
         };
         let missed = spawn(&[event("ljosbot-reviewer"), event("ljosbot")]);
         assert!(missed.is_empty(), "{missed:?}");

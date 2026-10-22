@@ -1,4 +1,5 @@
-A real checkout that includes a `target/` subtree now keeps git
-discovery for tracker locking, push gating and tracker commits, and a
-dotfiles-style checkout that uses `GIT_DIR`/`GIT_WORK_TREE` keeps that
-behavior as well.
+Tracker setup now treats a directory as an existing checkout only when
+that directory is itself the git toplevel, so scratch tracker paths
+inside another repository are initialized as their own trackers and no
+longer write lock, exclude or merge-driver state into the enclosing
+checkout.
