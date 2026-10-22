@@ -10,8 +10,9 @@
 //! `LJOS_CLOUD_AGE_SECRET` names an environment variable, it writes that
 //! variable's age identity for scope `cloud` to a mode 0600 file. On a
 //! cloud VM it also installs the release's `packset-embed` and the ONNX
-//! Runtime it links. A later boot with the binaries already installed only
-//! refreshes the clone.
+//! Runtime it links. A later boot with the binaries already installed
+//! refreshes the clone, rewrites env-owned wakes, and refreshes the scope
+//! cloud identity from the named secret.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -35,6 +36,14 @@ const OPTIONAL_BINS: &[&str] = &[
 ];
 const INSTALL_URL: &str = "https://github.com/leidarljos/ljos/releases/latest/download/install.sh";
 const CLOUD_GUARD_RULES_FILE: &str = "cloud-guard-rules.json";
+/// The rule that refuses a push updating a `cursor/*` ref, read from the
+/// push's argv by [`crate::cloud_guard::cursor_push`].
+const CURSOR_PUSH: &str = "cloud-cursor-push";
+/// The rule that refuses `gh pr create` and its alias `gh pr new`, read
+/// from gh's argv by [`crate::cloud_guard::gh_pr`].
+const GH_PR_CREATE: &str = "cloud-gh-pr-create";
+/// The rule that refuses `gh pr merge`, read the same way.
+const GH_PR_MERGE: &str = "cloud-gh-pr-merge";
 /// The release workflow's encoder archives, the runtime before the binary
 /// that links it. Each unpacks into the prefix above the binary directory.
 const ENCODER_ARCHIVES: &[&str] = &["onnxruntime", "packset-embed"];
@@ -112,6 +121,12 @@ pub fn up(force: bool) -> Result<String> {
         ("LJOS_SEAT", seat.clone()),
         ("VISSUE_AGENT", seat.clone()),
         ("LJOS_SEAT_KEY", key.display().to_string()),
+        // Tag this VM's memory and lessons scope:cloud. Not default_scope:
+        // an unscoped box atom must not follow a default into the cloud log.
+        (
+            crate::sync::WRITE_SCOPE_KEY,
+            crate::sync::CLOUD_SCOPE.to_string(),
+        ),
     ];
     if std::env::var("DEEDAR_HOST_SIGNING_KEY").ok().as_deref() != Some("off") {
         pairs.push(("DEEDAR_HOST_SIGNING_KEY", key.display().to_string()));
@@ -134,8 +149,10 @@ pub fn up(force: bool) -> Result<String> {
         }
     });
     lines.push(ensure_cloud_guard_rules()?);
-    lines.push(ensure_cloud_age()?);
+    // Retire env-owned wakes before any later step can fail, so a removed
+    // `LJOS_WAKE_<SEAT>_URL` cannot leave a stale URL that still sees a new key.
     lines.extend(ensure_wakes()?);
+    lines.push(ensure_cloud_age()?);
     let reaped = reap_gone_owners(crate::lease_secs());
     if !reaped.trim().is_empty() {
         lines.push(reaped.trim_end().to_string());
@@ -310,15 +327,43 @@ pub fn missing_mcp_line() -> Option<String> {
     }
 }
 
-/// Cloud-up refusals over shell commands, in the seat rule format.
+/// The cloud-up refusal `line` meets when it runs in `cwd`. A rule this
+/// ljos names is read from the command's argv; any other rule in the file
+/// is matched as a seat rule.
 #[must_use]
-pub(crate) fn guard_line(line: &str) -> Option<crate::Rule> {
+pub(crate) fn guard_line(line: &str, cwd: Option<&Path>) -> Option<crate::Rule> {
     let path = cloud_guard_rules_path()?;
-    let denies: Vec<crate::Rule> = crate::kept_rules(&path)
+    let denies = crate::kept_rules(&path)
         .into_iter()
-        .filter(|rule| rule.verdict == "deny")
-        .collect();
-    crate::verdict_for(&denies, line).cloned()
+        .filter(|rule| rule.verdict == "deny");
+    for rule in denies {
+        match rule.pattern.as_str() {
+            CURSOR_PUSH => {
+                if let Some(why) = crate::cloud_guard::cursor_push(line, cwd) {
+                    return Some(crate::Rule {
+                        reason: format!("{} ({why})", rule.reason),
+                        ..rule
+                    });
+                }
+            }
+            GH_PR_CREATE | GH_PR_MERGE => {
+                let verbs: &[&str] = if rule.pattern == GH_PR_CREATE {
+                    &["create", "new"]
+                } else {
+                    &["merge"]
+                };
+                if crate::cloud_guard::gh_pr(line, verbs) {
+                    return Some(rule);
+                }
+            }
+            _ => {
+                if let Some(hit) = crate::verdict_for(std::slice::from_ref(&rule), line) {
+                    return Some(hit.clone());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// git's org merge driver. The merged text replaces `ours`.
@@ -1027,8 +1072,10 @@ fn bins_ready(dir: &Path) -> bool {
 
 fn executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    fs::metadata(path)
-        .map(|m| m.permissions().mode() & 0o111 != 0)
+    // A directory is mode 0755, and `metadata` follows a symlink. Either
+    // would count as an installed encoder and skip the download.
+    fs::symlink_metadata(path)
+        .map(|meta| meta.file_type().is_file() && meta.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
 }
 
@@ -1130,7 +1177,7 @@ fn sha256_file(path: &Path) -> Result<String> {
 }
 
 /// `packset-embed` and the ONNX Runtime it links, from this version's
-/// release, on a cloud VM only. Elsewhere the encoder is built from source.
+/// release, on a cloud VM only. Elsewhere nothing is downloaded.
 /// A release without them leaves search lexical. Both sums are checked
 /// before either archive is unpacked.
 fn ensure_encoder(bin_dir: &Path, force: bool) -> Result<String> {
@@ -1196,6 +1243,13 @@ fn install_encoder(stage: &Path, target: &str, bin_dir: &Path, lib: &Path) -> Re
         }
         archives.push(file);
     }
+    // `tar -xzf` unpacks a symlink, and `is_file` follows it, so the
+    // install would put that link on PATH and chmod its target. Refuse
+    // those members, hard links, and paths that leave the tree, in both
+    // archives, before unpacking either.
+    for file in &archives {
+        refuse_unsafe_archive(file)?;
+    }
     let tree = stage.join("tree");
     fs::create_dir_all(&tree)?;
     for file in &archives {
@@ -1215,25 +1269,26 @@ fn install_encoder(stage: &Path, target: &str, bin_dir: &Path, lib: &Path) -> Re
             );
         }
     }
+    refuse_unsafe_tree(&tree)?;
     let new_lib = tree.join(ENCODER_LIB);
     let new_bin = tree.join("bin/packset-embed");
-    if !new_lib.join(ENCODER_SONAME).is_file() || !new_bin.is_file() {
+    if !regular_file(&new_lib.join(ENCODER_SONAME)) || !regular_file(&new_bin) {
         bail!("the encoder archives lack bin/packset-embed or {ENCODER_LIB}/{ENCODER_SONAME}; nothing was installed");
     }
-    // A running encoder keeps the files it opened; the new ones are renamed in.
-    let old = stage.join("old");
-    if lib.exists() {
-        fs::rename(lib, &old).with_context(|| format!("move {} aside", lib.display()))?;
-    }
-    if let Err(e) = fs::rename(&new_lib, lib) {
-        let _ = fs::rename(&old, lib);
-        return Err(e).with_context(|| format!("install {}", lib.display()));
-    }
+    // A running encoder keeps the inode it opened, so the new files are
+    // renamed in. chmod and the destination directory happen first: a
+    // failure after the runtime rename used to leave the new runtime and
+    // delete the old one with the stage. Both names move aside, then both
+    // new names move in, and either failure puts the previous pair back.
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&new_bin, fs::Permissions::from_mode(0o755))?;
-    fs::create_dir_all(bin_dir)?;
+    if let Err(err) = fs::set_permissions(&new_bin, fs::Permissions::from_mode(0o755)) {
+        bail!("encoder install failed ({err}); nothing was installed");
+    }
+    if let Err(err) = fs::create_dir_all(bin_dir) {
+        bail!("encoder install failed ({err}); nothing was installed");
+    }
     let bin = bin_dir.join("packset-embed");
-    fs::rename(&new_bin, &bin).with_context(|| format!("install {}", bin.display()))?;
+    swap_encoder(stage, &new_lib, &new_bin, lib, &bin)?;
     Ok(format!(
         "encoder: installed {} and ONNX Runtime in {} (checksums match)",
         bin.display(),
@@ -1241,8 +1296,73 @@ fn install_encoder(stage: &Path, target: &str, bin_dir: &Path, lib: &Path) -> Re
     ))
 }
 
-/// A cloud VM. A CI job is not one, and the box and a laptop build
-/// packset-embed from source.
+/// `symlink_metadata` sees a dangling symlink. `exists` follows links and
+/// would leave that name in the way of the rename.
+fn path_present(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => bail!("encoder install failed ({err}); nothing was installed"),
+    }
+}
+
+/// Stage both names, swap both, and roll both back. The stage directory is
+/// removed by the caller, so a backup that is still there at return is gone.
+fn swap_encoder(
+    stage: &Path,
+    new_lib: &Path,
+    new_bin: &Path,
+    lib: &Path,
+    bin: &Path,
+) -> Result<()> {
+    let backup_lib = stage.join("old-lib");
+    let backup_bin = stage.join("old-bin");
+    let had_lib = path_present(lib)?;
+    let had_bin = path_present(bin)?;
+    let mut bin_aside = false;
+
+    let fail = |bin_aside: bool, cause: &str| -> Result<()> {
+        let lib_err = had_lib
+            .then(|| fs::rename(&backup_lib, lib).err())
+            .flatten();
+        let bin_err = bin_aside
+            .then(|| fs::rename(&backup_bin, bin).err())
+            .flatten();
+        match lib_err.or(bin_err) {
+            None => bail!("encoder install failed ({cause}); nothing was installed"),
+            Some(err) => bail!(
+                "encoder install failed ({cause}); restoring the previous encoder also failed: {err}"
+            ),
+        }
+    };
+
+    if had_lib {
+        if let Err(err) = fs::rename(lib, &backup_lib) {
+            bail!("encoder install failed ({err}); nothing was installed");
+        }
+    }
+    if had_bin {
+        if let Err(err) = fs::rename(bin, &backup_bin) {
+            return fail(false, &err.to_string());
+        }
+        bin_aside = true;
+    }
+    if let Err(err) = fs::rename(new_lib, lib) {
+        return fail(bin_aside, &err.to_string());
+    }
+    if let Err(err) = fs::rename(new_bin, bin) {
+        // The new runtime is occupying the live name. Move it back into the
+        // stage, or delete it, so the previous runtime can return.
+        if fs::rename(lib, new_lib).is_err() {
+            let _ = fs::remove_dir_all(lib);
+        }
+        return fail(bin_aside, &err.to_string());
+    }
+    Ok(())
+}
+
+/// A cloud VM. A CI job is not one. Anywhere else the encoder is not
+/// installed.
 fn cloud_vm() -> bool {
     if github_actions() {
         return false;
@@ -1581,33 +1701,50 @@ struct WakeVar {
 /// command and is left in place. Entries this command wrote are written
 /// again.
 fn ensure_wakes() -> Result<Vec<String>> {
+    let by_seat = wake_vars_by_seat();
     let existing = crate::wake::load();
     let mut lines = Vec::new();
-    for (seat, group) in wake_vars_by_seat() {
+    for seat in existing.keys() {
+        let env_owned = existing
+            .get(seat)
+            .is_some_and(|wake| wake.source.as_deref() == Some(crate::wake::ENV_SOURCE));
+        if env_owned && !by_seat.contains_key(seat) && crate::wake::clear_env_webhook(seat)? {
+            lines.push(format!(
+                "wake {seat}: removed the stale wake cloud up wrote; no LJOS_WAKE_<SEAT>_URL names it now"
+            ));
+        }
+    }
+    for (seat, group) in by_seat {
         if group.len() > 1 {
-            lines.push(collision_line(&seat, &group));
+            lines.push(collision_line(
+                &seat,
+                &group,
+                crate::wake::clear_env_webhook(&seat)?,
+            ));
             continue;
         }
         let one = &group[0];
         if crate::wake::check_webhook(&one.url).is_err() {
+            let said = if crate::wake::clear_env_webhook(&seat)? {
+                "removed the stale wake cloud up wrote"
+            } else {
+                "no wake was written"
+            };
             lines.push(format!(
-                "wake {seat}: {} is not https, nor http on this machine, so no wake was written",
+                "wake {seat}: {} is not https, nor http on this machine, so {said}",
                 one.name
             ));
             continue;
         }
-        let hand_set = existing
-            .get(&seat)
-            .is_some_and(|wake| wake.source.as_deref() != Some(crate::wake::ENV_SOURCE));
-        if hand_set {
+        let key_env = format!("LJOS_WAKE_{}_KEY", one.mid);
+        let wrote = crate::wake::set_env_webhook(&seat, &one.url, &key_env)?;
+        if !wrote {
             lines.push(format!(
                 "wake {seat}: left the wake cloud up did not write; {} did not replace it",
                 one.name
             ));
             continue;
         }
-        let key_env = format!("LJOS_WAKE_{}_KEY", one.mid);
-        crate::wake::set_env_webhook(&seat, &one.url, &key_env)?;
         let unset = if nonempty_var(&key_env).is_some() {
             ""
         } else {
@@ -1647,12 +1784,17 @@ fn wake_vars_by_seat() -> BTreeMap<String, Vec<WakeVar>> {
     by_seat
 }
 
-fn collision_line(seat: &str, group: &[WakeVar]) -> String {
+fn collision_line(seat: &str, group: &[WakeVar], retired: bool) -> String {
     let mut names: Vec<&str> = group.iter().map(|var| var.name.as_str()).collect();
     names.sort_unstable();
+    let said = if retired {
+        "removed the stale wake cloud up wrote"
+    } else {
+        "no wake was written"
+    };
     format!(
-        "wake {seat}: {} name the same seat, so no wake was written",
-        list_names(&names)
+        "wake {seat}: {} name the same seat, so {said}",
+        list_names(&names),
     )
 }
 
@@ -1721,18 +1863,17 @@ fn cloud_guard_rules_path() -> Option<PathBuf> {
 fn cloud_guard_rules() -> Vec<crate::Rule> {
     vec![
         crate::Rule {
-            pattern: "re:git push(?:\\s+\\S+)*\\s(?:\\S*:)?(?:refs/heads/)?cursor/\\S+(?:\\s|$)"
-                .into(),
+            pattern: CURSOR_PUSH.into(),
             verdict: "deny".into(),
             reason: "cloud seat rule: never push to cursor/* refs from this machine".into(),
         },
         crate::Rule {
-            pattern: "gh* pr create*".into(),
+            pattern: GH_PR_CREATE.into(),
             verdict: "deny".into(),
             reason: "cloud seat rule: never open pull requests from this machine".into(),
         },
         crate::Rule {
-            pattern: "gh* pr merge*".into(),
+            pattern: GH_PR_MERGE.into(),
             verdict: "deny".into(),
             reason: "cloud seat rule: never merge pull requests from this machine".into(),
         },
@@ -1921,7 +2062,8 @@ enum Install {
 
 fn install_identity(path: &Path, text: &str) -> Result<Install> {
     // Follow a symlink and the identity would be written into the target,
-    // or the target's mode would change. Replace the link instead.
+    // or the target's mode would change. A link is left to write_private,
+    // which refuses it.
     let regular = fs::symlink_metadata(path)
         .ok()
         .is_some_and(|meta| meta.file_type().is_file());
@@ -1950,32 +2092,40 @@ fn set_mode_0600(path: &Path) -> Result<()> {
         .with_context(|| format!("mode 0600 {}", path.display()))
 }
 
-/// Write `text` to `path` as mode 0600. A symlink at `path` is replaced,
-/// so the identity is not stored through a link to another file.
+/// Write `text` to `path` as mode 0600. A symlink at `path` is refused, so
+/// the identity is not stored through a link to another file. The temp
+/// file beside it is made new, mode 0600 from the start, and is not a
+/// link: a file or link already at that name is refused, not written
+/// through, so no other user can read the identity even for a moment.
 fn write_private(path: &Path, text: &str) -> Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    }
+    if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        bail!(
+            "cloud up: {} is a symlink, so the scope cloud identity was not written; remove it and run `ljos cloud up` again",
+            path.display()
+        );
     }
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("cloud.age");
     let tmp = path.with_file_name(format!(".{name}.tmp-{}", std::process::id()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&tmp)
+        .with_context(|| format!("create {}", tmp.display()))?;
     let write = (|| -> Result<()> {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)
-            .with_context(|| format!("write {}", tmp.display()))?;
+        // The umask may clear bits of the mode asked for at creation.
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
-        drop(file);
-        set_mode_0600(&tmp)?;
         fs::rename(&tmp, path).with_context(|| format!("install {}", path.display()))?;
-        set_mode_0600(path)?;
         Ok(())
     })();
     if write.is_err() {
@@ -2360,4 +2510,300 @@ fn hostname() -> String {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "vm".into())
+}
+
+#[derive(Debug)]
+struct ArchiveMember {
+    /// tar's verbose type character: `-` file, `d` directory, `l` symlink.
+    kind: u8,
+    name: Vec<u8>,
+}
+
+/// Members of one encoder archive. A listing tar will not parse is refused,
+/// so a hostile header cannot be unpacked on the strength of a later stat.
+fn refuse_unsafe_archive(file: &Path) -> Result<()> {
+    let out = Command::new("tar")
+        .args(["--full-time", "--quoting-style=shell-always", "-tvzf"])
+        .arg(file)
+        .stdin(std::process::Stdio::null())
+        .env("LC_ALL", "C")
+        .output()
+        .context("tar")?;
+    if !out.status.success() {
+        bail!(
+            "tar {}: {}; nothing was installed",
+            file.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let members = match parse_tar_listing(&out.stdout) {
+        Ok(members) => members,
+        Err(err) => bail!("tar {}: {err}; nothing was installed", file.display()),
+    };
+    for member in members {
+        let shown = String::from_utf8_lossy(&member.name);
+        if member.name.is_empty() || member.name.contains(&0) {
+            bail!(
+                "encoder archive {}: a member path is empty; nothing was installed",
+                file.display()
+            );
+        }
+        if !archive_member_path_ok(&member.name) {
+            bail!(
+                "encoder archive {}: member {shown} has an absolute path or '..'; nothing was installed",
+                file.display()
+            );
+        }
+        match member.kind {
+            b'-' | b'd' => {}
+            b'l' => bail!(
+                "encoder archive {}: member {shown} is a symlink; nothing was installed",
+                file.display()
+            ),
+            b'h' => bail!(
+                "encoder archive {}: member {shown} is a hard link; nothing was installed",
+                file.display()
+            ),
+            _ => bail!(
+                "encoder archive {}: member {shown} is not a regular file; nothing was installed",
+                file.display()
+            ),
+        }
+    }
+    Ok(())
+}
+
+fn archive_member_path_ok(name: &[u8]) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Component;
+    if name.is_empty() || name.contains(&0) || name[0] == b'/' {
+        return false;
+    }
+    let path = Path::new(std::ffi::OsStr::from_bytes(name));
+    if path.is_absolute() {
+        return false;
+    }
+    path.components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
+/// `tar -tv` with `--quoting-style=shell-always`. Names may contain
+/// newlines, so records are split on the shell quotes, not on lines.
+fn parse_tar_listing(bytes: &[u8]) -> Result<Vec<ArchiveMember>> {
+    let mut members = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\n' {
+            i += 1;
+            continue;
+        }
+        let kind = bytes[i];
+        let quote = bytes[i..]
+            .iter()
+            .position(|b| *b == b'\'')
+            .context("unquoted tar member")?;
+        let start = i + quote;
+        let (name, used) = parse_shell_single(&bytes[start..])?;
+        let mut j = start + used;
+        let rest = &bytes[j..];
+        if rest.starts_with(b" -> ") || rest.starts_with(b" link to ") {
+            let target = rest
+                .iter()
+                .position(|b| *b == b'\'')
+                .context("unquoted link target")?;
+            let (_, used_target) = parse_shell_single(&rest[target..])?;
+            j += target + used_target;
+        }
+        if j < bytes.len() && bytes[j] == b'\n' {
+            j += 1;
+        } else if j < bytes.len() {
+            bail!("tar member list has trailing bytes");
+        }
+        members.push(ArchiveMember { kind, name });
+        i = j;
+    }
+    Ok(members)
+}
+
+/// One shell-always single-quoted word. `'\''` is a literal quote.
+fn parse_shell_single(bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
+    if bytes.first() != Some(&b'\'') {
+        bail!("tar member is not shell-quoted");
+    }
+    let mut out = Vec::new();
+    let mut i = 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            i += 1;
+            if bytes.get(i) == Some(&b'\\') && bytes.get(i + 1) == Some(&b'\'') {
+                out.push(b'\'');
+                i += 2;
+                if bytes.get(i) != Some(&b'\'') {
+                    bail!("broken shell quote in tar member");
+                }
+                i += 1;
+                continue;
+            }
+            return Ok((out, i));
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    bail!("unterminated shell quote in tar member")
+}
+
+/// What the unpack left on disk. `symlink_metadata` does not follow a link,
+/// so a link tar created is still a link here.
+fn refuse_unsafe_tree(root: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for ent in fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
+            let path = ent?.path();
+            let meta =
+                fs::symlink_metadata(&path).with_context(|| format!("stat {}", path.display()))?;
+            let rel = path.strip_prefix(root).unwrap_or(path.as_path());
+            let ft = meta.file_type();
+            if ft.is_symlink() {
+                bail!(
+                    "encoder archive member {} is a symlink; nothing was installed",
+                    rel.display()
+                );
+            }
+            if ft.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !ft.is_file() {
+                bail!(
+                    "encoder archive member {} is not a regular file; nothing was installed",
+                    rel.display()
+                );
+            }
+            if meta.nlink() != 1 {
+                bail!(
+                    "encoder archive member {} is a hard link; nothing was installed",
+                    rel.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn regular_file(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file())
+}
+
+#[cfg(all(test, unix))]
+mod archive_member_tests {
+    use super::{archive_member_path_ok, parse_tar_listing, refuse_unsafe_archive};
+
+    #[test]
+    fn shell_quotes_and_escaping_paths_parse() {
+        let mut raw = b"-rw-r--r-- 0/0 3 1970-01-01 00:00:00 'bin/odd '".to_vec();
+        raw.extend_from_slice(b"\\''name'\\''\nwith space'\n");
+        raw.extend_from_slice(
+            b"lrwxrwxrwx ubuntu/ubuntu 0 2026-10-22 01:11:10 'bin/packset-embed' -> '/etc/passwd'\n",
+        );
+        raw.extend_from_slice(
+            b"hrw-r--r-- ubuntu/ubuntu 0 2026-10-22 01:11:10 'bin/real' link to 'bin/packset-embed'\n",
+        );
+        raw.extend_from_slice(b"prw-r--r-- ubuntu/ubuntu 0 2026-10-22 01:11:10 'bin/fifo'\n");
+        raw.extend_from_slice(b"-rw-r--r-- 0/0 17 1970-01-01 00:00:00 '/bin/packset-embed'\n");
+        raw.extend_from_slice(b"-rw-r--r-- 0/0 7 1970-01-01 00:00:00 '../escaped'\n");
+        let members = parse_tar_listing(&raw).unwrap();
+        assert_eq!(members.len(), 6, "{members:?}");
+        assert_eq!(members[0].kind, b'-');
+        assert_eq!(members[0].name, b"bin/odd 'name'\nwith space");
+        assert_eq!(members[1].kind, b'l');
+        assert_eq!(members[2].kind, b'h');
+        assert_eq!(members[3].kind, b'p');
+        assert_eq!(members[4].name, b"/bin/packset-embed");
+        assert_eq!(members[5].name, b"../escaped");
+        assert!(archive_member_path_ok(&members[0].name));
+        assert!(!archive_member_path_ok(&members[4].name));
+        assert!(!archive_member_path_ok(&members[5].name));
+        assert!(!archive_member_path_ok(b"bin/../../escaped2"));
+        assert!(archive_member_path_ok(
+            b"lib/onnxruntime/libonnxruntime.so.1"
+        ));
+        assert!(archive_member_path_ok(b"lib/"));
+    }
+
+    #[test]
+    fn tar_listing_refuses_a_symlink_member() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("tree");
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", dir.join("bin/packset-embed")).unwrap();
+        let archive = root.path().join("bad.tar.gz");
+        let out = std::process::Command::new("tar")
+            .arg("-C")
+            .arg(&dir)
+            .arg("-czf")
+            .arg(&archive)
+            .arg("bin")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let err = refuse_unsafe_archive(&archive).unwrap_err().to_string();
+        assert!(err.contains("symlink"), "{err}");
+        assert!(err.contains("nothing was installed"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    const SECRET: &str = "AGE-SECRET-KEY-1PLANTED\n";
+
+    fn temp_of(path: &Path) -> PathBuf {
+        path.with_file_name(format!(".cloud.age.tmp-{}", std::process::id()))
+    }
+
+    #[test]
+    fn a_link_planted_at_the_temp_name_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cloud.age");
+        let outside = dir.path().join("outside");
+        fs::write(&outside, "keep\n").unwrap();
+        let tmp = temp_of(&path);
+        std::os::unix::fs::symlink(&outside, &tmp).unwrap();
+        assert!(write_private(&path, SECRET).is_err());
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "keep\n");
+        assert!(fs::symlink_metadata(&tmp).unwrap().file_type().is_symlink());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_readable_file_planted_at_the_temp_name_never_holds_the_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cloud.age");
+        let tmp = temp_of(&path);
+        fs::write(&tmp, "planted\n").unwrap();
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(write_private(&path, SECRET).is_err());
+        assert_eq!(fs::read_to_string(&tmp).unwrap(), "planted\n");
+        assert_eq!(
+            fs::metadata(&tmp).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert!(!path.exists());
+
+        fs::remove_file(&tmp).unwrap();
+        write_private(&path, SECRET).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), SECRET);
+        assert_eq!(
+            fs::symlink_metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!tmp.exists());
+    }
 }

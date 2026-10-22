@@ -5,8 +5,9 @@
 //! wake command finds the log already on the remote, and `LJOS_WAKE_COMMIT`
 //! is that commit. The other clone's `ljos inbox --sync` then lists the
 //! letter. A remote that refuses the push still gets the wake, the refusal
-//! is a line in the wake log, and the commit is the local one. A checkout
-//! with no remote only lists.
+//! is a line in the wake log, and the commit is the local one. A push that
+//! lands after `inbox --sync` started is still read. A checkout with no
+//! remote only lists.
 
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
@@ -24,6 +25,8 @@ const REPLY: &str = "looking";
 /// pushes before it returns cannot beat this while the hook is asleep.
 const SEND_BUDGET: Duration = Duration::from_secs(4);
 const HOOK_SLEEP_SECS: u64 = 5;
+/// Past the recipient's first fetch, well inside its 30 s wait.
+const LATE_PUSH: Duration = Duration::from_secs(2);
 
 struct Daemon(Child);
 
@@ -203,9 +206,11 @@ fn world(slow_push: bool, reject: bool) -> (World, Daemon) {
         &["remote", "add", "origin", origin.to_str().unwrap()],
     );
     std::fs::create_dir_all(seed.join(".ljos")).expect("ljos");
+    // `cloud` is reserved for the shared extra scope. These letters are
+    // unscoped, so they stay on the primary log under another name.
     std::fs::write(
         seed.join(".ljos/sync.toml"),
-        format!("name = \"cloud\"\nrecipients = [\"{public}\"]\n"),
+        format!("name = \"mail\"\nrecipients = [\"{public}\"]\n"),
     )
     .expect("sync.toml");
     std::fs::write(
@@ -343,8 +348,8 @@ impl World {
             .env("ORIGIN", &self.origin);
     }
 
-    /// `ljos` as `seat` with this machine's hostname. The detached wake
-    /// inherits the namespace, so the log is named after `host`.
+    /// `ljos` as `seat` with this machine's hostname override. The detached
+    /// wake inherits the override, so the log is named after `host`.
     fn ljos(&self, home: &Path, host: &str, seat: &str, args: &[&str]) -> Output {
         self.run(home, host, seat, self.port, &[], args)
     }
@@ -358,20 +363,12 @@ impl World {
         extra: &[(&str, &str)],
         args: &[&str],
     ) -> Output {
-        let mut cmd = Command::new("/usr/bin/unshare");
-        cmd.args([
-            "--uts",
-            "--map-root-user",
-            "--",
-            "/bin/sh",
-            "-c",
-            "/usr/bin/hostname \"$1\" && shift && exec \"$@\"",
-        ]);
-        cmd.arg("ljos").arg(host).arg(env!("CARGO_BIN_EXE_ljos"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args);
         self.env(&mut cmd, home);
         cmd.env("PACKSET_PORT", port.to_string());
         cmd.env("LJOS_SEAT", seat);
+        cmd.env("LJOS_TEST_HOSTNAME", host);
         for (key, value) in extra {
             cmd.env(key, value);
         }
@@ -380,7 +377,7 @@ impl World {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("unshare");
+            .expect("ljos");
         child.wait_with_output().expect("wait")
     }
 
@@ -498,7 +495,7 @@ fn script(home: &Path) -> PathBuf {
     let path = home.join("wake.sh");
     write_exe(
         &path,
-        "#!/bin/sh\nset -e\nhost=$(/usr/bin/hostname)\nprintf '%s\\n' \"$host\" > \"$HOME/wake-host\"\nprintf '%s\\n' \"${LJOS_WAKE_COMMIT:-}\" > \"$HOME/wake-commit\"\ngit --git-dir \"$ORIGIN\" cat-file -e \"HEAD:.ljos/atoms/${host}.jsonl.age\"\nprintf '%s\\n' \"$host\" > \"$HOME/woke\"\n",
+        "#!/bin/sh\nset -e\nhost=\"${LJOS_TEST_HOSTNAME:-$HOSTNAME}\"\nif [ -z \"$host\" ]; then\n  host=$(/usr/bin/hostname)\nfi\nprintf '%s\\n' \"$host\" > \"$HOME/wake-host\"\nprintf '%s\\n' \"${LJOS_WAKE_COMMIT:-}\" > \"$HOME/wake-commit\"\ngit --git-dir \"$ORIGIN\" cat-file -e \"HEAD:.ljos/atoms/${host}.jsonl.age\"\nprintf '%s\\n' \"$host\" > \"$HOME/woke\"\n",
     );
     path
 }
@@ -534,7 +531,7 @@ fn touch_script(home: &Path) -> PathBuf {
     let path = home.join("wake.sh");
     write_exe(
         &path,
-        "#!/bin/sh\n/usr/bin/hostname > \"$HOME/wake-host\"\nprintf '%s\\n' \"${LJOS_WAKE_COMMIT:-}\" > \"$HOME/wake-commit\"\n: > \"$HOME/woke\"\n",
+        "#!/bin/sh\nhost=\"${LJOS_TEST_HOSTNAME:-$HOSTNAME}\"\nif [ -z \"$host\" ]; then\n  host=$(/usr/bin/hostname)\nfi\nprintf '%s\\n' \"$host\" > \"$HOME/wake-host\"\nprintf '%s\\n' \"${LJOS_WAKE_COMMIT:-}\" > \"$HOME/wake-commit\"\n: > \"$HOME/woke\"\n",
     );
     path
 }
@@ -773,7 +770,7 @@ fn a_recipients_inbox_sync_reads_the_pushed_letter() {
         RECIPIENT_HOST,
         RECIPIENT,
         other_port,
-        &[("LJOS_WAKE_COMMIT", missing)],
+        &[("LJOS_WAKE_COMMIT", missing), ("LJOS_INBOX_SYNC_WAIT", "1")],
         &["inbox", "--sync"],
     );
     assert!(fell.status.success(), "{}", text(&fell));
@@ -843,6 +840,65 @@ fn a_recipients_inbox_sync_reads_the_pushed_letter() {
         String::from_utf8_lossy(&seen.stdout).contains(REPLY),
         "the sender did not see the reply: {}",
         text(&seen)
+    );
+}
+
+/// The wake can name a commit whose push has not landed. `inbox --sync`
+/// fetches again until the remote has it, so a push that lands while the
+/// recipient is already fetching is still read.
+#[test]
+fn inbox_sync_waits_for_a_push_that_lands_late() {
+    let (world, _daemon) = world(false, true);
+    let joined = world.sender(RECIPIENT, &["group", "crew", "--add", RECIPIENT]);
+    assert!(joined.status.success(), "{}", text(&joined));
+    let script = touch_script(&world.sender_home);
+    let set = world.sender(
+        RECIPIENT,
+        &[
+            "wake",
+            RECIPIENT,
+            "--command",
+            &format!("sh {}", script.display()),
+        ],
+    );
+    assert!(set.status.success(), "{}", text(&set));
+    let sent = world.sender(SENDER, &["send", RECIPIENT, LETTER]);
+    assert!(sent.status.success(), "{}", text(&sent));
+    wait_for(&world.sender_home.join("woke"), Duration::from_secs(30)).unwrap_or_else(|| {
+        panic!(
+            "the wake did not run after the refused push: {}",
+            wake_log(&world.sender_home)
+        )
+    });
+    assert_commit_holds(&world, &world.sender_home, &world.sender_repo, SENDER_HOST);
+    let commit = recorded_commit(&world.sender_home);
+    std::fs::remove_file(world.origin.join("hooks/pre-receive")).expect("open the remote");
+
+    let (_pack, port) = extra_pack(&world, "late-pack");
+    let (gitconfig, sender_repo) = (world.gitconfig.clone(), world.sender_repo.clone());
+    let push = std::thread::spawn(move || {
+        std::thread::sleep(LATE_PUSH);
+        git(&gitconfig, &sender_repo, &["push", "-q", "origin", "HEAD"]);
+    });
+    let synced = world.run(
+        &world.recipient_home,
+        RECIPIENT_HOST,
+        RECIPIENT,
+        port,
+        &[],
+        &["inbox", "--sync", &commit],
+    );
+    push.join().expect("the late push");
+    assert!(synced.status.success(), "{}", text(&synced));
+    assert!(
+        String::from_utf8_lossy(&synced.stdout).contains(LETTER),
+        "inbox --sync gave up before the push landed: {}",
+        text(&synced)
+    );
+    assert!(
+        !String::from_utf8_lossy(&synced.stderr).contains("not on the remote"),
+        "{}",
+        text(&synced)
     );
 }
 
