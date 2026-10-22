@@ -3277,15 +3277,14 @@ fn pin_at(repo: &Path, seat: &str, unix: &str) -> String {
 }
 
 /// Pin a standing seat with an author date after slots began, and push it.
-/// The list, or a pin committed before the first slot, makes the seat
-/// standing. The date would refuse it if the gate still trusted git time.
+/// A pin committed before the first slot makes the seat standing. The
+/// date would refuse it if the gate still trusted git time.
 fn pin_standing(repo: &Path, seat: &str) -> String {
     pin_at(repo, seat, "1792700000")
 }
 
-/// A box clone whose seat `ljosbot` is on the standing list, over an
-/// origin holding `issues` on one board. The pin's author date is after
-/// slots began.
+/// A box clone signing as `ljosbot`, over an origin holding `issues` on
+/// one board.
 fn slot_world(root: &Path, issues: &[&str]) -> (PathBuf, PathBuf) {
     isolate_git(root);
     clear_agent_ids();
@@ -3631,14 +3630,46 @@ fn a_backdated_pin_does_not_make_a_standing_seat() {
         )]
     );
 
-    pin_at(&repo, "inky", "1792700000");
-    std::env::set_var("LJOS_SEAT", "inky");
-    std::env::set_var("VISSUE_AGENT", "inky");
+    std::env::set_var("LJOS_SEAT", "ljosbot");
+    std::env::set_var("VISSUE_AGENT", "ljosbot");
     let said = ljos_cli::slot::write("probe-bare", "ridley-review", "grok-4", "feedface0002abcd");
     assert!(
         said.is_ok(),
-        "a standing seat dated after slots was refused: {said:?}"
+        "a seat pinned before slots, dated after them, was refused: {said:?}"
     );
+}
+
+/// A listed name this tracker had not pinned when slots began does not
+/// stand when a writer pins it after: the first to sign as `disk-saver`
+/// is not the box seat, so its ballot needs a slot and it cannot launch.
+#[test]
+fn an_unpinned_listed_name_pinned_after_slots_does_not_stand() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_origin, repo) = slot_world(root.path(), &["probe-b", "probe-slot"]);
+    pin_standing(&repo, "ljosbot");
+    ljos_cli::slot::write("probe-slot", "ridley-first", "grok-4", "cafebabe0001abcd").unwrap();
+    let pushed = ljos_cli::persist_tracker("probe-slot", "slotted");
+    assert!(pushed.contains("pushed"), "{pushed}");
+    std::env::set_var("XDG_DATA_HOME", root.path().join("mallory-data"));
+    cast("disk-saver", "probe-b", "hold");
+
+    let rows = [serde_json::json!({"agent": "disk-saver", "choice": "hold"})];
+    let left =
+        ljos_cli::check_seat_signatures("probe-b", &rows, &std::collections::BTreeSet::new())
+            .unwrap()
+            .left_out;
+    assert_eq!(
+        left,
+        vec![(
+            "disk-saver".to_string(),
+            "disk-saver is not a standing seat, and no slot on probe-b names it".to_string()
+        )]
+    );
+    let err = ljos_cli::slot::write("probe-b", "ridley-review", "grok-4", "feedface0002abcd")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("disk-saver is not a standing seat"), "{err}");
 }
 
 /// Stage `paths` and commit them at author time `unix`.
