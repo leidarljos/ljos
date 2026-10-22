@@ -323,9 +323,17 @@ file sits below an install root: =~/.local/bin=, =~/.cargo/bin= or
 global =lib/node_modules= under =/usr=, =/usr/local= or
 =/opt/homebrew=; an app directory of the runner's name under
 =~/.local/share= or =/usr/share=, such as =/usr/share/cursor/cursor=;
-or a =/nix/store= entry. Root or the person owns the file and every
-directory from the root down to it, and no one else can write them
-but the person's own primary group. A copy whose name is the runner,
+or a =/nix/store= entry. Root or the person owns the file, every
+directory from the root down to it, and the directory the root sits
+in, and no one else can write them but the person's primary group,
+and that only when the group bears the person's name and holds no one
+else. A store entry counts only when Nix alone keeps it: a root-owned
+store the person cannot write, sticky if its group may, holding a
+root-owned entry, or on a single-user install a store the person owns
+and no one else may write. Each directory is opened beneath the one
+before without following a link, and the file opened must be the one
+the process runs, so a directory swapped after the path was resolved
+is not walked through. A copy whose name is the runner,
 in =/tmp=, =/var/tmp=, =/dev/shm=, a project tree or a =.local= of its
 own making, or reached through a link that leaves its root, is not
 that program. Nothing sits between the hook and the runner but the

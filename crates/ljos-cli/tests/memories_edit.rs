@@ -4,6 +4,9 @@
 //! under a runner is refused. An edit from outside a runner keeps that
 //! missing basis, and an edit of a memory that already has a basis keeps it.
 
+#[path = "common/terminal.rs"]
+mod terminal;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -298,7 +301,8 @@ fn review_edit_keeps_the_basis_the_memory_already_had() {
     assert_eq!(joined["origin"], "user-declared", "{joined}");
     assert!(basis(joined).is_none(), "merge invented a basis: {joined}");
 
-    let person = succeeded(&seat.output(ljos, &["prefer", PERSON]), "person prefer");
+    let typed = terminal::shape("terminal", ljos, &["prefer", PERSON]);
+    let person = succeeded(&seat.output(terminal::PYTHON, &typed), "person prefer");
     assert!(person.contains("preference") || person.contains("kept") || !person.is_empty());
     let live = atoms(&daemon.url);
     let person_atom = by_text(&live, "release branches");

@@ -5,6 +5,9 @@
 //! stays. Keeping a preference and stamping a person basis from any of
 //! those must fail the same way a live `claude` parent fails.
 
+#[path = "common/terminal.rs"]
+mod terminal;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -477,10 +480,12 @@ fn detaching_does_not_make_this_process_the_person() {
         text_of(&direct)
     );
 
-    let typed = seat
-        .command(ljos(), &["prefer", "Keep the release notes in one file."])
-        .output()
-        .unwrap();
+    let shaped = terminal::shape(
+        "terminal",
+        ljos(),
+        &["prefer", "Keep the release notes in one file."],
+    );
+    let typed = seat.command(terminal::PYTHON, &shaped).output().unwrap();
     assert!(
         typed.status.success(),
         "terminal prefer\n{}",
