@@ -358,8 +358,10 @@ against writes made through tool calls the runner hooks.
 A runner variable left in an interactive terminal does not by itself
 hide the person. The process tree and the scope have to show a runner
 as well: a parent that is one, a cgroup that names one, or a transient
-``run-*.scope``. The variable together with that evidence does hide the
-person. A variable with no terminal, as a hook or a pipe has, still does.
+``run-*.scope``. The cgroup is read even when a program such as
+``python3`` sits above the process, and a cgroup that cannot be read
+counts as a runner. The variable together with that evidence does hide
+the person. A variable with no terminal, as a hook or a pipe has, still does.
 A prompt event is not always the person: Codex sends one inside a
 subagent with the parent agent's brief as the prompt. A prompt whose
 payload names a subagent (``agent_id``), or a Codex thread other than the

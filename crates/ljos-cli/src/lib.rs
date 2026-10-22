@@ -2287,23 +2287,37 @@ fn cgroup_text_is_transient(text: &str) -> bool {
     })
 }
 
-/// The chain up to the session is only shells and wrappers, or it is
-/// empty because the session (or init) is the parent. `setsid -f`, a
-/// double fork, `script` and a detached tmux all leave this shape: the
-/// runner is no longer an ancestor.
-fn wrappers_only() -> bool {
-    own_ancestry()
-        .iter()
-        .all(|(_, comm)| WRAPPERS.contains(&comm.as_str()))
+/// Linux: this process's cgroup, or an error when it cannot be read.
+/// An empty string is a cgroup that was read and names nothing. An error
+/// is not that: the scope is hidden, and a hidden scope counts as a runner.
+#[cfg(target_os = "linux")]
+fn own_cgroup() -> Result<String, ()> {
+    std::fs::read_to_string("/proc/self/cgroup").map_err(|_| ())
+}
+
+/// A cgroup read that names a runner or a transient scope, or that failed.
+/// `Err` is an unreadable `/proc/self/cgroup`. A program between this
+/// process and the session does not change the answer: `setsid -f python3`
+/// leaves python in the chain and the runner's cgroup around both.
+#[cfg(test)]
+fn cgroup_read_is_runner(read: Result<&str, ()>, runners: &[String]) -> bool {
+    match read {
+        Err(()) => true,
+        Ok(text) => cgroup_text_names_runner(text, runners) || cgroup_text_is_transient(text),
+    }
 }
 
 /// Linux: the cgroup this process was started in. A new session does not
 /// leave it. Writing a different cgroup, which a user service or
-/// `systemd-run --user --scope` does, does leave it.
+/// `systemd-run --user --scope` does, does leave it. The file is read
+/// whether or not a program sits above this process. Unreadable counts
+/// as a runner.
 #[cfg(target_os = "linux")]
 fn scope_names_runner(runners: &[String]) -> bool {
-    let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
-    cgroup_text_names_runner(&text, runners)
+    match own_cgroup() {
+        Ok(text) => cgroup_text_names_runner(&text, runners),
+        Err(()) => true,
+    }
 }
 
 /// macOS: the process that owns this one after a detach. `launchctl
@@ -2353,11 +2367,12 @@ fn responsible_comm() -> Option<String> {
         .map(str::to_string)
 }
 
-/// A runner in the process tree, or a scope that still names one when the
-/// chain above is only shells and wrappers. On Linux the scope is the
-/// cgroup, including a transient `run-*.scope` from `systemd-run` or a
-/// D-Bus scope. On macOS it is the responsible process. A cleared
-/// environment does not leave either.
+/// A runner in the process tree, or the scope this process still sits in.
+/// The scope is read whatever the ancestors are. A program a tool call
+/// puts in the chain (`python3`, `node`, `perl`, `nice`) used to hide it.
+/// On Linux the scope is the cgroup, including a transient `run-*.scope`
+/// from `systemd-run` or a D-Bus scope, and an unreadable cgroup. On macOS
+/// it is the responsible process. A cleared environment does not leave either.
 fn runner_scope_or_tree() -> bool {
     let runners = runner_names();
     if own_ancestry().iter().any(|(pid, comm)| {
@@ -2365,14 +2380,17 @@ fn runner_scope_or_tree() -> bool {
     }) {
         return true;
     }
-    wrappers_only() && (scope_names_runner(&runners) || transient_scope())
+    scope_names_runner(&runners) || transient_scope()
 }
 
-/// Linux: this process sits in a transient `run-*.scope`.
+/// Linux: this process sits in a transient `run-*.scope`. An unreadable
+/// cgroup counts as one, so a hidden scope is not a login.
 #[cfg(target_os = "linux")]
 fn transient_scope() -> bool {
-    let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
-    cgroup_text_is_transient(&text)
+    match own_cgroup() {
+        Ok(text) => cgroup_text_is_transient(&text),
+        Err(()) => true,
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -2382,10 +2400,12 @@ fn transient_scope() -> bool {
 
 /// Whether this process runs under an agent runner.
 ///
-/// A runner in the process tree, or a scope that still names one when the
-/// chain above is only shells, is enough on its own. That scope is the
-/// cgroup on Linux, including a transient `run-*.scope` from `systemd-run`
-/// or a D-Bus scope, and the responsible process on macOS. A runner
+/// A runner in the process tree, or the scope this process still sits in,
+/// is enough on its own. The scope is read whatever the ancestors are: a
+/// `python3`, `node`, `perl` or `nice` a tool call put in the chain does
+/// not hide it. On Linux that scope is the cgroup, including a transient
+/// `run-*.scope` from `systemd-run` or a D-Bus scope, and a cgroup that
+/// cannot be read. On macOS it is the responsible process. A runner
 /// variable ([`runner_mark_set`]) counts only when this is not a person's
 /// terminal: a hook, a pipe, a process with no controlling tty. On a
 /// terminal whose tree and scope show no runner, the variable does not
@@ -47482,6 +47502,14 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(!super::cgroup_text_is_transient(
             "0::/system.slice/pod/cursor-agent/workload\n"
         ));
+        // A program above the process does not skip this. An unreadable
+        // cgroup is a runner; a login session that was read is not.
+        assert!(super::cgroup_read_is_runner(Err(()), &runners));
+        assert!(super::cgroup_read_is_runner(Ok(transient), &runners));
+        assert!(!super::cgroup_read_is_runner(
+            Ok("0::/user.slice/user-1000.slice/session-3.scope\n"),
+            &runners
+        ));
     }
 
     /// macOS asks whether the controlling terminal's responsible process
@@ -47538,23 +47566,41 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 None => std::env::remove_var("CURSOR_AGENT"),
             }
         }
-        assert!(
-            !at_terminal.0 && at_terminal.1,
-            "a variable alone hid the person at a terminal: {at_terminal:?}"
-        );
+        let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+        let scope = super::cgroup_read_is_runner(Ok(&text), &super::runner_names());
+        if scope {
+            assert!(
+                at_terminal.0 && !at_terminal.1,
+                "a runner cgroup did not count at a terminal: {at_terminal:?}"
+            );
+        } else {
+            assert!(
+                !at_terminal.0 && at_terminal.1,
+                "a variable alone hid the person at a terminal: {at_terminal:?}"
+            );
+        }
         assert!(
             no_terminal.0 && !no_terminal.1,
             "a variable with no terminal was not a runner: {no_terminal:?}"
         );
     }
 
-    /// The test process is not a detached shell, so a runner-shaped cgroup
-    /// around the suite does not make every test a runner. A session
-    /// variable still does.
+    /// The cgroup is consulted whatever sits above this process. When it
+    /// names a runner, this process is under one. When it does not, and no
+    /// runner variable is set, it is not.
     #[test]
-    fn this_process_is_not_under_a_runner_without_one() {
+    fn this_process_follows_its_cgroup() {
         let _g = env_guard();
-        assert!(!super::under_a_runner());
+        let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+        let named = super::cgroup_read_is_runner(Ok(&text), &super::runner_names());
+        super::PERSON_AT_TERMINAL.with(|p| p.set(true));
+        let under = super::under_a_runner();
+        super::PERSON_AT_TERMINAL.with(|p| p.set(false));
+        if named {
+            assert!(under, "a runner cgroup did not count at a terminal");
+        } else {
+            assert!(!under, "no runner in the cgroup or the tree");
+        }
     }
 
     #[test]
