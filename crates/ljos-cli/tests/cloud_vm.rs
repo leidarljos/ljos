@@ -1583,6 +1583,170 @@ fn cloud_guard_reads_the_gh_pr_verb_and_never_its_arguments() {
     }
 }
 
+/// `gh api` and a gh alias open or merge a pull request without the words
+/// `gh pr create` or `gh pr merge`. The bare remote is the repo those
+/// commands are judged in.
+#[test]
+fn cloud_guard_refuses_gh_api_aliases_ready_and_reopen() {
+    let _g = Guard::new();
+    let gh_dir = gh_bin_dir();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    std::env::set_var("PATH", format!("{}:/usr/bin:/bin", gh_dir.display()));
+    let cfg = root.path().join("ghcfg");
+    let empty = root.path().join("empty-gh");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::create_dir_all(&empty).unwrap();
+    std::env::set_var("GH_CONFIG_DIR", &cfg);
+    ljos_cli::cloud::up(false).unwrap();
+    let (origin, repo) = bare_checkout(root.path());
+    assert!(
+        git(&origin, &["show-ref"]).contains("refs/heads/develop"),
+        "the bare remote has no develop"
+    );
+
+    let set = |name: &str, expansion: &str| {
+        let out = Command::new("gh")
+            .args(["alias", "set", name, expansion])
+            .output()
+            .unwrap_or_else(|e| panic!("gh alias set {name}: {e}"));
+        assert!(
+            out.status.success(),
+            "gh alias set {name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    set("pc", "pr create --fill");
+    set("ship", "pr merge --squash");
+    set(
+        "mkpr",
+        "api repos/acme/widgets/pulls -f title=t -f head=feature-x -f base=develop",
+    );
+    set("bang", "!gh pr reopen 3");
+
+    let here = repo.as_path();
+    let open_query = "gh api graphql -f query='mutation { createPullRequest(input: {repositoryId: \"R\"}) { clientMutationId } }'";
+    let merge_query = "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"P\"}) { clientMutationId } }'";
+    let reopen_query = "gh api graphql -f query='mutation { reopenPullRequest(input: {pullRequestId: \"P\"}) { clientMutationId } }'";
+    let ready_query = "gh api graphql -f query='mutation { markPullRequestReadyForReview(input: {pullRequestId: \"P\"}) { clientMutationId } }'";
+    let auto_query = "gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {pullRequestId: \"P\"}) { clientMutationId } }'";
+    for line in [
+        "gh pr ready 7",
+        "gh pr reopen 7",
+        "gh pr --repo acme/widgets ready 4",
+        "gh pc --fill",
+        "gh ship 9",
+        "gh bang",
+        "gh mkpr",
+        "gh api repos/acme/widgets/pulls -f title=t -f head=feature-x -f base=develop",
+        "gh api --method POST /repos/acme/widgets/pulls -f title=t -f head=feature-x -f base=develop",
+        "gh api --method PUT repos/acme/widgets/pulls/7/merge",
+        "gh api repos/acme/widgets/pulls/7/merge -f merge_method=squash",
+        "gh api -X PUT https://api.github.com/repos/acme/widgets/pulls/7/merge",
+        open_query,
+        merge_query,
+        reopen_query,
+        ready_query,
+        auto_query,
+    ] {
+        let hit = refused(line, here);
+        assert!(
+            hit.pattern == "cloud-gh-pr-create" || hit.pattern == "cloud-gh-pr-merge",
+            "{line}: {hit:?}"
+        );
+    }
+    assert_eq!(refused("gh pr ready 7", here).pattern, "cloud-gh-pr-create",);
+    assert_eq!(
+        refused("gh pr reopen 7", here).pattern,
+        "cloud-gh-pr-create",
+    );
+    assert_eq!(
+        refused("gh api --method PUT repos/acme/widgets/pulls/7/merge", here).pattern,
+        "cloud-gh-pr-merge",
+    );
+    assert_eq!(refused(open_query, here).pattern, "cloud-gh-pr-create");
+    assert_eq!(refused(merge_query, here).pattern, "cloud-gh-pr-merge");
+    assert_eq!(refused(auto_query, here).pattern, "cloud-gh-pr-merge");
+
+    fs::write(
+        repo.join("open.graphql"),
+        "mutation { createPullRequest(input: {}) { clientMutationId } }\n",
+    )
+    .unwrap();
+    fs::write(repo.join("read.graphql"), "query { viewer { login } }\n").unwrap();
+    assert_eq!(
+        refused("gh api graphql -F query=@open.graphql", here).pattern,
+        "cloud-gh-pr-create"
+    );
+
+    for line in [
+        "gh api repos/acme/widgets/pulls",
+        "gh api repos/acme/widgets/pulls/7",
+        "gh api --method GET repos/acme/widgets/pulls/7/merge",
+        "gh api -X GET repos/acme/widgets/pulls -f per_page=5",
+        "gh api repos/acme/widgets/issues -f title=t -f body=b",
+        "gh api graphql -f query='query { viewer { login } }'",
+        "gh api graphql -F query=@read.graphql",
+        "gh pr comment --body 'please pr create a follow-up'",
+        "gh pr list",
+        "gh pr checkout 7",
+    ] {
+        allowed(line, here);
+    }
+
+    // The alias is in `cfg`, not in the process config. The guard has to
+    // read the directory the command itself names.
+    std::env::set_var("GH_CONFIG_DIR", &empty);
+    allowed("gh pc --fill", here);
+    let prefixed = format!("GH_CONFIG_DIR={} gh pc --fill", cfg.display());
+    assert_eq!(refused(&prefixed, here).pattern, "cloud-gh-pr-create");
+}
+
+fn gh_bin_dir() -> PathBuf {
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg("command -v gh")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "gh is not on PATH");
+    PathBuf::from(String::from_utf8(out.stdout).unwrap().trim())
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}
+
+/// A clone of a local bare remote on `develop`, with `feature-x` and
+/// `cursor/probe` beside it.
+fn bare_checkout(root: &Path) -> (PathBuf, PathBuf) {
+    let origin = root.join("origin.git");
+    git(
+        root,
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "develop",
+            origin.to_str().unwrap(),
+        ],
+    );
+    let repo = root.join("repo");
+    git(
+        root,
+        &["init", "-q", "-b", "develop", repo.to_str().unwrap()],
+    );
+    identity(&repo);
+    git(&repo, &["commit", "-q", "--allow-empty", "-m", "seed"]);
+    git(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git(&repo, &["push", "-q", "-u", "origin", "develop"]);
+    git(&repo, &["branch", "feature-x"]);
+    git(&repo, &["branch", "cursor/probe"]);
+    (origin, repo)
+}
+
 #[test]
 fn cloud_guard_allows_pushes_that_leave_cursor_refs_alone() {
     let _g = Guard::new();

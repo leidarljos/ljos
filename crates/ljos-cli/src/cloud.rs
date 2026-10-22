@@ -39,10 +39,10 @@ const CLOUD_GUARD_RULES_FILE: &str = "cloud-guard-rules.json";
 /// The rule that refuses a push updating a `cursor/*` ref, read from the
 /// push's argv by [`crate::cloud_guard::cursor_push`].
 const CURSOR_PUSH: &str = "cloud-cursor-push";
-/// The rule that refuses `gh pr create` and its alias `gh pr new`, read
-/// from gh's argv by [`crate::cloud_guard::gh_pr`].
+/// The rule that refuses opening, readying or reopening a pull request,
+/// read from gh's argv by [`crate::cloud_guard::gh_acts`].
 const GH_PR_CREATE: &str = "cloud-gh-pr-create";
-/// The rule that refuses `gh pr merge`, read the same way.
+/// The rule that refuses merging a pull request, read the same way.
 const GH_PR_MERGE: &str = "cloud-gh-pr-merge";
 /// The release workflow's encoder archives, the runtime before the binary
 /// that links it. Each unpacks into the prefix above the binary directory.
@@ -325,6 +325,7 @@ pub fn missing_mcp_line() -> Option<String> {
 #[must_use]
 pub(crate) fn guard_line(line: &str, cwd: Option<&Path>) -> Option<crate::Rule> {
     let path = cloud_guard_rules_path()?;
+    let gh = crate::cloud_guard::gh_acts(line, cwd);
     let denies = crate::kept_rules(&path)
         .into_iter()
         .filter(|rule| rule.verdict == "deny");
@@ -338,16 +339,9 @@ pub(crate) fn guard_line(line: &str, cwd: Option<&Path>) -> Option<crate::Rule> 
                     });
                 }
             }
-            GH_PR_CREATE | GH_PR_MERGE => {
-                let verbs: &[&str] = if rule.pattern == GH_PR_CREATE {
-                    &["create", "new"]
-                } else {
-                    &["merge"]
-                };
-                if crate::cloud_guard::gh_pr(line, verbs) {
-                    return Some(rule);
-                }
-            }
+            GH_PR_CREATE if gh.open => return Some(rule),
+            GH_PR_MERGE if gh.merge => return Some(rule),
+            GH_PR_CREATE | GH_PR_MERGE => {}
             _ => {
                 if let Some(hit) = crate::verdict_for(std::slice::from_ref(&rule), line) {
                     return Some(hit.clone());
