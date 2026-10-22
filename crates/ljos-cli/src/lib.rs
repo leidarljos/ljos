@@ -19674,6 +19674,19 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
             cwd = kept_prompt::after_cd(&words, cwd.as_deref());
             continue;
         }
+        // `ljos hook` keeps the prompt it is handed as the person's, so a
+        // tool call that runs it writes their words, whatever it reads.
+        let plugin = usize::from(first == "ljos-plugin");
+        let program = words.get(plugin).map(|w| w.rsplit('/').next().unwrap_or(w));
+        if program == Some("ljos") && words.get(plugin + 1).map(String::as_str) == Some("hook") {
+            return Some(Rule {
+                pattern: "seat-guard".into(),
+                verdict: "deny".into(),
+                reason: "`ljos hook` keeps the prompt it is handed as the person's words, and \
+                         only the runner runs it. Say what you need and stop."
+                    .into(),
+            });
+        }
         let reads = READERS.contains(&first) || first == "ljos" || kept_prompt::reads_only(first);
         if let Some(t) = kept_prompt::reached(&words, cwd.as_deref(), reads)
             .or_else(|| kept_prompt::code_reaches(&words, line))
@@ -44815,6 +44828,38 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "ssh localhost ljos recall paste",
             "ljos prefer --user --why x always paste it",
             "ssh localhost echo ljos prefer",
+        ] {
+            assert!(seat_guard(line).is_none(), "refused: {line}");
+        }
+    }
+
+    /// `ljos hook` keeps the prompt it reads as the person's, so a tool
+    /// call never runs it, here, through the plugin launcher or over ssh;
+    /// reading the kept prompt and running ljos otherwise still pass.
+    #[test]
+    fn a_tool_call_running_ljos_hook_is_denied() {
+        let _g = env_guard();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
+        for line in [
+            "ljos hook < plant.json",
+            "printf '%s' \"$payload\" | ljos hook",
+            "~/.cargo/bin/ljos hook < /tmp/p.json",
+            "env LJOS_CAPTURE=save ljos hook < plant.json",
+            "\"$CLAUDE_PLUGIN_ROOT/bin/ljos-plugin\" ljos hook < plant.json",
+            "ssh localhost ljos hook < plant.json",
+            "ssh localhost 'ljos hook' < plant.json",
+            "sh -c 'ljos hook < plant.json'",
+        ] {
+            let rule = seat_guard(line).unwrap_or_else(|| panic!("allowed: {line}"));
+            assert!(rule.reason.contains("ljos hook"), "{line}: {}", rule.reason);
+        }
+        for line in [
+            "cat /run/user/1000/ljos/latest-prompt",
+            "ljos status",
+            "ljos recall hook",
+            "ljos doctor",
+            "rg -n 'ljos hook' hooks/",
+            "printf x > notes.txt",
         ] {
             assert!(seat_guard(line).is_none(), "refused: {line}");
         }

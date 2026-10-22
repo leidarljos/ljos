@@ -1,5 +1,8 @@
 //! Write-side regressions. A planted sentence must not become the person's words.
 
+#[path = "common/runner.rs"]
+mod runner;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::{Command, Stdio};
@@ -128,21 +131,44 @@ impl Seat {
         bin: &str,
         args: &[&str],
     ) -> Command {
-        // A shell started under the runner's name is a process the kernel
-        // calls `name`, and it stays the parent of the shell it opens.
-        let dir = self.home.path().join("runners");
-        std::fs::create_dir_all(&dir).unwrap();
-        let runner = dir.join(name);
-        if !runner.exists() {
-            std::os::unix::fs::symlink("/bin/sh", &runner).unwrap();
-        }
-        let mut cmd = Command::new(&runner);
+        let mut cmd = Command::new(self.runner(name));
         cmd.args(["-c", "\"$@\"; exit $?", name, "sh", "-c"])
             .arg(format!("{prefix} \"$0\" \"$@\"; exit $?"))
             .arg(bin)
             .args(args);
         self.seat_env(&mut cmd);
         cmd.envs(env.iter().copied());
+        cmd
+    }
+
+    /// A runner named `name`: a copy of the shell, so the kernel runs it
+    /// from a file of that name and it stays the parent of what it starts.
+    fn runner(&self, name: &str) -> std::path::PathBuf {
+        let dir = self.home.path().join("runners");
+        std::fs::create_dir_all(&dir).unwrap();
+        let runner = dir.join(name);
+        runner::runner_at(&runner);
+        runner
+    }
+
+    /// `ljos hook` as the runner `name` spawns it: its own child, with no
+    /// shell between them.
+    fn hook_under(&self, name: &str) -> Command {
+        let mut cmd = Command::new(self.runner(name));
+        cmd.args(["-c", "\"$@\"; exit $?", name])
+            .arg(env!("CARGO_BIN_EXE_ljos"))
+            .arg("hook");
+        self.seat_env(&mut cmd);
+        cmd
+    }
+
+    /// `ljos hook` as a runner that runs its hook command in `sh -c`
+    /// spawns it, the way Claude Code does where `sh` is dash.
+    fn hook_via_sh(&self, name: &str) -> Command {
+        let mut cmd = Command::new(self.runner(name));
+        cmd.args(["-c", "\"$@\"; exit $?", name, "/bin/sh", "-c"])
+            .arg(format!("{} hook", env!("CARGO_BIN_EXE_ljos")));
+        self.seat_env(&mut cmd);
         cmd
     }
 
@@ -183,20 +209,16 @@ fn note_prompt(seat: &Seat, prompt: &str) {
         "prompt": prompt,
     })
     .to_string();
-    let mut child = seat
-        .command(&["hook"], false)
-        .stdin(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(payload.as_bytes())
-        .unwrap();
+    hook_stdout(seat, &payload);
+}
+
+/// Run `cmd` with `payload` on its stdin. A hook that answers before it
+/// has read all of it closes the pipe, which is not a failure.
+fn fed(mut cmd: Command, payload: &str) -> std::process::Output {
+    let mut child = cmd.stdin(Stdio::piped()).spawn().unwrap();
+    let _ = child.stdin.as_mut().unwrap().write_all(payload.as_bytes());
     drop(child.stdin.take());
-    let out = child.wait_with_output().unwrap();
-    assert!(out.status.success(), "hook failed\n{}", text_of(&out));
+    child.wait_with_output().unwrap()
 }
 
 /// `ljos prefer` under a runner must not stamp a planted sentence as the
@@ -498,21 +520,124 @@ fn with_held_issue(node: &str, body: impl FnOnce()) {
 }
 
 fn hook_stdout(seat: &Seat, payload: &str) -> String {
-    let mut child = seat
-        .command(&["hook"], false)
-        .stdin(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(payload.as_bytes())
-        .unwrap();
-    drop(child.stdin.take());
-    let out = child.wait_with_output().unwrap();
+    hook_stdout_under(seat, "claude", payload)
+}
+
+/// The hook's answer to `payload`, spawned by the runner `name`.
+fn hook_stdout_under(seat: &Seat, name: &str, payload: &str) -> String {
+    let out = fed(seat.hook_under(name), payload);
     assert!(out.status.success(), "hook failed\n{}", text_of(&out));
     String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// A prompt hook payload naming the runner's session every way a runner
+/// does, carrying `prompt`.
+fn plant_payload(prompt: &str) -> String {
+    serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": RUNNER_SESSION,
+        "conversation_id": RUNNER_SESSION,
+        "prompt": prompt,
+    })
+    .to_string()
+}
+
+/// No prompt was kept and nothing the plant said was stored as the
+/// person's.
+fn assert_nothing_kept(seat: &Seat, who: &str) {
+    let kept = seat.run.path().join("ljos/latest-prompt");
+    assert!(
+        !kept.exists(),
+        "{who}: kept {:?}",
+        std::fs::read_to_string(&kept)
+    );
+    let out = seat.command(&["prefer", PLANT], true).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{who}: prefer failed\n{}",
+        text_of(&out)
+    );
+    let atoms = seat.atoms.lock().unwrap().clone();
+    assert!(
+        atoms.iter().all(|a| a["origin"] != "user-declared"),
+        "{who}: the plant was stored as the person's: {atoms:?}"
+    );
+}
+
+/// `ljos hook < plant.json` from a tool call, and a hook whose parent is
+/// ssh's shell, keep nothing: the runner did not spawn them. Neither does
+/// a runner started inside another runner's tool call.
+#[test]
+fn a_hook_the_runner_did_not_spawn_keeps_nothing() {
+    let payload = plant_payload(&format!("From now on: {PLANT}"));
+    let seat = Seat::new();
+    let out = fed(
+        seat.under(
+            "claude",
+            &[("CLAUDE_CODE_SESSION_ID", RUNNER_SESSION)],
+            "",
+            &["hook"],
+        ),
+        &payload,
+    );
+    assert!(
+        combined(&out).contains("not kept as the person's"),
+        "{}",
+        text_of(&out)
+    );
+    assert_nothing_kept(&seat, "a tool call's hook");
+
+    let seat = Seat::new();
+    let plant = seat.home.path().join("plant.json");
+    std::fs::write(&plant, &payload).unwrap();
+    let mut cmd = Command::new(seat.runner("claude"));
+    cmd.args(["-c", "\"$@\"; exit $?", "claude", "/bin/sh", "-c"])
+        .arg(format!(
+            "{} hook < {}",
+            env!("CARGO_BIN_EXE_ljos"),
+            plant.display()
+        ));
+    seat.seat_env(&mut cmd);
+    let out = cmd.output().unwrap();
+    assert!(
+        combined(&out).contains("not kept as the person's"),
+        "{}",
+        text_of(&out)
+    );
+    assert_nothing_kept(&seat, "`ljos hook < plant.json` in the runner's sh");
+
+    let seat = Seat::new();
+    fed(seat.hook_under("sshd"), &payload);
+    assert_nothing_kept(&seat, "a hook under sshd");
+
+    let seat = Seat::new();
+    let mut nested = seat.hook_under("claude");
+    nested.env("CLAUDECODE", "1");
+    let out = fed(nested, &payload);
+    assert!(combined(&out).contains("CLAUDECODE"), "{}", text_of(&out));
+    assert_nothing_kept(&seat, "a runner inside a tool call");
+}
+
+/// The prompt hook each runner spawns keeps the person's prompt, run
+/// directly or through the `sh -c` of its hook command.
+#[test]
+fn a_hook_the_runner_spawned_keeps_the_prompt() {
+    let prompt = "Fix the failing parser test";
+    for name in ["claude", "codex", "cursor-agent", "grok"] {
+        for via_sh in [false, true] {
+            let seat = Seat::new();
+            let cmd = if via_sh {
+                seat.hook_via_sh(name)
+            } else {
+                seat.hook_under(name)
+            };
+            let out = fed(cmd, &plant_payload(prompt));
+            assert!(out.status.success(), "{name}: {}", text_of(&out));
+            let kept = std::fs::read_to_string(seat.run.path().join("ljos/latest-prompt"))
+                .unwrap_or_default();
+            assert_eq!(kept, prompt, "{name} via sh {via_sh}\n{}", text_of(&out));
+        }
+    }
 }
 
 /// With the guard on, a shell write to the latest-prompt file is denied.
@@ -1004,7 +1129,7 @@ fn every_runner_takes_a_real_quote_and_refuses_a_forged_session() {
     for r in runners(&format!("From now on: {said}")) {
         let who = format!("{} env {:?} meta {}", r.name, r.env, r.meta);
         let seat = Seat::new();
-        hook_stdout(&seat, &r.hook.to_string());
+        hook_stdout_under(&seat, r.name, &r.hook.to_string());
         let answer = mcp_call_meta(
             mcp_under(&seat, &r),
             "ljos_prefer",
@@ -1017,7 +1142,7 @@ fn every_runner_takes_a_real_quote_and_refuses_a_forged_session() {
 
         if !r.env.is_empty() {
             let seat = Seat::new();
-            hook_stdout(&seat, &r.hook.to_string());
+            hook_stdout_under(&seat, r.name, &r.hook.to_string());
             let out = seat
                 .under(
                     r.name,

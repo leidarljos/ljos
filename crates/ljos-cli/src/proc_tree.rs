@@ -331,9 +331,294 @@ pub fn runner(chain: &[Proc]) -> Option<&Proc> {
         .or_else(|| own.last())
 }
 
+/// The runners that spawn `ljos hook`, by the name of the program they
+/// are: `claude-code` is Claude Code's npm package.
+const HOOK_RUNNERS: &[(&str, &str)] = &[
+    ("claude", "claude"),
+    ("claude-code", "claude"),
+    ("codex", "codex"),
+    ("cursor-agent", "cursor-agent"),
+    ("cursor", "cursor"),
+    ("grok", "grok"),
+    ("opencode", "opencode"),
+    ("gemini", "gemini"),
+    ("agy", "agy"),
+    ("antigravity", "agy"),
+];
+
+/// Runtimes a runner may ship as: the program is the directory or script
+/// above them.
+const RUNTIMES: &[&str] = &["node", "nodejs", "bun", "deno"];
+
+/// The runner a program file is, read up its path past versions, places
+/// and entry scripts: `~/.local/share/claude/versions/2.1.3` is Claude
+/// Code, and so is `@anthropic-ai/claude-code/cli.js`. A bundled runtime
+/// (`cursor-agent/versions/V/node`) is the runner it ships in.
+fn runner_of_file(path: &std::path::Path) -> Option<&'static str> {
+    let mut parts: Vec<String> = path
+        .components()
+        .filter_map(|c| c.as_os_str().to_str().map(str::to_string))
+        .collect();
+    while let Some(last) = parts.pop() {
+        let last = last.trim_end_matches(" (deleted)");
+        let name = last
+            .strip_suffix(".js")
+            .or_else(|| last.strip_suffix(".mjs"))
+            .or_else(|| last.strip_suffix(".cjs"))
+            .unwrap_or(last);
+        if crate::version_like(name)
+            || crate::PLACES.contains(&name)
+            || crate::ENTRY_STEMS.contains(&name)
+            || RUNTIMES.contains(&name)
+        {
+            continue;
+        }
+        let name = name.split_once("-x86_64").map_or(name, |(n, _)| n);
+        let name = name.split_once("-aarch64").map_or(name, |(n, _)| n);
+        return HOOK_RUNNERS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, r)| *r);
+    }
+    None
+}
+
+/// The runner `pid` is, from the file the kernel runs it from, never
+/// from the name it gives itself. A runtime such as `node` is the runner
+/// whose script it runs, that script's path resolved on disk.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn exe_runner(pid: u32) -> Option<&'static str> {
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    if let Some(r) = runner_of_file(&exe) {
+        return Some(r);
+    }
+    let base = exe.file_name()?.to_str()?;
+    if !RUNTIMES.iter().any(|r| base.starts_with(r)) {
+        return None;
+    }
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let script = cmdline
+        .split(|b| *b == 0)
+        .skip(1)
+        .map(String::from_utf8_lossy)
+        .find(|a| !a.is_empty() && !a.starts_with('-'))?;
+    let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
+    let script = std::fs::canonicalize(cwd.join(script.as_ref())).ok()?;
+    runner_of_file(&script)
+}
+
+#[cfg(not(target_os = "linux"))]
+#[must_use]
+pub fn exe_runner(_pid: u32) -> Option<&'static str> {
+    None
+}
+
+/// Whether `cmd`, a shell's `-c` line, runs `ljos hook` and nothing else:
+/// the program (`ljos`, a path to it, or the plugin launcher with `ljos`),
+/// `hook`, and flags. `${NAME}` and double quotes are the runner's own
+/// spelling of the launcher; a redirection, pipe or second command,
+/// which a tool call needs to hand the hook a payload, is not.
+fn bare_hook_command(cmd: &str) -> bool {
+    let mut plain = String::new();
+    let mut rest = cmd;
+    while let Some(at) = rest.find("${") {
+        plain.push_str(&rest[..at]);
+        let Some(close) = rest[at..].find('}') else {
+            return false;
+        };
+        let name = &rest[at + 2..at + close];
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return false;
+        }
+        plain.push_str("VAR");
+        rest = &rest[at + close + 1..];
+    }
+    plain.push_str(rest);
+    let plain = plain.replace('"', "");
+    if plain.contains(|c: char| "<>|;&$`(){}\\'\n\r*?[]~#!".contains(c)) {
+        return false;
+    }
+    let words: Vec<&str> = plain.split_whitespace().collect();
+    let base = |w: &str| w.rsplit('/').next().unwrap_or(w).to_string();
+    let at = match words.first().map(|w| base(w)).as_deref() {
+        Some("ljos-plugin") if words.get(1) == Some(&"ljos") => 2,
+        Some("ljos") => 1,
+        _ => return false,
+    };
+    words.get(at) == Some(&"hook")
+        && words[at + 1..].iter().all(|w| {
+            w.starts_with("--")
+                || w.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        })
+}
+
+/// Whether `pid` is the shell a runner opens to run its configured hook
+/// command: a shell by the file it runs from, started as `SHELL -c CMD`
+/// with [`bare_hook_command`] for CMD. `dash` forks that command rather
+/// than replacing itself with it.
+#[cfg(target_os = "linux")]
+fn hook_shell(pid: u32) -> bool {
+    let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe")) else {
+        return false;
+    };
+    let shell = exe
+        .file_name()
+        .and_then(|f| f.to_str())
+        .is_some_and(|f| SHELLS.contains(&f));
+    let argv: Vec<String> = std::fs::read(format!("/proc/{pid}/cmdline"))
+        .unwrap_or_default()
+        .split(|b| *b == 0)
+        .map(|a| String::from_utf8_lossy(a).into_owned())
+        .collect();
+    shell
+        && matches!(argv.as_slice(), [_, c, cmd, last] if c == "-c" && last.is_empty() && bare_hook_command(cmd))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn hook_shell(_pid: u32) -> bool {
+    false
+}
+
+/// Variables a runner gives the shell of a tool call. A runner started
+/// with one runs inside another runner's tool call.
+fn tool_call_stamp(env: &[(String, String)]) -> Option<&str> {
+    env.iter()
+        .find(|(k, v)| {
+            matches!(
+                k.as_str(),
+                "CLAUDECODE" | "CURSOR_AGENT" | "CODEX_THREAD_ID"
+            ) || (crate::runner_session_var(k, v) && !k.starts_with("LJOS_"))
+        })
+        .map(|(k, _)| k.as_str())
+}
+
+/// The runner that spawned this `ljos hook` itself, or why none did: the
+/// parent must be a runner's own program ([`exe_runner`]), with no shell
+/// or interpreter between them but the `sh -c` the runner runs its hook
+/// command in ([`hook_shell`]), and that runner must not run inside a
+/// tool call, which a runner above it or a tool call's variables in the
+/// environment it was started with would show. Only such a hook's prompt
+/// is the person's.
+///
+/// # Errors
+///
+/// Why the parent is not a runner the person started.
+pub fn hook_runner() -> Result<(Proc, &'static str), String> {
+    let mut chain = ancestors();
+    let parent = chain.first().ok_or("it has no parent process")?;
+    if exe_runner(parent.pid).is_none() && chain.len() > 1 && hook_shell(parent.pid) {
+        chain.remove(0);
+    }
+    let parent = &chain[0];
+    let Some(runner) = exe_runner(parent.pid) else {
+        return Err(format!(
+            "its parent, {} (pid {}), is not a runner's own program: a shell, an interpreter or ssh ran it, so a tool call may have",
+            parent.comm, parent.pid
+        ));
+    };
+    let env = environ(parent.pid).unwrap_or_default();
+    if let Some(key) = tool_call_stamp(&env) {
+        return Err(format!(
+            "{runner} (pid {}) was started with {key} set, inside another runner's tool call",
+            parent.pid
+        ));
+    }
+    // The Cursor app also hosts the person's own terminals; its agent's
+    // shells carry `CURSOR_AGENT`, which the stamp above reads.
+    let own = chain[1..].iter().take_while(|p| !ends_the_walk(p));
+    if let Some((p, other)) = own
+        .filter_map(|p| exe_runner(p.pid).map(|r| (p, r)))
+        .find(|(_, r)| *r != "cursor")
+    {
+        return Err(format!(
+            "{runner} (pid {}) runs under {other} (pid {}), inside a tool call",
+            parent.pid, p.pid
+        ));
+    }
+    Ok((parent.clone(), runner))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_runner_is_read_from_the_file_it_runs_from() {
+        use std::path::Path;
+        for (path, want) in [
+            ("/home/u/.local/share/claude/versions/2.1.3", Some("claude")),
+            ("/home/u/.local/bin/claude", Some("claude")),
+            (
+                "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+                Some("claude"),
+            ),
+            (
+                "/usr/lib/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/codex/codex",
+                Some("codex"),
+            ),
+            (
+                "/home/u/.local/share/cursor-agent/versions/2025.10.2-abc/node",
+                Some("cursor-agent"),
+            ),
+            ("/usr/share/cursor/cursor", Some("cursor")),
+            ("/usr/bin/node", None),
+            ("/usr/bin/bash", None),
+            ("/usr/bin/python3", None),
+            ("/usr/bin/ssh", None),
+            ("/home/u/.cargo/bin/ljos", None),
+        ] {
+            assert_eq!(runner_of_file(Path::new(path)), want, "{path}");
+        }
+    }
+
+    #[test]
+    fn a_tool_calls_variables_mark_a_runner_started_inside_one() {
+        let env = |k: &str, v: &str| vec![(k.to_string(), v.to_string())];
+        assert_eq!(tool_call_stamp(&env("CLAUDECODE", "1")), Some("CLAUDECODE"));
+        assert_eq!(
+            tool_call_stamp(&env("CURSOR_AGENT", "1")),
+            Some("CURSOR_AGENT")
+        );
+        assert!(tool_call_stamp(&env("CURSOR_CONVERSATION_ID", "0199a1b2-c3d4")).is_some());
+        assert_eq!(tool_call_stamp(&env("LJOS_SESSION_ID", "mine-0001")), None);
+        assert_eq!(tool_call_stamp(&env("HOME", "/home/u")), None);
+    }
+
+    #[test]
+    fn only_a_bare_hook_command_is_the_runners_hook_shell() {
+        for cmd in [
+            "ljos hook",
+            "/home/u/.cargo/bin/ljos hook --runner codex",
+            "ljos hook --event SessionStart",
+            "\"${CLAUDE_PLUGIN_ROOT}/bin/ljos-plugin\" ljos hook",
+            "\"${CURSOR_PLUGIN_ROOT}/bin/ljos-plugin\" ljos hook",
+        ] {
+            assert!(bare_hook_command(cmd), "{cmd}");
+        }
+        for cmd in [
+            "ljos hook < plant.json",
+            "cat plant.json | ljos hook",
+            "ljos hook <<'EOF'\n{}\nEOF",
+            "ljos status; ljos hook",
+            "ljos hook $(cat p)",
+            "python3 plant.py",
+            "ljos remember a b c d",
+            "ljos-plugin hook",
+            "bash -c 'ljos hook'",
+        ] {
+            assert!(!bare_hook_command(cmd), "{cmd}");
+        }
+    }
+
+    /// The test runner is no runner's program, so a hook it spawned is
+    /// not the person's.
+    #[test]
+    fn a_hook_this_test_runs_has_no_runner() {
+        let why = hook_runner().unwrap_err();
+        assert!(why.contains("not a runner's own program"), "{why}");
+    }
 
     fn named(pid: u32, comm: &str) -> Proc {
         Proc {
