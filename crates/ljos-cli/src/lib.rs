@@ -25917,10 +25917,20 @@ fn ljos_source_checkout(root: &Path) -> bool {
 
 #[cfg(test)]
 fn git_toplevel(start: &Path) -> Option<PathBuf> {
+    // `GIT_DIR` overrides `-C`. A dotfiles test exports it, and both
+    // directories then look like that work tree, so a temporary home was
+    // refused as if it were this repository. The guard is about the
+    // directory on disk.
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(start)
         .args(["rev-parse", "--show-toplevel"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_NAMESPACE")
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()
