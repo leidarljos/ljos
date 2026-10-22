@@ -176,7 +176,7 @@ pub fn stands(
 }
 
 /// The refusal when pin order cannot be read. Names the cause: the
-/// deepen a caller runs, a `refs/replace` ref, or a grafts file.
+/// fetch a caller runs, a `refs/replace` ref, or a grafts file.
 pub const HISTORY_INCOMPLETE: &str = "tracker history incomplete";
 
 /// Make `root`'s history readable for pin order. A shallow checkout, or
@@ -190,7 +190,9 @@ pub const HISTORY_INCOMPLETE: &str = "tracker history incomplete";
 ///
 /// History is still incomplete, or parents are rewritten. The error is
 /// [`HISTORY_INCOMPLETE`]. A shallow checkout names `git fetch
-/// --unshallow`. A replace ref or a grafts file names that cause.
+/// --unshallow`. A checkout that is not shallow and still misses
+/// objects, as a partial clone does, names `git fetch --refetch
+/// --no-filter`. A replace ref or a grafts file names that cause.
 /// Missing history is not "stood".
 pub fn require_tracker_history(root: &Path) -> std::result::Result<(), String> {
     if ballot_sig::git_in(root, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true")
@@ -230,12 +232,21 @@ pub fn require_tracker_history(root: &Path) -> std::result::Result<(), String> {
         if let Some(remote) = remote_name(root) {
             if deepen(root, &remote) {
                 history_cache().deepened.push(key.clone());
-                if !history_gap(root) {
-                    history_cache().ready.push(key);
-                    return Ok(());
-                }
+            }
+            // A fetch that failed may have lost to another process that
+            // completed the checkout, so read it again either way.
+            if !history_gap(root) {
+                history_cache().ready.push(key);
+                return Ok(());
             }
         }
+    }
+    if shallow_repo(root) == Some(false) && missing_objects(root) == Some(true) {
+        return Err(format!(
+            "{HISTORY_INCOMPLETE}: this checkout is not shallow, but objects its history names are missing, \
+             as a partial clone leaves them. Run `git fetch --refetch --no-filter` in the tracker, \
+             or clone the tracker again without --filter, then retry"
+        ));
     }
     Err(format!(
         "{HISTORY_INCOMPLETE}: this checkout does not hold the commits a pin's order is read from. \
@@ -1353,6 +1364,75 @@ mod tests {
             "false",
             "the clone stayed shallow"
         );
+    }
+
+    /// A deepen whose fetch failed reads the checkout again. Here the
+    /// remote's upload-pack completes the checkout, as another process's
+    /// fetch would, and then fails this one.
+    #[test]
+    fn a_checkout_completed_while_the_deepen_failed_is_ready() {
+        let _lock = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin");
+        pinned_before_slots(&origin);
+        let shallow = shallow_of(root.path(), &origin);
+        let git = shallow.join(".git");
+        // git appends the repository path, which `false` ignores.
+        let upload_pack = format!(
+            "echo '{}' > '{}'; rm '{}'; false",
+            origin.join(".git").join("objects").display(),
+            git.join("objects")
+                .join("info")
+                .join("alternates")
+                .display(),
+            git.join("shallow").display()
+        );
+        git_ok(
+            &shallow,
+            &["config", "remote.origin.uploadpack", &upload_pack],
+        );
+        require_tracker_history(&shallow).unwrap();
+    }
+
+    /// A depth-1 partial clone unshallows and still misses the blobs its
+    /// filter left out. The refusal names those objects and a fetch that
+    /// brings them, and that fetch makes the checkout ready.
+    #[test]
+    fn a_partial_clone_names_its_missing_objects_and_not_unshallow() {
+        let _lock = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin");
+        pinned_before_slots(&origin);
+        git_ok(&origin, &["config", "uploadpack.allowFilter", "true"]);
+        let partial = root.path().join("partial");
+        let url = format!("file://{}", origin.display());
+        git_ok(
+            root.path(),
+            &[
+                "clone",
+                "-q",
+                "--depth",
+                "1",
+                "--filter=blob:none",
+                &url,
+                partial.to_str().unwrap(),
+            ],
+        );
+        let err = require_tracker_history(&partial).unwrap_err();
+        assert!(err.contains(HISTORY_INCOMPLETE), "{err}");
+        assert!(err.contains("missing"), "{err}");
+        assert!(err.contains("git fetch --refetch --no-filter"), "{err}");
+        assert!(!err.contains("git fetch --unshallow"), "{err}");
+        assert_eq!(
+            git_ok(&partial, &["rev-parse", "--is-shallow-repository"]).trim(),
+            "false",
+            "the partial clone was not unshallowed"
+        );
+        git_ok(
+            &partial,
+            &["fetch", "-q", "--refetch", "--no-filter", "origin"],
+        );
+        require_tracker_history(&partial).unwrap();
     }
 
     #[test]
