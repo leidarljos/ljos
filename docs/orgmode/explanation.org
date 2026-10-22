@@ -310,12 +310,51 @@ clause of that prompt and keeps its =not=, =never=, =unless= and
 =only=. The quote and the prompt are read in NFKC with =’=, =ʼ= and =＇= as an apostrophe,
 and a negation counts back to where the sentence ends, across a line
 break or a colon, so "Don’t do this:" on one line still governs the
-next.
+next. A stated choice is read the same way: a line that ends on a
+dangling negation, or on a colon, comma or dash, is joined with the
+next line before it is saved, so "Do not" does not become "Always".
+A finished line, and a blank line, still start a new sentence.
 Only the runner keeps that prompt. =ljos hook= keeps it when the
-process that spawned it is the runner, as the file the kernel runs it
-from names it, with nothing between them but the =sh -c= that runs the
-configured hook command, and when that runner does not itself run
-inside a tool call. Otherwise it keeps nothing and says why on stderr,
+process that spawned it is an installed runner, read from the file the
+kernel runs it from (=/proc/<pid>/exe=). That file sits under =.local=,
+=.cargo= or =node_modules=, or on a path that starts at =/usr=, =/opt=
+or =/bin=, including a =bin= directory beside those roots and an app
+directory of the runner's name such as =/usr/share/cursor/cursor=. A
+copy whose name is the runner, in =/tmp= or a home directory, is not
+that program. Nothing sits between the hook and the runner but the
+=sh -c= that runs the configured hook command, and the runner must not
+itself run inside a tool call.
+The guard's =PreToolUse= records the tool call: the session id, the
+whole cgroup file, and the start time of that hook, beside the runner
+process that spawned it. A later hook, or =prefer --user=, whose cgroup
+or session is one of those records, and whose runner is not older than
+that hook, is still the tool call. So is a process whose ancestors
+include a tool shell the record names. =setsid=, =env -i=, =nohup=, a
+double fork and a reparent onto init change the parent and can change
+the session; they leave the cgroup when the process cannot migrate out
+of it. The runner the record names, the same pid and start time, is the
+one that opened the tool call and still counts. With no record yet, a
+runner the person just started has nothing to be younger than. When
+the session id, the cgroup, the start time or the record cannot be
+read, or the record is corrupt, the hook keeps nothing.
+On Linux the session id is =getsid=, the start time is field 22 of
+=/proc/<pid>/stat= (clock ticks since boot) and the cgroup is the text
+of =/proc/<pid>/cgroup=, compared whole. cgroup v2 without a delegated
+subtree, the usual container and a systemd slice the process does not
+own, holds the process in that cgroup across =setsid= and a reparent.
+A delegated cgroup lets the process leave; =setsid= then drops the
+session as well, and a double fork drops the ancestry, so a young
+binary at a real install path can sit outside every record. An
+unreadable cgroup fails closed. macOS has no =/proc=, so the file a
+process runs from is unread and a hook keeps nothing. Inside a pid
+namespace the start times compare there, and pid 1 may be the
+container's init.
+A process already running before the tool call, from a real install
+path, which the tool then asks to spawn the hook, is older than the
+record and shares its cgroup. The record does not mark it. A second
+runner started in that same cgroup and session after the tool call is
+read as the tool call.
+Otherwise it keeps nothing and says why on stderr,
 and the seat guard denies a tool call that runs =ljos hook=, locally or
 through ssh. The bind beside the prompt records the runner process,
 the hook's time and the transcript the runner named. The prompt counts
@@ -329,8 +368,14 @@ agrees with the runner's own record of the turn:
 |--------+----------------|
 | Claude Code | the transcript the payload names, under =~/.claude/projects= or =$CLAUDE_CONFIG_DIR/projects=; required |
 | Codex | the rollout the payload names, under =~/.codex/sessions= or =$CODEX_HOME/sessions=; required |
-| Cursor | the agent transcript of the conversation, under =~/.cursor/projects=, when one is found |
-| Grok, OpenCode, Gemini, Antigravity | none; only the bind and the time |
+| Cursor | the agent transcript under =~/.cursor/projects=, when one is found and it holds the prompt. With no such transcript the prompt is unverified: it is not stored as the person's, and a stated choice is not saved |
+| Grok, OpenCode, Gemini, Antigravity | none. A typed prompt is unverified, the same as Cursor without a transcript: it is not stored as the person's, and a stated choice is not saved |
+
+Claude Code and Codex still keep a typed prompt. Their transcript is
+required before a later prefer calls those words the person's, and a
+standing choice in the prompt is still saved when the hook runs. The
+other runners lose that. The hook may still note the prompt, and the
+refusal says the record is unverified.
 
 The seat guard also denies a tool call that writes, moves, links or
 touches either file or the runtime ljos directory, however its path is
@@ -340,9 +385,12 @@ that runs ljos, and =ljos prefer=, =remember= or =accept= run through
 ssh, where ljos is not under the runner. A script that never spells the
 path now fails on the record and the time instead. What remains is code
 of the same user that forges the runner's transcript as well as both
-files, or that runs outside the guard, not as a tool call. This is a
-check on tool calls, not a sandbox: a person basis is strong only
-against writes made through tool calls the runner hooks.
+files, or that runs outside the guard, not as a tool call, or a
+process that was already running at a real install path, or a process
+that can leave its cgroup and call =setsid= before it execs a young
+binary there. This is a check on tool calls, not a sandbox: a person
+basis is strong only against writes made through tool calls the runner
+hooks.
 A prompt event is not always the person: Codex sends one inside a
 subagent with the parent agent's brief as the prompt. A prompt whose
 payload names a subagent (=agent_id=), or a Codex thread other than the

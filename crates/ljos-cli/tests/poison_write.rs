@@ -141,10 +141,20 @@ impl Seat {
         cmd
     }
 
-    /// A runner named `name`: a copy of the shell, so the kernel runs it
-    /// from a file of that name and it stays the parent of what it starts.
+    /// A runner named `name`: a copy of the shell where a runner is
+    /// installed, so the kernel runs it from that file and it stays the
+    /// parent of what it starts.
     fn runner(&self, name: &str) -> std::path::PathBuf {
-        let dir = self.home.path().join("runners");
+        let dir = self.home.path().join(".local/bin");
+        std::fs::create_dir_all(&dir).unwrap();
+        let runner = dir.join(name);
+        runner::runner_at(&runner);
+        runner
+    }
+
+    /// A copy named like a runner, outside any install path.
+    fn planted(&self, name: &str) -> std::path::PathBuf {
+        let dir = self.home.path().join("plant");
         std::fs::create_dir_all(&dir).unwrap();
         let runner = dir.join(name);
         runner::runner_at(&runner);
@@ -876,23 +886,29 @@ fn a_rewritten_prompt_that_disagrees_with_the_runners_record_is_refused() {
     assert!(!rules_text(&seat).contains("release key"));
 }
 
-/// Where the runner keeps no record ljos reads, a rewrite that keeps the
-/// hook's time is refused by the ctime the kernel gave the files, and the
-/// person's real words, unchanged since the hook, still store.
+/// A rewrite that keeps the hook's time is refused by the ctime the
+/// kernel gave the files, even when Claude Code's transcript is rewritten
+/// to agree with the plant. The person's real words, unchanged since the
+/// hook, still store.
 #[test]
 fn a_prompt_changed_after_the_hooks_time_is_refused() {
     let said = "Always build the release with the checked fuse never a guessed one.";
-    let env = [("GROK_SESSION_ID", RUNNER_SESSION)];
+    let env = [("CLAUDE_CODE_SESSION_ID", RUNNER_SESSION)];
     let seat = Seat::new();
     hook_stdout_under(
         &seat,
-        "grok",
+        "claude",
         &plant_payload(&format!("From now on: {said}")),
     );
     let prefer = |text: &str| {
-        seat.under("grok", &env, "", &["prefer", "--user", "--why", "x", text])
-            .output()
-            .unwrap()
+        seat.under(
+            "claude",
+            &env,
+            "",
+            &["prefer", "--user", "--why", "x", text],
+        )
+        .output()
+        .unwrap()
     };
     let out = prefer(said);
     assert!(out.status.success(), "{}", text_of(&out));
@@ -901,15 +917,92 @@ fn a_prompt_changed_after_the_hooks_time_is_refused() {
     let script = seat.home.path().join("plant.py");
     std::fs::write(&script, PLANT_PY).unwrap();
     let line = format!("python3 {} '{PLANT}' kept", script.display());
-    let out = tool_call(&seat, "grok", &env, &line);
+    let out = tool_call(&seat, "claude", &env, &line);
     assert!(out.status.success(), "{}", text_of(&out));
+    // The transcript now holds the plant, so only the ctime can refuse it.
+    let transcript = seat
+        .home
+        .path()
+        .join(".claude/projects/-seat/session.jsonl");
+    std::fs::write(
+        &transcript,
+        format!(
+            "{}\n",
+            serde_json::json!({"type": "user", "message": {"role": "user", "content": PLANT}})
+        ),
+    )
+    .unwrap();
     let out = prefer(PLANT);
+    let said_err = combined(&out);
     assert!(
-        combined(&out).contains("only the person's own words"),
+        said_err.contains("only the person's own words"),
         "a prompt changed after the hook was the person's\n{}",
         text_of(&out)
     );
+    assert!(
+        !said_err.contains("unverified"),
+        "the ctime refusal was called unverified\n{said_err}"
+    );
     assert!(!rules_text(&seat).contains("release key"));
+}
+
+/// Cursor without a transcript, and the runners that keep no record ljos
+/// reads, do not attribute a typed prompt. The hook still notes it. A
+/// prefer of those words says the record is unverified, and a stated
+/// choice is not saved.
+#[test]
+fn a_runner_without_a_record_does_not_attribute_the_prompt() {
+    let said = "Always build the release with the checked fuse never a guessed one.";
+    let prompt = format!("From now on: {said}");
+    for (name, var, payload) in [
+        (
+            "cursor-agent",
+            "CURSOR_CONVERSATION_ID",
+            serde_json::json!({
+                "cursor_version": "2.4.0",
+                "hook_event_name": "beforeSubmitPrompt",
+                "conversation_id": RUNNER_SESSION,
+                "session_id": "cursor-sess-0002bbbb",
+                "generation_id": "gen-0001",
+                "prompt": prompt,
+            })
+            .to_string(),
+        ),
+        ("grok", "GROK_SESSION_ID", plant_payload(&prompt)),
+        ("opencode", "OPENCODE_SESSION_ID", plant_payload(&prompt)),
+        ("gemini", "GEMINI_SESSION_ID", plant_payload(&prompt)),
+        ("agy", "AGY_SESSION_ID", plant_payload(&prompt)),
+    ] {
+        let seat = Seat::new();
+        let out = fed(seat.hook_under(name), &payload);
+        assert!(out.status.success(), "{name}: {}", text_of(&out));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !stdout.contains("Saved the person's preference"),
+            "{name}: a stated choice was saved without a record: {stdout}"
+        );
+        let kept =
+            std::fs::read_to_string(seat.run.path().join("ljos/latest-prompt")).unwrap_or_default();
+        assert_eq!(kept, prompt, "{name}: the hook did not note the prompt");
+        let out = seat
+            .under(
+                name,
+                &[(var, RUNNER_SESSION)],
+                "",
+                &["prefer", "--user", "--why", "x", said],
+            )
+            .output()
+            .unwrap();
+        let body = combined(&out);
+        assert!(
+            !out.status.success()
+                && body.contains("unverified")
+                && body.contains("only the person's own words"),
+            "{name}: prefer attributed the prompt\n{}",
+            text_of(&out)
+        );
+        assert!(!rules_text(&seat).contains("checked fuse"), "{name}");
+    }
 }
 
 /// A forged prompt and bind naming a session other than the runner's is
@@ -1329,8 +1422,20 @@ fn every_runner_takes_a_real_quote_and_refuses_a_forged_session() {
             r.meta.clone(),
         );
         let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
-        assert!(!refused, "{who}: mcp refused the person's words: {answer}");
-        assert!(rules_text(&seat).contains("checked fuse"), "{who}");
+        // Grok keeps no record ljos reads, so the words stay unverified.
+        // Claude Code, Codex and Cursor name one, and `recorded` wrote it.
+        if r.name == "grok" {
+            assert!(refused, "{who}: mcp stored an unverified prompt: {answer}");
+            let body = answer.to_string();
+            assert!(
+                body.contains("unverified") && body.contains("only the person's own words"),
+                "{who}: {body}"
+            );
+            assert!(!rules_text(&seat).contains("checked fuse"), "{who}");
+        } else {
+            assert!(!refused, "{who}: mcp refused the person's words: {answer}");
+            assert!(rules_text(&seat).contains("checked fuse"), "{who}");
+        }
 
         if !r.env.is_empty() {
             let seat = Seat::new();
@@ -1344,12 +1449,24 @@ fn every_runner_takes_a_real_quote_and_refuses_a_forged_session() {
                 )
                 .output()
                 .unwrap();
-            assert!(
-                out.status.success(),
-                "{who}: cli refused\n{}",
-                text_of(&out)
-            );
-            assert!(rules_text(&seat).contains("checked fuse"), "{who}");
+            if r.name == "grok" {
+                let body = combined(&out);
+                assert!(
+                    !out.status.success()
+                        && body.contains("unverified")
+                        && body.contains("only the person's own words"),
+                    "{who}: cli stored an unverified prompt\n{}",
+                    text_of(&out)
+                );
+                assert!(!rules_text(&seat).contains("checked fuse"), "{who}");
+            } else {
+                assert!(
+                    out.status.success(),
+                    "{who}: cli refused\n{}",
+                    text_of(&out)
+                );
+                assert!(rules_text(&seat).contains("checked fuse"), "{who}");
+            }
         }
 
         let seat = Seat::new();
@@ -1363,5 +1480,338 @@ fn every_runner_takes_a_real_quote_and_refuses_a_forged_session() {
         let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
         assert!(refused, "{who}: mcp took a forged bind: {answer}");
         assert!(!rules_text(&seat).contains("release key"), "{who}");
+    }
+}
+
+/// Detach a grandchild, scrub its environment, and exec `prog` on `script`.
+const DETACH_PY: &str = r#"import os, signal, sys, time
+mode, report, runner_pid, prog, script = sys.argv[1:6]
+runner_pid = int(runner_pid)
+rest = sys.argv[6:]
+keep = (
+    "PATH", "HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
+    "PACKSET_URL", "PACKSET_WORKSPACE", "PACKSET_TIMEOUT_MS",
+    "LJOS_USER_RULES_SYNC", "LJOS_GUARD", "LJOS_CAPTURE",
+)
+parent_sid = os.getsid(0)
+pid1 = os.fork()
+if pid1 > 0:
+    os.waitpid(pid1, 0)
+    raise SystemExit(0)
+if mode == "setsid":
+    os.setsid()
+elif mode == "nohup":
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+pid2 = os.fork()
+if pid2 > 0:
+    os._exit(0)
+kept = {key: os.environ[key] for key in keep if key in os.environ}
+os.environ.clear()
+os.environ.update(kept)
+for _ in range(400):
+    if os.getppid() != runner_pid:
+        break
+    time.sleep(0.01)
+with open(report, "w") as handle:
+    handle.write(f"ppid={os.getppid()}\nsid={os.getsid(0)}\nparent_sid={parent_sid}\n")
+os.execv(prog, [prog, script, *rest])
+"#;
+
+/// The detached runner's hook, then `prefer --user` with the session restored.
+const DETACH_HOOK: &str = r#"ljos=$1
+payload=$2
+out=$3
+err=$4
+status=$5
+plant=$6
+var=$7
+value=$8
+pref_out=$9
+pref_err=${10}
+pref_status=${11}
+"$ljos" hook < "$payload" > "$out" 2> "$err"
+echo $? > "$status"
+if [ -n "$var" ]; then
+    export "$var=$value"
+fi
+"$ljos" prefer --user --why x "$plant" > "$pref_out" 2> "$pref_err"
+echo $? > "$pref_status"
+"#;
+
+/// The real runner records a tool call, then a detached copy runs the hook.
+const DETACH_RUN: &str = r#"ljos=$1
+pre=$2
+pre_out=$3
+pre_err=$4
+py=$5
+mode=$6
+report=$7
+fake=$8
+hooksh=$9
+payload=${10}
+hook_out=${11}
+hook_err=${12}
+hook_status=${13}
+plant=${14}
+var=${15}
+value=${16}
+pref_out=${17}
+pref_err=${18}
+pref_status=${19}
+"$ljos" hook < "$pre" > "$pre_out" 2> "$pre_err"
+echo $$ > "$report.runner"
+python3 "$py" "$mode" "$report" "$$" "$fake" "$hooksh" "$ljos" "$payload" "$hook_out" "$hook_err" "$hook_status" "$plant" "$var" "$value" "$pref_out" "$pref_err" "$pref_status"
+i=0
+while [ ! -f "$pref_status" ] && [ "$i" -lt 400 ]; do
+    i=$((i + 1))
+    sleep 0.05
+done
+"#;
+
+fn session_var(name: &str) -> &'static str {
+    match name {
+        "grok" => "GROK_SESSION_ID",
+        "codex" => "CODEX_SESSION_ID",
+        "cursor-agent" => "CURSOR_CONVERSATION_ID",
+        _ => "CLAUDE_CODE_SESSION_ID",
+    }
+}
+
+fn read_report(path: &std::path::Path) -> (u32, u32, u32) {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let field = |key: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
+            .unwrap_or(0)
+    };
+    (field("ppid"), field("sid"), field("parent_sid"))
+}
+
+/// `setsid`, `nohup`, a double fork and a reparent run a fake runner.
+/// The prompt it feeds the hook is not the person's, and neither is the
+/// user rule it asks for afterwards.
+fn detach_keeps_nothing(seat: &Seat, name: &str, mode: &str, fake: &std::path::Path) {
+    let dir = seat.home.path().join(format!("detach-{name}-{mode}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let py = dir.join("detach.py");
+    let hooksh = dir.join("hook.sh");
+    let run = dir.join("run.sh");
+    std::fs::write(&py, DETACH_PY).unwrap();
+    std::fs::write(&hooksh, DETACH_HOOK).unwrap();
+    std::fs::write(&run, DETACH_RUN).unwrap();
+    let prompt = format!("From now on: {PLANT}");
+    let payload = dir.join("hook.json");
+    std::fs::write(&payload, recorded(seat, name, &plant_payload(&prompt))).unwrap();
+    let pre = dir.join("pre.json");
+    std::fs::write(
+        &pre,
+        serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": RUNNER_SESSION,
+            "tool_name": "Bash",
+            "tool_input": {"command": "true"},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let report = dir.join("report");
+    let pref_status = dir.join("prefer.status");
+    let mut cmd = Command::new(seat.runner(name));
+    cmd.arg(&run)
+        .arg(env!("CARGO_BIN_EXE_ljos"))
+        .arg(&pre)
+        .arg(dir.join("pre.out"))
+        .arg(dir.join("pre.err"))
+        .arg(&py)
+        .arg(mode)
+        .arg(&report)
+        .arg(fake)
+        .arg(&hooksh)
+        .arg(&payload)
+        .arg(dir.join("hook.out"))
+        .arg(dir.join("hook.err"))
+        .arg(dir.join("hook.status"))
+        .arg(PLANT)
+        .arg(session_var(name))
+        .arg(RUNNER_SESSION)
+        .arg(dir.join("prefer.out"))
+        .arg(dir.join("prefer.err"))
+        .arg(&pref_status);
+    seat.seat_env(&mut cmd);
+    let out = cmd.output().unwrap();
+    let who = format!("{name} via {mode}");
+    assert!(out.status.success(), "{who}: harness\n{}", text_of(&out));
+    let runner_pid = std::fs::read_to_string(format!("{}.runner", report.display()))
+        .unwrap_or_default()
+        .trim()
+        .parse::<u32>()
+        .unwrap_or(0);
+    assert!(
+        pref_status.is_file(),
+        "{who}: detached prefer never finished"
+    );
+    let (ppid, sid, parent_sid) = read_report(&report);
+    assert_ne!(
+        ppid, runner_pid,
+        "{who}: still parented by the runner ({ppid})"
+    );
+    assert_ne!(ppid, 0, "{who}: no reparent report");
+    if mode == "setsid" {
+        assert_ne!(sid, parent_sid, "{who}: setsid left the session");
+        assert_ne!(sid, 0, "{who}: no session in the report");
+    }
+    let hook_err = std::fs::read_to_string(dir.join("hook.err")).unwrap_or_default();
+    let kept =
+        std::fs::read_to_string(seat.run.path().join("ljos/latest-prompt")).unwrap_or_default();
+    assert!(
+        !kept.contains("release key"),
+        "{who}: detached hook kept the plant: {kept}\n{hook_err}"
+    );
+    assert!(
+        hook_err.contains("not kept as the person's"),
+        "{who}: {hook_err}"
+    );
+    assert!(
+        seat.run.path().join("ljos/tool-calls").is_file(),
+        "{who}: PreToolUse recorded no tool call\n{}",
+        std::fs::read_to_string(dir.join("pre.err")).unwrap_or_default()
+    );
+    let prefer_code = std::fs::read_to_string(&pref_status).unwrap_or_default();
+    assert_ne!(prefer_code.trim(), "0", "{who}: prefer stored the plant");
+    let prefer_err = std::fs::read_to_string(dir.join("prefer.err")).unwrap_or_default();
+    assert!(
+        prefer_err.contains("only the person's own words"),
+        "{who}: {prefer_err}"
+    );
+    assert!(!rules_text(seat).contains("release key"), "{who}");
+}
+
+/// A tool call that detaches, scrubs its environment and runs a binary
+/// named like a runner does not make that binary the person's runner.
+#[test]
+fn a_detached_runner_keeps_nothing_of_the_tool_call() {
+    for name in ["claude", "grok"] {
+        for mode in ["setsid", "double", "nohup", "reparent"] {
+            let seat = Seat::new();
+            let fake = seat.planted(name);
+            detach_keeps_nothing(&seat, name, mode, &fake);
+        }
+    }
+    // The installed path, started after the tool call, is still the call.
+    let seat = Seat::new();
+    let fake = seat.runner("claude");
+    detach_keeps_nothing(&seat, "claude", "setsid", &fake);
+}
+
+/// One long-lived runner records a tool call and then takes the person's
+/// own prompt. A later process would be the tool call; this one is the
+/// runner that opened it.
+#[test]
+fn a_runners_own_prompt_still_keeps_after_a_tool_call() {
+    let prompt = "Fix the failing parser test";
+    for name in [
+        "claude",
+        "codex",
+        "cursor-agent",
+        "grok",
+        "opencode",
+        "gemini",
+        "agy",
+    ] {
+        let seat = Seat::new();
+        let dir = seat.home.path().join(format!("keep-{name}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pre = dir.join("pre.json");
+        std::fs::write(
+            &pre,
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": RUNNER_SESSION,
+                "tool_name": "Bash",
+                "tool_input": {"command": "true"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let payload = dir.join("prompt.json");
+        std::fs::write(&payload, plant_payload(prompt)).unwrap();
+        let script = dir.join("run.sh");
+        std::fs::write(
+            &script,
+            "\"$1\" hook < \"$2\" > \"$4\" 2> \"$5\"\n\"$1\" hook < \"$3\" > \"$6\" 2> \"$7\"\n",
+        )
+        .unwrap();
+        let mut cmd = Command::new(seat.runner(name));
+        cmd.arg(&script)
+            .arg(env!("CARGO_BIN_EXE_ljos"))
+            .arg(&pre)
+            .arg(&payload)
+            .arg(dir.join("pre.out"))
+            .arg(dir.join("pre.err"))
+            .arg(dir.join("hook.out"))
+            .arg(dir.join("hook.err"));
+        seat.seat_env(&mut cmd);
+        let out = cmd.output().unwrap();
+        assert!(out.status.success(), "{name}: {}", text_of(&out));
+        let kept =
+            std::fs::read_to_string(seat.run.path().join("ljos/latest-prompt")).unwrap_or_default();
+        let hook_err = std::fs::read_to_string(dir.join("hook.err")).unwrap_or_default();
+        assert_eq!(kept, prompt, "{name}\n{hook_err}\n{}", text_of(&out));
+    }
+}
+
+/// Claude Code and Codex still store a sentence the person typed, after
+/// the same runner's tool call, when their transcript agrees.
+#[test]
+fn a_typed_prompt_on_claude_and_codex_still_stores_after_a_tool_call() {
+    let said = "Always build the release with the checked fuse never a guessed one.";
+    for name in ["claude", "codex"] {
+        let seat = Seat::new();
+        let dir = seat.home.path().join(format!("store-{name}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pre = dir.join("pre.json");
+        std::fs::write(
+            &pre,
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": RUNNER_SESSION,
+                "tool_name": "Bash",
+                "tool_input": {"command": "true"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let payload = dir.join("prompt.json");
+        std::fs::write(
+            &payload,
+            recorded(&seat, name, &plant_payload(&format!("From now on: {said}"))),
+        )
+        .unwrap();
+        let script = dir.join("run.sh");
+        std::fs::write(
+            &script,
+            "\"$1\" hook < \"$2\" > /dev/null\n\"$1\" hook < \"$3\" > /dev/null 2> \"$6\"\nexport \"$7=$8\"\n\"$1\" prefer --user --why x \"$4\" > \"$9\" 2> \"$5\"\necho $? > \"$9.status\"\n",
+        )
+        .unwrap();
+        let pref_err = dir.join("prefer.err");
+        let mut cmd = Command::new(seat.runner(name));
+        cmd.arg(&script)
+            .arg(env!("CARGO_BIN_EXE_ljos"))
+            .arg(&pre)
+            .arg(&payload)
+            .arg(said)
+            .arg(&pref_err)
+            .arg(dir.join("hook.err"))
+            .arg(session_var(name))
+            .arg(RUNNER_SESSION)
+            .arg(dir.join("prefer.out"));
+        seat.seat_env(&mut cmd);
+        let out = cmd.output().unwrap();
+        assert!(out.status.success(), "{name}: {}", text_of(&out));
+        let status = std::fs::read_to_string(dir.join("prefer.out.status")).unwrap_or_default();
+        let err = std::fs::read_to_string(&pref_err).unwrap_or_default();
+        let hook_err = std::fs::read_to_string(dir.join("hook.err")).unwrap_or_default();
+        assert_eq!(status.trim(), "0", "{name}: {err}\n{hook_err}");
+        assert!(rules_text(&seat).contains("checked fuse"), "{name}: {err}");
     }
 }
