@@ -29,13 +29,13 @@
 #                   for each repository to hold
 #   --attest        refuse a tarball whose GitHub build attestation is
 #                   missing or does not verify
-#   --cloud         install the binaries, skip onboarding and packset's
-#                   encoder, then run `ljos cloud up` (clone
-#                   LJOS_TRACKER_REMOTE, write the harness MCP command, and
-#                   on a cloud VM install the ljos release's encoder).
-#                   Idempotent: when the binaries are already installed
-#                   and `ljos cloud up` answers, that command is all that
-#                   runs
+#   --cloud         install the binaries, skip packset's encoder, run
+#                   `ljos onboard --harness cursor`, then `ljos cloud up`
+#                   (clone LJOS_TRACKER_REMOTE, write the harness MCP
+#                   command, and on a cloud VM install the ljos release's
+#                   encoder). Idempotent: when the binaries are already
+#                   installed and `ljos cloud up` answers, onboard and
+#                   that command are all that run
 #   --force         with --cloud, download again instead of reusing the
 #                   binaries already in --bin-dir
 #   --help          this text
@@ -89,7 +89,7 @@ while [ $# -gt 0 ]; do
     --pin) [ $# -ge 2 ] || die "--pin needs REPO=VER"; PINS="$PINS $2"; shift 2 ;;
     --pin=*) PINS="$PINS ${1#--pin=}"; shift ;;
     --attest) ATTEST=1; shift ;;
-    --cloud) CLOUD=1; ONBOARD=0; WITH_EMBED=0; shift ;;
+    --cloud) CLOUD=1; WITH_EMBED=0; shift ;;
     --force) FORCE=1; shift ;;
     --help|-h) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
     *) die "unknown option $1 (try --help)" ;;
@@ -115,10 +115,21 @@ for pin in $PINS; do
 done
 
 # The binaries are already here and this ljos knows `cloud up`. Skip the
-# download. A later boot only refreshes the tracker clone and the MCP path.
+# download. A later boot onboards the cursor harness, then refreshes the
+# tracker clone and the MCP path.
+onboard_cursor() {
+  if "$BIN_DIR/ljos" onboard --harness cursor > "${1:-/dev/null}" 2>&1; then
+    say "  cursor: onboarded"
+  else
+    say "  cursor: onboard reported a problem:"
+    sed 's/^/    /' "${1:-/dev/null}"
+  fi
+}
 if [ "$CLOUD" = 1 ] && [ "$FORCE" = 0 ] && [ -z "$FROM_DIR" ] \
-  && [ -x "$BIN_DIR/ljos" ] && [ -x "$BIN_DIR/ljos-mcp" ] && [ -x "$BIN_DIR/ljos-policyd" ] \
+   && [ -x "$BIN_DIR/ljos" ] && [ -x "$BIN_DIR/ljos-mcp" ] && [ -x "$BIN_DIR/ljos-policyd" ] \
   && "$BIN_DIR/ljos" cloud up --help >/dev/null 2>&1; then
+  say "Connecting the cursor harness:"
+  onboard_cursor
   exec "$BIN_DIR/ljos" cloud up
 fi
 
@@ -498,7 +509,10 @@ windsurf dir:.codeium/windsurf
 cline dir:Documents/Cline"
 
 found_any=0
-if [ "$ONBOARD" = 1 ]; then
+if [ "$CLOUD" = 1 ]; then
+  say "Connecting the cursor harness:"
+  onboard_cursor "$TMP/onboard-cursor"
+elif [ "$ONBOARD" = 1 ]; then
   say "Connecting the coding agents found here:"
   printf '%s\n' "$RUNNERS" > "$TMP/runners"
   while read -r name probes; do

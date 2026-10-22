@@ -4050,10 +4050,17 @@ fn install_sh_cloud_reuses_binaries_that_already_answer() {
     let bins = root.path().join("bin");
     fs::create_dir_all(&bins).unwrap();
     let marker = root.path().join("ran");
+    let log = root.path().join("argv");
     executable(
         &bins.join("ljos"),
         &format!(
-            "#!/bin/sh\nif [ \"$1\" = cloud ] && [ \"$2\" = up ] && [ \"$3\" = --help ]; then exit 0; fi\nif [ \"$1\" = cloud ] && [ \"$2\" = up ]; then echo ran > '{}'; exit 0; fi\nexit 1\n",
+            "#!/bin/sh\n\
+             printf '%s\\n' \"$*\" >> '{}'\n\
+             if [ \"$1\" = cloud ] && [ \"$2\" = up ] && [ \"$3\" = --help ]; then exit 0; fi\n\
+             if [ \"$1\" = onboard ] && [ \"$2\" = --harness ] && [ \"$3\" = cursor ]; then exit 0; fi\n\
+             if [ \"$1\" = cloud ] && [ \"$2\" = up ]; then echo ran > '{}'; exit 0; fi\n\
+             exit 1\n",
+            log.display(),
             marker.display()
         ),
     );
@@ -4088,6 +4095,17 @@ fn install_sh_cloud_reuses_binaries_that_already_answer() {
     );
     assert!(out.status.success(), "{said}");
     assert!(marker.is_file(), "cloud up did not run: {said}");
+    assert!(said.contains("cursor: onboarded"), "{said}");
+    let argv = fs::read_to_string(&log).unwrap();
+    let onboard = argv
+        .lines()
+        .position(|line| line == "onboard --harness cursor")
+        .unwrap_or_else(|| panic!("onboard did not run:\n{argv}"));
+    let up = argv
+        .lines()
+        .position(|line| line == "cloud up")
+        .unwrap_or_else(|| panic!("cloud up did not run:\n{argv}"));
+    assert!(onboard < up, "{argv}");
     assert!(!said.contains("Installing ljos"), "{said}");
 }
 

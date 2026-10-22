@@ -2,7 +2,7 @@
 
 `ljos cloud up` installs `ljos`, `ljos-mcp`, `ljos-policyd`, and `packsetd` when the release lists it, into `~/.local/bin`, and on a cloud VM the encoder `packset-embed`. It checks the SHA-256 sums, puts that directory first on PATH for this process and in `~/.profile` and `~/.bashrc`, then writes `~/.cursor/mcp.json`. The command is `ljos-mcp` when PATH already runs this install as `cloud up` starts, and the absolute path otherwise, since a client that does not read the edited profile keeps the PATH it had. It clones `LJOS_TRACKER_REMOTE`. Run it again and it refreshes the clone and the MCP command, rewrites env-owned wake entries from `LJOS_WAKE_<SEAT>_URL`, and refreshes the scope `cloud` age identity from the named secret.
 
-`sh scripts/install.sh --cloud` is the same bootstrap. When the binaries are already installed and `ljos cloud up` answers, that command is all that runs. `--force` downloads again. From this repository, if the installed `ljos` has no `cloud up`, the script builds this tree's `ljos` and `ljos-mcp` and leaves them in place.
+`sh scripts/install.sh --cloud` is the same bootstrap, and it runs `ljos onboard --harness cursor` before `ljos cloud up`. When the binaries are already installed and `ljos cloud up` answers, those two commands are all that run. `--force` downloads again. From this repository, if the installed `ljos` has no `cloud up`, the script builds this tree's `ljos` and `ljos-mcp` and leaves them in place.
 
 `ljos cloud up` and `install.sh --cloud` arrive in the next release; the latest release has neither. Until then they work from `develop`: run `sh scripts/install.sh --cloud` in a checkout of it.
 
