@@ -20,6 +20,7 @@ pub mod capture;
 pub mod cloud;
 pub mod command_prefs;
 pub mod converge;
+mod deedbag;
 pub mod extract;
 pub mod gates;
 pub mod git_hooks;
@@ -25449,7 +25450,10 @@ pub fn finish(
             "the ticket {issue} stays open and nobody holds it; `ljos finish {issue} --close` or `vissue update {issue} -s DONE` closes it when the work is accepted\n"
         ));
     }
-    out.push_str(&persist_tracker(issue, "finished"));
+    // A cloud seat's deeds leave with the tracker. A box writes nothing.
+    let (deeds, deed_paths) = deedbag::on_finish(issue);
+    out.push_str(&deeds);
+    out.push_str(&persist_tracker_with(issue, "finished", &deed_paths));
     // What this sitting taught leaves the machine with the tracker.
     out.push_str(
         &sync::sync_repo_in_passing(false, true).unwrap_or_else(|e| format!("sync: {e:#}\n")),
@@ -25527,15 +25531,14 @@ pub const TRACKER_LOCK: &str = ".ljos-commit.lock";
 /// and the next seat would lock a new file beside it. `None` outside a git
 /// checkout.
 fn tracker_lock_path(dir: &Path) -> Option<PathBuf> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
         .arg(dir)
         .args(["rev-parse", "--show-toplevel", "--git-common-dir"])
         .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
+        .stderr(std::process::Stdio::null());
+    git_hooks::hook_child_env(&mut cmd);
+    let out = cmd.output().ok().filter(|o| o.status.success())?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut lines = text.lines().map(str::trim);
     let top = PathBuf::from(lines.next().filter(|l| !l.is_empty())?);
@@ -25941,15 +25944,14 @@ const ORPHAN_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 /// git process working in the checkout. A git killed outright leaves one,
 /// and every later commit fails on it until a person removes it.
 pub fn orphaned_index_lock(dir: &Path) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
         .arg(dir)
         .args(["rev-parse", "--absolute-git-dir", "--show-toplevel"])
         .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
+        .stderr(std::process::Stdio::null());
+    git_hooks::hook_child_env(&mut cmd);
+    let out = cmd.output().ok().filter(|o| o.status.success())?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut lines = text.lines().map(str::trim);
     let lock = Path::new(lines.next()?).join("index.lock");
@@ -26043,6 +26045,12 @@ fn git_refusal(out: &std::process::Output) -> String {
 /// again on the next write. The subject names the seat, and the logbook
 /// gains `- {Verb} by {seat} [timestamp]`.
 pub fn persist_tracker(issue: &str, verb: &str) -> String {
+    persist_tracker_with(issue, verb, &[])
+}
+
+/// [`persist_tracker`], and `also` paths from the checkout root in the same
+/// commit. Empty `also` commits the issue file alone.
+fn persist_tracker_with(issue: &str, verb: &str, also: &[String]) -> String {
     let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
     if matches!(mode.as_str(), "off" | "0" | "false") {
         return "tracker git: off (LJOS_TRACKER_GIT)\n".into();
@@ -26051,7 +26059,7 @@ pub fn persist_tracker(issue: &str, verb: &str) -> String {
         Ok(path) => path,
         Err(e) => return format!("tracker git: could not find {issue}: {e}\n"),
     };
-    persist_tracker_file(&path, issue, verb)
+    persist_tracker_paths(&path, issue, verb, also)
 }
 
 /// The file that holds `issue`. A ledger fold names `issues/<id>.org`.
@@ -26092,13 +26100,33 @@ fn path_before_line_range(file: &str) -> Option<PathBuf> {
 /// [`persist_tracker`] for a file already known: an issue filed into a
 /// projected board's inbox lives there until the fold, not in the corpus.
 pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
+    persist_tracker_paths(path, issue, verb, &[])
+}
+
+/// [`persist_tracker_file`], and `also` paths that live at the checkout root.
+/// Empty `also` commits the issue file from its own directory. A bag at the
+/// root is named from the root, beside the issue's path from there, so one
+/// commit carries both.
+fn persist_tracker_paths(path: &Path, issue: &str, verb: &str, also: &[String]) -> String {
     let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
     if matches!(mode.as_str(), "off" | "0" | "false") {
         return "tracker git: off (LJOS_TRACKER_GIT)\n".into();
     }
-    let Some(dir) = path.parent() else {
+    let Some(parent) = path.parent() else {
         return format!("tracker git: {} has no directory\n", path.display());
     };
+    // Relative to the directory git runs in: an absolute path that reaches
+    // the checkout through a symlink is outside it to git.
+    let file = path.file_name().map_or_else(
+        || path.to_string_lossy().to_string(),
+        |name| name.to_string_lossy().to_string(),
+    );
+    let git_dir = if also.is_empty() {
+        parent.to_path_buf()
+    } else {
+        tracker_push::repo_root(parent)
+    };
+    let dir: &Path = &git_dir;
     let git = |args: &[&str]| {
         let mut cmd = std::process::Command::new("git");
         cmd.arg("-C")
@@ -26108,15 +26136,22 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
         git_hooks::hook_child_env(&mut cmd);
         cmd.output()
     };
-    // Relative to the directory git runs in: an absolute path that reaches
-    // the checkout through a symlink is outside it to git.
-    let file = path.file_name().map_or_else(
-        || path.to_string_lossy().to_string(),
-        |n| n.to_string_lossy().to_string(),
-    );
     match git(&["rev-parse", "--is-inside-work-tree"]) {
         Ok(o) if o.status.success() => {}
         _ => return "tracker git: the tracker is not a git checkout\n".into(),
+    }
+    let mut specs = Vec::new();
+    if also.is_empty() {
+        specs.push(file);
+    } else {
+        let Some(prefix) = git_ok_stdout(parent, &["rev-parse", "--show-prefix"]) else {
+            return format!(
+                "tracker git: could not place {} in the checkout\n",
+                path.display()
+            );
+        };
+        specs.push(format!("{}{file}", prefix.trim()));
+        specs.extend_from_slice(also);
     }
     // Every seat on the host commits this one checkout. From the status
     // read to the seat pin, one lock outside .git is held, so ljos writers
@@ -26125,21 +26160,54 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
     // outside ljos that holds the index is waited out a few times before
     // the line says so.
     let held = tracker_commit_lock(dir);
-    match git(&["status", "--porcelain", "--", &file]) {
+    let mut live: Vec<&str> = Vec::new();
+    let mut ignored_note = String::new();
+    if also.is_empty() {
+        live.push(specs[0].as_str());
+    } else {
+        for spec in &specs {
+            match git(&["check-ignore", "-v", "--", spec]) {
+                Ok(ignored) if ignored.status.success() => {
+                    ignored_note.push_str(&format!(
+                        "tracker git: {spec} is ignored ({}), so the write stays in this worktree\n",
+                        first_line(&ignored.stdout)
+                    ));
+                }
+                _ => live.push(spec.as_str()),
+            }
+        }
+        if live.is_empty() {
+            return if ignored_note.is_empty() {
+                "tracker git: nothing to commit\n".into()
+            } else {
+                ignored_note
+            };
+        }
+    }
+    let mut status_args = vec!["status", "--porcelain", "--"];
+    status_args.extend(live.iter().copied());
+    match git(&status_args) {
         Ok(o) if o.status.success() && o.stdout.is_empty() => {
             // An ignored file has an empty status, the same shape as a
             // clean tracked file. The ignore rule is what keeps the write
             // on this machine.
-            match git(&["check-ignore", "-v", "--", &file]) {
-                Ok(ignored) if ignored.status.success() => {
-                    return format!(
-                        "tracker git: {} is ignored ({}), so the write stays in this worktree\n",
-                        path.display(),
-                        first_line(&ignored.stdout)
-                    );
+            if also.is_empty() {
+                match git(&["check-ignore", "-v", "--", live[0]]) {
+                    Ok(ignored) if ignored.status.success() => {
+                        return format!(
+                            "tracker git: {} is ignored ({}), so the write stays in this worktree\n",
+                            path.display(),
+                            first_line(&ignored.stdout)
+                        );
+                    }
+                    _ => return "tracker git: nothing to commit\n".into(),
                 }
-                _ => return "tracker git: nothing to commit\n".into(),
             }
+            return if ignored_note.is_empty() {
+                "tracker git: nothing to commit\n".into()
+            } else {
+                ignored_note
+            };
         }
         Ok(o) if o.status.success() => {}
         Ok(o) => return format!("tracker git: {}\n", first_line(&o.stderr)),
@@ -26148,26 +26216,37 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
     let seat = tracker_seat();
     stamp_seat_logbook(path, issue, verb, &seat);
     let message = format!("chore(issues): {issue} {verb} by {seat}");
-    let committed = commit_paths(dir, &[file.as_str()], &message);
+    let committed = commit_paths(dir, &live, &message);
     if !matches!(committed, PathCommit::Refused(_)) {
         commit_seat_pin(dir, &seat);
     }
     drop(held);
+    let say = |line: String| -> String {
+        if ignored_note.is_empty() {
+            line
+        } else {
+            format!("{line}{ignored_note}")
+        }
+    };
     match committed {
         PathCommit::Made => {}
-        PathCommit::AlreadyIn => return "tracker git: nothing to commit\n".into(),
-        PathCommit::Refused(why) => return format!("tracker git: commit refused: {why}\n"),
+        PathCommit::AlreadyIn => return say("tracker git: nothing to commit\n".into()),
+        PathCommit::Refused(why) => return say(format!("tracker git: commit refused: {why}\n")),
     }
     if mode == "commit" {
-        return format!("tracker git: committed {message}; not pushed (LJOS_TRACKER_GIT=commit)\n");
+        return say(format!(
+            "tracker git: committed {message}; not pushed (LJOS_TRACKER_GIT=commit)\n"
+        ));
     }
     // A tracker with no remote is local on purpose; a push would only fail.
     let remotes = git(&["remote"]).ok().filter(|o| o.status.success());
     if remotes.is_some_and(|o| o.stdout.iter().all(u8::is_ascii_whitespace)) {
-        return format!("tracker git: committed {message}; no remote, kept local\n");
+        return say(format!(
+            "tracker git: committed {message}; no remote, kept local\n"
+        ));
     }
     if mode == "push" {
-        return match tracker_push::publish(dir) {
+        return say(match tracker_push::publish(dir) {
             Ok(()) => {
                 clear_push_refusal();
                 format!("tracker git: committed and pushed {message}\n")
@@ -26176,7 +26255,7 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
                 record_push_refusal(&e);
                 format!("tracker git: committed {message}; push queued: {e}\n")
             }
-        };
+        });
     }
     // A push can run a repository's pre-push hook that publishes data first
     // and takes minutes. The sitting waits a bounded time; a push still going
@@ -26184,7 +26263,9 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
     let log = runtime_dir().join(format!("tracker-push-{}.log", std::process::id()));
     let _ = std::fs::create_dir_all(runtime_dir());
     let Ok(out) = std::fs::File::create(&log) else {
-        return format!("tracker git: committed {message}; push not started: no log file\n");
+        return say(format!(
+            "tracker git: committed {message}; push not started: no log file\n"
+        ));
     };
     let err = out.try_clone();
     // Every other remote that carries the branch gets it too: seats that
@@ -26209,7 +26290,11 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
     git_hooks::hook_child_env(&mut push);
     let mut child = match push.spawn() {
         Ok(c) => c,
-        Err(e) => return format!("tracker git: committed {message}; push failed: {e}\n"),
+        Err(e) => {
+            return say(format!(
+                "tracker git: committed {message}; push failed: {e}\n"
+            ))
+        }
     };
     let _ = std::fs::write(push_child_record(&log), format!("{}\n", child.id()));
     let wait = push_wait();
@@ -26219,33 +26304,37 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
             Ok(Some(status)) if status.success() => {
                 let _ = std::fs::remove_file(&log);
                 let _ = std::fs::remove_file(push_child_record(&log));
-                return format!("tracker git: committed and pushed {message}\n");
+                return say(format!("tracker git: committed and pushed {message}\n"));
             }
             Ok(Some(_)) => {
                 let said = std::fs::read(&log).unwrap_or_default();
                 let said = String::from_utf8_lossy(&said);
                 if tracker_push::rejected(&said) {
-                    return match tracker_push::push_checkout(dir) {
+                    return say(match tracker_push::push_checkout(dir) {
                         Ok(()) => format!("tracker git: committed and pushed {message}\n"),
                         Err(e) => format!("tracker git: committed {message}; push refused: {e}\n"),
-                    };
+                    });
                 }
-                return format!(
+                return say(format!(
                     "tracker git: committed {message}; push refused: {}\n",
                     first_line(said.as_bytes())
-                );
+                ));
             }
             Ok(None) if started.elapsed() < wait => {
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
             Ok(None) => {
-                return format!(
+                return say(format!(
                     "tracker git: committed {message}; push still running after {}s, finishing in the background (log {})\n",
                     wait.as_secs(),
                     log.display()
-                );
+                ));
             }
-            Err(e) => return format!("tracker git: committed {message}; push failed: {e}\n"),
+            Err(e) => {
+                return say(format!(
+                    "tracker git: committed {message}; push failed: {e}\n"
+                ))
+            }
         }
     }
 }
@@ -26874,6 +26963,7 @@ pub fn tcb_verdict(line: &str) -> Option<Rule> {
 }
 
 /// [`tcb_verdict`] for a command whose working directory is `cwd`.
+/// `ljos-policyd` is started there when that path is a directory.
 #[must_use]
 pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     clear_guard_note();
@@ -26903,7 +26993,7 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         if argv.is_empty() {
             continue;
         }
-        match tcb_check(&argv) {
+        match tcb_check_in(&argv, cwd) {
             Some(t) if t.starts_with("deny") => {
                 clear_guard_note();
                 let token = policyd_token(&t);
@@ -27346,15 +27436,31 @@ pub fn policyd_reason(token: &str) -> String {
 /// A binary that fails to start, crashes, hangs past [`guard_timeout`], or
 /// prints something that is not a verdict allows the line and says the
 /// guard is unhealthy. A line [`static_guard`] already judged does not
-/// wait for that binary.
+/// wait for that binary. The binary keeps this process's directory;
+/// [`tcb_verdict_in`] starts it in the hook's directory instead.
 pub fn tcb_check(argv: &[String]) -> Option<String> {
+    tcb_check_in(argv, None)
+}
+
+/// [`tcb_check`] for a command that will run in `cwd`.
+fn tcb_check_in(argv: &[String], cwd: Option<&Path>) -> Option<String> {
     let bin = policyd_bin()?;
-    Some(tcb_answer(&bin, argv, guard_timeout()))
+    Some(tcb_answer(&bin, argv, guard_timeout(), cwd))
 }
 
 /// What `bin check -- argv` says within `deadline`, as a verdict line.
+///
+/// `cwd` is the directory the checked command will run in. The binary
+/// starts there, so it reads that tree's Makefile or package.json. When
+/// `cwd` is missing or not a directory, the binary keeps this process's
+/// directory.
 #[must_use]
-pub fn tcb_answer(bin: &Path, argv: &[String], deadline: std::time::Duration) -> String {
+pub fn tcb_answer(
+    bin: &Path,
+    argv: &[String],
+    deadline: std::time::Duration,
+    cwd: Option<&Path>,
+) -> String {
     use std::io::Read as _;
     let unhealthy = |why: &str| format!("allow\t{}", unhealthy_note(why));
     // A binary just written, by an install or a test, can be busy for a
@@ -27362,14 +27468,21 @@ pub fn tcb_answer(bin: &Path, argv: &[String], deadline: std::time::Duration) ->
     // its exec, and the kernel answers ETXTBSY. That is not a guard that
     // failed, so the spawn is tried again for about a second.
     let spawn = || {
-        std::process::Command::new(bin)
-            .arg("check")
+        let mut cmd = std::process::Command::new(bin);
+        cmd.arg("check")
             .arg("--")
             .args(argv)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
+            .stderr(std::process::Stdio::null());
+        // ljos-policyd reads a Makefile or package.json from the directory
+        // the command will run in. The hook already has that directory.
+        // A missing path, or one that is not a directory, leaves this
+        // process's directory, which is what the spawn did before.
+        if let Some(dir) = cwd.filter(|path| path.is_dir()) {
+            cmd.current_dir(dir);
+        }
+        cmd.spawn()
     };
     let Ok(mut child) = spawn_while_busy(spawn) else {
         return unhealthy("did not start");
@@ -29229,17 +29342,23 @@ mod tests {
             "#!/bin/sh\ncase \"$*\" in\n*push*--force*) printf 'deny\\tgit-force-push\\n'; exit 2;;\n*) printf 'allow\\n';;\nesac\n",
         );
         let real_git = which::which("git").expect("git on PATH");
+        // A parallel test may set GIT_DIR on this process. These git
+        // commands have to see this checkout, not that one.
+        let scrub = |cmd: &mut std::process::Command| {
+            cmd.env_remove("GIT_DIR");
+            cmd.env_remove("GIT_WORK_TREE");
+        };
         let plain = |args: &[&str]| {
-            let out = std::process::Command::new(&real_git)
-                .arg("-C")
+            let mut cmd = std::process::Command::new(&real_git);
+            cmd.arg("-C")
                 .arg(&repo)
                 .args(args)
                 .env("GIT_AUTHOR_NAME", "Rohit Goswami")
                 .env("GIT_AUTHOR_EMAIL", "rgoswami@ieee.org")
                 .env("GIT_COMMITTER_NAME", "Rohit Goswami")
-                .env("GIT_COMMITTER_EMAIL", "rgoswami@ieee.org")
-                .output()
-                .unwrap();
+                .env("GIT_COMMITTER_EMAIL", "rgoswami@ieee.org");
+            scrub(&mut cmd);
+            let out = cmd.output().unwrap();
             assert!(
                 out.status.success(),
                 "{args:?}: {}",
@@ -29251,8 +29370,8 @@ mod tests {
         plain(&["commit", "-q", "--allow-empty", "-m", "seed"]);
         plain(&["checkout", "-q", "-b", "feature"]);
         let shim = |args: &[&str]| {
-            std::process::Command::new(guard.join("git"))
-                .args(args)
+            let mut cmd = std::process::Command::new(guard.join("git"));
+            cmd.args(args)
                 .current_dir(&repo)
                 .env("HOME", &home)
                 .env(
@@ -29265,9 +29384,9 @@ mod tests {
                     ),
                 )
                 .env_remove("LJOS_OFF")
-                .env("LJOS_GUARD", "on")
-                .output()
-                .unwrap()
+                .env("LJOS_GUARD", "on");
+            scrub(&mut cmd);
+            cmd.output().unwrap()
         };
         // There is no remote, so git itself fails once the shim lets the
         // push through; the shim's own refusal is exit 126.
@@ -30018,12 +30137,26 @@ mod tests {
         let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("qemu");
+        let origin = dir.path().join("origin.git");
         let arm = repo.join("target/arm");
         std::fs::create_dir_all(&arm).unwrap();
         let run = |args: &[&str]| {
             let out = std::process::Command::new("git")
                 .arg("-C")
                 .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let run_root = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
                 .args(args)
                 .output()
                 .unwrap();
@@ -30041,6 +30174,16 @@ mod tests {
         run(&["add", "target/arm/kconfig"]);
         run(&["commit", "-q", "-m", "seed"]);
         run(&["checkout", "-q", "-b", "feature/arm"]);
+        run_root(&[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            origin.to_str().unwrap(),
+        ]);
+        run(&["remote", "add", "origin", origin.to_str().unwrap()]);
+        run(&["push", "-q", "-u", "origin", "feature/arm"]);
         std::fs::write(arm.join("kconfig"), "CONFIG_ARM=y\nCONFIG_NEON=y\n").unwrap();
 
         let lock_path = super::tracker_lock_path(&arm).expect("the checkout is still discovered");
@@ -30054,13 +30197,8 @@ mod tests {
 
         let cwd = arm.display().to_string();
         assert!(
-            gate_push(
-                None,
-                "git push --force-with-lease origin feature/arm",
-                Some(&cwd)
-            )
-            .is_none(),
-            "a lease push onto a feature branch in target/arm is ordinary"
+            gate_push(None, "git push --force-with-lease", Some(&cwd)).is_none(),
+            "a bare lease push follows the feature upstream in target/arm"
         );
     }
 
@@ -30071,6 +30209,7 @@ mod tests {
         let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let bare = dir.path().join("dotfiles.git");
+        let origin = dir.path().join("origin.git");
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
         let init = std::process::Command::new("git")
@@ -30102,6 +30241,18 @@ mod tests {
         git(&["add", ".vimrc"]);
         git(&["commit", "-q", "-m", "seed"]);
         git(&["checkout", "-q", "-b", "feature/dots"]);
+        let origin_init = std::process::Command::new("git")
+            .args(["init", "-q", "--bare", "-b", "main"])
+            .arg(&origin)
+            .output()
+            .unwrap();
+        assert!(
+            origin_init.status.success(),
+            "origin init: {}",
+            String::from_utf8_lossy(&origin_init.stderr)
+        );
+        git(&["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(&["push", "-q", "-u", "origin", "feature/dots"]);
         std::fs::write(home.join(".vimrc"), "set number\nset list\n").unwrap();
 
         std::env::set_var("GIT_DIR", &bare);
@@ -30116,13 +30267,42 @@ mod tests {
         );
         let cwd = home.display().to_string();
         assert!(
-            gate_push(
-                None,
-                "git push --force-with-lease origin feature/dots",
-                Some(&cwd)
-            )
-            .is_none(),
-            "a feature lease push stays ordinary with GIT_DIR/GIT_WORK_TREE"
+            gate_push(None, "git push --force-with-lease", Some(&cwd)).is_none(),
+            "a bare lease push stays ordinary with GIT_DIR/GIT_WORK_TREE"
+        );
+        std::env::remove_var("GIT_DIR");
+        std::env::remove_var("GIT_WORK_TREE");
+    }
+
+    /// In hook-child mode, lock-path discovery must ignore the hook's
+    /// exported git directory and stay on the checkout passed to `-C`.
+    #[test]
+    fn hook_children_ignore_exported_git_dir_for_lock_paths() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        let decoy = dir.path().join("decoy");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&decoy).unwrap();
+        seeded_tracker(&real);
+        seeded_tracker(&decoy);
+        let lock = real.join(".git/index.lock");
+        let file = std::fs::File::create(&lock).unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120))
+            .unwrap();
+        drop(file);
+        std::env::set_var("GIT_DIR", decoy.join(".git"));
+        std::env::set_var("GIT_WORK_TREE", &decoy);
+        let tracker = crate::git_hooks::with_hook_children_for_test(|| {
+            super::tracker_lock_path(&real).expect("checkout lock path")
+        });
+        assert_eq!(tracker, real.join(TRACKER_LOCK));
+        let orphan = crate::git_hooks::with_hook_children_for_test(|| {
+            super::orphaned_index_lock(&real).expect("orphaned lock")
+        });
+        assert!(
+            orphan.contains(&lock.display().to_string()),
+            "wrong lock path under hook child env: {orphan}"
         );
         std::env::remove_var("GIT_DIR");
         std::env::remove_var("GIT_WORK_TREE");
@@ -40655,13 +40835,62 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         });
     }
 
+    /// ljos-policyd reads a Makefile or package.json from its own working
+    /// directory, which is where the hook's command will run. A fake
+    /// policyd that prints `pwd -P` shows that directory reached it. A
+    /// missing path, or a path that is not a directory, leaves the process
+    /// directory, which is what the spawn did before.
+    #[test]
+    fn the_hook_directory_is_where_policyd_runs() {
+        let _g = env_guard();
+        let home = SeatDir::new("policyd-cwd");
+        let bin = fake_policyd(
+            home.path(),
+            "ljos-policyd",
+            "printf 'deny\\t'\n/bin/pwd -P\nexit 2",
+        );
+        let work = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
+            (
+                "XDG_CONFIG_HOME",
+                home.path().join("config").to_str().unwrap(),
+            ),
+            ("XDG_DATA_HOME", home.path().join("data").to_str().unwrap()),
+            ("POLICYD_BIN", bin.to_str().unwrap()),
+            ("PACKSET_WORKSPACE", "policyd-cwd"),
+            ("LJOS_CONFIG", ""),
+            ("LJOS_OFF", "0"),
+        ]);
+        let process = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        let here = std::fs::canonicalize(work.path()).unwrap();
+        assert_ne!(
+            here, process,
+            "the hook directory must differ from the process directory"
+        );
+        let printed = |cwd: Option<&std::path::Path>| {
+            let rule = tcb_verdict_in("make clean-all", cwd).expect("policyd answered");
+            assert_eq!(rule.verdict, "deny", "{}", rule.reason);
+            assert_eq!(rule.pattern, "ljos-policyd", "{}", rule.reason);
+            rule.reason
+        };
+        assert_eq!(printed(Some(work.path())), here.display().to_string());
+        let missing = elsewhere.path().join("gone");
+        assert_eq!(printed(Some(&missing)), process.display().to_string());
+        let file = elsewhere.path().join("not-a-dir");
+        std::fs::write(&file, "x").unwrap();
+        assert_eq!(printed(Some(&file)), process.display().to_string());
+        assert_eq!(printed(None), process.display().to_string());
+    }
+
     #[test]
     fn a_tcb_that_crashes_or_times_out_allows_the_line() {
         let dir = tempfile::tempdir().unwrap();
         let argv = vec!["git".to_string(), "status".to_string()];
         let quick = std::time::Duration::from_millis(200);
         let answer = |name: &str, body: &str| {
-            tcb_answer(&fake_policyd(dir.path(), name, body), &argv, quick)
+            tcb_answer(&fake_policyd(dir.path(), name, body), &argv, quick, None)
         };
         assert_eq!(answer("allows", "echo allow"), "allow");
         assert_eq!(
@@ -40704,7 +40933,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             );
             assert!(!said.contains("refused unchecked"), "{name}: {said}");
         }
-        let gone = tcb_answer(&dir.path().join("missing"), &argv, quick);
+        let gone = tcb_answer(&dir.path().join("missing"), &argv, quick, None);
         assert!(
             gone.starts_with("allow\t") && gone.contains("did not start"),
             "{gone}"
@@ -46065,5 +46294,255 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(own(&["bash", "tmux"]).as_deref(), Some("bash"));
         assert_eq!(own(&["bash"]).as_deref(), Some("bash"));
         assert_eq!(own(&["tmux"]), None);
+    }
+
+    /// A box finish leaves the tracker without a deed bag. A cloud seat,
+    /// the machine `ljos cloud up` marked, exports the deeds that seat
+    /// cited, with the file bytes and the supersedes link, and the finish
+    /// commit carries a bag `deedar check` accepts.
+    #[test]
+    fn a_box_finish_writes_no_bag_and_a_cloud_finish_writes_one() {
+        which::which("deedar").unwrap_or_else(|_| panic!("deedar is not on PATH"));
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tracker");
+        let project = root.join("Software/probe");
+        let store = dir.path().join("store");
+        let home = dir.path().join("home");
+        let config = dir.path().join("config");
+        let runtime = dir.path().join("run");
+        let state = dir.path().join("state");
+        for path in [&project, &home, &config, &runtime, &state] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let v1 = dir.path().join("v1.txt");
+        let v2 = dir.path().join("v2.txt");
+        let other = dir.path().join("other.txt");
+        std::fs::write(&v1, b"version one\n").unwrap();
+        std::fs::write(&v2, b"version two\n").unwrap();
+        std::fs::write(&other, b"other seat\n").unwrap();
+        let store_url = format!("file://{}", store.display());
+        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        let _env = HoldEnv::set(&[
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.to_str().unwrap()),
+            ("XDG_DATA_HOME", dir.path().join("data").to_str().unwrap()),
+            ("XDG_RUNTIME_DIR", runtime.to_str().unwrap()),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+            ("DEEDAR_URL", store_url.as_str()),
+            ("DEEDAR_HOST_SIGNING_KEY", "off"),
+            ("PACKSET_URL", "off"),
+            ("VISSUE_ROOT", root.to_str().unwrap()),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("LJOS_SEAT", "cloudseat"),
+            ("LJOS_TRACKER_GIT", "commit"),
+        ]);
+        let deedar = |args: &[&str]| -> String {
+            let out = std::process::Command::new("deedar")
+                .args(args)
+                .output()
+                .unwrap_or_else(|e| panic!("deedar {args:?}: {e}"));
+            assert!(
+                out.status.success(),
+                "deedar {args:?}\n{}{}",
+                String::from_utf8_lossy(&out.stderr),
+                String::from_utf8_lossy(&out.stdout)
+            );
+            String::from_utf8(out.stdout).unwrap_or_else(|e| panic!("deedar stdout: {e}"))
+        };
+        let made = deedar(&[
+            "create",
+            "file",
+            "--path",
+            v1.to_str().unwrap(),
+            "--agent",
+            "cloudseat",
+            "--name",
+            "note-v1",
+        ]);
+        let id1 = accession_of(&made);
+        let sha1 = digest_of(&made);
+        let made = deedar(&[
+            "create",
+            "file",
+            "--path",
+            v2.to_str().unwrap(),
+            "--agent",
+            "cloudseat",
+            "--name",
+            "note-v2",
+            "--supersedes",
+            &id1,
+        ]);
+        let id2 = accession_of(&made);
+        let sha2 = digest_of(&made);
+        let made = deedar(&[
+            "create",
+            "file",
+            "--path",
+            other.to_str().unwrap(),
+            "--agent",
+            "otherseat",
+            "--name",
+            "note-other",
+        ]);
+        let id3 = accession_of(&made);
+        std::fs::write(
+            project.join("issues.org"),
+            format!(
+                "#+TITLE: probe issues\n#+VISSUE: 1\n#+TODO: TODO STARTED | DONE\n\
+                 * STARTED [#B] Box finish\n:PROPERTIES:\n:ID:         probe-box1\n\
+                 :DEEDS:      {id1} {id2} {id3}\n:END:\n\
+                 * STARTED [#B] Cloud finish\n:PROPERTIES:\n:ID:         probe-cld1\n\
+                 :DEEDS:      {id1} {id2} {id3}\n:END:\n"
+            ),
+        )
+        .unwrap();
+        let git = |args: &[&str]| -> String {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+            assert!(
+                out.status.success(),
+                "git {args:?}\n{}{}",
+                String::from_utf8_lossy(&out.stderr),
+                String::from_utf8_lossy(&out.stdout)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test Seat"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        git(&["config", "core.hooksPath", "/dev/null"]);
+        git(&["add", "Software/probe/issues.org"]);
+        git(&["commit", "-m", "init"]);
+        let calls = dir.path().join("claimdag.log");
+        fake_claimdag(dir.path(), &calls);
+        assert!(!cloud::cloud_seat(), "a box has no cloud guard file");
+        let cloud_said = with_fake_on_path(dir.path(), || {
+            let box_said = finish(
+                "probe-box1",
+                "done",
+                None,
+                None,
+                false,
+                LEARN_BETA,
+                "cloudseat",
+                Some(2),
+                false,
+            )
+            .unwrap_or_else(|e| panic!("box finish: {e:#}"));
+            assert!(!box_said.contains("deeds:"), "{box_said}");
+            assert!(
+                !root.join(".ljos").join("deeds").exists(),
+                "box finish wrote {}",
+                root.join(".ljos").join("deeds").display()
+            );
+            let mid = git(&["ls-tree", "-r", "HEAD", "--name-only"]);
+            assert!(!mid.contains(".ljos/deeds"), "{mid}");
+            cloud::ensure_cloud_guard_rules().unwrap_or_else(|e| panic!("cloud guard: {e:#}"));
+            assert!(cloud::cloud_seat(), "cloud up's guard file marks the seat");
+            finish(
+                "probe-cld1",
+                "done",
+                None,
+                None,
+                false,
+                LEARN_BETA,
+                "cloudseat",
+                Some(2),
+                false,
+            )
+            .unwrap_or_else(|e| panic!("cloud finish: {e:#}"))
+        });
+        assert!(
+            cloud_said.contains(
+                "deeds: exported 2 deeds cited by cloudseat into .ljos/deeds/cloudseat\n"
+            ),
+            "{cloud_said}"
+        );
+        assert!(
+            cloud_said.contains("tracker git: committed"),
+            "{cloud_said}"
+        );
+        let bag = root.join(".ljos").join("deeds").join("cloudseat");
+        for id in [&id1, &id2] {
+            assert!(bag.join(id).join("proof.txt").is_file(), "{id}");
+            assert!(bag.join(id).join("deed.bin").is_file(), "{id}");
+        }
+        assert!(!bag.join(&id3).exists(), "another seat's deed was exported");
+        assert_eq!(
+            std::fs::read_to_string(bag.join(&id2).join("supersedes"))
+                .unwrap()
+                .trim(),
+            id1
+        );
+        assert_eq!(
+            std::fs::read_to_string(bag.join(&id1).join("successor"))
+                .unwrap()
+                .trim(),
+            id2
+        );
+        assert_eq!(
+            std::fs::read(bag.join(&id1).join(&sha1)).unwrap(),
+            b"version one\n".to_vec()
+        );
+        assert_eq!(
+            std::fs::read(bag.join(&id2).join(&sha2)).unwrap(),
+            b"version two\n".to_vec()
+        );
+        let checked = std::process::Command::new("deedar")
+            .args(["check", bag.to_str().unwrap()])
+            .output()
+            .unwrap_or_else(|e| panic!("deedar check: {e}"));
+        assert!(
+            checked.status.success(),
+            "deedar check\n{}{}",
+            String::from_utf8_lossy(&checked.stderr),
+            String::from_utf8_lossy(&checked.stdout)
+        );
+        let tree = git(&["ls-tree", "-r", "HEAD", "--name-only"]);
+        for name in [
+            format!(".ljos/deeds/cloudseat/{id1}/proof.txt"),
+            format!(".ljos/deeds/cloudseat/{id1}/deed.bin"),
+            format!(".ljos/deeds/cloudseat/{id1}/{sha1}"),
+            format!(".ljos/deeds/cloudseat/{id1}/successor"),
+            format!(".ljos/deeds/cloudseat/{id2}/supersedes"),
+            format!(".ljos/deeds/cloudseat/{id2}/{sha2}"),
+        ] {
+            assert!(
+                tree.lines().any(|line| line == name),
+                "{name} missing from\n{tree}"
+            );
+        }
+        assert!(!tree.contains(id3.as_str()), "{tree}");
+    }
+
+    fn accession_of(text: &str) -> String {
+        text.lines()
+            .rev()
+            .find_map(|line| {
+                line.strip_prefix("accession=")
+                    .map(str::trim)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| panic!("no accession in {text}"))
+    }
+
+    fn digest_of(text: &str) -> String {
+        let paths = text
+            .lines()
+            .find_map(|line| line.strip_prefix("paths="))
+            .unwrap_or_else(|| panic!("no paths in {text}"));
+        let hex = paths
+            .split(',')
+            .find_map(|part| part.trim().strip_prefix("sha256:"))
+            .unwrap_or_else(|| panic!("no digest in {paths}"));
+        assert!(hex.bytes().all(|b| b.is_ascii_hexdigit()), "{hex}");
+        hex.to_string()
     }
 }
