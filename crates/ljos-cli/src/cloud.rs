@@ -1229,25 +1229,90 @@ fn install_encoder(stage: &Path, target: &str, bin_dir: &Path, lib: &Path) -> Re
     if !regular_file(&new_lib.join(ENCODER_SONAME)) || !regular_file(&new_bin) {
         bail!("the encoder archives lack bin/packset-embed or {ENCODER_LIB}/{ENCODER_SONAME}; nothing was installed");
     }
-    // A running encoder keeps the files it opened; the new ones are renamed in.
-    let old = stage.join("old");
-    if lib.exists() {
-        fs::rename(lib, &old).with_context(|| format!("move {} aside", lib.display()))?;
-    }
-    if let Err(e) = fs::rename(&new_lib, lib) {
-        let _ = fs::rename(&old, lib);
-        return Err(e).with_context(|| format!("install {}", lib.display()));
-    }
+    // A running encoder keeps the inode it opened, so the new files are
+    // renamed in. chmod and the destination directory happen first: a
+    // failure after the runtime rename used to leave the new runtime and
+    // delete the old one with the stage. Both names move aside, then both
+    // new names move in, and either failure puts the previous pair back.
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&new_bin, fs::Permissions::from_mode(0o755))?;
-    fs::create_dir_all(bin_dir)?;
+    if let Err(err) = fs::set_permissions(&new_bin, fs::Permissions::from_mode(0o755)) {
+        bail!("encoder install failed ({err}); nothing was installed");
+    }
+    if let Err(err) = fs::create_dir_all(bin_dir) {
+        bail!("encoder install failed ({err}); nothing was installed");
+    }
     let bin = bin_dir.join("packset-embed");
-    fs::rename(&new_bin, &bin).with_context(|| format!("install {}", bin.display()))?;
+    swap_encoder(stage, &new_lib, &new_bin, lib, &bin)?;
     Ok(format!(
         "encoder: installed {} and ONNX Runtime in {} (checksums match)",
         bin.display(),
         lib.display()
     ))
+}
+
+/// `symlink_metadata` sees a dangling symlink. `exists` follows links and
+/// would leave that name in the way of the rename.
+fn path_present(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => bail!("encoder install failed ({err}); nothing was installed"),
+    }
+}
+
+/// Stage both names, swap both, and roll both back. The stage directory is
+/// removed by the caller, so a backup that is still there at return is gone.
+fn swap_encoder(
+    stage: &Path,
+    new_lib: &Path,
+    new_bin: &Path,
+    lib: &Path,
+    bin: &Path,
+) -> Result<()> {
+    let backup_lib = stage.join("old-lib");
+    let backup_bin = stage.join("old-bin");
+    let had_lib = path_present(lib)?;
+    let had_bin = path_present(bin)?;
+    let mut bin_aside = false;
+
+    let fail = |bin_aside: bool, cause: &str| -> Result<()> {
+        let lib_err = had_lib
+            .then(|| fs::rename(&backup_lib, lib).err())
+            .flatten();
+        let bin_err = bin_aside
+            .then(|| fs::rename(&backup_bin, bin).err())
+            .flatten();
+        match lib_err.or(bin_err) {
+            None => bail!("encoder install failed ({cause}); nothing was installed"),
+            Some(err) => bail!(
+                "encoder install failed ({cause}); restoring the previous encoder also failed: {err}"
+            ),
+        }
+    };
+
+    if had_lib {
+        if let Err(err) = fs::rename(lib, &backup_lib) {
+            bail!("encoder install failed ({err}); nothing was installed");
+        }
+    }
+    if had_bin {
+        if let Err(err) = fs::rename(bin, &backup_bin) {
+            return fail(false, &err.to_string());
+        }
+        bin_aside = true;
+    }
+    if let Err(err) = fs::rename(new_lib, lib) {
+        return fail(bin_aside, &err.to_string());
+    }
+    if let Err(err) = fs::rename(new_bin, bin) {
+        // The new runtime is occupying the live name. Move it back into the
+        // stage, or delete it, so the previous runtime can return.
+        if fs::rename(lib, new_lib).is_err() {
+            let _ = fs::remove_dir_all(lib);
+        }
+        return fail(bin_aside, &err.to_string());
+    }
+    Ok(())
 }
 
 /// A cloud VM. A CI job is not one, and the box and a laptop build
