@@ -29320,17 +29320,23 @@ mod tests {
             "#!/bin/sh\ncase \"$*\" in\n*push*--force*) printf 'deny\\tgit-force-push\\n'; exit 2;;\n*) printf 'allow\\n';;\nesac\n",
         );
         let real_git = which::which("git").expect("git on PATH");
+        // A parallel test may set GIT_DIR on this process. These git
+        // commands have to see this checkout, not that one.
+        let scrub = |cmd: &mut std::process::Command| {
+            cmd.env_remove("GIT_DIR");
+            cmd.env_remove("GIT_WORK_TREE");
+        };
         let plain = |args: &[&str]| {
-            let out = std::process::Command::new(&real_git)
-                .arg("-C")
+            let mut cmd = std::process::Command::new(&real_git);
+            cmd.arg("-C")
                 .arg(&repo)
                 .args(args)
                 .env("GIT_AUTHOR_NAME", "Rohit Goswami")
                 .env("GIT_AUTHOR_EMAIL", "rgoswami@ieee.org")
                 .env("GIT_COMMITTER_NAME", "Rohit Goswami")
-                .env("GIT_COMMITTER_EMAIL", "rgoswami@ieee.org")
-                .output()
-                .unwrap();
+                .env("GIT_COMMITTER_EMAIL", "rgoswami@ieee.org");
+            scrub(&mut cmd);
+            let out = cmd.output().unwrap();
             assert!(
                 out.status.success(),
                 "{args:?}: {}",
@@ -29342,8 +29348,8 @@ mod tests {
         plain(&["commit", "-q", "--allow-empty", "-m", "seed"]);
         plain(&["checkout", "-q", "-b", "feature"]);
         let shim = |args: &[&str]| {
-            std::process::Command::new(guard.join("git"))
-                .args(args)
+            let mut cmd = std::process::Command::new(guard.join("git"));
+            cmd.args(args)
                 .current_dir(&repo)
                 .env("HOME", &home)
                 .env(
@@ -29356,9 +29362,9 @@ mod tests {
                     ),
                 )
                 .env_remove("LJOS_OFF")
-                .env("LJOS_GUARD", "on")
-                .output()
-                .unwrap()
+                .env("LJOS_GUARD", "on");
+            scrub(&mut cmd);
+            cmd.output().unwrap()
         };
         // There is no remote, so git itself fails once the shim lets the
         // push through; the shim's own refusal is exit 126.
