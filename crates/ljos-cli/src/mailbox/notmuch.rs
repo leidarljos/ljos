@@ -33,6 +33,8 @@ const OUTPUT_MAX: u64 = 16 << 20;
 const BODY_MAX: usize = 32 * 1024;
 const MESSAGES_MAX: usize = 50;
 const ATTACHMENTS_MAX: usize = 20;
+const PART_DEPTH_MAX: usize = 16;
+const THREAD_DEPTH_MAX: usize = 64;
 /// The longest one notmuch run may take before it is killed.
 pub const TIMEOUT: Duration = Duration::from_secs(30);
 /// The most bytes of one attachment that are read to hash it.
@@ -238,10 +240,11 @@ impl Reader {
             &query,
         ])?;
         let mut raw = Vec::new();
+        let mut cut = false;
         for nodes in found.as_array().map(Vec::as_slice).unwrap_or_default() {
-            walk(nodes, &mut raw);
+            cut |= walk(nodes, 0, &mut raw);
         }
-        let truncated = raw.len() > MESSAGES_MAX;
+        let truncated = cut || raw.len() > MESSAGES_MAX;
         let mut messages = Vec::new();
         for msg in raw.into_iter().take(MESSAGES_MAX) {
             messages.push(self.message(msg)?);
@@ -264,7 +267,7 @@ impl Reader {
             .map(Vec::as_slice)
             .unwrap_or_default()
         {
-            self.part(id, part, &mut text, &mut hidden, &mut attachments)?;
+            self.part(id, part, 0, &mut text, &mut hidden, &mut attachments)?;
         }
         let mut body = text.join("\n\n");
         let body_truncated = body.chars().count() > BODY_MAX;
@@ -290,10 +293,14 @@ impl Reader {
         &self,
         id: &str,
         part: &Value,
+        depth: usize,
         text: &mut Vec<String>,
         hidden: &mut bool,
         attachments: &mut Vec<Attachment>,
     ) -> Result<()> {
+        if depth > PART_DEPTH_MAX {
+            bail!("mail: a message nests parts more than {PART_DEPTH_MAX} deep");
+        }
         let kind = part["content-type"]
             .as_str()
             .unwrap_or("")
@@ -310,7 +317,7 @@ impl Reader {
                     })
                     .flatten();
                 for child in pick.map_or(children.as_slice(), std::slice::from_ref) {
-                    self.part(id, child, text, hidden, attachments)?;
+                    self.part(id, child, depth + 1, text, hidden, attachments)?;
                 }
             }
             Value::String(plain) if !attached && kind == "text/plain" => {
@@ -476,13 +483,21 @@ fn kill_group(child: &Mutex<Child>) {
 }
 
 /// Messages of one thread in thread order. A node is `[message, replies]`.
-fn walk<'a>(nodes: &'a Value, out: &mut Vec<&'a Value>) {
-    for node in nodes.as_array().map(Vec::as_slice).unwrap_or_default() {
+/// Replies deeper than `THREAD_DEPTH_MAX` are left out; the return says
+/// whether any were.
+fn walk<'a>(nodes: &'a Value, depth: usize, out: &mut Vec<&'a Value>) -> bool {
+    let nodes = nodes.as_array().map(Vec::as_slice).unwrap_or_default();
+    if depth > THREAD_DEPTH_MAX {
+        return !nodes.is_empty();
+    }
+    let mut cut = false;
+    for node in nodes {
         if node[0].is_object() {
             out.push(&node[0]);
         }
-        walk(&node[1], out);
+        cut |= walk(&node[1], depth + 1, out);
     }
+    cut
 }
 
 fn thread_id(id: &str) -> Result<String> {
@@ -536,4 +551,63 @@ pub(crate) fn clean(text: &str) -> String {
 pub(crate) fn hiding(c: char) -> bool {
     (c.is_control() && c != '\t' && c != '\n')
         || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn walk_stops_at_the_thread_depth_cap() {
+        let mut nodes = json!([]);
+        for n in 0..THREAD_DEPTH_MAX + 10 {
+            nodes = json!([[{"id": n}, nodes]]);
+        }
+        let mut out = Vec::new();
+        assert!(walk(&nodes, 0, &mut out));
+        assert_eq!(out.len(), THREAD_DEPTH_MAX + 1);
+        let two = json!([[{"id": 1}, [[{"id": 2}, []]]]]);
+        let mut shallow = Vec::new();
+        assert!(!walk(&two, 0, &mut shallow));
+        assert_eq!(shallow.len(), 2);
+    }
+
+    #[test]
+    fn part_refuses_nesting_past_the_cap() {
+        let reader = Reader::new(&MailConfig {
+            notmuch_config: Some(PathBuf::from("/nonexistent/notmuch-config")),
+            ..MailConfig::default()
+        })
+        .unwrap();
+        let nest = |depth: usize| {
+            let mut part = json!({"content-type": "text/plain", "content": "hi"});
+            for _ in 0..depth {
+                part = json!({"content-type": "multipart/mixed", "content": [part]});
+            }
+            part
+        };
+        let (mut text, mut hidden, mut attachments) = (Vec::new(), false, Vec::new());
+        let deep = reader.part(
+            "",
+            &nest(PART_DEPTH_MAX + 1),
+            0,
+            &mut text,
+            &mut hidden,
+            &mut attachments,
+        );
+        assert!(deep.unwrap_err().to_string().contains("deep"));
+        text.clear();
+        reader
+            .part(
+                "",
+                &nest(PART_DEPTH_MAX),
+                0,
+                &mut text,
+                &mut hidden,
+                &mut attachments,
+            )
+            .unwrap();
+        assert_eq!(text, ["hi"]);
+    }
 }
