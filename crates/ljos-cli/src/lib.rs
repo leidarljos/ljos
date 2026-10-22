@@ -34662,8 +34662,10 @@ mod tests {
     }
 
     fn signal_hit(kind: &str, text: &str, score: f64, ballots: u32) -> Hit {
+        let id = format!("id-{}", text.len());
+        keep_origin(&serde_json::json!({"id": id, "origin": admit::ORIGIN_USER}));
         Hit {
-            id: Some(format!("id-{}", text.len())),
+            id: Some(id),
             text: text.into(),
             score,
             kind: kind.into(),
