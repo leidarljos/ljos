@@ -21616,11 +21616,18 @@ pub fn log_bypass(kind: &str, how: &str, command: &str, rule: &Rule) {
     line.push('\n');
     let _ = path.parent().map(std::fs::create_dir_all);
     if let Err(err) = append_locked_row(&path, line.as_bytes(), Durability::BestEffort) {
-        eprintln!(
-            "ljos: the bypass row for `{command}` was not written to {}: {err}",
-            path.display()
-        );
+        eprintln!("{}", bypass_skip_note(&path, &err));
     }
+}
+
+/// The note stderr shows when a bypass row could not be written. It names
+/// the log and the error, never the command: the command can carry a secret
+/// or a newline, which several runners show on stderr as the deny reason.
+fn bypass_skip_note(path: &Path, err: &std::io::Error) -> String {
+    format!(
+        "ljos: a guard bypass row was not written to {}: {err}",
+        path.display()
+    )
 }
 
 /// The doctor's line on the bypass log: how many commands ran past the
@@ -40174,6 +40181,23 @@ mod tests {
         assert!(
             state.starts_with("2 commands ran past the guard"),
             "{state}"
+        );
+    }
+
+    /// A skipped bypass row names the log and the error, not the command:
+    /// the command can carry a secret or an injected newline a runner shows
+    /// on stderr as the deny reason.
+    #[test]
+    fn a_bypass_skip_note_names_the_log_not_the_command() {
+        let err = std::io::Error::new(std::io::ErrorKind::WouldBlock, "still locked after 50ms");
+        let note = bypass_skip_note(Path::new("/x/ljos/bypass.jsonl"), &err);
+        assert!(
+            note.contains("/x/ljos/bypass.jsonl") && note.contains("still locked after 50ms"),
+            "{note}"
+        );
+        assert!(
+            !note.contains("terraform") && !note.contains("AKIA") && !note.contains('\n'),
+            "{note}"
         );
     }
 
