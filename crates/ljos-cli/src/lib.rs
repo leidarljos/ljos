@@ -29955,31 +29955,22 @@ mod tests {
             "#!/bin/sh\ncase \"$*\" in\n*push*--force*) printf 'deny\\tgit-force-push\\n'; exit 2;;\n*) printf 'allow\\n';;\nesac\n",
         );
         let real_git = which::which("git").expect("git on PATH");
-        // Dropping GIT_DIR and GIT_WORK_TREE is not enough. Git also
-        // follows GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_COMMON_DIR,
-        // GIT_NAMESPACE and the config-count variables, and a global
-        // hooks path exits 1. A parallel test that exports any of those
-        // makes rev-parse leave this fixture, so a protected branch is
-        // pushed and git exits 1 instead of the guard's 126. Start from
-        // an empty environment and name only this fixture.
-        let gitconfig = root.path().join("gitconfig");
-        std::fs::write(&gitconfig, "[core]\n\thooksPath = /dev/null\n").unwrap();
-        let real_path = format!("{}:/usr/bin:/bin", real_git.parent().unwrap().display());
-        let seal = |cmd: &mut std::process::Command| {
-            cmd.env_clear()
-                .env("HOME", &home)
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_CONFIG_GLOBAL", &gitconfig)
+        // A parallel test may set GIT_DIR on this process. These git
+        // commands have to see this checkout, not that one.
+        let scrub = |cmd: &mut std::process::Command| {
+            cmd.env_remove("GIT_DIR");
+            cmd.env_remove("GIT_WORK_TREE");
+        };
+        let plain = |args: &[&str]| {
+            let mut cmd = std::process::Command::new(&real_git);
+            cmd.arg("-C")
+                .arg(&repo)
+                .args(args)
                 .env("GIT_AUTHOR_NAME", "Rohit Goswami")
                 .env("GIT_AUTHOR_EMAIL", "rgoswami@ieee.org")
                 .env("GIT_COMMITTER_NAME", "Rohit Goswami")
                 .env("GIT_COMMITTER_EMAIL", "rgoswami@ieee.org");
-        };
-        let plain = |args: &[&str]| {
-            let mut cmd = std::process::Command::new(&real_git);
-            cmd.arg("-C").arg(&repo).args(args);
-            seal(&mut cmd);
-            cmd.env("PATH", &real_path);
+            scrub(&mut cmd);
             let out = cmd.output().unwrap();
             assert!(
                 out.status.success(),
@@ -29991,12 +29982,23 @@ mod tests {
         plain(&["config", "commit.gpgsign", "false"]);
         plain(&["commit", "-q", "--allow-empty", "-m", "seed"]);
         plain(&["checkout", "-q", "-b", "feature"]);
-        let shim_path = format!("{}:{}:{real_path}", guard.display(), fake.display());
         let shim = |args: &[&str]| {
             let mut cmd = std::process::Command::new(guard.join("git"));
-            cmd.args(args).current_dir(&repo);
-            seal(&mut cmd);
-            cmd.env("PATH", &shim_path).env("LJOS_GUARD", "on");
+            cmd.args(args)
+                .current_dir(&repo)
+                .env("HOME", &home)
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}:{}",
+                        guard.display(),
+                        fake.display(),
+                        real_git.parent().unwrap().display()
+                    ),
+                )
+                .env_remove("LJOS_OFF")
+                .env("LJOS_GUARD", "on");
+            scrub(&mut cmd);
             cmd.output().unwrap()
         };
         // There is no remote, so git itself fails once the shim lets the
