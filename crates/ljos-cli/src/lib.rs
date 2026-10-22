@@ -11191,6 +11191,8 @@ pub fn check_seat_signatures(
     ballots: &[Value],
     personas: &std::collections::BTreeSet<String>,
 ) -> std::result::Result<Vec<String>, String> {
+    const LEGACY_DATING_UNAVAILABLE: &str =
+        "not a git checkout: pre-signing ballots cannot be dated, reported as unsigned";
     if ballot_sig::unsigned_allowed() {
         return Ok(Vec::new());
     }
@@ -11198,13 +11200,24 @@ pub fn check_seat_signatures(
     if seats.is_empty() {
         return Ok(Vec::new());
     }
+    let tracker_is_git = ballot_sig::tracker_is_git_checkout();
+    let can_date_legacy = tracker_is_git == Some(true);
     let v = issue_record(issue).map_err(|e| format!("{issue}: not readable: {e:#}"))?;
     let legacy = |voter: &str, choice: &str| {
-        ballot_sig::recorded_at(issue, voter, choice).is_some_and(|t| t < ballot_sig::SIGNING_SINCE)
+        can_date_legacy
+            && ballot_sig::recorded_at(issue, voter, choice)
+                .is_some_and(|t| t < ballot_sig::SIGNING_SINCE)
     };
     let notes = ballot_sig::notes_of(&v);
     let pins = ballot_sig::pins();
-    let (problems, old) = ballot_sig::seat_check(issue, &seats, &notes, &pins, &legacy);
+    let (mut problems, old) = ballot_sig::seat_check(issue, &seats, &notes, &pins, &legacy);
+    if tracker_is_git == Some(false)
+        && problems
+            .iter()
+            .any(|problem| problem.ends_with("ballot is unsigned"))
+    {
+        problems.push(LEGACY_DATING_UNAVAILABLE.to_string());
+    }
     if !problems.is_empty() {
         return Err(format!(
             "the seat ballots on {issue} are not all signed, so it decides nothing for a push: {}",
