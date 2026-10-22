@@ -27079,6 +27079,41 @@ pub fn guard_report(line: &str) -> Result<GuardReport> {
     guard_report_in(line, None)
 }
 
+fn expand_guard_cwd(path: &Path) -> Result<PathBuf> {
+    let raw = path.to_string_lossy();
+    if raw == "~" {
+        return home().context("guard cwd `~` needs HOME");
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        return home()
+            .map(|base| base.join(rest))
+            .context("guard cwd `~/...` needs HOME");
+    }
+    Ok(path.to_path_buf())
+}
+
+fn guard_start_directory(cwd: Option<&Path>) -> Result<PathBuf> {
+    let rooted = match cwd {
+        Some(path) => {
+            let expanded = expand_guard_cwd(path)?;
+            if expanded.is_absolute() {
+                expanded
+            } else {
+                std::env::current_dir()
+                    .context("guard cwd is unavailable")?
+                    .join(expanded)
+            }
+        }
+        None => std::env::current_dir().context("guard cwd is unavailable")?,
+    };
+    let directory = std::fs::canonicalize(&rooted)
+        .with_context(|| format!("guard cwd is unavailable: {}", rooted.display()))?;
+    if !directory.is_dir() {
+        bail!("guard cwd is not a directory: {}", directory.display());
+    }
+    Ok(directory)
+}
+
 /// [`guard_report`] for a command that would run in `cwd`.
 ///
 /// # Errors
@@ -27089,6 +27124,8 @@ pub fn guard_report_in(line: &str, cwd: Option<&Path>) -> Result<GuardReport> {
     if line.is_empty() {
         bail!("guard: pass the command to check");
     }
+    let start = guard_start_directory(cwd)?;
+    let cwd = Some(start.as_path());
     // Judge the line as written. Splitting it into argv and joining the
     // words again drops the quotes a commit message needs.
     if let Some(rule) = static_guard_in(line, cwd) {
@@ -27206,7 +27243,7 @@ pub fn policyd_bin() -> Option<std::path::PathBuf> {
 }
 
 /// The TCB's verdict on a shell line: a fast in-process check first, then
-/// `ljos-policyd` on each pipeline, and the first deny stands. A heredoc
+/// `ljos-policyd` on that whole line, and the first deny stands. A heredoc
 /// body is data the shell feeds a command, and it is not sent as argv.
 /// With the TCB required and absent, the line is refused. A policyd that
 /// times out or crashes does not refuse a line the fast check allowed.
@@ -27216,42 +27253,48 @@ pub fn tcb_verdict(line: &str) -> Option<Rule> {
 }
 
 /// [`tcb_verdict`] for a command whose working directory is `cwd`.
-/// `ljos-policyd` is started there when that path is a directory.
+/// `ljos-policyd` is started there once that path resolves.
 #[must_use]
 pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     clear_guard_note();
     if bookkeep::guard_suspended() {
         return None;
     }
+    let start = match guard_start_directory(cwd) {
+        Ok(dir) => dir,
+        Err(e) => {
+            return Some(Rule {
+                pattern: "ljos-policyd".into(),
+                verdict: "deny".into(),
+                reason: format!("cannot resolve command directory: {e:#}"),
+            });
+        }
+    };
+    let cwd = Some(start.as_path());
     if let Some(rule) = static_guard_in(line, cwd) {
         return Some(rule);
     }
     let mut answered = false;
-    // Each pipeline whole, in shell words: a quoted sentence that names a
-    // command is one word, and a download piped into a shell is one call.
-    // The substitutions and scripts inside the line run too, so each of
-    // their pipelines is judged as well: `echo $(git push -f)` is a push.
+    // The whole shell line is judged as one call. The substitutions and
+    // scripts inside the line run too, so each of their pipelines is judged
+    // as well: `echo $(git push -f)` is a push.
     // A here-document fed to `python3 -` or `node` is that program, sent
     // as `python3 -c BODY`, so a shell call inside it is judged.
     // A download and each later pipeline go once more as one call, so a
     // file `curl -o i.sh URL` saves and `sh i.sh` then runs is judged as
     // the pair it is.
-    let mut argvs = pipeline_argvs(line, cwd);
-    argvs.extend(
-        stdin_programs(line)
-            .into_iter()
-            .map(|argv| (argv, cwd.map(Path::to_path_buf))),
-    );
-    argvs.extend(
-        fetch_pairs(line)
-            .into_iter()
-            .map(|argv| (argv, cwd.map(Path::to_path_buf))),
-    );
-    for (argv, at) in argvs {
+    let mut argvs = Vec::new();
+    let words = shell_words(line);
+    if !words.is_empty() {
+        argvs.push(words);
+    }
+    argvs.extend(stdin_programs(line));
+    argvs.extend(fetch_pairs(line));
+    for argv in argvs {
         if argv.is_empty() {
             continue;
         }
-        match tcb_check_in(&argv, at.as_deref()) {
+        match tcb_check_in(&argv, cwd) {
             Some(t) if t.starts_with("deny") => {
                 clear_guard_note();
                 let token = policyd_token(&t);
@@ -27292,56 +27335,6 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
                  shell command runs until `cargo install --locked ljos-policyd` puts it on PATH"
             .to_string(),
     })
-}
-
-/// Each command line the TCB checks, with the directory that command runs in.
-///
-/// A `cd` or `pushd` in one pipeline changes where the next one runs.
-fn pipeline_argvs(line: &str, cwd: Option<&Path>) -> Vec<(Vec<String>, Option<PathBuf>)> {
-    let mut out = Vec::new();
-    for nested in nested_lines(line, 0) {
-        let mut at = cwd.filter(|path| path.is_dir()).map(Path::to_path_buf);
-        for seg in pipelines(&nested) {
-            let words = shell_words(&seg);
-            if words.is_empty() {
-                continue;
-            }
-            let here = at.clone();
-            if let Some(next) = cd_segment_target(&words, here.as_deref()) {
-                at = Some(next);
-            }
-            out.push((words, here));
-        }
-    }
-    out
-}
-
-/// Where a `cd` or `pushd` segment moves the next segment.
-fn cd_segment_target(words: &[String], cwd: Option<&Path>) -> Option<PathBuf> {
-    let (at, _) = prefix_end(words);
-    let command = words.get(at)?;
-    let name = base_name(command);
-    if name != "cd" && name != "pushd" {
-        return None;
-    }
-    let raw = match words.get(at + 1).map(String::as_str) {
-        Some(d) if d != "-" && !d.starts_with('-') => d,
-        None if name == "cd" => "~",
-        _ => return None,
-    };
-    let moved = if raw == "~" {
-        home().ok()?
-    } else if let Some(rest) = raw.strip_prefix("~/") {
-        home().ok()?.join(rest)
-    } else {
-        PathBuf::from(raw)
-    };
-    if moved.is_absolute() {
-        return Some(moved);
-    }
-    cwd.map(Path::to_path_buf)
-        .or_else(|| std::env::current_dir().ok())
-        .map(|base| base.join(moved))
 }
 
 /// Most pairs [`fetch_pairs`] hands the TCB for one line.
@@ -27766,8 +27759,9 @@ pub fn tcb_answer(bin: &Path, argv: &[String], deadline: std::time::Duration) ->
 ///
 /// `cwd` is the directory the checked command will run in. The binary
 /// starts there, so it reads that tree's Makefile or package.json. When
-/// `cwd` is missing or not a directory, the binary keeps this process's
-/// directory.
+/// `cwd` starts with `~`, it expands against HOME. A `cwd` that does not
+/// resolve is a refusal (`deny\tcwd-unresolved`), rather than a fallback
+/// to this process's directory.
 #[must_use]
 pub fn tcb_answer_in(
     bin: &Path,
@@ -27777,6 +27771,13 @@ pub fn tcb_answer_in(
 ) -> String {
     use std::io::Read as _;
     let unhealthy = |why: &str| format!("allow\t{}", unhealthy_note(why));
+    let run_dir = match cwd {
+        Some(_) => match guard_start_directory(cwd) {
+            Ok(dir) => Some(dir),
+            Err(e) => return format!("deny\tcwd-unresolved: {e:#}"),
+        },
+        None => None,
+    };
     // A binary just written, by an install or a test, can be busy for a
     // moment: another thread's fork still holds the write descriptor until
     // its exec, and the kernel answers ETXTBSY. That is not a guard that
@@ -27791,9 +27792,7 @@ pub fn tcb_answer_in(
             .stderr(std::process::Stdio::null());
         // ljos-policyd reads a Makefile or package.json from the directory
         // the command will run in. The hook already has that directory.
-        // A missing path, or one that is not a directory, leaves this
-        // process's directory.
-        if let Some(dir) = cwd.filter(|path| path.is_dir()) {
+        if let Some(dir) = run_dir.as_deref() {
             cmd.current_dir(dir);
         }
         cmd.spawn()
@@ -41430,8 +41429,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// ljos-policyd reads a Makefile or package.json from its own working
     /// directory, which is where the hook's command will run. A fake
     /// policyd that prints `pwd -P` shows that directory reached it. A
-    /// missing path, or a path that is not a directory, leaves the process
-    /// directory.
+    /// missing path, or one that is not a directory, is refused.
     #[test]
     fn the_hook_directory_is_where_policyd_runs() {
         let _g = env_guard();
@@ -41469,25 +41467,40 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         };
         assert_eq!(printed(Some(work.path())), here.display().to_string());
         let missing = elsewhere.path().join("gone");
-        assert_eq!(printed(Some(&missing)), process.display().to_string());
+        let miss = printed(Some(&missing));
+        assert!(miss.contains("cannot resolve command directory"), "{miss}");
         let file = elsewhere.path().join("not-a-dir");
         std::fs::write(&file, "x").unwrap();
-        assert_eq!(printed(Some(&file)), process.display().to_string());
+        let not_dir = printed(Some(&file));
+        assert!(
+            not_dir.contains("cannot resolve command directory"),
+            "{not_dir}"
+        );
         assert_eq!(printed(None), process.display().to_string());
     }
 
     #[test]
-    fn a_cd_or_pushd_pipeline_is_checked_in_its_entered_directory() {
+    fn shell_lines_that_left_the_start_directory_are_still_denied() {
         let _g = env_guard();
         let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join("danger")).unwrap();
+        let danger = root.path().join("danger");
+        let safe = root.path().join("safe");
+        let elsewhere = root.path().join("elsewhere/leaf");
+        std::fs::create_dir_all(&danger).unwrap();
+        std::fs::create_dir_all(&safe).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, danger.join("lnk")).unwrap();
         let bin = fake_policyd(
             root.path(),
             "ljos-policyd",
-            "if [ \"$(basename \"$(/bin/pwd -P)\")\" = \"danger\" ]; then\n\
+            "case \"$*\" in\n\
+             *\"make clean-all\"*)\n\
+             if [ \"$(basename \"$(/bin/pwd -P)\")\" = \"danger\" ]; then\n\
              printf 'deny\\tmake-clean-all\\n'\n\
              exit 2\n\
              fi\n\
+             ;;\n\
+             esac\n\
              printf 'allow\\n'\n",
         );
         let _env = HoldEnv::set(&[
@@ -41496,11 +41509,14 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ("LJOS_OFF", "0"),
         ]);
         for line in [
-            "cd danger && make clean-all",
-            "(cd danger; make clean-all)",
-            "pushd danger && make clean-all",
+            "cd safe | true && make clean-all",
+            "cd safe & make clean-all",
+            "cd missing ; make clean-all",
+            "pushd safe && popd && make clean-all",
+            "cd safe && cd - && make clean-all",
+            "cd lnk/.. && make clean-all",
         ] {
-            let rule = tcb_verdict_in(line, Some(root.path())).expect(line);
+            let rule = tcb_verdict_in(line, Some(&danger)).expect(line);
             assert_eq!(rule.verdict, "deny", "{line}: {}", rule.reason);
             assert_eq!(rule.pattern, "ljos-policyd", "{line}: {}", rule.reason);
         }
@@ -41559,6 +41575,40 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(
             gone.starts_with("allow\t") && gone.contains("did not start"),
             "{gone}"
+        );
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join("proj")).unwrap();
+        let _home = HoldEnv::set(&[("HOME", home.to_str().unwrap())]);
+        let shown = tcb_answer_in(
+            &fake_policyd(
+                dir.path(),
+                "cwd-shows",
+                "printf 'deny\\t'\n/bin/pwd -P\nexit 2",
+            ),
+            &argv,
+            quick,
+            Some(Path::new("~/proj")),
+        );
+        assert_eq!(
+            shown,
+            format!(
+                "deny\t{}",
+                home.join("proj").canonicalize().unwrap().display()
+            )
+        );
+        let unresolved = tcb_answer_in(
+            &fake_policyd(
+                dir.path(),
+                "cwd-unresolved",
+                "printf 'deny\\tkeep\\n'; exit 2",
+            ),
+            &argv,
+            quick,
+            Some(Path::new("~/missing")),
+        );
+        assert!(
+            unresolved.starts_with("deny\tcwd-unresolved:"),
+            "{unresolved}"
         );
     }
 
