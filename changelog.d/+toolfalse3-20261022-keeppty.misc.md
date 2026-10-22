@@ -1,0 +1,1 @@
+The migration tests open a pty from Python and then keep a held lesson. Python is not a login session, so the keep now runs with the pty held by a terminal emulator, which is what a person at a terminal looks like.

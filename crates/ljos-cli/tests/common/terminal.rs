@@ -60,6 +60,13 @@ elif mode == "double-fork":
 elif mode == "reparented":
     said, code = orphan(False)
 else:
+    # The person at a terminal has a terminal emulator holding the pty.
+    # python's own name is not one, so the default shape takes one.
+    libc = ctypes.CDLL(None)
+    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_char_p]
+    libc.prctl.restype = ctypes.c_int
+    if libc.prctl(15, b"gnome-terminal-") != 0:
+        raise SystemExit(91)
     said, code = run()
 sys.stdout.buffer.write(said)
 raise SystemExit(code)

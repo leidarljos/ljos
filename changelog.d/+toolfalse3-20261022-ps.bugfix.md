@@ -1,0 +1,1 @@
+On macOS the parent walk and the responsible-process lookup ran `ps` from `PATH`, so a caller could name that program. Both use `/bin/ps`. Harness names match without regard to case, so `Cursor` is `cursor`. A missing responsibility symbol or a pid of 1 is not proof that no runner is there. A process `launchctl submit` handed to launchd, with no terminal, is not the person.

@@ -384,8 +384,9 @@ pub fn not_the_person(input: &str) -> Option<&'static str> {
 /// How long a prompt counts as the latest one for [`said_in_latest_prompt`].
 pub const LATEST_PROMPT_SECS: u64 = 3600;
 
-/// The longest prompt kept for [`said_in_latest_prompt`].
-const LATEST_PROMPT_CHARS: usize = 8000;
+/// The longest prompt kept for [`said_in_latest_prompt`]. The bind also
+/// stores a hash of the whole prompt, so the rest is not lost.
+const LATEST_PROMPT_CHARS: usize = crate::turn_record::KEPT_PROMPT_CHARS;
 
 fn latest_prompt_path() -> std::path::PathBuf {
     runtime_dir().join("latest-prompt")
@@ -457,7 +458,8 @@ pub fn note_latest_prompt_from(
             at: now_nanos(),
             transcript: bind_session(transcript),
         };
-        let _ = write_prompt_bind(&path, text.as_bytes(), &bind, sessions);
+        let full_hash = crate::turn_record::folded_hash(prompt);
+        let _ = write_prompt_bind(&path, text.as_bytes(), &bind, sessions, &full_hash);
     }
 }
 
@@ -535,7 +537,12 @@ fn needs_positive_record(kind: &str) -> bool {
 /// that names none, or names a file elsewhere, disagrees under them.
 /// Cursor without a transcript that holds the prompt, and a runner that
 /// keeps no record, are [`RecordWord::Unverified`].
-fn agrees_with_record(kept: &[u8], named: &str, runner_ids: &[String]) -> RecordWord {
+fn agrees_with_record(
+    kept: &[u8],
+    named: &str,
+    runner_ids: &[String],
+    full_hash: &str,
+) -> RecordWord {
     use crate::turn_record;
     let Some((runner, kind)) = crate::proc_tree::runner_above() else {
         return RecordWord::Agrees;
@@ -581,7 +588,7 @@ fn agrees_with_record(kept: &[u8], named: &str, runner_ids: &[String]) -> Record
     if !turn_record::required(kind) && turn_record::latest_turn(&text).is_empty() {
         return word(true);
     }
-    if turn_record::agrees(&text, &String::from_utf8_lossy(kept)) {
+    if turn_record::agrees_truncated(&text, &String::from_utf8_lossy(kept), full_hash) {
         RecordWord::Agrees
     } else {
         word(false)
@@ -613,16 +620,20 @@ fn bind_session(session: Option<&str>) -> String {
 }
 
 /// The bind the hook writes beside the prompt: version, sha256 of the
-/// bytes, mtime in nanoseconds, the runner that spawned the hook as a
+/// kept bytes, mtime in nanoseconds, the runner that spawned the hook as a
 /// [`crate::proc_tree::token`] or `-`, the hook's time in nanoseconds,
-/// the runner's transcript or `-`, and the session ids, one a line. The
+/// the runner's transcript or `-`, and the session ids, one a line. A
+/// final line `full <sha256>` is the folded whole prompt, so a prompt
+/// longer than the kept text can still agree with the transcript. The
 /// gate reads it back, so a later write of the prompt file no longer
-/// matches.
+/// matches. The `full` line is after the session ids and is not one of
+/// them: a plant that rewrites the kept hash leaves it in place.
 fn write_prompt_bind(
     path: &std::path::Path,
     bytes: &[u8],
     bind: &Bind,
     sessions: &[String],
+    full_hash: &str,
 ) -> std::io::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
@@ -641,7 +652,7 @@ fn write_prompt_bind(
         ids.push(bind_session(None));
     }
     let body = format!(
-        "3\n{hash}\n{mtime}\n{}\n{}\n{}\n{}\n",
+        "3\n{hash}\n{mtime}\n{}\n{}\n{}\n{}\nfull {full_hash}\n",
         bind.runner,
         bind.at,
         bind.transcript,
@@ -708,10 +719,7 @@ fn kept_prompt(path: &std::path::Path) -> Kept {
     if late(path) || late(&bind_path) {
         return Kept::No;
     }
-    let bound: Vec<String> = lines
-        .map(crate::ballot_sig::field)
-        .filter(|s| s != "-")
-        .collect();
+    let (bound, full_hash) = bind_tail(lines);
     let runner = crate::ballot_sig::runner_sessions();
     let above = spawner != "-"
         && crate::proc_tree::ancestors()
@@ -729,7 +737,7 @@ fn kept_prompt(path: &std::path::Path) -> Kept {
     if hash != hex::encode(sha2::Sha256::digest(&bytes)) || stored != mtime.to_string() {
         return Kept::No;
     }
-    match agrees_with_record(&bytes, transcript, &runner) {
+    match agrees_with_record(&bytes, transcript, &runner, &full_hash) {
         RecordWord::Agrees => Kept::Yes,
         RecordWord::Unverified => Kept::Unverified,
         RecordWord::Disagrees => Kept::No,
@@ -1030,11 +1038,31 @@ fn bind_record_name() -> (String, Vec<String>) {
     let _runner = lines.next();
     let _at = lines.next();
     let named = lines.next().filter(|s| !s.is_empty()).unwrap_or("-");
-    let sessions = lines
-        .map(crate::ballot_sig::field)
-        .filter(|s| s != "-")
-        .collect();
+    let (sessions, _) = bind_tail(lines);
     (named.to_string(), sessions)
+}
+
+/// Session ids, and the `full <64 hex>` line when the bind has one.
+/// Anything else in the tail is a session. An older bind has no full line.
+fn bind_tail<'a>(lines: impl Iterator<Item = &'a str>) -> (Vec<String>, String) {
+    let mut sessions = Vec::new();
+    let mut full = String::new();
+    for line in lines {
+        if let Some(hash) = full_prompt_hash(line) {
+            full = hash;
+            continue;
+        }
+        let session = crate::ballot_sig::field(line);
+        if session != "-" {
+            sessions.push(session);
+        }
+    }
+    (sessions, full)
+}
+
+fn full_prompt_hash(line: &str) -> Option<String> {
+    let hash = line.strip_prefix("full ")?.trim();
+    (hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit())).then(|| hash.to_string())
 }
 
 /// Whether saving `prompt` as the person's would trust a runner that has
@@ -1046,7 +1074,7 @@ fn capture_unverified(prompt: &str) -> bool {
     }
     let (named, sessions) = bind_record_name();
     matches!(
-        agrees_with_record(prompt.as_bytes(), &named, &sessions),
+        agrees_with_record(prompt.as_bytes(), &named, &sessions, ""),
         RecordWord::Unverified
     )
 }
@@ -1293,6 +1321,25 @@ mod tests {
         "Explain why we never got the webhook",
         "Going forward is the only option for the migration",
     ];
+
+    /// The full-prompt hash sits after the session ids and is not a session.
+    /// An older bind, with no such line, still yields its sessions.
+    #[test]
+    fn the_full_prompt_line_is_not_a_session() {
+        let hash = "ab".repeat(32);
+        let (sessions, full) = bind_tail(
+            format!("sess-1\nfull {hash}\n-")
+                .lines()
+                .collect::<Vec<_>>()
+                .into_iter(),
+        );
+        assert_eq!(sessions, ["sess-1"]);
+        assert_eq!(full, hash);
+        let (sessions, full) = bind_tail("sess-1\n".lines());
+        assert_eq!(sessions, ["sess-1"]);
+        assert!(full.is_empty());
+        assert!(full_prompt_hash("full not-a-hash").is_none());
+    }
 
     /// A Codex subagent's brief, Codex's review thread and an unattended
     /// run are not the person; the root thread's prompt and Claude Code's

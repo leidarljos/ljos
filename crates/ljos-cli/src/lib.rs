@@ -371,6 +371,12 @@ pub fn session_start_for(session: Option<&str>) -> String {
             line.push('.');
         }
     }
+    let held_rules = user_rules::held_count();
+    if held_rules > 0 {
+        line.push(' ');
+        line.push_str(&user_rules::review_sentence(held_rules));
+        line.push('.');
+    }
     user_rules::prepend(line)
 }
 
@@ -2090,10 +2096,17 @@ fn parent_and_comm(pid: u32) -> Option<(u32, String)> {
     Some((ppid, comm))
 }
 
-/// macOS has no procfs. `ps` prints the parent and the short command name.
+/// `ps` by absolute path. A `ps` earlier on `PATH` is a program the
+/// caller chose, and it must not be the one that names a parent.
+#[cfg(any(test, target_os = "macos"))]
+fn ps_bin() -> &'static str {
+    "/bin/ps"
+}
+
+/// macOS has no procfs. `/bin/ps` prints the parent and the short command name.
 #[cfg(target_os = "macos")]
 fn parent_and_comm(pid: u32) -> Option<(u32, String)> {
-    let out = std::process::Command::new("ps")
+    let out = std::process::Command::new(ps_bin())
         .args(["-o", "ppid=,comm=", "-p", &pid.to_string()])
         .output()
         .ok()?;
@@ -2245,16 +2258,21 @@ fn runner_names() -> Vec<String> {
 /// multiplexer or a terminal is not a runner, and a name shorter than
 /// four letters is too small a word to trust inside a path.
 fn scope_word_counts(name: &str) -> bool {
-    name.len() >= 4
-        && !WRAPPERS.contains(&name)
-        && !SESSION.iter().any(|prefix| name.starts_with(prefix))
-        && !TERMINALS.contains(&name)
+    let lower = name.to_ascii_lowercase();
+    lower.len() >= 4
+        && !WRAPPERS.iter().any(|w| w.eq_ignore_ascii_case(name))
+        && !SESSION
+            .iter()
+            .any(|prefix| lower.starts_with(&prefix.to_ascii_lowercase()))
+        && !TERMINALS.iter().any(|t| t.eq_ignore_ascii_case(name))
 }
 
 fn segment_names_runner(segment: &str, runners: &[String]) -> bool {
     segment
         .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|word| scope_word_counts(word) && runners.iter().any(|name| name == word))
+        .any(|word| {
+            scope_word_counts(word) && runners.iter().any(|name| name.eq_ignore_ascii_case(word))
+        })
 }
 
 /// Whether `text` is `/proc/self/cgroup` for a process still inside a
@@ -2267,33 +2285,77 @@ fn cgroup_text_names_runner(text: &str, runners: &[String]) -> bool {
     })
 }
 
-/// The chain up to the session is only shells and wrappers, or it is
-/// empty because the session (or init) is the parent. `setsid -f`, a
-/// double fork, `script` and a detached tmux all leave this shape: the
-/// runner is no longer an ancestor.
-fn wrappers_only() -> bool {
-    own_ancestry()
-        .iter()
-        .all(|(_, comm)| WRAPPERS.contains(&comm.as_str()))
+/// Whether `text` is a transient scope, the cgroup `systemd-run --scope`
+/// and a D-Bus `StartTransientUnit` of mode scope leave behind. The unit
+/// is named `run-*.scope`. A login is `session-*.scope` and is not this.
+fn cgroup_text_is_transient(text: &str) -> bool {
+    text.lines().any(|line| {
+        let path = line.rsplit_once(':').map_or(line, |(_, path)| path);
+        path.split('/').any(|segment| {
+            segment
+                .strip_suffix(".scope")
+                .is_some_and(|name| name.starts_with("run-") && name.len() > "run-".len())
+        })
+    })
+}
+
+/// Linux: this process's cgroup, or an error when it cannot be read.
+/// An empty string is a cgroup that was read and names nothing. An error
+/// is not that: the scope is hidden, and a hidden scope counts as a runner.
+#[cfg(target_os = "linux")]
+fn own_cgroup() -> Result<String, ()> {
+    std::fs::read_to_string("/proc/self/cgroup").map_err(|_| ())
+}
+
+/// A cgroup read that names a runner or a transient scope, or that failed.
+/// `Err` is an unreadable `/proc/self/cgroup`. A program between this
+/// process and the session does not change the answer: `setsid -f python3`
+/// leaves python in the chain and the runner's cgroup around both.
+#[cfg(test)]
+fn cgroup_read_is_runner(read: Result<&str, ()>, runners: &[String]) -> bool {
+    match read {
+        Err(()) => true,
+        Ok(text) => cgroup_text_names_runner(text, runners) || cgroup_text_is_transient(text),
+    }
 }
 
 /// Linux: the cgroup this process was started in. A new session does not
 /// leave it. Writing a different cgroup, which a user service or
-/// `systemd-run --user --scope` does, does leave it.
+/// `systemd-run --user --scope` does, does leave it. The file is read
+/// whether or not a program sits above this process. Unreadable counts
+/// as a runner.
 #[cfg(target_os = "linux")]
 fn scope_names_runner(runners: &[String]) -> bool {
-    let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
-    cgroup_text_names_runner(&text, runners)
+    match own_cgroup() {
+        Ok(text) => cgroup_text_names_runner(&text, runners),
+        Err(()) => true,
+    }
+}
+
+/// What the responsible process says about a runner. No name is not
+/// "not a runner": a missing symbol or a pid of 1 has no other evidence,
+/// and that fails closed.
+#[cfg(any(test, target_os = "macos"))]
+fn responsible_names_runner(comm: Option<&str>, runners: &[String]) -> bool {
+    match comm {
+        Some(comm) => segment_names_runner(comm, runners),
+        None => true,
+    }
+}
+
+/// `launchctl submit` reparents onto launchd and drops the responsible
+/// process. With no controlling terminal that process is not the person.
+#[cfg(any(test, target_os = "macos"))]
+fn launchd_without_tty(parent: Option<&str>, tty: bool) -> bool {
+    !tty && parent.is_some_and(|name| name.eq_ignore_ascii_case("launchd"))
 }
 
 /// macOS: the process that owns this one after a detach. `launchctl
-/// submit` can hand it to launchd, and then the name is gone.
+/// submit` can hand it to launchd, and then the name is gone. No name
+/// counts as a runner.
 #[cfg(target_os = "macos")]
 fn scope_names_runner(runners: &[String]) -> bool {
-    let Some(comm) = responsible_comm() else {
-        return false;
-    };
-    segment_names_runner(&comm, runners)
+    responsible_names_runner(responsible_comm().as_deref(), runners)
 }
 
 #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
@@ -2315,7 +2377,7 @@ fn responsible_comm() -> Option<String> {
     if unsafe { ask(std::process::id() as i32, &mut pid) } != 0 || pid <= 1 {
         return None;
     }
-    let out = std::process::Command::new("ps")
+    let out = std::process::Command::new(ps_bin())
         .args(["-o", "comm=", "-p", &pid.to_string()])
         .output()
         .ok()?;
@@ -2333,34 +2395,61 @@ fn responsible_comm() -> Option<String> {
         .map(str::to_string)
 }
 
-/// Whether this process runs under an agent runner.
-///
-/// Any one of these is enough. The environment carries a runner's
-/// conversation. A process above this one is a runner, one whose server
-/// left a seat record or one [`runner_names`] lists. Or the chain above
-/// is only shells and wrappers, which is what `setsid`, a double fork,
-/// `script` and a detached tmux leave, and the scope still names a
-/// runner: the cgroup on Linux, the responsible process on macOS.
-///
-/// The same user can still step out of that scope. On Linux that is a
-/// new cgroup (`systemd-run --user --scope`, or a cgroup the runner's
-/// parent allows). On macOS it is handing the process to launchd. A
-/// cleared environment does not do it. Consent is the person's, so the
-/// verbs that grant it refuse here.
-#[must_use]
-pub fn under_a_runner() -> bool {
-    if std::env::vars().any(|(k, v)| runner_session_var(&k, &v))
-        || std::env::var_os("CLAUDECODE").is_some()
-    {
-        return true;
-    }
+/// A runner in the process tree, or the scope this process still sits in.
+/// The scope is read whatever the ancestors are. A program a tool call
+/// puts in the chain (`python3`, `node`, `perl`, `nice`) used to hide it.
+/// On Linux the scope is the cgroup, including a transient `run-*.scope`
+/// from `systemd-run` or a D-Bus scope, and an unreadable cgroup. On macOS
+/// it is the responsible process. A cleared environment does not leave either.
+fn runner_scope_or_tree() -> bool {
     let runners = runner_names();
     if own_ancestry().iter().any(|(pid, comm)| {
-        seat_record_path(*pid).exists() || runners.iter().any(|name| name == comm)
+        seat_record_path(*pid).exists()
+            || runners.iter().any(|name| name.eq_ignore_ascii_case(comm))
     }) {
         return true;
     }
-    wrappers_only() && scope_names_runner(&runners)
+    scope_names_runner(&runners) || transient_scope()
+}
+
+/// Linux: this process sits in a transient `run-*.scope`. An unreadable
+/// cgroup counts as one, so a hidden scope is not a login.
+#[cfg(target_os = "linux")]
+fn transient_scope() -> bool {
+    match own_cgroup() {
+        Ok(text) => cgroup_text_is_transient(&text),
+        Err(()) => true,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn transient_scope() -> bool {
+    false
+}
+
+/// Whether this process runs under an agent runner.
+///
+/// A runner in the process tree, or the scope this process still sits in,
+/// is enough on its own. The scope is read whatever the ancestors are: a
+/// `python3`, `node`, `perl` or `nice` a tool call put in the chain does
+/// not hide it. On Linux that scope is the cgroup, including a transient
+/// `run-*.scope` from `systemd-run` or a D-Bus scope, and a cgroup that
+/// cannot be read. On macOS it is the responsible process. A runner
+/// variable ([`runner_mark_set`]) counts only when this is not a person's
+/// terminal: a hook, a pipe, a process with no controlling tty. On a
+/// terminal whose tree and scope show no runner, the variable does not
+/// count. One left over from a runner that started the shell is not a
+/// runner. The same variable with that evidence does count. Consent is
+/// the person's, so the verbs that grant it refuse when this is true.
+#[must_use]
+pub fn under_a_runner() -> bool {
+    if runner_scope_or_tree() {
+        return true;
+    }
+    if person_at_terminal() {
+        return false;
+    }
+    runner_mark_set()
 }
 
 /// Variables a runner, or the hook it spawned, leaves on what it starts.
@@ -2372,16 +2461,25 @@ const RUNNER_MARKS: &[&str] = &[
     "GEMINI_CLI",
 ];
 
-/// Whether the person is at this process, on positive evidence: no
-/// runner's variable in the environment, and [`person_at_terminal`].
-/// Not being [`under_a_runner`] proves nothing, since a tool call can
-/// name its parent `systemd` or leave the runner by a double fork. Every
-/// basis of person a CLI verb decides asks this; anything less is the
-/// agent's.
+/// A runner's variable, or one [`RUNNER_MARKS`] names.
+fn runner_mark_set() -> bool {
+    std::env::vars().any(|(k, v)| runner_session_var(&k, &v) || RUNNER_MARKS.contains(&k.as_str()))
+}
+
+/// Whether the person is at this process, on positive evidence.
+///
+/// [`person_at_terminal`] must hold, and [`under_a_runner`] must not. The
+/// terminal has to belong to an interactive login session: a terminal, a
+/// multiplexer or a login holds it. A fresh transient scope, a container
+/// and a CI runner (`GITHUB_ACTIONS`, `Runner.Worker`) are not that
+/// session, even with a pty and a cleared environment. A runner variable
+/// alone does not hide the person at a login session whose tree and scope
+/// show no runner. The same variable with that evidence does, and so does
+/// the variable when there is no terminal. Every basis of person a CLI
+/// verb decides asks this; anything less is the agent's.
 #[must_use]
 pub fn person_present() -> bool {
-    !std::env::vars().any(|(k, v)| runner_session_var(&k, &v) || RUNNER_MARKS.contains(&k.as_str()))
-        && person_at_terminal()
+    person_at_terminal() && !under_a_runner()
 }
 
 /// One `/proc/PID/stat` row, the fields [`person_at_terminal`] reads.
@@ -2442,6 +2540,101 @@ thread_local! {
         const { std::cell::Cell::new(false) };
 }
 
+/// Whether a person's terminal drives this process.
+///
+/// On Linux that is the controlling terminal, the foreground group and
+/// the chain to pid 1. On macOS it is a controlling terminal plus the
+/// process the kernel holds responsible, which must not be a runner; if
+/// that process cannot be named the check fails closed. Anywhere else
+/// there is no check, and [`person_at_terminal`] is false.
+fn person_at_terminal() -> bool {
+    #[cfg(test)]
+    if PERSON_AT_TERMINAL.with(std::cell::Cell::get) {
+        return true;
+    }
+    host_at_terminal()
+}
+
+/// `Some` when the terminal question could be answered. The person is
+/// there only when `tty` is the controlling terminal, `responsible` is an
+/// interactive login (a terminal, a multiplexer or a login, not a
+/// runner), and it is not a hosted CI worker. `None` means the
+/// responsible process could not be named, which the caller treats as
+/// absent.
+#[cfg(any(test, target_os = "macos"))]
+fn at_terminal_with_responsible(
+    tty: bool,
+    responsible: Option<&str>,
+    runners: &[String],
+) -> Option<bool> {
+    if !tty {
+        return Some(false);
+    }
+    let name = responsible?;
+    if segment_names_runner(name, runners) || hosted_runner_comm(name) {
+        return Some(false);
+    }
+    Some(interactive_login(name, name))
+}
+
+/// A terminal emulator, a multiplexer, sshd or a login. The process that
+/// holds the session's tty, or the session leader, has to be one of these.
+/// Compared without regard to case, so `Terminal` and `terminal` agree.
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+fn login_holder(comm: &str) -> bool {
+    const ENDS: &[&str] = &[
+        "sshd", "login", "tmux", "screen", "zellij", "Terminal", "iTerm2", "iTerm", "Warp",
+    ];
+    ENDS.iter().any(|name| comm.eq_ignore_ascii_case(name))
+        || TERMINALS.iter().any(|name| comm.eq_ignore_ascii_case(name))
+}
+
+/// The session's tty belongs to an interactive login: the process that
+/// holds it, or the session leader, is a terminal, a multiplexer or a login.
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+fn interactive_login(holder_comm: &str, leader_comm: &str) -> bool {
+    login_holder(holder_comm) || login_holder(leader_comm)
+}
+
+/// `docker` and `podman` leave this in the cgroup after the environment
+/// has been cleared. A word, so `pod-something` is not `podman`.
+#[cfg(any(test, target_os = "linux"))]
+fn container_cgroup(text: &str) -> bool {
+    const MARKS: &[&str] = &[
+        "docker",
+        "podman",
+        "libpod",
+        "containerd",
+        "crio",
+        "kubepods",
+    ];
+    text.lines().any(|line| {
+        let path = line.rsplit_once(':').map_or(line, |(_, path)| path);
+        path.split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| MARKS.iter().any(|mark| word.eq_ignore_ascii_case(mark)))
+    })
+}
+
+/// GitHub Actions sets this on the job. `false` is not a job.
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+fn github_actions_set(value: &str) -> bool {
+    let value = value.trim();
+    value == "1" || value.eq_ignore_ascii_case("true")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn ci_env_set() -> bool {
+    std::env::var("GITHUB_ACTIONS").is_ok_and(|value| github_actions_set(&value))
+}
+
+/// The process name of a GitHub-hosted runner worker. The kernel keeps at
+/// most fifteen characters; `Runner.Worker` fits.
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+fn hosted_runner_comm(comm: &str) -> bool {
+    let base = comm.rsplit(['/', '\\']).next().unwrap_or(comm);
+    base.eq_ignore_ascii_case("Runner.Worker") || base.eq_ignore_ascii_case("Runner.Worker.exe")
+}
+
 /// Whether the kernel says a person's terminal drives this process. Stdin
 /// is this process's controlling terminal, a pseudo-terminal, and its
 /// foreground group is ours. The session leader is this process or one
@@ -2452,11 +2645,7 @@ thread_local! {
 /// reparented, which a process outside its own session with a parent in
 /// another shows. Names prove nothing here; a tool call picks its own.
 #[cfg(target_os = "linux")]
-fn person_at_terminal() -> bool {
-    #[cfg(test)]
-    if PERSON_AT_TERMINAL.with(std::cell::Cell::get) {
-        return true;
-    }
+fn host_at_terminal() -> bool {
     // SAFETY: isatty reads one descriptor's mode and cannot fail.
     if unsafe { libc::isatty(0) } != 1 {
         return false;
@@ -2520,12 +2709,75 @@ fn person_at_terminal() -> bool {
             || is_harness_program(&r.comm, &program_name(r.pid, &r.comm), &runners)
             || proc_tree::exe_runner(r.pid).is_some()
     });
-    !reparented && !runner && holds_pty(holder.pid, index)
+    if reparented || runner || !holds_pty(holder.pid, index) {
+        return false;
+    }
+    // The pty is the person's only when a terminal, a multiplexer or a
+    // login holds it, or the session leader is one of those. python,
+    // script and systemd-run can open a pty and are not that.
+    if !interactive_login(&holder.comm, &chain[leader].comm) {
+        return false;
+    }
+    match own_cgroup() {
+        Ok(text) => {
+            if cgroup_text_is_transient(&text) || container_cgroup(&text) {
+                return false;
+            }
+        }
+        Err(()) => return false,
+    }
+    let parent = chain.get(1).map(|row| row.comm.as_str()).unwrap_or("");
+    !ci_env_set() && !hosted_runner_comm(&holder.comm) && !hosted_runner_comm(parent)
 }
 
-#[cfg(not(target_os = "linux"))]
-fn person_at_terminal() -> bool {
+/// macOS: a controlling terminal, and the process the kernel names as
+/// responsible for this one. A runner there is not the person. No name
+/// for that process fails closed. A login with no terminal is absent,
+/// which is an answer, not a failed check.
+#[cfg(target_os = "macos")]
+fn host_at_terminal() -> bool {
+    let tty = controlling_tty();
+    if launchd_without_tty(parent_name().as_deref(), tty) || ci_env_set() {
+        return false;
+    }
+    match at_terminal_with_responsible(tty, responsible_comm().as_deref(), &runner_names()) {
+        Some(present) => present,
+        None => false,
+    }
+}
+
+/// The command name of this process's parent.
+#[cfg(target_os = "macos")]
+fn parent_name() -> Option<String> {
+    let (ppid, _) = parent_and_comm(std::process::id())?;
+    parent_and_comm(ppid).map(|(_, comm)| comm)
+}
+
+/// Stdin is this process's controlling terminal and its foreground group.
+#[cfg(target_os = "macos")]
+fn controlling_tty() -> bool {
+    // SAFETY: isatty, tcgetpgrp and getpgrp only read process state.
+    unsafe { libc::isatty(0) == 1 && libc::tcgetpgrp(0) == libc::getpgrp() }
+}
+
+/// No terminal check. [`person_present`] stays false, and the doctor says so.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn host_at_terminal() -> bool {
     false
+}
+
+/// Linux and macOS can say whether the person is at the terminal. Any
+/// other host cannot, and must not pretend a typed command is theirs.
+fn host_lacks_person_check() -> bool {
+    !cfg!(target_os = "linux") && !cfg!(target_os = "macos")
+}
+
+fn person_absent_row() -> Habitat {
+    Habitat {
+        name: "person",
+        state: "attribution is absent on this host: a terminal cannot be checked, so a typed command is not the person's".to_string(),
+        ok: false,
+    }
 }
 
 /// Path components that name a place, not a program.
@@ -17961,6 +18213,27 @@ fn preferences_row() -> Habitat {
     }
 }
 
+fn user_rules_row() -> Habitat {
+    // The doctor is a person-side run, so it records the cutoff. Under a
+    // runner the call does nothing and the count below still stands.
+    user_rules::note_cutoff();
+    let held = user_rules::held_count();
+    let state = if held > 0 {
+        user_rules::review_sentence(held)
+    } else {
+        match user_rules::load() {
+            Ok(rules) if rules.is_empty() => "no user rules".to_string(),
+            Ok(_) => "none held from before a basis was kept".to_string(),
+            Err(err) => format!("not counted: {err:#}"),
+        }
+    };
+    Habitat {
+        name: "user rules",
+        state,
+        ok: held == 0 && user_rules::load().is_ok(),
+    }
+}
+
 /// How many preferences one command hears at most.
 pub const COMMAND_PREFERENCES: usize = 2;
 
@@ -23474,6 +23747,9 @@ pub fn doctor_seat() -> Vec<Habitat> {
         state: format_seat_row(),
         ok: true,
     });
+    if host_lacks_person_check() {
+        out.push(person_absent_row());
+    }
     out.push(seat_source_row(&whoami()));
     out.push(cloud::mcp_row());
     out.push(cloud::guard_row());
@@ -23486,6 +23762,9 @@ pub fn doctor_seat() -> Vec<Habitat> {
     // How many stored preferences the hook enforces: a preference with no
     // rule is recalled and never holds the agent to it.
     out.push(preferences_row());
+    // Old user rules with no basis stay visible until the person keeps
+    // them. The count is a warning; the seat still starts.
+    out.push(user_rules_row());
     // The dense ballot: without it the pack ranks by words alone, and an
     // island's seeds are weaker than the agent may assume.
     out.push(
@@ -24275,6 +24554,14 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     }
     // Older preferences awaiting review are named, not a failed seat.
     if row.name == "preferences" && !row.ok {
+        return "warn";
+    }
+    // Older user rules awaiting confirmation are the same kind of warning.
+    if row.name == "user rules" && !row.ok {
+        return "warn";
+    }
+    // A host with no terminal check says so. The seat still starts.
+    if row.name == "person" && !row.ok {
         return "warn";
     }
     if row.ok && row.name == "mcp" && row.state.starts_with("warning:") {
@@ -47324,6 +47611,11 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "0::/system.slice/pod/cursor-agent/workload\n",
             &runners
         ));
+        // The harness file says `cursor`. The cgroup may say `Cursor`.
+        assert!(super::cgroup_text_names_runner(
+            "0::/system.slice/pod/Cursor-agent/workload\n",
+            &runners
+        ));
         assert!(super::cgroup_text_names_runner(
             "0::/user.slice/user-1000.slice/app-claude-123.scope\n",
             &runners
@@ -47337,15 +47629,197 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "0::/user.slice/user-1000.slice/tmux.service\n",
             &runners
         ));
+        // systemd-run and a D-Bus transient scope are `run-*.scope`. A login
+        // session is not, and neither is a scope that does not use that name.
+        let transient = "0::/user.slice/user-1000.slice/app.slice/run-u1000-4242.scope\n";
+        assert!(super::cgroup_text_is_transient(transient));
+        assert!(!super::cgroup_text_names_runner(transient, &runners));
+        assert!(!super::cgroup_text_is_transient(
+            "0::/user.slice/user-1000.slice/session-3.scope\n"
+        ));
+        assert!(!super::cgroup_text_is_transient(
+            "0::/system.slice/pod/cursor-agent/workload\n"
+        ));
+        // A program above the process does not skip this. An unreadable
+        // cgroup is a runner; a login session that was read is not.
+        assert!(super::cgroup_read_is_runner(Err(()), &runners));
+        assert!(super::cgroup_read_is_runner(Ok(transient), &runners));
+        assert!(!super::cgroup_read_is_runner(
+            Ok("0::/user.slice/user-1000.slice/session-3.scope\n"),
+            &runners
+        ));
     }
 
-    /// The test process is not a detached shell, so a runner-shaped cgroup
-    /// around the suite does not make every test a runner. A session
-    /// variable still does.
+    /// macOS asks whether the controlling terminal's responsible process
+    /// is a runner. The name is passed in, so the decision is tested here
+    /// without a Mac. No name fails closed. No terminal is an answer.
     #[test]
-    fn this_process_is_not_under_a_runner_without_one() {
+    fn a_responsible_process_decides_the_terminal() {
+        let runners = vec!["cursor".to_string(), "claude".to_string()];
+        assert_eq!(
+            super::at_terminal_with_responsible(true, Some("Terminal"), &runners),
+            Some(true)
+        );
+        assert_eq!(
+            super::at_terminal_with_responsible(true, Some("cursor-agent"), &runners),
+            Some(false)
+        );
+        assert_eq!(
+            super::at_terminal_with_responsible(true, Some("Cursor"), &runners),
+            Some(false)
+        );
+        assert!(super::responsible_names_runner(None, &runners));
+        assert!(!super::responsible_names_runner(Some("Terminal"), &runners));
+        assert!(super::responsible_names_runner(Some("Cursor"), &runners));
+        assert!(super::launchd_without_tty(Some("launchd"), false));
+        assert!(super::launchd_without_tty(Some("Launchd"), false));
+        assert!(!super::launchd_without_tty(Some("launchd"), true));
+        assert!(!super::launchd_without_tty(Some("Terminal"), false));
+        assert_eq!(
+            super::at_terminal_with_responsible(true, Some("python3"), &runners),
+            Some(false)
+        );
+        assert_eq!(
+            super::at_terminal_with_responsible(true, Some("Runner.Worker"), &runners),
+            Some(false)
+        );
+    }
+
+    /// A pty is not enough. The session has to be an interactive login, and
+    /// a transient scope, a container or a CI runner is not one.
+    #[test]
+    fn a_login_session_is_required() {
+        assert!(super::interactive_login("gnome-terminal-", "bash"));
+        assert!(super::interactive_login("sshd", "bash"));
+        assert!(super::interactive_login("Terminal", "zsh"));
+        assert!(!super::interactive_login("python3", "ljos"));
+        assert!(!super::interactive_login("script", "bash"));
+        assert!(!super::interactive_login("systemd-run", "bash"));
+        assert!(super::container_cgroup(
+            "0::/system.slice/docker-abc.scope\n"
+        ));
+        assert!(super::container_cgroup(
+            "0::/user.slice/user-1000.slice/libpod-abc.scope\n"
+        ));
+        assert!(super::container_cgroup("0::/podman/abc\n"));
+        assert!(!super::container_cgroup(
+            "0::/user.slice/user-1000.slice/session-3.scope\n"
+        ));
+        assert!(!super::container_cgroup(
+            "0::/system.slice/pod-4bhi/cursor-agent/daemon\n"
+        ));
+        assert!(super::github_actions_set("true"));
+        assert!(super::github_actions_set("TRUE"));
+        assert!(super::github_actions_set("1"));
+        assert!(!super::github_actions_set("false"));
+        assert!(!super::github_actions_set(""));
+        assert!(super::hosted_runner_comm("Runner.Worker"));
+        assert!(super::hosted_runner_comm("runner.worker"));
+        assert!(!super::hosted_runner_comm("bash"));
+        let runners = vec!["cursor".to_string()];
+        assert_eq!(
+            super::at_terminal_with_responsible(true, None, &runners),
+            None
+        );
+        assert_eq!(
+            super::at_terminal_with_responsible(false, Some("Terminal"), &runners),
+            Some(false)
+        );
+        assert_eq!(
+            super::at_terminal_with_responsible(false, None, &runners),
+            Some(false)
+        );
+        let row = super::person_absent_row();
+        assert_eq!(super::doctor_word(&row), "warn");
+        assert!(super::failing(std::slice::from_ref(&row)).is_empty());
+        assert!(super::healthy(std::slice::from_ref(&row)));
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert!(!super::host_lacks_person_check());
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        assert!(super::host_lacks_person_check());
+    }
+
+    /// A `ps` earlier on `PATH` must not be the program that names a parent.
+    #[test]
+    fn ps_is_not_taken_from_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("called");
+        let fake = dir.path().join("ps");
+        std::fs::write(&fake, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perm = std::fs::metadata(&fake).unwrap().permissions();
+            perm.set_mode(0o755);
+            std::fs::set_permissions(&fake, perm).unwrap();
+        }
+        assert_eq!(super::ps_bin(), "/bin/ps");
+        let out = std::process::Command::new(super::ps_bin())
+            .args(["-o", "comm=", "-p", &std::process::id().to_string()])
+            .env("PATH", dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!marker.exists(), "the ps on PATH ran instead of /bin/ps");
+    }
+
+    /// A runner variable in a real terminal, with no runner in the tree or
+    /// the scope, is the person's shell. The same variable with no
+    /// terminal is a runner: a hook and a pipe have no terminal.
+    #[test]
+    fn a_runner_variable_at_a_terminal_does_not_hide_the_person() {
         let _g = env_guard();
-        assert!(!super::under_a_runner());
+        let saved = std::env::var_os("CURSOR_AGENT");
+        unsafe { std::env::set_var("CURSOR_AGENT", "1") };
+        super::PERSON_AT_TERMINAL.with(|p| p.set(true));
+        let at_terminal = (super::under_a_runner(), super::person_present());
+        super::PERSON_AT_TERMINAL.with(|p| p.set(false));
+        let no_terminal = (super::under_a_runner(), super::person_present());
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("CURSOR_AGENT", value),
+                None => std::env::remove_var("CURSOR_AGENT"),
+            }
+        }
+        let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+        let scope = super::cgroup_read_is_runner(Ok(&text), &super::runner_names());
+        if scope {
+            assert!(
+                at_terminal.0 && !at_terminal.1,
+                "a runner cgroup did not count at a terminal: {at_terminal:?}"
+            );
+        } else {
+            assert!(
+                !at_terminal.0 && at_terminal.1,
+                "a variable alone hid the person at a terminal: {at_terminal:?}"
+            );
+        }
+        assert!(
+            no_terminal.0 && !no_terminal.1,
+            "a variable with no terminal was not a runner: {no_terminal:?}"
+        );
+    }
+
+    /// The cgroup is consulted whatever sits above this process. When it
+    /// names a runner, this process is under one. When it does not, and no
+    /// runner variable is set, it is not.
+    #[test]
+    fn this_process_follows_its_cgroup() {
+        let _g = env_guard();
+        let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+        let named = super::cgroup_read_is_runner(Ok(&text), &super::runner_names());
+        super::PERSON_AT_TERMINAL.with(|p| p.set(true));
+        let under = super::under_a_runner();
+        super::PERSON_AT_TERMINAL.with(|p| p.set(false));
+        if named {
+            assert!(under, "a runner cgroup did not count at a terminal");
+        } else {
+            assert!(!under, "no runner in the cgroup or the tree");
+        }
     }
 
     #[test]
