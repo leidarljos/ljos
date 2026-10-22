@@ -3181,12 +3181,13 @@ const LEGACY_SEATS: &[(&str, &str)] = &[("ljos-bot", "ljosbot")];
 /// ljos writes. ljos-mcp 0.31 and earlier wrote `SEAT-TAG`, with the tag
 /// a pid in base 36 (`inky-n9o`, `disk-saver-t4t`, `free-claude-8h`,
 /// `free-opencode-1vmow`); a last part of one to six lowercase letters and
-/// digits with at least one digit is read as that tag, so `eessi-bot` and
-/// `disk-saver` stay whole seats. The same suffix on the seat side of
-/// `SEAT@TAG` (`inky-n9o@deadbeef`) is that tag too. An old tag comes back
-/// as `None`: the server that wrote it is gone and no conversation holds
-/// under it again, so the seat is its holder now and any conversation of
-/// that seat may finish or release the claim.
+/// digits with at least one of each is read as that tag, so `eessi-bot`
+/// and `disk-saver` stay whole seats, and so does a version or a run
+/// number such as `gpt-5` or `ridley-ci-a-555001`. The same suffix on the
+/// seat side of `SEAT@TAG` (`inky-n9o@deadbeef`) is that tag too. An old
+/// tag comes back as `None`: the server that wrote it is gone and no
+/// conversation holds under it again, so the seat is its holder now and
+/// any conversation of that seat may finish or release the claim.
 #[must_use]
 pub fn holder_parts(holder: &str) -> (String, Option<String>) {
     let holder = holder.trim();
@@ -3207,6 +3208,7 @@ fn legacy_tag(tag: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
         && tag.bytes().any(|b| b.is_ascii_digit())
+        && tag.bytes().any(|b| b.is_ascii_lowercase())
 }
 
 /// Drop a pid-shaped suffix (`n9o`, `1vmow`) from a seat. A name that has
@@ -11695,7 +11697,7 @@ pub fn atom_body(kind: &str, text: &str, workspace: &str) -> Value {
     if let Some(citation) = citation {
         source["citation"] = Value::String(citation);
     }
-    serde_json::json!({
+    let mut atom = serde_json::json!({
         "schema": "inside.atom/v1",
         "kind": kind,
         "level": "explicit",
@@ -11703,7 +11705,19 @@ pub fn atom_body(kind: &str, text: &str, workspace: &str) -> Value {
         "workspace": workspace,
         "entities": entities,
         "source": source,
-    })
+    });
+    // A VM `cloud up` prepared tags memory explicitly. Other atoms stay
+    // unscoped, and a box with the variable unset is unchanged.
+    if memory_write(kind) {
+        if let Some(scope) = sync::machine_write_scope() {
+            add_entities(&mut atom, [format!("scope:{scope}")]);
+        }
+    }
+    atom
+}
+
+fn memory_write(kind: &str) -> bool {
+    kind == "lesson" || kind == "preference" || kind == packset_core::record::NOTE_KIND
 }
 
 /// Take citation tails off `text`. The claim is unchanged when nothing
@@ -25324,7 +25338,7 @@ pub fn lesson_claims(text: &str) -> Vec<String> {
 
 fn finish_lesson(issue: &str, text: &str) -> String {
     let filed = (|| -> Result<String> {
-        let scope = sync::scope_for_issue(issue);
+        let scope = sync::scope_for_lesson(sync::scope_for_issue(issue));
         let persons = lesson_is_the_persons(under_a_runner(), std::io::stdin().is_terminal());
         let prefix = "finish: POST /v1/atoms failed for the lesson";
         let client = pack()?;
@@ -34312,6 +34326,11 @@ mod tests {
             ("ljosbot".to_string(), Some("q4s23e2cxd".to_string()))
         );
         assert_eq!(holder_parts("eessi-bot"), ("eessi-bot".to_string(), None));
+        assert_eq!(holder_parts("gpt-5"), ("gpt-5".to_string(), None));
+        assert_eq!(
+            holder_parts("ridley-ci-a-555001"),
+            ("ridley-ci-a-555001".to_string(), None)
+        );
         assert_eq!(
             holder_parts("grokbot-sand-sub"),
             ("grokbot-sand-sub".to_string(), None)
