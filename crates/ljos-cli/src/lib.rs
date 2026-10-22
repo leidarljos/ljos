@@ -46416,24 +46416,33 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             assert!(bag.join(id).join("deed.bin").is_file(), "{id}");
         }
         assert!(!bag.join(&id3).exists(), "another seat's deed was exported");
+        let digest = |id: &str| -> String {
+            let proof = std::fs::read_to_string(bag.join(id).join("proof.txt"))
+                .unwrap_or_else(|e| panic!("{id} proof: {e}"));
+            proof
+                .lines()
+                .find_map(|line| line.strip_prefix("digest="))
+                .unwrap_or_else(|| panic!("no digest in {id}"))
+                .to_string()
+        };
         assert_eq!(
-            std::fs::read_to_string(bag.join(&id2).join("supersedes"))
-                .unwrap()
-                .trim(),
-            id1
+            std::fs::read_to_string(bag.join(&id2).join("supersedes")).unwrap(),
+            format!("{id1}\n{}\n", digest(&id1))
         );
         assert_eq!(
-            std::fs::read_to_string(bag.join(&id1).join("successor"))
-                .unwrap()
-                .trim(),
-            id2
+            std::fs::read_to_string(bag.join(&id1).join("successor")).unwrap(),
+            format!("{id2}\n{}\n", digest(&id2))
+        );
+        assert!(
+            !bag.join(&id1).join(&sha1).exists(),
+            "bytes belong under bytes/"
         );
         assert_eq!(
-            std::fs::read(bag.join(&id1).join(&sha1)).unwrap(),
+            std::fs::read(bag.join(&id1).join("bytes").join(&sha1)).unwrap(),
             b"version one\n".to_vec()
         );
         assert_eq!(
-            std::fs::read(bag.join(&id2).join(&sha2)).unwrap(),
+            std::fs::read(bag.join(&id2).join("bytes").join(&sha2)).unwrap(),
             b"version two\n".to_vec()
         );
         let checked = std::process::Command::new("deedar")
@@ -46450,10 +46459,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         for name in [
             format!(".ljos/deeds/cloudseat/{id1}/proof.txt"),
             format!(".ljos/deeds/cloudseat/{id1}/deed.bin"),
-            format!(".ljos/deeds/cloudseat/{id1}/{sha1}"),
+            format!(".ljos/deeds/cloudseat/{id1}/bytes/{sha1}"),
             format!(".ljos/deeds/cloudseat/{id1}/successor"),
             format!(".ljos/deeds/cloudseat/{id2}/supersedes"),
-            format!(".ljos/deeds/cloudseat/{id2}/{sha2}"),
+            format!(".ljos/deeds/cloudseat/{id2}/bytes/{sha2}"),
         ] {
             assert!(
                 tree.lines().any(|line| line == name),
