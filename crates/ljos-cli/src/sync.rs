@@ -2245,11 +2245,59 @@ fn host_state_rel(root: &Path, scope_name: &str, host: &str, ext: &str) -> Strin
     format!("{}/{scope_name}/{host}.{ext}", tracker_state_rel(root))
 }
 
-/// Whether a log of `host`'s in `scope_name` has opened here with its header.
-/// Kept apart from `.taken`, which adopt removes.
+/// Whether a log of `host`'s in `scope_name` has opened here with its header,
+/// or any committed blob of that log carried one. Kept apart from `.taken`,
+/// which adopt removes. The local mark is per checkout. A fresh clone does
+/// not have it, and would otherwise adopt a headerless file that replaced
+/// a host who had already committed a headed log.
 fn was_headed(root: &Path, scope_name: &str, host: &str) -> Result<bool> {
     let rel = host_state_rel(root, scope_name, host, "headed");
-    Ok(read_beneath(&state_base(), &rel)?.is_some())
+    if read_beneath(&state_base(), &rel)?.is_some() {
+        return Ok(true);
+    }
+    headed_in_history(root, scope_name, host)
+}
+
+/// Whether git history of this host's log holds a blob that opens with a
+/// header naming `host` and `scope_name`. A blob that does not open is
+/// skipped: one unreadable commit must not hide a headed one, and it must
+/// not make import fail.
+fn headed_in_history(root: &Path, scope_name: &str, host: &str) -> Result<bool> {
+    let Some(scope) = scope_of_repo(root)? else {
+        return Ok(false);
+    };
+    let [rel, _] = host_log_rels_for_scope(host, &scope.name, scope_name);
+    let out = match git(root, &["rev-list", "HEAD", "--", &rel]) {
+        Ok(out) => out,
+        Err(_) => return Ok(false),
+    };
+    if !out.status.success() {
+        return Ok(false);
+    }
+    let identities = identities_for_open(scope_name);
+    if identities.is_empty() {
+        return Ok(false);
+    }
+    for commit in String::from_utf8_lossy(&out.stdout).lines() {
+        if commit.is_empty() {
+            continue;
+        }
+        let spec = format!("{commit}:{rel}");
+        let blob = match git(root, &["cat-file", "blob", &spec]) {
+            Ok(blob) if blob.status.success() => blob.stdout,
+            _ => continue,
+        };
+        let plain = match open_sealed_bytes(&blob, &identities) {
+            Ok(Some(plain)) => plain,
+            _ => continue,
+        };
+        if let Some((named_host, named_scope, _)) = split_header(&plain) {
+            if named_host == host && named_scope == scope_name {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Note that `host` writes headed logs of `scope_name`, and drop any
@@ -9282,6 +9330,64 @@ mod tests {
         assert!(said.contains("none without one is read again"), "{said}");
         let again = adopt_legacy_in_repo(&fix.root, &fix.scope(), "erin").unwrap();
         assert!(again.contains("stays unread"), "{again}");
+    }
+
+    /// The headed mark is stored under the tracker path. A second clone,
+    /// with a fresh state directory, still has the headed blob in git
+    /// history and must not offer adoption of a headerless replacement.
+    #[test]
+    fn a_second_clone_does_not_adopt_a_host_whose_committed_log_was_headed() {
+        let dir = tempfile::tempdir().unwrap();
+        let fix = Shared::new(dir.path());
+        let cloud = [fix.cloud.as_str()];
+        let headed = fix.sealed(
+            Some(("alice", CLOUD_SCOPE)),
+            &lesson_line("Alice wrote this.", "cloud"),
+            &cloud,
+        );
+        fix.push(&[("alice+cloud.jsonl.age", &headed)]);
+        let said = fix.import();
+        assert!(said.contains("alice: 1 cloud atoms taken"), "{said}");
+        let forged = fix.sealed(None, &lesson_line("Forged as Alice.", "cloud"), &cloud);
+        fix.push(&[("alice+cloud.jsonl.age", &forged)]);
+        fix.pull();
+        let other = fix.dir.join("other");
+        git_ok(
+            &fix.dir,
+            &[
+                "clone",
+                "-q",
+                fix.dir.join("origin.git").to_str().unwrap(),
+                other.to_str().unwrap(),
+            ],
+        );
+        let fresh = fix.dir.join("fresh-state");
+        // SAFETY: the fixture holds the process env lock. The first clone's
+        // headed mark stays in the old state directory.
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", &fresh);
+        }
+        for root in [&fix.root, &other] {
+            let said = import(root, &fix.scope()).unwrap();
+            assert!(!said.contains("adopt-legacy"), "{}: {said}", root.display());
+            assert!(
+                said.contains("none without one is read again"),
+                "{}: {said}",
+                root.display()
+            );
+            assert!(
+                legacy_adopt_commands(root).unwrap().is_empty(),
+                "{}: {said}",
+                root.display()
+            );
+            let again = adopt_legacy_in_repo(root, &fix.scope(), "alice").unwrap();
+            assert!(
+                again.contains("stays unread"),
+                "{}: {again}",
+                root.display()
+            );
+        }
+        assert_eq!(fix.held(), vec!["Alice wrote this."]);
     }
 
     /// Headed logs still import through a symlinked `$HOME`, a checkout
