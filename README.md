@@ -328,6 +328,11 @@ sender and keeps the issue. `ljos hook --prompt` prints unread mail and writes
 a receipt for each message it shows. When the pack does not answer, it prints
 `mail could not be checked` and still exits 0. A shell seat polls
 `ljos inbox`.
+In push mode the detached wake pushes the sealed log before it fires.
+The send does not wait, and a failed push is a line in the wake log.
+`ljos inbox --sync [COMMIT]` fetches until that commit is present, or the
+remote head when it is not, imports the sealed logs, and then lists.
+With no remote it only lists.
 
 ## Decision panel concurrency
 
@@ -374,6 +379,7 @@ ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the relea
 ljos brief reviewer vissue-xxxx                # what a subagent playing reviewer starts from
 ljos remember --as reviewer "..."              # a lesson the persona keeps; its next brief opens with it
 ljos panel vissue-xxxx --out panel             # every persona's brief as a file, for a runner without MCP
+ljos panel vissue-xxxx --cloud                  # one prompt file per persona: seat env, slot, push rules
 ljos vote vissue-xxxx --for hold --as reviewer
 ljos panel vissue-xxxx --jev                   # with Jev on: cast when every seat is sure and agrees, else briefs for subagents
 ljos learn vissue-xxxx --outcome ship

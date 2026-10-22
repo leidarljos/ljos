@@ -1,13 +1,14 @@
 //! Sharing the seat's memory across machines through the tracker repository
 //! that already travels between them.
 //!
-//! Each tracker repository names one scope in `.ljos/sync.toml`: the scope's
-//! name and the age recipients allowed to read it. Every machine writes only
-//! its own log, `.ljos/atoms/<host>.jsonl.age`, sealed to those recipients,
-//! so two machines never touch one file and git never has to merge a log.
-//! A log carries the machine's live atoms of that scope without their
-//! vectors; the receiving pack encodes them again. An atom's scope is its
-//! `scope:NAME` entity, else the machine's default scope.
+//! Each tracker repository names one or more scopes in `.ljos/sync.toml`.
+//! The primary scope keeps the legacy keys (`name`, `recipients`), and
+//! optional `[scopes]` entries add named scopes with their own recipients.
+//! Every machine writes only its own log for each configured scope under
+//! `.ljos/atoms/`, so two machines never touch one file and git never has to
+//! merge a log. A log carries the machine's live atoms of that scope without
+//! their vectors; the receiving pack encodes them again. An atom's scope is
+//! its `scope:NAME` entity, else the machine's default scope.
 //!
 //! Import posts every atom of every other machine's log to this seat's pack,
 //! which answers a text it already holds with the claim it has, so an import
@@ -35,6 +36,10 @@ pub struct Scope {
     /// issue with the `shared` scope's log instead of this one.
     #[serde(default)]
     pub projects: BTreeMap<String, String>,
+    /// Additional named scopes in this repository:
+    /// `[scopes] cloud = ["age1..."]`.
+    #[serde(default)]
+    pub scopes: BTreeMap<String, Vec<String>>,
 }
 
 impl Scope {
@@ -46,6 +51,33 @@ impl Scope {
             .cloned()
             .unwrap_or_else(|| self.name.clone())
     }
+
+    fn recipients_for(&self, name: &str) -> Option<&[String]> {
+        if name == self.name {
+            Some(&self.recipients)
+        } else {
+            self.scopes.get(name).map(Vec::as_slice)
+        }
+    }
+
+    fn all_scopes(&self) -> Vec<ScopeView<'_>> {
+        let mut scopes = vec![ScopeView {
+            name: &self.name,
+            recipients: &self.recipients,
+        }];
+        scopes.extend(
+            self.scopes
+                .iter()
+                .map(|(name, recipients)| ScopeView { name, recipients }),
+        );
+        scopes
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScopeView<'a> {
+    name: &'a str,
+    recipients: &'a [String],
 }
 
 /// This machine's defaults: `~/.config/ljos/sync.toml`, `default_scope`.
@@ -114,6 +146,76 @@ pub fn identity_path() -> PathBuf {
     config_dir().join("age.key")
 }
 
+/// The age identity for scope `cloud`, written by `ljos cloud up` from a
+/// named secret. It is not [`identity_path`]: that key is this machine's
+/// own. Scope `cloud` is sealed to one shared recipient, and the private
+/// key is not in the tracker, so a VM cannot read the scope without this
+/// file.
+#[must_use]
+pub fn cloud_identity_path() -> PathBuf {
+    config_dir().join("cloud.age")
+}
+
+/// Bech32 charset, upper case, as `age` writes an identity line.
+const AGE_BECH32: &[u8] = b"QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L";
+
+/// Whether `text` is an age identity file: comments, blank lines, and one
+/// or more `AGE-SECRET-KEY-1` lines. The payload length is the X25519
+/// identity `age` writes today.
+#[must_use]
+pub(crate) fn age_identity(text: &str) -> bool {
+    if text.len() > 8192 || text.contains('\0') {
+        return false;
+    }
+    let mut found = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("AGE-SECRET-KEY-1") else {
+            return false;
+        };
+        if !(58..=96).contains(&rest.len()) || !rest.bytes().all(|b| AGE_BECH32.contains(&b)) {
+            return false;
+        }
+        found = true;
+    }
+    found
+}
+
+/// Identity files that may open a sealed log.
+///
+/// The machine key when it is an age identity, then the scope `cloud`
+/// identity when `cloud up` wrote one. A machine key that is not an
+/// identity is still passed when it is the only file, so `age` reports
+/// the broken key. A cloud file that is not an identity is left out, so
+/// it cannot make `age` refuse the machine key.
+fn identities_for_open() -> Vec<PathBuf> {
+    let own = identity_path();
+    let own_ok = read_identity(&own).is_some_and(|text| age_identity(&text));
+    let cloud = cloud_identity_path();
+    let cloud_ok = read_identity(&cloud).is_some_and(|text| age_identity(&text));
+    let mut ids = Vec::new();
+    // A valid machine key is used. A broken one is passed only when the
+    // cloud identity cannot stand in, so age still reports that key.
+    if own_ok || (own.is_file() && !cloud_ok) {
+        ids.push(own);
+    }
+    if cloud_ok {
+        ids.push(cloud);
+    }
+    ids
+}
+
+fn read_identity(path: &Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > 8192 {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
 /// The public key of this machine's identity, making the identity first when
 /// there is none. This is what goes into a scope's `recipients`.
 ///
@@ -161,9 +263,24 @@ pub fn public_key() -> Result<String> {
 pub fn scope_of_repo(root: &Path) -> Result<Option<Scope>> {
     let path = root.join(".ljos").join("sync.toml");
     match std::fs::read_to_string(&path) {
-        Ok(text) => Ok(Some(
-            toml::from_str(&text).with_context(|| path.display().to_string())?,
-        )),
+        Ok(text) => {
+            let scope: Scope = toml::from_str(&text).with_context(|| path.display().to_string())?;
+            if scope.scopes.contains_key(&scope.name) {
+                bail!(
+                    "{} repeats `{}` in [scopes]; keep the primary scope in `name` and `recipients`",
+                    path.display(),
+                    scope.name
+                );
+            }
+            if let Some(name) = scope.scopes.keys().find(|name| name.contains('+')) {
+                bail!(
+                    "{} names `{}` in [scopes], but `+` is reserved in log file names",
+                    path.display(),
+                    name
+                );
+            }
+            Ok(Some(scope))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| path.display().to_string()),
     }
@@ -226,6 +343,37 @@ fn log_dir(root: &Path) -> PathBuf {
     root.join(".ljos").join("atoms")
 }
 
+fn log_suffix(primary_scope: &str, scope_name: &str) -> String {
+    if scope_name == primary_scope {
+        String::new()
+    } else {
+        format!("+{scope_name}")
+    }
+}
+
+fn host_log_rels_for_scope(host: &str, primary_scope: &str, scope_name: &str) -> [String; 2] {
+    let suffix = log_suffix(primary_scope, scope_name);
+    [
+        format!(".ljos/atoms/{host}{suffix}.jsonl.age"),
+        format!(".ljos/atoms/{host}{suffix}.digest"),
+    ]
+}
+
+fn host_scope_from_log_path(path: &Path, scope: &Scope) -> Option<(String, String)> {
+    let name = path.file_name()?.to_str()?;
+    let stem = name.strip_suffix(".jsonl.age")?;
+    if let Some((host, scope_name)) = stem.rsplit_once('+') {
+        if host.is_empty() || scope_name.is_empty() {
+            return None;
+        }
+        if scope.scopes.contains_key(scope_name) {
+            return Some((host.to_string(), scope_name.to_string()));
+        }
+        return None;
+    }
+    Some((stem.to_string(), scope.name.clone()))
+}
+
 /// Seal `plain` to the recipients into `out`.
 fn seal(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
     if recipients.is_empty() {
@@ -258,13 +406,25 @@ fn seal(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Open a sealed log with this machine's identity; none when this machine
-/// is not one of its recipients.
+/// Open a sealed log with one identity file. None when that identity is
+/// not a recipient.
+#[cfg(test)]
 fn open(path: &Path, identity: &Path) -> Result<Option<String>> {
-    let out = Command::new("age")
-        .arg("-d")
-        .arg("-i")
-        .arg(identity)
+    open_identities(path, &[identity.to_path_buf()])
+}
+
+/// Open a sealed log with every identity in `identities`. None when none
+/// of them is a recipient.
+fn open_identities(path: &Path, identities: &[PathBuf]) -> Result<Option<String>> {
+    if identities.is_empty() {
+        return Ok(None);
+    }
+    let mut cmd = Command::new("age");
+    cmd.arg("-d");
+    for identity in identities {
+        cmd.arg("-i").arg(identity);
+    }
+    let out = cmd
         .arg(path)
         .stdin(Stdio::null())
         .output()
@@ -340,31 +500,61 @@ fn age_missing(err: &anyhow::Error) -> bool {
 /// The pack not answering, or age refusing to seal for a reason other than
 /// being absent.
 pub fn export(root: &Path, scope: &Scope, atoms: &[Value]) -> Result<String> {
+    export_for_scope(root, scope, &scope.name, atoms, &default_scope(&scope.name))
+}
+
+pub(crate) fn export_named(
+    root: &Path,
+    scope: &Scope,
+    scope_name: &str,
+    atoms: &[Value],
+) -> Result<String> {
+    export_for_scope(root, scope, scope_name, atoms, &default_scope(&scope.name))
+}
+
+fn export_for_scope(
+    root: &Path,
+    scope: &Scope,
+    scope_name: &str,
+    atoms: &[Value],
+    default: &str,
+) -> Result<String> {
+    let Some(recipients) = scope.recipients_for(scope_name) else {
+        bail!("sync: scope `{scope_name}` is not named in .ljos/sync.toml");
+    };
+    export_named_scope(root, &scope.name, scope_name, recipients, atoms, default)
+}
+
+fn export_named_scope(
+    root: &Path,
+    primary_scope: &str,
+    scope_name: &str,
+    recipients: &[String],
+    atoms: &[Value],
+    default: &str,
+) -> Result<String> {
     let host = host();
-    let plain = log_plaintext(atoms, &scope.name, &default_scope(&scope.name));
+    let plain = log_plaintext(atoms, scope_name, default);
     let count = plain.lines().count();
-    let dir = log_dir(root);
-    std::fs::create_dir_all(&dir)?;
-    let stamp = dir.join(format!("{host}.digest"));
+    std::fs::create_dir_all(log_dir(root))?;
+    let [log_rel, digest_rel] = host_log_rels_for_scope(&host, primary_scope, scope_name);
+    let log = root.join(&log_rel);
+    let stamp = root.join(&digest_rel);
     let digest = format!(
         "{} {}\n",
         crate::work_id(&plain),
-        crate::work_id(&scope.recipients.join(","))
+        crate::work_id(&recipients.join(","))
     );
     if std::fs::read_to_string(&stamp).is_ok_and(|d| d == digest) {
         return Ok(format!(
             "sync: {count} {} atoms unchanged since the last export\n",
-            scope.name
+            scope_name
         ));
     }
     if !age_on_path() {
         return Ok(age_missing_line());
     }
-    if let Err(err) = seal(
-        &plain,
-        &scope.recipients,
-        &dir.join(format!("{host}.jsonl.age")),
-    ) {
+    if let Err(err) = seal(&plain, recipients, &log) {
         if age_missing(&err) {
             return Ok(age_missing_line());
         }
@@ -372,11 +562,34 @@ pub fn export(root: &Path, scope: &Scope, atoms: &[Value]) -> Result<String> {
     }
     std::fs::write(&stamp, digest)?;
     Ok(format!(
-        "sync: exported {count} {} atoms to .ljos/atoms/{host}.jsonl.age, sealed to {} recipient{}\n",
-        scope.name,
-        scope.recipients.len(),
-        if scope.recipients.len() == 1 { "" } else { "s" }
+        "sync: exported {count} {} atoms to {log_rel}, sealed to {} recipient{}\n",
+        scope_name,
+        recipients.len(),
+        if recipients.len() == 1 { "" } else { "s" }
     ))
+}
+
+fn export_all(root: &Path, scope: &Scope, atoms: &[Value]) -> Result<String> {
+    if !age_on_path() {
+        return Ok(age_missing_line());
+    }
+    let default = default_scope(&scope.name);
+    let mut out = String::new();
+    for named_scope in scope.all_scopes() {
+        let said = export_named_scope(
+            root,
+            &scope.name,
+            named_scope.name,
+            named_scope.recipients,
+            atoms,
+            &default,
+        )?;
+        if said == age_missing_line() {
+            return Ok(said);
+        }
+        out.push_str(&said);
+    }
+    Ok(out)
 }
 
 /// What one host's log asks of this pack: the atoms to post, and the texts
@@ -439,6 +652,16 @@ pub fn incoming(
     before: &BTreeSet<String>,
     held: &BTreeSet<String>,
 ) -> Incoming {
+    incoming_with_sender(plain, &sender_entity(host), before, held)
+}
+
+#[must_use]
+fn incoming_with_sender(
+    plain: &str,
+    sender: &str,
+    before: &BTreeSet<String>,
+    held: &BTreeSet<String>,
+) -> Incoming {
     let mut post = Vec::new();
     let mut now = BTreeSet::new();
     for line in plain.lines().filter(|l| !l.trim().is_empty()) {
@@ -460,9 +683,8 @@ pub fn incoming(
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            let tag = sender_entity(host);
-            if !entities.iter().any(|e| e.as_str() == Some(tag.as_str())) {
-                entities.push(Value::String(tag));
+            if !entities.iter().any(|e| e.as_str() == Some(sender)) {
+                entities.push(Value::String(sender.to_string()));
             }
             map.insert("entities".into(), Value::Array(entities));
             map.insert(
@@ -501,6 +723,14 @@ fn write_taken(scope: &str, host: &str, plain: &str) -> Result<()> {
     Ok(())
 }
 
+fn sender_entity_for_scope(host: &str, scope: &Scope, scope_name: &str) -> String {
+    if scope_name == scope.name {
+        sender_entity(host)
+    } else {
+        format!("sync:{host}+{scope_name}")
+    }
+}
+
 /// Import every other machine's log of the repository's scope into this
 /// seat's pack. Returns one line per host.
 ///
@@ -509,8 +739,8 @@ fn write_taken(scope: &str, host: &str, plain: &str) -> Result<()> {
 /// The pack not answering, or a log this machine should open failing to.
 pub fn import(root: &Path, scope: &Scope) -> Result<String> {
     let me = host();
-    let identity = identity_path();
-    if !identity.exists() {
+    let identities = identities_for_open();
+    if identities.is_empty() {
         return Ok("sync: no age identity on this machine; `ljos sync --key` makes one\n".into());
     }
     let dir = log_dir(root);
@@ -526,26 +756,23 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
         .collect();
     paths.sort();
     for path in paths {
-        let host = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|n| n.strip_suffix(".jsonl.age"))
-            .unwrap_or("")
-            .to_string();
+        let Some((host, scope_name)) = host_scope_from_log_path(&path, scope) else {
+            continue;
+        };
         if host.is_empty() || host == me {
             continue;
         }
-        let Some(plain) = open(&path, &identity)? else {
+        let Some(plain) = open_identities(&path, &identities)? else {
             out.push_str(&format!(
                 "sync: {host}'s {} log is not sealed to this machine\n",
-                scope.name
+                scope_name
             ));
             continue;
         };
         let workspace = client.workspace();
+        let sender = sender_entity_for_scope(&host, scope, &scope_name);
         // The pack names a posted atom afresh, so a text already taken
         // from this host would be held twice; what is held is skipped.
-        let tag = sender_entity(&host);
         let held: BTreeSet<String> = crate::atoms_lean(&client, &workspace)?
             .iter()
             .filter(|a| {
@@ -553,11 +780,11 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .any(|e| e.as_str() == Some(tag.as_str()))
+                    .any(|e| e.as_str() == Some(sender.as_str()))
             })
             .filter_map(|a| a["text"].as_str().map(crate::work_id))
             .collect();
-        let got = incoming(&plain, &host, &read_taken(&scope.name, &host), &held);
+        let got = incoming_with_sender(&plain, &sender, &read_taken(&scope_name, &host), &held);
         let (mut kept, mut refused) = (0usize, 0usize);
         for mut atom in got.post {
             if let Some(map) = atom.as_object_mut() {
@@ -576,7 +803,7 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .any(|e| e.as_str() == Some(tag.as_str()));
+                    .any(|e| e.as_str() == Some(sender.as_str()));
                 if from_host && got.retired.contains(&crate::work_id(text)) {
                     if let Some(id) = atom["id"].as_str() {
                         if crate::packset_forget(id, None).is_ok() {
@@ -586,10 +813,10 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
                 }
             }
         }
-        write_taken(&scope.name, &host, &plain)?;
+        write_taken(&scope_name, &host, &plain)?;
         out.push_str(&format!(
             "sync: {host}: {kept} {} atoms taken, {refused} refused, {retired} retired\n",
-            scope.name
+            scope_name
         ));
     }
     Ok(out)
@@ -615,8 +842,8 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, push: bool) -> Result<S
     if gone == me {
         bail!("sync: {gone} is this machine; pass a gone host");
     }
-    let identity = identity_path();
-    if !identity.exists() {
+    let identities = identities_for_open();
+    if identities.is_empty() {
         return Ok("sync: no age identity on this machine; `ljos sync --key` makes one\n".into());
     }
     let [gone_log, gone_digest] = host_log_rels(gone);
@@ -627,7 +854,7 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, push: bool) -> Result<S
             scope.name
         ));
     }
-    let Some(plain) = open(&log_path, &identity)? else {
+    let Some(plain) = open_identities(&log_path, &identities)? else {
         return Ok(format!(
             "sync: {gone}'s {} log is not sealed to this machine\n",
             scope.name
@@ -767,6 +994,25 @@ fn commit_if_sealed(root: &Path, scope: &str, exported: &str, push: bool) -> Str
     commit_log(root, scope, push)
 }
 
+fn any_scope_log_file(root: &Path, scope: &Scope, host: &str) -> bool {
+    scope.all_scopes().into_iter().any(|named_scope| {
+        let [log_rel, _] = host_log_rels_for_scope(host, &scope.name, named_scope.name);
+        root.join(log_rel).is_file()
+    })
+}
+
+fn commit_if_sealed_scopes(root: &Path, scope: &Scope, exported: &str, push: bool) -> String {
+    let me = host();
+    if exported.contains("age is not installed") && !any_scope_log_file(root, scope, &me) {
+        return if push {
+            String::new()
+        } else {
+            kept_local(root)
+        };
+    }
+    commit_logs(root, scope, push)
+}
+
 /// The line finish prints when commit-only mode leaves the branch here.
 fn kept_local(root: &Path) -> String {
     if commits_to_push(root) {
@@ -887,6 +1133,26 @@ fn commit_log(root: &Path, scope: &str, push: bool) -> String {
     commit_files(root, &[&files[0], &files[1]], &message, push)
 }
 
+fn commit_logs(root: &Path, scope: &Scope, push: bool) -> String {
+    let me = host();
+    let refs: Vec<String> = scope
+        .all_scopes()
+        .into_iter()
+        .flat_map(|named_scope| host_log_rels_for_scope(&me, &scope.name, named_scope.name))
+        .filter(|rel| stageable_path(root, rel))
+        .collect();
+    if refs.is_empty() {
+        return if push {
+            push_pending(root)
+        } else {
+            kept_local(root)
+        };
+    }
+    let files: Vec<&str> = refs.iter().map(String::as_str).collect();
+    let message = format!("chore(sync): {me} {} atoms", scope.name);
+    commit_files(root, &files, &message, push)
+}
+
 /// Fetch every remote and fast-forward to each one that is ahead. Machines
 /// that push to different remotes of one tracker then read each other's
 /// logs whenever the history is linear; a real divergence stays for the
@@ -952,6 +1218,143 @@ pub fn sync_repo(pull_import: bool, export_log: bool) -> Result<String> {
 /// As [`sync_repo`].
 pub fn sync_repo_in_passing(pull_import: bool, export_log: bool) -> Result<String> {
     sync_repos(pull_import, export_log, false)
+}
+
+/// Export this machine's sealed log and push it.
+///
+/// A wake in push mode does this before it fires. The letter is already
+/// written, and the send has already returned: a refusal is for the wake
+/// log, not an error the send should grow. A tracker with no scope has
+/// nothing to push, and that is not a refusal.
+///
+/// # Errors
+///
+/// The pack did not answer, age refused to seal, or the commit or the
+/// push was refused. The message is the line the wake log stores.
+pub(crate) fn push_sealed_log() -> Result<()> {
+    let said = sync_repo_in_passing(false, true)?;
+    if let Some(why) = said.lines().map(str::trim).find(|line| {
+        line.contains("push refused")
+            || line.contains("commit refused")
+            || line.contains("no remote is configured")
+    }) {
+        bail!("{why}");
+    }
+    Ok(())
+}
+
+/// The commit at `HEAD` whose tree holds this machine's sealed log.
+///
+/// A wake in push mode reads this after the push and puts it on the
+/// envelope. A refused push still leaves the commit here, and the next
+/// push sends it. `None` when no tracker checkout holds the log.
+pub(crate) fn log_commit() -> Option<String> {
+    let spec = format!("HEAD:.ljos/atoms/{}.jsonl.age", host());
+    for root in &configured_roots() {
+        let Some(out) = git(root, &["rev-parse", "HEAD"]).ok() else {
+            continue;
+        };
+        if !out.status.success() {
+            continue;
+        }
+        let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if sha.is_empty() {
+            continue;
+        }
+        if git(root, &["cat-file", "-e", &spec]).is_ok_and(|o| o.status.success()) {
+            return Some(sha);
+        }
+    }
+    None
+}
+
+/// Tracker checkouts this machine shares. Named repos, or the tracker
+/// root when none are named. A missing tracker is no checkouts.
+fn configured_roots() -> Vec<PathBuf> {
+    let listed = local().repos;
+    if listed.is_empty() {
+        tracker_root().ok().into_iter().collect()
+    } else {
+        listed.iter().map(|r| expand(r)).collect()
+    }
+}
+
+fn has_remote(root: &Path) -> bool {
+    git(root, &["remote"])
+        .ok()
+        .filter(|out| out.status.success())
+        .is_some_and(|out| !String::from_utf8_lossy(&out.stdout).trim().is_empty())
+}
+
+fn hex_commit(commit: &str) -> bool {
+    (7..=64).contains(&commit.len()) && commit.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn is_ancestor(root: &Path, commit: &str) -> bool {
+    git(root, &["merge-base", "--is-ancestor", commit, "HEAD"]).is_ok_and(|o| o.status.success())
+}
+
+/// Bring `commit` into `HEAD` when a fetched tip already has it.
+///
+/// A commit the remote does not have is named, and the caller still
+/// imports the remote head. A fetch that already failed is not named
+/// twice.
+fn note_commit(root: &Path, commit: &str, fetched: bool) -> String {
+    let spec = format!("{commit}^{{commit}}");
+    let present = git(root, &["cat-file", "-e", &spec]).is_ok_and(|o| o.status.success());
+    if !present {
+        return if fetched {
+            format!("sync: {commit} is not on the remote; imported the remote head\n")
+        } else {
+            String::new()
+        };
+    }
+    if is_ancestor(root, commit) {
+        return String::new();
+    }
+    let _held = crate::tracker_commit_lock(root);
+    let forwarded =
+        git(root, &["merge", "-q", "--ff-only", commit]).is_ok_and(|o| o.status.success());
+    if forwarded && is_ancestor(root, commit) {
+        return String::new();
+    }
+    format!("sync: {commit} is not in this checkout; imported the remote head\n")
+}
+
+/// Fetch the tracker and import its sealed logs for `ljos inbox --sync`.
+///
+/// `commit` asks that this checkout contain that commit. Absent, or empty,
+/// the remote head is enough. A commit the remote does not have imports
+/// the remote head and says so. A checkout with no remote is left alone,
+/// and that is not an error. The returned lines are notes for stderr.
+///
+/// # Errors
+///
+/// `commit` is not 7 to 64 hex digits, a scope file does not parse, or
+/// the import fails. A fetch that fails is a note, not an error.
+pub(crate) fn fetch_for_inbox(commit: Option<&str>) -> Result<String> {
+    let commit = commit.map(str::trim).filter(|name| !name.is_empty());
+    if let Some(commit) = commit {
+        if !hex_commit(commit) {
+            bail!("sync: {commit} is not a commit");
+        }
+    }
+    let mut out = String::new();
+    for root in configured_roots() {
+        if !has_remote(&root) {
+            continue;
+        }
+        let fetched = catch_up(&root);
+        let fetched_ok = !fetched.contains("fetch failed");
+        out.push_str(&fetched);
+        if let Some(commit) = commit {
+            out.push_str(&note_commit(&root, commit, fetched_ok));
+        }
+        if let Some(scope) = scope_of_repo(&root)? {
+            out.push_str(&import(&root, &scope)?);
+        }
+    }
+    Ok(out)
 }
 
 fn sync_roots() -> Result<Vec<PathBuf>> {
@@ -1082,14 +1485,25 @@ fn sync_one(root: &Path, pull_import: bool, export_log: bool, asked: bool) -> Re
     if export_log {
         let client = crate::pack()?;
         let atoms = crate::atoms_lean(&client, &client.workspace())?;
-        let said = export(&root, &scope, &atoms)?;
-        out.push_str(&said);
-        out.push_str(&commit_if_sealed(
-            &root,
-            &scope.name,
-            &said,
-            mode == TrackerGit::Push,
-        ));
+        if scope.scopes.is_empty() {
+            let said = export(&root, &scope, &atoms)?;
+            out.push_str(&said);
+            out.push_str(&commit_if_sealed(
+                &root,
+                &scope.name,
+                &said,
+                mode == TrackerGit::Push,
+            ));
+        } else {
+            let said = export_all(&root, &scope, &atoms)?;
+            out.push_str(&said);
+            out.push_str(&commit_if_sealed_scopes(
+                &root,
+                &scope,
+                &said,
+                mode == TrackerGit::Push,
+            ));
+        }
     }
     Ok(out)
 }
@@ -1423,7 +1837,7 @@ fn plain_rules_rel(name: &str) -> String {
 
 /// Rows of every sealed user-rule file this machine can open, and how many
 /// it could not: sealed to other machines, or `age` missing.
-fn sealed_rows(root: &Path, identity: &Path) -> (Vec<crate::user_rules::UserRule>, usize) {
+fn sealed_rows(root: &Path) -> (Vec<crate::user_rules::UserRule>, usize) {
     let dir = root.join(".ljos").join("user-rules");
     let Ok(read) = std::fs::read_dir(&dir) else {
         return (Vec::new(), 0);
@@ -1434,13 +1848,14 @@ fn sealed_rows(root: &Path, identity: &Path) -> (Vec<crate::user_rules::UserRule
         .filter(|path| path.to_string_lossy().ends_with(".json.age"))
         .collect();
     paths.sort();
+    let identities = identities_for_open();
     let mut rows = Vec::new();
     let mut closed = 0;
     for path in paths {
-        let opened = if identity.exists() {
-            open(&path, identity).ok().flatten()
-        } else {
+        let opened = if identities.is_empty() {
             None
+        } else {
+            open_identities(&path, &identities).ok().flatten()
         };
         match opened.and_then(|text| crate::user_rules::parse_rules(&text).ok()) {
             Some(parsed) => rows.extend(parsed),
@@ -1548,11 +1963,10 @@ pub fn exchange_user_rules(
     if !looks_like_git(root) {
         bail!("sync: user rules: {} is not a git checkout", root.display());
     }
-    let identity = identity_path();
     let mode = tracker_git(asked);
     let scope = scope_of_repo(root)?;
     let Some(scope) = scope.filter(|_| mode != TrackerGit::Off) else {
-        let (mut rows, _) = sealed_rows(root, &identity);
+        let (mut rows, _) = sealed_rows(root);
         rows.extend(repo_rows(root));
         let merged = merge_into_local(rows)?;
         if !asked {
@@ -1573,7 +1987,7 @@ pub fn exchange_user_rules(
     if remote {
         integrate_remote(root, deadline)?;
     }
-    let (mut rows, closed) = sealed_rows(root, &identity);
+    let (mut rows, closed) = sealed_rows(root);
     rows.extend(repo_rows(root));
     let merged = merge_into_local(rows)?;
     let mut out = String::new();
@@ -2077,6 +2491,96 @@ mod tests {
     }
 
     #[test]
+    fn a_scope_file_may_name_additional_scopes() {
+        let scope: Scope = toml::from_str(
+            "name = \"grokbot\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = [\"age1cloud\"]\n",
+        )
+        .unwrap();
+        let grokbot: Vec<&str> = scope
+            .recipients_for("grokbot")
+            .unwrap()
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let cloud: Vec<&str> = scope
+            .recipients_for("cloud")
+            .unwrap()
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(grokbot, vec!["age1box"]);
+        assert_eq!(cloud, vec!["age1cloud"]);
+        assert!(scope.recipients_for("missing").is_none());
+        let names: Vec<&str> = scope
+            .all_scopes()
+            .into_iter()
+            .map(|named| named.name)
+            .collect();
+        assert_eq!(names, vec!["grokbot", "cloud"]);
+    }
+
+    #[test]
+    fn a_grokbot_atom_never_lands_in_the_cloud_file() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        let fake_age = dir.path().join("age");
+        std::fs::write(
+            &fake_age,
+            "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -o) out=\"$2\"; shift 2 ;;\n    -r) shift 2 ;;\n    *) shift ;;\n  esac\ndone\ncat > \"$out\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_age, std::fs::Permissions::from_mode(0o755)).unwrap();
+        struct PathGuard(Option<std::ffi::OsString>);
+        impl Drop for PathGuard {
+            fn drop(&mut self) {
+                // SAFETY: this test holds the process env lock.
+                unsafe {
+                    if let Some(value) = &self.0 {
+                        std::env::set_var("PATH", value);
+                    } else {
+                        std::env::remove_var("PATH");
+                    }
+                }
+            }
+        }
+        let before = std::env::var_os("PATH");
+        let mut entries = vec![dir.path().to_path_buf()];
+        if let Some(old) = &before {
+            entries.extend(std::env::split_paths(old));
+        }
+        let joined = std::env::join_paths(entries).unwrap();
+        // SAFETY: this test holds the process env lock.
+        unsafe { std::env::set_var("PATH", &joined) };
+        let _guard = PathGuard(before);
+        let scope: Scope = toml::from_str(
+            "name = \"grokbot\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = [\"age1cloud\"]\n",
+        )
+        .unwrap();
+        let atoms = vec![
+            atom("a", "box only", &["scope:grokbot"]),
+            atom("b", "cloud only", &["scope:cloud"]),
+        ];
+        export_for_scope(dir.path(), &scope, "grokbot", &atoms, "grokbot").unwrap();
+        export_for_scope(dir.path(), &scope, "cloud", &atoms, "grokbot").unwrap();
+        let host = host();
+        let [cloud_rel, _] = host_log_rels_for_scope(&host, &scope.name, "cloud");
+        let cloud_text = std::fs::read_to_string(dir.path().join(cloud_rel)).unwrap();
+        assert!(
+            cloud_text.contains("cloud only"),
+            "cloud file lost the cloud atom: {cloud_text}"
+        );
+        assert!(
+            !cloud_text.contains("box only"),
+            "cloud file leaked a grokbot atom: {cloud_text}"
+        );
+        let [grok_rel, _] = host_log_rels_for_scope(&host, &scope.name, "grokbot");
+        let grok_text = std::fs::read_to_string(dir.path().join(grok_rel)).unwrap();
+        assert!(grok_text.contains("box only"), "{grok_text}");
+        assert!(!grok_text.contains("cloud only"), "{grok_text}");
+    }
+
+    #[test]
     fn an_import_tags_the_sender_and_names_what_it_retired() {
         let plain = format!(
             "{}\n{}\n",
@@ -2178,5 +2682,121 @@ mod tests {
             "personal"
         );
         assert_eq!(atom_scope(&atom("a", "t", &["seat:x"]), "surf"), "surf");
+    }
+
+    #[test]
+    fn inbox_sync_refuses_a_name_that_is_not_a_commit() {
+        let err = fetch_for_inbox(Some("nope")).unwrap_err();
+        assert_eq!(err.to_string(), "sync: nope is not a commit");
+    }
+
+    #[test]
+    fn an_age_identity_file_is_one_secret_line() {
+        let line = format!("AGE-SECRET-KEY-1{}", "Q".repeat(58));
+        let file = format!("# created: 2021-01-02T15:30:45Z\n# public key: age1example\n{line}\n");
+        assert!(age_identity(&file));
+        assert!(!age_identity(
+            "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p\n"
+        ));
+        assert!(!age_identity(&line.to_lowercase()));
+        assert!(!age_identity("AGE-SECRET-KEY-1\n"));
+        assert!(!age_identity("# only a comment\n"));
+        assert!(!age_identity(&format!("{line}\nnot a key\n")));
+        assert!(!age_identity(&format!("{line}\0\n")));
+    }
+
+    #[test]
+    fn the_cloud_identity_opens_a_log_without_a_machine_key() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        std::env::set_var("HOME", dir.path().join("home"));
+        let cloud = cloud_identity_path();
+        assert!(
+            cloud.starts_with(dir.path()),
+            "cloud identity left the test directory: {}",
+            cloud.display()
+        );
+        std::fs::create_dir_all(cloud.parent().unwrap()).unwrap();
+        let made = Command::new("age-keygen")
+            .arg("-o")
+            .arg(&cloud)
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "age-keygen must be installed: {}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        let public = Command::new("age-keygen")
+            .arg("-y")
+            .arg(&cloud)
+            .output()
+            .unwrap();
+        assert!(public.status.success());
+        let public = String::from_utf8_lossy(&public.stdout).trim().to_string();
+        assert!(!identity_path().exists(), "the machine key was invented");
+        let sealed = dir.path().join("cloud.jsonl.age");
+        seal("{\"text\":\"from cloud\"}\n", &[public], &sealed).unwrap();
+        assert_eq!(
+            open_identities(&sealed, &identities_for_open())
+                .unwrap()
+                .as_deref(),
+            Some("{\"text\":\"from cloud\"}\n")
+        );
+
+        let other = dir.path().join("other.key");
+        let made = Command::new("age-keygen")
+            .arg("-o")
+            .arg(&other)
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        let other_public = Command::new("age-keygen")
+            .arg("-y")
+            .arg(&other)
+            .output()
+            .unwrap();
+        let other_public = String::from_utf8_lossy(&other_public.stdout)
+            .trim()
+            .to_string();
+        let closed = dir.path().join("closed.jsonl.age");
+        seal("nope\n", &[other_public], &closed).unwrap();
+        assert_eq!(
+            open_identities(&closed, &identities_for_open()).unwrap(),
+            None
+        );
+
+        let own = identity_path();
+        let made = Command::new("age-keygen")
+            .arg("-o")
+            .arg(&own)
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        assert_eq!(
+            open_identities(&sealed, &identities_for_open())
+                .unwrap()
+                .as_deref(),
+            Some("{\"text\":\"from cloud\"}\n"),
+            "the machine key must not hide the cloud identity"
+        );
+    }
+
+    #[test]
+    fn a_broken_cloud_file_is_not_passed_to_age() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        let own = identity_path();
+        std::fs::create_dir_all(own.parent().unwrap()).unwrap();
+        let made = Command::new("age-keygen")
+            .arg("-o")
+            .arg(&own)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "age-keygen must be installed");
+        std::fs::write(cloud_identity_path(), "not a key\n").unwrap();
+        assert_eq!(identities_for_open(), vec![own]);
     }
 }

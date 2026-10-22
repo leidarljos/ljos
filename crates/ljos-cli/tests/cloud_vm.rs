@@ -2,6 +2,8 @@
 //! stand in for two cloud VMs. Nothing here talks to GitHub.
 
 use std::fs;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
@@ -453,6 +455,242 @@ fn cloud_up_writes_custom_ljos_bin_dir_into_shell_profiles() {
     assert!(line_at < guard_at, "{bashrc}");
 }
 
+#[test]
+fn cloud_up_wakes_box_seats_with_keys_passed_by_name() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let config = home.join(".config");
+    let rel = root.path().join("rel");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(config.join("ljos")).unwrap();
+    let names = ["ljos", "ljos-mcp", "ljos-policyd"];
+    for name in names {
+        executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
+    }
+    fs::write(rel.join("SHA256SUMS"), sums(&rel, &names)).unwrap();
+    let wakes = config.join("ljos/wake.toml");
+    fs::write(&wakes, "[claude-review]\ncommand = \"true\"\n").unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", &config);
+    std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::remove_var("LJOS_BIN_DIR");
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    clear_agent_ids();
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("LJOS_WAKE_") {
+            std::env::remove_var(&key);
+        }
+    }
+    let hook = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/hook",
+        hook.local_addr().unwrap().port()
+    );
+    std::env::set_var("LJOS_WAKE_INKY_URL", &url);
+    std::env::set_var("LJOS_WAKE_INKY_KEY", "inky-sender-key");
+    std::env::set_var(
+        "LJOS_WAKE_GROK_BOT_URL",
+        "https://api2.cursor.sh/automations/webhook/grok",
+    );
+    std::env::set_var("LJOS_WAKE_PLAIN_URL", "http://example.com/hook");
+
+    let said = ljos_cli::cloud::up(false).unwrap();
+    assert!(
+        said.contains(
+            "wake inky: posts to LJOS_WAKE_INKY_URL with the key in LJOS_WAKE_INKY_KEY\n"
+        ),
+        "{said}"
+    );
+    assert!(
+        said.contains("wake grok-bot: posts to LJOS_WAKE_GROK_BOT_URL with the key in LJOS_WAKE_GROK_BOT_KEY, which is unset now"),
+        "{said}"
+    );
+    assert!(
+        said.contains("wake plain: LJOS_WAKE_PLAIN_URL is not https"),
+        "{said}"
+    );
+    assert!(!said.contains(&url), "{said}");
+    assert!(!said.contains("inky-sender-key"), "{said}");
+    let text = fs::read_to_string(&wakes).unwrap();
+    assert!(!text.contains("inky-sender-key"), "{text}");
+    assert!(!text.contains("key_file"), "{text}");
+    let table = ljos_cli::wake::load();
+    assert_eq!(table["inky"].webhook.as_deref(), Some(url.as_str()));
+    assert_eq!(table["inky"].key_env.as_deref(), Some("LJOS_WAKE_INKY_KEY"));
+    assert_eq!(
+        table["grok-bot"].key_env.as_deref(),
+        Some("LJOS_WAKE_GROK_BOT_KEY")
+    );
+    assert!(!table.contains_key("plain"), "{text}");
+    assert_eq!(table["claude-review"].command.as_deref(), Some("true"));
+    ljos_cli::cloud::up(false).unwrap();
+    assert_eq!(fs::read_to_string(&wakes).unwrap(), text);
+
+    let heard = std::thread::spawn(move || {
+        let (conn, _) = hook.accept().unwrap();
+        let mut reader = BufReader::new(conn);
+        let mut head = String::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line.trim().is_empty() {
+                break;
+            }
+            head.push_str(&line);
+        }
+        let len = head
+            .lines()
+            .find_map(|l| {
+                l.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .map(|n| n.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or(0);
+        let mut body = vec![0; len];
+        reader.read_exact(&mut body).unwrap();
+        reader
+            .get_mut()
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        head
+    });
+    let fired = ljos_cli::wake::fire(&ljos_cli::wake::Event {
+        seat: "inky".into(),
+        from: "vm-seat".into(),
+        msg: "m1".into(),
+        ..ljos_cli::wake::Event::default()
+    })
+    .unwrap();
+    assert!(fired.contains("posted, 200"), "{fired}");
+    let head = heard.join().unwrap().to_ascii_lowercase();
+    assert!(
+        head.contains("authorization: bearer inky-sender-key"),
+        "{head}"
+    );
+}
+
+#[test]
+fn cloud_up_refuses_a_seat_collision_and_keeps_a_hand_set_wake() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let config = home.join(".config");
+    let rel = root.path().join("rel");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(config.join("ljos")).unwrap();
+    for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
+    }
+    fs::write(
+        rel.join("SHA256SUMS"),
+        sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
+    )
+    .unwrap();
+    let wakes = config.join("ljos/wake.toml");
+    fs::write(
+        &wakes,
+        "\
+[claude-review]
+command = \"true\"
+
+[inky]
+webhook = \"https://old.example/hook\"
+key_env = \"LJOS_WAKE_INKY_KEY\"
+source = \"env\"
+
+[saddle]
+webhook = \"https://kept.example/hook\"
+key_env = \"SADDLE_HAND_KEY\"
+",
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", &config);
+    std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::remove_var("LJOS_BIN_DIR");
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    clear_agent_ids();
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("LJOS_WAKE_") {
+            std::env::remove_var(&key);
+        }
+    }
+    let inky = "https://api2.cursor.sh/automations/webhook/inky";
+    std::env::set_var("LJOS_WAKE_INKY_URL", inky);
+    std::env::set_var("LJOS_WAKE_INKY_KEY", "inky-sender-key");
+    std::env::set_var(
+        "LJOS_WAKE_GROK_BOT_URL",
+        "https://api2.cursor.sh/automations/webhook/grok-a",
+    );
+    std::env::set_var(
+        "LJOS_WAKE_GROK-BOT_URL",
+        "https://api2.cursor.sh/automations/webhook/grok-b",
+    );
+    std::env::set_var(
+        "LJOS_WAKE_SADDLE_URL",
+        "https://api2.cursor.sh/automations/webhook/saddle",
+    );
+    std::env::set_var(
+        "LJOS_WAKE_EVIL_URL",
+        "http://localhost.attacker.invalid/hook",
+    );
+
+    let said = ljos_cli::cloud::up(false).unwrap();
+    assert!(
+        said.contains(
+            "wake inky: posts to LJOS_WAKE_INKY_URL with the key in LJOS_WAKE_INKY_KEY\n"
+        ),
+        "{said}"
+    );
+    assert!(
+        said.contains("wake grok-bot: LJOS_WAKE_GROK-BOT_URL and LJOS_WAKE_GROK_BOT_URL name the same seat, so no wake was written"),
+        "{said}"
+    );
+    assert!(
+        said.contains(
+            "wake saddle: left the wake cloud up did not write; LJOS_WAKE_SADDLE_URL did not replace it"
+        ),
+        "{said}"
+    );
+    assert!(
+        said.contains(
+            "wake evil: LJOS_WAKE_EVIL_URL is not https, nor http on this machine, so no wake was written"
+        ),
+        "{said}"
+    );
+    assert!(!said.contains("localhost.attacker.invalid"), "{said}");
+    assert!(!said.contains("inky-sender-key"), "{said}");
+    assert!(!said.contains("api2.cursor.sh"), "{said}");
+    let table = ljos_cli::wake::load();
+    assert_eq!(table["inky"].webhook.as_deref(), Some(inky));
+    assert_eq!(table["inky"].source.as_deref(), Some("env"));
+    assert_eq!(table["inky"].key_env.as_deref(), Some("LJOS_WAKE_INKY_KEY"));
+    assert_eq!(
+        table["saddle"].webhook.as_deref(),
+        Some("https://kept.example/hook")
+    );
+    assert_eq!(table["saddle"].key_env.as_deref(), Some("SADDLE_HAND_KEY"));
+    assert!(table["saddle"].source.is_none(), "{table:?}");
+    assert_eq!(table["claude-review"].command.as_deref(), Some("true"));
+    assert!(!table.contains_key("grok-bot"), "{table:?}");
+    assert!(!table.contains_key("evil"), "{table:?}");
+    let text = fs::read_to_string(&wakes).unwrap();
+    assert!(!text.contains("inky-sender-key"), "{text}");
+    ljos_cli::cloud::up(false).unwrap();
+    assert_eq!(fs::read_to_string(&wakes).unwrap(), text);
+}
+
 /// A seat home in `root` with a release `ljos cloud up` can install, the
 /// guard on, and git off the person's config. Returns the home.
 fn seat_env(root: &Path) -> PathBuf {
@@ -821,6 +1059,196 @@ fn cloud_guard_allows_pushes_that_leave_cursor_refs_alone() {
     ] {
         allowed(&line, elsewhere);
     }
+}
+
+#[test]
+fn cloud_up_writes_the_scope_cloud_identity_from_a_named_secret() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let rel = root.path().join("rel");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
+    }
+    fs::write(
+        rel.join("SHA256SUMS"),
+        sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::remove_var("LJOS_BIN_DIR");
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    clear_agent_ids();
+    std::env::remove_var("LJOS_CLOUD_AGE_SECRET");
+    std::env::remove_var("LJOS_CLOUD_AGE_KEY");
+
+    let bare = ljos_cli::cloud::up(false).unwrap();
+    assert!(bare.contains("LJOS_CLOUD_AGE_SECRET is unset"), "{bare}");
+    let path = ljos_cli::sync::cloud_identity_path();
+    assert!(
+        path.starts_with(&home),
+        "identity left the test home: {}",
+        path.display()
+    );
+    assert!(
+        !path.exists(),
+        "an unset secret still wrote {}",
+        path.display()
+    );
+    let unset = ljos_cli::cloud::cloud_age_row();
+    assert_eq!(ljos_cli::doctor_word(&unset), "info");
+    assert!(ljos_cli::failing(std::slice::from_ref(&unset)).is_empty());
+
+    let made = Command::new("age-keygen")
+        .arg("-o")
+        .arg(root.path().join("id.txt"))
+        .output()
+        .unwrap();
+    assert!(
+        made.status.success(),
+        "age-keygen must be installed: {}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    let identity = fs::read_to_string(root.path().join("id.txt")).unwrap();
+    let secret_line = identity
+        .lines()
+        .find(|line| line.starts_with("AGE-SECRET-KEY-"))
+        .unwrap()
+        .to_string();
+    let public = Command::new("age-keygen")
+        .arg("-y")
+        .arg(root.path().join("id.txt"))
+        .output()
+        .unwrap();
+    assert!(public.status.success());
+    let public = String::from_utf8_lossy(&public.stdout).trim().to_string();
+
+    std::env::set_var("LJOS_CLOUD_AGE_SECRET", &identity);
+    let pasted = ljos_cli::cloud::up(false).unwrap_err().to_string();
+    assert!(pasted.contains("holds an age identity"), "{pasted}");
+    assert!(!pasted.contains(&secret_line), "{pasted}");
+    assert!(!path.exists());
+
+    std::env::set_var("LJOS_CLOUD_AGE_SECRET", "LJOS_CLOUD_AGE_KEY");
+    let missing = ljos_cli::cloud::up(false).unwrap_err().to_string();
+    assert!(missing.contains("LJOS_CLOUD_AGE_KEY is unset"), "{missing}");
+    let row = ljos_cli::cloud::cloud_age_row();
+    assert!(!row.ok, "{row:?}");
+    assert_eq!(ljos_cli::doctor_word(&row), "no");
+    assert!(row.state.contains("LJOS_CLOUD_AGE_KEY"), "{row:?}");
+    assert!(!row.state.contains(&secret_line), "{row:?}");
+    assert_eq!(
+        ljos_cli::failing(std::slice::from_ref(&row)),
+        vec!["cloud age"]
+    );
+
+    std::env::set_var("LJOS_CLOUD_AGE_KEY", "nope");
+    let bad = ljos_cli::cloud::up(false).unwrap_err().to_string();
+    assert!(bad.contains("is not an age identity"), "{bad}");
+    assert!(!path.exists());
+
+    let outside = root.path().join("outside");
+    fs::write(&outside, b"keep\n").unwrap();
+    std::os::unix::fs::symlink(&outside, &path).unwrap();
+    std::env::set_var("LJOS_CLOUD_AGE_KEY", &identity);
+    let wrote = ljos_cli::cloud::up(false).unwrap();
+    assert!(wrote.contains("wrote"), "{wrote}");
+    assert!(wrote.contains("0600"), "{wrote}");
+    assert!(!wrote.contains(&secret_line), "{wrote}");
+    assert_eq!(fs::read(&outside).unwrap(), b"keep\n");
+    let meta = fs::symlink_metadata(&path).unwrap();
+    assert!(meta.file_type().is_file(), "the symlink was followed");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    let stored = fs::read_to_string(&path).unwrap();
+    assert!(stored.contains(&secret_line));
+    assert!(!home.join(".config/ljos/age.key").exists());
+    let env = fs::read_to_string(home.join(".config/ljos/env")).unwrap();
+    let mcp = fs::read_to_string(home.join(".cursor/mcp.json")).unwrap();
+    assert!(!env.contains("AGE-SECRET-KEY-"), "{env}");
+    assert!(!mcp.contains("AGE-SECRET-KEY-"), "{mcp}");
+    assert!(!env.contains("cloud.age"), "{env}");
+
+    let sealed = root.path().join("msg.age");
+    let mut child = Command::new("age")
+        .args(["-r", &public, "-o"])
+        .arg(&sealed)
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"scope cloud\n")
+        .unwrap();
+    let done = child.wait_with_output().unwrap();
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+    let opened = Command::new("age")
+        .args(["-d", "-i"])
+        .arg(&path)
+        .arg(&sealed)
+        .output()
+        .unwrap();
+    assert!(
+        opened.status.success(),
+        "{}",
+        String::from_utf8_lossy(&opened.stderr)
+    );
+    assert_eq!(opened.stdout, b"scope cloud\n");
+
+    let good = ljos_cli::cloud::cloud_age_row();
+    assert!(good.ok, "{good:?}");
+    assert_eq!(ljos_cli::doctor_word(&good), "ok");
+    assert!(good.state.contains("0600"), "{good:?}");
+    assert!(!good.state.contains(&secret_line), "{good:?}");
+    assert!(ljos_cli::failing(&[good]).is_empty());
+
+    let bytes = fs::read(&path).unwrap();
+    let again = ljos_cli::cloud::up(false).unwrap();
+    assert!(again.contains("already holds"), "{again}");
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    let loose = ljos_cli::cloud::cloud_age_row();
+    assert!(!loose.ok, "{loose:?}");
+    assert_eq!(ljos_cli::doctor_word(&loose), "no");
+    assert!(loose.state.contains("0644"), "{loose:?}");
+    assert_eq!(ljos_cli::failing(&[loose]), vec!["cloud age"]);
+    let fixed = ljos_cli::cloud::up(false).unwrap();
+    assert!(fixed.contains("mode 0600"), "{fixed}");
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(
+        fs::symlink_metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    std::env::set_var("LJOS_CLOUD_AGE_KEY", "nope");
+    let refused = ljos_cli::cloud::up(false).unwrap_err().to_string();
+    assert!(refused.contains("is not an age identity"), "{refused}");
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+
+    std::env::remove_var("LJOS_CLOUD_AGE_SECRET");
+    std::env::remove_var("LJOS_CLOUD_AGE_KEY");
+    let left = ljos_cli::cloud::up(false).unwrap();
+    assert!(left.contains("is unset"), "{left}");
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    let still = ljos_cli::cloud::cloud_age_row();
+    assert!(still.ok, "{still:?}");
+    assert_eq!(ljos_cli::doctor_word(&still), "ok");
 }
 
 #[test]
@@ -1718,4 +2146,170 @@ fn a_signed_handover_is_not_signed_again_by_the_machine_key() {
     assert_eq!(used.trim(), seat_key.display().to_string());
     assert_ne!(used.trim(), host.display().to_string());
     assert_eq!(fs::read(&host).unwrap(), vec![8u8; 32]);
+}
+
+/// Pin `seat`'s key in a commit dated long before slots began, as the
+/// seats a tracker held before then were pinned, and push it.
+fn pin_standing(repo: &Path, seat: &str) -> String {
+    let path = ljos_cli::cloud::prepare_seat_key(seat).unwrap();
+    let key = ljos_cli::ballot_sig::load_or_create(&path).unwrap();
+    let (public, _) = ljos_cli::ballot_sig::signed_hex(&key, b"pin");
+    let pins = repo.join(".ljos-seat-keys");
+    let mut text = fs::read_to_string(&pins).unwrap_or_default();
+    text.push_str(&format!("{seat} {public}\n"));
+    fs::write(&pins, text).unwrap();
+    git(repo, &["add", ".ljos-seat-keys"]);
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["commit", "-q", "-m", &format!("pin {seat}")])
+        .env("GIT_AUTHOR_DATE", "@1700000000 +0000")
+        .env("GIT_COMMITTER_DATE", "@1700000000 +0000")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    git(repo, &["push", "-q", "origin", "HEAD"]);
+    public
+}
+
+/// A box clone whose seat `ljosbot` is pinned from before slots began,
+/// over an origin holding `issues` on one board.
+fn slot_world(root: &Path, issues: &[&str]) -> (PathBuf, PathBuf) {
+    isolate_git(root);
+    clear_agent_ids();
+    std::env::set_var("LJOS_TRACKER_GIT", "push");
+    std::env::set_var("LJOS_ORG_DRIVER", "false");
+    std::env::set_var("HOME", root.join("home"));
+    std::env::set_var("XDG_RUNTIME_DIR", root.join("run"));
+    std::env::set_var("XDG_DATA_HOME", root.join("box-data"));
+    fs::create_dir_all(root.join("run")).unwrap();
+    let origin = init_bare(root);
+    let blocks: Vec<String> = issues
+        .iter()
+        .map(|id| issue_block(id, "TODO", "", &[]))
+        .collect();
+    seed(root, &origin, &board(&blocks));
+    let box_repo = clone_of(root, &origin, "box");
+    std::env::set_var("VISSUE_ROOT", &box_repo);
+    std::env::set_var("ISSUE_ROOT", &box_repo);
+    std::env::set_var("LJOS_SEAT", "ljosbot");
+    std::env::set_var("VISSUE_AGENT", "ljosbot");
+    (origin, box_repo)
+}
+
+#[test]
+fn a_launcher_slots_the_seat_its_run_takes() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (origin, box_repo) = slot_world(root.path(), &["probe-slot"]);
+    let err = ljos_cli::slot::write("probe-slot", "ridley-review", "grok-4", "cafebabe0001abcd")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("ljosbot has no pinned key"), "{err}");
+
+    let public = pin_standing(&box_repo, "ljosbot");
+    let said =
+        ljos_cli::slot::write("probe-slot", "ridley-review", "grok-4", "cafebabe0001abcd").unwrap();
+    let pushed = ljos_cli::persist_tracker("probe-slot", "slotted");
+    assert!(pushed.contains("pushed"), "{pushed}");
+
+    std::env::set_var("CURSOR_AGENT_ID", "cafebabe0001abcd");
+    std::env::set_var("LJOS_SEAT", "ridley-review");
+    let run_seat = ljos_cli::cloud::default_seat();
+    std::env::remove_var("CURSOR_AGENT_ID");
+    std::env::set_var("LJOS_SEAT", "ljosbot");
+    assert!(
+        said.contains(&format!("slot: {run_seat} on probe-slot")),
+        "{said}"
+    );
+    let text = show(&origin, "Software/probe/issues.org");
+    let note = text
+        .lines()
+        .find_map(|line| line.split('"').find(|part| part.starts_with("slot: ")))
+        .unwrap_or_else(|| panic!("no slot on the remote: {text}"));
+    let slot = ljos_cli::slot::parse(note).unwrap();
+    assert_eq!(slot.seat, run_seat);
+    assert_eq!(slot.model, "grok-4");
+    assert_eq!(slot.run, "cafebabe0001abcd");
+    assert_eq!(slot.launcher, "ljosbot");
+    assert_eq!(slot.key, public);
+    assert!(ljos_cli::slot::verifies("probe-slot", &slot));
+
+    let pins = box_repo.join(".ljos-seat-keys");
+    let mut text = fs::read_to_string(&pins).unwrap();
+    text.push_str(&format!("ridley-taken-cafebabe0001abcd {public}\n"));
+    fs::write(&pins, text).unwrap();
+    let err = ljos_cli::slot::write("probe-slot", "ridley-taken", "grok-4", "cafebabe0001abcd")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("is already pinned"), "{err}");
+    let err = ljos_cli::slot::write("probe-slot", "ljosbot", "grok-4", "ljosbot")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("does not slot itself"), "{err}");
+}
+
+#[test]
+fn a_run_ballot_counts_for_a_push_under_its_slot_and_not_without_one() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (origin, box_repo) = slot_world(root.path(), &["probe-slot", "probe-bare"]);
+    pin_standing(&box_repo, "ljosbot");
+    ljos_cli::slot::write("probe-slot", "ridley-review", "grok-4", "cafebabe0001abcd").unwrap();
+    let pushed = ljos_cli::persist_tracker("probe-slot", "slotted");
+    assert!(pushed.contains("pushed"), "{pushed}");
+
+    let vm = clone_of(root.path(), &origin, "vm");
+    std::env::set_var("VISSUE_ROOT", &vm);
+    std::env::set_var("ISSUE_ROOT", &vm);
+    std::env::set_var("XDG_DATA_HOME", root.path().join("vm-data"));
+    let seat = ljos_cli::cloud::run_seat("ridley-review", "cafebabe0001abcd");
+    std::env::set_var("LJOS_SEAT", &seat);
+    std::env::set_var("VISSUE_AGENT", &seat);
+    let layout = vissue_core::Layout::resolve(None, None).unwrap();
+    for issue in ["probe-slot", "probe-bare"] {
+        vissue_core::ops::vote_with(&layout, issue, Some("ship"), &seat, Some("none"), None)
+            .unwrap();
+        let signed = ljos_cli::ballot_sig::sign_own_ballot(issue).unwrap();
+        assert!(signed.contains("ballot signed"), "{signed}");
+        let pushed = ljos_cli::persist_tracker(issue, "voted");
+        assert!(pushed.contains("pushed"), "{pushed}");
+    }
+
+    git(&box_repo, &["pull", "-q", "--ff-only"]);
+    std::env::set_var("VISSUE_ROOT", &box_repo);
+    std::env::set_var("ISSUE_ROOT", &box_repo);
+    std::env::set_var("LJOS_SEAT", "ljosbot");
+    std::env::set_var("VISSUE_AGENT", "ljosbot");
+    let rows = [serde_json::json!({"agent": seat, "choice": "ship"})];
+    let personas = std::collections::BTreeSet::new();
+    let slotted = ljos_cli::check_seat_signatures("probe-slot", &rows, &personas);
+    assert_eq!(slotted, Ok(Vec::new()));
+    let bare = ljos_cli::check_seat_signatures("probe-bare", &rows, &personas).unwrap_err();
+    assert!(
+        bare.contains(&format!(
+            "{seat} was first pinned after slots began, and no slot on probe-bare names it"
+        )),
+        "{bare}"
+    );
+
+    std::env::set_var("LJOS_SEAT", "inky");
+    std::env::set_var("VISSUE_AGENT", "inky");
+    let key = ljos_cli::cloud::prepare_seat_key("inky").unwrap();
+    let key = ljos_cli::ballot_sig::load_or_create(&key).unwrap();
+    let (public, _) = ljos_cli::ballot_sig::signed_hex(&key, b"pin");
+    let pins = box_repo.join(".ljos-seat-keys");
+    let text = fs::read_to_string(&pins).unwrap() + &format!("inky {public}\n");
+    fs::write(&pins, text).unwrap();
+    git(
+        &box_repo,
+        &["commit", "-q", "-m", "pin inky", ".ljos-seat-keys"],
+    );
+    let err = ljos_cli::slot::write("probe-bare", "ridley-review", "grok-4", "feedface0002abcd")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("inky was first pinned after slots began"),
+        "{err}"
+    );
 }
