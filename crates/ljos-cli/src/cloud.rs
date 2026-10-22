@@ -3,10 +3,13 @@
 //! `ljos cloud up` installs the release binaries into `~/.local/bin`,
 //! checks the published SHA-256 sums, puts that directory on PATH, writes
 //! the harness MCP command as `ljos-mcp`, clones `LJOS_TRACKER_REMOTE`, and
-//! writes a webhook wake for each `LJOS_WAKE_<SEAT>_URL`. When
+//! writes a webhook wake for each `LJOS_WAKE_<SEAT>_URL`. Entries this
+//! command writes are marked `source = "env"`; any other wake stays. When
 //! `LJOS_CLOUD_AGE_SECRET` names an environment variable, it writes that
-//! variable's age identity for scope `cloud` to a mode 0600 file. A later
-//! boot with the binaries already installed only refreshes the clone.
+//! variable's age identity for scope `cloud` to a mode 0600 file. On a
+//! cloud VM it also installs the release's `packset-embed` and the ONNX
+//! Runtime it links. A later boot with the binaries already installed only
+//! refreshes the clone.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -30,6 +33,12 @@ const OPTIONAL_BINS: &[&str] = &[
 ];
 const INSTALL_URL: &str = "https://github.com/leidarljos/ljos/releases/latest/download/install.sh";
 const CLOUD_GUARD_RULES_FILE: &str = "cloud-guard-rules.json";
+/// The release workflow's encoder archives, the runtime before the binary
+/// that links it. Each unpacks into the prefix above the binary directory.
+const ENCODER_ARCHIVES: &[&str] = &["onnxruntime", "packset-embed"];
+/// Where the encoder's rpath, `$ORIGIN/../lib/onnxruntime`, finds the runtime.
+const ENCODER_LIB: &str = "lib/onnxruntime";
+const ENCODER_SONAME: &str = "libonnxruntime.so.1";
 
 /// Names the environment variable that holds the age identity for scope
 /// `cloud`. The value is an identity file as `age-keygen` writes it, not a
@@ -54,6 +63,7 @@ pub fn up(force: bool) -> Result<String> {
     let bin_dir = bin_dir(&home);
     let mut lines = Vec::new();
     lines.push(ensure_binaries(&bin_dir, force)?);
+    lines.push(ensure_encoder(&bin_dir, force)?);
     // The config names a bare `ljos-mcp`. The directory has to be on PATH
     // before anything reads that file, including a later step in this process.
     lines.push(ensure_process_path(&bin_dir));
@@ -934,6 +944,173 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(hash.to_ascii_lowercase())
 }
 
+/// `packset-embed` and the ONNX Runtime it links, from this version's
+/// release, on a cloud VM only. Elsewhere the encoder is built from source.
+/// A release without them leaves search lexical. Both sums are checked
+/// before either archive is unpacked.
+fn ensure_encoder(bin_dir: &Path, force: bool) -> Result<String> {
+    if !cloud_vm() {
+        return Ok("encoder: not a cloud VM, so packset-embed is not downloaded".into());
+    }
+    let Some(target) = encoder_target() else {
+        return Ok(format!(
+            "encoder: no release build of packset-embed for {}-{}; search stays lexical",
+            std::env::consts::ARCH,
+            std::env::consts::OS
+        ));
+    };
+    let lib = bin_dir
+        .parent()
+        .context("cloud up: the binary directory has no parent for lib/")?
+        .join(ENCODER_LIB);
+    let bin = bin_dir.join("packset-embed");
+    if !force && executable(&bin) && lib.join(ENCODER_SONAME).is_file() {
+        return Ok(format!(
+            "encoder: packset-embed already in {}",
+            bin_dir.display()
+        ));
+    }
+    let parent = lib.parent().context("cloud up: no lib directory")?;
+    let stage = parent.join(format!(".onnxruntime-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&stage);
+    fs::create_dir_all(&stage).with_context(|| format!("create {}", stage.display()))?;
+    let said = install_encoder(&stage, target, bin_dir, &lib);
+    let _ = fs::remove_dir_all(&stage);
+    said
+}
+
+fn install_encoder(stage: &Path, target: &str, bin_dir: &Path, lib: &Path) -> Result<String> {
+    let mut archives = Vec::new();
+    for base in ENCODER_ARCHIVES {
+        let name = format!("{base}-{target}.tar.gz");
+        let file = stage.join(&name);
+        let sums = stage.join(format!("{name}.sha256"));
+        match release_asset(&name, &file) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(format!(
+                    "encoder: {} has no {name}; search stays lexical",
+                    release_source()
+                ))
+            }
+            Err(e) => return Ok(format!("encoder: {e}; search stays lexical")),
+        }
+        match release_asset(&format!("{name}.sha256"), &sums) {
+            Ok(true) => {}
+            Ok(false) => bail!("{name} has no published checksum; nothing was installed"),
+            Err(e) => return Ok(format!("encoder: {e}; nothing was installed")),
+        }
+        let want = crate::upgrade::digest_of(&fs::read_to_string(&sums)?).with_context(|| {
+            format!("{name}.sha256 is not a sha256 line; nothing was installed")
+        })?;
+        let got = sha256_file(&file)?;
+        if got != want {
+            bail!(
+                "{name}: checksum mismatch (published {want}, file {got}); nothing was installed"
+            );
+        }
+        archives.push(file);
+    }
+    let tree = stage.join("tree");
+    fs::create_dir_all(&tree)?;
+    for file in &archives {
+        let out = Command::new("tar")
+            .arg("-xzf")
+            .arg(file)
+            .arg("-C")
+            .arg(&tree)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .context("tar")?;
+        if !out.status.success() {
+            bail!(
+                "tar {}: {}; nothing was installed",
+                file.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    }
+    let new_lib = tree.join(ENCODER_LIB);
+    let new_bin = tree.join("bin/packset-embed");
+    if !new_lib.join(ENCODER_SONAME).is_file() || !new_bin.is_file() {
+        bail!("the encoder archives lack bin/packset-embed or {ENCODER_LIB}/{ENCODER_SONAME}; nothing was installed");
+    }
+    // A running encoder keeps the files it opened; the new ones are renamed in.
+    let old = stage.join("old");
+    if lib.exists() {
+        fs::rename(lib, &old).with_context(|| format!("move {} aside", lib.display()))?;
+    }
+    if let Err(e) = fs::rename(&new_lib, lib) {
+        let _ = fs::rename(&old, lib);
+        return Err(e).with_context(|| format!("install {}", lib.display()));
+    }
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&new_bin, fs::Permissions::from_mode(0o755))?;
+    fs::create_dir_all(bin_dir)?;
+    let bin = bin_dir.join("packset-embed");
+    fs::rename(&new_bin, &bin).with_context(|| format!("install {}", bin.display()))?;
+    Ok(format!(
+        "encoder: installed {} and ONNX Runtime in {} (checksums match)",
+        bin.display(),
+        lib.display()
+    ))
+}
+
+/// A cloud VM. A CI job is not one, and the box and a laptop build
+/// packset-embed from source.
+fn cloud_vm() -> bool {
+    if github_actions() {
+        return false;
+    }
+    nonempty_var("CURSOR_AGENT_ID").is_some()
+        || nonempty_var("CLOUD_AGENT_ID").is_some()
+        || Path::new("/run/cursor/api.sock").exists()
+}
+
+fn encoder_target() -> Option<&'static str> {
+    match (std::env::consts::ARCH, std::env::consts::OS) {
+        ("x86_64", "linux") => Some("x86_64-unknown-linux-gnu"),
+        _ => None,
+    }
+}
+
+fn release_source() -> String {
+    match std::env::var_os("LJOS_RELEASE_DIR").filter(|p| !p.is_empty()) {
+        Some(dir) => Path::new(&dir).display().to_string(),
+        None => format!("release v{}", env!("CARGO_PKG_VERSION")),
+    }
+}
+
+/// An asset of this version's release into `to`, from `LJOS_RELEASE_DIR`
+/// when it is set. `Ok(false)` when the release has no such asset.
+fn release_asset(name: &str, to: &Path) -> Result<bool> {
+    if let Some(dir) = std::env::var_os("LJOS_RELEASE_DIR").filter(|p| !p.is_empty()) {
+        let src = Path::new(&dir).join(name);
+        if !src.is_file() {
+            return Ok(false);
+        }
+        fs::copy(&src, to).with_context(|| format!("copy {}", src.display()))?;
+        return Ok(true);
+    }
+    let url = format!(
+        "https://github.com/{}/releases/download/v{}/{name}",
+        crate::upgrade::RELEASE_REPO,
+        env!("CARGO_PKG_VERSION")
+    );
+    let resp = match ureq::get(&url).timeout(Duration::from_secs(300)).call() {
+        Ok(resp) => resp,
+        Err(ureq::Error::Status(404, _)) => return Ok(false),
+        Err(e) => bail!("{url}: {e}"),
+    };
+    let mut file = fs::File::create(to).with_context(|| format!("write {}", to.display()))?;
+    std::io::copy(
+        &mut std::io::Read::take(resp.into_reader(), 512 * 1024 * 1024),
+        &mut file,
+    )
+    .with_context(|| format!("read {url}"))?;
+    Ok(true)
+}
+
 fn run_installer(bin_dir: &Path) -> Result<()> {
     let script = installer_script()?;
     let mut cmd = Command::new("sh");
@@ -1188,45 +1365,109 @@ fn write_env(path: &Path, pairs: &[(&str, String)]) -> Result<()> {
     Ok(())
 }
 
+/// One `LJOS_WAKE_<SEAT>_URL` read from the environment.
+struct WakeVar {
+    name: String,
+    mid: String,
+    url: String,
+}
+
 /// A webhook wake for each `LJOS_WAKE_<SEAT>_URL`, keyed by the variable
 /// `LJOS_WAKE_<SEAT>_KEY`. The launcher passes the key by name, so it is
 /// read when the wake fires and never written down. `GROK_BOT` is the seat
 /// `grok-bot`. The lines name the variables and not the URL.
+///
+/// Two variables whose names slug to one seat are refused, and the line
+/// names both. An entry without `source = "env"` was not written by this
+/// command and is left in place. Entries this command wrote are written
+/// again.
 fn ensure_wakes() -> Result<Vec<String>> {
-    let vars: BTreeMap<String, String> = std::env::vars_os()
-        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
-        .collect();
+    let existing = crate::wake::load();
     let mut lines = Vec::new();
-    for (name, url) in &vars {
-        let Some(mid) = name
-            .strip_prefix("LJOS_WAKE_")
-            .and_then(|rest| rest.strip_suffix("_URL"))
-        else {
-            continue;
-        };
-        let url = url.trim();
-        if url.is_empty() || !mid.bytes().any(|b| b.is_ascii_alphanumeric()) {
+    for (seat, group) in wake_vars_by_seat() {
+        if group.len() > 1 {
+            lines.push(collision_line(&seat, &group));
             continue;
         }
-        let seat = crate::seat_slug(mid);
-        if crate::wake::check_webhook(url).is_err() {
+        let one = &group[0];
+        if crate::wake::check_webhook(&one.url).is_err() {
             lines.push(format!(
-                "wake {seat}: {name} is not https, nor http on this machine, so no wake was written"
+                "wake {seat}: {} is not https, nor http on this machine, so no wake was written",
+                one.name
             ));
             continue;
         }
-        let key_env = format!("LJOS_WAKE_{mid}_KEY");
-        crate::wake::set_webhook(&seat, url, None, Some(&key_env))?;
+        let hand_set = existing
+            .get(&seat)
+            .is_some_and(|wake| wake.source.as_deref() != Some(crate::wake::ENV_SOURCE));
+        if hand_set {
+            lines.push(format!(
+                "wake {seat}: left the wake cloud up did not write; {} did not replace it",
+                one.name
+            ));
+            continue;
+        }
+        let key_env = format!("LJOS_WAKE_{}_KEY", one.mid);
+        crate::wake::set_env_webhook(&seat, &one.url, &key_env)?;
         let unset = if nonempty_var(&key_env).is_some() {
             ""
         } else {
             ", which is unset now"
         };
         lines.push(format!(
-            "wake {seat}: posts to {name} with the key in {key_env}{unset}"
+            "wake {seat}: posts to {} with the key in {key_env}{unset}",
+            one.name
         ));
     }
     Ok(lines)
+}
+
+fn wake_vars_by_seat() -> BTreeMap<String, Vec<WakeVar>> {
+    let vars: BTreeMap<String, String> = std::env::vars_os()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+        .collect();
+    let mut by_seat: BTreeMap<String, Vec<WakeVar>> = BTreeMap::new();
+    for (name, value) in vars {
+        let Some(mid) = name
+            .strip_prefix("LJOS_WAKE_")
+            .and_then(|rest| rest.strip_suffix("_URL"))
+        else {
+            continue;
+        };
+        let url = value.trim();
+        if url.is_empty() || !mid.bytes().any(|b| b.is_ascii_alphanumeric()) {
+            continue;
+        }
+        let seat = crate::seat_slug(mid);
+        by_seat.entry(seat).or_default().push(WakeVar {
+            mid: mid.to_string(),
+            url: url.to_string(),
+            name,
+        });
+    }
+    by_seat
+}
+
+fn collision_line(seat: &str, group: &[WakeVar]) -> String {
+    let mut names: Vec<&str> = group.iter().map(|var| var.name.as_str()).collect();
+    names.sort_unstable();
+    format!(
+        "wake {seat}: {} name the same seat, so no wake was written",
+        list_names(&names)
+    )
+}
+
+fn list_names(names: &[&str]) -> String {
+    let Some((last, rest)) = names.split_last() else {
+        return String::new();
+    };
+    if rest.is_empty() {
+        return (*last).to_string();
+    }
+    let mut line = rest.join(", ");
+    line.push_str(" and ");
+    line.push_str(last);
+    line
 }
 
 fn ensure_profile(home: &Path, bin_dir: &Path) -> Result<String> {
@@ -1237,7 +1478,15 @@ fn ensure_profile(home: &Path, bin_dir: &Path) -> Result<String> {
     Ok(notes.join("; "))
 }
 
-fn ensure_cloud_guard_rules() -> Result<String> {
+/// Whether this machine is a cloud seat: `ljos cloud up` wrote the guard
+/// file, and the file still holds the refusals that command writes. A box
+/// that never ran it has no such file, so finish exports no deeds.
+#[must_use]
+pub(crate) fn cloud_seat() -> bool {
+    cloud_guard_rules_path().is_some_and(|path| crate::kept_rules(&path) == cloud_guard_rules())
+}
+
+pub(crate) fn ensure_cloud_guard_rules() -> Result<String> {
     let path =
         cloud_guard_rules_path().context("cloud up: no config home for cloud guard rules")?;
     let wanted = cloud_guard_rules();
@@ -1745,10 +1994,7 @@ fn nonempty_var(key: &str) -> Option<String> {
 fn agent_id() -> Option<String> {
     // A GitHub Actions job is one run, including when a cloud-agent id is
     // also present in the environment. The run id is the suffix.
-    if std::env::var("GITHUB_ACTIONS").ok().is_some_and(|v| {
-        let v = v.trim();
-        !v.is_empty() && !matches!(v, "0" | "false")
-    }) {
+    if github_actions() {
         if let Some(id) = id_slug("GITHUB_RUN_ID") {
             return Some(id);
         }
@@ -1767,6 +2013,13 @@ fn agent_id() -> Option<String> {
         }
     }
     None
+}
+
+fn github_actions() -> bool {
+    std::env::var("GITHUB_ACTIONS").ok().is_some_and(|v| {
+        let v = v.trim();
+        !v.is_empty() && !matches!(v, "0" | "false")
+    })
 }
 
 fn id_slug(key: &str) -> Option<String> {
