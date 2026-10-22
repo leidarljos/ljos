@@ -41552,6 +41552,53 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(seat_guard("rm -rf /run/user/1000/ljos/approvals").is_some());
     }
 
+    /// The kept prompt makes a sentence the person's, so no tool call may
+    /// replace it: not by naming the runtime directory that holds it, not
+    /// by a relative name or a glob, and not through a file tool that
+    /// names its target `path`.
+    #[test]
+    fn the_kept_prompt_and_its_directory_are_guarded() {
+        let _g = env_guard();
+        let prev = std::env::var_os("XDG_RUNTIME_DIR");
+        // SAFETY: under env_guard, and restored below.
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000") };
+        for line in [
+            "mv /tmp/p /run/user/1000/ljos/latest-prompt",
+            "ln -sf /tmp/p $XDG_RUNTIME_DIR/ljos/latest-prompt.bind",
+            "touch -r /tmp/p ${XDG_RUNTIME_DIR}/ljos/latest-prompt",
+            "mv /run/user/1000/ljos /run/user/1000/ljos.old",
+            "rm -rf $XDG_RUNTIME_DIR/ljos/",
+            "ln -s /tmp/fake ${XDG_RUNTIME_DIR}/ljos",
+            "cd /run/user/1000/ljos && printf plant > latest-prompt",
+            "cp /tmp/bind ./latest-prompt.bind",
+            "cp /tmp/p $XDG_RUNTIME_DIR/ljos/latest-pr*",
+        ] {
+            assert!(seat_guard(line).is_some(), "allowed: {line}");
+        }
+        for line in [
+            "cat /run/user/1000/ljos/latest-prompt",
+            "ls $XDG_RUNTIME_DIR/ljos",
+            "cargo test -p ljos latest_prompt",
+            "git -C /home/u/src/ljos status",
+        ] {
+            assert!(seat_guard(line).is_none(), "refused: {line}");
+        }
+        let mcp = hook_call(
+            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__write_file","tool_input":{"path":"/run/user/1000/ljos/latest-prompt","content":"it's the person's words"}}"#,
+        );
+        assert!(seat_guard(&mcp.cue).is_some(), "allowed: {}", mcp.cue);
+        let read = hook_call(
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Grep","tool_input":{"path":"/run/user/1000/ljos","pattern":"x"}}"#,
+        );
+        assert!(seat_guard(&read.cue).is_none(), "refused: {}", read.cue);
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+        }
+    }
+
     #[test]
     fn the_seat_guards_its_own_law() {
         // The guard stands down when HOME is a temporary directory. Other tests
