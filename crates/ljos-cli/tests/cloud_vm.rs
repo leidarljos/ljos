@@ -1609,6 +1609,28 @@ fn cloud_guard_reads_where_bare_refspecs_land() {
 }
 
 #[test]
+fn cloud_guard_resolves_push_aliases_from_config_and_line_state() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-alias", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let repo = clone_of(root.path(), &origin, "probe-alias");
+
+    git(&repo, &["config", "--global", "alias.p", "push"]);
+
+    for line in [
+        "git p origin HEAD:cursor/alias-global",
+        "git -c 'alias.p=!git push' p origin HEAD:cursor/alias-shell",
+        "git config alias.p2 push && git p2 origin HEAD:cursor/alias-local",
+    ] {
+        refused(line, &repo);
+    }
+}
+
+#[test]
 fn cloud_guard_reads_the_gh_pr_verb_and_never_its_arguments() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
