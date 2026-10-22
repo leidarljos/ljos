@@ -599,8 +599,9 @@ pub fn preface() -> String {
 /// Whether the preface may state `rule` as the person's. A rule written
 /// as words is. A rule promoted from a lesson is only when this seat's pack
 /// stored that lesson as the person's. A pack that answers without the
-/// lesson has dropped it, and the rule with it; only a pack that does not
-/// answer leaves the origin kept on the row at promote time to decide.
+/// lesson has dropped it, and the rule with it. A pack that does not
+/// answer leaves its last answer in this process to decide, and only when
+/// it never answered, the origin kept on the row at promote time.
 fn persons_rule(rule: &UserRule) -> bool {
     let Some(id) = rule.from.as_deref() else {
         return true;
@@ -1421,6 +1422,108 @@ mod tests {
             !head.contains("Paste the key"),
             "a promoted agent lesson was in the preface: {head}"
         );
+    }
+
+    /// packsetd from PATH on a free port with its home under `home`; CI
+    /// builds it from packset develop.
+    fn packsetd(home: &std::path::Path) -> (std::process::Child, String) {
+        use std::io::{Read, Write};
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let dir = home.join("pack");
+        let mut child = std::process::Command::new("packsetd")
+            .args(["--port", &port.to_string()])
+            .arg("--home")
+            .arg(&dir)
+            .env("PACKSET_AUTH", "off")
+            .env("PACKSET_HOME", &dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("packsetd is not on PATH; CI builds it from packset develop");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            assert!(child.try_wait().unwrap().is_none(), "packsetd exited");
+            if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+                let _ = stream.write_all(b"GET /health HTTP/1.1\r\nConnection: close\r\n\r\n");
+                let mut said = String::new();
+                let _ = stream.read_to_string(&mut said);
+                if said.starts_with("HTTP/1.1 200") {
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "packsetd did not answer"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        (child, format!("http://127.0.0.1:{port}"))
+    }
+
+    /// One process, as the MCP server or a hook daemon is: a rule promoted
+    /// from the person's lesson is stated until the pack drops the lesson
+    /// (`why` names a retraction's deed), then not, and a pack that goes
+    /// down after does not bring it back.
+    fn a_dropped_lesson_stays_dropped(why: Option<&str>) {
+        let (_lock, dir) = isolated();
+        let (mut daemon, url) = packsetd(dir.path());
+        unsafe {
+            std::env::set_var("PACKSET_URL", &url);
+            std::env::set_var("PACKSET_WORKSPACE", "seat");
+        }
+        let client = packset_client::PacksetClient::new(url.as_str());
+        let stored = client
+            .post_atom(&serde_json::json!({
+                "workspace": "seat", "kind": "lesson",
+                "text": "Run the deploy form checks before every release.",
+                "origin": "user-declared", "source": {"basis": "person"},
+            }))
+            .unwrap();
+        let id = stored["id"].as_str().unwrap().to_string();
+        promote_atom(&stored, "fixture", &People::default(), &People::default()).unwrap();
+        assert!(preface().contains("deploy form checks"), "{}", preface());
+        assert_eq!(
+            super::super::stored_origin_of(&id),
+            super::super::Stored::Origin(super::super::StoredBy::Person)
+        );
+
+        client.delete_atom("seat", &id, why).unwrap();
+        let head = preface();
+        assert!(
+            !head.contains("deploy form checks"),
+            "a rule whose lesson the pack dropped was stated: {head}"
+        );
+        assert_eq!(
+            super::super::stored_origin_of(&id),
+            super::super::Stored::Absent
+        );
+
+        daemon.kill().unwrap();
+        daemon.wait().unwrap();
+        let head = preface();
+        assert!(
+            !head.contains("deploy form checks"),
+            "a pack that went down revived a dropped rule: {head}"
+        );
+        assert_eq!(
+            super::super::stored_origin_of(&id),
+            super::super::Stored::Absent
+        );
+    }
+
+    #[test]
+    fn a_deleted_lesson_is_not_stated_by_a_long_lived_reader() {
+        a_dropped_lesson_stays_dropped(None);
+    }
+
+    #[test]
+    fn a_retracted_lesson_is_not_stated_by_a_long_lived_reader() {
+        a_dropped_lesson_stays_dropped(Some("deed-patch-overlay"));
     }
 
     #[test]
