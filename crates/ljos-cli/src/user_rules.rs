@@ -347,6 +347,11 @@ pub fn write_preference(
     deny_mention: &People,
     deny_reply_to: &People,
 ) -> Result<UserRule> {
+    // A person typing the command is the words. Under a runner the words
+    // have to be in the prompt the hook kept, the same check MCP makes.
+    if super::under_a_runner() {
+        super::refuse_unless_person_words("prefer", text)?;
+    }
     let mut rule = fresh(text, reason, None)?;
     rule.deny_mention = clean_people(deny_mention)?;
     rule.deny_reply_to = clean_people(deny_reply_to)?;

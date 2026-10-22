@@ -99,13 +99,42 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
     std::fs::write(tracker.join("vissue.toml"), "seats = [\"saddle\"]\n").unwrap();
     let url = serve(Arc::new(Mutex::new(Vec::new())));
     let text = "Pin the review set before a release.";
-    let prompt_dir = home.path().join("ljos");
-    std::fs::create_dir_all(&prompt_dir).unwrap();
-    std::fs::write(
-        prompt_dir.join("latest-prompt"),
-        format!("Please remember this for next time: {text}"),
-    )
-    .unwrap();
+    let payload = serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "person-1",
+        "prompt": format!("Please remember this for next time: {text}"),
+    })
+    .to_string();
+    let mut noted = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .args(["hook"])
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("XDG_STATE_HOME", &state)
+        .env("XDG_RUNTIME_DIR", home.path())
+        .env("VISSUE_ROOT", &tracker)
+        .env("PACKSET_URL", &url)
+        .env("PACKSET_WORKSPACE", "seat")
+        .env("LJOS_CAPTURE", "save")
+        .env_remove("LJOS_UNATTENDED")
+        .env_remove("LJOS_OFF")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    noted
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    drop(noted.stdin.take());
+    let noted = noted.wait_with_output().unwrap();
+    assert!(
+        noted.status.success(),
+        "prompt hook failed: {}",
+        String::from_utf8_lossy(&noted.stderr)
+    );
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))

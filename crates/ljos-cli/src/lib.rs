@@ -9116,7 +9116,7 @@ pub fn limit_stop(input: &str, session: Option<&str>) -> Option<String> {
     Some(format!(
         "The usage limit is reached; record the work before the turn ends, in this order and \
          with nothing else: `ljos note {on} \"done: ...; left: ...\"`; `ljos file \"TITLE\"` for \
-         each item left{}; `ljos remember \"...\"` for each lesson that holds next time. Then \
+         each item left{}; `ljos note {on} \"lesson: ...\"` for a lesson of your own. Then \
          stop and tell the person the limit was reached, what is done and what is left.",
         if issue.is_some() {
             ""
@@ -9212,7 +9212,7 @@ pub fn work_nudge(call: &HookCall, subagent: bool) -> Option<String> {
         Some(issue) => format!(
             "{count} tool calls on {issue} since the seat last heard from this conversation. \
              Record what the work has shown: progress is `ljos note {issue} \"...\"`, a lesson \
-             that holds next time is `ljos remember \"...\"`, an artifact is `ljos deed {issue} \
+             of your own is `ljos note {issue} \"lesson: ...\"`, an artifact is `ljos deed {issue} \
              --add ACCESSION`; the work closes with `ljos finish {issue} --lesson \"...\"`."
         ),
         None => format!(
@@ -9398,8 +9398,8 @@ pub fn subagent_brief(kind: &str, issue: &str, decision: bool) -> String {
     format!(
         "You are a subagent ({kind}) working under {issue}, which your parent holds. Do not open a sitting \
          on it. Record on {issue} with `ljos vote {issue}` or `ljos note {issue}` even when the task \
-         does not name {issue}. {judge} A lesson that will hold next time is `ljos remember \"...\" --as ROLE`; a \
-         finding is `ljos note {issue} \"...\"`. ROLE is a persona from `ljos personas` when one fits \
+         does not name {issue}. {judge} A finding or a lesson of your own is `ljos note {issue} \"...\"`. \
+         ROLE is a persona from `ljos personas` when one fits \
          your task, else `{kind}`."
     )
 }
@@ -9426,8 +9426,8 @@ pub fn subagent_stop_reason(
     } else {
         format!(
             "You worked under {issue}. Before you stop: if your result settles a choice, \
-             `ljos vote {issue} --for OPTION --expect OPTION --as ROLE`; if it taught something that holds next time, \
-             `ljos remember \"...\" --as ROLE`. Otherwise stop."
+             `ljos vote {issue} --for OPTION --expect OPTION --as ROLE`; if it taught something to keep, \
+             `ljos note {issue} \"...\"`. Otherwise stop."
         )
     })
 }
@@ -12297,6 +12297,22 @@ pub fn packset_write_agent(
 /// hit, so recall can put the person's words ahead of an agent's.
 pub const SAID_ENTITY: &str = "via:prompt";
 
+/// Drop a claim that the words are the person's.
+///
+/// An import keeps kind and horizon. [`SAID_ENTITY`] and `source.basis`
+/// of `person` are that claim, and a peer must not supply them. Removing
+/// a basis that is already absent is a no-op, so a second pass is safe.
+pub(crate) fn strip_person_basis(atom: &mut Value) {
+    if let Some(entities) = atom.get_mut("entities").and_then(Value::as_array_mut) {
+        entities.retain(|entity| entity.as_str() != Some(SAID_ENTITY));
+    }
+    if atom.pointer("/source/basis").and_then(Value::as_str) == Some(Basis::Person.as_str()) {
+        if let Some(source) = atom.get_mut("source").and_then(Value::as_object_mut) {
+            source.remove("basis");
+        }
+    }
+}
+
 /// Who a claim written through MCP comes from, kept as `source.basis`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Basis {
@@ -12329,6 +12345,23 @@ impl Basis {
             Self::Agent
         }
     }
+}
+
+/// Refuse `text` unless it is the person's own words from their latest prompt.
+///
+/// User rules and the MCP prefer of them reach every prompt. A sentence the
+/// prompt hook did not keep is not those words.
+///
+/// # Errors
+///
+/// `text` is not in the person's latest prompt.
+pub fn refuse_unless_person_words(label: &str, text: &str) -> Result<()> {
+    if Basis::of(text) != Basis::Person {
+        bail!(
+            "{label}: the text is not in the person's latest prompt; only the person's own words can be stored here"
+        );
+    }
+    Ok(())
 }
 
 /// The atom an MCP `ljos_remember` or `ljos_prefer` posts, with its basis.
@@ -13072,7 +13105,8 @@ pub(crate) fn stamp_issue(atom: &mut Value, issue: &str) {
 /// A preference is a rule. A lesson is an episode until a recalled review
 /// or a consolidation promotes it, unless the caller said which it is.
 /// `ljos remember` typed by the person says standing; see
-/// [`remember_horizon`].
+/// [`remember_horizon`]. An agent's own remember is a note and carries
+/// no horizon tag.
 fn stamp_horizon(atom: &mut Value, kind: &str, _text: &str, force: Option<bool>) {
     let transient = match (kind, force) {
         ("preference", _) => false,
@@ -13087,26 +13121,37 @@ fn stamp_horizon(atom: &mut Value, kind: &str, _text: &str, force: Option<bool>)
     add_entities(atom, [tag.to_string()]);
 }
 
-/// The horizon `ljos remember` writes when neither `--transient` nor
-/// `--standing` is given: standing, whoever wrote it, like `prefer` and
-/// `rule`. Under an agent runner the lesson keeps origin `agent-derived`
-/// and its provenance, and `ljos memories review` prunes it later.
+/// The horizon `ljos remember` writes for the person: standing, unless
+/// `--transient`. Under a runner the result is transient. The remember
+/// command stores the agent's own words as a note instead of calling
+/// this, and the transient result keeps a leftover caller from stamping
+/// `horizon:standing` on text the person did not say. `--standing` does
+/// not override that.
 #[must_use]
 pub fn remember_horizon(transient: bool, standing: bool, under_runner: bool) -> Option<bool> {
-    // An agent's lesson stands when written, like the person's: no review
-    // gates it. `ljos memories review` keeps, edits or drops it afterwards.
-    let _ = (standing, under_runner);
-    Some(transient)
+    let _ = standing;
+    if transient || under_runner {
+        Some(true)
+    } else {
+        Some(false)
+    }
 }
 
 /// The line `ljos remember` prints after the write, saying when the hook
 /// shows the lesson.
 #[must_use]
 pub fn remember_note(body: &Value) -> &'static str {
-    let standing = body["entities"]
-        .as_array()
-        .is_some_and(|e| e.iter().any(|v| v == "horizon:standing"));
-    if standing {
+    let has = |tag: &str| {
+        body["entities"]
+            .as_array()
+            .is_some_and(|e| e.iter().any(|v| v == tag))
+    };
+    if body["kind"].as_str() == Some(packset_core::record::NOTE_KIND)
+        || (!has("horizon:standing") && !has("horizon:transient"))
+    {
+        return "unreviewed note: the prompt does not treat it as a fact";
+    }
+    if has("horizon:standing") {
         "standing: the hook shows it from the next prompt it bears on"
     } else {
         "episode: the hook shows it when a prompt bears on it, and `ljos due` with `ljos graded` promotes it to standing"
@@ -13115,6 +13160,74 @@ pub fn remember_note(body: &Value) -> &'static str {
 
 pub fn packset_write(label: &str, text: &str) -> Result<Value> {
     packset_write_as(label, text, None, None)
+}
+
+/// The preference `ljos prefer` writes.
+///
+/// Typed by the person, it is theirs. Under a runner the same person-words
+/// check as an MCP prefer applies: words from the latest prompt are stored
+/// as theirs, and any other text is agent-derived. The seat guard does not
+/// stop the verb, so the check is what keeps a planted sentence from
+/// becoming the person's words.
+///
+/// # Errors
+///
+/// An empty text, or the pack refusing the claim.
+/// An agent's `ljos remember` of words that are not the person's.
+///
+/// Stored as an unreviewed note: kind `note`, origin `agent-derived`,
+/// no horizon tag and no [`SAID_ENTITY`], so the prompt does not treat it
+/// as a fact. A pack that does not know kind `note` takes the same text as
+/// a `summary`, still agent-derived and untagged. Posted with the origin
+/// set, not through the agent writer that relabels soft prose as the
+/// person's.
+///
+/// # Errors
+///
+/// An empty text, or the pack refusing the note.
+pub fn packset_write_remember_note(text: &str, persona: Option<&str>) -> Result<Value> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        bail!("Remember: empty text is not a claim");
+    }
+    let client = pack()?;
+    let mut atom = atom_body(
+        packset_core::record::NOTE_KIND,
+        trimmed,
+        &client.workspace(),
+    );
+    atom["source"]["basis"] = Value::String(Basis::Agent.as_str().into());
+    let mut tags = vec![
+        format!("{NOTE_BASIS_ENTITY}agent"),
+        format!("{NOTE_SOURCE_ENTITY}ljos-remember"),
+    ];
+    if let Some(name) = persona.map(str::trim).filter(|n| !n.is_empty()) {
+        tags.push(persona_entity(name));
+        atom["set"] = Value::String(persona_set(name));
+    }
+    add_entities(&mut atom, tags);
+    admit::stamp_origin(&mut atom, admit::ORIGIN_AGENT);
+    let prefix = "Remember: POST /v1/atoms failed";
+    match with_writer(|| admit::post_kept(&client, &atom).map_err(|e| with_post_failure(prefix, e)))
+    {
+        Err(e) if note_kind_unknown(&e) => {
+            atom["kind"] = Value::String("summary".into());
+            with_writer(|| {
+                admit::post_kept(&client, &atom).map_err(|e| with_post_failure(prefix, e))
+            })
+        }
+        other => other,
+    }
+}
+
+pub fn packset_prefer(text: &str, persona: Option<&str>) -> Result<Value> {
+    if under_a_runner() {
+        if capture::said_in_latest_prompt(text) {
+            return packset_write_mcp("Prefer", text, persona, Some(false));
+        }
+        return packset_write_agent("Prefer", text, persona, Some(false));
+    }
+    packset_write_as("Prefer", text, persona, Some(false))
 }
 
 /// [`packset_write`] for a lesson learned on an issue: it carries an
@@ -15245,7 +15358,7 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
          --used none records that the ballot drew on no deed. \
          The line it prints is a count. `ljos consensus {issue}` is the settle. \
          Only the tracker is proof: your ballot is cast when `vissue vote {issue} --json` holds your row and `ljos vote` printed `recorded on the tracker`. Never report a ballot, claim or finish the tracker does not show. \
-         A lesson of your own goes in with `ljos remember --as {name} \"...\"`.\n",
+         A lesson of your own is `ljos note {issue} \"...\"`.\n",
         name = p.name,
     ));
     Ok(user_rules::prepend(out))
@@ -15798,8 +15911,8 @@ pub fn persona_ballot_task(brief: &str, persona: &str, issue: &str) -> String {
          (`ljos search \"...\"`). Write your reasoning in two or three sentences with \
          `ljos note {issue} \"{persona}: ...\"`, then cast \
          `ljos vote {issue} --for OPTION --expect OPTION --as {persona} --used none` (name the \
-         deeds you used instead of none). A lesson that will hold next time is \
-         `ljos remember \"...\" --as {persona}`. Do not open a sitting, change files or push."
+         deeds you used instead of none). A lesson of your own is \
+         `ljos note {issue} \"...\"`. Do not open a sitting, change files or push."
     )
 }
 
@@ -18768,6 +18881,10 @@ pub const SEAT_PATHS: &[&str] = &[
     "/.omp/agent/extensions/ljos.ts",
     "/ljos/approvals",
     "/ljos/approvals/",
+    // The prompt the hook kept, and the bind the gate checks. A plain
+    // write would make a sentence count as the person's words.
+    "/ljos/latest-prompt",
+    "/ljos/latest-prompt.bind",
 ];
 
 /// Whether a path names one of [`SEAT_PATHS`]; a backup beside a binary
@@ -22568,6 +22685,7 @@ pub fn receive(
                     Value::String(admit::ORIGIN_PEER.to_string()),
                 );
             }
+            strip_person_basis(&mut atom);
             match admit::post_kept(&client, &atom) {
                 Ok(_) => kept += 1,
                 Err(e) => refused.push(e.to_string()),
@@ -39651,10 +39769,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     #[test]
-    fn a_remember_stands_whoever_writes_it_and_an_episode_waits() {
+    fn a_persons_remember_stands_and_an_agents_does_not() {
         assert_eq!(remember_horizon(false, false, false), Some(false));
         assert_eq!(remember_horizon(true, false, false), Some(true));
-        assert_eq!(remember_horizon(false, true, true), Some(false));
+        assert_eq!(remember_horizon(false, true, true), Some(true));
         let mut person = atom_body("lesson", "Run the linter before the push.", "w");
         stamp_horizon(
             &mut person,
@@ -39664,8 +39782,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         );
         assert_eq!(
             remember_horizon(false, false, true),
-            Some(false),
-            "an agent's lesson stands at once"
+            Some(true),
+            "an agent's lesson does not stand"
         );
         let mut agent = atom_body("lesson", "Run the linter before the push.", "w");
         stamp_horizon(
@@ -40773,7 +40891,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(
             task.contains("ljos vote surf-ab12 --for OPTION --expect OPTION --as buildengineer ")
         );
-        assert!(task.contains("ljos remember"));
+        assert!(task.contains("ljos note"));
+        assert!(!task.contains("ljos remember"));
         assert!(task.contains("Do not open a sitting"));
         let p = Persona {
             name: "buildengineer".into(),
@@ -41480,6 +41599,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             seat_guard("cp ~/.local/bin/ljos /tmp/copy").is_some(),
             "a writer naming it is refused"
         );
+        assert!(seat_guard("printf x > /run/user/1000/ljos/latest-prompt").is_some());
+        assert!(seat_guard("printf x > /run/user/1000/ljos/latest-prompt.bind").is_some());
         assert!(seat_guard("ljos onboard --harness grok").is_none());
         assert!(seat_guard("cargo build --release").is_none());
         assert!(!is_seat_path("~/.local/bin/ljos.bak"));
