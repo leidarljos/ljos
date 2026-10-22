@@ -2657,6 +2657,20 @@ fn run_command() -> Result<()> {
             if on_tool {
                 let _ = ljos_cli::take_guard_note();
             }
+            // The tool shell does not exist yet. Record the session, cgroup
+            // and this hook's start time while the runner that spawned the
+            // guard is still the parent, so a later detach is still the call.
+            if call.event == "PreToolUse" {
+                match ljos_cli::proc_tree::hook_runner() {
+                    Ok((runner, _)) => {
+                        let _ = ljos_cli::proc_tree::note_tool_call(&runner);
+                    }
+                    Err(why) if why.contains("cannot be read") => {
+                        ljos_cli::proc_tree::seal_unreadable_tool_call();
+                    }
+                    Err(_) => {}
+                }
+            }
             let resolved = ljos_cli::command_directory(input.trim());
             let cwd = match &resolved {
                 Ok(dir) => Some(dir.clone()),
