@@ -369,10 +369,23 @@ fn stamp_basis(client: &packset_client::PacksetClient, atom: &Value) -> Result<S
     let new_id = copy_id(id);
     let held = post(client, "/v1/atoms", &copy)?;
     if id_of(&held) == Some(new_id.as_str()) || fetch(client, &new_id)?.is_some() {
-        confirm(client, id, &new_id)?;
+        confirm(client, atom, &new_id)?;
         retire(client, id)?;
         unjournal(id);
         return Ok(new_id);
+    }
+    // With the original gone the pack answers the copy with any other
+    // live record that makes the same claim, so one must not exist.
+    let live = atoms_lean(client, &client.workspace())?;
+    if let Some(other) = live
+        .iter()
+        .find(|a| id_of(a) != Some(id) && same_claim(a, atom))
+    {
+        return Err(Refused(format!(
+            "the pack holds {id}'s text under {} as well",
+            id_of(other).unwrap_or("?")
+        ))
+        .into());
     }
     journal(atom)?;
     retire(client, id)?;
@@ -388,7 +401,7 @@ fn store_copy(client: &packset_client::PacksetClient, atom: &Value) -> Result<St
     if fetch(client, &new_id).map_err(unstored)?.is_none() {
         post(client, "/v1/atoms", &person_copy(client, atom)?).map_err(unstored)?;
     }
-    confirm(client, id, &new_id).map_err(unstored)?;
+    confirm(client, atom, &new_id).map_err(unstored)?;
     unjournal(id);
     Ok(new_id)
 }
@@ -443,15 +456,37 @@ fn copy_id(id: &str) -> String {
     crate::work_id(&format!("pref-basis copy\n{id}"))
 }
 
-/// The copy reads back live under its own id and as the person's.
-fn confirm(client: &packset_client::PacksetClient, id: &str, new_id: &str) -> Result<()> {
+/// The copy reads back live under its own id, as the person's, with the
+/// original's claim, entities and clock.
+fn confirm(client: &packset_client::PacksetClient, atom: &Value, new_id: &str) -> Result<()> {
+    let id = id_of(atom).unwrap_or("?");
     let Some(stored) = fetch(client, new_id)? else {
         bail!("the pack does not hold the copy of {id} under {new_id}");
     };
     if !crate::person_stored(&stored) {
         bail!("the pack holds {id}'s copy under a record that is not the person's");
     }
+    if !same_claim(&stored, atom) {
+        return Err(Refused(format!("{new_id} does not make {id}'s claim")).into());
+    }
+    if let Some(key) = ["entities", "ts", "valid_from"]
+        .iter()
+        .find(|key| stored.get(**key) != atom.get(**key))
+    {
+        return Err(Refused(format!("{new_id} differs from {id} in {key}")).into());
+    }
     Ok(())
+}
+
+/// The fields the pack compares when it answers a post with a live
+/// record that already makes the claim.
+fn same_claim(a: &Value, b: &Value) -> bool {
+    [
+        "text", "kind", "set", "pattern", "verdict", "from", "to", "about", "agent", "issue",
+        "name",
+    ]
+    .iter()
+    .all(|key| a.get(*key) == b.get(*key))
 }
 
 fn retire(client: &packset_client::PacksetClient, id: &str) -> Result<()> {
