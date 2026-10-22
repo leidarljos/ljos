@@ -42187,19 +42187,6 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     #[test]
     fn the_guard_waits_five_seconds_unless_told_otherwise() {
         let _g = env_guard();
-        let saved = std::env::var_os("LJOS_GUARD_TIMEOUT");
-        struct Restore(Option<std::ffi::OsString>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                unsafe {
-                    match &self.0 {
-                        Some(v) => std::env::set_var("LJOS_GUARD_TIMEOUT", v),
-                        None => std::env::remove_var("LJOS_GUARD_TIMEOUT"),
-                    }
-                }
-            }
-        }
-        let _restore = Restore(saved);
         unsafe { std::env::remove_var("LJOS_GUARD_TIMEOUT") };
         assert_eq!(guard_timeout(), std::time::Duration::from_secs(5));
         assert_eq!(GUARD_TIMEOUT, std::time::Duration::from_secs(5));
@@ -42211,6 +42198,28 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(guard_timeout(), GUARD_TIMEOUT);
         unsafe { std::env::set_var("LJOS_GUARD_TIMEOUT", "nope") };
         assert_eq!(guard_timeout(), GUARD_TIMEOUT);
+    }
+
+    /// EnvLock puts the process environment back when it drops. A second
+    /// restore in a test that already holds one, and a changelog note
+    /// about that test, would be published as if a person could see it.
+    #[test]
+    fn a_test_lock_is_the_only_env_restore() {
+        let needle = ["struct ", "Restore"].concat();
+        for src in [include_str!("lib.rs"), include_str!("runner_hooks.rs")] {
+            assert!(
+                !src.contains(&needle),
+                "a second restore is still in the source"
+            );
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../changelog.d");
+        for name in [
+            "+rgkz-20261021-guard-fault-test-env-lock.misc.md",
+            "+rgkz-20261021-guard-fault-test-env-lock-2.misc.md",
+            "+rgkz-20261021-guard-fault-test-shape.misc.md",
+        ] {
+            assert!(!root.join(name).exists(), "{name}");
+        }
     }
 
     /// A checkout whose tip already has a passing `true` evidence record.

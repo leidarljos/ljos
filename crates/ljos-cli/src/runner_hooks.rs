@@ -1517,18 +1517,6 @@ mod tests {
     #[test]
     fn an_inner_hook_fault_denies_in_every_runner_shape() {
         let _lock = crate::test_env_lock();
-        struct Restore(Option<std::ffi::OsString>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                unsafe {
-                    match &self.0 {
-                        Some(v) => std::env::set_var("LJOS_GUARD_FAIL_OPEN", v),
-                        None => std::env::remove_var("LJOS_GUARD_FAIL_OPEN"),
-                    }
-                }
-            }
-        }
-        let _restore = Restore(std::env::var_os("LJOS_GUARD_FAIL_OPEN"));
         unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         // The timeout, the exit, and the signal are injected. A wall-clock
         // race is what made a slow runner report the timeout instead of
@@ -1660,18 +1648,6 @@ mod tests {
     #[test]
     fn an_inner_hook_that_answers_keeps_its_answer() {
         let _lock = crate::test_env_lock();
-        struct Restore(Option<std::ffi::OsString>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                unsafe {
-                    match &self.0 {
-                        Some(v) => std::env::set_var("LJOS_GUARD_FAIL_OPEN", v),
-                        None => std::env::remove_var("LJOS_GUARD_FAIL_OPEN"),
-                    }
-                }
-            }
-        }
-        let _restore = Restore(std::env::var_os("LJOS_GUARD_FAIL_OPEN"));
         unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         assert_eq!(inner("true", 30_000), "", "a clean allow");
         assert_eq!(inner(&format!("printf '%s' '{DENY}'"), 30_000), DENY);
@@ -1690,18 +1666,6 @@ mod tests {
     #[test]
     fn guard_fail_open_restores_allow_with_note() {
         let _lock = crate::test_env_lock();
-        struct Restore(Option<std::ffi::OsString>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                unsafe {
-                    match &self.0 {
-                        Some(v) => std::env::set_var("LJOS_GUARD_FAIL_OPEN", v),
-                        None => std::env::remove_var("LJOS_GUARD_FAIL_OPEN"),
-                    }
-                }
-            }
-        }
-        let _restore = Restore(std::env::var_os("LJOS_GUARD_FAIL_OPEN"));
         unsafe { std::env::set_var("LJOS_GUARD_FAIL_OPEN", "1") };
         allows_fault(
             &fault_output("PreToolUse", "exited with status 3"),
@@ -1729,31 +1693,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let keys = [
-            "HOME",
-            "XDG_DATA_HOME",
-            "LJOS_OFF",
-            "POLICYD_BIN",
-            "PACKSET_WORKSPACE",
-        ];
-        struct RestoreEnv(Vec<(String, Option<std::ffi::OsString>)>);
-        impl Drop for RestoreEnv {
-            fn drop(&mut self) {
-                for (k, v) in &self.0 {
-                    unsafe {
-                        match v {
-                            Some(v) => std::env::set_var(k, v),
-                            None => std::env::remove_var(k),
-                        }
-                    }
-                }
-            }
-        }
-        let saved = RestoreEnv(
-            keys.iter()
-                .map(|k| ((*k).to_string(), std::env::var_os(k)))
-                .collect(),
-        );
         let data = dir.join("data");
         unsafe {
             std::env::set_var("HOME", &dir);
@@ -1808,7 +1747,6 @@ mod tests {
             Some("deny"),
             "{wind}"
         );
-        drop(saved);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
