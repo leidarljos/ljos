@@ -19,6 +19,8 @@ To: Friend <friend@example.test>, \"Doe, Jo\" <jo@example.test>\n\
 Subject: Friday\n\
 Date: Thu, 22 Oct 2026 12:00:00 +0000\n\
 Message-ID: <draft-7@example.test>\n\
+MIME-Version: 1.0\n\
+Content-Type: text/plain; charset=utf-8\n\
 \n\
 See you at noon about topic-a.\n";
 
@@ -141,17 +143,107 @@ fn attribution_is_refused_by_default_and_by_config() {
 #[test]
 fn text_the_checks_cannot_read_is_refused() {
     let s = setup(DENY);
-    let base64 = CLEAN.replace("Subject:", "Content-Transfer-Encoding: base64\nSubject:");
-    let qp = CLEAN.replace(
-        "See you",
-        "--b\nContent-Transfer-Encoding: Quoted-Printable\n\nSee you",
-    );
+    let cte = |value: &str| {
+        CLEAN.replace(
+            "Subject:",
+            &format!("Content-Transfer-Encoding:{value}\nSubject:"),
+        )
+    };
     let word = CLEAN.replace("Subject: Friday", "Subject: =?utf-8?b?UHJvamVjdC1Y?=");
-    for draft in [base64, qp, word] {
+    let body_word = CLEAN.replace("See you", "=?utf-8?q?project-x?= See you");
+    for draft in [
+        cte(" base64"),
+        cte("\tbase64"),
+        cte("\n base64"),
+        cte("\n\tQuoted-Printable"),
+        cte(" binary"),
+        cte(" 7bit").replace("Subject:", "Content-Transfer-Encoding: 8bit\nSubject:"),
+        word,
+        body_word,
+    ] {
         let got = refused(&draft, &s.config);
-        assert!(got.iter().any(|r| r.contains("encoded")), "{got:?}");
+        assert!(
+            got.iter().any(|r| r.contains("encoded")),
+            "{draft}: {got:?}"
+        );
+    }
+    for ok in [" 7bit", "\t8BIT", "\n 8bit"] {
+        assert!(refused(&cte(ok), &s.config).is_empty(), "{ok:?}");
     }
     assert!(!refusals(b"From: owner@example.test\n\ncaf\xe9", &s.config).is_empty());
+}
+
+#[test]
+fn only_one_plain_utf8_part_is_accepted() {
+    let s = setup(DENY);
+    let plain = "Content-Type: text/plain; charset=utf-8\n";
+    for kind in [
+        "",
+        "Content-Type: text/html; charset=utf-8\n",
+        "Content-Type: text/plain\n",
+        "Content-Type: text/plain; charset=iso-8859-1\n",
+        "Content-Type: text/plain; charset=utf-8; format=flowed; delsp=yes\n",
+        "Content-Type: multipart/alternative; boundary=b\n",
+        "Content-Type:\n\tmultipart/mixed;\n boundary=b\n",
+        "Content-Type: text/plain; charset=utf-8\nContent-Type: text/html\n",
+    ] {
+        let draft = CLEAN.replace(plain, kind);
+        let got = refused(&draft, &s.config);
+        assert!(
+            got.iter().any(|r| r.contains("text/plain")),
+            "{kind:?}: {got:?}"
+        );
+    }
+    let folded = CLEAN.replace(plain, "Content-Type: text/plain;\n\tcharset=\"UTF-8\"\n");
+    assert!(refused(&folded, &s.config).is_empty());
+    let broken = CLEAN.replace("Subject:", "not a header\nSubject:");
+    assert!(!refused(&broken, &s.config).is_empty());
+}
+
+#[test]
+fn markup_in_the_body_is_refused_so_a_term_cannot_hide_in_it() {
+    let s = setup(DENY);
+    for body in [
+        "Status of proj&#101;ct-x.",
+        "Status of proj&#x65;ct-x.",
+        "Status of pro<span>ject-x</span>.",
+        "Gener<b></b>ated by a tool.",
+        "Fine &amp; dandy.",
+        "<!-- project-x --> hi",
+    ] {
+        let draft = CLEAN.replace("See you at noon about topic-a.", body);
+        let got = refused(&draft, &s.config);
+        assert!(got.iter().any(|r| r.contains("HTML")), "{body}: {got:?}");
+    }
+    for body in ["1 < 2 & 3 > 2", "AT&T at 5", "a <= b"] {
+        let draft = CLEAN.replace("See you at noon about topic-a.", body);
+        assert!(refused(&draft, &s.config).is_empty(), "{body}");
+    }
+}
+
+#[test]
+fn folded_headers_are_checked_unfolded() {
+    let s = setup(DENY);
+    let subject = CLEAN.replace("Subject: Friday", "Subject: Status of\n\tPROJECT-X");
+    let got = refused(&subject, &s.config);
+    assert!(got.iter().any(|r| r.contains("term")), "{got:?}");
+    let cc = CLEAN.replace("Subject:", "Cc: Pal\n <pal@denied.example.test>\nSubject:");
+    let got = refused(&cc, &s.config);
+    assert!(got.iter().any(|r| r.contains("cc")), "{got:?}");
+}
+
+#[test]
+fn a_trailing_dot_on_a_recipient_domain_is_the_same_domain() {
+    let s = setup(DENY);
+    for to in [
+        "user@denied.example.test.",
+        "user@mail.denied.example.test.",
+        "blocked@example.test.",
+    ] {
+        let draft = CLEAN.replace("friend@example.test", to);
+        let got = refused(&draft, &s.config);
+        assert!(got.iter().any(|r| r.contains("recipient")), "{to}: {got:?}");
+    }
 }
 
 #[test]
