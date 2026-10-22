@@ -18565,16 +18565,29 @@ fn cite_ballots(
         .map_err(|e| format!("{cite}: the ballots are not readable: {e}"))?;
     let ballots =
         panel_gate::counted_ballots(cite, &ballots.as_array().cloned().unwrap_or_default());
-    let personas = personas_from_pack()
-        .map_err(|e| {
-            format!(
-                "{cite}: the roster is not readable, so persona ballots cannot be left out: {e:#}"
-            )
-        })?
-        .into_iter()
-        .map(|p| p.name.trim().to_string())
-        .collect();
-    Ok((ballots, personas))
+    Ok((ballots, cite_roster(cite)?))
+}
+
+/// The persona names a push cite leaves out: the pack's roster. A seat
+/// whose pack is off on purpose (`PACKSET_URL=off`) has no personas.
+///
+/// # Errors
+///
+/// The pack is on and its roster does not answer: a persona's ballot
+/// cannot be told from a seat's, so no cite stands until it does.
+pub fn cite_roster(cite: &str) -> std::result::Result<std::collections::BTreeSet<String>, String> {
+    match personas_from_pack() {
+        Ok(personas) => Ok(personas
+            .into_iter()
+            .map(|p| p.name.trim().to_string())
+            .collect()),
+        Err(_) if std::env::var("PACKSET_URL").is_ok_and(|url| url == "off") => {
+            Ok(std::collections::BTreeSet::new())
+        }
+        Err(e) => Err(format!(
+            "{cite}: the roster is not readable, so persona ballots cannot be left out: {e:#}"
+        )),
+    }
 }
 
 /// The files that are the seat's law and its reach into each runner: the
@@ -28420,6 +28433,23 @@ pub fn push_cite_reading(
         pusher,
         check_seat_signatures(issue, rows, personas),
     )
+}
+
+/// [`push_cite_reading`] under the pack's roster ([`cite_roster`]), the
+/// reading `ljos consensus` prints. A roster that is not readable is the
+/// refusal, the same one [`cite_stands`] gives.
+#[must_use]
+pub fn push_cite_reading_on_roster(issue: &str, rows: &[Value], pusher: &str) -> (String, Value) {
+    match cite_roster(issue) {
+        Ok(personas) => push_cite_reading(issue, rows, &personas, pusher),
+        Err(why) => push_cite_reading_signed(
+            issue,
+            rows,
+            &std::collections::BTreeSet::new(),
+            pusher,
+            Err(why),
+        ),
+    }
 }
 
 /// [`push_cite_reading`] with the signature check already made: a refusal
