@@ -1835,7 +1835,10 @@ fn cloud_up_writes_the_scope_cloud_identity_from_a_named_secret() {
     assert!(!wrote.contains(&secret_line), "{wrote}");
     assert_eq!(fs::read(&outside).unwrap(), b"keep\n");
     let meta = fs::symlink_metadata(&path).unwrap();
-    assert!(meta.file_type().is_file(), "the symlink was followed");
+    assert!(
+        meta.file_type().is_file(),
+        "cloud.age was not installed as a file"
+    );
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(meta.permissions().mode() & 0o777, 0o600);
     let stored = fs::read_to_string(&path).unwrap();
