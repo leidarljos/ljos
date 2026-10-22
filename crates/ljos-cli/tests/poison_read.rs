@@ -462,8 +462,9 @@ fn a_promoted_agent_lesson_is_not_a_user_rule() {
             "written_at": "2026-10-20T00:00:00Z",
             "updated_at": "2026-10-20T00:00:00Z",
         });
-        if let Some(from) = from {
-            row["from"] = serde_json::json!(from);
+        match from {
+            Some(from) => row["from"] = serde_json::json!(from),
+            None => row["basis"] = serde_json::json!("person"),
         }
         row
     };
