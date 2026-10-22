@@ -1411,6 +1411,20 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_inner_hook_fault_denies_in_every_runner_shape() {
+        let _lock = crate::test_env_lock();
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.0 {
+                        Some(v) => std::env::set_var("LJOS_GUARD_FAIL_OPEN", v),
+                        None => std::env::remove_var("LJOS_GUARD_FAIL_OPEN"),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("LJOS_GUARD_FAIL_OPEN"));
+        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         // The timeout, the exit, and the signal are injected. A wall-clock
         // race is what made a slow runner report the timeout instead of
         // the signal.
