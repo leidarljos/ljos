@@ -10516,6 +10516,8 @@ fn redact_hit_provenance(body: &mut Value) {
 /// is asked again as an older writer. Any other 4xx, a 401, a 429 or a
 /// 400 about something else, refuses nothing: that search has no hits
 /// of the writer's, and the stored atoms that best match answer alone.
+/// A 401 or 403 is said, at most once a minute, and `ljos doctor`
+/// reports it without failing a seat whose search answers.
 /// An older writer is not asked, and cuts its
 /// fused list, which decays with age, so rank 21 of a pack full of fresh
 /// lookalikes never arrives: the stored atoms that best match the cue
@@ -10584,6 +10586,11 @@ fn search_relevant(
         refuses_relevance(client, !open);
         answer = ask(false)?;
     }
+    if let Err((code @ (401 | 403), _)) = &answer {
+        // A 401 or 403 fails this search closed, as a 429 does, and does
+        // not refuse the rank. It is also an auth fault, so it is said.
+        warn_search_refused(client.base(), *code);
+    }
     let mut body: Value = match answer {
         Ok(answer) => answer
             .into_json()
@@ -10636,6 +10643,116 @@ fn stored_only(client: &PacksetClient, cue: &str, limit: u32) -> (Value, usize) 
 /// The last missing-token line [`say_search_miss`] printed. Stderr is
 /// given the same line.
 static SEARCH_MISS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// How often a hook says that search answered 401 or 403. A hook is a
+/// new process each prompt, so the stamp is a file.
+const SEARCH_AUTH_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Lines [`warn_search_refused`] has printed, with the writer they name.
+static SEARCH_AUTH_SAID: std::sync::Mutex<Vec<(String, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// The line stderr gets when search answered `code`.
+fn search_auth_warning(code: u16) -> String {
+    format!(
+        "ljos: the writer answered {code} on /v1/search, so recall is using stored memories. Run `ljos doctor`."
+    )
+}
+
+/// Where the last refusal of `base` is stamped, so the next prompt inside
+/// [`SEARCH_AUTH_EVERY`] stays quiet.
+fn search_auth_path(base: &str) -> std::path::PathBuf {
+    let name: String = base
+        .trim_end_matches('/')
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    runtime_dir().join(format!("search-auth-{name}"))
+}
+
+fn parse_search_auth(text: &str) -> Option<(u16, std::time::SystemTime)> {
+    let mut parts = text.split_whitespace();
+    let code = parts.next()?.parse().ok()?;
+    let secs = parts.next()?.parse().ok()?;
+    Some((
+        code,
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs),
+    ))
+}
+
+/// Whether `code` from `base` should be said now. A fresh stamp of the
+/// same code inside [`SEARCH_AUTH_EVERY`] is not said again.
+fn mark_search_auth(base: &str, code: u16) -> bool {
+    let path = search_auth_path(base);
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Some((was, at)) = parse_search_auth(&text) {
+            if was == code {
+                if let Ok(age) = std::time::SystemTime::now().duration_since(at) {
+                    if age < SEARCH_AUTH_EVERY {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let _ = std::fs::write(&path, format!("{code} {stamp}\n"));
+    true
+}
+
+/// Say that search answered 401 or 403, at most once a minute per writer.
+/// The search has already failed closed; this is how the person hears it.
+fn warn_search_refused(base: &str, code: u16) {
+    if !matches!(code, 401 | 403) {
+        return;
+    }
+    let base = base.trim_end_matches('/').to_string();
+    if !mark_search_auth(&base, code) {
+        return;
+    }
+    let line = search_auth_warning(code);
+    SEARCH_AUTH_SAID
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((base, line.clone()));
+    eprintln!("{line}");
+}
+
+/// What doctor reports when an authenticated search is still refused.
+/// `None` when search answers, the listener does not ask, or this seat
+/// has no token: a working seat gains no row, and a missing token is the
+/// pack token row.
+fn search_auth_habitat(client: &PacksetClient) -> Option<Habitat> {
+    let timeout = std::time::Duration::from_secs(2).min(pack_timeout());
+    let url = format!("{}/v1/search", client.base().trim_end_matches('/'));
+    let probe = || {
+        ureq::get(&url)
+            .query("workspace", &client.workspace())
+            .query("q", "ljos")
+            .query("limit", "1")
+    };
+    let asked = match proven_request("the search", client.base(), timeout, probe) {
+        Ok(req) => req,
+        Err(_) => return None,
+    };
+    let code = match asked.timeout(timeout).call() {
+        Err(ureq::Error::Status(code @ (401 | 403), _)) => code,
+        _ => return None,
+    };
+    Some(Habitat {
+        name: "search",
+        state: format!(
+            "the writer answered {code} on /v1/search; recall is using stored memories until that read is accepted"
+        ),
+        ok: false,
+    })
+}
 
 /// Say `err` on stderr. A missing token used to be read as an open
 /// listener, and the recall then followed whatever that listener answered.
@@ -23229,6 +23346,16 @@ pub fn doctor_seat() -> Vec<Habitat> {
             refused,
         ));
     }
+    // A search that keeps answering 401 or 403 is using stored memories
+    // only. Asked when the pack answers, so a seat whose search is fine
+    // gains no row, and the row is a warning rather than a failed doctor.
+    if out.iter().any(|h| h.name == "pack" && h.ok) {
+        if let Ok(client) = pack() {
+            if let Some(row) = search_auth_habitat(&client) {
+                out.push(row);
+            }
+        }
+    }
     // What the pack holds and what it let go: the seat that lets a pack
     // grow or forget under it reads it here rather than in `packset status`.
     if let Ok(client) = pack() {
@@ -23943,6 +24070,11 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     }
     // Older preferences awaiting review are named, not a failed seat.
     if row.name == "preferences" && !row.ok {
+        return "warn";
+    }
+    // Search answered 401 or 403. Recall still runs on stored memories,
+    // and doctor stays green so a working seat is not failed by the row.
+    if row.name == "search" && !row.ok {
         return "warn";
     }
     if row.ok && row.name == "mcp" && row.state.starts_with("warning:") {
@@ -38786,6 +38918,122 @@ mod tests {
         refuses_relevance(&both, true);
         assert!(ranks_by_relevance(&both, timeout, false));
         assert!(!ranks_by_relevance(&both, timeout, true));
+    }
+
+    /// A 401 or 403 on search fails closed and is said once a minute.
+    /// Doctor reports it as a warning. A search that answers adds no row,
+    /// so a working seat is not failed.
+    #[test]
+    fn a_refused_search_is_said_once_a_minute_and_doctor_warns() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("PACKSET_TOKEN", "search-auth-token"),
+            ("PACKSET_WORKSPACE", "seat"),
+            ("PACKSET_TIMEOUT_MS", "2000"),
+        ]);
+        let atoms = serde_json::json!([{
+            "id": "old", "kind": "lesson",
+            "text": "With pnpm the registry rejected the token because the CI secret expired",
+            "ts": "2026-01-14T09:00:00.000Z", "entities": ["horizon:standing"]
+        }]);
+        let serve = |code: u16| {
+            let listed = atoms.clone();
+            serve_http(move |req| {
+                let first = req.lines().next().unwrap_or("");
+                let authed = req.lines().any(|line| {
+                    line.split_once(':').is_some_and(|(name, value)| {
+                        name.eq_ignore_ascii_case("authorization")
+                            && value.trim() == "Bearer search-auth-token"
+                    })
+                });
+                if first.contains("/v1/search") && !authed {
+                    return (401, r#"{"error":"token"}"#.into());
+                }
+                if first.contains("/v1/search") {
+                    return (code, format!(r#"{{"error":"{code}"}}"#));
+                }
+                if first.contains("/v1/atoms") && authed {
+                    return (200, serde_json::json!({"atoms": listed}).to_string());
+                }
+                if first.contains("/v1/status") {
+                    return (200, r#"{"search":{"ranks":["fused"]}}"#.into());
+                }
+                (404, r#"{"error":"missing"}"#.into())
+            })
+        };
+        let said = |base: &str| -> Vec<String> {
+            let base = base.trim_end_matches('/').to_string();
+            SEARCH_AUTH_SAID
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(writer, _)| writer == &base)
+                .map(|(_, line)| line.clone())
+                .collect()
+        };
+        let (url, _) = serve(401);
+        let _url = HoldEnv::set(&[("PACKSET_URL", &url)]);
+        let search = || packset_search_relevant("npm: the registry rejected my token", 20).unwrap();
+        let hits = search();
+        let ids: Vec<&str> = hits.iter().filter_map(|h| h.id.as_deref()).collect();
+        assert_eq!(ids, ["old"], "{hits:?}");
+        let lines = said(&url);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("401"), "{lines:?}");
+        assert!(lines[0].contains("ljos doctor"), "{lines:?}");
+        let _ = search();
+        assert_eq!(said(&url).len(), 1, "{:?}", said(&url));
+        std::fs::write(search_auth_path(&url), "401 1\n").unwrap();
+        let _ = search();
+        let lines = said(&url);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        let client = PacksetClient::new(&url).with_workspace("seat");
+        let row = search_auth_habitat(&client).expect("doctor reports the refusal");
+        assert!(!row.ok);
+        assert!(row.state.contains("401"), "{}", row.state);
+        assert_eq!(doctor_word(&row), "warn");
+        assert!(failing(std::slice::from_ref(&row)).is_empty());
+        assert!(healthy(std::slice::from_ref(&row)));
+
+        let (forbidden, _) = serve(403);
+        let _forbidden = HoldEnv::set(&[("PACKSET_URL", &forbidden)]);
+        let _ = search();
+        let lines = said(&forbidden);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("403") && line.contains("ljos doctor")),
+            "{lines:?}"
+        );
+        let client = PacksetClient::new(&forbidden).with_workspace("seat");
+        let row = search_auth_habitat(&client).expect("403");
+        assert!(row.state.contains("403"), "{}", row.state);
+        assert_eq!(doctor_word(&row), "warn");
+        assert!(healthy(std::slice::from_ref(&row)));
+
+        let (open, _) = serve_http(|req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/search") && !req.to_ascii_lowercase().contains("authorization:")
+            {
+                return (401, r#"{"error":"token"}"#.into());
+            }
+            if first.contains("/v1/search") {
+                return (200, r#"{"hits":[]}"#.into());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let answering = PacksetClient::new(&open).with_workspace("seat");
+        assert!(search_auth_habitat(&answering).is_none());
+        warn_search_refused(&open, 429);
+        assert!(
+            said(&open).iter().all(|line| !line.contains("429")),
+            "{:?}",
+            said(&open)
+        );
     }
 
     /// The hits the writer chose are read by their `rerank_score`, highest
