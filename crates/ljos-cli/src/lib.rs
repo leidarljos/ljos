@@ -9270,7 +9270,7 @@ pub fn hook_trace(input: &str, call: &HookCall, subagent: Option<&str>) {
         .as_str()
         .or_else(|| v["hookEventName"].as_str())
         .unwrap_or("");
-    let line = serde_json::json!({
+    let row = serde_json::json!({
         "ts": now_utc(),
         "event": call.event,
         "raw": raw,
@@ -9281,14 +9281,11 @@ pub fn hook_trace(input: &str, call: &HookCall, subagent: Option<&str>) {
         "tree_holder": runner_record_holders().first().cloned(),
         "held": subagent.and_then(|_| held_issue()),
     });
-    use std::io::Write as _;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("hook-trace.jsonl"))
-    {
-        let _ = writeln!(f, "{line}");
-    }
+    let Ok(mut line) = serde_json::to_string(&row) else {
+        return;
+    };
+    line.push('\n');
+    let _ = append_locked_row(&dir.join("hook-trace.jsonl"), line.as_bytes());
 }
 
 /// The holders the seat records above this process name, nearest first,
@@ -39011,6 +39008,57 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    /// `hook-trace.jsonl` is the same append as the bypass log: one JSON
+    /// value per line, written from many hooks at once. A torn line drops
+    /// the event the trace was kept to show.
+    #[test]
+    fn concurrent_hook_trace_rows_each_parse() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_RUNTIME_DIR", dir.path().to_str().unwrap())]);
+        let trace_dir = dir.path().join("ljos");
+        std::fs::create_dir_all(&trace_dir).unwrap();
+        std::fs::write(trace_dir.join("hook-trace"), "").unwrap();
+        const THREADS: usize = 32;
+        const EACH: usize = 8;
+        let mut handles = Vec::with_capacity(THREADS);
+        for thread in 0..THREADS {
+            handles.push(std::thread::spawn(move || {
+                for n in 0..EACH {
+                    let call = HookCall {
+                        event: "PreToolUse".into(),
+                        cue: format!("terraform {thread}-{n}"),
+                        session: Some(format!("s-{thread}-{n}")),
+                        shape: HookShape::Asks,
+                    };
+                    let input = format!(r#"{{"hook_event_name":"PreToolUse","n":"{thread}-{n}"}}"#);
+                    hook_trace(&input, &call, None);
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("trace writer");
+        }
+        let path = trace_dir.join("hook-trace.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rows: Vec<Value> = text
+            .lines()
+            .map(|line| {
+                serde_json::from_str(line).unwrap_or_else(|err| {
+                    panic!("trace row does not parse ({err}): {line}");
+                })
+            })
+            .collect();
+        assert_eq!(rows.len(), THREADS * EACH, "{text}");
+        let mode = std::fs::symlink_metadata(&path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "hook trace mode {mode:o}");
     }
 
     #[test]
