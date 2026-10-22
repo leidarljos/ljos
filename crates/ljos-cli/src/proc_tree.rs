@@ -423,7 +423,10 @@ pub fn own_home() -> Option<std::path::PathBuf> {
 
 /// Where a runner is installed under the person's home ([`own_home`]):
 /// a user `bin`, and the prefix npm's own guide gives a user for global
-/// packages.
+/// packages. These are trusted because the person owns them, which
+/// also lets any process of the person's uid, a tool call among them,
+/// replace what they hold: the check keeps out other users and copies
+/// placed elsewhere, not the person's own account.
 const HOME_ROOTS: &[&str] = &[".local/bin", ".cargo/bin", ".npm-global"];
 
 /// Where a runner is installed for every user, and where npm keeps a
@@ -469,29 +472,12 @@ fn nix_entry(path: &Path, store: &Path) -> Option<PathBuf> {
     (hashed && rest.len() > 1 && rest.starts_with('-')).then(|| store.join(name))
 }
 
-/// The runner `path` names when it sits strictly below one of `roots` or
-/// in an entry of the Nix store `store`, and that root: the nearest component that is not
-/// packing layout ([`layout_component`]), read from the file up to the
-/// root's own name, so `share/claude/versions/2.1.3` is Claude Code. The
-/// path must be absolute and plain, since a `..` after the root would
-/// leave it. A path the kernel marks ` (deleted)` is not the file that
-/// was installed.
+/// The runner `path` names when it sits below a root ([`root_below`]),
+/// and that root: the nearest component that is not packing layout
+/// ([`layout_component`]), read from the file up to the root's own name,
+/// so `share/claude/versions/2.1.3` is Claude Code.
 fn runner_below(path: &Path, roots: &[PathBuf], store: &Path) -> Option<(&'static str, PathBuf)> {
-    let plain = path.is_absolute()
-        && path.components().all(|c| {
-            matches!(
-                c,
-                std::path::Component::RootDir | std::path::Component::Normal(_)
-            )
-        });
-    if !plain || path.to_str()?.contains(" (deleted)") {
-        return None;
-    }
-    let root = roots
-        .iter()
-        .cloned()
-        .chain(nix_entry(path, store))
-        .find(|root| path != root.as_path() && path.starts_with(root))?;
+    let root = root_below(path, roots, store)?;
     let parts = root
         .file_name()
         .into_iter()
@@ -502,6 +488,28 @@ fn runner_below(path: &Path, roots: &[PathBuf], store: &Path) -> Option<(&'stati
     Some((hook_name(name)?, root))
 }
 
+/// The one of `roots`, or the entry of the Nix store `store`, that
+/// `path` sits strictly below. The path must be absolute and plain,
+/// since a `..` after the root would leave it. A path the kernel marks
+/// ` (deleted)` is not the file that was installed.
+fn root_below(path: &Path, roots: &[PathBuf], store: &Path) -> Option<PathBuf> {
+    let plain = path.is_absolute()
+        && path.components().all(|c| {
+            matches!(
+                c,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
+        });
+    if !plain || path.to_str()?.contains(" (deleted)") {
+        return None;
+    }
+    roots
+        .iter()
+        .cloned()
+        .chain(nix_entry(path, store))
+        .find(|root| path != root.as_path() && path.starts_with(root))
+}
+
 /// A group as the group database lists it.
 struct GroupEntry {
     name: std::ffi::OsString,
@@ -509,7 +517,8 @@ struct GroupEntry {
 }
 
 /// The account lookups [`group_is_private`] makes. `None` is a lookup
-/// that failed, which is never read as an empty answer.
+/// that failed or that cannot be shown to be complete, which is never
+/// read as an empty answer.
 trait Accounts {
     fn user_name(&self, uid: u32) -> Option<std::ffi::OsString>;
     fn group(&self, gid: u32) -> Option<GroupEntry>;
@@ -517,7 +526,11 @@ trait Accounts {
     fn primary_members(&self, gid: u32) -> Option<Vec<u32>>;
 }
 
-/// The passwd and group databases, through the C library.
+/// The passwd and group databases: a user's name through the C
+/// library, and a group and the accounts in it from `/etc/group` and
+/// `/etc/passwd` themselves ([`group_in_files`], [`primary_in_files`]),
+/// since a lookup by gid returns only the first line and enumerating
+/// NSS can stop short.
 struct SystemAccounts;
 
 /// Runs a `get*_r` lookup with a buffer that grows while it is too small.
@@ -568,64 +581,105 @@ impl Accounts for SystemAccounts {
     }
 
     fn group(&self, gid: u32) -> Option<GroupEntry> {
-        with_buf(|buf| {
-            // SAFETY: group is plain data, so all zeroes is a valid value.
-            let mut entry: libc::group = unsafe { std::mem::zeroed() };
-            let mut found: *mut libc::group = std::ptr::null_mut();
-            // SAFETY: getgrgid_r writes at most buf.len() bytes into buf
-            // and points entry's fields into it.
-            let rc = unsafe {
-                libc::getgrgid_r(
-                    gid,
-                    &mut entry,
-                    buf.as_mut_ptr().cast(),
-                    buf.len(),
-                    &mut found,
-                )
-            };
-            if rc != 0 {
-                return Err(rc);
-            }
-            if found.is_null() || entry.gr_name.is_null() || entry.gr_mem.is_null() {
-                return Ok(None);
-            }
-            let mut members = Vec::new();
-            // SAFETY: gr_mem is a NULL-terminated array of strings in buf.
-            unsafe {
-                let mut at = entry.gr_mem;
-                while !(*at).is_null() {
-                    members.push(os_string(*at));
-                    at = at.add(1);
-                }
-            }
-            // SAFETY: gr_name is a string inside buf.
-            let name = unsafe { os_string(entry.gr_name) };
-            Ok(Some(GroupEntry { name, members }))
-        })
+        group_in_files(Path::new(ETC), gid)
     }
 
     fn primary_members(&self, gid: u32) -> Option<Vec<u32>> {
-        static WALK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _walk = WALK.lock().ok()?;
-        let mut uids = Vec::new();
-        // SAFETY: the enumeration state is the C library's own, and WALK
-        // keeps this the only walk over it; each entry is read before
-        // the next call replaces it.
-        unsafe {
-            libc::setpwent();
-            loop {
-                let entry = libc::getpwent();
-                if entry.is_null() {
-                    break;
-                }
-                if (*entry).pw_gid == gid {
-                    uids.push((*entry).pw_uid);
-                }
-            }
-            libc::endpwent();
-        }
-        Some(uids)
+        primary_in_files(Path::new(ETC), gid)
     }
+}
+
+/// Where the account files and `nsswitch.conf` are.
+const ETC: &str = "/etc";
+
+/// Whether `etc/nsswitch.conf` sends database `db` to `files` and
+/// nothing else, so the file under `etc` is all of it. A missing
+/// file, a missing or repeated line, or any other source, such as
+/// `systemd`, `sss`, `ldap` or `compat`, may add accounts that file
+/// does not list.
+fn files_only(etc: &Path, db: &str) -> bool {
+    let Ok(conf) = std::fs::read_to_string(etc.join("nsswitch.conf")) else {
+        return false;
+    };
+    let mut lines = conf
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or_default())
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(name, _)| name.trim() == db);
+    let (Some((_, sources)), None) = (lines.next(), lines.next()) else {
+        return false;
+    };
+    sources.split_whitespace().eq(["files"])
+}
+
+/// The one line of `etc/group` for `gid`, read only when group is
+/// that file alone ([`files_only`]). `None` when no line or more than
+/// one has that gid, since a lookup returns only the first and the
+/// members of the others still hold the group, and when the file
+/// cannot be read whole, as for `passwd` ([`primary_in_files`]).
+fn group_in_files(etc: &Path, gid: u32) -> Option<GroupEntry> {
+    if !files_only(etc, "group") {
+        return None;
+    }
+    let text = std::fs::read_to_string(etc.join("group")).ok()?;
+    let mut found = None;
+    for line in text.lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with(['+', '-']) {
+            return None;
+        }
+        let fields: Vec<&str> = line.split(':').collect();
+        let [name, _, id, members] = fields[..] else {
+            return None;
+        };
+        if id.parse::<u32>().ok()? != gid {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(GroupEntry {
+            name: name.into(),
+            members: members
+                .split(',')
+                .filter(|m| !m.is_empty())
+                .map(Into::into)
+                .collect(),
+        });
+    }
+    found
+}
+
+/// The uid of every line of `etc/passwd` whose primary group is `gid`,
+/// read only when passwd is that file alone ([`files_only`]). `None`
+/// when the file cannot be read whole: a line that is not seven fields
+/// with numeric ids, or a `+` or `-` line, which names accounts kept
+/// elsewhere.
+fn primary_in_files(etc: &Path, gid: u32) -> Option<Vec<u32>> {
+    if !files_only(etc, "passwd") {
+        return None;
+    }
+    let text = std::fs::read_to_string(etc.join("passwd")).ok()?;
+    let mut uids = Vec::new();
+    for line in text.lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with(['+', '-']) {
+            return None;
+        }
+        let fields: Vec<&str> = line.split(':').collect();
+        let [_, _, uid, primary, _, _, _] = fields[..] else {
+            return None;
+        };
+        let (uid, primary) = (uid.parse::<u32>().ok()?, primary.parse::<u32>().ok()?);
+        if primary == gid {
+            uids.push(uid);
+        }
+    }
+    Some(uids)
 }
 
 /// Whether group `gid` holds no one but user `uid`: it bears the user's
@@ -718,12 +772,14 @@ impl From<&std::fs::Metadata> for Owner {
 
 /// The owner of `/` and of each directory below it down to `file`, and
 /// of `file`, each read from a descriptor opened beneath the one before
-/// without following a link, so a directory swapped for a link or for
-/// another directory after `file` was resolved is never walked through.
-/// `None` unless every component above `file` is a directory and `file`
-/// a regular file that, when `expect` is given, is that (device, inode).
+/// without following a link, so a directory swapped for a link after
+/// `file` was resolved is not walked through. One swapped for another
+/// directory leads to another file than `expect`, the (device, inode)
+/// the caller holds for `file`. `None` unless every component above
+/// `file` is a directory and the file the walk ends on is a regular
+/// file that is `expect`.
 #[cfg(target_os = "linux")]
-fn pinned_walk(file: &Path, expect: Option<(u64, u64)>) -> Option<Vec<Owner>> {
+fn pinned_walk(file: &Path, expect: (u64, u64)) -> Option<Vec<Owner>> {
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
     use std::os::unix::ffi::OsStrExt as _;
     use std::os::unix::fs::MetadataExt as _;
@@ -760,11 +816,11 @@ fn pinned_walk(file: &Path, expect: Option<(u64, u64)>) -> Option<Vec<Owner>> {
         meta = at.metadata().ok()?;
         owners.push(Owner::from(&meta));
     }
-    (meta.is_file() && expect.is_none_or(|id| id == (meta.dev(), meta.ino()))).then_some(owners)
+    (meta.is_file() && expect == (meta.dev(), meta.ino())).then_some(owners)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn pinned_walk(_file: &Path, _expect: Option<(u64, u64)>) -> Option<Vec<Owner>> {
+fn pinned_walk(_file: &Path, _expect: (u64, u64)) -> Option<Vec<Owner>> {
     None
 }
 
@@ -773,7 +829,9 @@ fn pinned_walk(_file: &Path, _expect: Option<(u64, u64)>) -> Option<Vec<Owner>> 
 /// the person cannot write it, and it is sticky if its group or anyone
 /// may write it; the entry is then root's, as the daemon builds it. On
 /// a single-user install the store is the person's and no one else may
-/// write it, and the entry is the person's or root's.
+/// write it, and the entry is the person's or root's. Such a store, like
+/// a home root ([`HOME_ROOTS`]), is writable by a tool call of the
+/// person's uid, and is trusted only because the person owns it.
 fn store_keeps(store: Owner, entry: Owner, person: &Person) -> bool {
     let group = store.mode & 0o020 != 0;
     let anyone = store.mode & 0o002 != 0;
@@ -808,14 +866,15 @@ fn person_keeps(file: Owner, person: &Person) -> bool {
 /// written, or swapped through a directory between it and its root, or
 /// an entry of a Nix store `store` that Nix does not keep
 /// ([`store_keeps`]). The directories and the file are judged as they
-/// were opened ([`pinned_walk`]), and the file must be `expect` when
-/// that (device, inode) is given.
+/// were opened ([`pinned_walk`]) from `path` resolved once, and the
+/// file the walk ends on must be `expect`, the (device, inode) the
+/// caller holds for the file it means.
 fn runner_of_file(
     path: &Path,
     home: Option<&Path>,
     store: &Path,
     person: &Person,
-    expect: Option<(u64, u64)>,
+    expect: (u64, u64),
 ) -> Option<&'static str> {
     runner_at(
         &std::fs::canonicalize(path).ok()?,
@@ -832,21 +891,62 @@ fn runner_at(
     home: Option<&Path>,
     store: &Path,
     person: &Person,
-    expect: Option<(u64, u64)>,
+    expect: (u64, u64),
 ) -> Option<&'static str> {
-    if crate::bookkeep::path_is_temp(Some(file)) {
-        return None;
-    }
-    let roots: Vec<PathBuf> = install_roots(home)
+    let (roots, store) = resolved_roots(home, store);
+    let (runner, root) = runner_below(file, &roots, &store)?;
+    kept_below(file, &root, &store, person, expect).then_some(runner)
+}
+
+/// Whether `path` is a runtime ([`RUNTIMES`]) by its exact name, and
+/// an installed copy kept as a runner file is ([`runner_of_file`]):
+/// below an install root, left to the person, and the file `expect`.
+#[cfg(target_os = "linux")]
+fn runtime_of_file(
+    path: &Path,
+    home: Option<&Path>,
+    store: &Path,
+    person: &Person,
+    expect: (u64, u64),
+) -> bool {
+    let Ok(file) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    let named = file
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|name| RUNTIMES.contains(&name));
+    let (roots, store) = resolved_roots(home, store);
+    named
+        && root_below(&file, &roots, &store)
+            .is_some_and(|root| kept_below(&file, &root, &store, person, expect))
+}
+
+/// The install roots for `home` ([`install_roots`]) and the Nix store
+/// `store`, resolved.
+fn resolved_roots(home: Option<&Path>, store: &Path) -> (Vec<PathBuf>, PathBuf) {
+    let roots = install_roots(home)
         .iter()
         .filter_map(|root| std::fs::canonicalize(root).ok())
         .collect();
     let store = std::fs::canonicalize(store).unwrap_or_else(|_| store.to_path_buf());
-    let (runner, root) = runner_below(file, &roots, &store)?;
-    let owners = pinned_walk(file, expect)?;
-    let at = root.components().count().checked_sub(1)?;
-    let in_store = root.parent() == Some(store.as_path());
-    walk_kept(&owners, at, in_store, person).then_some(runner)
+    (roots, store)
+}
+
+/// Whether `file`, a resolved path below install root `root`, is the
+/// file `expect` and left to the person ([`walk_kept`]) as the walk
+/// reads it ([`pinned_walk`]). A file in a temp directory never is.
+fn kept_below(file: &Path, root: &Path, store: &Path, person: &Person, expect: (u64, u64)) -> bool {
+    if crate::bookkeep::resolved_path_is_temp(file) {
+        return false;
+    }
+    let (Some(owners), Some(at)) = (
+        pinned_walk(file, expect),
+        root.components().count().checked_sub(1),
+    ) else {
+        return false;
+    };
+    walk_kept(&owners, at, root.parent() == Some(store), person)
 }
 
 /// Whether the owners [`pinned_walk`] read leave a file to the person,
@@ -871,37 +971,70 @@ fn walk_kept(owners: &[Owner], at: usize, in_store: bool, person: &Person) -> bo
 }
 
 /// The runner `pid` is, from the file the kernel runs it from, never
-/// from the name it gives itself. A runtime such as `node` is the runner
-/// whose script it runs, that script's path resolved on disk.
+/// from the name it gives itself. An installed runtime such as `node`
+/// ([`runtime_of_file`]) is the runner whose script it runs, that
+/// script's path resolved on disk and judged as a runner file is. The
+/// script's path comes from the process's own arguments, so only a
+/// runtime the person installed is believed about it.
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn exe_runner(pid: u32) -> Option<&'static str> {
     use std::os::unix::fs::MetadataExt as _;
-    let home = own_home();
-    let person = Person::new(&SystemAccounts);
     let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
     let running = std::fs::metadata(format!("/proc/{pid}/exe"))
         .ok()
         .map(|meta| (meta.dev(), meta.ino()));
-    let store = Path::new(NIX_STORE);
-    if let Some(r) = runner_of_file(&exe, home.as_deref(), store, &person, running) {
-        return Some(r);
-    }
-    let base = exe.file_name()?.to_str()?;
-    if !RUNTIMES.iter().any(|r| base.starts_with(r)) {
-        return None;
-    }
-    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-    let script = cmdline
-        .split(|b| *b == 0)
-        .skip(1)
-        .map(String::from_utf8_lossy)
-        .find(|a| !a.is_empty() && !a.starts_with('-'))?;
-    let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
-    let script = std::fs::canonicalize(cwd.join(script.as_ref())).ok()?;
-    runner_of_file(&script, home.as_deref(), store, &person, None)
+    let script = || {
+        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let script = cmdline
+            .split(|b| *b == 0)
+            .skip(1)
+            .map(String::from_utf8_lossy)
+            .find(|a| !a.is_empty() && !a.starts_with('-'))?;
+        let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
+        Some(cwd.join(script.as_ref()))
+    };
+    let home = own_home();
+    let person = Person::new(&SystemAccounts);
+    runner_from(
+        &exe,
+        running,
+        script,
+        home.as_deref(),
+        Path::new(NIX_STORE),
+        &person,
+    )
 }
 
+/// [`exe_runner`] for a process run from `exe`, whose (device, inode)
+/// the kernel reports as `running`, and that names `script` as the
+/// script a runtime there runs. `None` when `running` could not be
+/// read, since the path alone may name another file than the one the
+/// process runs.
+#[cfg(target_os = "linux")]
+fn runner_from(
+    exe: &Path,
+    running: Option<(u64, u64)>,
+    script: impl FnOnce() -> Option<PathBuf>,
+    home: Option<&Path>,
+    store: &Path,
+    person: &Person,
+) -> Option<&'static str> {
+    use std::os::unix::fs::MetadataExt as _;
+    let running = running?;
+    if let Some(r) = runner_of_file(exe, home, store, person, running) {
+        return Some(r);
+    }
+    if !runtime_of_file(exe, home, store, person, running) {
+        return None;
+    }
+    let script = std::fs::canonicalize(script()?).ok()?;
+    let meta = std::fs::metadata(&script).ok()?;
+    runner_of_file(&script, home, store, person, (meta.dev(), meta.ino()))
+}
+
+/// Off Linux there is no `/proc/<pid>/exe` to read nor a descriptor
+/// walk ([`pinned_walk`]), so no process is an installed runner.
 #[cfg(not(target_os = "linux"))]
 #[must_use]
 pub fn exe_runner(_pid: u32) -> Option<&'static str> {
@@ -1472,6 +1605,19 @@ pub fn hook_runner() -> Result<(Proc, &'static str), String> {
 mod tests {
     use super::*;
 
+    /// [`runner_of_file`] for the file `path` names now.
+    #[cfg(target_os = "linux")]
+    fn runner_here(
+        path: &Path,
+        home: Option<&Path>,
+        store: &Path,
+        person: &Person,
+    ) -> Option<&'static str> {
+        use std::os::unix::fs::MetadataExt as _;
+        let meta = std::fs::metadata(path).ok()?;
+        runner_of_file(path, home, store, person, (meta.dev(), meta.ino()))
+    }
+
     #[test]
     fn an_editor_name_matches_the_file_and_not_a_shell() {
         assert!(is_editor_name("Cursor"));
@@ -1561,6 +1707,7 @@ mod tests {
     /// that home into another, and a file anyone may rewrite or reach
     /// through a directory anyone may write are not installed copies; the
     /// same file kept by the person is.
+    #[cfg(target_os = "linux")]
     #[test]
     fn an_install_root_holds_only_what_resolves_inside_it() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1581,47 +1728,39 @@ mod tests {
         let bin = home.join(".local/bin");
         let claude = program(&bin, "claude");
         assert_eq!(
-            runner_of_file(&claude, Some(&home), &store, &person, None),
+            runner_here(&claude, Some(&home), &store, &person),
             Some("claude")
         );
 
         let away = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(program(away.path(), "codex"), bin.join("codex")).unwrap();
         assert_eq!(
-            runner_of_file(&bin.join("codex"), Some(&home), &store, &person, None),
+            runner_here(&bin.join("codex"), Some(&home), &store, &person),
             None
         );
 
         program(&base.path().join("other/.local/bin"), "claude");
         let climbed = home.join("../other/.local/bin/claude");
-        assert_eq!(
-            runner_of_file(&climbed, Some(&home), &store, &person, None),
-            None
-        );
+        assert_eq!(runner_here(&climbed, Some(&home), &store, &person), None);
 
         std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o757)).unwrap();
-        assert_eq!(
-            runner_of_file(&claude, Some(&home), &store, &person, None),
-            None
-        );
+        assert_eq!(runner_here(&claude, Some(&home), &store, &person), None);
 
         let open = bin.join("open");
         let grok = program(&open, "grok");
         assert_eq!(
-            runner_of_file(&grok, Some(&home), &store, &person, None),
+            runner_here(&grok, Some(&home), &store, &person),
             Some("grok")
         );
         std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
-        assert_eq!(
-            runner_of_file(&grok, Some(&home), &store, &person, None),
-            None
-        );
+        assert_eq!(runner_here(&grok, Some(&home), &store, &person), None);
     }
 
     /// Whoever may write the directory an install root sits in may swap
     /// the root, so that directory is judged as the root is: each root
     /// under the person's home is refused once its own directory is
     /// writable by anyone or by a group the person shares.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_root_in_a_directory_others_may_write_is_refused() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1634,9 +1773,9 @@ mod tests {
         let person = Person::new(&SystemAccounts);
         let staff = FakeAccounts {
             user: Some("u"),
-            group: "staff",
+            group: Some("staff"),
             members: &["u", "v"],
-            primary: vec![person.uid],
+            primary: Some(vec![person.uid]),
         };
         let sharing = Person::new(&staff);
         let mut files: Vec<PathBuf> = vec![
@@ -1662,7 +1801,7 @@ mod tests {
         {
             let file = files.iter().find(|f| f.starts_with(root)).unwrap();
             let above = root.parent().unwrap();
-            let runner = |who| runner_of_file(file, Some(&home), &store, who, None);
+            let runner = |who| runner_here(file, Some(&home), &store, who);
             assert!(runner(&person).is_some(), "{}", root.display());
             set(above, 0o757);
             assert_eq!(runner(&person), None, "{}", root.display());
@@ -1689,6 +1828,7 @@ mod tests {
     /// path resolved, for a link or for another directory holding a file
     /// of the same name, is not walked through, and a file that is not
     /// the one the process runs is not its runner.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_parent_swapped_after_the_path_resolved_is_refused() {
         use std::os::unix::fs::MetadataExt as _;
@@ -1705,21 +1845,109 @@ mod tests {
             std::fs::create_dir_all(dir).unwrap();
             std::fs::write(dir.join("2.1.3"), "").unwrap();
         }
+        let id = |path: &Path| {
+            let meta = std::fs::metadata(path).unwrap();
+            (meta.dev(), meta.ino())
+        };
         let file = versions.join("2.1.3");
-        let meta = std::fs::metadata(&file).unwrap();
-        let running = Some((meta.dev(), meta.ino()));
+        let (running, planted) = (id(&file), id(&other.join("2.1.3")));
         let runner = |expect| runner_at(&file, Some(&home), &store, &person, expect);
         assert_eq!(runner(running), Some("claude"));
 
         std::fs::rename(&versions, home.join("held")).unwrap();
         std::os::unix::fs::symlink(&other, &versions).unwrap();
-        assert_eq!(runner(None), None);
         assert_eq!(runner(running), None);
+        assert_eq!(runner(planted), None);
 
         std::fs::remove_file(&versions).unwrap();
         std::fs::rename(&other, &versions).unwrap();
         assert_eq!(runner(running), None);
-        assert_eq!(runner(None), Some("claude"));
+    }
+
+    /// A process is its runner only through the (device, inode) the
+    /// kernel reports for its executable. When that cannot be read, the
+    /// path the link names is not trusted in its place.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_executable_that_cannot_be_read_is_no_runner() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let base = tempfile::Builder::new()
+            .prefix(".ljos-exe-")
+            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .unwrap();
+        let home = base.path().join("u");
+        let bin = home.join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let claude = bin.join("claude");
+        std::fs::write(&claude, "").unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let meta = std::fs::metadata(&claude).unwrap();
+        let person = Person::new(&SystemAccounts);
+        let store = PathBuf::from(NIX_STORE);
+        let runner = |running| runner_from(&claude, running, || None, Some(&home), &store, &person);
+        assert_eq!(runner(Some((meta.dev(), meta.ino()))), Some("claude"));
+        assert_eq!(runner(None), None);
+    }
+
+    /// A runtime's script names the runner only when the runtime is an
+    /// installed copy of its exact name, kept as a runner file is and the
+    /// file the process runs. A `node` of a tool call's own making, or a
+    /// program whose name merely starts like one, may name any script.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_script_names_the_runner_only_for_an_installed_runtime() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let base = tempfile::Builder::new()
+            .prefix(".ljos-runtime-")
+            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .unwrap();
+        let home = base.path().join("u");
+        let away = tempfile::tempdir().unwrap();
+        let program = |dir: &Path, name: &str| {
+            std::fs::create_dir_all(dir).unwrap();
+            let path = dir.join(name);
+            std::fs::write(&path, "").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let id = |path: &Path| {
+            let meta = std::fs::metadata(path).unwrap();
+            (meta.dev(), meta.ino())
+        };
+        let cli = program(
+            &home.join(".npm-global/lib/node_modules/@anthropic-ai/claude-code"),
+            "cli.js",
+        );
+        let bin = home.join(".local/bin");
+        let node = program(&bin, "node");
+        let person = Person::new(&SystemAccounts);
+        let store = PathBuf::from(NIX_STORE);
+        let runner = |exe: &Path, running| {
+            runner_from(
+                exe,
+                Some(running),
+                || Some(cli.clone()),
+                Some(&home),
+                &store,
+                &person,
+            )
+        };
+        assert_eq!(runner(&node, id(&node)), Some("claude"));
+        assert_eq!(runner(&node, id(&cli)), None);
+        for planted in [
+            program(&bin, "node-v20"),
+            program(&bin, "nodejs_modules"),
+            program(away.path(), "node"),
+        ] {
+            assert_eq!(
+                runner(&planted, id(&planted)),
+                None,
+                "{}",
+                planted.display()
+            );
+        }
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o757)).unwrap();
+        assert_eq!(runner(&node, id(&node)), None);
     }
 
     /// A Nix store entry is a runner only while Nix alone keeps it. A
@@ -1727,6 +1955,7 @@ mod tests {
     /// no one else may write it; a root's store must be closed to the
     /// person, sticky when its group may write it, and hold root's
     /// entries.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_nix_entry_is_a_runner_only_in_a_store_nix_keeps() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1744,7 +1973,7 @@ mod tests {
         let set = |mode| {
             std::fs::set_permissions(&store, std::fs::Permissions::from_mode(mode)).unwrap();
         };
-        let runner = || runner_of_file(&claude, None, &store, &person, None);
+        let runner = || runner_here(&claude, None, &store, &person);
 
         set(0o755);
         assert_eq!(runner(), Some("claude"));
@@ -1804,27 +2033,29 @@ mod tests {
 
     /// One user `u`, the name and members of whatever group is asked
     /// for, and the uids whose primary group it is.
+    #[cfg(target_os = "linux")]
     struct FakeAccounts {
         user: Option<&'static str>,
-        group: &'static str,
+        group: Option<&'static str>,
         members: &'static [&'static str],
-        primary: Vec<u32>,
+        primary: Option<Vec<u32>>,
     }
 
+    #[cfg(target_os = "linux")]
     impl Accounts for FakeAccounts {
         fn user_name(&self, _uid: u32) -> Option<std::ffi::OsString> {
             self.user.map(Into::into)
         }
 
         fn group(&self, _gid: u32) -> Option<GroupEntry> {
-            Some(GroupEntry {
-                name: self.group.into(),
+            self.group.map(|name| GroupEntry {
+                name: name.into(),
                 members: self.members.iter().map(Into::into).collect(),
             })
         }
 
         fn primary_members(&self, _gid: u32) -> Option<Vec<u32>> {
-            Some(self.primary.clone())
+            self.primary.clone()
         }
     }
 
@@ -1832,6 +2063,7 @@ mod tests {
     /// when that group is: named for them, listing no one else, and no
     /// other account's primary group. An account lookup that fails is
     /// not such a group.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_group_write_counts_only_from_a_group_the_person_has_alone() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1840,13 +2072,17 @@ mod tests {
         let uid = unsafe { libc::getuid() };
         let alone = |members, primary| FakeAccounts {
             user: Some("u"),
-            group: "u",
+            group: Some("u"),
             members,
-            primary,
+            primary: Some(primary),
         };
         let shared = [
             FakeAccounts {
-                group: "staff",
+                group: Some("staff"),
+                ..alone(&[], vec![uid])
+            },
+            FakeAccounts {
+                group: None,
                 ..alone(&[], vec![uid])
             },
             alone(&["u", "v"], vec![uid]),
@@ -1854,6 +2090,10 @@ mod tests {
             alone(&[], vec![uid, uid + 1]),
             FakeAccounts {
                 user: None,
+                ..alone(&[], vec![uid])
+            },
+            FakeAccounts {
+                primary: None,
                 ..alone(&[], vec![uid])
             },
         ];
@@ -1874,17 +2114,96 @@ mod tests {
             assert!(group_is_private(&accounts, uid, 0));
             let person = Person::new(&accounts);
             assert_eq!(
-                runner_of_file(&claude, Some(&home), &store, &person, None),
+                runner_here(&claude, Some(&home), &store, &person),
                 Some("claude")
             );
         }
         for accounts in &shared {
             assert!(!group_is_private(accounts, uid, 0));
             let person = Person::new(accounts);
-            assert_eq!(
-                runner_of_file(&claude, Some(&home), &store, &person, None),
-                None
-            );
+            assert_eq!(runner_here(&claude, Some(&home), &store, &person), None);
+        }
+    }
+
+    /// The accounts in a group are read from `passwd` only when
+    /// `nsswitch.conf` names that file alone, and a file that cannot be
+    /// read whole lists no one rather than fewer.
+    #[test]
+    fn a_primary_group_is_listed_only_from_a_passwd_file_read_whole() {
+        let etc = tempfile::tempdir().unwrap();
+        let write = |name: &str, text: &str| std::fs::write(etc.path().join(name), text).unwrap();
+        let passwd = "root:x:0:0::/root:/bin/sh\nu:x:1000:1000::/home/u:/bin/sh\n";
+        write("passwd", passwd);
+        assert_eq!(primary_in_files(etc.path(), 1000), None, "no nsswitch.conf");
+        for conf in [
+            "passwd: files systemd\n",
+            "passwd: sss files\n",
+            "passwd: compat\n",
+            "passwd: files [NOTFOUND=return] ldap\n",
+            "passwd: files\npasswd: files ldap\n",
+            "group: files\n",
+        ] {
+            write("nsswitch.conf", conf);
+            assert_eq!(primary_in_files(etc.path(), 1000), None, "{conf}");
+        }
+        write(
+            "nsswitch.conf",
+            "# local\npasswd:   files # only\ngroup: files\n",
+        );
+        assert_eq!(primary_in_files(etc.path(), 1000), Some(vec![1000]));
+        assert_eq!(primary_in_files(etc.path(), 7), Some(vec![]));
+        for extra in [
+            "+@admins\n",
+            "-v\n",
+            "v:x:1001\n",
+            "v:x:one:1000::/home/v:/bin/sh\n",
+        ] {
+            write("passwd", &format!("{passwd}{extra}"));
+            assert_eq!(primary_in_files(etc.path(), 1000), None, "{extra}");
+        }
+        write(
+            "passwd",
+            &format!("{passwd}\n# kept\nv:x:1001:1000::/home/v:/bin/sh\n"),
+        );
+        assert_eq!(primary_in_files(etc.path(), 1000), Some(vec![1000, 1001]));
+        std::fs::remove_file(etc.path().join("passwd")).unwrap();
+        assert_eq!(primary_in_files(etc.path(), 1000), None);
+    }
+
+    /// A group is read from `group` only when `nsswitch.conf` names that
+    /// file alone, and only when one line has its gid: a second line's
+    /// members hold the group as well, though a lookup returns the first.
+    #[test]
+    fn a_group_is_read_only_from_one_line_of_a_group_file_read_whole() {
+        let etc = tempfile::tempdir().unwrap();
+        let write = |name: &str, text: &str| std::fs::write(etc.path().join(name), text).unwrap();
+        let group = "root:x:0:\nu:x:1000:\nstaff:x:50:u,v\n";
+        write("group", group);
+        let read = |gid| {
+            group_in_files(etc.path(), gid).map(|g| {
+                let members: Vec<String> = g
+                    .members
+                    .iter()
+                    .map(|m| m.to_string_lossy().into_owned())
+                    .collect();
+                (g.name.to_string_lossy().into_owned(), members)
+            })
+        };
+        assert_eq!(read(1000), None, "no nsswitch.conf");
+        for conf in ["group: files systemd\n", "group: sss\n", "passwd: files\n"] {
+            write("nsswitch.conf", conf);
+            assert_eq!(read(1000), None, "{conf}");
+        }
+        write("nsswitch.conf", "passwd: files\ngroup: files\n");
+        assert_eq!(read(1000), Some(("u".into(), vec![])));
+        assert_eq!(
+            read(50),
+            Some(("staff".into(), vec!["u".into(), "v".into()]))
+        );
+        assert_eq!(read(7), None);
+        for extra in ["shadow:x:1000:v\n", "+:::\n", "w:x:1000\n", "w:x:ten:\n"] {
+            write("group", &format!("{group}{extra}"));
+            assert_eq!(read(1000), None, "{extra}");
         }
     }
 
