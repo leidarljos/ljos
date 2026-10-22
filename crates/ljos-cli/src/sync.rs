@@ -461,6 +461,29 @@ fn log_lines(atoms: &[Value], scope: &str, default: &str, explicit_only: bool) -
     mine.iter().map(|a| format!("{a}\n")).collect()
 }
 
+/// The key of the first line export seals into every log. The line names
+/// the writing host and the log's scope, inside the ciphertext, so a log
+/// copied under another host's or scope's file name says so when opened.
+/// It has no `text`, so a reader that predates it skips it as an atom.
+const LOG_HEADER: &str = "ljos_log";
+
+fn log_header(host: &str, scope_name: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({ LOG_HEADER: 1, "host": host, "scope": scope_name })
+    )
+}
+
+/// The host and scope a log's header names, and the atoms after it. None
+/// for a log written before the header.
+fn split_header(plain: &str) -> Option<(String, String, &str)> {
+    let (first, body) = plain.split_once('\n').unwrap_or((plain, ""));
+    let header: Value = serde_json::from_str(first).ok()?;
+    header.get(LOG_HEADER)?;
+    let field = |key: &str| header.get(key).and_then(Value::as_str).map(str::to_string);
+    Some((field("host")?, field("scope")?, body))
+}
+
 fn belongs_to_scope(atom: &Value, scope: &str, default: &str, explicit_only: bool) -> bool {
     if !is_own(atom) {
         return false;
@@ -761,8 +784,9 @@ fn export_named_scope(
 ) -> Result<String> {
     let host = host();
     let explicit_only = scope_name != primary_scope;
-    let plain = log_lines(atoms, scope_name, default, explicit_only);
-    let count = plain.lines().count();
+    let body = log_lines(atoms, scope_name, default, explicit_only);
+    let count = body.lines().count();
+    let plain = log_header(&host, scope_name) + &body;
     std::fs::create_dir_all(log_dir(root))?;
     let [log_rel, digest_rel] = host_log_rels_for_scope(&host, primary_scope, scope_name);
     let log = root.join(&log_rel);
@@ -1309,13 +1333,17 @@ fn import_jobs(root: &Path, scope: &Scope, me: &str) -> Result<(Vec<ImportJob>, 
                 continue;
             }
             let identities = identities_for_open(&scope_name);
-            match open_identities(&path, &identities)? {
-                Some(plain) => jobs.push(ImportJob {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            let bytes =
+                std::fs::read(&path).with_context(|| format!("sync: {}", path.display()))?;
+            match open_log(&bytes, &host, &scope_name, &format!(".ljos/atoms/{name}"))? {
+                Opened::Atoms(plain) => jobs.push(ImportJob {
                     host,
                     scope_name,
                     plain,
                 }),
-                None => {
+                Opened::Refused(line) => out.push_str(&line),
+                Opened::Miss => {
                     // The log's own recipients. A cloud log lists different
                     // keys than the primary, and a miss is an error only
                     // when one of those keys is an identity this log was
@@ -1789,6 +1817,46 @@ fn open_sealed_bytes(bytes: &[u8], identities: &[PathBuf]) -> Result<Option<Stri
     age_opened(&out, "sealed log")
 }
 
+/// What opening one host's log of one scope gave.
+enum Opened {
+    /// The atoms, after a header that names that host and scope.
+    Atoms(String),
+    /// No identity on this machine is a recipient.
+    Miss,
+    /// It opened and is not that host's log of that scope. The line says so.
+    Refused(String),
+}
+
+/// Open `bytes`, found at `label` as `host`'s log of `scope_name`, and hold
+/// it to that name. A peer can commit any ciphertext it holds under any
+/// file name, and a log sealed only to this machine, read as scope cloud,
+/// would be resealed to the cloud recipients. A header naming another host
+/// or scope is refused. A log with no header predates it and is read only
+/// through a key that is not this machine's, the cloud identity for scope
+/// cloud, which no narrower scope is sealed to.
+fn open_log(bytes: &[u8], host: &str, scope_name: &str, label: &str) -> Result<Opened> {
+    let identities = identities_for_open(scope_name);
+    let Some(plain) = open_sealed_bytes(bytes, &identities)? else {
+        return Ok(Opened::Miss);
+    };
+    if let Some((named_host, named_scope, body)) = split_header(&plain) {
+        if named_host == host && named_scope == scope_name {
+            return Ok(Opened::Atoms(body.to_string()));
+        }
+        return Ok(Opened::Refused(format!(
+            "sync: {label} holds {named_host}'s {named_scope} log, not {host}'s {scope_name} log; it was left unread\n"
+        )));
+    }
+    let own = identity_path();
+    let shared: Vec<PathBuf> = identities.into_iter().filter(|id| *id != own).collect();
+    if let Some(plain) = open_sealed_bytes(bytes, &shared)? {
+        return Ok(Opened::Atoms(plain));
+    }
+    Ok(Opened::Refused(format!(
+        "sync: {label} has no scope header and opens only with this machine's key; it was left unread\n"
+    )))
+}
+
 /// Read a regular file without following a symlink at the last component.
 fn read_regular_nofollow(path: &Path) -> Result<Vec<u8>> {
     use std::io::Read;
@@ -1807,7 +1875,7 @@ fn read_regular_nofollow(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn sealed_plain(root: &Path, rel: &str, identities: &[PathBuf]) -> Result<Option<String>> {
+fn sealed_bytes(root: &Path, rel: &str) -> Result<Option<Vec<u8>>> {
     if !tracked_modes_are_regular(root, rel) {
         bail!("sync: {rel} is not a regular file; the log was kept");
     }
@@ -1816,18 +1884,9 @@ fn sealed_plain(root: &Path, rel: &str, identities: &[PathBuf]) -> Result<Option
         WorktreeKind::Unsafe => {
             bail!("sync: {rel} is not a regular file; the log was kept");
         }
-        WorktreeKind::Regular => {
-            let bytes = read_regular_nofollow(&path)?;
-            open_sealed_bytes(&bytes, identities)
-        }
-        WorktreeKind::Missing => {
-            if in_head(root, rel) {
-                let bytes = head_blob(root, rel)?;
-                open_sealed_bytes(&bytes, identities)
-            } else {
-                Ok(None)
-            }
-        }
+        WorktreeKind::Regular => read_regular_nofollow(&path).map(Some),
+        WorktreeKind::Missing if in_head(root, rel) => head_blob(root, rel).map(Some),
+        WorktreeKind::Missing => Ok(None),
     }
 }
 
@@ -2258,12 +2317,16 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
     let mut opened = Vec::with_capacity(present.len());
     let mut skipped_scopes = Vec::new();
     for log in &present {
-        let identities = identities_for_open(&log.scope_name);
-        match sealed_plain(root, &log.age, &identities) {
-            Ok(Some(plain)) => {
+        let result = sealed_bytes(root, &log.age).and_then(|bytes| match bytes {
+            Some(bytes) => open_log(&bytes, &gone, &log.scope_name, &log.age),
+            None => Ok(Opened::Miss),
+        });
+        match result {
+            Ok(Opened::Atoms(plain)) => {
                 opened.push((log, plain));
             }
-            Ok(None) => {
+            Ok(Opened::Refused(line)) => out.push_str(&line),
+            Ok(Opened::Miss) => {
                 skipped_scopes.push(log.scope_name.clone());
                 out.push_str(&format!(
                     "sync: {gone}'s {} log is not sealed to this machine\n",
