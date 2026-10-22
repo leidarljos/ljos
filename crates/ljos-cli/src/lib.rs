@@ -3127,6 +3127,12 @@ pub fn same_holder(a: &str, b: &str) -> bool {
     }
     let (seat_a, tag_a) = holder_parts(a);
     let (seat_b, tag_b) = holder_parts(b);
+    let invalid = |raw: &str, tag: &Option<String>| raw.contains('@') && tag.is_none();
+    if invalid(a, &tag_a) || invalid(b, &tag_b) {
+        return false;
+    }
+    let seat_a = seat_slug(&seat_a);
+    let seat_b = seat_slug(&seat_b);
     // Two tags of one seat are two conversations, not one holder.
     seat_a == seat_b && (tag_a.is_none() || tag_b.is_none())
 }
@@ -3143,28 +3149,14 @@ pub fn same_holder(a: &str, b: &str) -> bool {
 /// stays apart from `eessi`.
 #[must_use]
 pub fn same_seat(held: &str, holder: &str, known: &std::collections::BTreeSet<String>) -> bool {
+    let _ = known;
     let (held, holder) = (held.trim(), holder.trim());
     if held.is_empty() || holder.is_empty() {
         return false;
     }
     let (seat_a, _) = holder_parts(held);
     let (seat_b, _) = holder_parts(holder);
-    if seat_a == seat_b {
-        return true;
-    }
-    let suffixed = |name: &str, seat: &str| {
-        !known.contains(name)
-            && name
-                .strip_prefix(seat)
-                .and_then(|rest| rest.strip_prefix('-'))
-                .is_some_and(|tag| {
-                    (1..=6).contains(&tag.len())
-                        && tag
-                            .bytes()
-                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-                })
-    };
-    suffixed(&seat_a, &seat_b) || suffixed(&seat_b, &seat_a)
+    seat_slug(&seat_a) == seat_slug(&seat_b)
 }
 
 /// [`same_seat`] against the seats this tracker lists.
@@ -3197,37 +3189,48 @@ pub fn holder_parts(holder: &str) -> (String, Option<String>) {
     };
     let seat = LEGACY_SEATS
         .iter()
-        .find(|(old, _)| *old == seat.to_ascii_lowercase())
+        .find(|(old, _)| *old == seat)
         .map_or(seat, |(_, now)| (*now).to_string());
     (seat, tag)
 }
 
-fn legacy_tag(tag: &str) -> bool {
-    (1..=6).contains(&tag.len())
-        && tag
+fn legacy_tag(head: &str, tag: &str) -> bool {
+    if head.starts_with("run-")
+        || head == "run"
+        || head.starts_with("judge-")
+        || head == "judge"
+        || head.ends_with("sand-subagent")
+    {
+        return false;
+    }
+    if !(1..=6).contains(&tag.len())
+        || !tag
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-        && tag.bytes().any(|b| b.is_ascii_digit())
-        && tag.bytes().any(|b| b.is_ascii_lowercase())
+        || !tag.bytes().any(|b| b.is_ascii_digit())
+    {
+        return false;
+    }
+    // Old pid tags can be all digits (`inky-10`), but keep one-digit model
+    // suffixes (`gpt-5`) and long build numbers (`ridley-ci-a-555001`) whole.
+    if tag.bytes().all(|b| b.is_ascii_digit()) && (tag.len() == 1 || tag.len() > 5) {
+        return false;
+    }
+    true
 }
 
 /// Drop a pid-shaped suffix (`n9o`, `1vmow`) from a seat. A name that has
-/// none is returned unchanged, so `Disk Saver` keeps its case.
+/// none keeps its full text, but case folds (`Disk Saver` becomes
+/// `disk saver`).
 fn without_legacy_tag(seat: &str) -> String {
     let mut lower = seat.to_ascii_lowercase();
-    let mut stripped = false;
     while let Some((head, tag)) = lower.rsplit_once('-') {
-        if head.is_empty() || !legacy_tag(tag) {
+        if head.is_empty() || !legacy_tag(head, tag) {
             break;
         }
         lower = head.to_string();
-        stripped = true;
     }
-    if stripped {
-        lower
-    } else {
-        seat.to_string()
-    }
+    lower
 }
 
 /// `name` without a `:issue` scope. `saddle:proj-aaaa` is the holder
@@ -21653,10 +21656,13 @@ fn optional_bin(name: &str) -> bool {
 }
 
 /// `ok` when the row answers, `warn` when the policy row names an
-/// `ljos-policyd` without phronesis or a runner skill or runner env ljos
-/// wrote is stale or edited by hand, `info` when the row is optional and
-/// absent, `no` when a required row failed. A stale skill or env ljos
-/// wrote is a warning `ljos doctor --fix` rewrites, not a failure.
+/// `ljos-policyd` without phronesis, a runner skill or runner env ljos
+/// wrote is stale or edited by hand, or the cloud guard file is a known
+/// older version or differs from the seat refusals, `info` when the row
+/// is optional and absent, `no` when a required row failed. A stale skill,
+/// env or cloud guard file ljos wrote is a warning `ljos doctor --fix`
+/// rewrites, not a failure. A cloud guard file that differs is a warning
+/// `ljos cloud up` rewrites.
 #[must_use]
 pub fn doctor_word(row: &Habitat) -> &'static str {
     if cloud::cloud_age_is_unset(row.name, &row.state) {
@@ -21672,6 +21678,8 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
         "warn"
     } else if row.ok {
         "ok"
+    } else if row.name == "cloud guard" && cloud::guard_row_is_warning(&row.state) {
+        "warn"
     } else if OPTIONAL_ROWS.contains(&row.name)
         || optional_bin(row.name)
         || (row.name == "git hooks" && row.state.starts_with(git_hooks::HOOKS_UNSET))
@@ -34510,6 +34518,8 @@ mod tests {
         assert!(same_holder("inky@i1o6nf7w3i", "inky"));
         assert!(same_holder("disk-saver", "disk-saver-t4t"));
         assert!(same_holder("ljosbot", "ljos-bot"));
+        assert!(same_holder("GPT-5", "gpt-5"));
+        assert!(same_holder("Ridley-CI-A-555001", "ridley-ci-a-555001"));
         assert!(same_holder("ljos-bot", "ljosbot@q4s23e2cxd"));
         assert!(same_holder("inky-n9o", "inky@i1o6nf7w3i"));
         assert!(same_holder("inky-n9o", "inky-8zo"));
@@ -34542,6 +34552,16 @@ mod tests {
         assert_eq!(holder_parts("gpt-5"), ("gpt-5".to_string(), None));
         assert_eq!(
             holder_parts("ridley-ci-a-555001"),
+            ("ridley-ci-a-555001".to_string(), None)
+        );
+        assert_eq!(holder_parts("inky-10"), ("inky".to_string(), None));
+        assert_eq!(
+            holder_parts("sand-subagent-0e61"),
+            ("sand-subagent-0e61".to_string(), None)
+        );
+        assert_eq!(holder_parts("GPT-5"), ("gpt-5".to_string(), None));
+        assert_eq!(
+            holder_parts("Ridley-CI-A-555001"),
             ("ridley-ci-a-555001".to_string(), None)
         );
         assert_eq!(
@@ -34591,13 +34611,24 @@ mod tests {
                 .collect();
         assert!(same_seat("free-claude-8h", "free-claude", &known));
         assert!(same_seat("free-claude", "free-claude-8h", &known));
-        assert!(same_seat("free-agy-aak", "free-agy@q4s23e2cxd", &known));
+        assert!(!same_seat("free-agy-aak", "free-agy@q4s23e2cxd", &known));
         assert!(same_seat("free-opencode@abc", "free-opencode@xyz", &known));
-        assert!(same_seat("free-opencode-nrv", "free-opencode", &known));
+        assert!(!same_seat("free-opencode-nrv", "free-opencode", &known));
         assert!(!same_seat("eessi-bot", "eessi", &known));
         assert!(!same_seat("free-claude-8h", "free-codex", &known));
         assert!(same_seat("free-opencode-1v8am", "free-opencode", &known));
         assert!(!same_seat("free-claude-sandbox", "free-claude", &known));
+        assert!(same_seat("GPT-5", "gpt-5", &known));
+        assert!(same_seat(
+            "Ridley-CI-A-555001",
+            "ridley-ci-a-555001",
+            &known
+        ));
+        assert!(!same_seat(
+            "sand-subagent-0e61",
+            "sand-subagent-0f3a",
+            &known
+        ));
         assert!(!same_seat("", "free-claude", &known));
     }
 
