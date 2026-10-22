@@ -3531,6 +3531,7 @@ mod tests {
     /// terminated, and cleans up, before anything kills it.
     #[test]
     fn a_commit_past_its_budget_leaves_no_index_lock() {
+        let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let rel = hooked_repo(root, "#!/bin/sh\nsleep 30\n");
@@ -3553,6 +3554,7 @@ mod tests {
     /// any git starts, instead of leaving git no time to finish.
     #[test]
     fn a_held_checkout_stops_the_commit_at_the_budget() {
+        let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let rel = hooked_repo(root, "#!/bin/sh\nexit 0\n");
@@ -6549,6 +6551,7 @@ mod tests {
 
     #[test]
     fn commit_logs_commits_each_scope_and_drops_a_removed_one() {
+        let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let git = |args: &[&str]| {
