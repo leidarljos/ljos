@@ -11,10 +11,13 @@ your rules and a built-in list of destructive commands before the command
 runs. It plugs into the agent through the agent's own hook and MCP settings.
 Nothing leaves the machine unless you turn on a remote judge.
 
-It works with Claude Code, Codex, Cursor, GitHub Copilot CLI, Gemini CLI,
-Windsurf, Factory's Droid, Kiro, Cline, Qwen Code, Crush, Auggie, Amp, goose,
-OpenHands, Continue, Roo Code, Kilo Code, Grok Build, opencode, omp, hermes
-and Antigravity's `agy`.
+It blocks denied commands in Claude Code, Codex, Cursor, GitHub Copilot CLI,
+Gemini CLI, Windsurf, Factory's Droid, Kiro, Qwen Code, Crush, Auggie, Amp,
+goose, OpenHands, Grok Build, opencode, omp, hermes and Antigravity's `agy`.
+Cline hooks are installed too, but upstream docs do not yet document whether a
+hook failure blocks the command.
+It serves memory, skills and tools over MCP in Zed, VS Code, Claude Desktop,
+Continue, Roo Code and Kilo Code.
 
 ## Five minutes
 
