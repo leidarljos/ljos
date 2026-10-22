@@ -10435,7 +10435,8 @@ fn merge_by_lexical(judged: Vec<Hit>, mut extra: Vec<Hit>, cue: &str) -> Vec<Hit
 
 /// The search with the cross-encoder asked for, and whether it ordered
 /// the hits. A writer without one says `absent` and returns the fused
-/// order, which carries age. Hits that carry a `rerank_score` are read
+/// order, which carries age. When every hit the writer chose carries a
+/// `rerank_score`, which is null on a hit it did not rerank, they are read
 /// by it. An atom [`search_relevant`] added, which the cross-encoder did
 /// not read, goes in ahead of the first hit its lexical match beats.
 fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> {
@@ -10456,9 +10457,10 @@ fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> 
                 Some((hit, v["rerank_score"].as_f64()))
             })
             .collect();
-        let scored_all = !scored.is_empty() && scored.iter().all(|(_, s)| s.is_some());
+        let chosen = chosen.min(scored.len());
+        let scored_all = chosen > 0 && scored[..chosen].iter().all(|(_, s)| s.is_some());
         if scored_all {
-            scored.sort_by(|a, b| b.1.unwrap_or(0.0).total_cmp(&a.1.unwrap_or(0.0)));
+            scored[..chosen].sort_by(|a, b| b.1.unwrap_or(0.0).total_cmp(&a.1.unwrap_or(0.0)));
         }
         let ran = scored_all || body["rerank"].as_str() == Some("cross-encoder");
         let mut hits: Vec<Hit> = scored.into_iter().map(|(h, _)| h).collect();
