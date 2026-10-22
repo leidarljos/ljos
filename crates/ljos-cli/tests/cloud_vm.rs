@@ -2193,3 +2193,91 @@ fn a_slot_line_replayed_from_another_issue_does_not_backdate_it() {
         "{err}"
     );
 }
+
+/// A writer that answers `GET /v1/atoms` with an empty roster.
+fn serve_empty_pack() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { break };
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 1024];
+            loop {
+                let n = s.read(&mut tmp).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let body = r#"{"atoms":[]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = s.write_all(resp.as_bytes());
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// Two standing seats vote ship from one harness session. The older note
+/// is the pusher. Raw rows are two ballots, so a cite that does not count
+/// them stands; consensus, which counts, does not. Both paths refuse.
+#[test]
+fn duplicate_ballots_from_one_session_have_one_push_verdict() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_origin, repo) = slot_world(root.path(), &["probe-dup"]);
+    pin_standing(&repo, "ljosbot");
+    pin_standing(&repo, "inky");
+    let issue = "probe-dup";
+    let layout = vissue_core::Layout::resolve(None, None).unwrap();
+    for seat in ["ljosbot", "inky"] {
+        vissue_core::ops::vote_with(&layout, issue, Some("ship"), seat, Some("none"), None)
+            .unwrap();
+    }
+    let harness = "sess-dup-0001";
+    for seat in ["ljosbot", "inky"] {
+        let key =
+            ljos_cli::ballot_sig::load_or_create(&ljos_cli::cloud::prepare_seat_key(seat).unwrap())
+                .unwrap();
+        let note = ljos_cli::ballot_sig::sign_bound(&key, issue, seat, "ship", harness, "-");
+        vissue_core::ops::note(&layout, issue, &note).unwrap();
+    }
+
+    let bin = root.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    executable(
+        &bin.join("vissue"),
+        "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = vote ]; then\n    printf '%s\\n' '[{\"agent\":\"ljosbot\",\"choice\":\"ship\"},{\"agent\":\"inky\",\"choice\":\"ship\"}]'\n    exit 0\n  fi\ndone\nexit 1\n",
+    );
+    std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+    std::env::set_var("PACKSET_URL", serve_empty_pack());
+    std::env::set_var("PACKSET_WORKSPACE", "seat");
+    std::env::remove_var("LJOS_UNSIGNED_BALLOTS");
+    std::env::set_var("LJOS_SEAT", "ljosbot");
+    std::env::set_var("VISSUE_AGENT", "ljosbot");
+
+    assert_eq!(ljos_cli::seat_name(), "ljosbot");
+    let rows = ljos_cli::ballot_rows(issue);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["agent"].as_str(), Some("ljosbot"), "{rows:?}");
+    let cite = ljos_cli::cite_stands(issue);
+    let (words, json) = ljos_cli::push_cite_reading(
+        issue,
+        &rows,
+        &std::collections::BTreeSet::new(),
+        &ljos_cli::seat_name(),
+    );
+    let stands = json["push_cite"]["stands"].as_bool().unwrap();
+    assert!(!stands, "{words}");
+    assert!(words.contains("does not stand"), "{words}");
+    assert_eq!(cite.is_ok(), stands, "{cite:?} {words}");
+    let err = cite.unwrap_err();
+    assert!(err.contains("the only seat ballot"), "{err}");
+    assert!(err.contains("ljosbot"), "{err}");
+}
