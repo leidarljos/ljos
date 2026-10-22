@@ -278,6 +278,8 @@ const TRACKER_WRITES: &[&str] = &[
     "ljos_file",
     "ljos_options",
     "ljos_deed",
+    "ljos_playbook",
+    "ljos_predict",
 ];
 
 fn writes_tracker(name: &str, args: Option<&serde_json::Map<String, serde_json::Value>>) -> bool {
@@ -286,7 +288,21 @@ fn writes_tracker(name: &str, args: Option<&serde_json::Map<String, serde_json::
             .and_then(|a| a.get("add"))
             .is_some_and(|add| !add.is_null());
     }
+    if name == "ljos_vote" {
+        let set = |key| {
+            args.and_then(|a| a.get(key))
+                .is_some_and(|v| !v.is_null() && *v != serde_json::Value::Bool(false))
+        };
+        return set("choice") || set("jev") || set("withdraw");
+    }
     TRACKER_WRITES.contains(&name)
+}
+
+/// The name a tracker write under this call's seat records: the call's
+/// own holder, or the `assignee` it passed when that is the same seat.
+fn call_assignee(verb: &str, passed: Option<&str>) -> Result<String, McpError> {
+    let checked = ljos_cli::write_seat(verb).map_err(refused)?;
+    ljos_cli::write_assignee(verb, &checked, resolve_assignee(passed), false).map_err(refused)
 }
 
 fn runs_without_seat(name: &str) -> bool {
@@ -2013,8 +2029,8 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<TakeArgs>,
     ) -> Result<Json<Said>, McpError> {
-        let text =
-            claim(&args.node, &resolve_assignee(args.assignee.as_deref())).map_err(refused)?;
+        let assignee = call_assignee("claim", args.assignee.as_deref())?;
+        let text = claim(&args.node, &assignee).map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
     }
 
@@ -2034,7 +2050,7 @@ impl LjosServer {
     ) -> Result<Json<Said>, McpError> {
         let text = sitting_gated(
             &args.issue,
-            &resolve_assignee(args.assignee.as_deref()),
+            &call_assignee("sitting", args.assignee.as_deref())?,
             &self.cards_dir,
             args.anyway,
             args.playbook.as_deref(),
@@ -2070,7 +2086,7 @@ impl LjosServer {
             args.outcome.as_deref(),
             args.new_option,
             LEARN_BETA,
-            &resolve_assignee(args.assignee.as_deref()),
+            &call_assignee("finish", args.assignee.as_deref())?,
             args.gen,
             args.close,
         )
@@ -2119,8 +2135,8 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<TakeArgs>,
     ) -> Result<Json<Said>, McpError> {
-        let mut text =
-            release(&args.node, &resolve_assignee(args.assignee.as_deref())).map_err(refused)?;
+        let assignee = call_assignee("release", args.assignee.as_deref())?;
+        let mut text = release(&args.node, &assignee).map_err(refused)?;
         text.push_str(&ljos_cli::persist_tracker(&args.node, "released"));
         Ok(Json(Said { text, aside: None }))
     }
@@ -2142,7 +2158,7 @@ impl LjosServer {
         let text = complete(
             &args.node,
             args.status.as_deref(),
-            &resolve_assignee(args.assignee.as_deref()),
+            &call_assignee("complete", args.assignee.as_deref())?,
             args.gen,
         )
         .map_err(refused)?;
@@ -3591,7 +3607,11 @@ impl ServerHandler for LjosServer {
         let seated = seat.is_some();
         if let Some(seat) = &seat {
             if writes_tracker(&name, request.arguments.as_ref()) {
-                if let Err(e) = ljos_cli::registered_seat(&seat.seat) {
+                let verb = name.trim_start_matches("ljos_");
+                let checked =
+                    ljos_cli::with_call_seat(seat.clone(), async { ljos_cli::write_seat(verb) })
+                        .await;
+                if let Err(e) = checked {
                     return Ok(attach_next(&name, as_tool_error(refused(e))?));
                 }
             }

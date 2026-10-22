@@ -57,6 +57,8 @@ fn consensus_on(dir: &Path, home: &Path, args: &[&str], pack: &str) -> Output {
         .env("XDG_RUNTIME_DIR", home)
         .env("VISSUE_ROOT", home.join("tracker"))
         .env("PACKSET_URL", pack)
+        // A consensus that may file a dissent is a tracker write.
+        .env("LJOS_SEAT", "saddle")
         // The stub tracker holds no signature notes; this test reads the
         // shape of the JSON, and signed ballots have their own suite.
         .env("LJOS_UNSIGNED_BALLOTS", "allow")

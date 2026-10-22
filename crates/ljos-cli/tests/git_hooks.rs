@@ -1640,3 +1640,46 @@ fn a_claude_session_is_not_booked_by_the_git_hook() {
         ""
     );
 }
+
+/// With a seats file, the hook books a commit only for a seat it lists:
+/// an unlisted `LJOS_SEAT`, the `grokbot-<id8>` of an unmapped
+/// conversation and an agy conversation book nothing, a commit that names
+/// an open issue included.
+#[test]
+fn a_git_hook_books_only_a_seat_the_seats_file_lists() {
+    let hab = Hab::new("repo");
+    seed_issue(&hab, "probe-32fx", "TODO");
+    install(&hab);
+    fs::create_dir_all(hab.config.join("ljos")).unwrap();
+    fs::write(hab.config.join("ljos/seats.toml"), "seats = [\"saddle\"]\n").unwrap();
+    commit_with(&hab, "a.txt", "probe-32fx: unlisted seat", &[], false);
+    commit_with(
+        &hab,
+        "b.txt",
+        "unmapped conversation",
+        &[(
+            "CURSOR_CONVERSATION_ID",
+            "0b1c2d3e-0000-4000-8000-000000000000",
+        )],
+        true,
+    );
+    commit_with(
+        &hab,
+        "c.txt",
+        "agy conversation",
+        &[("ANTIGRAVITY_CONVERSATION_ID", "agy-conv-0003-deed")],
+        true,
+    );
+    assert_eq!(vissue_log(&hab.tracker), "");
+    assert_eq!(deeds(&hab.tracker), 0);
+
+    let sha = commit_with(
+        &hab,
+        "d.txt",
+        "listed seat",
+        &[("LJOS_SEAT", "saddle")],
+        false,
+    );
+    let org = fs::read_to_string(hab.tracker.join("Software/probe/issues.org")).unwrap_or_default();
+    assert!(org.contains(&format!("deed-file-commit-{sha}")), "{org}");
+}

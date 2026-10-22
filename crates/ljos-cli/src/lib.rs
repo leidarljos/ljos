@@ -3567,12 +3567,23 @@ pub fn derived_seat(who: &Seat) -> Option<Derived> {
 /// made under. Refused, as a ballot is, when nothing named the seat: a
 /// subagent shell wrote hundreds of notes as `exec-daemon` and `cursor`.
 ///
+/// The seat is [`resolve_seat`]'s, the one `ljos seat` prints, so a
+/// conversation id `seats.toml` maps writes as that seat.
+///
 /// # Errors
 ///
 /// The seat is the program above this shell, or the login user under a
 /// runner.
 pub fn write_seat(verb: &str) -> Result<Seat> {
-    let who = whoami();
+    if let (Some(seat), Some(holder)) = (hook_actor(), hook_holder()) {
+        registered_seat(&seat)?;
+        return Ok(Seat {
+            seat,
+            holder,
+            source: "the git hook".into(),
+        });
+    }
+    let who = resolve_seat();
     if let Some(from) = derived_seat(&who) {
         bail!(
             "{verb}: no seat is named, so this write would be made as {}, {from}. \
@@ -3585,13 +3596,75 @@ pub fn write_seat(verb: &str) -> Result<Seat> {
     Ok(who)
 }
 
-/// Refuse a tracker write from a seat the seats file does not list. A
-/// file that lists no seat, or is missing as on a fresh single-user
-/// install, refuses nothing.
+thread_local! {
+    static SEATED: std::cell::RefCell<Option<Seat>> = const { std::cell::RefCell::new(None) };
+}
+
+/// While this guard is alive, [`seat_name`] and [`holder_name`] are the
+/// seat [`write_seat`] checked, so everything a write records names that
+/// seat and not the one the process tree would give.
+pub struct Seated {
+    previous: Option<Seat>,
+}
+
+impl Seated {
+    #[must_use]
+    pub fn enter(seat: &Seat) -> Self {
+        let previous = SEATED.with(|slot| slot.replace(Some(seat.clone())));
+        Self { previous }
+    }
+}
+
+impl Drop for Seated {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        SEATED.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+fn seated() -> Option<Seat> {
+    SEATED.with(|slot| slot.borrow().clone())
+}
+
+/// The name a write under `checked` records for an assignee a caller
+/// passed, already resolved to `assignee`. This seat's own name or holder
+/// is kept. Another name is refused, unless the verb hands work to
+/// another name (`delegates`), and then it has to be a seat the seats
+/// file lists.
 ///
 /// # Errors
 ///
-/// The seats file lists seats and `seat` is not one of them, or the file
+/// `assignee` is another seat and the verb does not delegate, or the
+/// seats file does not list it.
+pub fn write_assignee(
+    verb: &str,
+    checked: &Seat,
+    assignee: String,
+    delegates: bool,
+) -> Result<String> {
+    let slug = canonical_seat_name(&assignee);
+    if same_holder(&assignee, &checked.holder) || slug == canonical_seat_name(&checked.seat) {
+        return Ok(assignee);
+    }
+    claim_holder(&assignee).map_err(|e| anyhow::anyhow!("{verb}: {e}"))?;
+    if !delegates {
+        bail!(
+            "{verb}: {assignee} is not this seat, {}; a write is recorded as the seat that makes it. \
+             Drop --assignee, or run it as that seat (`export LJOS_SEAT={slug}`); nothing was written",
+            checked.seat
+        );
+    }
+    registered_seat(&assignee).map_err(|e| anyhow::anyhow!("{verb}: {e}"))?;
+    Ok(assignee)
+}
+
+/// Refuse a tracker write from a seat the seats file does not list. A
+/// missing file, as on a fresh single-user install, refuses nothing; a
+/// file that is there and lists no seat refuses every write.
+///
+/// # Errors
+///
+/// The seats file is there and `seat` is not one it lists, or the file
 /// cannot be read as TOML.
 pub fn registered_seat(seat: &str) -> Result<()> {
     let path = seats_file();
@@ -3602,6 +3675,13 @@ pub fn registered_seat(seat: &str) -> Result<()> {
     if listed.contains(&slug) {
         return Ok(());
     }
+    if listed.is_empty() {
+        bail!(
+            "the seats file {} lists no seat, so no seat may write. \
+             Add `seats = [\"{slug}\"]` or a `\"CONVERSATION-ID\" = \"{slug}\"` line to it; nothing was written",
+            path.display()
+        );
+    }
     bail!(
         "no seat named {slug} in {}, which lists {}. \
          Set LJOS_SEAT to a seat it lists, or add yours to it; nothing was written",
@@ -3610,8 +3690,9 @@ pub fn registered_seat(seat: &str) -> Result<()> {
     )
 }
 
-/// The seat names `path` maps conversations to, slugged. `None` when the
-/// file is missing or names no seat.
+/// The seats `path` lists, slugged: every name it maps a conversation to
+/// (`"ID" = "NAME"`) and every name in a `seats = [...]` array. `None`
+/// only when the file is missing.
 fn listed_seats(path: &Path) -> Result<Option<std::collections::BTreeSet<String>>> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -3620,13 +3701,19 @@ fn listed_seats(path: &Path) -> Result<Option<std::collections::BTreeSet<String>
     };
     let table: toml::Table = toml::from_str(&text)
         .map_err(|e| anyhow::anyhow!("the seats file {} is not TOML: {e}", path.display()))?;
-    let listed: std::collections::BTreeSet<String> = table
+    let roster = table
+        .get("seats")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten();
+    let listed = table
         .values()
+        .chain(roster)
         .filter_map(toml::Value::as_str)
         .map(canonical_seat_name)
         .filter(|slug| !slug.is_empty())
         .collect();
-    Ok((!listed.is_empty()).then_some(listed))
+    Ok(Some(listed))
 }
 
 /// Append one line, `ts seat verb what`, to the state dir's recall.log, so
@@ -3667,7 +3754,9 @@ pub fn log_recall_in(dir: &Path, verb: &str, what: &str) {
 /// A git hook that resolved a seat passes that name, not the process tree.
 #[must_use]
 pub fn seat_name() -> String {
-    hook_actor().unwrap_or_else(|| whoami().seat)
+    hook_actor()
+        .or_else(|| seated().map(|s| s.seat))
+        .unwrap_or_else(|| whoami().seat)
 }
 
 /// Whether a conversation under a runner may accept a proposal: only one
@@ -3682,7 +3771,9 @@ pub fn accepts_another_conversation(proposer: Option<&str>, holder: &str) -> boo
 /// A git hook that resolved a seat passes that name, not the process tree.
 #[must_use]
 pub fn holder_name() -> String {
-    hook_holder().unwrap_or_else(|| whoami().holder)
+    hook_holder()
+        .or_else(|| seated().map(|s| s.holder))
+        .unwrap_or_else(|| whoami().holder)
 }
 
 /// Resolve an `--assignee` / MCP field for a claim. Empty, a pronoun
@@ -3750,6 +3841,12 @@ pub fn seat_source_row(who: &Seat) -> Habitat {
             ok: true,
         },
     }
+}
+
+/// [`seat_source_row`] for the seat the `seat` row and [`write_seat`] name.
+#[must_use]
+pub fn doctor_seat_source() -> Habitat {
+    seat_source_row(&resolve_seat())
 }
 
 /// The doctor's `seat` row: who votes, who holds, and where the names came
@@ -23751,7 +23848,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
     if host_lacks_person_check() {
         out.push(person_absent_row());
     }
-    out.push(seat_source_row(&whoami()));
+    out.push(doctor_seat_source());
     out.push(cloud::mcp_row());
     out.push(cloud::guard_row());
     // Scope cloud is readable here when cloud up wrote its age identity.
@@ -32776,8 +32873,8 @@ pub fn run_captured(bin: &str, args: &[impl AsRef<str>]) -> Result<Said> {
 const CAPTURE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(180);
 
 /// [`run_captured`] with `VISSUE_AGENT` set to `identity`, for a tracker
-/// write whose output the caller has to hand on. `None` leaves the
-/// environment as it is.
+/// write whose output the caller has to hand on. `None` is the seat a
+/// [`Seated`] guard holds, else the environment as it is.
 pub fn run_captured_as(
     bin: &str,
     args: &[impl AsRef<str>],
@@ -32803,7 +32900,10 @@ fn run_captured_within(
     use std::process::{Command, Stdio};
     let path = which::which(bin).with_context(|| format!("{bin} not on PATH"))?;
     let mut cmd = Command::new(&path);
-    if let Some(who) = identity {
+    if let Some(who) = identity
+        .map(str::to_string)
+        .or_else(|| seated().map(|s| s.seat))
+    {
         cmd.env("VISSUE_AGENT", who);
     }
     bind_connection_env(&mut cmd);
@@ -50872,6 +50972,111 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_login_user_under_a_runner_warns_and_a_named_seat_with_no_seats_file_passes() {
+        let _env = env_guard();
+        let keys = [
+            "LJOS_SEAT",
+            "VISSUE_AGENT",
+            "LJOS_HOLD",
+            "LJOS_SEATS",
+            "CODEX_THREAD_ID",
+            "CODEX_SESSION_ID",
+            "GROK_SESSION_ID",
+            "USER",
+            "XDG_RUNTIME_DIR",
+        ];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            for k in keys {
+                std::env::remove_var(k);
+            }
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+            std::env::set_var("LJOS_SEATS", dir.path().join("seats.toml"));
+            std::env::set_var("USER", "probe-login");
+            std::env::set_var("GROK_SESSION_ID", "2c12969d-0000-4000-8000-000000000000");
+        }
+        let derived = seat_source_row(&Seat {
+            seat: "probe-login".into(),
+            holder: "probe-login".into(),
+            source: "the login user".into(),
+        });
+        unsafe { std::env::set_var("LJOS_SEAT", "rohit") };
+        let named = doctor_seat_source();
+        let writes = write_seat("note");
+        unsafe {
+            for (k, v) in saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+        assert!(!derived.ok, "{}", derived.state);
+        assert_eq!(doctor_word(&derived), "warn");
+        assert!(
+            derived
+                .state
+                .contains("the login user of a shell under an agent runner"),
+            "{}",
+            derived.state
+        );
+        assert!(healthy(&[derived]), "a derived seat fails no doctor");
+        assert!(named.ok, "{}", named.state);
+        assert!(healthy(&[named]));
+        assert_eq!(
+            writes.unwrap().seat,
+            "rohit",
+            "no seats file refuses nobody"
+        );
+    }
+
+    #[test]
+    fn the_doctor_seat_source_row_names_the_seat_a_conversation_maps_to() {
+        let _env = env_guard();
+        let keys = [
+            "LJOS_SEAT",
+            "VISSUE_AGENT",
+            "LJOS_HOLD",
+            "LJOS_SEATS",
+            "CURSOR_CONVERSATION_ID",
+            "XDG_RUNTIME_DIR",
+        ];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let seats = dir.path().join("seats.toml");
+        std::fs::write(
+            &seats,
+            "\"0b1c2d3e-0000-4000-8000-000000000000\" = \"saddle\"\n",
+        )
+        .unwrap();
+        unsafe {
+            for k in keys {
+                std::env::remove_var(k);
+            }
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+            std::env::set_var("LJOS_SEATS", &seats);
+            std::env::set_var(
+                "CURSOR_CONVERSATION_ID",
+                "0b1c2d3e-0000-4000-8000-000000000000",
+            );
+        }
+        let row = doctor_seat_source();
+        let seat = resolve_seat().seat;
+        unsafe {
+            for (k, v) in saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+        assert_eq!(seat, "saddle");
+        assert!(row.ok, "{}", row.state);
+        assert_eq!(row.state, "saddle named by seats.toml");
     }
 
     #[test]
