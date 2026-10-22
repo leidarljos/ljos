@@ -11169,7 +11169,8 @@ mod read_back_tests {
 /// The seat ballots on `issue` that fail their signature check, said as
 /// one refusal. `Ok` when every seat ballot is signed under its pinned key
 /// or is legacy unsigned (committed to the tracker before signing began),
-/// and every signed seat first pinned after slots began is under a slot
+/// and every signed seat that is not standing is under a slot that this
+/// issue already held when its pin was introduced
 /// ([`slot::problems`]), or when `LJOS_UNSIGNED_BALLOTS=allow`; the `Ok`
 /// names the legacy ones.
 ///
@@ -11205,14 +11206,10 @@ pub fn check_seat_signatures(
         .into_iter()
         .filter(|(voter, _)| !old.iter().any(|o| o == voter))
         .collect();
-    let unslotted = slot::problems(
-        issue,
-        &signed,
-        &notes,
-        &pins,
-        &slot::pinned_at,
-        &slot::noted_at,
-    );
+    let unslotted = slot::problems(issue, &signed, &notes, &pins, &|note, voter| {
+        pins.get(voter)
+            .is_some_and(|key| slot::recorded_before_pin(issue, note, voter, key).unwrap_or(true))
+    });
     if unslotted.is_empty() {
         Ok(old)
     } else {
@@ -18304,10 +18301,12 @@ pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
 }
 
 /// Whether a cite stands: a tracker issue its seat ballots decide
-/// ([`seats_decide`]), open or closed. The text says which ballots it
-/// counted. A deed alone does not stand: the pushing seat can mint one
-/// with `deedar create` a moment before the push, so the decision has to
-/// be on an issue another seat voted on.
+/// ([`seats_decide`]), open or closed. The ballots are the ones
+/// [`ballot_rows`] counts, so one session is one ballot here and in
+/// `ljos consensus`. The text says which ballots it counted. A deed
+/// alone does not stand: the pushing seat can mint one with `deedar
+/// create` a moment before the push, so the decision has to be on an
+/// issue another seat voted on.
 pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
     if let Ok(v) = tracker_show_json(cite) {
         if let Some(why) = panel_gate::settle_refusal(cite) {
@@ -18439,12 +18438,16 @@ fn vissue_json(args: &[&str]) -> std::result::Result<Value, String> {
     serde_json::from_str(&said.stdout).map_err(|e| e.to_string())
 }
 
-/// An issue's ballots and the persona names to leave out of them.
+/// An issue's ballots and the persona names to leave out of them. The
+/// rows are what [`panel_gate::counted_ballots`] keeps of `vissue vote
+/// --json`, the same rows [`ballot_rows`] hands to consensus.
 fn cite_ballots(
     cite: &str,
 ) -> std::result::Result<(Vec<Value>, std::collections::BTreeSet<String>), String> {
     let ballots = vissue_json(&["vote", cite, "--json"])
         .map_err(|e| format!("{cite}: the ballots are not readable: {e}"))?;
+    let ballots =
+        panel_gate::counted_ballots(cite, &ballots.as_array().cloned().unwrap_or_default());
     let personas = personas_from_pack()
         .map_err(|e| {
             format!(
@@ -18454,7 +18457,7 @@ fn cite_ballots(
         .into_iter()
         .map(|p| p.name.trim().to_string())
         .collect();
-    Ok((ballots.as_array().cloned().unwrap_or_default(), personas))
+    Ok((ballots, personas))
 }
 
 /// The files that are the seat's law and its reach into each runner: the
@@ -25592,6 +25595,61 @@ impl Drop for CommitLock {
 /// The file ljos locks around every write to a tracker checkout's index.
 pub const TRACKER_LOCK: &str = ".ljos-commit.lock";
 
+/// A child git command that follows `-C` in `dir` and does not inherit an
+/// exported repository from the parent process.
+pub(crate) fn git_at(dir: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_PREFIX",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+    ] {
+        cmd.env_remove(key);
+    }
+    cmd.arg("-C").arg(dir);
+    cmd
+}
+
+/// Discovery should not walk up from a scratch path under `target/` into an
+/// enclosing checkout; those are separate repositories when they are
+/// initialized. A path that already has its own `.git` keeps normal discovery.
+pub(crate) fn checkout_ceiling(dir: &Path) -> Option<PathBuf> {
+    let start = if let Ok(canon) = std::fs::canonicalize(dir) {
+        canon
+    } else if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(dir)
+    };
+    let mut cur = start.clone();
+    loop {
+        if cur.join(".git").exists() {
+            return None;
+        }
+        if cur.file_name().is_some_and(|name| name == "target") {
+            if cur == start {
+                return cur.parent().map(Path::to_path_buf);
+            }
+            return Some(cur);
+        }
+        if !cur.pop() {
+            return None;
+        }
+    }
+}
+
+fn tracker_git_at(dir: &Path) -> std::process::Command {
+    let mut cmd = git_at(dir);
+    if let Some(ceiling) = checkout_ceiling(dir) {
+        cmd.env("GIT_CEILING_DIRECTORIES", ceiling);
+    }
+    cmd
+}
+
 /// `TRACKER_LOCK` at the top of the worktree that holds `dir`, kept out of
 /// `git status` by the repository's `info/exclude`. Not in `.git`, where a
 /// hand clearing `*.lock` after a crash would unlink it under a live holder
@@ -25914,13 +25972,12 @@ fn commit_seat_pin(start: &Path, seat: &str) {
     if !root.join(name).is_file() {
         return;
     }
-    let ignored = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&root)
+    let mut ignored_cmd = git_at(&root);
+    ignored_cmd
         .args(["check-ignore", "-q", "--", name])
-        .stdin(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
+        .stdin(std::process::Stdio::null());
+    git_hooks::hook_child_env(&mut ignored_cmd);
+    let ignored = ignored_cmd.status().is_ok_and(|s| s.success());
     if ignored {
         return;
     }
@@ -26263,11 +26320,8 @@ fn persist_tracker_paths(path: &Path, issue: &str, verb: &str, also: &[String]) 
     };
     let dir: &Path = &git_dir;
     let git = |args: &[&str]| {
-        let mut cmd = std::process::Command::new("git");
-        cmd.arg("-C")
-            .arg(dir)
-            .args(args)
-            .stdin(std::process::Stdio::null());
+        let mut cmd = tracker_git_at(dir);
+        cmd.args(args).stdin(std::process::Stdio::null());
         git_hooks::hook_child_env(&mut cmd);
         cmd.output()
     };
@@ -30425,6 +30479,7 @@ mod tests {
             PathCommit::Made
         );
 
+        let _guard = HoldEnv::set(&[("LJOS_GUARD", "on"), ("LJOS_OFF", "")]);
         let cwd = arm.display().to_string();
         assert!(
             gate_push(None, "git push --force-with-lease", Some(&cwd)).is_none(),
@@ -30495,6 +30550,7 @@ mod tests {
             commit_paths(&home, &[".vimrc"], "dot update"),
             PathCommit::Made
         );
+        let _guard = HoldEnv::set(&[("LJOS_GUARD", "on"), ("LJOS_OFF", "")]);
         let cwd = home.display().to_string();
         assert!(
             gate_push(None, "git push --force-with-lease", Some(&cwd)).is_none(),
@@ -30536,6 +30592,73 @@ mod tests {
         );
         std::env::remove_var("GIT_DIR");
         std::env::remove_var("GIT_WORK_TREE");
+    }
+
+    /// A hook-child tracker write must check pin ignores in that tracker,
+    /// not in an exported `GIT_DIR` from the parent hook process.
+    #[test]
+    fn hook_children_check_pin_ignores_in_the_tracker_checkout() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        let decoy = dir.path().join("decoy");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&decoy).unwrap();
+        let issues = seeded_tracker(&real);
+        seeded_tracker(&decoy);
+        std::fs::write(
+            decoy.join(".gitignore"),
+            format!("{}\n", ballot_sig::PIN_FILE),
+        )
+        .unwrap();
+        let decoy_add = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&decoy)
+            .args(["add", ".gitignore"])
+            .status()
+            .unwrap();
+        assert!(decoy_add.success());
+        let decoy_commit = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&decoy)
+            .args(["commit", "-q", "-m", "ignore pin"])
+            .status()
+            .unwrap();
+        assert!(decoy_commit.success());
+
+        std::fs::write(
+            &issues,
+            "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
+        )
+        .unwrap();
+        std::fs::write(real.join(ballot_sig::PIN_FILE), "saddle deadbeef\n").unwrap();
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        std::env::set_var("GIT_DIR", decoy.join(".git"));
+        std::env::set_var("GIT_WORK_TREE", &decoy);
+        let said = crate::git_hooks::with_hook_children_for_test(|| {
+            persist_tracker_file(&issues, "probe-a1b2", "claimed")
+        });
+        assert!(said.contains("committed chore(issues): probe-a1b2 claimed by saddle"));
+        std::env::remove_var("GIT_DIR");
+        std::env::remove_var("GIT_WORK_TREE");
+        let log = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&real)
+            .args(["log", "-2", "--format=%s"])
+            .output()
+            .unwrap();
+        assert!(log.status.success(), "real log failed");
+        let subjects = String::from_utf8_lossy(&log.stdout);
+        assert!(
+            subjects
+                .lines()
+                .any(|line| line == "chore(issues): pin saddle key"),
+            "pin commit missing under hook child env: {subjects}"
+        );
+        for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
     }
 
     /// Paths HEAD already holds, as another seat's commit leaves them, are
@@ -30776,6 +30899,64 @@ mod tests {
         assert!(!said.contains("nothing to commit"), "{said}");
         assert_eq!(run(&["log", "-1", "--format=%s"]).trim(), "seed");
         for var in ["VISSUE_ROOT", "VISSUE_NO_ROUTE", "LJOS_TRACKER_GIT"] {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// A path under another checkout's ignored `target/` is not itself a
+    /// tracker checkout. Persisting that file must not touch the outer
+    /// checkout's lock or exclude list.
+    #[test]
+    fn an_unprepared_nested_tracker_path_does_not_touch_the_enclosing_checkout() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let outer = dir.path();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(outer)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "seat@example.invalid"]);
+        run(&["config", "user.name", "seat"]);
+        run(&["config", "core.hooksPath", "/dev/null"]);
+        std::fs::write(outer.join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(outer.join("README.md"), "seed\n").unwrap();
+        run(&["add", ".gitignore", "README.md"]);
+        run(&["commit", "-q", "-m", "seed"]);
+
+        let nested = outer.join("target/tracker-home/Software/probe");
+        std::fs::create_dir_all(&nested).unwrap();
+        let issues = nested.join("issues.org");
+        std::fs::write(
+            &issues,
+            "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
+        )
+        .unwrap();
+        let before_exclude =
+            std::fs::read_to_string(outer.join(".git/info/exclude")).unwrap_or_default();
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+
+        let said = persist_tracker_file(&issues, "probe-a1b2", "claimed");
+        assert!(said.contains("the tracker is not a git checkout"), "{said}");
+        assert!(
+            !outer.join(TRACKER_LOCK).exists(),
+            "outer checkout gained {}",
+            TRACKER_LOCK
+        );
+        let after_exclude =
+            std::fs::read_to_string(outer.join(".git/info/exclude")).unwrap_or_default();
+        assert_eq!(after_exclude, before_exclude, "outer exclude changed");
+        for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
             std::env::remove_var(var);
         }
     }
