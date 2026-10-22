@@ -230,10 +230,14 @@ const KEPT_THEN_UNFINISHED: &[u8] = concat!(
 /// Doctor reads the note queue and writes none of it. A last row
 /// without its newline, touched a moment ago or dated ahead of the
 /// clock, is not taken for one being written and then lost to a rewrite
-/// of the rows that parse.
+/// of the rows that parse. Touched a moment ago it may be one being
+/// written; a year ahead it is not, and doctor calls the queue damaged.
 #[test]
 fn doctor_keeps_every_byte_of_the_note_queue() {
-    for (when, at) in [("just now", SystemTime::now()), ("ahead", ahead())] {
+    for (when, at, word) in [
+        ("just now", SystemTime::now(), "ok"),
+        ("ahead", ahead(), "no"),
+    ] {
         let home = Home::new();
         std::fs::write(home.queue(), KEPT_THEN_UNFINISHED).expect("queue");
         set_mtime(&home.queue(), at);
@@ -243,16 +247,22 @@ fn doctor_keeps_every_byte_of_the_note_queue() {
             .unwrap_or_else(|| panic!("doctor hung on a queue touched {when}"));
         assert_eq!(home.tree(), before, "touched {when}:\n{out}");
         assert_eq!(std::fs::read(home.queue()).unwrap(), KEPT_THEN_UNFINISHED);
+        let line = row(&out, "note queue").unwrap_or_else(|| panic!("no queue row:\n{out}"));
+        assert!(line.starts_with(&format!("{word}\t")), "{when}: {line}");
     }
 }
 
 /// Another process holding the note-queue lock does not hold doctor: it
 /// tries the lock once, says the queue is busy in a row the short doctor
-/// shows, and says so no longer once the lock is let go.
+/// shows, and says so no longer once the lock is let go. A queue dated a
+/// year ahead is damaged, and that is what the row says.
 #[test]
 fn doctor_says_busy_while_the_note_queue_lock_is_held() {
     use std::os::unix::io::AsRawFd;
-    for (when, at) in [("just now", SystemTime::now()), ("ahead", ahead())] {
+    for (when, at, said) in [
+        ("just now", SystemTime::now(), "warn\tnote queue\tbusy: "),
+        ("ahead", ahead(), "no\tnote queue\t"),
+    ] {
         let home = Home::new();
         std::fs::write(home.queue(), KEPT_THEN_UNFINISHED).expect("queue");
         set_mtime(&home.queue(), at);
@@ -266,10 +276,7 @@ fn doctor_says_busy_while_the_note_queue_lock_is_held() {
             .unwrap_or_else(|| panic!("doctor waited on the held queue lock ({when})"));
         assert_eq!(home.tree(), before, "touched {when}:\n{out}");
         let line = row(&out, "note queue").unwrap_or_else(|| panic!("no queue row:\n{out}"));
-        assert!(
-            line.starts_with("warn\tnote queue\tbusy: "),
-            "{when}: {line}"
-        );
+        assert!(line.starts_with(said), "{when}: {line}");
         drop(lock);
         let (_, out) = home.doctor(&["--all"]).expect("doctor hung");
         let line = row(&out, "note queue").unwrap_or_else(|| panic!("no queue row:\n{out}"));
