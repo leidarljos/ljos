@@ -89,7 +89,7 @@ fn queue_file(dir: &Path) -> PathBuf {
 
 fn lock(dir: &Path) -> crate::CommitLock {
     let _ = std::fs::create_dir_all(dir);
-    crate::CommitLock::acquire(&dir.join("note-queue.lock"))
+    crate::CommitLock::acquire_private(&dir.join("note-queue.lock"))
 }
 
 fn read(dir: &Path) -> Vec<Queued> {
@@ -100,18 +100,18 @@ fn write(dir: &Path, notes: &[Queued]) -> Result<()> {
     let path = queue_file(dir);
     if notes.is_empty() {
         if path.exists() {
-            std::fs::write(&path, "").with_context(|| format!("empty {}", path.display()))?;
+            crate::rewrite_state_file(&path, b"")
+                .with_context(|| format!("empty {}", path.display()))?;
         }
         return Ok(());
     }
-    let tmp = dir.join("note-queue.jsonl.tmp");
     let mut body = String::new();
     for note in notes {
         body.push_str(&serde_json::to_string(note)?);
         body.push('\n');
     }
-    std::fs::write(&tmp, body).with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).with_context(|| format!("replace {}", path.display()))
+    crate::rewrite_state_file(&path, body.as_bytes())
+        .with_context(|| format!("replace {}", path.display()))
 }
 
 /// The notes waiting in `dir`, oldest first.
@@ -322,6 +322,44 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600, "queue mode {mode:o}");
+    }
+
+    /// A drain rewrites the queue. The file and the lock are ljos's own, so
+    /// the rewrite lands mode 0600, not the 0644 a plain `tmp + rename`
+    /// leaves, and a symlink swapped in for the queue file is refused rather
+    /// than written through to its target.
+    #[test]
+    fn a_rewrite_stays_private_and_refuses_a_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = dir("rewrite");
+        push_in(&dir, note("p-1", "a")).unwrap();
+        push_in(&dir, note("p-2", "b")).unwrap();
+        let done = drain_in(&dir, |n| match n.issue.as_str() {
+            "p-1" => Sent::Kept("id".into()),
+            _ => Sent::Wait("down".into()),
+        })
+        .unwrap();
+        assert_eq!(done.left, 1);
+        let path = queue_file(&dir);
+        let mode = std::fs::symlink_metadata(&path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "queue mode after rewrite {mode:o}");
+        let lock_mode = std::fs::symlink_metadata(dir.join("note-queue.lock"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(lock_mode, 0o600, "lock mode {lock_mode:o}");
+
+        let outside = dir.join("outside");
+        std::fs::write(&outside, "kept\n").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        assert!(replace_in(&dir, vec![note("p-9", "forged")]).is_err());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "kept\n");
     }
 
     #[test]
