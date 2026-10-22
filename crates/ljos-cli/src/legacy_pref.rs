@@ -15,6 +15,17 @@
 //! command gate, session start and any process under a runner do not
 //! write the receipt and do not stamp a basis.
 //!
+//! One atom the pack refuses does not stop the rest. The receipt is
+//! written before any stamp. A permanent refusal is recorded on it as
+//! `source.refused` and is not tried again. A pack that did not answer
+//! is tried on the next person-side run.
+//!
+//! These marks are not proof the person typed the atom. A v0.32.1
+//! `ljos prefer` with `CLAUDECODE=1` and no runner ancestor stored
+//! harness, seat and session as the same word, and that shape is
+//! promoted. The cutoff and the runner check are what this upgrade
+//! trusts. The marks only choose which older atoms are candidates.
+//!
 //! The writers at v0.32.1, and the same writers through d47b69bd, left
 //! these marks:
 //!
@@ -89,17 +100,17 @@ pub(crate) fn legacy(atom: &Value) -> Option<Legacy> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|o| !o.is_empty());
-    // An origin other than the person's never read as theirs, basis or
-    // not. `tool-echo`, `agent-derived`, `peer` and `external` stay out.
-    if origin.is_some_and(|o| !o.eq_ignore_ascii_case(ORIGIN_USER)) {
+    // The pack stamps `user-declared` on a post that left origin out, and
+    // fills it on the way out when the record is blank. A body that
+    // arrives without one was not stored that way, so it is not legacy.
+    // An origin other than the person's never read as theirs.
+    let origin = origin?;
+    if !origin.eq_ignore_ascii_case(ORIGIN_USER) {
         return None;
     }
-    // A missing origin is the pack's default, not a writer saying the
-    // person stood behind it. It waits for review.
-    let persons_origin = origin.is_some_and(|o| o.eq_ignore_ascii_case(ORIGIN_USER));
     // `via:prompt` is not read. The hook runs under the runner, and a
     // direct post can wear the tag.
-    if persons_origin && terminal_write(atom) {
+    if terminal_write(atom) {
         Some(Legacy::Promote)
     } else {
         Some(Legacy::Hold)
@@ -166,6 +177,7 @@ pub(crate) fn review_sentence(held: &[(String, String, String)]) -> String {
 /// is not under a runner. A later run finds that receipt and does not
 /// write another. Search, the island, the command gate and session start
 /// do not call this. A pack that does not answer is left for the next run.
+/// One refused update does not stop the receipt or the atoms after it.
 pub fn migrate_once() {
     if under_a_runner() {
         return;
@@ -309,7 +321,13 @@ pub fn keep(id: &str) -> Result<String> {
         bail!("prefer: {id} is not an older preference or lesson awaiting review");
     }
     let client = pack()?;
-    stamp_basis(&client, atom).with_context(|| format!("prefer: could not keep {id}"))?;
+    match stamp_basis(&client, atom) {
+        Update::Stamped => {}
+        Update::Refused(code) => {
+            bail!("prefer: could not keep {id}: the pack refused the update ({code})")
+        }
+        Update::Later => bail!("prefer: could not keep {id}: the pack did not answer"),
+    }
     let noun = if kind == Some("lesson") {
         "lesson"
     } else {
@@ -406,39 +424,117 @@ fn live() -> Result<Vec<Value>> {
     atoms_lean(&client, &client.workspace()).context("prefer: GET /v1/atoms failed")
 }
 
+/// What one `POST /v1/atoms/update` did.
+enum Update {
+    Stamped,
+    /// The pack refused this atom and will refuse it the same way again.
+    Refused(u16),
+    /// The pack did not answer, or asked us to wait.
+    Later,
+}
+
 fn stamp_marked() -> Result<usize> {
     let client = pack()?;
     let atoms = atoms_lean(&client, &client.workspace())?;
     // The receipt is written before any stamp, so a later refusal cannot
     // move the window. Atoms read above are the ones this run may stamp;
     // one posted after the receipt is newer than it.
-    let cutoff = match earliest_cutoff(&atoms) {
-        Some(at) => at,
-        None => record_cutoff(&client)?,
+    let bound = match earliest_bound(&atoms) {
+        Some(bound) => bound,
+        None => bound_of(&record_cutoff(&client)?)
+            .context("prefer: the preference cutoff has no time")?,
     };
+    let already = refused_ids(&bound.source);
+    let mut fresh = Vec::new();
+    let mut later = false;
     let mut n = 0;
     for atom in &atoms {
-        if legacy(atom) != Some(Legacy::Promote) {
+        if legacy(atom) != Some(Legacy::Promote) || !older_than(atom, bound.at) {
             continue;
         }
-        if !older_than(atom, cutoff) {
+        let Some(id) = atom_id(atom) else {
+            continue;
+        };
+        if already.iter().any(|seen| seen == &id) {
             continue;
         }
-        stamp_basis(&client, atom)?;
-        n += 1;
+        match stamp_basis(&client, atom) {
+            Update::Stamped => n += 1,
+            Update::Refused(_) => fresh.push(id),
+            Update::Later => later = true,
+        }
+    }
+    if !fresh.is_empty() {
+        remember_refusals(&client, &bound, &fresh)?;
+    }
+    if later {
+        bail!("prefer: the pack did not answer an update; it will be tried again");
     }
     Ok(n)
+}
+
+/// A 4xx the pack will give again for this body. Auth, a timeout and a
+/// rate limit are not that: the next run may get through.
+fn permanent(code: u16) -> bool {
+    (400..500).contains(&code) && !matches!(code, 401 | 408 | 429)
+}
+
+/// The cutoff receipt this run stamps against: its time, its id, and the
+/// source object that lists atoms the pack has already refused.
+struct Bound {
+    at: DateTime<FixedOffset>,
+    id: String,
+    source: Value,
 }
 
 /// The earliest cutoff receipt in `atoms`, compared as a time. A `Z`
 /// stamp and a millisecond stamp are the same instant either way; a
 /// string compare is not.
 fn earliest_cutoff(atoms: &[Value]) -> Option<DateTime<FixedOffset>> {
+    earliest_bound(atoms).map(|bound| bound.at)
+}
+
+fn earliest_bound(atoms: &[Value]) -> Option<Bound> {
     atoms
         .iter()
-        .filter(|atom| is_cutoff(atom))
-        .filter_map(instant_of)
-        .min()
+        .filter_map(bound_of)
+        .min_by_key(|bound| bound.at)
+}
+
+fn bound_of(atom: &Value) -> Option<Bound> {
+    if !is_cutoff(atom) {
+        return None;
+    }
+    let at = instant_of(atom)?;
+    let id = atom_id(atom)?;
+    let source = atom
+        .get("source")
+        .cloned()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    Some(Bound { at, id, source })
+}
+
+fn atom_id(atom: &Value) -> Option<String> {
+    let id = atom.get("id").and_then(Value::as_str)?.trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
+/// Ids on `source.refused`. The pack refused an update of each one, so a
+/// later run does not ask again.
+fn refused_ids(source: &Value) -> Vec<String> {
+    source
+        .get("refused")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn is_cutoff(atom: &Value) -> bool {
@@ -459,7 +555,7 @@ fn instant_of(atom: &Value) -> Option<DateTime<FixedOffset>> {
     }
 }
 
-fn record_cutoff(client: &packset_client::PacksetClient) -> Result<DateTime<FixedOffset>> {
+fn record_cutoff(client: &packset_client::PacksetClient) -> Result<Value> {
     let seat = crate::seat_name();
     let atom = json!({
         "schema": "inside.atom/v1",
@@ -471,42 +567,63 @@ fn record_cutoff(client: &packset_client::PacksetClient) -> Result<DateTime<Fixe
         "entities": [format!("seat:{seat}"), CUTOFF_ENTITY],
         "source": crate::atom_source(),
     });
-    let posted = client
+    client
         .post_atom(&atom)
-        .context("prefer: could not record the preference cutoff")?;
-    instant_of(&posted).context("prefer: the preference cutoff has no time")
+        .context("prefer: could not record the preference cutoff")
 }
 
-fn stamp_basis(client: &packset_client::PacksetClient, atom: &Value) -> Result<()> {
-    let id = atom
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .context("legacy preference has no id")?;
+/// Write `ids` onto the cutoff receipt. A later run skips them.
+fn remember_refusals(
+    client: &packset_client::PacksetClient,
+    bound: &Bound,
+    ids: &[String],
+) -> Result<()> {
+    let mut source = bound.source.clone();
+    let mut list = refused_ids(&source);
+    for id in ids {
+        if !list.iter().any(|seen| seen == id) {
+            list.push(id.clone());
+        }
+    }
+    source["refused"] = json!(list);
+    match post_source(client, &bound.id, source) {
+        Update::Stamped => Ok(()),
+        Update::Refused(code) => {
+            bail!("prefer: the pack refused to record a refused preference: {code}")
+        }
+        Update::Later => {
+            bail!("prefer: the pack did not answer while recording a refused preference")
+        }
+    }
+}
+
+fn stamp_basis(client: &packset_client::PacksetClient, atom: &Value) -> Update {
+    let Some(id) = atom_id(atom) else {
+        return Update::Later;
+    };
     let mut source = atom
         .get("source")
         .cloned()
         .filter(Value::is_object)
         .unwrap_or_else(|| json!({}));
     source["basis"] = json!("person");
+    post_source(client, &id, source)
+}
+
+fn post_source(client: &packset_client::PacksetClient, id: &str, source: Value) -> Update {
     let url = format!("{}/v1/atoms/update", client.base());
     let body = json!({
         "workspace": client.workspace(),
         "id": id,
         "fields": {"source": source},
     });
-    let timeout = http_timeout();
     match packset_client::authorize(ureq::post(&url))
-        .timeout(timeout)
+        .timeout(http_timeout())
         .send_json(body)
     {
-        Ok(_) => Ok(()),
-        Err(ureq::Error::Status(code, resp)) => {
-            let text = resp.into_string().unwrap_or_default();
-            bail!("POST /v1/atoms/update failed: {code}: {text}");
-        }
-        Err(e) => bail!("POST /v1/atoms/update failed: {e}"),
+        Ok(_) => Update::Stamped,
+        Err(ureq::Error::Status(code, _)) if permanent(code) => Update::Refused(code),
+        Err(_) => Update::Later,
     }
 }
 
@@ -517,6 +634,9 @@ fn gate() -> &'static Mutex<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+    use std::sync::{Arc, Mutex};
+
     use super::*;
 
     fn atom(kind: &str, origin: &str, entities: &[&str], source: Value) -> Value {
@@ -585,6 +705,8 @@ mod tests {
         let mut ancestor = typed.clone();
         ancestor["source"]["harness"] = json!("node");
         ancestor["id"] = json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa3");
+        // No origin. The pack stamps user-declared on the way in, so a
+        // body that arrives without one was not stored. It is not legacy.
         let mut bare = typed.clone();
         bare.as_object_mut().unwrap().remove("source");
         bare.as_object_mut().unwrap().remove("origin");
@@ -605,8 +727,8 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .push(json!("session:read-1"));
-        // via:prompt beside a session-end tag is both writers at once.
-        // Neither mark is unambiguous, so it stays held back.
+        // via:prompt beside a session: entity is a hook write and an
+        // agent mark at once. The hook tag is not promoted.
         let mut hook_and_session = hook.clone();
         hook_and_session["entities"]
             .as_array_mut()
@@ -638,7 +760,7 @@ mod tests {
             (&old_mismatch, Some(Legacy::Hold)),
             (&turned, Some(Legacy::Hold)),
             (&ancestor, Some(Legacy::Hold)),
-            (&bare, Some(Legacy::Hold)),
+            (&bare, None),
             (&ended, Some(Legacy::Hold)),
             (&forged, None),
             (&planted, None),
@@ -656,7 +778,7 @@ mod tests {
                 None => left += 1,
             }
         }
-        assert_eq!((promote, hold, left), (4, 9, 4), "fixture split");
+        assert_eq!((promote, hold, left), (4, 8, 5), "fixture split");
         runner["id"] = json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         // No cutoff receipt: nothing is older yet, so nothing awaits.
         assert!(awaiting(&[hook.clone(), typed.clone(), runner.clone()]).is_empty());
@@ -743,5 +865,245 @@ mod tests {
         assert_eq!(shown_when(&entity_only), "-");
         assert_eq!(shown_seat(&entity_only), "claude");
         assert_eq!(shown_source(&entity_only), "-");
+    }
+
+    #[test]
+    fn a_retryable_status_is_not_a_permanent_refusal() {
+        assert!(permanent(400));
+        assert!(permanent(409));
+        assert!(permanent(422));
+        assert!(!permanent(401));
+        assert!(!permanent(408));
+        assert!(!permanent(429));
+        assert!(!permanent(500));
+        assert!(!permanent(503));
+    }
+
+    /// One atom the pack refuses, one it does not answer, and one it takes.
+    /// The cutoff is written anyway. The refusal is recorded and not asked
+    /// again. The one that did not answer is stamped on the next run, and
+    /// the one that was taken is not stamped twice.
+    #[test]
+    fn a_refused_update_does_not_stop_the_rest_or_retry_forever() {
+        const REFUSED: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const STAMPED: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const LATER: &str = "cccccccccccccccccccccccccccccccc";
+        let pref = |id: &str, text: &str| {
+            json!({
+                "id": id,
+                "kind": "preference",
+                "text": text,
+                "origin": "user-declared",
+                "entities": ["seat:person", "horizon:standing"],
+                "source": terminal_source(),
+                "ts": "2020-01-01T00:00:00Z",
+            })
+        };
+        let (url, pack) = serve(vec![
+            pref(REFUSED, "Keep the refused note in its own file."),
+            pref(STAMPED, "Keep the stamped note in its own file."),
+            pref(LATER, "Keep the later note in its own file."),
+        ]);
+        pack.lock().unwrap().refuse.push(REFUSED.to_string());
+        pack.lock().unwrap().later.push(LATER.to_string());
+
+        with_pack(&url, || {
+            let err = stamp_marked().unwrap_err();
+            assert!(err.to_string().contains("did not answer"), "{err}");
+        });
+        {
+            let pack = pack.lock().unwrap();
+            let cutoff = pack
+                .atoms
+                .iter()
+                .find(|a| is_cutoff(a))
+                .expect("cutoff receipt");
+            let refused = refused_ids(cutoff.get("source").unwrap_or(&Value::Null));
+            assert_eq!(refused, vec![REFUSED.to_string()], "{cutoff}");
+            assert!(basis_of(by_id(&pack.atoms, STAMPED)).is_some());
+            assert!(basis_of(by_id(&pack.atoms, REFUSED)).is_none());
+            assert!(basis_of(by_id(&pack.atoms, LATER)).is_none());
+            assert_eq!(pack.updates.iter().filter(|id| *id == REFUSED).count(), 1);
+            assert_eq!(pack.updates.iter().filter(|id| *id == STAMPED).count(), 1);
+            assert_eq!(pack.updates.iter().filter(|id| *id == LATER).count(), 1);
+        }
+
+        with_pack(&url, || {
+            let n = stamp_marked().expect("the pack answers the atom it missed");
+            assert_eq!(n, 1);
+        });
+        let pack = pack.lock().unwrap();
+        assert_eq!(basis_of(by_id(&pack.atoms, LATER)), Some("person"));
+        assert!(basis_of(by_id(&pack.atoms, REFUSED)).is_none());
+        assert_eq!(basis_of(by_id(&pack.atoms, STAMPED)), Some("person"));
+        assert_eq!(pack.updates.iter().filter(|id| *id == REFUSED).count(), 1);
+        assert_eq!(pack.updates.iter().filter(|id| *id == STAMPED).count(), 1);
+        assert_eq!(pack.updates.iter().filter(|id| *id == LATER).count(), 2);
+        assert_eq!(
+            pack.atoms.iter().filter(|a| is_cutoff(a)).count(),
+            1,
+            "a second run wrote another cutoff"
+        );
+    }
+
+    fn by_id<'a>(atoms: &'a [Value], id: &str) -> &'a Value {
+        atoms
+            .iter()
+            .find(|a| a.get("id").and_then(Value::as_str) == Some(id))
+            .unwrap_or_else(|| panic!("no {id}"))
+    }
+
+    fn with_pack(url: &str, f: impl FnOnce()) {
+        crate::with_env_mutation(|| {
+            let keys = [
+                "PACKSET_URL",
+                "PACKSET_WORKSPACE",
+                "PACKSET_AUTH",
+                "PACKSET_TIMEOUT_MS",
+            ];
+            let prev: Vec<(&'static str, Option<String>)> = keys
+                .iter()
+                .map(|key| (*key, std::env::var(key).ok()))
+                .collect();
+            unsafe {
+                std::env::set_var("PACKSET_URL", url);
+                std::env::set_var("PACKSET_WORKSPACE", "seat");
+                std::env::set_var("PACKSET_AUTH", "off");
+                std::env::set_var("PACKSET_TIMEOUT_MS", "2000");
+            }
+            struct Put(Vec<(&'static str, Option<String>)>);
+            impl Drop for Put {
+                fn drop(&mut self) {
+                    for (key, value) in &self.0 {
+                        unsafe {
+                            match value {
+                                Some(value) => std::env::set_var(key, value),
+                                None => std::env::remove_var(key),
+                            }
+                        }
+                    }
+                }
+            }
+            let _put = Put(prev);
+            f();
+        });
+    }
+
+    struct Pack {
+        atoms: Vec<Value>,
+        updates: Vec<String>,
+        refuse: Vec<String>,
+        later: Vec<String>,
+    }
+
+    fn serve(atoms: Vec<Value>) -> (String, Arc<Mutex<Pack>>) {
+        use std::io::Write;
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let pack = Arc::new(Mutex::new(Pack {
+            atoms,
+            updates: Vec::new(),
+            refuse: Vec::new(),
+            later: Vec::new(),
+        }));
+        let shared = Arc::clone(&pack);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut socket) = stream else { break };
+                let req = read_req(&mut socket);
+                let resp = answer(&req, &shared);
+                let _ = socket.write_all(resp.as_bytes());
+            }
+        });
+        (format!("http://{addr}"), pack)
+    }
+
+    fn read_req(socket: &mut impl Read) -> String {
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 1024];
+        loop {
+            let n = socket.read(&mut tmp).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                let mut need = 0usize;
+                for line in buf[..at].split(|b| *b == b'\n') {
+                    let line = std::str::from_utf8(line).unwrap_or("").trim();
+                    if let Some(v) = line
+                        .split_once(':')
+                        .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+                        .map(|(_, v)| v.trim())
+                    {
+                        need = v.parse().unwrap_or(0);
+                    }
+                }
+                if buf.len().saturating_sub(at + 4) >= need {
+                    break;
+                }
+            }
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    fn answer(req: &str, pack: &Mutex<Pack>) -> String {
+        let line = req.lines().next().unwrap_or("");
+        let body = req
+            .split_once("\r\n\r\n")
+            .map(|(_, rest)| rest)
+            .unwrap_or("");
+        let (code, payload) = if line.starts_with("GET /v1/atoms") {
+            let pack = pack.lock().unwrap_or_else(|e| e.into_inner());
+            (200, json!({"atoms": pack.atoms}).to_string())
+        } else if line.starts_with("POST /v1/atoms/update") {
+            let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+            let id = parsed
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let mut pack = pack.lock().unwrap_or_else(|e| e.into_inner());
+            pack.updates.push(id.clone());
+            if pack.refuse.iter().any(|seen| seen == &id) {
+                (422, r#"{"error":"refused"}"#.to_string())
+            } else if let Some(at) = pack.later.iter().position(|seen| seen == &id) {
+                pack.later.remove(at);
+                (503, r#"{"error":"later"}"#.to_string())
+            } else if let Some(atom) = pack
+                .atoms
+                .iter_mut()
+                .find(|atom| atom.get("id").and_then(Value::as_str) == Some(id.as_str()))
+            {
+                if let Some(fields) = parsed.get("fields").and_then(Value::as_object) {
+                    for (key, value) in fields {
+                        atom[key] = value.clone();
+                    }
+                }
+                (200, atom.to_string())
+            } else {
+                (404, r#"{"error":"missing"}"#.to_string())
+            }
+        } else if line.starts_with("POST /v1/atoms") {
+            let mut atom: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
+            atom["id"] = json!("dddddddddddddddddddddddddddddddd");
+            atom["ts"] = json!("2026-10-21T00:00:00Z");
+            let mut pack = pack.lock().unwrap_or_else(|e| e.into_inner());
+            pack.atoms.push(atom.clone());
+            (200, atom.to_string())
+        } else {
+            (404, r#"{"error":"unexpected"}"#.to_string())
+        };
+        let status = match code {
+            200 => "200 OK",
+            404 => "404 Not Found",
+            422 => "422 Unprocessable Entity",
+            _ => "503 Service Unavailable",
+        };
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            payload.len()
+        )
     }
 }
