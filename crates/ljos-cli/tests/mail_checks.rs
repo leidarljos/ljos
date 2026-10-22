@@ -254,6 +254,12 @@ fn a_broken_setup_refuses_everything() {
         ..s.config.clone()
     };
     assert!(!refused(CLEAN, &no_identity).is_empty());
+    let no_deny = MailConfig {
+        deny_file: None,
+        ..s.config.clone()
+    };
+    let got = refused(CLEAN, &no_deny);
+    assert!(got.iter().any(|r| r.contains("deny_file")), "{got:?}");
     let missing = MailConfig {
         deny_file: Some(PathBuf::from("/nonexistent/deny.txt")),
         ..s.config.clone()
