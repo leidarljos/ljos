@@ -55,7 +55,8 @@ stays on the machine that holds it.
   limit is at most 50. It returns thread id, date, tags and counts, with
   subject and authors wrapped as untrusted. Mail tagged `spam` or `deleted`
   is left out unless the query names that tag.
-- `ljos_mail_show {thread}` takes a 16-digit thread id. Text parts are
+- `ljos_mail_show {thread}` takes a 16-digit thread id. Messages in the
+  thread tagged `spam` or `deleted` are left out. Text parts are
   wrapped as untrusted. HTML is reduced to the text a mail client would
   show. Text the reducer can tell is concealed is dropped: the `hidden`
   attribute, or a style that sets `display:none`, `visibility:hidden`,

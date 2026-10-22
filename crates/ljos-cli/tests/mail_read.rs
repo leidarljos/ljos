@@ -236,3 +236,18 @@ fn a_stylesheet_the_reader_cannot_follow_withholds_the_html_text() {
         assert!(!msg.body.contains(hidden), "{hidden} reached the body");
     }
 }
+
+#[test]
+fn show_leaves_out_spam_and_deleted_messages_in_the_thread() {
+    let mailbox = maildir::mailbox();
+    let thread = mailbox.thread_of("spoofed-approval-1@relay.example.test");
+    let reply = "id:spam-reply-1@spam.example.test";
+    assert_eq!(reader(&mailbox).show(&thread).unwrap().messages.len(), 2);
+    for tag in ["spam", "deleted"] {
+        mailbox.notmuch(&["tag", "-spam", "-deleted", &format!("+{tag}"), "--", reply]);
+        let shown = reader(&mailbox).show(&thread).unwrap();
+        let json = serde_json::to_string(&shown).unwrap();
+        assert_eq!(shown.messages.len(), 1, "{tag}: {json}");
+        assert!(!json.contains("password"), "{tag}: {json}");
+    }
+}

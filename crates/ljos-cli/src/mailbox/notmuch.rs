@@ -230,7 +230,8 @@ impl Reader {
         })
     }
 
-    /// Every message in one thread, by its 16-digit id.
+    /// Every message in one thread, by its 16-digit id, except those
+    /// tagged spam or deleted.
     pub fn show(&self, thread: &str) -> Result<Show> {
         let thread = thread_id(thread.trim().trim_start_matches("thread:"))?;
         let query = format!("thread:{thread}");
@@ -249,6 +250,7 @@ impl Reader {
         for nodes in found.as_array().map(Vec::as_slice).unwrap_or_default() {
             cut |= walk(nodes, 0, &mut raw);
         }
+        raw.retain(|msg| !tags(msg).iter().any(|t| EXCLUDED.contains(&t.as_str())));
         let truncated = cut || raw.len() > MESSAGES_MAX;
         let mut messages = Vec::new();
         for msg in raw.into_iter().take(MESSAGES_MAX) {
