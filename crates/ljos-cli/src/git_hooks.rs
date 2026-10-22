@@ -79,6 +79,10 @@ fn books_commit(name: &str) -> bool {
     matches!(name, "post-commit" | "post-rewrite")
 }
 
+fn gates_git(name: &str) -> bool {
+    matches!(name, "pre-commit" | "pre-push")
+}
+
 /// `install`, `uninstall`, or `status`.
 ///
 /// # Errors
@@ -399,12 +403,20 @@ fn ljos_executable() -> String {
 }
 
 /// The block appended to a hook. `post-commit` and `post-rewrite` book
-/// through `ljos git-hook`. The absolute path is the fallback when `ljos`
-/// is not on `PATH`. `post-rewrite` copies stdin when the caller has not,
-/// so this block and a chained hook can both read the old and new shas.
+/// through `ljos git-hook`, and the `pre-commit` and `pre-push` blocks
+/// fail the hook when it refuses. The absolute path is the fallback when
+/// `ljos` is not on `PATH`; a `pre-commit` or `pre-push` with neither
+/// runs nothing. `post-rewrite` and `pre-push` copy stdin when the caller
+/// has not, so this block and a chained hook can both read the shas and
+/// refs.
 fn hook_block(name: &str) -> String {
     let bin = shell_quote(&ljos_executable());
-    if name == "post-rewrite" {
+    let (otherwise, fail) = if gates_git(name) {
+        (format!("elif [ -x {bin} ]; then"), "exit 1")
+    } else {
+        ("else".to_string(), "true")
+    };
+    if matches!(name, "post-rewrite" | "pre-push") {
         return format!(
             "{BLOCK_BEGIN}\n\
              if [ -z \"${{_ljos_in:-}}\" ]; then\n\
@@ -415,15 +427,15 @@ fn hook_block(name: &str) -> String {
              fi\n\
              if command -v ljos >/dev/null 2>&1; then\n\
              \tif [ -n \"${{_ljos_in:-}}\" ]; then\n\
-             \t\tljos git-hook {name} \"$@\" < \"$_ljos_in\" >&2 || true\n\
+             \t\tljos git-hook {name} \"$@\" < \"$_ljos_in\" >&2 || {fail}\n\
              \telse\n\
-             \t\tljos git-hook {name} \"$@\" >&2 || true\n\
+             \t\tljos git-hook {name} \"$@\" >&2 || {fail}\n\
              \tfi\n\
-             else\n\
+             {otherwise}\n\
              \tif [ -n \"${{_ljos_in:-}}\" ]; then\n\
-             \t\t{bin} git-hook {name} \"$@\" < \"$_ljos_in\" >&2 || true\n\
+             \t\t{bin} git-hook {name} \"$@\" < \"$_ljos_in\" >&2 || {fail}\n\
              \telse\n\
-             \t\t{bin} git-hook {name} \"$@\" >&2 || true\n\
+             \t\t{bin} git-hook {name} \"$@\" >&2 || {fail}\n\
              \tfi\n\
              fi\n\
              {BLOCK_END}\n"
@@ -432,9 +444,9 @@ fn hook_block(name: &str) -> String {
     format!(
         "{BLOCK_BEGIN}\n\
          if command -v ljos >/dev/null 2>&1; then\n\
-         \tljos git-hook {name} \"$@\" >&2 || true\n\
-         else\n\
-         \t{bin} git-hook {name} \"$@\" >&2 || true\n\
+         \tljos git-hook {name} \"$@\" >&2 || {fail}\n\
+         {otherwise}\n\
+         \t{bin} git-hook {name} \"$@\" >&2 || {fail}\n\
          fi\n\
          {BLOCK_END}\n"
     )
@@ -632,9 +644,10 @@ fn hook_body(name: &str) -> String {
         "#!/bin/sh\n\
          # ljos books the commit, then chains to this repository's\n\
          # .git/hooks/{name}, or to the core.hooksPath recorded in\n\
-         # previous-hooks-path. Booking cannot fail the hook. The chained\n\
-         # hook's exit status is kept. post-rewrite keeps a copy of stdin\n\
-         # for that hook.\n\
+         # previous-hooks-path. Booking cannot fail the hook; a refusal\n\
+         # from ljos in pre-commit or pre-push does. The chained hook's\n\
+         # exit status is kept. post-rewrite and pre-push keep a copy of\n\
+         # stdin for that hook.\n\
          #\n\
          # pre-commit install follows core.hooksPath and would replace this\n\
          # file. Install the framework into the repository, then re-run\n\
