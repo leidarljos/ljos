@@ -4028,12 +4028,46 @@ fn curl_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) ->
     if !curl_rc_skipped(words) {
         opaque |= curl_default_files(env, cwd, &mut tune, &mut seen).is_some();
     }
+    for arg in curl_argv(words) {
+        match arg {
+            CurlArg::Opt(hit, value) => {
+                opaque |=
+                    apply_curl_opt(hit, value.as_deref(), cwd, &mut tune, &mut seen).is_some();
+            }
+            CurlArg::Unknown { short } => {
+                tune.github = true;
+                opaque |= short;
+            }
+            CurlArg::Url(url) => tune.urls.push(url),
+        }
+    }
+    let shape = if opaque {
+        HttpShape::Opaque
+    } else {
+        finish_http(tune.method.as_deref(), tune.body, tune.query, tune.upload)
+    };
+    (shape, curl_config_github(&tune))
+}
+
+/// One option or URL of a curl command line.
+enum CurlArg {
+    Opt(CurlHit, Option<String>),
+    /// An option the table does not name. Curl refuses an unknown short.
+    Unknown {
+        short: bool,
+    },
+    Url(String),
+}
+
+/// The curl command line, option by option, as curl reads it.
+fn curl_argv(words: &[String]) -> Vec<CurlArg> {
+    let mut out = Vec::new();
     let mut i = 1usize;
     while i < words.len() {
         let word = words[i].as_str();
         i += 1;
         if word == "--" {
-            tune.urls.extend(words[i..].iter().cloned());
+            out.extend(words[i..].iter().cloned().map(CurlArg::Url));
             break;
         }
         if let Some(long) = word.strip_prefix("--") {
@@ -4042,7 +4076,7 @@ fn curl_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) ->
                 None => (long, None),
             };
             let Some(hit) = curl_long_opt(name) else {
-                tune.github = true;
+                out.push(CurlArg::Unknown { short: false });
                 continue;
             };
             let value = if !hit.kind.takes_value() {
@@ -4053,21 +4087,20 @@ fn curl_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) ->
                 i += 1;
                 words.get(i - 1).cloned()
             };
-            opaque |= apply_curl_opt(hit, value.as_deref(), cwd, &mut tune, &mut seen).is_some();
+            out.push(CurlArg::Opt(hit, value));
             continue;
         }
         let Some(cluster) = word.strip_prefix('-').filter(|rest| !rest.is_empty()) else {
-            tune.urls.push(word.to_string());
+            out.push(CurlArg::Url(word.to_string()));
             continue;
         };
         for (at, c) in cluster.char_indices() {
             let Some(hit) = curl_short_opt(c) else {
-                tune.github = true;
-                opaque = true;
+                out.push(CurlArg::Unknown { short: true });
                 break;
             };
             if !hit.kind.takes_value() {
-                opaque |= apply_curl_opt(hit, None, cwd, &mut tune, &mut seen).is_some();
+                out.push(CurlArg::Opt(hit, None));
                 continue;
             }
             let rest = &cluster[at + c.len_utf8()..];
@@ -4077,16 +4110,11 @@ fn curl_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) ->
             } else {
                 Some(rest.to_string())
             };
-            opaque |= apply_curl_opt(hit, value.as_deref(), cwd, &mut tune, &mut seen).is_some();
+            out.push(CurlArg::Opt(hit, value));
             break;
         }
     }
-    let shape = if opaque {
-        HttpShape::Opaque
-    } else {
-        finish_http(tune.method.as_deref(), tune.body, tune.query, tune.upload)
-    };
-    (shape, curl_config_github(&tune))
+    out
 }
 
 /// A config that applies and could not be read may add any URL, whatever
