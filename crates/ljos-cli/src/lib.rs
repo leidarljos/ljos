@@ -19330,7 +19330,9 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
             continue;
         }
         let reads = READERS.contains(&first) || first == "ljos";
-        if let Some(t) = kept_prompt::reached(&words, cwd.as_deref(), reads) {
+        if let Some(t) = kept_prompt::reached(&words, cwd.as_deref(), reads)
+            .or_else(|| kept_prompt::code_reaches(&words, line))
+        {
             return Some(refuse(&t));
         }
         if first == "ljos" {
