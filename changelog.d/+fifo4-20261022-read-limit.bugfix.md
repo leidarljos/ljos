@@ -1,0 +1,1 @@
+`ljos doctor` read the whole guard bypass log and note queue into memory whatever their size, so a runaway or swapped-in file held it for as long as the read took. Doctor now reads at most 32 MiB of either, and a log past that is a damaged row that gives its size and says it was not read.

@@ -1,0 +1,1 @@
+`ljos doctor` took a state log whose last row lacks its newline for one still being written whenever the file was dated ahead of the clock, so a touched or clock-skewed log never showed as damaged. A last row dated more than 5 seconds ahead of the clock is now damaged at once, and the row says it is dated ahead of the clock.
