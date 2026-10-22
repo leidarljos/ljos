@@ -361,10 +361,10 @@ pub fn session_start_for(session: Option<&str>) -> String {
         }
     }
     if let Ok(got) = &atoms {
-        let n = legacy_pref::awaiting(got).len();
-        if n > 0 {
+        let held = legacy_pref::awaiting(got);
+        if !held.is_empty() {
             line.push(' ');
-            line.push_str(&legacy_pref::review_sentence(n));
+            line.push_str(&legacy_pref::review_sentence(&held));
             line.push('.');
         }
     }
@@ -17330,12 +17330,13 @@ fn preferences_row() -> Habitat {
     });
     let (state, held) = match listed {
         Ok(atoms) => {
-            let held = legacy_pref::awaiting(&atoms).len();
+            let held_rows = legacy_pref::awaiting(&atoms);
+            let held = held_rows.len();
             let (enforced, could, total) =
                 preferences_enforced(&preferences_of(&atoms), &rules_of(&atoms));
             let mut line = preferences_line(enforced, could, total);
             if held > 0 {
-                line.push_str(&format!("; {}", legacy_pref::review_sentence(held)));
+                line.push_str(&format!("; {}", legacy_pref::review_sentence(&held_rows)));
             }
             (line, held)
         }

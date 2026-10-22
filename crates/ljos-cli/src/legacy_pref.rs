@@ -24,9 +24,10 @@
 //!   tag is not promoted.
 //! * A terminal `ljos prefer` or `ljos remember` (`post_claim_horizon`)
 //!   stamps origin `user-declared`, `source.via` `ljos`, and no basis. With
-//!   no runner ancestor and no runner session id, `source.harness`,
-//!   `source.seat` and `source.session` are the same word and `source.turn`
-//!   is absent. `seat_from_tree` is none in that case, and no
+//!   no runner ancestor and no runner session id, `source.harness` and
+//!   `source.session` are the same word and `source.turn` is absent.
+//!   `source.seat` is that same word from v0.30 on. v0.17 through v0.29
+//!   left it out. `seat_from_tree` is none in that case, and no
 //!   `*_SESSION_ID`, `*_THREAD_ID` or `*_CONVERSATION_ID` was recorded.
 //! * A runner's `ljos prefer` records the runner: `source.session` contains
 //!   `@` (the holder `holder_for_session` builds), or `source.turn` is set
@@ -105,34 +106,52 @@ pub(crate) fn legacy(atom: &Value) -> Option<Legacy> {
     }
 }
 
-/// Preferences with no basis, older than the pack's cutoff, that the
-/// upgrade did not promote. No cutoff means nothing is older yet.
+/// Preferences and lessons with no basis, older than the pack's cutoff,
+/// that the upgrade did not promote. No cutoff means nothing is older yet.
+/// Each row is (id, kind, text).
 #[must_use]
-pub(crate) fn awaiting(atoms: &[Value]) -> Vec<(String, String)> {
+pub(crate) fn awaiting(atoms: &[Value]) -> Vec<(String, String, String)> {
     let Some(cutoff) = earliest_cutoff(atoms) else {
         return Vec::new();
     };
     atoms
         .iter()
         .filter(|a| legacy(a) == Some(Legacy::Hold))
-        .filter(|a| a.get("kind").and_then(Value::as_str) == Some("preference"))
+        .filter(|a| {
+            matches!(
+                a.get("kind").and_then(Value::as_str),
+                Some("preference" | "lesson")
+            )
+        })
         .filter(|a| older_than(a, cutoff))
         .filter_map(|a| {
             let id = a.get("id").and_then(Value::as_str)?.trim();
+            let kind = a.get("kind").and_then(Value::as_str)?.trim();
             let text = a.get("text").and_then(Value::as_str)?.trim();
-            if id.is_empty() || text.is_empty() {
+            if id.is_empty() || kind.is_empty() || text.is_empty() {
                 None
             } else {
-                Some((id.to_string(), text.to_string()))
+                Some((id.to_string(), kind.to_string(), text.to_string()))
             }
         })
         .collect()
 }
 
 /// The sentence session start, the doctor and `ljos prefer --review` share.
+///
+/// Preferences and lessons are named on their own. A mix is memories, so
+/// the count is not a count of preferences alone.
 #[must_use]
-pub(crate) fn review_sentence(n: usize) -> String {
-    let (noun, verb) = if n == 1 {
+pub(crate) fn review_sentence(held: &[(String, String, String)]) -> String {
+    let n = held.len();
+    let lessons = held.iter().filter(|(_, kind, _)| kind == "lesson").count();
+    let (noun, verb) = if lessons > 0 && lessons < n {
+        ("memories", "await")
+    } else if lessons > 0 && n == 1 {
+        ("lesson", "awaits")
+    } else if lessons > 0 {
+        ("lessons", "await")
+    } else if n == 1 {
         ("preference", "awaits")
     } else {
         ("preferences", "await")
@@ -157,7 +176,7 @@ pub fn migrate_once() {
     });
 }
 
-/// List the preferences the upgrade held back.
+/// List the preferences and lessons the upgrade held back.
 ///
 /// # Errors
 ///
@@ -168,61 +187,70 @@ pub fn list() -> Result<String> {
     if rows.is_empty() {
         return Ok("no older preferences await review\n".to_string());
     }
-    let mut out = format!("{}\n", review_sentence(rows.len()));
-    for (id, text) in &rows {
+    let mut out = format!("{}\n", review_sentence(&rows));
+    for (id, kind, text) in &rows {
         let short = id.get(..8).unwrap_or(id);
         out.push_str(&format!(
-            "{short}  {text}\n  ljos prefer --review --keep {id}\n"
+            "{short}  {kind}  {text}\n  ljos prefer --review --keep {id}\n"
         ));
     }
     Ok(out)
 }
 
-/// Keep one held-back preference as the person's.
+/// Keep one held-back preference or lesson as the person's.
 ///
 /// A runner is refused, and so is a pipe. The person types this at a
 /// terminal of their own.
 ///
 /// # Errors
 ///
-/// The id is not a held-back preference, this process is under a runner
-/// or not a terminal, or the pack refused the update.
+/// The id is not a held-back preference or lesson, this process is under
+/// a runner or not a terminal, or the pack refused the update.
 pub fn keep(id: &str) -> Result<String> {
     if under_a_runner() {
         bail!(
-            "prefer: a runner cannot keep a preference. \
+            "prefer: a runner cannot keep a preference or a lesson. \
              Run `ljos prefer --review --keep {id}` from a terminal of your own"
         );
     }
     if !std::io::stdin().is_terminal() {
         bail!(
-            "prefer: keeping a preference needs a terminal. \
+            "prefer: keeping a preference or a lesson needs a terminal. \
              Run `ljos prefer --review --keep {id}` from a terminal of your own"
         );
     }
     migrate_once();
     let atoms = live()?;
     let rows = awaiting(&atoms);
-    let ids: Vec<String> = rows.iter().map(|(id, _)| id.clone()).collect();
+    let ids: Vec<String> = rows.iter().map(|(id, _, _)| id.clone()).collect();
     let id = crate::resolve_short_id("prefer", id.trim(), &ids)?;
     let Some(atom) = atoms
         .iter()
         .find(|a| a.get("id").and_then(Value::as_str) == Some(id.as_str()))
     else {
-        bail!("prefer: {id} is not an older preference awaiting review");
+        bail!("prefer: {id} is not an older preference or lesson awaiting review");
     };
-    if legacy(atom) != Some(Legacy::Hold)
-        || atom.get("kind").and_then(Value::as_str) != Some("preference")
-    {
-        bail!("prefer: {id} is not an older preference awaiting review");
+    let kind = atom.get("kind").and_then(Value::as_str);
+    if legacy(atom) != Some(Legacy::Hold) || !matches!(kind, Some("preference" | "lesson")) {
+        bail!("prefer: {id} is not an older preference or lesson awaiting review");
     }
     let client = pack()?;
     stamp_basis(&client, atom).with_context(|| format!("prefer: could not keep {id}"))?;
-    Ok(format!("kept {id} as the person's preference\n"))
+    let noun = if kind == Some("lesson") {
+        "lesson"
+    } else {
+        "preference"
+    };
+    Ok(format!("kept {id} as the person's {noun}\n"))
 }
 
 /// The shape `post_claim_horizon` left when no runner ancestor and no
 /// runner session id were recorded.
+///
+/// v0.30 stamps `source.seat` with the same word as harness and session.
+/// v0.17 through v0.29 left `source.seat` out and still wrote harness and
+/// session as the login user. A seat that names a different word is not
+/// this write.
 fn terminal_write(atom: &Value) -> bool {
     let source = match atom.get("source").and_then(Value::as_object) {
         Some(s) => s,
@@ -239,7 +267,10 @@ fn terminal_write(atom: &Value) -> bool {
     let seat = field(source, "seat");
     let session = field(source, "session");
     let harness = field(source, "harness");
-    if seat.is_empty() || session != seat || harness != seat || session.contains('@') {
+    if harness.is_empty() || session != harness || session.contains('@') {
+        return false;
+    }
+    if !seat.is_empty() && seat != harness {
         return false;
     }
     if !field(source, "turn").is_empty() {
@@ -507,13 +538,30 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .push(json!("session:read-1"));
+        // v0.17–v0.29 left seat out. Harness and session are the login user.
+        let mut old_pref = typed.clone();
+        old_pref["source"].as_object_mut().unwrap().remove("seat");
+        old_pref["id"] = json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5");
+        let mut old_lesson = remembered.clone();
+        old_lesson["source"].as_object_mut().unwrap().remove("seat");
+        old_lesson["id"] = json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa6");
+        let mut old_mismatch = old_pref.clone();
+        old_mismatch["source"]["session"] = json!("other");
+        old_mismatch["id"] = json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa7");
+        let mut runner_lesson = runner.clone();
+        runner_lesson["kind"] = json!("lesson");
+        runner_lesson["id"] = json!("ffffffffffffffffffffffffffffffff");
 
         let fixtures = [
             (&hook, Some(Legacy::Hold)),
             (&typed, Some(Legacy::Promote)),
             (&remembered, Some(Legacy::Promote)),
+            (&old_pref, Some(Legacy::Promote)),
+            (&old_lesson, Some(Legacy::Promote)),
             (&hook_and_session, Some(Legacy::Hold)),
             (&runner, Some(Legacy::Hold)),
+            (&runner_lesson, Some(Legacy::Hold)),
+            (&old_mismatch, Some(Legacy::Hold)),
             (&turned, Some(Legacy::Hold)),
             (&ancestor, Some(Legacy::Hold)),
             (&bare, Some(Legacy::Hold)),
@@ -534,7 +582,7 @@ mod tests {
                 None => left += 1,
             }
         }
-        assert_eq!((promote, hold, left), (2, 7, 4), "fixture split");
+        assert_eq!((promote, hold, left), (4, 9, 4), "fixture split");
         runner["id"] = json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         // No cutoff receipt: nothing is older yet, so nothing awaits.
         assert!(awaiting(&[hook.clone(), typed.clone(), runner.clone()]).is_empty());
@@ -555,11 +603,32 @@ mod tests {
             "ts": "2026-10-21T00:00:00Z",
         });
         assert!("2026-10-21T00:00:00.100Z" < "2026-10-21T00:00:00Z");
-        let waiting = awaiting(&[hook, typed, runner, late, fraction, cutoff]);
-        assert_eq!(waiting.len(), 2, "{waiting:?}");
+        let waiting = awaiting(&[
+            hook,
+            typed,
+            runner,
+            runner_lesson.clone(),
+            old_lesson.clone(),
+            late,
+            fraction,
+            cutoff,
+        ]);
+        assert_eq!(waiting.len(), 3, "{waiting:?}");
         assert_eq!(waiting[0].0, "0123456789abcdef0123456789abcdef");
+        assert_eq!(waiting[0].1, "preference");
         assert_eq!(waiting[1].0, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-        assert!(review_sentence(1).contains("ljos prefer --review"));
-        assert!(review_sentence(2).contains("preferences await"));
+        assert_eq!(waiting[2].0, "ffffffffffffffffffffffffffffffff");
+        assert_eq!(waiting[2].1, "lesson");
+        let pref = (
+            "id".to_string(),
+            "preference".to_string(),
+            "text".to_string(),
+        );
+        let lesson = ("id".to_string(), "lesson".to_string(), "text".to_string());
+        assert!(review_sentence(std::slice::from_ref(&pref)).contains("1 older preference awaits"));
+        assert!(review_sentence(&[pref.clone(), pref.clone()]).contains("preferences await"));
+        assert!(review_sentence(std::slice::from_ref(&lesson)).contains("1 older lesson awaits"));
+        assert!(review_sentence(&[pref, lesson.clone()]).contains("2 older memories await"));
+        assert!(review_sentence(&[lesson.clone(), lesson]).contains("ljos prefer --review"));
     }
 }
