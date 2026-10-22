@@ -422,8 +422,10 @@ fn write_prompt_bind(
 }
 
 /// Whether the prompt file still matches the bind the hook wrote, and the
-/// bind names the runner session this process belongs to. A bind with
-/// any other session, or none, is a prompt from somewhere else.
+/// bind names a session of the runner above this process
+/// ([`crate::ballot_sig::runner_sessions`]). A bind with any other
+/// session, or none, is a prompt from somewhere else, and with no runner
+/// above nothing matches.
 fn prompt_bind_matches(path: &std::path::Path) -> bool {
     let Ok(bytes) = std::fs::read(path) else {
         return false;
@@ -440,8 +442,8 @@ fn prompt_bind_matches(path: &std::path::Path) -> bool {
     else {
         return false;
     };
-    let current = crate::ballot_sig::harness_session();
-    if current.is_empty() || current == "-" || crate::ballot_sig::field(session) != current {
+    let session = crate::ballot_sig::field(session);
+    if session == "-" || !crate::ballot_sig::runner_sessions().contains(&session) {
         return false;
     }
     hash == hex::encode(sha2::Sha256::digest(bytes)) && stored == mtime.to_string()

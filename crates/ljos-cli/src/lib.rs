@@ -46823,8 +46823,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
             ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
             ("LJOS_CAPTURE", "save"),
-            ("LJOS_HARNESS_SESSION", "chat-person-1"),
         ]);
+        let _runner = crate::ballot_sig::fake_runner_sessions(&["chat-person-1"]);
         let _url = PackUrl::set(&url);
         capture::note_latest_prompt_for(
             "remember this: the integration tests need a local Redis on port 6380, not 6379",
@@ -46873,8 +46873,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
             ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
             ("LJOS_CAPTURE", "save"),
-            ("LJOS_HARNESS_SESSION", "chat-person-1"),
         ]);
+        let _runner = crate::ballot_sig::fake_runner_sessions(&["chat-person-1"]);
         let _url = PackUrl::set(&url);
         capture::note_latest_prompt_for(
             "remember this: the integration tests need a local Redis on port 6380, not 6379",
@@ -47059,8 +47059,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let _hold = HoldEnv::set(&[
             ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
             ("LJOS_CAPTURE", "save"),
-            ("LJOS_HARNESS_SESSION", "chat-person-1"),
         ]);
+        let _runner = crate::ballot_sig::fake_runner_sessions(&["chat-person-1"]);
         capture::note_latest_prompt_for(
             "remember this: the integration tests need a local Redis on port 6380, not 6379",
             Some("chat-person-1"),
