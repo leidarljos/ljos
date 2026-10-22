@@ -803,21 +803,158 @@ fn an_agent_rule_of_a_plant_is_agent_derived() {
     }
 }
 
-/// The person typing `ljos rule` stands behind it.
+/// Runs `argv` on a fresh pty in the shape `mode` names: `terminal`, a
+/// parent renamed (`renamed:NAME`), or below a process left by a double
+/// fork (`double-fork`) or reparented without one (`reparented`).
+const SHAPE_PY: &str = r#"import ctypes, os, pty, sys, time
+mode, argv = sys.argv[1], sys.argv[2:]
+
+def run():
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execv(argv[0], argv)
+    out = []
+    while True:
+        try:
+            data = os.read(fd, 4096)
+        except OSError:
+            break
+        if not data:
+            break
+        out.append(data)
+    _, status = os.waitpid(pid, 0)
+    return b"".join(out), os.waitstatus_to_exitcode(status)
+
+def orphan(setsid):
+    r, w = os.pipe()
+    if os.fork() == 0:
+        os.close(r)
+        if setsid:
+            os.setsid()
+        parent = os.getpid()
+        if os.fork() != 0:
+            os._exit(0)
+        while os.getppid() == parent:
+            time.sleep(0.01)
+        said, code = run()
+        os.write(w, bytes([code & 0xff]) + said)
+        os._exit(0)
+    os.close(w)
+    os.wait()
+    got = b""
+    while True:
+        chunk = os.read(r, 65536)
+        if not chunk:
+            break
+        got += chunk
+    return got[1:], (got[0] if got else 99)
+
+if mode.startswith("renamed:"):
+    libc = ctypes.CDLL(None)
+    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_char_p]
+    libc.prctl.restype = ctypes.c_int
+    if libc.prctl(15, mode.split(":", 1)[1].encode()) != 0:
+        raise SystemExit(91)
+    said, code = run()
+elif mode == "double-fork":
+    said, code = orphan(True)
+elif mode == "reparented":
+    said, code = orphan(False)
+else:
+    said, code = run()
+sys.stdout.buffer.write(said)
+raise SystemExit(code)
+"#;
+
+const RULE_ARGS: [&str; 6] = ["rule", "*deploy-form*", "--verdict", "ask", "--why", PLANT];
+
+/// `ljos ARGS` in the shape `mode`, with no runner above.
+fn shaped(seat: &Seat, mode: &str, args: &[&str]) -> std::process::Output {
+    let mut cmd = Command::new("python3");
+    cmd.args(["-c", SHAPE_PY, mode, env!("CARGO_BIN_EXE_ljos")])
+        .args(args);
+    seat.seat_env(&mut cmd);
+    cmd.output().unwrap()
+}
+
+/// `ljos ARGS` in the shape `mode`, in a tool call of the runner `name`
+/// started with a clean environment.
+fn shaped_under(seat: &Seat, name: &str, mode: &str, args: &[&str]) -> std::process::Output {
+    let mut all = vec!["-c", SHAPE_PY, mode, env!("CARGO_BIN_EXE_ljos")];
+    all.extend_from_slice(args);
+    seat.under_bin(name, &[], "", "/usr/bin/python3", &all)
+        .output()
+        .unwrap()
+}
+
+fn rule_basis(seat: &Seat, out: &std::process::Output) -> String {
+    assert!(out.status.success(), "rule failed\n{}", text_of(out));
+    let rule = stored_rule(seat, &text_of(out));
+    let basis = rule["source"]["basis"].as_str().unwrap_or("").to_string();
+    let origin = if basis == "person" {
+        "user-declared"
+    } else {
+        "agent-derived"
+    };
+    assert_eq!(rule["origin"], origin, "{rule}");
+    basis
+}
+
+/// The person typing `ljos rule` at a terminal of their own stands behind it.
 #[test]
 fn a_person_rule_from_the_terminal_is_theirs() {
     let seat = Seat::new();
-    let out = seat
-        .command(
-            &["rule", "*deploy-form*", "--verdict", "ask", "--why", PLANT],
-            false,
-        )
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "rule failed\n{}", text_of(&out));
-    let rule = stored_rule(&seat, &text_of(&out));
-    assert_eq!(rule["origin"], "user-declared", "{rule}");
-    assert_eq!(rule["source"]["basis"], "person", "{rule}");
+    let out = shaped(&seat, "terminal", &RULE_ARGS);
+    assert_eq!(rule_basis(&seat, &out), "person", "{}", text_of(&out));
+}
+
+/// A tool call that names its parent like a session, so a walk that stops
+/// at the session never reaches the runner above, is the agent's.
+#[test]
+fn a_parent_named_like_a_session_is_not_the_person() {
+    for name in ["systemd", "sshd", "init"] {
+        let seat = Seat::new();
+        let out = shaped_under(&seat, "claude", &format!("renamed:{name}"), &RULE_ARGS);
+        assert_eq!(
+            rule_basis(&seat, &out),
+            "agent",
+            "{name}\n{}",
+            text_of(&out)
+        );
+    }
+}
+
+/// A runner known by name and not in the runners file, with every
+/// variable it sets cleared, is still a runner.
+#[test]
+fn a_clean_environment_under_a_runner_is_not_the_person() {
+    let seat = Seat::new();
+    let out = shaped_under(&seat, "cursor-agent", "terminal", &RULE_ARGS);
+    assert_eq!(rule_basis(&seat, &out), "agent", "{}", text_of(&out));
+}
+
+/// A process that left the runner by a double fork, or was reparented on
+/// a pty of its own, has no runner above it and is still not the person.
+#[test]
+fn a_reparented_process_on_a_pty_is_not_the_person() {
+    for mode in ["double-fork", "reparented"] {
+        let seat = Seat::new();
+        let out = shaped_under(&seat, "claude", mode, &RULE_ARGS);
+        assert_eq!(
+            rule_basis(&seat, &out),
+            "agent",
+            "{mode}\n{}",
+            text_of(&out)
+        );
+    }
+}
+
+/// With no runner above, a pipe on stdin is not a person at a terminal.
+#[test]
+fn a_rule_from_a_pipe_is_not_the_persons() {
+    let seat = Seat::new();
+    let out = seat.command(&RULE_ARGS, false).output().unwrap();
+    assert_eq!(rule_basis(&seat, &out), "agent", "{}", text_of(&out));
 }
 
 /// A file written beside the hook is not the person's prompt. Remember
