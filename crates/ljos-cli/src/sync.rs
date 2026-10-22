@@ -481,8 +481,9 @@ fn open(path: &Path, identity: &Path) -> Result<Option<String>> {
 }
 
 /// Open a sealed log with every identity in `identities`. None when none
-/// of them is a recipient. `age` and `rage` run under `LC_ALL=C`, so a
-/// French miss stays a miss instead of aborting the rest of the import.
+/// of them is a recipient. `age` and `rage` run with `LC_ALL`, `LANG`,
+/// `LANGUAGE`, and `LC_MESSAGES` set to C, so a French miss stays a miss
+/// instead of aborting the rest of the import.
 fn open_identities(path: &Path, identities: &[PathBuf]) -> Result<Option<String>> {
     if identities.is_empty() {
         return Ok(None);
@@ -537,12 +538,16 @@ fn age_on_path() -> bool {
     crate::on_path("age") || crate::on_path("rage")
 }
 
-/// Run an age-compatible tool in the C locale. rage's French
-/// "Aucune clef correspondante" would not match the English miss text,
-/// and import would abort every later host.
+/// Run an age-compatible tool in the C locale. rage asks sys-locale for
+/// languages in the order `LANGUAGE`, `LC_ALL`, `LC_MESSAGES`, `LANG`.
+/// A parent `LANGUAGE=fr` or `LC_MESSAGES=fr` stays French when the child
+/// only sets `LC_ALL` and `LANG`, so "Aucune clef correspondante" would
+/// not match the English miss text and import would abort every later host.
 fn c_locale(mut cmd: Command) -> Command {
     cmd.env("LC_ALL", "C");
     cmd.env("LANG", "C");
+    cmd.env("LANGUAGE", "C");
+    cmd.env("LC_MESSAGES", "C");
     cmd
 }
 
@@ -4011,6 +4016,55 @@ mod tests {
         std::env::set_var("PATH", &old_path);
         assert!(matches!(opened, Ok(None)), "age: {opened:?}");
         assert!(matches!(via_rage, Ok(None)), "rage: {via_rage:?}");
+    }
+
+    /// rage (via sys-locale) asks LANGUAGE before LC_ALL, then
+    /// LC_MESSAGES, then LANG. A parent LANGUAGE=fr or LC_MESSAGES=fr
+    /// stays French when the child only sets LC_ALL and LANG, and the
+    /// English miss check then aborts import.
+    #[test]
+    fn a_rage_miss_stays_a_miss_when_language_is_french() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let script = "#!/bin/sh\nif [ \"$LC_ALL\" = C ] && [ \"$LANG\" = C ] && [ \"$LANGUAGE\" = C ] && [ \"$LC_MESSAGES\" = C ]; then echo 'no matching keys found' >&2; exit 1; fi\necho 'Aucune clef correspondante' >&2; exit 1\n";
+        for name in ["age", "rage"] {
+            let path = bin.join(name);
+            std::fs::write(&path, script).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        let old_language = std::env::var("LANGUAGE").ok();
+        let old_lc_messages = std::env::var("LC_MESSAGES").ok();
+        std::env::set_var("LANGUAGE", "fr");
+        std::env::set_var("LC_MESSAGES", "fr");
+        std::env::set_var("PATH", &bin);
+        let log = dir.path().join("peer.jsonl.age");
+        std::fs::write(&log, b"sealed").unwrap();
+        let id = dir.path().join("age.key");
+        std::fs::write(&id, b"key").unwrap();
+        let opened = open(&log, &id);
+        std::fs::remove_file(bin.join("age")).unwrap();
+        let via_rage = open(&log, &id);
+        std::env::set_var("PATH", &old_path);
+        match old_language {
+            Some(value) => std::env::set_var("LANGUAGE", value),
+            None => std::env::remove_var("LANGUAGE"),
+        }
+        match old_lc_messages {
+            Some(value) => std::env::set_var("LC_MESSAGES", value),
+            None => std::env::remove_var("LC_MESSAGES"),
+        }
+        assert!(
+            matches!(opened, Ok(None)),
+            "age kept the French miss: {opened:?}"
+        );
+        assert!(
+            matches!(via_rage, Ok(None)),
+            "rage kept the French miss: {via_rage:?}"
+        );
     }
 
     /// A miss on a log this machine's key is listed for is a broken seal,
