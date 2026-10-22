@@ -24119,7 +24119,10 @@ fn root_source() -> String {
 /// resolved, and where the root came from. A root that is relative, missing,
 /// or holds no prefix directory fails the row: tickets filed there are
 /// invisible to every other seat. When the root is a git checkout with an
-/// upstream, the row also names how many commits origin lacks.
+/// upstream, the row also names how many commits origin lacks. When
+/// `LJOS_TRACKER_GIT=commit` and `LJOS_TRACKER_REMOTE` names a repository
+/// this checkout has no upstream for, the row names that repository and
+/// stays healthy. [`doctor_word`] prints `warn`.
 pub fn tracker_state(identity: &str, source: &str) -> (String, bool) {
     let version = identity.lines().next().unwrap_or("").trim();
     let field = |key: &str| {
@@ -24145,11 +24148,36 @@ pub fn tracker_state(identity: &str, source: &str) -> (String, bool) {
     let base = format!("{version} root={root} prefix={prefix} from {source}");
     match problem {
         Some(why) => (format!("{base}; {why}"), false),
-        None => match tracker_git_drift(path) {
-            Some((extra, git_ok)) => (format!("{base}; {extra}"), git_ok),
-            None => (base, true),
-        },
+        None => {
+            let (mut state, ok) = match tracker_git_drift(path) {
+                Some((extra, git_ok)) => (format!("{base}; {extra}"), git_ok),
+                None => (base, true),
+            };
+            if let Some(note) = shared_tracker_unread(path) {
+                state = format!("{state}; {note}");
+            }
+            (state, ok)
+        }
     }
+}
+
+/// A shared remote this checkout never fetched. `cloud up` leaves that
+/// machine on a local tracker in commit mode. The row stays healthy and
+/// [`doctor_word`] prints `warn`.
+fn shared_tracker_unread(root: &Path) -> Option<String> {
+    if std::env::var("LJOS_TRACKER_GIT").ok().as_deref() != Some("commit") {
+        return None;
+    }
+    let remote = std::env::var("LJOS_TRACKER_REMOTE").ok()?;
+    let remote = remote.trim();
+    if remote.is_empty() || tracker_upstream(root).is_some() {
+        return None;
+    }
+    let repo = crate::cloud::tracker_repo_name(remote);
+    Some(format!(
+        "shared tracker {repo} was not cloned. {}",
+        crate::cloud::tracker_access_fix(&repo)
+    ))
 }
 
 fn git_in(dir: &Path, args: &[&str]) -> Option<std::process::Output> {
@@ -24683,13 +24711,16 @@ fn optional_bin(name: &str) -> bool {
 /// is optional and absent, `no` when a required row failed. A stale skill,
 /// env or cloud guard file ljos wrote is a warning `ljos doctor --fix`
 /// rewrites, not a failure. A cloud guard file that differs is a warning
-/// `ljos cloud up` rewrites.
+/// `ljos cloud up` rewrites. A tracker this machine could not clone from
+/// its shared remote is `warn`, and so is a tracker with unpushed commits.
 #[must_use]
 pub fn doctor_word(row: &Habitat) -> &'static str {
     if cloud::cloud_age_is_unset(row.name, &row.state) {
         return "info";
     }
-    if row.name == "tracker" && names_unpushed(&row.state) {
+    if row.name == "tracker"
+        && (names_unpushed(&row.state) || row.state.contains(cloud::TRACKER_ACCESS_MARK))
+    {
         return "warn";
     }
     // A headerless log is left unread until someone pins it. The row names
@@ -36112,6 +36143,56 @@ mod tests {
         assert!(state.contains("no prefix directory"), "{state}");
 
         assert!(!super::tracker_state("vissue 0.16.1\n", "cwd").1);
+    }
+
+    /// Commit mode plus a remote this checkout never fetched is a local
+    /// fallback. Push mode, and commit mode with no remote, stay quiet.
+    #[test]
+    fn tracker_row_warns_when_a_shared_remote_was_not_cloned() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tracker");
+        std::fs::create_dir_all(root.join("Software")).unwrap();
+        git_scratch(&root);
+        let id = format!(
+            "vissue 0.0.0\nprotocol: 1\nroot={}\nprefix=Software\n",
+            root.display()
+        );
+        let row = |state: String, ok: bool| super::Habitat {
+            name: "tracker",
+            state,
+            ok,
+        };
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var(
+            "LJOS_TRACKER_REMOTE",
+            "file:///no/such/HaoZeke/grokbot_ljostracker.git",
+        );
+        let (state, ok) = super::tracker_state(&id, "VISSUE_ROOT=x");
+        assert!(ok, "{state}");
+        assert!(
+            state.contains("Grant the Cursor GitHub app access to HaoZeke/grokbot_ljostracker"),
+            "{state}"
+        );
+        assert_eq!(super::doctor_word(&row(state, ok)), "warn");
+
+        std::env::set_var("LJOS_TRACKER_GIT", "push");
+        let (state, ok) = super::tracker_state(&id, "VISSUE_ROOT=x");
+        assert!(ok, "{state}");
+        assert!(
+            !state.contains("Grant the Cursor GitHub app access to "),
+            "{state}"
+        );
+        assert_eq!(super::doctor_word(&row(state, ok)), "ok");
+
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::remove_var("LJOS_TRACKER_REMOTE");
+        let (state, ok) = super::tracker_state(&id, "VISSUE_ROOT=x");
+        assert!(
+            !state.contains("Grant the Cursor GitHub app access to "),
+            "{state}"
+        );
+        assert_eq!(super::doctor_word(&row(state, ok)), "ok");
     }
 
     fn git_scratch(root: &std::path::Path) {

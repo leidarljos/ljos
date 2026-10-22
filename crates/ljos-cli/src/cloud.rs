@@ -2,7 +2,10 @@
 //!
 //! `ljos cloud up` installs the release binaries into `~/.local/bin`,
 //! checks the published SHA-256 sums, puts that directory first on PATH,
-//! writes the harness MCP command, and clones `LJOS_TRACKER_REMOTE`.
+//! writes the harness MCP command, and clones `LJOS_TRACKER_REMOTE`
+//! when this machine can read it. A clone the credential cannot read
+//! is a warning: the env file, the guard, the hook, and the seat are
+//! written first, and the machine keeps a local tracker in commit mode.
 //! The command is the bare name when PATH already runs this install, and
 //! the absolute path when another copy or none would run. It writes a
 //! webhook wake for each `LJOS_WAKE_<SEAT>_URL`. Entries this command
@@ -74,8 +77,9 @@ const CLOUD_AGE_MAX: usize = 8192;
 /// # Errors
 ///
 /// A checksum does not match, a required binary is missing, or the tracker
-/// remote cannot be cloned. A push that fails after a successful clone is
-/// reported and left queued; the clone itself stands.
+/// directory exists and is not a git checkout. A remote that cannot be
+/// cloned is a warning, not an error. A push that fails after a successful
+/// clone is reported and left queued; the clone itself stands.
 pub fn up(force: bool) -> Result<String> {
     up_at(force, false)
 }
@@ -124,18 +128,7 @@ pub fn up_at(force: bool, repoint: bool) -> Result<String> {
         hex::encode(public.to_bytes())
     ));
 
-    let remote = nonempty_var("LJOS_TRACKER_REMOTE");
-    let tracker = remote.as_ref().map(|_| tracker_dir(&home));
     lines.push(ensure_profile(&home, &bin_dir)?);
-    lines.push(write_mcp(
-        &home,
-        &server,
-        &plan,
-        &seat,
-        &key,
-        tracker.as_deref(),
-        remote.as_deref(),
-    )?);
 
     let mut pairs = vec![
         ("LJOS_SEAT", seat.clone()),
@@ -151,28 +144,46 @@ pub fn up_at(force: bool, repoint: bool) -> Result<String> {
     if std::env::var("DEEDAR_HOST_SIGNING_KEY").ok().as_deref() != Some("off") {
         pairs.push(("DEEDAR_HOST_SIGNING_KEY", key.display().to_string()));
     }
-    if let (Some(remote), Some(dest)) = (remote.as_deref(), tracker.as_deref()) {
-        lines.push(ensure_tracker(remote, dest, &seat)?);
-        pairs.push(("LJOS_TRACKER_GIT", "push".into()));
-        pairs.push(("LJOS_TRACKER_REMOTE", remote.to_string()));
-        pairs.push(("VISSUE_ROOT", dest.display().to_string()));
-        pairs.push(("ISSUE_ROOT", dest.display().to_string()));
-    } else {
-        lines.push(
-            "tracker: LJOS_TRACKER_REMOTE is unset, so this machine has no shared tracker".into(),
-        );
-    }
-    write_env(&home.join(".config/ljos/env"), &pairs)?;
-    crate::with_env_mutation(|| {
-        for (k, v) in &pairs {
-            std::env::set_var(k, v);
-        }
-    });
+    // The clone used to run first and return on failure, so a credential
+    // that cannot read the tracker left this boot with no env file, no
+    // guard, no hook, and no seat. Those land before the clone is tried.
+    let env_path = home.join(".config/ljos/env");
+    write_env(&env_path, &pairs)?;
+    apply_env(&pairs);
     lines.push(ensure_cloud_guard_rules()?);
     // After the rule file, so a second `cloud up` still says the refusals
     // are already installed. Git runs this hook for every push; the rule
     // file cannot see a push a script starts.
     lines.push(crate::cloud_hook::ensure(repoint)?);
+
+    let remote = nonempty_var("LJOS_TRACKER_REMOTE");
+    let tracker = remote.as_ref().map(|_| tracker_dir(&home));
+    let git_mode = if let (Some(remote), Some(dest)) = (remote.as_deref(), tracker.as_deref()) {
+        let hold = ensure_tracker(remote, dest, &seat)?;
+        let mode = hold.git_mode();
+        lines.push(hold.line().to_string());
+        pairs.push(("LJOS_TRACKER_GIT", mode.to_string()));
+        pairs.push(("LJOS_TRACKER_REMOTE", remote.to_string()));
+        pairs.push(("VISSUE_ROOT", dest.display().to_string()));
+        pairs.push(("ISSUE_ROOT", dest.display().to_string()));
+        write_env(&env_path, &pairs)?;
+        apply_env(&pairs);
+        Some(mode)
+    } else {
+        lines.push(
+            "tracker: LJOS_TRACKER_REMOTE is unset, so this machine has no shared tracker".into(),
+        );
+        None
+    };
+    let mcp_tracker = match (tracker.as_deref(), remote.as_deref(), git_mode) {
+        (Some(root), Some(remote), Some(git_mode)) => Some(McpTracker {
+            root,
+            remote,
+            git_mode,
+        }),
+        _ => None,
+    };
+    lines.push(write_mcp(&home, &server, &plan, &seat, &key, mcp_tracker)?);
     // Retire env-owned wakes before any later step can fail, so a removed
     // `LJOS_WAKE_<SEAT>_URL` cannot leave a stale URL that still sees a new key.
     lines.extend(ensure_wakes()?);
@@ -1875,17 +1886,60 @@ fn installer_script() -> Result<PathBuf> {
     Ok(path)
 }
 
-fn ensure_tracker(remote: &str, dest: &Path, seat: &str) -> Result<String> {
-    if is_work_tree(dest) {
-        ensure_identity(dest, seat)?;
-        match crate::tracker_push::publish(dest) {
-            Ok(()) => Ok(format!("tracker: updated {}", dest.display())),
-            Err(e) => Ok(format!(
-                "tracker: {} kept local; push queued: {e}",
-                dest.display()
-            )),
+/// Where a shared tracker ended up. `Shared` is push mode: the remote was
+/// cloned or still matches this checkout. `Local` is commit mode: the
+/// remote could not be read, and this machine keeps its own tracker.
+enum TrackerHold {
+    Shared(String),
+    Local(String),
+}
+
+impl TrackerHold {
+    fn line(&self) -> &str {
+        match self {
+            Self::Shared(line) | Self::Local(line) => line,
         }
-    } else if dest.exists() {
+    }
+
+    fn git_mode(&self) -> &'static str {
+        match self {
+            Self::Shared(_) => "push",
+            Self::Local(_) => "commit",
+        }
+    }
+}
+
+/// The sentence `cloud up` and `ljos doctor` share. The doctor row matches
+/// this prefix, so the wording stays in one place.
+pub(crate) const TRACKER_ACCESS_MARK: &str = "Grant the Cursor GitHub app access to ";
+
+pub(crate) fn tracker_access_fix(repo: &str) -> String {
+    format!("{TRACKER_ACCESS_MARK}{repo}")
+}
+
+/// `owner/repo` from a git URL. The last two path pieces, so a host, a
+/// port, and a missing parent directory are not part of the name.
+pub(crate) fn tracker_repo_name(remote: &str) -> String {
+    let trimmed = remote.trim().trim_end_matches('/');
+    let bare = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+    let mut prev = None;
+    let mut last = None;
+    for part in bare.split(['/', ':']).filter(|part| !part.is_empty()) {
+        prev = last;
+        last = Some(part);
+    }
+    match (prev, last) {
+        (Some(owner), Some(repo)) => format!("{owner}/{repo}"),
+        (None, Some(repo)) => repo.to_string(),
+        _ => remote.trim().to_string(),
+    }
+}
+
+fn ensure_tracker(remote: &str, dest: &Path, seat: &str) -> Result<TrackerHold> {
+    if is_work_tree(dest) {
+        return hold_checkout(remote, dest, seat);
+    }
+    if dest.exists() {
         let empty = fs::read_dir(dest)
             .map(|mut d| d.next().is_none())
             .unwrap_or(false);
@@ -1896,9 +1950,104 @@ fn ensure_tracker(remote: &str, dest: &Path, seat: &str) -> Result<String> {
             );
         }
         fs::remove_dir(dest)?;
-        clone_tracker(remote, dest, seat)
+    }
+    match clone_tracker(remote, dest, seat) {
+        Ok(line) => Ok(TrackerHold::Shared(line)),
+        Err(err) => {
+            let text = err.to_string();
+            let Some(detail) = clone_failure_detail(&text) else {
+                return Err(err);
+            };
+            // A failed clone may leave a partial checkout. That directory
+            // is not the local tracker this machine will keep.
+            if dest.exists() {
+                fs::remove_dir_all(dest)
+                    .with_context(|| format!("tracker: remove failed clone {}", dest.display()))?;
+            }
+            local_hold(remote, dest, seat, &detail)
+        }
+    }
+}
+
+fn hold_checkout(remote: &str, dest: &Path, seat: &str) -> Result<TrackerHold> {
+    match origin_url(dest) {
+        Some(have) if same_remote(&have, remote) => refresh_shared(dest, seat),
+        Some(have) => bail!("tracker: {} tracks {have}, not {remote}", dest.display()),
+        // A local fallback has no origin. Adding one and failing the fetch
+        // has to leave it that way. Treating the checkout as a finished
+        // clone would turn commit mode into push mode on the next boot.
+        None => adopt_or_local(remote, dest, seat),
+    }
+}
+
+fn refresh_shared(dest: &Path, seat: &str) -> Result<TrackerHold> {
+    ensure_identity(dest, seat)?;
+    match crate::tracker_push::publish(dest) {
+        Ok(()) => Ok(TrackerHold::Shared(format!(
+            "tracker: updated {}",
+            dest.display()
+        ))),
+        Err(e) => Ok(TrackerHold::Shared(format!(
+            "tracker: {} kept local; push queued: {e}",
+            dest.display()
+        ))),
+    }
+}
+
+fn adopt_or_local(remote: &str, dest: &Path, seat: &str) -> Result<TrackerHold> {
+    git_ok(dest, &["remote", "add", "origin", remote])?;
+    let fetched = git_output(dest, &["fetch", "--quiet", "origin"])?;
+    if !fetched.status.success() {
+        let removed = git_output(dest, &["remote", "remove", "origin"])?;
+        if !removed.status.success() && origin_url(dest).is_some() {
+            bail!(
+                "tracker: could not drop origin on {} after a failed fetch",
+                dest.display()
+            );
+        }
+        return local_hold(remote, dest, seat, &command_detail(&fetched));
+    }
+    let head = git_output(dest, &["rev-parse", "--verify", "HEAD"])?;
+    if !head.status.success() {
+        let checkout = git_output(dest, &["checkout", "-B", "main", "origin/HEAD"])?;
+        if !checkout.status.success() {
+            bail!(
+                "tracker: fetched {remote} but could not check out origin/HEAD: {}",
+                command_detail(&checkout)
+            );
+        }
+    }
+    refresh_shared(dest, seat)
+}
+
+fn local_hold(remote: &str, dest: &Path, seat: &str, detail: &str) -> Result<TrackerHold> {
+    if !is_work_tree(dest) {
+        if dest.exists() {
+            fs::remove_dir_all(dest)
+                .with_context(|| format!("tracker: remove {}", dest.display()))?;
+        }
+        crate::tracker_push::prepare_tracker(dest, true, false)
+            .map_err(|e| anyhow::anyhow!("tracker: {e}"))?;
+    }
+    fs::create_dir_all(dest.join("Software"))
+        .with_context(|| format!("tracker: create {}/Software", dest.display()))?;
+    ensure_identity(dest, seat)?;
+    let repo = tracker_repo_name(remote);
+    Ok(TrackerHold::Local(format!(
+        "tracker: could not clone {remote} ({detail}). {}. This machine keeps a local tracker at {} and commits there (LJOS_TRACKER_GIT=commit).",
+        tracker_access_fix(&repo),
+        dest.display()
+    )))
+}
+
+fn clone_failure_detail(text: &str) -> Option<String> {
+    let (_, after) = text.split_once("clone of ")?;
+    let (_, detail) = after.split_once(" failed: ")?;
+    let detail = detail.trim();
+    if detail.is_empty() {
+        Some("git clone failed".to_string())
     } else {
-        clone_tracker(remote, dest, seat)
+        Some(detail.to_string())
     }
 }
 
@@ -1920,8 +2069,10 @@ fn clone_tracker(remote: &str, dest: &Path, seat: &str) -> Result<String> {
         .output()
         .context("git clone")?;
     if !out.status.success() {
-        let said = String::from_utf8_lossy(&out.stderr);
-        bail!("tracker: clone of {remote} failed: {}", said.trim());
+        bail!(
+            "tracker: clone of {remote} failed: {}",
+            command_detail(&out)
+        );
     }
     ensure_identity(dest, seat)?;
     match crate::tracker_push::publish(dest) {
@@ -1931,6 +2082,65 @@ fn clone_tracker(remote: &str, dest: &Path, seat: &str) -> Result<String> {
             dest.display()
         )),
     }
+}
+
+fn command_detail(out: &std::process::Output) -> String {
+    let err = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for text in [err.as_ref(), stdout.as_ref()] {
+        if let Some(line) = text.lines().map(str::trim).find(|line| !line.is_empty()) {
+            return line.to_string();
+        }
+    }
+    format!("exit {}", out.status)
+}
+
+fn git_output(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
+    Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .with_context(|| format!("git {}", args.join(" ")))
+}
+
+fn git_ok(dir: &Path, args: &[&str]) -> Result<()> {
+    let out = git_output(dir, args)?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        bail!("git {}: {}", args.join(" "), command_detail(&out))
+    }
+}
+
+fn origin_url(dir: &Path) -> Option<String> {
+    let out = git_output(dir, &["remote", "get-url", "origin"]).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!url.is_empty()).then_some(url)
+}
+
+fn same_remote(left: &str, right: &str) -> bool {
+    remote_key(left) == remote_key(right)
+}
+
+/// Compare a URL to the one git stored. A trailing slash or `.git`, and a
+/// path git canonicalized, are the same remote.
+fn remote_key(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    let stripped = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+    for candidate in [trimmed, stripped] {
+        if let Ok(path) = std::fs::canonicalize(candidate) {
+            let text = path.to_string_lossy();
+            let text = text.trim_end_matches('/');
+            return text.strip_suffix(".git").unwrap_or(text).to_string();
+        }
+    }
+    stripped.to_string()
 }
 
 fn ensure_identity(dir: &Path, seat: &str) -> Result<()> {
@@ -1994,14 +2204,19 @@ fn is_work_tree(dir: &Path) -> bool {
     out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true"
 }
 
+struct McpTracker<'a> {
+    root: &'a Path,
+    remote: &'a str,
+    git_mode: &'a str,
+}
+
 fn write_mcp(
     home: &Path,
     server: &Path,
     plan: &crate::ServerCommandPlan,
     seat: &str,
     key: &Path,
-    tracker: Option<&Path>,
-    remote: Option<&str>,
+    tracker: Option<McpTracker<'_>>,
 ) -> Result<String> {
     if !server.is_file() {
         bail!(
@@ -2023,18 +2238,22 @@ fn write_mcp(
         );
     }
     if let Some(tracker) = tracker {
-        env.insert("LJOS_TRACKER_GIT".into(), serde_json::json!("push"));
+        env.insert(
+            "LJOS_TRACKER_GIT".into(),
+            serde_json::json!(tracker.git_mode),
+        );
         env.insert(
             "VISSUE_ROOT".into(),
-            serde_json::json!(tracker.display().to_string()),
+            serde_json::json!(tracker.root.display().to_string()),
         );
         env.insert(
             "ISSUE_ROOT".into(),
-            serde_json::json!(tracker.display().to_string()),
+            serde_json::json!(tracker.root.display().to_string()),
         );
-    }
-    if let Some(remote) = remote {
-        env.insert("LJOS_TRACKER_REMOTE".into(), serde_json::json!(remote));
+        env.insert(
+            "LJOS_TRACKER_REMOTE".into(),
+            serde_json::json!(tracker.remote),
+        );
     }
     let command = plan.command.as_str();
     let entry = serde_json::json!({
@@ -2063,6 +2282,14 @@ fn write_mcp(
         line.push_str(note);
     }
     Ok(line)
+}
+
+fn apply_env(pairs: &[(&str, String)]) {
+    crate::with_env_mutation(|| {
+        for (key, value) in pairs {
+            std::env::set_var(key, value);
+        }
+    });
 }
 
 fn write_env(path: &Path, pairs: &[(&str, String)]) -> Result<()> {
@@ -3610,5 +3837,21 @@ mod tests {
             "run --mcp-config {\"mcpServers\":{}}".to_string(),
         ];
         assert!(mcp_json_from_args(&script).is_none());
+    }
+
+    #[test]
+    fn tracker_repo_name_is_the_owner_and_the_repository() {
+        assert_eq!(
+            tracker_repo_name("file:///no/such/HaoZeke/grokbot_ljostracker.git"),
+            "HaoZeke/grokbot_ljostracker"
+        );
+        assert_eq!(
+            tracker_repo_name("https://127.0.0.1:1/HaoZeke/grokbot_ljostracker.git"),
+            "HaoZeke/grokbot_ljostracker"
+        );
+        assert_eq!(
+            tracker_repo_name("git@github.com:HaoZeke/grokbot_ljostracker.git"),
+            "HaoZeke/grokbot_ljostracker"
+        );
     }
 }

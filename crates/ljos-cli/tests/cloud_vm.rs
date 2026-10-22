@@ -802,6 +802,132 @@ fn cloud_up_installs_points_the_harness_and_clones() {
     assert!(second.contains("tracker:"), "{second}");
 }
 
+/// A remote the VM credential cannot read must not stop the boot. The env
+/// file, the guard, the hook, and the seat are written, the failure names
+/// the repository, and the machine keeps a local tracker in commit mode.
+#[test]
+fn cloud_up_keeps_the_seat_when_the_tracker_cannot_be_cloned() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    isolate_git(root.path());
+    let home = root.path().join("home");
+    let rel = root.path().join("rel");
+    let stub = root.path().join("stub");
+    let cache = root.path().join("cache");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(&stub).unwrap();
+    fs::create_dir_all(cache.join("ljos")).unwrap();
+    let names = ["ljos", "ljos-mcp", "ljos-policyd"];
+    for name in names {
+        executable(&rel.join(name), "#!/bin/sh\necho ok\n");
+    }
+    fs::write(rel.join("SHA256SUMS"), sums(&rel, &names)).unwrap();
+    executable(
+        &stub.join("vissue"),
+        "#!/bin/sh\nif [ \"$1\" = identity ]; then\nprintf 'vissue 0.0.0\\nprotocol: 1\\nroot=%s\\nprefix=Software\\n' \"$VISSUE_ROOT\"\nexit 0\nfi\nexit 0\n",
+    );
+    for name in [
+        "ljos",
+        "ljos-policyd",
+        "ljos-consensus",
+        "vissue-cli",
+        "vissue-mcp",
+        "deedar-cli",
+        "claimdag-cli",
+        "packset",
+        "packset-embed",
+        "ljos-hud",
+    ] {
+        fs::write(cache.join("ljos").join(format!("crate-{name}")), "9.9.9\n").unwrap();
+    }
+    let remote = "file:///no/such/HaoZeke/grokbot_ljostracker.git";
+    let runtime = root.path().join("run");
+    fs::create_dir_all(&runtime).unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("XDG_CACHE_HOME", &cache);
+    std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+    std::env::remove_var("XDG_DATA_HOME");
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::remove_var("LJOS_BIN_DIR");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_CLOUD_AGE_SECRET");
+    std::env::remove_var("LJOS_MCP_CONFIG");
+    std::env::set_var("PATH", format!("{}:/usr/bin:/bin", stub.display()));
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    std::env::set_var("PACKSET_URL", "off");
+    std::env::set_var("LJOS_TRACKER_REMOTE", remote);
+    clear_agent_ids();
+    std::env::set_var("LJOS_SEAT", "saddle");
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+
+    let said = ljos_cli::cloud::up(false).unwrap();
+    let grant = "Grant the Cursor GitHub app access to HaoZeke/grokbot_ljostracker";
+    assert!(said.contains(grant), "{said}");
+    assert!(said.contains(remote), "{said}");
+    assert!(said.contains("LJOS_TRACKER_GIT=commit"), "{said}");
+    assert!(said.contains("seat key:"), "{said}");
+    assert!(!said.contains("push queued"), "{said}");
+
+    let env = fs::read_to_string(home.join(".config/ljos/env")).unwrap();
+    assert!(env.contains("LJOS_SEAT=saddle\n"), "{env}");
+    assert!(env.contains("LJOS_TRACKER_GIT=commit\n"), "{env}");
+    assert!(
+        env.contains(&format!("LJOS_TRACKER_REMOTE={remote}\n")),
+        "{env}"
+    );
+    assert!(env.contains("VISSUE_ROOT="), "{env}");
+    assert!(home.join(".config/ljos/cloud-guard-rules.json").is_file());
+    assert!(home.join(".config/ljos/hooks/pre-push").is_file());
+    assert!(home
+        .join(".local/share/ljos/seats/saddle/ballot.key")
+        .is_file());
+
+    let tracker = home.join(".local/share/ljos/tracker");
+    assert_eq!(
+        git(&tracker, &["rev-parse", "--is-inside-work-tree"]).trim(),
+        "true"
+    );
+    assert!(tracker.join("Software").is_dir());
+    let origin = Command::new("git")
+        .arg("-C")
+        .arg(&tracker)
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .unwrap();
+    assert!(
+        !origin.status.success(),
+        "local fallback still has origin: {}",
+        String::from_utf8_lossy(&origin.stdout)
+    );
+    let mcp = fs::read_to_string(home.join(".cursor/mcp.json")).unwrap();
+    assert!(mcp.contains("\"LJOS_TRACKER_GIT\": \"commit\""), "{mcp}");
+    assert!(!mcp.contains("\"LJOS_TRACKER_GIT\": \"push\""), "{mcp}");
+
+    let again = ljos_cli::cloud::up(false).unwrap();
+    assert!(again.contains(grant), "{again}");
+    let env = fs::read_to_string(home.join(".config/ljos/env")).unwrap();
+    assert!(env.contains("LJOS_TRACKER_GIT=commit\n"), "{env}\n{again}");
+    let mcp = fs::read_to_string(home.join(".cursor/mcp.json")).unwrap();
+    assert!(mcp.contains("\"LJOS_TRACKER_GIT\": \"commit\""), "{mcp}");
+    assert!(!mcp.contains("\"LJOS_TRACKER_GIT\": \"push\""), "{mcp}");
+
+    let rows = ljos_cli::doctor();
+    let tracker_row = rows
+        .iter()
+        .find(|row| row.name == "tracker")
+        .unwrap_or_else(|| panic!("no tracker row"));
+    assert!(tracker_row.ok, "{}", tracker_row.state);
+    assert!(tracker_row.state.contains(grant), "{}", tracker_row.state);
+    assert!(
+        tracker_row.state.contains("HaoZeke/grokbot_ljostracker"),
+        "{}",
+        tracker_row.state
+    );
+    assert_eq!(ljos_cli::doctor_word(tracker_row), "warn");
+}
+
 #[test]
 fn cloud_up_puts_ljos_mcp_on_path_before_the_config() {
     let _g = Guard::new();
