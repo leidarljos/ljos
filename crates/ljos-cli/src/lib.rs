@@ -3103,28 +3103,83 @@ fn login_user() -> String {
 /// The seat is a process name nobody chose.
 pub fn ballot_seat(verb: &str) -> Result<String> {
     let who = whoami();
+    match derived_seat(&who) {
+        Some(Derived::LoginUser) => bail!(
+            "{verb}: this shell runs under an agent runner, and nothing names its seat, \
+             so this ballot would count for {}, the login user. \
+             Set LJOS_SEAT to the seat's name (`export LJOS_SEAT=NAME`) and run it again; nothing was written",
+            who.seat
+        ),
+        Some(Derived::ProcessTree) => bail!(
+            "{verb}: no seat is named, so this ballot would count for {}, the program above this shell. \
+             Set LJOS_SEAT to the seat's name (`export LJOS_SEAT=NAME`) and run it again; nothing was written",
+            who.seat
+        ),
+        None => Ok(who.seat),
+    }
+}
+
+/// Where a seat nobody named came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Derived {
+    /// The program above this shell.
+    ProcessTree,
+    /// The login user of a shell under an agent runner.
+    LoginUser,
+}
+
+impl std::fmt::Display for Derived {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ProcessTree => "the program above this shell",
+            Self::LoginUser => "the login user of a shell under an agent runner",
+        })
+    }
+}
+
+/// Whether `who` is a seat nobody named: `LJOS_SEAT`, `VISSUE_AGENT`, an
+/// MCP client's name, a tool call's seat or a runner's record would each
+/// have named it. A person at a terminal with no runner above is their
+/// login user, and that is named enough.
+#[must_use]
+pub fn derived_seat(who: &Seat) -> Option<Derived> {
     let named = CALL_SEAT.try_with(|_| ()).is_ok()
         || ANNOUNCED.get().is_some()
         || named_var("LJOS_SEAT").is_some()
         || named_var("VISSUE_AGENT").is_some()
         || seat_from_tree_records().is_some()
         || seat_from_runner_env().is_some();
-    if !named && who.seat == login_user() && under_a_runner() {
+    if named {
+        return None;
+    }
+    if who.seat == login_user() && under_a_runner() {
+        return Some(Derived::LoginUser);
+    }
+    if program_above().is_some_and(|p| p.seat == who.seat) {
+        return Some(Derived::ProcessTree);
+    }
+    None
+}
+
+/// The seat a tracker write (note, claim, sitting, finish, file, deed) is
+/// made under. Refused, as a ballot is, when nothing named the seat: a
+/// subagent shell wrote hundreds of notes as `exec-daemon` and `cursor`.
+///
+/// # Errors
+///
+/// The seat is the program above this shell, or the login user under a
+/// runner.
+pub fn write_seat(verb: &str) -> Result<Seat> {
+    let who = whoami();
+    if let Some(from) = derived_seat(&who) {
         bail!(
-            "{verb}: this shell runs under an agent runner, and nothing names its seat, \
-             so this ballot would count for {}, the login user. \
-             Set LJOS_SEAT to the seat's name (`export LJOS_SEAT=NAME`) and run it again; nothing was written",
-            who.seat
+            "{verb}: no seat is named, so this write would be made as {}, {from}. \
+             Export LJOS_SEAT=NAME with your seat's name (the seats file is {}) and run it again; nothing was written",
+            who.seat,
+            seats_file().display()
         );
     }
-    if !named && program_above().is_some_and(|p| p.seat == who.seat) {
-        bail!(
-            "{verb}: no seat is named, so this ballot would count for {}, the program above this shell. \
-             Set LJOS_SEAT to the seat's name (`export LJOS_SEAT=NAME`) and run it again; nothing was written",
-            who.seat
-        );
-    }
-    Ok(who.seat)
+    Ok(who)
 }
 
 /// Append one line, `ts seat verb what`, to the state dir's recall.log, so
