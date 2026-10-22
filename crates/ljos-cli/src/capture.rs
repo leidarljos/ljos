@@ -459,11 +459,158 @@ fn words_only(text: &str) -> String {
         .join(" ")
 }
 
-/// Whether `text` is the person's words: it appears in the prompt they
-/// sent last, within [`LATEST_PROMPT_SECS`], and the file still matches
-/// the bind the hook wrote for this runner session. Four words or more,
-/// so "use bun" alone is not taken as a quote. A file written without
-/// that bind does not count.
+/// One word of a prompt, lowercased, where it sits in the text, and
+/// whether a sentence or a clause ends before it.
+struct Word {
+    word: String,
+    start: usize,
+    end: usize,
+    sentence_before: bool,
+    clause_before: bool,
+}
+
+fn prompt_words(text: &str) -> Vec<Word> {
+    let mut out: Vec<Word> = Vec::new();
+    let (mut sentence, mut clause) = (true, true);
+    let mut at = None;
+    let close = |out: &mut Vec<Word>, from: usize, to: usize, s: &mut bool, c: &mut bool| {
+        let raw = &text[from..to];
+        let lead = raw.len() - raw.trim_start_matches('\'').len();
+        let word = raw.trim_matches('\'');
+        if !word.is_empty() {
+            out.push(Word {
+                word: word.to_lowercase(),
+                start: from + lead,
+                end: from + lead + word.len(),
+                sentence_before: std::mem::take(s),
+                clause_before: std::mem::take(c),
+            });
+        }
+    };
+    for (i, ch) in text.char_indices() {
+        if ch.is_alphanumeric() || ch == '\'' {
+            at.get_or_insert(i);
+            continue;
+        }
+        if let Some(from) = at.take() {
+            close(&mut out, from, i, &mut sentence, &mut clause);
+        }
+        if matches!(ch, '.' | '!' | '?' | ';' | '\n') {
+            sentence = true;
+        }
+        if matches!(
+            ch,
+            ',' | ':'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '"'
+                | '\u{201c}'
+                | '\u{201d}'
+                | '\u{2013}'
+                | '\u{2014}'
+        ) {
+            clause = true;
+        }
+    }
+    if let Some(from) = at {
+        close(&mut out, from, text.len(), &mut sentence, &mut clause);
+    }
+    out
+}
+
+/// Words that turn a clause around: a quote that leaves one of them
+/// behind in its sentence says something the person did not.
+fn turns_it_around(word: &str) -> bool {
+    matches!(
+        word,
+        "not"
+            | "never"
+            | "no"
+            | "nor"
+            | "dont"
+            | "cannot"
+            | "without"
+            | "avoid"
+            | "unless"
+            | "except"
+            | "if"
+            | "only"
+            | "until"
+    ) || word.ends_with("n't")
+}
+
+/// `text` with case, spacing and plain punctuation set aside, and every
+/// other mark kept: a quote may drop a comma, not add a backtick.
+fn marks_kept(text: &str) -> String {
+    text.chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '.' | ','
+                    | ';'
+                    | ':'
+                    | '!'
+                    | '?'
+                    | '\''
+                    | '"'
+                    | '('
+                    | ')'
+                    | '-'
+                    | '\u{2018}'
+                    | '\u{2019}'
+                    | '\u{201c}'
+                    | '\u{201d}'
+                    | '\u{2013}'
+                    | '\u{2014}'
+            )
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Whether `quote` is whole clauses of `prompt`, starting and ending where
+/// a clause or a sentence does, with no word in the rest of its sentences
+/// that turns it around, and no mark the person did not write.
+fn quotes(prompt: &str, quote: &str) -> bool {
+    let words = prompt_words(prompt);
+    let want: Vec<String> = prompt_words(quote).into_iter().map(|w| w.word).collect();
+    let n = want.len();
+    if n == 0 || n > words.len() {
+        return false;
+    }
+    let ends = |i: usize| {
+        words
+            .get(i)
+            .is_none_or(|w| w.clause_before || w.sentence_before)
+    };
+    (0..=words.len() - n).any(|i| {
+        let j = i + n;
+        if !ends(i) || !ends(j) || words[i..j].iter().zip(&want).any(|(w, q)| w.word != *q) {
+            return false;
+        }
+        let from = (0..=i)
+            .rev()
+            .find(|&k| words[k].sentence_before)
+            .unwrap_or(0);
+        let to = (j..words.len())
+            .find(|&k| words[k].sentence_before)
+            .unwrap_or(words.len());
+        let dropped = words[from..i].iter().chain(&words[j..to]);
+        !dropped.into_iter().any(|w| turns_it_around(&w.word))
+            && marks_kept(&prompt[words[i].start..words[j - 1].end]) == marks_kept(quote)
+    })
+}
+
+/// Whether `text` is the person's words: whole clauses of the prompt they
+/// sent last ([`quotes`]), within [`LATEST_PROMPT_SECS`], and the file
+/// still matches the bind the hook wrote for this runner session. Four
+/// words or more, so "use bun" alone is not taken as a quote. A file
+/// written without that bind does not count.
 #[must_use]
 pub fn said_in_latest_prompt(text: &str) -> bool {
     let want = words_only(text);
@@ -482,7 +629,7 @@ pub fn said_in_latest_prompt(text: &str) -> bool {
     let Ok(prompt) = std::fs::read_to_string(&path) else {
         return false;
     };
-    format!(" {} ", words_only(&prompt)).contains(&format!(" {want} "))
+    quotes(&prompt, text)
 }
 
 /// The session key that keeps one stated choice from being saved twice.
