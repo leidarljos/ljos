@@ -250,6 +250,109 @@ pub(crate) fn reached(words: &[String], cwd: Option<&Path>, reader: bool) -> Opt
     None
 }
 
+/// Interpreters that take their code as an argument, and the flags it
+/// follows. A Python is any `python*` or `pypy*`.
+const CODE_FLAGS: &[(&str, &[&str])] = &[
+    ("python", &["-c"]),
+    ("perl", &["-e", "-E"]),
+    ("ruby", &["-e"]),
+    ("node", &["-e", "--eval", "-p", "--print"]),
+    ("nodejs", &["-e", "--eval", "-p", "--print"]),
+    ("bun", &["-e", "--eval", "-p", "--print"]),
+    ("deno", &["eval"]),
+    ("php", &["-r"]),
+    ("lua", &["-e"]),
+    ("osascript", &["-e"]),
+];
+
+const AWKS: &[&str] = &["awk", "gawk", "mawk", "nawk"];
+
+/// Whether code or text a program runs names the kept prompt: a runtime
+/// ljos directory as written or resolved, `XDG_RUNTIME_DIR`, or a kept
+/// file's name. Code builds a path however it likes, so naming any one
+/// of them is taken as a write.
+fn names_it(code: &str) -> bool {
+    let uid = crate::euid();
+    code.contains("XDG_RUNTIME_DIR")
+        || NAMES.iter().any(|n| code.contains(n))
+        || dirs()
+            .iter()
+            .cloned()
+            .chain([
+                crate::runtime_dir_path(),
+                PathBuf::from(format!("/run/user/{uid}/ljos")),
+            ])
+            .any(|d| d.to_str().is_some_and(|d| code.contains(d)))
+}
+
+/// Which interpreter `cmd` is, by the name [`CODE_FLAGS`] lists it under.
+fn interpreter(cmd: &str) -> Option<&'static str> {
+    if cmd.starts_with("python") || cmd.starts_with("pypy") {
+        return Some("python");
+    }
+    CODE_FLAGS.iter().map(|(n, _)| *n).find(|n| *n == cmd)
+}
+
+/// The code of one command, its wrappers off, that names the kept prompt:
+/// the argument of an interpreter's code flag or an awk program, or, for
+/// an interpreter, `git apply`, `git am` or `patch` given no file to read,
+/// the whole `line` that feeds it its stdin.
+pub(crate) fn code_reaches(words: &[String], line: &str) -> Option<String> {
+    let cmd = words.first()?.rsplit('/').next().unwrap_or("");
+    let args = &words[1..];
+    if AWKS.contains(&cmd) {
+        let mut it = args.iter();
+        while let Some(w) = it.next() {
+            if matches!(w.as_str(), "-F" | "-v" | "-f") {
+                it.next();
+            } else if !w.starts_with('-') {
+                return names_it(w).then(|| w.clone());
+            }
+        }
+        return None;
+    }
+    // A here-document's `<<EOF` and a `<` read stdin; neither is a file.
+    let no_file = |ws: &[String]| {
+        ws.iter()
+            .all(|w| (w.starts_with('-') && w != "--") || w.starts_with('<'))
+            || ws.iter().any(|w| w == "-")
+    };
+    let reads_stdin = if let Some(name) = interpreter(cmd) {
+        let flags = CODE_FLAGS.iter().find(|(n, _)| *n == name)?.1;
+        let short: Vec<char> = flags
+            .iter()
+            .filter(|f| f.len() == 2 && f.starts_with('-'))
+            .filter_map(|f| f.chars().nth(1))
+            .collect();
+        for (i, w) in args.iter().enumerate() {
+            // `-ne CODE` bundles flags and ends on the one that takes code.
+            let bundle = w.len() > 2
+                && w.starts_with('-')
+                && w[1..].chars().all(|c| c.is_ascii_alphabetic())
+                && w.chars().last().is_some_and(|c| short.contains(&c));
+            let code = if flags.contains(&w.as_str()) || bundle {
+                args.get(i + 1).map(String::as_str)
+            } else {
+                flags.iter().find_map(|f| {
+                    if f.len() == 2 {
+                        w.strip_prefix(f).filter(|rest| !rest.is_empty())
+                    } else {
+                        w.strip_prefix(f).and_then(|rest| rest.strip_prefix('='))
+                    }
+                })
+            };
+            if let Some(code) = code {
+                return names_it(code).then(|| code.to_string());
+            }
+        }
+        no_file(args)
+    } else {
+        let git = cmd == "git" && matches!(args.first().map(String::as_str), Some("apply" | "am"));
+        (cmd == "patch" && no_file(args)) || (git && no_file(&args[1..]))
+    };
+    (reads_stdin && names_it(line)).then(|| cmd.to_string())
+}
+
 /// Where the shell stands after `cd` or `pushd` with `words`, from `cwd`.
 /// `None` when that is not known.
 pub(crate) fn after_cd(words: &[String], cwd: Option<&Path>) -> Option<PathBuf> {
