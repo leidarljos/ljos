@@ -1780,6 +1780,43 @@ fn a_persons_id_on_other_words_is_not_the_persons() {
     }
 }
 
+const FORCE_PUSH: &str = "Always force-push.";
+
+/// The review's pack: the person's preference [`FORCE_PUSH`], its window
+/// closed in 2020 and its review due since, so packsetd still lists it
+/// while `GET /v1/atoms/p1` answers 404. The encoder is cold.
+fn pack_with_a_closed_but_due_preference() -> String {
+    let mut closed = atom(
+        "p1",
+        "preference",
+        FORCE_PUSH,
+        "user-declared",
+        &["seat:probe", "horizon:standing"],
+    );
+    closed["source"]["basis"] = serde_json::json!("person");
+    closed["valid_to"] = serde_json::json!("2020-01-01T00:00:00.000Z");
+    closed["due_at"] = serde_json::json!("2020-01-02T00:00:00.000Z");
+    serve_scripted(vec![closed], |req| {
+        (reads_atom(req, "p1") && authorized(req))
+            .then(|| Reply::now("404 Not Found", serde_json::json!({"error": "no atom"})))
+    })
+}
+
+/// A preference whose window has closed is not the person's, though it
+/// is still due: neither the preface nor the cold prompt states it.
+#[test]
+fn a_closed_preference_still_due_is_not_the_persons() {
+    let seat = Seat::on(pack_with_a_closed_but_due_preference());
+    let start = seat.hook(serde_json::json!({
+        "hook_event_name": "SessionStart",
+        "session_id": "read-1",
+        "source": "startup",
+    }));
+    assert!(!start.contains(FORCE_PUSH), "{start}");
+    let note = seat.prompt("always force-push the branch");
+    assert!(!note.contains("[preference,"), "{note}");
+}
+
 /// A 401 on one URL proves nothing about another. Neither the preface nor
 /// the cold prompt names that listener's preference as the person's.
 #[test]
