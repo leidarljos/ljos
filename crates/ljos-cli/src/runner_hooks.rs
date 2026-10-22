@@ -602,6 +602,48 @@ fn fault_output(event: &str, what: &str) -> String {
     .to_string()
 }
 
+/// Whether `event` is a tool call the relay must fail closed. An unnamed
+/// event is a tool call: Amp sends the arguments alone, and stdin that is
+/// not text has no event to read.
+#[must_use]
+pub fn relay_event_is_gate(event: Option<&str>) -> bool {
+    match event {
+        Some(name) if !name.is_empty() => gate_event(name),
+        _ => true,
+    }
+}
+
+/// Whether this payload is a tool call. The event in the payload wins;
+/// otherwise the `--event` flag, and an unnamed one is a gate.
+#[must_use]
+pub fn relay_input_is_gate(input: &str, event: Option<&str>) -> bool {
+    let raw = raw_event(input);
+    if raw.is_empty() {
+        relay_event_is_gate(event)
+    } else {
+        gate_event(&raw)
+    }
+}
+
+/// A deny for a relay that failed before it could judge, in the runner's
+/// own contract. `None` when `event` is a prompt: that error still exits
+/// 1, and denying it would block the person. Exit 2 with no JSON allows
+/// the command on Gemini, Copilot, Cline and Auggie, so those runners
+/// get their deny object and the exit their contract uses.
+#[must_use]
+pub fn relay_fault_deny(runner: &str, event: &str, what: &str) -> Option<(String, String, i32)> {
+    if !event.is_empty() && !gate_event(event) {
+        return None;
+    }
+    let what: String = what
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(240)
+        .collect();
+    let text = fault_output(event, &what);
+    Some(answer(runner, event, &text))
+}
+
 /// The command a normalized payload would run, or empty when it has none.
 fn tool_command(normalized: &str) -> String {
     serde_json::from_str::<Value>(normalized.trim())
@@ -1391,6 +1433,43 @@ mod tests {
             "auggie" => code == 0 && stdout.contains(r#""permissionDecision":"deny""#),
             _ => false,
         }
+    }
+
+    #[test]
+    fn a_relay_fault_denies_in_the_runners_contract() {
+        for runner in RUNNERS {
+            let (stdout, stderr, code) =
+                relay_fault_deny(runner, "", "stdin is not utf-8").expect(runner);
+            let body = format!("{stdout}{stderr}");
+            assert!(
+                runner_denied(runner, &stdout, &stderr, code),
+                "{runner}: code {code} {body}"
+            );
+            assert!(body.contains("stdin is not utf-8"), "{runner}: {body}");
+            assert!(body.contains("run `ljos doctor`"), "{runner}: {body}");
+        }
+        for runner in ["gemini", "copilot", "cline", "auggie"] {
+            let (stdout, _, code) =
+                relay_fault_deny(runner, "BeforeTool", "stdin is not utf-8").expect(runner);
+            assert_eq!(code, 0, "{runner} exit 2 alone would allow the command");
+            assert!(
+                stdout.contains("deny") || stdout.contains("cancel"),
+                "{runner}: {stdout}"
+            );
+        }
+        assert!(relay_fault_deny("windsurf", "UserPromptSubmit", "stdin is not utf-8").is_none());
+        assert!(relay_fault_deny("gemini", "BeforeAgent", "stdin is not utf-8").is_none());
+        assert!(relay_event_is_gate(None));
+        assert!(relay_event_is_gate(Some("")));
+        assert!(!relay_event_is_gate(Some("BeforeAgent")));
+        assert!(relay_input_is_gate(
+            r#"{"hook_event_name":"PreToolUse"}"#,
+            Some("UserPromptSubmit")
+        ));
+        assert!(!relay_input_is_gate(
+            r#"{"hook_event_name":"UserPromptSubmit","prompt":"hi"}"#,
+            None
+        ));
     }
 
     fn denies_fault(out: &str, why: &str) {
