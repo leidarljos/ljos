@@ -19237,6 +19237,21 @@ fn shell_words(segment: &str) -> Vec<String> {
     words
 }
 
+/// Whether one of `words` assigns a variable a runner names its session
+/// with: `LJOS_HARNESS_SESSION`, a `CURSOR_*SESSION*`, or any
+/// `*_SESSION_ID`, `*_THREAD_ID` or `*_CONVERSATION_ID`.
+fn assigns_session(words: &[String]) -> bool {
+    words.iter().any(|w| {
+        w.split_once('=').is_some_and(|(k, _)| {
+            k == "LJOS_HARNESS_SESSION"
+                || (k.starts_with("CURSOR_") && k.contains("SESSION"))
+                || ["_SESSION_ID", "_THREAD_ID", "_CONVERSATION_ID"]
+                    .iter()
+                    .any(|s| k.ends_with(s))
+        })
+    })
+}
+
 /// The seat's own guard, before any rule: a shell command that writes one
 /// of [`SEAT_PATHS`] (anything but a reader, or a redirect into it), or a
 /// file tool aimed at one, is refused. A path is a word of its own: a
@@ -19261,14 +19276,31 @@ pub fn seat_guard(line: &str) -> Option<Rule> {
     if nested_too_deep(line) {
         return Some(too_deep_rule().clone());
     }
+    let mut named_session = false;
     for seg in nested_lines(line, 0).iter().flat_map(|l| raw_segments(l)) {
         // Every wrapper off, as a rule sees it: `nice tmux send-keys` and
         // `timeout 5 xdotool type` are the tools they run.
         let words = shell_words(&seg);
         let (at, _) = prefix_end(&words);
+        named_session |= assigns_session(&words[..at]);
         let words = words[at..].to_vec();
         let Some(first) = words.first() else { continue };
         let first = first.rsplit('/').next().unwrap_or(first);
+        if matches!(
+            first,
+            "export" | "declare" | "typeset" | "readonly" | "local"
+        ) {
+            named_session |= assigns_session(&words[1..]);
+        }
+        if named_session && matches!(first, "ljos" | "ljos-mcp") {
+            return Some(Rule {
+                pattern: "seat-guard".into(),
+                verdict: "deny".into(),
+                reason: "A runner session set on the line that runs ljos chooses the session \
+                         the person's words are checked against. Run ljos without it."
+                    .into(),
+            });
+        }
         if first == "ljos" {
             // `ljos approve` is the person's, typed in a terminal of their
             // own. Every line this guard sees is an agent's tool call, so
