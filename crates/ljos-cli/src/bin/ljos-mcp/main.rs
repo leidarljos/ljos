@@ -19,13 +19,17 @@ use rmcp::{transport::stdio, ServiceExt};
 /// one call, so two workers keep the stdin reader moving; the pool is
 /// capped and its threads leave after a short idle.
 fn main() -> anyhow::Result<()> {
-    tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .max_blocking_threads(8)
         .thread_keep_alive(std::time::Duration::from_secs(2))
         .enable_all()
-        .build()?
-        .block_on(serve())
+        .build()?;
+    let ended = runtime.block_on(serve());
+    // Stdin is read on a blocking thread. After the parent dies with stdin
+    // still open that read never returns, and a plain drop would wait on it.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(2));
+    ended
 }
 
 async fn serve() -> anyhow::Result<()> {
@@ -41,6 +45,7 @@ async fn serve() -> anyhow::Result<()> {
         println!("ljos-mcp {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    lifetime::watch_parent();
     // Starting the server is a run of this version: refresh skills and
     // runner env files ljos wrote.
     ljos_cli::runner_skills::refresh_on_new_version();

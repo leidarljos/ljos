@@ -1,5 +1,5 @@
-//! An ljos-mcp ends when its input does, and answers what it already
-//! read first.
+//! An ljos-mcp ends when its input does or its parent dies, and answers
+//! what it already read first.
 //!
 //! The pack here takes seven seconds to answer a search, longer than the
 //! five seconds rmcp waits for a handler once the input ends. The client
@@ -101,5 +101,69 @@ fn stdin_eof_answers_the_call_in_flight_then_exits() {
     assert!(
         answer.to_string().contains("Pin the review set"),
         "{answer}"
+    );
+}
+
+/// `R` running, `Z` exited and not yet reaped, `None` reaped.
+#[cfg(target_os = "linux")]
+fn state(pid: u32) -> Option<char> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("State:"))
+        .and_then(|rest| rest.trim().chars().next())
+}
+
+/// A shell starts the server with stdin on the test's pipe and is then
+/// killed. The pipe stays open, so only the parent's death can end it.
+#[test]
+#[cfg(target_os = "linux")]
+fn the_parents_death_ends_the_server_with_stdin_still_open() {
+    use std::io::BufRead as _;
+    let home = tempfile::tempdir().unwrap();
+    let template = server(home.path());
+    let mut child = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "exec 3<&0; \"$0\" <&3 3<&- & echo $!; exec sleep 600",
+            env!("CARGO_BIN_EXE_ljos-mcp"),
+        ])
+        .env_clear()
+        .envs(template.get_envs().filter_map(|(k, v)| Some((k, v?))))
+        .current_dir(home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let pid: u32 = line.trim().parse().expect("the server's pid");
+    for line in initialize() {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    loop {
+        line.clear();
+        assert!(stdout.read_line(&mut line).unwrap() > 0, "server closed");
+        if serde_json::from_str::<serde_json::Value>(&line).is_ok_and(|value| value["id"] == 1) {
+            break;
+        }
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && matches!(state(pid), Some(s) if s != 'Z') {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let left = state(pid);
+    if matches!(left, Some(s) if s != 'Z') {
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    }
+    drop(stdin);
+    assert!(
+        matches!(left, None | Some('Z')),
+        "the server outlived its parent by 10 s: state {left:?}"
     );
 }

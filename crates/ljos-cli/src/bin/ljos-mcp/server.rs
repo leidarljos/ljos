@@ -3389,6 +3389,10 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for InboundOrder<R> {
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         let this = self.get_mut();
+        crate::lifetime::park_reader(cx.waker());
+        if crate::lifetime::closing() {
+            this.ended = true;
+        }
         if !this.ended {
             let before = buf.filled().len();
             let room = buf.remaining();
@@ -3399,7 +3403,6 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for InboundOrder<R> {
             }
             this.ended = true;
         }
-        crate::lifetime::park_reader(cx.waker());
         if crate::lifetime::settled() {
             return std::task::Poll::Ready(Ok(()));
         }
