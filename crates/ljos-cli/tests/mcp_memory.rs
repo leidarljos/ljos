@@ -99,6 +99,13 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
     std::fs::write(tracker.join("vissue.toml"), "seats = [\"saddle\"]\n").unwrap();
     let url = serve(Arc::new(Mutex::new(Vec::new())));
     let text = "Pin the review set before a release.";
+    let prompt_dir = home.path().join("ljos");
+    std::fs::create_dir_all(&prompt_dir).unwrap();
+    std::fs::write(
+        prompt_dir.join("latest-prompt"),
+        format!("Please remember this for next time: {text}"),
+    )
+    .unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))
@@ -145,7 +152,7 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
 
     let list = || {
         let got = Command::new(env!("CARGO_BIN_EXE_ljos"))
-            .args(["memories", "list"])
+            .args(["memories", "list", "--user"])
             .env("HOME", home.path())
             .env("XDG_CONFIG_HOME", home.path().join(".config"))
             .env("XDG_STATE_HOME", &state)
