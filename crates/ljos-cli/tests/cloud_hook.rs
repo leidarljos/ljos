@@ -1385,6 +1385,43 @@ fn a_proxy_in_the_environment_may_reach_github() {
     allowed(wget, here);
 }
 
+/// An ordinary curl option that changes neither the request nor where it
+/// goes, in a curlrc or on the command line, leaves a GitHub GET and a
+/// write to another host allowed.
+#[test]
+fn an_ordinary_curl_option_is_not_a_refusal() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    for rc in [
+        "tlsv1.2",
+        "continue-at = -",
+        "http1.0",
+        "--tlsv1.3\ntls-max = 1.3\nciphers = ECDHE-RSA-AES128-GCM-SHA256",
+        "remote-time\nmax-filesize = 10M\nfail-early\nno-buffer\ntcp-nodelay",
+        "keepalive-time = 30\nretry-connrefused\nurl-query = a=b\nrange = 0-99",
+        "etag-save = /tmp/etag\nparallel\ntrace-ascii = /tmp/t\nstderr = /tmp/e",
+        "digest\npost301\nnoproxy = example.com\ndisallow-username-in-url",
+    ] {
+        fs::write(home.join(".curlrc"), format!("{rc}\n")).unwrap();
+        allowed("curl -s https://api.github.com/user", here);
+        allowed("curl -X POST https://example.com/x", here);
+    }
+    fs::remove_file(home.join(".curlrc")).unwrap();
+    allowed(
+        "curl --proto '=https' --tlsv1.2 -sSf -X POST https://example.com/x",
+        here,
+    );
+    allowed("curl -Z -R -N -0 -X POST https://example.com/x", here);
+    refused(
+        "curl --tlsv1.2 --keepalive https://api.github.com/user -X POST",
+        here,
+    );
+}
+
 /// A curl option that names a proxy, a resolver, a socket, an address
 /// map, or a `Host:` header sends the request somewhere the URL does not
 /// say. So does an address for a host, and an option the guard does not
