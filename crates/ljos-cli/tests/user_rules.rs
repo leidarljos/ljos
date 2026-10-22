@@ -72,13 +72,8 @@ struct Home {
 
 impl Home {
     fn new() -> Self {
-        // A home under `/tmp` suspends the guard, so the policy cases
-        // would allow every line. The scratch directory is not a temp root.
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/user-rule-homes");
-        std::fs::create_dir_all(&root).unwrap();
         Self {
-            root: tempfile::TempDir::new_in(&root).unwrap(),
+            root: tempfile::TempDir::new().unwrap(),
         }
     }
 
@@ -93,6 +88,7 @@ impl Home {
             .env("PACKSET_URL", "off")
             .env("LJOS_HOLD", "rohit")
             .env("LJOS_ASK_PACK", "off")
+            .env("LJOS_GUARD", "on")
             .env("LJOS_USER_RULES_SYNC", "off")
             .env_remove("POLICYD_BIN")
             .env_remove("POLICYD_REQUIRED")
