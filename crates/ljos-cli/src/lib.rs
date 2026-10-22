@@ -9509,7 +9509,11 @@ pub fn hook_trace(input: &str, call: &HookCall, subagent: Option<&str>) {
         return;
     };
     line.push('\n');
-    let _ = append_locked_row(&dir.join("hook-trace.jsonl"), line.as_bytes());
+    let _ = append_locked_row(
+        &dir.join("hook-trace.jsonl"),
+        line.as_bytes(),
+        Durability::BestEffort,
+    );
 }
 
 /// The holders the seat records above this process name, nearest first,
@@ -12795,15 +12799,32 @@ fn store_agent_atom(client: &PacksetClient, atom: Value, prefix: &str) -> Result
         Err(e) if note_can_wait(&e) && atom["kind"].as_str() == Some("lesson") => {
             let text = atom["text"].as_str().unwrap_or("");
             let copies = pack_copy::pack_copies(text);
-            if !copies.is_empty() {
-                let issue = atom["issue"].as_str().unwrap_or("");
-                let workspace = atom["workspace"].as_str().unwrap_or("");
-                let closes = atom_supersedes(&atom);
-                let _ = queue_copies(issue, &copies, workspace, "lesson", &closes);
+            let err = with_post_failure(prefix, e);
+            if copies.is_empty() {
+                return Err(err);
             }
-            Err(with_post_failure(prefix, e))
+            let issue = atom["issue"].as_str().unwrap_or("");
+            let workspace = atom["workspace"].as_str().unwrap_or("");
+            let closes = atom_supersedes(&atom);
+            Err(with_queue_outcome(
+                err,
+                queue_copies(issue, &copies, workspace, "lesson", &closes),
+            ))
         }
         Err(e) => Err(with_post_failure(prefix, e)),
+    }
+}
+
+/// Fold how queueing a down pack's lesson went into the error the caller
+/// reports, so a lesson the queue could not take is not reported as queued.
+/// A queue write that itself failed, now a durable write that waits for the
+/// lock, is named rather than dropped.
+fn with_queue_outcome(err: anyhow::Error, queued: Result<Option<bool>>) -> anyhow::Error {
+    match queued {
+        Ok(Some(true)) => err.context("the lesson is queued for the next send"),
+        Ok(Some(false)) => err.context("the lesson was already queued"),
+        Ok(None) => err,
+        Err(e) => err.context(format!("and it could not be queued: {e:#}")),
     }
 }
 
@@ -12820,10 +12841,14 @@ fn client_or_queue(
         Ok(client) => Ok(client),
         Err(e) if kind == "lesson" && note_can_wait(&e) => {
             let copies = pack_copy::pack_copies(text);
-            if !copies.is_empty() {
-                let _ = queue_copies(issue, &copies, "", "lesson", supersedes);
+            let err = with_post_failure(prefix, e);
+            if copies.is_empty() {
+                return Err(err);
             }
-            Err(with_post_failure(prefix, e))
+            Err(with_queue_outcome(
+                err,
+                queue_copies(issue, &copies, "", "lesson", supersedes),
+            ))
         }
         Err(e) => Err(e),
     }
@@ -21360,53 +21385,22 @@ pub fn bypass_log_path() -> Option<PathBuf> {
     Some(data_base()?.join("ljos").join("bypass.jsonl"))
 }
 
-/// The rows of a log written by [`append_locked_row`], read without its
-/// lock.
+/// Open the directory `path` sits in with `O_DIRECTORY | O_NOFOLLOW`, and
+/// return it with the file name to use from that descriptor.
 ///
-/// A row whose write is still under way has no newline yet, so a last
-/// line without one is left for the next read. A line that does not
-/// parse, including one with bytes that are not UTF-8, is skipped and
-/// the rest are kept: an older ljos wrote rows that could tear.
-pub(crate) fn complete_rows<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Vec<T> {
-    let end = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
-    bytes[..end]
-        .split(|&b| b == b'\n')
-        .filter_map(|line| serde_json::from_slice(line).ok())
-        .collect()
-}
-
-/// How long [`append_locked_row`] tries for the lock before it skips
-/// the row.
-pub(crate) const ROW_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
-
-/// Append `bytes` as one row. The caller includes the trailing newline.
-///
-/// `writeln!` of a JSON value issues a `write(2)` per token, and those
-/// calls interleave when two processes append together. An exclusive
-/// advisory lock and one `write_all` keep the row whole. The file is
-/// created mode 0600, and a symlink is not followed: the row would
-/// otherwise land in whatever the link names. A row that cannot be
-/// written is the caller's to skip.
-///
-/// Hooks call this on the path of the person's command, so the lock is
-/// tried for [`ROW_LOCK_WAIT`] and then given up with `WouldBlock`. A
-/// writer holds it for one `write(2)`; a lock held longer than that is
-/// not one of ours, and the row is skipped rather than the command.
-///
-/// The directory `path` sits in is one ljos made, such as
-/// `$XDG_STATE_HOME/ljos`, and a symlink there is refused as well: it
-/// is opened first and the file is opened from that descriptor, so the
-/// link cannot be swapped in between. What lies above it, `$HOME` or
-/// an XDG base the person pointed elsewhere, is followed as set.
-pub(crate) fn append_locked_row(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
+/// The directory is one ljos made, such as `$XDG_STATE_HOME/ljos`, so a
+/// symlink swapped in for it is refused: the file is then opened from this
+/// descriptor, and the link cannot be slipped in between. What lies above
+/// it, `$HOME` or an XDG base the person pointed elsewhere, is followed as
+/// set. Every state-log read, write and rewrite goes through here, so the
+/// reader refuses the same links the writer does.
+fn open_state_dir(path: &Path) -> std::io::Result<(std::fs::File, std::ffi::CString)> {
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    use std::os::unix::io::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::OpenOptionsExt;
     let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "row path has no directory",
+            "state path has no directory",
         ));
     };
     let dir = if dir.as_os_str().is_empty() {
@@ -21431,6 +21425,232 @@ pub(crate) fn append_locked_row(path: &Path, bytes: &[u8]) -> std::io::Result<()
     };
     let name = std::ffi::CString::new(name.as_bytes())
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+    Ok((dir, name))
+}
+
+/// Read a state log written by [`append_locked_row`] without its lock,
+/// refusing a symlink at the file or at the directory ljos made.
+///
+/// A missing file is an empty log. A symlink in ljos's own directory, at
+/// the file or the directory, is an error rather than the bytes it points
+/// at: the write side refuses the same links, so the read side does not
+/// hand back whatever a swap put there.
+pub(crate) fn read_state_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    let (dir, name) = open_state_dir(path)?;
+    // SAFETY: `dir` is an open directory descriptor and `name` has no
+    // interior NUL. openat returns a new descriptor or -1.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ENOENT) {
+            return Ok(Vec::new());
+        }
+        return Err(err);
+    }
+    // SAFETY: `fd` was just opened above and nothing else owns it.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Replace `path` with `bytes` through the directory ljos made, refusing a
+/// symlink at the file or at that directory.
+///
+/// A fresh temp is created beside the target with `O_CREAT | O_EXCL |
+/// O_NOFOLLOW` mode 0600, written, fsynced, and renamed over the target
+/// from the directory descriptor; the directory is then fsynced so the
+/// rename is on disk. A `tmp + rename` through the path would follow a
+/// symlink and leave the file mode 0644; this does neither.
+pub(crate) fn rewrite_state_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    let (dir, name) = open_state_dir(path)?;
+    // A rename over the target would drop a symlink safely, but a state
+    // file ljos made is never one, so its presence there is tampering.
+    // SAFETY: `dir` is an open directory descriptor and `name` has no
+    // interior NUL; `stat` is filled by the call.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let seen = unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            &mut st,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if seen == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFLNK {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is a symlink", path.display()),
+        ));
+    }
+    let mut tmp_bytes = path
+        .file_name()
+        .map(|n| n.as_bytes().to_vec())
+        .unwrap_or_default();
+    tmp_bytes.extend_from_slice(format!(".{}.tmp", std::process::id()).as_bytes());
+    let tmp = std::ffi::CString::new(tmp_bytes)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+    // SAFETY: `dir` is an open directory descriptor; `tmp` has no interior
+    // NUL. A leftover temp from a crashed write is removed and the create
+    // is tried once more. openat returns a new descriptor or -1.
+    let fd = unsafe {
+        let open = || {
+            libc::openat(
+                dir.as_raw_fd(),
+                tmp.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600 as libc::c_uint,
+            )
+        };
+        let mut fd = open();
+        if fd < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EEXIST) {
+            libc::unlinkat(dir.as_raw_fd(), tmp.as_ptr(), 0);
+            fd = open();
+        }
+        fd
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fd` was just opened above and nothing else owns it.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    if let Err(err) = written {
+        // SAFETY: `dir` and `tmp` are still valid; a failed write leaves no
+        // temp behind.
+        unsafe { libc::unlinkat(dir.as_raw_fd(), tmp.as_ptr(), 0) };
+        return Err(err);
+    }
+    drop(file);
+    // SAFETY: both descriptors are open and both names have no interior NUL.
+    let renamed = unsafe {
+        libc::renameat(
+            dir.as_raw_fd(),
+            tmp.as_ptr(),
+            dir.as_raw_fd(),
+            name.as_ptr(),
+        )
+    };
+    if renamed != 0 {
+        let err = std::io::Error::last_os_error();
+        // SAFETY: as above; clean up the temp the rename did not consume.
+        unsafe { libc::unlinkat(dir.as_raw_fd(), tmp.as_ptr(), 0) };
+        return Err(err);
+    }
+    dir.sync_all()
+}
+
+/// The rows of a log written by [`append_locked_row`], read without its
+/// lock.
+///
+/// A row whose write is still under way has no newline yet, so a last
+/// line without one is left for the next read. A line that does not
+/// parse, including one with bytes that are not UTF-8, is skipped and
+/// the rest are kept: an older ljos wrote rows that could tear.
+pub(crate) fn complete_rows<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Vec<T> {
+    complete_rows_counted(bytes).0
+}
+
+/// [`complete_rows`] with the number of complete lines that did not parse.
+///
+/// A complete line is one before the last newline, so the row still being
+/// written is not counted. The dropped count is how a reader tells a whole
+/// log from one an older torn write, or a swap at the file, left damaged,
+/// instead of taking the lines that still parse for the whole log.
+pub(crate) fn complete_rows_counted<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> (Vec<T>, usize) {
+    let end = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    let mut rows = Vec::new();
+    let mut dropped = 0usize;
+    for line in bytes[..end].split(|&b| b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_slice(line) {
+            Ok(row) => rows.push(row),
+            Err(_) => dropped += 1,
+        }
+    }
+    (rows, dropped)
+}
+
+/// How long a best-effort [`append_locked_row`] tries for the lock before
+/// it skips the row.
+pub(crate) const ROW_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// How long a durable [`append_locked_row`] waits for the lock before it
+/// reports failure. Long enough to outlast a writer that holds the lock for
+/// one `write(2)`, so a verdict or a queued memory is not dropped for a
+/// brush with contention, bounded so a wedged holder still returns.
+pub(crate) const ROW_LOCK_WAIT_DURABLE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How hard [`append_locked_row`] tries for the lock before it gives up.
+#[derive(Clone, Copy)]
+pub(crate) enum Durability {
+    /// A verdict, a proposal or a queued memory, whose loss is a lost
+    /// decision: wait [`ROW_LOCK_WAIT_DURABLE`] and report failure, so the
+    /// caller can roll back or tell the person it did not land.
+    Durable,
+    /// A row the command hook writes, such as the bypass, hook-trace and
+    /// judge logs: try [`ROW_LOCK_WAIT`] and skip, so a lock held by
+    /// something stuck never holds the person's command.
+    BestEffort,
+}
+
+impl Durability {
+    fn lock_wait(self) -> std::time::Duration {
+        match self {
+            Self::Durable => ROW_LOCK_WAIT_DURABLE,
+            Self::BestEffort => ROW_LOCK_WAIT,
+        }
+    }
+}
+
+/// Append `bytes` as one row. The caller includes the trailing newline.
+///
+/// `writeln!` of a JSON value issues a `write(2)` per token, and those
+/// calls interleave when two processes append together. An exclusive
+/// advisory lock and one `write_all` keep the row whole. The file is
+/// created mode 0600, and a symlink is not followed: the row would
+/// otherwise land in whatever the link names. A row that cannot be
+/// written is the caller's to skip.
+///
+/// `durability` sets how long the lock is tried. A [`Durability::Durable`]
+/// row waits [`ROW_LOCK_WAIT_DURABLE`] and reports `WouldBlock` on failure,
+/// so a verdict or a queued memory is not dropped for a brush with
+/// contention. A [`Durability::BestEffort`] row, which the command hook
+/// writes, waits [`ROW_LOCK_WAIT`] and then gives up: a writer holds the
+/// lock for one `write(2)`, and a lock held longer than that is not one of
+/// ours, so the row is skipped rather than the person's command.
+///
+/// The directory `path` sits in is one ljos made, such as
+/// `$XDG_STATE_HOME/ljos`, and a symlink there is refused as well: it
+/// is opened first and the file is opened from that descriptor, so the
+/// link cannot be swapped in between. What lies above it, `$HOME` or
+/// an XDG base the person pointed elsewhere, is followed as set.
+pub(crate) fn append_locked_row(
+    path: &Path,
+    bytes: &[u8],
+    durability: Durability,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    let (dir, name) = open_state_dir(path)?;
+    // O_RDWR, not O_WRONLY: the torn-tail check pread(2)s the last byte, and
+    // a write-only descriptor answers that with EBADF.
     // SAFETY: dir is an open directory descriptor and name is a
     // NUL-terminated string with no interior NUL. openat returns a new
     // descriptor or -1.
@@ -21438,7 +21658,7 @@ pub(crate) fn append_locked_row(path: &Path, bytes: &[u8]) -> std::io::Result<()
         libc::openat(
             dir.as_raw_fd(),
             name.as_ptr(),
-            libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            libc::O_RDWR | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             0o600 as libc::c_uint,
         )
     };
@@ -21448,7 +21668,8 @@ pub(crate) fn append_locked_row(path: &Path, bytes: &[u8]) -> std::io::Result<()
     // SAFETY: fd was just opened above and nothing else owns it.
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
     file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    let deadline = std::time::Instant::now() + ROW_LOCK_WAIT;
+    let wait = durability.lock_wait();
+    let deadline = std::time::Instant::now() + wait;
     loop {
         // SAFETY: this descriptor stays open until the matching unlock.
         // The lock is advisory, so the row is written on this same
@@ -21464,17 +21685,48 @@ pub(crate) fn append_locked_row(path: &Path, bytes: &[u8]) -> std::io::Result<()
             Some(libc::EWOULDBLOCK) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WouldBlock,
-                    format!("still locked after {}ms", ROW_LOCK_WAIT.as_millis()),
+                    format!("still locked after {}ms", wait.as_millis()),
                 ));
             }
             _ => return Err(err),
         }
     }
-    let wrote = file.write_all(bytes);
+    // A write that tore left the last row without its newline. Appending
+    // now would glue this row onto that one, and both would fail to parse,
+    // so a good write would vanish. Cap the torn tail first, under the lock.
+    let wrote = cap_torn_tail(&mut file).and_then(|()| file.write_all(bytes));
     // SAFETY: the same descriptor, still open. Close would drop the lock
     // as well; unlock first so the next writer can take it.
     unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
     wrote
+}
+
+/// Write a newline when `file` is non-empty and does not end in one, so an
+/// appended row is not glued to a torn last line. `file` is `O_APPEND`, so
+/// the newline and the row both land at the end.
+fn cap_torn_tail(file: &mut std::fs::File) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::io::AsRawFd;
+    let fd = file.as_raw_fd();
+    // SAFETY: fstat on an open descriptor fills the struct.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if st.st_size <= 0 {
+        return Ok(());
+    }
+    let mut last = [0u8; 1];
+    // SAFETY: pread of one byte at the last offset into a local buffer; it
+    // does not move the append offset.
+    let read = unsafe { libc::pread(fd, last.as_mut_ptr().cast(), 1, st.st_size - 1) };
+    if read < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if read == 1 && last[0] != b'\n' {
+        file.write_all(b"\n")?;
+    }
+    Ok(())
 }
 
 /// Write a row when the guard is passed over on a command it would have
@@ -21501,19 +21753,26 @@ pub fn log_bypass(kind: &str, how: &str, command: &str, rule: &Rule) {
     };
     line.push('\n');
     let _ = path.parent().map(std::fs::create_dir_all);
-    if let Err(err) = append_locked_row(&path, line.as_bytes()) {
-        eprintln!(
-            "ljos: the bypass row for `{command}` was not written to {}: {err}",
-            path.display()
-        );
+    if let Err(err) = append_locked_row(&path, line.as_bytes(), Durability::BestEffort) {
+        eprintln!("{}", bypass_skip_note(&path, &err));
     }
+}
+
+/// The note stderr shows when a bypass row could not be written. It names
+/// the log and the error, never the command: the command can carry a secret
+/// or a newline, which several runners show on stderr as the deny reason.
+fn bypass_skip_note(path: &Path, err: &std::io::Error) -> String {
+    format!(
+        "ljos: a guard bypass row was not written to {}: {err}",
+        path.display()
+    )
 }
 
 /// The doctor's line on the bypass log: how many commands ran past the
 /// guard, and the last one. Passing over the guard is allowed, so the row
 /// stays green; it is there to be read.
 fn bypass_row() -> Habitat {
-    let state = match bypass_log_path().and_then(|p| std::fs::read(&p).ok().map(|t| (p, t))) {
+    let state = match bypass_log_path().and_then(|p| read_state_file(&p).ok().map(|t| (p, t))) {
         None => "no command has run past the guard".to_string(),
         Some((path, bytes)) => bypass_summary(&bytes, &path.display().to_string()),
     };
@@ -21527,13 +21786,27 @@ fn bypass_row() -> Habitat {
 /// [`bypass_row`]'s text from the log's rows.
 #[must_use]
 pub fn bypass_summary(bytes: &[u8], path: &str) -> String {
-    let rows: Vec<Value> = complete_rows(bytes);
+    let (rows, dropped): (Vec<Value>, usize) = complete_rows_counted(bytes);
     let Some(last) = rows.last() else {
+        if dropped > 0 {
+            return format!(
+                "the guard bypass log at {path} is damaged: {dropped} row{} could not be read",
+                if dropped == 1 { "" } else { "s" }
+            );
+        }
         return "no command has run past the guard".to_string();
+    };
+    let damaged = if dropped > 0 {
+        format!(
+            "; {dropped} row{} could not be read",
+            if dropped == 1 { "" } else { "s" }
+        )
+    } else {
+        String::new()
     };
     let s = |k: &str| last[k].as_str().unwrap_or("").to_string();
     format!(
-        "{} command{} ran past the guard; last at {}: `{}` past {} ({}); see {path}",
+        "{} command{} ran past the guard; last at {}: `{}` past {} ({}); see {path}{damaged}",
         rows.len(),
         if rows.len() == 1 { "" } else { "s" },
         local_when(&s("ts")),
@@ -26646,6 +26919,35 @@ impl CommitLock {
         else {
             return Self(None);
         };
+        // SAFETY: flock on a descriptor this struct owns until drop.
+        let ok = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0;
+        Self(ok.then_some(file))
+    }
+
+    /// Like [`Self::acquire`], but the lock file is made in a directory ljos
+    /// made, created mode 0600 and not through a symlink. A lock that cannot
+    /// be opened is no lock, as above.
+    #[must_use]
+    pub(crate) fn acquire_private(path: &std::path::Path) -> Self {
+        use std::os::unix::io::{AsRawFd, FromRawFd};
+        let Ok((dir, name)) = open_state_dir(path) else {
+            return Self(None);
+        };
+        // SAFETY: `dir` is an open directory descriptor; `name` has no
+        // interior NUL. openat returns a new descriptor or -1.
+        let fd = unsafe {
+            libc::openat(
+                dir.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600 as libc::c_uint,
+            )
+        };
+        if fd < 0 {
+            return Self(None);
+        }
+        // SAFETY: `fd` was just opened above and nothing else owns it.
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
         // SAFETY: flock on a descriptor this struct owns until drop.
         let ok = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0;
         Self(ok.then_some(file))
@@ -40574,6 +40876,73 @@ mod tests {
         );
     }
 
+    /// A skipped bypass row names the log and the error, not the command:
+    /// the command can carry a secret or an injected newline a runner shows
+    /// on stderr as the deny reason.
+    #[test]
+    fn a_bypass_skip_note_names_the_log_not_the_command() {
+        let err = std::io::Error::new(std::io::ErrorKind::WouldBlock, "still locked after 50ms");
+        let note = bypass_skip_note(Path::new("/x/ljos/bypass.jsonl"), &err);
+        assert!(
+            note.contains("/x/ljos/bypass.jsonl") && note.contains("still locked after 50ms"),
+            "{note}"
+        );
+        assert!(
+            !note.contains("terraform") && !note.contains("AKIA") && !note.contains('\n'),
+            "{note}"
+        );
+    }
+
+    /// A write that tore left the last row without its newline. The next
+    /// append caps the torn tail first, so the new row lands on its own
+    /// line and is not glued to the torn one and lost with it.
+    #[test]
+    fn a_row_after_a_torn_tail_is_not_glued_and_lost() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", dir.path().to_str().unwrap())]);
+        let path = bypass_log_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut bytes =
+            b"{\"kind\":\"switch\",\"command\":\"first\",\"how\":\"h\",\"rule\":\"r\",\"ts\":\"t\"}\n"
+                .to_vec();
+        bytes.extend_from_slice(b"{\"kind\":\"switch\",\"command\":\"torn");
+        std::fs::write(&path, bytes).unwrap();
+        let rule = Rule {
+            pattern: "r".into(),
+            verdict: "ask".into(),
+            reason: "infra-destroy: this tears down infrastructure".into(),
+        };
+        log_bypass("approval", "grant", "second", &rule);
+        let rows: Vec<Value> = complete_rows(&std::fs::read(&path).unwrap());
+        let commands: Vec<&str> = rows.iter().filter_map(|r| r["command"].as_str()).collect();
+        assert!(
+            commands.contains(&"first") && commands.contains(&"second"),
+            "{commands:?}"
+        );
+    }
+
+    /// A row torn in the middle of the log, bytes that are not UTF-8 among
+    /// them, is one the doctor reports as unreadable, not one it passes
+    /// over to call the log healthy and empty.
+    #[test]
+    fn a_damaged_bypass_log_is_reported_not_called_empty() {
+        let only_torn = b"{\"command\":\"caf\xc3\n".to_vec();
+        let said = bypass_summary(&only_torn, "LOG");
+        assert!(said.contains("damaged") && said.contains("1 row"), "{said}");
+
+        let mut mixed =
+            b"{\"kind\":\"switch\",\"command\":\"ok\",\"how\":\"h\",\"rule\":\"r\",\"ts\":\"t\"}\n"
+                .to_vec();
+        mixed.extend_from_slice(b"{\"command\":\"caf\xc3\n");
+        let said = bypass_summary(&mixed, "LOG");
+        assert!(
+            said.starts_with("1 command ran past the guard")
+                && said.contains("1 row could not be read"),
+            "{said}"
+        );
+    }
+
     /// The `ljos` directory is ljos's own, so a symlink put there is not
     /// written through. An XDG base the person made a symlink still is.
     #[test]
@@ -40604,6 +40973,37 @@ mod tests {
         log_bypass("switch", "LJOS_ASK_PACK=off", "terraform destroy", &rule);
         let text = std::fs::read_to_string(real.join("ljos/bypass.jsonl")).unwrap();
         assert_eq!(text.lines().count(), 1, "{text}");
+    }
+
+    /// The reader refuses the symlinks the writer refuses. A log file, or
+    /// ljos's own directory, swapped for a link is not read through, so a
+    /// row forged at the link's target is not handed back as a healthy log.
+    #[test]
+    fn a_symlinked_state_log_is_not_read_through() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let forged = br#"{"kind":"switch","command":"forged","how":"x","rule":"r","ts":"t"}
+"#;
+        let outside = dir.path().join("outside.jsonl");
+        std::fs::write(&outside, forged).unwrap();
+
+        // A link at the file itself.
+        let data = dir.path().join("data");
+        let ljos = data.join("ljos");
+        std::fs::create_dir_all(&ljos).unwrap();
+        std::os::unix::fs::symlink(&outside, ljos.join("bypass.jsonl")).unwrap();
+        {
+            let _env = HoldEnv::set(&[("XDG_DATA_HOME", data.to_str().unwrap())]);
+            assert!(read_state_file(&bypass_log_path().unwrap()).is_err());
+            assert_eq!(bypass_row().state, "no command has run past the guard");
+        }
+
+        // A link at the directory ljos keeps its logs in.
+        let data2 = dir.path().join("data2");
+        std::fs::create_dir_all(&data2).unwrap();
+        std::os::unix::fs::symlink(dir.path(), data2.join("ljos")).unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", data2.to_str().unwrap())]);
+        assert!(read_state_file(&bypass_log_path().unwrap()).is_err());
     }
 
     /// The fail-open path writes its row before the command runs. A lock

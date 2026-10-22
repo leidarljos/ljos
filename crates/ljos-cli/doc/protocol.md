@@ -94,10 +94,16 @@ recipients and its own log, `<host>+<scope>.jsonl.age`
 the other machines' logs before the island is walked; finish writes and
 pushes this machine's. `commit` skips that pull and that push.
 Each log's first line, inside the seal, names its host and scope;
-a log naming another host or scope is left unread, and a log from
-before that line opens only with a key other than this machine's own.
-A symlink at `.ljos`, `.ljos/atoms`, `.ljos/user-rules` or the state
-directory's `sync/` is refused.
+a log naming another host or scope is left unread, and so is a log
+from before that line, whichever key opens it. `ljos sync
+--adopt-legacy HOST` pins the blobs filed under HOST now; import
+then reads those exact bytes as HOST's, and only until HOST writes a
+log with the line.
+A log is read only under the name export writes, `HOST.jsonl.age`
+for the primary scope and `HOST+SCOPE.jsonl.age` for an extra one.
+A symlink at `.ljos`, `.ljos/atoms`, a log in it, `.ljos/user-rules`
+or the state directory's `sync/` is refused, by import, export and
+the atoms merge driver.
 `ljos sync --key` prints this machine's public key
 for a scope's recipients, and `ljos sync` runs the pull and the push by hand.
 `ljos sync --adopt HOST` reposts that host's live atoms as this
