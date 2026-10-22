@@ -41,8 +41,8 @@ ok	deed store	size=0 root=...
 $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
 $ ljos prefer "CombMNZ over RRF for fusing two ballots."
 $ ljos search "which fusion"
-2.0000	1/3	lesson	...	today	The lexical default is BM25+. It beat BM25 by two points on turns.
-1.0000	1/3	preference	...	today	CombMNZ over RRF for fusing two ballots.
+2.0000	1/3	lesson	1fe4b916d956798196df680ade594ac5	today	The lexical default is BM25+. It beat BM25 by two points on turns.
+1.0000	1/3	preference	85dde12b553372dafb3d50e3b4b63fec	today	CombMNZ over RRF for fusing two ballots.
 #+end_src
 
 A claim is two sentences at most, stored as written. The pack never mines a
