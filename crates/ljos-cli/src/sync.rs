@@ -665,7 +665,7 @@ fn split_rel(rel: &str) -> (&str, &str) {
 
 /// The bytes of the regular file `rel` below `root`, with no symlink at
 /// any component. None when it is missing.
-fn read_beneath(root: &Path, rel: &str) -> Result<Option<Vec<u8>>> {
+pub(crate) fn read_beneath(root: &Path, rel: &str) -> Result<Option<Vec<u8>>> {
     use std::io::Read;
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::fs::MetadataExt;
@@ -702,7 +702,7 @@ fn read_beneath(root: &Path, rel: &str) -> Result<Option<Vec<u8>>> {
 
 /// Replace `rel` below `root` with `bytes`, making missing directories,
 /// with no symlink at any component.
-fn write_beneath(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_beneath(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     use std::os::fd::{AsRawFd, FromRawFd};
     let (parent, name) = split_rel(rel);
