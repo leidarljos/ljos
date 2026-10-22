@@ -304,13 +304,22 @@ use bun, never yarn", is the person's own sentence, so the hook saves it
 as a standing preference and says so with the =ljos forget= line that
 takes it back. =LJOS_CAPTURE=nudge= asks the agent to write it instead,
 and =off= leaves it. An agent's =remember= of the person's words from
-their latest prompt stands at once too. That prompt counts only when the
-hook's bind beside it names the runner session asking, and the seat
-guard denies a tool call that writes, moves, links or touches either
-file or the runtime ljos directory. A process of the same user that
-runs outside the guard, not as a tool call, can still write both files
-and forge the person's words, so a person basis is strong only against
-writes made through tool calls the guard sees.
+their latest prompt stands at once too, when it is a whole sentence or
+clause of that prompt and keeps its =not=, =never=, =unless= and
+=only=. That prompt counts only when the hook's bind beside it names
+a session of the runner above the process asking: read from the
+environment the runner started its child with, or from an MCP call's
+=_meta=, never from the asking process's own variables, and nothing
+counts with no runner above. The seat guard denies a tool call that
+writes, moves, links or touches either file or the runtime ljos
+directory, however its path is spelled, through interpreter code that
+names them, or through any argument of a file tool. It denies a session
+variable set on the line that runs ljos, and =ljos prefer=,
+=remember= or =accept= run through ssh, where ljos is not under the
+runner. A process of the same user that runs outside the guard, not as
+a tool call, can still write both files and forge the person's words,
+so a person basis is strong only against writes made through tool calls
+the guard sees.
 A prompt event is not always the person: Codex sends one inside a
 subagent with the parent agent's brief as the prompt. A prompt whose
 payload names a subagent (=agent_id=), or a Codex thread other than the
