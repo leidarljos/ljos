@@ -3851,7 +3851,7 @@ fn http_shape(
 ) -> (HttpShape, bool) {
     match cmd {
         "curl" => curl_shape(words, env, cwd),
-        "wget" => (wget_shape(words, env), false),
+        "wget" => wget_shape(words, env, cwd),
         "http" | "https" => (httpie_shape(words), false),
         _ => (HttpShape::Opaque, false),
     }
@@ -3947,69 +3947,11 @@ fn finish_http(method: Option<&str>, body: bool, query: bool, upload: bool) -> H
     }
 }
 
-fn carries_token(words: &[String], env: &[(String, String)]) -> bool {
-    words.iter().any(|word| token_mark(word)) || env_has_token(env)
-}
-
-fn token_mark(word: &str) -> bool {
-    let lower = word.to_ascii_lowercase();
-    lower.contains("$gh_token")
-        || lower.contains("${gh_token}")
-        || lower.contains("$github_token")
-        || lower.contains("${github_token}")
-        || lower.contains("$github_pat")
-        || lower.contains("${github_pat}")
-        || lower.contains("authorization")
-        || lower.contains("bearer")
-        || lower.contains("x-access-token")
-        || (word.contains("://") && word.contains('@'))
-        || word == "-u"
-        || word == "--user"
-        || word == "--oauth2-bearer"
-        || word == "--netrc"
-        || word == "--netrc-optional"
-        || word == "--netrc-file"
-        || word == "-n"
-}
-
-fn env_has_token(env: &[(String, String)]) -> bool {
-    for key in ["GH_TOKEN", "GITHUB_TOKEN", "GITHUB_PAT"] {
-        if let Some((_, value)) = env.iter().rev().find(|(name, _)| name == key) {
-            if !value.is_empty() {
-                return true;
-            }
-            continue;
-        }
-        if std::env::var(key)
-            .ok()
-            .is_some_and(|value| !value.is_empty())
-        {
-            return true;
-        }
-    }
-    false
-}
-
 fn prefixed_or_process(env: &[(String, String)], key: &str) -> Option<String> {
     if let Some((_, value)) = env.iter().rev().find(|(name, _)| name == key) {
         return Some(value.clone());
     }
     std::env::var(key).ok()
-}
-
-fn wget_config_applies(words: &[String], env: &[(String, String)]) -> bool {
-    if words
-        .iter()
-        .any(|word| word == "--config" || word.starts_with("--config="))
-    {
-        return true;
-    }
-    if prefixed_or_process(env, "WGETRC").is_some_and(|value| !value.is_empty()) {
-        return true;
-    }
-    crate::home()
-        .map(|home| home.join(".wgetrc").is_file())
-        .unwrap_or(false)
 }
 
 fn curl_long(
@@ -4645,12 +4587,17 @@ fn open_cfg(path: &Path) -> Result<Option<String>, ()> {
     }
 }
 
-fn wget_shape(words: &[String], env: &[(String, String)]) -> HttpShape {
-    if carries_token(words, env) && wget_config_applies(words, env) {
-        return HttpShape::Opaque;
+fn wget_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) -> (HttpShape, bool) {
+    let mut tune = Tune::default();
+    // `--no-config` before any `--config` reads nothing. A named
+    // `--config` replaces the system and user files. Otherwise both
+    // the system wgetrc and the user file apply, and either can set
+    // the method.
+    if let Some(shape) = wget_files(words, env, cwd, &mut tune) {
+        return (shape, curl_config_github(words, &tune));
     }
-    let mut method: Option<String> = None;
-    let mut body = false;
+    let mut method = tune.method.clone();
+    let mut body = tune.body;
     let mut i = 1usize;
     while i < words.len() {
         let lower = words[i].to_ascii_lowercase();
@@ -4688,7 +4635,137 @@ fn wget_shape(words: &[String], env: &[(String, String)]) -> HttpShape {
         }
         i += 1;
     }
-    finish_http(method.as_deref(), body, false, false)
+    let shape = finish_http(method.as_deref(), body, false, false);
+    (shape, curl_config_github(words, &tune))
+}
+
+enum WgetFiles {
+    Off,
+    Defaults,
+    Named(Vec<PathBuf>),
+}
+
+/// The first of `--no-config` and `--config` wins, which is what wget
+/// does when it scans the command before reading a file.
+fn wget_files_plan(words: &[String]) -> WgetFiles {
+    let mut named = Vec::new();
+    let mut i = 1usize;
+    while i < words.len() {
+        let lower = words[i].to_ascii_lowercase();
+        if lower == "--no-config" && named.is_empty() {
+            return WgetFiles::Off;
+        }
+        if lower == "--config" {
+            let value = words.get(i + 1).cloned().unwrap_or_default();
+            named.push(PathBuf::from(value));
+            i += 2;
+            continue;
+        }
+        if let Some(value) = lower.strip_prefix("--config=") {
+            named.push(PathBuf::from(value));
+            i += 1;
+            continue;
+        }
+        i += 1;
+    }
+    if named.is_empty() {
+        WgetFiles::Defaults
+    } else {
+        WgetFiles::Named(named)
+    }
+}
+
+fn wget_files(
+    words: &[String],
+    env: &[(String, String)],
+    cwd: Option<&Path>,
+    tune: &mut Tune,
+) -> Option<HttpShape> {
+    match wget_files_plan(words) {
+        WgetFiles::Off => None,
+        WgetFiles::Named(paths) => {
+            let mut opaque = false;
+            for path in paths {
+                let path = resolve_cfg(&path.to_string_lossy(), cwd);
+                if read_wget_file(&path, tune, true).is_some() {
+                    opaque = true;
+                }
+            }
+            opaque.then_some(HttpShape::Opaque)
+        }
+        WgetFiles::Defaults => {
+            if let Some(shape) = wget_system(env, tune) {
+                return Some(shape);
+            }
+            wget_user(env, cwd, tune)
+        }
+    }
+}
+
+fn wget_system(env: &[(String, String)], tune: &mut Tune) -> Option<HttpShape> {
+    if let Some(path) = prefixed_or_process(env, "SYSTEM_WGETRC") {
+        if !path.is_empty() {
+            let path = PathBuf::from(path);
+            match open_cfg(&path) {
+                Ok(None) => {}
+                Err(()) => {
+                    tune.unreadable = true;
+                    return Some(HttpShape::Opaque);
+                }
+                Ok(Some(_)) => return read_wget_file(&path, tune, true),
+            }
+        }
+    }
+    read_wget_file(Path::new("/etc/wgetrc"), tune, false)
+}
+
+fn wget_user(env: &[(String, String)], cwd: Option<&Path>, tune: &mut Tune) -> Option<HttpShape> {
+    if let Some(path) = prefixed_or_process(env, "WGETRC") {
+        if !path.is_empty() {
+            return read_wget_file(&resolve_cfg(&path, cwd), tune, true);
+        }
+    }
+    if let Some(home) = prefixed_or_process(env, "HOME") {
+        if !home.is_empty() {
+            return read_wget_file(&PathBuf::from(home).join(".wgetrc"), tune, false);
+        }
+    }
+    None
+}
+
+fn read_wget_file(path: &Path, tune: &mut Tune, required: bool) -> Option<HttpShape> {
+    match open_cfg(path) {
+        Ok(None) if !required => None,
+        Ok(None) | Err(()) => {
+            tune.unreadable = true;
+            Some(HttpShape::Opaque)
+        }
+        Ok(Some(text)) => apply_wget_text(&text, tune),
+    }
+}
+
+fn apply_wget_text(text: &str, tune: &mut Tune) -> Option<HttpShape> {
+    let mut opaque = false;
+    for line in text.lines() {
+        match curl_cfg_line(line) {
+            CfgLine::Blank => {}
+            CfgLine::Bad => opaque = true,
+            CfgLine::Item { name, value } => {
+                let key = name.replace(['_', '-'], "");
+                match key.as_str() {
+                    "method" => {
+                        tune.method = Some(value.unwrap_or_default().trim().to_ascii_uppercase());
+                    }
+                    "postdata" | "postfile" | "bodydata" | "bodyfile" => tune.body = true,
+                    "header" if value.as_deref().unwrap_or("").trim_start().starts_with('@') => {
+                        opaque = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    opaque.then_some(HttpShape::Opaque)
 }
 
 fn note_wget_exec(value: &str, method: &mut Option<String>, body: &mut bool) {
