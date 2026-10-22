@@ -12,12 +12,18 @@ config, never in this repository.
 ## Config
 
 The `[mail]` table is optional. Without it the mail tools refuse and
-nothing else changes. It is read from the same layers as the rest of ljos
-config: `~/.config/vissue/config.toml`, `~/.config/ljos/ljos.toml`,
-`~/.config/ljos/mail.toml`, then `./vissue.toml`, `./ljos.toml`,
-`VISSUE_CONFIG` and `LJOS_CONFIG`. A later file overrides the keys it sets.
-A file that does not parse, or a `[mail]` key ljos does not know, is an
-error rather than a silent default.
+nothing else changes. It names the From a draft may carry, the deny list
+and the mailbox, so only the user may set it: it is read from the user's
+own `~/.config/ljos/ljos.toml` and then `~/.config/ljos/mail.toml`
+(under `XDG_CONFIG_HOME` when that is set), the second overriding the
+keys it sets. Each must be owned by the user running ljos and not be
+group or world writable. Any other layer of ljos config (`./ljos.toml`,
+`./vissue.toml`, `VISSUE_CONFIG`, `LJOS_CONFIG` and
+`~/.config/vissue/config.toml`) that carries a `[mail]` table, even an
+empty one, is an error, so a seat that can write its working directory
+cannot swap the identity or the deny list. A file that cannot be read
+or does not parse, or a `[mail]` key ljos does not know, is an error
+rather than a silent default.
 
 ```toml
 [mail]
