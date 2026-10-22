@@ -42740,6 +42740,48 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
     }
 
+    /// The kept prompt's directory is the one the path names once it is
+    /// resolved, however the word spells it: `.` and `..`, a variable with
+    /// a default, a symlink to a parent, a relative name after `cd`, a
+    /// glob. Moving or removing a directory above it replaces it too.
+    #[test]
+    fn the_kept_prompt_is_guarded_however_its_path_is_spelled() {
+        let _g = env_guard();
+        let top = tempfile::tempdir().unwrap();
+        let run = top.path().join("run");
+        std::fs::create_dir_all(run.join("ljos")).unwrap();
+        std::fs::write(run.join("ljos/latest-prompt"), "x").unwrap();
+        let alias = top.path().join("alias");
+        std::os::unix::fs::symlink(&run, &alias).unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", run.to_str().unwrap())]);
+        let (run, alias, top) = (run.display(), alias.display(), top.path().display());
+        for line in [
+            format!("mv {run}/ljos/. /tmp/old"),
+            format!("mv {run}/x/../ljos /tmp/old"),
+            format!("rm -rf {alias}/ljos"),
+            "mv ${XDG_RUNTIME_DIR:-/run/user/1000}/ljos /tmp/old".to_string(),
+            format!("cd {run} && mv ljos ljos.old"),
+            "cd $XDG_RUNTIME_DIR/ljos && rm -f ./*".to_string(),
+            format!("touch {run}/lj?s"),
+            format!("rm -rf {run}"),
+            format!("mv {top} /tmp/elsewhere"),
+            format!("cd {top} && rm -r run"),
+            format!("mv /tmp/ljos {run}/"),
+        ] {
+            assert!(seat_guard(&line).is_some(), "allowed: {line}");
+        }
+        for line in [
+            format!("mv {run}/ljos-notes /tmp/x"),
+            format!("rm -rf {run}/other"),
+            format!("cp notes.txt {top}/"),
+            format!("mv notes.txt {top}/"),
+            format!("ls {alias}/ljos"),
+            format!("cat {run}/ljos/latest-prompt"),
+        ] {
+            assert!(seat_guard(&line).is_none(), "refused: {line}");
+        }
+    }
+
     /// A tool call that names a runner session for the ljos it runs is
     /// choosing the session the person's words are checked against.
     #[test]
