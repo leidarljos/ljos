@@ -360,7 +360,7 @@ fn replace(olds: &[&Memory], text: &str, verdict: &str) -> Result<String> {
     let posted = if first.is_agents() {
         crate::admit::write_agent(&client, atom)?
     } else {
-        crate::admit::stamp_origin(&mut atom, crate::admit::ORIGIN_USER);
+        crate::admit::stamp_person(&mut atom);
         crate::admit::post_kept(&client, &atom)?
     };
     let new_id = s(&posted["id"]);
