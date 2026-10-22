@@ -9,6 +9,7 @@
 //! the cards are resources, and the sequences that cross the habitats are
 //! prompts a person can pick.
 
+mod lifetime;
 mod server;
 
 use rmcp::{transport::stdio, ServiceExt};
