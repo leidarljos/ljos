@@ -1009,12 +1009,11 @@ fn cloud_up_refuses_to_overwrite_a_broken_wake_toml() {
     assert_eq!(fs::read_to_string(&wakes).unwrap(), broken);
 }
 
-#[test]
-fn cloud_up_installs_cloud_guard_refusals_idempotently() {
-    let _g = Guard::new();
-    let root = tempfile::tempdir().unwrap();
-    let home = root.path().join("home");
-    let rel = root.path().join("rel");
+/// A seat home in `root` with a release `ljos cloud up` can install, the
+/// guard on, and git off the person's config. Returns the home.
+fn seat_env(root: &Path) -> PathBuf {
+    let home = root.join("home");
+    let rel = root.join("rel");
     fs::create_dir_all(&rel).unwrap();
     fs::create_dir_all(&home).unwrap();
     for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
@@ -1025,6 +1024,7 @@ fn cloud_up_installs_cloud_guard_refusals_idempotently() {
         sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
     )
     .unwrap();
+    isolate_git(root);
     std::env::set_var("HOME", &home);
     std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
     std::env::set_var("LJOS_RELEASE_DIR", &rel);
@@ -1032,10 +1032,65 @@ fn cloud_up_installs_cloud_guard_refusals_idempotently() {
     std::env::remove_var("LJOS_TRACKER_REMOTE");
     std::env::remove_var("LJOS_TRACKER_GIT");
     std::env::remove_var("LJOS_TRACKER_DIR");
-    std::env::set_var("PATH", "/usr/bin:/bin");
     std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
     std::env::set_var("LJOS_GUARD", "on");
     clear_agent_ids();
+    home
+}
+
+/// A checkout at `root/name` on `develop` with one commit, an `origin`,
+/// and each of `branches` beside it.
+fn checkout(root: &Path, name: &str, branches: &[&str]) -> PathBuf {
+    let dir = root.join(name);
+    git(
+        root,
+        &["init", "-q", "-b", "develop", dir.to_str().unwrap()],
+    );
+    identity(&dir);
+    git(&dir, &["commit", "-q", "--allow-empty", "-m", "seed"]);
+    git(
+        &dir,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/ljos.git",
+        ],
+    );
+    for branch in branches {
+        git(&dir, &["branch", branch]);
+    }
+    dir
+}
+
+/// The cloud seat refusal the static guard gives `line` run in `cwd`. A
+/// push gate ask on the same line is not one.
+fn cloud_refusal(line: &str, cwd: &Path) -> Option<ljos_cli::Rule> {
+    ljos_cli::static_guard_in(line, Some(cwd))
+        .filter(|rule| rule.reason.starts_with("cloud seat rule"))
+}
+
+fn refused(line: &str, cwd: &Path) -> ljos_cli::Rule {
+    let hit = cloud_refusal(line, cwd)
+        .unwrap_or_else(|| panic!("`{line}` in {} was allowed", cwd.display()));
+    assert_eq!(hit.verdict, "deny", "{line}: {hit:?}");
+    hit
+}
+
+fn allowed(line: &str, cwd: &Path) {
+    let hit = cloud_refusal(line, cwd);
+    assert!(
+        hit.is_none(),
+        "`{line}` in {} was refused: {hit:?}",
+        cwd.display()
+    );
+}
+
+#[test]
+fn cloud_up_installs_cloud_guard_refusals_idempotently() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = seat_env(root.path());
 
     let missing = ljos_cli::cloud::guard_row();
     assert_eq!(missing.name, "cloud guard");
@@ -1082,6 +1137,246 @@ fn cloud_up_installs_cloud_guard_refusals_idempotently() {
         before,
         "a second cloud up rewrote cloud guard rules"
     );
+}
+
+#[test]
+fn a_machine_without_cloud_up_keeps_doctor_healthy() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = seat_env(root.path());
+    let laptop = checkout(root.path(), "laptop", &["cursor/probe"]);
+    git(&laptop, &["checkout", "-q", "cursor/probe"]);
+
+    let row = ljos_cli::cloud::guard_row();
+    assert_eq!(row.name, "cloud guard");
+    assert!(!row.ok, "{row:?}");
+    assert_eq!(ljos_cli::doctor_word(&row), "info", "{row:?}");
+    let rows = vec![row];
+    assert!(ljos_cli::failing(&rows).is_empty(), "{rows:?}");
+    assert!(ljos_cli::healthy(&rows), "doctor would exit 1: {rows:?}");
+    assert!(
+        ljos_cli::doctor_summary(&rows).starts_with("ljos is ready"),
+        "{}",
+        ljos_cli::doctor_summary(&rows)
+    );
+    let short = ljos_cli::format_doctor_short(&rows);
+    assert!(!short.contains("cloud guard"), "{short}");
+    assert!(!home.join(".config/ljos/cloud-guard-rules.json").exists());
+
+    for line in [
+        "git push origin +cursor/probe",
+        "git push",
+        "gh pr create --fill",
+        "gh pr merge 7",
+    ] {
+        allowed(line, &laptop);
+    }
+}
+
+#[test]
+fn cloud_guard_refuses_every_push_onto_a_cursor_ref() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let develop = checkout(root.path(), "develop", &["cursor/probe"]);
+    let on_cursor = checkout(root.path(), "on-cursor", &[]);
+    git(&on_cursor, &["checkout", "-q", "-b", "cursor/probe"]);
+
+    for line in [
+        "git push origin cursor/probe",
+        "git push origin HEAD:cursor/probe",
+        "git push origin +HEAD:cursor/probe",
+        "git push origin refs/heads/cursor/probe",
+        "git push origin +cursor/probe",
+        "git push origin +refs/heads/cursor/probe",
+        "git push --repo origin +cursor/probe",
+        "git push --repo=origin +refs/heads/cursor/probe",
+        "git push origin develop:cursor/probe",
+        "git push origin develop:refs/heads/cursor/probe",
+        "git push origin refs/tags/cursor/probe",
+        "git push origin tag cursor/probe",
+        "git push origin :cursor/probe",
+        "git push origin --delete cursor/probe",
+        "git push -o ci.skip origin cursor/probe",
+        "git push origin 'refs/heads/*:refs/heads/*'",
+        "git push origin \"$BRANCH\"",
+        "git -c alias.p=push p origin cursor/probe",
+        "git -c remote.origin.push=HEAD:cursor/probe push",
+        "sh -c 'git push origin +cursor/probe'",
+        "git status && git push origin +cursor/probe",
+        "git push origin '+cursor/probe'",
+        "\"git\" push origin \"+refs/heads/cursor/probe\"",
+        "/usr/bin/git push origin +HEAD:cursor/probe",
+        "FOO=1 git push origin +cursor/probe",
+        "env GIT_TRACE=0 git push --repo=origin +refs/heads/cursor/probe",
+        "git push --all",
+        "git push --branches",
+        "git push origin --all",
+        "git push --mirror",
+    ] {
+        refused(line, &develop);
+    }
+    for line in [
+        "git push",
+        "git push origin",
+        "git push origin HEAD",
+        "git push origin @",
+        "git push -u origin HEAD",
+        "git push -u origin \"$(git branch --show-current)\"",
+        "FOO=1 git push -u origin HEAD",
+    ] {
+        refused(line, &on_cursor);
+    }
+    let elsewhere = root.path();
+    for line in [
+        format!("git -C {} push origin +cursor/probe", develop.display()),
+        format!("git -C '{}' push --all", develop.display()),
+        format!("git -C {} push", on_cursor.display()),
+        "git -C on-cursor push -u origin HEAD".to_string(),
+        format!("cd {} && git push", on_cursor.display()),
+        format!("FOO=1 git -C \"{}\" push origin HEAD", on_cursor.display()),
+    ] {
+        refused(&line, elsewhere);
+    }
+
+    let named = refused("git push origin +cursor/probe", &develop);
+    assert_eq!(named.pattern, "cloud-cursor-push");
+    assert!(
+        named.reason.contains("this push updates cursor/probe"),
+        "{}",
+        named.reason
+    );
+    let implicit = refused("git push", &on_cursor);
+    assert!(
+        implicit
+            .reason
+            .contains("cursor/probe, the branch checked out"),
+        "{}",
+        implicit.reason
+    );
+    let all = refused("git push --all", &develop);
+    assert!(
+        all.reason
+            .contains("`--all` pushes refs/heads/cursor/probe"),
+        "{}",
+        all.reason
+    );
+}
+
+#[test]
+fn cloud_guard_reads_the_gh_pr_verb_and_never_its_arguments() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+
+    for line in [
+        "gh pr create --fill",
+        "gh pr new --fill",
+        "gh pr --repo owner/name create",
+        "gh pr --repo=owner/name create",
+        "gh pr -R owner/name create",
+        "gh pr create --repo owner/name",
+        "gh --repo owner/name pr create",
+        "FOO=1 gh pr create",
+        "'gh' pr \"create\" --fill",
+        "git push origin develop && gh pr create --fill",
+    ] {
+        let hit = refused(line, here);
+        assert_eq!(hit.pattern, "cloud-gh-pr-create", "{line}: {hit:?}");
+        assert!(hit.reason.contains("never open pull requests"), "{hit:?}");
+    }
+    for line in [
+        "gh pr merge 7",
+        "gh pr --repo owner/name merge",
+        "gh pr -R owner/name merge",
+        "gh -R owner/name pr merge 7",
+        "env GH_TOKEN=x gh pr --repo=owner/name merge 7",
+        "/usr/local/bin/gh pr merge --squash 7",
+        "sh -c 'gh pr merge 7'",
+    ] {
+        let hit = refused(line, here);
+        assert_eq!(hit.pattern, "cloud-gh-pr-merge", "{line}: {hit:?}");
+        assert!(hit.reason.contains("never merge pull requests"), "{hit:?}");
+    }
+    for line in [
+        "gh pr comment --body 'please pr create a follow-up'",
+        "gh pr comment -b 'do not pr merge yet'",
+        "gh pr review 5 --comment 'LGTM, pr merge when green'",
+        "gh help pr create",
+        "gh pr list",
+        "gh pr view 7 --repo owner/name",
+        "gh pr -R owner/name checks 7",
+        "gh issue create --title 'pr create'",
+        "FOO=1 gh pr comment 7 --body \"pr merge\"",
+        "echo gh pr create",
+    ] {
+        allowed(line, here);
+    }
+}
+
+#[test]
+fn cloud_guard_allows_pushes_that_leave_cursor_refs_alone() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let develop = checkout(root.path(), "develop", &["cursor/probe"]);
+    let clean = checkout(root.path(), "clean", &["feature/x"]);
+
+    for line in [
+        "git push origin develop",
+        "git push origin cursor/probe:develop",
+        "git push origin refs/heads/cursor/probe:refs/heads/develop",
+        "git push origin +cursor/probe:develop",
+        "git push git@github.com:cursor/ljos.git develop",
+        "git push --repo git@github.com:cursor/ljos.git develop",
+        "git push --repo=git@github.com:cursor/ljos.git develop",
+        "git push --repo cursor/local develop",
+        "git push -o cursor/skip origin develop",
+        "git push --push-option cursor/skip origin develop",
+        "git push --receive-pack cursor/helper origin develop",
+        "git push --exec cursor/helper origin develop",
+        "git push",
+        "git push origin",
+        "git push origin HEAD",
+        "git push -u origin HEAD",
+        "git push -u origin \"$(git branch --show-current)\"",
+        "git push origin develop 2>&1",
+        "git push origin develop > cursor/push.log",
+        "git push origin 'refs/heads/feature/*:refs/heads/feature/*'",
+        "echo 'git push origin cursor/probe'",
+        "git log --oneline cursor/probe",
+        "git push origin 'cursor/probe:develop'",
+        "\"git\" push origin \"cursor/probe:refs/heads/develop\"",
+        "FOO=1 git push origin cursor/probe:develop",
+        "env GIT_TRACE=0 git push --repo git@github.com:cursor/ljos.git develop",
+    ] {
+        allowed(line, &develop);
+    }
+    for line in [
+        "git push --all",
+        "git push --branches",
+        "git push --mirror",
+        "git push --tags",
+    ] {
+        allowed(line, &clean);
+    }
+    let elsewhere = root.path();
+    for line in [
+        format!(
+            "git -C {} push origin cursor/probe:develop",
+            develop.display()
+        ),
+        format!("git -C '{}' push", develop.display()),
+        "git -C clean push --all".to_string(),
+        format!("cd {} && git push -u origin HEAD", develop.display()),
+        format!("FOO=1 git -C \"{}\" push origin HEAD", develop.display()),
+    ] {
+        allowed(&line, elsewhere);
+    }
 }
 
 #[test]

@@ -343,8 +343,8 @@ impl World {
             .env("ORIGIN", &self.origin);
     }
 
-    /// `ljos` as `seat` with this machine's hostname. The detached wake
-    /// inherits the namespace, so the log is named after `host`.
+    /// `ljos` as `seat` with this machine's hostname override. The detached
+    /// wake inherits the override, so the log is named after `host`.
     fn ljos(&self, home: &Path, host: &str, seat: &str, args: &[&str]) -> Output {
         self.run(home, host, seat, self.port, &[], args)
     }
@@ -358,20 +358,12 @@ impl World {
         extra: &[(&str, &str)],
         args: &[&str],
     ) -> Output {
-        let mut cmd = Command::new("/usr/bin/unshare");
-        cmd.args([
-            "--uts",
-            "--map-root-user",
-            "--",
-            "/bin/sh",
-            "-c",
-            "/usr/bin/hostname \"$1\" && shift && exec \"$@\"",
-        ]);
-        cmd.arg("ljos").arg(host).arg(env!("CARGO_BIN_EXE_ljos"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args);
         self.env(&mut cmd, home);
         cmd.env("PACKSET_PORT", port.to_string());
         cmd.env("LJOS_SEAT", seat);
+        cmd.env("LJOS_TEST_HOSTNAME", host);
         for (key, value) in extra {
             cmd.env(key, value);
         }
@@ -380,7 +372,7 @@ impl World {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("unshare");
+            .expect("ljos");
         child.wait_with_output().expect("wait")
     }
 
@@ -498,7 +490,7 @@ fn script(home: &Path) -> PathBuf {
     let path = home.join("wake.sh");
     write_exe(
         &path,
-        "#!/bin/sh\nset -e\nhost=$(/usr/bin/hostname)\nprintf '%s\\n' \"$host\" > \"$HOME/wake-host\"\nprintf '%s\\n' \"${LJOS_WAKE_COMMIT:-}\" > \"$HOME/wake-commit\"\ngit --git-dir \"$ORIGIN\" cat-file -e \"HEAD:.ljos/atoms/${host}.jsonl.age\"\nprintf '%s\\n' \"$host\" > \"$HOME/woke\"\n",
+        "#!/bin/sh\nset -e\nhost=\"${LJOS_TEST_HOSTNAME:-$HOSTNAME}\"\nif [ -z \"$host\" ]; then\n  host=$(/usr/bin/hostname)\nfi\nprintf '%s\\n' \"$host\" > \"$HOME/wake-host\"\nprintf '%s\\n' \"${LJOS_WAKE_COMMIT:-}\" > \"$HOME/wake-commit\"\ngit --git-dir \"$ORIGIN\" cat-file -e \"HEAD:.ljos/atoms/${host}.jsonl.age\"\nprintf '%s\\n' \"$host\" > \"$HOME/woke\"\n",
     );
     path
 }
@@ -534,7 +526,7 @@ fn touch_script(home: &Path) -> PathBuf {
     let path = home.join("wake.sh");
     write_exe(
         &path,
-        "#!/bin/sh\n/usr/bin/hostname > \"$HOME/wake-host\"\nprintf '%s\\n' \"${LJOS_WAKE_COMMIT:-}\" > \"$HOME/wake-commit\"\n: > \"$HOME/woke\"\n",
+        "#!/bin/sh\nhost=\"${LJOS_TEST_HOSTNAME:-$HOSTNAME}\"\nif [ -z \"$host\" ]; then\n  host=$(/usr/bin/hostname)\nfi\nprintf '%s\\n' \"$host\" > \"$HOME/wake-host\"\nprintf '%s\\n' \"${LJOS_WAKE_COMMIT:-}\" > \"$HOME/wake-commit\"\n: > \"$HOME/woke\"\n",
     );
     path
 }

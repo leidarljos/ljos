@@ -116,6 +116,12 @@ pub fn sender_entity(host: &str) -> String {
 /// This machine's short host name.
 #[must_use]
 pub fn host() -> String {
+    if let Some(host) = std::env::var_os("LJOS_TEST_HOSTNAME").and_then(|raw| {
+        let host = raw.to_string_lossy().trim().to_string();
+        (!host.is_empty()).then_some(host)
+    }) {
+        return host;
+    }
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .map(|h| h.trim().to_string())
         .ok()
