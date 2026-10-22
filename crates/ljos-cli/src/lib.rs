@@ -10298,7 +10298,7 @@ pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<(Vec<Hit>, bool)>
 /// that atom's count, which is none: which of the tied lessons a ballot
 /// keeps at its cut is arbitrary, and one it dropped would have come in
 /// as the atom. A body that does not parse, a NaN from a writer that is
-/// not packset, has no hits and no echo, so the stored atoms answer.
+/// not packset, is an error, so a pool the hook already holds stands.
 fn search_relevant(
     client: &PacksetClient,
     cue: &str,
@@ -10339,7 +10339,7 @@ fn search_relevant(
     let mut body: Value = match answer {
         Ok(answer) => answer
             .into_json()
-            .unwrap_or_else(|_| serde_json::json!({ "hits": [] })),
+            .context("search: the /v1/search answer is not JSON")?,
         Err(_) => serde_json::json!({ "hits": [] }),
     };
     let chosen = body["hits"].as_array().map_or(0, Vec::len);
@@ -38306,11 +38306,12 @@ mod tests {
         }
     }
 
-    /// A writer whose every search body carries a NaN, which is not JSON,
-    /// is read as one that found nothing: the stored atoms that best match
-    /// answer, and the old lesson still reaches the prompt.
+    /// A writer whose plain search answers and whose rerank=1 body
+    /// carries a NaN, which is not JSON, leaves the prompt the pool the
+    /// plain search found. The second stage is an error, not an answer
+    /// with no hits that the stored atoms, here none, would fill.
     #[test]
-    fn a_search_body_that_does_not_parse_leaves_the_stored_atoms() {
+    fn a_reranked_body_that_does_not_parse_leaves_the_pool() {
         let _env = env_guard();
         let runtime = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
@@ -38318,35 +38319,40 @@ mod tests {
             ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
             ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
         ]);
-        let atoms = serde_json::json!([
+        let hits = serde_json::json!([
             {
-                "id": "fresh", "kind": "lesson",
+                "id": "fresh", "kind": "lesson", "score": 1.0,
                 "text": "Operator Figma recorded that the registry rejected the token",
                 "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"]
             },
             {
-                "id": "old", "kind": "lesson",
+                "id": "old", "kind": "lesson", "score": 0.5,
                 "text": "With pnpm the registry rejected the token because the CI secret expired",
                 "ts": "2026-01-14T09:00:00.000Z", "entities": ["horizon:standing"]
             }
         ]);
         let (url, _) = serve_http(move |req| {
             let first = req.lines().next().unwrap_or("");
-            if first.contains("/v1/search") {
+            if first.contains("/v1/search") && first.contains("rerank=1") {
                 let body = r#"{"hits":[{"id":"fresh","kind":"lesson","score":NaN,
                     "text":"Operator Figma recorded that the registry rejected the token"}]}"#;
                 return (200, body.into());
             }
+            if first.contains("/v1/search") {
+                return (200, serde_json::json!({"hits": hits}).to_string());
+            }
             if first.contains("/v1/atoms") {
-                return (200, serde_json::json!({"atoms": atoms}).to_string());
+                return (200, r#"{"atoms":[]}"#.into());
             }
             (404, r#"{"error":"missing"}"#.into())
         });
         let _url = PackUrl::set(&url);
+        let cue = "npm: the registry rejected my token";
+        assert!(packset_search_reranked(cue, 20).is_err());
         let prompt = HookCall {
             event: "UserPromptSubmit".into(),
-            cue: "npm: the registry rejected my token".into(),
-            session: Some("nan-body".into()),
+            cue: cue.into(),
+            session: Some("nan-rerank".into()),
             shape: HookShape::default(),
         };
         let (note, _) = hook_note(&prompt, 5);
