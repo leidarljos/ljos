@@ -655,7 +655,8 @@ pub const HARNESSES_EXAMPLE: &str = r#"# ~/.config/ljos/harnesses.toml: runners 
 # {server} is ljos-mcp when that name on PATH is this install, and the
 # absolute path when it is not. {name} is the runner's name. An absolute
 # path is kept while it is this install, and rewritten when it names a
-# missing file or another binary.
+# missing file or another binary. A bare ljos-mcp that PATH does not
+# resolve to this install becomes the absolute path.
 # Paths may start with ~. The seat names itself after the client that
 # connects; nothing is passed in env.
 
@@ -3596,20 +3597,26 @@ fn is_absolute_ljos_mcp(value: &str) -> bool {
     path.is_absolute() && path.file_name().and_then(|n| n.to_str()) == Some(MCP_SERVER_COMMAND)
 }
 
-/// An absolute `ljos-mcp` that is missing here or is another binary than
-/// `server`. A path to this install, or a link to it, is left alone.
-fn needs_portable_rewrite(value: &str, server: &Path) -> bool {
+/// An `ljos-mcp` command that would not start `server`: an absolute path
+/// that is missing here or is another binary, or the bare name when PATH
+/// does not resolve it to this install, which is when `replacement` is
+/// not the bare name. A path to this install, or a link to it, is left
+/// alone.
+fn needs_portable_rewrite(value: &str, server: &Path, replacement: &str) -> bool {
+    if value == MCP_SERVER_COMMAND {
+        return replacement != MCP_SERVER_COMMAND;
+    }
     is_absolute_ljos_mcp(value) && !same_binary(Path::new(value), server)
 }
 
 fn command_made_portable(command: &mut Value, server: &Path, replacement: &str) -> bool {
     match command {
-        Value::String(text) if needs_portable_rewrite(text, server) => {
+        Value::String(text) if needs_portable_rewrite(text, server, replacement) => {
             *text = replacement.to_string();
             true
         }
         Value::Array(args) => match args.first_mut() {
-            Some(Value::String(text)) if needs_portable_rewrite(text, server) => {
+            Some(Value::String(text)) if needs_portable_rewrite(text, server, replacement) => {
                 *text = replacement.to_string();
                 true
             }
@@ -3619,9 +3626,9 @@ fn command_made_portable(command: &mut Value, server: &Path, replacement: &str) 
     }
 }
 
-/// Rewrite an existing JSON entry whose command is an absolute `ljos-mcp`
-/// that would not start `server`. The replacement is the bare name, or
-/// this install's path when the bare name would not run it.
+/// Rewrite an existing JSON entry whose `ljos-mcp` command would not start
+/// `server`. The replacement is the bare name, or this install's path when
+/// the bare name would not run it.
 fn heal_json_command(
     path: &Path,
     pointer: &str,
@@ -3747,7 +3754,7 @@ fn rewrite_marker_command(
             let value_start = at + value_start;
             let value_end = at + value_end;
             let value = &text[value_start..value_end];
-            if needs_portable_rewrite(value, server) {
+            if needs_portable_rewrite(value, server, replacement) {
                 let mut out = String::with_capacity(
                     text.len()
                         .saturating_sub(value.len())
