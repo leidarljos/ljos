@@ -134,6 +134,7 @@ impl Seat {
         let mut cmd = Command::new(bin);
         let path = format!("{}:/usr/bin:/bin", self.home.path().join("bin").display());
         cmd.args(args)
+            .current_dir(self.home.path())
             .env_clear()
             .env("PATH", path)
             .env("HOME", self.home.path())
