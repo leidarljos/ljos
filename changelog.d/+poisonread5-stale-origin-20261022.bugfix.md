@@ -1,0 +1,1 @@
+A long-lived reader (the MCP server, a hook daemon) no longer keeps stating a user rule after the pack deletes or retracts the lesson it was promoted from. The pack is asked for the lesson on every read; what the process recorded earlier stands in only while the pack does not answer, and a lesson the pack answered it no longer holds stays dropped when the pack then goes down.
