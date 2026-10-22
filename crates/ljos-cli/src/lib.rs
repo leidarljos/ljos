@@ -6382,6 +6382,10 @@ fn steps_call(v: &Value, event: Option<&str>) -> HookCall {
                 // writes is named, so the seat's guard sees it.
                 .unwrap_or_else(|| {
                     let name = v["toolCall"]["name"].as_str().unwrap_or("");
+                    if let Some(t) = kept_prompt::written_target(name, args, None) {
+                        let name = if name.is_empty() { "Edit" } else { name };
+                        return format!("{name} {}", t.display());
+                    }
                     // agy 1.4.3 names the file `Path` for `write_file`,
                     // `edit_file` and `view_file`.
                     let path = [
@@ -6602,6 +6606,15 @@ fn cue_for(v: &Value, input: &Value, event: &str) -> String {
     if tool {
         if let Some(command) = command {
             return command;
+        }
+        let name = v["tool_name"]
+            .as_str()
+            .or_else(|| v["toolName"].as_str())
+            .filter(|n| !n.is_empty())
+            .unwrap_or("Edit");
+        let cwd = v["cwd"].as_str().map(Path::new);
+        if let Some(t) = kept_prompt::written_target(name, input, cwd) {
+            return format!("{name} {}", t.display());
         }
         if let Some(file) = file {
             return file;
@@ -19349,7 +19362,7 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
             cwd = kept_prompt::after_cd(&words, cwd.as_deref());
             continue;
         }
-        let reads = READERS.contains(&first) || first == "ljos";
+        let reads = READERS.contains(&first) || first == "ljos" || kept_prompt::reads_only(first);
         if let Some(t) = kept_prompt::reached(&words, cwd.as_deref(), reads)
             .or_else(|| kept_prompt::code_reaches(&words, line))
         {

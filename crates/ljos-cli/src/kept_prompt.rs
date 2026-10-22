@@ -412,6 +412,73 @@ pub(crate) fn code_reaches(words: &[String], line: &str) -> Option<String> {
     (reads_stdin && names_it(line)).then(|| cmd.to_string())
 }
 
+/// File tools that only read what they are given, by the name after an
+/// MCP server's `mcp__server__` prefix, lower-cased.
+const READ_TOOLS: &[&str] = &[
+    "read",
+    "view",
+    "grep",
+    "glob",
+    "ls",
+    "notebookread",
+    "codebase_search",
+    "file_search",
+    "grep_search",
+    "directory_tree",
+    "get_file_info",
+    "list_allowed_directories",
+];
+
+/// Prefixes of a read-only file tool's name: `read_file`, `view_file`,
+/// `list_directory`, `search_files`.
+const READ_PREFIXES: &[&str] = &["read_", "view_", "list_", "search_"];
+
+/// Whether the file tool `name` only reads.
+pub(crate) fn reads_only(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let base = name.rsplit("__").next().unwrap_or(&name);
+    READ_TOOLS.contains(&base) || READ_PREFIXES.iter().any(|p| base.starts_with(p))
+}
+
+/// The path, resolved, of the first string in a file tool's `args` that
+/// reaches into a runtime ljos directory, when tool `name` does not only
+/// read. Every key counts, however deep, and a string that is itself JSON
+/// arguments is looked into.
+pub(crate) fn written_target(
+    name: &str,
+    args: &serde_json::Value,
+    cwd: Option<&Path>,
+) -> Option<PathBuf> {
+    fn walk(v: &serde_json::Value, cwd: Option<&Path>, depth: usize) -> Option<PathBuf> {
+        use serde_json::Value;
+        if depth > 8 {
+            return None;
+        }
+        match v {
+            Value::String(s) => {
+                let s = s.trim();
+                if s.starts_with('{') || s.starts_with('[') {
+                    if let Ok(inner) = serde_json::from_str::<Value>(s) {
+                        return walk(&inner, cwd, depth + 1);
+                    }
+                }
+                let s = s.strip_prefix("file://").unwrap_or(s);
+                if s.is_empty() || s.contains(char::is_whitespace) {
+                    return None;
+                }
+                path_of(s, cwd).filter(|p| inside(p))
+            }
+            Value::Array(items) => items.iter().find_map(|i| walk(i, cwd, depth + 1)),
+            Value::Object(map) => map.values().find_map(|i| walk(i, cwd, depth + 1)),
+            _ => None,
+        }
+    }
+    if reads_only(name) {
+        return None;
+    }
+    walk(args, cwd, 0)
+}
+
 /// Where the shell stands after `cd` or `pushd` with `words`, from `cwd`.
 /// `None` when that is not known.
 pub(crate) fn after_cd(words: &[String], cwd: Option<&Path>) -> Option<PathBuf> {
