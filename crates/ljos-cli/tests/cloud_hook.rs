@@ -228,6 +228,42 @@ fn bare_repo(root: &Path, name: &str) -> (PathBuf, PathBuf) {
     (origin, dir)
 }
 
+/// `isolate_git` leaves only `/usr/bin:/bin` on PATH, and a CI job does
+/// not install node. The hook still has to refuse a push an npm recipe
+/// starts, so the directory of a real `npm` is put back when one is
+/// installed. Otherwise a script runs the `package.json` recipe the way
+/// `npm run` does.
+fn npm_prefix(root: &Path) -> PathBuf {
+    let found = Command::new("sh")
+        .arg("-c")
+        .arg("command -v npm")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|text| text.trim().to_string())
+        .filter(|path| !path.is_empty());
+    if let Some(path) = found {
+        return Path::new(&path)
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
+    }
+    let bin = root.join("npm-bin");
+    fs::create_dir_all(&bin).unwrap();
+    executable(
+        &bin.join("npm"),
+        r#"#!/bin/sh
+set -eu
+[ "${1:-}" = run ] || { echo "npm: only run" >&2; exit 1; }
+name=${2:?}
+script=$(python3 -c 'import json,sys; print(json.load(open("package.json"))["scripts"][sys.argv[1]])' "$name")
+exec sh -c "$script"
+"#,
+    );
+    bin
+}
+
 fn has_ref(origin: &Path, name: &str) -> bool {
     let out = Command::new("git")
         .arg("-C")
@@ -261,6 +297,7 @@ fn allowed(line: &str, cwd: &Path) {
 fn hook_refuses_every_push_the_line_filter_cannot_see() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
+    let npm = npm_prefix(root.path());
     let (_home, xdg) = seat_env(root.path());
     clear_ids();
     std::env::set_var("LJOS_SEAT", "probe");
@@ -312,9 +349,8 @@ fn hook_refuses_every_push_the_line_filter_cannot_see() {
 
     git(&repo, &["branch", "main"]);
     git(&repo, &["branch", "other"]);
-    let npm = "/home/ubuntu/.nvm/versions/node/v22.23.4/bin";
-    let npm_push = format!("PATH=\"$PATH:{npm}\" npm run push");
-    let npm_build = format!("PATH=\"$PATH:{npm}\" npm run build");
+    let npm_push = format!("PATH=\"$PATH:{}\" npm run push", npm.display());
+    let npm_build = format!("PATH=\"$PATH:{}\" npm run build", npm.display());
     executable(
         &repo.join("push.sh"),
         "#!/bin/sh\nexec git push origin main\n",
