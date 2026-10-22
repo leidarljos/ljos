@@ -956,9 +956,10 @@ pub(crate) fn fake_runner_sessions(ids: &[&str]) -> impl Drop {
 /// The sessions the runner above this process gave the process it
 /// started, read from that process's environment and never from this
 /// one's: `LJOS_HARNESS_SESSION=forged ljos ...` sets ours, not that.
-/// Every id there is the runner's, so a bind may name any of them. An
-/// MCP server the runner started with none of them is its connection.
-/// Empty when no runner is above this process.
+/// Every id there is the runner's, so a bind may name any of them, and
+/// so is the session an MCP call's `_meta` names: the runner writes that,
+/// not the agent's arguments. An MCP server the runner started with none
+/// of them is its connection. Empty when no runner is above this process.
 #[must_use]
 pub fn runner_sessions() -> Vec<String> {
     #[cfg(test)]
@@ -979,6 +980,7 @@ pub fn runner_sessions() -> Vec<String> {
         .map(|(_, v)| field(v.trim()))
         .filter(|v| !v.is_empty() && v != "-")
         .collect();
+    ids.extend(call_session().filter(|s| !ids.contains(s)));
     if ids.is_empty() {
         ids.extend(connection_session());
     }
