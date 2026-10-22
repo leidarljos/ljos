@@ -66,27 +66,44 @@ force-push.
     )
 }
 
+/// The seats a run from `persona`'s file can boot as, read the way
+/// `whoami` reads `LJOS_SEAT`. A run id that stays on makes the slug's own
+/// seat. With no run id, or a short one that reads as an old pid tag and
+/// strips back off, the seat is what [`crate::seat_for_env`] makes of the
+/// slug: `inky-n9o`, `inky@n9o`, `inky-ab1c` and `inky-n9o-ab1c` are all
+/// `inky`, and `ljos-bot` is `ljosbot`.
+fn boot_seats(persona: &str) -> Vec<String> {
+    let slug = crate::seat_slug(persona);
+    let bare = crate::seat_for_env(&slug);
+    if bare == slug {
+        vec![slug]
+    } else {
+        vec![slug, bare]
+    }
+}
+
 /// Write one prompt file per seated persona under `out`.
 ///
 /// Files are named `<persona>.md`. Families rotate in persona name order.
 ///
 /// # Errors
 ///
-/// As [`crate::panel_roster`], two personas make the same seat, or a
-/// prompt file cannot be written. A shared seat is refused before any
-/// file is written.
+/// As [`crate::panel_roster`], two personas can boot as the same seat
+/// ([`boot_seats`]), or a prompt file cannot be written. A shared seat is
+/// refused before any file is written.
 pub fn panel_cloud(issue: &str, out: &Path) -> Result<String> {
     let (all, mut personas) = crate::panel_roster(issue)?;
     personas.sort_by(|a, b| a.name.cmp(&b.name));
     let mut seats = std::collections::BTreeMap::new();
     for persona in &personas {
-        let seat = crate::seat_slug(&persona.name);
-        if let Some(first) = seats.insert(seat.clone(), persona.name.as_str()) {
-            bail!(
-                "panel --cloud: personas {first} and {} both make seat {seat}; rename one so each \
-                 prompt file names its own seat",
-                persona.name
-            );
+        for seat in boot_seats(&persona.name) {
+            if let Some(first) = seats.insert(seat.clone(), persona.name.as_str()) {
+                bail!(
+                    "panel --cloud: personas {first} and {} both boot as seat {seat}; rename one so \
+                     each prompt file names its own seat",
+                    persona.name
+                );
+            }
         }
     }
     std::fs::create_dir_all(out).with_context(|| format!("panel --cloud: {}", out.display()))?;
@@ -122,6 +139,25 @@ mod tests {
         assert_eq!(family(2), "codex");
         assert_eq!(family(3), "grok");
         assert_ne!(family(0), family(1));
+    }
+
+    #[test]
+    fn a_short_run_id_strips_back_to_the_seat_without_one() {
+        for run in ["inky-ab1c", "inky-n9o-ab1c"] {
+            assert_eq!(crate::seat_for_env(run), "inky", "{run}");
+        }
+        assert_eq!(
+            crate::seat_for_env("inky-n9o-cafebabe0001abcd"),
+            "inky-n9o-cafebabe0001abcd"
+        );
+        for persona in ["inky", "inky-n9o", "inky@n9o"] {
+            assert!(
+                boot_seats(persona).contains(&"inky".to_string()),
+                "{persona}"
+            );
+        }
+        assert_eq!(boot_seats("ljos-bot"), ["ljos-bot", "ljosbot"]);
+        assert_eq!(boot_seats("eessi-bot"), ["eessi-bot"]);
     }
 
     #[test]
