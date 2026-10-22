@@ -38904,6 +38904,53 @@ mod tests {
         );
     }
 
+    /// Several hooks can pass the guard at once. Each row has to stay one
+    /// JSON line: this file is the only record of a fail-open bypass, and
+    /// a line that does not parse is a bypass the doctor cannot count.
+    #[test]
+    fn concurrent_bypass_rows_each_parse() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", dir.path().to_str().unwrap())]);
+        let rule = Rule {
+            pattern: "ask pack: cloud".into(),
+            verdict: "ask".into(),
+            reason: "infra-destroy: this tears down infrastructure".into(),
+        };
+        const THREADS: usize = 32;
+        const EACH: usize = 8;
+        let mut handles = Vec::with_capacity(THREADS);
+        for thread in 0..THREADS {
+            let rule = rule.clone();
+            handles.push(std::thread::spawn(move || {
+                for n in 0..EACH {
+                    let command = format!("terraform destroy {thread}-{n}");
+                    log_bypass("switch", "LJOS_GUARD_FAIL_OPEN=1", &command, &rule);
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("bypass writer");
+        }
+        let text = std::fs::read_to_string(bypass_log_path().unwrap()).unwrap();
+        let rows: Vec<Value> = text
+            .lines()
+            .map(|line| {
+                serde_json::from_str(line).unwrap_or_else(|err| {
+                    panic!("bypass row does not parse ({err}): {line}");
+                })
+            })
+            .collect();
+        assert_eq!(rows.len(), THREADS * EACH, "{text}");
+        let mut commands: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| row["command"].as_str())
+            .collect();
+        commands.sort_unstable();
+        commands.dedup();
+        assert_eq!(commands.len(), THREADS * EACH, "{text}");
+    }
+
     #[test]
     fn a_line_reads_what_one_command_hands_the_next() {
         let carried = |line: &str| nested_lines(line, 0);
