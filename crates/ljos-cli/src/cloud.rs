@@ -10,8 +10,9 @@
 //! `LJOS_CLOUD_AGE_SECRET` names an environment variable, it writes that
 //! variable's age identity for scope `cloud` to a mode 0600 file. On a
 //! cloud VM it also installs the release's `packset-embed` and the ONNX
-//! Runtime it links. A later boot with the binaries already installed only
-//! refreshes the clone.
+//! Runtime it links. A later boot with the binaries already installed
+//! refreshes the clone, rewrites env-owned wakes, and refreshes the scope
+//! cloud identity from the named secret.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -1617,33 +1618,50 @@ struct WakeVar {
 /// command and is left in place. Entries this command wrote are written
 /// again.
 fn ensure_wakes() -> Result<Vec<String>> {
+    let by_seat = wake_vars_by_seat();
     let existing = crate::wake::load();
     let mut lines = Vec::new();
-    for (seat, group) in wake_vars_by_seat() {
+    for seat in existing.keys() {
+        let env_owned = existing
+            .get(seat)
+            .is_some_and(|wake| wake.source.as_deref() == Some(crate::wake::ENV_SOURCE));
+        if env_owned && !by_seat.contains_key(seat) && crate::wake::clear_env_webhook(seat)? {
+            lines.push(format!(
+                "wake {seat}: removed the stale wake cloud up wrote; no LJOS_WAKE_<SEAT>_URL names it now"
+            ));
+        }
+    }
+    for (seat, group) in by_seat {
         if group.len() > 1 {
-            lines.push(collision_line(&seat, &group));
+            lines.push(collision_line(
+                &seat,
+                &group,
+                crate::wake::clear_env_webhook(&seat)?,
+            ));
             continue;
         }
         let one = &group[0];
         if crate::wake::check_webhook(&one.url).is_err() {
+            let said = if crate::wake::clear_env_webhook(&seat)? {
+                "removed the stale wake cloud up wrote"
+            } else {
+                "no wake was written"
+            };
             lines.push(format!(
-                "wake {seat}: {} is not https, nor http on this machine, so no wake was written",
+                "wake {seat}: {} is not https, nor http on this machine, so {said}",
                 one.name
             ));
             continue;
         }
-        let hand_set = existing
-            .get(&seat)
-            .is_some_and(|wake| wake.source.as_deref() != Some(crate::wake::ENV_SOURCE));
-        if hand_set {
+        let key_env = format!("LJOS_WAKE_{}_KEY", one.mid);
+        let wrote = crate::wake::set_env_webhook(&seat, &one.url, &key_env)?;
+        if !wrote {
             lines.push(format!(
                 "wake {seat}: left the wake cloud up did not write; {} did not replace it",
                 one.name
             ));
             continue;
         }
-        let key_env = format!("LJOS_WAKE_{}_KEY", one.mid);
-        crate::wake::set_env_webhook(&seat, &one.url, &key_env)?;
         let unset = if nonempty_var(&key_env).is_some() {
             ""
         } else {
@@ -1683,12 +1701,17 @@ fn wake_vars_by_seat() -> BTreeMap<String, Vec<WakeVar>> {
     by_seat
 }
 
-fn collision_line(seat: &str, group: &[WakeVar]) -> String {
+fn collision_line(seat: &str, group: &[WakeVar], retired: bool) -> String {
     let mut names: Vec<&str> = group.iter().map(|var| var.name.as_str()).collect();
     names.sort_unstable();
+    let said = if retired {
+        "removed the stale wake cloud up wrote"
+    } else {
+        "no wake was written"
+    };
     format!(
-        "wake {seat}: {} name the same seat, so no wake was written",
-        list_names(&names)
+        "wake {seat}: {} name the same seat, so {said}",
+        list_names(&names),
     )
 }
 
