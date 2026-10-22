@@ -270,7 +270,7 @@ pub fn write(issue: &str, seat: &str, model: &str, run: &str, run_key: &str) -> 
         .context("slot: no place for a seat key: HOME and XDG_DATA_HOME are unset")?;
     let key = ballot_sig::key_from_file(&path)?;
     let mine = hex::encode(key.verifying_key().to_bytes());
-    if mine != *pinned {
+    if ballot_sig::key_fingerprint(&mine) != ballot_sig::key_fingerprint(pinned) {
         bail!(
             "slot: {launcher} is pinned to key {}…, and this key is {}…",
             &pinned[..12.min(pinned.len())],
@@ -341,9 +341,14 @@ pub fn problems(
                 None => Some(format!(
                     "{voter}'s slot is from {launcher}, which has no pinned key on this tracker"
                 )),
-                Some(key) if *key != slot.key => Some(format!(
-                    "{voter}'s slot is signed by a key other than {launcher}'s pinned one"
-                )),
+                Some(key)
+                    if ballot_sig::key_fingerprint(key)
+                        != ballot_sig::key_fingerprint(&slot.key) =>
+                {
+                    Some(format!(
+                        "{voter}'s slot is signed by a key other than {launcher}'s pinned one"
+                    ))
+                }
                 Some(_) if !stands(launcher) => Some(format!(
                     "{voter}'s slot is from {launcher}, which is not a standing seat"
                 )),
