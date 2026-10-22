@@ -34677,6 +34677,27 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "a dangling separator matched")]
+    fn a_dangling_separator_is_not_the_seat() {
+        let known = std::collections::BTreeSet::new();
+        for (a, b) in [
+            ("ljosbot@", "ljosbot"),
+            ("ljosbot-", "ljosbot"),
+            ("ljosbot.", "ljosbot"),
+            ("@abc", "runner"),
+            ("-", "runner"),
+        ] {
+            for (x, y) in [(a, b), (b, a)] {
+                assert!(!same_holder(x, y), "a dangling separator matched: {x} {y}");
+                assert!(
+                    !same_seat(x, y, &known),
+                    "a dangling separator matched: {x} {y}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_claim_under_a_legacy_holder_is_held_as_the_seat() {
         assert_eq!(claim_holder("inky-n9o").unwrap(), "inky");
         assert_eq!(claim_holder("disk-saver-t4t").unwrap(), "disk-saver");
