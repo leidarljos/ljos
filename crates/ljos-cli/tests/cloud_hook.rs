@@ -747,6 +747,55 @@ fn github_clients_allow_only_a_resolved_get() {
     }
 }
 
+/// HTTPie with no method sends POST when it has a body: `--raw`, a data
+/// item, or a stdin the line pipes or redirects in. Only `-I` or
+/// `--ignore-stdin`, or a unique prefix of it, leaves that stdin unread.
+#[test]
+fn httpie_guesses_post_from_a_body() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let url = "https://api.github.com/user";
+
+    for line in [
+        format!("http --raw '{{\"a\":1}}' {url}"),
+        format!("http --raw='x' {url}"),
+        format!("http -I --ra x {url}"),
+        format!("echo '{{\"a\":1}}' | http {url}"),
+        format!("printf x | https {url}"),
+        format!("http {url} < /tmp/body.json"),
+        format!("http {url} <<< x"),
+        format!("http {url} <<EOF\nx\nEOF"),
+        format!("http -v {url} a:=1"),
+        format!("http -I {url} 'a\\:b=c'"),
+        format!("http -I -f {url} f@/tmp/x"),
+        format!("http -Iv {url} a=@/tmp/x"),
+        format!("http -a u:p -I {url} a=b"),
+    ] {
+        let hit = refused(&line, here);
+        assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {}", hit.reason);
+    }
+
+    for line in [
+        format!("http {url}"),
+        format!("http -I {url}"),
+        format!("http {url} | jq ."),
+        format!("echo x | http -I {url}"),
+        format!("echo x | http --ignore-stdin {url}"),
+        format!("echo x | http --ignore-s {url}"),
+        format!("echo x | http -vI {url}"),
+        format!("http -I {url} X-A:b=c"),
+        format!("http -I {url} a==b"),
+        "http -a u:p -I api.github.com/user?a=b".to_string(),
+        "echo x | http https://example.com/x".to_string(),
+    ] {
+        allowed(&line, here);
+    }
+}
+
 #[test]
 fn the_hook_off_switch_does_not_let_a_push_land() {
     let _g = Guard::new();

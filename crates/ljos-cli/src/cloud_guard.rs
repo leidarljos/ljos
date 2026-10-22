@@ -299,7 +299,9 @@ fn judge_depth(line: &str, cwd: Option<&Path>, incoming: &WalkIn) -> Verdict {
     let mut verdict = Verdict::default();
     for l in crate::nested_lines(line, 0) {
         let mut names: Vec<(String, String)> = Vec::new();
+        let piped = piped_segments(&l);
         for seg in crate::raw_segments(&l) {
+            let fed = piped.iter().any(|p| p == seg.trim()) || stdin_redirected(&seg);
             // An assignment on its own is not a git command, and it is
             // skipped below, but `export GIT_CONFIG_KEY_0=core.hooksPath`
             // still disarms the hook for every later push.
@@ -430,7 +432,7 @@ fn judge_depth(line: &str, cwd: Option<&Path>, incoming: &WalkIn) -> Verdict {
                     // An `export` or assignment earlier on the line reaches
                     // the client too; a prefix on this command wins.
                     let env: Vec<_> = names.iter().chain(&run.env).cloned().collect();
-                    if let Some(why) = http_ref_write(&words, &env, here.as_deref()) {
+                    if let Some(why) = http_ref_write(&words, &env, here.as_deref(), fed) {
                         if verdict.push.is_none() {
                             verdict.push = Some(why);
                         }
@@ -3857,16 +3859,18 @@ fn address_host(host: &str) -> bool {
     !last.is_empty() && (hex || last.chars().all(|c| c.is_ascii_digit()))
 }
 
+/// `fed` is a stdin the line pipes or redirects into the client.
 fn http_ref_write(
     words: &[String],
     env: &[(String, String)],
     cwd: Option<&Path>,
+    fed: bool,
 ) -> Option<String> {
     let cmd = words.first()?.rsplit('/').next()?;
     if !matches!(cmd, "curl" | "wget" | "http" | "https") {
         return None;
     }
-    let (shape, config_github) = http_shape(cmd, words, env, cwd);
+    let (shape, config_github) = http_shape(cmd, words, env, cwd, fed);
     let config_github = config_github || proxy_env(env);
     // A host that is not GitHub is left alone, including a clustered
     // DELETE. Cargo and npm talk to those hosts. A config file can name
@@ -3909,13 +3913,34 @@ fn http_shape(
     words: &[String],
     env: &[(String, String)],
     cwd: Option<&Path>,
+    fed: bool,
 ) -> (HttpShape, bool) {
     match cmd {
         "curl" => curl_shape(words, env, cwd),
         "wget" => wget_shape(words, env, cwd),
-        "http" | "https" => (httpie_shape(words), false),
+        "http" | "https" => (httpie_shape(words, fed), false),
         _ => (HttpShape::Opaque, false),
     }
+}
+
+/// The segments of `line` that read a pipe, trimmed: each stage of a
+/// pipeline after the first. Another segment with the same text counts
+/// as piped too, which only refuses.
+fn piped_segments(line: &str) -> Vec<String> {
+    crate::pipelines(line)
+        .iter()
+        .flat_map(|pipe| crate::raw_segments(pipe).into_iter().skip(1))
+        .map(|seg| seg.trim().to_string())
+        .collect()
+}
+
+/// A `<` redirect, here-document, or here-string gives the command a
+/// stdin that is not a terminal.
+fn stdin_redirected(seg: &str) -> bool {
+    crate::shell_words(seg).iter().any(|word| {
+        word.trim_start_matches(|c: char| c.is_ascii_digit())
+            .starts_with('<')
+    })
 }
 
 /// How curl reads an option, on the command line and in a curlrc alike.
@@ -4949,15 +4974,55 @@ fn zero(value: &str) -> bool {
     value.trim().parse::<u64>().is_ok_and(|n| n == 0)
 }
 
-fn httpie_shape(words: &[String]) -> HttpShape {
+/// HTTPie's long options that take the next word when no `=` joins it.
+const HTTPIE_LONG_VALUES: &str = "auth auth-type boundary cert cert-key cert-key-pass ciphers \
+    default-scheme format-options history-print max-headers max-redirects output pretty print \
+    proxy response-charset response-mime session session-read-only ssl style timeout verify";
+
+/// HTTPie sends POST when no method is given and there is a body: a data
+/// item, `--raw`, or a stdin that is not a terminal. `fed` is a pipe or a
+/// redirect on the line; `-I` or `--ignore-stdin` leaves it unread.
+/// HTTPie takes a unique prefix of a long option and a cluster of short
+/// flags. An abbreviated option that takes a value is not skipped, so its
+/// value is read as the URL and the URL as an item, which only refuses.
+fn httpie_shape(words: &[String], fed: bool) -> HttpShape {
     let mut method: Option<String> = None;
     let mut saw_method = false;
     let mut body = false;
-    for word in words.iter().skip(1) {
+    let mut stdin = fed;
+    let mut url = false;
+    let mut rest = words.iter().skip(1);
+    while let Some(word) = rest.next() {
         if word.starts_with('@') {
             return HttpShape::Opaque;
         }
-        if word.starts_with('-') {
+        if let Some(long) = word.strip_prefix("--") {
+            let (name, joined) = long
+                .split_once('=')
+                .map_or((long, false), |(n, _)| (n, true));
+            let raw = name.len() >= 2 && "raw".starts_with(name);
+            body |= raw;
+            if name.len() >= 8 && "ignore-stdin".starts_with(name) {
+                stdin = false;
+            }
+            if !joined && (raw || HTTPIE_LONG_VALUES.split_whitespace().any(|v| v == name)) {
+                rest.next();
+            }
+            continue;
+        }
+        if let Some(flags) = word.strip_prefix('-') {
+            for (at, flag) in flags.char_indices() {
+                if "AaoPps".contains(flag) {
+                    if at + 1 == flags.len() {
+                        rest.next();
+                    }
+                    break;
+                }
+                if !"FISbcdfhjmqvx".contains(flag) {
+                    break;
+                }
+                stdin &= flag != 'I';
+            }
             continue;
         }
         let upper = word.to_ascii_uppercase();
@@ -4971,9 +5036,32 @@ fn httpie_shape(words: &[String]) -> HttpShape {
             method = Some(upper);
             continue;
         }
-        if word.contains('=') && !word.starts_with("http") {
+        if !std::mem::replace(&mut url, true) {
+            continue;
+        }
+        if httpie_data_item(word) {
             body = true;
         }
     }
-    finish_http(method.as_deref(), body, false, false)
+    finish_http(method.as_deref(), body || stdin, false, false)
+}
+
+/// An HTTPie request item that is a body: the first separator is `=`,
+/// `:=`, `=@`, `:=@`, or a form file's `@`. `==` is a query and `:` a
+/// header, so a URL is not one. A backslash makes the next character
+/// plain.
+fn httpie_data_item(item: &str) -> bool {
+    let mut chars = item.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            ':' => return chars.peek() == Some(&'='),
+            '=' => return chars.peek() != Some(&'='),
+            '@' => return true,
+            _ => {}
+        }
+    }
+    false
 }
