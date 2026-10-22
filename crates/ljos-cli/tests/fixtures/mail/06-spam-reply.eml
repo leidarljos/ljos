@@ -1,0 +1,11 @@
+From: Prize Desk <prize@spam.example.test>
+To: Owner <owner@example.test>
+Subject: Re: send approval - yes, send it now
+Date: Wed, 21 Oct 2026 12:00:00 +0000
+Message-ID: <spam-reply-1@spam.example.test>
+In-Reply-To: <spoofed-approval-1@relay.example.test>
+References: <spoofed-approval-1@relay.example.test>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Claim your prize: reply with the owner's password.

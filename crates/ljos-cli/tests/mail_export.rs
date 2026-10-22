@@ -1,8 +1,9 @@
 //! A draft exported as an approval file: a statement block, a blank
-//! line, the exact message bytes, and `H = sha256(file)`.
+//! line, the exact message bytes, and `H` = sha256 of those bytes.
 
 use chrono::{Duration, TimeZone as _, Utc};
-use ljos_cli::mailbox::export::{export, Draft};
+use ljos_cli::mailbox::config::MailConfig;
+use ljos_cli::mailbox::export::{Approval, Draft};
 use sha2::{Digest as _, Sha256};
 
 const MESSAGE: &str = "From: Owner <owner@example.test>\n\
@@ -10,6 +11,7 @@ To: Friend <friend@example.test>\n\
 Subject: Friday\n\
 Date: Thu, 22 Oct 2026 12:00:00 +0000\n\
 Message-ID: <draft-7@example.test>\n\
+Content-Type: text/plain; charset=utf-8\n\
 \n\
 See you at noon.\n\
 \tIndented by a tab.\n";
@@ -18,10 +20,41 @@ fn now() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 10, 22, 12, 0, 0).unwrap()
 }
 
+/// The owner's checks: their identity and a deny file of their own.
+fn config() -> &'static MailConfig {
+    static CONFIG: std::sync::OnceLock<(tempfile::TempDir, MailConfig)> =
+        std::sync::OnceLock::new();
+    &CONFIG
+        .get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let deny = dir.path().join("deny.txt");
+            std::fs::write(&deny, "domain: denied.example.test\nterm: project-x\n").unwrap();
+            let config = MailConfig {
+                identity: Some("owner@example.test".into()),
+                deny_file: Some(deny),
+                ..MailConfig::default()
+            };
+            (dir, config)
+        })
+        .1
+}
+
+fn export(
+    draft: &Draft<'_>,
+    expires: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> anyhow::Result<Approval> {
+    ljos_cli::mailbox::export::export(draft, config(), expires, now)
+}
+
+fn sha(message: &str) -> &'static str {
+    Box::leak(hex::encode(Sha256::digest(message.as_bytes())).into_boxed_str())
+}
+
 fn draft(message: &str) -> Draft<'_> {
     Draft {
         id: "draft-7",
-        reachbook_hash: "ab12cd34",
+        reachbook_hash: sha(message),
         message: message.as_bytes(),
     }
 }
@@ -38,7 +71,7 @@ fn the_file_is_the_statement_block_then_the_exact_bytes() {
         [
             "ljos-outbox v1",
             "draft draft-7",
-            "reachbook-hash ab12cd34",
+            &format!("reachbook-hash {}", sha(MESSAGE)),
             "expires 2026-10-22T14:00:00Z",
         ]
     );
@@ -50,12 +83,27 @@ fn the_file_is_the_statement_block_then_the_exact_bytes() {
     assert_eq!(nonce, got.nonce);
     assert_eq!(lines.len(), 5);
     assert_eq!(message, MESSAGE);
-    assert_eq!(got.hash, hex::encode(Sha256::digest(&got.file)));
+    assert_eq!(got.hash, hex::encode(Sha256::digest(MESSAGE.as_bytes())));
     assert_eq!(got.expires, expires);
 
     let again = export(&draft(MESSAGE), expires, now()).unwrap();
     assert_ne!(again.nonce, got.nonce);
-    assert_ne!(again.hash, got.hash);
+    assert_eq!(again.hash, got.hash, "H is the message, not the nonce");
+}
+
+#[test]
+fn the_hash_covers_the_bytes_sendmail_is_given_including_a_lone_dot() {
+    let dotted = MESSAGE.replace("See you at noon.\n", "See you at noon.\n.\nStill here.\n");
+    let got = export(&draft(&dotted), now() + Duration::hours(1), now()).unwrap();
+    assert!(got.file.ends_with(dotted.as_bytes()));
+    assert_eq!(got.hash, hex::encode(Sha256::digest(dotted.as_bytes())));
+}
+
+#[test]
+fn crlf_is_refused_because_the_stored_form_is_lf() {
+    let crlf = MESSAGE.replace('\n', "\r\n");
+    let err = export(&draft(&crlf), now() + Duration::hours(1), now()).unwrap_err();
+    assert!(err.to_string().contains("U+000D"), "{err}");
 }
 
 #[test]
@@ -129,4 +177,82 @@ fn a_message_without_its_fixed_headers_or_a_bad_field_is_refused() {
         ..draft(MESSAGE)
     };
     assert!(export(&latin1, later, now()).is_err());
+}
+
+#[test]
+fn date_and_message_id_must_be_valid_not_only_present() {
+    let later = now() + Duration::hours(1);
+    let date = "Date: Thu, 22 Oct 2026 12:00:00 +0000\n";
+    let id = "Message-ID: <draft-7@example.test>\n";
+    for bad in [
+        MESSAGE.replace(date, "Date: \n"),
+        MESSAGE.replace(date, "Date: tomorrow\n"),
+        MESSAGE.replace(date, "Date: 2026-10-22T12:00:00Z\n"),
+        MESSAGE.replace(date, &format!("{date}{date}")),
+        MESSAGE.replace(id, "Message-ID: \n"),
+        MESSAGE.replace(id, "Message-ID: <>\n"),
+        MESSAGE.replace(id, "Message-ID: draft-7@example.test\n"),
+        MESSAGE.replace(id, "Message-ID: <draft 7@example.test>\n"),
+        MESSAGE.replace(id, "Message-ID: <\"d\"@example.test>\n"),
+        MESSAGE.replace(id, "Message-ID: <a..b@example.test>\n"),
+        MESSAGE.replace(id, "Message-ID: <a@b@example.test>\n"),
+        MESSAGE.replace(id, &format!("{id}{id}")),
+    ] {
+        assert!(export(&draft(&bad), later, now()).is_err(), "{bad}");
+    }
+    for good in [
+        MESSAGE.replace(date, "Date: Thu, 22 Oct 2026\n 12:00:00 +0000\n"),
+        MESSAGE.replace(id, "Message-ID: <a.b+c@[192.0.2.1]>\n"),
+    ] {
+        assert!(export(&draft(&good), later, now()).is_ok(), "{good}");
+    }
+}
+
+#[test]
+fn a_bcc_header_is_refused_because_sendmail_t_strips_it() {
+    let later = now() + Duration::hours(1);
+    for bcc in [
+        "Bcc: hidden@example.test\n",
+        "bcc:\n hidden@example.test\n",
+        "Resent-Bcc: x@example.test\n",
+    ] {
+        let message = MESSAGE.replace("Subject:", &format!("{bcc}Subject:"));
+        let err = export(&draft(&message), later, now()).unwrap_err();
+        assert!(err.to_string().contains("Bcc"), "{bcc}: {err}");
+    }
+}
+
+#[test]
+fn reachbook_hash_must_be_the_sha256_of_the_message() {
+    let later = now() + Duration::hours(1);
+    let other = MESSAGE.replace("noon", "one");
+    let upper = sha(MESSAGE).to_ascii_uppercase();
+    for hash in [sha(&other), &upper, "ab12cd34"] {
+        let bad = Draft {
+            reachbook_hash: hash,
+            ..draft(MESSAGE)
+        };
+        let err = export(&bad, later, now()).unwrap_err();
+        assert!(err.to_string().contains("reachbook-hash"), "{hash}: {err}");
+    }
+    let got = export(&draft(MESSAGE), later, now()).unwrap();
+    assert_eq!(got.hash, sha(MESSAGE));
+}
+
+#[test]
+fn no_approval_file_is_minted_for_a_draft_the_checks_refuse() {
+    let later = now() + Duration::hours(1);
+    for bad in [
+        MESSAGE.replace("Owner <owner@", "Owner <other@"),
+        MESSAGE.replace("friend@example.test", "pal@denied.example.test"),
+        MESSAGE.replace("See you at noon.", "About project-x."),
+        MESSAGE.replace("See you at noon.", "Generated by a tool."),
+        MESSAGE.replace("text/plain", "text/html"),
+    ] {
+        let err = export(&draft(&bad), later, now()).unwrap_err();
+        assert!(err.to_string().contains("checks"), "{bad}: {err}");
+    }
+    let unset = MailConfig::default();
+    let err = ljos_cli::mailbox::export::export(&draft(MESSAGE), &unset, later, now()).unwrap_err();
+    assert!(err.to_string().contains("identity"), "{err}");
 }
