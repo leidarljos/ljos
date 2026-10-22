@@ -73,6 +73,10 @@ Set `LJOS_TRACKER_REMOTE` in the environment. The tracker repository has to be o
 
 `cloud up` rewrites the harness MCP command to `ljos-mcp` on PATH. A claim, a note and a vote then push to the tracker, and another clone sees them after a fetch. A `STARTED` claim whose program has exited returns to `TODO` after `LJOS_LEASE_SECS`. A claim whose program is still running stays. The tracker URL has to be one the machine's git credentials can clone.
 
+## Deeds
+
+A cloud seat's finish exports the deeds that seat cited on the issue into `.ljos/deeds/<seat>/`. The bag carries the deed, the inclusion receipt, the file bytes and any supersedes link. The tracker commit takes the bag, so a fetch brings it to the box. A machine that never ran `ljos cloud up` writes no bag on finish.
+
 ## Slots
 
 A run's seat is new, and the tracker pins its key the first time it signs. Any writer with push to the tracker can pin a name that way, so a seat first pinned after slots began counts toward a push cite only under a slot. The seat that launches a cloud agent or a job writes one on the issue it hands over, before the run's first ballot:
