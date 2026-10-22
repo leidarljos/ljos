@@ -272,7 +272,7 @@ fn has_markup(body: &str) -> bool {
 /// Header fields unfolded as RFC 5322 says (a line break before
 /// whitespace is removed), names in lower case. `None` when a line is
 /// neither a field nor a continuation, so nothing is silently skipped.
-fn unfold(head: &str) -> Option<Vec<(String, String)>> {
+pub(crate) fn unfold(head: &str) -> Option<Vec<(String, String)>> {
     let mut headers: Vec<(String, String)> = Vec::new();
     for line in head.lines() {
         if line.starts_with([' ', '\t']) {

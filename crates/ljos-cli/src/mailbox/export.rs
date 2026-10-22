@@ -64,13 +64,25 @@ pub fn export(draft: &Draft<'_>, expires: DateTime<Utc>, now: DateTime<Utc>) -> 
     let Some((headers, _)) = message.split_once("\n\n") else {
         bail!("export: the message has no blank line between headers and body");
     };
-    for want in ["message-id:", "date:"] {
-        if !headers
-            .lines()
-            .any(|line| line.to_ascii_lowercase().starts_with(want))
-        {
-            bail!("export: the message has no {want} header; the send path would add one");
+    let fields = super::checks::unfold(headers)
+        .context("export: a header line is neither a field nor a continuation")?;
+    let one = |name: &str| -> Result<&str> {
+        let mut values = fields.iter().filter(|(n, _)| n == name);
+        match (values.next(), values.next()) {
+            (Some((_, value)), None) => Ok(value),
+            _ => bail!(
+                "export: the message needs exactly one {name} header; the send path would add one"
+            ),
         }
+    };
+    if DateTime::parse_from_rfc2822(one("date")?).is_err() {
+        bail!("export: Date is not an RFC 5322 date-time");
+    }
+    if !is_msg_id(one("message-id")?) {
+        bail!("export: Message-ID is not an RFC 5322 msg-id such as <id@example.test>");
+    }
+    if fields.iter().any(|(n, _)| n == "bcc" || n == "resent-bcc") {
+        bail!("export: sendmail -t strips Bcc, so the sent bytes would not be H; use To or Cc");
     }
     let mut seed = [0u8; 16];
     std::fs::File::open("/dev/urandom")
@@ -92,6 +104,34 @@ pub fn export(draft: &Draft<'_>, expires: DateTime<Utc>, now: DateTime<Utc>) -> 
         nonce,
         expires,
     })
+}
+
+/// `<id-left@id-right>`: dot-atom text on the left, dot-atom text or a
+/// `[...]` literal without folding on the right.
+fn is_msg_id(value: &str) -> bool {
+    let dot_atom = |s: &str| {
+        s.split('.').all(|atom| {
+            !atom.is_empty()
+                && atom
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-/=?^_`{|}~".contains(&b))
+        })
+    };
+    let Some((left, right)) = value
+        .strip_prefix('<')
+        .and_then(|v| v.strip_suffix('>'))
+        .and_then(|v| v.split_once('@'))
+    else {
+        return false;
+    };
+    let literal = right
+        .strip_prefix('[')
+        .and_then(|r| r.strip_suffix(']'))
+        .is_some_and(|d| {
+            d.bytes()
+                .all(|b| b.is_ascii_graphic() && !b"[]\\".contains(&b))
+        });
+    dot_atom(left) && (dot_atom(right) || literal)
 }
 
 fn refuse_hiding(message: &str) -> Result<()> {

@@ -145,3 +145,46 @@ fn a_message_without_its_fixed_headers_or_a_bad_field_is_refused() {
     };
     assert!(export(&latin1, later, now()).is_err());
 }
+
+#[test]
+fn date_and_message_id_must_be_valid_not_only_present() {
+    let later = now() + Duration::hours(1);
+    let date = "Date: Thu, 22 Oct 2026 12:00:00 +0000\n";
+    let id = "Message-ID: <draft-7@example.test>\n";
+    for bad in [
+        MESSAGE.replace(date, "Date: \n"),
+        MESSAGE.replace(date, "Date: tomorrow\n"),
+        MESSAGE.replace(date, "Date: 2026-10-22T12:00:00Z\n"),
+        MESSAGE.replace(date, &format!("{date}{date}")),
+        MESSAGE.replace(id, "Message-ID: \n"),
+        MESSAGE.replace(id, "Message-ID: <>\n"),
+        MESSAGE.replace(id, "Message-ID: draft-7@example.test\n"),
+        MESSAGE.replace(id, "Message-ID: <draft 7@example.test>\n"),
+        MESSAGE.replace(id, "Message-ID: <\"d\"@example.test>\n"),
+        MESSAGE.replace(id, "Message-ID: <a..b@example.test>\n"),
+        MESSAGE.replace(id, "Message-ID: <a@b@example.test>\n"),
+        MESSAGE.replace(id, &format!("{id}{id}")),
+    ] {
+        assert!(export(&draft(&bad), later, now()).is_err(), "{bad}");
+    }
+    for good in [
+        MESSAGE.replace(date, "Date: Thu, 22 Oct 2026\n 12:00:00 +0000\n"),
+        MESSAGE.replace(id, "Message-ID: <a.b+c@[192.0.2.1]>\n"),
+    ] {
+        assert!(export(&draft(&good), later, now()).is_ok(), "{good}");
+    }
+}
+
+#[test]
+fn a_bcc_header_is_refused_because_sendmail_t_strips_it() {
+    let later = now() + Duration::hours(1);
+    for bcc in [
+        "Bcc: hidden@example.test\n",
+        "bcc:\n hidden@example.test\n",
+        "Resent-Bcc: x@example.test\n",
+    ] {
+        let message = MESSAGE.replace("Subject:", &format!("{bcc}Subject:"));
+        let err = export(&draft(&message), later, now()).unwrap_err();
+        assert!(err.to_string().contains("Bcc"), "{bcc}: {err}");
+    }
+}

@@ -85,7 +85,12 @@ precondition, not an option.
    fields and body with LF line endings, no carriage return anywhere.
    mailgate writes exactly those bytes to `sendmail -i -t`, and the MTA
    turns each LF into CRLF on the wire. `-i` keeps a line holding only
-   `.` as text, and `-t` takes the recipients from `To` and `Cc`.
+   `.` as text, and `-t` takes the recipients from `To` and `Cc`. The
+   exporter refuses a message without exactly one `Date` that parses as
+   an RFC 5322 date-time and exactly one `Message-ID` in msg-id syntax
+   (`<left@right>`, dot-atom text or a `[...]` literal), since an MTA
+   would add or replace them. It refuses `Bcc` and `Resent-Bcc`, which
+   `-t` strips, so the sent bytes would no longer be the hashed ones.
 2. Export. The approval file is plain text: a statement block, a blank
    line, then the message bytes.
 
