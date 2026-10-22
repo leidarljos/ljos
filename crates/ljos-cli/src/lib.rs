@@ -6929,7 +6929,11 @@ pub fn tool_error(input: &str) -> String {
 /// prompt hook's tests. It must also share [`FAILURE_SHARED_WORDS`] subject
 /// words with the command and the error, where a prompt needs one, since an
 /// error is long and noisy, and its lexical match on those words must reach
-/// [`FAILURE_LEXICAL_MIN`]. The floor is the lexical match of the hits that
+/// [`FAILURE_LEXICAL_MIN`], which only naming that subject reaches. Those
+/// are the second scorer, so the pack's count of the ballots that named a
+/// hit is not read: where many lessons tie on the words the pack scores,
+/// which of them a ballot keeps at its cut is arbitrary. The floor is the
+/// lexical match of the hits that
 /// pass those tests, not the fused score: the pack decays that score by
 /// age, and age only ranks. What passes is read most relevant first, see
 /// [`sort_by_relevance`]. One handed over earlier in the session is left
@@ -6957,7 +6961,6 @@ pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<
         .enumerate()
         .map(|(i, h)| {
             !UNREVIEWED_KINDS.contains(&h.kind.as_str())
-                && agreed(h)
                 && shared_failure_words(&h.text, &cue) >= FAILURE_SHARED_WORDS
                 && lexical[i] >= FAILURE_LEXICAL_MIN
                 && shown_on_prompt(h)
@@ -7608,8 +7611,8 @@ fn shared_failure_words(text: &str, cue: &str) -> usize {
 
 /// The lexical match on its subject words a lesson needs before a failure
 /// note hands it over, however weak the rest of the pool is. Naming the
-/// subject scores 1; one word of the failure no other hit carries clears
-/// it alone.
+/// subject scores from 0.5 to 1; one word of the failure no other hit
+/// carries, without naming it, stays under.
 pub const FAILURE_LEXICAL_MIN: f64 = 0.5;
 
 #[cfg(test)]
@@ -45891,6 +45894,44 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             3,
         );
         assert!(note.contains("VITE_API_URL"), "{note}");
+    }
+
+    /// Twenty-four lessons tie the old one on every word the pack scores,
+    /// so one ballot's cut keeps it or not by chance. Kept by one of two,
+    /// it still names the failure, and the note hands it over.
+    #[test]
+    fn a_failed_tool_admits_a_lesson_one_ballot_cut_at_a_tie() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap())]);
+        let hit = |id: &str, text: &str, ballots: u32| {
+            serde_json::json!({
+                "id": id, "text": text, "score": 1.0, "kind": "lesson",
+                "ts": "2026-01-14T09:00:00.000Z", "entities": ["horizon:standing"],
+                "ballots": ballots, "of": 2
+            })
+        };
+        let url = serve_signal_pack(serde_json::json!([
+            hit(
+                "old",
+                "With pnpm the registry rejected the token because the CI secret expired",
+                1
+            ),
+            hit(
+                "fresh",
+                "Mapbox registry rejected the tile token after the plan downgrade",
+                2
+            ),
+        ]));
+        let _url = PackUrl::set(&url);
+        let call = HookCall {
+            event: "PostToolUseFailure".into(),
+            cue: "npm publish".into(),
+            session: Some("tie-fail".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = failure_note(&call, "E401: the registry rejected the token", 3);
+        assert!(note.contains("CI secret expired"), "{note}");
     }
 
     /// "Clear the npm cache weekly" is the only hit that says `npm`, so
