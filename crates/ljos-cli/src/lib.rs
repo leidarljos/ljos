@@ -48453,6 +48453,12 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// is installed on PATH the way CI installs deedar. A failed build
     /// fails the test.
     fn deedimport_deedar() -> std::path::PathBuf {
+        // Two tests call this at once, and one would clear the cache the
+        // other is still building in.
+        static BUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _build = BUILD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let sha = deedar_pin();
         let cache = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/deedimport2-deedar");
