@@ -45,7 +45,13 @@ fn read_http(stream: &mut std::net::TcpStream) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
-fn serve(atoms: Arc<Mutex<Vec<serde_json::Value>>>) -> String {
+/// The token an asking seat shows its pack, in the form packsetd keeps.
+const TOKEN: &str = "0e1d2c3b4a59687706f5e4d3c2b1a0900e1d2c3b4a59687706f5e4d3c2b1a090";
+
+/// A pack holding `atoms`. When `asks`, it refuses a request without
+/// [`TOKEN`] as packsetd does, which is what lets a reader trust the
+/// origin it lists.
+fn serve(atoms: Arc<Mutex<Vec<serde_json::Value>>>, asks: bool) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     thread::spawn(move || {
@@ -54,7 +60,11 @@ fn serve(atoms: Arc<Mutex<Vec<serde_json::Value>>>) -> String {
             let req = read_http(&mut stream);
             let path = req.lines().next().unwrap_or("");
             let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
-            let (code, payload) = if path.starts_with("POST /v1/atoms") {
+            let bearer = format!("authorization: bearer {TOKEN}");
+            let shown = req.lines().any(|l| l.to_ascii_lowercase() == bearer);
+            let (code, payload) = if asks && !shown && !path.starts_with("GET /health") {
+                (401, r#"{"error":"token"}"#.into())
+            } else if path.starts_with("POST /v1/atoms") {
                 let mut atom: serde_json::Value =
                     serde_json::from_str(body).unwrap_or(serde_json::json!({}));
                 if atom.get("id").and_then(|v| v.as_str()).is_none() {
@@ -70,10 +80,10 @@ fn serve(atoms: Arc<Mutex<Vec<serde_json::Value>>>) -> String {
             } else {
                 (404, r#"{"error":"missing"}"#.into())
             };
-            let status = if code == 200 {
-                "200 OK"
-            } else {
-                "404 Not Found"
+            let status = match code {
+                200 => "200 OK",
+                401 => "401 Unauthorized",
+                _ => "404 Not Found",
             };
             let resp = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
@@ -91,18 +101,29 @@ struct Seat {
     installed: tempfile::TempDir,
     url: String,
     atoms: Arc<Mutex<Vec<serde_json::Value>>>,
+    asks: bool,
 }
 
 impl Seat {
     fn new() -> Self {
+        Self::with(false)
+    }
+
+    /// A seat whose pack asks for its token.
+    fn asking() -> Self {
+        Self::with(true)
+    }
+
+    fn with(asks: bool) -> Self {
         let atoms = Arc::new(Mutex::new(Vec::new()));
-        let url = serve(Arc::clone(&atoms));
+        let url = serve(Arc::clone(&atoms), asks);
         Self {
             home: tempfile::tempdir().unwrap(),
             run: tempfile::tempdir().unwrap(),
             installed: runner::install_dir(),
             url,
             atoms,
+            asks,
         }
     }
 
@@ -202,6 +223,9 @@ impl Seat {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if self.asks {
+            cmd.env("PACKSET_TOKEN", TOKEN);
+        }
     }
 }
 
@@ -822,10 +846,17 @@ fn a_bash_write_to_the_latest_prompt_is_denied() {
 
 /// The guard states a rule's reason as the person's only when the pack
 /// says the person stands behind it. An agent rule, or one with no
-/// basis, has its reason labelled an unverified agent note.
+/// basis, has its reason labelled an unverified agent note, and so does
+/// every rule from a pack that does not ask for the seat's token.
 #[test]
 fn the_guard_labels_a_rule_not_the_persons_unverified() {
-    let seat = Seat::new();
+    for asks in [true, false] {
+        guard_labels(asks);
+    }
+}
+
+fn guard_labels(asks: bool) {
+    let seat = if asks { Seat::asking() } else { Seat::new() };
     let stored = [
         ("agent", "agent-derived", Some("agent")),
         ("bare", "user-declared", None),
@@ -861,7 +892,8 @@ fn the_guard_labels_a_rule_not_the_persons_unverified() {
             .unwrap_or_default();
         assert!(reason.contains(PLANT), "{name}: {stdout}");
         let labelled = reason.starts_with("unverified agent note: ");
-        assert_eq!(labelled, basis != Some("person"), "{name}: {reason}");
+        let theirs = asks && basis == Some("person");
+        assert_eq!(labelled, !theirs, "{name} asks {asks}: {reason}");
     }
 }
 
