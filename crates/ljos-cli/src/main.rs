@@ -1848,6 +1848,7 @@ fn run_command() -> Result<()> {
             let out =
                 std::process::Command::new(which::which("vissue").context("vissue not on PATH")?)
                     .args(&argv)
+                    .env("VISSUE_AGENT", ljos_cli::seat_name())
                     .stdin(std::process::Stdio::null())
                     .output()?;
             let text = String::from_utf8_lossy(&out.stdout);

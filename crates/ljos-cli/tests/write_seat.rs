@@ -220,6 +220,22 @@ fn a_write_records_the_seat_the_seats_file_maps() {
 }
 
 #[test]
+fn a_filed_issue_is_created_as_the_seat_the_check_named() {
+    let b = Bench::new();
+    b.seats("seats = [\"saddle\", \"inky\"]\n");
+    b.ljos_env(
+        &[("LJOS_SEAT", "saddle"), ("VISSUE_AGENT", "inky")],
+        &["file", "a new bug", "--top", "-p", "proj"],
+    );
+    let calls = b.calls();
+    let create = calls
+        .lines()
+        .find(|l| l.starts_with("vissue create"))
+        .unwrap_or_else(|| panic!("no create: {calls}"));
+    assert!(create.ends_with("VISSUE_AGENT=saddle"), "{create}");
+}
+
+#[test]
 fn a_conversation_the_seats_file_maps_votes_as_that_seat() {
     let b = Bench::new();
     b.seats("\"0b1c2d3e-0000-4000-8000-000000000000\" = \"saddle\"\n");
