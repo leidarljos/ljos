@@ -877,8 +877,9 @@ pub fn inbox(all: bool) -> Result<String> {
 ///
 /// `None` lists the pack as it stands. `Some("")` fetches the remote head,
 /// or the commit in `LJOS_WAKE_COMMIT` when that is set. `Some(commit)`
-/// fetches until that commit is present, or the remote head when it is
-/// not. A checkout with no remote is listed as it is. Fetch notes go to
+/// fetches until the remote has that commit, for up to
+/// `LJOS_INBOX_SYNC_WAIT` seconds, or else takes the remote head. A
+/// checkout with no remote is listed as it is. Fetch notes go to
 /// stderr. The returned text is the inbox.
 ///
 /// # Errors

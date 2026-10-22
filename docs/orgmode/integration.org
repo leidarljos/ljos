@@ -79,7 +79,7 @@ same everywhere and the envelope differs:
 | Runner | Memory injection | Shell check | Ask | Notes |
 |---+---+---+---+---|
 | Claude Code | =UserPromptSubmit= context, skills, =ljos://protocol= | =PreToolUse= deny blocks | native permission prompt | plugin =ljos@leidarljos=; sitting and finish commands are in the repo |
-| Codex | hooks plus MCP server list | hook deny blocks | none: Codex does not prompt; an ask is rewritten to a deny that offers =ljos approve= | prompt and =PreToolUse=; =exec_command= omits =workdir= in hook payloads, so ljos cannot read it |
+| Codex | hooks plus MCP server list | hook deny blocks | none: Codex does not prompt; an ask is rewritten to a deny that offers =ljos approve= | prompt and =PreToolUse=; =shell_command= payloads carry the command and session =cwd= only, so ljos cannot read a =workdir= override |
 | Grok Build | =PostToolUse= =additionalContext= after the first tool (=UserPromptSubmit= stdout is discarded, so =ljos hook= keeps the text and emits it once) | =PreToolUse=, 10 seconds, the Trusted Computing Base (TCB) check's budget | =ask= rewritten to deny where stdin carries =turn_id= | frozen file =crates/ljos-cli/assets/grok/ljos.json=; =LJOS_MCP_GENERATION= bump respawns the server; the full page is Grok Build |
 | Antigravity (=agy=) | hooks plus skill | hook deny blocks | =ljos approve=, =ljos_request_approval=, or reply =approve ID= | pipeline stages arrive separated by a =\|= word so a download and the shell it feeds are judged together |
 | opencode | =assets/opencode/ljos.ts= | hook deny blocks | runner prompt or =ljos approve= | same contract, TypeScript hook |
