@@ -597,7 +597,8 @@ pub(crate) fn open_dir_beneath(
 ) -> Result<Option<std::fs::File>> {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::fs::OpenOptionsExt;
-    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let flags =
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
     let mut dir = match std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
@@ -671,33 +672,23 @@ fn split_rel(rel: &str) -> (&str, &str) {
 /// any component. None when it is missing.
 pub(crate) fn read_beneath(root: &Path, rel: &str) -> Result<Option<Vec<u8>>> {
     use std::io::Read;
-    use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::fs::MetadataExt;
     let (parent, name) = split_rel(rel);
     let Some(dir) = open_dir_beneath(root, parent, false)? else {
         return Ok(None);
     };
     let cname = c_name(name)?;
-    // SAFETY: dir is an open directory fd and cname is NUL-terminated.
-    let fd = unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            cname.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
-        )
+    let shown = root.join(rel);
+    // O_NONBLOCK so a fifo does not wait for a writer. A device or a
+    // directory is refused the same way: only a regular file is a log.
+    let mut file = match super::open_regular_at(&dir, &cname, &shown, libc::O_RDONLY, 0) {
+        Ok(file) => file,
+        Err(err) if err.raw_os_error() == Some(libc::ENOENT) => return Ok(None),
+        Err(_) => bail!("sync: {} is not a regular file", shown.display()),
     };
-    if fd < 0 {
-        let err = std::io::Error::last_os_error();
-        return match err.raw_os_error() {
-            Some(libc::ENOENT) => Ok(None),
-            _ => bail!("sync: {} is not a regular file", root.join(rel).display()),
-        };
-    }
-    // SAFETY: fd is new, owned here, and opened with O_CLOEXEC.
-    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
     let meta = file.metadata()?;
     if !meta.file_type().is_file() || meta.nlink() != 1 {
-        bail!("sync: {} is not a regular file", root.join(rel).display());
+        bail!("sync: {} is not a regular file", shown.display());
     }
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
@@ -726,7 +717,7 @@ thread_local! {
 /// new name is in place.
 pub(crate) fn write_beneath(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
-    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::fd::AsRawFd;
     let (parent, name) = split_rel(rel);
     std::fs::create_dir_all(root).with_context(|| format!("sync: {}", root.display()))?;
     let dir = open_dir_beneath(root, parent, true)?
@@ -735,24 +726,25 @@ pub(crate) fn write_beneath(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> 
     // parent after this open is not followed.
     before_dir_write();
     let cname = c_name(name)?;
+    let shown = root.join(rel);
+    // Refuse a fifo, device, directory or symlink before rename would
+    // replace it or a write would block on it.
+    match super::open_regular_at(&dir, &cname, &shown, libc::O_RDONLY, 0) {
+        Ok(_) => {}
+        Err(err) if err.raw_os_error() == Some(libc::ENOENT) => {}
+        Err(_) => bail!("sync: {} is not a regular file", shown.display()),
+    }
     let ctmp = c_name(&format!(".{name}.tmp-{}", std::process::id()))?;
     // SAFETY: dir is an open directory fd; both names are NUL-terminated.
     unsafe { libc::unlinkat(dir.as_raw_fd(), ctmp.as_ptr(), 0) };
-    // SAFETY: as above. O_EXCL with O_NOFOLLOW makes a new file or fails.
-    let fd = unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            ctmp.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o666,
-        )
-    };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("sync: {}", root.join(rel).display()));
-    }
-    // SAFETY: fd is new, owned here, and opened with O_CLOEXEC.
-    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mut file = super::open_regular_at(
+        &dir,
+        &ctmp,
+        &shown,
+        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        0o666,
+    )
+    .with_context(|| format!("sync: {}", shown.display()))?;
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
     drop(file);
     // SAFETY: as above. renameat replaces the entry and follows no link.
@@ -4130,6 +4122,110 @@ pub fn exchange_user_rules(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::FileTypeExt;
+
+    /// A fifo, a directory, or a device node where a `.ljos` file should be
+    /// is refused at once. Each open is bounded so a regression that waits
+    /// on the fifo fails the test instead of hanging it.
+    #[test]
+    fn a_non_regular_file_under_ljos_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let rel = ".ljos/atoms/host.jsonl.age";
+        let path = root.path().join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut kinds = vec!["fifo", "directory"];
+        if mknod_char(&path) {
+            std::fs::remove_file(&path).unwrap();
+            kinds.push("device");
+        }
+        for kind in kinds {
+            match kind {
+                "fifo" => mkfifo(&path),
+                "directory" => std::fs::create_dir(&path).unwrap(),
+                "device" => assert!(mknod_char(&path), "mknod"),
+                _ => unreachable!(),
+            }
+            let root_path = root.path().to_path_buf();
+            let read = bounded(&format!("read {kind}"), {
+                let root_path = root_path.clone();
+                let rel = rel.to_string();
+                move || read_beneath(&root_path, &rel)
+            });
+            let err = read.expect_err(kind);
+            assert!(
+                err.to_string().contains("not a regular file"),
+                "{kind} read: {err}"
+            );
+            let write = bounded(&format!("write {kind}"), {
+                let rel = rel.to_string();
+                move || write_beneath(&root_path, &rel, b"sealed\n")
+            });
+            let err = write.expect_err(kind);
+            assert!(
+                err.to_string().contains("not a regular file"),
+                "{kind} write: {err}"
+            );
+            let still = path.symlink_metadata().unwrap().file_type();
+            match kind {
+                "fifo" => assert!(still.is_fifo(), "{kind} was replaced"),
+                "directory" => assert!(still.is_dir(), "{kind} was replaced"),
+                "device" => assert!(still.is_char_device(), "{kind} was replaced"),
+                _ => unreachable!(),
+            }
+            if still.is_dir() {
+                std::fs::remove_dir(&path).unwrap();
+            } else {
+                std::fs::remove_file(&path).unwrap();
+            }
+        }
+        let zero = Path::new("/dev/zero");
+        if zero
+            .symlink_metadata()
+            .is_ok_and(|meta| meta.file_type().is_char_device())
+        {
+            let read = bounded("read /dev/zero", || read_beneath(Path::new("/dev"), "zero"));
+            let err = read.expect_err("device");
+            assert!(
+                err.to_string().contains("not a regular file"),
+                "device read: {err}"
+            );
+            assert!(zero
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_char_device());
+        }
+    }
+
+    fn bounded<T: Send + 'static>(what: &str, body: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(body());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap_or_else(|_| panic!("{what} hung"))
+    }
+
+    fn mkfifo(path: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: mkfifo takes a NUL-terminated path that lives until it
+        // returns, and a mode.
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(rc, 0, "mkfifo: {}", std::io::Error::last_os_error());
+    }
+
+    /// `true` when this machine lets the test make a character device.
+    fn mknod_char(path: &Path) -> bool {
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: mknod takes a NUL-terminated path that lives until it
+        // returns. Major 1 minor 3 is the null device; a kernel that
+        // refuses the node returns -1 and the caller skips the case.
+        let rc =
+            unsafe { libc::mknod(c_path.as_ptr(), libc::S_IFCHR | 0o600, libc::makedev(1, 3)) };
+        rc == 0
+    }
 
     fn packsetd_bin() -> PathBuf {
         if let Some(path) = std::env::var_os("PATH").and_then(|path| {
