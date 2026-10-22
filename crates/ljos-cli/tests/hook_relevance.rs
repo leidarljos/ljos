@@ -59,7 +59,12 @@ impl Seat {
 
     /// A standing lesson written at `ts`.
     fn lesson(&self, text: &str, ts: &str) {
-        let atom = serde_json::json!({
+        self.lesson_as(None, text, ts);
+    }
+
+    /// [`Self::lesson`] under `id` when one is given.
+    fn lesson_as(&self, id: Option<&str>, text: &str, ts: &str) {
+        let mut atom = serde_json::json!({
             "schema": "inside.atom/v1",
             "kind": "lesson",
             "level": "explicit",
@@ -68,10 +73,25 @@ impl Seat {
             "entities": ["horizon:standing"],
             "ts": ts,
         });
+        if let Some(id) = id {
+            atom["id"] = id.into();
+        }
         let posted = ureq::post(&format!("{}/v1/atoms", self.url()))
             .timeout(Duration::from_secs(10))
             .send_json(atom);
         assert!(posted.is_ok(), "post {text:?}: {posted:?}");
+    }
+
+    /// What the pack answers to `GET path` with `query`, asked directly.
+    fn get(&self, path: &str, query: &[(&str, &str)]) -> Value {
+        let mut req = ureq::get(&format!("{}{path}", self.url())).timeout(Duration::from_secs(10));
+        for (key, value) in query {
+            req = req.query(key, value);
+        }
+        req.call()
+            .unwrap_or_else(|e| panic!("GET {path}: {e}"))
+            .into_json()
+            .unwrap_or_else(|e| panic!("GET {path}: {e}"))
     }
 
     /// The context the prompt hook onboard wrote gives back, and how long
@@ -265,115 +285,98 @@ fn always_does_not_bring_in_a_rule_about_something_else() {
     );
 }
 
+/// A word no other lesson here says: `n` read as three consonant-vowel
+/// pairs. Lessons that carry a few each stay apart under packset's
+/// rewrite test, token Jaccard 0.6, so none replaces another.
+fn unique_word(n: usize) -> String {
+    const CONSONANTS: &[u8] = b"bdfgklmnprstvz";
+    const VOWELS: &[u8] = b"aeiou";
+    let mut n = n;
+    let mut word = String::new();
+    for _ in 0..3 {
+        word.push(char::from(CONSONANTS[n % CONSONANTS.len()]));
+        n /= CONSONANTS.len();
+        word.push(char::from(VOWELS[n % VOWELS.len()]));
+        n /= VOWELS.len();
+    }
+    word
+}
+
+fn unique_words(from: usize, count: usize) -> String {
+    (from..from + count)
+        .map(unique_word)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Twenty-four fresh lessons that tie the old one on every word the pack
-/// scores. The old one says `pnpm`, which shares the alias groups of the
-/// failure's `npm` and is a word the pack does not score, so it covers
-/// more of the failure.
+/// scores: registry, rejected and token. Each carries eight words of its
+/// own.
 fn lookalikes() -> Vec<String> {
-    const WHO: [&str; 24] = [
-        "Figma",
-        "Grafana",
-        "Sentry",
-        "Jira",
-        "Slack",
-        "Vercel",
-        "Netlify",
-        "Heroku",
-        "Stripe",
-        "Twilio",
-        "Okta",
-        "Auth0",
-        "Datadog",
-        "PagerDuty",
-        "Linear",
-        "Notion",
-        "Airtable",
-        "Zendesk",
-        "Mapbox",
-        "Algolia",
-        "Cloudflare",
-        "Fastly",
-        "Mailgun",
-        "Segment",
-    ];
-    const WHAT: [&str; 24] = [
-        "export",
-        "webhook",
-        "bot",
-        "preview",
-        "deploy",
-        "sandbox",
-        "staging",
-        "read-only",
-        "admin",
-        "upload",
-        "billing",
-        "search",
-        "metrics",
-        "alerting",
-        "sync",
-        "import",
-        "share",
-        "audit",
-        "tile",
-        "index",
-        "purge",
-        "edge",
-        "bounce",
-        "replay",
-    ];
-    const WHEN: [&str; 24] = [
-        "after the plan changed",
-        "once the seat was removed",
-        "when the org moved region",
-        "after a password reset",
-        "during the outage",
-        "on the second retry",
-        "after the workspace was renamed",
-        "when the scope was narrowed",
-        "after SSO was enforced",
-        "when the trial ended",
-        "after the key rotation",
-        "once two-factor was required",
-        "after the domain moved",
-        "when the quota ran out",
-        "after the app was reinstalled",
-        "when the project was archived",
-        "after an audit",
-        "once the IP list changed",
-        "after the plan downgrade",
-        "when the account was merged",
-        "after the cache was purged",
-        "when the zone was deleted",
-        "after the sender was blocked",
-        "when the source was paused",
-    ];
     (0..24)
         .map(|i| {
+            let own = 100 + i * 8;
             format!(
-                "{} registry rejected the {} token {}; ask its owner for a new one.",
-                WHO[i], WHAT[i], WHEN[i]
+                "Operator {} recorded that the registry rejected the token during incident {}. {}",
+                unique_word(own),
+                unique_word(own + 1),
+                unique_words(own + 2, 6)
             )
         })
         .collect()
 }
 
-/// The pack cuts its list by a fused score that decays with age, and
-/// with twenty-four fresh lookalikes the January lesson is past the
-/// failure note's twelve. A writer that ranks by relevance alone returns
-/// it; an older one is joined by the stored atoms that best match. Either
-/// way the failure note and the prompt hook hand it over.
-#[test]
-fn an_old_lesson_behind_a_full_fused_cut_still_arrives() {
-    let seat = seat();
-    seat.lesson(
+/// The January lesson. It says `pnpm`, which is in the alias group of
+/// the prompt's `npm` and which the pack does not match, so it covers
+/// more of the prompt than any lookalike. Thirty words of its own make it
+/// long, so BM25 ranks it under every lookalike.
+fn pnpm_lesson() -> String {
+    format!(
         "With pnpm the registry rejected the token because the CI secret expired; \
-         refresh it from 1Password.",
-        JANUARY,
-    );
-    for text in lookalikes() {
-        seat.lesson(&text, FRESH);
+         refresh it from 1Password. {}",
+        unique_words(0, 30)
+    )
+}
+
+const PNPM_ID: &str = "a0000000000000000000000000000000";
+
+/// More live lookalikes than the hook's window of twenty, and the
+/// relevance cut keeps the January lesson on one ballot of two. The
+/// pack's lexical ballot ties all twenty-five and keeps the twenty whose
+/// ids sort first, so the ids pin it inside that cut; BM25 leaves it
+/// out. The failure note and the prompt hook both hand it over.
+#[test]
+fn an_old_lesson_one_ballot_kept_in_a_full_window_still_arrives() {
+    let seat = seat();
+    seat.lesson_as(Some(PNPM_ID), &pnpm_lesson(), JANUARY);
+    for (i, text) in lookalikes().iter().enumerate() {
+        seat.lesson_as(Some(&format!("f{i:031}")), text, FRESH);
     }
+    let workspace = ("workspace", ljos_cli::SEAT_WORKSPACE);
+    let listed = seat.get("/v1/atoms", &[workspace]);
+    let live = listed["atoms"].as_array().map_or(0, Vec::len);
+    assert_eq!(live, 25, "a lookalike replaced another: {listed}");
+    let prompt = "npm: the registry rejected my token";
+    let cut = seat.get(
+        "/v1/search",
+        &[
+            workspace,
+            ("q", prompt),
+            ("limit", "20"),
+            ("rank", "relevance"),
+        ],
+    );
+    let hits = cut["hits"].as_array().cloned().unwrap_or_default();
+    assert_eq!(hits.len(), 20, "the window is not full: {cut}");
+    let kept = hits
+        .iter()
+        .find(|h| h["id"] == PNPM_ID)
+        .unwrap_or_else(|| panic!("the cut left the lesson out: {cut}"));
+    assert_eq!(
+        (kept["ballots"].as_u64(), kept["of"].as_u64()),
+        (Some(1), Some(2)),
+        "the cut did not keep the lesson on one ballot: {kept}"
+    );
     let (context, took) = seat.fire(
         "PostToolUseFailure",
         serde_json::json!({
@@ -388,10 +391,10 @@ fn an_old_lesson_behind_a_full_fused_cut_still_arrives() {
         context.contains("CI secret expired"),
         "the failure note never saw the old lesson: {context}"
     );
-    let (context, took) = seat.prompt("pool-2", "npm: the registry rejected my token");
+    let (context, took) = seat.prompt("pool-2", prompt);
     eprintln!("prompt hook took {took:?}");
     assert!(
         context.contains("CI secret expired"),
-        "the prompt hook never saw the old lesson: {context}"
+        "the prompt hook dropped the lesson the cut kept on one ballot: {context}"
     );
 }
