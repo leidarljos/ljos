@@ -3125,16 +3125,21 @@ pub fn same_holder(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
-    let (seat_a, tag_a) = holder_parts(a);
-    let (seat_b, tag_b) = holder_parts(b);
-    let invalid = |raw: &str, tag: &Option<String>| raw.contains('@') && tag.is_none();
-    if invalid(a, &tag_a) || invalid(b, &tag_b) {
+    let (Some((seat_a, tag_a)), Some((seat_b, tag_b))) = (holder_seat(a), holder_seat(b)) else {
         return false;
-    }
-    let seat_a = seat_slug(&seat_a);
-    let seat_b = seat_slug(&seat_b);
+    };
     // Two tags of one seat are two conversations, not one holder.
     seat_a == seat_b && (tag_a.is_none() || tag_b.is_none())
+}
+
+/// [`holder_parts`] of a well-formed holder. `None` for a name with no
+/// seat before `@` or nothing after it, which no conversation writes.
+/// The seat is compared as parsed, not slugged: `ljosbot-` and `@abc`
+/// would slug to `ljosbot` and `runner`.
+fn holder_seat(holder: &str) -> Option<(String, Option<String>)> {
+    let (seat, tag) = holder_parts(holder);
+    let dangling = holder.contains('@') && tag.is_none();
+    (!seat.is_empty() && !dangling).then_some((seat, tag))
 }
 
 /// Whether `held`, the name a tracker row is claimed under, belongs to
@@ -3154,9 +3159,10 @@ pub fn same_seat(held: &str, holder: &str, known: &std::collections::BTreeSet<St
     if held.is_empty() || holder.is_empty() {
         return false;
     }
-    let (seat_a, _) = holder_parts(held);
-    let (seat_b, _) = holder_parts(holder);
-    seat_slug(&seat_a) == seat_slug(&seat_b)
+    let (Some((seat_a, _)), Some((seat_b, _))) = (holder_seat(held), holder_seat(holder)) else {
+        return false;
+    };
+    seat_a == seat_b
 }
 
 /// [`same_seat`] against the seats this tracker lists.
@@ -34677,7 +34683,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a dangling separator matched")]
     fn a_dangling_separator_is_not_the_seat() {
         let known = std::collections::BTreeSet::new();
         for (a, b) in [
