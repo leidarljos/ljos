@@ -19,6 +19,11 @@
 #   --from-dir DIR  take the programs from DIR instead of downloading
 #                   (a local build, or an offline copy)
 #   --no-onboard    install only; onboard nothing
+#   --no-modify-path
+#                   leave the shell profiles alone. Without it, when the
+#                   bin dir is not on PATH, ~/.profile and ~/.bashrc (and
+#                   ~/.zshrc if there is one) each get one line that puts
+#                   it there, once
 #   --version VER   install ljos VER (such as 0.29.0) instead of the latest
 #   --pin REPO=VER  install REPO at VER (such as packset=0.14.0); repeat
 #                   for each repository to hold
@@ -56,6 +61,7 @@ BIN_DIR=${LJOS_BIN_DIR:-$HOME/.local/bin}
 WITH_EMBED=1
 FROM_DIR=
 ONBOARD=1
+MODIFY_PATH=1
 OWNER=leidarljos
 PINS=
 ATTEST=0
@@ -77,6 +83,7 @@ while [ $# -gt 0 ]; do
     --no-embed) WITH_EMBED=0; shift ;;
     --from-dir) FROM_DIR=$2; shift 2 ;;
     --no-onboard) ONBOARD=0; shift ;;
+    --no-modify-path) MODIFY_PATH=0; shift ;;
     --version) [ $# -ge 2 ] || die "--version needs a version"; PINS="$PINS ljos=$2"; shift 2 ;;
     --version=*) PINS="$PINS ljos=${1#--version=}"; shift ;;
     --pin) [ $# -ge 2 ] || die "--pin needs REPO=VER"; PINS="$PINS $2"; shift 2 ;;
@@ -411,9 +418,44 @@ if [ -f "$TMP/attested" ]; then
   say "$line"
 fi
 
+# A shell opened after the install finds the programs: each profile gets
+# the line once, under a marker a later install looks for. `cloud up`
+# writes its own line, so --cloud leaves the profiles to it.
+PROFILE_MARK='# Added by the ljos installer: its programs on PATH.'
+case $BIN_DIR in
+  "$HOME"/*) shown_dir="\$HOME/${BIN_DIR#"$HOME"/}" ;;
+  *) shown_dir=$BIN_DIR ;;
+esac
+PATH_LINE="export PATH=\"$shown_dir:\$PATH\""
+add_to_profiles() {
+  added=
+  for rc in .profile .bashrc .zshrc; do
+    file=$HOME/$rc
+    [ "$rc" != .zshrc ] || [ -f "$file" ] || continue
+    if [ -f "$file" ] && grep -qxF "$PROFILE_MARK" "$file"; then
+      continue
+    fi
+    if [ -s "$file" ]; then
+      printf '\n' >> "$file" || continue
+    fi
+    printf '%s\n%s\n' "$PROFILE_MARK" "$PATH_LINE" >> "$file" || continue
+    added="$added ~/$rc"
+  done
+  printf '%s' "$added"
+}
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
-  *) say "Note: $BIN_DIR is not on PATH; add it to your shell profile."
+  *) if [ "$MODIFY_PATH" = 1 ] && [ "$CLOUD" = 0 ]; then
+       added=$(add_to_profiles)
+       if [ -n "$added" ]; then
+         say "Added $BIN_DIR to PATH in$added; a new shell finds ljos. In this one, run:"
+       else
+         say "Your shell profiles already add $BIN_DIR to PATH. In this shell, run:"
+       fi
+     else
+       say "Note: $BIN_DIR is not on PATH. Add this line to your shell profile, and run it here:"
+     fi
+     say "  $PATH_LINE"
      PATH="$BIN_DIR:$PATH"; export PATH ;;
 esac
 
