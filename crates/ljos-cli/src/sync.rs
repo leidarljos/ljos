@@ -469,6 +469,48 @@ pub struct Incoming {
     pub retired: Vec<String>,
 }
 
+/// What adopting one gone host's log asks of this pack: which texts are
+/// still live there, and which atoms this host should post as its own.
+#[derive(Debug, Default, PartialEq)]
+struct AdoptPlan {
+    live: BTreeSet<String>,
+    post: Vec<Value>,
+}
+
+/// The atoms to adopt from one gone host log: one live text once, and never
+/// a text this host already holds as its own.
+#[must_use]
+fn adopt_plan(plain: &str, own: &BTreeSet<String>) -> AdoptPlan {
+    let mut plan = AdoptPlan::default();
+    for line in plain.lines().filter(|l| !l.trim().is_empty()) {
+        let Ok(mut atom) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let text = atom["text"].as_str().unwrap_or("").to_string();
+        if text.is_empty() {
+            continue;
+        }
+        let id = crate::work_id(&text);
+        if !plan.live.insert(id.clone()) || own.contains(&id) {
+            continue;
+        }
+        if let Some(map) = atom.as_object_mut() {
+            map.remove("id");
+            let entities: Vec<Value> = map
+                .get("entities")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|e| !e.as_str().is_some_and(|tag| tag.starts_with("sync:")))
+                .cloned()
+                .collect();
+            map.insert("entities".into(), Value::Array(entities));
+        }
+        plan.post.push(atom);
+    }
+    plan
+}
+
 /// Read one host's log against the texts taken from it last time
 /// (`before`, for what it retired) and the texts from it this pack
 /// already holds (`held`, which are not posted again).
@@ -635,6 +677,128 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
     Ok(out)
 }
 
+fn host_log_rels(host: &str) -> [String; 2] {
+    [
+        format!(".ljos/atoms/{host}.jsonl.age"),
+        format!(".ljos/atoms/{host}.digest"),
+    ]
+}
+
+fn tracked_path(root: &Path, rel: &str) -> bool {
+    git(root, &["ls-files", "--error-unmatch", "--", rel]).is_ok_and(|o| o.status.success())
+}
+
+fn stageable_path(root: &Path, rel: &str) -> bool {
+    root.join(rel).exists() || tracked_path(root, rel)
+}
+
+fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, push: bool) -> Result<String> {
+    let me = host();
+    if gone == me {
+        bail!("sync: {gone} is this machine; pass a gone host");
+    }
+    let identities = identities_for_open();
+    if identities.is_empty() {
+        return Ok("sync: no age identity on this machine; `ljos sync --key` makes one\n".into());
+    }
+    let [gone_log, gone_digest] = host_log_rels(gone);
+    let log_path = root.join(&gone_log);
+    if !log_path.is_file() {
+        return Ok(format!(
+            "sync: {gone} has no {} log in this tracker\n",
+            scope.name
+        ));
+    }
+    let Some(plain) = open_identities(&log_path, &identities)? else {
+        return Ok(format!(
+            "sync: {gone}'s {} log is not sealed to this machine\n",
+            scope.name
+        ));
+    };
+    let client = crate::pack()?;
+    let workspace = client.workspace();
+    let before = crate::atoms_lean(&client, &workspace)?;
+    let own: BTreeSet<String> = before
+        .iter()
+        .filter(|a| is_own(a))
+        .filter_map(|a| a["text"].as_str().map(crate::work_id))
+        .collect();
+    let plan = adopt_plan(&plain, &own);
+    let mut adopted = BTreeSet::new();
+    let (mut kept, mut refused) = (0usize, 0usize);
+    for mut atom in plan.post {
+        let text = atom["text"].as_str().unwrap_or("");
+        let id = crate::work_id(text);
+        if let Some(map) = atom.as_object_mut() {
+            map.insert("workspace".into(), Value::String(workspace.clone()));
+        }
+        match crate::admit::post_kept(&client, &atom) {
+            Ok(_) => {
+                adopted.insert(id);
+                kept += 1;
+            }
+            Err(_) => refused += 1,
+        }
+    }
+    let tag = sender_entity(gone);
+    let mut moved = 0usize;
+    for atom in before {
+        let Some(text) = atom["text"].as_str() else {
+            continue;
+        };
+        let from_gone = atom["entities"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|e| e.as_str() == Some(tag.as_str()));
+        if !from_gone {
+            continue;
+        }
+        let text_id = crate::work_id(text);
+        if !plan.live.contains(&text_id) {
+            continue;
+        }
+        if !(own.contains(&text_id) || adopted.contains(&text_id)) {
+            continue;
+        }
+        if let Some(id) = atom["id"].as_str() {
+            if crate::packset_forget(id, None).is_ok() {
+                moved += 1;
+            }
+        }
+    }
+    let atoms = crate::atoms_lean(&client, &workspace)?;
+    let exported = export(root, scope, &atoms)?;
+    if exported.contains("age is not installed") {
+        bail!("sync: age is not installed, so adoption cannot seal {me}'s log; install age and try again");
+    }
+    let gone_paths = [gone_log.clone(), gone_digest.clone()];
+    let mut stage = Vec::new();
+    for rel in gone_paths {
+        if stageable_path(root, &rel) {
+            stage.push(rel.clone());
+        }
+        let path = root.join(rel);
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+    }
+    let _ = std::fs::remove_file(taken_path(&scope.name, gone));
+    for rel in host_log_rels(&me) {
+        if stageable_path(root, &rel) {
+            stage.push(rel);
+        }
+    }
+    let committed = commit_adopt(root, &scope.name, gone, &stage, push);
+    let mut out = format!(
+        "sync: {gone}: {kept} {} atoms adopted, {refused} refused, {moved} moved\n",
+        scope.name
+    );
+    out.push_str(&exported);
+    out.push_str(&committed);
+    Ok(out)
+}
+
 /// The scope of the repository that holds an issue, when it declares one.
 #[must_use]
 pub fn scope_for_issue(issue: &str) -> Option<String> {
@@ -692,6 +856,55 @@ fn kept_local(root: &Path) -> String {
     } else {
         String::new()
     }
+}
+
+fn commit_files(root: &Path, files: &[&str], message: &str, push: bool) -> String {
+    let held = crate::tracker_commit_lock(root);
+    match crate::commit_paths(root, files, message) {
+        crate::PathCommit::Made => {}
+        crate::PathCommit::AlreadyIn => {
+            drop(held);
+            return if push {
+                push_pending(root)
+            } else {
+                kept_local(root)
+            };
+        }
+        crate::PathCommit::Refused(why) => return format!("sync: commit refused: {why}\n"),
+    }
+    drop(held);
+    if !push {
+        return format!("sync: committed {message}; not pushed (LJOS_TRACKER_GIT=commit)\n");
+    }
+    let remotes = git(root, &["remote"])
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if remotes.is_empty() {
+        return format!(
+            "sync: committed {message}; no remote is configured, so nothing was pushed. \
+             Set one with `git -C {} remote add origin URL` and `git push -u origin HEAD`.\n",
+            root.display()
+        );
+    }
+    // No upstream yet: push_checkout sets it with `-u origin <branch>`.
+    // A sibling bot's push is rebased, and an org conflict keeps both
+    // headings. Failure stays a failure; the line does not say the log was
+    // pushed.
+    match crate::tracker_push::push_checkout(root) {
+        Ok(()) => format!("sync: committed {message}; pushed\n"),
+        Err(e) => format!("sync: committed {message}; push refused: {e}\n"),
+    }
+}
+
+fn commit_adopt(root: &Path, scope: &str, gone: &str, files: &[String], push: bool) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+    let message = format!("chore(sync): adopt {gone} {scope} atoms");
+    commit_files(root, &refs, &message, push)
 }
 
 /// Push commits this checkout has not sent. Atoms that did not change used
@@ -752,49 +965,8 @@ fn commit_log(root: &Path, scope: &str, push: bool) -> String {
         format!(".ljos/atoms/{host}.jsonl.age"),
         format!(".ljos/atoms/{host}.digest"),
     ];
-    // The same lock the tracker commits take: one checkout, many seats.
-    let held = crate::tracker_commit_lock(root);
     let message = format!("chore(sync): {host} {scope} atoms");
-    match crate::commit_paths(root, &[&files[0], &files[1]], &message) {
-        crate::PathCommit::Made => {}
-        crate::PathCommit::AlreadyIn => {
-            // Atoms did not change. A commit already made in this checkout,
-            // such as the tracker's merge attributes, still has to leave,
-            // unless pushes are off. Commit-only mode names that, the same
-            // way the ticket commit does, instead of returning nothing.
-            drop(held);
-            return if push {
-                push_pending(root)
-            } else {
-                kept_local(root)
-            };
-        }
-        crate::PathCommit::Refused(why) => return format!("sync: commit refused: {why}\n"),
-    }
-    drop(held);
-    if !push {
-        return format!("sync: committed {message}; not pushed (LJOS_TRACKER_GIT=commit)\n");
-    }
-    let remotes = git(root, &["remote"])
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
-    if remotes.is_empty() {
-        return format!(
-            "sync: committed {message}; no remote is configured, so nothing was pushed. \
-             Set one with `git -C {} remote add origin URL` and `git push -u origin HEAD`.\n",
-            root.display()
-        );
-    }
-    // No upstream yet: push_checkout sets it with `-u origin <branch>`.
-    // A sibling bot's push is rebased, and an org conflict keeps both
-    // headings. Failure stays a failure; the line does not say the log was
-    // pushed.
-    match crate::tracker_push::push_checkout(root) {
-        Ok(()) => format!("sync: committed {message}; pushed\n"),
-        Err(e) => format!("sync: committed {message}; push refused: {e}\n"),
-    }
+    commit_files(root, &[&files[0], &files[1]], &message, push)
 }
 
 /// Fetch every remote and fast-forward to each one that is ahead. Machines
@@ -864,15 +1036,51 @@ pub fn sync_repo_in_passing(pull_import: bool, export_log: bool) -> Result<Strin
     sync_repos(pull_import, export_log, false)
 }
 
-fn sync_repos(pull_import: bool, export_log: bool, asked: bool) -> Result<String> {
+fn sync_roots() -> Result<Vec<PathBuf>> {
     let listed = local().repos;
-    let roots: Vec<PathBuf> = if listed.is_empty() {
+    Ok(if listed.is_empty() {
         vec![tracker_root()?]
     } else {
         listed.iter().map(|r| expand(r)).collect()
-    };
+    })
+}
+
+/// Fold one gone host's atoms into this host's log and drop the gone host's
+/// log file from each configured tracker repository.
+///
+/// # Errors
+///
+/// A missing host name, trying to adopt this machine's own host name, a
+/// scope file that does not parse, the pack not answering, or age refusing.
+pub fn adopt(target: &str) -> Result<String> {
+    let gone = target.trim();
+    if gone.is_empty() {
+        bail!("sync: pass a host after --adopt");
+    }
+    if gone == host() {
+        bail!("sync: {gone} is this machine; pass a gone host");
+    }
     let mut out = String::new();
-    for root in roots {
+    for root in sync_roots()? {
+        if let Err(e) = crate::tracker_push::prepare_tracker(&root, false, true) {
+            out.push_str(&format!("sync: merge setup: {e}\n"));
+        }
+        let Some(scope) = scope_of_repo(&root)? else {
+            out.push_str(&format!(
+                "sync: {} names no scope; write .ljos/sync.toml with name and recipients (`ljos sync --key` prints this machine's)\n",
+                root.display()
+            ));
+            continue;
+        };
+        out.push_str(&catch_up(&root));
+        out.push_str(&adopt_in_repo(&root, &scope, gone, true)?);
+    }
+    Ok(out)
+}
+
+fn sync_repos(pull_import: bool, export_log: bool, asked: bool) -> Result<String> {
+    let mut out = String::new();
+    for root in sync_roots()? {
         out.push_str(&sync_one(&root, pull_import, export_log, asked)?);
     }
     Ok(out)
@@ -1978,6 +2186,37 @@ mod tests {
         let claimed = "{\"id\":\"c\",\"text\":\"claimed\",\"kind\":\"lesson\",\"origin\":\"user-declared\",\"entities\":[]}\n";
         let overwrote = incoming(claimed, "rglat", &BTreeSet::new(), &BTreeSet::new());
         assert_eq!(overwrote.post[0]["origin"], "peer");
+    }
+
+    #[test]
+    fn an_adopt_plan_posts_each_live_text_once_without_sync_tags() {
+        let plain = format!(
+            "{}\n{}\n{}\nnot-json\n",
+            atom("a", "fresh", &["seat:x", "sync:gone"]),
+            atom("b", "mine", &["scope:cloud"]),
+            atom("c", "fresh", &["sync:stale"])
+        );
+        let own: BTreeSet<String> = [crate::work_id("mine")].into_iter().collect();
+        let plan = adopt_plan(&plain, &own);
+        let live: BTreeSet<String> = [crate::work_id("fresh"), crate::work_id("mine")]
+            .into_iter()
+            .collect();
+        assert_eq!(plan.live, live);
+        assert_eq!(plan.post.len(), 1);
+        assert_eq!(plan.post[0]["text"], "fresh");
+        assert!(plan.post[0].get("id").is_none());
+        assert!(plan.post[0]["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| !e.as_str().is_some_and(|tag| tag.starts_with("sync:"))));
+    }
+
+    #[test]
+    fn an_adopt_names_a_missing_scope() {
+        let _g = crate::test_env_lock();
+        let said = adopt("otherhost").unwrap();
+        assert!(said.contains("names no scope"), "{said}");
     }
 
     #[test]

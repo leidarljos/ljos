@@ -2,7 +2,8 @@
 //! stand in for two cloud VMs. Nothing here talks to GitHub.
 
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
@@ -452,6 +453,126 @@ fn cloud_up_writes_custom_ljos_bin_dir_into_shell_profiles() {
     let line_at = bashrc.find(&line).unwrap();
     let guard_at = bashrc.find("return").unwrap();
     assert!(line_at < guard_at, "{bashrc}");
+}
+
+#[test]
+fn cloud_up_wakes_box_seats_with_keys_passed_by_name() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let config = home.join(".config");
+    let rel = root.path().join("rel");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(config.join("ljos")).unwrap();
+    let names = ["ljos", "ljos-mcp", "ljos-policyd"];
+    for name in names {
+        executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
+    }
+    fs::write(rel.join("SHA256SUMS"), sums(&rel, &names)).unwrap();
+    let wakes = config.join("ljos/wake.toml");
+    fs::write(&wakes, "[claude-review]\ncommand = \"true\"\n").unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", &config);
+    std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::remove_var("LJOS_BIN_DIR");
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    clear_agent_ids();
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("LJOS_WAKE_") {
+            std::env::remove_var(&key);
+        }
+    }
+    let hook = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/hook",
+        hook.local_addr().unwrap().port()
+    );
+    std::env::set_var("LJOS_WAKE_INKY_URL", &url);
+    std::env::set_var("LJOS_WAKE_INKY_KEY", "inky-sender-key");
+    std::env::set_var(
+        "LJOS_WAKE_GROK_BOT_URL",
+        "https://api2.cursor.sh/automations/webhook/grok",
+    );
+    std::env::set_var("LJOS_WAKE_PLAIN_URL", "http://example.com/hook");
+
+    let said = ljos_cli::cloud::up(false).unwrap();
+    assert!(
+        said.contains(
+            "wake inky: posts to LJOS_WAKE_INKY_URL with the key in LJOS_WAKE_INKY_KEY\n"
+        ),
+        "{said}"
+    );
+    assert!(
+        said.contains("wake grok-bot: posts to LJOS_WAKE_GROK_BOT_URL with the key in LJOS_WAKE_GROK_BOT_KEY, which is unset now"),
+        "{said}"
+    );
+    assert!(
+        said.contains("wake plain: LJOS_WAKE_PLAIN_URL is not https"),
+        "{said}"
+    );
+    assert!(!said.contains(&url), "{said}");
+    assert!(!said.contains("inky-sender-key"), "{said}");
+    let text = fs::read_to_string(&wakes).unwrap();
+    assert!(!text.contains("inky-sender-key"), "{text}");
+    assert!(!text.contains("key_file"), "{text}");
+    let table = ljos_cli::wake::load();
+    assert_eq!(table["inky"].webhook.as_deref(), Some(url.as_str()));
+    assert_eq!(table["inky"].key_env.as_deref(), Some("LJOS_WAKE_INKY_KEY"));
+    assert_eq!(
+        table["grok-bot"].key_env.as_deref(),
+        Some("LJOS_WAKE_GROK_BOT_KEY")
+    );
+    assert!(!table.contains_key("plain"), "{text}");
+    assert_eq!(table["claude-review"].command.as_deref(), Some("true"));
+    ljos_cli::cloud::up(false).unwrap();
+    assert_eq!(fs::read_to_string(&wakes).unwrap(), text);
+
+    let heard = std::thread::spawn(move || {
+        let (conn, _) = hook.accept().unwrap();
+        let mut reader = BufReader::new(conn);
+        let mut head = String::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line.trim().is_empty() {
+                break;
+            }
+            head.push_str(&line);
+        }
+        let len = head
+            .lines()
+            .find_map(|l| {
+                l.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .map(|n| n.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or(0);
+        let mut body = vec![0; len];
+        reader.read_exact(&mut body).unwrap();
+        reader
+            .get_mut()
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        head
+    });
+    let fired = ljos_cli::wake::fire(&ljos_cli::wake::Event {
+        seat: "inky".into(),
+        from: "vm-seat".into(),
+        msg: "m1".into(),
+        ..ljos_cli::wake::Event::default()
+    })
+    .unwrap();
+    assert!(fired.contains("posted, 200"), "{fired}");
+    let head = heard.join().unwrap().to_ascii_lowercase();
+    assert!(
+        head.contains("authorization: bearer inky-sender-key"),
+        "{head}"
+    );
 }
 
 #[test]
