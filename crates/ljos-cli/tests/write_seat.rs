@@ -248,3 +248,32 @@ fn release_hands_back_only_to_a_seat_the_seats_file_lists() {
     assert!(!err.contains("no seat named"), "{err}");
     assert!(!err.contains("is not this seat"), "{err}");
 }
+
+#[test]
+fn a_seats_array_is_the_list_of_seats() {
+    let b = Bench::new();
+    let note = ["note", "proj-aaaa", "progress"];
+    b.seats("seats = [\"saddle\"]\n");
+    let refused = b.ljos(Some("stranger"), &note);
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(err.contains("no seat named stranger"), "{err}");
+    assert!(err.contains("which lists saddle"), "{err}");
+    assert_eq!(b.calls(), "", "nothing reached the tracker");
+
+    b.ljos(Some("saddle"), &note);
+    assert!(b.calls().contains("vissue note"), "{}", b.calls());
+}
+
+#[test]
+fn a_seats_file_that_lists_no_seat_refuses_every_write() {
+    let b = Bench::new();
+    let path = b.seats("# seats go here\n[owner]\nname = 1\n");
+    let out = b.ljos(Some("saddle"), &["note", "proj-aaaa", "progress"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(err.contains("lists no seat"), "{err}");
+    assert!(err.contains(&path.display().to_string()), "{err}");
+    assert!(err.contains("seats = [\"saddle\"]"), "names the fix: {err}");
+    assert_eq!(b.calls(), "", "nothing reached the tracker");
+}
