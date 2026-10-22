@@ -1,0 +1,6 @@
+# Seats that stood when slots began (SLOTS_SINCE, 2026-10-21T23:48:25Z).
+# A name here needs no launch slot and may sign one. Any other seat needs
+# a slot signed by one of these. A git date does not add a name.
+disk-saver
+inky
+ljosbot
