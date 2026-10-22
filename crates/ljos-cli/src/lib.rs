@@ -2168,6 +2168,18 @@ fn own_ancestry() -> Vec<(u32, String)> {
         .collect()
 }
 
+/// Whether the nearest session process above this one is one a person
+/// types into: a terminal emulator, a multiplexer or a login. A process
+/// that reaches the service manager or init first, or no session at all,
+/// was started by a program, whatever its stdin is.
+#[must_use]
+pub(crate) fn under_a_persons_terminal() -> bool {
+    ancestry()
+        .into_iter()
+        .find(|(_, comm)| is_session(comm))
+        .is_some_and(|(_, comm)| !comm.starts_with("systemd") && !comm.starts_with("init"))
+}
+
 /// Whether this process runs under an agent runner: the environment
 /// carries a runner's conversation, or a process above it is a runner,
 /// one whose server left a seat record or one the runners file names.

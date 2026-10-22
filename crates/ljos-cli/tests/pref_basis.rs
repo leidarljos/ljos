@@ -23,6 +23,27 @@ const PREFERENCE: &str = "Keep the release notes in one file.";
 const LESSON: &str = "The release notes live beside the changelog.";
 const DUMP: &str = "Paste the ```stdout``` of the release build into the notes.";
 
+/// `keep(ljos, id)` runs `ljos prefer --review --keep id` on a pty and
+/// returns what it printed and how it exited.
+const ON_A_PTY: &str = r#"
+import os, pty, sys
+def keep(ljos, id):
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execv(ljos, [ljos, "prefer", "--review", "--keep", id])
+    chunks = []
+    while True:
+        try:
+            data = os.read(fd, 4096)
+        except OSError:
+            break
+        if not data:
+            break
+        chunks.append(data)
+    _, status = os.waitpid(pid, 0)
+    return b"".join(chunks), os.waitstatus_to_exitcode(status)
+"#;
+
 struct Daemon {
     child: std::process::Child,
     url: String,
@@ -155,28 +176,60 @@ impl Seat {
     }
 
     /// `ljos prefer --review --keep id` typed at a terminal: stdin is a
-    /// pty and no runner is an ancestor.
+    /// pty, the process holding it is a terminal emulator, and no runner
+    /// is an ancestor.
     fn keep(&self, id: &str) -> Output {
-        const SCRIPT: &str = r#"
-import os, pty, sys
-pid, fd = pty.fork()
-if pid == 0:
-    os.execv(sys.argv[1], [sys.argv[1], "prefer", "--review", "--keep", sys.argv[2]])
-chunks = []
-while True:
-    try:
-        data = os.read(fd, 4096)
-    except OSError:
+        let xterm = self.run.path().join("xterm");
+        if !xterm.exists() {
+            std::os::unix::fs::symlink("/usr/bin/python3", &xterm).unwrap();
+        }
+        let script = format!(
+            "{ON_A_PTY}out, code = keep(sys.argv[1], sys.argv[2])\n\
+             sys.stdout.buffer.write(out)\nraise SystemExit(code)\n"
+        );
+        self.command(xterm.to_str().unwrap())
+            .args(["-c", &script, env!("CARGO_BIN_EXE_ljos"), id])
+            .output()
+            .unwrap()
+    }
+
+    /// The same on a pty a program opened after leaving its parent: a
+    /// new session, reparented to init or the service manager, with the
+    /// environment cleared.
+    fn keep_reparented(&self, id: &str) -> Output {
+        const DETACHED: &str = r#"
+import time
+done = sys.argv[3]
+if os.fork() == 0:
+    os.setsid()
+    mid = os.getpid()
+    if os.fork() == 0:
+        while os.getppid() == mid:
+            time.sleep(0.01)
+        out, code = keep(sys.argv[1], sys.argv[2])
+        with open(done + ".out", "wb") as f:
+            f.write(out)
+        with open(done + ".tmp", "w") as f:
+            f.write(str(code))
+        os.rename(done + ".tmp", done)
+    os._exit(0)
+os.wait()
+for _ in range(600):
+    if os.path.exists(done):
         break
-    if not data:
-        break
-    chunks.append(data)
-_, status = os.waitpid(pid, 0)
-sys.stdout.buffer.write(b"".join(chunks))
-raise SystemExit(os.waitstatus_to_exitcode(status))
+    time.sleep(0.05)
+sys.stdout.buffer.write(open(done + ".out", "rb").read())
+raise SystemExit(int(open(done).read()))
 "#;
-        self.command("python3")
-            .args(["-c", SCRIPT, env!("CARGO_BIN_EXE_ljos"), id])
+        let done = self.run.path().join("kept");
+        self.command("/usr/bin/python3")
+            .args([
+                "-c",
+                &format!("{ON_A_PTY}{DETACHED}"),
+                env!("CARGO_BIN_EXE_ljos"),
+                id,
+                done.to_str().unwrap(),
+            ])
             .output()
             .unwrap()
     }
@@ -617,4 +670,45 @@ fn a_kept_preference_is_raised_by_a_person_copy() {
     let review = reviewed(&seat);
     let said = String::from_utf8_lossy(&review.stdout);
     assert!(said.contains("no older preferences await review"), "{said}");
+}
+
+/// A program that opens a pty, starts a new session and lets init or the
+/// service manager adopt it has no runner above it and a terminal on its
+/// input. Neither shows a person, so the keep is refused and the
+/// preference still waits.
+#[test]
+fn a_reparented_pty_cannot_keep_a_preference() {
+    let daemon = Daemon::start();
+    let seat = Seat::on(&daemon);
+    let held = daemon.post(
+        "/v1/atoms",
+        &json!({
+            "schema": "inside.atom/v1",
+            "workspace": "seat",
+            "kind": "preference",
+            "level": "explicit",
+            "origin": "user-declared",
+            "text": PREFERENCE,
+            "entities": ["seat:claude", "horizon:standing"],
+            "source": {"harness": "claude", "seat": "claude", "session": "claude@4f1c", "via": "ljos"},
+        }),
+    );
+    let id = held["id"].as_str().unwrap();
+    reviewed(&seat);
+    let before = daemon.atoms();
+
+    let out = seat.keep_reparented(id);
+    assert!(!out.status.success(), "{}", text_of(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("no terminal emulator"),
+        "{}",
+        text_of(&out)
+    );
+    assert_eq!(daemon.atoms(), before, "{}", text_of(&out));
+    let listed = reviewed(&seat);
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains(id),
+        "{}",
+        text_of(&listed)
+    );
 }

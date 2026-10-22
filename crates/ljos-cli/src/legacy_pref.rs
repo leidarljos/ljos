@@ -194,13 +194,14 @@ pub fn list() -> Result<String> {
 
 /// Keep one held-back preference as the person's.
 ///
-/// A runner is refused, and so is a pipe. The person types this at a
-/// terminal of their own.
+/// A runner is refused, and so is a pipe, and so is a pty with no
+/// terminal emulator, multiplexer or login above it. The person types
+/// this at a terminal of their own.
 ///
 /// # Errors
 ///
 /// The id is not a held-back preference, this process is under a runner
-/// or not a terminal, or the pack refused the person's copy.
+/// or not under a person's terminal, or the pack refused the copy.
 pub fn keep(id: &str) -> Result<String> {
     if under_a_runner() {
         bail!(
@@ -211,6 +212,14 @@ pub fn keep(id: &str) -> Result<String> {
     if !std::io::stdin().is_terminal() {
         bail!(
             "prefer: keeping a preference needs a terminal. \
+             Run `ljos prefer --review --keep {id}` from a terminal of your own"
+        );
+    }
+    // A program can open a pty and leave its runner behind, so the
+    // terminal has to be one a person opened.
+    if !crate::under_a_persons_terminal() {
+        bail!(
+            "prefer: no terminal emulator, multiplexer or login is above this process. \
              Run `ljos prefer --review --keep {id}` from a terminal of your own"
         );
     }
