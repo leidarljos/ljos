@@ -28477,21 +28477,15 @@ pub(crate) fn keep_origin(atom: &Value) {
     }
 }
 
-/// Record the stored origin of each hit no reader recorded yet, from the
-/// pack's listing. A hit the listing does not hold stays unknown.
+/// Record the stored origin of each hit from the pack's listing, read
+/// fresh: the pack can change a held atom's origin in place, and a
+/// long-lived process must not name a hit by the origin it read before.
+/// A hit the listing does not hold keeps what was recorded.
 fn keep_origins_of(client: &PacksetClient, hits: &[Hit]) {
-    let missing = {
-        let known = stored_origins()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        hits.iter()
-            .filter_map(|h| h.id.as_deref())
-            .any(|id| !known.get(id).is_some_and(Option::is_some))
-    };
-    if !missing {
+    if hits.iter().all(|h| h.id.is_none()) {
         return;
     }
-    if let Ok(atoms) = atoms_lean_shared(client, &client.workspace()) {
+    if let Ok(atoms) = atoms_lean(client, &client.workspace()) {
         atoms.iter().for_each(keep_origin);
     }
 }
