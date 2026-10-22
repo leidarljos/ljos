@@ -23,9 +23,16 @@ Continue, Roo Code, Kilo Code, hermes and Amazon Q.
 
 ```
 curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
+export PATH="$HOME/.local/bin:$PATH"
 ljos prefer "Push a tag with git push origin TAG; --follow-tags skips lightweight tags."
 ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the release runbook."
 ```
+
+The programs land in `~/.local/bin`, and the `export` line puts it on PATH
+in the shell you pasted into. From the next release on, when `~/.local/bin`
+is not on PATH, the installer also adds that line to `~/.profile` and
+`~/.bashrc`, and to `~/.zshrc` when there is one, so a new shell finds
+`ljos`; `--no-modify-path` leaves them alone.
 
 The installer downloads each program from its GitHub release, checks it
 against the published SHA-256 sum, and builds from source with `cargo` where a
@@ -65,6 +72,8 @@ ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the relea
 `auggie`, `amp`, `goose`, `openhands`, `continue`, `roo` or `kilo`.
 Cursor's IDE and its `agent` CLI share `~/.cursor/mcp.json`.
 A fresh machine runs `ljos cloud up`, or `sh scripts/install.sh --cloud`.
+Both arrive in the next release; the release the install line above fetches has neither.
+Until then they work from `develop`: run `sh scripts/install.sh --cloud` in a checkout of it, and the script builds that tree's `ljos` with `cargo` when the installed one has no `cloud up`.
 The binaries land in `~/.local/bin`, `~/.cursor/mcp.json` names `ljos-mcp` on PATH, and `LJOS_TRACKER_REMOTE` is cloned as the shared tracker. `docs/cloud-vm.md` has the environment file, the push mode, and a job step.
 Codex runs a hook only once you trust it. After `ljos onboard`, open
 `/hooks` in Codex and trust each ljos hook before the guard runs, and
