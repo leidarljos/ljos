@@ -1979,6 +1979,17 @@ pub fn cloud_seat() -> bool {
     cloud_guard_rules_path().is_some_and(|path| covers_seat(&crate::kept_rules(&path)))
 }
 
+/// Whether anything `ljos cloud up` leaves behind is here: the guard file
+/// or the push allowlist, whatever it holds. For a refusal that must fail
+/// closed; [`cloud_seat`] wants the exact rules.
+#[must_use]
+pub fn any_cloud_marker() -> bool {
+    [cloud_guard_rules_path(), crate::cloud_hook::allow_path()]
+        .into_iter()
+        .flatten()
+        .any(|path| path.symlink_metadata().is_ok())
+}
+
 /// Replace a cloud guard file from an older ljos with the rules this ljos
 /// writes. A missing file stays missing. A file that is not one of those
 /// versions stays as it was written; `ljos cloud up` is what replaces that.
