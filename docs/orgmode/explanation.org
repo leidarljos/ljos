@@ -333,7 +333,11 @@ root-owned entry, or on a single-user install a store the person owns
 and no one else may write. Each directory is opened beneath the one
 before without following a link, and the file opened must be the one
 the process runs, so a directory swapped after the path was resolved
-is not walked through. A copy whose name is the runner,
+is not walked through. A runtime named exactly =node=, =nodejs=,
+=bun= or =deno= stands for the script its arguments name only when the
+runtime is itself such an installed file, kept the same way and the
+file the process runs; the script is then judged as a runner file is.
+A copy whose name is the runner,
 in =/tmp=, =/var/tmp=, =/dev/shm=, a project tree or a =.local= of its
 own making, or reached through a link that leaves its root, is not
 that program. Nothing sits between the hook and the runner but the
