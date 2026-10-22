@@ -36,6 +36,14 @@ const OPTIONAL_BINS: &[&str] = &[
 ];
 const INSTALL_URL: &str = "https://github.com/leidarljos/ljos/releases/latest/download/install.sh";
 const CLOUD_GUARD_RULES_FILE: &str = "cloud-guard-rules.json";
+/// The rule that refuses a push updating a `cursor/*` ref, read from the
+/// push's argv by [`crate::cloud_guard::cursor_push`].
+const CURSOR_PUSH: &str = "cloud-cursor-push";
+/// The rule that refuses `gh pr create` and its alias `gh pr new`, read
+/// from gh's argv by [`crate::cloud_guard::gh_pr`].
+const GH_PR_CREATE: &str = "cloud-gh-pr-create";
+/// The rule that refuses `gh pr merge`, read the same way.
+const GH_PR_MERGE: &str = "cloud-gh-pr-merge";
 /// The release workflow's encoder archives, the runtime before the binary
 /// that links it. Each unpacks into the prefix above the binary directory.
 const ENCODER_ARCHIVES: &[&str] = &["onnxruntime", "packset-embed"];
@@ -311,15 +319,43 @@ pub fn missing_mcp_line() -> Option<String> {
     }
 }
 
-/// Cloud-up refusals over shell commands, in the seat rule format.
+/// The cloud-up refusal `line` meets when it runs in `cwd`. A rule this
+/// ljos names is read from the command's argv; any other rule in the file
+/// is matched as a seat rule.
 #[must_use]
-pub(crate) fn guard_line(line: &str) -> Option<crate::Rule> {
+pub(crate) fn guard_line(line: &str, cwd: Option<&Path>) -> Option<crate::Rule> {
     let path = cloud_guard_rules_path()?;
-    let denies: Vec<crate::Rule> = crate::kept_rules(&path)
+    let denies = crate::kept_rules(&path)
         .into_iter()
-        .filter(|rule| rule.verdict == "deny")
-        .collect();
-    crate::verdict_for(&denies, line).cloned()
+        .filter(|rule| rule.verdict == "deny");
+    for rule in denies {
+        match rule.pattern.as_str() {
+            CURSOR_PUSH => {
+                if let Some(why) = crate::cloud_guard::cursor_push(line, cwd) {
+                    return Some(crate::Rule {
+                        reason: format!("{} ({why})", rule.reason),
+                        ..rule
+                    });
+                }
+            }
+            GH_PR_CREATE | GH_PR_MERGE => {
+                let verbs: &[&str] = if rule.pattern == GH_PR_CREATE {
+                    &["create", "new"]
+                } else {
+                    &["merge"]
+                };
+                if crate::cloud_guard::gh_pr(line, verbs) {
+                    return Some(rule);
+                }
+            }
+            _ => {
+                if let Some(hit) = crate::verdict_for(std::slice::from_ref(&rule), line) {
+                    return Some(hit.clone());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// git's org merge driver. The merged text replaces `ours`.
@@ -1744,18 +1780,17 @@ fn cloud_guard_rules_path() -> Option<PathBuf> {
 fn cloud_guard_rules() -> Vec<crate::Rule> {
     vec![
         crate::Rule {
-            pattern: "re:git push(?:\\s+\\S+)*\\s(?:\\S*:)?(?:refs/heads/)?cursor/\\S+(?:\\s|$)"
-                .into(),
+            pattern: CURSOR_PUSH.into(),
             verdict: "deny".into(),
             reason: "cloud seat rule: never push to cursor/* refs from this machine".into(),
         },
         crate::Rule {
-            pattern: "gh* pr create*".into(),
+            pattern: GH_PR_CREATE.into(),
             verdict: "deny".into(),
             reason: "cloud seat rule: never open pull requests from this machine".into(),
         },
         crate::Rule {
-            pattern: "gh* pr merge*".into(),
+            pattern: GH_PR_MERGE.into(),
             verdict: "deny".into(),
             reason: "cloud seat rule: never merge pull requests from this machine".into(),
         },
