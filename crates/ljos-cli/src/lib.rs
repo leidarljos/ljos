@@ -6748,9 +6748,9 @@ pub fn tool_error(input: &str) -> String {
 /// error is long and noisy, and its lexical match on those words must reach
 /// [`FAILURE_LEXICAL_MIN`]. The floor is the lexical match of the hits that
 /// pass those tests, not the fused score: the pack decays that score by
-/// age, and age only ranks. The pack's order, which is that score, is kept.
-/// One handed over earlier in the session is left out. Calls that worked
-/// are not searched.
+/// age, and age only ranks. What passes is read most relevant first, see
+/// [`sort_by_relevance`]. One handed over earlier in the session is left
+/// out. Calls that worked are not searched.
 #[must_use]
 pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<String>) {
     let error: String = error.chars().take(400).collect();
@@ -6758,14 +6758,16 @@ pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<
     if cue.len() < 3 {
         return (String::new(), Vec::new());
     }
+    let pool = u32::try_from(limit.max(1) * POOL_PER_SHOWN).unwrap_or(u32::MAX);
     let Ok(hits) = with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
-        packset_search_opts(&cue, 10, false)
+        packset_search_opts(&cue, pool, false)
     })
-    .or_else(|_| packset_search(&cue)) else {
+    .or_else(|_| packset_search_opts(&cue, pool, false)) else {
         return (String::new(), Vec::new());
     };
+    let subject = without_failure_words(&cue);
     let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
-    let lexical = lexical_match_scores(&texts, &without_failure_words(&cue));
+    let lexical = lexical_match_scores(&texts, &subject);
     let seen = seen_ids(call.session.as_deref());
     let eligible: Vec<bool> = hits
         .iter()
@@ -6780,13 +6782,14 @@ pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<
         })
         .collect();
     let admitted = clears_lexical_floor(&lexical, &eligible);
-    let rows: Vec<&Hit> = hits
+    let mut rows: Vec<&Hit> = hits
         .iter()
         .zip(&admitted)
         .filter(|(_, ok)| **ok)
         .map(|(h, _)| h)
-        .take(limit)
         .collect();
+    sort_by_relevance(&mut rows, &subject);
+    rows.truncate(limit);
     if rows.is_empty() {
         return (String::new(), Vec::new());
     }
@@ -7785,6 +7788,45 @@ fn lexical_match_scores(texts: &[&str], cue: &str) -> Vec<f64> {
         .collect()
 }
 
+/// How many hits a search asks the pack for, per hit it may show. The
+/// pack cuts its list by the fused score, which decays with age, so a
+/// relevant old memory has to be asked for before the floors run.
+pub const POOL_PER_SHOWN: usize = 4;
+
+/// Indices of `rows`, most relevant to `cue` first: the lexical match,
+/// then BM25 among rows that match as well, then the fused score, which
+/// carries age, only to break a tie.
+fn relevance_order<H: std::borrow::Borrow<Hit>>(rows: &[H], cue: &str) -> Vec<usize> {
+    let texts: Vec<&str> = rows.iter().map(|h| h.borrow().text.as_str()).collect();
+    let docs: Vec<Vec<String>> = texts.iter().map(|text| match_tokens(text)).collect();
+    let df = document_frequency(&docs);
+    let lexical = lexical_match_scores(&texts, cue);
+    let keys: Vec<(f64, f64, f64)> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let bm25 = bm25_distinctive(&docs, &df, i, cue);
+            (lexical[i], bm25, h.borrow().score)
+        })
+        .collect();
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by(|&a, &b| {
+        let (ka, kb) = (keys[a], keys[b]);
+        kb.0.total_cmp(&ka.0)
+            .then(kb.1.total_cmp(&ka.1))
+            .then(kb.2.total_cmp(&ka.2))
+            .then(a.cmp(&b))
+    });
+    order
+}
+
+/// `rows` in [`relevance_order`].
+fn sort_by_relevance<H: std::borrow::Borrow<Hit>>(rows: &mut Vec<H>, cue: &str) {
+    let order = relevance_order(rows, cue);
+    let mut taken: Vec<Option<H>> = rows.drain(..).map(Some).collect();
+    rows.extend(order.into_iter().filter_map(|i| taken[i].take()));
+}
+
 /// Which hits clear [`HOOK_SCORE_FLOOR`] of the best lexical match among
 /// the `eligible` ones, those that pass every other test. A hit kept out
 /// by kind, agreement, horizon or the word test does not set the floor.
@@ -8017,7 +8059,9 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             // writer that is still fetching its cross-encoder on the first
             // prompt then costs the budget, not the whole hook deadline.
             let reranked = if rerank {
-                hook_timed("rerank", || search_within(cue, 10, HOOK_RERANK_BUDGET_MS))
+                hook_timed("rerank", || {
+                    search_within(cue, RERANK_POOL, HOOK_RERANK_BUDGET_MS)
+                })
             } else {
                 Err(anyhow::anyhow!("search: rerank off"))
             };
@@ -8027,37 +8071,36 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
                 (Err(_), None) => return (nudge, pending),
             };
             hits = found;
-            // Age is in the fused score twice, so the floor is the lexical
-            // match. The fused score still orders the rows below.
+            // Age is in the fused score twice, so the floor and the order
+            // are the lexical match. The fused score only breaks a tie.
             let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
             let lexical = lexical_match_scores(&texts, cue);
             let eligible: Vec<bool> = hits.iter().map(could).collect();
             let admitted = clears_lexical_floor(&lexical, &eligible);
-            hits.iter()
+            let mut rows: Vec<&Hit> = hits
+                .iter()
                 .zip(admitted)
                 .filter(|(_, ok)| *ok)
                 .map(|(h, _)| h)
-                .collect()
+                .collect();
+            sort_by_relevance(&mut rows, cue);
+            rows
         }
     };
-    // Jev's probability ranks what it judged; the search score ranks the rest.
-    let weight = |h: &Hit| -> f64 {
-        judged
-            .as_ref()
-            .and_then(|(c, j)| {
-                let i = c.iter().position(|x| x.id == h.id && x.text == h.text)?;
-                j.bears.get(i).copied()
-            })
-            .unwrap_or(h.score)
-    };
+    // Jev's probability ranks what it judged; the cosine or the lexical
+    // match ordered the rest above.
+    if let Some((c, j)) = &judged {
+        let weight = |h: &Hit| -> f64 {
+            c.iter()
+                .position(|x| x.id == h.id && x.text == h.text)
+                .and_then(|i| j.bears.get(i).copied())
+                .unwrap_or(0.0)
+        };
+        rows.sort_by(|a, b| weight(b).total_cmp(&weight(a)));
+    }
     // The cap keeps the strongest, whatever their kind: a weak preference
     // that shares one word with the prompt does not push out the lesson
     // the prompt repeats. Preferences are then read first.
-    rows.sort_by(|a, b| {
-        weight(b)
-            .partial_cmp(&weight(a))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
     let mut rows: Vec<&Hit> = rows
         .into_iter()
         .take(limit.min(HOOK_MAX_MEMORIES))
@@ -8139,14 +8182,21 @@ fn judged_prompt(call: &HookCall, cue: &str) -> Option<(Vec<Hit>, jev::Judgment)
         return None;
     }
     let seen = seen_ids(call.session.as_deref());
-    let hits = hook_timed("judge_search", || packset_search_opts(cue, 10, false)).ok()?;
-    let candidates: Vec<Hit> = hits
+    let hits = hook_timed("judge_search", || {
+        packset_search_opts(cue, RERANK_POOL, false)
+    })
+    .ok()?;
+    let pool: Vec<Hit> = hits
         .into_iter()
         .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
         .filter(shown_on_prompt)
         .filter(|h| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
-        .take(10)
         .collect();
+    // Jev reads the ten most relevant, in the pack's order.
+    let mut kept = relevance_order(&pool, cue);
+    kept.truncate(10);
+    kept.sort_unstable();
+    let candidates: Vec<Hit> = kept.into_iter().map(|i| pool[i].clone()).collect();
     if candidates.len() < cfg.min_candidates {
         return None;
     }
@@ -35135,6 +35185,81 @@ mod tests {
             (404, r#"{"error":"missing"}"#.into())
         });
         url
+    }
+
+    /// A pack whose search keeps the first `limit` of `hits`, the way the
+    /// writer cuts its fused list.
+    fn serve_limited_pack(hits: Vec<Value>) -> String {
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if !first.contains("/v1/search") {
+                return (404, r#"{"error":"missing"}"#.into());
+            }
+            let limit = first
+                .split(['?', '&', ' '])
+                .find_map(|kv| kv.strip_prefix("limit="))
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(hits.len());
+            let kept: Vec<&Value> = hits.iter().take(limit).collect();
+            (200, serde_json::json!({ "hits": kept }).to_string())
+        });
+        url
+    }
+
+    /// Ten fresh lessons that name the subject lead the pack's fused list.
+    /// An old one that names it and the words no other hit has sits
+    /// eleventh. A pool cut at ten never saw it; a wider pool ordered by
+    /// relevance puts it first.
+    #[test]
+    fn the_hook_asks_past_the_fused_cut_and_orders_by_relevance() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let hit = |id: &str, text: &str, score: f64, ts: &str| {
+            serde_json::json!({
+                "id": id, "text": text, "score": score, "kind": "lesson",
+                "ts": ts, "entities": ["horizon:standing"], "ballots": 2, "of": 3
+            })
+        };
+        let mut hits: Vec<Value> = (0..10)
+            .map(|i| {
+                hit(
+                    &format!("fresh{i}"),
+                    &format!("The registry rejected the token on host {i}; rotate it there"),
+                    2.0 - f64::from(i) * 0.01,
+                    "2026-10-20T09:00:00.000Z",
+                )
+            })
+            .collect();
+        hits.push(hit(
+            "old",
+            "npm publish to the acme scope needs the registry token from 1Password, not the CI one",
+            0.5,
+            "2026-07-22T09:00:00.000Z",
+        ));
+        let url = serve_limited_pack(hits);
+        let _url = PackUrl::set(&url);
+        let prompt = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "npm publish to the acme scope says the registry rejected my token".into(),
+            session: Some("wide-prompt".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(&prompt, 5);
+        assert!(note.contains("acme scope needs"), "{note}");
+        let failed = HookCall {
+            event: "PostToolUseFailure".into(),
+            cue: "npm publish --scope acme".into(),
+            session: Some("wide-fail".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = failure_note(&failed, "E401: the registry rejected the token", 3);
+        let first = note.lines().nth(1).unwrap_or("");
+        assert!(first.contains("acme scope needs"), "{note}");
     }
 
     /// The prompt hook hands over a paraphrase the encoder ranked first
