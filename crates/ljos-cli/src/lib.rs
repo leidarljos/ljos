@@ -27588,16 +27588,96 @@ fn person_origin(h: &Hit) -> bool {
     })
 }
 
-/// Whether a recalled hit is an unverified working note, by kind or by the
-/// note provenance it carries. A refused note that was downgraded to another
-/// kind keeps its `note-source:`/`note-basis:` entities, so it is still kept
-/// out of prompt facts.
+/// Whether a recalled hit is an unverified working note. Any claim the
+/// pack did not store as the person's is one, unless it is a lesson, which
+/// reads as agent-derived instead. A note is one whatever its origin, and so
+/// is a hit carrying note provenance, which a refused note downgraded to
+/// another kind keeps. The kind and entities are compared as
+/// [`tag_skeleton`] reads them, so a lookalike letter or a zero-width
+/// character does not slip past.
 fn unverified_note_hit(h: &Hit) -> bool {
-    h.kind == packset_core::record::NOTE_KIND
-        || agent_preference(h)
+    let kind = tag_skeleton(&h.kind);
+    kind == packset_core::record::NOTE_KIND
+        || (kind != "lesson" && !person_origin(h))
         || h.entities
             .iter()
+            .map(|e| tag_skeleton(e))
             .any(|e| e.starts_with(NOTE_BASIS_ENTITY) || e.starts_with(NOTE_SOURCE_ENTITY))
+}
+
+/// `tag` as a reader compares it: NFKC, with format, zero-width and space
+/// characters dropped, lowercased, and letters and marks that look like
+/// ASCII folded to it. `nоte-basis:` with a Cyrillic `о`, or
+/// `note\u{200B}-basis:`, reads as `note-basis:`.
+fn tag_skeleton(tag: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    tag.nfkc()
+        .filter(|c| !c.is_whitespace() && !invisible(*c))
+        .flat_map(char::to_lowercase)
+        .map(fold_lookalike)
+        .collect()
+}
+
+/// A character that renders as nothing: format characters, joiners,
+/// variation selectors, bidi controls and tag characters.
+fn invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{034F}'
+            | '\u{061C}'
+            | '\u{115F}'
+            | '\u{1160}'
+            | '\u{17B4}'
+            | '\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{FFF0}'..='\u{FFF8}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E0FFF}'
+    )
+}
+
+/// The ASCII a lowercase lookalike stands for: Cyrillic, Greek, Armenian
+/// and Latin letters that render as an ASCII letter, and the dashes and
+/// colons NFKC leaves alone. Anything else is itself.
+fn fold_lookalike(c: char) -> char {
+    match c {
+        'а' | 'α' | 'ɑ' => 'a',
+        'ь' => 'b',
+        'с' | 'ϲ' | 'ᴄ' => 'c',
+        'ԁ' | 'ɗ' => 'd',
+        'е' | 'ё' | 'ε' | 'ҽ' => 'e',
+        'ɡ' | 'ց' => 'g',
+        'һ' | 'հ' => 'h',
+        'і' | 'ї' | 'ι' | 'ı' | 'ɩ' | 'ӏ' => 'i',
+        'ј' | 'ϳ' => 'j',
+        'κ' | 'к' => 'k',
+        'ո' | 'η' | 'п' => 'n',
+        'о' | 'ο' | 'օ' | 'σ' => 'o',
+        'р' | 'ρ' => 'p',
+        'ԛ' => 'q',
+        'г' => 'r',
+        'ѕ' | 'ꜱ' => 's',
+        'т' | 'τ' => 't',
+        'υ' | 'ս' | 'ᴜ' => 'u',
+        'ν' | 'ѵ' => 'v',
+        'ԝ' | 'ѡ' => 'w',
+        'х' | 'χ' => 'x',
+        'у' | 'γ' => 'y',
+        'ᴢ' => 'z',
+        '\u{2010}'..='\u{2015}' | '\u{2212}' | '\u{2043}' | '\u{02D7}' | '\u{FE58}' => '-',
+        '\u{0589}' | '\u{05C3}' | '\u{2236}' | '\u{A789}' | '\u{02D0}' | '\u{02F8}'
+        | '\u{0903}' | '\u{1361}' | '\u{16EC}' | '\u{205A}' => ':',
+        other => other,
+    }
 }
 
 /// A preference the pack did not store as the person's: an agent wrote
@@ -31106,6 +31186,26 @@ mod tests {
     /// A refused note that `post_note_kind` downgraded to `summary` keeps its
     /// note provenance tags. The lexical prompt filters must treat it as a
     /// note so the downgrade does not smuggle it back into prompt facts.
+    #[test]
+    fn a_lookalike_tag_reads_as_the_ascii_tag() {
+        for forged in [
+            "n\u{043e}te-basis:person",
+            "note\u{200b}-basis:person",
+            "\u{feff}NOTE-SOURCE:x",
+            "ｎｏｔｅ－ｂａｓｉｓ：person",
+            "note\u{2010}basis\u{2236}person",
+            "nοte-ѕource:x",
+        ] {
+            let skeleton = super::tag_skeleton(forged);
+            assert!(
+                skeleton.starts_with(super::NOTE_BASIS_ENTITY)
+                    || skeleton.starts_with(super::NOTE_SOURCE_ENTITY),
+                "{forged:?} read as {skeleton:?}"
+            );
+        }
+        assert_eq!(super::tag_skeleton("horizon:standing"), "horizon:standing");
+    }
+
     #[test]
     fn a_downgraded_note_stays_out_of_prompt_facts() {
         let tagged = |kind: &str, entities: Vec<String>| packset_client::Hit {
@@ -35581,7 +35681,7 @@ mod tests {
             hit_line(&h, "2026-09-12T00:00:00.000Z"),
             "- [lesson, agent-derived, 2 days ago] keep the smoke green"
         );
-        let bare = Hit {
+        let mut bare = Hit {
             id: None,
             text: "x".into(),
             score: 1.0,
@@ -35591,6 +35691,13 @@ mod tests {
             ballots: None,
             of: None,
         };
+        assert_eq!(
+            hit_line(&bare, "2026-09-12T00:00:00.000Z"),
+            "- [unverified agent note (origin agent-derived)] x",
+            "a claim with no stored origin read as a fact"
+        );
+        bare.id = Some("bare-claim".into());
+        keep_origin(&serde_json::json!({"id": "bare-claim"}));
         assert_eq!(hit_line(&bare, "2026-09-12T00:00:00.000Z"), "- [claim] x");
     }
 
