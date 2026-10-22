@@ -93,6 +93,11 @@ const WRITES: &[&[&str]] = &[
     &["options", "proj-aaaa", "a,b"],
     &["deed", "proj-aaaa", "--add", "d-0000"],
     &["deed", "proj-aaaa", "--remove", "d-0000"],
+    &["workflow", "proj-aaaa", "--start", "feature"],
+    &["workflow", "proj-aaaa", "--round"],
+    &["consensus", "proj-aaaa"],
+    &["playbook", "proj-aaaa", "sit"],
+    &["reap", "--idle", "6h", "--apply"],
 ];
 
 #[test]
@@ -276,4 +281,23 @@ fn a_seats_file_that_lists_no_seat_refuses_every_write() {
     assert!(err.contains(&path.display().to_string()), "{err}");
     assert!(err.contains("seats = [\"saddle\"]"), "names the fix: {err}");
     assert_eq!(b.calls(), "", "nothing reached the tracker");
+}
+
+#[test]
+fn a_playbook_binding_records_the_seat_the_seats_file_maps() {
+    let b = Bench::new();
+    b.seats("\"0b1c2d3e-0000-4000-8000-000000000000\" = \"saddle\"\n");
+    b.ljos_env(
+        &[(
+            "CURSOR_CONVERSATION_ID",
+            "0b1c2d3e-0000-4000-8000-000000000000",
+        )],
+        &["playbook", "proj-aaaa", "sit"],
+    );
+    let calls = b.calls();
+    let note = calls
+        .lines()
+        .find(|l| l.starts_with("vissue note proj-aaaa playbook: sit"))
+        .unwrap_or_else(|| panic!("no binding: {calls}"));
+    assert!(note.ends_with("VISSUE_AGENT=saddle"), "{note}");
 }

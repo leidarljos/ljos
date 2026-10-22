@@ -3572,7 +3572,9 @@ fn issue_topic_and_tags(id: &str) -> (Vec<String>, Vec<String>) {
 }
 
 /// The verb of a command that writes the tracker under this seat. Listing
-/// a deed's citations is a read; a slot names its seat on the line.
+/// a deed's citations, a workflow's status, a consensus read with
+/// `--no-file` and a dry-run reap are reads; a slot names its seat on the
+/// line.
 fn tracker_write(cmd: &Cmd) -> Option<&'static str> {
     Some(match cmd {
         Cmd::Sitting { .. } => "sitting",
@@ -3584,6 +3586,12 @@ fn tracker_write(cmd: &Cmd) -> Option<&'static str> {
         Cmd::File { .. } => "file",
         Cmd::Options { .. } => "options",
         Cmd::Deed { add, remove, .. } if !add.is_empty() || !remove.is_empty() => "deed",
+        Cmd::Workflow { start, round, .. } if start.is_some() || *round => "workflow",
+        Cmd::Consensus {
+            no_file, deadline, ..
+        } if !no_file || deadline.is_some() => "consensus",
+        Cmd::Playbook { .. } => "playbook",
+        Cmd::Reap { apply: true, .. } => "reap",
         _ => return None,
     })
 }

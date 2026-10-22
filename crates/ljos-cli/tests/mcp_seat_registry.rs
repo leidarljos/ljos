@@ -78,6 +78,11 @@ fn a_seats_file_keeps_unlisted_seats_off_the_tracker() {
         serde_json::json!({"seat": "stranger", "node": "proj-aaaa"}),
     );
     assert!(claim.contains("no seat named stranger in"), "{claim}");
+    let bound = call(
+        "ljos_playbook",
+        serde_json::json!({"seat": "stranger", "issue": "proj-aaaa", "name": "sit"}),
+    );
+    assert!(bound.contains("no seat named stranger in"), "{bound}");
 
     let listed = note("saddle");
     assert!(!listed.contains("no seat named"), "{listed}");

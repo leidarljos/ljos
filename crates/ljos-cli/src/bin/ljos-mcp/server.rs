@@ -278,6 +278,7 @@ const TRACKER_WRITES: &[&str] = &[
     "ljos_file",
     "ljos_options",
     "ljos_deed",
+    "ljos_playbook",
 ];
 
 fn writes_tracker(name: &str, args: Option<&serde_json::Map<String, serde_json::Value>>) -> bool {
