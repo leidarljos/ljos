@@ -15403,21 +15403,24 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
         );
     }
     {
-        let atoms = pool;
-        let mut own: Vec<&Value> = atoms.iter().filter(|a| reviewable(a)).collect();
-        own.sort_by(|a, b| b["ts"].as_str().cmp(&a["ts"].as_str()));
+        // The same exclusion and labels as the domain section below: a
+        // persona's working notes are not what it established, and its own
+        // lessons are agent-derived.
+        let mut own: Vec<Hit> = pool
+            .iter()
+            .filter(|a| reviewable(a))
+            .filter_map(atom_as_hit)
+            .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()) && !unverified_note_hit(h))
+            .collect();
+        own.sort_by(|a, b| b.ts.cmp(&a.ts));
         if !own.is_empty() {
             out.push_str("\nWhat you remembered yourself:\n");
-            for a in own.iter().take(8) {
-                if let Some(id) = a["id"].as_str() {
-                    seen.insert(id.to_string());
+            for h in own.iter().take(8) {
+                if let Some(id) = &h.id {
+                    seen.insert(id.clone());
                 }
-                out.push_str(&format!(
-                    "- [{}{}] {}\n",
-                    a["kind"].as_str().unwrap_or("claim"),
-                    age_tag(a["ts"].as_str(), &now),
-                    a["text"].as_str().unwrap_or("").trim()
-                ));
+                out.push_str(&hit_line(h, &now));
+                out.push('\n');
             }
         }
     }
