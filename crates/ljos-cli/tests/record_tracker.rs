@@ -228,6 +228,41 @@ fn each_ballot_that_does_not_stand_fails_with_its_reason() {
 }
 
 #[test]
+fn one_key_pinned_for_two_voters_stands_for_neither() {
+    let shared = |voter: &str, other: &str| {
+        format!("{voter}'s key is also pinned for {other}, so one key counts as several voters")
+    };
+    let tracker = Tracker::new(&[ISSUE]);
+    tracker.cast(ISSUE, "inky", "rail", &key(1));
+    tracker.cast(ISSUE, "twin-a", "bus", &key(8));
+    tracker.cast(ISSUE, "twin-b", "bus", &key(8));
+    tracker.pin(&[("inky", &key(1)), ("twin-a", &key(8)), ("twin-b", &key(8))]);
+    tracker.commit(None);
+    let (ok, said) = tracker.check();
+    assert!(!ok, "{said}");
+    for (voter, other) in [("twin-a", "twin-b"), ("twin-b", "twin-a")] {
+        let line = tracker.line_of(voter);
+        let want = format!("{BOARD}:{line}: {ISSUE}: {}\n", shared(voter, other));
+        assert!(said.contains(&want), "want {want}{said}");
+    }
+    assert!(
+        said.contains("record check: 2 of 3 ballots on 1 issues do not stand"),
+        "{said}"
+    );
+
+    // A pin alone makes the key a second voter's, in either hex case.
+    let tracker = Tracker::new(&[ISSUE]);
+    tracker.cast(ISSUE, "twin-a", "bus", &key(8));
+    let hex = hex::encode(key(8).verifying_key().to_bytes());
+    let pins = format!("twin-a {hex}\ntwin-b {}\n", hex.to_uppercase());
+    std::fs::write(tracker.root.join(ballot_sig::PIN_FILE), pins).unwrap();
+    tracker.commit(None);
+    let (ok, said) = tracker.check();
+    assert!(!ok, "{said}");
+    assert!(said.contains(&shared("twin-a", "twin-b")), "{said}");
+}
+
+#[test]
 fn an_unsigned_ballot_committed_before_signing_began_is_legacy() {
     let tracker = Tracker::new(&[ISSUE]);
     tracker.vote(ISSUE, "elder", "rail");
