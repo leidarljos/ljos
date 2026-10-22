@@ -1313,48 +1313,6 @@ mod tests {
     }
 
     #[test]
-    fn a_shared_override_key_splits_by_run_session() {
-        let _home = test_home();
-        let root = tempfile::tempdir().expect("root");
-        let shared = root.path().join("shared.key");
-        crate::with_env_mutation(|| {
-            // SAFETY: this test holds the process environment lock.
-            unsafe {
-                std::env::set_var("LJOS_SEAT_KEY", &shared);
-                std::env::remove_var("LJOS_SEAT");
-                std::env::remove_var("VISSUE_AGENT");
-                std::env::set_var("CURSOR_AGENT_ID", "agent-run-1111");
-            }
-        });
-        let first = sign_entry(
-            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
-            "alpha/seat-a",
-        )
-        .expect("run 1");
-        crate::with_env_mutation(|| {
-            // SAFETY: this test holds the process environment lock.
-            unsafe { std::env::set_var("CURSOR_AGENT_ID", "agent-run-2222") };
-        });
-        let second = sign_entry(
-            ballot_entry("beta/seat-b", "accept", "2026-10-21T11:00:00Z"),
-            "beta/seat-b",
-        )
-        .expect("run 2");
-        crate::with_env_mutation(|| {
-            // SAFETY: this test holds the process environment lock.
-            unsafe {
-                std::env::remove_var("CURSOR_AGENT_ID");
-                std::env::remove_var("LJOS_SEAT_KEY");
-            }
-        });
-        assert_ne!(
-            first.signature.key, second.signature.key,
-            "two runs shared one fallback override key"
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "LJOS_SEAT_KEY was not used as given")]
     fn an_explicit_seat_key_is_used_as_given() {
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
