@@ -162,6 +162,11 @@ fn seat_env(root: &Path) -> (PathBuf, PathBuf) {
         "GITHUB_ACTIONS",
         "RUNNER_OS",
         "RUNNER_TEMP",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GITHUB_PAT",
+        "CURL_HOME",
+        "WGETRC",
     ] {
         std::env::remove_var(key);
     }
@@ -660,6 +665,10 @@ fn github_clients_allow_only_a_resolved_get() {
         "http DELETE api.github.com/repos/acme/widgets/git/refs/heads/main \"Authorization:token $GH_TOKEN\"",
         "curl -X POST --data-binary @pack https://x:$GH_TOKEN@github.com/acme/widgets.git/git-receive-pack",
         "curl -X PUT https://ghcr.io/v2/acme/widgets/manifests/latest",
+        "curl -G -T file https://api.github.com/repos/acme/widgets",
+        "curl -G -F a=b https://api.github.com/user",
+        "wget -e method=DELETE https://api.github.com/user",
+        "wget --execute=body_data=abc https://api.github.com/user",
     ] {
         let hit = refused(line, here);
         assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {}", hit.reason);
@@ -857,4 +866,30 @@ fn cloud_up_chains_a_pre_push_already_booked() {
     let text = text_of(&out);
     assert!(!out.status.success(), "{text}");
     assert!(text.contains("booked-hook"), "{text}");
+}
+
+#[test]
+fn a_token_and_a_client_config_hide_the_method() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    fs::write(home.join(".curlrc"), "request = DELETE\n").unwrap();
+    refused(
+        "curl -s -H \"Authorization: Bearer $GH_TOKEN\" https://api.github.com/user",
+        here,
+    );
+    allowed("curl -s https://api.github.com/user", here);
+    refused("echo hidden > ~/.curlrc", here);
+    refused("echo hidden > ~/.wgetrc", here);
+    refused(
+        "CURL_HOME=/tmp/curlhome curl -H \"Authorization: Bearer $GH_TOKEN\" https://api.github.com/user",
+        here,
+    );
+    refused(
+        "WGETRC=/tmp/wgetrc wget -q https://api.github.com/user --header \"Authorization: Bearer $GH_TOKEN\"",
+        here,
+    );
 }

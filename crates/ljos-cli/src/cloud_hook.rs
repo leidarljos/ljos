@@ -652,9 +652,25 @@ pub(crate) fn protected_write_targets() -> Vec<PathBuf> {
     if let Ok(home) = crate::home() {
         out.push(home.join(".gitconfig"));
         out.push(home.join(".config/git/config"));
+        out.push(home.join(".curlrc"));
+        out.push(home.join(".wgetrc"));
     }
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        out.push(PathBuf::from(&xdg).join("git/config"));
+        let xdg = PathBuf::from(xdg);
+        out.push(xdg.join("git/config"));
+        out.push(xdg.join("curlrc"));
+    }
+    if let Some(path) = std::env::var_os("CURL_HOME") {
+        let path = PathBuf::from(&path);
+        if !path.as_os_str().is_empty() {
+            out.push(path.join(".curlrc"));
+        }
+    }
+    if let Some(path) = std::env::var_os("WGETRC") {
+        let path = PathBuf::from(path);
+        if !path.as_os_str().is_empty() {
+            out.push(path);
+        }
     }
     if let Some(seat) = recorded_seat() {
         out.push(seat.join(".git/config"));
@@ -730,6 +746,10 @@ fn config_file_name(path: &str) -> bool {
         || path.ends_with("/.gitconfig")
         || path == ".git/config"
         || path.ends_with(".git/config")
+        || path == ".curlrc"
+        || path.ends_with("/.curlrc")
+        || path == ".wgetrc"
+        || path.ends_with("/.wgetrc")
 }
 
 fn path_under(path: &Path, dir: &Path) -> bool {

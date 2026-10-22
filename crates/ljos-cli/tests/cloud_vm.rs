@@ -1499,6 +1499,15 @@ fn seat_env(root: &Path) -> PathBuf {
     std::env::remove_var("LJOS_TRACKER_DIR");
     std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
     std::env::set_var("LJOS_GUARD", "on");
+    for key in [
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GITHUB_PAT",
+        "CURL_HOME",
+        "WGETRC",
+    ] {
+        std::env::remove_var(key);
+    }
     clear_agent_ids();
     home
 }
