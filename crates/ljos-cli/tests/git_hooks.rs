@@ -1,5 +1,5 @@
 //! Grok Bot commits are booked by git hooks, without a prompt hook.
-//! The directory is under the workspace target, not /tmp: ljos skips a temp seat.
+//! The directory is outside the temp roots, not /tmp: ljos skips a temp seat.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -7,10 +7,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[path = "common/seat_root.rs"]
+mod seat_root;
+
 fn work_root() -> PathBuf {
     static N: AtomicU64 = AtomicU64::new(0);
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/grokbot-books-tests")
+    let path = seat_root::seat_root(ljos_cli::bookkeep::path_is_temp)
+        .join("grokbot-books-tests")
         .join(format!(
             "{}-{}",
             std::process::id(),
