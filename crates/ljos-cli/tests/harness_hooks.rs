@@ -1727,17 +1727,68 @@ server.serve_forever()
     );
 }
 
-/// A workdir that does not exist is not a seat-rule deny of a normal command.
+/// A command whose directory does not resolve, a workdir or a session
+/// `cwd` that is missing, a symlink loop, or a directory it cannot enter,
+/// is denied as `cwd-unresolved`: judged in the session or the process
+/// directory instead, it was judged where it does not run. With
+/// `LJOS_GUARD_FAIL_OPEN=1` it is judged there, and a prompt from such a
+/// directory is never denied.
 #[test]
-fn a_missing_workdir_is_not_a_seat_rule_deny() {
+fn a_workdir_that_does_not_resolve_denies_the_command() {
+    use std::os::unix::fs::PermissionsExt;
     let (_dir, hab) = habitat();
     let session = hab.repo.to_str().unwrap();
-    let on_input = pretool(session, Some("/path/to/git/repo"), NORMAL_GIT);
-    let out = hook_in(&hab, &on_input, &hab.repo, true, &[]);
-    assert_ordinary(&out, &on_input);
-    let as_cwd = pretool("/path/to/git/repo", None, NORMAL_GIT);
-    let out = hook_in(&hab, &as_cwd, &hab.repo, true, &[]);
-    assert_ordinary(&out, &as_cwd);
+    let missing = hab.root.join("gone");
+    let looped = hab.root.join("loop-a");
+    std::os::unix::fs::symlink(hab.root.join("loop-b"), &looped).unwrap();
+    std::os::unix::fs::symlink(&looped, hab.root.join("loop-b")).unwrap();
+    let locked = hab.root.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let on = [("LJOS_GUARD", "on"), ("LJOS_OFF", "0")];
+    let payloads = [
+        pretool(session, Some("/path/to/git/repo"), NORMAL_GIT),
+        pretool(missing.to_str().unwrap(), None, NORMAL_GIT),
+        pretool(session, Some(looped.to_str().unwrap()), "echo hi"),
+        pretool(locked.to_str().unwrap(), None, "echo hi"),
+    ];
+    let denied: Vec<_> = payloads
+        .iter()
+        .map(|p| hook_in(&hab, p, &hab.repo, true, &on))
+        .collect();
+    let open = hook_in(
+        &hab,
+        &payloads[0],
+        &hab.repo,
+        true,
+        &[on[0], on[1], ("LJOS_GUARD_FAIL_OPEN", "1")],
+    );
+    let prompt = claude(
+        "UserPromptSubmit",
+        "1",
+        &missing,
+        serde_json::json!({"prompt": "Fix the build"}),
+    );
+    let asked = hook_in(&hab, &prompt, &hab.repo, true, &on);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for (payload, out) in payloads.iter().zip(&denied) {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !out.status.success()
+                && stdout.contains("\"permissionDecision\":\"deny\"")
+                && stdout.contains("cwd-unresolved"),
+            "exit {}\nstdout:\n{stdout}\nstderr:\n{}\npayload:\n{payload}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert_ordinary(&open, &payloads[0]);
+    assert!(
+        asked.status.success() && !String::from_utf8_lossy(&asked.stdout).contains("deny"),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&asked.stdout),
+        String::from_utf8_lossy(&asked.stderr)
+    );
 }
 
 /// The hook process may run outside a repo while the payload carries `cwd`.

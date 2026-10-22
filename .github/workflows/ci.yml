@@ -129,6 +129,24 @@ jobs:
           echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
           export PATH="${{ runner.temp }}/bin:${PATH}"
           command -v deedar
+      # The guard tests ask the real ljos-policyd about a shell line, so
+      # they run the build a release ships: develop, phronesis linked.
+      - name: Build ljos-policyd from develop with phronesis
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends meson ninja-build capnproto pkg-config
+          git clone --depth 1 --branch v0.2.5 https://github.com/leidarljos/phronesis "${{ runner.temp }}/phronesis"
+          cd "${{ runner.temp }}/phronesis"
+          meson setup build --prefix="${{ runner.temp }}/phronesis-prefix" -Dtests=disabled
+          meson compile -C build
+          meson install -C build
+          cd "$GITHUB_WORKSPACE"
+          git clone --depth 1 --branch develop https://github.com/leidarljos/ljos-policyd.git "${{ runner.temp }}/ljos-policyd"
+          PHRONESIS_DIR="${{ runner.temp }}/phronesis-prefix" cargo build --locked --release --manifest-path "${{ runner.temp }}/ljos-policyd/Cargo.toml"
+          mkdir -p "${{ runner.temp }}/bin"
+          install -m 0755 "${{ runner.temp }}/ljos-policyd/target/release/ljos-policyd" "${{ runner.temp }}/bin/ljos-policyd"
+          echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
+          "${{ runner.temp }}/bin/ljos-policyd" version | grep -q '(phronesis)'
       - name: Workspace tests
         run: cargo test --workspace
       - name: MCP tool list size
