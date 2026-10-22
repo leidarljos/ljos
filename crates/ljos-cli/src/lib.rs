@@ -4213,13 +4213,21 @@ pub fn detect_runners(
 ///
 /// The home directory is unknown.
 pub fn onboard_detected(dry: bool, skills: Option<&Path>) -> Result<Vec<Step>> {
+    onboard_detected_with_lookup(dry, skills, &on_path)
+}
+
+fn onboard_detected_with_lookup(
+    dry: bool,
+    skills: Option<&Path>,
+    on_path_lookup: &dyn Fn(&str) -> bool,
+) -> Result<Vec<Step>> {
     let file = harnesses_path();
     let shipped: Harnesses = toml::from_str(HARNESSES_EXAMPLE).unwrap_or_default();
     let mut shapes = harnesses_with_shipped(&file)
         .map(|h| h.harness)
         .unwrap_or_default();
     shapes.extend(shipped.harness);
-    let found = detect_runners(&shapes, &home()?, &|c| on_path(c));
+    let found = detect_runners(&shapes, &home()?, on_path_lookup);
     if found.is_empty() {
         // The tracker, the deed store and the writer are the seat, not a
         // runner. A machine with no coding tool still gets them, or the
@@ -42118,10 +42126,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     fn a_seat_with_no_runner_still_gets_its_tracker() {
         let _g = env_guard();
         let _seat = HermeticSeat::new();
-        let empty = tempfile::tempdir().unwrap();
-        // SAFETY: env_guard restores PATH with the rest of the environment.
-        unsafe { std::env::set_var("PATH", empty.path()) };
-        let steps = super::onboard_detected(true, None).expect("dry onboard");
+        let steps =
+            super::onboard_detected_with_lookup(true, None, &|_| false).expect("dry onboard");
         let whats: Vec<&str> = steps.iter().map(|s| s.what.as_str()).collect();
         assert!(
             steps[0].detail.contains("found no coding tool"),
