@@ -12,8 +12,10 @@
  * spawns MCP servers or shells, and one OMP_SESSION_ID is minted for this
  * process, so its claims are its own.
  *
- * Fails open: a missing binary, a timeout or bad JSON is no opinion. A throw
- * in a tool_call handler blocks the tool, so every path here catches.
+ * Fails open: a missing binary, a timeout or bad JSON is no opinion. A JSON
+ * answer counts on any exit, and exit 2 without one is a deny with stderr
+ * as its reason, so the deny a failed seat hook writes still blocks. A
+ * throw in a tool_call handler blocks the tool, so every path here catches.
  */
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
@@ -43,13 +45,28 @@ async function hook(payload: Record<string, unknown>): Promise<HookOut | undefin
 		const proc = Bun.spawn([LJOS, "hook"], {
 			stdin: new TextEncoder().encode(JSON.stringify({ session_id: SESSION, ...payload })),
 			stdout: "pipe",
-			stderr: "ignore",
+			stderr: "pipe",
 		});
 		const timer = setTimeout(() => proc.kill(), TIMEOUT_MS);
-		const text = await new Response(proc.stdout).text();
+		const [text, err] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+		]);
+		const code = await proc.exited;
 		clearTimeout(timer);
-		if ((await proc.exited) !== 0 || !text.trim()) return undefined;
-		return JSON.parse(text) as HookOut;
+		let out: HookOut | undefined;
+		try {
+			out = text.trim() ? (JSON.parse(text) as HookOut) : undefined;
+		} catch {
+			out = undefined;
+		}
+		if (code !== 2 || out?.hookSpecificOutput?.permissionDecision) return out;
+		return {
+			hookSpecificOutput: {
+				permissionDecision: "deny",
+				permissionDecisionReason: err.trim() || "ljos hook exited 2",
+			},
+		};
 	} catch {
 		return undefined;
 	}
