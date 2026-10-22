@@ -2468,14 +2468,15 @@ fn runner_mark_set() -> bool {
 
 /// Whether the person is at this process, on positive evidence.
 ///
-/// [`person_at_terminal`] must hold, and [`under_a_runner`] must not. A
-/// detached runner, `systemd-run --user --scope` and a D-Bus scope are
-/// not the person even when they cleared the environment and opened a
-/// terminal. A runner variable alone does not hide the person at a
-/// terminal whose tree and scope show no runner. The same variable with
-/// that evidence does, and so does the variable when there is no
-/// terminal. Every basis of person a CLI verb decides asks this;
-/// anything less is the agent's.
+/// [`person_at_terminal`] must hold, and [`under_a_runner`] must not. The
+/// terminal has to belong to an interactive login session: a terminal, a
+/// multiplexer or a login holds it. A fresh transient scope, a container
+/// and a CI runner (`GITHUB_ACTIONS`, `Runner.Worker`) are not that
+/// session, even with a pty and a cleared environment. A runner variable
+/// alone does not hide the person at a login session whose tree and scope
+/// show no runner. The same variable with that evidence does, and so does
+/// the variable when there is no terminal. Every basis of person a CLI
+/// verb decides asks this; anything less is the agent's.
 #[must_use]
 pub fn person_present() -> bool {
     person_at_terminal() && !under_a_runner()
@@ -2555,9 +2556,11 @@ fn person_at_terminal() -> bool {
 }
 
 /// `Some` when the terminal question could be answered. The person is
-/// there only when `tty` is the controlling terminal and `responsible` is
-/// not a runner. `None` means the responsible process could not be named,
-/// which the caller treats as absent.
+/// there only when `tty` is the controlling terminal, `responsible` is an
+/// interactive login (a terminal, a multiplexer or a login, not a
+/// runner), and it is not a hosted CI worker. `None` means the
+/// responsible process could not be named, which the caller treats as
+/// absent.
 #[cfg(any(test, target_os = "macos"))]
 fn at_terminal_with_responsible(
     tty: bool,
@@ -2568,7 +2571,68 @@ fn at_terminal_with_responsible(
         return Some(false);
     }
     let name = responsible?;
-    Some(!segment_names_runner(name, runners))
+    if segment_names_runner(name, runners) || hosted_runner_comm(name) {
+        return Some(false);
+    }
+    Some(interactive_login(name, name))
+}
+
+/// A terminal emulator, a multiplexer, sshd or a login. The process that
+/// holds the session's tty, or the session leader, has to be one of these.
+/// Compared without regard to case, so `Terminal` and `terminal` agree.
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+fn login_holder(comm: &str) -> bool {
+    const ENDS: &[&str] = &[
+        "sshd", "login", "tmux", "screen", "zellij", "Terminal", "iTerm2", "iTerm", "Warp",
+    ];
+    ENDS.iter().any(|name| comm.eq_ignore_ascii_case(name))
+        || TERMINALS.iter().any(|name| comm.eq_ignore_ascii_case(name))
+}
+
+/// The session's tty belongs to an interactive login: the process that
+/// holds it, or the session leader, is a terminal, a multiplexer or a login.
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+fn interactive_login(holder_comm: &str, leader_comm: &str) -> bool {
+    login_holder(holder_comm) || login_holder(leader_comm)
+}
+
+/// `docker` and `podman` leave this in the cgroup after the environment
+/// has been cleared. A word, so `pod-something` is not `podman`.
+#[cfg(any(test, target_os = "linux"))]
+fn container_cgroup(text: &str) -> bool {
+    const MARKS: &[&str] = &[
+        "docker",
+        "podman",
+        "libpod",
+        "containerd",
+        "crio",
+        "kubepods",
+    ];
+    text.lines().any(|line| {
+        let path = line.rsplit_once(':').map_or(line, |(_, path)| path);
+        path.split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| MARKS.iter().any(|mark| word.eq_ignore_ascii_case(mark)))
+    })
+}
+
+/// GitHub Actions sets this on the job. `false` is not a job.
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+fn github_actions_set(value: &str) -> bool {
+    let value = value.trim();
+    value == "1" || value.eq_ignore_ascii_case("true")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn ci_env_set() -> bool {
+    std::env::var("GITHUB_ACTIONS").is_ok_and(|value| github_actions_set(&value))
+}
+
+/// The process name of a GitHub-hosted runner worker. The kernel keeps at
+/// most fifteen characters; `Runner.Worker` fits.
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+fn hosted_runner_comm(comm: &str) -> bool {
+    let base = comm.rsplit(['/', '\\']).next().unwrap_or(comm);
+    base.eq_ignore_ascii_case("Runner.Worker") || base.eq_ignore_ascii_case("Runner.Worker.exe")
 }
 
 /// Whether the kernel says a person's terminal drives this process. Stdin
@@ -2645,7 +2709,25 @@ fn host_at_terminal() -> bool {
             || is_harness_program(&r.comm, &program_name(r.pid, &r.comm), &runners)
             || proc_tree::exe_runner(r.pid).is_some()
     });
-    !reparented && !runner && holds_pty(holder.pid, index)
+    if reparented || runner || !holds_pty(holder.pid, index) {
+        return false;
+    }
+    // The pty is the person's only when a terminal, a multiplexer or a
+    // login holds it, or the session leader is one of those. python,
+    // script and systemd-run can open a pty and are not that.
+    if !interactive_login(&holder.comm, &chain[leader].comm) {
+        return false;
+    }
+    match own_cgroup() {
+        Ok(text) => {
+            if cgroup_text_is_transient(&text) || container_cgroup(&text) {
+                return false;
+            }
+        }
+        Err(()) => return false,
+    }
+    let parent = chain.get(1).map(|row| row.comm.as_str()).unwrap_or("");
+    !ci_env_set() && !hosted_runner_comm(&holder.comm) && !hosted_runner_comm(parent)
 }
 
 /// macOS: a controlling terminal, and the process the kernel names as
@@ -2655,7 +2737,7 @@ fn host_at_terminal() -> bool {
 #[cfg(target_os = "macos")]
 fn host_at_terminal() -> bool {
     let tty = controlling_tty();
-    if launchd_without_tty(parent_name().as_deref(), tty) {
+    if launchd_without_tty(parent_name().as_deref(), tty) || ci_env_set() {
         return false;
     }
     match at_terminal_with_responsible(tty, responsible_comm().as_deref(), &runner_names()) {
@@ -47578,6 +47660,48 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(super::launchd_without_tty(Some("Launchd"), false));
         assert!(!super::launchd_without_tty(Some("launchd"), true));
         assert!(!super::launchd_without_tty(Some("Terminal"), false));
+        assert_eq!(
+            super::at_terminal_with_responsible(true, Some("python3"), &runners),
+            Some(false)
+        );
+        assert_eq!(
+            super::at_terminal_with_responsible(true, Some("Runner.Worker"), &runners),
+            Some(false)
+        );
+    }
+
+    /// A pty is not enough. The session has to be an interactive login, and
+    /// a transient scope, a container or a CI runner is not one.
+    #[test]
+    fn a_login_session_is_required() {
+        assert!(super::interactive_login("gnome-terminal-", "bash"));
+        assert!(super::interactive_login("sshd", "bash"));
+        assert!(super::interactive_login("Terminal", "zsh"));
+        assert!(!super::interactive_login("python3", "ljos"));
+        assert!(!super::interactive_login("script", "bash"));
+        assert!(!super::interactive_login("systemd-run", "bash"));
+        assert!(super::container_cgroup(
+            "0::/system.slice/docker-abc.scope\n"
+        ));
+        assert!(super::container_cgroup(
+            "0::/user.slice/user-1000.slice/libpod-abc.scope\n"
+        ));
+        assert!(super::container_cgroup("0::/podman/abc\n"));
+        assert!(!super::container_cgroup(
+            "0::/user.slice/user-1000.slice/session-3.scope\n"
+        ));
+        assert!(!super::container_cgroup(
+            "0::/system.slice/pod-4bhi/cursor-agent/daemon\n"
+        ));
+        assert!(super::github_actions_set("true"));
+        assert!(super::github_actions_set("TRUE"));
+        assert!(super::github_actions_set("1"));
+        assert!(!super::github_actions_set("false"));
+        assert!(!super::github_actions_set(""));
+        assert!(super::hosted_runner_comm("Runner.Worker"));
+        assert!(super::hosted_runner_comm("runner.worker"));
+        assert!(!super::hosted_runner_comm("bash"));
+        let runners = vec!["cursor".to_string()];
         assert_eq!(
             super::at_terminal_with_responsible(true, None, &runners),
             None

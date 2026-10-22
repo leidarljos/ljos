@@ -362,6 +362,12 @@ as well: a parent that is one, a cgroup that names one, or a transient
 ``python3`` sits above the process, and a cgroup that cannot be read
 counts as a runner. The variable together with that evidence does hide
 the person. A variable with no terminal, as a hook or a pipe has, still does.
+The person is present only when that terminal belongs to an interactive
+login session. The process holding the session's tty, or the session
+leader, is a terminal emulator, a multiplexer or a login. ``systemd-run
+--scope``, a container (``docker``, ``podman``) and a CI runner
+(``GITHUB_ACTIONS``, ``Runner.Worker``) are not that session, even when
+the environment was cleared and a pty is open.
 A prompt event is not always the person: Codex sends one inside a
 subagent with the parent agent's brief as the prompt. A prompt whose
 payload names a subagent (``agent_id``), or a Codex thread other than the
