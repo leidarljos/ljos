@@ -1354,6 +1354,34 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "LJOS_SEAT_KEY was not used as given")]
+    fn an_explicit_seat_key_is_used_as_given() {
+        let _home = test_home();
+        let root = tempfile::tempdir().expect("root");
+        let given = root.path().join("seat.key");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe {
+                std::env::set_var("LJOS_SEAT_KEY", &given);
+                std::env::set_var("CURSOR_AGENT_ID", "agent-run-1111");
+            }
+        });
+        let path = crate::ballot_sig::seat_key_path("alpha/seat-a");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe {
+                std::env::remove_var("CURSOR_AGENT_ID");
+                std::env::remove_var("LJOS_SEAT_KEY");
+            }
+        });
+        assert_eq!(
+            path.as_deref(),
+            Some(given.as_path()),
+            "LJOS_SEAT_KEY was not used as given"
+        );
+    }
+
+    #[test]
     fn sign_entry_refuses_a_signer_not_named_on_the_entry() {
         let _home = test_home();
         let err = sign_entry(
