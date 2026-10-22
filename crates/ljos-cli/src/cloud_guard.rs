@@ -1607,6 +1607,20 @@ fn parse_api_call<'a>(words: impl Iterator<Item = &'a str>, cwd: Option<&Path>) 
                 continue;
             }
         }
+        if let Some(cluster) = word.strip_prefix('-') {
+            if !word.starts_with("--") && !cluster.is_empty() && !API_VALUED.contains(&word) {
+                take_api_cluster(
+                    cluster,
+                    &mut it,
+                    cwd,
+                    &mut method,
+                    &mut method_unreadable,
+                    &mut fields,
+                    &mut opaque,
+                );
+                continue;
+            }
+        }
         if API_VALUED.contains(&word) {
             let Some(value) = it.next() else {
                 continue;
@@ -1643,6 +1657,54 @@ fn parse_api_call<'a>(words: impl Iterator<Item = &'a str>, cwd: Option<&Path>) 
         method_unreadable,
         endpoint_unreadable,
     })
+}
+
+/// gh shorts stuck to their values: `-fbase=main`, `-Fk=@file`, `-if title=x`.
+/// `i` is boolean. `f`, `F`, and `X` take the rest of the cluster or the next word.
+fn take_api_cluster<'a>(
+    cluster: &str,
+    it: &mut impl Iterator<Item = &'a str>,
+    cwd: Option<&Path>,
+    method: &mut Option<String>,
+    method_unreadable: &mut bool,
+    fields: &mut Vec<(String, String)>,
+    opaque: &mut bool,
+) {
+    const VALUE: &str = "fFXHqpt";
+    const BOOL: &str = "i";
+    let chars: Vec<char> = cluster.chars().collect();
+    let mut k = 0usize;
+    while k < chars.len() {
+        let c = chars[k];
+        if BOOL.contains(c) {
+            k += 1;
+            continue;
+        }
+        if VALUE.contains(c) {
+            let attached: String = chars[k + 1..].iter().collect();
+            let value = if attached.is_empty() {
+                it.next().unwrap_or("").to_string()
+            } else {
+                attached
+            };
+            match c {
+                'X' => {
+                    if unreadable_token(&value) {
+                        *method_unreadable = true;
+                    }
+                    *method = Some(value);
+                }
+                'f' => fields.push(field_pair(&value)),
+                'F' => match resolve_typed_field(&value, cwd) {
+                    Ok(pair) => fields.push(pair),
+                    Err(()) => *opaque = true,
+                },
+                _ => {}
+            }
+            return;
+        }
+        k += 1;
+    }
 }
 
 /// `-F` / `--field` reads `@file` as the field's value. `-f` does not.
