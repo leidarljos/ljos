@@ -21299,6 +21299,95 @@ pub(crate) fn read_state_file(path: &Path) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Replace `path` with `bytes` through the directory ljos made, refusing a
+/// symlink at the file or at that directory.
+///
+/// A fresh temp is created beside the target with `O_CREAT | O_EXCL |
+/// O_NOFOLLOW` mode 0600, written, fsynced, and renamed over the target
+/// from the directory descriptor; the directory is then fsynced so the
+/// rename is on disk. A `tmp + rename` through the path would follow a
+/// symlink and leave the file mode 0644; this does neither.
+pub(crate) fn rewrite_state_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    let (dir, name) = open_state_dir(path)?;
+    // A rename over the target would drop a symlink safely, but a state
+    // file ljos made is never one, so its presence there is tampering.
+    // SAFETY: `dir` is an open directory descriptor and `name` has no
+    // interior NUL; `stat` is filled by the call.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let seen = unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            &mut st,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if seen == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFLNK {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is a symlink", path.display()),
+        ));
+    }
+    let mut tmp_bytes = path
+        .file_name()
+        .map(|n| n.as_bytes().to_vec())
+        .unwrap_or_default();
+    tmp_bytes.extend_from_slice(format!(".{}.tmp", std::process::id()).as_bytes());
+    let tmp = std::ffi::CString::new(tmp_bytes)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+    // SAFETY: `dir` is an open directory descriptor; `tmp` has no interior
+    // NUL. A leftover temp from a crashed write is removed and the create
+    // is tried once more. openat returns a new descriptor or -1.
+    let fd = unsafe {
+        let open = || {
+            libc::openat(
+                dir.as_raw_fd(),
+                tmp.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600 as libc::c_uint,
+            )
+        };
+        let mut fd = open();
+        if fd < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EEXIST) {
+            libc::unlinkat(dir.as_raw_fd(), tmp.as_ptr(), 0);
+            fd = open();
+        }
+        fd
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fd` was just opened above and nothing else owns it.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    if let Err(err) = written {
+        // SAFETY: `dir` and `tmp` are still valid; a failed write leaves no
+        // temp behind.
+        unsafe { libc::unlinkat(dir.as_raw_fd(), tmp.as_ptr(), 0) };
+        return Err(err);
+    }
+    drop(file);
+    // SAFETY: both descriptors are open and both names have no interior NUL.
+    let renamed = unsafe {
+        libc::renameat(
+            dir.as_raw_fd(),
+            tmp.as_ptr(),
+            dir.as_raw_fd(),
+            name.as_ptr(),
+        )
+    };
+    if renamed != 0 {
+        let err = std::io::Error::last_os_error();
+        // SAFETY: as above; clean up the temp the rename did not consume.
+        unsafe { libc::unlinkat(dir.as_raw_fd(), tmp.as_ptr(), 0) };
+        return Err(err);
+    }
+    dir.sync_all()
+}
+
 /// The rows of a log written by [`append_locked_row`], read without its
 /// lock.
 ///
@@ -26515,6 +26604,35 @@ impl CommitLock {
         else {
             return Self(None);
         };
+        // SAFETY: flock on a descriptor this struct owns until drop.
+        let ok = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0;
+        Self(ok.then_some(file))
+    }
+
+    /// Like [`Self::acquire`], but the lock file is made in a directory ljos
+    /// made, created mode 0600 and not through a symlink. A lock that cannot
+    /// be opened is no lock, as above.
+    #[must_use]
+    pub(crate) fn acquire_private(path: &std::path::Path) -> Self {
+        use std::os::unix::io::{AsRawFd, FromRawFd};
+        let Ok((dir, name)) = open_state_dir(path) else {
+            return Self(None);
+        };
+        // SAFETY: `dir` is an open directory descriptor; `name` has no
+        // interior NUL. openat returns a new descriptor or -1.
+        let fd = unsafe {
+            libc::openat(
+                dir.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600 as libc::c_uint,
+            )
+        };
+        if fd < 0 {
+            return Self(None);
+        }
+        // SAFETY: `fd` was just opened above and nothing else owns it.
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
         // SAFETY: flock on a descriptor this struct owns until drop.
         let ok = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0;
         Self(ok.then_some(file))
