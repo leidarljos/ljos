@@ -123,8 +123,10 @@ fn every_tracker_write_from_a_shell_with_no_seat_is_refused() {
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success(), "{args:?} went through: {out:?}");
         assert!(err.contains("no seat is named"), "{args:?}: {err}");
+        // Which derived seat it is depends on what runs above the test.
         assert!(
-            err.contains("the program above this shell"),
+            err.contains("the program above this shell")
+                || err.contains("the login user of a shell under an agent runner"),
             "{args:?}: {err}"
         );
         assert!(err.contains("LJOS_SEAT"), "{args:?} names the fix: {err}");
@@ -338,5 +340,21 @@ fn a_slot_is_signed_only_by_a_listed_seat() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "{out:?}");
     assert!(err.contains("slot: no seat named stranger"), "{err}");
+    assert_eq!(b.calls(), "", "nothing reached the tracker");
+}
+
+#[test]
+fn a_seats_file_that_is_not_toml_refuses_every_write() {
+    let b = Bench::new();
+    let path = b.seats("seats = [\"saddle\"\n");
+    for args in WRITES {
+        let out = b.ljos(Some("saddle"), args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{args:?} went through: {out:?}");
+        assert!(
+            err.contains(&format!("the seats file {} is not TOML", path.display())),
+            "{args:?}: {err}"
+        );
+    }
     assert_eq!(b.calls(), "", "nothing reached the tracker");
 }

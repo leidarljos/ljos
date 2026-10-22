@@ -50469,6 +50469,66 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     #[test]
+    fn a_login_user_under_a_runner_warns_and_a_named_seat_with_no_seats_file_passes() {
+        let _env = env_guard();
+        let keys = [
+            "LJOS_SEAT",
+            "VISSUE_AGENT",
+            "LJOS_HOLD",
+            "LJOS_SEATS",
+            "CODEX_THREAD_ID",
+            "CODEX_SESSION_ID",
+            "GROK_SESSION_ID",
+            "USER",
+            "XDG_RUNTIME_DIR",
+        ];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            for k in keys {
+                std::env::remove_var(k);
+            }
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+            std::env::set_var("LJOS_SEATS", dir.path().join("seats.toml"));
+            std::env::set_var("USER", "probe-login");
+            std::env::set_var("GROK_SESSION_ID", "2c12969d-0000-4000-8000-000000000000");
+        }
+        let derived = seat_source_row(&Seat {
+            seat: "probe-login".into(),
+            holder: "probe-login".into(),
+            source: "the login user".into(),
+        });
+        unsafe { std::env::set_var("LJOS_SEAT", "rohit") };
+        let named = doctor_seat_source();
+        let writes = write_seat("note");
+        unsafe {
+            for (k, v) in saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+        assert!(!derived.ok, "{}", derived.state);
+        assert_eq!(doctor_word(&derived), "warn");
+        assert!(
+            derived
+                .state
+                .contains("the login user of a shell under an agent runner"),
+            "{}",
+            derived.state
+        );
+        assert!(healthy(&[derived]), "a derived seat fails no doctor");
+        assert!(named.ok, "{}", named.state);
+        assert!(healthy(&[named]));
+        assert_eq!(
+            writes.unwrap().seat,
+            "rohit",
+            "no seats file refuses nobody"
+        );
+    }
+
+    #[test]
     fn the_doctor_seat_source_row_names_the_seat_a_conversation_maps_to() {
         let _env = env_guard();
         let keys = [
