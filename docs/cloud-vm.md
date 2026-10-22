@@ -71,6 +71,16 @@ Set `LJOS_TRACKER_REMOTE` in the environment. The tracker repository has to be o
 
 `cloud up` rewrites the harness MCP command to `ljos-mcp` on PATH. A claim, a note and a vote then push to the tracker, and another clone sees them after a fetch. A `STARTED` claim whose program has exited returns to `TODO` after `LJOS_LEASE_SECS`. A claim whose program is still running stays. The tracker URL has to be one the machine's git credentials can clone.
 
+## Slots
+
+A run's seat is new, and the tracker pins its key the first time it signs. Any writer with push to the tracker can pin a name that way, so a seat first pinned after slots began counts toward a push cite only under a slot. The seat that launches a cloud agent or a job writes one on the issue it hands over, before the run's first ballot:
+
+```sh
+ljos slot ISSUE ridley-review --model grok-4 --run "$AGENT_ID"
+```
+
+`ridley-review` is the run's `LJOS_SEAT`, and the run id is appended the way `cloud up` appends it. The slot is signed under the launcher's pinned key, and the launcher has to be a seat pinned before slots began. `ljos consensus` and the push gate count the run's ballot on that issue when the slot verifies and the run's key was pinned after it. A seat pinned before slots began needs no slot. On a tracker that is not a git repository, no seat needs one.
+
 ## A panel
 
 `ljos panel ISSUE --cloud` writes one prompt file per persona under `--out` (default `panel`). Start one cloud seat from each file. The file sets `LJOS_SEAT` and `VISSUE_AGENT` to the persona's slug and `LJOS_TRACKER_GIT=push`, then says to run `ljos cloud up`, which appends the run id and mints the key. The slot line is `slot: SEAT model=FAMILY`. Families rotate grok, opus, codex in persona name order. The launcher signs `slot: SEAT model=FAMILY run=RUN` when the run id exists; this command records the line and does not sign it. The file also states the push rules: no ref under `cursor/`, no `gh pr create`, no `gh pr merge`, no force-push. The brief is `ljos brief NAME ISSUE` on the seat after `cloud up`. The prompt file does not carry the pack. The tracker URL stays in the launcher's environment.
