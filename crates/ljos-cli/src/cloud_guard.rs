@@ -425,7 +425,7 @@ fn judge_depth(line: &str, cwd: Option<&Path>, incoming: &WalkIn) -> Verdict {
                     if http_targets_github(&words) {
                         verdict.saw_ref = true;
                     }
-                    if let Some(why) = http_ref_write(&words, &run.env) {
+                    if let Some(why) = http_ref_write(&words, &run.env, here.as_deref()) {
                         if verdict.push.is_none() {
                             verdict.push = Some(why);
                         }
@@ -3674,6 +3674,14 @@ fn script_mentions_ref_write(text: &str) -> bool {
 }
 
 fn http_targets_github(words: &[String]) -> bool {
+    http_hosts(words).0
+}
+
+/// `(treat as GitHub, saw a host that is not GitHub)`.
+///
+/// A hidden host counts as GitHub: the line does not show where it goes.
+/// A visible other host does not, so cargo and npm stay allowed.
+fn http_hosts(words: &[String]) -> (bool, bool) {
     let cmd = words
         .first()
         .map(|word| word.rsplit('/').next().unwrap_or(word.as_str()))
@@ -3716,14 +3724,14 @@ fn http_targets_github(words: &[String]) -> bool {
         }
     }
     if github {
-        return true;
+        return (true, other);
     }
     // A visible host that is not GitHub stays out of this allowlist, even
     // when the path or a header still has a substitution.
     if other {
-        return false;
+        return (false, true);
     }
-    hidden
+    (hidden, false)
 }
 
 fn curl_proto_default(words: &[String]) -> Option<String> {
@@ -3805,17 +3813,23 @@ fn is_github_host(host: &str) -> bool {
         || host.ends_with(".pkg.github.com")
 }
 
-fn http_ref_write(words: &[String], env: &[(String, String)]) -> Option<String> {
+fn http_ref_write(
+    words: &[String],
+    env: &[(String, String)],
+    cwd: Option<&Path>,
+) -> Option<String> {
     let cmd = words.first()?.rsplit('/').next()?;
     if !matches!(cmd, "curl" | "wget" | "http" | "https") {
         return None;
     }
+    let (shape, config_github) = http_shape(cmd, words, env, cwd);
     // A host that is not GitHub is left alone, including a clustered
-    // DELETE. Cargo and npm talk to those hosts.
-    if !http_targets_github(words) {
+    // DELETE. Cargo and npm talk to those hosts. A config file can name
+    // the host when the command line does not.
+    if !http_targets_github(words) && !config_github {
         return None;
     }
-    match http_shape(cmd, words, env) {
+    match shape {
         HttpShape::Get => None,
         HttpShape::Write | HttpShape::Opaque => Some(format!(
             "an HTTP client can write refs on GitHub and the destination is not limited to this seat; {ALLOW_RULE}"
@@ -3829,29 +3843,49 @@ enum HttpShape {
     Opaque,
 }
 
-fn http_shape(cmd: &str, words: &[String], env: &[(String, String)]) -> HttpShape {
+fn http_shape(
+    cmd: &str,
+    words: &[String],
+    env: &[(String, String)],
+    cwd: Option<&Path>,
+) -> (HttpShape, bool) {
     match cmd {
-        "curl" => curl_shape(words, env),
-        "wget" => wget_shape(words, env),
-        "http" | "https" => httpie_shape(words),
-        _ => HttpShape::Opaque,
+        "curl" => curl_shape(words, env, cwd),
+        "wget" => (wget_shape(words, env), false),
+        "http" | "https" => (httpie_shape(words), false),
+        _ => (HttpShape::Opaque, false),
     }
 }
 
-/// Boolean curl shorts. `G` is `--get` and `I` is `--head`. `n` is
-/// `--netrc` and is not in this set.
-const CURL_BOOL: &str = "sSfkLvgGIOJi4";
+/// Boolean curl shorts. `G` is `--get` and `I` is `--head`. `q` is
+/// `--disable`. `n` is `--netrc` and is not in this set.
+const CURL_BOOL: &str = "sSfkLvgGIOJiq4";
 /// Curl shorts that take a value. `K` is a config file.
 const CURL_VALUE: &str = "XdHuKoTFAbcemwExUrPQDyYztC";
 
-fn curl_shape(words: &[String], env: &[(String, String)]) -> HttpShape {
-    if !curl_disabled(words) && carries_token(words, env) && curl_config_applies(words, env) {
-        return HttpShape::Opaque;
+/// Method, body and host learned from a curl or wget config file.
+#[derive(Default)]
+struct Tune {
+    method: Option<String>,
+    body: bool,
+    upload: bool,
+    query: bool,
+    /// A config line named a GitHub host.
+    github: bool,
+    /// A config that applies could not be read.
+    unreadable: bool,
+}
+
+fn curl_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) -> (HttpShape, bool) {
+    let mut tune = Tune::default();
+    let mut seen = HashSet::new();
+    // `-q` and `--disable` skip the default curlrc only as the first
+    // argument. A later one still loads the file, which can set the method.
+    if !curl_rc_skipped(words) {
+        if let Some(shape) = curl_default_files(env, cwd, &mut tune, &mut seen) {
+            return (shape, curl_config_github(words, &tune));
+        }
     }
-    let mut method: Option<String> = None;
-    let mut body = false;
-    let mut upload = false;
-    let mut query = false;
     let mut i = 1usize;
     while i < words.len() {
         let word = words[i].as_str();
@@ -3859,15 +3893,8 @@ fn curl_shape(words: &[String], env: &[(String, String)]) -> HttpShape {
             break;
         }
         if word.starts_with("--") {
-            match curl_long(
-                words,
-                &mut i,
-                &mut method,
-                &mut body,
-                &mut upload,
-                &mut query,
-            ) {
-                Some(shape) => return shape,
+            match curl_long(words, &mut i, &mut tune, cwd, &mut seen) {
+                Some(shape) => return (shape, curl_config_github(words, &tune)),
                 None => continue,
             }
         }
@@ -3876,22 +3903,34 @@ fn curl_shape(words: &[String], env: &[(String, String)]) -> HttpShape {
                 i += 1;
                 continue;
             }
-            if let Some(shape) = curl_cluster(
-                cluster,
-                words,
-                &mut i,
-                &mut method,
-                &mut body,
-                &mut upload,
-                &mut query,
-            ) {
-                return shape;
+            if let Some(shape) = curl_cluster(cluster, words, &mut i, &mut tune, cwd, &mut seen) {
+                return (shape, curl_config_github(words, &tune));
             }
             continue;
         }
         i += 1;
     }
-    finish_http(method.as_deref(), body, query, upload)
+    let shape = finish_http(tune.method.as_deref(), tune.body, tune.query, tune.upload);
+    (shape, curl_config_github(words, &tune))
+}
+
+fn curl_config_github(words: &[String], tune: &Tune) -> bool {
+    if tune.github {
+        return true;
+    }
+    // The file was not readable, so the host it would request is unknown
+    // unless the command already shows a host that is not GitHub.
+    tune.unreadable && !http_hosts(words).1
+}
+
+/// Curl skips its default curlrc when `-q` or `--disable` is argv[1].
+/// `-qs` counts: curl compares the first argument with the prefix `-q`.
+fn curl_rc_skipped(words: &[String]) -> bool {
+    match words.get(1).map(String::as_str) {
+        Some("--disable") => true,
+        Some(word) => word.starts_with("-q"),
+        None => false,
+    }
 }
 
 fn finish_http(method: Option<&str>, body: bool, query: bool, upload: bool) -> HttpShape {
@@ -3906,10 +3945,6 @@ fn finish_http(method: Option<&str>, body: bool, query: bool, upload: bool) -> H
         None if body && !query => HttpShape::Write,
         None => HttpShape::Get,
     }
-}
-
-fn curl_disabled(words: &[String]) -> bool {
-    words.iter().any(|word| word == "-q" || word == "--disable")
 }
 
 fn carries_token(words: &[String], env: &[(String, String)]) -> bool {
@@ -3962,26 +3997,6 @@ fn prefixed_or_process(env: &[(String, String)], key: &str) -> Option<String> {
     std::env::var(key).ok()
 }
 
-fn curl_config_applies(words: &[String], env: &[(String, String)]) -> bool {
-    if curl_disabled(words) {
-        return false;
-    }
-    if prefixed_or_process(env, "CURL_HOME").is_some_and(|value| !value.is_empty()) {
-        return true;
-    }
-    if let Ok(home) = crate::home() {
-        if home.join(".curlrc").is_file() {
-            return true;
-        }
-    }
-    if let Some(xdg) = prefixed_or_process(env, "XDG_CONFIG_HOME") {
-        if !xdg.is_empty() && Path::new(&xdg).join("curlrc").is_file() {
-            return true;
-        }
-    }
-    false
-}
-
 fn wget_config_applies(words: &[String], env: &[(String, String)]) -> bool {
     if words
         .iter()
@@ -4000,19 +4015,22 @@ fn wget_config_applies(words: &[String], env: &[(String, String)]) -> bool {
 fn curl_long(
     words: &[String],
     i: &mut usize,
-    method: &mut Option<String>,
-    body: &mut bool,
-    upload: &mut bool,
-    query: &mut bool,
+    tune: &mut Tune,
+    cwd: Option<&Path>,
+    seen: &mut HashSet<PathBuf>,
 ) -> Option<HttpShape> {
     let word = words[*i].as_str();
     let (name, attached) = word.split_once('=').unwrap_or((word, ""));
     let lower = name.to_ascii_lowercase();
     if matches!(
         lower.as_str(),
-        "--netrc" | "--netrc-optional" | "--netrc-file" | "--config"
+        "--netrc" | "--netrc-optional" | "--netrc-file"
     ) {
         return Some(HttpShape::Opaque);
+    }
+    if lower == "--config" {
+        let value = flag_value(words, i, attached);
+        return curl_named_file(&value, cwd, tune, seen);
     }
     if matches!(
         lower.as_str(),
@@ -4031,25 +4049,25 @@ fn curl_long(
         return if value.starts_with('@') {
             Some(HttpShape::Opaque)
         } else if uploading {
-            *upload = true;
+            tune.upload = true;
             None
         } else {
-            *body = true;
+            tune.body = true;
             None
         };
     }
     if lower == "--request" {
         let value = flag_value(words, i, attached);
-        *method = Some(value.to_ascii_uppercase());
+        tune.method = Some(value.to_ascii_uppercase());
         return None;
     }
     if lower == "--head" {
-        *method = Some("HEAD".to_string());
+        tune.method = Some("HEAD".to_string());
         *i += 1;
         return None;
     }
     if lower == "--get" {
-        *query = true;
+        tune.query = true;
         *i += 1;
         return None;
     }
@@ -4058,6 +4076,9 @@ fn curl_long(
         "--header" | "--oauth2-bearer" | "--user" | "--url"
     ) {
         let value = flag_value(words, i, attached);
+        if lower == "--url" {
+            note_cfg_url(&value, tune);
+        }
         return if lower == "--header" && value.starts_with('@') {
             Some(HttpShape::Opaque)
         } else {
@@ -4140,10 +4161,9 @@ fn curl_cluster(
     cluster: &str,
     words: &[String],
     i: &mut usize,
-    method: &mut Option<String>,
-    body: &mut bool,
-    upload: &mut bool,
-    query: &mut bool,
+    tune: &mut Tune,
+    cwd: Option<&Path>,
+    seen: &mut HashSet<PathBuf>,
 ) -> Option<HttpShape> {
     let chars: Vec<char> = cluster.chars().collect();
     let mut k = 0;
@@ -4151,10 +4171,10 @@ fn curl_cluster(
         let c = chars[k];
         if CURL_BOOL.contains(c) {
             if c == 'G' {
-                *query = true;
+                tune.query = true;
             }
             if c == 'I' {
-                *method = Some("HEAD".to_string());
+                tune.method = Some("HEAD".to_string());
             }
             k += 1;
             continue;
@@ -4173,19 +4193,19 @@ fn curl_cluster(
             attached
         };
         return match c {
-            'K' => Some(HttpShape::Opaque),
+            'K' => curl_named_file(&value, cwd, tune, seen),
             'X' => {
-                *method = Some(value.to_ascii_uppercase());
+                tune.method = Some(value.to_ascii_uppercase());
                 None
             }
             'd' | 'T' | 'F' => {
                 if value.starts_with('@') {
                     Some(HttpShape::Opaque)
                 } else if c == 'd' {
-                    *body = true;
+                    tune.body = true;
                     None
                 } else {
-                    *upload = true;
+                    tune.upload = true;
                     None
                 }
             }
@@ -4195,6 +4215,434 @@ fn curl_cluster(
     }
     *i += 1;
     None
+}
+
+fn curl_named_file(
+    value: &str,
+    cwd: Option<&Path>,
+    tune: &mut Tune,
+    seen: &mut HashSet<PathBuf>,
+) -> Option<HttpShape> {
+    if value.is_empty() || value == "-" {
+        tune.unreadable = true;
+        return Some(HttpShape::Opaque);
+    }
+    read_curl_file(&resolve_cfg(value, cwd), cwd, tune, seen, true)
+}
+
+/// Default curlrc search. `CURL_HOME` replaces the others: a missing file
+/// there is opaque, because the variable says a config applies and it
+/// could not be read. Otherwise the first of the XDG file and `~/.curlrc`
+/// that exists is the one curl would load.
+fn curl_default_files(
+    env: &[(String, String)],
+    cwd: Option<&Path>,
+    tune: &mut Tune,
+    seen: &mut HashSet<PathBuf>,
+) -> Option<HttpShape> {
+    if let Some(dir) = prefixed_or_process(env, "CURL_HOME") {
+        if !dir.is_empty() {
+            let path = PathBuf::from(dir).join(".curlrc");
+            return read_curl_file(&path, cwd, tune, seen, true);
+        }
+    }
+    if let Some(xdg) = prefixed_or_process(env, "XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            let path = PathBuf::from(xdg).join("curlrc");
+            if let Some(shape) = read_curl_file(&path, cwd, tune, seen, false) {
+                return Some(shape);
+            }
+            if tune.unreadable || seen.iter().any(|have| have == &cfg_key(&path)) {
+                return None;
+            }
+        }
+    }
+    if let Some(home) = prefixed_or_process(env, "HOME") {
+        if !home.is_empty() {
+            let path = PathBuf::from(home).join(".curlrc");
+            return read_curl_file(&path, cwd, tune, seen, false);
+        }
+    }
+    None
+}
+
+/// `required` makes a missing file opaque. A default curlrc that is simply
+/// absent does not apply.
+fn read_curl_file(
+    path: &Path,
+    cwd: Option<&Path>,
+    tune: &mut Tune,
+    seen: &mut HashSet<PathBuf>,
+    required: bool,
+) -> Option<HttpShape> {
+    if seen.len() >= 8 {
+        tune.unreadable = true;
+        return Some(HttpShape::Opaque);
+    }
+    let key = cfg_key(path);
+    if !seen.insert(key.clone()) {
+        return None;
+    }
+    match open_cfg(&key) {
+        Ok(None) if !required => {
+            seen.remove(&key);
+            None
+        }
+        Ok(None) | Err(()) => {
+            tune.unreadable = true;
+            Some(HttpShape::Opaque)
+        }
+        Ok(Some(text)) => apply_curl_text(&text, cwd, tune, seen),
+    }
+}
+
+fn apply_curl_text(
+    text: &str,
+    cwd: Option<&Path>,
+    tune: &mut Tune,
+    seen: &mut HashSet<PathBuf>,
+) -> Option<HttpShape> {
+    let mut opaque = false;
+    for line in text.lines() {
+        match curl_cfg_line(line) {
+            CfgLine::Blank => {}
+            CfgLine::Bad => opaque = true,
+            CfgLine::Item { name, value } => {
+                if apply_curl_opt(&name, value.as_deref(), cwd, tune, seen).is_some() {
+                    opaque = true;
+                }
+            }
+        }
+    }
+    opaque.then_some(HttpShape::Opaque)
+}
+
+enum CfgLine {
+    Blank,
+    Bad,
+    Item { name: String, value: Option<String> },
+}
+
+fn curl_cfg_line(line: &str) -> CfgLine {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return CfgLine::Blank;
+    }
+    if line.starts_with('-') {
+        return curl_dashed_line(line);
+    }
+    let mut name_end = line.len();
+    for (i, c) in line.char_indices() {
+        if c == '=' || c == ':' || c.is_whitespace() {
+            name_end = i;
+            break;
+        }
+    }
+    let name = &line[..name_end];
+    if name.is_empty() {
+        return CfgLine::Bad;
+    }
+    let rest = line[name_end..].trim_start();
+    let rest = if let Some(rest) = rest.strip_prefix('=').or_else(|| rest.strip_prefix(':')) {
+        rest.trim()
+    } else {
+        rest
+    };
+    if rest.is_empty() {
+        return CfgLine::Item {
+            name: name.to_ascii_lowercase(),
+            value: None,
+        };
+    }
+    match unquote(rest) {
+        Some(value) => CfgLine::Item {
+            name: name.to_ascii_lowercase(),
+            value: Some(value),
+        },
+        None => CfgLine::Bad,
+    }
+}
+
+fn curl_dashed_line(line: &str) -> CfgLine {
+    let long = line.starts_with("--");
+    let body = if long { &line[2..] } else { &line[1..] };
+    if body.is_empty() {
+        return CfgLine::Bad;
+    }
+    if !long {
+        let mut chars = body.chars();
+        let Some(flag) = chars.next() else {
+            return CfgLine::Bad;
+        };
+        let attached = chars.as_str().trim();
+        let value = if attached.is_empty() {
+            None
+        } else {
+            match unquote(attached) {
+                Some(value) => Some(value),
+                None => return CfgLine::Bad,
+            }
+        };
+        return CfgLine::Item {
+            name: flag.to_string(),
+            value,
+        };
+    }
+    let (name, raw) = if let Some((name, value)) = body.split_once('=') {
+        (name, Some(value))
+    } else if let Some((name, value)) = body.split_once(char::is_whitespace) {
+        (name, Some(value.trim()))
+    } else {
+        (body, None)
+    };
+    if name.is_empty() || name.chars().any(char::is_whitespace) {
+        return CfgLine::Bad;
+    }
+    let value = match raw {
+        None | Some("") => None,
+        Some(value) => match unquote(value.trim()) {
+            Some(value) => Some(value),
+            None => return CfgLine::Bad,
+        },
+    };
+    CfgLine::Item {
+        name: name.to_ascii_lowercase(),
+        value,
+    }
+}
+
+fn unquote(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if !raw.starts_with('"') {
+        return Some(raw.to_string());
+    }
+    let mut out = String::new();
+    let mut chars = raw[1..].chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some('t') => out.push('\t'),
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('v') => out.push('\u{0b}'),
+                Some(other) => out.push(other),
+                None => return None,
+            }
+            continue;
+        }
+        if c == '"' {
+            return Some(out);
+        }
+        out.push(c);
+    }
+    None
+}
+
+fn apply_curl_opt(
+    name: &str,
+    value: Option<&str>,
+    cwd: Option<&Path>,
+    tune: &mut Tune,
+    seen: &mut HashSet<PathBuf>,
+) -> Option<HttpShape> {
+    let short = name.chars().count() == 1;
+    match name {
+        "request" | "X" => {
+            let value = value.unwrap_or("");
+            if value.is_empty() {
+                return Some(HttpShape::Opaque);
+            }
+            tune.method = Some(value.to_ascii_uppercase());
+            None
+        }
+        "head" | "I" => {
+            tune.method = Some("HEAD".to_string());
+            None
+        }
+        "get" | "G" => {
+            tune.query = true;
+            None
+        }
+        "data" | "data-ascii" | "data-binary" | "data-raw" | "data-urlencode" | "json" | "d" => {
+            let value = value.unwrap_or("");
+            if value.starts_with('@') {
+                return Some(HttpShape::Opaque);
+            }
+            tune.body = true;
+            None
+        }
+        "upload-file" | "form" | "form-string" | "T" | "F" => {
+            let value = value.unwrap_or("");
+            if value.starts_with('@') {
+                return Some(HttpShape::Opaque);
+            }
+            tune.upload = true;
+            None
+        }
+        "header" | "H" => {
+            let value = value.unwrap_or("");
+            if value.starts_with('@') {
+                Some(HttpShape::Opaque)
+            } else {
+                None
+            }
+        }
+        "config" | "K" => {
+            let value = value.unwrap_or("");
+            curl_named_file(value, cwd, tune, seen)
+        }
+        "url" => {
+            if let Some(value) = value {
+                note_cfg_url(value, tune);
+            }
+            None
+        }
+        "netrc" | "netrc-optional" | "netrc-file" | "n" => Some(HttpShape::Opaque),
+        _ if short && curl_short_benign(name) => None,
+        _ if !short && curl_long_benign(name) => None,
+        _ => Some(HttpShape::Opaque),
+    }
+}
+
+fn curl_short_benign(name: &str) -> bool {
+    matches!(
+        name,
+        "s" | "S"
+            | "f"
+            | "k"
+            | "L"
+            | "v"
+            | "g"
+            | "O"
+            | "J"
+            | "i"
+            | "4"
+            | "6"
+            | "q"
+            | "o"
+            | "A"
+            | "b"
+            | "c"
+            | "e"
+            | "m"
+            | "u"
+            | "U"
+            | "r"
+            | "w"
+            | "x"
+            | "y"
+            | "Y"
+            | "z"
+            | "C"
+            | "E"
+            | "P"
+            | "Q"
+            | "D"
+    )
+}
+
+fn curl_long_benign(name: &str) -> bool {
+    matches!(
+        name,
+        "silent"
+            | "show-error"
+            | "fail"
+            | "fail-with-body"
+            | "insecure"
+            | "location"
+            | "location-trusted"
+            | "verbose"
+            | "globoff"
+            | "compressed"
+            | "progress-bar"
+            | "remote-name"
+            | "http1.1"
+            | "http2"
+            | "path-as-is"
+            | "no-progress-meter"
+            | "create-dirs"
+            | "ipv4"
+            | "ipv6"
+            | "retry-all-errors"
+            | "remote-header-name"
+            | "output"
+            | "retry"
+            | "retry-delay"
+            | "retry-max-time"
+            | "connect-timeout"
+            | "max-time"
+            | "max-redirs"
+            | "user-agent"
+            | "referer"
+            | "cookie"
+            | "cookie-jar"
+            | "proxy"
+            | "proxy-user"
+            | "cacert"
+            | "capath"
+            | "cert"
+            | "key"
+            | "speed-limit"
+            | "speed-time"
+            | "limit-rate"
+            | "output-dir"
+            | "write-out"
+            | "user"
+            | "oauth2-bearer"
+            | "disable"
+            | "include"
+            | "dump-header"
+    )
+}
+
+fn note_cfg_url(value: &str, tune: &mut Tune) {
+    if value.contains('$') || value.contains('`') {
+        tune.github = true;
+        return;
+    }
+    if let Some(host) = host_in_url(value).or_else(|| schemeless_host(value)) {
+        if is_github_host(&host) {
+            tune.github = true;
+        }
+    }
+}
+
+fn resolve_cfg(value: &str, cwd: Option<&Path>) -> PathBuf {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        path
+    } else {
+        cwd.map(|dir| dir.join(path))
+            .unwrap_or_else(|| PathBuf::from(value))
+    }
+}
+
+fn cfg_key(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn open_cfg(path: &Path) -> Result<Option<String>, ()> {
+    match std::fs::metadata(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(()),
+        Ok(meta) if !meta.is_file() => Ok(None),
+        Ok(_) => match std::fs::read_to_string(path) {
+            Ok(text) => Ok(Some(text)),
+            Err(_) => Err(()),
+        },
+    }
 }
 
 fn wget_shape(words: &[String], env: &[(String, String)]) -> HttpShape {

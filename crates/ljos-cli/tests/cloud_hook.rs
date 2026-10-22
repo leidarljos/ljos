@@ -908,7 +908,8 @@ fn a_token_and_a_client_config_hide_the_method() {
         "curl -s -H \"Authorization: Bearer $GH_TOKEN\" https://api.github.com/user",
         here,
     );
-    allowed("curl -s https://api.github.com/user", here);
+    // The file sets the method. A token on the command is not required.
+    refused("curl -s https://api.github.com/user", here);
     refused("echo hidden > ~/.curlrc", here);
     refused("echo hidden > ~/.wgetrc", here);
     refused(
@@ -919,6 +920,71 @@ fn a_token_and_a_client_config_hide_the_method() {
         "WGETRC=/tmp/wgetrc wget -q https://api.github.com/user --header \"Authorization: Bearer $GH_TOKEN\"",
         here,
     );
+}
+
+/// A curlrc can carry both the method and the token. The command line
+/// shows neither. `-q` or `--disable` as the first argument is the
+/// switch that leaves the default file unread.
+#[test]
+fn a_curl_config_is_a_write_without_a_token_on_the_command() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let rc = "request = DELETE\nheader = Authorization: Bearer x\n";
+
+    fs::write(home.join(".curlrc"), rc).unwrap();
+    refused("curl -s https://api.github.com/user", here);
+    allowed("curl -q -s https://api.github.com/user", here);
+    allowed("curl --disable -s https://api.github.com/user", here);
+    refused("curl -s -q https://api.github.com/user", here);
+    refused("curl -s --disable https://api.github.com/user", here);
+
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(home.join(".curlrc")).unwrap().permissions();
+    perms.set_mode(0o000);
+    fs::set_permissions(home.join(".curlrc"), perms.clone()).unwrap();
+    refused("curl -s https://api.github.com/user", here);
+    allowed("curl -q -s https://api.github.com/user", here);
+    perms.set_mode(0o644);
+    fs::set_permissions(home.join(".curlrc"), perms).unwrap();
+    fs::remove_file(home.join(".curlrc")).unwrap();
+
+    let dir = root.path().join("curlhome");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(".curlrc"), rc).unwrap();
+    refused(
+        &format!(
+            "CURL_HOME={} curl -s https://api.github.com/user",
+            dir.display()
+        ),
+        here,
+    );
+
+    fs::write(xdg.join("curlrc"), rc).unwrap();
+    refused("curl -s https://api.github.com/user", here);
+    fs::remove_file(xdg.join("curlrc")).unwrap();
+
+    let inner = root.path().join("inner.cfg");
+    fs::write(&inner, rc).unwrap();
+    fs::write(
+        home.join(".curlrc"),
+        format!("config = \"{}\"\n", inner.display()),
+    )
+    .unwrap();
+    refused("curl -s https://api.github.com/user", here);
+    fs::remove_file(home.join(".curlrc")).unwrap();
+
+    let named = root.path().join("k.cfg");
+    fs::write(
+        &named,
+        "url = \"https://api.github.com/user\"\nrequest = \"DELETE\"\nheader = \"Authorization: Bearer x\"\n",
+    )
+    .unwrap();
+    refused(&format!("curl -K {}", named.display()), here);
+    refused(&format!("curl --config {}", named.display()), here);
 }
 
 #[test]
