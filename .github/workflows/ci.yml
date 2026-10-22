@@ -50,10 +50,14 @@ jobs:
           command -v age-keygen
           command -v packset
           command -v packsetd
-      - name: Build deedar from main
+      # deedar on main writes no bytes/ and no sources sidecar, so a
+      # carried deed made from one this bag does not carry cannot be
+      # imported. deedimport2-20261021 writes both. Pin this build there
+      # until main carries that export.
+      - name: Build deedar from deedimport2-20261021
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch main https://github.com/leidarljos/deedar.git "${{ runner.temp }}/deedar"
+          git clone --depth 1 --branch deedimport2-20261021 https://github.com/leidarljos/deedar.git "${{ runner.temp }}/deedar"
           cargo build --locked --manifest-path "${{ runner.temp }}/deedar/Cargo.toml" -p deedar-cli --bin deedar
           mkdir -p "${{ runner.temp }}/bin"
           install -m 0755 "${{ runner.temp }}/deedar/target/debug/deedar" "${{ runner.temp }}/bin/deedar"

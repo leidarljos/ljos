@@ -129,7 +129,9 @@ the deed that showed it, and a contrary claim closes the old one's window.
 On a longitudinal corpus where one claim per topic is kept recalled and
 three paraphrases written later are not, retrievability ranks the kept
 claim first 0.947 of the time; lexical scoring scores at chance and a
-recency half-life at 0.270 (the packset site carries the table).
+recency half-life at 0.270 (the packset site carries the table). The
+stdout of that comparison is packset's
+`measurements/forgetting.txt <https://github.com/leidarljos/packset/blob/develop/measurements/forgetting.txt>`__.
 
 When the seat speaks
 ====================
@@ -413,6 +415,8 @@ panel of seven similar voters at three outcomes. That figure is the
 consensus crate's
 `examples/correlation\ history.rs <https://github.com/leidarljos/consensus/blob/main/examples/correlation_history.rs>`__,
 the row for seven voters in [0.60, 0.75] after three named outcomes.
+The stdout of that run is
+`measurements/correlation\ history-0-7-4000.txt <https://github.com/leidarljos/consensus/blob/develop/measurements/correlation_history-0-7-4000.txt>`__.
 ``learn`` therefore shrinks
 each voter's accuracy toward the panel's pooled accuracy before weighing
 it, by empirical Bayes (Efron and Morris,

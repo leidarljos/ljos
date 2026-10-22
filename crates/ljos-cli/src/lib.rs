@@ -18,6 +18,7 @@ pub mod ballot_sig;
 pub mod bookkeep;
 pub mod capture;
 pub mod cloud;
+mod cloud_guard;
 pub mod command_prefs;
 pub mod converge;
 mod deedbag;
@@ -96,8 +97,9 @@ pub struct Step {
 /// table each, and `onboard` and `doctor` read it.
 ///
 /// A runner registers MCP servers one of two ways. `register` is a command
-/// that does it (`{server}` is replaced by `ljos-mcp`, resolved on PATH) and
-/// `registered` a command that exits 0 once it is done. Or `config` is a
+/// that does it (`{server}` is `ljos-mcp` when that name on PATH is this
+/// install, and the absolute path otherwise). `registered` is a command
+/// that exits 0 once it is done. Or `config` is a
 /// file the runner reads, `marker` a line that means the entry is present,
 /// and `snippet` what to append when it is not. `skills` is the directory
 /// the runner loads skills from; the protocol goes to `<skills>/ljos/SKILL.md`.
@@ -650,9 +652,10 @@ pub struct Harnesses {
 /// prints it; the two shapes are a registering command and a config file.
 pub const HARNESSES_EXAMPLE: &str = r#"# ~/.config/ljos/harnesses.toml: runners this machine registers by command.
 # Optional: `ljos onboard` alone prints the one entry any runner takes.
-# {server} is replaced by ljos-mcp, resolved on PATH where the runner starts
-# it, and {name} by the runner's name. An absolute path would be the machine
-# that wrote the file.
+# {server} is ljos-mcp when that name on PATH is this install, and the
+# absolute path when it is not. {name} is the runner's name. An absolute
+# path is kept while the file exists here, and rewritten when a synced
+# config names a missing file.
 # Paths may start with ~. The seat names itself after the client that
 # connects; nothing is passed in env.
 
@@ -719,7 +722,7 @@ name = "hermes"
 # `hermes mcp add` asks which tools to enable; the answer is all of them.
 register = ["sh", "-c", "printf 'Y\\n' | hermes mcp add ljos --command {server}"]
 config = "~/.hermes/config.yaml"
-marker = "\n  ljos:\n    command:"
+marker = "  ljos:\n    command:"
 skills = "~/.hermes/skills"
 # A hermes installed without its MCP extra lists ljos and loads nothing.
 probe = ["hermes", "mcp", "test", "ljos"]
@@ -1193,18 +1196,17 @@ pub fn shipped_differences(path: &Path) -> Vec<String> {
     out
 }
 
-/// The MCP command a harness config names.
+/// The MCP command a harness config prefers.
 ///
-/// The runner resolves this on `PATH` when it starts the server. Storing
-/// [`server_path`] instead would bake in the machine that wrote the file,
-/// and a config synced onto another home would name a directory that is
-/// not there.
+/// The bare name when `ljos-mcp` on `PATH` is this install. The absolute
+/// [`server_path`] when that name is missing or resolves to a different
+/// binary.
 pub(crate) const MCP_SERVER_COMMAND: &str = "ljos-mcp";
 
 #[derive(Debug, Clone)]
-struct ServerCommandPlan {
-    command: String,
-    note: Option<String>,
+pub(crate) struct ServerCommandPlan {
+    pub(crate) command: String,
+    pub(crate) note: Option<String>,
 }
 
 /// Where `ljos-mcp` is, for this process to exec.
@@ -1235,7 +1237,7 @@ fn same_binary(a: &Path, b: &Path) -> bool {
     }
 }
 
-fn server_command_plan(server: &Path) -> ServerCommandPlan {
+pub(crate) fn server_command_plan(server: &Path, who: &str) -> ServerCommandPlan {
     match which::which(MCP_SERVER_COMMAND) {
         Ok(found) if same_binary(&found, server) => ServerCommandPlan {
             command: MCP_SERVER_COMMAND.to_string(),
@@ -1244,7 +1246,7 @@ fn server_command_plan(server: &Path) -> ServerCommandPlan {
         Ok(found) => ServerCommandPlan {
             command: server.display().to_string(),
             note: Some(format!(
-                "PATH resolves {MCP_SERVER_COMMAND} to {}, so onboard wrote {}",
+                "PATH resolves {MCP_SERVER_COMMAND} to {}, so {who} wrote {}",
                 found.display(),
                 server.display()
             )),
@@ -1252,7 +1254,7 @@ fn server_command_plan(server: &Path) -> ServerCommandPlan {
         Err(_) => ServerCommandPlan {
             command: server.display().to_string(),
             note: Some(format!(
-                "PATH does not resolve {MCP_SERVER_COMMAND}, so onboard wrote {}",
+                "PATH does not resolve {MCP_SERVER_COMMAND}, so {who} wrote {}",
                 server.display()
             )),
         },
@@ -1284,7 +1286,12 @@ pub fn exec_server(args: &[std::ffi::OsString]) -> anyhow::Error {
 /// The MCP server entry any runner that reads JSON accepts.
 pub fn server_entry() -> Result<Value> {
     let server = server_path()?;
-    let plan = server_command_plan(&server);
+    let plan = server_command_plan(&server, "onboard");
+    // `--harness json` prints this value alone on stdout so it parses.
+    // The reason for an absolute path goes to stderr.
+    if let Some(note) = &plan.note {
+        eprintln!("{note}");
+    }
     Ok(serde_json::json!({
         "mcpServers": {
             "ljos": {
@@ -1301,9 +1308,8 @@ fn write_skill(dir: &Path, dry: bool) -> Step {
     runner_skills::install_skill(&dir.join("ljos").join("SKILL.md"), dry)
 }
 
-/// `{server}` is the MCP command, `{name}` the runner's name from the
-/// runners file. A harness config passes [`MCP_SERVER_COMMAND`], not an
-/// absolute path.
+/// `{server}` is the MCP command: the bare name when PATH resolves to this
+/// install, and the absolute path otherwise. `{name}` is the runner's name.
 fn filled(argv: &[String], server: &Path, name: &str) -> Vec<String> {
     argv.iter()
         .map(|a| a.replace("{server}", &server.display().to_string()))
@@ -3583,8 +3589,8 @@ fn heal_detail(base: &str, healed: &Result<Option<String>>) -> String {
     }
 }
 
-/// An absolute path whose file name is the MCP server. That path is the
-/// machine that wrote the config.
+/// An absolute path whose file name is the MCP server. It may name another
+/// machine. A path that is a file here is this install and is left alone.
 fn is_absolute_ljos_mcp(value: &str) -> bool {
     let path = Path::new(value);
     path.is_absolute() && path.file_name().and_then(|n| n.to_str()) == Some(MCP_SERVER_COMMAND)
@@ -3611,9 +3617,10 @@ fn command_made_portable(command: &mut Value, replacement: &str) -> bool {
     }
 }
 
-/// Point an existing JSON entry at [`MCP_SERVER_COMMAND`] when it still
-/// names an absolute `ljos-mcp`. A runner that was onboarded before keeps
-/// that path until the next onboard, and then syncs it again.
+/// Rewrite an existing JSON entry whose command is an absolute `ljos-mcp`
+/// that is not a file here. The replacement is the bare name, or this
+/// install's path when the bare name would not run it. A path that exists
+/// is left alone.
 fn heal_json_command(
     path: &Path,
     pointer: &str,
@@ -3716,7 +3723,13 @@ fn rewrite_marker_command(text: &str, marker: &str, replacement: &str) -> (Strin
     let Some(found) = text.find(marker) else {
         return (text.to_string(), false);
     };
-    let start = text[..found].rfind('\n').map_or(0, |at| at + 1);
+    // A marker that begins with a newline already names the next line.
+    // Rewinding once more rewrites the sibling command above it.
+    let start = if marker.starts_with('\n') {
+        found + 1
+    } else {
+        text[..found].rfind('\n').map_or(0, |at| at + 1)
+    };
     let end = marker_section_end(text, start, marker);
     let mut at = start;
     while at < end {
@@ -3819,7 +3832,7 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             ok: false,
         };
     }
-    let plan = server_command_plan(server);
+    let plan = server_command_plan(server, "onboard");
     match is_registered(h, server) {
         Some(true) => {
             let healed = heal_registered(h, &plan.command, dry);
@@ -5838,35 +5851,83 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
 }
 
 /// The directory the tool executes in, including an explicit tool override.
-/// Relative overrides are resolved against the hook's directory.
+/// Relative overrides are resolved lexically against the hook's directory.
 pub fn hook_directory(input: &str) -> Result<PathBuf> {
     let value = serde_json::from_str::<Value>(input).unwrap_or(Value::Null);
-    let base = value["cwd"]
-        .as_str()
-        .or_else(|| value["workspacePaths"][0].as_str())
+    let base = session_path_raw(&value)
         .map(PathBuf::from)
         .map(Ok)
         .unwrap_or_else(std::env::current_dir)?;
     if !base.is_absolute() {
         bail!("hook working directory must be absolute");
     }
+    let base = std::fs::canonicalize(base).context("hook working directory is unavailable")?;
+    if !base.is_dir() {
+        bail!("hook working directory is not a directory");
+    }
     let args = value
         .get("tool_input")
         .filter(|v| !v.is_null())
         .or_else(|| value.get("toolInput"));
     let override_dir = args
-        .and_then(|v| v.get("workdir").or_else(|| v.get("cwd")))
+        .and_then(|v| {
+            v.get("workdir")
+                .or_else(|| v.get("cwd"))
+                .or_else(|| v.get("dir_path"))
+                .or_else(|| v.get("directory"))
+        })
         .filter(|v| !v.is_null());
     let directory = match override_dir {
-        Some(v) => base.join(v.as_str().context("invalid tool working directory")?),
+        Some(v) => {
+            let raw = v.as_str().context("invalid tool working directory")?;
+            std::fs::canonicalize(resolve_tool_directory(&base, raw))
+                .context("tool working directory is unavailable")?
+        }
         None => base,
     };
-    let directory =
-        std::fs::canonicalize(directory).context("tool working directory is unavailable")?;
     if !directory.is_dir() {
         bail!("tool working directory is not a directory");
     }
     Ok(directory)
+}
+
+/// Resolve one tool workdir the way opencode does: lexical path resolution.
+fn resolve_tool_directory(base: &Path, raw: &str) -> PathBuf {
+    let expanded = if raw == "~" {
+        home().unwrap_or_else(|_| PathBuf::from(raw))
+    } else {
+        expand(raw)
+    };
+    let joined = if expanded.is_absolute() {
+        expanded
+    } else {
+        base.join(expanded)
+    };
+    lexical_path(&joined)
+}
+
+/// Lexical path normalization (`path.resolve` semantics).
+fn lexical_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(part.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let pop = out
+                    .components()
+                    .next_back()
+                    .is_some_and(|tail| matches!(tail, Component::Normal(_)));
+                if pop {
+                    out.pop();
+                }
+            }
+            Component::Normal(piece) => out.push(piece),
+        }
+    }
+    out
 }
 
 /// Directory a tool command is judged in.
@@ -5888,9 +5949,7 @@ pub fn command_directory(input: &str) -> Option<PathBuf> {
 /// session directory when the hook was started there.
 fn session_directory(input: &str) -> Option<PathBuf> {
     let value = serde_json::from_str::<Value>(input).ok()?;
-    let raw = value["cwd"]
-        .as_str()
-        .or_else(|| value["workspacePaths"][0].as_str())?;
+    let raw = session_path_raw(&value)?;
     let path = Path::new(raw);
     let joined = if path.is_absolute() {
         path.to_path_buf()
@@ -5900,6 +5959,14 @@ fn session_directory(input: &str) -> Option<PathBuf> {
     std::fs::canonicalize(joined)
         .ok()
         .filter(|path| path.is_dir())
+}
+
+/// The payload directory, with agy's tool-call cwd before workspace paths.
+fn session_path_raw(value: &Value) -> Option<&str> {
+    value["cwd"]
+        .as_str()
+        .or_else(|| value["toolCall"]["args"]["Cwd"].as_str())
+        .or_else(|| value["workspacePaths"][0].as_str())
 }
 
 /// What the runner's hook hands the seat: the event, and the text worth
@@ -11102,7 +11169,8 @@ mod read_back_tests {
 /// The seat ballots on `issue` that fail their signature check, said as
 /// one refusal. `Ok` when every seat ballot is signed under its pinned key
 /// or is legacy unsigned (committed to the tracker before signing began),
-/// and every signed seat first pinned after slots began is under a slot
+/// and every signed seat that is not standing is under a slot that this
+/// issue already held when its pin was introduced
 /// ([`slot::problems`]), or when `LJOS_UNSIGNED_BALLOTS=allow`; the `Ok`
 /// names the legacy ones.
 ///
@@ -11138,14 +11206,10 @@ pub fn check_seat_signatures(
         .into_iter()
         .filter(|(voter, _)| !old.iter().any(|o| o == voter))
         .collect();
-    let unslotted = slot::problems(
-        issue,
-        &signed,
-        &notes,
-        &pins,
-        &slot::pinned_at,
-        &slot::noted_at,
-    );
+    let unslotted = slot::problems(issue, &signed, &notes, &pins, &|note, voter| {
+        pins.get(voter)
+            .is_some_and(|key| slot::recorded_before_pin(issue, note, voter, key).unwrap_or(true))
+    });
     if unslotted.is_empty() {
         Ok(old)
     } else {
@@ -18237,10 +18301,12 @@ pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
 }
 
 /// Whether a cite stands: a tracker issue its seat ballots decide
-/// ([`seats_decide`]), open or closed. The text says which ballots it
-/// counted. A deed alone does not stand: the pushing seat can mint one
-/// with `deedar create` a moment before the push, so the decision has to
-/// be on an issue another seat voted on.
+/// ([`seats_decide`]), open or closed. The ballots are the ones
+/// [`ballot_rows`] counts, so one session is one ballot here and in
+/// `ljos consensus`. The text says which ballots it counted. A deed
+/// alone does not stand: the pushing seat can mint one with `deedar
+/// create` a moment before the push, so the decision has to be on an
+/// issue another seat voted on.
 pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
     if let Ok(v) = tracker_show_json(cite) {
         if let Some(why) = panel_gate::settle_refusal(cite) {
@@ -18372,12 +18438,16 @@ fn vissue_json(args: &[&str]) -> std::result::Result<Value, String> {
     serde_json::from_str(&said.stdout).map_err(|e| e.to_string())
 }
 
-/// An issue's ballots and the persona names to leave out of them.
+/// An issue's ballots and the persona names to leave out of them. The
+/// rows are what [`panel_gate::counted_ballots`] keeps of `vissue vote
+/// --json`, the same rows [`ballot_rows`] hands to consensus.
 fn cite_ballots(
     cite: &str,
 ) -> std::result::Result<(Vec<Value>, std::collections::BTreeSet<String>), String> {
     let ballots = vissue_json(&["vote", cite, "--json"])
         .map_err(|e| format!("{cite}: the ballots are not readable: {e}"))?;
+    let ballots =
+        panel_gate::counted_ballots(cite, &ballots.as_array().cloned().unwrap_or_default());
     let personas = personas_from_pack()
         .map_err(|e| {
             format!(
@@ -18387,7 +18457,7 @@ fn cite_ballots(
         .into_iter()
         .map(|p| p.name.trim().to_string())
         .collect();
-    Ok((ballots.as_array().cloned().unwrap_or_default(), personas))
+    Ok((ballots, personas))
 }
 
 /// The files that are the seat's law and its reach into each runner: the
@@ -25871,6 +25941,71 @@ pub enum PathCommit {
     Refused(String),
 }
 
+/// Refuse to commit into the checkout that holds this crate.
+///
+/// `cargo test` runs with the package directory as its working directory.
+/// A tracker root that falls back there makes `prepare_tracker` commit
+/// `.gitattributes` into the ljos history. That is how `3df31c6` appeared.
+/// The check is on in tests only: a seat that really uses this checkout
+/// as its tracker is a person, and this function does not second-guess one.
+pub(crate) fn refuse_ljos_checkout(root: &Path) -> Result<(), String> {
+    #[cfg(test)]
+    if ljos_source_checkout(root) {
+        return Err(format!(
+            "refusing to commit into the ljos checkout at {}; a test uses a temporary tracker",
+            root.display()
+        ));
+    }
+    let _ = root;
+    Ok(())
+}
+
+/// Whether `root` is the git checkout that contains this crate.
+#[cfg(test)]
+fn ljos_source_checkout(root: &Path) -> bool {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let Some(source) = git_toplevel(&manifest) else {
+        return false;
+    };
+    match git_toplevel(root) {
+        Some(top) => same_dir(&source, &top),
+        None => same_dir(&source, root),
+    }
+}
+
+#[cfg(test)]
+fn git_toplevel(start: &Path) -> Option<PathBuf> {
+    // `GIT_DIR` overrides `-C`. A dotfiles test exports it, and both
+    // directories then look like that work tree, so a temporary home was
+    // refused as if it were this repository. The guard is about the
+    // directory on disk.
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(start)
+        .args(["rev-parse", "--show-toplevel"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_NAMESPACE")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    (!path.as_os_str().is_empty() && path.is_dir()).then_some(path)
+}
+
+#[cfg(test)]
+fn same_dir(a: &Path, b: &Path) -> bool {
+    let canon = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    canon(a) == canon(b)
+}
+
 /// Stage `paths` and commit them alone (`--only`) in the checkout at
 /// `dir`, so another seat's staged work is left out. The caller holds
 /// [`tracker_commit_lock`]. A git process outside ljos that holds the
@@ -25880,6 +26015,9 @@ pub enum PathCommit {
 /// for a file git never took in reports a pathspec error that hides why
 /// the add failed. An untracked file is added here, that file only.
 pub fn commit_paths(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
+    if let Err(why) = refuse_ljos_checkout(dir) {
+        return PathCommit::Refused(why);
+    }
     let git = |head: &[&str]| {
         let mut cmd = std::process::Command::new("git");
         cmd.arg("-C")
@@ -26696,6 +26834,11 @@ pub fn policy_line(argv: &[String]) -> Result<String> {
 /// policy layer injects beside its verdict. The line prints even when the
 /// pack is down; the memory is the part that may be empty.
 pub fn policy_with_memory(argv: &[String]) -> Result<String> {
+    policy_with_memory_in(argv, None)
+}
+
+/// [`policy_with_memory`] for a command that runs in `cwd`.
+pub fn policy_with_memory_in(argv: &[String], cwd: Option<&Path>) -> Result<String> {
     let line = policy_line(argv)?;
     let call = HookCall {
         event: "argv".into(),
@@ -26709,17 +26852,30 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
     // already judged does not wait on policyd, which can hang. A guard that
     // is switched off judges nothing, policyd included.
     let off = bookkeep::guard_suspended();
-    let fast = if off { None } else { static_guard(&line) };
+    let fast = if off {
+        None
+    } else {
+        static_guard_in(&line, cwd)
+    };
     let judged = fast.is_some();
     let rules = if off { Vec::new() } else { rules_for_gate() };
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|d| d.display().to_string());
+    let cwd_text = cwd
+        .filter(|path| path.is_dir())
+        .map(|d| d.display().to_string())
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|d| d.display().to_string())
+        });
     let gated = if off {
         None
     } else {
         redirect_seat_verb(
-            gate_push(ruled_verdict(&rules, &line).as_ref(), &line, cwd.as_deref()),
+            gate_push(
+                ruled_verdict(&rules, &line).as_ref(),
+                &line,
+                cwd_text.as_deref(),
+            ),
             &line,
         )
     };
@@ -26735,7 +26891,7 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
     let tcb = if judged || off {
         None
     } else {
-        match tcb_check(argv) {
+        match tcb_check_in(argv, cwd) {
             // `git-force-push` asks, the same way the push gate does. The raw
             // `deny` line would read as a refusal beside that ask.
             Some(tcb) if policyd_token(&tcb) == "git-force-push" => None,
@@ -26841,13 +26997,22 @@ pub struct GuardReport {
 ///
 /// The command is empty, or the rules deny it.
 pub fn guard_report(line: &str) -> Result<GuardReport> {
+    guard_report_in(line, None)
+}
+
+/// [`guard_report`] for a command that would run in `cwd`.
+///
+/// # Errors
+///
+/// The command is empty, or the rules deny it.
+pub fn guard_report_in(line: &str, cwd: Option<&Path>) -> Result<GuardReport> {
     let line = line.trim();
     if line.is_empty() {
         bail!("guard: pass the command to check");
     }
     // Judge the line as written. Splitting it into argv and joining the
     // words again drops the quotes a commit message needs.
-    if let Some(rule) = static_guard(line) {
+    if let Some(rule) = static_guard_in(line, cwd) {
         // The push ran into an ask or a deny. Drop the evidence warning so
         // the next allowed command does not inherit it.
         let _ = gates::take_push_warning();
@@ -26868,7 +27033,7 @@ pub fn guard_report(line: &str) -> Result<GuardReport> {
         bail!("guard: pass the command to check");
     }
     let warning = gates::take_push_warning();
-    let mut text = policy_with_memory(&argv)?;
+    let mut text = policy_with_memory_in(&argv, cwd)?;
     let verdict = policy_verdict(&text);
     if verdict == "deny" {
         bail!("{text}");
@@ -26983,17 +27148,22 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     // A download and each later pipeline go once more as one call, so a
     // file `curl -o i.sh URL` saves and `sh i.sh` then runs is judged as
     // the pair it is.
-    let argvs = nested_lines(line, 0)
-        .into_iter()
-        .flat_map(|l| pipelines(&l))
-        .map(|seg| shell_words(&seg))
-        .chain(stdin_programs(line))
-        .chain(fetch_pairs(line));
-    for argv in argvs {
+    let mut argvs = pipeline_argvs(line, cwd);
+    argvs.extend(
+        stdin_programs(line)
+            .into_iter()
+            .map(|argv| (argv, cwd.map(Path::to_path_buf))),
+    );
+    argvs.extend(
+        fetch_pairs(line)
+            .into_iter()
+            .map(|argv| (argv, cwd.map(Path::to_path_buf))),
+    );
+    for (argv, at) in argvs {
         if argv.is_empty() {
             continue;
         }
-        match tcb_check_in(&argv, cwd) {
+        match tcb_check_in(&argv, at.as_deref()) {
             Some(t) if t.starts_with("deny") => {
                 clear_guard_note();
                 let token = policyd_token(&t);
@@ -27034,6 +27204,56 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
                  shell command runs until `cargo install --locked ljos-policyd` puts it on PATH"
             .to_string(),
     })
+}
+
+/// Each command line the TCB checks, with the directory that command runs in.
+///
+/// A `cd` or `pushd` in one pipeline changes where the next one runs.
+fn pipeline_argvs(line: &str, cwd: Option<&Path>) -> Vec<(Vec<String>, Option<PathBuf>)> {
+    let mut out = Vec::new();
+    for nested in nested_lines(line, 0) {
+        let mut at = cwd.filter(|path| path.is_dir()).map(Path::to_path_buf);
+        for seg in pipelines(&nested) {
+            let words = shell_words(&seg);
+            if words.is_empty() {
+                continue;
+            }
+            let here = at.clone();
+            if let Some(next) = cd_segment_target(&words, here.as_deref()) {
+                at = Some(next);
+            }
+            out.push((words, here));
+        }
+    }
+    out
+}
+
+/// Where a `cd` or `pushd` segment moves the next segment.
+fn cd_segment_target(words: &[String], cwd: Option<&Path>) -> Option<PathBuf> {
+    let (at, _) = prefix_end(words);
+    let command = words.get(at)?;
+    let name = base_name(command);
+    if name != "cd" && name != "pushd" {
+        return None;
+    }
+    let raw = match words.get(at + 1).map(String::as_str) {
+        Some(d) if d != "-" && !d.starts_with('-') => d,
+        None if name == "cd" => "~",
+        _ => return None,
+    };
+    let moved = if raw == "~" {
+        home().ok()?
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        home().ok()?.join(rest)
+    } else {
+        PathBuf::from(raw)
+    };
+    if moved.is_absolute() {
+        return Some(moved);
+    }
+    cwd.map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .map(|base| base.join(moved))
 }
 
 /// Most pairs [`fetch_pairs`] hands the TCB for one line.
@@ -27150,7 +27370,7 @@ pub fn static_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if let Some(rule) = destructive_delete(line) {
         return Some(rule);
     }
-    if let Some(rule) = cloud::guard_line(line) {
+    if let Some(rule) = cloud::guard_line(line, cwd) {
         return Some(rule);
     }
     if let Some(rule) = user_rules::guard_line(line) {
@@ -27445,17 +27665,23 @@ pub fn tcb_check(argv: &[String]) -> Option<String> {
 /// [`tcb_check`] for a command that will run in `cwd`.
 fn tcb_check_in(argv: &[String], cwd: Option<&Path>) -> Option<String> {
     let bin = policyd_bin()?;
-    Some(tcb_answer(&bin, argv, guard_timeout(), cwd))
+    Some(tcb_answer_in(&bin, argv, guard_timeout(), cwd))
 }
 
 /// What `bin check -- argv` says within `deadline`, as a verdict line.
+#[must_use]
+pub fn tcb_answer(bin: &Path, argv: &[String], deadline: std::time::Duration) -> String {
+    tcb_answer_in(bin, argv, deadline, None)
+}
+
+/// [`tcb_answer`] for a command that will run in `cwd`.
 ///
 /// `cwd` is the directory the checked command will run in. The binary
 /// starts there, so it reads that tree's Makefile or package.json. When
 /// `cwd` is missing or not a directory, the binary keeps this process's
 /// directory.
 #[must_use]
-pub fn tcb_answer(
+pub fn tcb_answer_in(
     bin: &Path,
     argv: &[String],
     deadline: std::time::Duration,
@@ -27478,7 +27704,7 @@ pub fn tcb_answer(
         // ljos-policyd reads a Makefile or package.json from the directory
         // the command will run in. The hook already has that directory.
         // A missing path, or one that is not a directory, leaves this
-        // process's directory, which is what the spawn did before.
+        // process's directory.
         if let Some(dir) = cwd.filter(|path| path.is_dir()) {
             cmd.current_dir(dir);
         }
@@ -29033,6 +29259,9 @@ pub(crate) fn test_env_lock() -> EnvLock {
 }
 
 #[cfg(test)]
+pub(crate) use tests::{serve_sync_pack, SyncPack};
+
+#[cfg(test)]
 mod tests {
     /// A guard shim refuses what ljos-policyd denies, with the rule and a
     /// way forward, and runs the real command for everything else.
@@ -29322,6 +29551,10 @@ mod tests {
     #[test]
     fn a_guard_shim_lets_a_feature_lease_push_run_and_asks_about_main() {
         use std::os::unix::fs::PermissionsExt;
+        // The shim inherits this process. Another test's GIT_DIR would
+        // make rev-parse leave the fixture, and a protected branch would
+        // be pushed instead of asked about.
+        let _g = env_guard();
         // A temp home with the explicit guard-on setting, not a directory
         // moved out of /tmp.
         let root = tempfile::tempdir().unwrap();
@@ -30801,7 +31034,11 @@ mod tests {
 
         let id = |r: &str| format!("vissue 0.16.2\nprotocol: 1\nroot={r}\nprefix=Software\n");
         let root_s = root.display().to_string();
-        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "5");
+        // The product default is five seconds. That is not enough in this
+        // test: the age is read after several git calls, and a busy suite
+        // spends that long inside git. A long wait still means younger than
+        // the wait. The zero below is what fails the row.
+        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "600");
         std::env::set_var("XDG_RUNTIME_DIR", dir.path());
 
         let (state, ok) = super::tracker_state(&id(&root_s), "VISSUE_ROOT=x");
@@ -36220,6 +36457,21 @@ mod tests {
     }
 
     #[test]
+    fn the_harness_example_says_when_the_command_is_bare() {
+        let text = super::HARNESSES_EXAMPLE;
+        assert!(
+            !text.contains("An absolute path would be the machine"),
+            "{text}"
+        );
+        assert!(!text.contains("always bare"), "{text}");
+        assert!(
+            text.contains("ljos-mcp when that name on PATH is this install"),
+            "{text}"
+        );
+        assert!(text.contains("absolute path when it is not"), "{text}");
+    }
+
+    #[test]
     fn a_probe_passes_only_when_the_runner_lists_ljos() {
         let s = |v: &[&str]| v.iter().map(|x| (*x).to_string()).collect::<Vec<_>>();
         assert!(probe_lists_ljos(&s(&["sh", "-c", "echo '  ljos_sitting   Call this'"])).is_ok());
@@ -40839,7 +41091,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// directory, which is where the hook's command will run. A fake
     /// policyd that prints `pwd -P` shows that directory reached it. A
     /// missing path, or a path that is not a directory, leaves the process
-    /// directory, which is what the spawn did before.
+    /// directory.
     #[test]
     fn the_hook_directory_is_where_policyd_runs() {
         let _g = env_guard();
@@ -40885,12 +41137,42 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     #[test]
+    fn a_cd_or_pushd_pipeline_is_checked_in_its_entered_directory() {
+        let _g = env_guard();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("danger")).unwrap();
+        let bin = fake_policyd(
+            root.path(),
+            "ljos-policyd",
+            "if [ \"$(basename \"$(/bin/pwd -P)\")\" = \"danger\" ]; then\n\
+             printf 'deny\\tmake-clean-all\\n'\n\
+             exit 2\n\
+             fi\n\
+             printf 'allow\\n'\n",
+        );
+        let _env = HoldEnv::set(&[
+            ("POLICYD_BIN", bin.to_str().unwrap()),
+            ("LJOS_GUARD", "on"),
+            ("LJOS_OFF", "0"),
+        ]);
+        for line in [
+            "cd danger && make clean-all",
+            "(cd danger; make clean-all)",
+            "pushd danger && make clean-all",
+        ] {
+            let rule = tcb_verdict_in(line, Some(root.path())).expect(line);
+            assert_eq!(rule.verdict, "deny", "{line}: {}", rule.reason);
+            assert_eq!(rule.pattern, "ljos-policyd", "{line}: {}", rule.reason);
+        }
+    }
+
+    #[test]
     fn a_tcb_that_crashes_or_times_out_allows_the_line() {
         let dir = tempfile::tempdir().unwrap();
         let argv = vec!["git".to_string(), "status".to_string()];
         let quick = std::time::Duration::from_millis(200);
         let answer = |name: &str, body: &str| {
-            tcb_answer(&fake_policyd(dir.path(), name, body), &argv, quick, None)
+            tcb_answer_in(&fake_policyd(dir.path(), name, body), &argv, quick, None)
         };
         assert_eq!(answer("allows", "echo allow"), "allow");
         assert_eq!(
@@ -40933,7 +41215,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             );
             assert!(!said.contains("refused unchecked"), "{name}: {said}");
         }
-        let gone = tcb_answer(&dir.path().join("missing"), &argv, quick, None);
+        let gone = tcb_answer_in(&dir.path().join("missing"), &argv, quick, None);
         assert!(
             gone.starts_with("allow\t") && gone.contains("did not start"),
             "{gone}"
@@ -43621,6 +43903,76 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         );
     }
 
+    /// How [`serve_sync_pack`] treats a post and a delete. Adopt's checks
+    /// need a pack that lists, keeps, refuses, or answers with the atom it
+    /// already holds.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum SyncPack {
+        /// Store a new atom. Delete removes one.
+        Keep,
+        /// POST answers 400 and stores nothing.
+        RefusePosts,
+        /// POST returns the stored atom of the same text and stores nothing.
+        EchoText,
+        /// POST stores. DELETE answers 500 and leaves the atom.
+        FailDeletes,
+    }
+
+    /// The keeping pack, plus the list and delete adopt and import call.
+    /// The same request loop as [`serve_keeping_pack`].
+    pub(crate) fn serve_sync_pack(mode: SyncPack) -> (String, Arc<Mutex<Vec<Value>>>) {
+        let stored = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let slot = Arc::clone(&stored);
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+            if first.contains("POST /v1/atoms/delete") {
+                if mode == SyncPack::FailDeletes {
+                    return (500, r#"{"error":"delete failed"}"#.into());
+                }
+                let id = serde_json::from_str::<Value>(body)
+                    .ok()
+                    .and_then(|v| v["id"].as_str().map(str::to_string))
+                    .unwrap_or_default();
+                let mut held = slot.lock().unwrap();
+                let before = held.len();
+                held.retain(|atom| atom["id"].as_str() != Some(id.as_str()));
+                if held.len() == before {
+                    return (404, format!(r#"{{"error":"no atom {id}"}}"#));
+                }
+                return (200, format!(r#"{{"deleted":"{id}"}}"#));
+            }
+            if first.contains("POST /v1/atoms") {
+                if mode == SyncPack::RefusePosts {
+                    return (400, r#"{"error":"held as proposal"}"#.into());
+                }
+                let Ok(mut atom) = serde_json::from_str::<Value>(body) else {
+                    return (400, r#"{"error":"atom text is required"}"#.into());
+                };
+                let mut held = slot.lock().unwrap();
+                if mode == SyncPack::EchoText {
+                    if let Some(existing) =
+                        held.iter().find(|stored| stored["text"] == atom["text"])
+                    {
+                        return (200, existing.to_string());
+                    }
+                }
+                atom["id"] = Value::String(format!("{:032x}", held.len() + 1));
+                held.push(atom.clone());
+                return (200, atom.to_string());
+            }
+            if first.contains("GET /v1/atoms") {
+                let held = slot.lock().unwrap().clone();
+                return (200, serde_json::json!({ "atoms": held }).to_string());
+            }
+            if first.contains("GET /v1/status") {
+                return (200, r#"{"version":"0.13.0"}"#.into());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        (url, stored)
+    }
+
     /// A pack that keeps what is posted and answers every search with it.
     fn serve_keeping_pack() -> (String, Arc<Mutex<Vec<Value>>>) {
         let stored: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
@@ -45019,11 +45371,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
     }
 
-    /// `ljos panel ISSUE --cloud` writes one prompt per seated persona.
-    /// The process seat and the tracker URL stay out of the file. The
-    /// brief's pack text stays out too.
-    #[test]
-    fn a_cloud_panel_writes_one_prompt_per_persona() {
+    /// `panel_cloud` on probe-l0g0 against a pack whose persona atoms are
+    /// `atoms`: the directory it ran in, the prompt directory, its answer.
+    fn cloud_panel(atoms: &'static str) -> (tempfile::TempDir, PathBuf, Result<String>) {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("tracker");
@@ -45040,13 +45390,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let (url, _seen) = serve_http(|req| {
+        let (url, _seen) = serve_http(move |req| {
             let line = req.lines().next().unwrap_or("");
             if line.starts_with("GET /v1/atoms") && line.contains("kind=persona") {
-                (
-                    200,
-                    r#"{"atoms":[{"id":"atom-a","kind":"persona","name":"ada","anchor":0.5,"text":"LEGIBILITY-VIEW-TOKEN ada","entities":["logo"],"ts":"2026-10-11T10:00:00Z"},{"id":"atom-b","kind":"persona","name":"bea","anchor":0.4,"text":"LEGIBILITY-VIEW-TOKEN bea","entities":["logo"],"ts":"2026-10-11T10:00:00Z"}]}"#.into(),
-                )
+                (200, atoms.into())
             } else if line.starts_with("GET /v1/atoms") {
                 (200, r#"{"atoms":[]}"#.into())
             } else {
@@ -45070,8 +45417,20 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let out = dir.path().join("panel");
         let said = with_fake_on_path(dir.path(), || {
             bind_playbook("probe-l0g0", "company-panel").unwrap();
-            super::panel_cloud::panel_cloud("probe-l0g0", &out).unwrap()
+            super::panel_cloud::panel_cloud("probe-l0g0", &out)
         });
+        (dir, out, said)
+    }
+
+    /// `ljos panel ISSUE --cloud` writes one prompt per seated persona.
+    /// The process seat and the tracker URL stay out of the file. The
+    /// brief's pack text stays out too.
+    #[test]
+    fn a_cloud_panel_writes_one_prompt_per_persona() {
+        let (_dir, out, said) = cloud_panel(
+            r#"{"atoms":[{"id":"atom-a","kind":"persona","name":"ada","anchor":0.5,"text":"LEGIBILITY-VIEW-TOKEN ada","entities":["logo"],"ts":"2026-10-11T10:00:00Z"},{"id":"atom-b","kind":"persona","name":"bea","anchor":0.4,"text":"LEGIBILITY-VIEW-TOKEN bea","entities":["logo"],"ts":"2026-10-11T10:00:00Z"}]}"#,
+        );
+        let said = said.unwrap();
         assert!(said.contains("2 of 2 personas"), "{said}");
         assert!(said.contains("model grok"), "{said}");
         assert!(said.contains("model opus"), "{said}");
@@ -45110,6 +45469,21 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         );
         let n = std::fs::read_dir(&out).unwrap().count();
         assert_eq!(n, 2, "{said}");
+    }
+
+    /// Two personas whose names make one seat would give two prompt files
+    /// the same `LJOS_SEAT` and slot line, so the panel names both and
+    /// writes nothing.
+    #[test]
+    fn a_cloud_panel_refuses_two_personas_on_one_seat() {
+        let (_dir, out, said) = cloud_panel(
+            r#"{"atoms":[{"id":"atom-a","kind":"persona","name":"Ada Rider","anchor":0.5,"text":"ada","entities":["logo"],"ts":"2026-10-11T10:00:00Z"},{"id":"atom-b","kind":"persona","name":"ada-rider","anchor":0.4,"text":"ada","entities":["logo"],"ts":"2026-10-11T10:00:00Z"}]}"#,
+        );
+        let err = format!("{:#}", said.unwrap_err());
+        assert!(err.contains("Ada Rider"), "{err}");
+        assert!(err.contains("and ada-rider"), "{err}");
+        assert!(err.contains("seat ada-rider"), "{err}");
+        assert!(!out.exists(), "{err}");
     }
 
     /// The pack's address, its request lines and its posted atoms.
@@ -45941,7 +46315,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let child = root.path().join("checkout");
         std::fs::create_dir(&child).unwrap();
         for tool in ["tool_input", "toolInput"] {
-            for field in ["workdir", "cwd"] {
+            for field in ["workdir", "cwd", "dir_path", "directory"] {
                 for directory in [child.to_str().unwrap(), "checkout"] {
                     let input = serde_json::json!({"cwd":root.path(), tool:{field:directory}});
                     assert_eq!(hook_directory(&input.to_string()).unwrap(), child);
@@ -45968,6 +46342,23 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         .is_err());
     }
 
+    #[test]
+    fn agy_tool_call_cwd_precedes_workspace_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let agy = root.path().join("agy");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&agy).unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        let input = serde_json::json!({
+            "workspacePaths":[workspace],
+            "toolCall":{"args":{"Cwd":agy}},
+        });
+        assert_eq!(
+            hook_directory(&input.to_string()).unwrap(),
+            agy.canonicalize().unwrap()
+        );
+    }
+
     /// A relative workdir resolves against the session directory. A missing
     /// workdir is the session directory, so the command is still judged.
     #[test]
@@ -45990,6 +46381,37 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(
             command_directory(&missing.to_string()).unwrap(),
             root.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn opencode_workdir_resolves_lexically_and_expands_tilde() {
+        let _g = env_guard();
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("base");
+        let elsewhere = root.path().join("elsewhere/leaf");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, base.join("lnk")).unwrap();
+        let lexical = serde_json::json!({
+            "cwd": base,
+            "tool_input": {"command": "git status", "workdir": "lnk/.."}
+        });
+        assert_eq!(
+            hook_directory(&lexical.to_string()).unwrap(),
+            base.canonicalize().unwrap()
+        );
+
+        let home = root.path().join("home");
+        std::fs::create_dir_all(home.join("proj")).unwrap();
+        let _env = HoldEnv::set(&[("HOME", home.to_str().unwrap())]);
+        let tilde = serde_json::json!({
+            "cwd": root.path(),
+            "tool_input": {"command":"git status", "workdir":"~/proj"}
+        });
+        assert_eq!(
+            hook_directory(&tilde.to_string()).unwrap(),
+            home.join("proj").canonicalize().unwrap()
         );
     }
 
@@ -46302,8 +46724,11 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// commit carries a bag `deedar check` accepts.
     #[test]
     fn a_box_finish_writes_no_bag_and_a_cloud_finish_writes_one() {
-        which::which("deedar").unwrap_or_else(|_| panic!("deedar is not on PATH"));
+        // After the env lock. A parallel test replaces PATH while it holds
+        // the lock, and a lookup before it sees that PATH and reports
+        // deedar missing.
         let _g = env_guard();
+        which::which("deedar").unwrap_or_else(|_| panic!("deedar is not on PATH"));
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("tracker");
         let project = root.join("Software/probe");
@@ -46475,24 +46900,33 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             assert!(bag.join(id).join("deed.bin").is_file(), "{id}");
         }
         assert!(!bag.join(&id3).exists(), "another seat's deed was exported");
+        let digest = |id: &str| -> String {
+            let proof = std::fs::read_to_string(bag.join(id).join("proof.txt"))
+                .unwrap_or_else(|e| panic!("{id} proof: {e}"));
+            proof
+                .lines()
+                .find_map(|line| line.strip_prefix("digest="))
+                .unwrap_or_else(|| panic!("no digest in {id}"))
+                .to_string()
+        };
         assert_eq!(
-            std::fs::read_to_string(bag.join(&id2).join("supersedes"))
-                .unwrap()
-                .trim(),
-            id1
+            std::fs::read_to_string(bag.join(&id2).join("supersedes")).unwrap(),
+            format!("{id1}\n{}\n", digest(&id1))
         );
         assert_eq!(
-            std::fs::read_to_string(bag.join(&id1).join("successor"))
-                .unwrap()
-                .trim(),
-            id2
+            std::fs::read_to_string(bag.join(&id1).join("successor")).unwrap(),
+            format!("{id2}\n{}\n", digest(&id2))
+        );
+        assert!(
+            !bag.join(&id1).join(&sha1).exists(),
+            "bytes belong under bytes/"
         );
         assert_eq!(
-            std::fs::read(bag.join(&id1).join(&sha1)).unwrap(),
+            std::fs::read(bag.join(&id1).join("bytes").join(&sha1)).unwrap(),
             b"version one\n".to_vec()
         );
         assert_eq!(
-            std::fs::read(bag.join(&id2).join(&sha2)).unwrap(),
+            std::fs::read(bag.join(&id2).join("bytes").join(&sha2)).unwrap(),
             b"version two\n".to_vec()
         );
         let checked = std::process::Command::new("deedar")
@@ -46509,10 +46943,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         for name in [
             format!(".ljos/deeds/cloudseat/{id1}/proof.txt"),
             format!(".ljos/deeds/cloudseat/{id1}/deed.bin"),
-            format!(".ljos/deeds/cloudseat/{id1}/{sha1}"),
+            format!(".ljos/deeds/cloudseat/{id1}/bytes/{sha1}"),
             format!(".ljos/deeds/cloudseat/{id1}/successor"),
             format!(".ljos/deeds/cloudseat/{id2}/supersedes"),
-            format!(".ljos/deeds/cloudseat/{id2}/{sha2}"),
+            format!(".ljos/deeds/cloudseat/{id2}/bytes/{sha2}"),
         ] {
             assert!(
                 tree.lines().any(|line| line == name),
@@ -46520,6 +46954,351 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             );
         }
         assert!(!tree.contains(id3.as_str()), "{tree}");
+    }
+
+    /// Build deedar at the deedimport2 tip and import a bag `on_finish`
+    /// wrote. The export is then reduced to what deedar on main leaves:
+    /// one-line link files, no `sources`, no `bytes/`. Finish has to put
+    /// the digest form back, including a tab-separated `sources` line for
+    /// a carried deed made from one this bag does not carry. A missing
+    /// binary is a failure. The test does not skip.
+    #[test]
+    fn a_cloud_finish_bag_imports_with_deedar() {
+        let bin_dir = deedimport_deedar();
+        let _g = env_guard();
+        let _path = super::prepend_path(&bin_dir);
+        which::which("deedar").unwrap_or_else(|_| panic!("deedar is not on PATH"));
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tracker");
+        let project = root.join("Software/probe");
+        let store = dir.path().join("store");
+        let home = dir.path().join("home");
+        let config = dir.path().join("config");
+        let runtime = dir.path().join("run");
+        let state = dir.path().join("state");
+        for path in [&project, &home, &config, &runtime, &state] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let v1 = dir.path().join("v1.txt");
+        let v2 = dir.path().join("v2.txt");
+        let base_file = dir.path().join("base.txt");
+        let made_file = dir.path().join("made.txt");
+        std::fs::write(&v1, b"version one\n").unwrap();
+        std::fs::write(&v2, b"version two\n").unwrap();
+        std::fs::write(&base_file, b"carried from this\n").unwrap();
+        std::fs::write(&made_file, b"made from the other\n").unwrap();
+        let store_url = format!("file://{}", store.display());
+        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        let _env = HoldEnv::set(&[
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.to_str().unwrap()),
+            ("XDG_DATA_HOME", dir.path().join("data").to_str().unwrap()),
+            ("XDG_RUNTIME_DIR", runtime.to_str().unwrap()),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+            ("DEEDAR_URL", store_url.as_str()),
+            ("DEEDAR_HOST_SIGNING_KEY", "off"),
+            ("PACKSET_URL", "off"),
+            ("VISSUE_ROOT", root.to_str().unwrap()),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("LJOS_SEAT", "cloudseat"),
+            ("LJOS_TRACKER_GIT", "off"),
+        ]);
+        let deedar = |args: &[&str]| -> String {
+            let out = std::process::Command::new("deedar")
+                .args(args)
+                .output()
+                .unwrap_or_else(|e| panic!("deedar {args:?}: {e}"));
+            assert!(
+                out.status.success(),
+                "deedar {args:?}\n{}{}",
+                String::from_utf8_lossy(&out.stderr),
+                String::from_utf8_lossy(&out.stdout)
+            );
+            String::from_utf8(out.stdout).unwrap_or_else(|e| panic!("deedar stdout: {e}"))
+        };
+        let made = deedar(&[
+            "create",
+            "file",
+            "--path",
+            v1.to_str().unwrap(),
+            "--agent",
+            "cloudseat",
+            "--name",
+            "note-v1",
+        ]);
+        let id1 = accession_of(&made);
+        let sha1 = digest_of(&made);
+        let made = deedar(&[
+            "create",
+            "file",
+            "--path",
+            v2.to_str().unwrap(),
+            "--agent",
+            "cloudseat",
+            "--name",
+            "note-v2",
+            "--supersedes",
+            &id1,
+        ]);
+        let id2 = accession_of(&made);
+        let sha2 = digest_of(&made);
+        let made = deedar(&[
+            "create",
+            "file",
+            "--path",
+            base_file.to_str().unwrap(),
+            "--agent",
+            "otherseat",
+            "--name",
+            "note-base",
+        ]);
+        let base_id = accession_of(&made);
+        let made = deedar(&[
+            "create",
+            "file",
+            "--path",
+            made_file.to_str().unwrap(),
+            "--agent",
+            "cloudseat",
+            "--name",
+            "note-made",
+            "--input",
+            &base_id,
+        ]);
+        let made_id = accession_of(&made);
+        let made_sha = digest_of(&made);
+        let proved = deedar(&["log", "prove", &base_id]);
+        let base_digest = proved
+            .lines()
+            .find_map(|line| line.strip_prefix("digest="))
+            .map(str::trim)
+            .unwrap_or_else(|| panic!("no digest in {proved}"))
+            .to_string();
+        std::fs::write(
+            project.join("issues.org"),
+            format!(
+                "#+TITLE: probe issues\n#+VISSUE: 1\n#+TODO: TODO STARTED | DONE\n\
+                 * STARTED [#B] Cloud finish\n:PROPERTIES:\n:ID:         probe-imp1\n\
+                 :DEEDS:      {id1} {id2} {made_id}\n:END:\n"
+            ),
+        )
+        .unwrap();
+        let git = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["init", "-b", "main"])
+            .output()
+            .unwrap_or_else(|e| panic!("git init: {e}"));
+        assert!(
+            git.status.success(),
+            "git init\n{}",
+            String::from_utf8_lossy(&git.stderr)
+        );
+        let recv = dir.path().join("recv");
+        let recv_url = format!("file://{}", recv.display());
+        let side = dir.path().join("base-bag");
+        let exported = std::process::Command::new("deedar")
+            .args(["export", "--into", side.to_str().unwrap(), &base_id])
+            .output()
+            .unwrap_or_else(|e| panic!("deedar export: {e}"));
+        assert!(
+            exported.status.success(),
+            "deedar export\n{}{}",
+            String::from_utf8_lossy(&exported.stderr),
+            String::from_utf8_lossy(&exported.stdout)
+        );
+        let imported_base = std::process::Command::new("deedar")
+            .args(["import", "--allow-unsigned-head", side.to_str().unwrap()])
+            .env("DEEDAR_URL", &recv_url)
+            .env("DEEDAR_HOST_SIGNING_KEY", "off")
+            .output()
+            .unwrap_or_else(|e| panic!("deedar import base: {e}"));
+        assert!(
+            imported_base.status.success(),
+            "deedar import base\n{}{}",
+            String::from_utf8_lossy(&imported_base.stderr),
+            String::from_utf8_lossy(&imported_base.stdout)
+        );
+        assert!(!cloud::cloud_seat(), "a box has no cloud guard file");
+        let (box_said, box_paths) = deedbag::on_finish("probe-imp1");
+        assert!(box_said.is_empty(), "{box_said}");
+        assert!(box_paths.is_empty());
+        assert!(!root.join(".ljos").join("deeds").exists());
+        cloud::ensure_cloud_guard_rules().unwrap_or_else(|e| panic!("cloud guard: {e:#}"));
+        // deedar on main writes the store's one-line link and no sources
+        // or bytes/. This stands in for that export so finish has to
+        // write the digest form itself.
+        let wrap_dir = dir.path().join("wrap");
+        std::fs::create_dir_all(&wrap_dir).unwrap();
+        let real = bin_dir.join("deedar");
+        let script = format!(
+            "#!/bin/sh\nset -eu\nreal='{real}'\nif [ \"$1\" = export ]; then\n  \"$real\" \"$@\"\n  into=\n  prev=\n  for arg in \"$@\"; do\n    if [ \"$prev\" = --into ]; then into=$arg; fi\n    prev=$arg\n  done\n  [ -n \"$into\" ]\n  for d in \"$into\"/*; do\n    [ -d \"$d\" ] || continue\n    if [ -f \"$d/supersedes\" ]; then\n      id=$(head -n 1 \"$d/supersedes\")\n      printf '%s\\n' \"$id\" > \"$d/supersedes\"\n    fi\n    if [ -f \"$d/successor\" ]; then\n      id=$(head -n 1 \"$d/successor\")\n      printf '%s\\n' \"$id\" > \"$d/successor\"\n    fi\n    rm -f \"$d/sources\"\n    rm -rf \"$d/bytes\"\n  done\n  exit 0\nfi\nexec \"$real\" \"$@\"\n",
+            real = real.display()
+        );
+        let wrap = wrap_dir.join("deedar");
+        std::fs::write(&wrap, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&wrap, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _wrap_path = super::prepend_path(&wrap_dir);
+        let (said, paths) = deedbag::on_finish("probe-imp1");
+        drop(_wrap_path);
+        assert!(
+            said.contains(
+                "deeds: exported 3 deeds cited by cloudseat into .ljos/deeds/cloudseat\n"
+            ),
+            "{said}"
+        );
+        assert_eq!(paths, vec![".ljos/deeds/cloudseat".to_string()]);
+        let bag = root.join(".ljos").join("deeds").join("cloudseat");
+        assert!(
+            !bag.join(&base_id).exists(),
+            "an uncarried source was exported"
+        );
+        assert_eq!(
+            std::fs::read(bag.join(&id1).join("bytes").join(&sha1)).unwrap(),
+            b"version one\n".to_vec()
+        );
+        assert!(!bag.join(&id1).join(&sha1).exists());
+        let link = std::fs::read_to_string(bag.join(&id2).join("supersedes")).unwrap();
+        let mut lines = link.lines();
+        assert_eq!(lines.next(), Some(id1.as_str()), "{link}");
+        let digest = lines
+            .next()
+            .unwrap_or_else(|| panic!("no digest in {link}"));
+        assert!(digest.starts_with("sha256:"), "{link}");
+        assert_eq!(digest.len(), "sha256:".len() + 64, "{link}");
+        assert!(lines.next().is_none(), "{link}");
+        assert_eq!(
+            std::fs::read_to_string(bag.join(&made_id).join("sources")).unwrap(),
+            format!("{base_id}\t{base_digest}\n")
+        );
+        assert_eq!(
+            std::fs::read(bag.join(&made_id).join("bytes").join(&made_sha)).unwrap(),
+            b"made from the other\n".to_vec()
+        );
+        let imported = std::process::Command::new("deedar")
+            .args(["import", "--allow-unsigned-head", bag.to_str().unwrap()])
+            .env("DEEDAR_URL", &recv_url)
+            .env("DEEDAR_HOST_SIGNING_KEY", "off")
+            .output()
+            .unwrap_or_else(|e| panic!("deedar import: {e}"));
+        assert!(
+            imported.status.success(),
+            "deedar import\n{}{}",
+            String::from_utf8_lossy(&imported.stderr),
+            String::from_utf8_lossy(&imported.stdout)
+        );
+        let report = String::from_utf8_lossy(&imported.stdout);
+        assert!(report.contains("imported 3 deeds"), "{report}");
+        assert_eq!(
+            std::fs::read(recv.join("bytes").join(&sha1)).unwrap(),
+            b"version one\n".to_vec()
+        );
+        assert_eq!(
+            std::fs::read(recv.join("bytes").join(&sha2)).unwrap(),
+            b"version two\n".to_vec()
+        );
+        assert_eq!(
+            std::fs::read(recv.join("bytes").join(&made_sha)).unwrap(),
+            b"made from the other\n".to_vec()
+        );
+        let current = std::process::Command::new("deedar")
+            .args(["current", &id1])
+            .env("DEEDAR_URL", &recv_url)
+            .env("DEEDAR_HOST_SIGNING_KEY", "off")
+            .output()
+            .unwrap_or_else(|e| panic!("deedar current: {e}"));
+        assert!(
+            current.status.success(),
+            "deedar current\n{}{}",
+            String::from_utf8_lossy(&current.stderr),
+            String::from_utf8_lossy(&current.stdout)
+        );
+        let tip = String::from_utf8_lossy(&current.stdout);
+        assert!(tip.contains(&id2), "{tip}");
+    }
+
+    /// deedar from deedimport2-20261021, at the commit whose import reads
+    /// `bytes/` and digest sidecars. The binary is installed on PATH the
+    /// way CI installs deedar. A failed build fails the test.
+    fn deedimport_deedar() -> std::path::PathBuf {
+        const SHA: &str = "89e2574f6432bfc0451315f552f048eec747f59a";
+        let cache = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/deedimport2-deedar");
+        let bin_dir = cache.join("bin");
+        let bin = bin_dir.join("deedar");
+        let stamp = cache.join("sha");
+        if bin.is_file() && std::fs::read_to_string(&stamp).ok().as_deref() == Some(SHA) {
+            return bin_dir;
+        }
+        if cache.exists() {
+            std::fs::remove_dir_all(&cache)
+                .unwrap_or_else(|e| panic!("clear {}: {e}", cache.display()));
+        }
+        let src = cache.join("src");
+        let cloned = std::process::Command::new("git")
+            .args([
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                "deedimport2-20261021",
+                "https://github.com/leidarljos/deedar.git",
+            ])
+            .arg(&src)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .unwrap_or_else(|e| panic!("git clone deedar: {e}"));
+        assert!(
+            cloned.status.success(),
+            "git clone deedar\n{}{}",
+            String::from_utf8_lossy(&cloned.stderr),
+            String::from_utf8_lossy(&cloned.stdout)
+        );
+        let head = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&src)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap_or_else(|e| panic!("git rev-parse: {e}"));
+        assert!(head.status.success(), "git rev-parse failed");
+        let head = String::from_utf8_lossy(&head.stdout);
+        assert_eq!(head.trim(), SHA, "deedimport2-20261021 moved");
+        let built = std::process::Command::new("cargo")
+            .args(["build", "--locked", "--manifest-path"])
+            .arg(src.join("Cargo.toml"))
+            .arg("--target-dir")
+            .arg(cache.join("target"))
+            .args(["-p", "deedar-cli", "--bin", "deedar"])
+            .env_remove("CARGO_TARGET_DIR")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .unwrap_or_else(|e| panic!("cargo build deedar: {e}"));
+        assert!(
+            built.status.success(),
+            "cargo build deedar\n{}{}",
+            String::from_utf8_lossy(&built.stderr),
+            String::from_utf8_lossy(&built.stdout)
+        );
+        let produced = cache.join("target").join("debug").join("deedar");
+        assert!(
+            produced.is_file(),
+            "deedar is not on PATH; build wrote no {}",
+            produced.display()
+        );
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::copy(&produced, &bin).unwrap_or_else(|e| panic!("install deedar: {e}"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::write(&stamp, SHA).unwrap();
+        assert!(bin.is_file(), "deedar is not on PATH");
+        bin_dir
     }
 
     fn accession_of(text: &str) -> String {
