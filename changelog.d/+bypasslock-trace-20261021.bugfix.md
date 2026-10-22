@@ -1,0 +1,1 @@
+Concurrent hooks used to split one `hook-trace.jsonl` row across several writes, so a live session's hook contract could no longer be read back. Each trace row is now one locked write, and the file is mode 0600.
