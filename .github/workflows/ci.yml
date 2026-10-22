@@ -23,6 +23,62 @@ jobs:
       - run: python3 scripts/check-workflows.py
       - name: server.json version
         run: scripts/check-server-json.sh
+  # A push is before..sha. A new branch's before is all zeros, so the
+  # commits are the ones on no other remote branch. A pull request is
+  # base..head. Commits already on the base are outside the range.
+  identity:
+    name: commit identity
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Test the identity gate
+        run: scripts/identity-gate-test.sh
+      - name: Check commits new to this event
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -eu
+          EVENT_NAME=${EVENT_NAME-}
+          BEFORE=${BEFORE-}
+          SHA=${SHA-}
+          PR_BASE=${PR_BASE-}
+          PR_HEAD=${PR_HEAD-}
+          REF_NAME=${REF_NAME-}
+          zero=0000000000000000000000000000000000000000
+          if [ "$SHA" = "$zero" ]; then
+            echo "identity-gate: ref deletion has no commits to judge" >&2
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            if [ -z "$PR_BASE" ] || [ -z "$PR_HEAD" ]; then
+              echo "identity-gate: missing pull request range" >&2
+              exit 1
+            fi
+            scripts/identity-gate.sh "$PR_BASE..$PR_HEAD"
+          elif [ "$BEFORE" = "$zero" ]; then
+            if [ -z "$REF_NAME" ]; then
+              echo "identity-gate: missing ref name" >&2
+              exit 1
+            fi
+            git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
+            scripts/identity-gate.sh "$SHA" --not \
+              --exclude="origin/${REF_NAME}" \
+              --exclude="origin/HEAD" \
+              --remotes=origin
+          elif [ -n "$BEFORE" ]; then
+            scripts/identity-gate.sh "$BEFORE..$SHA"
+          else
+            echo "identity-gate: missing before" >&2
+            exit 1
+          fi
   test:
     name: cargo test
     # CPU runner. The packset binary is built on its own; packset-embed is not.
