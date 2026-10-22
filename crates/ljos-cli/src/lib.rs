@@ -6778,12 +6778,14 @@ pub fn tool_error(input: &str) -> String {
 
 /// What this seat knows that bears on a tool that just failed. The pack is
 /// searched on the command and the error it gave, and a hit has to pass the
-/// prompt hook's tests. It must also share [`FAILURE_SHARED_WORDS`] content
+/// prompt hook's tests. It must also share [`FAILURE_SHARED_WORDS`] subject
 /// words with the command and the error, where a prompt needs one, since an
-/// error is long and noisy. The floor is the lexical match, not the fused
-/// score: the pack decays that score by age, and age only ranks. The pack's
-/// order, which is that score, is kept. One handed over earlier in the
-/// session is left out. Calls that worked are not searched.
+/// error is long and noisy, and its lexical match on those words must reach
+/// [`FAILURE_LEXICAL_MIN`]. The floor is the lexical match of the hits that
+/// pass those tests, not the fused score: the pack decays that score by
+/// age, and age only ranks. What passes is read most relevant first, see
+/// [`sort_by_relevance`]. One handed over earlier in the session is left
+/// out. Calls that worked are not searched.
 #[must_use]
 pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<String>) {
     let error: String = error.chars().take(400).collect();
@@ -6791,31 +6793,38 @@ pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<
     if cue.len() < 3 {
         return (String::new(), Vec::new());
     }
+    let pool = u32::try_from(limit.max(1) * POOL_PER_SHOWN).unwrap_or(u32::MAX);
     let Ok(hits) = with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
-        packset_search_opts(&cue, 10, false)
+        packset_search_opts(&cue, pool, false)
     })
-    .or_else(|_| packset_search(&cue)) else {
+    .or_else(|_| packset_search_opts(&cue, pool, false)) else {
         return (String::new(), Vec::new());
     };
+    let subject = without_failure_words(&cue);
     let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
-    let lexical = lexical_match_scores(&texts, &cue);
-    let best_lexical = lexical.iter().copied().fold(0.0_f64, f64::max);
-    if best_lexical <= 0.0 {
-        return (String::new(), Vec::new());
-    }
+    let lexical = lexical_match_scores(&texts, &subject);
     let seen = seen_ids(call.session.as_deref());
-    let rows: Vec<&Hit> = hits
+    let eligible: Vec<bool> = hits
         .iter()
         .enumerate()
-        .filter(|(_, h)| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
-        .filter(|(i, _)| lexical[*i] >= best_lexical * HOOK_SCORE_FLOOR)
-        .filter(|(_, h)| agreed(h))
-        .filter(|(_, h)| shared_cue_words(&h.text, &cue) >= FAILURE_SHARED_WORDS)
-        .filter(|(_, h)| shown_on_prompt(h))
-        .filter(|(_, h)| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
-        .map(|(_, h)| h)
-        .take(limit)
+        .map(|(i, h)| {
+            !UNREVIEWED_KINDS.contains(&h.kind.as_str())
+                && agreed(h)
+                && shared_failure_words(&h.text, &cue) >= FAILURE_SHARED_WORDS
+                && lexical[i] >= FAILURE_LEXICAL_MIN
+                && shown_on_prompt(h)
+                && h.id.as_ref().is_none_or(|id| !seen.contains(id))
+        })
         .collect();
+    let admitted = clears_lexical_floor(&lexical, &eligible);
+    let mut rows: Vec<&Hit> = hits
+        .iter()
+        .zip(&admitted)
+        .filter(|(_, ok)| **ok)
+        .map(|(h, _)| h)
+        .collect();
+    sort_by_relevance(&mut rows, &subject);
+    rows.truncate(limit);
     if rows.is_empty() {
         return (String::new(), Vec::new());
     }
@@ -7396,6 +7405,48 @@ fn shared_cue_words(text: &str, cue: &str) -> usize {
 /// match.
 pub const FAILURE_SHARED_WORDS: usize = 2;
 
+/// Words any failed command says. A lesson that shares `build` and
+/// `failed` with an error names that something failed, not what did.
+const FAILURE_WORDS: &[&str] = &[
+    "build", "error", "exit", "fail", "failed", "failing", "failure", "test", "warning",
+];
+
+/// A word of a failure that names no subject: one of [`FAILURE_WORDS`]
+/// or [`RULE_WORDS`].
+fn failure_filler(word: &str) -> bool {
+    let word = word.to_lowercase();
+    [word.as_str(), singular(&word).as_str()]
+        .iter()
+        .any(|w| FAILURE_WORDS.contains(w) || RULE_WORDS.contains(w))
+}
+
+/// The failure cue without its filler words, so a lexical match on it is
+/// a match on what failed.
+fn without_failure_words(cue: &str) -> String {
+    cue.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty() && !failure_filler(w))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// How many subject words a lesson shares with a failed command and its
+/// error: the words [`names_the_subject`] matches on, less
+/// [`FAILURE_WORDS`].
+fn shared_failure_words(text: &str, cue: &str) -> usize {
+    let words = |t: &str| prompt_words(&without_failure_words(t));
+    let have = words(text);
+    words(cue)
+        .iter()
+        .filter(|w| have.binary_search(w).is_ok())
+        .count()
+}
+
+/// The lexical match on its subject words a lesson needs before a failure
+/// note hands it over, however weak the rest of the pool is. Naming the
+/// subject scores 1; one word of the failure no other hit carries clears
+/// it alone.
+pub const FAILURE_LEXICAL_MIN: f64 = 0.5;
+
 #[cfg(test)]
 /// A claim about one numbered pull request is a snapshot of that review.
 /// "A PR branch must contain main" is a rule and stays. "PR 32 replays PR 36" does not.
@@ -7749,18 +7800,82 @@ fn lexical_scores(bodies: &[&str], cue: &str) -> Vec<(usize, f64)> {
     scored
 }
 
-/// Lexical match of each text against `cue`, in the same order. Zero when
-/// that text matches nothing. The pack's fused score adds recency on each
-/// ballot and then multiplies by retrievability, so this is the score that
-/// does not read the clock.
+/// Lexical match of each text against `cue`, in the same order, on one
+/// scale from 0 to 1. A text that names the subject scores 1. Any other
+/// text scores its BM25 squashed under 1, so one rare word cannot outrank
+/// naming the subject. Zero when that text matches nothing. The pack's
+/// fused score adds recency on each ballot and then multiplies by
+/// retrievability, so this is the score that does not read the clock.
 fn lexical_match_scores(texts: &[&str], cue: &str) -> Vec<f64> {
-    let mut scores = vec![0.0; texts.len()];
-    for (index, score) in lexical_scores(texts, cue) {
-        if let Some(slot) = scores.get_mut(index) {
-            *slot = score;
-        }
-    }
-    scores
+    let docs: Vec<Vec<String>> = texts.iter().map(|text| match_tokens(text)).collect();
+    let df = document_frequency(&docs);
+    texts
+        .iter()
+        .enumerate()
+        .map(|(i, text)| {
+            if names_the_subject(text, cue) {
+                1.0
+            } else {
+                let bm25 = bm25_distinctive(&docs, &df, i, cue);
+                bm25 / (1.0 + bm25)
+            }
+        })
+        .collect()
+}
+
+/// How many hits a search asks the pack for, per hit it may show. The
+/// pack cuts its list by the fused score, which decays with age, so a
+/// relevant old memory has to be asked for before the floors run.
+pub const POOL_PER_SHOWN: usize = 4;
+
+/// Indices of `rows`, most relevant to `cue` first: the lexical match,
+/// then BM25 among rows that match as well, then the fused score, which
+/// carries age, only to break a tie.
+fn relevance_order<H: std::borrow::Borrow<Hit>>(rows: &[H], cue: &str) -> Vec<usize> {
+    let texts: Vec<&str> = rows.iter().map(|h| h.borrow().text.as_str()).collect();
+    let docs: Vec<Vec<String>> = texts.iter().map(|text| match_tokens(text)).collect();
+    let df = document_frequency(&docs);
+    let lexical = lexical_match_scores(&texts, cue);
+    let keys: Vec<(f64, f64, f64)> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let bm25 = bm25_distinctive(&docs, &df, i, cue);
+            (lexical[i], bm25, h.borrow().score)
+        })
+        .collect();
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by(|&a, &b| {
+        let (ka, kb) = (keys[a], keys[b]);
+        kb.0.total_cmp(&ka.0)
+            .then(kb.1.total_cmp(&ka.1))
+            .then(kb.2.total_cmp(&ka.2))
+            .then(a.cmp(&b))
+    });
+    order
+}
+
+/// `rows` in [`relevance_order`].
+fn sort_by_relevance<H: std::borrow::Borrow<Hit>>(rows: &mut Vec<H>, cue: &str) {
+    let order = relevance_order(rows, cue);
+    let mut taken: Vec<Option<H>> = rows.drain(..).map(Some).collect();
+    rows.extend(order.into_iter().filter_map(|i| taken[i].take()));
+}
+
+/// Which hits clear [`HOOK_SCORE_FLOOR`] of the best lexical match among
+/// the `eligible` ones, those that pass every other test. A hit kept out
+/// by kind, agreement, horizon or the word test does not set the floor.
+fn clears_lexical_floor(lexical: &[f64], eligible: &[bool]) -> Vec<bool> {
+    let best = lexical
+        .iter()
+        .zip(eligible)
+        .filter(|(_, ok)| **ok)
+        .fold(0.0_f64, |best, (score, _)| best.max(*score));
+    lexical
+        .iter()
+        .zip(eligible)
+        .map(|(score, ok)| *ok && best > 0.0 && *score >= best * HOOK_SCORE_FLOOR)
+        .collect()
 }
 
 fn atom_as_hit(atom: &Value) -> Option<Hit> {
@@ -7881,13 +7996,18 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     let hits: Vec<Hit>;
     let mut rows: Vec<&Hit> = if let Some((candidates, j)) = &judged {
         // Jev read the prompt and each claim together. What it says bears
-        // goes in when Jev alone is sure, or when the claim names the
-        // subject and clears the lexical floor. The two scorers still
+        // goes in when Jev is sure and the claim shares a word with the
+        // prompt, or when the claim names the subject and clears the
+        // lexical floor. The two scorers still
         // have to agree. The fused score is not a gate: the pack decays
         // it by age, and Jev's probability orders this path.
         let texts: Vec<&str> = candidates.iter().map(|h| h.text.as_str()).collect();
         let lexical = lexical_match_scores(&texts, cue);
-        let best_lexical = lexical.iter().copied().fold(0.0_f64, f64::max);
+        let best_lexical = candidates
+            .iter()
+            .enumerate()
+            .filter(|(i, h)| j.bears(*i) && agreed(h) && names_the_subject(&h.text, cue))
+            .fold(0.0_f64, |best, (i, _)| best.max(lexical[i]));
         candidates
             .iter()
             .enumerate()
@@ -7957,14 +8077,14 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             // pass. When none does, no memory can reach the prompt, and
             // the second stage, a few hundred milliseconds a prompt, is not
             // run.
+            let could = |h: &Hit| {
+                !UNREVIEWED_KINDS.contains(&h.kind.as_str())
+                    && agreed(h)
+                    && names_the_subject(&h.text, cue)
+                    && shown_on_prompt(h)
+                    && h.id.as_ref().is_none_or(|id| !seen.contains(id))
+            };
             if let Some(pool) = &pool {
-                let could = |h: &Hit| {
-                    !UNREVIEWED_KINDS.contains(&h.kind.as_str())
-                        && agreed(h)
-                        && names_the_subject(&h.text, cue)
-                        && shown_on_prompt(h)
-                        && h.id.as_ref().is_none_or(|id| !seen.contains(id))
-                };
                 if !pool.iter().any(could) {
                     return (nudge, pending);
                 }
@@ -7974,7 +8094,9 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             // writer that is still fetching its cross-encoder on the first
             // prompt then costs the budget, not the whole hook deadline.
             let reranked = if rerank {
-                hook_timed("rerank", || search_within(cue, 10, HOOK_RERANK_BUDGET_MS))
+                hook_timed("rerank", || {
+                    search_within(cue, RERANK_POOL, HOOK_RERANK_BUDGET_MS)
+                })
             } else {
                 Err(anyhow::anyhow!("search: rerank off"))
             };
@@ -7984,44 +8106,36 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
                 (Err(_), None) => return (nudge, pending),
             };
             hits = found;
-            // Age is in the fused score twice, so the floor is the lexical
-            // match. The fused score still orders the rows below.
+            // Age is in the fused score twice, so the floor and the order
+            // are the lexical match. The fused score only breaks a tie.
             let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
             let lexical = lexical_match_scores(&texts, cue);
-            let best_lexical = lexical.iter().copied().fold(0.0_f64, f64::max);
-            if best_lexical <= 0.0 {
-                return (nudge, pending);
-            }
-            hits.iter()
-                .enumerate()
-                .filter(|(_, h)| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
-                .filter(|(i, _)| lexical[*i] >= best_lexical * HOOK_SCORE_FLOOR)
-                .filter(|(_, h)| agreed(h))
-                .filter(|(_, h)| names_the_subject(&h.text, cue))
-                .filter(|(_, h)| shown_on_prompt(h))
-                .filter(|(_, h)| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
-                .map(|(_, h)| h)
-                .collect()
+            let eligible: Vec<bool> = hits.iter().map(could).collect();
+            let admitted = clears_lexical_floor(&lexical, &eligible);
+            let mut rows: Vec<&Hit> = hits
+                .iter()
+                .zip(admitted)
+                .filter(|(_, ok)| *ok)
+                .map(|(h, _)| h)
+                .collect();
+            sort_by_relevance(&mut rows, cue);
+            rows
         }
     };
-    // Jev's probability ranks what it judged; the search score ranks the rest.
-    let weight = |h: &Hit| -> f64 {
-        judged
-            .as_ref()
-            .and_then(|(c, j)| {
-                let i = c.iter().position(|x| x.id == h.id && x.text == h.text)?;
-                j.bears.get(i).copied()
-            })
-            .unwrap_or(h.score)
-    };
+    // Jev's probability ranks what it judged; the cosine or the lexical
+    // match ordered the rest above.
+    if let Some((c, j)) = &judged {
+        let weight = |h: &Hit| -> f64 {
+            c.iter()
+                .position(|x| x.id == h.id && x.text == h.text)
+                .and_then(|i| j.bears.get(i).copied())
+                .unwrap_or(0.0)
+        };
+        rows.sort_by(|a, b| weight(b).total_cmp(&weight(a)));
+    }
     // The cap keeps the strongest, whatever their kind: a weak preference
     // that shares one word with the prompt does not push out the lesson
     // the prompt repeats. Preferences are then read first.
-    rows.sort_by(|a, b| {
-        weight(b)
-            .partial_cmp(&weight(a))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
     let mut rows: Vec<&Hit> = rows
         .into_iter()
         .take(limit.min(HOOK_MAX_MEMORIES))
@@ -8103,14 +8217,21 @@ fn judged_prompt(call: &HookCall, cue: &str) -> Option<(Vec<Hit>, jev::Judgment)
         return None;
     }
     let seen = seen_ids(call.session.as_deref());
-    let hits = hook_timed("judge_search", || packset_search_opts(cue, 10, false)).ok()?;
-    let candidates: Vec<Hit> = hits
+    let hits = hook_timed("judge_search", || {
+        packset_search_opts(cue, RERANK_POOL, false)
+    })
+    .ok()?;
+    let pool: Vec<Hit> = hits
         .into_iter()
         .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
         .filter(shown_on_prompt)
         .filter(|h| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
-        .take(10)
         .collect();
+    // Jev reads the ten most relevant, in the pack's order.
+    let mut kept = relevance_order(&pool, cue);
+    kept.truncate(10);
+    kept.sort_unstable();
+    let candidates: Vec<Hit> = kept.into_iter().map(|i| pool[i].clone()).collect();
     if candidates.len() < cfg.min_candidates {
         return None;
     }
@@ -8182,15 +8303,17 @@ pub fn recall_note(issue: &str, memories: &str) -> String {
     }
 }
 
-/// How sure Jev must be that a claim bears on a prompt it shares no
-/// content word with.
+/// How sure Jev must be that a claim bears on a prompt when the claim
+/// shares a word with it but does not name its subject.
 pub const JEV_ALONE_AT: f64 = 0.75;
 
 /// Whether a judged claim reaches the prompt. Jev says it bears and the
-/// two scorers agreed. A claim Jev is sure of needs nothing else: that
-/// probability carries no age. Otherwise the claim has to name the
-/// subject and clear [`HOOK_SCORE_FLOOR`] of `best_lexical`. The fused
-/// score is not read. The pack decays it by age, and age only ranks.
+/// two scorers agreed. A claim Jev is sure of needs one word or alias in
+/// common with the prompt, or to name its subject: a check that is not
+/// Jev's and, like that probability, carries no age. Otherwise the claim
+/// has to name the subject and clear [`HOOK_SCORE_FLOOR`] of
+/// `best_lexical`. The fused score is not read. The pack decays it by
+/// age, and age only ranks.
 #[must_use]
 pub fn admits_judged(
     h: &Hit,
@@ -8204,7 +8327,7 @@ pub fn admits_judged(
         return false;
     }
     if p >= JEV_ALONE_AT {
-        return true;
+        return names_the_cue(&h.text, cue) || names_the_subject(&h.text, cue);
     }
     names_the_subject(&h.text, cue)
         && best_lexical > 0.0
@@ -15468,18 +15591,23 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
     } else {
         p.entities.clone()
     };
+    // The pack cuts its list by a score that decays with age, so ask for
+    // more than are shown and keep the ones that match the domain best.
+    const PER_DOMAIN: usize = 5;
+    let pool = u32::try_from(PER_DOMAIN * POOL_PER_SHOWN).unwrap_or(u32::MAX);
     for cue in &cues {
-        let Ok(hits) = packset_search(cue) else {
+        let Ok(hits) = packset_search_opts(cue, pool, false) else {
             continue;
         };
-        for h in hits.into_iter().take(5) {
-            if UNREVIEWED_KINDS.contains(&h.kind.as_str()) || unverified_note_hit(&h) {
-                continue;
-            }
+        let mut hits: Vec<Hit> = hits
+            .into_iter()
+            .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()) && !unverified_note_hit(h))
+            .filter(|h| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
+            .collect();
+        sort_by_relevance(&mut hits, cue);
+        for h in hits.into_iter().take(PER_DOMAIN) {
             if let Some(id) = &h.id {
-                if !seen.insert(id.clone()) {
-                    continue;
-                }
+                seen.insert(id.clone());
             }
             lines.push((h.kind == "preference", hit_line(&h, &now)));
         }
@@ -24981,7 +25109,8 @@ pub fn is_decision(v: &Value) -> bool {
 }
 
 /// How many of an issue's own memories a recall lists, newest first,
-/// before it says how many older ones it left out.
+/// before it says how many it left out. Past the cap the ones kept are
+/// the most relevant to the issue, newest first among equals.
 pub const ISSUE_MEMORY_CAP: usize = 20;
 
 /// How many text-search hits a recall adds after the issue's own memories.
@@ -24992,7 +25121,8 @@ pub const RELATED_MEMORY_CAP: usize = 5;
 /// with the issue (`issue` on the atom, or an `issue:ID` entity), newest
 /// first, at most [`ISSUE_MEMORY_CAP`] with a count of the rest. Then up
 /// to [`RELATED_MEMORY_CAP`] hits from a search on the issue's id and
-/// title that are not already listed. Reviewed kinds only. Empty when the
+/// title that are not already listed, most relevant first, out of
+/// [`POOL_PER_SHOWN`] times as many. Reviewed kinds only. Empty when the
 /// pack holds nothing on it. A pack that does not answer is started, as
 /// the doctor starts it, and the line says so only when the start did not
 /// bring it up.
@@ -25030,15 +25160,24 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> String {
             cues.push(t);
         }
     }
+    let pool = u32::try_from(RELATED_MEMORY_CAP * POOL_PER_SHOWN).unwrap_or(u32::MAX);
     let mut related = Vec::new();
     for cue in &cues {
-        match ask(&|| packset_search(cue)) {
+        match ask(&|| packset_search_opts(cue, pool, false)) {
             Ok(hits) => related.extend(hits),
             Err(e) if own.is_empty() && related.is_empty() => return recall_down(&e),
             Err(_) => break,
         }
     }
-    recall_lines(&own, related, &now_utc(), include_notes)
+    recall_lines(&own, related, &cues.join(" "), &now_utc(), include_notes)
+}
+
+/// The `cap` of `rows` most relevant to `cue`, in the order they came.
+fn most_relevant<'a>(rows: &[&'a Hit], cue: &str, cap: usize) -> Vec<&'a Hit> {
+    let mut kept = relevance_order(rows, cue);
+    kept.truncate(cap);
+    kept.sort_unstable();
+    kept.into_iter().map(|i| rows[i]).collect()
 }
 
 /// The memories the pack holds on `issue`, newest first: every live atom
@@ -25092,7 +25231,13 @@ fn tagged_with_issue(atoms: &[Value], issue: &str) -> Vec<Hit> {
 
 /// The `Memory` block: the issue's own memories, then related hits that
 /// are neither listed already nor unreviewed.
-fn recall_lines(own: &[Hit], related: Vec<Hit>, now: &str, include_notes: bool) -> String {
+fn recall_lines(
+    own: &[Hit],
+    related: Vec<Hit>,
+    cue: &str,
+    now: &str,
+    include_notes: bool,
+) -> String {
     let key = |h: &Hit| h.id.clone().unwrap_or_else(|| h.text.clone());
     let (own_facts, own_notes): (Vec<&Hit>, Vec<&Hit>) = own
         .iter()
@@ -25100,13 +25245,14 @@ fn recall_lines(own: &[Hit], related: Vec<Hit>, now: &str, include_notes: bool) 
         .partition(|h| !unverified_note_hit(h));
     let mut seen: std::collections::BTreeSet<String> =
         own_facts.iter().chain(&own_notes).map(|h| key(h)).collect();
-    let related: Vec<Hit> = related
+    let mut related: Vec<Hit> = related
         .into_iter()
         .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
         .filter(|h| include_notes || !unverified_note_hit(h))
         .filter(|h| seen.insert(key(h)))
-        .take(RELATED_MEMORY_CAP)
         .collect();
+    sort_by_relevance(&mut related, cue);
+    related.truncate(RELATED_MEMORY_CAP);
     let (related_facts, related_notes): (Vec<&Hit>, Vec<&Hit>) =
         related.iter().partition(|h| !unverified_note_hit(h));
     if own_facts.is_empty()
@@ -25117,14 +25263,14 @@ fn recall_lines(own: &[Hit], related: Vec<Hit>, now: &str, include_notes: bool) 
         return String::new();
     }
     let mut out = String::from("\nMemory\n");
-    for h in own_facts.iter().take(ISSUE_MEMORY_CAP) {
+    for h in most_relevant(&own_facts, cue, ISSUE_MEMORY_CAP) {
         out.push_str("  ");
         out.push_str(&hit_line(h, now));
         out.push('\n');
     }
     if own_facts.len() > ISSUE_MEMORY_CAP {
         out.push_str(&format!(
-            "  ({} older memories on this issue left out)\n",
+            "  ({} more memories on this issue left out)\n",
             own_facts.len() - ISSUE_MEMORY_CAP
         ));
     }
@@ -25142,14 +25288,14 @@ fn recall_lines(own: &[Hit], related: Vec<Hit>, now: &str, include_notes: bool) 
     // own heading, so a note never reads as something the issue established.
     if !own_notes.is_empty() || !related_notes.is_empty() {
         out.push_str("  unverified logbook notes:\n");
-        for h in own_notes.iter().take(ISSUE_MEMORY_CAP) {
+        for h in most_relevant(&own_notes, cue, ISSUE_MEMORY_CAP) {
             out.push_str("  ");
             out.push_str(&hit_line(h, now));
             out.push('\n');
         }
         if own_notes.len() > ISSUE_MEMORY_CAP {
             out.push_str(&format!(
-                "  ({} older logbook notes on this issue left out)\n",
+                "  ({} more logbook notes on this issue left out)\n",
                 own_notes.len() - ISSUE_MEMORY_CAP
             ));
         }
@@ -31487,7 +31633,13 @@ mod tests {
             hit("own21", "note", "note 21"),
             hit("near", "lesson", "a related lesson"),
         ];
-        let text = super::recall_lines(&own, related, "2026-10-18T12:00:00.000Z", true);
+        let text = super::recall_lines(
+            &own,
+            related,
+            "probe-0lm4",
+            "2026-10-18T12:00:00.000Z",
+            true,
+        );
         // Facts lead; the working notes follow under their own heading.
         assert!(
             text.starts_with("\nMemory\n  - [lesson, agent-derived, today] tagged lesson\n"),
@@ -31505,25 +31657,118 @@ mod tests {
         assert!(text.contains("note 02"), "{text}");
         assert!(!text.contains("note 01"), "{text}");
         assert!(
-            text.contains("(2 older logbook notes on this issue left out)"),
+            text.contains("(2 more logbook notes on this issue left out)"),
             "{text}"
         );
         assert_eq!(text.matches("note 21").count(), 1, "{text}");
-        let prompt = super::recall_lines(&own, vec![hit("own21", "note", "note 21")], "now", false);
+        let prompt = super::recall_lines(
+            &own,
+            vec![hit("own21", "note", "note 21")],
+            "probe-0lm4",
+            "now",
+            false,
+        );
         assert_eq!(
             prompt,
             "\nMemory\n  - [lesson, agent-derived] tagged lesson\n"
         );
-        assert_eq!(super::recall_lines(&[], Vec::new(), "now", true), "");
+        assert_eq!(
+            super::recall_lines(&[], Vec::new(), "probe-0lm4", "now", true),
+            ""
+        );
         let alone = super::recall_lines(
             &[],
             vec![hit("near", "lesson", "a related lesson")],
+            "probe-0lm4",
             "now",
             true,
         );
         assert_eq!(
             alone,
             "\nMemory\n  - [lesson, agent-derived] a related lesson\n"
+        );
+    }
+
+    /// An issue's own memories past the cap and the related hits past
+    /// the first five were cut newest or freshest first, before anything
+    /// asked what bears on the issue. The two oldest memories on it and
+    /// a related one the pack ranks seventh are the ones that name its
+    /// subject, and they are what a recall lists.
+    #[test]
+    fn a_recall_keeps_what_bears_on_the_issue_past_the_newest() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("Software/sample");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("issues.org"),
+            "#+TITLE: sample issues\n#+VISSUE: 1\n#+CATEGORY: sample\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n* TODO [#B] Rotate the npm registry token\n:PROPERTIES:\n:ID:         sample-k2p2\n:CREATED:    [2026-09-20 Sat]\n:END:\n",
+        )
+        .unwrap();
+        let mut atoms: Vec<Value> = (0..20)
+            .map(|i| {
+                serde_json::json!({"id": format!("chat{i:02}"), "kind": "lesson",
+                    "text": format!("Standup {i:02} moved to the small room"),
+                    "ts": format!("2026-10-{:02}T09:00:00.000Z", i + 1),
+                    "entities": ["issue:sample-k2p2"]})
+            })
+            .collect();
+        for (i, text) in [
+            "The npm registry token is rotated from 1Password, not by hand",
+            "Rotate the registry token before the old one expires on the first",
+        ]
+        .iter()
+        .enumerate()
+        {
+            atoms.push(
+                serde_json::json!({"id": format!("token{i}"), "kind": "lesson",
+                "text": text, "ts": format!("2026-07-0{}T09:00:00.000Z", i + 1),
+                "entities": ["issue:sample-k2p2"]}),
+            );
+        }
+        let mut hits: Vec<Value> = (0..6)
+            .map(|i| {
+                serde_json::json!({"id": format!("sync{i}"), "kind": "lesson", "score": 2.0,
+                    "text": format!("Weekly sync {i} ran long"), "entities": []})
+            })
+            .collect();
+        hits.push(
+            serde_json::json!({"id": "publish", "kind": "lesson", "score": 0.5,
+            "text": "npm publish reads the registry token from the CI secret", "entities": []}),
+        );
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/atoms") {
+                return (200, serde_json::json!({ "atoms": atoms }).to_string());
+            }
+            if !first.contains("/v1/search") {
+                return (404, r#"{"error":"missing"}"#.into());
+            }
+            let limit = first
+                .split(['?', '&', ' '])
+                .find_map(|kv| kv.strip_prefix("limit="))
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(hits.len());
+            let kept: Vec<&Value> = hits.iter().take(limit).collect();
+            (200, serde_json::json!({ "hits": kept }).to_string())
+        });
+        let _url = PackUrl::set(&url);
+        let _bins = super::set_path(super::path_without(&["vissue"]));
+        let _roots = HoldEnv::set(&[
+            ("ISSUE_ROOT", dir.path().to_str().unwrap()),
+            ("VISSUE_ROOT", dir.path().to_str().unwrap()),
+            ("VISSUE_NO_ROUTE", "1"),
+        ]);
+        let text = recall_memories("sample-k2p2");
+        assert!(text.contains("rotated from 1Password"), "{text}");
+        assert!(text.contains("before the old one expires"), "{text}");
+        assert!(
+            text.contains("(2 more memories on this issue left out)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("reads the registry token from the CI"),
+            "{text}"
         );
     }
 
@@ -35448,6 +35693,81 @@ mod tests {
         url
     }
 
+    /// A pack whose search keeps the first `limit` of `hits`, the way the
+    /// writer cuts its fused list.
+    fn serve_limited_pack(hits: Vec<Value>) -> String {
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if !first.contains("/v1/search") {
+                return (404, r#"{"error":"missing"}"#.into());
+            }
+            let limit = first
+                .split(['?', '&', ' '])
+                .find_map(|kv| kv.strip_prefix("limit="))
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(hits.len());
+            let kept: Vec<&Value> = hits.iter().take(limit).collect();
+            (200, serde_json::json!({ "hits": kept }).to_string())
+        });
+        url
+    }
+
+    /// Ten fresh lessons that name the subject lead the pack's fused list.
+    /// An old one that names it and the words no other hit has sits
+    /// eleventh. A pool cut at ten never saw it; a wider pool ordered by
+    /// relevance puts it first.
+    #[test]
+    fn the_hook_asks_past_the_fused_cut_and_orders_by_relevance() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let hit = |id: &str, text: &str, score: f64, ts: &str| {
+            serde_json::json!({
+                "id": id, "text": text, "score": score, "kind": "lesson",
+                "ts": ts, "entities": ["horizon:standing"], "ballots": 2, "of": 3
+            })
+        };
+        let mut hits: Vec<Value> = (0..10)
+            .map(|i| {
+                hit(
+                    &format!("fresh{i}"),
+                    &format!("The registry rejected the token on host {i}; rotate it there"),
+                    2.0 - f64::from(i) * 0.01,
+                    "2026-10-20T09:00:00.000Z",
+                )
+            })
+            .collect();
+        hits.push(hit(
+            "old",
+            "npm publish to the acme scope needs the registry token from 1Password, not the CI one",
+            0.5,
+            "2026-07-22T09:00:00.000Z",
+        ));
+        let url = serve_limited_pack(hits);
+        let _url = PackUrl::set(&url);
+        let prompt = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "npm publish to the acme scope says the registry rejected my token".into(),
+            session: Some("wide-prompt".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(&prompt, 5);
+        assert!(note.contains("acme scope needs"), "{note}");
+        let failed = HookCall {
+            event: "PostToolUseFailure".into(),
+            cue: "npm publish --scope acme".into(),
+            session: Some("wide-fail".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = failure_note(&failed, "E401: the registry rejected the token", 3);
+        let first = note.lines().nth(1).unwrap_or("");
+        assert!(first.contains("acme scope needs"), "{note}");
+    }
+
     /// The prompt hook hands over a paraphrase the encoder ranked first
     /// with no word in common, leaves out what the encoder barely named,
     /// and hands over three memories at most.
@@ -35613,6 +35933,51 @@ mod tests {
         assert!(note.contains("VITE_API_URL"), "{note}");
     }
 
+    /// A hit one scorer named carries a word no other hit has. Its BM25
+    /// is near 2, but it is kept out, so it must not lift the floor over
+    /// the memories that name the subject and do get in.
+    #[test]
+    fn a_rare_word_on_a_hit_kept_out_does_not_lift_the_lexical_floor() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let hit = |id: &str, text: &str, ballots: u32| {
+            serde_json::json!({
+                "id": id, "text": text, "score": 2.0, "kind": "lesson",
+                "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"],
+                "ballots": ballots, "of": 3
+            })
+        };
+        let mut hits = vec![hit(
+            "rare",
+            "Publishing on Fridays needs a second reviewer",
+            1,
+        )];
+        for i in 0..8 {
+            hits.push(hit(
+                &format!("subject{i}"),
+                &format!("The registry rejected the token on host {i}; mint a new one"),
+                2,
+            ));
+        }
+        hits.push(hit("other", "Pin the Postgres image by digest", 2));
+        let url = serve_signal_pack(Value::Array(hits));
+        let _url = PackUrl::set(&url);
+        let call = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "publishing failed, the registry rejected my token".into(),
+            session: Some("rare-lexical".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(&call, 5);
+        assert!(note.contains("The registry rejected the token"), "{note}");
+        assert!(!note.contains("Fridays"), "{note}");
+    }
+
     /// Jev says an old memory bears on the prompt and the memory names
     /// the subject. Its fused score sits under 0.6 of a fresh hit on
     /// age alone, and its cosine sits outside the dense band, so only
@@ -35681,6 +36046,65 @@ mod tests {
         };
         let (note, _) = hook_note(&call, 5);
         assert!(note.contains("VITE_API_URL"), "{note}");
+    }
+
+    /// Jev is sure of a claim that shares no word with the prompt. Beside
+    /// it sits a claim that names the subject. Only that one gets in:
+    /// Jev's probability alone is not the gate.
+    #[test]
+    fn the_judge_alone_does_not_admit_a_claim_with_no_word_in_common() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let answers = config.path().join("judge-answers.json");
+        std::fs::write(
+            &answers,
+            r#"{"answers":{"bears_0":{"noul":0.95},"bears_1":{"noul":0.6},"correction":{"noul":0.0},"choice":{"noul":0.0},"injection":{"noul":0.0}}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(config.path().join("ljos")).unwrap();
+        std::fs::write(
+            config.path().join("ljos/jev.toml"),
+            format!(
+                "enabled = true\nbackend = \"command\"\ncache_days = 0\nmin_words = 1\n\
+                 min_candidates = 2\nbudget_ms = 5000\n\
+                 command = [\"sh\", \"-c\", \"cat >/dev/null; cat {}\"]\n",
+                answers.display()
+            ),
+        )
+        .unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+            ("XDG_STATE_HOME", state.path().to_str().unwrap()),
+            ("XDG_CACHE_HOME", cache.path().to_str().unwrap()),
+        ]);
+        let hit = |id: &str, text: &str| {
+            serde_json::json!({
+                "id": id, "text": text, "score": 2.0, "kind": "lesson",
+                "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"],
+                "ballots": 2, "of": 3, "dense_rank": 2, "cosine": 0.40
+            })
+        };
+        let url = serve_signal_pack(serde_json::json!([
+            hit("pager", "Rotate the on-call pager every Monday morning"),
+            hit(
+                "vite",
+                "The frontend reads its API base URL from VITE_API_URL at build time, not at runtime"
+            ),
+        ]));
+        let _url = PackUrl::set(&url);
+        let call = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "the API base URL is wrong after deploying".into(),
+            session: Some("judged-alone".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(&call, 5);
+        assert!(note.contains("VITE_API_URL"), "{note}");
+        assert!(!note.contains("pager"), "{note}");
     }
 
     /// A cold encoder and a paraphrase share no word, so the atom list
@@ -37965,8 +38389,8 @@ mod tests {
             !admits_judged(&hit(1.0, Some(1), Some(3)), true, 0.95, cue, 1.0, 1.0),
             "one scorer of three does not admit"
         );
-        // Jev is sure, so a fused score under the old floor does not keep
-        // the claim out. The probability carries no age.
+        // Jev is sure and the claim shares a word, so a fused score under
+        // the old floor does not keep it out. Neither carries age.
         assert!(admits_judged(
             &hit(0.5, Some(2), Some(2)),
             true,
@@ -37975,6 +38399,13 @@ mod tests {
             0.0,
             1.0
         ));
+        // However sure Jev is, a claim that shares no word or alias with
+        // the prompt is Jev's word alone.
+        let unrelated = Hit {
+            text: "rotate the on-call pager every Monday".into(),
+            ..hit(1.0, Some(2), Some(2))
+        };
+        assert!(!admits_judged(&unrelated, true, 0.95, cue, 0.0, 1.0));
         assert!(
             !admits_judged(&hit(1.0, Some(2), Some(2)), true, 0.6, cue, 0.4, 1.0),
             "under the lexical floor"
@@ -43350,6 +43781,99 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             3,
         );
         assert!(note.contains("VITE_API_URL"), "{note}");
+    }
+
+    /// "Clear the npm cache weekly" is the only hit that says `npm`, so
+    /// its BM25 is above 2. It shares no two words with the failure and
+    /// is kept out, and naming the subject is worth as much as a rare
+    /// word, so the eight lessons on the rejected token still get in.
+    #[test]
+    fn a_failed_tool_floor_is_set_by_the_hits_that_pass() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap())]);
+        let hit = |id: &str, text: &str, score: f64| {
+            serde_json::json!({
+                "id": id, "text": text, "score": score, "kind": "lesson",
+                "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"],
+                "ballots": 2, "of": 3
+            })
+        };
+        let mut hits = vec![hit("cache", "Clear the npm cache weekly", 3.0)];
+        for i in 0..8 {
+            hits.push(hit(
+                &format!("token{i}"),
+                &format!("The registry rejected the token on host {i}; rotate it there"),
+                2.0,
+            ));
+        }
+        hits.push(hit("other", "Pin the Postgres image by digest", 1.0));
+        let url = serve_signal_pack(Value::Array(hits));
+        let _url = PackUrl::set(&url);
+        let call = HookCall {
+            event: "PostToolUseFailure".into(),
+            cue: "npm test".into(),
+            session: Some("rare-fail".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = failure_note(&call, "failed: token rejected by the registry", 3);
+        assert_eq!(
+            note.matches("The registry rejected the token").count(),
+            3,
+            "{note}"
+        );
+        assert!(!note.contains("npm cache"), "{note}");
+    }
+
+    /// Every failed command says `build`, `failed`, `test` or `error`,
+    /// and every rule says `always` or `never`. Lessons that share only
+    /// those with a failure all clear 0.6 of a best that is as weak, so
+    /// they are not counted: a pool of them hands nothing over. A lesson
+    /// that names what failed still does.
+    #[test]
+    fn a_failed_tool_does_not_admit_lessons_that_share_only_generic_words() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap())]);
+        let hit = |id: &str, text: &str| {
+            serde_json::json!({
+                "id": id, "text": text, "score": 2.0, "kind": "lesson",
+                "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"],
+                "ballots": 2, "of": 3
+            })
+        };
+        let generic = [
+            hit("g1", "Always run the test build before you push"),
+            hit("g2", "Never ignore a failed build in review"),
+            hit("g3", "Always read the whole error when a test failed"),
+            hit(
+                "g4",
+                "Never merge while a build is failing or a test has an error",
+            ),
+        ];
+        let call = |session: &str| HookCall {
+            event: "PostToolUseFailure".into(),
+            cue: "cargo build".into(),
+            session: Some(session.into()),
+            shape: HookShape::default(),
+        };
+        let error = "error: the build failed; never seen this test exit before, always edition2024";
+        let url = serve_signal_pack(Value::Array(generic.to_vec()));
+        let pack = PackUrl::set(&url);
+        let (note, ids) = failure_note(&call("generic-only"), error, 3);
+        assert!(note.is_empty() && ids.is_empty(), "{note}");
+        drop(pack);
+
+        let mut pool = generic.to_vec();
+        pool.push(hit(
+            "real",
+            "Cargo older than 1.85 cannot read an edition2024 manifest; use the pinned toolchain",
+        ));
+        let url = serve_signal_pack(Value::Array(pool));
+        let _pack = PackUrl::set(&url);
+        let (note, _) = failure_note(&call("generic-real"), error, 3);
+        assert!(note.contains("edition2024 manifest"), "{note}");
+        assert_eq!(note.lines().count(), 2, "{note}");
     }
 
     /// A compaction forgets which memories the conversation was handed, so
@@ -48734,6 +49258,80 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(
             brief_text.contains("unverified logbook notes"),
             "the tracker recall is not labelled: {brief_text}"
+        );
+    }
+
+    /// Six fresh hits the pack ranks first do not name the persona's
+    /// domain; an old lesson that does sits seventh. A brief that took
+    /// the first five never read it.
+    #[test]
+    fn a_brief_keeps_what_names_the_domain_past_the_fused_cut() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tracker");
+        let project = root.join("Software/probe");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("issues.org"),
+            "#+TITLE: probe issues\n#+VISSUE: 1\n#+TODO: TODO STARTED | DONE\n* TODO [#C] Logo legibility review\n:PROPERTIES:\n:ID:         probe-l0g0\n:END:\n",
+        )
+        .unwrap();
+        let script = "#!/bin/sh\ncase \"$1\" in\n  recall) echo 'probe-l0g0  TODO  Logo legibility review' ;;\nesac\nexit 0\n";
+        let fake = dir.path().join("vissue");
+        std::fs::write(&fake, script).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut hits: Vec<Value> = (0..6)
+            .map(|i| {
+                serde_json::json!({"id": format!("fresh{i}"), "kind": "lesson", "score": 2.0,
+                    "text": format!("Brand colours were reviewed in round {i}"), "entities": []})
+            })
+            .collect();
+        hits.push(
+            serde_json::json!({"id": "old", "kind": "lesson", "score": 0.5,
+            "text": "Keep the logo legible at sixteen pixels", "entities": ["logo"],
+            "ts": "2026-07-22T09:00:00.000Z"}),
+        );
+        let (url, _seen) = serve_http(move |req| {
+            let line = req.lines().next().unwrap_or("");
+            if line.starts_with("GET /v1/atoms") && line.contains("kind=persona") {
+                (
+                    200,
+                    r#"{"atoms":[{"id":"atom-p","kind":"persona","name":"designer","anchor":0.5,"text":"Reads a mark for legibility at small sizes.","entities":["logo"],"ts":"2026-10-11T10:00:00Z"}]}"#.into(),
+                )
+            } else if line.starts_with("GET /v1/search") {
+                let limit = line
+                    .split(['?', '&', ' '])
+                    .find_map(|kv| kv.strip_prefix("limit="))
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .unwrap_or(hits.len());
+                let kept: Vec<&Value> = hits.iter().take(limit).collect();
+                (200, serde_json::json!({ "hits": kept }).to_string())
+            } else if line.starts_with("GET /v1/atoms") {
+                (200, r#"{"atoms":[]}"#.into())
+            } else {
+                (200, "{}".into())
+            }
+        });
+        let runtime = dir.path().join("run");
+        std::fs::create_dir_all(&runtime).unwrap();
+        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        let _env = HoldEnv::set(&[
+            ("VISSUE_ROOT", root.to_str().unwrap()),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("LJOS_TRACKER_GIT", "off"),
+            ("XDG_RUNTIME_DIR", runtime.to_str().unwrap()),
+        ]);
+        let _url = PackUrl::set(&url);
+        let brief_text = with_fake_on_path(dir.path(), || {
+            bind_playbook("probe-l0g0", "company-panel").unwrap();
+            brief("designer", "probe-l0g0").unwrap()
+        });
+        assert!(
+            brief_text.contains("Keep the logo legible at sixteen pixels"),
+            "the lesson on the domain was cut: {brief_text}"
         );
     }
 
