@@ -43878,6 +43878,54 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
     }
 
+    /// A `cd` through `$HOME`, `${HOME}`, `~`, `~login` or a `CDPATH`
+    /// entry still runs `make clean-all` where it lands.
+    #[test]
+    fn a_cd_through_home_or_cdpath_is_judged_where_it_lands() {
+        let _g = env_guard();
+        let (root, home, _env) = policyd_tree("policyd-home");
+        for (dir, makefile) in [
+            (home.path().join("proj"), RISKY_MAKEFILE),
+            (home.path().join("plain"), PLAIN_MAKEFILE),
+            (root.path().join("lib/proj"), RISKY_MAKEFILE),
+        ] {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("Makefile"), makefile).unwrap();
+        }
+        // SAFETY: getpwuid returns null or a record that stays valid until
+        // the next lookup, and both fields are copied out at once.
+        let (login, pw_home) = unsafe {
+            let pw = libc::getpwuid(libc::getuid());
+            assert!(!pw.is_null(), "no passwd entry for this user");
+            let field =
+                |p: *const libc::c_char| std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned();
+            (field((*pw).pw_name), PathBuf::from(field((*pw).pw_dir)))
+        };
+        let theirs = tempfile::Builder::new()
+            .prefix(".ljos-login-")
+            .tempdir_in(&pw_home)
+            .unwrap();
+        std::fs::create_dir_all(theirs.path().join("proj")).unwrap();
+        std::fs::write(theirs.path().join("proj/Makefile"), RISKY_MAKEFILE).unwrap();
+        let below = theirs.path().strip_prefix(&pw_home).unwrap().display();
+        let verdict = |line: &str| tcb_verdict_in(line, Some(root.path()));
+        for line in [
+            "cd $HOME/proj && make clean-all".to_string(),
+            "cd ${HOME}/proj && make clean-all".to_string(),
+            "cd ~/proj && make clean-all".to_string(),
+            format!("cd ~{login}/{below}/proj && make clean-all"),
+            "CDPATH=lib cd proj && make clean-all".to_string(),
+            "CDPATH=$HOME cd proj && make clean-all".to_string(),
+        ] {
+            let rule = verdict(&line).unwrap_or_else(|| panic!("{line:?} was allowed"));
+            assert_eq!(rule.verdict, "deny", "{line:?}: {}", rule.reason);
+            assert_eq!(rule.pattern, "ljos-policyd", "{line:?}: {}", rule.reason);
+        }
+        for line in ["cd ~/plain && make clean-all", "cd lib && make clean-all"] {
+            assert!(verdict(line).is_none(), "{line:?}: {:?}", verdict(line));
+        }
+    }
+
     /// A backslash and the newline after it drop out of the line the TCB
     /// reads, as the shell drops them, except inside single quotes or
     /// `$'...'`, in a comment, or after an escaped backslash.
