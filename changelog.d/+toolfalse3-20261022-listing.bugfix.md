@@ -1,1 +1,0 @@
-`ljos rules` proved the pack listing on every call to ask whether it wants the seat token. That answer is now kept per pack base for the life of the process, including a listing that does not ask, so a second call does not prove it again.

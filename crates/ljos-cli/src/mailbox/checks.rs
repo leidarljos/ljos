@@ -89,7 +89,10 @@ impl DenyList {
         Ok(deny)
     }
 
+    /// A trailing dot on the domain is the same domain to DNS, so it is
+    /// dropped before matching.
     fn denies_address(&self, address: &str) -> bool {
+        let address = address.trim_end_matches('.');
         let domain = address.rsplit_once('@').map_or("", |(_, d)| d);
         self.addresses.iter().any(|a| a == address)
             || self
@@ -106,8 +109,11 @@ pub fn refusals(message: &[u8], config: &MailConfig) -> Vec<String> {
     let Some(identity) = config.identity.as_deref() else {
         return vec!["checks: no [mail] identity is configured".into()];
     };
-    let deny = match config.deny_file.as_deref().map(DenyList::read).transpose() {
-        Ok(deny) => deny.unwrap_or_default(),
+    let Some(deny_file) = config.deny_file.as_deref() else {
+        return vec!["checks: no [mail] deny_file is configured".into()];
+    };
+    let deny = match DenyList::read(deny_file) {
+        Ok(deny) => deny,
         Err(e) => return vec![format!("{e:#}")],
     };
     let attribution: Vec<String> = ATTRIBUTION
@@ -124,7 +130,9 @@ fn check(message: &[u8], identity: &str, deny: &DenyList, attribution: &[String]
     };
     let message = message.replace("\r\n", "\n");
     let (head, body) = message.split_once("\n\n").unwrap_or((&message, ""));
-    let headers = unfold(head);
+    let Some(headers) = unfold(head) else {
+        return vec!["checks: a header line is neither a field nor a continuation".into()];
+    };
     let mut out = Vec::new();
     let values = |name: &str| -> Vec<&str> {
         headers
@@ -156,16 +164,7 @@ fn check(message: &[u8], identity: &str, deny: &DenyList, attribution: &[String]
         }
     }
 
-    let lower = message.to_ascii_lowercase();
-    if headers.iter().any(|(_, v)| v.contains("=?"))
-        || lower.lines().any(|l| {
-            let l = l.replace(' ', "");
-            l.starts_with("content-transfer-encoding:base64")
-                || l.starts_with("content-transfer-encoding:quoted-printable")
-        })
-    {
-        out.push("checks: encoded text cannot be scanned; send it as plain UTF-8".into());
-    }
+    out.extend(plain_text_only(&headers, body));
 
     let text = fold(&format!(
         "{}\n{body}",
@@ -211,20 +210,88 @@ fn check(message: &[u8], identity: &str, deny: &DenyList, attribution: &[String]
     out
 }
 
-/// Header lines with continuations joined, names in lower case.
-fn unfold(head: &str) -> Vec<(String, String)> {
+/// What a recipient's client shows is what the checks scanned only for a
+/// single `text/plain; charset=utf-8` part in 7bit or 8bit. Anything
+/// else (multipart, HTML, base64, quoted-printable, encoded words,
+/// markup or entities a client might render) is refused.
+fn plain_text_only(headers: &[(String, String)], body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let compact = |v: &str| -> String {
+        v.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .to_ascii_lowercase()
+    };
+    let all = |name: &str| -> Vec<String> {
+        headers
+            .iter()
+            .filter(|(n, _)| n == name)
+            .map(|(_, v)| compact(v))
+            .collect()
+    };
+    let types = all("content-type");
+    if types.len() != 1
+        || !matches!(
+            types[0].as_str(),
+            "text/plain;charset=utf-8" | "text/plain;charset=\"utf-8\""
+        )
+    {
+        out.push("checks: the draft must be one text/plain; charset=utf-8 part".into());
+    }
+    let encodings = all("content-transfer-encoding");
+    if encodings.len() > 1 || encodings.iter().any(|e| e != "7bit" && e != "8bit") {
+        out.push("checks: encoded text cannot be scanned; send it as 7bit or 8bit UTF-8".into());
+    }
+    if body.contains("=?") || headers.iter().any(|(_, v)| v.contains("=?")) {
+        out.push("checks: encoded words cannot be scanned; send plain UTF-8".into());
+    }
+    if has_markup(body) {
+        out.push("checks: the body carries HTML tags or entities".into());
+    }
+    out
+}
+
+/// A `<` that could open a tag, comment or declaration, or an `&` that
+/// starts a named or numeric entity.
+fn has_markup(body: &str) -> bool {
+    let bytes = body.as_bytes();
+    bytes.iter().enumerate().any(|(i, &b)| {
+        let next = bytes.get(i + 1).copied().unwrap_or(0);
+        match b {
+            b'<' => next.is_ascii_alphabetic() || matches!(next, b'/' | b'!' | b'?'),
+            b'&' => {
+                let name: Vec<u8> = bytes[i + 1..]
+                    .iter()
+                    .copied()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == b'#')
+                    .collect();
+                !name.is_empty() && bytes.get(i + 1 + name.len()) == Some(&b';')
+            }
+            _ => false,
+        }
+    })
+}
+
+/// Header fields unfolded as RFC 5322 says (a line break before
+/// whitespace is removed), names in lower case. `None` when a line is
+/// neither a field nor a continuation, so nothing is silently skipped.
+pub(crate) fn unfold(head: &str) -> Option<Vec<(String, String)>> {
     let mut headers: Vec<(String, String)> = Vec::new();
     for line in head.lines() {
         if line.starts_with([' ', '\t']) {
-            if let Some((_, value)) = headers.last_mut() {
-                value.push(' ');
-                value.push_str(line.trim());
+            headers.last_mut()?.1.push_str(line);
+        } else {
+            let (name, value) = line.split_once(':')?;
+            if name.is_empty() || !name.bytes().all(|b| b.is_ascii_graphic()) {
+                return None;
             }
-        } else if let Some((name, value)) = line.split_once(':') {
-            headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
+            headers.push((name.to_ascii_lowercase(), value.to_string()));
         }
     }
-    headers
+    for (_, value) in &mut headers {
+        *value = value.trim().to_string();
+    }
+    Some(headers)
 }
 
 /// The folded addresses in one address header, display names dropped.
