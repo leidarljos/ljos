@@ -57,6 +57,9 @@ fn serve(atoms: Arc<Mutex<Vec<serde_json::Value>>>) -> String {
                 }
                 atoms.lock().unwrap().push(atom.clone());
                 (200, atom.to_string())
+            } else if path.starts_with("GET /v1/atoms") {
+                let stored = atoms.lock().unwrap().clone();
+                (200, serde_json::json!({"atoms": stored}).to_string())
             } else if path.starts_with("GET /v1/") {
                 (200, r#"{"hits":[],"atoms":[]}"#.into())
             } else {
@@ -496,6 +499,14 @@ fn a_bash_write_to_the_latest_prompt_is_denied() {
 }
 
 fn mcp_remember(seat: &Seat, text: &str) -> serde_json::Value {
+    mcp_call(
+        seat,
+        "ljos_remember",
+        serde_json::json!({"seat": "probe", "text": text}),
+    )
+}
+
+fn mcp_call(seat: &Seat, tool: &str, arguments: serde_json::Value) -> serde_json::Value {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -506,6 +517,7 @@ fn mcp_remember(seat: &Seat, text: &str) -> serde_json::Value {
         .env("PACKSET_URL", &seat.url)
         .env("PACKSET_WORKSPACE", "seat")
         .env("PACKSET_TIMEOUT_MS", "2000")
+        .env("LJOS_USER_RULES_SYNC", "off")
         .env("LJOS_GUARD", "on")
         .env("LJOS_CAPTURE", "save")
         .env("LJOS_SEAT", "probe")
@@ -520,8 +532,8 @@ fn mcp_remember(seat: &Seat, text: &str) -> serde_json::Value {
             "clientInfo": {"name": "probe", "version": "0"}}}),
         serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
         serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
-            "name": "ljos_remember",
-            "arguments": {"seat": "probe", "text": text}}}),
+            "name": tool,
+            "arguments": arguments}}),
     ];
     {
         let stdin = child.stdin.as_mut().unwrap();
@@ -614,6 +626,72 @@ fn a_forged_prompt_and_bind_do_not_make_prefer_the_persons() {
             "{atom}"
         );
     }
+}
+
+/// A lesson the person typed at the terminal, so promote has one to copy.
+fn remembered_lesson(seat: &Seat) -> String {
+    let out = seat.command(&["remember", PLANT], false).output().unwrap();
+    assert!(out.status.success(), "{}", text_of(&out));
+    let atoms = seat.atoms.lock().unwrap().clone();
+    atoms
+        .iter()
+        .find(|atom| atom["kind"] == "lesson")
+        .and_then(|atom| atom["id"].as_str())
+        .unwrap_or_else(|| panic!("no lesson stored\n{atoms:?}"))
+        .to_string()
+}
+
+/// `ljos prefer --user --promote` under a runner writes a user rule that
+/// reaches every prompt, so it refuses a lesson that is not in the
+/// person's latest prompt, the same as `prefer --user` of the words.
+#[test]
+fn a_runner_promote_of_a_lesson_the_person_did_not_say_is_refused() {
+    let seat = Seat::new();
+    let id = remembered_lesson(&seat);
+    let out = seat
+        .command(&["prefer", "--user", "--why", "x", "--promote", &id], false)
+        .env("CURSOR_CONVERSATION_ID", "0199a1b2-c3d4-e5f6-cursor")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "a runner promoted a lesson the person did not say\n{}",
+        text_of(&out)
+    );
+    assert!(
+        combined(&out).contains("only the person's own words"),
+        "{}",
+        text_of(&out)
+    );
+    assert!(
+        !rules_text(&seat).contains("release key"),
+        "{}",
+        rules_text(&seat)
+    );
+}
+
+/// MCP `ljos_prefer` with `user` and `promote` refuses the same lesson,
+/// with or without a runner session variable.
+#[test]
+fn mcp_promote_of_a_lesson_the_person_did_not_say_is_refused() {
+    let seat = Seat::new();
+    let id = remembered_lesson(&seat);
+    let answer = mcp_call(
+        &seat,
+        "ljos_prefer",
+        serde_json::json!({"text": "", "user": true, "why": "x", "promote": id}),
+    );
+    let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
+    assert!(refused, "mcp promoted the lesson: {answer}");
+    assert!(
+        answer.to_string().contains("only the person's own words"),
+        "{answer}"
+    );
+    assert!(
+        !rules_text(&seat).contains("release key"),
+        "{}",
+        rules_text(&seat)
+    );
 }
 
 /// Briefs, the limit stop and the work nudge must not tell an agent to
