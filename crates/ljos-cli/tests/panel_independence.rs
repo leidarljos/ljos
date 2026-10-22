@@ -496,15 +496,17 @@ fn one_sand_subagent_five_personas_count_as_the_first_ballot() {
 #[test]
 fn n_distinct_sessions_settle() {
     let world = World::new();
-    for seat in ["alice", "bob", "carol"] {
+    // A cite stands for these seats because they are on the standing list.
+    // A seat off that list needs a slot, which this panel does not write.
+    for seat in ["ljosbot", "inky", "disk-saver"] {
         vote(&world, seat, &format!("sess-{seat}-0001"), "demo-ind2");
     }
-    let out = world.ljos("alice", "sess-alice-0001", &["consensus", "demo-ind2"]);
+    let out = world.ljos("ljosbot", "sess-ljosbot-0001", &["consensus", "demo-ind2"]);
     let said = text(&out);
     assert!(out.status.success(), "{said}");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("decides ship for a push by alice"),
+        stdout.contains("decides ship for a push by ljosbot"),
         "{said}"
     );
     assert!(stdout.contains("the settle is unanimous"), "{said}");
@@ -587,10 +589,10 @@ fn a_design_that_saw_another_candidate_is_flagged_and_distinct_sessions_still_se
     let said = text(&filed);
     assert!(filed.status.success(), "{said}");
     assert!(said.contains(&format!("blind design: {BLIND}")), "{said}");
-    for seat in ["alice", "bob", "carol"] {
+    for seat in ["ljosbot", "inky", "disk-saver"] {
         vote(&world, seat, &format!("sess-{seat}-0001"), "demo-blind");
     }
-    let out = world.ljos("alice", "sess-alice-0001", &["consensus", "demo-blind"]);
+    let out = world.ljos("ljosbot", "sess-ljosbot-0001", &["consensus", "demo-blind"]);
     let said = text(&out);
     assert!(out.status.success(), "{said}");
     let stdout = String::from_utf8_lossy(&out.stdout);
