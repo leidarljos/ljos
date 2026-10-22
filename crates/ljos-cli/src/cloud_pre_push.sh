@@ -4,6 +4,10 @@
 # insteadOf and pushInsteadOf. Refs arrive on stdin. A filter on the
 # command text cannot see a push that a script, make, or another
 # program starts; this hook can, because git runs it either way.
+#
+# The allowlist is the sibling of this script's directory, resolved
+# from the script path. Nothing in the environment chooses that file,
+# the tilde root, or the commands this script runs.
 
 normalize() {
   u=$1
@@ -29,18 +33,16 @@ normalize() {
 local_key() {
   p=$1
   case "$p" in
-    \~) p=${HOME:-} ;;
-    \~/*) p=${HOME:-}/${p#\~/} ;;
+    \~) p=${ljos_home-} ;;
+    \~/*) p=${ljos_home-}/${p#\~/} ;;
   esac
   case "$p" in
     /*) ;;
     *) p=$(pwd)/$p ;;
   esac
-  if command -v readlink >/dev/null 2>&1; then
-    c=$(readlink -f -- "$p" 2>/dev/null || true)
-    if [ -n "$c" ]; then
-      p=$c
-    fi
+  c=$(/usr/bin/readlink -f -- "$p" 2>/dev/null || true)
+  if [ -n "$c" ]; then
+    p=$c
   fi
   while [ "$p" != "${p%/}" ]; do
     p=${p%/}
@@ -104,23 +106,42 @@ host_path() {
     *.git) path=${path%.git} ;;
   esac
   if [ -n "$path" ]; then
-    printf '%s/%s\n' "$host" "$path" | tr '[:upper:]' '[:lower:]'
+    printf '%s/%s\n' "$host" "$path" | /usr/bin/tr '[:upper:]' '[:lower:]'
   else
-    printf '%s\n' "$host" | tr '[:upper:]' '[:lower:]'
+    printf '%s\n' "$host" | /usr/bin/tr '[:upper:]' '[:lower:]'
   fi
 }
 
 # ljos-push-gate
+PATH=/usr/bin:/bin
+export PATH
+unset IFS
 set -eu
 z=0000000000000000000000000000000000000000
-base=${HOME:-}/.config
-case ${XDG_CONFIG_HOME-} in
-  /*) base=$XDG_CONFIG_HOME ;;
-esac
-allow=$base/ljos/push-allow
+ljos_home=
+self=$(/usr/bin/readlink -f -- "$0" 2>/dev/null || true)
+if [ -z "$self" ]; then
+  echo "pre-push: cannot resolve this hook" >&2
+  exit 1
+fi
+cfg=$(/usr/bin/dirname "$self")
+cfg=$(/usr/bin/dirname "$cfg")
+allow=$cfg/push-allow
 if [ ! -f "$allow" ]; then
   echo "pre-push: no push allowlist; a cloud seat may push only its named branches and develop" >&2
   exit 1
+fi
+while IFS='	' read -r tag val; do
+  case "$tag" in
+    home)
+      if [ -z "$ljos_home" ]; then
+        ljos_home=$val
+      fi
+      ;;
+  esac
+done < "$allow"
+if [ -z "$ljos_home" ]; then
+  ljos_home=$(/usr/bin/getent passwd "$(/usr/bin/id -u)" | /usr/bin/cut -d: -f6 || true)
 fi
 key=$(normalize "${2-}")
 kind=
@@ -169,7 +190,7 @@ while IFS=' ' read -r local_ref local_sha remote_ref remote_sha _; do
       ;;
   esac
   if [ "$remote_sha" != "$z" ]; then
-    if ! git merge-base --is-ancestor "$remote_sha" "$local_sha" >/dev/null 2>&1; then
+    if ! /usr/bin/git merge-base --is-ancestor "$remote_sha" "$local_sha" >/dev/null 2>&1; then
       echo "pre-push: $branch is not a fast-forward" >&2
       exit 1
     fi

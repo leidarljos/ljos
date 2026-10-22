@@ -510,6 +510,8 @@ mod tests {
     #[test]
     fn the_shipped_hook_has_no_environment_switch() {
         assert!(!HOOK_SCRIPT.contains("LJOS_HOOK_KEY"));
+        assert!(!HOOK_SCRIPT.contains("XDG_CONFIG_HOME"));
+        assert!(!HOOK_SCRIPT.contains("$HOME"));
         assert!(HOOK_SCRIPT.contains("# ljos-push-gate\n"));
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("pre-push");

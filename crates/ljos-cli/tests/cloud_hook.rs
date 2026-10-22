@@ -693,3 +693,50 @@ fn the_hook_off_switch_does_not_let_a_push_land() {
     push_fails(&repo, "LJOS_HOOK_KEY=1 git push -q other develop");
     assert!(!has_ref(&other_origin, "refs/heads/develop"));
 }
+
+#[test]
+fn the_hook_ignores_home_xdg_and_path() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    let (origin, repo) = bare_repo(root.path(), "seat");
+    let (other_origin, _other) = bare_repo(root.path(), "other");
+    std::env::set_current_dir(&repo).unwrap();
+    ljos_cli::cloud::up(false).unwrap();
+    std::env::set_current_dir(root.path()).unwrap();
+    ljos_cli::cloud::write_push_allowlist(&[origin.to_str().unwrap()], &[], &["develop"]).unwrap();
+    sh_ok(&repo, "git push -q -u origin develop");
+    git(
+        &repo,
+        &["remote", "add", "other", other_origin.to_str().unwrap()],
+    );
+
+    let forged = root.path().join("forged");
+    fs::create_dir_all(forged.join("ljos")).unwrap();
+    fs::write(
+        forged.join("ljos/push-allow"),
+        format!("code\t{}\nbranch\tdevelop\n", other_origin.display()),
+    )
+    .unwrap();
+    let fake = root.path().join("fakebin");
+    fs::create_dir_all(&fake).unwrap();
+    executable(&fake.join("readlink"), "#!/bin/sh\necho /no/such\n");
+    executable(&fake.join("tr"), "#!/bin/sh\ncat\n");
+    let empty = root.path().join("emptyhome");
+    fs::create_dir_all(&empty).unwrap();
+    for script in [
+        &format!(
+            "XDG_CONFIG_HOME={} git push -q other develop",
+            forged.display()
+        ),
+        &format!("PATH={}:$PATH git push -q other develop", fake.display()),
+        &format!(
+            "HOME={} git -c user.name=x -c user.email=x@example.invalid push -q other develop",
+            empty.display()
+        ),
+    ] {
+        push_fails(&repo, script);
+    }
+    assert!(!has_ref(&other_origin, "refs/heads/develop"));
+}
