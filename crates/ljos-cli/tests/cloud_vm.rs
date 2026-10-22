@@ -3467,6 +3467,25 @@ fn a_seat_pinned_before_slots_stands_and_an_unslotted_one_is_left_out() {
     );
 }
 
+/// A second pin line for a standing seat, appended under another key,
+/// does not re-pin it: the gate refuses the pin file instead of letting
+/// the last line win.
+#[test]
+fn an_appended_pin_line_does_not_re_pin_a_standing_seat() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_origin, repo) = slot_world(root.path(), &["probe-c"]);
+    pin_standing(&repo, "ljosbot");
+    std::env::set_var("XDG_DATA_HOME", root.path().join("mallory-data"));
+    pin_standing(&repo, "ljosbot");
+    cast("ljosbot", "probe-c", "hold");
+
+    let rows = [serde_json::json!({"agent": "ljosbot", "choice": "hold"})];
+    let err = ljos_cli::check_seat_signatures("probe-c", &rows, &std::collections::BTreeSet::new())
+        .unwrap_err();
+    assert!(err.contains("duplicate pin voter `ljosbot`"), "{err}");
+}
+
 /// A pin whose author date is before slots began, committed after the
 /// first slot, does not make a seat standing, and a standing seat still
 /// launches when its pin is dated after.

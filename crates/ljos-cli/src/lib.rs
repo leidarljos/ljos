@@ -11216,7 +11216,8 @@ impl SeatSignatures {
 ///
 /// # Errors
 ///
-/// The refusal naming each ballot that does not count.
+/// The refusal naming each ballot that does not count, or the pin file
+/// when it names a seat twice: a second line would re-pin that seat.
 pub fn check_seat_signatures(
     issue: &str,
     ballots: &[Value],
@@ -11234,7 +11235,9 @@ pub fn check_seat_signatures(
         ballot_sig::recorded_at(issue, voter, choice).is_some_and(|t| t < ballot_sig::SIGNING_SINCE)
     };
     let notes = ballot_sig::notes_of(&v);
-    let pins = ballot_sig::pins();
+    let (pins, _) = ballot_sig::pins_for_check().map_err(|e| {
+        format!("{issue}: the seat pins are not one key per seat, so it decides nothing for a push: {e:#}")
+    })?;
     let starts = slot::starts();
     let stands =
         |seat: &str| slot::stands(seat, pins.get(seat).map(String::as_str), starts.as_deref());
