@@ -341,9 +341,9 @@ pub fn session_start_for(session: Option<&str>) -> String {
     // Other machines' rules arrive before the preface is built. A tracker
     // that does not answer leaves the local file, and the hook does not wait.
     user_rules::sync_for_hook();
-    // A preference stored before a basis existed is stamped first, so this
-    // line still shows the ones the person wrote.
-    legacy_pref::migrate_once();
+    // Older preferences are counted when a cutoff receipt is already in
+    // the pack. Session start does not write one: it runs under the
+    // runner, and the cutoff is a person-side record.
     let mut atoms = session_atoms(400);
     if atoms.is_err() {
         wake_for_recall();
@@ -379,10 +379,10 @@ pub fn session_start_for(session: Option<&str>) -> String {
         }
     }
     if let Ok(got) = &atoms {
-        let n = legacy_pref::awaiting(got).len();
-        if n > 0 {
+        let held = legacy_pref::awaiting(got);
+        if !held.is_empty() {
             line.push(' ');
-            line.push_str(&legacy_pref::review_sentence(n));
+            line.push_str(&legacy_pref::review_sentence(&held));
             line.push('.');
         }
     }
@@ -2106,7 +2106,31 @@ fn parent_and_comm(pid: u32) -> Option<(u32, String)> {
     Some((ppid, comm))
 }
 
-#[cfg(not(target_os = "linux"))]
+/// macOS has no procfs. `ps` prints the parent and the short command name.
+#[cfg(target_os = "macos")]
+fn parent_and_comm(pid: u32) -> Option<(u32, String)> {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "ppid=,comm=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(out.stdout).ok()?;
+    let line = text.lines().next()?.trim();
+    let (ppid, comm) = line.split_once(char::is_whitespace)?;
+    let comm = comm.trim();
+    if comm.is_empty() {
+        return None;
+    }
+    let comm = std::path::Path::new(comm)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(comm);
+    Some((ppid.parse().ok()?, comm.to_string()))
+}
+
+#[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
 fn parent_and_comm(_pid: u32) -> Option<(u32, String)> {
     None
 }
@@ -2135,7 +2159,7 @@ fn ancestry() -> Vec<(u32, String)> {
 /// Programs that run other programs and are nobody's seat.
 const WRAPPERS: &[&str] = &[
     "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "env", "sudo", "doas",
-    "timeout", "nohup", "xargs", "script", "uv", "direnv", "ljos", "ljos-mcp",
+    "timeout", "nohup", "xargs", "script", "setsid", "uv", "direnv", "ljos", "ljos-mcp",
 ];
 
 /// Where a process tree stops being a program and becomes the session
@@ -2201,10 +2225,144 @@ fn own_ancestry() -> Vec<(u32, String)> {
         .collect()
 }
 
-/// Whether this process runs under an agent runner: the environment
-/// carries a runner's conversation, or a process above it is a runner,
-/// one whose server left a seat record or one the runners file names.
-/// Consent is the person's, so the verbs that grant it refuse here.
+/// Names ljos ships for runners, plus any the runners file adds.
+///
+/// An absent runners file is not "no runners": the shapes in
+/// [`HARNESSES_EXAMPLE`] are the names a process tree and a cgroup are
+/// matched against. A file that does not parse contributes nothing of
+/// its own; the shipped names still count.
+fn runner_names() -> Vec<String> {
+    fn shipped() -> &'static [String] {
+        static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+        NAMES.get_or_init(|| {
+            toml::from_str::<Harnesses>(HARNESSES_EXAMPLE)
+                .map(|all| all.harness.into_iter().map(|h| h.name).collect())
+                .unwrap_or_default()
+        })
+    }
+    let mut names = shipped().to_vec();
+    if let Ok(all) = harnesses_with_shipped(&harnesses_path()) {
+        for harness in all.harness {
+            if !names.iter().any(|name| name == &harness.name) {
+                names.push(harness.name);
+            }
+        }
+    }
+    for extra in ["agy", "antigravity"] {
+        if !names.iter().any(|name| name == extra) {
+            names.push(extra.to_string());
+        }
+    }
+    names
+}
+
+/// A cgroup path component names a runner when one of its words is that
+/// runner's name. `cursor-agent` is the word `cursor`. A shell, a
+/// multiplexer or a terminal is not a runner, and a name shorter than
+/// four letters is too small a word to trust inside a path.
+fn scope_word_counts(name: &str) -> bool {
+    name.len() >= 4
+        && !WRAPPERS.contains(&name)
+        && !SESSION.iter().any(|prefix| name.starts_with(prefix))
+        && !TERMINALS.contains(&name)
+}
+
+fn segment_names_runner(segment: &str, runners: &[String]) -> bool {
+    segment
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| scope_word_counts(word) && runners.iter().any(|name| name == word))
+}
+
+/// Whether `text` is `/proc/self/cgroup` for a process still inside a
+/// runner's scope. Each line is `id:controllers:path`.
+fn cgroup_text_names_runner(text: &str, runners: &[String]) -> bool {
+    text.lines().any(|line| {
+        let path = line.rsplit_once(':').map_or(line, |(_, path)| path);
+        path.split('/')
+            .any(|segment| segment_names_runner(segment, runners))
+    })
+}
+
+/// The chain up to the session is only shells and wrappers, or it is
+/// empty because the session (or init) is the parent. `setsid -f`, a
+/// double fork, `script` and a detached tmux all leave this shape: the
+/// runner is no longer an ancestor.
+fn wrappers_only() -> bool {
+    own_ancestry()
+        .iter()
+        .all(|(_, comm)| WRAPPERS.contains(&comm.as_str()))
+}
+
+/// Linux: the cgroup this process was started in. A new session does not
+/// leave it. Writing a different cgroup, which a user service or
+/// `systemd-run --user --scope` does, does leave it.
+#[cfg(target_os = "linux")]
+fn scope_names_runner(runners: &[String]) -> bool {
+    let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+    cgroup_text_names_runner(&text, runners)
+}
+
+/// macOS: the process that owns this one after a detach. `launchctl
+/// submit` can hand it to launchd, and then the name is gone.
+#[cfg(target_os = "macos")]
+fn scope_names_runner(runners: &[String]) -> bool {
+    let Some(comm) = responsible_comm() else {
+        return false;
+    };
+    segment_names_runner(&comm, runners)
+}
+
+#[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
+fn scope_names_runner(_runners: &[String]) -> bool {
+    false
+}
+
+/// The command name of the process macOS holds responsible for this one.
+#[cfg(target_os = "macos")]
+fn responsible_comm() -> Option<String> {
+    use std::ffi::CString;
+    let symbol = CString::new("responsibility_get_pid_responsible_for_pid").ok()?;
+    let found = unsafe { libc::dlsym(libc::RTLD_DEFAULT, symbol.as_ptr()) };
+    if found.is_null() {
+        return None;
+    }
+    let ask: unsafe extern "C" fn(i32, *mut i32) -> i32 = unsafe { std::mem::transmute(found) };
+    let mut pid = 0i32;
+    if unsafe { ask(std::process::id() as i32, &mut pid) } != 0 || pid <= 1 {
+        return None;
+    }
+    let out = std::process::Command::new("ps")
+        .args(["-o", "comm=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(out.stdout).ok()?;
+    let comm = text.trim();
+    if comm.is_empty() {
+        return None;
+    }
+    std::path::Path::new(comm)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+}
+
+/// Whether this process runs under an agent runner.
+///
+/// Any one of these is enough. The environment carries a runner's
+/// conversation. A process above this one is a runner, one whose server
+/// left a seat record or one [`runner_names`] lists. Or the chain above
+/// is only shells and wrappers, which is what `setsid`, a double fork,
+/// `script` and a detached tmux leave, and the scope still names a
+/// runner: the cgroup on Linux, the responsible process on macOS.
+///
+/// The same user can still step out of that scope. On Linux that is a
+/// new cgroup (`systemd-run --user --scope`, or a cgroup the runner's
+/// parent allows). On macOS it is handing the process to launchd. A
+/// cleared environment does not do it. Consent is the person's, so the
+/// verbs that grant it refuse here.
 #[must_use]
 pub fn under_a_runner() -> bool {
     if std::env::vars().any(|(k, v)| runner_session_var(&k, &v))
@@ -2212,13 +2370,13 @@ pub fn under_a_runner() -> bool {
     {
         return true;
     }
-    let mut runners: Vec<String> = harnesses_with_shipped(&harnesses_path())
-        .map(|all| all.harness.into_iter().map(|h| h.name).collect())
-        .unwrap_or_default();
-    runners.extend(["agy", "antigravity"].map(String::from));
-    own_ancestry()
-        .iter()
-        .any(|(pid, comm)| seat_record_path(*pid).exists() || runners.iter().any(|r| r == comm))
+    let runners = runner_names();
+    if own_ancestry().iter().any(|(pid, comm)| {
+        seat_record_path(*pid).exists() || runners.iter().any(|name| name == comm)
+    }) {
+        return true;
+    }
+    wrappers_only() && scope_names_runner(&runners)
 }
 
 /// Path components that name a place, not a program.
@@ -10355,8 +10513,11 @@ fn redact_hit_provenance(body: &mut Value) {
 /// that lists `rank=relevance` ([`ranks_by_relevance`]) is asked for it,
 /// picks them by lexical, BM25 and cosine with no half-life, and echoes
 /// the rank; an answer without the echo is read as fused. One that lists
-/// it and answers it with a 4xx is asked again as an older writer. An
-/// older writer is not asked, and cuts its
+/// it and answers it 400 with a body that names `rank` refuses it, and
+/// is asked again as an older writer. Any other 4xx, a 401, a 429 or a
+/// 400 about something else, refuses nothing: that search has no hits
+/// of the writer's, and the stored atoms that best match answer alone.
+/// An older writer is not asked, and cuts its
 /// fused list, which decays with age, so rank 21 of a pack full of fresh
 /// lookalikes never arrives: the stored atoms that best match the cue
 /// then follow its hits, so a relevant old memory still gets in. So they
@@ -10367,7 +10528,7 @@ fn redact_hit_provenance(body: &mut Value) {
 /// that atom's count, which is none: which of the tied lessons a ballot
 /// keeps at its cut is arbitrary, and one it dropped would have come in
 /// as the atom. A body that does not parse, a NaN from a writer that is
-/// not packset, has no hits and no echo, so the stored atoms answer.
+/// not packset, is an error, so a pool the hook already holds stands.
 ///
 /// The read is sent first without this seat's token and has to come back
 /// 401, the same check as [`atom_now`]. The token goes out only after
@@ -10394,33 +10555,35 @@ fn search_relevant(
         }
         Err(err) => bail!("search: GET /v1/search failed: {err}"),
     };
-    let ask = |rank: bool| {
+    // The writer's answer, or the status and body of a 4xx it gave.
+    let ask = |rank: bool| -> Result<std::result::Result<ureq::Response, (u16, String)>> {
         let req = search_query(client, &url, cue, limit, rerank, rank);
         let req = if open {
             req
         } else {
             packset_client::authorize(req)
         };
-        req.timeout(timeout).call().map_err(Box::new)
+        let failed = match req.timeout(timeout).call() {
+            Ok(answer) => return Ok(Ok(answer)),
+            Err(ureq::Error::Status(code @ 400..=499, answer)) => {
+                return Ok(Err((code, answer.into_string().unwrap_or_default())));
+            }
+            Err(e @ ureq::Error::Status(..)) => packset_client::Error::Bad(e.to_string()),
+            Err(e) => packset_client::Error::Http(Box::new(e)),
+        };
+        Err(failed).context("search: GET /v1/search failed")
     };
-    // A writer that lists the rank and answers it with a 4xx is an older
-    // writer for the rest of the process. The probe already separated a
-    // listener that does not ask from one that does.
-    let answer = match ask(ranked) {
-        Err(e) if ranked && matches!(*e, ureq::Error::Status(400..=499, _)) => {
-            refuses_relevance(client);
-            ask(false)
-        }
-        other => other,
+    let mut answer = ask(ranked)?;
+    if matches!(&answer, Err((400, why)) if ranked && names_the_rank(why)) {
+        refuses_relevance(client);
+        answer = ask(false)?;
+    }
+    let mut body: Value = match answer {
+        Ok(answer) => answer
+            .into_json()
+            .context("search: the /v1/search answer is not JSON")?,
+        Err(_) => serde_json::json!({ "hits": [] }),
     };
-    let mut body: Value = answer
-        .map_err(|e| match *e {
-            ureq::Error::Status(..) => packset_client::Error::Bad(e.to_string()),
-            _ => packset_client::Error::Http(e),
-        })
-        .context("search: GET /v1/search failed")?
-        .into_json()
-        .unwrap_or_else(|_| serde_json::json!({ "hits": [] }));
     let chosen = body["hits"].as_array().map_or(0, Vec::len);
     if body["rank"].as_str() != Some("relevance") || chosen >= limit as usize {
         let mut extra = Vec::new();
@@ -10453,25 +10616,29 @@ fn search_relevant(
     Ok((body, chosen))
 }
 
-/// Whether the writer at `client` takes `rank=relevance`: its
-/// `/v1/status` lists it under `search.ranks`. An older writer omits
-/// `search`, and one that does not answer is taken as older. Its crate
-/// version did not move with the rank, so it is not read. Asked once a
-/// process per writer. `with_token` is false for a listener that did not
-/// ask, so the token is not handed to it.
+/// Whether the writer at `client` takes `rank=relevance` in this
+/// workspace: its `/v1/status` lists it under `search.ranks`, and no
+/// search here was refused it since. An older writer omits `search`, and
+/// one that does not answer is taken as older. Its crate version did not
+/// move with the rank, so it is not read. Asked once per writer and
+/// workspace each [`RANKS_FOR`]. `with_token` is false for a listener
+/// that did not ask, so the token is not handed to it.
 fn ranks_by_relevance(
     client: &PacksetClient,
     timeout: std::time::Duration,
     with_token: bool,
 ) -> bool {
     let base = client.base().trim_end_matches('/').to_string();
+    let workspace = client.workspace();
     let mut known = RANKS_KNOWN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((at, ranks)) = known.as_ref() {
-        if *at == base {
-            return *ranks;
-        }
+    known.retain(|(.., at, _)| at.elapsed() < RANKS_FOR);
+    if let Some((.., ranks)) = known
+        .iter()
+        .find(|(b, w, ..)| *b == base && *w == workspace)
+    {
+        return *ranks;
     }
     let req = ureq::get(&format!("{base}/v1/status"));
     let req = if with_token {
@@ -10491,21 +10658,43 @@ fn ranks_by_relevance(
         .pointer("/search/ranks")
         .and_then(Value::as_array)
         .is_some_and(|r| r.iter().any(|v| v.as_str() == Some("relevance")));
-    *known = Some((base, ranks));
+    known.push((base, workspace, std::time::Instant::now(), ranks));
     ranks
 }
 
-/// The last writer [`ranks_by_relevance`] asked, and its answer.
-static RANKS_KNOWN: std::sync::Mutex<Option<(String, bool)>> = std::sync::Mutex::new(None);
+/// How long [`ranks_by_relevance`] believes a status it read, and so the
+/// longest a refusal lasts: past it the status is read again, and a
+/// writer that lists the rank is asked for it.
+const RANKS_FOR: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// The writer at `client` answered a ranked search with a 4xx though its
-/// status lists the rank: for the rest of the process it is asked as an
-/// older writer.
+/// The writer and workspace [`ranks_by_relevance`] asked about, when it
+/// read the status, and whether that workspace is asked for the rank.
+type RanksKnown = Vec<(String, String, std::time::Instant, bool)>;
+static RANKS_KNOWN: std::sync::Mutex<RanksKnown> = std::sync::Mutex::new(Vec::new());
+
+/// Whether a 400's body names the `rank` parameter, as packset's `rank
+/// must be fused or relevance` does. `rerank` is another parameter and
+/// another word.
+fn names_the_rank(body: &str) -> bool {
+    body.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|w| w.eq_ignore_ascii_case("rank"))
+}
+
+/// The writer at `client` answered a ranked search 400 naming `rank`
+/// though its status lists it: this workspace is asked as an older writer
+/// until [`ranks_by_relevance`] reads the status again.
 fn refuses_relevance(client: &PacksetClient) {
-    let base = client.base().trim_end_matches('/').to_string();
-    *RANKS_KNOWN
+    let base = client.base().trim_end_matches('/');
+    let workspace = client.workspace();
+    let mut known = RANKS_KNOWN
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((base, false));
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((.., ranks)) = known
+        .iter_mut()
+        .find(|(b, w, ..)| b == base && *w == workspace)
+    {
+        *ranks = false;
+    }
 }
 
 /// The stored atoms that best match `cue` on [`lexical_match_scores`],
@@ -17322,7 +17511,6 @@ pub fn rules_for_gate() -> Vec<Rule> {
 /// empty when the pack does not answer: a reminder is not worth a wait.
 #[must_use]
 pub fn gate_read() -> (Vec<Rule>, Vec<(String, String)>) {
-    legacy_pref::migrate_once();
     let kept = rules_cache_path();
     let listed = pack().and_then(|client| {
         let atoms =
@@ -17410,18 +17598,21 @@ pub fn preferences_line(enforced: usize, could: usize, total: usize) -> String {
 }
 
 fn preferences_row() -> Habitat {
+    // The doctor is a person-side run, so it records the cutoff. Under a
+    // runner the call does nothing and the count below still stands.
     legacy_pref::migrate_once();
     let listed = pack().and_then(|client| {
         atoms_lean(&client, &client.workspace()).context("preferences: GET /v1/atoms failed")
     });
     let (state, held) = match listed {
         Ok(atoms) => {
-            let held = legacy_pref::awaiting(&atoms).len();
+            let held_rows = legacy_pref::awaiting(&atoms);
+            let held = held_rows.len();
             let (enforced, could, total) =
                 preferences_enforced(&preferences_of(&atoms), &rules_of(&atoms));
             let mut line = preferences_line(enforced, could, total);
             if held > 0 {
-                line.push_str(&format!("; {}", legacy_pref::review_sentence(held)));
+                line.push_str(&format!("; {}", legacy_pref::review_sentence(&held_rows)));
             }
             (line, held)
         }
@@ -25095,7 +25286,6 @@ pub fn packset_island(cue: &str, fire: bool) -> Result<Value> {
 /// weights that persona fired, and a fire writes its weights and not the
 /// seat's. The seat's own island is the one with no lens.
 pub fn packset_island_as(cue: &str, fire: bool, lens: Option<&str>) -> Result<Value> {
-    legacy_pref::migrate_once();
     let cue = cue.trim();
     if cue.is_empty() {
         bail!("island: pass the task or question at hand");
@@ -25422,7 +25612,6 @@ pub fn packset_search_as_of(
     as_of: Option<&str>,
     rerank: bool,
 ) -> Result<Vec<Hit>> {
-    legacy_pref::migrate_once();
     let q = query.trim();
     if q.is_empty() {
         bail!("search: empty query");
@@ -35841,6 +36030,30 @@ mod tests {
         assert_eq!(sitting_warn_line(&[calm]), None);
     }
 
+    /// Older preferences and lessons are a warning. They are named, and
+    /// they are not a habitat that failed to answer.
+    #[test]
+    fn held_memories_warn_and_the_doctor_stays_healthy() {
+        let prefs = Habitat {
+            name: "preferences",
+            state: "no preferences stored; 1 older lesson awaits review (`ljos prefer --review`)"
+                .into(),
+            ok: false,
+        };
+        assert_eq!(doctor_word(&prefs), "warn");
+        let mut rows: Vec<Habitat> = REQUIRED
+            .iter()
+            .map(|name| Habitat {
+                name,
+                state: "answers".into(),
+                ok: true,
+            })
+            .collect();
+        rows.push(prefs);
+        assert!(failing(&rows).is_empty(), "{:?}", failing(&rows));
+        assert!(healthy(&rows));
+    }
+
     /// the tarball the release workflow uploads for each target is the one
     /// binstall's metadata asks for, holding every binary of both crates,
     /// and each target's standard library is added to the toolchain that
@@ -37727,14 +37940,13 @@ mod tests {
         let _url = PackUrl::set(&url);
         let found = packset_search_as_of("tag the release", 3, Some("2026-01-01"), true).unwrap();
         assert_eq!(found[0].id.as_deref(), Some("other"));
-        // The upgrade lists the pack before the query. That listing is
-        // not a search: a dated search is still asked once, for the
-        // writer's order, and not again for the encoder's signals.
+        // Search does not run the preference migration. A dated search is
+        // still asked once, for the writer's order, and not again for
+        // the encoder's signals.
         let all = seen.lock().unwrap().clone();
         assert!(
-            all.iter()
-                .any(|l| l.contains("/v1/atoms") && l.contains("embedding=omit")),
-            "{all:?}"
+            !all.iter().any(|l| l.contains("embedding=omit")),
+            "search ran the migration\n{all:?}"
         );
         let lines: Vec<String> = all
             .iter()
@@ -38016,9 +38228,12 @@ mod tests {
     /// The relevance cut kept the old lesson on one ballot of two: where
     /// lessons tie on every word the pack scores, which of them a ballot
     /// keeps at its cut is arbitrary. It names the prompt's subject and
-    /// covers the most of it, so the prompt gets it. A line that shares
-    /// one rare word with a longer prompt does not name its subject, and
-    /// one ballot does not let it in.
+    /// covers the most of it, so the prompt gets it. A one-ballot lesson
+    /// sets the lexical floor too: one that carries all thirteen words of
+    /// a prompt with no small words in it puts the floor at 0.6, which a
+    /// line on both ballots that shares only `kebab` and `case` (0.58)
+    /// does not reach. Without that lesson the floor would be 0.6 of the
+    /// line that shares four words, and the kebab stand would get in.
     #[test]
     fn a_lesson_one_ballot_kept_still_reaches_the_prompt() {
         let _env = env_guard();
@@ -38050,12 +38265,18 @@ mod tests {
             "With pnpm the registry rejected the token because the CI secret expired",
             1,
         ));
-        hits.push(hit("case", "Name pytest fixtures by their case", 2));
         hits.push(hit(
-            "kebab",
-            "kebab kebab kebab: the kebab stand shuts at nine",
+            "snake",
+            "Kebab case in pytest fixtures breaks the conftest parametrize ids, \
+             the nightly coverage report and the tox matrix: name them in snake case",
             1,
         ));
+        hits.push(hit(
+            "case",
+            "Name pytest fixtures by their case in conftest",
+            2,
+        ));
+        hits.push(hit("kebab", "kebab case: the kebab stand shuts at nine", 2));
         let (url, _) = serve_http(move |req| {
             let first = req.lines().next().unwrap_or("");
             if first.contains("/v1/status") {
@@ -38075,17 +38296,17 @@ mod tests {
             session: Some(session.into()),
             shape: HookShape::default(),
         };
+        let cue = "kebab case pytest fixtures: conftest parametrize ids break nightly \
+                   coverage report, tox matrix";
+        let (note, _) = hook_note(&prompt("floor", cue), 5);
+        assert!(!note.contains("kebab stand"), "{note}");
+        assert!(note.contains("snake case"), "{note}");
+        assert!(note.contains("Name pytest fixtures"), "{note}");
         let (note, _) = hook_note(
             &prompt("one-ballot", "npm: the registry rejected my token"),
             5,
         );
         assert!(note.contains("CI secret expired"), "{note}");
-        let (note, _) = hook_note(
-            &prompt("rare-word", "kebab case for the pytest fixtures"),
-            5,
-        );
-        assert!(note.contains("Name pytest fixtures"), "{note}");
-        assert!(!note.contains("kebab stand"), "{note}");
     }
 
     /// A full relevance cut kept the old lesson on one ballot of two, and
@@ -38226,16 +38447,131 @@ mod tests {
             .iter()
             .any(|r| r.lines().next().unwrap_or("").contains("rank=relevance"));
         assert!(asked, "{:?}", seen.lock().unwrap());
-        let (refusing, _) = serve_http(|req| {
+        let (failing, _) = serve_http(|req| {
             if req.lines().next().unwrap_or("").contains("/v1/status") {
                 return (200, r#"{"search":{"ranks":["relevance"]}}"#.into());
             }
-            (400, r#"{"error":"q required"}"#.into())
+            (500, r#"{"error":"store locked"}"#.into())
         });
-        let _url = PackUrl::set(&refusing);
+        let _url = PackUrl::set(&failing);
         let err = packset_search_relevant("npm: the registry rejected my token", 20).unwrap_err();
         assert!(!writer_unreachable(&err), "{err:#}");
         assert!(!format!("{err:#}").contains("not answering"), "{err:#}");
+    }
+
+    /// Only a 400 whose body names `rank` refuses the rank. A 429, a 401
+    /// or a 400 about `rerank` fails that search closed, with the stored
+    /// atoms alone and no fused retry, and the next search asks for the
+    /// rank again.
+    #[test]
+    fn only_a_400_that_names_the_rank_refuses_it() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap())]);
+        let atoms = serde_json::json!([{
+            "id": "old", "kind": "lesson",
+            "text": "With pnpm the registry rejected the token because the CI secret expired",
+            "ts": "2026-01-14T09:00:00.000Z", "entities": ["horizon:standing"]
+        }]);
+        let fused = serde_json::json!([{
+            "id": "fused", "kind": "lesson", "score": 1.0,
+            "text": "Operator Figma recorded that the registry rejected the token",
+            "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"]
+        }]);
+        let script = Arc::new(Mutex::new(std::collections::VecDeque::from([
+            (429, r#"{"error":"slow down"}"#),
+            (401, r#"{"error":"unauthorized"}"#),
+            (400, r#"{"error":"rerank must be on or off"}"#),
+            (400, r#"{"error":"rank must be fused or relevance"}"#),
+        ])));
+        let (url, seen) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/status") {
+                return (200, r#"{"search":{"ranks":["fused","relevance"]}}"#.into());
+            }
+            if first.contains("/v1/search") && first.contains("rank=") {
+                let (code, body) = script.lock().unwrap().pop_front().unwrap();
+                return (code, body.into());
+            }
+            if first.contains("/v1/search") {
+                return (200, serde_json::json!({"hits": fused}).to_string());
+            }
+            if first.contains("/v1/atoms") {
+                return (200, serde_json::json!({"atoms": atoms}).to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let ranked = || {
+            let seen = seen.lock().unwrap();
+            seen.iter().filter(|r| r.contains("rank=relevance")).count()
+        };
+        let search = || -> Vec<String> {
+            packset_search_relevant("npm: the registry rejected my token", 20)
+                .unwrap()
+                .into_iter()
+                .filter_map(|h| h.id)
+                .collect()
+        };
+        for asked in 1..=3 {
+            assert_eq!(search(), ["old"], "{:?}", seen.lock().unwrap());
+            assert_eq!(ranked(), asked, "{:?}", seen.lock().unwrap());
+        }
+        assert_eq!(search(), ["fused", "old"]);
+        assert_eq!(ranked(), 4);
+        assert_eq!(search(), ["fused", "old"]);
+        assert_eq!(ranked(), 4, "{:?}", seen.lock().unwrap());
+    }
+
+    /// A refused rank holds for the workspace whose search was refused,
+    /// and only until the writer's status is read again: another
+    /// workspace on that writer is asked for it, and so is the refused
+    /// one once [`RANKS_FOR`] has passed since the read.
+    #[test]
+    fn a_refused_rank_holds_for_its_workspace_until_the_status_is_read_again() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap())]);
+        let (url, seen) = serve_http(|req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/status") {
+                return (200, r#"{"search":{"ranks":["fused","relevance"]}}"#.into());
+            }
+            if first.contains("rank=") && first.contains("workspace=refused&") {
+                return (400, r#"{"error":"rank must be fused or relevance"}"#.into());
+            }
+            if first.contains("/v1/search") {
+                return (200, r#"{"hits":[]}"#.into());
+            }
+            (200, r#"{"atoms":[]}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let ranked = |workspace: &str| {
+            let workspace = format!("workspace={workspace}&");
+            let seen = seen.lock().unwrap();
+            seen.iter()
+                .filter(|r| r.contains("rank=relevance") && r.contains(&workspace))
+                .count()
+        };
+        let search = |workspace: &str| {
+            let _workspace = HoldEnv::set(&[("PACKSET_WORKSPACE", workspace)]);
+            packset_search_relevant("the registry rejected my token", 20).unwrap();
+        };
+        search("refused");
+        search("refused");
+        assert_eq!(ranked("refused"), 1, "{:?}", seen.lock().unwrap());
+        search("other");
+        assert_eq!(ranked("other"), 1, "{:?}", seen.lock().unwrap());
+        for (base, workspace, at, _) in RANKS_KNOWN.lock().unwrap().iter_mut() {
+            if base == url.trim_end_matches('/') && workspace == "refused" {
+                *at = at.checked_sub(RANKS_FOR).expect("up longer than RANKS_FOR");
+            }
+        }
+        search("refused");
+        assert_eq!(ranked("refused"), 2, "{:?}", seen.lock().unwrap());
+        let seen = seen.lock().unwrap();
+        let reads = seen.iter().filter(|r| r.contains("/v1/status")).count();
+        assert_eq!(reads, 3, "{seen:?}");
     }
 
     /// The hits the writer chose are read by their `rerank_score`, highest
@@ -38314,11 +38650,12 @@ mod tests {
         }
     }
 
-    /// A writer whose every search body carries a NaN, which is not JSON,
-    /// is read as one that found nothing: the stored atoms that best match
-    /// answer, and the old lesson still reaches the prompt.
+    /// A writer whose plain search answers and whose rerank=1 body
+    /// carries a NaN, which is not JSON, leaves the prompt the pool the
+    /// plain search found. The second stage is an error, not an answer
+    /// with no hits that the stored atoms, here none, would fill.
     #[test]
-    fn a_search_body_that_does_not_parse_leaves_the_stored_atoms() {
+    fn a_reranked_body_that_does_not_parse_leaves_the_pool() {
         let _env = env_guard();
         let runtime = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
@@ -38326,35 +38663,40 @@ mod tests {
             ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
             ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
         ]);
-        let atoms = serde_json::json!([
+        let hits = serde_json::json!([
             {
-                "id": "fresh", "kind": "lesson",
+                "id": "fresh", "kind": "lesson", "score": 1.0,
                 "text": "Operator Figma recorded that the registry rejected the token",
                 "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"]
             },
             {
-                "id": "old", "kind": "lesson",
+                "id": "old", "kind": "lesson", "score": 0.5,
                 "text": "With pnpm the registry rejected the token because the CI secret expired",
                 "ts": "2026-01-14T09:00:00.000Z", "entities": ["horizon:standing"]
             }
         ]);
         let (url, _) = serve_http(move |req| {
             let first = req.lines().next().unwrap_or("");
-            if first.contains("/v1/search") {
+            if first.contains("/v1/search") && first.contains("rerank=1") {
                 let body = r#"{"hits":[{"id":"fresh","kind":"lesson","score":NaN,
                     "text":"Operator Figma recorded that the registry rejected the token"}]}"#;
                 return (200, body.into());
             }
+            if first.contains("/v1/search") {
+                return (200, serde_json::json!({"hits": hits}).to_string());
+            }
             if first.contains("/v1/atoms") {
-                return (200, serde_json::json!({"atoms": atoms}).to_string());
+                return (200, r#"{"atoms":[]}"#.into());
             }
             (404, r#"{"error":"missing"}"#.into())
         });
         let _url = PackUrl::set(&url);
+        let cue = "npm: the registry rejected my token";
+        assert!(packset_search_reranked(cue, 20).is_err());
         let prompt = HookCall {
             event: "UserPromptSubmit".into(),
-            cue: "npm: the registry rejected my token".into(),
-            session: Some("nan-body".into()),
+            cue: cue.into(),
+            session: Some("nan-rerank".into()),
             shape: HookShape::default(),
         };
         let (note, _) = hook_note(&prompt, 5);
@@ -46450,6 +46792,41 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     #[test]
+    fn a_cgroup_word_names_the_runner_that_started_it() {
+        let runners = vec![
+            "cursor".to_string(),
+            "claude".to_string(),
+            "tmux".to_string(),
+        ];
+        assert!(super::cgroup_text_names_runner(
+            "0::/system.slice/pod/cursor-agent/workload\n",
+            &runners
+        ));
+        assert!(super::cgroup_text_names_runner(
+            "0::/user.slice/user-1000.slice/app-claude-123.scope\n",
+            &runners
+        ));
+        assert!(!super::cgroup_text_names_runner(
+            "0::/user.slice/user-1000.slice/session-3.scope\n",
+            &runners
+        ));
+        // tmux is a multiplexer, not a runner, even when a harness uses the name.
+        assert!(!super::cgroup_text_names_runner(
+            "0::/user.slice/user-1000.slice/tmux.service\n",
+            &runners
+        ));
+    }
+
+    /// The test process is not a detached shell, so a runner-shaped cgroup
+    /// around the suite does not make every test a runner. A session
+    /// variable still does.
+    #[test]
+    fn this_process_is_not_under_a_runner_without_one() {
+        let _g = env_guard();
+        assert!(!super::under_a_runner());
+    }
+
+    #[test]
     fn consent_is_refused_under_a_runner() {
         let _g = env_guard();
         // Safety: the variable is this test's own and is removed after.
@@ -52319,6 +52696,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                     401 => "401 Unauthorized",
                     403 => "403 Forbidden",
                     404 => "404 Not Found",
+                    429 => "429 Too Many Requests",
                     _ => "500 Internal Server Error",
                 };
                 let resp = format!(

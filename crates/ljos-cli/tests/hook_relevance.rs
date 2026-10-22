@@ -326,10 +326,12 @@ fn lookalikes() -> Vec<String> {
         .collect()
 }
 
-/// The January lesson. It says `pnpm`, which is in the alias group of
-/// the prompt's `npm` and which the pack does not match, so it covers
-/// more of the prompt than any lookalike. Thirty words of its own make it
-/// long, so BM25 ranks it under every lookalike.
+/// The old lesson. It says `pnpm`, which is in the alias group of the
+/// prompt's `yarn`, so it covers more of the prompt than any lookalike.
+/// The pack does not match the two: both are four letters, past its
+/// exact-match floor, and neither is a prefix, a part or one edit of the
+/// other. Thirty words of its own make it long, so BM25 ranks it under
+/// every lookalike.
 fn pnpm_lesson() -> String {
     format!(
         "With pnpm the registry rejected the token because the CI secret expired; \
@@ -340,32 +342,59 @@ fn pnpm_lesson() -> String {
 
 const PNPM_ID: &str = "a0000000000000000000000000000000";
 
+/// A stamp `days` before now. The pack adds recency against its own
+/// clock, so a fixed date drifts out of the half-life it was picked for.
+fn days_ago(days: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after 1970")
+        .as_secs();
+    ljos_cli::utc_at(now - days * 86_400)
+}
+
 /// More live lookalikes than the hook's window of twenty, and the
-/// relevance cut keeps the January lesson on one ballot of two. The
-/// pack's lexical ballot ties all twenty-five and keeps the twenty whose
-/// ids sort first, so the ids pin it inside that cut; BM25 leaves it
-/// out. The failure note and the prompt hook both hand it over.
+/// relevance cut keeps the old lesson on one ballot of two. The pack's
+/// lexical ballot ties all twenty-five and keeps the twenty whose ids
+/// sort first, so the ids pin it inside that cut; BM25 leaves it out.
+/// The lookalikes are a day old and the lesson nine months, so the fused
+/// cut, which adds recency to that ballot, leaves it out. Each of these
+/// is asked of the writer before a hook fires, so a packsetd that does
+/// not rank by relevance fails here. The failure note and the prompt
+/// hook both hand the lesson over.
 #[test]
 fn an_old_lesson_one_ballot_kept_in_a_full_window_still_arrives() {
     let seat = seat();
-    seat.lesson_as(Some(PNPM_ID), &pnpm_lesson(), JANUARY);
+    let status = seat.get("/v1/status", &[]);
+    let ranks = status["search"]["ranks"].as_array();
+    assert!(
+        ranks.is_some_and(|r| r.iter().any(|v| v == "relevance")),
+        "packsetd does not list rank=relevance; CI builds packset develop: {status}"
+    );
+    seat.lesson_as(Some(PNPM_ID), &pnpm_lesson(), &days_ago(280));
+    let fresh = days_ago(1);
     for (i, text) in lookalikes().iter().enumerate() {
-        seat.lesson_as(Some(&format!("f{i:031}")), text, FRESH);
+        seat.lesson_as(Some(&format!("f{i:031}")), text, &fresh);
     }
     let workspace = ("workspace", ljos_cli::SEAT_WORKSPACE);
     let listed = seat.get("/v1/atoms", &[workspace]);
     let live = listed["atoms"].as_array().map_or(0, Vec::len);
     assert_eq!(live, 25, "a lookalike replaced another: {listed}");
-    let prompt = "npm: the registry rejected my token";
-    let cut = seat.get(
-        "/v1/search",
-        &[
-            workspace,
-            ("q", prompt),
-            ("limit", "20"),
-            ("rank", "relevance"),
-        ],
+    let prompt = "yarn: the registry rejected my token";
+    let cut = |rank| {
+        let query = [workspace, ("q", prompt), ("limit", "20"), ("rank", rank)];
+        seat.get("/v1/search", &query)
+    };
+    let fused = cut("fused");
+    let ids = |cut: &Value| -> Vec<Value> {
+        let hits = cut["hits"].as_array().cloned().unwrap_or_default();
+        hits.into_iter().map(|h| h["id"].clone()).collect()
+    };
+    assert!(
+        !ids(&fused).contains(&PNPM_ID.into()),
+        "the fused cut kept the old lesson, so age did not cut it: {fused}"
     );
+    let cut = cut("relevance");
+    assert_eq!(cut["rank"], "relevance", "no relevance cut: {cut}");
     let hits = cut["hits"].as_array().cloned().unwrap_or_default();
     assert_eq!(hits.len(), 20, "the window is not full: {cut}");
     let kept = hits
@@ -382,7 +411,7 @@ fn an_old_lesson_one_ballot_kept_in_a_full_window_still_arrives() {
         serde_json::json!({
             "session_id": "pool-1",
             "tool_name": "Bash",
-            "tool_input": {"command": "npm publish"},
+            "tool_input": {"command": "yarn publish"},
             "error": "E401: the registry rejected the token",
         }),
     );
