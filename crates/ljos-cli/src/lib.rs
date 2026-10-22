@@ -17894,7 +17894,14 @@ pub(crate) fn push_forces(args: &[String], dir: Option<&str>) -> bool {
 }
 
 /// `git push` options that take the next word as their value.
-const PUSH_VALUED: &[&str] = &["-o", "--push-option", "--receive-pack", "--exec", "--repo"];
+const PUSH_VALUED: &[&str] = &[
+    "-o",
+    "--push-option",
+    "--receive-pack",
+    "--exec",
+    "--repo",
+    "--recurse-submodules",
+];
 
 /// Where a `--force-with-lease` push goes on the remote, read from its
 /// words alone. The same reading is `lease_push_guarded` in ljos-policyd
@@ -18649,6 +18656,33 @@ fn ssh_remote_command(words: &[&str]) -> Option<String> {
     Some(unquoted.to_string())
 }
 
+fn push_ansi_codepoint(word: &mut String, value: u32) {
+    if let Some(ch) = char::from_u32(value) {
+        word.push(ch);
+    }
+}
+
+fn read_ansi_digits(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    base: u32,
+    max: usize,
+) -> Option<u32> {
+    let mut out = 0_u32;
+    let mut read = 0_usize;
+    while read < max {
+        let Some(next) = chars.peek().copied() else {
+            break;
+        };
+        let Some(d) = next.to_digit(base) else {
+            break;
+        };
+        chars.next();
+        out = out.saturating_mul(base).saturating_add(d);
+        read += 1;
+    }
+    (read > 0).then_some(out)
+}
+
 /// A command's shell words, quotes and escapes resolved, with each output
 /// redirection outside quotes as a word of its own (`>`, its file
 /// descriptor dropped): `echo "a > b" 2>>f` is `echo`, `a > b`, `>`, `f`.
@@ -18668,8 +18702,44 @@ fn shell_words(segment: &str) -> Vec<String> {
                     match q {
                         '\'' => break,
                         '\\' => match chars.next() {
+                            Some('a') => word.push('\x07'),
+                            Some('b') => word.push('\x08'),
+                            Some('e' | 'E') => word.push('\x1b'),
+                            Some('f') => word.push('\x0c'),
                             Some('n') => word.push('\n'),
+                            Some('r') => word.push('\r'),
                             Some('t') => word.push('\t'),
+                            Some('v') => word.push('\x0b'),
+                            Some(d @ '0'..='7') => {
+                                let mut value = d.to_digit(8).unwrap_or(0);
+                                for _ in 0..2 {
+                                    let Some(next) = chars.peek().copied() else {
+                                        break;
+                                    };
+                                    let Some(digit) = next.to_digit(8) else {
+                                        break;
+                                    };
+                                    chars.next();
+                                    value = value.saturating_mul(8).saturating_add(digit);
+                                }
+                                push_ansi_codepoint(&mut word, value);
+                            }
+                            Some('x') => {
+                                if let Some(value) = read_ansi_digits(&mut chars, 16, 2) {
+                                    push_ansi_codepoint(&mut word, value);
+                                }
+                            }
+                            Some('u') => {
+                                if let Some(value) = read_ansi_digits(&mut chars, 16, 4) {
+                                    push_ansi_codepoint(&mut word, value);
+                                }
+                            }
+                            Some('U') => {
+                                if let Some(value) = read_ansi_digits(&mut chars, 16, 8) {
+                                    push_ansi_codepoint(&mut word, value);
+                                }
+                            }
+                            Some(c @ ('\\' | '\'' | '"' | '?')) => word.push(c),
                             Some(e) => word.push(e),
                             None => {}
                         },
