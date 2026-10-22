@@ -7826,10 +7826,13 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     let hits: Vec<Hit>;
     let mut rows: Vec<&Hit> = if let Some((candidates, j)) = &judged {
         // Jev read the prompt and each claim together. What it says bears
-        // goes in when the claim also names a content word of the prompt,
-        // or when Jev alone is sure, and only when the two scorers agreed
-        // and the score clears the same floor as the local path.
-        let top = candidates.iter().map(|h| h.score).fold(0.0_f64, f64::max);
+        // goes in when Jev alone is sure, or when the claim names the
+        // subject and clears the lexical floor. The two scorers still
+        // have to agree. The fused score is not a gate: the pack decays
+        // it by age, and Jev's probability orders this path.
+        let texts: Vec<&str> = candidates.iter().map(|h| h.text.as_str()).collect();
+        let lexical = lexical_match_scores(&texts, cue);
+        let best_lexical = lexical.iter().copied().fold(0.0_f64, f64::max);
         candidates
             .iter()
             .enumerate()
@@ -7839,7 +7842,8 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
                     j.bears(*i),
                     j.bears.get(*i).copied().unwrap_or(0.0),
                     cue,
-                    top,
+                    lexical[*i],
+                    best_lexical,
                 )
             })
             .map(|(_, h)| h)
@@ -8127,14 +8131,29 @@ pub fn recall_note(issue: &str, memories: &str) -> String {
 /// content word with.
 pub const JEV_ALONE_AT: f64 = 0.75;
 
-/// Whether a judged claim reaches the prompt: Jev says it bears, the two
-/// scorers agreed, and its score clears [`HOOK_SCORE_FLOOR`] of the top.
+/// Whether a judged claim reaches the prompt. Jev says it bears and the
+/// two scorers agreed. A claim Jev is sure of needs nothing else: that
+/// probability carries no age. Otherwise the claim has to name the
+/// subject and clear [`HOOK_SCORE_FLOOR`] of `best_lexical`. The fused
+/// score is not read. The pack decays it by age, and age only ranks.
 #[must_use]
-pub fn admits_judged(h: &Hit, bears: bool, p: f64, cue: &str, top: f64) -> bool {
-    bears
-        && (names_the_subject(&h.text, cue) || p >= JEV_ALONE_AT)
-        && agreed(h)
-        && h.score >= top * HOOK_SCORE_FLOOR
+pub fn admits_judged(
+    h: &Hit,
+    bears: bool,
+    p: f64,
+    cue: &str,
+    lexical: f64,
+    best_lexical: f64,
+) -> bool {
+    if !bears || !agreed(h) {
+        return false;
+    }
+    if p >= JEV_ALONE_AT {
+        return true;
+    }
+    names_the_subject(&h.text, cue)
+        && best_lexical > 0.0
+        && lexical >= best_lexical * HOOK_SCORE_FLOOR
 }
 
 /// The most memories one prompt is handed. Past three, the ones that
@@ -35096,6 +35115,76 @@ mod tests {
         assert!(note.contains("VITE_API_URL"), "{note}");
     }
 
+    /// Jev says an old memory bears on the prompt and the memory names
+    /// the subject. Its fused score sits under 0.6 of a fresh hit on
+    /// age alone, and its cosine sits outside the dense band, so only
+    /// the judged path can hand it over.
+    #[test]
+    fn the_judge_admits_an_old_memory_that_names_the_subject() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let answers = config.path().join("judge-answers.json");
+        std::fs::write(
+            &answers,
+            r#"{"answers":{"bears_0":{"noul":0.1},"bears_1":{"noul":0.6},"correction":{"noul":0.0},"choice":{"noul":0.0},"injection":{"noul":0.0}}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(config.path().join("ljos")).unwrap();
+        std::fs::write(
+            config.path().join("ljos/jev.toml"),
+            format!(
+                "enabled = true\nbackend = \"command\"\ncache_days = 0\nmin_words = 1\n\
+                 min_candidates = 2\nbudget_ms = 5000\n\
+                 command = [\"sh\", \"-c\", \"cat >/dev/null; cat {}\"]\n",
+                answers.display()
+            ),
+        )
+        .unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+            ("XDG_STATE_HOME", state.path().to_str().unwrap()),
+            ("XDG_CACHE_HOME", cache.path().to_str().unwrap()),
+        ]);
+        let hit = |id: &str, text: &str, score: f64, ts: &str, rank: u32, cos: f64| {
+            serde_json::json!({
+                "id": id, "text": text, "score": score, "kind": "lesson",
+                "ts": ts, "entities": ["horizon:standing"],
+                "ballots": 2, "of": 3, "dense_rank": rank, "cosine": cos
+            })
+        };
+        let url = serve_signal_pack(serde_json::json!([
+            hit(
+                "fresh",
+                "Restart the worker after every deploy so it reads the new config",
+                2.0,
+                "2026-10-20T09:00:00.000Z",
+                1,
+                0.70
+            ),
+            hit(
+                "old",
+                "The frontend reads its API base URL from VITE_API_URL at build time, not at runtime",
+                0.8,
+                "2026-07-22T09:00:00.000Z",
+                2,
+                0.40
+            ),
+        ]));
+        let _url = PackUrl::set(&url);
+        let call = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "the API base URL is wrong after deploying".into(),
+            session: Some("aged-judged".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(&call, 5);
+        assert!(note.contains("VITE_API_URL"), "{note}");
+    }
+
     /// A cold encoder and a paraphrase share no word, so the atom list
     /// recalls nothing. The prompt waits until status says the encoder
     /// has answered, then the search is what the prompt hears.
@@ -37371,16 +37460,37 @@ mod tests {
             true,
             0.9,
             cue,
+            1.0,
             1.0
         ));
         assert!(
-            !admits_judged(&hit(1.0, Some(1), Some(3)), true, 0.95, cue, 1.0),
+            !admits_judged(&hit(1.0, Some(1), Some(3)), true, 0.95, cue, 1.0, 1.0),
             "one scorer of three does not admit"
         );
+        // Jev is sure, so a fused score under the old floor does not keep
+        // the claim out. The probability carries no age.
+        assert!(admits_judged(
+            &hit(0.5, Some(2), Some(2)),
+            true,
+            0.95,
+            cue,
+            0.0,
+            1.0
+        ));
         assert!(
-            !admits_judged(&hit(0.5, Some(2), Some(2)), true, 0.95, cue, 1.0),
-            "under the score floor"
+            !admits_judged(&hit(1.0, Some(2), Some(2)), true, 0.6, cue, 0.4, 1.0),
+            "under the lexical floor"
         );
+        // Names the subject at the lexical floor. Age decayed the fused
+        // score; that score is not the gate.
+        assert!(admits_judged(
+            &hit(0.01, Some(2), Some(2)),
+            true,
+            0.6,
+            cue,
+            1.0,
+            1.0
+        ));
         assert!(hook_uses_rerank(false));
         assert!(!hook_uses_rerank(true));
     }
