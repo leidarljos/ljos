@@ -6743,13 +6743,14 @@ pub fn tool_error(input: &str) -> String {
 
 /// What this seat knows that bears on a tool that just failed. The pack is
 /// searched on the command and the error it gave, and a hit has to pass the
-/// prompt hook's tests. It must also share [`FAILURE_SHARED_WORDS`] content
+/// prompt hook's tests. It must also share [`FAILURE_SHARED_WORDS`] subject
 /// words with the command and the error, where a prompt needs one, since an
-/// error is long and noisy. The floor is the lexical match of the hits that
+/// error is long and noisy, and its lexical match on those words must reach
+/// [`FAILURE_LEXICAL_MIN`]. The floor is the lexical match of the hits that
 /// pass those tests, not the fused score: the pack decays that score by
-/// age, and age only ranks. The pack's
-/// order, which is that score, is kept. One handed over earlier in the
-/// session is left out. Calls that worked are not searched.
+/// age, and age only ranks. The pack's order, which is that score, is kept.
+/// One handed over earlier in the session is left out. Calls that worked
+/// are not searched.
 #[must_use]
 pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<String>) {
     let error: String = error.chars().take(400).collect();
@@ -6764,14 +6765,16 @@ pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<
         return (String::new(), Vec::new());
     };
     let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
-    let lexical = lexical_match_scores(&texts, &cue);
+    let lexical = lexical_match_scores(&texts, &without_failure_words(&cue));
     let seen = seen_ids(call.session.as_deref());
     let eligible: Vec<bool> = hits
         .iter()
-        .map(|h| {
+        .enumerate()
+        .map(|(i, h)| {
             !UNREVIEWED_KINDS.contains(&h.kind.as_str())
                 && agreed(h)
-                && shared_cue_words(&h.text, &cue) >= FAILURE_SHARED_WORDS
+                && shared_failure_words(&h.text, &cue) >= FAILURE_SHARED_WORDS
+                && lexical[i] >= FAILURE_LEXICAL_MIN
                 && shown_on_prompt(h)
                 && h.id.as_ref().is_none_or(|id| !seen.contains(id))
         })
@@ -7363,6 +7366,48 @@ fn shared_cue_words(text: &str, cue: &str) -> usize {
 /// (`build` in an npm error and in "Grok Build") is a coincidence, not a
 /// match.
 pub const FAILURE_SHARED_WORDS: usize = 2;
+
+/// Words any failed command says. A lesson that shares `build` and
+/// `failed` with an error names that something failed, not what did.
+const FAILURE_WORDS: &[&str] = &[
+    "build", "error", "exit", "fail", "failed", "failing", "failure", "test", "warning",
+];
+
+/// A word of a failure that names no subject: one of [`FAILURE_WORDS`]
+/// or [`RULE_WORDS`].
+fn failure_filler(word: &str) -> bool {
+    let word = word.to_lowercase();
+    [word.as_str(), singular(&word).as_str()]
+        .iter()
+        .any(|w| FAILURE_WORDS.contains(w) || RULE_WORDS.contains(w))
+}
+
+/// The failure cue without its filler words, so a lexical match on it is
+/// a match on what failed.
+fn without_failure_words(cue: &str) -> String {
+    cue.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty() && !failure_filler(w))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// How many subject words a lesson shares with a failed command and its
+/// error: the words [`names_the_subject`] matches on, less
+/// [`FAILURE_WORDS`].
+fn shared_failure_words(text: &str, cue: &str) -> usize {
+    let words = |t: &str| prompt_words(&without_failure_words(t));
+    let have = words(text);
+    words(cue)
+        .iter()
+        .filter(|w| have.binary_search(w).is_ok())
+        .count()
+}
+
+/// The lexical match on its subject words a lesson needs before a failure
+/// note hands it over, however weak the rest of the pool is. Naming the
+/// subject scores 1; one word of the failure no other hit carries clears
+/// it alone.
+pub const FAILURE_LEXICAL_MIN: f64 = 0.5;
 
 #[cfg(test)]
 /// A claim about one numbered pull request is a snapshot of that review.
@@ -42984,6 +43029,57 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "{note}"
         );
         assert!(!note.contains("npm cache"), "{note}");
+    }
+
+    /// Every failed command says `build`, `failed`, `test` or `error`,
+    /// and every rule says `always` or `never`. Lessons that share only
+    /// those with a failure all clear 0.6 of a best that is as weak, so
+    /// they are not counted: a pool of them hands nothing over. A lesson
+    /// that names what failed still does.
+    #[test]
+    fn a_failed_tool_does_not_admit_lessons_that_share_only_generic_words() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap())]);
+        let hit = |id: &str, text: &str| {
+            serde_json::json!({
+                "id": id, "text": text, "score": 2.0, "kind": "lesson",
+                "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"],
+                "ballots": 2, "of": 3
+            })
+        };
+        let generic = [
+            hit("g1", "Always run the test build before you push"),
+            hit("g2", "Never ignore a failed build in review"),
+            hit("g3", "Always read the whole error when a test failed"),
+            hit(
+                "g4",
+                "Never merge while a build is failing or a test has an error",
+            ),
+        ];
+        let call = |session: &str| HookCall {
+            event: "PostToolUseFailure".into(),
+            cue: "cargo build".into(),
+            session: Some(session.into()),
+            shape: HookShape::default(),
+        };
+        let error = "error: the build failed; never seen this test exit before, always edition2024";
+        let url = serve_signal_pack(Value::Array(generic.to_vec()));
+        let pack = PackUrl::set(&url);
+        let (note, ids) = failure_note(&call("generic-only"), error, 3);
+        assert!(note.is_empty() && ids.is_empty(), "{note}");
+        drop(pack);
+
+        let mut pool = generic.to_vec();
+        pool.push(hit(
+            "real",
+            "Cargo older than 1.85 cannot read an edition2024 manifest; use the pinned toolchain",
+        ));
+        let url = serve_signal_pack(Value::Array(pool));
+        let _pack = PackUrl::set(&url);
+        let (note, _) = failure_note(&call("generic-real"), error, 3);
+        assert!(note.contains("edition2024 manifest"), "{note}");
+        assert_eq!(note.lines().count(), 2, "{note}");
     }
 
     /// A compaction forgets which memories the conversation was handed, so
