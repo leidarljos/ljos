@@ -4563,6 +4563,65 @@ mod tests {
         assert!(miss.contains("guard cwd is unavailable"), "{miss}");
     }
 
+    /// The check asks the real ljos-policyd what the hook asks it: the
+    /// line as the shell reads it, and the program a heredoc feeds
+    /// `python3 -`. Both refuse the same lines.
+    #[tokio::test]
+    async fn guard_check_asks_policyd_what_the_hook_asks() {
+        let _env_lock = ENV_TEST_LOCK.lock().await;
+        let _saved = RestoreEnv::new(&[
+            "POLICYD_BIN",
+            "LJOS_GUARD",
+            "LJOS_OFF",
+            "HOME",
+            "PHRONESIS_STATE_DIR",
+        ]);
+        let bin = which::which("ljos-policyd")
+            .expect("ljos-policyd is not on PATH; CI builds it from ljos-policyd develop");
+        let root = tempfile::tempdir().expect("tempdir");
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).expect("project dir");
+        std::fs::write(root.path().join("Makefile"), "clean-all:\n\techo clean\n").unwrap();
+        std::fs::write(
+            project.join("Makefile"),
+            "clean-all:\n\trm -rf $(HOME)/.cache ~\n",
+        )
+        .unwrap();
+        let home = tempfile::tempdir().expect("home");
+        unsafe {
+            std::env::set_var("POLICYD_BIN", &bin);
+            std::env::set_var("LJOS_GUARD", "on");
+            std::env::remove_var("LJOS_OFF");
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("PHRONESIS_STATE_DIR", home.path().join("policyd"));
+        }
+        let server = LjosServer::at(std::env::temp_dir());
+        let check = |command: &str| {
+            server.ljos_guard_check(Parameters(GuardArgs {
+                command: command.into(),
+                cwd: Some(root.path().display().to_string()),
+            }))
+        };
+        for command in [
+            "python3 - <<'PY'\nimport os\nos.system('rm -rf /')\nPY",
+            "(cd project; make clean-all)",
+        ] {
+            if let Ok(out) = check(command).await {
+                panic!("allowed {command:?}: {} {}", out.0.verdict, out.0.text);
+            }
+            let hook = ljos_cli::tcb_verdict_in(command, Some(root.path()));
+            assert_eq!(
+                hook.map(|rule| rule.verdict).as_deref(),
+                Some("deny"),
+                "{command:?}"
+            );
+        }
+        let allowed = check("python3 - <<'PY'\nprint('hi')\nPY")
+            .await
+            .expect("allow");
+        assert_eq!(allowed.0.verdict, "allow");
+    }
+
     /// The protocol is a resource every harness can read, and it names the
     /// tools in the order a sitting calls them.
     #[test]

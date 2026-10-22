@@ -2613,13 +2613,16 @@ fn run_command() -> Result<()> {
             if on_tool {
                 let _ = ljos_cli::take_guard_note();
             }
-            let cwd = ljos_cli::command_directory(input.trim());
+            let resolved = ljos_cli::command_directory(input.trim());
+            let cwd = match &resolved {
+                Ok(dir) => Some(dir.clone()),
+                Err(_) => ljos_cli::fallback_directory(input.trim()),
+            };
             let posted = matches!(call.event.as_str(), "PreToolUse" | "beforeMCPExecution")
                 .then(|| ljos_cli::user_rules::guard_payload(&input))
                 .flatten();
             // The static guard includes the commit, push, and merge gates,
-            // in the directory the tool would run in. A directory that
-            // cannot be resolved is not a refusal.
+            // in the directory the tool would run in.
             let dir = cwd.as_deref();
             // LJOS_OFF and a temporary HOME switch the guard off. The push
             // gate and the pack's rules stay out too, as the shim does.
@@ -2640,7 +2643,30 @@ fn run_command() -> Result<()> {
             let argv: Vec<String> = call.cue.split_whitespace().map(String::from).collect();
             // A tool call with no command line (a file read, a search) has
             // no argv for the law to judge; the TCB sees only shell lines.
-            let tcb_rule = if let Some(rule) = fast {
+            // A command whose directory does not resolve does not run in
+            // the fallback, so what the guard reads there does not judge it.
+            let unresolved = match &resolved {
+                Err(e)
+                    if on_tool
+                        && !suspended
+                        && !argv.is_empty()
+                        && !ljos_cli::guard_fail_open() =>
+                {
+                    Some(ljos_cli::Rule {
+                        pattern: "cwd-unresolved".into(),
+                        verdict: "deny".into(),
+                        reason: format!(
+                            "cwd-unresolved: the directory this command would run in does not \
+                             resolve ({e:#}), so the guard cannot judge it there. Run it from a \
+                             directory that exists and can be entered"
+                        ),
+                    })
+                }
+                _ => None,
+            };
+            let tcb_rule = if unresolved.is_some() {
+                unresolved
+            } else if let Some(rule) = fast {
                 Some(rule)
             } else if on_tool && !argv.is_empty() {
                 ljos_cli::tcb_verdict_in(&call.cue, dir)
