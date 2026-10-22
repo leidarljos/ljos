@@ -47565,7 +47565,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// `bytes/` and digest sidecars. The binary is installed on PATH the
     /// way CI installs deedar. A failed build fails the test.
     fn deedimport_deedar() -> std::path::PathBuf {
-        const SHA: &str = "89e2574f6432bfc0451315f552f048eec747f59a";
+        const SHA: &str = "0cf75a3f647968ffce5eb466c22b0d3320837032";
         let cache = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/deedimport2-deedar");
         let bin_dir = cache.join("bin");
