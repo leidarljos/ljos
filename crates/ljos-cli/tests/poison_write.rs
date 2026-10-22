@@ -86,6 +86,7 @@ fn serve(atoms: Arc<Mutex<Vec<serde_json::Value>>>) -> String {
 struct Seat {
     home: tempfile::TempDir,
     run: tempfile::TempDir,
+    installed: tempfile::TempDir,
     url: String,
     atoms: Arc<Mutex<Vec<serde_json::Value>>>,
 }
@@ -97,6 +98,7 @@ impl Seat {
         Self {
             home: tempfile::tempdir().unwrap(),
             run: tempfile::tempdir().unwrap(),
+            installed: runner::install_dir(),
             url,
             atoms,
         }
@@ -145,9 +147,7 @@ impl Seat {
     /// installed, so the kernel runs it from that file and it stays the
     /// parent of what it starts.
     fn runner(&self, name: &str) -> std::path::PathBuf {
-        let dir = self.home.path().join(".local/bin");
-        std::fs::create_dir_all(&dir).unwrap();
-        let runner = dir.join(name);
+        let runner = self.installed.path().join(name);
         runner::runner_at(&runner);
         runner
     }

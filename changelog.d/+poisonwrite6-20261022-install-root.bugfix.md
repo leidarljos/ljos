@@ -1,0 +1,2 @@
+`ljos hook` and `prefer --user` count a runner as installed only below a real install root: `~/.local/bin`, `~/.cargo/bin` or `~/.npm-global` of the passwd home rather than `$HOME`, a system `bin`, npm's global `node_modules`, an app directory of the runner's name under `~/.local/share` or `/usr/share`, or a `/nix/store` entry.
+The path is compared after every link resolves, so a copy in `/tmp/.local/bin`, a project's `node_modules/.bin`, a `.local` a tool call made elsewhere, a link from `~/.local/bin` into `/tmp`, or a file another user could rewrite is not the runner.
