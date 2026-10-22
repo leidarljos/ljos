@@ -320,7 +320,7 @@ pub fn budget_from_toml(text: &str) -> PanelBudget {
 #[must_use]
 pub fn load_budget() -> PanelBudget {
     let mut budget = PanelBudget::default();
-    for path in budget_paths() {
+    for path in config_paths(None) {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -333,11 +333,16 @@ pub fn load_budget() -> PanelBudget {
     budget
 }
 
-fn budget_paths() -> Vec<PathBuf> {
+/// The config layers in the order [`load_budget`] reads them. `own` adds
+/// a file of that name in the ljos config dir, after `ljos.toml`.
+pub(crate) fn config_paths(own: Option<&str>) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(base) = config_base() {
         paths.push(base.join("vissue").join("config.toml"));
         paths.push(base.join("ljos").join("ljos.toml"));
+        if let Some(name) = own {
+            paths.push(base.join("ljos").join(name));
+        }
     }
     paths.push(PathBuf::from("vissue.toml"));
     paths.push(PathBuf::from("ljos.toml"));

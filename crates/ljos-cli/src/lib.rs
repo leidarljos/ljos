@@ -31,6 +31,7 @@ pub mod jev;
 mod kept_prompt;
 pub mod legacy_pref;
 pub mod mail;
+pub mod mailbox;
 pub mod memories;
 pub mod note_queue;
 pub mod pack_copy;
