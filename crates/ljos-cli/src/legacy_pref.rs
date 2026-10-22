@@ -1779,6 +1779,7 @@ mod tests {
     }
 
     fn with_pack(url: &str, f: impl FnOnce()) {
+        let _env = crate::test_env_lock();
         crate::with_env_mutation(|| {
             let keys = [
                 "PACKSET_URL",
