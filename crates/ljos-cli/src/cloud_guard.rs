@@ -3887,7 +3887,7 @@ const CURL_FLAG: &str = "\
     progress-bar/# remote-name/O remote-name-all remote-header-name/J http1.1 http2 \
     path-as-is no-progress-meter create-dirs ipv4/4 ipv6/6 retry-all-errors include/i \
     disable/q use-ascii/B list-only/l append/a help/h version/V manual/M \
-    junk-session-cookies/j proxytunnel/p location/L location-trusted";
+    junk-session-cookies/j proxytunnel/p";
 const CURL_VALUE: &str = "\
     output/o retry retry-delay retry-max-time connect-timeout max-time/m max-redirs \
     user-agent/A referer/e cookie/b cookie-jar/c proxy-user/U cacert capath cert/E key \
@@ -3897,7 +3897,8 @@ const CURL_VALUE: &str = "\
 const CURL_ROUTE: &str = "\
     proxy/x preproxy proxy1.0 socks4 socks4a socks5 socks5-hostname resolve connect-to \
     doh-url dns-servers unix-socket abstract-unix-socket alt-svc";
-const CURL_OWN_FLAG: &str = "get/G head/I globoff/g netrc/n netrc-optional next/:";
+const CURL_OWN_FLAG: &str =
+    "get/G head/I globoff/g netrc/n netrc-optional next/: location/L location-trusted";
 const CURL_OWN_VALUE: &str = "\
     request/X data/d data-ascii data-binary data-raw data-urlencode json upload-file/T \
     form/F form-string header/H url config/K netrc-file variable";
@@ -3987,6 +3988,8 @@ struct Tune {
     urls: Vec<String>,
     /// `-g`: curl takes `{}[]` in a URL literally.
     globoff: bool,
+    /// A wgetrc set `max_redirect` to 0.
+    no_follow: bool,
 }
 
 fn curl_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) -> (HttpShape, bool) {
@@ -4390,6 +4393,10 @@ fn apply_curl_opt(
             tune.globoff = false;
             return None;
         }
+        // A redirect an earlier option allowed may still be followed.
+        if hit.long.starts_with("location") {
+            return None;
+        }
         return (hit.kind != CurlOpt::Flag).then_some(HttpShape::Opaque);
     }
     match hit.kind {
@@ -4406,6 +4413,8 @@ fn apply_curl_opt(
         "head" => tune.method = Some("HEAD".to_string()),
         "get" => tune.query = true,
         "globoff" => tune.globoff = true,
+        // A redirect can lead to GitHub, and 307 or 308 keeps the method.
+        "location" | "location-trusted" => tune.github = true,
         "data" | "data-ascii" | "data-binary" | "data-raw" | "data-urlencode" | "json"
         | "upload-file" | "form" | "form-string" | "header"
             if value.starts_with('@') =>
@@ -4523,22 +4532,26 @@ fn wget_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) ->
     // the system wgetrc and the user file apply, and either can set
     // the method. The command line is read after an opaque file too.
     let opaque = wget_files(words, env, cwd, &mut tune).is_some();
-    let mut method = tune.method.clone();
-    let mut body = tune.body;
     for (name, value) in wget_args(words) {
         match name {
-            "method" => method = Some(value.to_ascii_uppercase()),
-            "execute" => note_wget_exec(&value, &mut method, &mut body, &mut tune.github),
+            "method" => tune.method = Some(value.to_ascii_uppercase()),
+            "execute" => note_wget_exec(&value, &mut tune),
             "input-file" | "input-metalink" | "base" => tune.github = true,
             "header" if header_sets_host(&value) => tune.github = true,
-            "post-data" | "post-file" | "body-data" | "body-file" => body = true,
+            "post-data" | "post-file" | "body-data" | "body-file" => tune.body = true,
+            "max-redirect" => tune.no_follow = zero(&value),
             _ => {}
         }
+    }
+    // Wget follows a redirect unless `max_redirect` is 0, and a redirect
+    // can lead to GitHub.
+    if !tune.no_follow {
+        tune.github = true;
     }
     let shape = if opaque {
         HttpShape::Opaque
     } else {
-        finish_http(method.as_deref(), body, false, false)
+        finish_http(tune.method.as_deref(), tune.body, false, false)
     };
     (shape, curl_config_github(&tune))
 }
@@ -4548,7 +4561,7 @@ fn wget_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) ->
 /// of one listed here must be listed too.
 const WGET_READ: &str = "\
     method execute/e input-file/i input-metalink base/B config no-config header post-data \
-    post-file body-data body-file";
+    post-file body-data body-file max-redirect";
 /// Wget shorts that take a value the guard does not read. `-n` takes the
 /// letters after it.
 const WGET_SHORT_VALUE: &str = "oatOTwQPUlARDIXn";
@@ -4738,6 +4751,7 @@ fn apply_wget_text(text: &str, tune: &mut Tune) -> Option<HttpShape> {
                         tune.method = Some(value.unwrap_or_default().trim().to_ascii_uppercase());
                     }
                     "postdata" | "postfile" | "bodydata" | "bodyfile" => tune.body = true,
+                    "maxredirect" => tune.no_follow = zero(value.as_deref().unwrap_or("")),
                     "header" if value.as_deref().unwrap_or("").trim_start().starts_with('@') => {
                         opaque = true;
                     }
@@ -4760,18 +4774,23 @@ fn wget_key_moves_target(key: &str, value: &str) -> bool {
     }
 }
 
-fn note_wget_exec(value: &str, method: &mut Option<String>, body: &mut bool, github: &mut bool) {
+fn note_wget_exec(value: &str, tune: &mut Tune) {
     let lower = value.to_ascii_lowercase();
     let (key, val) = lower.split_once('=').unwrap_or((lower.as_str(), ""));
     let key = key.trim();
     if wget_key_moves_target(&key.replace(['_', '-'], ""), val) {
-        *github = true;
+        tune.github = true;
     }
     match key {
-        "method" => *method = Some(val.trim().to_ascii_uppercase()),
-        "body_data" | "body_file" | "post_data" | "post_file" | "header" => *body = true,
+        "method" => tune.method = Some(val.trim().to_ascii_uppercase()),
+        "body_data" | "body_file" | "post_data" | "post_file" | "header" => tune.body = true,
+        "max_redirect" | "maxredirect" | "max-redirect" => tune.no_follow = zero(val),
         _ => {}
     }
+}
+
+fn zero(value: &str) -> bool {
+    value.trim().parse::<u64>().is_ok_and(|n| n == 0)
 }
 
 fn httpie_shape(words: &[String]) -> HttpShape {
