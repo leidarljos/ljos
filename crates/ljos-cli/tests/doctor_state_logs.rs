@@ -152,8 +152,8 @@ const QUEUE_ROW: &[u8] =
 /// A fifo or a symlink at either log is left as doctor found it: the
 /// fifo stays a fifo, the link and the file it names keep their bytes,
 /// nothing lands beside them, and doctor returns and names the log
-/// damaged in a row the short doctor shows: `warn` for the bypass log,
-/// `no` for the note queue.
+/// damaged in its summary and in a row the short doctor shows: `warn`
+/// for the bypass log, `no` for the note queue.
 #[test]
 fn doctor_leaves_a_fifo_or_a_symlink_at_either_log_as_it_found_it() {
     for kind in ["fifo", "symlink"] {
@@ -176,12 +176,18 @@ fn doctor_leaves_a_fifo_or_a_symlink_at_either_log_as_it_found_it() {
                 .doctor(&[])
                 .unwrap_or_else(|| panic!("doctor hung on a {kind} at the {name}"));
             assert_eq!(home.tree(), before, "{kind} at the {name}:\n{out}");
-            let word = if name == "guard bypass" { "warn" } else { "no" };
+            let (word, log) = if name == "guard bypass" {
+                ("warn", "the guard bypass log")
+            } else {
+                ("no", "the note queue")
+            };
             let line = row(&out, name).unwrap_or_else(|| panic!("no {name} row:\n{out}"));
             assert!(
                 line.starts_with(word) && line.contains("damaged"),
                 "{kind}: {line}"
             );
+            let summary = out.lines().next().unwrap();
+            assert!(summary.contains(&format!("{log} is damaged")), "{summary}");
         }
     }
 }
@@ -205,6 +211,11 @@ fn doctor_warns_about_an_aged_torn_bypass_log() {
     assert!(
         line.starts_with("warn\tguard bypass\t") && line.contains("an unfinished last row"),
         "{line}"
+    );
+    let summary = out.lines().next().unwrap();
+    assert!(
+        summary.contains("the guard bypass log is damaged"),
+        "{summary}"
     );
 }
 
