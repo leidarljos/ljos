@@ -405,6 +405,20 @@ fn marker_files(seat: &Seat) -> Vec<PathBuf> {
     out
 }
 
+/// The cutoff records a person-side run left in the seat's state directory.
+fn cutoff_records(seat: &Seat) -> Vec<PathBuf> {
+    let dir = seat.home.path().join("state/ljos/pref-cutoff");
+    std::fs::read_dir(&dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn post_atom(url: &str, token: &str, atom: Value) -> Value {
     ureq::post(&format!("{url}/v1/atoms"))
         .set("Authorization", &format!("Bearer {token}"))
@@ -615,6 +629,7 @@ fn preferences_from_v0_32_1_follow_the_writer_that_stored_them() {
         "a runner, session start or search wrote the cutoff: {untouched:?}"
     );
     assert!(marker_files(&seat).is_empty());
+    assert!(cutoff_records(&seat).is_empty());
     assert_eq!(untouched.len(), before.len());
     assert!(basis(by_text(&untouched, "release notes")).is_none());
     assert!(basis(by_text(&untouched, "use bun")).is_none());
@@ -641,6 +656,11 @@ fn preferences_from_v0_32_1_follow_the_writer_that_stored_them() {
         marker_files(&seat).is_empty(),
         "migration wrote an XDG marker"
     );
+    let records = cutoff_records(&seat);
+    assert_eq!(records.len(), 1, "{records:?}");
+    let record: Value =
+        serde_json::from_str(&std::fs::read_to_string(&records[0]).unwrap()).unwrap();
+    assert_eq!(record["id"], cutoff[0]["id"], "{record}");
     assert_eq!(basis(by_text(&migrated, "release notes")), Some("person"));
     assert!(basis(by_text(&migrated, "use bun")).is_none());
     assert!(basis(by_text(&migrated, "release key")).is_none());
