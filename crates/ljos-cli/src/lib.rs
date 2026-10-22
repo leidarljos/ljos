@@ -22364,6 +22364,26 @@ fn bypass_row() -> Habitat {
     }
 }
 
+/// The doctor rows that read a state log ljos keeps, with the log as the
+/// summary line names it. Each row is `ok` unless its log is damaged, and
+/// a damaged log keeps the summary from calling ljos ready. A damaged
+/// guard bypass log is a `warn` that leaves the exit at 0 (see
+/// [`bypass_row`]). A damaged note queue is `no` and fails doctor: its
+/// rows are memory copies the pack has not taken, and a queue that cannot
+/// be read or added to loses them. An empty or missing log is whole.
+const STATE_LOG_ROWS: &[(&str, &str)] = &[
+    ("guard bypass", "the guard bypass log"),
+    ("note queue", "the note queue"),
+];
+
+/// How the summary line names the log a [`STATE_LOG_ROWS`] row reads.
+fn state_log_named(row: &str) -> Option<&'static str> {
+    STATE_LOG_ROWS
+        .iter()
+        .find(|(name, _)| *name == row)
+        .map(|(_, log)| *log)
+}
+
 /// How long a state log's last row may sit without its newline before
 /// the doctor calls it damaged. A writer puts a row down in one
 /// `write_all` under the lock, so a live append ends well inside this.
@@ -23337,7 +23357,8 @@ pub fn pack_token_row(
     }
 }
 
-/// The required rows that do not answer, by name.
+/// The required rows that do not answer, and a damaged note queue (see
+/// [`STATE_LOG_ROWS`]), by name.
 #[must_use]
 pub fn failing(rows: &[Habitat]) -> Vec<&str> {
     rows.iter()
@@ -23347,7 +23368,8 @@ pub fn failing(rows: &[Habitat]) -> Vec<&str> {
                     || h.name == "pack"
                     || h.name == "pack token"
                     || h.name == "mcp"
-                    || h.name == "cloud age")
+                    || h.name == "cloud age"
+                    || h.name == "note queue")
         })
         .map(|h| h.name)
         .collect()
@@ -23493,14 +23515,19 @@ pub fn format_doctor(rows: &[Habitat]) -> String {
 }
 
 /// The line `ljos doctor` opens with: whether the seat is ready, which
-/// parts work or which required parts do not answer, and how many
-/// optional parts are off.
+/// parts work or which required parts do not answer, which state logs are
+/// damaged, and how many optional parts are off.
 #[must_use]
 pub fn doctor_summary(rows: &[Habitat]) -> String {
     let down = failing(rows);
+    let damaged: Vec<&str> = rows
+        .iter()
+        .filter(|h| !h.ok)
+        .filter_map(|h| state_log_named(h.name))
+        .collect();
     let off = rows.iter().filter(|h| doctor_word(h) == "info").count();
     let words: Vec<(&str, &str)> = rows.iter().map(|h| (doctor_word(h), h.name)).collect();
-    summary_line(&down, &working_parts(&words), off)
+    summary_line(&down, &damaged, &working_parts(&words), off)
 }
 
 /// The parts a ready line can name, each with the rows that answer for
@@ -23533,20 +23560,37 @@ fn and_list(names: &[&str]) -> String {
     }
 }
 
-fn summary_line(down: &[&str], working: &[&str], off: usize) -> String {
-    let mut line = if down.is_empty() {
+/// `down` are failing rows by name; `damaged` are the state logs, as
+/// [`STATE_LOG_ROWS`] names them, whose rows are not `ok`. A failing row
+/// whose log is in `damaged` is said once, as damaged. A damaged log
+/// whose row does not fail still keeps the line from saying ready.
+fn summary_line(down: &[&str], damaged: &[&str], working: &[&str], off: usize) -> String {
+    let silent: Vec<&str> = down
+        .iter()
+        .copied()
+        .filter(|name| state_log_named(name).is_none_or(|log| !damaged.contains(&log)))
+        .map(plain_part)
+        .collect();
+    let mut why = Vec::new();
+    if !silent.is_empty() {
+        let verb = if silent.len() == 1 { "does" } else { "do" };
+        why.push(format!("{} {verb} not answer", and_list(&silent)));
+    }
+    if !damaged.is_empty() {
+        let verb = if damaged.len() == 1 { "is" } else { "are" };
+        why.push(format!("{} {verb} damaged", and_list(damaged)));
+    }
+    let why = why.join(", and ");
+    let mut line = if why.is_empty() {
         match working {
             [] => "ljos is ready.".to_string(),
             [one] => format!("ljos is ready: {one} works."),
             parts => format!("ljos is ready: {} work.", and_list(parts)),
         }
+    } else if down.is_empty() {
+        format!("ljos runs, but {why}.")
     } else {
-        let names: Vec<&str> = down.iter().copied().map(plain_part).collect();
-        format!(
-            "ljos is not ready: {} {} not answer.",
-            and_list(&names),
-            if down.len() == 1 { "does" } else { "do" }
-        )
+        format!("ljos is not ready: {why}.")
     };
     if off > 0 {
         line.push_str(" Optional extras: `ljos doctor --all`.\n");
@@ -23623,7 +23667,7 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                     _ => {}
                 }
             }
-            out.push_str(&summary_line(&down, &working_parts(&words), off));
+            out.push_str(&summary_line(&down, &[], &working_parts(&words), off));
             out.push_str(&act);
         }
         "island" => {
@@ -42509,6 +42553,90 @@ mod tests {
         assert!(missing.ok);
     }
 
+    /// A damaged state log is a row the short doctor shows, and the
+    /// summary does not call ljos ready. A damaged bypass log warns and
+    /// passes; a damaged note queue fails. An empty or a missing log is
+    /// neither, so a seat that never bypassed or queued stays ready.
+    #[test]
+    fn a_damaged_state_log_keeps_doctor_from_saying_ready() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let state = dir.path().join("state");
+        let home = dir.path().join("home");
+        for path in [&data.join("ljos"), &state.join("ljos"), &home] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let _env = HoldEnv::set(&[
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_DATA_HOME", data.to_str().unwrap()),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+        ]);
+        let bypass = bypass_log_path().unwrap();
+        let queue = note_queue::state_dir().join("note-queue.jsonl");
+        let torn_bypass: &[u8] = b"{\"kind\":\"switch\",\"command\":\"to";
+        let torn_queue: &[u8] = b"{\"issue\":\"ljos-abc\",\"te";
+        let cases = [
+            ("missing", "missing", "ljos is ready."),
+            ("empty", "empty", "ljos is ready."),
+            (
+                "torn",
+                "missing",
+                "ljos runs, but the guard bypass log is damaged.",
+            ),
+            (
+                "missing",
+                "torn",
+                "ljos is not ready: the note queue is damaged.",
+            ),
+            (
+                "torn",
+                "torn",
+                "ljos is not ready: the guard bypass log and the note queue are damaged.",
+            ),
+        ];
+        for (bypass_is, queue_is, summary) in cases {
+            let mut shown = Vec::new();
+            if bypass_is == "torn" {
+                shown.push("warn\tguard bypass\t");
+            }
+            if queue_is == "torn" {
+                shown.push("no\tnote queue\t");
+            }
+            for (log, is, torn) in [
+                (&bypass, bypass_is, torn_bypass),
+                (&queue, queue_is, torn_queue),
+            ] {
+                let _ = std::fs::remove_file(log);
+                if is != "missing" {
+                    std::fs::write(log, if is == "torn" { torn } else { b"" }).unwrap();
+                    age_by(log, std::time::Duration::from_secs(60));
+                }
+            }
+            let rows = vec![
+                bounded("doctor bypass", bypass_row),
+                bounded("doctor note queue", note_queue_row),
+            ];
+            let short = format_doctor_short(&rows);
+            assert!(short.starts_with(summary), "{short}");
+            for line in &shown {
+                assert!(
+                    short.lines().any(|l| l.starts_with(line)),
+                    "{line}: {short}"
+                );
+            }
+            assert_eq!(short.lines().count(), 1 + shown.len(), "{short}");
+            let fails = if queue_is == "torn" {
+                vec!["note queue"]
+            } else {
+                vec![]
+            };
+            assert_eq!(failing(&rows), fails);
+        }
+        let line = summary_line(&["note queue"], &[], &[], 0);
+        assert!(line.starts_with("ljos is not ready: note queue does not answer."));
+    }
+
     fn bounded<T: Send + 'static>(what: &str, body: impl FnOnce() -> T + Send + 'static) -> T {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -44224,14 +44352,16 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             assert!(line.chars().count() <= 100, "{line}");
         }
         let all: &[&str] = &["memory", "tracker", "command guard"];
-        let cases: [(&[&str], usize); 4] = [
-            (&[], 0),
-            (&[], 6),
-            (&["pack"], 6),
-            (&["pack", "ljos-policyd"], 1),
+        let cases: [(&[&str], &[&str], usize); 6] = [
+            (&[], &[], 0),
+            (&[], &[], 6),
+            (&["pack"], &[], 6),
+            (&["pack", "ljos-policyd"], &[], 1),
+            (&[], &["the guard bypass log"], 6),
+            (&["note queue"], &["the note queue"], 6),
         ];
-        for (down, off) in cases {
-            let line = summary_line(down, all, off);
+        for (down, damaged, off) in cases {
+            let line = summary_line(down, damaged, all, off);
             assert!(line.trim_end().chars().count() <= 100, "{line}");
             assert!(!line.contains("pack"), "{line}");
         }
