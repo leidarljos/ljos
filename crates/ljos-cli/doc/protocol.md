@@ -75,7 +75,10 @@ answer on an issue this way before building it.
 
 Memory crosses machines through the tracker repository. A repository
 whose `.ljos/sync.toml` names a scope and its age recipients carries one
-sealed log per machine under `.ljos/atoms/`. The sitting pulls and takes
+sealed log per machine under `.ljos/atoms/`. The primary scope is
+`<host>.jsonl.age`. An extra scope under `[scopes]` has its own
+recipients and its own log, `<host>+<scope>.jsonl.age`
+(`cloud = ["age1..."]`). The sitting pulls and takes
 the other machines' logs before the island is walked; finish writes and
 pushes this machine's. `commit` skips that pull and that push.
 `ljos sync --key` prints this machine's public key
@@ -87,11 +90,17 @@ with the per-issue field merge, and pushes; `commit` commits the log and
 neither fetches nor pushes it; `off` leaves the tracker alone. A push that
 fails stays queued for the next write and the end of the session. `ljos sync`
 by hand always pulls and pushes. An
-atom goes to the scope its `scope:NAME` entity names, else the machine's
-`default_scope` in `~/.config/ljos/sync.toml`. A lesson from `finish`
-takes the scope of the repository its issue lives in, and a
+atom goes to the scope its `scope:NAME` entity names. An atom with no
+`scope:` entity stays on the primary log. `default_scope` in
+`~/.config/ljos/sync.toml` may name only that primary scope. A value that
+names an extra scope is refused, so an unscoped box atom is never sealed
+into a shared log. A primary scope named `cloud` is refused: `cloud` belongs
+under `[scopes]`. A scope name is non-empty and only `[a-z0-9-]`. A lesson
+from `finish` takes the scope of the repository its issue lives in, and a
 `[projects]` table in that repository's `sync.toml` sends one project's
-lessons to another scope (`tools = "shared"`).
+lessons to another scope (`tools = "shared"`). Where `ljos cloud up` has
+set `LJOS_WRITE_SCOPE=cloud`, memory and lessons are tagged `scope:cloud`.
+That tag is explicit. `cloud up` does not set `default_scope`.
 
 No issue yet? `vissue q -p PROJECT "TITLE"` mints one and prints its id.
 Every piece of work has an issue before it has a claim.
