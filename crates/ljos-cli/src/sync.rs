@@ -718,6 +718,7 @@ thread_local! {
 pub(crate) fn write_beneath(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     use std::os::fd::AsRawFd;
+    let _durable = crate::bookkeep::durable_write();
     let (parent, name) = split_rel(rel);
     std::fs::create_dir_all(root).with_context(|| format!("sync: {}", root.display()))?;
     let dir = open_dir_beneath(root, parent, true)?

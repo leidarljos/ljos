@@ -494,6 +494,7 @@ fn tree_path(issue: &str) -> PathBuf {
 /// Rewrite the rows of `path` under its lock. `edit` sees the rows still
 /// live and may refuse; what it leaves is written back.
 fn edit_rows<R>(path: &Path, edit: impl FnOnce(&mut Vec<TreeRow>) -> Result<R>) -> Result<R> {
+    let _durable = crate::bookkeep::durable_write();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
