@@ -50,7 +50,13 @@ file, a tool's output or a web page is a `note`, never a memory. Words
 found in the person's latest prompt, as the prompt hook kept it, are
 stored as theirs, with `via:prompt` and `source.basis` `person`. Any other
 claim is refused on this path. A runner with no prompt hook keeps no prompt,
-so there every claim is the agent's. Prompt recall reads preferences first,
+so there every claim is the agent's. `LJOS_CAPTURE=off` writes no prompt
+either, and the same refusal holds. A paraphrase is not the person's
+words. A prompt older than an hour is not the latest one. The match is a
+contiguous run of four or more words from the prompt the hook kept. It
+does not check that the person asserted the claim. Tightening that match
+is more than a one-line change, so it is left as it is. Prompt recall reads
+preferences first,
 then the person's words, then other claims, and leaves working notes out of
 the prompt fact block. `ljos recall` still lists notes as unverified agent
 notes, with provenance where known.
@@ -204,12 +210,13 @@ Every piece of work has an issue before it has a claim.
   Citing a deed names it; the bytes stay in deedar.
   `ljos deed --remove ACCESSION --ticket ISSUE` drops a citation. The
   removal is appended. The heading is not rewritten.
-- A lesson is one `ljos remember` of two short sentences at most. Run by
-  you, the agent, it is stored as an episode. The hook shows it when a
-  prompt bears on it. `ljos graded ID` promotes it to standing, and so does
-  a consolidation that finds it replaced an earlier claim. The person's own
-  `ljos remember` takes effect at once.
-  `ljos remember --standing` writes a rule now. A standing choice between
+- A lesson in the person's words is one `ljos remember` of two short
+  sentences at most and takes effect at once. Under a runner the agent's
+  own words are an unreviewed note, `ljos note ISSUE "..."`, and the prompt
+  does not treat that note as a fact. `ljos graded ID` promotes a lesson
+  the person wrote, and so does a consolidation that finds it replaced an
+  earlier claim. `ljos remember --standing` writes a standing lesson for
+  the person. A standing choice between
   two ways is one `ljos prefer`. Never a transcript, never a summary of the session. A
   correction from the person ("you should have", "do you not remember")
   is filed as a proposal in the person's words, origin `user-declared`.
@@ -324,8 +331,8 @@ Every piece of work has an issue before it has a claim.
   `ljos vote --as NAME`, then the seat runs `ljos consensus`. One playbook
   step per subagent; no resume across phases. Each brief is a file to start a
   subagent from. A panel
-  member's own lesson goes in with `ljos remember --as NAME "..."` and
-  comes back to it first in its next brief; the seat still reads it. A ballot
+  member's own lesson is `ljos note ISSUE "..."`, an unreviewed note the
+  prompt does not treat as a fact; the seat still reads it. A ballot
   and a design candidate carry the harness session that wrote them (the hook's
   session, the MCP call's session, a `*_SESSION_ID` in the environment, else
   the run's `CURSOR_AGENT_ID` or `GITHUB_RUN_ID`) and a marker, `-`, or
@@ -409,7 +416,7 @@ Every piece of work has an issue before it has a claim.
   so a child can name it at once.
 - At a usage limit the hook keeps the turn open once. Spend it on the record and
   nothing else: `ljos note` the held issue with what is done and left,
-  `ljos file` each item left, `ljos remember` each lesson, then stop.
+  `ljos file` each item left, `ljos note` each lesson, then stop.
 - Progress goes on the issue, dated: `ljos note ISSUE "..."`; a longer
   report is `vissue append ISSUE "..."` (or `--file F`); a tag is
   `vissue update ISSUE -t TAG`.
@@ -457,7 +464,7 @@ lock exists before proceeding": the next seat cannot act on that.
   own. What it finds joins the parent's issue. A judgement between
   options is `ljos vote ISSUE --for OPTION --as NAME`, cast by the
   subagent itself; the parent never casts it for the subagent. A lesson still
-  true next time is `ljos remember "..." --as NAME`, and a finding is
+  true next time is `ljos note ISSUE "..."`, and a finding is
   `ljos note ISSUE "..."`. `NAME` is its persona, else its subagent
   type. On a runner that fires subagent events, the hook names the
   parent's issue on the subagent's first tool result. It keeps the

@@ -391,7 +391,7 @@ ljos vote vissue-xxxx --for hold --expect ship --confidence 0.6 --used none
 ljos predict vissue-xxxx --expect ship          # the same forecast on its own; two forecasts and consensus names the surprisingly popular answer
 ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the release runbook."   # argv law in the pack; the hook and policy enforce it (see "What a rule reads" in the reference)
 ljos brief reviewer vissue-xxxx                # what a subagent playing reviewer starts from
-ljos remember --as reviewer "..."              # a lesson the persona keeps; its next brief opens with it
+ljos note ISSUE "..."                         # the agent's own lesson; the prompt does not treat it as a fact
 ljos panel vissue-xxxx --out panel             # every persona's brief as a file, for a runner without MCP
 ljos panel vissue-xxxx --cloud                  # one prompt file per persona: seat env, slot, push rules
 ljos vote vissue-xxxx --for hold --as reviewer

@@ -10,6 +10,6 @@ Save what the arguments say in ljos.
 Arguments: $ARGUMENTS
 
 Decide which verb fits, as the ljos-remember skill says: `ljos prefer` for a
-standing choice, `ljos remember` for a lesson, `ljos rule PATTERN --verdict deny --why ...`
+standing choice, `ljos remember` for a lesson in the person's words, `ljos note` for the agent's own, `ljos rule PATTERN --verdict deny --why ...`
 for a command that must never run. Keep the wording to one or two
 sentences. Show the line you will run, run it, and print what it returned.

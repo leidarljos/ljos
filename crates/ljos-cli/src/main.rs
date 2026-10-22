@@ -237,7 +237,9 @@ enum RecordCmd {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Remember one lesson. Typed by the person it takes effect at once. From an agent runner it is written at once as agent-derived, with its provenance; `ljos memories review` prunes it later.
+    /// Remember one lesson. Typed by the person it takes effect at once.
+    /// Under a runner, words from the person's latest prompt are theirs.
+    /// Any other text is an unreviewed note, which the prompt does not treat as a fact.
     Remember {
         text: Vec<String>,
         /// Remember as this persona: the lesson comes back to it first in its next brief.
@@ -256,7 +258,9 @@ enum Cmd {
         #[arg(long, value_name = "DATE")]
         valid_to: Option<String>,
     },
-    /// Prefer one way over another, as a standing preference. Stored as written.
+    /// Prefer one way over another, as a standing preference. Typed by the
+    /// person, it is theirs. Under a runner, only words from the person's
+    /// latest prompt are theirs; any other text is agent-derived.
     /// `--user` writes a user rule instead: shared by every seat, never reviewed.
     Prefer {
         text: Vec<String>,
@@ -1283,6 +1287,20 @@ fn write_ack(body: &serde_json::Value) -> String {
     }
 }
 
+/// Print a relay fault in the runner's contract and exit with its code.
+/// A prompt has no such deny; the caller then returns the error.
+fn exit_relay_fault(runner: &str, event: &str, what: &str) -> Result<()> {
+    let Some((out, err, code)) = ljos_cli::runner_hooks::relay_fault_deny(runner, event, what)
+    else {
+        anyhow::bail!("hook: {what}");
+    };
+    print!("{out}");
+    eprint!("{err}");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    std::process::exit(code);
+}
+
 fn main() -> Result<()> {
     let ran = run_command();
     if let Err(e) = &ran {
@@ -1350,14 +1368,17 @@ fn run_command() -> Result<()> {
             }
             ljos_cli::set_validity(valid_from.as_deref(), valid_to.as_deref())?;
             let text = join(&text);
-            // Under a runner the lesson is the agent's, unless it is the
-            // person's words from their latest prompt: then it stands.
-            let agents =
-                ljos_cli::under_a_runner() && !ljos_cli::capture::said_in_latest_prompt(&text);
-            let horizon = ljos_cli::remember_horizon(transient, standing, agents);
-            let body = if agents {
-                ljos_cli::packset_write_agent("Remember", &text, as_persona.as_deref(), horizon)?
+            // Under a runner the agent's own words are an unreviewed note.
+            // Words from the person's latest prompt are theirs and stand.
+            // The seat guard lets remember through, so this is the check.
+            let under = ljos_cli::under_a_runner();
+            let body = if under && !ljos_cli::capture::said_in_latest_prompt(&text) {
+                ljos_cli::packset_write_remember_note(&text, as_persona.as_deref())?
+            } else if under {
+                let horizon = transient.then_some(true);
+                ljos_cli::packset_write_mcp("Remember", &text, as_persona.as_deref(), horizon)?
             } else {
+                let horizon = ljos_cli::remember_horizon(transient, standing, false);
                 packset_write_as("Remember", &text, as_persona.as_deref(), horizon)?
             };
             println!("{}", write_ack(&body));
@@ -1468,7 +1489,7 @@ fn run_command() -> Result<()> {
             } else {
                 Vec::new()
             };
-            let body = packset_write_as("Prefer", &text, as_persona.as_deref(), Some(false))?;
+            let body = ljos_cli::packset_prefer(&text, as_persona.as_deref())?;
             println!("{}", write_ack(&body));
             for rule in &rules {
                 println!("{}", write_ack(&write_rule(rule)?));
@@ -2375,8 +2396,28 @@ fn run_command() -> Result<()> {
                 return Ok(());
             }
             use std::io::Read;
-            let mut input = String::new();
-            std::io::stdin().read_to_string(&mut input)?;
+            let mut bytes = Vec::new();
+            std::io::stdin().read_to_end(&mut bytes)?;
+            let input = match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(_) => {
+                    // The relay reads stdin before the gate's panic hook is
+                    // armed. Invalid text used to exit 1 with no output,
+                    // which nine runners read as an allow.
+                    if let Some(name) = runner.as_deref() {
+                        if ljos_cli::runner_hooks::is_runner(name)
+                            && ljos_cli::runner_hooks::relay_event_is_gate(event.as_deref())
+                        {
+                            return exit_relay_fault(
+                                name,
+                                event.as_deref().unwrap_or(""),
+                                "stdin is not utf-8",
+                            );
+                        }
+                    }
+                    anyhow::bail!("hook: stdin is not utf-8");
+                }
+            };
             ljos_cli::log_recall("hook", event.as_deref().unwrap_or("-"));
             if let Some(runner) = runner.as_deref() {
                 if !ljos_cli::runner_hooks::is_runner(runner) {
@@ -2385,8 +2426,38 @@ fn run_command() -> Result<()> {
                         ljos_cli::runner_hooks::RUNNERS.join(", ")
                     );
                 }
-                let code = ljos_cli::runner_hooks::relay(runner, &input, limit, event.as_deref())?;
-                std::process::exit(code);
+                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    ljos_cli::runner_hooks::relay(runner, &input, limit, event.as_deref())
+                }));
+                match caught {
+                    Ok(Ok(code)) => std::process::exit(code),
+                    Ok(Err(err))
+                        if ljos_cli::runner_hooks::relay_input_is_gate(
+                            &input,
+                            event.as_deref(),
+                        ) =>
+                    {
+                        return exit_relay_fault(
+                            runner,
+                            event.as_deref().unwrap_or(""),
+                            &format!("{err:#}"),
+                        );
+                    }
+                    Ok(Err(err)) => return Err(err),
+                    Err(_)
+                        if ljos_cli::runner_hooks::relay_input_is_gate(
+                            &input,
+                            event.as_deref(),
+                        ) =>
+                    {
+                        return exit_relay_fault(
+                            runner,
+                            event.as_deref().unwrap_or(""),
+                            "panicked",
+                        );
+                    }
+                    Err(_) => anyhow::bail!("hook: relay panicked"),
+                }
             }
             let call = if prompt {
                 ljos_cli::prompt_call(&input)
@@ -2756,7 +2827,10 @@ fn run_command() -> Result<()> {
                     // repeat it and the correction hook does not file it
                     // again as a proposal.
                     let captured = if person {
-                        ljos_cli::capture::note_latest_prompt(&call.cue);
+                        ljos_cli::capture::note_latest_prompt_for(
+                            &call.cue,
+                            call.session.as_deref(),
+                        );
                         ljos_cli::hook_timed("capture", || ljos_cli::capture::capture_stated(&call))
                     } else {
                         None
