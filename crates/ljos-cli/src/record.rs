@@ -316,7 +316,8 @@ pub struct TrackerReport {
 /// Hold every ballot on the tracker at `root` to the push gate's
 /// signature check ([`crate::ballot_sig::seat_check`]): the newest
 /// `ballot-sig:` note of its voter names its choice, verifies, and is
-/// under the key `.ljos-seat-keys` pins for that voter. A persona's or a
+/// under the key `.ljos-seat-keys` pins for that voter and for no other
+/// voter, so one key does not count as several voters. A persona's or a
 /// judge's ballot is held to it too, since every cast signs. An unsigned
 /// ballot the tracker committed before signing began is legacy, as at the
 /// push gate. Only files are read, and git for the commit dates.
@@ -373,8 +374,13 @@ pub fn check_tracker(root: &Path) -> Result<TrackerReport> {
                     crate::ballot_sig::seat_check(issue, &seat, &notes, &pins, &legacy);
                 if !old.is_empty() {
                     report.legacy.push(format!("{issue} {}", ballot.agent));
+                    continue;
                 }
-                let Some(reason) = problems.into_iter().next() else {
+                let reason = problems
+                    .into_iter()
+                    .next()
+                    .or_else(|| shared_key(&ballot.agent, &pins));
+                let Some(reason) = reason else {
                     continue;
                 };
                 let line =
@@ -389,6 +395,23 @@ pub fn check_tracker(root: &Path) -> Result<TrackerReport> {
         }
     }
     Ok(report)
+}
+
+/// The other voters `pins` holds `voter`'s key for, as a reason. Hex in
+/// another case is the same key.
+fn shared_key(voter: &str, pins: &BTreeMap<String, String>) -> Option<String> {
+    let key = pins.get(voter)?;
+    let others: Vec<&str> = pins
+        .iter()
+        .filter(|(other, k)| other.as_str() != voter && k.eq_ignore_ascii_case(key))
+        .map(|(other, _)| other.as_str())
+        .collect();
+    (!others.is_empty()).then(|| {
+        format!(
+            "{voter}'s key is also pinned for {}, so one key counts as several voters",
+            others.join(", ")
+        )
+    })
 }
 
 fn is_votes_drawer(drawer: &str) -> bool {
