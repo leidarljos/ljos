@@ -6,6 +6,8 @@
 
 #[path = "common/runner.rs"]
 mod runner;
+#[path = "common/terminal.rs"]
+mod terminal;
 
 use std::io::Write;
 use std::net::TcpListener;
@@ -53,6 +55,19 @@ impl Home {
         cmd.args(args);
         self.env(&mut cmd, home);
         run(cmd, stdin)
+    }
+
+    /// [`Home::ljos`] typed at a terminal of the person's own.
+    fn on_a_terminal(&self, args: &[&str]) -> Output {
+        let home = self.dir.path();
+        let mut cmd = Command::new(terminal::PYTHON);
+        cmd.args(terminal::shape(
+            "terminal",
+            env!("CARGO_BIN_EXE_ljos"),
+            args,
+        ));
+        self.env(&mut cmd, home);
+        run(cmd, None)
     }
 
     fn env(&self, cmd: &mut Command, home: &Path) {
@@ -209,7 +224,7 @@ fn prompt_through(home: &Home, hook: &str, session: &str, prompt: &str) -> Strin
 #[test]
 fn a_remembered_lesson_reaches_the_prompt_hook_onboard_writes() {
     let (home, _daemon, hook) = seat();
-    let remembered = home.ljos(&["remember", LESSON], None);
+    let remembered = home.on_a_terminal(&["remember", LESSON]);
     assert!(remembered.status.success(), "{}", text(&remembered));
     if text(&remembered).contains("episode:") || text(&remembered).contains("unreviewed note:") {
         // This test runs under an agent runner, so the words are the
