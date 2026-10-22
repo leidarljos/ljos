@@ -1020,12 +1020,12 @@ pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result
             return Ok(said);
         }
     }
-    let issue_id = match asked {
+    let (issue_id, filed_here) = match asked {
         Some(id) => {
             claim_existing(id)?;
-            id.to_string()
+            (id.to_string(), false)
         }
-        None => file_and_claim(&project_for(&place), &task)?,
+        None => (file_and_claim(&project_for(&place), &task)?, true),
     };
     let persisted = super::persist_tracker(&issue_id, "claimed");
     if persisted.contains("could not") || persisted.contains("refused") {
@@ -1047,8 +1047,10 @@ pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result
     }
     let row = book.repos.entry(place.clone()).or_default();
     row.last_unix = now;
-    clear_lesson_if_issue_changes(row, &issue_id);
+    clear_issue_fields_if_issue_changes(row, &issue_id);
     row.issue = Some(issue_id.clone());
+    row.filed = filed_here;
+    row.named = false;
     row.finished = false;
     row.started = true;
     row.claim_failed = false;
@@ -1338,8 +1340,10 @@ fn ensure_claim(
                 log_line(line.trim());
             }
             let row = book.repos.entry(repo.to_string()).or_default();
+            clear_issue_fields_if_issue_changes(row, &issue);
             row.issue = Some(issue.clone());
             row.filed = true;
+            row.named = false;
             row.recall = recall_line(&issue);
             Ok(())
         }
@@ -1784,7 +1788,7 @@ fn tracker_holder(issue: &str) -> Option<String> {
 /// row, which then holds `issue`.
 fn adopt_row(book: &mut Book, repo: &str, issue: &str, moved: RepoBook) {
     let row = book.repos.entry(repo.to_string()).or_default();
-    clear_lesson_if_issue_changes(row, issue);
+    clear_issue_fields_if_issue_changes(row, issue);
     row.issue = Some(issue.to_string());
     row.finished = false;
     row.claim_failed = false;
@@ -2867,7 +2871,7 @@ fn book_named_in(book: &mut Book, key: &str, repo: &str, head: &str, issue: &str
             }
         }
         None if placeholder.is_some() => {
-            clear_lesson_if_issue_changes(row, issue);
+            clear_issue_fields_if_issue_changes(row, issue);
             row.issue = Some(issue.to_string());
             row.named = true;
             row.filed = false;
@@ -3350,15 +3354,32 @@ fn bind_prompt(book: &mut Book, repo: &str, now: u64) {
     book.prompt_unix = now;
 }
 
-/// A row that moves to another issue must not keep lesson linkage from the
-/// prior issue. Rewrites only supersede lessons from the same issue history.
-fn clear_lesson_if_issue_changes(row: &mut RepoBook, issue: &str) {
+/// A row that moves to another issue must drop issue-bound state from the
+/// prior issue. A rewrite must not carry old deeds, failures or lesson links
+/// onto the new ticket.
+fn clear_issue_fields_if_issue_changes(row: &mut RepoBook, issue: &str) {
     if row.issue.as_deref() == Some(issue) {
         return;
     }
+    if row.issue.is_none() {
+        row.lesson = false;
+        row.lesson_id = None;
+        row.lesson_title = None;
+        return;
+    }
+    row.deeds.clear();
+    row.landed.clear();
+    row.landed_head = None;
+    row.failures.clear();
+    row.asks.clear();
     row.lesson = false;
     row.lesson_id = None;
     row.lesson_title = None;
+    row.title = None;
+    row.named = false;
+    row.also.clear();
+    row.elsewhere.clear();
+    row.filed = false;
 }
 
 /// Copy `row.title` into `lesson_title` once, when a lesson already exists.
@@ -5364,8 +5385,6 @@ mod tests {
         switched.prompt = "Now add a kebab-case helper".into();
         bind_prompt(&mut switched, &repo_s, unix_secs());
         let row = switched.repos.get_mut(&repo_s).expect("repo row");
-        row.title = Some("Now add a kebab-case helper".into());
-        row.deeds = vec![old.clone()];
         row.finished = true;
         row.lesson = true;
         store_book(&path, &switched);
@@ -5374,8 +5393,8 @@ mod tests {
         let queued =
             std::fs::read_to_string(state.join("ljos/note-queue.jsonl")).unwrap_or_default();
         assert!(
-            queued.contains("kebab case helper"),
-            "the second issue title was lost\n{queued}"
+            queued.trim().is_empty(),
+            "a rebind with no deeds should not rewrite any lesson\n{queued}"
         );
         assert!(
             !queued.contains("slugify"),
@@ -5385,6 +5404,41 @@ mod tests {
             !queued.contains("atom-a"),
             "the second issue rewrite superseded the first issue atom\n{queued}"
         );
+    }
+
+    /// A fresh claim on a row that had no issue clears stale lesson linkage
+    /// before it binds the new issue.
+    #[test]
+    fn ensure_claim_clears_stale_lesson_before_setting_new_issue() {
+        let _g = lock();
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let repo_s = git_toplevel(&repo).expect("repo toplevel");
+        let mut book = Book {
+            prompt: "write a kebab-case helper".into(),
+            ..Book::default()
+        };
+        book.repos.insert(
+            repo_s.clone(),
+            RepoBook {
+                lesson: true,
+                lesson_id: Some("atom-old".into()),
+                lesson_title: Some("old lesson".into()),
+                deeds: vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()],
+                failures: vec!["old failure".into()],
+                asks: vec!["old ask".into()],
+                title: Some("old title".into()),
+                issue: None,
+                ..RepoBook::default()
+            },
+        );
+        ensure_claim(&mut book, &book_path("ensure-claim-clear"), &repo_s, None).unwrap();
+        let row = book.repos.get(&repo_s).expect("repo row");
+        let issue = row.issue.clone().expect("new issue");
+        assert!(issue.starts_with("probe-"), "{issue}");
+        assert!(!row.lesson);
+        assert!(row.lesson_id.is_none());
+        assert!(row.lesson_title.is_none());
     }
 
     /// willma-20261020f w4, w8 and w12: agy 1.4.3's `write_file` filed no
@@ -5715,9 +5769,6 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::create_dir_all(&other).unwrap();
         std::fs::create_dir_all(&plain).unwrap();
-        // This tree sits inside the ljos checkout. An invalid gitfile stops
-        // git from walking up and treating `plain` as that checkout.
-        std::fs::write(plain.join(".git"), "gitdir: /dev/null\n").unwrap();
         git(&repo, &["init", "-q", "-b", "main"]);
         git(&other, &["init", "-q", "-b", "main"]);
         let top = git_toplevel(&repo).unwrap();
