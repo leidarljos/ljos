@@ -111,7 +111,7 @@ same everywhere and the envelope differs:
 +--------------------------+--------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+----------------------------------------------------------------------+--------------------------------------------------------------------------------------------------+
 | hermes                   | MCP server list plus skill                                                                       | advisory: onboard registers no hook                                                        | none: no hook                                                        | nothing leaves the machine unless a remote judge is turned on                                    |
 +--------------------------+--------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+----------------------------------------------------------------------+--------------------------------------------------------------------------------------------------+
-| Cursor                   | prompt note on the first tool result; skill; ``~/.cursor/agents``                                | ``beforeShellExecution`` and ``preToolUse``, fail closed                                   | Cursor's permission prompt on a shell command                        | the IDE and the ``agent`` CLI share ``~/.cursor/mcp.json`` and ``~/.cursor/hooks.json``          |
+| Cursor                   | prompt note on the first tool result; skill; ``~/.cursor/agents``                                | ``beforeShellExecution`` and ``preToolUse``; a missing policyd allows                      | Cursor's permission prompt on a shell command                        | the IDE and the ``agent`` CLI share ``~/.cursor/mcp.json`` and ``~/.cursor/hooks.json``          |
 +--------------------------+--------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+----------------------------------------------------------------------+--------------------------------------------------------------------------------------------------+
 | GitHub Copilot CLI       | skill; no prompt note, since Copilot drops a command hook's prompt output                        | ``PreToolUse`` in ``~/.copilot/hooks/ljos.json``, ``permissionDecision``                   | Copilot's permission prompt                                          | the same file in a repository's ``.github/hooks`` reaches Copilot's cloud agent                  |
 +--------------------------+--------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------+----------------------------------------------------------------------+--------------------------------------------------------------------------------------------------+
@@ -156,13 +156,14 @@ and writes the answer back in the runner's field names and exit code.
 On a tool call, the relay denies when the inner hook crashes, exits
 non-zero without an answer, or runs past ``GUARD_TIMEOUT``, which is 5
 seconds unless ``LJOS_GUARD_TIMEOUT`` names another number of seconds.
-It also denies when the inner hook says ``ljos-policyd`` did not start,
-gave no verdict or ran out of time. The reason names the failure and
-says to run ``ljos doctor``. ``LJOS_GUARD_FAIL_OPEN=1`` restores the old
-allow-with-note behavior while the seat is repaired. On any other
-event, such as a prompt, the relay waits 9 seconds, past the inner
-hook's own 8 second deadline, and a fault lets the event through with
-a note that the guard is unhealthy.
+A policyd that is installed but hangs, crashes, or prints no verdict
+is denied by the check itself. The reason asks the person to run
+``ljos doctor`` in their own terminal. A missing ``ljos-policyd`` is an
+allow with a note, not that deny. ``LJOS_GUARD_FAIL_OPEN=1`` restores
+the old allow-with-note behavior for a fault while the seat is repaired.
+On any other event, such as a prompt, the relay waits 9 seconds, past
+the inner hook's own 8 second deadline, and a fault lets the event
+through with a note that the guard is unhealthy.
 
 When a hook fails
 -----------------
@@ -199,14 +200,15 @@ ahead unchecked.
 | Crush                    | runs; only exit 2 blocks                                                                                                 | runs           | not read; the exit code decides                | `hooks <https://github.com/charmbracelet/crush/blob/main/docs/hooks/README.md>`__                                                                                                                    |
 +--------------------------+--------------------------------------------------------------------------------------------------------------------------+----------------+------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
-Three things on the seat's side close part of the gap. On the runners
-from Copilot down, ``ljos hook --runner`` fails closed on those guard
-faults unless ``LJOS_GUARD_FAIL_OPEN=1`` is set. Claude Code, Codex and
-Cursor run plain ``ljos hook``, and there the same faults let the
-command run with a note that the guard is unhealthy. An ``ljos-policyd``
-that is not installed is not a fault: the seat's rules alone judge the
-command, unless ``POLICYD_REQUIRED=1`` is set, which refuses it wherever
-the hook runs. The hook files the seat writes give each runner a
+Three things on the seat's side close part of the gap. A guard fault
+denies the tool call: a ``ljos-policyd`` that is installed but hangs,
+crashes, or prints no verdict, a relay that cannot read its input, and
+a wait past ``LJOS_GUARD_TIMEOUT``. A missing ``ljos-policyd`` still
+allows, with a note, so CI and a fresh install are not locked out.
+``POLICYD_REQUIRED=1`` refuses the line when no binary answers, on the
+relay and on a direct hook. ``LJOS_GUARD_FAIL_OPEN=1`` restores the old
+allow-with-note behavior for a fault while that is repaired. The hook
+files the seat writes give each runner a
 timeout of 10 to 20 seconds; a check that takes longer meets the
 "times out" column. None of these helps when the ``ljos`` binary itself
 is gone: on Copilot and Kiro that blocks every shell command, and on

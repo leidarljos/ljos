@@ -22,7 +22,7 @@ issue id; the commands below write them as `NAME` and `ISSUE`.
    `--used` lists the deed accessions you relied on, comma separated, or `none`.
    Add `--expect OPTION` with the option you think most other voters will pick.
 4. If the persona learned something it should know next time:
-   `ljos remember --as NAME "..."`.
+   `ljos note ISSUE "..."`. The prompt does not treat that note as a fact.
 5. Report the option, the confidence and two sentences of reasons. Do not run
    `ljos consensus`; the agent that started the panel reads the result.
 

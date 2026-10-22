@@ -497,8 +497,9 @@ fn one_sand_subagent_five_personas_count_as_the_first_ballot() {
 fn n_distinct_sessions_settle() {
     let world = World::new();
     // A cite stands for these seats because they are on the standing list.
-    // A seat off that list needs a slot, which this panel does not write.
-    for seat in ["ljosbot", "inky", "disk-saver"] {
+    // A seat off that list needs a slot, which this panel does not write,
+    // so carol's ballot is left out and named and the rest still decide.
+    for seat in ["ljosbot", "inky", "disk-saver", "carol"] {
         vote(&world, seat, &format!("sess-{seat}-0001"), "demo-ind2");
     }
     let out = world.ljos("ljosbot", "sess-ljosbot-0001", &["consensus", "demo-ind2"]);
@@ -506,7 +507,11 @@ fn n_distinct_sessions_settle() {
     assert!(out.status.success(), "{said}");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("decides ship for a push by ljosbot"),
+        stdout.contains(
+            "decides ship for a push by ljosbot; \
+             counted ljosbot for ship, inky for ship, disk-saver for ship; \
+             left out: carol is not a standing seat, and no slot on demo-ind2 names it"
+        ),
         "{said}"
     );
     assert!(stdout.contains("the settle is unanimous"), "{said}");

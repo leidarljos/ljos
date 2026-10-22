@@ -308,15 +308,31 @@ fn one_seat_pinned_under_two_names_shares_its_key_but_not_an_issue() {
     );
 }
 
+/// Legacy is read by commit order: a ballot committed before the first
+/// pin is legacy whatever its date, and one committed after is not,
+/// however far back its date is set.
 #[test]
-fn an_unsigned_ballot_committed_before_signing_began_is_legacy() {
+fn an_unsigned_ballot_committed_before_the_first_pin_is_legacy() {
     let tracker = Tracker::new(&[ISSUE]);
     tracker.vote(ISSUE, "elder", "rail");
-    tracker.commit(Some("2026-10-01T00:00:00Z"));
+    tracker.commit(Some("2026-11-01T00:00:00Z"));
+    tracker.cast(ISSUE, "inky", "rail", &key(1));
+    tracker.pin(&[("inky", &key(1))]);
+    tracker.commit(None);
     let (ok, said) = tracker.check();
     assert!(ok, "{said}");
     assert!(
         said.contains("legacy unsigned, committed before signing began: probe-r001 elder"),
         "{said}"
     );
+
+    tracker.vote(ISSUE, "late", "bus");
+    tracker.commit(Some("2026-10-01T00:00:00Z"));
+    let (ok, said) = tracker.check();
+    assert!(!ok, "{said}");
+    let want = format!(
+        "{BOARD}:{}: {ISSUE}: late's ballot is unsigned\n",
+        tracker.line_of("late")
+    );
+    assert!(said.contains(&want), "want {want}{said}");
 }
