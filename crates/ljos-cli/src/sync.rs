@@ -704,8 +704,26 @@ pub(crate) fn read_beneath(root: &Path, rel: &str) -> Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
+/// Runs after a directory fd is open and before the write. Tests swap a
+/// symlink in for the path here; the write still uses the fd.
+fn before_dir_write() {
+    #[cfg(test)]
+    BEFORE_DIR_WRITE.with(|hook| {
+        if let Some(mut run) = hook.borrow_mut().take() {
+            run();
+        }
+    });
+}
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_DIR_WRITE: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Replace `rel` below `root` with `bytes`, making missing directories,
-/// with no symlink at any component.
+/// with no symlink at any component. The directory is fsynced once the
+/// new name is in place.
 pub(crate) fn write_beneath(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     use std::os::fd::{AsRawFd, FromRawFd};
@@ -713,6 +731,9 @@ pub(crate) fn write_beneath(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> 
     std::fs::create_dir_all(root).with_context(|| format!("sync: {}", root.display()))?;
     let dir = open_dir_beneath(root, parent, true)?
         .with_context(|| format!("sync: {} was not made", root.join(parent).display()))?;
+    // The directory fd is what the write uses. A symlink swapped in for a
+    // parent after this open is not followed.
+    before_dir_write();
     let cname = c_name(name)?;
     let ctmp = c_name(&format!(".{name}.tmp-{}", std::process::id()))?;
     // SAFETY: dir is an open directory fd; both names are NUL-terminated.
@@ -732,7 +753,7 @@ pub(crate) fn write_beneath(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> 
     }
     // SAFETY: fd is new, owned here, and opened with O_CLOEXEC.
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-    let written = file.write_all(bytes);
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
     drop(file);
     // SAFETY: as above. renameat replaces the entry and follows no link.
     let renamed = written.is_ok()
@@ -751,7 +772,8 @@ pub(crate) fn write_beneath(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> 
         written?;
         return Err(err).with_context(|| format!("sync: {}", root.join(rel).display()));
     }
-    Ok(())
+    dir.sync_all()
+        .with_context(|| format!("sync: {}", root.join(parent).display()))
 }
 
 /// Names in the directory `rel` below `root`, with no symlink at any
@@ -1881,28 +1903,13 @@ fn in_head(root: &Path, rel: &str) -> bool {
     git(root, &["cat-file", "-e", &spec]).is_ok_and(|out| out.status.success())
 }
 
-/// What the worktree path is, without following a symlink.
+/// What one directory entry is, without following a symlink.
 enum WorktreeKind {
     Missing,
     /// A regular file with link count 1.
     Regular,
     /// Symlink, fifo, directory, hard link, or unreadable.
     Unsafe,
-}
-
-fn worktree_kind(path: &Path) -> WorktreeKind {
-    match std::fs::symlink_metadata(path) {
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => WorktreeKind::Missing,
-        Err(_) => WorktreeKind::Unsafe,
-        Ok(meta) => {
-            use std::os::unix::fs::MetadataExt;
-            if meta.file_type().is_file() && meta.nlink() == 1 {
-                WorktreeKind::Regular
-            } else {
-                WorktreeKind::Unsafe
-            }
-        }
-    }
 }
 
 /// Modes git reports for `rel` in the index and in HEAD. Empty when the
@@ -1937,10 +1944,21 @@ fn tracked_modes_are_regular(root: &Path, rel: &str) -> bool {
 }
 
 fn gone_log_state(root: &Path, rel: &str) -> GoneLog {
-    if open_dir_beneath(root, split_rel(rel).0, false).is_err() {
-        return GoneLog::Refused;
-    }
-    let kind = worktree_kind(&root.join(rel));
+    let (parent, name) = split_rel(rel);
+    // Hold the directory fd for the kind check and the byte compare. A
+    // path lookup after the open would follow a symlink swapped in for
+    // `.ljos` or `.ljos/atoms`.
+    let opened = match open_dir_beneath(root, parent, false) {
+        Err(_) => return GoneLog::Refused,
+        Ok(dir) => dir,
+    };
+    let kind = match &opened {
+        None => WorktreeKind::Missing,
+        Some(dir) => match kind_at(dir, name) {
+            Ok(kind) => kind,
+            Err(_) => return GoneLog::Refused,
+        },
+    };
     if matches!(kind, WorktreeKind::Unsafe) || !tracked_modes_are_regular(root, rel) {
         return GoneLog::Refused;
     }
@@ -1955,13 +1973,82 @@ fn gone_log_state(root: &Path, rel: &str) -> GoneLog {
     if !tracked {
         return GoneLog::Absent;
     }
-    let clean =
-        git(root, &["diff", "--quiet", "HEAD", "--", rel]).is_ok_and(|out| out.status.success());
-    if clean {
-        GoneLog::Clean
-    } else {
-        GoneLog::Dirty
+    let Some(dir) = opened else {
+        return GoneLog::Resume;
+    };
+    let have = match read_at(&dir, name, &root.join(rel)) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return GoneLog::Resume,
+        Err(_) => return GoneLog::Refused,
+    };
+    match head_blob(root, rel) {
+        Ok(want) if want == have => GoneLog::Clean,
+        _ => GoneLog::Dirty,
     }
+}
+
+/// What `name` is in `dir`, without following a symlink.
+fn kind_at(dir: &std::fs::File, name: &str) -> Result<WorktreeKind> {
+    use std::os::fd::AsRawFd;
+    let cname = c_name(name)?;
+    // SAFETY: dir is an open directory fd and cname is NUL-terminated.
+    // stat is zeroed and only read when fstatat fills it.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            cname.as_ptr(),
+            &mut st,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        return if err.raw_os_error() == Some(libc::ENOENT) {
+            Ok(WorktreeKind::Missing)
+        } else {
+            Err(err).with_context(|| format!("sync: {name}"))
+        };
+    }
+    let regular = (st.st_mode & libc::S_IFMT) == libc::S_IFREG && st.st_nlink == 1;
+    Ok(if regular {
+        WorktreeKind::Regular
+    } else {
+        WorktreeKind::Unsafe
+    })
+}
+
+/// The bytes of `name` in `dir`. None when it is missing. A symlink or any
+/// other non-regular file is an error, and the read uses this fd.
+fn read_at(dir: &std::fs::File, name: &str, label: &Path) -> Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::MetadataExt;
+    let cname = c_name(name)?;
+    // SAFETY: dir is an open directory fd and cname is NUL-terminated.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            cname.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
+    };
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        return match err.raw_os_error() {
+            Some(libc::ENOENT) => Ok(None),
+            _ => bail!("sync: {} is not a regular file", label.display()),
+        };
+    }
+    // SAFETY: fd is new, owned here, and opened with O_CLOEXEC.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() || meta.nlink() != 1 {
+        bail!("sync: {} is not a regular file", label.display());
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
 }
 
 fn log_committed_at(root: &Path, rel: &str) -> Option<i64> {
@@ -2172,12 +2259,19 @@ fn sealed_bytes(root: &Path, rel: &str) -> Result<Option<Vec<u8>>> {
     if !tracked_modes_are_regular(root, rel) {
         bail!("sync: {rel} is not a regular file; the log was kept");
     }
-    let path = root.join(rel);
-    match worktree_kind(&path) {
+    let (parent, name) = split_rel(rel);
+    let Some(dir) = open_dir_beneath(root, parent, false)? else {
+        return if in_head(root, rel) {
+            head_blob(root, rel).map(Some)
+        } else {
+            Ok(None)
+        };
+    };
+    match kind_at(&dir, name)? {
         WorktreeKind::Unsafe => {
             bail!("sync: {rel} is not a regular file; the log was kept");
         }
-        WorktreeKind::Regular => read_beneath(root, rel)?
+        WorktreeKind::Regular => read_at(&dir, name, &root.join(rel))?
             .map(Some)
             .with_context(|| format!("sync: {rel} went missing; the log was kept")),
         WorktreeKind::Missing if in_head(root, rel) => head_blob(root, rel).map(Some),
@@ -6389,6 +6483,48 @@ mod tests {
         let said = import(&root, &scope).unwrap();
         assert!(said.contains("has no scope header"), "{said}");
         assert!(posted_texts(&posted).is_empty(), "{said}");
+    }
+
+    /// The atoms directory is real when it is opened. The hook then swaps
+    /// `.ljos` or `.ljos/atoms` for a symlink. The bytes go through the
+    /// directory fd, and the outside directory stays empty.
+    #[test]
+    fn a_directory_swapped_after_it_is_opened_is_not_written_through() {
+        for linked in [".ljos", ".ljos/atoms"] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("tracker");
+            std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
+            let outside = dir.path().join("outside");
+            std::fs::create_dir_all(&outside).unwrap();
+            let hook_root = root.clone();
+            let hook_outside = outside.clone();
+            let which = linked.to_string();
+            BEFORE_DIR_WRITE.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    let path = hook_root.join(&which);
+                    let saved = hook_root.join(format!("{which}.real"));
+                    if let Some(parent) = saved.parent() {
+                        std::fs::create_dir_all(parent).unwrap();
+                    }
+                    std::fs::rename(&path, &saved).unwrap();
+                    std::os::unix::fs::symlink(&hook_outside, &path).unwrap();
+                }));
+            });
+            let wrote = write_beneath(&root, ".ljos/atoms/host.jsonl.age", b"secret log");
+            BEFORE_DIR_WRITE.with(|hook| *hook.borrow_mut() = None);
+            assert!(wrote.is_ok(), "{linked}: {wrote:?}");
+            assert!(
+                !outside.join("host.jsonl.age").exists(),
+                "{linked}: log landed outside the tracker"
+            );
+            let saved = root.join(format!("{linked}.real"));
+            let kept = if linked == ".ljos" {
+                saved.join("atoms").join("host.jsonl.age")
+            } else {
+                saved.join("host.jsonl.age")
+            };
+            assert_eq!(std::fs::read(&kept).unwrap(), b"secret log", "{linked}");
+        }
     }
 
     /// A tracker whose `.ljos` or `.ljos/atoms` is a symlink to a local
