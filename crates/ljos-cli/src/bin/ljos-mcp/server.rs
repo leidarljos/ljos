@@ -807,6 +807,9 @@ pub struct StartArgs {
 pub struct GuardArgs {
     /// The command line, as the shell would read it.
     pub command: String,
+    /// Optional working directory for the command.
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 /// A session node to finish.
@@ -1920,7 +1923,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this before a destructive shell command, a git commit, a git push, or a merge. Pass the command line. It returns verdict allow or ask. Run the command only when verdict is allow. An ask names the command and waits for the person; it is not a deny. A commit, push, or merge the gates refuse is an error that names what makes the line pass.",
+        description = "Call this before a destructive shell command, a git commit, a git push, or a merge. Pass the command line, and pass cwd when the command runs outside the server's start directory. It returns verdict allow or ask. Run the command only when verdict is allow. An ask names the command and waits for the person; it is not a deny. A commit, push, or merge the gates refuse is an error that names what makes the line pass.",
         annotations(
             title = "Check a command",
             read_only_hint = true,
@@ -1931,7 +1934,8 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<GuardArgs>,
     ) -> Result<Json<GuardSaid>, McpError> {
-        let report = ljos_cli::guard_report(&args.command).map_err(refused)?;
+        let report = ljos_cli::guard_report_in(&args.command, args.cwd.as_deref().map(Path::new))
+            .map_err(refused)?;
         Ok(Json(GuardSaid {
             text: report.text,
             verdict: report.verdict,
@@ -4411,6 +4415,7 @@ mod tests {
         let allow = server
             .ljos_guard_check(Parameters(GuardArgs {
                 command: "ls".into(),
+                cwd: None,
             }))
             .await
             .expect("allow");
@@ -4421,6 +4426,7 @@ mod tests {
         let err = match server
             .ljos_guard_check(Parameters(GuardArgs {
                 command: command.into(),
+                cwd: None,
             }))
             .await
         {
@@ -4429,6 +4435,56 @@ mod tests {
         };
         let said = format!("{err:?}");
         assert!(said.contains("Co-authored-by"), "{said}");
+    }
+
+    #[tokio::test]
+    async fn guard_check_uses_the_passed_cwd() {
+        let _env_lock = ENV_TEST_LOCK.lock().await;
+        let _saved = RestoreEnv::new(&["POLICYD_BIN", "LJOS_GUARD", "LJOS_OFF"]);
+        let home = tempfile::tempdir().expect("tempdir");
+        let danger = home.path().join("danger");
+        std::fs::create_dir(&danger).expect("danger dir");
+        let bin = home.path().join("ljos-policyd");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\n\
+             if [ \"$(basename \"$(/bin/pwd -P)\")\" = \"danger\" ]; then\n\
+             printf 'deny\\tcwd-deny\\n'\n\
+             exit 2\n\
+             fi\n\
+             printf 'allow\\n'\n",
+        )
+        .expect("policyd");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        unsafe {
+            std::env::set_var("POLICYD_BIN", &bin);
+            std::env::set_var("LJOS_GUARD", "on");
+            std::env::remove_var("LJOS_OFF");
+        }
+        let server = LjosServer::at(std::env::temp_dir());
+        let allow = server
+            .ljos_guard_check(Parameters(GuardArgs {
+                command: "echo hi".into(),
+                cwd: None,
+            }))
+            .await
+            .expect("allow");
+        assert_eq!(allow.0.verdict, "allow");
+        let err = match server
+            .ljos_guard_check(Parameters(GuardArgs {
+                command: "echo hi".into(),
+                cwd: Some(danger.display().to_string()),
+            }))
+            .await
+        {
+            Err(err) => err,
+            Ok(out) => panic!("allowed {}: {}", out.0.verdict, out.0.text),
+        };
+        let said = format!("{err:?}");
+        assert!(said.contains("cwd-deny"), "{said}");
     }
 
     /// The protocol is a resource every harness can read, and it names the
