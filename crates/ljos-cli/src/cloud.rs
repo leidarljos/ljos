@@ -1237,7 +1237,15 @@ fn ensure_profile(home: &Path, bin_dir: &Path) -> Result<String> {
     Ok(notes.join("; "))
 }
 
-fn ensure_cloud_guard_rules() -> Result<String> {
+/// Whether this machine is a cloud seat: `ljos cloud up` wrote the guard
+/// file, and the file still holds the refusals that command writes. A box
+/// that never ran it has no such file, so finish exports no deeds.
+#[must_use]
+pub(crate) fn cloud_seat() -> bool {
+    cloud_guard_rules_path().is_some_and(|path| crate::kept_rules(&path) == cloud_guard_rules())
+}
+
+pub(crate) fn ensure_cloud_guard_rules() -> Result<String> {
     let path =
         cloud_guard_rules_path().context("cloud up: no config home for cloud guard rules")?;
     let wanted = cloud_guard_rules();
