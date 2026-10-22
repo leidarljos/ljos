@@ -1056,3 +1056,91 @@ fn a_raise_another_record_would_answer_closes_nothing() {
         cutoff[0]
     );
 }
+
+/// A program that opens a pty, starts a new session and lets init or the
+/// service manager adopt it has no runner above it and a terminal on its
+/// input. Neither shows a person, so the keep is refused and the
+/// preference still waits.
+#[test]
+fn a_reparented_pty_cannot_keep_a_preference() {
+    const DETACHED: &str = r#"
+import os, pty, sys, time
+ljos, id, done = sys.argv[1:4]
+if os.fork() == 0:
+    os.setsid()
+    mid = os.getpid()
+    if os.fork() == 0:
+        while os.getppid() == mid:
+            time.sleep(0.01)
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.execv(ljos, [ljos, "prefer", "--review", "--keep", id])
+        chunks = []
+        while True:
+            try:
+                data = os.read(fd, 4096)
+            except OSError:
+                break
+            if not data:
+                break
+            chunks.append(data)
+        _, status = os.waitpid(pid, 0)
+        with open(done + ".out", "wb") as f:
+            f.write(b"".join(chunks))
+        with open(done + ".tmp", "w") as f:
+            f.write(str(os.waitstatus_to_exitcode(status)))
+        os.rename(done + ".tmp", done)
+    os._exit(0)
+os.wait()
+for _ in range(600):
+    if os.path.exists(done):
+        break
+    time.sleep(0.05)
+sys.stdout.buffer.write(open(done + ".out", "rb").read())
+raise SystemExit(int(open(done).read()))
+"#;
+    let daemon = Daemon::start();
+    let seat = Seat::on(daemon.url.clone(), daemon.token.clone());
+    let bin = env!("CARGO_BIN_EXE_ljos");
+    let held = post_atom(
+        &daemon.url,
+        &daemon.token,
+        json!({
+            "schema": "inside.atom/v1",
+            "workspace": "seat",
+            "kind": "preference",
+            "level": "explicit",
+            "origin": "user-declared",
+            "text": TERMINAL,
+            "entities": ["seat:claude", "horizon:standing"],
+            "source": {"harness": "claude", "seat": "claude", "session": "claude@4f1c", "via": "ljos"},
+        }),
+    );
+    let id = held["id"].as_str().unwrap();
+    succeeded(&seat.output(bin, &["prefer", "--review"]), "review");
+    let before = atoms(&daemon.url, &daemon.token);
+
+    let done = seat.run.path().join("kept");
+    let out = seat
+        .command(
+            "/usr/bin/python3",
+            &["-c", DETACHED, bin, id, done.to_str().unwrap()],
+        )
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{}", text_of(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("no terminal emulator"),
+        "{}",
+        text_of(&out)
+    );
+    assert_eq!(
+        atoms(&daemon.url, &daemon.token),
+        before,
+        "{}",
+        text_of(&out)
+    );
+    let listed = succeeded(&seat.output(bin, &["prefer", "--review"]), "review");
+    assert!(listed.contains(id), "{listed}");
+}
