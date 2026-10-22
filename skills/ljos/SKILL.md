@@ -689,6 +689,15 @@ names the holder. `VISSUE_AGENT` is
 the tracker's own name for the same thing; `--as` names a persona over
 both; a person at a terminal is their login user.
 
+A tracker write (`note`, `claim`, `sitting`, `finish`, `release`, `file`,
+`deed --add`) needs a seat somebody named, as a ballot does. A seat taken
+only from the program above the shell, or from the login user under a
+runner, is refused and nothing is written: `export LJOS_SEAT=NAME` and run
+it again. When `~/.config/ljos/seats.toml` (or `$LJOS_SEATS`) lists seats,
+a write from a seat it does not list is refused too; with no such file,
+any named seat writes. Reads need no seat. `ljos doctor` shows the
+`seat source` row, a warning when the seat is derived.
+
 ## One-command consent
 
 The `request_approval` verb is served as the MCP tool `ljos_request_approval`.
