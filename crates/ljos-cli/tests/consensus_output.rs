@@ -1,5 +1,6 @@
 //! `ljos consensus` refuses an issue with no ballots, and `--json` prints
-//! one JSON document a caller can parse whole.
+//! one JSON document a caller can parse whole. A pack that does not
+//! answer leaves the push cite standing on nothing, as at the push gate.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -33,6 +34,11 @@ fn fakes(ballots: &str) -> (tempfile::TempDir, PathBuf) {
 }
 
 fn consensus(dir: &Path, home: &Path, args: &[&str]) -> Output {
+    consensus_on(dir, home, args, "off")
+}
+
+/// [`consensus`] with `PACKSET_URL` set to `pack`.
+fn consensus_on(dir: &Path, home: &Path, args: &[&str], pack: &str) -> Output {
     let path = format!(
         "{}:{}",
         dir.display(),
@@ -48,7 +54,7 @@ fn consensus(dir: &Path, home: &Path, args: &[&str]) -> Output {
         .env("XDG_STATE_HOME", home.join(".state"))
         .env("XDG_RUNTIME_DIR", home)
         .env("VISSUE_ROOT", home.join("tracker"))
-        .env("PACKSET_URL", "off")
+        .env("PACKSET_URL", pack)
         // The stub tracker holds no signature notes; this test reads the
         // shape of the JSON, and signed ballots have their own suite.
         .env("LJOS_UNSIGNED_BALLOTS", "allow")
@@ -86,4 +92,20 @@ fn json_is_one_document() {
     let doc = one_document(&compared.stdout);
     assert_eq!(doc["settle"]["winner"], "rrf", "{doc}");
     assert_eq!(doc["tracker"], "consensus: rrf 2 of 2, settled", "{doc}");
+}
+
+#[test]
+fn a_pack_that_does_not_answer_leaves_the_push_cite_unread() {
+    let (dir, home) = fakes(r#"[{"agent":"alice","choice":"rrf"},{"agent":"bob","choice":"rrf"}]"#);
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let down = format!("http://{}", closed.local_addr().unwrap());
+    drop(closed);
+    let out = consensus_on(dir.path(), &home, &["proj-v0te", "--json"], &down);
+    let doc = one_document(&out.stdout);
+    assert_eq!(doc["push_cite"]["stands"], false, "{doc}");
+    let refusal = doc["push_cite"]["refusal"].as_str().unwrap_or_default();
+    assert!(
+        refusal.starts_with("proj-v0te: the roster is not readable"),
+        "{doc}"
+    );
 }
