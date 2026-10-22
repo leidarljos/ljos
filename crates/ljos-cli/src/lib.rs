@@ -25600,6 +25600,9 @@ pub const TRACKER_LOCK: &str = ".ljos-commit.lock";
 /// exported repository from the parent process.
 pub(crate) fn git_at(dir: &Path) -> std::process::Command {
     let mut cmd = std::process::Command::new("git");
+    // A test may name a decoy on this command. Drop it with the variables
+    // a hook would have exported, so `-C` is the checkout.
+    apply_git_command_env(&mut cmd);
     for key in [
         "GIT_DIR",
         "GIT_WORK_TREE",
@@ -30669,7 +30672,8 @@ mod tests {
     }
 
     /// A hook-child tracker write must check pin ignores in that tracker,
-    /// not in an exported `GIT_DIR` from the parent hook process.
+    /// not in a `GIT_DIR` named on the git command. The process environment
+    /// stays shared with the other tests.
     #[test]
     fn hook_children_check_pin_ignores_in_the_tracker_checkout() {
         let _env = env_guard();
@@ -30708,14 +30712,18 @@ mod tests {
         std::fs::write(real.join(ballot_sig::PIN_FILE), "saddle deadbeef\n").unwrap();
         std::env::set_var("LJOS_TRACKER_GIT", "commit");
         std::env::set_var("LJOS_SEAT", "saddle");
-        std::env::set_var("GIT_DIR", decoy.join(".git"));
-        std::env::set_var("GIT_WORK_TREE", &decoy);
+        let before_dir = std::env::var_os("GIT_DIR");
+        let before_tree = std::env::var_os("GIT_WORK_TREE");
+        let _decoy = super::GitCommandEnv::set([
+            ("GIT_DIR", decoy.join(".git").as_os_str()),
+            ("GIT_WORK_TREE", decoy.as_os_str()),
+        ]);
         let said = crate::git_hooks::with_hook_children_for_test(|| {
             persist_tracker_file(&issues, "probe-a1b2", "claimed")
         });
         assert!(said.contains("committed chore(issues): probe-a1b2 claimed by saddle"));
-        std::env::remove_var("GIT_DIR");
-        std::env::remove_var("GIT_WORK_TREE");
+        assert_eq!(std::env::var_os("GIT_DIR"), before_dir);
+        assert_eq!(std::env::var_os("GIT_WORK_TREE"), before_tree);
         let log = std::process::Command::new("git")
             .arg("-C")
             .arg(&real)
