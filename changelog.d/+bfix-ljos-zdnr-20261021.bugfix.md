@@ -1,5 +1,1 @@
-Tracker setup now treats a directory as an existing checkout only when
-that directory is itself the git toplevel, so scratch tracker paths
-inside another repository are initialized as their own trackers and no
-longer write lock, exclude or merge-driver state into the enclosing
-checkout.
+A tracker write aimed at an unprepared path under `target/` now reports that the path is not a tracker checkout instead of writing lock or exclude state into the enclosing repository.
