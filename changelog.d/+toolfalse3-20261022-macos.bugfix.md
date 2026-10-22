@@ -1,0 +1,1 @@
+On macOS a typed command is the person's when the terminal is the controlling one and the process the kernel holds responsible is not a runner. If that process cannot be named, the check fails closed. On any other host that is not Linux there is still no check, and `ljos doctor` says attribution is absent without failing the seat.
