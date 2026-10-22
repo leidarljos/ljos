@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+#[path = "common/seat_root.rs"]
+mod seat_root;
+
 fn script(dir: &Path, name: &str, body: &str) {
     use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
@@ -74,8 +77,7 @@ fn habitat() -> (Scratch, Habitat) {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../target")
+    let dir = seat_root::seat_root(ljos_cli::bookkeep::path_is_temp)
         .join(format!("ljos-harness-hooks-{}-{nanos}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();

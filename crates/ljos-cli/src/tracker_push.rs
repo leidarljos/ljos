@@ -729,18 +729,21 @@ pub(crate) fn prepare_tracker(root: &Path, init: bool, commit: bool) -> Result<(
 /// git's `ljos-atoms` merge driver. `current` is `%A` and `rel` is `%P`.
 /// The file becomes a fresh export of this machine's atoms.
 pub(crate) fn merge_atoms_driver(current: &Path, rel: &str) -> Result<(), String> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let root = work_tree_of(current).or_else(|_| work_tree_cwd())?;
     let bytes = reexport_local(&root, rel.trim())?;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(current)
-        .map_err(|e| format!("atoms merge: {}: {e}", current.display()))?;
-    file.write_all(&bytes).map_err(|e| e.to_string())
+    // `%A` is a path in the work tree. Opening it by name follows a parent
+    // that was swapped for a symlink after the log was read. Write through
+    // the directory fd instead, the same way the rebase path does.
+    let rel_current = current.strip_prefix(&root).map_err(|_| {
+        format!(
+            "atoms merge: {} is outside the work tree",
+            current.display()
+        )
+    })?;
+    let rel_current = rel_current
+        .to_str()
+        .ok_or_else(|| format!("atoms merge: {} is not a path", current.display()))?;
+    crate::sync::write_beneath(&root, rel_current, &bytes).map_err(|e| format!("atoms merge: {e}"))
 }
 
 /// One org file, after a union. Two headings that share a `:ID:` become
