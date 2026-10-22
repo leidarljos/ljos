@@ -1,0 +1,572 @@
+//! The pre-push hook is the destination check. A line filter cannot see
+//! a push that a script, make, npm, or python starts, and it cannot see
+//! a remote URL git rewrote. These tests push to a local bare origin and
+//! require the hook's own refusal.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
+
+static ENV: Mutex<()> = Mutex::new(());
+
+struct Guard {
+    saved: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    cwd: PathBuf,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl Guard {
+    fn new() -> Self {
+        let lock = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::vars_os().collect();
+        let cwd = std::env::current_dir().unwrap();
+        Self {
+            saved,
+            cwd,
+            _lock: lock,
+        }
+    }
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.cwd);
+        let keep: Vec<_> = self.saved.iter().map(|(k, _)| k.clone()).collect();
+        for (k, _) in std::env::vars_os() {
+            if !keep.iter().any(|have| have == &k) {
+                std::env::remove_var(&k);
+            }
+        }
+        for (k, v) in &self.saved {
+            std::env::set_var(k, v);
+        }
+    }
+}
+
+fn sh_at(dir: &Path, script: &str) -> std::process::Output {
+    Command::new("sh")
+        .current_dir(dir)
+        .arg("-c")
+        .arg(script)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .unwrap_or_else(|e| panic!("sh -c in {}: {e}", dir.display()))
+}
+
+fn text_of(out: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+fn sh_ok(dir: &Path, script: &str) -> String {
+    let out = sh_at(dir, script);
+    let text = text_of(&out);
+    assert!(
+        out.status.success(),
+        "sh -c {script:?} in {}: {text}",
+        dir.display()
+    );
+    text
+}
+
+fn push_fails(dir: &Path, script: &str) {
+    let out = sh_at(dir, script);
+    let text = text_of(&out);
+    assert!(!out.status.success(), "push was accepted: {script}\n{text}");
+    assert!(
+        text.contains("pre-push:"),
+        "the refusal is not the pre-push hook: {script}\n{text}"
+    );
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?} in {}: {}",
+        dir.display(),
+        text_of(&out)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn isolate_git(root: &Path) {
+    let cfg = root.join("gitconfig");
+    fs::write(&cfg, b"").unwrap();
+    std::env::set_var("GIT_CONFIG_GLOBAL", &cfg);
+    std::env::set_var("GIT_CONFIG_SYSTEM", &cfg);
+    std::env::set_var("GIT_TERMINAL_PROMPT", "0");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+}
+
+fn executable(path: &Path, body: &str) {
+    fs::write(path, body).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn seat_env(root: &Path) -> (PathBuf, PathBuf) {
+    let home = root.join("home");
+    let rel = root.join("rel");
+    let xdg = root.join("xdg");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&xdg).unwrap();
+    for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
+    }
+    let mut sums = String::new();
+    for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        let out = Command::new("sha256sum")
+            .arg(rel.join(name))
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let hash = String::from_utf8(out.stdout)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string();
+        sums.push_str(&hash);
+        sums.push_str("  ");
+        sums.push_str(name);
+        sums.push('\n');
+    }
+    fs::write(rel.join("SHA256SUMS"), sums).unwrap();
+    isolate_git(root);
+    std::env::set_var("HOME", &home);
+    // Not under `/.config/ljos/`, so a write to the hook is the cloud
+    // guard's refusal and not the seat-path refusal.
+    std::env::set_var("XDG_CONFIG_HOME", &xdg);
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::remove_var("LJOS_BIN_DIR");
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    std::env::set_var("LJOS_GUARD", "on");
+    for key in [
+        "CURSOR_AGENT",
+        "CLAUDECODE",
+        "GITHUB_ACTIONS",
+        "RUNNER_OS",
+        "RUNNER_TEMP",
+    ] {
+        std::env::remove_var(key);
+    }
+    (home, xdg)
+}
+
+fn clear_ids() {
+    for key in [
+        "CURSOR_AGENT_ID",
+        "CURSOR_AGENT",
+        "CURSOR_CONVERSATION_ID",
+        "CURSOR_AGENT_SOCKET",
+        "CLOUD_AGENT_ID",
+        "AGENT_ID",
+        "CODESPACE_NAME",
+        "GITHUB_RUN_ID",
+        "GITHUB_ACTIONS",
+        "GITLAB_CI",
+        "CI",
+        "BUILDKITE",
+        "TF_BUILD",
+        "CIRCLECI",
+        "JENKINS_URL",
+        "CODESPACES",
+        "CLAUDE_CODE_AGENT_ID",
+        "CODEX_THREAD_ID",
+        "LJOS_SEAT",
+        "LJOS_SEAT_KEY",
+        "VISSUE_AGENT",
+    ] {
+        std::env::remove_var(key);
+    }
+}
+
+/// A repo on `develop` with no local `core.hooksPath`, so the global hook
+/// `cloud up` installed is the one git runs.
+fn bare_repo(root: &Path, name: &str) -> (PathBuf, PathBuf) {
+    let origin = root.join(format!("{name}.git"));
+    git(
+        root,
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "develop",
+            origin.to_str().unwrap(),
+        ],
+    );
+    let dir = root.join(name);
+    git(
+        root,
+        &["init", "-q", "-b", "develop", dir.to_str().unwrap()],
+    );
+    for (key, value) in [
+        ("user.email", "seat@example.invalid"),
+        ("user.name", "seat"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&dir, &["config", key, value]);
+    }
+    git(&dir, &["commit", "-q", "--allow-empty", "-m", "seed"]);
+    git(&dir, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    (origin, dir)
+}
+
+fn has_ref(origin: &Path, name: &str) -> bool {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(origin)
+        .args(["show-ref"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .any(|line| line.ends_with(name))
+}
+
+fn cloud_refusal(line: &str, cwd: &Path) -> Option<ljos_cli::Rule> {
+    ljos_cli::static_guard_in(line, Some(cwd))
+        .filter(|rule| rule.reason.starts_with("cloud seat rule"))
+}
+
+fn refused(line: &str, cwd: &Path) -> ljos_cli::Rule {
+    let hit = cloud_refusal(line, cwd).unwrap_or_else(|| panic!("`{line}` was allowed"));
+    assert_eq!(hit.verdict, "deny", "{line}: {hit:?}");
+    assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {hit:?}");
+    hit
+}
+
+fn allowed(line: &str, cwd: &Path) {
+    let hit = cloud_refusal(line, cwd);
+    assert!(hit.is_none(), "`{line}` was refused: {hit:?}");
+}
+
+#[test]
+fn hook_refuses_every_push_the_line_filter_cannot_see() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, xdg) = seat_env(root.path());
+    clear_ids();
+    std::env::set_var("LJOS_SEAT", "probe");
+    ljos_cli::cloud::up(false).unwrap();
+    let seat = xdg.join("ljos/seats/probe");
+    fs::create_dir_all(&seat).unwrap();
+    fs::write(
+        seat.join("ljos.toml"),
+        "[cloud]\nbranches = [\n  \"feature-x\"\n]\n",
+    )
+    .unwrap();
+
+    let (origin, repo) = bare_repo(root.path(), "seat");
+    let (other_origin, other) = bare_repo(root.path(), "other");
+    let (tracker, tracker_repo) = bare_repo(root.path(), "tracker");
+    ljos_cli::cloud::write_push_allowlist(
+        &[origin.to_str().unwrap()],
+        &[tracker.to_str().unwrap()],
+        &["develop", "feature-x"],
+    )
+    .unwrap();
+
+    sh_ok(&repo, "git push -u origin develop");
+    assert!(has_ref(&origin, "refs/heads/develop"));
+    sh_ok(
+        &repo,
+        "git branch feature-x && git push -u origin feature-x",
+    );
+    assert!(has_ref(&origin, "refs/heads/feature-x"));
+    sh_ok(
+        &repo,
+        "git fetch origin && git pull --ff-only origin develop",
+    );
+    sh_ok(
+        &repo,
+        "git commit -q --allow-empty -m next && git push origin develop",
+    );
+    assert!(has_ref(&origin, "refs/heads/develop"));
+
+    sh_ok(
+        &tracker_repo,
+        "git branch -M main && git push -u origin main",
+    );
+    assert!(has_ref(&tracker, "refs/heads/main"));
+    sh_ok(
+        &tracker_repo,
+        "git commit -q --allow-empty -m tracked && git push origin main",
+    );
+
+    git(&repo, &["branch", "main"]);
+    git(&repo, &["branch", "other"]);
+    let npm = "/home/ubuntu/.nvm/versions/node/v22.23.4/bin";
+    let npm_push = format!("PATH=\"$PATH:{npm}\" npm run push");
+    let npm_build = format!("PATH=\"$PATH:{npm}\" npm run build");
+    executable(
+        &repo.join("push.sh"),
+        "#!/bin/sh\nexec git push origin main\n",
+    );
+    fs::write(repo.join("Makefile"), "push:\n\tgit push origin main\n").unwrap();
+    fs::write(
+        repo.join("package.json"),
+        "{\"name\":\"t\",\"version\":\"0.0.0\",\"scripts\":{\"push\":\"git push origin main\",\"build\":\"echo built\"}}\n",
+    )
+    .unwrap();
+    fs::write(repo.join("Build"), "all:\n\t@echo built\n").unwrap();
+
+    for script in [
+        "./push.sh",
+        "f(){ \"$@\";}; f git push origin other",
+        "$(echo git) push origin other",
+        "make -f Makefile push",
+        npm_push.as_str(),
+        "python3 -c 'import os,sys; sys.exit(1 if os.system(\"git push origin main\") else 0)'",
+        "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0=HEAD:refs/heads/main; git push",
+        "git push origin v1",
+        "git push origin :feature-x",
+        "git push --force origin develop",
+    ] {
+        if script.starts_with("git push origin v1") {
+            sh_ok(&repo, "git tag v1");
+        }
+        if script.starts_with("git push --force") {
+            sh_ok(
+                &repo,
+                "git reset -q --hard HEAD~1 && git commit -q --allow-empty -m diverge",
+            );
+        }
+        push_fails(&repo, script);
+    }
+    assert!(!has_ref(&origin, "refs/heads/main"), "main was created");
+    assert!(!has_ref(&origin, "refs/heads/other"), "other was created");
+    assert!(
+        has_ref(&origin, "refs/heads/feature-x"),
+        "feature-x was deleted"
+    );
+    assert!(!has_ref(&origin, "refs/tags/v1"), "the tag was pushed");
+
+    push_fails(&other, "git push -u origin develop");
+    assert!(!has_ref(&other_origin, "refs/heads/develop"));
+
+    let rewritten = format!(
+        "git config url.{}.pushInsteadOf {} && git push origin develop",
+        other_origin.display(),
+        origin.display()
+    );
+    push_fails(&repo, &rewritten);
+    assert!(!has_ref(&other_origin, "refs/heads/develop"));
+
+    push_fails(&tracker_repo, "git tag v2 && git push origin v2");
+    push_fails(&tracker_repo, "git push origin :main");
+    assert!(has_ref(&tracker, "refs/heads/main"));
+    sh_ok(
+        &tracker_repo,
+        "git commit -q --allow-empty -m again && git push origin HEAD:refs/heads/side",
+    );
+    assert!(has_ref(&tracker, "refs/heads/side"));
+
+    sh_ok(&repo, "make -f Build");
+    sh_ok(&repo, &npm_build);
+    allowed("cargo build --locked", &repo);
+    allowed("make", &repo);
+    allowed("npm test", &repo);
+    allowed("git fetch origin", &repo);
+    allowed("git pull --ff-only origin develop", &repo);
+    allowed("git push origin develop", &repo);
+    allowed("git push origin feature-x", &repo);
+    allowed(
+        "python3 -c 'import urllib.request; urllib.request.urlopen(\"https://example.invalid\")'",
+        &repo,
+    );
+}
+
+#[test]
+fn shell_guard_refuses_disarming_the_hook() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, xdg) = seat_env(root.path());
+    clear_ids();
+    std::env::set_var("LJOS_SEAT", "probe");
+    ljos_cli::cloud::up(false).unwrap();
+    let (_origin, repo) = bare_repo(root.path(), "seat");
+    let hook = xdg.join("ljos/hooks/pre-push");
+    let hooks = xdg.join("ljos/hooks");
+    assert!(
+        hook.is_file(),
+        "cloud up did not install {}",
+        hook.display()
+    );
+
+    let no_verify = refused("git push --no-verify origin develop", &repo);
+    assert!(
+        no_verify.reason.contains("pre-push hook"),
+        "{}",
+        no_verify.reason
+    );
+    assert!(
+        no_verify
+            .reason
+            .contains("a cloud seat may push only its named branches and develop"),
+        "{}",
+        no_verify.reason
+    );
+    for line in [
+        "git -c core.hooksPath=/dev/null push origin develop",
+        "git -c core.hooksPath=/tmp/keep push origin develop",
+        "git --config-env core.hooksPath=HOOK push origin develop",
+        "git config core.hooksPath /dev/null",
+        "git config --global --unset core.hooksPath",
+        "git config --replace-all core.hooksPath /dev/null",
+        "export GIT_CONFIG_GLOBAL=/tmp/other-gitconfig",
+        "export GIT_CONFIG_SYSTEM=/tmp/other-system",
+        "export GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null",
+        "GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/dev/null'\" git push origin develop",
+        &format!("echo x >> {}", hook.display()),
+        &format!("echo x >> {}", home.join(".gitconfig").display()),
+        "echo x >> ~/.gitconfig",
+        "echo x >> \"$HOME/.gitconfig\"",
+        &format!("rm -f {}", hook.display()),
+        &format!("chmod 644 {}", hook.display()),
+        &format!("cp /etc/hostname {}", hook.display()),
+        &format!("tee {} >/dev/null", hooks.join("pre-push").display()),
+    ] {
+        let hit = refused(line, &repo);
+        assert!(
+            hit.reason.contains("pre-push hook")
+                || hit.reason.contains("core.hooksPath")
+                || hit.reason.contains("GIT_CONFIG"),
+            "{line}: {}",
+            hit.reason
+        );
+    }
+
+    allowed("git config core.hooksPath", &repo);
+    allowed("git config --get core.hooksPath", &repo);
+    allowed("git config --list", &repo);
+    allowed("git config user.email seat@example.invalid", &repo);
+    allowed("git config --global user.name seat", &repo);
+    allowed("echo kept >> /tmp/not-the-hook", &repo);
+    allowed("git fetch origin", &repo);
+    allowed("git pull --ff-only", &repo);
+    allowed("cargo test --locked", &repo);
+    allowed("make all", &repo);
+    allowed("npm run build", &repo);
+
+    let counted = refused(
+        "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0=HEAD:cursor/from-env git push origin HEAD",
+        &repo,
+    );
+    assert!(
+        counted.reason.contains("cursor/from-env"),
+        "the refspec was judged as a hooksPath disarm: {}",
+        counted.reason
+    );
+    assert!(
+        !counted.reason.contains("core.hooksPath"),
+        "{}",
+        counted.reason
+    );
+}
+
+#[test]
+fn doctor_reports_a_missing_or_changed_pre_push_hook() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, xdg) = seat_env(root.path());
+    clear_ids();
+    let missing = ljos_cli::cloud::guard_row();
+    assert!(!missing.ok, "{missing:?}");
+    assert_eq!(ljos_cli::doctor_word(&missing), "info", "{missing:?}");
+    assert!(ljos_cli::healthy(std::slice::from_ref(&missing)));
+
+    ljos_cli::cloud::up(false).unwrap();
+    let row = ljos_cli::cloud::guard_row();
+    assert!(row.ok, "{row:?}");
+    assert!(row.state.contains("denies cursor/* pushes"), "{row:?}");
+    assert!(row.state.contains("pre-push hook"), "{row:?}");
+    assert_eq!(ljos_cli::doctor_word(&row), "ok");
+    assert!(ljos_cli::cloud::cloud_seat());
+
+    let hook = xdg.join("ljos/hooks/pre-push");
+    fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
+    let changed = ljos_cli::cloud::guard_row();
+    assert!(!changed.ok, "{changed:?}");
+    assert!(
+        changed.state.contains("denies cursor/* pushes"),
+        "{changed:?}"
+    );
+    assert!(changed.state.contains("pre-push hook"), "{changed:?}");
+    assert!(changed.state.contains("changed"), "{changed:?}");
+    assert_eq!(ljos_cli::doctor_word(&changed), "warn", "{changed:?}");
+    assert!(ljos_cli::healthy(std::slice::from_ref(&changed)));
+    assert!(ljos_cli::cloud::cloud_seat());
+
+    fs::remove_file(&hook).unwrap();
+    let gone = ljos_cli::cloud::guard_row();
+    assert!(!gone.ok, "{gone:?}");
+    assert!(gone.state.contains("missing"), "{gone:?}");
+    assert_eq!(ljos_cli::doctor_word(&gone), "warn");
+
+    ljos_cli::cloud::up(false).unwrap();
+    assert!(ljos_cli::cloud::guard_row().ok);
+
+    sh_ok(
+        root.path(),
+        "git config --global core.hooksPath /tmp/not-the-ljos-hooks",
+    );
+    let moved = ljos_cli::cloud::guard_row();
+    assert!(!moved.ok, "{moved:?}");
+    assert!(moved.state.contains("core.hooksPath"), "{moved:?}");
+    assert_eq!(ljos_cli::doctor_word(&moved), "warn");
+}
+
+#[test]
+fn a_closed_seat_still_lets_the_tracker_fast_forward() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, xdg) = seat_env(root.path());
+    clear_ids();
+    std::env::set_var("LJOS_SEAT", "probe");
+    let (origin, repo) = bare_repo(root.path(), "seat");
+    let (tracker, tracker_repo) = bare_repo(root.path(), "tracker");
+    // The bare tracker has to have a commit before `cloud up` clones it.
+    sh_ok(&tracker_repo, "git push -q -u origin develop");
+    fs::create_dir_all(xdg.join("ljos/seats/probe")).unwrap();
+    fs::write(xdg.join("ljos/seats/probe/ljos.toml"), "[\n").unwrap();
+    std::env::set_var("LJOS_TRACKER_REMOTE", tracker.as_os_str());
+    std::env::set_current_dir(&repo).unwrap();
+    ljos_cli::cloud::up(false).unwrap();
+    std::env::set_current_dir(root.path()).unwrap();
+    let allow = fs::read_to_string(xdg.join("ljos/push-allow")).unwrap();
+    assert!(
+        allow.lines().any(|line| line == "closed\t1"),
+        "allowlist did not fail closed:\n{allow}"
+    );
+
+    let out = sh_at(&repo, "git push -u origin develop");
+    let said = text_of(&out);
+    assert!(!out.status.success(), "{said}");
+    assert!(said.contains("pre-push:"), "{said}");
+    assert!(said.contains("seat config could not be read"), "{said}");
+    assert!(!has_ref(&origin, "refs/heads/develop"));
+
+    sh_ok(
+        &tracker_repo,
+        "git branch -M main && git push -u origin main",
+    );
+    assert!(has_ref(&tracker, "refs/heads/main"));
+    push_fails(&tracker_repo, "git push origin :main");
+}
