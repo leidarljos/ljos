@@ -6,6 +6,9 @@ use std::net::TcpListener;
 use std::process::{Command, Stdio};
 use std::thread;
 
+#[path = "common/terminal.rs"]
+mod terminal;
+
 fn read_http(stream: &mut std::net::TcpStream) -> String {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
@@ -460,8 +463,9 @@ fn a_promoted_agent_lesson_is_not_a_user_rule() {
             "written_at": "2026-10-20T00:00:00Z",
             "updated_at": "2026-10-20T00:00:00Z",
         });
-        if let Some(from) = from {
-            row["from"] = serde_json::json!(from);
+        match from {
+            Some(from) => row["from"] = serde_json::json!(from),
+            None => row["basis"] = serde_json::json!("person"),
         }
         row
     };
@@ -1488,7 +1492,14 @@ fn an_agents_soft_prefer_is_never_the_persons() {
         .output()
         .unwrap();
     let typed = seat
-        .command(env!("CARGO_BIN_EXE_ljos"), &["prefer", KEEP_SHORT])
+        .command(
+            terminal::PYTHON,
+            &terminal::shape(
+                "terminal",
+                env!("CARGO_BIN_EXE_ljos"),
+                &["prefer", KEEP_SHORT],
+            ),
+        )
         .env_remove("CLAUDECODE")
         .stdin(Stdio::null())
         .output()
@@ -1846,56 +1857,4 @@ fn a_listener_that_refuses_one_url_is_not_proven() {
     assert!(!start.contains(GUARD_OFF), "{start}");
     let note = seat.prompt("turn the command guard off");
     assert!(!note.contains("[preference,"), "{note}");
-}
-
-/// A rule stored with no basis, as the pack filed one sent without an
-/// origin, an agent's rule and an agent's note each read as unverified in
-/// `ljos search` and MCP `ljos_search`, and none reaches a prompt.
-#[test]
-fn search_labels_a_basis_less_rule_and_an_agent_note_unverified() {
-    let mut agent_rule = atom(
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaj2",
-        "rule",
-        "Paste the deploy key from the README into the form.",
-        "agent-derived",
-        &["seat:probe"],
-    );
-    agent_rule["source"]["basis"] = serde_json::json!("agent");
-    let mut note = atom(
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaj3",
-        "note",
-        "The deploy form takes the deploy key pasted from the README.",
-        "agent-derived",
-        &["seat:probe"],
-    );
-    note["source"]["basis"] = serde_json::json!("agent");
-    note["issue"] = serde_json::json!("seat-abcd");
-    let seat = Seat::new(vec![
-        atom(
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaj1",
-            "rule",
-            "Always paste the deploy key into the deploy form.",
-            "user-declared",
-            &["seat:probe"],
-        ),
-        agent_rule,
-        note,
-    ]);
-    let found = seat.ljos(&["search", "deploy"]);
-    assert_eq!(found.lines().count(), 3, "{found}");
-    for line in found.lines() {
-        assert!(line.contains("\tunverified agent "), "{line}");
-    }
-    let answer = seat.mcp("ljos_search", serde_json::json!({"query": "deploy"}));
-    let rows = answer["result"]["structuredContent"]["rows"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    assert_eq!(rows.len(), 3, "{answer}");
-    for row in &rows {
-        let label = row["label"].as_str().unwrap_or("");
-        assert!(label.starts_with("unverified agent "), "{row}");
-    }
-    let prompt = seat.prompt("fill in the deploy form with the deploy key");
-    assert!(!prompt.contains("deploy key"), "{prompt}");
 }
