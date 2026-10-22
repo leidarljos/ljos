@@ -4563,6 +4563,63 @@ fn a_run_pin_merged_from_a_branch_without_its_slot_does_not_count() {
     );
 }
 
+/// A tracker that is not a git repository keeps no commit order to read a
+/// pin against its slot, so a run pinned to the key its slot names counts
+/// there under a launcher on the standing list.
+#[test]
+fn a_slotted_run_counts_on_a_tracker_that_is_not_a_git_repository() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    isolate_git(root.path());
+    clear_agent_ids();
+    std::env::set_var("LJOS_TRACKER_GIT", "off");
+    std::env::set_var("LJOS_ORG_DRIVER", "false");
+    std::env::set_var("HOME", root.path().join("home"));
+    std::env::set_var("XDG_RUNTIME_DIR", root.path().join("run"));
+    std::env::set_var("XDG_DATA_HOME", root.path().join("box-data"));
+    fs::create_dir_all(root.path().join("run")).unwrap();
+    let tracker = root.path().join("tracker");
+    write_project(
+        &tracker,
+        "probe",
+        &board(&[issue_block("probe-n", "TODO", "", &[])]),
+    );
+    std::env::set_var("VISSUE_ROOT", &tracker);
+    std::env::set_var("ISSUE_ROOT", &tracker);
+    std::env::set_var("LJOS_SEAT", "ljosbot");
+    std::env::set_var("VISSUE_AGENT", "ljosbot");
+    let key = ljos_cli::ballot_sig::load_or_create(
+        &ljos_cli::cloud::prepare_seat_key("ljosbot").unwrap(),
+    )
+    .unwrap();
+    let (public, _) = ljos_cli::ballot_sig::signed_hex(&key, b"pin");
+    fs::write(
+        tracker.join(".ljos-seat-keys"),
+        format!("ljosbot {public}\n"),
+    )
+    .unwrap();
+    assert_eq!(ljos_cli::slot::tracker_id(), "-");
+    slot_run("probe-n", "ridley-review", "cafebabe0001abcd").unwrap();
+
+    std::env::set_var("XDG_DATA_HOME", root.path().join("vm-data"));
+    let run = ljos_cli::cloud::run_seat("ridley-review", "cafebabe0001abcd").unwrap();
+    std::env::set_var("LJOS_SEAT", &run);
+    std::env::set_var("VISSUE_AGENT", &run);
+    let layout = vissue_core::Layout::resolve(None, None).unwrap();
+    vissue_core::ops::vote_with(&layout, "probe-n", Some("ship"), &run, Some("none"), None)
+        .unwrap();
+    let signed = ljos_cli::ballot_sig::sign_own_ballot("probe-n").unwrap();
+    assert!(signed.contains("ballot signed"), "{signed}");
+
+    std::env::set_var("LJOS_SEAT", "ljosbot");
+    std::env::set_var("VISSUE_AGENT", "ljosbot");
+    let rows = [serde_json::json!({"agent": run, "choice": "ship"})];
+    assert_eq!(
+        ljos_cli::check_seat_signatures("probe-n", &rows, &std::collections::BTreeSet::new()),
+        Ok(ljos_cli::SeatSignatures::default())
+    );
+}
+
 /// A writer that answers `GET /v1/atoms` with an empty roster.
 fn serve_empty_pack() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
