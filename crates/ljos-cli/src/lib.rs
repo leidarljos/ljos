@@ -19266,6 +19266,26 @@ fn assigns_session(words: &[String]) -> bool {
     })
 }
 
+/// The ljos verb on `line` that writes words as the person's when ljos
+/// is not under a runner: `prefer`, `remember` or `accept`.
+fn writes_persons_words(line: &str) -> Option<&'static str> {
+    nested_lines(line, 0)
+        .iter()
+        .flat_map(|l| raw_segments(l))
+        .find_map(|seg| {
+            let words = shell_words(&seg);
+            let (at, _) = prefix_end(&words);
+            let first = words.get(at)?;
+            if first.rsplit('/').next() != Some("ljos") {
+                return None;
+            }
+            let verb = words.get(at + 1)?;
+            ["prefer", "remember", "accept"]
+                .into_iter()
+                .find(|v| v == verb)
+        })
+}
+
 /// The seat's own guard, before any rule: a shell command that writes one
 /// of [`SEAT_PATHS`] (anything but a reader, or a redirect into it), or a
 /// file tool aimed at one, is refused. A path is a word of its own: a
@@ -19406,6 +19426,17 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         if first == "ssh" {
             let refs: Vec<&str> = words.iter().map(String::as_str).collect();
             if let Some(remote) = ssh_remote_command(&refs) {
+                if let Some(verb) = writes_persons_words(&remote) {
+                    return Some(Rule {
+                        pattern: "seat-guard".into(),
+                        verdict: "deny".into(),
+                        reason: format!(
+                            "`ljos {verb}` through ssh runs outside the runner, where it takes \
+                             the words as the person's. Run it here, where they are checked \
+                             against the person's latest prompt."
+                        ),
+                    });
+                }
                 if let Some(r) = seat_guard_in(&remote, home().ok().as_deref()) {
                     return Some(r);
                 }
