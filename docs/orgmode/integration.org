@@ -89,11 +89,11 @@ same everywhere and the envelope differs:
 | GitHub Copilot CLI | skill; no prompt note, since Copilot drops a command hook's prompt output | =PreToolUse= in =~/.copilot/hooks/ljos.json=, =permissionDecision= | Copilot's permission prompt | the same file in a repository's =.github/hooks= reaches Copilot's cloud agent |
 | Gemini CLI | =BeforeAgent= =additionalContext= | =BeforeTool= on =run_shell_command=, =decision: deny= | none: an ask is a deny that says so | hooks and MCP server share =~/.gemini/settings.json=; timeouts there are milliseconds |
 | Windsurf (Devin Desktop) | skill | =pre_run_command=, exit 2 with the reason on stderr | none | =~/.codeium/windsurf/hooks.json= |
-| Factory droid | =UserPromptSubmit= context | =PreToolUse= on =Execute=, =permissionDecision= | droid's permission prompt | =~/.factory/hooks.json=, keyed by event at the top level |
+| Factory droid | =UserPromptSubmit= context | =PreToolUse= on =Execute=, exit 2 with the reason on stderr | droid's permission prompt | =~/.factory/hooks.json=, keyed by event at the top level |
 | Kiro | skill | =PreToolUse= on the =shell= tools, exit 2 with the reason on stderr | none | =~/.kiro/hooks/ljos.json=, Kiro CLI V3 and IDE 1.0 |
 | Cline | =UserPromptSubmit= =contextModification= | =PreToolUse=, =cancel: true= | none | two scripts in =~/Documents/Cline/Hooks=, macOS and Linux |
-| Qwen Code | =UserPromptSubmit= context | =PreToolUse= on =run_shell_command=, =permissionDecision= | Qwen's confirmation | =~/.qwen/settings.json= |
-| Crush | skill | =PreToolUse= on =bash=, =decision: deny= | none | =~/.config/crush/crush.json=; Crush fires only =PreToolUse= so far |
+| Qwen Code | =UserPromptSubmit= context | =PreToolUse= on =run_shell_command=, exit 2 with the reason on stderr | Qwen's confirmation | =~/.qwen/settings.json= |
+| Crush | skill | =PreToolUse= on =bash=, exit 2 with the reason on stderr | none | =~/.config/crush/crush.json=; Crush fires only =PreToolUse= so far |
 | Auggie | skill | =PreToolUse= on =launch-process=, =permissionDecision= | none: an ask is a deny that says so | =~/.augment/settings.json= runs =~/.augment/ljos-guard-auggie.sh= |
 | Amp | skill | =Bash= delegated first in =amp.permissions=, exit 2 | Amp's prompt, from exit 1 | =~/.config/amp/settings.json= runs =~/.config/amp/ljos-guard-amp.sh= |
 | goose | skill in the plugin | =PreToolUse= on =shell=, exit 2, fails closed | none | user plugin =~/.agents/plugins/ljos=; server in =~/.config/goose/config.yaml= |
@@ -131,11 +131,11 @@ ahead unchecked.
 | GitHub Copilot CLI | blocked | runs | falls through to Copilot's own permission flow | [[https://docs.github.com/en/copilot/reference/hooks-reference][hooks reference]] |
 | Gemini CLI | runs, with a warning | not documented | runs | [[https://geminicli.com/docs/hooks/reference/][hooks reference]] |
 | Windsurf (Devin Desktop) | runs; only exit 2 blocks | not documented | not read; the exit code decides | [[https://docs.devin.ai/desktop/cascade/hooks][Cascade hooks]] |
-| Factory droid | runs; only exit 2 blocks | not documented | runs | [[https://docs.factory.ai/harness/hooks][hooks]] |
+| Factory droid | runs; only exit 2 blocks | not documented | not read; the exit code decides | [[https://docs.factory.ai/harness/hooks][hooks]] |
 | Kiro | blocked | not documented | not read; the exit code decides | [[https://kiro.dev/docs/hooks/actions/][hook actions]] |
 | Cline | not documented | not documented | not documented | [[https://github.com/cline/cline][cline/cline]] |
-| Qwen Code | runs; only exit 2 blocks | not documented | runs | [[https://qwenlm.github.io/qwen-code-docs/en/users/features/hooks/][hooks]] |
-| Crush | runs; only exit 2 blocks | runs | not documented | [[https://github.com/charmbracelet/crush/blob/main/docs/hooks/README.md][hooks]] |
+| Qwen Code | runs; only exit 2 blocks | not documented | not read; the exit code decides | [[https://qwenlm.github.io/qwen-code-docs/en/users/features/hooks/][hooks]] |
+| Crush | runs; only exit 2 blocks | runs | not read; the exit code decides | [[https://github.com/charmbracelet/crush/blob/main/docs/hooks/README.md][hooks]] |
 
 Three things on the seat's side close part of the gap. =POLICYD_REQUIRED=1=
 makes a missing =ljos-policyd= a deny instead of an allow. The hook
