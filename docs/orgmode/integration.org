@@ -125,7 +125,7 @@ ahead unchecked.
 
 | Runner | Hook exits non-zero (not 2) or crashes | Hook times out | Answer is not JSON | Source |
 |---+---+---+---+---|
-| Claude Code | runs; only exit 2 blocks | runs | runs | [[https://docs.claude.com/en/docs/claude-code/hooks][hooks reference]] |
+| Claude Code | blocked: the seat writes ="onFailure": "block"= on its =PreToolUse= hook | blocked | blocked | [[https://docs.claude.com/en/docs/claude-code/hooks][hooks reference]] |
 | Codex | runs; only exit 2 with a reason on stderr blocks | runs | runs | [[https://developers.openai.com/codex/hooks][hooks]], [[https://github.com/openai/codex/blob/de8fab6d7adfcef8b4ce6f02f3b5c8be4092015a/codex-rs/hooks/src/events/pre_tool_use.rs][pre_tool_use.rs]] |
 | Cursor | runs in Cursor's CLI; blocked in the IDE when the hook sets =failClosed=, which the seat sets on the permission events | not checked | blocked on =beforeShellExecution= | Cursor hooks docs |
 | GitHub Copilot CLI | blocked | runs | falls through to Copilot's own permission flow | [[https://docs.github.com/en/copilot/reference/hooks-reference][hooks reference]] |
