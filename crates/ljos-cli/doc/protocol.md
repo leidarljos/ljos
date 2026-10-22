@@ -99,7 +99,8 @@ from before that line, whichever key opens it. `ljos sync
 --adopt-legacy HOST` pins the blobs filed under HOST now; import
 then reads those exact bytes as HOST's, and only until HOST writes a
 log with the line. `ljos doctor` names that command once per host
-while such a log is still unread.
+while such a log is still unread, and only when history is
+complete. Otherwise it names the host and why no command is offered.
 A log is read only under the name export writes, `HOST.jsonl.age`
 for the primary scope and `HOST+SCOPE.jsonl.age` for an extra one.
 A symlink at `.ljos`, `.ljos/atoms`, a log in it, `.ljos/user-rules`
