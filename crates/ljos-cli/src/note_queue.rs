@@ -93,11 +93,7 @@ fn lock(dir: &Path) -> crate::CommitLock {
 }
 
 fn read(dir: &Path) -> Vec<Queued> {
-    std::fs::read_to_string(queue_file(dir))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect()
+    crate::complete_rows(&std::fs::read(queue_file(dir)).unwrap_or_default())
 }
 
 fn write(dir: &Path, notes: &[Queued]) -> Result<()> {
@@ -270,6 +266,20 @@ mod tests {
         other.supersedes = vec!["atom-new".into()];
         assert!(push_in(&dir, other).unwrap());
         assert_eq!(pending_in(&dir).len(), 2);
+    }
+
+    /// A copy still being appended is not yet on the queue; the ones
+    /// before it are.
+    #[test]
+    fn a_torn_last_copy_leaves_the_queue() {
+        let dir = dir("torn");
+        let mut bytes =
+            format!("{}\n", serde_json::to_string(&note("p-1", "kept")).unwrap()).into_bytes();
+        bytes.extend_from_slice(b"{\"issue\":\"p-2\",\"text\":\"caf\xc3");
+        std::fs::write(dir.join("note-queue.jsonl"), bytes).unwrap();
+        let pending = pending_in(&dir);
+        assert_eq!(pending.len(), 1, "{pending:?}");
+        assert_eq!(pending[0].text, "kept");
     }
 
     /// The queue is one JSON line per copy. writeln! of that line is two
