@@ -48,6 +48,8 @@ const EVERY_TOOL: &[&str] = &[
     "ljos_handover",
     "ljos_island",
     "ljos_learn",
+    "ljos_mail_search",
+    "ljos_mail_show",
     "ljos_policy",
     "ljos_predict",
     "ljos_read",
