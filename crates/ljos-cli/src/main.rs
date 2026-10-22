@@ -716,7 +716,7 @@ enum Cmd {
         dry_run: bool,
         /// Write one prompt file per persona for a cloud seat: the seat
         /// environment, the slot and the push rules. Does not spawn.
-        #[arg(long, conflicts_with_all = ["jev", "harness", "dry_run"])]
+        #[arg(long, conflicts_with_all = ["jev", "harness", "designers", "dry_run"])]
         cloud: bool,
     },
     /// A voter with a view: NAME holds its ballot by ANCHOR in [0, 1] (0 never moves).
