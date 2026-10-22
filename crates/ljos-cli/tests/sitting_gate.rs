@@ -1,7 +1,9 @@
 //! Under an agent runner, a git verb that writes history waits for a
 //! sitting: a live claim this seat holds on an open tracker ticket. The
 //! refusal names `ljos sitting ID`. `LJOS_OFF` and a temporary `HOME` do
-//! not lift it. The person at their own terminal is never refused.
+//! not lift it. A push onto develop or main also waits for the seats on
+//! that ticket, and that refusal names `ljos consensus ID --no-file`. The
+//! person at their own terminal is never refused.
 
 #[path = "common/terminal.rs"]
 mod terminal;
@@ -27,6 +29,31 @@ fn text_of(out: &Output) -> String {
     )
 }
 
+/// A writer that answers `GET /v1/atoms` with an empty roster.
+fn empty_pack() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = std::io::Read::read(&mut stream, &mut buf).unwrap_or(0);
+                if n == 0 || buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let body = r#"{"atoms":[]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+    format!("http://{addr}")
+}
+
 struct Seat {
     _dir: tempfile::TempDir,
     bin: PathBuf,
@@ -34,6 +61,7 @@ struct Seat {
     run: PathBuf,
     repo: PathBuf,
     card: PathBuf,
+    ballots: PathBuf,
 }
 
 impl Seat {
@@ -45,6 +73,7 @@ impl Seat {
         let run = root.join("run");
         let repo = root.join("repo");
         let card = root.join("card.json");
+        let ballots = root.join("ballots.json");
         for d in [&bin, &home, &run, &repo] {
             std::fs::create_dir_all(d).unwrap();
         }
@@ -55,9 +84,10 @@ impl Seat {
         script(
             &bin.join("vissue"),
             &format!(
-                "#!/bin/sh\ncase \"$1\" in\n  show) if [ \"$2\" = {ISSUE} ] && [ -f '{}' ]; then cat '{}'; else echo '{{}}'; fi ;;\n  claim) echo claimed ;;\nesac\nexit 0\n",
+                "#!/bin/sh\ncase \"$1\" in\n  show) if [ \"$2\" = {ISSUE} ] && [ -f '{}' ]; then cat '{}'; else echo '{{}}'; fi ;;\n  vote) cat '{}' 2>/dev/null || echo '[]' ;;\n  claim) echo claimed ;;\nesac\nexit 0\n",
                 card.display(),
-                card.display()
+                card.display(),
+                ballots.display()
             ),
         );
         let init = Command::new("git")
@@ -73,6 +103,7 @@ impl Seat {
             run,
             repo,
             card,
+            ballots,
         }
     }
 
@@ -112,6 +143,10 @@ impl Seat {
     }
 
     fn hook(&self, line: &str) -> String {
+        self.hook_with(line, &[])
+    }
+
+    fn hook_with(&self, line: &str, env: &[(&str, &str)]) -> String {
         let payload = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "session_id": SESSION,
@@ -121,6 +156,7 @@ impl Seat {
         })
         .to_string();
         let mut cmd = self.command("setsid", &["-w", env!("CARGO_BIN_EXE_ljos"), "hook"]);
+        cmd.envs(env.iter().copied());
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -144,6 +180,25 @@ impl Seat {
             serde_json::json!({"id": ISSUE, "state": state, "claimed_by": by}).to_string(),
         )
         .unwrap();
+    }
+
+    fn vote(&self, ballots: &[(&str, &str)]) {
+        let rows: Vec<_> = ballots
+            .iter()
+            .map(|(agent, choice)| serde_json::json!({"agent": agent, "choice": choice}))
+            .collect();
+        std::fs::write(&self.ballots, serde_json::Value::from(rows).to_string()).unwrap();
+    }
+
+    /// Claim the ticket in this conversation and have the tracker read
+    /// it as started and held by this seat.
+    fn sit(&self) {
+        let out = self.runner(&["claim", ISSUE], &[]);
+        assert!(out.status.success(), "{}", text_of(&out));
+        self.card(
+            "STARTED",
+            &format!("inky@{}", ljos_cli::session_tag(SESSION)),
+        );
     }
 
     fn hold_record(&self) -> PathBuf {
@@ -230,6 +285,76 @@ fn a_runner_without_a_live_sitting_writes_no_history() {
     let said = seat.policy("git commit -m x", &[]);
     refused(&said, "a commit whose conversation is gone");
     assert!(said.contains("holds no live sitting"), "{said}");
+}
+
+fn waits_for_the_seats(said: &str, line: &str, why: &str) {
+    assert!(
+        said.contains("sitting-gate"),
+        "`{line}` was not refused:\n{said}"
+    );
+    assert!(
+        said.contains(&format!("ljos consensus {ISSUE} --no-file")),
+        "{line}:\n{said}"
+    );
+    assert!(said.contains(why), "{line}: wanted {why:?}:\n{said}");
+}
+
+#[test]
+fn a_runner_pushes_onto_develop_or_main_once_the_seats_clear_it() {
+    let seat = Seat::new();
+    seat.sit();
+    let pack = empty_pack();
+    // The stub tracker holds no signature notes; signed ballots have
+    // their own suite.
+    let env = [
+        ("PACKSET_URL", pack.as_str()),
+        ("LJOS_UNSIGNED_BALLOTS", "allow"),
+    ];
+    for line in ["git push origin topic", "git push -u origin HEAD:topic"] {
+        not_refused(&seat.policy(line, &env), line);
+    }
+    let develop = "git push origin develop";
+    waits_for_the_seats(&seat.policy(develop, &env), develop, "no seat voted");
+    seat.vote(&[("flint", "approve")]);
+    waits_for_the_seats(&seat.policy(develop, &env), develop, "1 of the 2 seats");
+    seat.vote(&[("inky", "approve"), ("flint", "approve")]);
+    for line in [develop, "git push origin HEAD:main"] {
+        not_refused(&seat.policy(line, &env), line);
+    }
+    not_refused(&seat.hook_with(develop, &env), "the hook's push");
+    let off = seat.policy(develop, &[("LJOS_UNSIGNED_BALLOTS", "allow")]);
+    waits_for_the_seats(&off, develop, "the roster is not readable");
+
+    seat.vote(&[("inky", "revise"), ("flint", "revise")]);
+    waits_for_the_seats(
+        &seat.policy("git push origin HEAD:main", &env),
+        "a push onto main",
+        "sends the work back",
+    );
+    waits_for_the_seats(
+        &seat.hook_with(develop, &env),
+        "the hook's push",
+        "sends the work back",
+    );
+
+    seat.vote(&[("inky", "approve"), ("flint", "approve")]);
+    let config = seat.home.join(".config/ljos");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("ljos.toml"),
+        "[gates]\nquorum = 3\nconsensus_branches = [\"release\"]\n",
+    )
+    .unwrap();
+    waits_for_the_seats(
+        &seat.policy("git push origin release", &env),
+        "a push onto release",
+        "2 of the 3 seats",
+    );
+    not_refused(&seat.policy(develop, &env), "develop, no longer named");
+    std::fs::write(config.join("ljos.toml"), "quorum = 0\n").unwrap();
+    let said = seat.policy(develop, &env);
+    assert!(said.contains("sitting-gate"), "{said}");
+    assert!(said.contains("`quorum`"), "{said}");
 }
 
 #[test]

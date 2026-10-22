@@ -1,8 +1,9 @@
 //! Under an agent runner, the git verbs that write history wait for a
-//! sitting: a live claim this seat holds on an open tracker ticket. The
-//! person at their own terminal is never asked. No variable switches the
-//! gate off: `LJOS_OFF` and a temporary `HOME` keep the rest of the guard
-//! out, not this.
+//! sitting: a live claim this seat holds on an open tracker ticket. A push
+//! onto a protected branch also waits for that ticket's seats to agree
+//! ([`crate::protected_push_stands`]). The person at their own terminal is
+//! never asked. No variable switches the gate off: `LJOS_OFF` and a
+//! temporary `HOME` keep the rest of the guard out, not this.
 
 use std::path::Path;
 
@@ -44,9 +45,11 @@ fn runner() -> bool {
 }
 
 /// The refusal for `line` run from `cwd` under a runner: a git call that
-/// writes history while this conversation holds no live sitting. `None`
-/// when no runner is above this process, when the line writes no history,
-/// or when the sitting holds.
+/// writes history while this conversation holds no live sitting, or a
+/// push that may land on a branch [`crate::gates::consensus_push`] names
+/// while the sitting's ticket does not clear it. `None` when no runner is
+/// above this process, when the line writes no history, or when both
+/// hold.
 #[must_use]
 pub fn guard_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if !runner() {
@@ -62,13 +65,45 @@ pub fn guard_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         }
     };
     let first = calls.iter().find(|call| writes_history(call))?;
-    let why = live_sitting().err()?;
-    Some(refusal(&format!(
-        "`git {}` writes history, and {why}. Run `ljos sitting ID` on the open ticket \
-         this work belongs to, then run it again. The person at their own terminal \
-         is not gated",
-        first.sub
-    )))
+    let issue = match live_sitting() {
+        Ok(issue) => issue,
+        Err(why) => {
+            return Some(refusal(&format!(
+                "`git {}` writes history, and {why}. Run `ljos sitting ID` on the open ticket \
+                 this work belongs to, then run it again. The person at their own terminal \
+                 is not gated",
+                first.sub
+            )))
+        }
+    };
+    let pushes = calls
+        .iter()
+        .filter(|c| c.sub == "push" && writes_history(c));
+    for push in pushes {
+        let cfg = match crate::gates::consensus_push(Some(&push.cwd)) {
+            Ok(cfg) => cfg,
+            Err(why) => {
+                return Some(refusal(&format!(
+                    "the settings that name the protected branches do not read: {why}"
+                )))
+            }
+        };
+        let Some(dest) = crate::gates::protected_push(push, line, &cfg.branches) else {
+            continue;
+        };
+        if let Err(why) = crate::protected_push_stands(&issue, cfg.quorum) {
+            let named: Vec<String> = cfg.branches.iter().map(|b| format!("`{b}`")).collect();
+            return Some(refusal(&format!(
+                "`git push` may land on {dest}, and a runner's push onto {} waits for the \
+                 seats on the ticket it sits on: {why}. Run `ljos consensus {issue} --no-file` \
+                 to see where they stand, then run it again once they clear it. A push onto \
+                 this seat's own topic branch needs only the sitting. The person at their own \
+                 terminal is not gated",
+                named.join(", ")
+            )));
+        }
+    }
+    None
 }
 
 fn writes_history(call: &GitCall) -> bool {
