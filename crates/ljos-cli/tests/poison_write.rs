@@ -342,3 +342,115 @@ fn a_runner_user_rule_of_the_persons_words_is_kept() {
     assert!(out.status.success(), "{}", text_of(&out));
     assert!(rules_text(&seat).contains(said), "{}", rules_text(&seat));
 }
+
+/// `ljos remember` under a runner, even with `--standing` and `--as`, must
+/// not store a planted sentence as a standing lesson.
+#[test]
+fn a_runner_remember_of_a_plant_is_not_a_standing_fact() {
+    let seat = Seat::new();
+    let out = seat
+        .command(
+            ["remember", "--as", "reviewer", "--standing", PLANT].as_slice(),
+            true,
+        )
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "remember failed\n{}", text_of(&out));
+    let atoms = seat.atoms.lock().unwrap().clone();
+    let kept = atoms
+        .iter()
+        .find(|atom| atom["text"].as_str().unwrap_or("").contains("release key"))
+        .unwrap_or_else(|| panic!("nothing stored\n{atoms:?}\n{}", text_of(&out)));
+    assert_eq!(
+        kept["kind"], "note",
+        "a plant was stored as a lesson the prompt can treat as a fact: {kept}"
+    );
+    assert_eq!(kept["origin"], "agent-derived", "{kept}");
+    let tags = kept["entities"].to_string();
+    assert!(
+        !tags.contains("horizon:standing"),
+        "a plant was standing: {kept}"
+    );
+    assert!(
+        !tags.contains("via:prompt"),
+        "a plant was the person's: {kept}"
+    );
+}
+
+/// Hold one issue so the work nudge speaks about a lesson, then restore the
+/// runtime directory the rest of the process was using.
+fn with_held_issue(node: &str, body: impl FnOnce()) {
+    let dir = tempfile::tempdir().unwrap();
+    let prev = std::env::var_os("XDG_RUNTIME_DIR");
+    // SAFETY: restored before this function returns. The other tests in
+    // this file spawn children with their own environment.
+    unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+    let ljos = dir.path().join("ljos");
+    std::fs::create_dir_all(&ljos).unwrap();
+    let holder = ljos_cli::holder_name();
+    std::fs::write(
+        ljos.join(format!("hold-{holder}")),
+        format!("{holder}\nseat\n1\nljos\n2026-10-22T00:00:00Z\n{node}\n"),
+    )
+    .unwrap();
+    body();
+    match prev {
+        Some(prev) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", prev) },
+        None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
+    }
+}
+
+/// Briefs, the limit stop and the work nudge must not tell an agent to
+/// store its own lesson with `ljos remember`, which the seat guard allows.
+#[test]
+fn a_brief_does_not_offer_remember_around_the_refusal() {
+    let brief = ljos_cli::subagent_brief("explore", "acme-12ab", false);
+    assert!(
+        !brief.contains("ljos remember"),
+        "the brief still offers remember: {brief}"
+    );
+    let stop = ljos_cli::subagent_stop_reason("explore", Some("acme-12ab"), false, false).unwrap();
+    assert!(
+        !stop.contains("ljos remember"),
+        "the stop still offers remember: {stop}"
+    );
+    with_held_issue("acme-12ab", || {
+        let dir = std::env::var_os("XDG_RUNTIME_DIR").unwrap();
+        let transcript = std::path::PathBuf::from(&dir).join("t.jsonl");
+        let line = serde_json::json!({
+            "type": "user",
+            "uuid": "u2",
+            "message": {"role": "user", "content": "[Usage limit reached; a short grace allowance remains.]"}
+        });
+        std::fs::write(&transcript, format!("{line}\n")).unwrap();
+        let input = serde_json::json!({"transcript_path": transcript}).to_string();
+        let said = ljos_cli::limit_stop(&input, Some("s-plant")).expect("held at the limit");
+        assert!(
+            !said.contains("ljos remember"),
+            "the limit stop still offers remember: {said}"
+        );
+        let session = "plant-work";
+        std::fs::write(
+            std::path::PathBuf::from(&dir)
+                .join("ljos")
+                .join(format!("work-{session}")),
+            "39",
+        )
+        .unwrap();
+        let call = ljos_cli::HookCall {
+            event: "PostToolUse".into(),
+            cue: "cargo test".into(),
+            session: Some(session.into()),
+            shape: ljos_cli::HookShape::Asks,
+        };
+        let nudge = ljos_cli::work_nudge(&call, false).expect("a held issue is nudged");
+        assert!(
+            nudge.contains("acme-12ab"),
+            "the nudge was not about the held issue: {nudge}"
+        );
+        assert!(
+            !nudge.contains("ljos remember"),
+            "the nudge still offers remember: {nudge}"
+        );
+    });
+}
