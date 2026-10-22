@@ -1699,7 +1699,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this for your own working notes on an issue: progress, a finding, or a claim you read in a file, a tool's output or a web page. A dated note on its logbook, with the tracker committed; recall labels it as an agent's working note and reads it after the person's words. The note goes on the issue you name, else the one this seat holds; it never files an issue.",
+        description = "Call this for your own working notes on an issue: progress, a finding, or a claim you read in a file, a tool's output or a web page. A dated note on its logbook, with the tracker committed; `ljos recall` labels it as an unverified agent note with provenance when known, and prompt hooks do not inject note text as a fact. The note goes on the issue you name, else the one this seat holds; it never files an issue.",
         annotations(
             title = "Note progress",
             read_only_hint = false,
