@@ -1320,9 +1320,7 @@ note from b
         let a = dir.path().join("a");
         let b = dir.path().join("b");
         let run = |cwd: &Path, args: &[&str]| {
-            let out = std::process::Command::new("git")
-                .arg("-C")
-                .arg(cwd)
+            let out = crate::git_at(cwd)
                 .args(args)
                 .env("GIT_TERMINAL_PROMPT", "0")
                 .output()
@@ -1692,9 +1690,7 @@ body b
     fn the_atoms_driver_stops_before_the_pack_when_the_tracker_has_no_scope() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(root)
+        let out = crate::git_at(root)
             .args(["init", "-q", "-b", "main"])
             .output()
             .unwrap();
