@@ -725,6 +725,43 @@ fn a_pack_that_does_not_ask_for_the_token_confirms_no_rule() {
     );
 }
 
+/// The review's repro for `ljos rules`: a rule promoted from the person's
+/// lesson is listed as a user rule while the pack holds that lesson, and
+/// as unverified, with the lesson id, once a by-id read answers 404. With
+/// the pack down it is unverified too, and the reason says the pack did
+/// not answer.
+#[test]
+fn ljos_rules_lists_an_unconfirmed_promoted_rule_as_unverified() {
+    const ID: &str = "lessonid0000000000000000000007";
+    let lesson = persons_lesson(ID, RELEASE_KEY);
+    let listed_line = |seat: &Seat| {
+        promoted_rule(seat, &lesson);
+        let listed = seat.ljos(&["rules"]);
+        listed
+            .lines()
+            .find(|line| line.contains(RELEASE_KEY))
+            .unwrap_or_else(|| panic!("the promoted rule is not listed: {listed}"))
+            .to_string()
+    };
+    let line = listed_line(&Seat::new(vec![lesson.clone()]));
+    assert!(line.starts_with("user\t"), "{line}");
+
+    let line = listed_line(&Seat::new(vec![]));
+    assert!(
+        line.starts_with("unverified\t") && line.contains(ID),
+        "a rule the pack answers 404 for was listed as the person's: {line}"
+    );
+
+    let down = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", down.local_addr().unwrap());
+    drop(down);
+    let line = listed_line(&Seat::on(url));
+    assert!(
+        line.starts_with("unverified\t") && line.contains("did not answer"),
+        "a rule with the pack down was not listed as unverified: {line}"
+    );
+}
+
 /// A `vissue` that answers every call with `body`, so a brief reads a
 /// tracker without one.
 fn stub_vissue(seat: &Seat, body: &str) {

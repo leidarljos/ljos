@@ -568,25 +568,34 @@ pub fn to_value(rule: &UserRule) -> Value {
     serde_json::to_value(rule).unwrap_or(Value::Null)
 }
 
-/// Text lines for `ljos rules`, empty when there are none.
+/// Text lines for `ljos rules`, empty when there are none. A promoted
+/// rule the pack does not confirm as the person's, as the preface would
+/// leave it out, is listed apart as unverified, with why.
 #[must_use]
 pub fn format_list() -> String {
     let Ok(rules) = load() else {
         return String::new();
     };
-    if rules.is_empty() {
-        return String::new();
-    }
-    let mut out = String::from("user rules (shared, never reviewed):\n");
+    let (mut persons, mut unverified) = (String::new(), String::new());
     for rule in &rules {
         let law = match (&rule.verdict, &rule.pattern) {
             (Some(verdict), Some(pattern)) => format!("{verdict}\t{pattern}\t"),
             _ => String::new(),
         };
-        out.push_str(&format!(
-            "user\t{law}{}\t{}\t{}\n",
-            rule.text, rule.author, rule.reason
-        ));
+        let line = format!("{law}{}\t{}\t{}", rule.text, rule.author, rule.reason);
+        match unconfirmed(rule) {
+            None => persons.push_str(&format!("user\t{line}\n")),
+            Some(why) => unverified.push_str(&format!("unverified\t{line}\t{why}\n")),
+        }
+    }
+    let mut out = String::new();
+    if !persons.is_empty() {
+        out.push_str("user rules (shared, never reviewed):\n");
+        out.push_str(&persons);
+    }
+    if !unverified.is_empty() {
+        out.push_str("promoted user rules the pack did not confirm (unverified):\n");
+        out.push_str(&unverified);
     }
     out
 }
@@ -623,12 +632,29 @@ pub fn preface() -> String {
 /// not stated as unverified: the preface is read as the person's, and a
 /// pack that is slow, down or answers for another atom confirms nothing.
 fn persons_rule(rule: &UserRule) -> bool {
-    let Some(id) = rule.from.as_deref() else {
-        return true;
+    unconfirmed(rule).is_none()
+}
+
+/// Why `rule` may not be read as the person's, or `None` when it may: the
+/// test [`persons_rule`] states.
+fn unconfirmed(rule: &UserRule) -> Option<String> {
+    let id = rule.from.as_deref()?;
+    let Some(kept) = rule.lesson_hash.as_deref() else {
+        return Some(format!(
+            "promoted from lesson {id} with no hash of its record kept; promote it again"
+        ));
     };
-    matches!(super::atom_now(id), Ok(Some(lesson))
-        if super::person_stored(&lesson)
-            && rule.lesson_hash.as_deref() == Some(lesson_hash(&lesson).as_str()))
+    match super::atom_now(id) {
+        Ok(Some(lesson)) if !super::person_stored(&lesson) => Some(format!(
+            "the pack does not hold lesson {id} as the person's"
+        )),
+        Ok(Some(lesson)) if lesson_hash(&lesson) != kept => Some(format!(
+            "lesson {id} in the pack is not the record this rule was promoted from"
+        )),
+        Ok(Some(_)) => None,
+        Ok(None) => Some(format!("the pack does not hold lesson {id}")),
+        Err(why) => Some(why),
+    }
 }
 
 fn render(rules: &[UserRule], budget: usize) -> String {
