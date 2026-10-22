@@ -12121,35 +12121,9 @@ pub fn check_seat_signatures(
 mod seat_signature_tests {
     use super::*;
 
-    fn with_env_var<R>(key: &str, val: Option<&std::ffi::OsStr>, f: impl FnOnce() -> R) -> R {
-        crate::with_env_mutation(|| {
-            let saved = std::env::var_os(key);
-            match val {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-            struct Reset {
-                key: String,
-                saved: Option<std::ffi::OsString>,
-            }
-            impl Drop for Reset {
-                fn drop(&mut self) {
-                    match &self.saved {
-                        Some(v) => std::env::set_var(&self.key, v),
-                        None => std::env::remove_var(&self.key),
-                    }
-                }
-            }
-            let _reset = Reset {
-                key: key.to_string(),
-                saved,
-            };
-            f()
-        })
-    }
-
     #[test]
     fn a_non_git_tracker_root_is_named_when_legacy_dating_is_unavailable() {
+        let _lock = crate::test_env_lock();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("tracker");
         let bin = temp.path().join("bin");
@@ -12172,14 +12146,14 @@ mod seat_signature_tests {
         let joined =
             std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&path)))
                 .unwrap();
+        crate::with_env_mutation(|| {
+            std::env::set_var("PATH", &joined);
+            std::env::set_var("VISSUE_ROOT", &root);
+        });
         let ballots: Vec<Value> =
             serde_json::from_str(r#"[{"agent":"ljosbot","choice":"rail"}]"#).unwrap();
-        let err = with_env_var("PATH", Some(joined.as_os_str()), || {
-            with_env_var("VISSUE_ROOT", Some(root.as_os_str()), || {
-                check_seat_signatures("probe-old", &ballots, &std::collections::BTreeSet::new())
-                    .unwrap_err()
-            })
-        });
+        let err = check_seat_signatures("probe-old", &ballots, &std::collections::BTreeSet::new())
+            .unwrap_err();
         assert!(
             err.contains(
                 "not a git checkout: pre-signing ballots cannot be dated, reported as unsigned"
