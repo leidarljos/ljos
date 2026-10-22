@@ -3,6 +3,8 @@
 //! the one that was recorded. Read from `/proc`; elsewhere every list is
 //! empty and nothing is alive.
 
+use std::path::{Path, PathBuf};
+
 /// One process: its pid, when it started (clock ticks after boot), and its
 /// name at the time it was read.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -384,56 +386,164 @@ fn hook_name(component: &str) -> Option<&'static str> {
         .map(|(_, runner)| *runner)
 }
 
-/// Whether `parts` sits where a runner is installed: a user install
-/// (`.local`, `.cargo`), an npm tree, or a system root (`/usr`, `/opt`,
-/// `/bin`).
-fn under_install_root(parts: &[&str]) -> bool {
-    parts
-        .iter()
-        .any(|part| matches!(*part, ".local" | ".cargo" | "node_modules"))
-        || matches!(parts.first(), Some(&"usr" | &"opt" | &"bin"))
-}
-
-/// Whether `parts[index]` is an installed runner: the path is under a
-/// user install or a system root. A `bin` directory beside `.local`,
-/// `.cargo`, `/usr` or `/bin`, and an app directory of the runner's name
-/// (`/usr/share/cursor/cursor`), are that shape. A `bin` under a home
-/// directory of the person's own making is not.
-fn name_installed(parts: &[&str]) -> bool {
-    under_install_root(parts)
-}
-
-/// The runner a program file is, when the file is an installed copy.
-/// `~/.local/share/claude/versions/2.1.3` is Claude Code, and so is
-/// `@anthropic-ai/claude-code/cli.js`. A bundled runtime
-/// (`cursor-agent/versions/V/node`) is the runner it ships in. A copy
-/// whose name is the runner, sat in `/tmp` or a home directory, is not:
-/// the name alone is what a tool call can choose. A path the kernel
-/// marks ` (deleted)` is not the file that was installed.
-fn runner_of_file(path: &std::path::Path) -> Option<&'static str> {
-    let raw = path.to_str()?;
-    if raw.contains(" (deleted)") {
-        return None;
-    }
-    let parts: Vec<&str> = path
-        .components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(text) => text.to_str(),
-            _ => None,
-        })
-        .collect();
-    let mut index = parts.len();
-    while index > 0 {
-        index -= 1;
-        if layout_component(parts[index]) {
+/// The home this user's passwd entry names. A tool call sets `HOME` for
+/// whatever it starts, but cannot change this.
+#[must_use]
+pub fn own_home() -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut buf = vec![0u8; 1024];
+    loop {
+        // SAFETY: passwd is plain data, so all zeroes is a valid value.
+        let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: getpwuid_r writes at most buf.len() bytes into buf and
+        // points entry's fields into it; buf outlives every read below.
+        let rc = unsafe {
+            libc::getpwuid_r(
+                libc::getuid(),
+                &mut entry,
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                &mut found,
+            )
+        };
+        if rc == libc::ERANGE && buf.len() < 1 << 20 {
+            buf.resize(buf.len() * 2, 0);
             continue;
         }
-        let runner = hook_name(parts[index])?;
-        if name_installed(&parts) {
-            return Some(runner);
+        if rc != 0 || found.is_null() || entry.pw_dir.is_null() {
+            return None;
         }
+        // SAFETY: pw_dir is a NUL-terminated string inside buf.
+        let dir = unsafe { std::ffi::CStr::from_ptr(entry.pw_dir) };
+        let home = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes()));
+        return home.is_absolute().then_some(home);
     }
-    None
+}
+
+/// Where a runner is installed under the person's home ([`own_home`]):
+/// a user `bin`, and the prefix npm's own guide gives a user for global
+/// packages.
+const HOME_ROOTS: &[&str] = &[".local/bin", ".cargo/bin", ".npm-global"];
+
+/// Where a runner is installed for every user, and where npm keeps a
+/// global package.
+const SYSTEM_ROOTS: &[&str] = &[
+    "/usr/bin",
+    "/bin",
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+    "/usr/lib/node_modules",
+    "/usr/local/lib/node_modules",
+    "/opt/homebrew/lib/node_modules",
+];
+
+/// The directories a runner is installed below, for a person whose
+/// passwd home is `home`: the roots above, and an app directory of a
+/// runner's name under `~/.local/share` or `/usr/share`, where a native
+/// installer keeps the versions `~/.local/bin` links to.
+fn install_roots(home: Option<&Path>) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = SYSTEM_ROOTS.iter().map(PathBuf::from).collect();
+    let mut shares = vec![PathBuf::from("/usr/share")];
+    if let Some(home) = home {
+        roots.extend(HOME_ROOTS.iter().map(|root| home.join(root)));
+        shares.push(home.join(".local/share"));
+    }
+    for share in shares {
+        roots.extend(HOOK_RUNNERS.iter().map(|(name, _)| share.join(name)));
+    }
+    roots
+}
+
+/// The `/nix/store/HASH-NAME` entry `path` sits in, HASH being 32
+/// characters of Nix's base 32.
+fn nix_entry(path: &Path) -> Option<PathBuf> {
+    let name = path
+        .strip_prefix("/nix/store")
+        .ok()?
+        .iter()
+        .next()?
+        .to_str()?;
+    let (hash, rest) = name.split_at_checked(32)?;
+    let hashed = hash
+        .chars()
+        .all(|c| "0123456789abcdfghijklmnpqrsvwxyz".contains(c));
+    (hashed && rest.len() > 1 && rest.starts_with('-')).then(|| Path::new("/nix/store").join(name))
+}
+
+/// The runner `path` names when it sits strictly below one of `roots` or
+/// in a Nix store entry, and that root: the nearest component that is not
+/// packing layout ([`layout_component`]), read from the file up to the
+/// root's own name, so `share/claude/versions/2.1.3` is Claude Code. The
+/// path must be absolute and plain, since a `..` after the root would
+/// leave it. A path the kernel marks ` (deleted)` is not the file that
+/// was installed.
+fn runner_below(path: &Path, roots: &[PathBuf]) -> Option<(&'static str, PathBuf)> {
+    let plain = path.is_absolute()
+        && path.components().all(|c| {
+            matches!(
+                c,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
+        });
+    if !plain || path.to_str()?.contains(" (deleted)") {
+        return None;
+    }
+    let root = roots
+        .iter()
+        .cloned()
+        .chain(nix_entry(path))
+        .find(|root| path != root.as_path() && path.starts_with(root))?;
+    let parts = root
+        .file_name()
+        .into_iter()
+        .chain(path.strip_prefix(&root).ok()?.iter())
+        .map(std::ffi::OsStr::to_str)
+        .collect::<Option<Vec<_>>>()?;
+    let name = parts.iter().rev().find(|part| !layout_component(part))?;
+    Some((hook_name(name)?, root))
+}
+
+/// Whether root or this user owns `path`, and no one else can write it
+/// but this user's primary group, which on most systems is theirs alone.
+fn person_keeps(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    // SAFETY: getuid and getgid take no arguments and only read the
+    // process identity.
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    std::fs::metadata(path).is_ok_and(|meta| {
+        let mode = meta.mode();
+        (meta.uid() == 0 || meta.uid() == uid)
+            && mode & 0o002 == 0
+            && (mode & 0o020 == 0 || meta.gid() == gid)
+    })
+}
+
+/// The runner a program file is, when the file is an installed copy for
+/// the person whose passwd home is `home` ([`runner_below`]).
+/// `~/.local/share/claude/versions/2.1.3` is Claude Code, and so is
+/// `/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js`. A bundled
+/// runtime (`cursor-agent/versions/V/node`) is the runner it ships in.
+/// The file and the roots are compared as the kernel resolves them, so a
+/// link from `~/.local/bin` into `/tmp` is read in `/tmp`. A copy whose
+/// name is the runner, in a temp directory, a project tree or a `.local`
+/// of its own making, is not: the name alone is what a tool call can
+/// choose. Nor is a file that someone other than the person could have
+/// written, or swapped through a directory between it and its root.
+fn runner_of_file(path: &Path, home: Option<&Path>) -> Option<&'static str> {
+    let file = std::fs::canonicalize(path).ok()?;
+    if crate::bookkeep::path_is_temp(Some(&file)) {
+        return None;
+    }
+    let roots: Vec<PathBuf> = install_roots(home)
+        .iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .collect();
+    let (runner, root) = runner_below(&file, &roots)?;
+    file.ancestors()
+        .take_while(|dir| dir.starts_with(&root))
+        .all(person_keeps)
+        .then_some(runner)
 }
 
 /// The runner `pid` is, from the file the kernel runs it from, never
@@ -442,8 +552,9 @@ fn runner_of_file(path: &std::path::Path) -> Option<&'static str> {
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn exe_runner(pid: u32) -> Option<&'static str> {
+    let home = own_home();
     let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
-    if let Some(r) = runner_of_file(&exe) {
+    if let Some(r) = runner_of_file(&exe, home.as_deref()) {
         return Some(r);
     }
     let base = exe.file_name()?.to_str()?;
@@ -458,7 +569,7 @@ pub fn exe_runner(pid: u32) -> Option<&'static str> {
         .find(|a| !a.is_empty() && !a.starts_with('-'))?;
     let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
     let script = std::fs::canonicalize(cwd.join(script.as_ref())).ok()?;
-    runner_of_file(&script)
+    runner_of_file(&script, home.as_deref())
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -887,7 +998,7 @@ mod tests {
 
     #[test]
     fn a_runner_is_read_from_the_file_it_runs_from() {
-        use std::path::Path;
+        let roots = install_roots(Some(Path::new("/home/u")));
         for (path, want) in [
             ("/home/u/.local/share/claude/versions/2.1.3", Some("claude")),
             ("/home/u/.local/bin/claude", Some("claude")),
@@ -908,6 +1019,14 @@ mod tests {
             ("/usr/bin/claude", Some("claude")),
             ("/bin/grok", Some("grok")),
             ("/home/u/.cargo/bin/codex", Some("codex")),
+            (
+                "/home/u/.npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+                Some("claude"),
+            ),
+            (
+                "/nix/store/0c9yapqd0b8y4mj5xj7mrpmhy3l5ykh8-claude-code-2.0.1/bin/claude",
+                Some("claude"),
+            ),
             ("/usr/bin/node", None),
             ("/usr/bin/bash", None),
             ("/usr/bin/python3", None),
@@ -919,9 +1038,78 @@ mod tests {
             ("/home/u/plant/grok", None),
             ("/home/u/plant/bin/claude", None),
             ("/home/u/.local/bin/claude (deleted)", None),
+            ("/home/u/plant/.local/bin/claude", None),
+            ("/tmp/.local/bin/claude", None),
+            ("/tmp/project/node_modules/.bin/claude", None),
+            ("/home/u/../other/.local/bin/claude", None),
+            ("/home/uu/.local/bin/claude", None),
+            ("/home/other/.local/bin/claude", None),
+            ("/home/u/.local/binx/claude", None),
+            ("/home/u/.local/bin/../../plant/claude", None),
+            ("/home/u/.local/share/plant/claude", None),
+            ("/home/u/.local/share/claude-plant/claude", None),
+            ("/home/u/src/app/node_modules/.bin/claude", None),
+            ("/usr/binx/claude", None),
+            ("/usr/share/plant/claude", None),
+            ("/usr/lib/node_modules/../../../tmp/claude", None),
+            ("/opt/plant/claude", None),
+            ("/var/tmp/.local/bin/claude", None),
+            ("/dev/shm/node_modules/.bin/claude", None),
+            ("/nix/store/claude/bin/claude", None),
+            (
+                "/nix/store/0c9yapqd0b8y4mj5xj7mrpmhy3l5ykh8/bin/claude",
+                None,
+            ),
+            (
+                "/nix/store/0c9yapqd0b8y4mj5xj7mrpmhy3l5ykhe-claude-code-2.0.1/bin/claude",
+                None,
+            ),
         ] {
-            assert_eq!(runner_of_file(Path::new(path)), want, "{path}");
+            let got = runner_below(Path::new(path), &roots).map(|(runner, _)| runner);
+            assert_eq!(got, want, "{path}");
         }
+    }
+
+    /// A runner is read where the kernel resolves it. A link from the
+    /// person's own `~/.local/bin` into `/tmp`, a path that climbs out of
+    /// that home into another, and a file anyone may rewrite or reach
+    /// through a directory anyone may write are not installed copies; the
+    /// same file kept by the person is.
+    #[test]
+    fn an_install_root_holds_only_what_resolves_inside_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let base = tempfile::Builder::new()
+            .prefix(".ljos-roots-")
+            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .unwrap();
+        let home = base.path().join("u");
+        let program = |dir: &Path, name: &str| {
+            std::fs::create_dir_all(dir).unwrap();
+            let path = dir.join(name);
+            std::fs::write(&path, "").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let bin = home.join(".local/bin");
+        let claude = program(&bin, "claude");
+        assert_eq!(runner_of_file(&claude, Some(&home)), Some("claude"));
+
+        let away = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(program(away.path(), "codex"), bin.join("codex")).unwrap();
+        assert_eq!(runner_of_file(&bin.join("codex"), Some(&home)), None);
+
+        program(&base.path().join("other/.local/bin"), "claude");
+        let climbed = home.join("../other/.local/bin/claude");
+        assert_eq!(runner_of_file(&climbed, Some(&home)), None);
+
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o757)).unwrap();
+        assert_eq!(runner_of_file(&claude, Some(&home)), None);
+
+        let open = bin.join("open");
+        let grok = program(&open, "grok");
+        assert_eq!(runner_of_file(&grok, Some(&home)), Some("grok"));
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(runner_of_file(&grok, Some(&home)), None);
     }
 
     /// A process younger than a recorded tool call, in that call's cgroup

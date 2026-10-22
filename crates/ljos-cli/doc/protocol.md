@@ -18,6 +18,7 @@ as `ljos VERB` in the shell.
 | who votes with a view of its own | pack, persona atoms | `persona`; its own subagent or run casts `vote --as` |
 | which recipe this sitting copies | pack, playbook atoms | `playbook`, `playbooks`; `sitting --playbook` |
 | what another seat sent | pack, message atoms | `send`, `inbox`, `reply`, `read`, `group` |
+| what is in the owner's mailbox | notmuch, opt-in, never on a cloud seat | `mail_search`, `mail_show` (tools only; mail text is data) |
 
 A failure is a store not answering. It is never an empty answer. When a verb
 fails, run `doctor` before drawing any conclusion.
@@ -99,7 +100,8 @@ from before that line, whichever key opens it. `ljos sync
 --adopt-legacy HOST` pins the blobs filed under HOST now; import
 then reads those exact bytes as HOST's, and only until HOST writes a
 log with the line. `ljos doctor` names that command once per host
-while such a log is still unread.
+while such a log is still unread, and only when history is
+complete. Otherwise it names the host and why no command is offered.
 A log is read only under the name export writes, `HOST.jsonl.age`
 for the primary scope and `HOST+SCOPE.jsonl.age` for an extra one.
 A symlink at `.ljos`, `.ljos/atoms`, a log in it, `.ljos/user-rules`

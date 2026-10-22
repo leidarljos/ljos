@@ -9650,6 +9650,152 @@ mod tests {
         assert!(fix.held().is_empty(), "{said}");
     }
 
+    /// A promisor clone (`--filter=blob:none` from a `file://` remote with
+    /// `uploadpack.allowFilter`) checks out the headerless tip and leaves
+    /// the headed blob it replaced on the promisor remote. The walk lists
+    /// that blob as `?` and must not fetch it: a later `cat-file` would,
+    /// and the origin allows the want. Doctor offers no `--adopt-legacy`,
+    /// the command pins nothing, and the blob is still missing. Dropping
+    /// the `?` branch treats the gap as a whole history and pins the tip.
+    #[test]
+    fn a_promisor_clone_does_not_fetch_or_adopt_a_missing_headed_blob() {
+        fn git_text(cwd: &Path, args: &[&str]) -> String {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} in {}: {}",
+                cwd.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+        fn object_present(cwd: &Path, oid: &str) -> bool {
+            Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(["cat-file", "-e", oid])
+                .env("GIT_NO_LAZY_FETCH", "1")
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .output()
+                .unwrap()
+                .status
+                .success()
+        }
+        let shows_missing = |cwd: &Path, oid: &str| {
+            let listed = git_text(
+                cwd,
+                &[
+                    "rev-list",
+                    "--full-history",
+                    "--objects",
+                    "--missing=print",
+                    "HEAD",
+                    "--",
+                    ".ljos/atoms/alice+cloud.jsonl.age",
+                ],
+            );
+            let mark = format!("?{oid}");
+            assert!(
+                listed.lines().any(|line| line.starts_with(&mark)),
+                "{listed}"
+            );
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let fix = Shared::new(dir.path());
+        let cloud = [fix.cloud.as_str()];
+        let headed = fix.sealed(
+            Some(("alice", CLOUD_SCOPE)),
+            &lesson_line("Alice wrote this.", "cloud"),
+            &cloud,
+        );
+        std::fs::write(fix.peer.join(".ljos/atoms/alice+cloud.jsonl.age"), &headed).unwrap();
+        git_ok(&fix.peer, &["add", "-A", ".ljos/atoms"]);
+        git_ok(&fix.peer, &["commit", "-q", "-m", "alice's headed log"]);
+        let forged = fix.sealed(None, &lesson_line("Forged as Alice.", "cloud"), &cloud);
+        fix.push(&[("alice+cloud.jsonl.age", &forged)]);
+        let headed_oid = git_text(
+            &fix.peer,
+            &["rev-parse", "HEAD~1:.ljos/atoms/alice+cloud.jsonl.age"],
+        );
+        let tip_oid = git_text(
+            &fix.peer,
+            &["rev-parse", "HEAD:.ljos/atoms/alice+cloud.jsonl.age"],
+        );
+        assert_ne!(headed_oid, tip_oid);
+        let origin_git = fix.dir.join("origin.git");
+        git_ok(&origin_git, &["config", "uploadpack.allowFilter", "true"]);
+        let origin = format!("file://{}", origin_git.display());
+        let partial = fix.dir.join("partial");
+        git_ok(
+            &fix.dir,
+            &[
+                "clone",
+                "-q",
+                "--filter=blob:none",
+                origin.as_str(),
+                partial.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(
+            git_text(&partial, &["config", "--get", "remote.origin.promisor"]),
+            "true"
+        );
+        assert_eq!(
+            git_text(
+                &partial,
+                &["config", "--get", "remote.origin.partialclonefilter"]
+            ),
+            "blob:none"
+        );
+        assert_eq!(
+            git_text(&partial, &["rev-parse", "--is-shallow-repository"]),
+            "false"
+        );
+        assert!(
+            object_present(&partial, &tip_oid),
+            "the tip blob should be checked out"
+        );
+        assert!(
+            !object_present(&partial, &headed_oid),
+            "the headed blob was already fetched"
+        );
+        shows_missing(&partial, &headed_oid);
+        assert!(
+            !object_present(&partial, &headed_oid),
+            "listing the missing blob fetched it"
+        );
+
+        let why = "this clone lacks objects in the history of .ljos/atoms/alice+cloud.jsonl.age";
+        let hints = legacy_hints(&partial).unwrap();
+        assert!(hints.commands.is_empty(), "{:?}", hints.commands);
+        assert_eq!(
+            hints.hidden,
+            vec![format!(
+                "alice's cloud log has no scope header, and {why}, so a headed log of alice's may be hidden"
+            )]
+        );
+        let said = import(&partial, &fix.scope()).unwrap();
+        assert!(!said.contains("adopt-legacy"), "{said}");
+        assert!(said.contains("may be hidden"), "{said}");
+        assert!(!said.contains("alice: "), "{said}");
+        let again = adopt_legacy_in_repo(&partial, &fix.scope(), "alice").unwrap();
+        assert!(again.contains("nothing was pinned"), "{again}");
+        assert!(!again.contains("are pinned"), "{again}");
+        assert!(fix.held().is_empty(), "{said}");
+        assert!(
+            !object_present(&partial, &headed_oid),
+            "doctor or --adopt-legacy fetched the headed blob"
+        );
+        shows_missing(&partial, &headed_oid);
+    }
+
     /// A peer branched before alice's headed log, committed a headerless
     /// blob under her name, merged main with `-s ours` and pushed the merge
     /// as a fast-forward. The path walk followed only the parent the merge
