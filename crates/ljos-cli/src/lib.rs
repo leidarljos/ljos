@@ -43576,6 +43576,69 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
     }
 
+    /// The `ljos-policyd` on PATH. CI builds it from develop, so a test
+    /// that asks it how a shell line reads fails, not skips, without one.
+    fn real_policyd() -> PathBuf {
+        which::which("ljos-policyd")
+            .expect("ljos-policyd is not on PATH; CI builds it from ljos-policyd develop")
+    }
+
+    const RISKY_MAKEFILE: &str = "test:\n\techo test\nclean-all:\n\trm -rf $(HOME)/.cache ~\n";
+    const PLAIN_MAKEFILE: &str = "test:\n\techo test\nclean-all:\n\techo clean\n";
+
+    /// A tree whose `project/Makefile` removes HOME on `make clean-all`,
+    /// below one whose `clean-all` only echoes, judged by the real
+    /// ljos-policyd from a seat HOME. Take [`env_guard`] first.
+    fn policyd_tree(name: &str) -> (tempfile::TempDir, SeatDir, HoldEnv) {
+        let bin = real_policyd();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("project")).unwrap();
+        std::fs::write(root.path().join("Makefile"), PLAIN_MAKEFILE).unwrap();
+        std::fs::write(root.path().join("project/Makefile"), RISKY_MAKEFILE).unwrap();
+        let home = SeatDir::new(name);
+        let env = HoldEnv::set(&[
+            ("POLICYD_BIN", bin.to_str().unwrap()),
+            ("HOME", home.path().to_str().unwrap()),
+            (
+                "PHRONESIS_STATE_DIR",
+                home.path().join("policyd").to_str().unwrap(),
+            ),
+            ("LJOS_GUARD", "on"),
+            ("LJOS_OFF", "0"),
+        ]);
+        (root, home, env)
+    }
+
+    /// A subshell, a substitution, a separator with no space around it,
+    /// or a newline still runs `make clean-all` in `project`.
+    #[test]
+    fn a_cd_the_shell_reads_is_where_policyd_judges_the_line() {
+        let _g = env_guard();
+        let (root, _home, _env) = policyd_tree("policyd-line");
+        let verdict = |line: &str| tcb_verdict_in(line, Some(root.path()));
+        for line in [
+            "(cd project; make clean-all)",
+            "cd project && (make clean-all)",
+            "cd project && echo $(make clean-all)",
+            "cd project && echo `make clean-all`",
+            "cd project;make clean-all",
+            "cd project&&make clean-all",
+            "cd project\nmake clean-all",
+        ] {
+            let rule = verdict(line).unwrap_or_else(|| panic!("{line:?} was allowed"));
+            assert_eq!(rule.verdict, "deny", "{line:?}: {}", rule.reason);
+            assert_eq!(rule.pattern, "ljos-policyd", "{line:?}: {}", rule.reason);
+        }
+        for line in [
+            "make clean-all",
+            "(cd project; make test)",
+            "cd project;make test",
+            "cd project\nmake test",
+        ] {
+            assert!(verdict(line).is_none(), "{line:?}: {:?}", verdict(line));
+        }
+    }
+
     /// A policyd that hangs, crashes, or prints garbage used to allow the
     /// tool call. Claude Code, Codex and Cursor call `ljos hook` directly,
     /// so that allow reached the runner, and Cursor's was a bare allow
