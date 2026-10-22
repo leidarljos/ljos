@@ -21396,11 +21396,31 @@ pub(crate) fn rewrite_state_file(path: &Path, bytes: &[u8]) -> std::io::Result<(
 /// parse, including one with bytes that are not UTF-8, is skipped and
 /// the rest are kept: an older ljos wrote rows that could tear.
 pub(crate) fn complete_rows<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Vec<T> {
+    complete_rows_counted(bytes).0
+}
+
+/// [`complete_rows`] with the number of complete lines that did not parse.
+///
+/// A complete line is one before the last newline, so the row still being
+/// written is not counted. The dropped count is how a reader tells a whole
+/// log from one an older torn write, or a swap at the file, left damaged,
+/// instead of taking the lines that still parse for the whole log.
+pub(crate) fn complete_rows_counted<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> (Vec<T>, usize) {
     let end = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
-    bytes[..end]
-        .split(|&b| b == b'\n')
-        .filter_map(|line| serde_json::from_slice(line).ok())
-        .collect()
+    let mut rows = Vec::new();
+    let mut dropped = 0usize;
+    for line in bytes[..end].split(|&b| b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_slice(line) {
+            Ok(row) => rows.push(row),
+            Err(_) => dropped += 1,
+        }
+    }
+    (rows, dropped)
 }
 
 /// How long [`append_locked_row`] tries for the lock before it skips
@@ -21431,6 +21451,8 @@ pub(crate) fn append_locked_row(path: &Path, bytes: &[u8]) -> std::io::Result<()
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::io::{AsRawFd, FromRawFd};
     let (dir, name) = open_state_dir(path)?;
+    // O_RDWR, not O_WRONLY: the torn-tail check pread(2)s the last byte, and
+    // a write-only descriptor answers that with EBADF.
     // SAFETY: dir is an open directory descriptor and name is a
     // NUL-terminated string with no interior NUL. openat returns a new
     // descriptor or -1.
@@ -21438,7 +21460,7 @@ pub(crate) fn append_locked_row(path: &Path, bytes: &[u8]) -> std::io::Result<()
         libc::openat(
             dir.as_raw_fd(),
             name.as_ptr(),
-            libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            libc::O_RDWR | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             0o600 as libc::c_uint,
         )
     };
@@ -21470,11 +21492,42 @@ pub(crate) fn append_locked_row(path: &Path, bytes: &[u8]) -> std::io::Result<()
             _ => return Err(err),
         }
     }
-    let wrote = file.write_all(bytes);
+    // A write that tore left the last row without its newline. Appending
+    // now would glue this row onto that one, and both would fail to parse,
+    // so a good write would vanish. Cap the torn tail first, under the lock.
+    let wrote = cap_torn_tail(&mut file).and_then(|()| file.write_all(bytes));
     // SAFETY: the same descriptor, still open. Close would drop the lock
     // as well; unlock first so the next writer can take it.
     unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
     wrote
+}
+
+/// Write a newline when `file` is non-empty and does not end in one, so an
+/// appended row is not glued to a torn last line. `file` is `O_APPEND`, so
+/// the newline and the row both land at the end.
+fn cap_torn_tail(file: &mut std::fs::File) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::io::AsRawFd;
+    let fd = file.as_raw_fd();
+    // SAFETY: fstat on an open descriptor fills the struct.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if st.st_size <= 0 {
+        return Ok(());
+    }
+    let mut last = [0u8; 1];
+    // SAFETY: pread of one byte at the last offset into a local buffer; it
+    // does not move the append offset.
+    let read = unsafe { libc::pread(fd, last.as_mut_ptr().cast(), 1, st.st_size - 1) };
+    if read < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if read == 1 && last[0] != b'\n' {
+        file.write_all(b"\n")?;
+    }
+    Ok(())
 }
 
 /// Write a row when the guard is passed over on a command it would have
@@ -21527,13 +21580,27 @@ fn bypass_row() -> Habitat {
 /// [`bypass_row`]'s text from the log's rows.
 #[must_use]
 pub fn bypass_summary(bytes: &[u8], path: &str) -> String {
-    let rows: Vec<Value> = complete_rows(bytes);
+    let (rows, dropped): (Vec<Value>, usize) = complete_rows_counted(bytes);
     let Some(last) = rows.last() else {
+        if dropped > 0 {
+            return format!(
+                "the guard bypass log at {path} is damaged: {dropped} row{} could not be read",
+                if dropped == 1 { "" } else { "s" }
+            );
+        }
         return "no command has run past the guard".to_string();
+    };
+    let damaged = if dropped > 0 {
+        format!(
+            "; {dropped} row{} could not be read",
+            if dropped == 1 { "" } else { "s" }
+        )
+    } else {
+        String::new()
     };
     let s = |k: &str| last[k].as_str().unwrap_or("").to_string();
     format!(
-        "{} command{} ran past the guard; last at {}: `{}` past {} ({}); see {path}",
+        "{} command{} ran past the guard; last at {}: `{}` past {} ({}); see {path}{damaged}",
         rows.len(),
         if rows.len() == 1 { "" } else { "s" },
         local_when(&s("ts")),
@@ -40046,6 +40113,56 @@ mod tests {
         assert!(
             state.starts_with("2 commands ran past the guard"),
             "{state}"
+        );
+    }
+
+    /// A write that tore left the last row without its newline. The next
+    /// append caps the torn tail first, so the new row lands on its own
+    /// line and is not glued to the torn one and lost with it.
+    #[test]
+    fn a_row_after_a_torn_tail_is_not_glued_and_lost() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", dir.path().to_str().unwrap())]);
+        let path = bypass_log_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut bytes =
+            b"{\"kind\":\"switch\",\"command\":\"first\",\"how\":\"h\",\"rule\":\"r\",\"ts\":\"t\"}\n"
+                .to_vec();
+        bytes.extend_from_slice(b"{\"kind\":\"switch\",\"command\":\"torn");
+        std::fs::write(&path, bytes).unwrap();
+        let rule = Rule {
+            pattern: "r".into(),
+            verdict: "ask".into(),
+            reason: "infra-destroy: this tears down infrastructure".into(),
+        };
+        log_bypass("approval", "grant", "second", &rule);
+        let rows: Vec<Value> = complete_rows(&std::fs::read(&path).unwrap());
+        let commands: Vec<&str> = rows.iter().filter_map(|r| r["command"].as_str()).collect();
+        assert!(
+            commands.contains(&"first") && commands.contains(&"second"),
+            "{commands:?}"
+        );
+    }
+
+    /// A row torn in the middle of the log, bytes that are not UTF-8 among
+    /// them, is one the doctor reports as unreadable, not one it passes
+    /// over to call the log healthy and empty.
+    #[test]
+    fn a_damaged_bypass_log_is_reported_not_called_empty() {
+        let only_torn = b"{\"command\":\"caf\xc3\n".to_vec();
+        let said = bypass_summary(&only_torn, "LOG");
+        assert!(said.contains("damaged") && said.contains("1 row"), "{said}");
+
+        let mut mixed =
+            b"{\"kind\":\"switch\",\"command\":\"ok\",\"how\":\"h\",\"rule\":\"r\",\"ts\":\"t\"}\n"
+                .to_vec();
+        mixed.extend_from_slice(b"{\"command\":\"caf\xc3\n");
+        let said = bypass_summary(&mixed, "LOG");
+        assert!(
+            said.starts_with("1 command ran past the guard")
+                && said.contains("1 row could not be read"),
+            "{said}"
         );
     }
 
