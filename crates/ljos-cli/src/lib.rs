@@ -46472,6 +46472,253 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(!tree.contains(id3.as_str()), "{tree}");
     }
 
+    /// Build deedar at the deedimport2 tip and import a bag `on_finish`
+    /// wrote. A missing binary is a failure. The test does not skip.
+    #[test]
+    fn a_cloud_finish_bag_imports_with_deedar() {
+        let bin_dir = deedimport_deedar();
+        let _g = env_guard();
+        let _path = super::prepend_path(&bin_dir);
+        which::which("deedar").unwrap_or_else(|_| panic!("deedar is not on PATH"));
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tracker");
+        let project = root.join("Software/probe");
+        let store = dir.path().join("store");
+        let home = dir.path().join("home");
+        let config = dir.path().join("config");
+        let runtime = dir.path().join("run");
+        let state = dir.path().join("state");
+        for path in [&project, &home, &config, &runtime, &state] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let v1 = dir.path().join("v1.txt");
+        let v2 = dir.path().join("v2.txt");
+        std::fs::write(&v1, b"version one\n").unwrap();
+        std::fs::write(&v2, b"version two\n").unwrap();
+        let store_url = format!("file://{}", store.display());
+        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        let _env = HoldEnv::set(&[
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.to_str().unwrap()),
+            ("XDG_DATA_HOME", dir.path().join("data").to_str().unwrap()),
+            ("XDG_RUNTIME_DIR", runtime.to_str().unwrap()),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+            ("DEEDAR_URL", store_url.as_str()),
+            ("DEEDAR_HOST_SIGNING_KEY", "off"),
+            ("PACKSET_URL", "off"),
+            ("VISSUE_ROOT", root.to_str().unwrap()),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("LJOS_SEAT", "cloudseat"),
+            ("LJOS_TRACKER_GIT", "off"),
+        ]);
+        let deedar = |args: &[&str]| -> String {
+            let out = std::process::Command::new("deedar")
+                .args(args)
+                .output()
+                .unwrap_or_else(|e| panic!("deedar {args:?}: {e}"));
+            assert!(
+                out.status.success(),
+                "deedar {args:?}\n{}{}",
+                String::from_utf8_lossy(&out.stderr),
+                String::from_utf8_lossy(&out.stdout)
+            );
+            String::from_utf8(out.stdout).unwrap_or_else(|e| panic!("deedar stdout: {e}"))
+        };
+        let made = deedar(&[
+            "create",
+            "file",
+            "--path",
+            v1.to_str().unwrap(),
+            "--agent",
+            "cloudseat",
+            "--name",
+            "note-v1",
+        ]);
+        let id1 = accession_of(&made);
+        let sha1 = digest_of(&made);
+        let made = deedar(&[
+            "create",
+            "file",
+            "--path",
+            v2.to_str().unwrap(),
+            "--agent",
+            "cloudseat",
+            "--name",
+            "note-v2",
+            "--supersedes",
+            &id1,
+        ]);
+        let id2 = accession_of(&made);
+        let sha2 = digest_of(&made);
+        std::fs::write(
+            project.join("issues.org"),
+            format!(
+                "#+TITLE: probe issues\n#+VISSUE: 1\n#+TODO: TODO STARTED | DONE\n\
+                 * STARTED [#B] Cloud finish\n:PROPERTIES:\n:ID:         probe-imp1\n\
+                 :DEEDS:      {id1} {id2}\n:END:\n"
+            ),
+        )
+        .unwrap();
+        let git = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["init", "-b", "main"])
+            .output()
+            .unwrap_or_else(|e| panic!("git init: {e}"));
+        assert!(
+            git.status.success(),
+            "git init\n{}",
+            String::from_utf8_lossy(&git.stderr)
+        );
+        assert!(!cloud::cloud_seat(), "a box has no cloud guard file");
+        let (box_said, box_paths) = deedbag::on_finish("probe-imp1");
+        assert!(box_said.is_empty(), "{box_said}");
+        assert!(box_paths.is_empty());
+        assert!(!root.join(".ljos").join("deeds").exists());
+        cloud::ensure_cloud_guard_rules().unwrap_or_else(|e| panic!("cloud guard: {e:#}"));
+        let (said, paths) = deedbag::on_finish("probe-imp1");
+        assert!(
+            said.contains(
+                "deeds: exported 2 deeds cited by cloudseat into .ljos/deeds/cloudseat\n"
+            ),
+            "{said}"
+        );
+        assert_eq!(paths, vec![".ljos/deeds/cloudseat".to_string()]);
+        let bag = root.join(".ljos").join("deeds").join("cloudseat");
+        assert_eq!(
+            std::fs::read(bag.join(&id1).join("bytes").join(&sha1)).unwrap(),
+            b"version one\n".to_vec()
+        );
+        assert!(!bag.join(&id1).join(&sha1).exists());
+        let link = std::fs::read_to_string(bag.join(&id2).join("supersedes")).unwrap();
+        let mut lines = link.lines();
+        assert_eq!(lines.next(), Some(id1.as_str()), "{link}");
+        let digest = lines
+            .next()
+            .unwrap_or_else(|| panic!("no digest in {link}"));
+        assert!(digest.starts_with("sha256:"), "{link}");
+        assert_eq!(digest.len(), "sha256:".len() + 64, "{link}");
+        assert!(lines.next().is_none(), "{link}");
+        let recv = dir.path().join("recv");
+        let recv_url = format!("file://{}", recv.display());
+        let imported = std::process::Command::new("deedar")
+            .args(["import", "--allow-unsigned-head", bag.to_str().unwrap()])
+            .env("DEEDAR_URL", &recv_url)
+            .env("DEEDAR_HOST_SIGNING_KEY", "off")
+            .output()
+            .unwrap_or_else(|e| panic!("deedar import: {e}"));
+        assert!(
+            imported.status.success(),
+            "deedar import\n{}{}",
+            String::from_utf8_lossy(&imported.stderr),
+            String::from_utf8_lossy(&imported.stdout)
+        );
+        let report = String::from_utf8_lossy(&imported.stdout);
+        assert!(report.contains("imported 2 deeds"), "{report}");
+        assert_eq!(
+            std::fs::read(recv.join("bytes").join(&sha1)).unwrap(),
+            b"version one\n".to_vec()
+        );
+        assert_eq!(
+            std::fs::read(recv.join("bytes").join(&sha2)).unwrap(),
+            b"version two\n".to_vec()
+        );
+        let current = std::process::Command::new("deedar")
+            .args(["current", &id1])
+            .env("DEEDAR_URL", &recv_url)
+            .env("DEEDAR_HOST_SIGNING_KEY", "off")
+            .output()
+            .unwrap_or_else(|e| panic!("deedar current: {e}"));
+        assert!(
+            current.status.success(),
+            "deedar current\n{}{}",
+            String::from_utf8_lossy(&current.stderr),
+            String::from_utf8_lossy(&current.stdout)
+        );
+        let tip = String::from_utf8_lossy(&current.stdout);
+        assert!(tip.contains(&id2), "{tip}");
+    }
+
+    /// deedar from deedimport2-20261021, at the commit whose import reads
+    /// `bytes/` and digest sidecars. The binary is installed on PATH the
+    /// way CI installs deedar. A failed build fails the test.
+    fn deedimport_deedar() -> std::path::PathBuf {
+        const SHA: &str = "89e2574f6432bfc0451315f552f048eec747f59a";
+        let cache = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/deedimport2-deedar");
+        let bin_dir = cache.join("bin");
+        let bin = bin_dir.join("deedar");
+        let stamp = cache.join("sha");
+        if bin.is_file() && std::fs::read_to_string(&stamp).ok().as_deref() == Some(SHA) {
+            return bin_dir;
+        }
+        if cache.exists() {
+            std::fs::remove_dir_all(&cache)
+                .unwrap_or_else(|e| panic!("clear {}: {e}", cache.display()));
+        }
+        let src = cache.join("src");
+        let cloned = std::process::Command::new("git")
+            .args([
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                "deedimport2-20261021",
+                "https://github.com/leidarljos/deedar.git",
+            ])
+            .arg(&src)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .unwrap_or_else(|e| panic!("git clone deedar: {e}"));
+        assert!(
+            cloned.status.success(),
+            "git clone deedar\n{}{}",
+            String::from_utf8_lossy(&cloned.stderr),
+            String::from_utf8_lossy(&cloned.stdout)
+        );
+        let head = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&src)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap_or_else(|e| panic!("git rev-parse: {e}"));
+        assert!(head.status.success(), "git rev-parse failed");
+        let head = String::from_utf8_lossy(&head.stdout);
+        assert_eq!(head.trim(), SHA, "deedimport2-20261021 moved");
+        let built = std::process::Command::new("cargo")
+            .args(["build", "--locked", "--manifest-path"])
+            .arg(src.join("Cargo.toml"))
+            .arg("--target-dir")
+            .arg(cache.join("target"))
+            .args(["-p", "deedar-cli", "--bin", "deedar"])
+            .env_remove("CARGO_TARGET_DIR")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .unwrap_or_else(|e| panic!("cargo build deedar: {e}"));
+        assert!(
+            built.status.success(),
+            "cargo build deedar\n{}{}",
+            String::from_utf8_lossy(&built.stderr),
+            String::from_utf8_lossy(&built.stdout)
+        );
+        let produced = cache.join("target").join("debug").join("deedar");
+        assert!(
+            produced.is_file(),
+            "deedar is not on PATH; build wrote no {}",
+            produced.display()
+        );
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::copy(&produced, &bin).unwrap_or_else(|e| panic!("install deedar: {e}"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::write(&stamp, SHA).unwrap();
+        assert!(bin.is_file(), "deedar is not on PATH");
+        bin_dir
+    }
+
     fn accession_of(text: &str) -> String {
         text.lines()
             .rev()
