@@ -6,6 +6,8 @@ mod maildir;
 use ljos_cli::mailbox::config::MailConfig;
 use ljos_cli::mailbox::notmuch::Reader;
 use sha2::{Digest as _, Sha256};
+use std::os::unix::fs::PermissionsExt as _;
+use std::time::{Duration, Instant};
 
 fn reader(mailbox: &maildir::Mailbox) -> Reader {
     Reader::new(&MailConfig {
@@ -153,4 +155,35 @@ fn no_notmuch_config_is_a_refusal_not_the_default_database() {
         .err()
         .expect("a refusal");
     assert!(err.to_string().contains("notmuch_config"), "{err}");
+}
+
+/// A reader whose notmuch is `script`, a shell script.
+fn fake(dir: &tempfile::TempDir, script: &str) -> Reader {
+    let bin = dir.path().join("notmuch");
+    std::fs::write(&bin, format!("#!/bin/sh\n{script}\n")).unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    Reader::new(&MailConfig {
+        notmuch: Some(bin),
+        notmuch_config: Some(dir.path().join("notmuch-config")),
+        ..MailConfig::default()
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_notmuch_that_hangs_is_stopped_at_the_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let reader = fake(&dir, "sleep 30 &\nsleep 30").with_timeout(Duration::from_millis(300));
+    let start = Instant::now();
+    for err in [
+        reader.search("lunch", None).unwrap_err(),
+        reader.show("0000000000000001").unwrap_err(),
+    ] {
+        assert!(err.to_string().contains("did not finish"), "{err:#}");
+    }
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
 }
