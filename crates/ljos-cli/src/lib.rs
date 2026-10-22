@@ -22395,7 +22395,9 @@ const UNFINISHED_ROW_GRACE: std::time::Duration = std::time::Duration::from_secs
 /// ljos may not read, is damaged, since calling it empty would hide the
 /// swap. So is a last row without its newline that has not been written
 /// to for [`UNFINISHED_ROW_GRACE`]: [`complete_rows`] leaves it for a
-/// live writer to finish, and nobody is finishing it.
+/// live writer to finish, and nobody is finishing it. An mtime further
+/// ahead of the clock than the grace is no live write either, since the
+/// kernel dates a write by the clock: it is a touch or a clock set back.
 fn doctor_state_log(what: &str, path: &Path) -> std::result::Result<Vec<u8>, String> {
     let damaged =
         |why: &dyn std::fmt::Display| format!("the {what} at {} is damaged: {why}", path.display());
@@ -22405,16 +22407,16 @@ fn doctor_state_log(what: &str, path: &Path) -> std::result::Result<Vec<u8>, Str
         Err(err) => return Err(damaged(&err)),
     };
     let unfinished = bytes.last().is_some_and(|&b| b != b'\n');
-    let idle = modified
-        .and_then(|at| at.elapsed().ok())
-        .is_some_and(|age| age >= UNFINISHED_ROW_GRACE);
-    if unfinished && idle {
-        return Err(damaged(&format_args!(
-            "an unfinished last row, unchanged for over {}s",
-            UNFINISHED_ROW_GRACE.as_secs()
-        )));
+    let grace = UNFINISHED_ROW_GRACE.as_secs();
+    match modified.map(|at| at.elapsed()) {
+        Some(Ok(age)) if unfinished && age >= UNFINISHED_ROW_GRACE => Err(damaged(&format_args!(
+            "an unfinished last row, unchanged for over {grace}s"
+        ))),
+        Some(Err(ahead)) if unfinished && ahead.duration() >= UNFINISHED_ROW_GRACE => Err(damaged(
+            &format_args!("an unfinished last row, dated over {grace}s ahead of the clock"),
+        )),
+        _ => Ok(bytes),
     }
-    Ok(bytes)
 }
 
 /// [`bypass_row`]'s text from the log's rows.
@@ -42219,28 +42221,45 @@ mod tests {
             r#"{"issue":"ljos-abc","text":"kept","workspace":"w","at":1792573200}"#,
             "\n",
         );
-        let cases: [(&str, &[u8], bool, bool); 6] = [
-            ("stale unfinished", &torn, true, true),
-            ("fresh unfinished", &torn, false, false),
-            ("healthy", row, true, false),
-            ("empty", b"", true, false),
-            ("v0.32.1", v0_32_1.as_bytes(), true, false),
-            ("missing", b"", true, false),
+        let year = 365 * 24 * 3600;
+        let cases: [(&str, &[u8], i64, Option<&str>); 9] = [
+            (
+                "stale unfinished",
+                &torn,
+                -60,
+                Some("unchanged for over 5s"),
+            ),
+            ("fresh unfinished", &torn, 0, None),
+            (
+                "unfinished, a year ahead",
+                &torn,
+                year,
+                Some("ahead of the clock"),
+            ),
+            ("unfinished, a second ahead", &torn, 1, None),
+            ("healthy", row, -60, None),
+            ("healthy, a year ahead", row, year, None),
+            ("empty", b"", -60, None),
+            ("v0.32.1", v0_32_1.as_bytes(), -60, None),
+            ("missing", b"", 0, None),
         ];
-        for (case, bytes, stale, damaged) in cases {
+        for (case, bytes, shift, damaged) in cases {
             let _ = std::fs::remove_file(&log);
             if case != "missing" {
                 std::fs::write(&log, bytes).unwrap();
-                if stale {
-                    age_by(&log, std::time::Duration::from_secs(60));
-                }
+                let by = std::time::Duration::from_secs(shift.unsigned_abs());
+                let now = std::time::SystemTime::now();
+                let at = if shift < 0 { now - by } else { now + by };
+                let file = std::fs::File::options().write(true).open(&log).unwrap();
+                file.set_modified(at).unwrap();
             }
             let said = doctor_state_log("guard bypass log", &log);
-            if damaged {
+            if let Some(why) = damaged {
                 let said = said.expect_err(case);
                 assert!(
                     said.contains(&log.display().to_string())
-                        && said.contains("an unfinished last row"),
+                        && said.contains("an unfinished last row")
+                        && said.contains(why),
                     "{case}: {said}"
                 );
             } else {
