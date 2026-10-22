@@ -3498,32 +3498,6 @@ fn login_user() -> String {
         .unwrap_or_else(|| "seat".to_string())
 }
 
-/// The seat a ballot or a forecast counts for. Refused when nothing named
-/// the seat and it is only the program above this shell. `LJOS_SEAT`,
-/// `VISSUE_AGENT`, an MCP client's name or a runner's record name a seat;
-/// a person at a terminal is their login user.
-///
-/// # Errors
-///
-/// The seat is a process name nobody chose.
-pub fn ballot_seat(verb: &str) -> Result<String> {
-    let who = whoami();
-    match derived_seat(&who) {
-        Some(Derived::LoginUser) => bail!(
-            "{verb}: this shell runs under an agent runner, and nothing names its seat, \
-             so this ballot would count for {}, the login user. \
-             Set LJOS_SEAT to the seat's name (`export LJOS_SEAT=NAME`) and run it again; nothing was written",
-            who.seat
-        ),
-        Some(Derived::ProcessTree) => bail!(
-            "{verb}: no seat is named, so this ballot would count for {}, the program above this shell. \
-             Set LJOS_SEAT to the seat's name (`export LJOS_SEAT=NAME`) and run it again; nothing was written",
-            who.seat
-        ),
-        None => Ok(who.seat),
-    }
-}
-
 /// Where a seat nobody named came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Derived {
@@ -50843,6 +50817,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "LJOS_SEAT",
             "VISSUE_AGENT",
             "CODEX_THREAD_ID",
+            "CURSOR_CONVERSATION_ID",
             "XDG_RUNTIME_DIR",
         ];
         let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
@@ -50857,14 +50832,20 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let who = whoami();
         assert_eq!(who.seat, "codex", "{who:?}");
         assert!(who.holder.starts_with("codex@"), "{who:?}");
-        assert_eq!(ballot_seat("vote").unwrap(), "codex");
+        let voter = with_config_home(rt.path(), || write_seat("vote"));
+        assert_eq!(voter.unwrap().seat, "codex");
         unsafe {
             std::env::remove_var("CODEX_THREAD_ID");
             std::env::set_var("ACME_SESSION_ID", "a-runner-nobody-names-0001");
         }
         if whoami().seat == login_user() {
-            let err = ballot_seat("vote").unwrap_err().to_string();
-            assert!(err.contains("nothing names its seat"), "{err}");
+            let err = with_config_home(rt.path(), || write_seat("vote"))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("the login user of a shell under an agent runner"),
+                "{err}"
+            );
         }
         unsafe {
             std::env::remove_var("ACME_SESSION_ID");

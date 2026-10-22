@@ -2125,7 +2125,6 @@ fn run_command() -> Result<()> {
                 }
             }
             Some(c) => {
-                ljos_cli::ballot_seat("vote")?;
                 let who = identity_or_seat(as_persona.as_deref()).unwrap_or_else(whoami_tracker);
                 let cast = ljos_cli::panel_gate::claim_session_ballot(&issue, &who)?;
                 let used = used.as_deref().unwrap_or("");
@@ -2406,7 +2405,6 @@ fn run_command() -> Result<()> {
             expect,
             as_persona,
         } => {
-            ljos_cli::ballot_seat("predict")?;
             let who = as_persona
                 .or_else(|| std::env::var("VISSUE_AGENT").ok())
                 .unwrap_or_else(whoami_tracker);

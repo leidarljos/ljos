@@ -220,6 +220,26 @@ fn a_write_records_the_seat_the_seats_file_maps() {
 }
 
 #[test]
+fn a_conversation_the_seats_file_maps_votes_as_that_seat() {
+    let b = Bench::new();
+    b.seats("\"0b1c2d3e-0000-4000-8000-000000000000\" = \"saddle\"\n");
+    let out = b.ljos_env(
+        &[(
+            "CURSOR_CONVERSATION_ID",
+            "0b1c2d3e-0000-4000-8000-000000000000",
+        )],
+        &["vote", "proj-aaaa", "--for", "accept", "--used", "none"],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("no seat is named"), "{err}");
+    let calls = b.calls();
+    assert!(
+        calls.contains("vissue vote proj-aaaa --for accept --used none VISSUE_AGENT=saddle"),
+        "{calls}"
+    );
+}
+
+#[test]
 fn an_assignee_that_is_another_seat_is_refused() {
     let b = Bench::new();
     for args in [
