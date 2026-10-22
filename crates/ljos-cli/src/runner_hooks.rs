@@ -531,16 +531,57 @@ pub fn raw_event(input: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The default wait for the inner `ljos hook`. [`crate::guard_timeout`] is
-/// what [`relay`] uses, so `LJOS_GUARD_TIMEOUT` changes it. Each runner's
-/// own timeout is 15 or 20 seconds, and several of them let the call run
-/// when it lapses, so the relay answers first.
+/// The default wait for the inner `ljos hook` on a tool call.
+/// [`relay_timeout`] is what [`relay`] uses. Each runner's own timeout is
+/// 15 or 20 seconds, and several of them let the call run when it lapses,
+/// so the relay answers first on a gate.
 pub const INNER_TIMEOUT: std::time::Duration = crate::GUARD_TIMEOUT;
 
-/// A deny for an inner hook fault. `what` says how it failed. With
-/// `LJOS_GUARD_FAIL_OPEN=1`, this falls back to an allow with a note.
+/// A runner's event name as the seat spells it, so [`crate::is_gate_event`]
+/// can tell a tool call from a prompt. Gemini's `BeforeTool` and
+/// Windsurf's `pre_run_command` are the gate. An empty name is a tool
+/// call: Amp sends the arguments alone.
+fn seat_event(event: &str) -> &str {
+    match event {
+        ""
+        | "BeforeTool"
+        | "pre_run_command"
+        | "tool_call"
+        | "pre_tool_use"
+        | "preToolUse"
+        | "beforeShellExecution" => "PreToolUse",
+        "BeforeAgent" | "pre_user_prompt" | "beforeSubmitPrompt" | "pre_llm_call" => {
+            "UserPromptSubmit"
+        }
+        "AfterTool" | "post_run_command" | "post_tool_use" | "postToolUse" => "PostToolUse",
+        other => other,
+    }
+}
+
+fn gate_event(event: &str) -> bool {
+    crate::is_gate_event(seat_event(event))
+}
+
+/// How long [`relay`] waits. A tool call uses [`crate::guard_timeout`].
+/// A prompt waits out the inner hook's own deadline
+/// ([`crate::HOOK_DEADLINE_MS`]): that hook exits on its own with whatever
+/// it has, and a shorter wait kills the answer. Rendering that kill as a
+/// deny blocks the person's prompt.
+#[must_use]
+pub fn relay_timeout(event: &str) -> std::time::Duration {
+    if gate_event(event) {
+        crate::guard_timeout()
+    } else {
+        std::time::Duration::from_millis(crate::HOOK_DEADLINE_MS.saturating_add(1_000))
+    }
+}
+
+/// A deny for an inner hook fault on a tool call. `what` says how it
+/// failed. With `LJOS_GUARD_FAIL_OPEN=1`, or on any event that is not a
+/// gate, this is the old allow with a note: a prompt that the guard could
+/// not finish is not a command, and denying it blocks the person.
 fn fault_output(event: &str, what: &str) -> String {
-    if crate::guard_fail_open() {
+    if !gate_event(event) || crate::guard_fail_open() {
         return json!({
             "hookSpecificOutput": {
                 "hookEventName": if event.is_empty() { "PreToolUse" } else { event },
@@ -615,11 +656,12 @@ fn early_answer(normalized: &str, event: &str) -> Option<String> {
 }
 
 /// Run `cmd` as the inner hook with `stdin` as its input, and give back
-/// what it printed. A spawn error, a kill by signal, a non-zero exit, or
-/// no exit within `timeout` is a deny that says how the guard failed.
-/// A non-zero exit that still printed a deny or an ask keeps it. A
-/// successful exit that still says the guard was unhealthy is denied too,
-/// unless `LJOS_GUARD_FAIL_OPEN=1`.
+/// what it printed. On a tool call, a spawn error, a kill by signal, a
+/// non-zero exit, or no exit within `timeout` is a deny that says how the
+/// guard failed. A prompt keeps the old allow with a note: the person's
+/// turn is not a command. A non-zero exit that still printed a deny or an
+/// ask keeps it. A successful exit that still says the guard was unhealthy
+/// is denied on a tool call too, unless `LJOS_GUARD_FAIL_OPEN=1`.
 #[must_use]
 pub fn run_inner(
     mut cmd: std::process::Command,
@@ -681,7 +723,7 @@ pub fn run_inner(
         return out;
     }
     if let Some(why) = unhealthy_fault(&said.context) {
-        if crate::guard_fail_open() {
+        if !gate_event(event) || crate::guard_fail_open() {
             return out;
         }
         return fault_output(event, &why);
@@ -701,7 +743,9 @@ pub fn run_inner(
 /// code the runner reads. A force push, a seat deny, and an `rm -rf` are
 /// judged here, before the inner hook. An inner hook that crashes, exits
 /// non-zero without a decision, or runs past [`crate::guard_timeout`]
-/// denies the call and says the guard failed.
+/// denies the call and says the guard failed. A prompt is not denied: the
+/// wait is the prompt hook's own deadline, and a fault stays an allow
+/// with a note.
 pub fn relay(runner: &str, input: &str, limit: usize, event: Option<&str>) -> anyhow::Result<i32> {
     let normalized = normalize_input(runner, input);
     let raw = raw_event(input);
@@ -714,7 +758,7 @@ pub fn relay(runner: &str, input: &str, limit: usize, event: Option<&str>) -> an
                 if let Some(e) = event {
                     cmd.arg("--event").arg(e);
                 }
-                run_inner(cmd, &normalized, &raw, crate::guard_timeout())
+                run_inner(cmd, &normalized, &raw, relay_timeout(&raw))
             }
             Err(e) => fault_output(&raw, &format!("could not find its own binary ({e})")),
         },
@@ -1455,6 +1499,75 @@ mod tests {
         );
         denies_fault(&missing, "did not start");
         assert_eq!(INNER_TIMEOUT, crate::GUARD_TIMEOUT);
+    }
+
+    /// A wedged memory pack used to miss the prompt hook's own deadline:
+    /// the relay waited five seconds, then denied the prompt with "while
+    /// checking this command". Gemini, Qwen, Factory, OpenHands, goose and
+    /// Cline all block on that deny. A prompt is not a tool call.
+    #[test]
+    fn a_prompt_fault_is_not_a_deny() {
+        let _lock = crate::test_env_lock();
+        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
+        let why = format!(
+            "gave no answer within {} s",
+            crate::GUARD_TIMEOUT.as_secs_f32()
+        );
+        let prompts = [
+            ("gemini", "BeforeAgent"),
+            ("qwen", "UserPromptSubmit"),
+            ("factory", "UserPromptSubmit"),
+            ("openhands", "UserPromptSubmit"),
+            ("goose", "UserPromptSubmit"),
+            ("cline", "UserPromptSubmit"),
+        ];
+        for (runner, event) in prompts {
+            let fault = fault_output(event, &why);
+            let said = read_answer(&fault);
+            assert!(said.decision.is_none(), "{runner}: {fault}");
+            assert!(
+                !fault.contains("while checking this command"),
+                "{runner}: {fault}"
+            );
+            assert!(said.context.contains("unhealthy"), "{runner}: {fault}");
+            let (stdout, stderr, code) = answer(runner, event, &fault);
+            let body = format!("{stdout}{stderr}");
+            assert_eq!(code, 0, "{runner}: {body}");
+            assert!(
+                !runner_denied(runner, &stdout, &stderr, code),
+                "{runner}: {body}"
+            );
+            assert!(
+                !body.contains("while checking this command"),
+                "{runner}: {body}"
+            );
+        }
+        denies_fault(&fault_output("PreToolUse", &why), &why);
+        denies_fault(&fault_output("BeforeTool", &why), &why);
+        let deadline = std::time::Duration::from_millis(crate::HOOK_DEADLINE_MS);
+        assert!(relay_timeout("UserPromptSubmit") >= deadline);
+        assert!(relay_timeout("BeforeAgent") >= deadline);
+        assert!(relay_timeout("pre_user_prompt") >= deadline);
+        assert_eq!(relay_timeout("PreToolUse"), crate::guard_timeout());
+        assert_eq!(relay_timeout("BeforeTool"), crate::guard_timeout());
+        assert_eq!(relay_timeout(""), crate::guard_timeout());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_prompt_hook_that_exits_early_is_not_denied() {
+        let _lock = crate::test_env_lock();
+        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
+        let out = run_inner(
+            sh("exit 3"),
+            r#"{"hook_event_name":"UserPromptSubmit","prompt":"hello"}"#,
+            "UserPromptSubmit",
+            std::time::Duration::from_secs(2),
+        );
+        let said = read_answer(&out);
+        assert!(said.decision.is_none(), "{out}");
+        assert!(!out.contains("while checking this command"), "{out}");
+        assert!(said.context.contains("unhealthy"), "{out}");
     }
 
     #[cfg(unix)]
