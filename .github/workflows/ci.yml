@@ -93,8 +93,9 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - name: Install age and tmux
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends age tmux
+      # Mail reader tests build a notmuch database. Detach tests need tmux.
+      - name: Install age, tmux and notmuch
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends age tmux notmuch
       - name: Build packset from develop
         run: |
           set -euo pipefail
