@@ -12887,6 +12887,37 @@ pub fn packset_write_agent_tagged(label: &str, text: &str, tags: &[String]) -> R
     store_agent_atom(&client, atom, &prefix)
 }
 
+/// Write an agent-derived working note with provenance tags. Unlike
+/// [`packset_write_agent_tagged`], the atom is a `note`, not a lesson, so
+/// session-end extraction of assistant prose cannot become a fact the hook
+/// shows on later prompts. The note carries `source.basis` `agent` and the
+/// `note-basis:`/`note-source:` entities that keep it out of prompt facts.
+///
+/// # Errors
+///
+/// An empty text, or the pack does not accept the write.
+pub fn packset_write_agent_note_tagged(text: &str, tags: &[String]) -> Result<Value> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        bail!("Remember: empty text is not a note");
+    }
+    let client = pack()?;
+    let workspace = client.workspace();
+    let mut atom = atom_body(packset_core::record::NOTE_KIND, trimmed, &workspace);
+    stamp_horizon(
+        &mut atom,
+        packset_core::record::NOTE_KIND,
+        trimmed,
+        Some(true),
+    );
+    atom["source"]["basis"] = Value::String("agent".into());
+    let mut all = tags.to_vec();
+    all.push(format!("{NOTE_BASIS_ENTITY}agent"));
+    all.push(format!("{NOTE_SOURCE_ENTITY}session-end-extract"));
+    add_entities(&mut atom, all);
+    post_note_kind(&client, atom)
+}
+
 /// The issue this memory belongs to. The pack reads `issue` as identity:
 /// two records that read alike stay both live when their issues differ,
 /// and a later record on the same issue still replaces the earlier one.
