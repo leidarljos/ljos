@@ -12379,35 +12379,9 @@ pub fn check_seat_signatures(
 mod seat_signature_tests {
     use super::*;
 
-    fn with_env_var<R>(key: &str, val: Option<&std::ffi::OsStr>, f: impl FnOnce() -> R) -> R {
-        crate::with_env_mutation(|| {
-            let saved = std::env::var_os(key);
-            match val {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-            struct Reset {
-                key: String,
-                saved: Option<std::ffi::OsString>,
-            }
-            impl Drop for Reset {
-                fn drop(&mut self) {
-                    match &self.saved {
-                        Some(v) => std::env::set_var(&self.key, v),
-                        None => std::env::remove_var(&self.key),
-                    }
-                }
-            }
-            let _reset = Reset {
-                key: key.to_string(),
-                saved,
-            };
-            f()
-        })
-    }
-
     #[test]
     fn a_non_git_tracker_root_is_named_when_legacy_dating_is_unavailable() {
+        let _lock = crate::test_env_lock();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("tracker");
         let bin = temp.path().join("bin");
@@ -12430,14 +12404,14 @@ mod seat_signature_tests {
         let joined =
             std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&path)))
                 .unwrap();
+        crate::with_env_mutation(|| {
+            std::env::set_var("PATH", &joined);
+            std::env::set_var("VISSUE_ROOT", &root);
+        });
         let ballots: Vec<Value> =
             serde_json::from_str(r#"[{"agent":"ljosbot","choice":"rail"}]"#).unwrap();
-        let err = with_env_var("PATH", Some(joined.as_os_str()), || {
-            with_env_var("VISSUE_ROOT", Some(root.as_os_str()), || {
-                check_seat_signatures("probe-old", &ballots, &std::collections::BTreeSet::new())
-                    .unwrap_err()
-            })
-        });
+        let err = check_seat_signatures("probe-old", &ballots, &std::collections::BTreeSet::new())
+            .unwrap_err();
         assert!(
             err.contains(
                 "not a git checkout: pre-signing ballots cannot be dated, reported as unsigned"
@@ -32798,15 +32772,17 @@ pub(crate) fn path_without(bins: &[&str]) -> std::ffi::OsString {
 }
 
 /// Serialises every test that reads or writes the process environment.
-/// Each holder gets a private `XDG_RUNTIME_DIR`. The environment this test
-/// found is put back while the mutex is still held, so the next test cannot
-/// observe a cleared runtime directory or a variable this one set.
+/// Each holder gets a private `XDG_RUNTIME_DIR` and an empty global and
+/// system git config. The environment this test found is put back while
+/// the mutex is still held, so the next test cannot observe a cleared
+/// runtime directory or a variable this one set.
 #[cfg(test)]
 #[must_use = "the environment is restored when this guard drops"]
 pub(crate) struct EnvLock {
     _guard: std::sync::MutexGuard<'static, ()>,
     snapshot: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     runtime: tempfile::TempDir,
+    _git_config: tempfile::NamedTempFile,
 }
 
 #[cfg(test)]
@@ -32925,7 +32901,7 @@ pub(crate) fn test_env_lock() -> EnvLock {
     let guard = ENV
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (snapshot, runtime) = with_env_mutation(|| {
+    let (snapshot, runtime, git_config) = with_env_mutation(|| {
         // The runner that launched the suite is not put back: a test sees
         // only the runner it sets itself, whatever shell ran `cargo test`.
         let snapshot: Vec<_> = std::env::vars_os()
@@ -32938,12 +32914,20 @@ pub(crate) fn test_env_lock() -> EnvLock {
         }
         let runtime = tempfile::tempdir().expect("private runtime dir");
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", runtime.path()) };
-        (snapshot, runtime)
+        // The login's git config would hand every git this test starts,
+        // and every git its children start, the machine's signing, hooks
+        // and identity.
+        let git_config = tempfile::NamedTempFile::new().expect("empty git config");
+        for key in ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"] {
+            unsafe { std::env::set_var(key, git_config.path()) };
+        }
+        (snapshot, runtime, git_config)
     });
     EnvLock {
         _guard: guard,
         snapshot,
         runtime,
+        _git_config: git_config,
     }
 }
 
@@ -34764,6 +34748,7 @@ mod tests {
     /// master`.
     #[test]
     fn paths_head_already_holds_are_committed_already() {
+        let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         seeded_tracker(dir.path());
         let probe = dir.path().join("Software/probe");
