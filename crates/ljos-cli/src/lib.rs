@@ -10371,20 +10371,24 @@ fn search_relevant(
     Ok((body, chosen))
 }
 
-/// Whether the writer at `client` takes `rank=relevance`: its
-/// `/v1/status` lists it under `search.ranks`. An older writer omits
-/// `search`, and one that does not answer is taken as older. Its crate
-/// version did not move with the rank, so it is not read. Asked once a
-/// process per writer.
+/// Whether the writer at `client` takes `rank=relevance` in this
+/// workspace: its `/v1/status` lists it under `search.ranks`, and no
+/// search here was refused it since. An older writer omits `search`, and
+/// one that does not answer is taken as older. Its crate version did not
+/// move with the rank, so it is not read. Asked once per writer and
+/// workspace each [`RANKS_FOR`].
 fn ranks_by_relevance(client: &PacksetClient, timeout: std::time::Duration) -> bool {
     let base = client.base().trim_end_matches('/').to_string();
+    let workspace = client.workspace();
     let mut known = RANKS_KNOWN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((at, ranks)) = known.as_ref() {
-        if *at == base {
-            return *ranks;
-        }
+    known.retain(|(.., at, _)| at.elapsed() < RANKS_FOR);
+    if let Some((.., ranks)) = known
+        .iter()
+        .find(|(b, w, ..)| *b == base && *w == workspace)
+    {
+        return *ranks;
     }
     let Some(status) = packset_client::authorize(ureq::get(&format!("{base}/v1/status")))
         .timeout(timeout)
@@ -10398,12 +10402,19 @@ fn ranks_by_relevance(client: &PacksetClient, timeout: std::time::Duration) -> b
         .pointer("/search/ranks")
         .and_then(Value::as_array)
         .is_some_and(|r| r.iter().any(|v| v.as_str() == Some("relevance")));
-    *known = Some((base, ranks));
+    known.push((base, workspace, std::time::Instant::now(), ranks));
     ranks
 }
 
-/// The last writer [`ranks_by_relevance`] asked, and its answer.
-static RANKS_KNOWN: std::sync::Mutex<Option<(String, bool)>> = std::sync::Mutex::new(None);
+/// How long [`ranks_by_relevance`] believes a status it read, and so the
+/// longest a refusal lasts: past it the status is read again, and a
+/// writer that lists the rank is asked for it.
+const RANKS_FOR: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The writer and workspace [`ranks_by_relevance`] asked about, when it
+/// read the status, and whether that workspace is asked for the rank.
+type RanksKnown = Vec<(String, String, std::time::Instant, bool)>;
+static RANKS_KNOWN: std::sync::Mutex<RanksKnown> = std::sync::Mutex::new(Vec::new());
 
 /// Whether a 400's body names the `rank` parameter, as packset's `rank
 /// must be fused or relevance` does. `rerank` is another parameter and
@@ -10414,13 +10425,20 @@ fn names_the_rank(body: &str) -> bool {
 }
 
 /// The writer at `client` answered a ranked search 400 naming `rank`
-/// though its status lists it: for the rest of the process it is asked
-/// as an older writer.
+/// though its status lists it: this workspace is asked as an older writer
+/// until [`ranks_by_relevance`] reads the status again.
 fn refuses_relevance(client: &PacksetClient) {
-    let base = client.base().trim_end_matches('/').to_string();
-    *RANKS_KNOWN
+    let base = client.base().trim_end_matches('/');
+    let workspace = client.workspace();
+    let mut known = RANKS_KNOWN
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((base, false));
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((.., ranks)) = known
+        .iter_mut()
+        .find(|(b, w, ..)| b == base && *w == workspace)
+    {
+        *ranks = false;
+    }
 }
 
 /// The stored atoms that best match `cue` on [`lexical_match_scores`],
@@ -38150,6 +38168,57 @@ mod tests {
         assert_eq!(ranked(), 4);
         assert_eq!(search(), ["fused", "old"]);
         assert_eq!(ranked(), 4, "{:?}", seen.lock().unwrap());
+    }
+
+    /// A refused rank holds for the workspace whose search was refused,
+    /// and only until the writer's status is read again: another
+    /// workspace on that writer is asked for it, and so is the refused
+    /// one once [`RANKS_FOR`] has passed since the read.
+    #[test]
+    fn a_refused_rank_holds_for_its_workspace_until_the_status_is_read_again() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap())]);
+        let (url, seen) = serve_http(|req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/status") {
+                return (200, r#"{"search":{"ranks":["fused","relevance"]}}"#.into());
+            }
+            if first.contains("rank=") && first.contains("workspace=refused&") {
+                return (400, r#"{"error":"rank must be fused or relevance"}"#.into());
+            }
+            if first.contains("/v1/search") {
+                return (200, r#"{"hits":[]}"#.into());
+            }
+            (200, r#"{"atoms":[]}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let ranked = |workspace: &str| {
+            let workspace = format!("workspace={workspace}&");
+            let seen = seen.lock().unwrap();
+            seen.iter()
+                .filter(|r| r.contains("rank=relevance") && r.contains(&workspace))
+                .count()
+        };
+        let search = |workspace: &str| {
+            let _workspace = HoldEnv::set(&[("PACKSET_WORKSPACE", workspace)]);
+            packset_search_relevant("the registry rejected my token", 20).unwrap();
+        };
+        search("refused");
+        search("refused");
+        assert_eq!(ranked("refused"), 1, "{:?}", seen.lock().unwrap());
+        search("other");
+        assert_eq!(ranked("other"), 1, "{:?}", seen.lock().unwrap());
+        for (base, workspace, at, _) in RANKS_KNOWN.lock().unwrap().iter_mut() {
+            if base == url.trim_end_matches('/') && workspace == "refused" {
+                *at = at.checked_sub(RANKS_FOR).expect("up longer than RANKS_FOR");
+            }
+        }
+        search("refused");
+        assert_eq!(ranked("refused"), 2, "{:?}", seen.lock().unwrap());
+        let seen = seen.lock().unwrap();
+        let reads = seen.iter().filter(|r| r.contains("/v1/status")).count();
+        assert_eq!(reads, 3, "{seen:?}");
     }
 
     /// The hits the writer chose are read by their `rerank_score`, highest
