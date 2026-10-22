@@ -357,6 +357,46 @@ fn a_runner_pushes_onto_develop_or_main_once_the_seats_clear_it() {
     assert!(said.contains("`quorum`"), "{said}");
 }
 
+fn gate_row(out: &Output) -> String {
+    let said = text_of(out);
+    said.lines()
+        .find(|line| line.contains("\tsitting gate\t"))
+        .unwrap_or_else(|| panic!("no sitting gate row:\n{said}"))
+        .to_string()
+}
+
+/// `ljos doctor` says whether the gate holds this seat. Under a runner it
+/// names the seat, the sitting it finds and what a protected push waits
+/// for, and warns when the settings do not read. For the person it is
+/// `info`: nothing there is gated.
+#[test]
+fn the_doctor_says_whether_the_gate_holds_this_seat() {
+    let seat = Seat::new();
+    let line = gate_row(&seat.runner(&["doctor", "--all"], &[]));
+    assert!(line.starts_with("ok\t"), "{line}");
+    assert!(line.contains("active for inky"), "{line}");
+    assert!(line.contains("holds no live sitting"), "{line}");
+    assert!(line.contains("`develop`, `main`"), "{line}");
+
+    seat.sit();
+    let line = gate_row(&seat.runner(&["doctor"], &[]));
+    assert!(line.starts_with("ok\t"), "{line}");
+    assert!(line.contains(&format!("sits on {ISSUE}")), "{line}");
+
+    let config = seat.home.join(".config/ljos");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("ljos.toml"), "quorum = 0\n").unwrap();
+    let line = gate_row(&seat.runner(&["doctor"], &[]));
+    assert!(line.starts_with("warn\t"), "{line}");
+    assert!(line.contains("`quorum`"), "{line}");
+
+    let typed = terminal::shape("terminal", env!("CARGO_BIN_EXE_ljos"), &["doctor"]);
+    let out = seat.command(terminal::PYTHON, &typed).output().unwrap();
+    let line = gate_row(&out);
+    assert!(line.starts_with("info\t"), "{line}");
+    assert!(line.contains("not active here"), "{line}");
+}
+
 #[test]
 fn the_person_at_a_terminal_is_not_refused() {
     let seat = Seat::new();

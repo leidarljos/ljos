@@ -22962,6 +22962,9 @@ pub fn doctor() -> Vec<Habitat> {
     out.extend(jev::doctor_row());
     out.push(seat_binary_row());
     out.push(git_hooks::doctor_row());
+    out.push(sitting_gate::doctor_row(
+        std::env::current_dir().ok().as_deref(),
+    ));
     out.push(policy_row());
     out.extend(guard_off_row());
     out.extend(guard_fail_open_row());
@@ -24718,6 +24721,17 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     if row.name == "tracker" && names_unpushed(&row.state) {
         return "warn";
     }
+    // An idle gate on the person's machine is no fault. Under a runner,
+    // settings that do not read refuse every protected push: a warning.
+    if row.name == "sitting gate" {
+        return if row.state.starts_with(sitting_gate::GATE_IDLE) {
+            "info"
+        } else if row.ok {
+            "ok"
+        } else {
+            "warn"
+        };
+    }
     // A headerless log is left unread until someone pins it. The row names
     // the command; it does not mean the seat failed to start.
     if row.name == "sync" && !row.ok {
@@ -24905,9 +24919,11 @@ pub fn format_doctor_short(rows: &[Habitat]) -> String {
 /// optional row of a [`READY_PARTS`] part that is off leaves the part out
 /// of the ready line, and the row says why. The other optional rows, such
 /// as a cloud guard on a machine that never ran `cloud up`, stay behind
-/// `ljos doctor --all`.
+/// `ljos doctor --all`. The sitting gate row is always printed: whether
+/// this seat's git is gated is the first thing a runner needs to know.
 fn shown_short(word: &str, name: &str) -> bool {
     matches!(word, "no" | "warn")
+        || name == "sitting gate"
         || (word == "info" && READY_PARTS.iter().any(|(_, rows)| rows.contains(&name)))
 }
 

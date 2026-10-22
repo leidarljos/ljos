@@ -117,6 +117,61 @@ pub fn seats_wait(dest: &str, branches: &[String], issue: &str, why: &str) -> St
     )
 }
 
+/// How the doctor's `sitting gate` row begins where no runner is above
+/// this shell; [`crate::doctor_word`] reads that row as `info`.
+pub const GATE_IDLE: &str = "not active here: no agent runner is above this shell";
+
+/// The doctor's `sitting gate` row. Under a runner: the seat it holds,
+/// the sitting it finds, and what a push onto a protected branch from
+/// `cwd` waits for; settings that do not read fail the row, since every
+/// such push is then refused. For the person, that nothing is gated.
+#[must_use]
+pub fn doctor_row(cwd: Option<&Path>) -> crate::Habitat {
+    let row = |state: String, ok: bool| crate::Habitat {
+        name: "sitting gate",
+        state,
+        ok,
+    };
+    if !runner() {
+        return row(
+            format!(
+                "{GATE_IDLE}, so the person's git is not gated; under one, a commit, merge, \
+                 rebase, cherry-pick or push waits for a live sitting"
+            ),
+            true,
+        );
+    }
+    let seat = crate::seat_name();
+    let cfg = match crate::gates::consensus_push(cwd) {
+        Ok(cfg) => cfg,
+        Err(why) => {
+            return row(
+                format!(
+                    "active for {seat}, and {}, so every push onto a protected branch is refused",
+                    unread_settings(&why)
+                ),
+                false,
+            )
+        }
+    };
+    let sitting = match live_sitting() {
+        Ok(issue) => format!("this conversation sits on {issue}"),
+        Err(why) => format!(
+            "{why}, so a commit, merge, rebase, cherry-pick or push waits for `ljos sitting ID`"
+        ),
+    };
+    let named: Vec<String> = cfg.branches.iter().map(|b| format!("`{b}`")).collect();
+    row(
+        format!(
+            "active for {seat}: {sitting}; a push onto {} also waits for a quorum of {} seats \
+             on that ticket",
+            named.join(", "),
+            cfg.quorum
+        ),
+        true,
+    )
+}
+
 fn writes_history(call: &GitCall) -> bool {
     if !WRITES.contains(&call.sub.as_str()) {
         return false;
@@ -187,6 +242,13 @@ mod tests {
         fn drop(&mut self) {
             RUNNER.with(|r| r.set(false));
         }
+    }
+
+    #[test]
+    fn an_idle_gate_informs_and_fails_no_doctor() {
+        let row = doctor_row(None);
+        assert_eq!(crate::doctor_word(&row), "info", "{}", row.state);
+        assert!(crate::healthy(&[row]));
     }
 
     #[test]
