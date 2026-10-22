@@ -7763,14 +7763,13 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             .as_ref()
             .filter(|p| p.iter().any(|(_, s)| s.cosine.is_some()))
         {
-            let top = pool.iter().map(|(h, _)| h.score).fold(0.0_f64, f64::max);
             let best = pool
                 .iter()
                 .filter_map(|(_, s)| s.cosine)
                 .fold(0.0_f64, f64::max);
             let mut admitted: Vec<(Hit, f64)> = pool
                 .iter()
-                .filter(|(h, s)| admits_local(h, *s, cue, top, best))
+                .filter(|(h, s)| admits_local(h, *s, cue, best))
                 .filter(|(h, _)| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
                 .map(|(h, s)| (h.clone(), s.cosine.unwrap_or(0.0)))
                 .collect();
@@ -8061,11 +8060,13 @@ pub const DENSE_WORD_BEHIND: f64 = 0.05;
 /// sends the encoder's cosine. A preference, a standing lesson or a
 /// transient lesson gets in when the encoder ranked it first at
 /// [`DENSE_ALONE_AT`] or more, or when it names the prompt's subject,
-/// clears [`HOOK_SCORE_FLOOR`] of the top score and sits within
-/// [`DENSE_WORD_BEHIND`] of `best`, the highest cosine in the pool.
+/// clears [`HOOK_SCORE_FLOOR`] of `best`, the highest cosine in the
+/// pool, and sits within [`DENSE_WORD_BEHIND`] of it. Both read the
+/// cosine, which carries no age: the pack decays the fused score by the
+/// memory's age, and a correct memory is not dropped for being old.
 /// A lesson with no horizon tag stays out.
 #[must_use]
-pub fn admits_local(h: &Hit, s: DenseSignal, cue: &str, top: f64, best: f64) -> bool {
+pub fn admits_local(h: &Hit, s: DenseSignal, cue: &str, best: f64) -> bool {
     if UNREVIEWED_KINDS.contains(&h.kind.as_str()) || !shown_on_prompt(h) {
         return false;
     }
@@ -8076,7 +8077,7 @@ pub fn admits_local(h: &Hit, s: DenseSignal, cue: &str, top: f64, best: f64) -> 
         return true;
     }
     names_the_subject(&h.text, cue)
-        && h.score >= top * HOOK_SCORE_FLOOR
+        && cosine >= best * HOOK_SCORE_FLOOR
         && cosine >= best - DENSE_WORD_BEHIND
 }
 
@@ -33600,18 +33601,18 @@ mod tests {
             rank: Some(1),
             cosine: Some(DENSE_ALONE_AT + 0.05),
         };
-        assert!(admits_local(&pref, near, cue, 1.0, 0.71));
+        assert!(admits_local(&pref, near, cue, 0.71));
         let far = DenseSignal {
             rank: Some(1),
             cosine: Some(DENSE_ALONE_AT - 0.05),
         };
-        assert!(!admits_local(&pref, far, cue, 1.0, 0.61));
+        assert!(!admits_local(&pref, far, cue, 0.61));
         let low = DenseSignal {
             rank: Some(DENSE_ALONE_RANK + 1),
             cosine: Some(0.9),
         };
-        assert!(!admits_local(&pref, low, cue, 1.0, 0.95));
-        assert!(!admits_local(&pref, DenseSignal::default(), cue, 1.0, 0.0));
+        assert!(!admits_local(&pref, low, cue, 0.95));
+        assert!(!admits_local(&pref, DenseSignal::default(), cue, 0.0));
     }
 
     #[test]
@@ -33729,25 +33730,27 @@ mod tests {
             cosine: Some(best - DENSE_WORD_BEHIND + 0.01),
         };
         // One ordinary word of a longer cue is a coincidence, even close to the best.
-        assert!(!admits_local(&lesson, near, long, 1.0, best));
+        assert!(!admits_local(&lesson, near, long, best));
         // That word is the subject when the cue has two content words or fewer.
-        assert!(admits_local(&lesson, near, "wrong URL", 1.0, best));
+        assert!(admits_local(&lesson, near, "wrong URL", best));
         // Two content words name the subject on a longer cue.
         let two = "the API base URL is wrong after deploying";
-        assert!(admits_local(&lesson, near, two, 1.0, best));
+        assert!(admits_local(&lesson, near, two, best));
         let behind = DenseSignal {
             rank: Some(5),
             cosine: Some(best - DENSE_WORD_BEHIND - 0.01),
         };
-        assert!(!admits_local(&lesson, behind, two, 1.0, best));
-        // Below the floor of the top score it stays out.
-        assert!(!admits_local(&lesson, near, "wrong URL", 10.0, best));
+        assert!(!admits_local(&lesson, behind, two, best));
+        // A fused score far under the pool's top does not keep it out:
+        // the pack decays that score by age.
+        let mut old = lesson.clone();
+        old.score = 0.01;
+        assert!(admits_local(&old, near, "wrong URL", best));
         // A word in common and no cosine: the encoder said nothing.
         assert!(!admits_local(
             &lesson,
             DenseSignal::default(),
             "wrong URL",
-            1.0,
             best
         ));
         // An alias names the subject even under the confidence line.
@@ -33765,7 +33768,6 @@ mod tests {
             &uv,
             alias,
             "set up a virtualenv and install black",
-            1.0,
             0.61
         ));
         // One ordinary word on a longer unrelated cue stays out below the line.
@@ -33783,7 +33785,6 @@ mod tests {
             &tests,
             weak,
             "Run the tests and tell me what fails",
-            1.0,
             0.60
         ));
         // A transient lesson the encoder ranks first at the confidence line is shown.
@@ -33793,13 +33794,13 @@ mod tests {
             rank: Some(1),
             cosine: Some(DENSE_ALONE_AT),
         };
-        assert!(admits_local(&episode, sure, long, 1.0, DENSE_ALONE_AT));
+        assert!(admits_local(&episode, sure, long, DENSE_ALONE_AT));
         // The same episode stays out on one ordinary word of a long cue.
-        assert!(!admits_local(&episode, near, long, 1.0, best));
+        assert!(!admits_local(&episode, near, long, best));
         // A lesson written before the horizon tag stays out whatever the encoder says.
         let mut untagged = lesson.clone();
         untagged.entities.clear();
-        assert!(!admits_local(&untagged, sure, long, 1.0, DENSE_ALONE_AT));
+        assert!(!admits_local(&untagged, sure, long, DENSE_ALONE_AT));
     }
 
     fn pin_hit(id: &str, text: &str) -> Hit {
@@ -34013,6 +34014,54 @@ mod tests {
         };
         let (note, _) = hook_note(&call, 5);
         assert_eq!(note.matches("Run the lint step").count(), 3, "{note}");
+    }
+
+    /// A memory that names the prompt's subject reaches it however old it
+    /// is. The pack's fused score for a three-month-old memory sits under
+    /// 0.6 of a fresh one's on age alone; its cosine does not.
+    #[test]
+    fn the_hook_admits_an_old_memory_that_names_the_subject() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let hit = |id: &str, text: &str, score: f64, ts: &str, rank: u32, cos: f64| {
+            serde_json::json!({
+                "id": id, "text": text, "score": score, "kind": "lesson",
+                "ts": ts, "entities": ["horizon:standing"],
+                "ballots": 2, "of": 3, "dense_rank": rank, "cosine": cos
+            })
+        };
+        let url = serve_signal_pack(serde_json::json!([
+            hit(
+                "fresh",
+                "Restart the worker after every deploy so it reads the new config",
+                2.0,
+                "2026-10-20T09:00:00.000Z",
+                1,
+                0.62
+            ),
+            hit(
+                "old",
+                "The frontend reads its API base URL from VITE_API_URL at build time, not at runtime",
+                0.8,
+                "2026-07-22T09:00:00.000Z",
+                2,
+                0.60
+            ),
+        ]));
+        let _url = PackUrl::set(&url);
+        let call = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "the API base URL is wrong after deploying".into(),
+            session: Some("aged-one".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(&call, 5);
+        assert!(note.contains("VITE_API_URL"), "{note}");
     }
 
     /// A cold encoder and a paraphrase share no word, so the atom list
@@ -38830,7 +38879,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             cosine: Some(DENSE_ALONE_AT),
         };
         assert!(
-            admits_local(&hit(&agent), sure, "anything", 1.0, DENSE_ALONE_AT),
+            admits_local(&hit(&agent), sure, "anything", DENSE_ALONE_AT),
             "the hook shows an episode the encoder ranks first"
         );
     }
