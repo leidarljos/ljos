@@ -1609,6 +1609,22 @@ fn age_phrase(committed_at: i64, now: i64) -> String {
     }
 }
 
+fn scope_names(scopes: &[String]) -> String {
+    if scopes.is_empty() {
+        "none".to_string()
+    } else {
+        scopes.join(", ")
+    }
+}
+
+fn adopt_scope_summary(gone: &str, adopted: &[String], skipped: &[String]) -> String {
+    format!(
+        "sync: {gone}: adopted scopes {}; skipped scopes {}\n",
+        scope_names(adopted),
+        scope_names(skipped)
+    )
+}
+
 fn head_blob(root: &Path, rel: &str) -> Result<Vec<u8>> {
     let spec = format!("HEAD:{rel}");
     let out = git(root, &["cat-file", "blob", &spec])?;
@@ -2065,20 +2081,36 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
     {
         return Ok("sync: no age identity on this machine; `ljos sync --key` makes one\n".into());
     }
-    let mut plains = Vec::with_capacity(present.len());
+    let mut out = String::new();
+    let mut opened = Vec::with_capacity(present.len());
+    let mut adopted_scopes = Vec::new();
+    let mut skipped_scopes = Vec::new();
     for log in &present {
         let identities = identities_for_open(&log.scope_name);
-        let Some(plain) = sealed_plain(root, &log.age, &identities)? else {
-            return Ok(format!(
-                "sync: {gone}'s {} log is not sealed to this machine\n",
-                log.scope_name
-            ));
-        };
-        plains.push(plain);
+        match sealed_plain(root, &log.age, &identities)? {
+            Some(plain) => {
+                adopted_scopes.push(log.scope_name.clone());
+                opened.push((log, plain));
+            }
+            None => {
+                skipped_scopes.push(log.scope_name.clone());
+                out.push_str(&format!(
+                    "sync: {gone}'s {} log is not sealed to this machine\n",
+                    log.scope_name
+                ));
+            }
+        }
+    }
+    if opened.is_empty() {
+        out.push_str(&adopt_scope_summary(
+            &gone,
+            &adopted_scopes,
+            &skipped_scopes,
+        ));
+        return Ok(out);
     }
     if opts.dry_run {
-        let mut out = String::new();
-        for (log, plain) in present.iter().zip(&plains) {
+        for (log, plain) in &opened {
             let sender = sender_entity_for_scope(&gone, scope, &log.scope_name);
             out.push_str(&dry_adopt_line(
                 root,
@@ -2089,18 +2121,22 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
                 &sender,
             )?);
         }
+        out.push_str(&adopt_scope_summary(
+            &gone,
+            &adopted_scopes,
+            &skipped_scopes,
+        ));
         return Ok(out);
     }
-    let mut rows = Vec::with_capacity(present.len());
+    let mut rows = Vec::with_capacity(opened.len());
     let mut failed = false;
-    for (log, plain) in present.iter().zip(&plains) {
+    for (log, plain) in &opened {
         let sender = sender_entity_for_scope(&gone, scope, &log.scope_name);
         let done = adopt_pack(root, &log.scope_name, &gone, plain, &sender)?;
         failed |= done.failed;
         rows.push(done);
     }
-    let mut out = String::new();
-    for (log, done) in present.iter().zip(&rows) {
+    for ((log, _), done) in opened.iter().zip(&rows) {
         out.push_str(&format!(
             "sync: {gone}: {} {} atoms adopted, {} refused, {} moved, {} retired",
             done.kept, log.scope_name, done.refused, done.moved, done.retired
@@ -2113,6 +2149,11 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
         }
         out.push('\n');
     }
+    out.push_str(&adopt_scope_summary(
+        &gone,
+        &adopted_scopes,
+        &skipped_scopes,
+    ));
     if failed {
         return Ok(out);
     }
@@ -2130,7 +2171,7 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
     }
     out.push_str(&exported);
     let mut drop_rels = Vec::new();
-    for log in &present {
+    for (log, _) in &opened {
         drop_rels.push(log.age.clone());
         if matches!(
             gone_log_state(root, &log.digest),
@@ -2178,14 +2219,14 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
     };
     let report = report_commit(root, &message, opts.push, made);
     if report.landed {
-        for log in &present {
+        for (log, _) in &opened {
             if !in_head(root, &log.age) {
                 let _ = std::fs::remove_file(taken_path(root, &log.scope_name, &gone));
             }
         }
     }
     out.push_str(&report.said);
-    if present.iter().any(|log| in_head(root, &log.age)) {
+    if opened.iter().any(|(log, _)| in_head(root, &log.age)) {
         out.push_str("sync: the log was kept\n");
     }
     Ok(out)
