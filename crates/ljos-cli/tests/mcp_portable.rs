@@ -282,6 +282,12 @@ fn onboard_writes_an_absolute_command_when_path_cannot_find_ljos_mcp() {
         pasted["mcpServers"]["ljos"]["command"],
         bin.join("ljos-mcp").display().to_string()
     );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("PATH does not resolve ljos-mcp"),
+        "stderr: {err}\nstdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 }
 
 #[test]
@@ -343,4 +349,30 @@ fn onboard_rewrites_only_the_ljos_entry_in_toml() {
         text.contains("# keep /home/box/.cargo/bin/ljos-mcp in this comment"),
         "{text}"
     );
+}
+
+#[test]
+fn onboard_does_not_rewrite_a_sibling_hermes_command() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join(".cargo/bin");
+    install_pair(&bin);
+    fs::create_dir_all(home.join(".hermes")).unwrap();
+    fs::write(
+        home.join(".hermes/config.yaml"),
+        "mcp_servers:\n  ljos-dev:\n    command: /opt/pinned/ljos-mcp\n  ljos:\n    command: /home/box/.cargo/bin/ljos-mcp\n",
+    )
+    .unwrap();
+    let out = onboard(
+        &bin.join("ljos"),
+        &home,
+        &["onboard", "--harness", "hermes"],
+    );
+    assert!(out.status.success(), "{}", said(&out));
+    let text = fs::read_to_string(home.join(".hermes/config.yaml")).unwrap();
+    assert!(
+        text.contains("  ljos-dev:\n    command: /opt/pinned/ljos-mcp"),
+        "{text}"
+    );
+    assert!(text.contains("  ljos:\n    command: ljos-mcp"), "{text}");
 }
