@@ -1006,8 +1006,9 @@ enum Cmd {
         deadline: Option<String>,
     },
     /// Sign a launch slot on the issue a cloud run is launched for: the
-    /// run's seat, the model asked for and the run id, under this seat's
-    /// pinned key. Written before the run's first ballot.
+    /// run's seat, the model asked for, the run id and the run's public
+    /// key, under this seat's pinned key. Written before the run's first
+    /// ballot.
     Slot {
         /// The issue the run is launched for.
         issue: String,
@@ -1020,6 +1021,10 @@ enum Cmd {
         /// The run id, the run's `CURSOR_AGENT_ID` or `GITHUB_RUN_ID`.
         #[arg(long)]
         run: String,
+        /// The run's public seat key, the hex `ljos cloud up` printed on
+        /// the run. Only ballots under this key count for the run.
+        #[arg(long, value_name = "HEX")]
+        key: String,
     },
     /// One trust row: FROM weighs TO at WEIGHT in (0, 1]. Written to the pack.
     Trust {
@@ -1798,8 +1803,12 @@ fn run_command() -> Result<()> {
             seat,
             model,
             run,
+            key,
         } => {
-            print!("{}", ljos_cli::slot::write(&issue, &seat, &model, &run)?);
+            print!(
+                "{}",
+                ljos_cli::slot::write(&issue, &seat, &model, &run, &key)?
+            );
             print!("{}", ljos_cli::persist_tracker(&issue, "slotted"));
         }
         Cmd::Log { seat } => print!("{}", ljos_cli::tracker_log(Some(&seat))?),

@@ -92,7 +92,12 @@ pub fn up(force: bool) -> Result<String> {
     let seat = default_seat();
     lines.push(format!("seat: {seat}"));
     let key = prepare_seat_key(&seat)?;
-    lines.push(format!("seat key: {}", key.display()));
+    let public = crate::ballot_sig::key_from_file(&key)?.verifying_key();
+    lines.push(format!(
+        "seat key: {}, public {}",
+        key.display(),
+        hex::encode(public.to_bytes())
+    ));
 
     let remote = nonempty_var("LJOS_TRACKER_REMOTE");
     let tracker = remote.as_ref().map(|_| tracker_dir(&home));
