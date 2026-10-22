@@ -672,14 +672,14 @@ enum Cmd {
         #[arg(short = 'n', long, default_value_t = 60)]
         limit: usize,
     },
-    /// A panel without MCP: one brief per persona, or `run` to spawn each designer and persona in its own harness session.
+    /// A panel without MCP: one brief per persona, `run` to spawn each designer and persona in its own harness session, or `--cloud` for one prompt file per persona.
     Panel {
         /// The issue id. `run` spawns the panel (`ljos panel run ISSUE`).
         issue: String,
         /// The issue id when the first argument is `run`.
         #[arg(value_name = "ISSUE")]
         run_issue: Option<String>,
-        /// Where the briefs go, one `<persona>.md` each.
+        /// Where the briefs go, one `<persona>.md` each. With `--cloud`, the prompt files.
         #[arg(long, default_value = "panel")]
         out: PathBuf,
         /// Ask Jev for every ballot first; only the personas it is unsure
@@ -695,6 +695,10 @@ enum Cmd {
         /// Print the sessions and prompts and do not spawn.
         #[arg(long)]
         dry_run: bool,
+        /// Write one prompt file per persona for a cloud seat: the seat
+        /// environment, the slot and the push rules. Does not spawn.
+        #[arg(long, conflicts_with_all = ["jev", "harness", "dry_run"])]
+        cloud: bool,
     },
     /// A voter with a view: NAME holds its ballot by ANCHOR in [0, 1] (0 never moves).
     Persona {
@@ -2002,8 +2006,16 @@ fn run_command() -> Result<()> {
             harness,
             designers,
             dry_run,
+            cloud,
         } => {
-            if issue == "run" {
+            if cloud {
+                if issue == "run" || run_issue.is_some() {
+                    bail!(
+                        "panel --cloud writes one prompt file per persona for one issue; it does not spawn"
+                    );
+                }
+                print!("{}", ljos_cli::panel_cloud::panel_cloud(&issue, &out)?);
+            } else if issue == "run" {
                 let issue = run_issue.context("`ljos panel run` needs an issue")?;
                 print!(
                     "{}",
