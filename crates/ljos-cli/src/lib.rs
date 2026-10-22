@@ -8470,10 +8470,12 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             // fused score. Reordering cannot change which of the twenty
             // pass. When none does, no memory can reach the prompt, and
             // the second stage, a few hundred milliseconds a prompt, is not
-            // run.
+            // run. The count of the pack's ballots that named a hit is not
+            // read: where many lessons tie on the words the pack scores,
+            // which of them a ballot keeps at its cut is arbitrary. The
+            // subject test and the lexical floor are the second scorer.
             let could = |h: &Hit| {
                 !UNREVIEWED_KINDS.contains(&h.kind.as_str())
-                    && agreed(h)
                     && names_the_subject(&h.text, cue)
                     && shown_on_prompt(h)
                     && h.id.as_ref().is_none_or(|id| !seen.contains(id))
@@ -10438,14 +10440,20 @@ pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<(Vec<Hit>, bool)>
 /// by relevance alone, and how many of them the writer chose. A writer
 /// that lists `rank=relevance` ([`ranks_by_relevance`]) is asked for it,
 /// picks them by lexical, BM25 and cosine with no half-life, and echoes
-/// the rank; an answer without the echo is read as fused. An older writer
-/// is not asked, and cuts its
+/// the rank; an answer without the echo is read as fused. One that lists
+/// it and answers it with a 4xx is asked again as an older writer. An
+/// older writer is not asked, and cuts its
 /// fused list, which decays with age, so rank 21 of a pack full of fresh
 /// lookalikes never arrives: the stored atoms that best match the cue
 /// then follow its hits, so a relevant old memory still gets in. So they
 /// do when a relevance cut comes back full, since the pack does not read
 /// the alias groups: to it `pnpm` does not match `npm`, and twenty-four
-/// lookalikes tie the lesson that says it.
+/// lookalikes tie the lesson that says it. A hit the cut kept on fewer
+/// ballots than [`agreed`] asks, whose stored atom is among them, takes
+/// that atom's count, which is none: which of the tied lessons a ballot
+/// keeps at its cut is arbitrary, and one it dropped would have come in
+/// as the atom. A body that does not parse, a NaN from a writer that is
+/// not packset, has no hits and no echo, so the stored atoms answer.
 fn search_relevant(
     client: &PacksetClient,
     cue: &str,
@@ -10454,34 +10462,58 @@ fn search_relevant(
     timeout: std::time::Duration,
 ) -> Result<(Value, usize)> {
     let url = format!("{}/v1/search", client.base().trim_end_matches('/'));
-    let mut req = packset_client::authorize(ureq::get(&url))
-        .query("workspace", &client.workspace())
-        .query("q", &recall_query(cue))
-        .query("limit", &limit.to_string())
-        .timeout(timeout);
-    if ranks_by_relevance(client, timeout) {
-        req = req.query("rank", "relevance");
-    }
-    if rerank {
-        req = req.query("rerank", "1");
-    }
-    let mut body: Value = req
-        .call()
-        .map_err(|e| packset_client::Error::Http(Box::new(e)))
+    let ask = |rank: bool| {
+        let mut req = packset_client::authorize(ureq::get(&url))
+            .query("workspace", &client.workspace())
+            .query("q", &recall_query(cue))
+            .query("limit", &limit.to_string())
+            .timeout(timeout);
+        if rank {
+            req = req.query("rank", "relevance");
+        }
+        if rerank {
+            req = req.query("rerank", "1");
+        }
+        req.call().map_err(Box::new)
+    };
+    let ranked = ranks_by_relevance(client, timeout);
+    let answer = match ask(ranked) {
+        Err(e) if ranked && matches!(*e, ureq::Error::Status(400..=499, _)) => {
+            refuses_relevance(client);
+            ask(false)
+        }
+        other => other,
+    };
+    let mut body: Value = answer
+        .map_err(|e| match *e {
+            ureq::Error::Status(..) => packset_client::Error::Bad(e.to_string()),
+            _ => packset_client::Error::Http(e),
+        })
         .context("search: GET /v1/search failed")?
-        .into_json()?;
+        .into_json()
+        .unwrap_or_else(|_| serde_json::json!({ "hits": [] }));
     let chosen = body["hits"].as_array().map_or(0, Vec::len);
     if body["rank"].as_str() != Some("relevance") || chosen >= limit as usize {
-        let have: std::collections::HashSet<String> = body["hits"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|h| h["id"].as_str().map(str::to_string))
-            .collect();
-        let extra: Vec<Value> = relevant_atoms(client, cue, limit as usize)
-            .into_iter()
-            .filter(|a| a["id"].as_str().is_none_or(|id| !have.contains(id)))
-            .collect();
+        let mut extra = Vec::new();
+        for atom in relevant_atoms(client, cue, limit as usize) {
+            let kept = atom["id"].as_str().and_then(|id| {
+                body["hits"]
+                    .as_array_mut()?
+                    .iter_mut()
+                    .find(|h| h["id"].as_str() == Some(id))
+            });
+            match kept {
+                Some(hit) => {
+                    let short =
+                        serde_json::from_value::<Hit>(hit.clone()).is_ok_and(|h| !agreed(&h));
+                    if let Some(fields) = hit.as_object_mut().filter(|_| short) {
+                        fields.remove("ballots");
+                        fields.remove("of");
+                    }
+                }
+                None => extra.push(atom),
+            }
+        }
         if let Some(hits) = body["hits"].as_array_mut() {
             hits.extend(extra);
         }
@@ -10495,9 +10527,8 @@ fn search_relevant(
 /// version did not move with the rank, so it is not read. Asked once a
 /// process per writer.
 fn ranks_by_relevance(client: &PacksetClient, timeout: std::time::Duration) -> bool {
-    static KNOWN: std::sync::Mutex<Option<(String, bool)>> = std::sync::Mutex::new(None);
     let base = client.base().trim_end_matches('/').to_string();
-    let mut known = KNOWN
+    let mut known = RANKS_KNOWN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some((at, ranks)) = known.as_ref() {
@@ -10519,6 +10550,19 @@ fn ranks_by_relevance(client: &PacksetClient, timeout: std::time::Duration) -> b
         .is_some_and(|r| r.iter().any(|v| v.as_str() == Some("relevance")));
     *known = Some((base, ranks));
     ranks
+}
+
+/// The last writer [`ranks_by_relevance`] asked, and its answer.
+static RANKS_KNOWN: std::sync::Mutex<Option<(String, bool)>> = std::sync::Mutex::new(None);
+
+/// The writer at `client` answered a ranked search with a 4xx though its
+/// status lists the rank: for the rest of the process it is asked as an
+/// older writer.
+fn refuses_relevance(client: &PacksetClient) {
+    let base = client.base().trim_end_matches('/').to_string();
+    *RANKS_KNOWN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((base, false));
 }
 
 /// The stored atoms that best match `cue` on [`lexical_match_scores`],
@@ -10596,10 +10640,13 @@ fn merge_by_lexical(judged: Vec<Hit>, mut extra: Vec<Hit>, cue: &str) -> Vec<Hit
 
 /// The search with the cross-encoder asked for, and whether it ordered
 /// the hits. A writer without one says `absent` and returns the fused
-/// order, which carries age. When every hit the writer chose carries a
-/// `rerank_score`, which is null on a hit it did not rerank, they are read
-/// by it. An atom [`search_relevant`] added, which the cross-encoder did
-/// not read, goes in ahead of the first hit its lexical match beats.
+/// order, which carries age. The hits the writer chose that carry a
+/// finite `rerank_score` are read by it. One whose score is null, which
+/// the writer did not rerank, or is not a number, goes in ahead of the
+/// first scored hit its lexical match beats, and so does an atom
+/// [`search_relevant`] added, which the cross-encoder did not read. A
+/// writer that says the cross-encoder ran and scores no hit keeps its
+/// order.
 fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> {
     let q = query.trim();
     if q.is_empty() {
@@ -10608,27 +10655,31 @@ fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> 
     let (hits, ran) = with_writer(|| {
         let client = pack()?;
         let (body, chosen) = search_relevant(&client, q, limit, true, pack_timeout())?;
-        let mut scored: Vec<(Hit, Option<f64>)> = body["hits"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|v| {
-                let hit: Hit = serde_json::from_value(v.clone()).ok()?;
-                Some((hit, v["rerank_score"].as_f64()))
-            })
-            .collect();
-        let chosen = chosen.min(scored.len());
-        let scored_all = chosen > 0 && scored[..chosen].iter().all(|(_, s)| s.is_some());
-        if scored_all {
-            scored[..chosen].sort_by(|a, b| b.1.unwrap_or(0.0).total_cmp(&a.1.unwrap_or(0.0)));
+        let mut scored: Vec<(Hit, f64)> = Vec::new();
+        let mut unscored: Vec<Hit> = Vec::new();
+        let mut extra: Vec<Hit> = Vec::new();
+        for (i, v) in body["hits"].as_array().into_iter().flatten().enumerate() {
+            let Ok(hit) = serde_json::from_value::<Hit>(v.clone()) else {
+                continue;
+            };
+            match v["rerank_score"].as_f64().filter(|s| s.is_finite()) {
+                _ if i >= chosen => extra.push(hit),
+                Some(score) => scored.push((hit, score)),
+                None => unscored.push(hit),
+            }
         }
-        let ran = scored_all || body["rerank"].as_str() == Some("cross-encoder");
-        let mut hits: Vec<Hit> = scored.into_iter().map(|(h, _)| h).collect();
-        if ran && hits.len() > chosen {
-            let extra = hits.split_off(chosen);
-            hits = merge_by_lexical(hits, extra, q);
-        }
+        let ran = !scored.is_empty() || body["rerank"].as_str() == Some("cross-encoder");
+        let hits = if scored.is_empty() {
+            if ran {
+                merge_by_lexical(unscored, extra, q)
+            } else {
+                unscored.into_iter().chain(extra).collect()
+            }
+        } else {
+            scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+            unscored.extend(extra);
+            merge_by_lexical(scored.into_iter().map(|(h, _)| h).collect(), unscored, q)
+        };
         keep_search_origins(&client, &body, &hits);
         Ok((hits, ran))
     })?;
@@ -37797,6 +37848,354 @@ mod tests {
             );
             assert_eq!(note.contains("host13"), !shows_full, "{stage}: {note}");
         }
+    }
+
+    /// The relevance cut kept the old lesson on one ballot of two: where
+    /// lessons tie on every word the pack scores, which of them a ballot
+    /// keeps at its cut is arbitrary. It names the prompt's subject and
+    /// covers the most of it, so the prompt gets it. A line that shares
+    /// one rare word with a longer prompt does not name its subject, and
+    /// one ballot does not let it in.
+    #[test]
+    fn a_lesson_one_ballot_kept_still_reaches_the_prompt() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let hit = |id: &str, text: &str, ballots: u32| {
+            serde_json::json!({
+                "id": id, "text": text, "score": 1.0, "kind": "lesson",
+                "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"],
+                "ballots": ballots, "of": 2
+            })
+        };
+        let mut hits: Vec<Value> = ["Figma", "Grafana", "Sentry"]
+            .iter()
+            .map(|who| {
+                hit(
+                    who,
+                    &format!("Operator {who} recorded that the registry rejected the token"),
+                    2,
+                )
+            })
+            .collect();
+        hits.push(hit(
+            "old",
+            "With pnpm the registry rejected the token because the CI secret expired",
+            1,
+        ));
+        hits.push(hit("case", "Name pytest fixtures by their case", 2));
+        hits.push(hit(
+            "kebab",
+            "kebab kebab kebab: the kebab stand shuts at nine",
+            1,
+        ));
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/status") {
+                let status = serde_json::json!({"search": {"ranks": ["fused", "relevance"]}});
+                return (200, status.to_string());
+            }
+            if first.contains("/v1/search") {
+                let body = serde_json::json!({"hits": hits, "rank": "relevance"});
+                return (200, body.to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let prompt = |session: &str, cue: &str| HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: cue.into(),
+            session: Some(session.into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(
+            &prompt("one-ballot", "npm: the registry rejected my token"),
+            5,
+        );
+        assert!(note.contains("CI secret expired"), "{note}");
+        let (note, _) = hook_note(
+            &prompt("rare-word", "kebab case for the pytest fixtures"),
+            5,
+        );
+        assert!(note.contains("Name pytest fixtures"), "{note}");
+        assert!(!note.contains("kebab stand"), "{note}");
+    }
+
+    /// A full relevance cut kept the old lesson on one ballot of two, and
+    /// it is among the stored atoms that best match. It takes that atom's
+    /// count, which is none, as it would have had the cut left it out. A
+    /// hit both ballots named keeps its count, and no atom comes twice.
+    #[test]
+    fn a_hit_kept_on_one_ballot_reads_as_its_stored_atom() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap())]);
+        let atom = |id: &str, text: &str| {
+            serde_json::json!({
+                "id": id, "text": text, "kind": "lesson",
+                "ts": "2026-01-14T09:00:00.000Z", "entities": ["horizon:standing"]
+            })
+        };
+        let mut atoms: Vec<Value> = ["Figma", "Grafana", "Sentry"]
+            .iter()
+            .map(|who| {
+                atom(
+                    who,
+                    &format!("Operator {who} recorded that the registry rejected the token"),
+                )
+            })
+            .collect();
+        atoms.push(atom(
+            "old",
+            "With pnpm the registry rejected the token because the CI secret expired",
+        ));
+        let hits: Vec<Value> = atoms
+            .iter()
+            .map(|a| {
+                let mut hit = a.clone();
+                let ballots = if a["id"] == "old" { 1 } else { 2 };
+                hit["score"] = 1.0.into();
+                hit["ballots"] = ballots.into();
+                hit["of"] = 2.into();
+                hit
+            })
+            .collect();
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/status") {
+                let status = serde_json::json!({"search": {"ranks": ["fused", "relevance"]}});
+                return (200, status.to_string());
+            }
+            if first.contains("/v1/search") {
+                let body = serde_json::json!({"hits": hits, "rank": "relevance"});
+                return (200, body.to_string());
+            }
+            if first.contains("/v1/atoms") {
+                return (200, serde_json::json!({"atoms": atoms}).to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let found = packset_search_relevant("npm: the registry rejected my token", 4).unwrap();
+        let old: Vec<&Hit> = found
+            .iter()
+            .filter(|h| h.id.as_deref() == Some("old"))
+            .collect();
+        assert_eq!(old.len(), 1, "{found:?}");
+        assert_eq!((old[0].ballots, old[0].of), (None, None), "{found:?}");
+        let figma = found.iter().find(|h| h.id.as_deref() == Some("Figma"));
+        assert_eq!(figma.and_then(|h| h.ballots), Some(2), "{found:?}");
+        assert_eq!(found.len(), 4, "{found:?}");
+    }
+
+    /// A writer whose status lists `relevance` but answers a ranked search
+    /// with 400 is asked again as an older writer, so the stored lesson its
+    /// fused cut of fresh lookalikes leaves out still reaches the prompt,
+    /// with `PACKSET_URL` set.
+    #[test]
+    fn a_writer_that_refuses_the_rank_it_lists_is_read_as_older() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let lookalikes: Vec<Value> = (0..20)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("fresh{i}"), "kind": "lesson",
+                    "text": format!(
+                        "Operator op{i} recorded that the registry rejected the token"
+                    ),
+                    "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"]
+                })
+            })
+            .collect();
+        let mut atoms = lookalikes.clone();
+        atoms.push(serde_json::json!({
+            "id": "old", "kind": "lesson",
+            "text": "With pnpm the registry rejected the token because the CI secret expired",
+            "ts": "2026-01-14T09:00:00.000Z", "entities": ["horizon:standing"]
+        }));
+        let hits: Vec<Value> = lookalikes
+            .into_iter()
+            .map(|mut hit| {
+                hit["score"] = 1.0.into();
+                hit["ballots"] = 2.into();
+                hit["of"] = 2.into();
+                hit
+            })
+            .collect();
+        let (url, seen) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/status") {
+                let status = serde_json::json!({"search": {"ranks": ["fused", "relevance"]}});
+                return (200, status.to_string());
+            }
+            if first.contains("/v1/search") && first.contains("rank=") {
+                return (400, r#"{"error":"unknown rank"}"#.into());
+            }
+            if first.contains("/v1/search") {
+                return (200, serde_json::json!({"hits": hits}).to_string());
+            }
+            if first.contains("/v1/atoms") {
+                return (200, serde_json::json!({"atoms": atoms}).to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let prompt = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "npm: the registry rejected my token".into(),
+            session: Some("refused-rank".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(&prompt, 5);
+        assert!(note.contains("CI secret expired"), "{note}");
+        let asked = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.lines().next().unwrap_or("").contains("rank=relevance"));
+        assert!(asked, "{:?}", seen.lock().unwrap());
+        let (refusing, _) = serve_http(|req| {
+            if req.lines().next().unwrap_or("").contains("/v1/status") {
+                return (200, r#"{"search":{"ranks":["relevance"]}}"#.into());
+            }
+            (400, r#"{"error":"q required"}"#.into())
+        });
+        let _url = PackUrl::set(&refusing);
+        let err = packset_search_relevant("npm: the registry rejected my token", 20).unwrap_err();
+        assert!(!writer_unreachable(&err), "{err:#}");
+        assert!(!format!("{err:#}").contains("not answering"), "{err:#}");
+    }
+
+    /// The hits the writer chose are read by their `rerank_score`, highest
+    /// first. One it did not score, null on the wire, goes in ahead of the
+    /// first scored hit its lexical match beats, so a lesson the writer put
+    /// last unscored behind three scored lookalikes still reaches the
+    /// prompt.
+    #[test]
+    fn the_rerank_score_orders_the_hits_and_a_null_one_merges_by_match() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let hit = |id: &str, text: &str, rerank: Value| {
+            serde_json::json!({
+                "id": id, "text": text, "score": 1.0, "kind": "lesson",
+                "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"],
+                "ballots": 2, "of": 2, "rerank_score": rerank
+            })
+        };
+        let scored: Vec<Value> = [("Figma", 0.1), ("Grafana", 0.9), ("Sentry", 0.5)]
+            .iter()
+            .map(|(who, score)| {
+                hit(
+                    who,
+                    &format!("Operator {who} recorded that the registry rejected the token"),
+                    (*score).into(),
+                )
+            })
+            .collect();
+        let mut with_null = scored.clone();
+        with_null.push(hit(
+            "old",
+            "With pnpm the registry rejected the token because the CI secret expired",
+            Value::Null,
+        ));
+        let cue = "npm: the registry rejected my token";
+        for (hits, want) in [
+            (scored, vec!["Grafana", "Sentry", "Figma"]),
+            (with_null, vec!["old", "Grafana", "Sentry", "Figma"]),
+        ] {
+            let (url, _) = serve_http(move |req| {
+                let first = req.lines().next().unwrap_or("");
+                if first.contains("/v1/status") {
+                    let status = serde_json::json!({"search": {"ranks": ["fused", "relevance"]}});
+                    return (200, status.to_string());
+                }
+                if first.contains("/v1/search") {
+                    let body = serde_json::json!({
+                        "hits": hits, "rank": "relevance", "rerank": "cross-encoder"
+                    });
+                    return (200, body.to_string());
+                }
+                (404, r#"{"error":"missing"}"#.into())
+            });
+            let _url = PackUrl::set(&url);
+            let (found, ran) = packset_search_reranked(cue, 20).unwrap();
+            let ids: Vec<&str> = found.iter().filter_map(|h| h.id.as_deref()).collect();
+            assert_eq!(ids, want);
+            assert!(ran);
+            let prompt = HookCall {
+                event: "UserPromptSubmit".into(),
+                cue: cue.into(),
+                session: Some(format!("rerank-score-{}", want.len())),
+                shape: HookShape::default(),
+            };
+            let (note, _) = hook_note(&prompt, 5);
+            assert_eq!(
+                note.contains("CI secret expired"),
+                want[0] == "old",
+                "{note}"
+            );
+        }
+    }
+
+    /// A writer whose every search body carries a NaN, which is not JSON,
+    /// is read as one that found nothing: the stored atoms that best match
+    /// answer, and the old lesson still reaches the prompt.
+    #[test]
+    fn a_search_body_that_does_not_parse_leaves_the_stored_atoms() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let atoms = serde_json::json!([
+            {
+                "id": "fresh", "kind": "lesson",
+                "text": "Operator Figma recorded that the registry rejected the token",
+                "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"]
+            },
+            {
+                "id": "old", "kind": "lesson",
+                "text": "With pnpm the registry rejected the token because the CI secret expired",
+                "ts": "2026-01-14T09:00:00.000Z", "entities": ["horizon:standing"]
+            }
+        ]);
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/search") {
+                let body = r#"{"hits":[{"id":"fresh","kind":"lesson","score":NaN,
+                    "text":"Operator Figma recorded that the registry rejected the token"}]}"#;
+                return (200, body.into());
+            }
+            if first.contains("/v1/atoms") {
+                return (200, serde_json::json!({"atoms": atoms}).to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let prompt = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "npm: the registry rejected my token".into(),
+            session: Some("nan-body".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(&prompt, 5);
+        assert!(note.contains("CI secret expired"), "{note}");
     }
 
     /// The prompt hook hands over a paraphrase the encoder ranked first
