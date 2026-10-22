@@ -5,9 +5,10 @@
 
 The server runs in a throwaway home with a tracker and one seat. It is
 initialised, sampled, given one tools/call of each core tool, then left
-alone for --idle seconds and sampled once a second. PACKSET_URL and
-PACKSET_TOKEN pass through when set, so the pack calls reach a running
-packsetd; unset, they fail fast and the rest of the call still runs.
+alone for --idle seconds and sampled once a second. PACKSET_URL must
+name a pack that answers. Unset, empty, off, or unreachable, this
+script exits and prints no RSS numbers. PACKSET_TOKEN passes through
+when set.
 
 Printed: VmRSS, VmHWM (peak), RssAnon and Threads after initialize,
 right after the burst, and at the end of the idle wait, plus the first
@@ -22,6 +23,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 
 CALLS = [
     ("ljos_recall", {"issue": "probe-abcd"}),
@@ -93,6 +96,20 @@ def read_answer(proc, want, deadline):
     return None
 
 
+def require_pack(url):
+    """Exit when `url` is unset, off, or not answering. Print no numbers."""
+    url = (url or "").strip()
+    if not url or url.lower() == "off":
+        sys.exit("PACKSET_URL is unset or off; refusing to report RSS")
+    try:
+        with urllib.request.urlopen(url, timeout=3):
+            return url
+    except urllib.error.HTTPError:
+        return url
+    except Exception as err:
+        sys.exit(f"PACKSET_URL {url} is unreachable ({err}); refusing to report RSS")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bin", default="target/release/ljos-mcp")
@@ -114,7 +131,7 @@ def main():
         "VISSUE_ROOT": tracker,
         "LJOS_SEAT": "probe",
         "PACKSET_WORKSPACE": "probe",
-        "PACKSET_URL": os.environ.get("PACKSET_URL", "http://127.0.0.1:9"),
+        "PACKSET_URL": require_pack(os.environ.get("PACKSET_URL")),
     }
     for key in ("PACKSET_TOKEN", "LJOS_MCP_IDLE_DROP"):
         if key in os.environ:
