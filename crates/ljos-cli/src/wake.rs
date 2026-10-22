@@ -20,6 +20,18 @@
 //! with it uses that wake, so a run named `ljosbot-review-` plus its run
 //! id wakes the launcher. An exact key wins, and the longest prefix wins
 //! when several match. The envelope still names the run's seat.
+//!
+//! In push mode the letter is in this machine's pack and not yet on the
+//! tracker the other machine reads. The detached wake pushes the sealed
+//! log before it runs the command or posts the webhook, so the send
+//! itself does not wait. A refused push is a line in the wake log. The
+//! wake still runs, and the send still stands.
+//!
+//! The envelope carries the tracker commit that holds the log, when push
+//! mode made one. A command sees `LJOS_WAKE_COMMIT`, and a webhook's JSON
+//! has `commit`. The field is absent when no log commit was made. The
+//! other machine fetches that commit with `ljos inbox --sync`, imports
+//! the sealed logs, and then lists. With no remote the flag only lists.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -64,6 +76,9 @@ pub struct Event {
     pub msg: String,
     pub issue: Option<String>,
     pub interrupt: bool,
+    /// The tracker commit whose tree holds the sealed log, when push
+    /// mode made one. Absent otherwise.
+    pub commit: Option<String>,
 }
 
 /// Where the wakes are kept: `wake.toml` beside `harnesses.toml`.
@@ -250,6 +265,12 @@ fn resolve<'a>(table: &'a BTreeMap<String, Wake>, seat: &str) -> Option<(&'a str
         .map(|(key, wake)| (key.as_str(), wake))
 }
 
+/// `LJOS_TRACKER_GIT=push`, the mode a cloud seat uses. Commit-only and
+/// off leave the log where the sitting's own sync puts it.
+fn push_mode() -> bool {
+    std::env::var("LJOS_TRACKER_GIT").as_deref() == Ok("push")
+}
+
 fn log_path() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -326,18 +347,27 @@ pub fn spawn(events: &[Event]) -> Vec<String> {
     woken
 }
 
-/// The envelope a webhook gets. The body stays in the pack.
+/// The envelope a webhook gets. The body stays in the pack. When the
+/// log's commit is known, `read` names `ljos inbox --sync COMMIT`.
 #[must_use]
 pub fn envelope(event: &Event) -> serde_json::Value {
-    serde_json::json!({
+    let read = match &event.commit {
+        Some(commit) => format!("LJOS_SEAT={} ljos inbox --sync {commit}", event.seat),
+        None => format!("LJOS_SEAT={} ljos inbox", event.seat),
+    };
+    let mut v = serde_json::json!({
         "event": "ljos-mail",
         "seat": event.seat,
         "from": event.from,
         "msg": event.msg,
         "issue": event.issue,
         "interrupt": event.interrupt,
-        "read": format!("LJOS_SEAT={} ljos inbox", event.seat),
-    })
+        "read": read,
+    });
+    if let Some(commit) = &event.commit {
+        v["commit"] = serde_json::Value::String(commit.clone());
+    }
+    v
 }
 
 fn webhook_key(wake: &Wake) -> Option<String> {
@@ -371,6 +401,14 @@ fn run_command(command: &str, event: &Event, timeout: Duration) -> Result<String
             if event.interrupt { "1" } else { "0" },
         )
         .stdin(std::process::Stdio::null());
+    match &event.commit {
+        Some(commit) => {
+            cmd.env("LJOS_WAKE_COMMIT", commit);
+        }
+        None => {
+            cmd.env_remove("LJOS_WAKE_COMMIT");
+        }
+    }
     // What the command prints goes to the wake log, above the line that
     // says how it ended.
     let path = log_path();
@@ -429,6 +467,12 @@ fn post(url: &str, wake: &Wake, event: &Event) -> Result<String> {
 /// a longer seat that starts with it. The outcome is also a line in the
 /// wake log, since a detached wake has nobody to tell.
 ///
+/// In push mode the sealed log is pushed first, from this process, which
+/// `send` and `reply` have already detached. The other machine can then
+/// read the letter. A push that does not land is recorded here and does
+/// not stop the wake. The envelope then names the commit that holds the
+/// log, including when the push was refused and the commit stayed local.
+///
 /// # Errors
 ///
 /// The seat has no wake, the guard refuses its command, or the command or
@@ -443,21 +487,32 @@ pub fn fire(event: &Event) -> Result<String> {
     } else {
         format!("{} via {key}", event.seat)
     };
+    // The letter is already in the pack. Pushing here, rather than in
+    // `send`, keeps the sender's wait to the detach. The other host's
+    // inbox stays empty until this push is on the remote. The commit is
+    // read after the push, so a refusal still names the local log.
+    let mut carried = event.clone();
+    if push_mode() {
+        if let Err(why) = super::sync::push_sealed_log() {
+            log(&format!("{}: {why:#}", carried.seat));
+        }
+        carried.commit = super::sync::log_commit();
+    }
     let outcome = if let Some(command) = &wake.command {
         let timeout = Duration::from_secs(wake.timeout.unwrap_or(WAKE_TIMEOUT_SECS).max(1));
-        run_command(command, event, timeout)
+        run_command(command, &carried, timeout)
     } else if let Some(url) = &wake.webhook {
-        post(url, wake, event)
+        post(url, wake, &carried)
     } else {
         Err(anyhow::anyhow!("neither a command nor a webhook"))
     };
     match outcome {
         Ok(said) => {
-            log(&format!("{named} {}: {said}", event.msg));
+            log(&format!("{named} {}: {said}", carried.msg));
             Ok(format!("wake {}: {said}\n", event.seat))
         }
         Err(e) => {
-            log(&format!("{named} {}: {e:#}", event.msg));
+            log(&format!("{named} {}: {e:#}", carried.msg));
             Err(e).context(format!("wake {}", event.seat))
         }
     }
@@ -508,12 +563,28 @@ mod tests {
             msg: "m1".into(),
             issue: Some("Software-d9n6".into()),
             interrupt: true,
+            commit: None,
         };
         let v = envelope(&event);
         assert_eq!(v["seat"], "grok");
         assert_eq!(v["msg"], "m1");
         assert_eq!(v["interrupt"], true);
+        assert!(v.get("commit").is_none(), "{v}");
+        assert_eq!(v["read"], "LJOS_SEAT=grok ljos inbox");
         assert!(v.get("body").is_none() && v.get("text").is_none(), "{v}");
+        let named = Event {
+            commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            ..event
+        };
+        let named_v = envelope(&named);
+        assert_eq!(
+            named_v["commit"],
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        assert_eq!(
+            named_v["read"],
+            "LJOS_SEAT=grok ljos inbox --sync 0123456789abcdef0123456789abcdef01234567"
+        );
         assert!(check_webhook("http://example.com/hook").is_err());
         assert!(check_webhook("https://api2.cursor.sh/automations/webhook/x").is_ok());
         assert!(check_webhook("http://127.0.0.1:9/hook").is_ok());
@@ -724,6 +795,7 @@ mod tests {
             msg: "m1".into(),
             issue: Some("Software-d9n6".into()),
             interrupt: true,
+            commit: None,
         };
         let said = fire(&run).expect("fire run");
         assert!(
@@ -830,6 +902,7 @@ mod tests {
             msg: "m1".into(),
             issue: Some("Software-d9n6".into()),
             interrupt: false,
+            commit: None,
         };
         let missed = spawn(&[event("ljosbot-reviewer"), event("ljosbot")]);
         assert!(missed.is_empty(), "{missed:?}");
