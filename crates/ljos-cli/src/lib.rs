@@ -51,6 +51,10 @@ pub mod upgrade;
 pub mod user_rules;
 pub mod wake;
 
+#[cfg(test)]
+#[path = "../tests/common/seat_root.rs"]
+mod test_seat_root;
+
 /// Working-core files this seat will print. Nothing else, and never write.
 pub const CARD_NAMES: &[&str] = &["USER.md", "MEMORY.md"];
 
@@ -31767,8 +31771,7 @@ mod tests {
     impl SeatDir {
         fn new(name: &str) -> Self {
             use std::os::unix::fs::PermissionsExt;
-            let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../target")
+            let dir = crate::test_seat_root::seat_root(crate::bookkeep::path_is_temp)
                 .join(format!("ljos-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
@@ -31785,6 +31788,23 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// A checkout under a temp root still gets seat homes the guard does
+    /// not take for sandboxes.
+    #[test]
+    fn a_seat_root_leaves_a_checkout_in_a_temp_root() {
+        let _g = env_guard();
+        let checkout_is_temp: fn(Option<&std::path::Path>) -> bool =
+            |p| p.is_some_and(|p| p.starts_with(env!("CARGO_MANIFEST_DIR")));
+        let root = crate::test_seat_root::seat_root(checkout_is_temp);
+        assert!(!checkout_is_temp(Some(&root)), "{}", root.display());
+        let real = crate::test_seat_root::seat_root(crate::bookkeep::path_is_temp);
+        assert!(
+            !crate::bookkeep::path_is_temp(Some(&real)),
+            "{}",
+            real.display()
+        );
     }
 
     /// A temp home or LJOS_OFF runs the real binary. A temp working
@@ -45731,6 +45751,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ("PACKSET_WORKSPACE", "tree-cleanup"),
             ("LJOS_OFF", "0"),
         ]);
+        // The relative lines are judged against the working tree, which is
+        // the checkout; it is a tree here wherever the checkout sits.
+        crate::bookkeep::TEST_TEMP_ROOTS.with(|r| *r.borrow_mut() = Some(Vec::new()));
         for line in [
             "rm -rf target/",
             "rm -rf node_modules",
