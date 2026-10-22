@@ -77,6 +77,18 @@ const CLOUD_AGE_MAX: usize = 8192;
 /// remote cannot be cloned. A push that fails after a successful clone is
 /// reported and left queued; the clone itself stands.
 pub fn up(force: bool) -> Result<String> {
+    up_at(force, false)
+}
+
+/// Install binaries, point the harness at them, and clone the shared tracker.
+///
+/// `repoint` replaces the repository an earlier `cloud up` recorded. The
+/// shell guard refuses that flag, so a seat cannot move its own allowlist.
+///
+/// # Errors
+///
+/// As [`up`]. A second repository is left unrecorded when `repoint` is false.
+pub fn up_at(force: bool, repoint: bool) -> Result<String> {
     let home = crate::home().context("cloud up: HOME is unset")?;
     let bin_dir = bin_dir(&home);
     let mut lines = Vec::new();
@@ -160,7 +172,7 @@ pub fn up(force: bool) -> Result<String> {
     // After the rule file, so a second `cloud up` still says the refusals
     // are already installed. Git runs this hook for every push; the rule
     // file cannot see a push a script starts.
-    lines.push(crate::cloud_hook::ensure()?);
+    lines.push(crate::cloud_hook::ensure(repoint)?);
     // Retire env-owned wakes before any later step can fail, so a removed
     // `LJOS_WAKE_<SEAT>_URL` cannot leave a stale URL that still sees a new key.
     lines.extend(ensure_wakes()?);

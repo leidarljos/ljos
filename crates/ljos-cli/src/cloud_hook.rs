@@ -35,10 +35,14 @@ fn allow_path() -> Option<PathBuf> {
 }
 
 /// Install the hook, record the repositories this process may push, and
-/// point the global `core.hooksPath` at the hook directory.
-pub(crate) fn ensure() -> Result<String> {
+/// point the global `core.hooksPath` at the hook directory. `repoint`
+/// replaces a repository recorded by an earlier run. The shell guard
+/// refuses that flag.
+pub(crate) fn ensure(repoint: bool) -> Result<String> {
     let dir = install_script()?;
-    let code = origin_url();
+    let existing = recorded_code_keys();
+    let new_key = origin_url().as_deref().and_then(key_or_empty);
+    let code_owned = code_keys(&existing, new_key.as_deref(), repoint)?;
     let tracker = std::env::var("LJOS_TRACKER_REMOTE")
         .ok()
         .map(|url| url.trim().to_string())
@@ -51,12 +55,41 @@ pub(crate) fn ensure() -> Result<String> {
         }
         Err(_) => (Vec::new(), true),
     };
-    let code_ref = code.as_deref().into_iter().collect::<Vec<_>>();
+    let code_ref = code_owned.iter().map(String::as_str).collect::<Vec<_>>();
     let tracker_ref = tracker.as_deref().into_iter().collect::<Vec<_>>();
     let branch_ref = branches.iter().map(String::as_str).collect::<Vec<_>>();
     write_lists(&code_ref, &tracker_ref, &branch_ref, closed)?;
     point_hooks(&dir)?;
     Ok(format!("hook: {} is the pre-push allowlist", dir.display()))
+}
+
+fn code_keys(existing: &[String], new_key: Option<&str>, repoint: bool) -> Result<Vec<String>> {
+    let Some(new_key) = new_key else {
+        return Ok(existing.to_vec());
+    };
+    if !repoint && !existing.is_empty() && !existing.iter().any(|key| key == new_key) {
+        let kept = existing
+            .first()
+            .map(String::as_str)
+            .unwrap_or("another repository");
+        bail!("cloud up: the seat repository is already recorded as {kept}; leaving it in place");
+    }
+    Ok(vec![new_key.to_string()])
+}
+
+fn recorded_code_keys() -> Vec<String> {
+    let Some(path) = allow_path() else {
+        return Vec::new();
+    };
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| {
+            let (tag, val) = line.split_once('\t')?;
+            (tag == "code" && !val.is_empty()).then(|| val.to_string())
+        })
+        .collect()
 }
 
 /// Replace the allowlist. `code` and `tracker` are remote URLs as git
@@ -382,6 +415,17 @@ pub(crate) fn push_repo_key(raw: &str) -> String {
     if let Some((left, path)) = raw.split_once(':') {
         return scp_key(left, path);
     }
+    // `write_lists` keys every code line, including one that is already
+    // `host/path`. A second pass must not join that key onto the current
+    // directory.
+    if let Some((host, path)) = raw.split_once('/') {
+        if !host.is_empty()
+            && !host.starts_with('.')
+            && (host.contains('.') || host.parse::<std::net::Ipv4Addr>().is_ok())
+        {
+            return host_path(host, path);
+        }
+    }
     local_key(raw)
 }
 
@@ -474,6 +518,7 @@ mod tests {
             "https://github.com:443/leidarljos/ljos.git/",
         ] {
             assert_eq!(push_repo_key(url), want, "{url}");
+            assert_eq!(push_repo_key(&push_repo_key(url)), want, "{url}");
             assert_eq!(shell_key(url), want, "{url}");
         }
         assert_ne!(push_repo_key("https://github.com/other/ljos.git"), want);

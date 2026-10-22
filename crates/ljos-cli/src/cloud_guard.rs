@@ -431,11 +431,39 @@ fn judge_depth(line: &str, cwd: Option<&Path>, incoming: &WalkIn) -> Verdict {
                         }
                     }
                 }
-                _ => {}
+                _ => {
+                    if cloud_repoint(cmd, &words) {
+                        verdict.saw_ref = true;
+                        if verdict.push.is_none() {
+                            verdict.push = Some(format!(
+                                "`ljos cloud up --repoint` would retarget the repository this seat may push; {ALLOW_RULE}"
+                            ));
+                        }
+                    }
+                }
             }
         }
     }
     verdict
+}
+
+/// `ljos cloud up --repoint` rewrites the repository the hook allows.
+fn cloud_repoint(cmd: &str, words: &[String]) -> bool {
+    if cmd.rsplit('/').next().unwrap_or(cmd) != "ljos" {
+        return false;
+    }
+    let mut cloud = false;
+    let mut up = false;
+    let mut repoint = false;
+    for word in words.iter().skip(1) {
+        match word.as_str() {
+            "cloud" => cloud = true,
+            "up" => up = true,
+            "--repoint" => repoint = true,
+            _ => {}
+        }
+    }
+    cloud && up && repoint
 }
 
 /// Why `seg` disarms the pre-push hook, or `None` when it does not.
