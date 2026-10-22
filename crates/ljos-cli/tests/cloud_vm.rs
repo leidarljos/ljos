@@ -2897,9 +2897,9 @@ fn a_signed_handover_is_not_signed_again_by_the_machine_key() {
     assert_eq!(fs::read(&host).unwrap(), vec![8u8; 32]);
 }
 
-/// Pin `seat`'s key in a commit dated long before slots began, as the
-/// seats a tracker held before then were pinned, and push it.
-fn pin_standing(repo: &Path, seat: &str) -> String {
+/// Pin `seat` at author time `unix` and push it. The date is what a tracker
+/// writer can set; the standing list does not read it.
+fn pin_at(repo: &Path, seat: &str, unix: &str) -> String {
     let path = ljos_cli::cloud::prepare_seat_key(seat).unwrap();
     let key = ljos_cli::ballot_sig::load_or_create(&path).unwrap();
     let (public, _) = ljos_cli::ballot_sig::signed_hex(&key, b"pin");
@@ -2912,8 +2912,8 @@ fn pin_standing(repo: &Path, seat: &str) -> String {
         .arg("-C")
         .arg(repo)
         .args(["commit", "-q", "-m", &format!("pin {seat}")])
-        .env("GIT_AUTHOR_DATE", "@1700000000 +0000")
-        .env("GIT_COMMITTER_DATE", "@1700000000 +0000")
+        .env("GIT_AUTHOR_DATE", format!("@{unix} +0000"))
+        .env("GIT_COMMITTER_DATE", format!("@{unix} +0000"))
         .output()
         .unwrap();
     assert!(out.status.success(), "{out:?}");
@@ -2921,8 +2921,16 @@ fn pin_standing(repo: &Path, seat: &str) -> String {
     public
 }
 
-/// A box clone whose seat `ljosbot` is pinned from before slots began,
-/// over an origin holding `issues` on one board.
+/// Pin a standing seat with an author date after slots began, and push it.
+/// The list makes the seat standing. The date would refuse it if the gate
+/// still trusted git time.
+fn pin_standing(repo: &Path, seat: &str) -> String {
+    pin_at(repo, seat, "1792700000")
+}
+
+/// A box clone whose seat `ljosbot` is on the standing list, over an
+/// origin holding `issues` on one board. The pin's author date is after
+/// slots began.
 fn slot_world(root: &Path, issues: &[&str]) -> (PathBuf, PathBuf) {
     isolate_git(root);
     clear_agent_ids();
@@ -3037,28 +3045,283 @@ fn a_run_ballot_counts_for_a_push_under_its_slot_and_not_without_one() {
     let bare = ljos_cli::check_seat_signatures("probe-bare", &rows, &personas).unwrap_err();
     assert!(
         bare.contains(&format!(
-            "{seat} was first pinned after slots began, and no slot on probe-bare names it"
+            "{seat} is not a standing seat, and no slot on probe-bare names it"
         )),
         "{bare}"
     );
+}
 
-    std::env::set_var("LJOS_SEAT", "inky");
-    std::env::set_var("VISSUE_AGENT", "inky");
-    let key = ljos_cli::cloud::prepare_seat_key("inky").unwrap();
-    let key = ljos_cli::ballot_sig::load_or_create(&key).unwrap();
-    let (public, _) = ljos_cli::ballot_sig::signed_hex(&key, b"pin");
-    let pins = box_repo.join(".ljos-seat-keys");
-    let text = fs::read_to_string(&pins).unwrap() + &format!("inky {public}\n");
-    fs::write(&pins, text).unwrap();
-    git(
-        &box_repo,
-        &["commit", "-q", "-m", "pin inky", ".ljos-seat-keys"],
+/// A pin whose author date is before slots began does not make a seat
+/// standing, and a standing seat still launches when its pin is dated after.
+#[test]
+fn a_backdated_pin_does_not_make_a_standing_seat() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_origin, repo) = slot_world(root.path(), &["probe-bare"]);
+    let public = pin_at(&repo, "mallory", "1700000000");
+    let needle = format!("-Smallory {public}");
+    let when = git(
+        &repo,
+        &[
+            "log",
+            "-1",
+            "--format=%at",
+            &needle,
+            "--",
+            ".ljos-seat-keys",
+        ],
     );
+    let when: i64 = when.trim().parse().unwrap();
+    assert!(
+        when < ljos_cli::slot::SLOTS_SINCE,
+        "the forged author time {when} is not before slots"
+    );
+
+    std::env::set_var("LJOS_SEAT", "mallory");
+    std::env::set_var("VISSUE_AGENT", "mallory");
     let err = ljos_cli::slot::write("probe-bare", "ridley-review", "grok-4", "feedface0002abcd")
         .unwrap_err()
         .to_string();
+    assert!(err.contains("mallory is not a standing seat"), "{err}");
+
+    let layout = vissue_core::Layout::resolve(None, None).unwrap();
+    vissue_core::ops::vote_with(
+        &layout,
+        "probe-bare",
+        Some("ship"),
+        "mallory",
+        Some("none"),
+        None,
+    )
+    .unwrap();
+    let signed = ljos_cli::ballot_sig::sign_own_ballot("probe-bare").unwrap();
+    assert!(signed.contains("ballot signed"), "{signed}");
+    let rows = [serde_json::json!({"agent": "mallory", "choice": "ship"})];
+    let bare =
+        ljos_cli::check_seat_signatures("probe-bare", &rows, &std::collections::BTreeSet::new())
+            .unwrap_err();
     assert!(
-        err.contains("inky was first pinned after slots began"),
+        bare.contains("mallory is not a standing seat, and no slot on probe-bare names it"),
+        "{bare}"
+    );
+
+    pin_at(&repo, "inky", "1792700000");
+    std::env::set_var("LJOS_SEAT", "inky");
+    std::env::set_var("VISSUE_AGENT", "inky");
+    let said = ljos_cli::slot::write("probe-bare", "ridley-review", "grok-4", "feedface0002abcd");
+    assert!(
+        said.is_ok(),
+        "a standing seat dated after slots was refused: {said:?}"
+    );
+}
+
+/// Stage `paths` and commit them at author time `unix`.
+fn commit_dated(repo: &Path, paths: &[&str], message: &str, unix: &str) {
+    let mut args = vec!["add", "--"];
+    args.extend_from_slice(paths);
+    git(repo, &args);
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["commit", "-q", "-m", message])
+        .env("GIT_AUTHOR_DATE", format!("@{unix} +0000"))
+        .env("GIT_COMMITTER_DATE", format!("@{unix} +0000"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "commit {message}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The same slot line, committed earlier on another issue, does not make
+/// this issue's pin look later than the slot. The oldest author time of
+/// the line is before the pin; the gate still refuses.
+#[test]
+fn a_slot_line_replayed_from_another_issue_does_not_backdate_it() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_origin, repo) = slot_world(root.path(), &["probe-slot", "probe-other"]);
+    pin_standing(&repo, "ljosbot");
+    let launcher = ljos_cli::ballot_sig::load_or_create(
+        &ljos_cli::cloud::prepare_seat_key("ljosbot").unwrap(),
+    )
+    .unwrap();
+    let run = "review-replay-0001";
+    let note = ljos_cli::slot::sign(&launcher, "probe-slot", run, "grok", "r1", "ljosbot");
+    let layout = vissue_core::Layout::resolve(None, None).unwrap();
+    vissue_core::ops::note(&layout, "probe-other", &note).unwrap();
+    commit_dated(
+        &repo,
+        &["Software/probe/issues.org"],
+        "note the slot on the other issue",
+        "1700000000",
+    );
+
+    let run_key =
+        ljos_cli::ballot_sig::load_or_create(&ljos_cli::cloud::prepare_seat_key(run).unwrap())
+            .unwrap();
+    let (public, _) = ljos_cli::ballot_sig::signed_hex(&run_key, b"pin");
+    let pins = repo.join(".ljos-seat-keys");
+    let mut text = fs::read_to_string(&pins).unwrap();
+    text.push_str(&format!("{run} {public}\n"));
+    fs::write(&pins, text).unwrap();
+    commit_dated(
+        &repo,
+        &[".ljos-seat-keys"],
+        "pin the run seat",
+        "1792700000",
+    );
+
+    let pick = format!("-S{note}");
+    let times = git(&repo, &["log", "--format=%at", &pick]);
+    let earliest: i64 = times
+        .lines()
+        .filter_map(|t| t.trim().parse().ok())
+        .min()
+        .unwrap();
+    let pin_time: i64 = git(
+        &repo,
+        &[
+            "log",
+            "-1",
+            "--format=%at",
+            &format!("-S{run} {public}"),
+            "--",
+            ".ljos-seat-keys",
+        ],
+    )
+    .trim()
+    .parse()
+    .unwrap();
+    assert!(
+        earliest < pin_time,
+        "the replayed line at {earliest} is not older than the pin at {pin_time}"
+    );
+    assert_eq!(
+        ljos_cli::slot::recorded_before_pin("probe-other", &note, run, &public),
+        Some(true),
+        "the other issue's own entry did not hold the replayed line"
+    );
+    assert_eq!(
+        ljos_cli::slot::recorded_before_pin("probe-slot", &note, run, &public),
+        Some(false),
+        "the replay counted as this issue's slot"
+    );
+
+    vissue_core::ops::note(&layout, "probe-slot", &note).unwrap();
+    std::env::set_var("LJOS_SEAT", run);
+    std::env::set_var("VISSUE_AGENT", run);
+    vissue_core::ops::vote_with(&layout, "probe-slot", Some("ship"), run, Some("none"), None)
+        .unwrap();
+    let signed = ljos_cli::ballot_sig::sign_own_ballot("probe-slot").unwrap();
+    assert!(signed.contains("ballot signed"), "{signed}");
+    commit_dated(
+        &repo,
+        &["Software/probe/issues.org"],
+        "slot this issue after the pin",
+        "1792710000",
+    );
+    assert_eq!(
+        ljos_cli::slot::recorded_before_pin("probe-slot", &note, run, &public),
+        Some(false),
+        "a later copy on this issue backdated the pin"
+    );
+    let rows = [serde_json::json!({"agent": run, "choice": "ship"})];
+    let err =
+        ljos_cli::check_seat_signatures("probe-slot", &rows, &std::collections::BTreeSet::new())
+            .unwrap_err();
+    assert!(
+        err.contains("review-replay-0001's key was pinned before its slot"),
         "{err}"
     );
+}
+
+/// A writer that answers `GET /v1/atoms` with an empty roster.
+fn serve_empty_pack() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { break };
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 1024];
+            loop {
+                let n = s.read(&mut tmp).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let body = r#"{"atoms":[]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = s.write_all(resp.as_bytes());
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// Two standing seats vote ship from one harness session. The older note
+/// is the pusher. Raw rows are two ballots, so a cite that does not count
+/// them stands; consensus, which counts, does not. Both paths refuse.
+#[test]
+fn duplicate_ballots_from_one_session_have_one_push_verdict() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_origin, repo) = slot_world(root.path(), &["probe-dup"]);
+    pin_standing(&repo, "ljosbot");
+    pin_standing(&repo, "inky");
+    let issue = "probe-dup";
+    let layout = vissue_core::Layout::resolve(None, None).unwrap();
+    for seat in ["ljosbot", "inky"] {
+        vissue_core::ops::vote_with(&layout, issue, Some("ship"), seat, Some("none"), None)
+            .unwrap();
+    }
+    let harness = "sess-dup-0001";
+    for seat in ["ljosbot", "inky"] {
+        let key =
+            ljos_cli::ballot_sig::load_or_create(&ljos_cli::cloud::prepare_seat_key(seat).unwrap())
+                .unwrap();
+        let note = ljos_cli::ballot_sig::sign_bound(&key, issue, seat, "ship", harness, "-");
+        vissue_core::ops::note(&layout, issue, &note).unwrap();
+    }
+
+    let bin = root.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    executable(
+        &bin.join("vissue"),
+        "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = vote ]; then\n    printf '%s\\n' '[{\"agent\":\"ljosbot\",\"choice\":\"ship\"},{\"agent\":\"inky\",\"choice\":\"ship\"}]'\n    exit 0\n  fi\ndone\nexit 1\n",
+    );
+    std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+    std::env::set_var("PACKSET_URL", serve_empty_pack());
+    std::env::set_var("PACKSET_WORKSPACE", "seat");
+    std::env::remove_var("LJOS_UNSIGNED_BALLOTS");
+    std::env::set_var("LJOS_SEAT", "ljosbot");
+    std::env::set_var("VISSUE_AGENT", "ljosbot");
+
+    assert_eq!(ljos_cli::seat_name(), "ljosbot");
+    let rows = ljos_cli::ballot_rows(issue);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["agent"].as_str(), Some("ljosbot"), "{rows:?}");
+    let cite = ljos_cli::cite_stands(issue);
+    let (words, json) = ljos_cli::push_cite_reading(
+        issue,
+        &rows,
+        &std::collections::BTreeSet::new(),
+        &ljos_cli::seat_name(),
+    );
+    let stands = json["push_cite"]["stands"].as_bool().unwrap();
+    assert!(!stands, "{words}");
+    assert!(words.contains("does not stand"), "{words}");
+    assert_eq!(cite.is_ok(), stands, "{cite:?} {words}");
+    let err = cite.unwrap_err();
+    assert!(err.contains("the only seat ballot"), "{err}");
+    assert!(err.contains("ljosbot"), "{err}");
 }
