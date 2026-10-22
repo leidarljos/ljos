@@ -191,9 +191,12 @@ they differ only in hex case or in a small-order part.
   that seat keeps counting and the later key for that seat is refused
 - of what remains, the latest `cast_at` per `(question, voter)` counts
 - a latest stance of `withdrawn` contributes no vote
-- two unreplaced ballots from one voter on one question in the same
-  hour are ambiguous and are dropped on that question only. `cast_at`
-  does not break that tie, and neither does file order
+- two unreplaced ballots from one voter on one question in that
+  voter's latest hour are ambiguous and are dropped on that question
+  only. `cast_at` does not break that tie, and neither does file
+  order. A tie in an earlier hour is superseded by the later ballot
+  like any older ballot: accept and reject at 10:00 and accept at
+  12:00 count one accept
 
 ## What the check cannot see
 
