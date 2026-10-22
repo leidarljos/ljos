@@ -1,23 +1,25 @@
 //! Launch slots. The seat that launches a cloud run leaves a `slot:` note
 //! on the issue it hands the run: the seat the run will vote as, the model
-//! it asked for and the run id, signed under the launcher's pinned key.
-//! The run mints its own key on its machine, so the slot names the seat
-//! before any key is pinned for it.
+//! it asked for, the run id and the public key the run minted on its
+//! machine, signed under the launcher's pinned key. The slot names the
+//! seat and its key before the tracker pins any key for it, so a writer
+//! that pins the seat first under another key does not vote as the run.
 //!
 //! A pin alone is what any tracker writer can make, and the author date on
-//! that commit is whatever the writer sets. A seat stands when its name is
-//! on a list in this binary ([`standing`]), or when its pinned key was
-//! already committed when slots began in this tracker ([`stood`]): in the
-//! parents of the commit that brought the first slot note, by commit
-//! order. Any other seat counts toward a push cite only under a slot on
-//! that issue ([`problems`]), on a git tracker and on any other. The slot
-//! has to already be in that issue's own entry in the commit that
+//! that commit is whatever the writer sets. A seat stands when its pinned
+//! key was already committed when slots began in this tracker ([`stood`]):
+//! in the parents of the commit that brought the first slot note, by
+//! commit order. On a tracker that is not a git repository the names on a
+//! list in this binary stand instead ([`standing`]). Any other seat counts
+//! toward a push cite only under a slot on that issue ([`problems`]). The
+//! slot has to already be in that issue's own entry in the commit that
 //! introduced the pin. A copy of the line on another issue does not
 //! count, and a git date is not read.
 
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::SigningKey;
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use crate::ballot_sig;
 
@@ -32,8 +34,8 @@ pub const SLOTS_SINCE: i64 = 1_792_626_505;
 /// comment.
 const STANDING_SEATS: &str = include_str!("standing_seats.txt");
 
-/// Whether `seat` stood when slots began. A standing seat needs no slot
-/// and may sign one. Any other seat is a run seat.
+/// Whether `seat` is on the list that stands on a tracker that is not a
+/// git repository ([`stands`]).
 #[must_use]
 pub fn standing(seat: &str) -> bool {
     let seat = seat.trim();
@@ -97,15 +99,17 @@ pub fn stood(starts: &[Vec<String>], seat: &str, key: &str) -> bool {
         .all(|parents| !parents.is_empty() && parents.iter().all(|p| pin_line_at(p, seat, key)))
 }
 
-/// Whether `seat`, pinned to `key`, needs no slot and may sign one: it is
-/// on the list, or its pin [`stood`]. `starts` is `None` on a tracker that
-/// is not a git repository, where only the list stands.
+/// Whether `seat`, pinned to `key`, needs no slot and may sign one: its
+/// pin [`stood`]. A name alone does not stand on a git tracker, since the
+/// first writer to sign as an unpinned name pins it. `starts` is `None` on
+/// a tracker that is not a git repository, which keeps no order, and there
+/// the list stands.
 #[must_use]
 pub fn stands(seat: &str, key: Option<&str>, starts: Option<&[Vec<String>]>) -> bool {
-    standing(seat)
-        || key
-            .zip(starts)
-            .is_some_and(|(key, at)| stood(at, seat, key))
+    match starts {
+        None => standing(seat),
+        Some(at) => key.is_some_and(|key| stood(at, seat, key)),
+    }
 }
 
 /// A slot note's fields.
@@ -114,84 +118,139 @@ pub struct Slot {
     pub seat: String,
     pub model: String,
     pub run: String,
+    /// The public key the run minted, as hex. Its ballots count only when
+    /// the tracker pins this key for `seat`.
+    pub run_key: String,
     pub launcher: String,
     pub key: String,
     pub sig: String,
 }
 
-/// The bytes a slot signature covers. The issue is in them, so a slot
-/// copied to another issue does not verify there.
+/// This tracker as a slot names it: its root commits, sorted and joined
+/// with `,`. `-` on a tracker that is not a git repository.
 #[must_use]
-pub fn message(issue: &str, seat: &str, model: &str, run: &str, launcher: &str) -> Vec<u8> {
+pub fn tracker_id() -> String {
+    let roots = ballot_sig::tracker_git(&["rev-list", "--max-parents=0", "HEAD"]);
+    let mut roots: Vec<&str> = roots.as_deref().unwrap_or("").split_whitespace().collect();
+    roots.sort_unstable();
+    if roots.is_empty() {
+        "-".into()
+    } else {
+        roots.join(",")
+    }
+}
+
+/// The bytes a slot signature covers. The tracker and the issue are in
+/// them, so a slot copied to another issue, or to the same issue id on
+/// another tracker, does not verify there.
+#[must_use]
+pub fn message(
+    tracker: &str,
+    issue: &str,
+    seat: &str,
+    model: &str,
+    run: &str,
+    run_key: &str,
+    launcher: &str,
+) -> Vec<u8> {
     format!(
-        "ljos-slot/v1\n{}\n{}\n{}\n{}\n{}\n",
+        "ljos-slot/v3\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+        tracker.trim(),
         issue.trim(),
         seat.trim(),
         model.trim(),
         run.trim(),
+        run_key.trim(),
         launcher.trim()
     )
     .into_bytes()
 }
 
-/// `slot: SEAT model=MODEL run=RUN LAUNCHER KEYHEX SIGHEX`.
+/// `slot: SEAT model=MODEL run=RUN key=RUNKEY LAUNCHER KEYHEX SIGHEX`. A
+/// slot without the run's key does not parse.
 #[must_use]
 pub fn parse(note: &str) -> Option<Slot> {
     let rest = note.trim().strip_prefix(SLOT_NOTE)?;
     let parts: Vec<&str> = rest.split_whitespace().collect();
-    let [seat, model, run, launcher, key, sig] = parts.as_slice() else {
+    let [seat, model, run, run_key, launcher, key, sig] = parts.as_slice() else {
         return None;
     };
     Some(Slot {
         seat: (*seat).to_string(),
         model: model.strip_prefix("model=")?.to_string(),
         run: run.strip_prefix("run=")?.to_string(),
+        run_key: run_key.strip_prefix("key=")?.to_string(),
         launcher: (*launcher).to_string(),
         key: (*key).to_string(),
         sig: (*sig).to_string(),
     })
 }
 
-/// Whether `slot` is a valid signature by its key over this issue's slot.
+/// Whether `slot` is a valid signature by its key over this issue's slot
+/// on `tracker` ([`tracker_id`]).
 #[must_use]
-pub fn verifies(issue: &str, slot: &Slot) -> bool {
+pub fn verifies(tracker: &str, issue: &str, slot: &Slot) -> bool {
     ballot_sig::signature_ok(
         &slot.key,
         &slot.sig,
-        &message(issue, &slot.seat, &slot.model, &slot.run, &slot.launcher),
+        &message(
+            tracker,
+            issue,
+            &slot.seat,
+            &slot.model,
+            &slot.run,
+            &slot.run_key,
+            &slot.launcher,
+        ),
     )
 }
 
-/// The note for a slot signed by `key`. Each field is one token.
+/// The note for a slot on `tracker` ([`tracker_id`]) signed by `key`.
+/// Each field is one token.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn sign(
     key: &SigningKey,
+    tracker: &str,
     issue: &str,
     seat: &str,
     model: &str,
     run: &str,
+    run_key: &str,
     launcher: &str,
 ) -> String {
-    let [seat, model, run, launcher] = [seat, model, run, launcher].map(ballot_sig::field);
-    let (public, sig) =
-        ballot_sig::signed_hex(key, &message(issue, &seat, &model, &run, &launcher));
-    format!("{SLOT_NOTE}{seat} model={model} run={run} {launcher} {public} {sig}")
+    let [seat, model, run, run_key, launcher] =
+        [seat, model, run, run_key, launcher].map(ballot_sig::field);
+    let (public, sig) = ballot_sig::signed_hex(
+        key,
+        &message(tracker, issue, &seat, &model, &run, &run_key, &launcher),
+    );
+    format!("{SLOT_NOTE}{seat} model={model} run={run} key={run_key} {launcher} {public} {sig}")
 }
 
 /// Sign a slot on `issue` for run `run` on `model`, as this process's
 /// seat, and leave it on the issue. `seat` is the `LJOS_SEAT` the run
 /// boots with; the run id is appended the way `ljos cloud up` appends it.
+/// `run_key` is the public key `ljos cloud up` printed on the run.
 ///
 /// # Errors
 ///
 /// No seat names the launcher, the launcher has no pinned key or holds
 /// another one, `seat` already ends with the run id, the run's seat is
-/// the launcher or is already pinned, or the tracker did not take the
-/// note. A launcher that is not a standing seat is refused too: no slot
-/// it signs would count.
-pub fn write(issue: &str, seat: &str, model: &str, run: &str) -> Result<String> {
+/// the launcher or is already pinned, `run_key` is not a public key, or
+/// the tracker did not take the note. A launcher that is not a standing
+/// seat is refused too: no slot it signs would count.
+pub fn write(issue: &str, seat: &str, model: &str, run: &str, run_key: &str) -> Result<String> {
     let launcher = ballot_sig::own_voter()
         .context("slot: no seat to sign as; set LJOS_SEAT to the launching seat")?;
+    let run_key = run_key.trim().to_ascii_lowercase();
+    let public = hex::decode(&run_key)
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+        .and_then(|b| ed25519_dalek::VerifyingKey::from_bytes(&b).ok());
+    if public.is_none() {
+        bail!("slot: --key {run_key} is not a public seat key; pass the hex `ljos cloud up` printed on the run");
+    }
     let seat = crate::cloud::run_seat(seat, run)?;
     if seat == launcher {
         bail!("slot: {seat} is the launching seat, and a seat does not slot itself");
@@ -223,26 +282,39 @@ pub fn write(issue: &str, seat: &str, model: &str, run: &str) -> Result<String> 
             "slot: {launcher} is not a standing seat, so no slot it signs counts; a standing seat launches"
         );
     }
-    let note = sign(&key, issue, &seat, model, run, &launcher);
+    let note = sign(
+        &key,
+        &tracker_id(),
+        issue,
+        &seat,
+        model,
+        run,
+        &run_key,
+        &launcher,
+    );
     if ballot_sig::write_sig_note(issue, &note).is_err() {
         crate::run_captured("vissue", &["note", issue, &note])?;
     }
     Ok(format!(
-        "slot: {seat} on {issue} for run {}, model {}, signed by {launcher} with key {}…\n",
+        "slot: {seat} on {issue} for run {}, model {}, run key {}…, signed by {launcher} with key {}…\n",
         ballot_sig::field(run),
         ballot_sig::field(model),
+        &run_key[..12],
         &mine[..12]
     ))
 }
 
 /// Why the run seats among `seats` do not count on `issue`. A seat that
 /// `stands` needs no slot. Any other needs a slot in `notes` that names it
-/// and verifies, signed under the pin of a seat that stands.
+/// and its pinned key and verifies, signed under the pin of a seat that
+/// stands.
 /// `before_pin(note, voter)` is whether `note` was already in this
 /// issue's own entry when `voter`'s pin was introduced. `false` refuses
 /// the slot: the key it vouches for is not one the run minted after it.
+/// A slot verifies only on `tracker` ([`tracker_id`]).
 #[must_use]
 pub fn problems(
+    tracker: &str,
     issue: &str,
     seats: &[(&str, &str)],
     notes: &[String],
@@ -263,7 +335,9 @@ pub fn problems(
             }
             let launcher = &slot.launcher;
             let refused = match pins.get(launcher) {
-                _ if !verifies(issue, &slot) => Some(format!("{voter}'s slot does not verify")),
+                _ if !verifies(tracker, issue, &slot) => {
+                    Some(format!("{voter}'s slot does not verify"))
+                }
                 None => Some(format!(
                     "{voter}'s slot is from {launcher}, which has no pinned key on this tracker"
                 )),
@@ -278,6 +352,14 @@ pub fn problems(
                 Some(_) if !stands(launcher) => Some(format!(
                     "{voter}'s slot is from {launcher}, which is not a standing seat"
                 )),
+                Some(_)
+                    if pins.get(*voter).map(|k| ballot_sig::key_fingerprint(k))
+                        != Some(ballot_sig::key_fingerprint(&slot.run_key)) =>
+                {
+                    Some(format!(
+                        "{voter} is pinned to a key other than the one its slot names"
+                    ))
+                }
                 Some(_) if !before_pin(note, voter) => {
                     Some(format!("{voter}'s key was pinned before its slot"))
                 }
@@ -330,12 +412,14 @@ pub fn recorded_before_pin(issue: &str, note: &str, seat: &str, key: &str) -> Op
 }
 
 /// Commits that added the exact pin line `seat key`, whose parent trees
-/// do not already hold it.
+/// do not already hold it. Every branch is read: a merge that kept the
+/// same line from both sides would otherwise hide one introduction.
 fn pin_introductions(seat: &str, key: &str) -> Vec<String> {
     let pick = format!("-S{seat} {key}");
     let log = ballot_sig::tracker_git(&[
         "--no-pager",
         "log",
+        "--full-history",
         "--format=%H %P",
         pick.as_str(),
         "--",
@@ -356,6 +440,40 @@ fn pin_introductions(seat: &str, key: &str) -> Vec<String> {
     out
 }
 
+/// The pin lines some commit in this tracker's history held that `pins`
+/// no longer does, as `seat key…`. A pin once committed stays: a line
+/// changed in place re-pins a seat, and a line removed drops its ballots.
+/// Empty on a tracker that is not a git repository.
+#[must_use]
+pub fn dropped_pins(pins: &BTreeMap<String, String>) -> Vec<String> {
+    let log = ballot_sig::tracker_git(&[
+        "--no-pager",
+        "log",
+        "--full-history",
+        "--format=%H",
+        "--",
+        ballot_sig::PIN_FILE,
+    ])
+    .unwrap_or_default();
+    let mut out = std::collections::BTreeSet::new();
+    for commit in log.lines() {
+        let Some(text) = file_at(commit.trim(), ballot_sig::PIN_FILE) else {
+            continue;
+        };
+        for line in text.lines() {
+            let mut words = line.split_whitespace();
+            let (Some(seat), Some(key)) = (words.next(), words.next()) else {
+                continue;
+            };
+            if pins.get(seat).map(String::as_str) != Some(key) {
+                let short: String = key.chars().take(12).collect();
+                out.insert(format!("{seat} {short}…"));
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
 fn pin_line_at(commit: &str, seat: &str, key: &str) -> bool {
     let Some(text) = file_at(commit, ballot_sig::PIN_FILE) else {
         return false;
@@ -367,24 +485,33 @@ fn pin_line_at(commit: &str, seat: &str, key: &str) -> bool {
 }
 
 fn file_at(commit: &str, path: &str) -> Option<String> {
+    file_at_in(&ballot_sig::env_root()?, commit, path)
+}
+
+pub(crate) fn file_at_in(root: &Path, commit: &str, path: &str) -> Option<String> {
     if path.is_empty() {
         return None;
     }
-    ballot_sig::tracker_git(&["--no-pager", "show", &format!("{commit}:{path}")])
+    ballot_sig::git_in(root, &["--no-pager", "show", &format!("{commit}:{path}")])
 }
 
 fn note_on_issue_at(commit: &str, issue: &str, note: &str) -> bool {
+    ballot_sig::env_root().is_some_and(|root| note_on_issue_at_in(&root, commit, issue, note))
+}
+
+pub(crate) fn note_on_issue_at_in(root: &Path, commit: &str, issue: &str, note: &str) -> bool {
     let pattern = format!(":ID:[[:space:]]+{}[[:space:]]*$", ere_escape(issue));
-    let Some(hits) =
-        ballot_sig::tracker_git(&["--no-pager", "grep", "-l", "-E", "-e", &pattern, commit])
-    else {
+    let Some(hits) = ballot_sig::git_in(
+        root,
+        &["--no-pager", "grep", "-l", "-E", "-e", &pattern, commit],
+    ) else {
         return false;
     };
     let prefix = format!("{commit}:");
     hits.lines().any(|hit| {
         let hit = hit.trim();
         let path = hit.strip_prefix(&prefix).unwrap_or(hit);
-        file_at(commit, path)
+        file_at_in(root, commit, path)
             .is_some_and(|text| issue_entry(&text, issue).is_some_and(|block| block.contains(note)))
     })
 }
@@ -461,35 +588,66 @@ mod tests {
     fn a_slot_parses_whole_and_verifies_on_its_issue_only() {
         let note = sign(
             &key(1),
+            "t-1",
             "d-1",
             "review-cafebabe0001abcd",
             "grok 4",
             "bc-cafebabe0001abcd",
+            &public(&key(4)),
             "ljosbot",
         );
         let slot = parse(&note).expect("a signed slot parses");
         assert_eq!(slot.seat, "review-cafebabe0001abcd");
         assert_eq!(slot.model, "grok_4");
         assert_eq!(slot.run, "bc-cafebabe0001abcd");
+        assert_eq!(slot.run_key, public(&key(4)));
         assert_eq!(slot.launcher, "ljosbot");
-        assert!(verifies("d-1", &slot));
+        assert!(verifies("t-1", "d-1", &slot));
         assert!(
-            !verifies("d-2", &slot),
+            !verifies("t-1", "d-2", &slot),
             "a slot lifted to another issue verified"
+        );
+        assert!(
+            !verifies("t-2", "d-1", &slot),
+            "a slot lifted to another tracker verified"
         );
         let mut moved = slot.clone();
         moved.model = "opus".into();
-        assert!(!verifies("d-1", &moved), "a rewritten model still verified");
+        assert!(
+            !verifies("t-1", "d-1", &moved),
+            "a rewritten model still verified"
+        );
+        let mut rekeyed = slot.clone();
+        rekeyed.run_key = public(&key(3));
+        assert!(
+            !verifies("t-1", "d-1", &rekeyed),
+            "a rewritten run key still verified"
+        );
         let mut renamed = slot;
         renamed.seat = "review-other".into();
         assert!(
-            !verifies("d-1", &renamed),
+            !verifies("t-1", "d-1", &renamed),
             "a rewritten seat still verified"
         );
     }
 
     fn public(k: &SigningKey) -> String {
         hex::encode(k.verifying_key().to_bytes())
+    }
+
+    /// A slot for `seat` on `issue` of tracker `t-1` naming the run key
+    /// [`check`] pins for `review-r1`, signed by `key(k)` as `launcher`.
+    fn slotted(k: u8, issue: &str, seat: &str, launcher: &str) -> String {
+        sign(
+            &key(k),
+            "t-1",
+            issue,
+            seat,
+            "grok",
+            "r1",
+            &public(&key(4)),
+            launcher,
+        )
     }
 
     /// `ljosbot` and `inky` are standing seats. `mallory` and the run seat
@@ -507,6 +665,7 @@ mod tests {
         .collect();
         let before_pin = |note: &str, _voter: &str| late != Some(note);
         problems(
+            "t-1",
             "d-1",
             &[("inky", "ship"), ("review-r1", "ship")],
             notes,
@@ -518,14 +677,14 @@ mod tests {
 
     #[test]
     fn a_run_seat_counts_under_a_slot_from_a_standing_seat() {
-        let slot = sign(&key(1), "d-1", "review-r1", "grok", "r1", "ljosbot");
+        let slot = slotted(1, "d-1", "review-r1", "ljosbot");
         assert!(check(std::slice::from_ref(&slot), None).is_empty());
         let none = check(&[], None);
         assert_eq!(
             none,
             vec!["review-r1 is not a standing seat, and no slot on d-1 names it"]
         );
-        let other = sign(&key(1), "d-1", "review-r2", "grok", "r2", "ljosbot");
+        let other = slotted(1, "d-1", "review-r2", "ljosbot");
         assert_eq!(check(&[other], None), none);
     }
 
@@ -536,24 +695,58 @@ mod tests {
             assert_eq!(p.len(), 1, "{p:?}");
             p[0].clone()
         };
-        let lifted = sign(&key(1), "d-2", "review-r1", "grok", "r1", "ljosbot");
+        let lifted = slotted(1, "d-2", "review-r1", "ljosbot");
         assert!(refused(lifted, false).contains("does not verify"));
-        let forged = sign(&key(3), "d-1", "review-r1", "grok", "r1", "ljosbot");
+        let forged = slotted(3, "d-1", "review-r1", "ljosbot");
         assert!(refused(forged, false).contains("other than ljosbot's pinned one"));
-        let minted = sign(&key(3), "d-1", "review-r1", "grok", "r1", "mallory");
+        let minted = slotted(3, "d-1", "review-r1", "mallory");
         assert!(refused(minted, false).contains("not a standing seat"));
-        let own = sign(&key(4), "d-1", "review-r1", "grok", "r1", "review-r1");
+        let own = slotted(4, "d-1", "review-r1", "review-r1");
         assert!(refused(own, false).contains("not a standing seat"));
-        let stranger = sign(&key(5), "d-1", "review-r1", "grok", "r1", "nobody");
+        let stranger = slotted(5, "d-1", "review-r1", "nobody");
         assert!(refused(stranger, false).contains("no pinned key"));
-        let late = sign(&key(1), "d-1", "review-r1", "grok", "r1", "ljosbot");
+        let rekeyed = sign(
+            &key(1),
+            "t-1",
+            "d-1",
+            "review-r1",
+            "grok",
+            "r1",
+            &public(&key(3)),
+            "ljosbot",
+        );
+        assert!(refused(rekeyed, false).contains("other than the one its slot names"));
+        let late = slotted(1, "d-1", "review-r1", "ljosbot");
         assert!(refused(late, true).contains("pinned before its slot"));
     }
 
     #[test]
+    fn a_run_pinned_in_upper_case_hex_counts_under_its_slot() {
+        let pins: BTreeMap<String, String> = [
+            ("ljosbot".to_string(), public(&key(1))),
+            (
+                "review-r1".to_string(),
+                public(&key(4)).to_ascii_uppercase(),
+            ),
+        ]
+        .into();
+        let slot = slotted(1, "d-1", "review-r1", "ljosbot");
+        let p = problems(
+            "t-1",
+            "d-1",
+            &[("review-r1", "ship")],
+            &[slot],
+            &pins,
+            &standing,
+            &|_, _| true,
+        );
+        assert!(p.is_empty(), "{p:?}");
+    }
+
+    #[test]
     fn one_good_slot_beside_a_forged_one_counts() {
-        let forged = sign(&key(3), "d-1", "review-r1", "grok", "r1", "ljosbot");
-        let good = sign(&key(2), "d-1", "review-r1", "grok", "r1", "inky");
+        let forged = slotted(3, "d-1", "review-r1", "ljosbot");
+        let good = slotted(2, "d-1", "review-r1", "inky");
         assert!(check(&[forged, good], None).is_empty());
     }
 
@@ -561,6 +754,7 @@ mod tests {
     fn a_seat_off_the_list_needs_a_slot_when_the_tracker_has_no_clock() {
         let pins: BTreeMap<String, String> = [("review-r1".to_string(), public(&key(4)))].into();
         let p = problems(
+            "t-1",
             "d-1",
             &[("review-r1", "ship")],
             &[],
@@ -586,7 +780,7 @@ mod tests {
 
     #[test]
     fn a_slot_line_in_another_issues_block_is_not_on_this_one() {
-        let note = sign(&key(1), "d-1", "review-r1", "grok", "r1", "ljosbot");
+        let note = slotted(1, "d-1", "review-r1", "ljosbot");
         let other =
             format!("* TODO other\n:PROPERTIES:\n:ID: d-2\n:END:\n- Note: \"{note}\" [2020]\n");
         let this = "* TODO this\n:PROPERTIES:\n:ID: d-1\n:END:\n";
@@ -612,6 +806,11 @@ mod tests {
     #[test]
     fn a_note_that_is_not_a_slot_does_not_parse() {
         assert_eq!(parse("slot: review model=m run=r ljosbot ab"), None);
+        assert_eq!(
+            parse("slot: review model=m run=r ljosbot ab cd"),
+            None,
+            "a slot that names no run key parsed"
+        );
         assert_eq!(parse("slot: review m r ljosbot ab cd"), None);
         assert_eq!(parse("ballot-sig: a ship ab cd"), None);
     }
