@@ -28448,14 +28448,22 @@ pub(crate) fn stored_by(atom: &Value) -> StoredBy {
     }
 }
 
-/// [`stored_by`] for each atom id this process read. A
-/// [`packset_client::Hit`] has no origin field, so the readers that parse
-/// the pack's answer record it here by id.
-fn stored_origins() -> &'static std::sync::Mutex<std::collections::BTreeMap<String, StoredBy>> {
-    static SEEN: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::BTreeMap<String, StoredBy>>,
-    > = std::sync::OnceLock::new();
+/// [`stored_by`] for each atom id this process read, or `None` for an id
+/// the pack last answered it does not hold. A [`packset_client::Hit`] has
+/// no origin field, so the readers that parse the pack's answer record it
+/// here by id.
+type Origins = std::collections::BTreeMap<String, Option<StoredBy>>;
+
+fn stored_origins() -> &'static std::sync::Mutex<Origins> {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<Origins>> = std::sync::OnceLock::new();
     SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+}
+
+fn record_origin(id: &str, by: Option<StoredBy>) {
+    stored_origins()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(id.to_string(), by);
 }
 
 /// Record the stored origin of `atom`, an atom or a search hit, by its id.
@@ -28465,10 +28473,7 @@ pub(crate) fn keep_origin(atom: &Value) {
         return;
     }
     if let Some(id) = atom.get("id").and_then(Value::as_str) {
-        stored_origins()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id.to_string(), stored_by(atom));
+        record_origin(id, Some(stored_by(atom)));
     }
 }
 
@@ -28481,7 +28486,7 @@ fn keep_origins_of(client: &PacksetClient, hits: &[Hit]) {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         hits.iter()
             .filter_map(|h| h.id.as_deref())
-            .any(|id| !known.contains_key(id))
+            .any(|id| !known.get(id).is_some_and(Option::is_some))
     };
     if !missing {
         return;
@@ -28506,6 +28511,12 @@ fn hit_stored_by(h: &Hit) -> StoredBy {
 }
 
 fn recorded_origin(id: &str) -> Option<StoredBy> {
+    recorded(id).flatten()
+}
+
+/// The pack's last answer for `id` in this process: `Some(None)` when it
+/// answered it does not hold the atom, `None` when it was never asked.
+fn recorded(id: &str) -> Option<Option<StoredBy>> {
     stored_origins()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -28524,42 +28535,33 @@ pub(crate) enum Stored {
     Unreachable,
 }
 
-/// How long a listing answers for atoms it did not hold before the pack
-/// is listed again: a long-lived reader sees atoms written since.
-const LISTING_FRESH: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// [`person_stored`] for atom `id` in this seat's pack. When no reader has
-/// recorded it, the pack is listed inside a short bound. Only a listing
-/// the pack answered is remembered, per pack and workspace, so a pack
-/// that was down is asked again on the next read.
+/// [`person_stored`] for atom `id` in this seat's pack, asked of the pack
+/// inside a short bound on every read. A long-lived process (the MCP
+/// server, a hook daemon) outlives a forget or a retraction, so what it
+/// recorded earlier never answers ahead of the pack. Only when the pack
+/// does not answer does the last answer recorded here stand, a held
+/// origin or the pack's not holding it. A failure is never recorded, so
+/// a pack that was down is asked again on the next read.
 pub(crate) fn stored_origin_of(id: &str) -> Stored {
-    static LISTED: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::BTreeMap<String, std::time::Instant>>,
-    > = std::sync::OnceLock::new();
-    if let Some(known) = recorded_origin(id) {
-        return Stored::Origin(known);
+    let asked = with_pack_timeout(400, || {
+        pack().map(|client| client.get_atom(&client.workspace(), id))
+    });
+    match asked {
+        Ok(Ok(atom)) => {
+            let by = stored_by(&atom);
+            record_origin(id, Some(by));
+            Stored::Origin(by)
+        }
+        Ok(Err(packset_client::Error::Bad(_))) => {
+            record_origin(id, None);
+            Stored::Absent
+        }
+        _ => match recorded(id) {
+            Some(Some(by)) => Stored::Origin(by),
+            Some(None) => Stored::Absent,
+            None => Stored::Unreachable,
+        },
     }
-    let Ok(client) = pack() else {
-        return Stored::Unreachable;
-    };
-    let key = format!("{}|{}", client.base(), client.workspace());
-    let listed = LISTED.get_or_init(Default::default);
-    let fresh = listed
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&key)
-        .is_some_and(|at| at.elapsed() < LISTING_FRESH);
-    if !fresh {
-        let Ok(atoms) = session_atoms(400) else {
-            return Stored::Unreachable;
-        };
-        atoms.iter().for_each(keep_origin);
-        listed
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(key, std::time::Instant::now());
-    }
-    recorded_origin(id).map_or(Stored::Absent, Stored::Origin)
 }
 
 /// Whether a recalled hit is an unverified working note. Any claim the
@@ -48010,15 +48012,15 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
         let (url, _) = serve_http(move |req| {
             let first = req.lines().next().unwrap_or("");
-            if first.contains("/v1/atoms") {
-                let atoms = serde_json::json!({"atoms": [{
+            if first.contains(&format!("/v1/atoms/{id}")) {
+                let atom = serde_json::json!({
                     "id": id, "kind": "lesson", "text": "Keep the form short.",
                     "workspace": "seat", "origin": "user-declared",
                     "source": {"basis": "person"},
-                }]});
-                return (200, atoms.to_string());
+                });
+                return (200, atom.to_string());
             }
-            (200, r#"{"atoms":[]}"#.into())
+            (404, r#"{"error":"no atom"}"#.into())
         });
         let _pack = HoldEnv::set(&[("PACKSET_URL", &url), ("PACKSET_WORKSPACE", "seat")]);
         assert_eq!(stored_origin_of(id), Stored::Origin(StoredBy::Person));
