@@ -534,6 +534,18 @@ enum Cmd {
         /// Include mail this seat has already read.
         #[arg(long)]
         all: bool,
+        /// Fetch the tracker and import its sealed logs before listing.
+        /// `COMMIT` waits until that commit is present. Without it, use
+        /// `LJOS_WAKE_COMMIT` when that is set, otherwise the remote head.
+        /// A commit the remote does not have imports the remote head. No
+        /// remote: list only.
+        #[arg(
+            long,
+            value_name = "COMMIT",
+            num_args = 0..=1,
+            default_missing_value = ""
+        )]
+        sync: Option<String>,
     },
     /// Write a read receipt for one message.
     Read {
@@ -575,7 +587,8 @@ enum Cmd {
         #[arg(long, conflicts_with_all = ["webhook", "clear", "fire"])]
         command: Option<String>,
         /// POST the message's envelope (never its body) here, such as a Grok
-        /// Bot routine's webhook. https, or http on this machine.
+        /// Bot routine's webhook. https, or http on localhost, an IPv4
+        /// loopback address, or ::1.
         #[arg(long, conflicts_with_all = ["clear", "fire"])]
         webhook: Option<String>,
         /// A file holding the webhook's bearer key.
@@ -697,7 +710,7 @@ enum Cmd {
         dry_run: bool,
         /// Write one prompt file per persona for a cloud seat: the seat
         /// environment, the slot and the push rules. Does not spawn.
-        #[arg(long, conflicts_with_all = ["jev", "harness", "dry_run"])]
+        #[arg(long, conflicts_with_all = ["jev", "harness", "designers", "dry_run"])]
         cloud: bool,
     },
     /// A voter with a view: NAME holds its ballot by ANCHOR in [0, 1] (0 never moves).
@@ -1811,7 +1824,9 @@ fn run_command() -> Result<()> {
                 })?
             );
         }
-        Cmd::Inbox { all } => print!("{}", ljos_cli::mail::inbox(all)?),
+        Cmd::Inbox { all, sync } => {
+            print!("{}", ljos_cli::mail::inbox_sync(all, sync.as_deref())?)
+        }
         Cmd::Read { id } => print!("{}", ljos_cli::mail::read(&id)?),
         Cmd::Reply {
             id,
@@ -1852,6 +1867,8 @@ fn run_command() -> Result<()> {
                     msg: msg.unwrap_or_default(),
                     issue,
                     interrupt,
+                    // Push mode fills this after the sealed log is committed.
+                    commit: None,
                 })?
             } else {
                 ljos_cli::wake::show(&seat)
