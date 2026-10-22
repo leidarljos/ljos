@@ -2083,8 +2083,16 @@ fn file_mode(path: &Path) -> Option<u32> {
 }
 
 fn set_mode_0600(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .with_context(|| format!("mode 0600 {}", path.display()))?;
+    if !file.metadata().is_ok_and(|meta| meta.file_type().is_file()) {
+        bail!("mode 0600 {}: target is not a file", path.display());
+    }
+    file.set_permissions(fs::Permissions::from_mode(0o600))
         .with_context(|| format!("mode 0600 {}", path.display()))
 }
 
@@ -2827,5 +2835,29 @@ mod tests {
             0o600
         );
         assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn mode_fix_refuses_a_symlink_planted_at_the_target_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cloud.age");
+        let outside = dir.path().join("outside");
+        fs::write(&path, SECRET).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::write(&outside, "keep\n").unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+
+        assert!(set_mode_0600(&path).is_err());
+        assert!(fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "a swapped symlink changed another file's mode"
+        );
     }
 }
