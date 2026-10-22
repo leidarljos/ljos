@@ -1596,11 +1596,7 @@ pub fn read_log() -> Vec<Value> {
     let Some(dir) = state_dir() else {
         return Vec::new();
     };
-    let text = std::fs::read_to_string(dir.join("jev-log.jsonl")).unwrap_or_default();
-    text.lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect()
+    crate::complete_rows(&std::fs::read(dir.join("jev-log.jsonl")).unwrap_or_default())
 }
 
 /// Per-decision accuracy and calibration. A ballot joins `about.issue` to
@@ -2329,6 +2325,24 @@ mod tests {
             std::env::remove_var("XDG_STATE_HOME");
             std::env::remove_var("XDG_CACHE_HOME");
         }
+    }
+
+    /// A reader can meet an answer whose write is still under way, cut in
+    /// the middle of a character. The rows before it are still the log.
+    #[test]
+    fn a_torn_last_answer_leaves_the_rest_of_the_log() {
+        let _lock = env_lock();
+        let state = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("XDG_STATE_HOME", state.path()) };
+        let dir = state.path().join("ljos");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut bytes =
+            b"{\"kind\":\"hook\",\"n\":1}\nnot json\n{\"kind\":\"hook\",\"n\":2}\n".to_vec();
+        bytes.extend_from_slice(b"{\"kind\":\"hook\",\"prompt\":\"caf\xc3");
+        std::fs::write(dir.join("jev-log.jsonl"), bytes).unwrap();
+        let rows = read_log();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[1]["n"], 2);
     }
 
     /// The judge log is one JSON object per answer. Two answers landing
