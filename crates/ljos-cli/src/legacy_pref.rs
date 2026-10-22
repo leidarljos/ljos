@@ -760,12 +760,17 @@ fn same_claim(a: &Value, b: &Value) -> bool {
 }
 
 /// `atom` is the person's copy of `successor`: the same claim, entities
-/// and clock, born with basis `person`.
+/// and clock, born with basis `person`. A successor without `valid_from`
+/// copies an original stored without one, and the pack fills the copy's
+/// from `ts`, so it is compared only when the successor carries one.
 fn copy_of(atom: &Value, successor: &Value) -> bool {
     same_claim(atom, successor)
-        && ["entities", "ts", "valid_from"]
+        && ["entities", "ts"]
             .iter()
             .all(|key| atom.get(*key) == successor.get(*key))
+        && successor
+            .get("valid_from")
+            .is_none_or(|from| atom.get("valid_from") == Some(from))
         && basis_of(atom) == Some("person")
 }
 
@@ -1522,6 +1527,36 @@ mod tests {
         assert_eq!(refused_ids(&cutoff["source"]), vec![OLD.to_string()]);
     }
 
+    /// An atom stored before the pack filled `valid_from` has none, and
+    /// the pack fills the copy's from `ts`. That copy is the one this run
+    /// posted: the original stays closed and is not refused.
+    #[test]
+    fn an_original_without_valid_from_takes_the_one_the_pack_fills() {
+        const OLD: &str = "cccccccccccccccccccccccccccccc01";
+        const TEXT: &str = "Keep the unbounded note in its own file.";
+        let original = older(OLD, TEXT);
+        assert!(original.get("valid_from").is_none());
+        let (url, pack) = serve(vec![original, cutoff_atom()]);
+        pack.lock().unwrap().rise.push(OLD.to_string());
+
+        with_pack(&url, || {
+            assert_eq!(stamp_marked().expect("the copy is stored"), 1);
+        });
+        let pack = pack.lock().unwrap();
+        let live: Vec<&Value> = pack
+            .atoms
+            .iter()
+            .filter(|atom| atom.get("text").and_then(Value::as_str) == Some(TEXT))
+            .filter(|atom| atom.get("valid_to").is_none_or(Value::is_null))
+            .collect();
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert_eq!(basis_of(live[0]), Some("person"), "{}", live[0]);
+        assert_eq!(live[0].get("valid_from"), live[0].get("ts"), "{}", live[0]);
+        let cutoff = by_id(&pack.atoms, CUTOFF_ID);
+        assert!(refused_ids(&cutoff["source"]).is_empty(), "{cutoff}");
+        assert!(cutoff.pointer("/source/pending").is_none(), "{cutoff}");
+    }
+
     fn by_id<'a>(atoms: &'a [Value], id: &str) -> &'a Value {
         atoms
             .iter()
@@ -1748,6 +1783,13 @@ mod tests {
                 .is_none_or(str::is_empty)
             {
                 atom["ts"] = json!("2026-10-21T00:00:00Z");
+            }
+            if atom
+                .get("valid_from")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+            {
+                atom["valid_from"] = atom["ts"].clone();
             }
             pack.atoms.push(atom.clone());
             (200, atom.to_string())
