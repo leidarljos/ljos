@@ -15,8 +15,9 @@
 //!
 //! `post-commit` and `post-rewrite` book the commit. Booking never fails
 //! the hook. `pre-commit` and `pre-push` run the sitting gate under an
-//! agent runner: a commit or a push needs a live sitting. That refusal
-//! fails the hook. `pre-push` copies stdin like `post-rewrite`.
+//! agent runner: a commit needs a live sitting, and a push onto a
+//! protected branch also needs the sitting's ticket to clear it. That
+//! refusal fails the hook. `pre-push` copies stdin like `post-rewrite`.
 //!
 //! `pre-commit install` follows `core.hooksPath` and would replace stubs
 //! ljos owns. Install the framework into the repository, then let the stub
@@ -727,9 +728,11 @@ pub fn run_named(name: &str) -> Result<()> {
 }
 
 /// The guard's sitting gate for a commit or push it did not see, such as
-/// one a script runs: under a runner, `pre-commit` and `pre-push` need a
-/// live sitting. A store or a tracker checkout, which ljos writes itself,
-/// is not gated, and nor is the person.
+/// one a script runs: under a runner, `pre-commit` needs a live sitting,
+/// and `pre-push` also needs that ticket to clear each ref it sends onto
+/// a branch [`crate::gates::consensus_push`] names. A store or a tracker
+/// checkout, which ljos writes itself, is not gated, and nor is the
+/// person.
 fn gate(name: &str) -> Result<()> {
     if !crate::under_a_runner() {
         return Ok(());
@@ -749,14 +752,55 @@ fn gate(name: &str) -> Result<()> {
     let seat = crate::git_hook_seat();
     let _actor = seat.as_deref().map(crate::HookActor::enter);
     let verb = if name == "pre-push" { "push" } else { "commit" };
-    crate::sitting_gate::live_sitting()
+    let issue = crate::sitting_gate::live_sitting().map_err(|why| {
+        anyhow!(
+            "sitting-gate: {}",
+            crate::sitting_gate::no_sitting(verb, &why)
+        )
+    })?;
+    if name != "pre-push" {
+        return Ok(());
+    }
+    let cfg = crate::gates::consensus_push(repo.as_deref()).map_err(|why| {
+        anyhow!(
+            "sitting-gate: {}",
+            crate::sitting_gate::unread_settings(&why)
+        )
+    })?;
+    let dest = match std::io::read_to_string(std::io::stdin()) {
+        Ok(refs) => protected_ref(&refs, &cfg.branches),
+        Err(e) => Some(format!("sends refs the hook cannot read ({e})")),
+    };
+    let Some(dest) = dest else {
+        return Ok(());
+    };
+    crate::protected_push_stands(&issue, cfg.quorum)
         .map(drop)
         .map_err(|why| {
-            anyhow!(
-                "sitting-gate: {}",
-                crate::sitting_gate::no_sitting(verb, &why)
-            )
+            let wait = crate::sitting_gate::seats_wait(&dest, &cfg.branches, &issue, &why);
+            anyhow!("sitting-gate: {wait}")
         })
+}
+
+/// What a push whose pre-push stdin is `refs` sends onto a branch in
+/// `branches`, as `sends BRANCH`, or `None` when no ref lands on one.
+/// Git runs the hook with no lines when nothing is to be sent. A line
+/// not in git's four-field form cannot be read, so it is taken to land
+/// on one.
+fn protected_ref(refs: &str, branches: &[String]) -> Option<String> {
+    for line in refs.lines().filter(|l| !l.trim().is_empty()) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let [_, _, remote, _] = fields[..] else {
+            return Some(format!("lists `{line}`, which is not a ref git would send"));
+        };
+        let Some(branch) = remote.strip_prefix("refs/heads/") else {
+            continue;
+        };
+        if let Some(b) = branches.iter().find(|b| b.eq_ignore_ascii_case(branch)) {
+            return Some(format!("sends `{b}`"));
+        }
+    }
+    None
 }
 
 /// Whether `repo` is a tracker checkout: it holds `vissue.toml` or
@@ -1337,6 +1381,22 @@ mod tests {
     #[test]
     fn a_hook_that_does_not_book_succeeds() {
         super::run_named("post-checkout").unwrap();
+    }
+
+    #[test]
+    fn a_pre_push_ref_list_names_the_protected_branch_it_sends() {
+        let branches = vec!["develop".to_string(), "main".to_string()];
+        let line = |dst: &str| format!("refs/heads/x 1111 {dst} 0000\n");
+        assert_eq!(protected_ref("", &branches), None);
+        assert_eq!(protected_ref(&line("refs/heads/topic"), &branches), None);
+        assert_eq!(protected_ref(&line("refs/tags/main"), &branches), None);
+        let both = line("refs/heads/topic") + &line("refs/heads/Main");
+        assert_eq!(
+            protected_ref(&both, &branches).as_deref(),
+            Some("sends `main`")
+        );
+        let odd = protected_ref("refs/heads/x main\n", &branches).unwrap();
+        assert!(odd.contains("not a ref git would send"), "{odd}");
     }
 
     #[test]

@@ -1540,8 +1540,9 @@ fn a_repo_pre_commit_still_blocks_and_later_hooks_still_run() {
 }
 
 /// Under a runner, the installed `pre-commit` and `pre-push` hold what no
-/// shell line showed the guard: a commit or a push waits for a live
-/// sitting. The person is not gated.
+/// shell line showed the guard: a commit waits for a live sitting, and a
+/// push onto develop or main for the sitting's ticket to clear it. A topic
+/// branch needs only the sitting. The person is not gated.
 #[test]
 fn the_installed_hooks_hold_a_runner_to_its_sitting() {
     let hab = Hab::new("repo");
@@ -1596,11 +1597,26 @@ fn the_installed_hooks_hold_a_runner_to_its_sitting() {
             String::from_utf8_lossy(&out.stderr)
         );
     }
+    for (dest, sent) in [
+        ("HEAD:develop", "sends `develop`"),
+        ("HEAD:main", "sends `main`"),
+    ] {
+        let out = as_runner(&["push", "-q", "origin", dest]);
+        refused(&out, "ljos consensus probe-51a1 --no-file");
+        refused(&out, sent);
+    }
     let person = git_status(&hab, &["push", "-q", "origin", "HEAD:main"]);
     assert!(
         person.status.success(),
         "{}",
         String::from_utf8_lossy(&person.stderr)
+    );
+    // Up to date, git runs pre-push with no refs: nothing lands on main.
+    let again = as_runner(&["push", "-q", "origin", "HEAD:main"]);
+    assert!(
+        again.status.success(),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
     );
 }
 
