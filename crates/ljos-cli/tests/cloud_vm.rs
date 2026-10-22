@@ -638,6 +638,22 @@ fn a_ci_job_downloads_no_encoder() {
     assert!(!home.join(".local/lib/onnxruntime").exists());
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn a_generic_ci_job_downloads_no_encoder() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _rel) = encoder_machine(root.path());
+    std::env::set_var("CI", "true");
+    let said = ljos_cli::cloud::up(false).unwrap();
+    assert!(
+        said.contains("encoder: not a cloud VM"),
+        "CI=true is not a cloud VM: {said}"
+    );
+    assert!(!home.join(".local/bin/packset-embed").exists());
+    assert!(!home.join(".local/lib/onnxruntime").exists());
+}
+
 #[test]
 fn cloud_up_installs_points_the_harness_and_clones() {
     let _g = Guard::new();
@@ -1592,6 +1608,168 @@ fn cloud_guard_refuses_every_push_onto_a_cursor_ref() {
 }
 
 #[test]
+fn cloud_guard_reads_valued_push_options_before_the_subcommand() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-opts", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let repo = clone_of(root.path(), &origin, "probe");
+
+    for line in [
+        "git --attr-source HEAD push origin HEAD:cursor/attr",
+        "git push --recurse-submodules check origin HEAD:cursor/submodule",
+    ] {
+        refused(line, &repo);
+    }
+}
+
+#[test]
+fn cloud_guard_denies_heads_and_tags_shortcuts_under_cursor() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-short-refs", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let repo = clone_of(root.path(), &origin, "probe-short-refs");
+
+    for line in [
+        "git push origin HEAD:heads/cursor/existing",
+        "git push origin HEAD:tags/cursor/probe-tag",
+    ] {
+        refused(line, &repo);
+    }
+}
+
+#[test]
+fn cloud_guard_reads_where_bare_refspecs_land() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-bare-map", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let repo = clone_of(root.path(), &origin, "probe-bare-map");
+
+    git(&repo, &["branch", "cursor/existing"]);
+    git(
+        &repo,
+        &["push", "-q", "origin", "cursor/existing:cursor/existing"],
+    );
+    git(&repo, &["checkout", "-q", "-b", "fix"]);
+    git(&repo, &["config", "push.default", "upstream"]);
+    git(
+        &repo,
+        &[
+            "branch",
+            "--set-upstream-to",
+            "origin/cursor/existing",
+            "fix",
+        ],
+    );
+    git(
+        &repo,
+        &[
+            "config",
+            "remote.origin.push",
+            "refs/heads/main:refs/heads/cursor/mapped",
+        ],
+    );
+
+    refused("git push origin fix", &repo);
+    refused("git push origin main", &repo);
+}
+
+#[test]
+fn cloud_guard_resolves_push_aliases_from_config_and_line_state() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-alias", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let repo = clone_of(root.path(), &origin, "probe-alias");
+
+    git(&repo, &["config", "--global", "alias.p", "push"]);
+
+    for line in [
+        "git p origin HEAD:cursor/alias-global",
+        "git -c 'alias.p=!git push' p origin HEAD:cursor/alias-shell",
+        "git config alias.p2 push && git p2 origin HEAD:cursor/alias-local",
+    ] {
+        refused(line, &repo);
+    }
+}
+
+#[test]
+fn cloud_guard_reads_git_env_and_env_chdir_context() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-git-env", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let dev = clone_of(root.path(), &origin, "dev");
+    let oncur = clone_of(root.path(), &origin, "oncur");
+    git(&oncur, &["checkout", "-q", "-b", "cursor/probe"]);
+
+    for line in [
+        "GIT_DIR=../oncur/.git git push origin HEAD",
+        "env -C ../oncur git push origin HEAD",
+        "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0=HEAD:cursor/from-env git push origin HEAD",
+    ] {
+        refused(line, &dev);
+    }
+
+    allowed("GIT_DIR=../dev/.git git push origin HEAD", &oncur);
+}
+
+#[test]
+fn cloud_guard_refuses_prune_and_mirror_when_they_can_delete_heads() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-prune", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let repo = clone_of(root.path(), &origin, "probe-prune");
+
+    refused("git push --prune origin 'refs/heads/*:refs/heads/*'", &repo);
+    refused("git push --mirror origin", &repo);
+}
+
+#[test]
+fn cloud_guard_refuses_shell_trick_push_forms() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-shell-tricks", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let repo = clone_of(root.path(), &origin, "probe-shell-tricks");
+
+    for line in [
+        "git \"$(echo push)\" origin HEAD:cursor/subcommand",
+        "git $'pu\\163h' origin HEAD:cursor/ansi-c",
+        "printf 'HEAD:cursor/xargs\\n' | xargs git push origin",
+        "git subtree push --prefix . origin cursor/subtree",
+        "git send-pack origin HEAD:refs/heads/cursor/send-pack",
+        "git submodule foreach 'git push origin HEAD:cursor/foreach'",
+    ] {
+        refused(line, &repo);
+    }
+}
+
+#[test]
 fn cloud_guard_reads_the_gh_pr_verb_and_never_its_arguments() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
@@ -1683,12 +1861,7 @@ fn cloud_guard_allows_pushes_that_leave_cursor_refs_alone() {
     ] {
         allowed(line, &develop);
     }
-    for line in [
-        "git push --all",
-        "git push --branches",
-        "git push --mirror",
-        "git push --tags",
-    ] {
+    for line in ["git push --all", "git push --branches", "git push --tags"] {
         allowed(line, &clean);
     }
     let elsewhere = root.path();
@@ -2352,6 +2525,71 @@ fn doctor_advises_cloud_up_only_on_a_cloud_vm() {
     assert!(ci.contains("ljos cloud up"), "{ci}");
 }
 
+/// `CURSOR_AGENT=1` is the desktop agent terminal. A CI variable counts
+/// only when its value says so: `false` is not a job, and Buildkite,
+/// Azure Pipelines, CircleCI, Jenkins, and `CI=true` are.
+#[test]
+fn desktop_cursor_and_ci_values_choose_cloud_up() {
+    let _g = Guard::new();
+    clear_agent_ids();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    fs::create_dir_all(home.join(".cursor")).unwrap();
+    fs::write(
+        home.join(".cursor/mcp.json"),
+        "{\"mcpServers\":{\"ljos\":{\"command\":\"/no/such/ljos-mcp\",\"args\":[]}}}\n",
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::remove_var("LJOS_MCP_CONFIG");
+
+    std::env::set_var("CURSOR_AGENT", "1");
+    let desktop = ljos_cli::cloud::missing_mcp_line().unwrap();
+    assert!(
+        desktop.contains("ljos onboard --harness cursor"),
+        "{desktop}"
+    );
+    assert!(
+        !desktop.contains("ljos cloud up"),
+        "CURSOR_AGENT=1 without a cloud id is the desktop agent: {desktop}"
+    );
+
+    std::env::remove_var("CURSOR_AGENT");
+    for (key, value) in [("GITHUB_ACTIONS", "false"), ("CI", "false")] {
+        clear_agent_ids();
+        std::env::set_var("HOME", &home);
+        std::env::set_var(key, value);
+        let line = ljos_cli::cloud::missing_mcp_line().unwrap();
+        assert!(
+            !line.contains("ljos cloud up"),
+            "{key}={value} is not a CI job: {line}"
+        );
+    }
+
+    for (key, value) in [
+        ("GITHUB_ACTIONS", "true"),
+        ("GITLAB_CI", "true"),
+        ("CI", "true"),
+        ("BUILDKITE", "true"),
+        ("TF_BUILD", "True"),
+        ("CIRCLECI", "true"),
+        ("JENKINS_URL", "https://jenkins.example/"),
+    ] {
+        clear_agent_ids();
+        std::env::set_var("HOME", &home);
+        std::env::set_var(key, value);
+        let line = ljos_cli::cloud::missing_mcp_line().unwrap();
+        assert!(
+            line.contains("ljos cloud up"),
+            "{key}={value} should be CI: {line}"
+        );
+        assert!(
+            !line.contains("onboard --harness cursor"),
+            "{key}={value}: {line}"
+        );
+    }
+}
+
 #[test]
 fn doctor_flags_a_command_from_another_home() {
     let _g = Guard::new();
@@ -2785,6 +3023,11 @@ fn clear_agent_ids() {
         "GITHUB_RUN_ID",
         "GITHUB_ACTIONS",
         "GITLAB_CI",
+        "CI",
+        "BUILDKITE",
+        "TF_BUILD",
+        "CIRCLECI",
+        "JENKINS_URL",
         "CODESPACES",
         "LJOS_SEAT",
         "LJOS_SEAT_KEY",
