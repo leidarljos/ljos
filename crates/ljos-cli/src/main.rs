@@ -1542,7 +1542,7 @@ fn run_command() -> Result<()> {
             for rule in &rules {
                 println!("{}", write_ack(&write_rule(rule, basis)?));
             }
-            if !proposed.is_empty() && ljos_cli::under_a_runner() {
+            if !proposed.is_empty() && !ljos_cli::person_present() {
                 for rule in &proposed {
                     println!(
                         "this preference can carry an ask over {}: `ljos rule {} --verdict ask --why {}`",
