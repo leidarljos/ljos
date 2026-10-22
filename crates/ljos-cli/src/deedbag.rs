@@ -136,7 +136,9 @@ fn hexes_of(paths: &str) -> Result<Vec<String>> {
         let Some(hex) = part.strip_prefix("sha256:") else {
             bail!("deed path {part} is not a sha256 digest");
         };
-        if hex.is_empty() || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        // Import accepts only a content address: 64 lowercase hex digits.
+        // Anything shorter, longer or upper case is a different name.
+        if !is_sha256_hex(hex) {
             bail!("deed path {part} is not a sha256 digest");
         }
         out.push(hex.to_string());
