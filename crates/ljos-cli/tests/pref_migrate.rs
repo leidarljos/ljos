@@ -636,7 +636,10 @@ fn preferences_from_v0_32_1_follow_the_writer_that_stored_them() {
         Some("person")
     );
     assert_eq!(basis(by_text(&migrated, "beside the tag")), Some("agent"));
-    assert!(at(cutoff[0]) > at(by_text(&migrated, "release notes")));
+    assert!(
+        at(cutoff[0]) > at(by_text(&before, "release notes")),
+        "the cutoff is not after the preference it promotes"
+    );
     let held_id = by_text(&migrated, "release key")["id"]
         .as_str()
         .unwrap()
