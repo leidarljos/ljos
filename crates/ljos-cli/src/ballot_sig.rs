@@ -1656,6 +1656,7 @@ mod tests {
 
     #[test]
     fn a_legacy_ballot_is_read_on_its_own_issue() {
+        let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("issues.org");
         git(dir.path(), &["init"], &[]);
