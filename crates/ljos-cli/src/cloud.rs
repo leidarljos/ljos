@@ -1028,8 +1028,10 @@ fn bins_ready(dir: &Path) -> bool {
 
 fn executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    fs::metadata(path)
-        .map(|m| m.permissions().mode() & 0o111 != 0)
+    // A directory is mode 0755, and `metadata` follows a symlink. Either
+    // would count as an installed encoder and skip the download.
+    fs::symlink_metadata(path)
+        .map(|meta| meta.file_type().is_file() && meta.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
 }
 
