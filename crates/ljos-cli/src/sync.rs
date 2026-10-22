@@ -944,22 +944,39 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
             if mine.is_none() {
                 let mut keys = Vec::new();
                 for identity in &identities {
-                    keys.push(identity_recipient(identity)?);
+                    // A keygen miss is not a recipient we know. Aborting
+                    // here dropped every later host's log.
+                    if let Ok(key) = identity_recipient(identity) {
+                        keys.push(key);
+                    }
                 }
                 mine = Some(keys);
             }
             // The log's own recipients. A cloud log lists different keys
             // than the primary scope, and a miss is an error only when
             // one of those keys is an identity this machine opens with.
+            // No known key means this log is not sealed to us.
             let recipients = scope.recipients_for(&scope_name).unwrap_or(&[]);
-            let mut skip = String::new();
-            for key in mine.as_deref().unwrap_or(&[]) {
-                skip = miss_report(&host, &scope_name, key, recipients)?;
+            let keys = mine.as_deref().unwrap_or(&[]);
+            if keys.is_empty() {
+                out.push_str(&format!(
+                    "sync: {host}'s {scope_name} log is not sealed to this machine\n"
+                ));
+            } else {
+                let mut skip = String::new();
+                for key in keys {
+                    skip = miss_report(&host, &scope_name, key, recipients)?;
+                }
+                out.push_str(&skip);
             }
-            out.push_str(&skip);
             continue;
         };
         opened.push((host, scope_name, plain));
+    }
+    // Nothing opened and nothing to retire. Asking the pack here replaced
+    // the skip lines with PACKSET_URL=off.
+    if opened.is_empty() && gone.is_empty() {
+        return Ok(out);
     }
     let client = crate::pack()?;
     for (host, scope_name, plain) in opened {
@@ -4242,12 +4259,88 @@ mod tests {
 
         std::fs::remove_file(root.join(".ljos/atoms/peerbox+cloud.jsonl.age")).unwrap();
         std::fs::write(root.join(".ljos/atoms/peerbox.jsonl.age"), b"sealed").unwrap();
-        let msg = import(&root, &scope).unwrap_err().to_string();
+        let msg = import(&root, &scope).unwrap();
         assert!(
-            msg.contains("PACKSET_URL"),
+            msg.contains("sync: peerbox's grokbot log is not sealed to this machine"),
             "a primary log must stay a skip when only the extra scope lists us: {msg}"
         );
-        assert!(!msg.contains("sealed to this machine"), "{msg}");
+        assert!(!msg.contains("PACKSET_URL"), "{msg}");
+        assert!(!msg.contains("did not open"), "{msg}");
+        assert!(!msg.contains("is sealed to this machine"), "{msg}");
+    }
+
+    /// No public-key comment, and age-keygen -y fails. That identity is not
+    /// a known recipient, so another machine's logs stay skips. Stopping
+    /// on the keygen miss, or asking the pack when nothing opened, hid
+    /// those lines behind an error.
+    #[test]
+    fn a_keygen_miss_on_foreign_logs_stays_a_skip() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(
+            bin.join("age"),
+            "#!/bin/sh\necho 'no matching keys found' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            bin.join("age-keygen"),
+            "#!/bin/sh\necho 'age-keygen: refusing' >&2\nexit 1\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        for name in ["age", "age-keygen"] {
+            std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        let old_pack = std::env::var("PACKSET_URL").ok();
+        let old_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        let old_host = std::env::var("LJOS_TEST_HOSTNAME").ok();
+        std::env::set_var("PATH", &bin);
+        std::env::set_var("PACKSET_URL", "off");
+        std::env::set_var("LJOS_TEST_HOSTNAME", "thisbox");
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(config.join("ljos")).unwrap();
+        std::fs::write(
+            config.join("ljos/age.key"),
+            format!("AGE-SECRET-KEY-1{}\n", "Q".repeat(58)),
+        )
+        .unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &config);
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
+        std::fs::write(root.join(".ljos/atoms/peerbox.jsonl.age"), b"sealed").unwrap();
+        std::fs::write(root.join(".ljos/atoms/otherbox.jsonl.age"), b"sealed").unwrap();
+        let scope: Scope =
+            toml::from_str("name = \"surf\"\nrecipients = [\"age1someoneelse\"]\n").unwrap();
+        let result = import(&root, &scope);
+        std::env::set_var("PATH", old_path);
+        match old_pack {
+            Some(value) => std::env::set_var("PACKSET_URL", value),
+            None => std::env::remove_var("PACKSET_URL"),
+        }
+        match old_xdg {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match old_host {
+            Some(value) => std::env::set_var("LJOS_TEST_HOSTNAME", value),
+            None => std::env::remove_var("LJOS_TEST_HOSTNAME"),
+        }
+        let msg = result.expect("foreign logs stay skips");
+        assert!(
+            msg.contains("sync: otherbox's surf log is not sealed to this machine"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("sync: peerbox's surf log is not sealed to this machine"),
+            "{msg}"
+        );
+        assert!(!msg.contains("PACKSET_URL"), "{msg}");
+        assert!(!msg.contains("age-keygen"), "{msg}");
+        assert!(!msg.contains("did not open"), "{msg}");
     }
 
     #[test]
