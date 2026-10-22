@@ -157,11 +157,29 @@ fn no_notmuch_config_is_a_refusal_not_the_default_database() {
     assert!(err.to_string().contains("notmuch_config"), "{err}");
 }
 
+#[test]
+fn a_notmuch_config_others_could_change_is_refused() {
+    let mailbox = maildir::mailbox();
+    let link = mailbox.dir.path().join("linked-config");
+    std::os::unix::fs::symlink(&mailbox.config, &link).unwrap();
+    let linked = Reader::new(&MailConfig {
+        notmuch_config: Some(link),
+        ..MailConfig::default()
+    })
+    .unwrap();
+    let err = linked.search("lunch", None).unwrap_err();
+    assert!(format!("{err:#}").contains("symlink"), "{err:#}");
+    std::fs::set_permissions(&mailbox.config, std::fs::Permissions::from_mode(0o620)).unwrap();
+    let err = reader(&mailbox).search("lunch", None).unwrap_err();
+    assert!(format!("{err:#}").contains("writable"), "{err:#}");
+}
+
 /// A reader whose notmuch is `script`, a shell script.
 fn fake(dir: &tempfile::TempDir, script: &str) -> Reader {
     let bin = dir.path().join("notmuch");
     std::fs::write(&bin, format!("#!/bin/sh\n{script}\n")).unwrap();
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(dir.path().join("notmuch-config"), "").unwrap();
     Reader::new(&MailConfig {
         notmuch: Some(bin),
         notmuch_config: Some(dir.path().join("notmuch-config")),

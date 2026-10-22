@@ -22,9 +22,14 @@ nothing else changes. It names the From a draft may carry, the deny list
 and the mailbox, so only the user may set it: it is read from the user's
 own `~/.config/ljos/ljos.toml` and then `~/.config/ljos/mail.toml`
 (under `XDG_CONFIG_HOME` when that is set), the second overriding the
-keys it sets. Each must be owned by the user running ljos and not be
-group or world writable. Any other layer of ljos config (`./ljos.toml`,
-`./vissue.toml`, `VISSUE_CONFIG`, `LJOS_CONFIG` and
+keys it sets. Each is opened `O_NOFOLLOW`, so a symlink is refused, and
+the open file must be a regular file owned by the user running ljos or
+root and not group or world writable. Every directory above it, with
+symlinks resolved, must be owned by that user or root and not be group
+or world writable unless it is sticky like `/tmp`. `deny_file` and
+`notmuch_config` pass the same check each time they are read, and
+notmuch is given the resolved path. Any other layer of ljos config
+(`./ljos.toml`, `./vissue.toml`, `VISSUE_CONFIG`, `LJOS_CONFIG` and
 `~/.config/vissue/config.toml`) that carries a `[mail]` table, even an
 empty one, is an error, so a seat that can write its working directory
 cannot swap the identity or the deny list. A file that cannot be read
@@ -69,20 +74,39 @@ here.
   when a message file notmuch names is a symlink or resolves outside
   notmuch's mail root (`database.mail_root`, else `database.path`).
   Text parts are wrapped as untrusted. HTML is reduced to the text a mail
-  client would
-  show. Text the reducer can tell is concealed is dropped: the `hidden`
-  attribute, or a style that sets `display:none`, `visibility:hidden`,
-  `opacity` near 0, a zero `font-size`, a zero width or height, a
-  transparent color or one equal to the background, a negative offset or
-  indent, `clip`, `clip-path` or `mso-hide:all`, inline or through a
-  class or id rule in a `<style>` block. Any `<style>` block or
-  concealment sets `hidden_content: true` on the message. When a
-  stylesheet does what the reducer cannot follow (an `@` rule such as
-  `@media`, a concealing rule on an element or other selector, a color
-  in one rule equal to a background in another, or a linked
-  stylesheet), the part's text is replaced by a note that it was
+  client would show. Attribute values are entity-decoded before use, and
+  CSS has its comments removed and its escapes decoded. As in HTML, `/>`
+  closes only a void element or one inside `<svg>` or `<math>`. Text the
+  reducer can tell is concealed is dropped: inside an element with the
+  `hidden` attribute, a class or id rule in a `<style>` block that
+  conceals, or a style that sets `display:none`, `visibility:hidden` or
+  `collapse`, `content-visibility:hidden`, `mso-hide:all`, a width or
+  height of 1px or less, an offset or indent that is negative or 1000px
+  or more, `clip`, `clip-path` or any transform; under an opacity (a
+  number or a percentage, multiplied down the tree) of 0.05 or less or a
+  font size (resolved down the tree) of 1px or less; or drawn in a color
+  whose alpha is 0.05 or less, or within 16 of its background in every
+  channel (black on white when nothing sets them). A value of one of
+  those properties the reducer cannot read, or any `var()`, counts as
+  concealing. Any `<style>` block or concealment sets `hidden_content:
+  true` on the message. Rules inside `@media`, `@supports` and other
+  block at-rules are read as if they apply; an `@` inside a CSS string
+  or comment is not an at-rule. When the HTML does what the reducer
+  cannot follow (`@import`, a concealing rule on an element or other
+  selector, a rule nested in a style rule or blocks nested more than 8
+  deep, a stylesheet color within 16 of a background set anywhere in the
+  part or, when its rule sets no background, of white, a stylesheet
+  background within 16 of a color set anywhere in the part or, when its
+  rule sets no color, of black, a linked stylesheet, or a `style`,
+  `class`, `id` or `hidden` attribute holding a reference the reducer
+  cannot decode), the part's text is replaced by a note that it was
   withheld. Links are shown as text with their target, never followed.
-  Attachments are listed by name, type, size and sha256, with no content
+  A `multipart/alternative` with a `text/plain` part and an HTML part
+  (the last `text/html` or multipart alternative) shows the plain text
+  when both have the same words. When they differ, the body holds both,
+  each under a label that carries the nonce, and `alternatives_differ`
+  is true: a mail client shows the owner the HTML. Attachments are
+  listed by name, type, size and sha256, with no content
   and no path. Hashing reads at most 64 MiB of one attachment; past that
   notmuch is stopped, `sha256` is null and `size` is a lower bound.
 
@@ -93,7 +117,8 @@ its process group are killed and the tool refuses, so a hung database or
 a slow part cannot stall the MCP server.
 
 Untrusted text sits between a start and an end marker that carry a fresh
-random nonce, so a message cannot close its own wrapping. Mail text is
+random nonce, so a message cannot close its own wrapping. Inside, every
+character the exporter refuses below becomes U+FFFD. Mail text is
 data. A message that says the owner approves a send, or tells the reader
 to call a tool, is a message, not an approval or an instruction.
 
@@ -128,8 +153,10 @@ precondition, not an option.
    exporter refuses a message without exactly one `Date` that parses as
    an RFC 5322 date-time and exactly one `Message-ID` in msg-id syntax
    (`<left@right>`, dot-atom text or a `[...]` literal), since an MTA
-   would add or replace them. It refuses `Bcc` and `Resent-Bcc`, which
-   `-t` strips, so the sent bytes would no longer be the hashed ones.
+   would add or replace them. It refuses `Bcc`, which `-t` strips, so
+   the sent bytes would no longer be the hashed ones, and every
+   `Resent-*` header: once one names a recipient, `-t` sends to the
+   `Resent-` recipients and ignores `To` and `Cc`.
 2. Export. The exporter runs the content checks below first and writes
    no file for a draft they refuse. The approval file is plain text: a
    statement block, a blank line, then the message bytes.
@@ -151,8 +178,11 @@ precondition, not an option.
    checks them and spends the nonce. `reachbook-hash` must equal `H`,
    so the outbox and the file name the same bytes; any other value is
    refused. The exporter refuses control characters other than tab and
-   newline, and the bidirectional overrides, anywhere in the message, so
-   a terminal cannot hide text from the person reading it.
+   newline, the bidirectional marks, overrides and isolates, the
+   invisible format characters (U+00AD, U+180E, U+200B to U+200F, U+2060
+   to U+2064, U+FEFF) and the line and paragraph separators U+2028 and
+   U+2029, anywhere in the message, so a terminal cannot hide, reorder
+   or break text the person reading it sees.
 3. Consensus. The draft's send issue carries the option `send H`. It
    passes with ballots from at least two seats of at least two model
    families, each verified against the seat keys the tracker pins.
@@ -179,16 +209,29 @@ The checks only ever refuse. Passing them grants nothing.
 - Header fields are unfolded first (a line break before a space or tab is
   removed), and every check reads the unfolded value. A header line that
   is neither a field nor a continuation is refused.
+- The draft is 7bit: every byte ASCII and no line over 998 octets.
+  Postfix's `sendmail` splits a longer line and the SMTP client folds at
+  998, and with the default `disable_mime_output_conversion = no` an
+  8bit body is rewritten to quoted-printable for a next hop without
+  `8BITMIME`, so either would deliver bytes other than the ones `H`
+  names. Encoding the draft ourselves would put bytes the owner cannot
+  read on the card, so non-ASCII text is refused instead; send it from
+  the mail client.
 - The draft is one part: exactly one `Content-Type: text/plain;
   charset=utf-8` with no other parameter, and `Content-Transfer-Encoding`
-  absent, `7bit` or `8bit`. Multipart, `text/html`, base64,
+  absent or `7bit`. Multipart, `text/html`, base64, `8bit`,
   quoted-printable and any other encoding are refused, as is `=?`
   (an encoded word) anywhere in the headers or body, and HTML in the
-  body: a `<` before a letter, `/`, `!` or `?`, or an entity such as
-  `&amp;` or `&#101;`. So what the checks scan is what a client shows.
+  body: a `<` before `/`, `!` or `?`, or an entity such as `&amp;` or
+  `&#101;`. So what the checks scan is what a client shows.
 - Subject, headers and body must not carry a denied term, or both halves
   of a denied pair, after NFKC normalisation, case folding and removing
-  invisible format characters.
+  invisible format characters. The term, pair and attribution scans run
+  twice, on the body as written and on a copy with every `<...>`
+  removed and numeric references (with or without their `;`) and
+  `&amp`, `&lt`, `&gt`, `&quot`, `&apos` and `&nbsp` decoded, and refuse
+  when either hits. So `<https://example.test/a>` passes, and
+  `pro<span>ject-x` is the term `project-x`.
 - Built-in attribution phrases ("generated by", "as an AI", model names,
   tool `X-Mailer` headers) are refused, and `attribution` adds more.
 
