@@ -7438,14 +7438,24 @@ fn without_failure_words(cue: &str) -> String {
 }
 
 /// How many subject words a lesson shares with a failed command and its
-/// error: the words [`names_the_subject`] matches on, less
-/// [`FAILURE_WORDS`].
+/// error: the words and alias groups [`names_the_subject`] matches on
+/// ([`cue_terms`]), less [`FAILURE_WORDS`]. Each word of the cue counts
+/// once, when the lesson has it or names one of its alias groups, so
+/// `npm` in both is one word, in however many groups, and `pnpm`
+/// against `npm` is one too.
 fn shared_failure_words(text: &str, cue: &str) -> usize {
-    let words = |t: &str| prompt_words(&without_failure_words(t));
-    let have = words(text);
-    words(cue)
+    let have = cue_terms(&without_failure_words(text), true);
+    cue_terms(&without_failure_words(cue), false)
         .iter()
-        .filter(|w| have.binary_search(w).is_ok())
+        .filter(|w| !w.starts_with("alias:"))
+        .filter(|w| {
+            have.binary_search(w).is_ok()
+                || (!CLAIM_ONLY_ALIASES.contains(&w.as_str())
+                    && CUE_ALIASES.iter().enumerate().any(|(i, group)| {
+                        group.iter().any(|a| a == w || singular(a) == **w)
+                            && have.binary_search(&format!("alias:{i}")).is_ok()
+                    }))
+        })
         .count()
 }
 
@@ -35870,6 +35880,19 @@ mod tests {
             .collect();
         let at = |i: usize| order.iter().position(|&x| x == i);
         assert!(at(0) < at(1), "{order:?}");
+    }
+
+    /// A failed command and a lesson share `pnpm` against `npm` through
+    /// their alias group, and `npm` in both counts once, though it sits
+    /// in two groups.
+    #[test]
+    fn a_failure_word_is_shared_once_through_its_alias() {
+        let cue = "npm publish failed: 403 from the registry";
+        assert_eq!(
+            shared_failure_words("Use pnpm against the private registry", cue),
+            2
+        );
+        assert_eq!(shared_failure_words("npm is slow on this host", cue), 1);
     }
 
     #[test]
