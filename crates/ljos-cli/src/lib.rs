@@ -796,7 +796,10 @@ headless = ["claude", "-p", "{prompt}", "--max-turns", "6", "--allowedTools", "B
 name = "codex"
 config = "~/.codex/config.toml"
 marker = "[mcp_servers.ljos]"
-snippet = "\n[mcp_servers.ljos]\ncommand = \"{server}\"\nargs = []\nenv_vars = [\"XDG_RUNTIME_DIR\"]\nenv = { LJOS_SEAT = \"{name}\" }\n"
+# Codex gives its MCP server only the variables env_vars names: the seat
+# records' directory, and the session the prompt hook binds the kept
+# prompt to.
+snippet = "\n[mcp_servers.ljos]\ncommand = \"{server}\"\nargs = []\nenv_vars = [\"XDG_RUNTIME_DIR\", \"CODEX_SESSION_ID\", \"CODEX_THREAD_ID\"]\nenv = { LJOS_SEAT = \"{name}\" }\n"
 skills = "~/.codex/skills"
 hooks = "~/.codex/hooks.json"
 hook_events = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionEnd"]
@@ -3869,6 +3872,86 @@ fn heal_text_command(
     )))
 }
 
+/// The names a TOML `env_vars = [...]` line lists.
+fn env_var_names(line: &str) -> Option<Vec<String>> {
+    let rest = line.trim().strip_prefix("env_vars")?.trim_start();
+    let inner = rest.strip_prefix('=')?.trim().strip_prefix('[')?;
+    let inner = inner.split(']').next()?;
+    Some(
+        inner
+            .split(',')
+            .map(|v| v.trim().trim_matches('"').to_string())
+            .filter(|v| !v.is_empty())
+            .collect(),
+    )
+}
+
+/// Add to the `env_vars` of the entry under `marker` in `path` the names
+/// the shipped `snippet` forwards and the entry does not, keeping its
+/// own. An entry with no `env_vars` gets the snippet's list.
+fn heal_env_vars(path: &Path, marker: &str, snippet: &str, dry: bool) -> Result<Option<String>> {
+    let Some(want) = snippet.lines().find_map(env_var_names) else {
+        return Ok(None);
+    };
+    if marker.is_empty() || !path.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(path).with_context(|| path.display().to_string())?;
+    let Some(found) = text.find(marker) else {
+        return Ok(None);
+    };
+    let start = text[..found].rfind('\n').map_or(0, |at| at + 1);
+    let end = marker_section_end(&text, start, marker);
+    let quoted = |names: &[String]| {
+        names
+            .iter()
+            .map(|n| format!("\"{n}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut at = start;
+    let mut edit: Option<(usize, usize, String, Vec<String>)> = None;
+    while at < end {
+        let line_end = text[at..end].find('\n').map_or(end, |rel| at + rel);
+        if let Some(have) = env_var_names(&text[at..line_end]) {
+            let missing: Vec<String> = want.iter().filter(|w| !have.contains(w)).cloned().collect();
+            if missing.is_empty() {
+                return Ok(None);
+            }
+            let all: Vec<String> = have.iter().chain(&missing).cloned().collect();
+            edit = Some((
+                at,
+                line_end,
+                format!("env_vars = [{}]", quoted(&all)),
+                missing,
+            ));
+            break;
+        }
+        at = line_end + 1;
+    }
+    // An entry with none gets the line after its last, so the lines
+    // before keep their place.
+    let (from, to, line, missing) = edit.unwrap_or_else(|| {
+        let last = start + text[start..end].trim_end().len();
+        (
+            last,
+            last,
+            format!("\nenv_vars = [{}]", quoted(&want)),
+            want.clone(),
+        )
+    });
+    let rewritten = format!("{}{line}{}", &text[..from], &text[to..]);
+    if !dry {
+        std::fs::write(path, rewritten).with_context(|| path.display().to_string())?;
+    }
+    let verb = if dry { "would add" } else { "added" };
+    Ok(Some(format!(
+        "{verb} {} to env_vars in {}",
+        missing.join(", "),
+        path.display()
+    )))
+}
+
 fn heal_registered(
     h: &Harness,
     server: &Path,
@@ -3893,6 +3976,14 @@ fn heal_registered(
             h.marker.as_deref().unwrap_or(""),
             server,
             replacement,
+            dry,
+        )? {
+            notes.push(note);
+        }
+        if let Some(note) = heal_env_vars(
+            &expand(config),
+            h.marker.as_deref().unwrap_or(""),
+            h.snippet.as_deref().unwrap_or(""),
             dry,
         )? {
             notes.push(note);
