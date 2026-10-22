@@ -559,6 +559,24 @@ fn argv(segment: &str) -> Vec<String> {
     out
 }
 
+/// The git argv a shell alias script runs. `None` when the script never
+/// reaches a plain `git ...` command that can be read from words.
+fn alias_script_words(script: &str) -> Option<Vec<String>> {
+    for line in crate::nested_lines(script, 0) {
+        for segment in crate::raw_segments(&line) {
+            let mut words = argv(&segment);
+            if words.first().map(String::as_str) != Some("git") {
+                continue;
+            }
+            words.remove(0);
+            if !words.is_empty() {
+                return Some(words);
+            }
+        }
+    }
+    None
+}
+
 /// Where `cd ARGS` leaves the line, `None` when it cannot be told: `-`,
 /// a variable, or a directory that was already unknown.
 /// `cd "$(git rev-parse --show-toplevel)"` is this checkout's top.
@@ -723,7 +741,10 @@ fn git_push(
     let sub = args.get(i)?;
     let mut words: Vec<String> = vec![sub.clone()];
     words.extend(args[i + 1..].iter().cloned());
-    words = at.expand_aliases(words, line_aliases);
+    words = match at.expand_aliases(words, line_aliases) {
+        Ok(words) => words,
+        Err(why) => return Some(Push::refuse(at, why)),
+    };
     let sub = words.first().map(String::as_str)?;
     if unresolved_subcommand(sub) {
         return Some(Push::refuse(
@@ -1118,7 +1139,11 @@ impl Checkout {
             .map(|(_, v)| v.clone())
     }
 
-    fn expand_aliases(&self, words: Vec<String>, line_aliases: &[(String, String)]) -> Vec<String> {
+    fn expand_aliases(
+        &self,
+        words: Vec<String>,
+        line_aliases: &[(String, String)],
+    ) -> Result<Vec<String>, String> {
         let mut words = words;
         let mut seen = HashSet::new();
         while let Some(sub) = words.first().cloned() {
@@ -1133,11 +1158,11 @@ impl Checkout {
                 .or_else(|| self.alias_setting(&sub));
             let Some(value) = value else { break };
             let mut expanded = if let Some(script) = value.strip_prefix('!') {
-                let mut script_words = argv(script);
-                if script_words.first().map(String::as_str) == Some("git") {
-                    script_words.remove(0);
-                }
-                script_words
+                alias_script_words(script).ok_or_else(|| {
+                    format!(
+                        "`!` alias `{sub}` runs a shell command whose git argv could not be read"
+                    )
+                })?
             } else {
                 value.split_whitespace().map(str::to_string).collect()
             };
@@ -1147,7 +1172,7 @@ impl Checkout {
             expanded.extend(words.into_iter().skip(1));
             words = expanded;
         }
-        words
+        Ok(words)
     }
 
     /// Every ref in the checkout, by its full name.
