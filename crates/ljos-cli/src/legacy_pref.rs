@@ -42,8 +42,10 @@
 //! These marks are not proof the person typed the atom. A v0.32.1
 //! `ljos prefer` with `CLAUDECODE=1` and no runner ancestor stored
 //! harness, seat and session as the same word, and that shape is
-//! promoted. The cutoff and the runner check are what this upgrade
-//! trusts. The marks only choose which older atoms are candidates.
+//! promoted unless the word is a runner's name, compared without case
+//! against the list runner detection uses. The cutoff and the runner
+//! check are what this upgrade trusts. The marks only choose which
+//! older atoms are candidates.
 //!
 //! The writers at v0.32.1, and the same writers through d47b69bd, left
 //! these marks:
@@ -400,7 +402,8 @@ pub fn keep(id: &str) -> Result<String> {
 /// v0.30 stamps `source.seat` with the same word as harness and session.
 /// v0.17 through v0.29 left `source.seat` out and still wrote harness and
 /// session as the login user. A seat that names a different word is not
-/// this write.
+/// this write, and neither is a word that names a runner: a login user
+/// is not `claude`, and a runner's seat is.
 fn terminal_write(atom: &Value) -> bool {
     let source = match atom.get("source").and_then(Value::as_object) {
         Some(s) => s,
@@ -420,6 +423,9 @@ fn terminal_write(atom: &Value) -> bool {
     if harness.is_empty() || session != harness || session.contains('@') {
         return false;
     }
+    if names_runner(harness) || names_runner(session) {
+        return false;
+    }
     if !seat.is_empty() && seat != harness {
         return false;
     }
@@ -427,6 +433,16 @@ fn terminal_write(atom: &Value) -> bool {
         return false;
     }
     !agent_mark(atom)
+}
+
+/// Whether `word` is a runner's name, from the list
+/// [`crate::under_a_runner`] matches a process tree against, in any case.
+fn names_runner(word: &str) -> bool {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMES
+        .get_or_init(crate::runner_names)
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(word))
 }
 
 /// A mark an agent path left on the atom: a session-end tag, or a
@@ -1330,6 +1346,16 @@ mod tests {
         let mut old_mismatch = old_pref.clone();
         old_mismatch["source"]["session"] = json!("other");
         old_mismatch["id"] = json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa7");
+        // Harness, seat and session one word, with no `@` and no turn, is
+        // the terminal shape. A runner's name in it is a runner's write.
+        let mut named = typed.clone();
+        for key in ["harness", "seat", "session"] {
+            named["source"][key] = json!("claude");
+        }
+        let mut shouted = old_pref.clone();
+        for key in ["harness", "session"] {
+            shouted["source"][key] = json!("Codex");
+        }
         let mut runner_lesson = runner.clone();
         runner_lesson["kind"] = json!("lesson");
         runner_lesson["id"] = json!("ffffffffffffffffffffffffffffffff");
@@ -1344,6 +1370,8 @@ mod tests {
             (&runner, Some(Legacy::Hold)),
             (&runner_lesson, Some(Legacy::Hold)),
             (&old_mismatch, Some(Legacy::Hold)),
+            (&named, Some(Legacy::Hold)),
+            (&shouted, Some(Legacy::Hold)),
             (&turned, Some(Legacy::Hold)),
             (&ancestor, Some(Legacy::Hold)),
             (&bare, None),
@@ -1364,7 +1392,7 @@ mod tests {
                 None => left += 1,
             }
         }
-        assert_eq!((promote, hold, left), (4, 8, 5), "fixture split");
+        assert_eq!((promote, hold, left), (4, 10, 5), "fixture split");
         runner["id"] = json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         // No cutoff receipt: nothing is older yet, so nothing awaits.
         assert!(held_before(&[hook.clone(), typed.clone(), runner.clone()], None).is_empty());
