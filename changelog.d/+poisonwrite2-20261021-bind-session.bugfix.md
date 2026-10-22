@@ -1,1 +1,0 @@
-A kept prompt now counts as the person's words only when its bind names the runner session of the process asking. A forged `latest-prompt` and `latest-prompt.bind` with any other session, or none, no longer make `ljos prefer` or `ljos remember` store a sentence as user-declared.

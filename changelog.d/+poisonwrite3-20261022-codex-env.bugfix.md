@@ -1,1 +1,0 @@
-The Codex MCP entry `ljos onboard` writes now forwards `CODEX_SESSION_ID` and `CODEX_THREAD_ID` beside `XDG_RUNTIME_DIR`, so the server sees the session the prompt hook binds the kept prompt to. A Codex entry written before is brought up to date on the next `ljos onboard`; variables it already forwards are kept.

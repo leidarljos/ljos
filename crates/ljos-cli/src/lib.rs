@@ -8859,6 +8859,7 @@ fn atom_as_hit(atom: &Value) -> Option<Hit> {
         entities,
         ballots: None,
         of: None,
+        rerank_score: None,
     })
 }
 
@@ -22872,7 +22873,7 @@ const POLICYD_INSTALL_FIX: &str = "`cargo install --locked ljos-policyd`";
 /// The oldest `ljos-policyd` this ljos runs with. A Rust older than the
 /// workspace's `rust-version` can leave an older one installed: `cargo
 /// install` picks the newest release that builds and says nothing.
-pub const POLICYD_MIN: &str = "0.4.5";
+pub const POLICYD_MIN: &str = "0.5.0";
 
 /// The policy row's state from what `ljos-policyd version` printed: the
 /// law it runs, or an error when the release is older than
@@ -34482,6 +34483,7 @@ mod tests {
             entities: Vec::new(),
             ballots: None,
             of: None,
+            rerank_score: None,
         };
         let related = vec![
             hit("own21", "note", "note 21"),
@@ -34660,6 +34662,7 @@ mod tests {
             entities,
             ballots: None,
             of: None,
+            rerank_score: None,
         };
         let downgraded = tagged(
             "summary",
@@ -34699,6 +34702,7 @@ mod tests {
                 entities: tags.iter().map(|t| (*t).to_string()).collect(),
                 ballots: None,
                 of: None,
+                rerank_score: None,
             }
         };
         let cased = serde_json::json!({"origin": "User-Declared", "source": {"basis": " Person "}});
@@ -34789,6 +34793,7 @@ mod tests {
             entities,
             ballots: None,
             of: None,
+            rerank_score: None,
         };
         // A forged note-basis entity claiming the person said it is ignored:
         // a note is agent-derived by its real origin.
@@ -36664,13 +36669,13 @@ mod tests {
             ok: true,
         };
         let table = row(format!(
-            "ljos-policyd 0.4.5 (host table) at /bin/ljos-policyd: each pipeline is judged by its built-in table; {POLICY_TABLE_ONLY}"
+            "ljos-policyd 0.5.0 (host table) at /bin/ljos-policyd: each pipeline is judged by its built-in table; {POLICY_TABLE_ONLY}"
         ));
         let old = row(format!(
             "ljos-policyd 0.2.0 at /bin/ljos-policyd: this version does not name its backend, 0.2.5 and later do; {POLICY_TABLE_ONLY}"
         ));
         let linked = row(
-            "ljos-policyd 0.4.5 (phronesis) at /bin/ljos-policyd: each pipeline is judged by its built-in table, then by phronesis".into(),
+            "ljos-policyd 0.5.0 (phronesis) at /bin/ljos-policyd: each pipeline is judged by its built-in table, then by phronesis".into(),
         );
         assert_eq!(doctor_word(&table), "warn");
         assert_eq!(doctor_word(&old), "warn");
@@ -36702,23 +36707,23 @@ mod tests {
     fn a_policyd_older_than_the_floor_fails_the_policy_row() {
         assert_eq!(RUST_MIN, "1.89");
         let old = policy_state("ljos-policyd 0.2.6 (host table)", "/bin/ljos-policyd").unwrap_err();
-        assert!(old.contains("older than 0.4.5"), "{old}");
+        assert!(old.contains("older than 0.5.0"), "{old}");
         assert!(old.contains("Rust older than 1.89"), "{old}");
         assert!(old.contains("rustup update stable"), "{old}");
         let unnamed = policy_state("ljos-policyd 0.2.0", "/bin/ljos-policyd");
         assert!(unnamed.is_err());
-        let previous = policy_state("ljos-policyd 0.4.4 (phronesis)", "/bin/ljos-policyd");
+        let previous = policy_state("ljos-policyd 0.4.6 (phronesis)", "/bin/ljos-policyd");
         assert!(previous.is_err(), "{previous:?}");
-        let current = policy_state("ljos-policyd 0.4.5 (host table)", "/bin/ljos-policyd").unwrap();
+        let current = policy_state("ljos-policyd 0.5.0 (host table)", "/bin/ljos-policyd").unwrap();
         assert!(current.ends_with(POLICY_TABLE_ONLY), "{current}");
-        let linked = policy_state("ljos-policyd 0.4.5 (phronesis)", "/bin/ljos-policyd").unwrap();
+        let linked = policy_state("ljos-policyd 0.5.0 (phronesis)", "/bin/ljos-policyd").unwrap();
         assert!(linked.ends_with("then by phronesis"), "{linked}");
         let floor = below_floor("ljos-policyd", Some("0.2.6")).unwrap();
-        assert!(floor.contains("older than 0.4.5"), "{floor}");
-        assert!(below_floor("ljos-policyd", Some("0.4.4"))
+        assert!(floor.contains("older than 0.5.0"), "{floor}");
+        assert!(below_floor("ljos-policyd", Some("0.4.6"))
             .unwrap()
-            .contains("older than 0.4.5"));
-        assert_eq!(below_floor("ljos-policyd", Some("0.4.5")), None);
+            .contains("older than 0.5.0"));
+        assert_eq!(below_floor("ljos-policyd", Some("0.5.0")), None);
         assert_eq!(below_floor("vissue", Some("0.0.1")), None);
         // The short doctor names only required failures. The binary row
         // stays required, so an old ljos-policyd is on that line and in
@@ -36743,7 +36748,7 @@ mod tests {
             "{short}"
         );
         assert!(short.contains("no\tljos-policyd\t"), "{short}");
-        assert!(short.contains("older than 0.4.5"), "{short}");
+        assert!(short.contains("older than 0.5.0"), "{short}");
         assert!(short.contains("rustup update stable"), "{short}");
         assert!(short.contains("Rust older than 1.89"), "{short}");
     }
@@ -36774,7 +36779,7 @@ mod tests {
             dir.path(),
             "hangs",
             "if [ \"$1\" = version ]; then\n\
-             printf '%s\\n' 'ljos-policyd 0.4.5 (phronesis)'\n\
+             printf '%s\\n' 'ljos-policyd 0.5.0 (phronesis)'\n\
              exit 0\n\
              fi\n\
              exec /bin/sleep 30",
@@ -38362,6 +38367,7 @@ mod tests {
             entities: vec!["horizon:standing".into()],
             ballots: Some(ballots),
             of: Some(3),
+            rerank_score: None,
         }
     }
 
@@ -38440,6 +38446,7 @@ mod tests {
             entities: vec!["horizon:standing".into()],
             ballots: None,
             of: None,
+            rerank_score: None,
         };
         assert!(!admits_judged(&hit, true, 0.9, cue, 0.0, 0.0));
     }
@@ -38648,6 +38655,7 @@ mod tests {
             entities: vec![],
             ballots: Some(2),
             of: Some(3),
+            rerank_score: None,
         }
     }
 
@@ -38888,6 +38896,7 @@ mod tests {
             entities: Vec::new(),
             ballots: None,
             of: None,
+            rerank_score: None,
         };
         let cue = "the registry rejected my token";
         let judged = vec![
@@ -39972,6 +39981,7 @@ mod tests {
             entities: vec![],
             ballots,
             of,
+            rerank_score: None,
         };
         assert!(agreed(&hit(Some(2), Some(3))));
         assert!(!agreed(&hit(Some(1), Some(3))));
@@ -40018,6 +40028,7 @@ mod tests {
             entities: vec!["horizon:standing".into()],
             ballots: None,
             of: None,
+            rerank_score: None,
         };
         assert!(is_refresher(&standing));
         let tagged = Hit {
@@ -40029,6 +40040,7 @@ mod tests {
             entities: vec!["horizon:transient".into()],
             ballots: None,
             of: None,
+            rerank_score: None,
         };
         assert!(!is_refresher(&tagged));
         let untagged = Hit {
@@ -40040,6 +40052,7 @@ mod tests {
             entities: vec![],
             ballots: None,
             of: None,
+            rerank_score: None,
         };
         assert!(!is_refresher(&untagged));
     }
@@ -40292,6 +40305,7 @@ mod tests {
             entities: vec![],
             ballots: None,
             of: None,
+            rerank_score: None,
         };
         assert_eq!(
             hit_line(&h, "2026-09-12T00:00:00.000Z"),
@@ -40306,6 +40320,7 @@ mod tests {
             entities: vec![],
             ballots: None,
             of: None,
+            rerank_score: None,
         };
         assert_eq!(
             hit_line(&bare, "2026-09-12T00:00:00.000Z"),
@@ -42224,6 +42239,7 @@ mod tests {
             entities: vec![],
             ballots,
             of,
+            rerank_score: None,
         };
         let cue = "build on the cluster fuse";
         assert!(admits_judged(
@@ -45477,7 +45493,7 @@ mod tests {
         let rows = vec![
             habitat_row("pack", "answers", true),
             habitat_row("tracker", "answers", true),
-            habitat_row("policy", "ljos-policyd 0.4.6 (phronesis)", true),
+            habitat_row("policy", "ljos-policyd 0.5.0 (phronesis)", true),
             habitat_row("host key", "none yet", false),
         ];
         let short = format_doctor_short(&rows);
@@ -45498,7 +45514,7 @@ mod tests {
         let mut rows = vec![
             habitat_row("pack", "answers", true),
             tracker.clone(),
-            habitat_row("policy", "ljos-policyd 0.4.6 (phronesis)", true),
+            habitat_row("policy", "ljos-policyd 0.5.0 (phronesis)", true),
             habitat_row("host key", "none yet", false),
             habitat_row("cloud guard", "missing; run `ljos cloud up`", false),
         ];
@@ -45523,7 +45539,7 @@ mod tests {
         let full = format!(
             "== doctor\n{}",
             format_doctor(&[
-                habitat_row("ljos-policyd", "/bin/ljos-policyd  0.4.6", true),
+                habitat_row("ljos-policyd", "/bin/ljos-policyd  0.5.0", true),
                 habitat_row("pack", "answers", true),
                 tracker,
             ])
@@ -45567,7 +45583,7 @@ mod tests {
 
     #[test]
     fn a_compact_sitting_keeps_what_needs_action_and_the_memories() {
-        let full = "== doctor\nok\tljos-policyd\t/bin/ljos-policyd  0.4.6\nok\tpack\tanswers\ninfo\thost key\tnone yet\nok\ttracker\tvissue 0.21.0 root=/t prefix=Software\nencoder down: the pack ranks by words alone\n\
+        let full = "== doctor\nok\tljos-policyd\t/bin/ljos-policyd  0.5.0\nok\tpack\tanswers\ninfo\thost key\tnone yet\nok\ttracker\tvissue 0.21.0 root=/t prefix=Software\nencoder down: the pack ranks by words alone\n\
 == sync\nsync: this repository names no scope\n\
 == cards\n\
 == due\n2 due; the soonest: abc\n\
@@ -45840,6 +45856,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 .collect(),
             ballots: None,
             of: None,
+            rerank_score: None,
         };
         assert!(
             is_refresher(&hit(&person)),
@@ -53313,6 +53330,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 },
                 ballots: None,
                 of: None,
+                rerank_score: None,
             }
         };
         let mut rows = vec![

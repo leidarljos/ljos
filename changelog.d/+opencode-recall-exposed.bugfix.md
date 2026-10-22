@@ -1,1 +1,0 @@
-`ljos onboard --harness opencode` writes the server at `mcp.servers.ljos` with `codemode` false, so opencode lists `ljos_ljos_recall` and `ljos_ljos_note` on the native tool list. With Code Mode left on, those names were missing and note and recall failed on every model.

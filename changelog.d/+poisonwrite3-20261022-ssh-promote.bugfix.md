@@ -1,1 +1,0 @@
-The seat guard now refuses `ljos prefer`, `ljos remember` and `ljos accept` run through `ssh`, including `ssh localhost`. ljos started that way is not under the runner, so it took the words as the person's and skipped the check against the latest prompt; `ssh localhost ljos prefer --user --promote` could promote a lesson the person never said.

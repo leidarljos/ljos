@@ -1,1 +1,0 @@
-Push-gate path tests now force `LJOS_GUARD=on` so they still exercise lease-push parsing under a temporary test `HOME`, and the MCP guard-check test comment now matches the tool's allow-versus-error behavior.

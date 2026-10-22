@@ -1,1 +1,0 @@
-The first import of a log that git already stored with a header left no local note that the host writes headers, and it left a pinned pre-header blob in place. History is how a fresh clone knows. The note is still the file this checkout writes when it opens a headed log.

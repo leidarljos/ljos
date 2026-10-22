@@ -1,1 +1,0 @@
-Every surface reads who stands behind a memory from one stored origin. The basis and origin are read without case, so a peer import strips a `Person` basis just as the reader honours it. Note tags no longer turn the person's record into an unverified note. A peer's preference, lesson or note is labelled as a peer's instead of an agent's.
