@@ -347,11 +347,25 @@ pub fn session_start_for(session: Option<&str>) -> String {
         wake_for_recall();
         atoms = session_atoms(2_000);
     }
-    let mut line = session_start_line_from(
-        atoms.as_ref().ok().map(|v| v.as_slice()),
-        &now_utc(),
-        on_path("ljos-policyd"),
-    );
+    // The preface names preferences as this seat's. An open listener's
+    // listing is not that word, the same as a search hit is not.
+    let asks = atoms.is_ok() && pack().ok().is_some_and(|client| listing_asks(&client));
+    let stripped = if asks {
+        None
+    } else {
+        atoms.as_ref().ok().map(|list| {
+            list.iter()
+                .cloned()
+                .map(without_person_claim)
+                .collect::<Vec<_>>()
+        })
+    };
+    let for_line = if asks {
+        atoms.as_ref().ok().map(|list| list.as_slice())
+    } else {
+        stripped.as_deref()
+    };
+    let mut line = session_start_line_from(for_line, &now_utc(), on_path("ljos-policyd"));
     // A guard that switched itself off says so where the session starts,
     // not only in `ljos doctor`.
     if let Some(off) = bookkeep::guard_off_reason() {
@@ -371,6 +385,23 @@ pub fn session_start_for(session: Option<&str>) -> String {
         }
     }
     user_rules::prepend(line)
+}
+
+/// `atom` with a person claim removed, so a line built from an unproven
+/// listing does not state it.
+fn without_person_claim(mut atom: Value) -> Value {
+    if person_stored(&atom) {
+        if let Some(obj) = atom.as_object_mut() {
+            obj.insert(
+                "origin".to_string(),
+                Value::String(admit::ORIGIN_AGENT.to_string()),
+            );
+            if let Some(source) = obj.get_mut("source").and_then(Value::as_object_mut) {
+                source.remove("basis");
+            }
+        }
+    }
+    atom
 }
 
 fn session_atoms(ms: u64) -> Result<Vec<Value>> {
@@ -7877,6 +7908,7 @@ fn with_issue_recall(call: &HookCall, text: String) -> String {
 /// floor below is theirs. Empty when none of them bear on the prompt.
 fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, Vec<String>)> {
     let atoms = session_atoms(1_500).ok()?;
+    record_listed_origins(&atoms);
     let seen = seen_ids(call.session.as_deref());
     let rows: Vec<(Hit, String)> = atoms
         .iter()
@@ -8114,7 +8146,6 @@ fn clears_lexical_floor(lexical: &[f64], eligible: &[bool]) -> Vec<bool> {
 }
 
 fn atom_as_hit(atom: &Value) -> Option<Hit> {
-    keep_origin(atom);
     let text = atom.get("text")?.as_str()?.trim().to_string();
     if text.is_empty() {
         return None;
@@ -8658,7 +8689,7 @@ pub fn search_with_signals(cue: &str, limit: u32) -> Result<Vec<(Hit, DenseSigna
                 Some((hit, signal))
             })
             .collect::<Option<_>>()?;
-        keep_search_origins(&client, &body, found.iter().map(|(h, _)| h));
+        keep_search_origins(&client, found.iter().map(|(h, _)| h));
         Some(found)
     })();
     match raw {
@@ -10278,6 +10309,45 @@ pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<(Vec<Hit>, bool)>
         .unwrap_or_else(|_| bail!("search: the reranked search took longer than {ms} ms"))
 }
 
+fn search_query(
+    client: &PacksetClient,
+    url: &str,
+    cue: &str,
+    limit: u32,
+    rerank: bool,
+    relevance: bool,
+) -> ureq::Request {
+    let mut req = ureq::get(url)
+        .query("workspace", &client.workspace())
+        .query("q", &recall_query(cue))
+        .query("limit", &limit.to_string());
+    if relevance {
+        req = req.query("rank", "relevance");
+    }
+    if rerank {
+        req = req.query("rerank", "1");
+    }
+    req
+}
+
+/// Drop origin and basis from search hits. An open listener's body is
+/// not a word for who stored them; the texts stay, so a lesson can still
+/// be shown as an agent's.
+fn redact_hit_provenance(body: &mut Value) {
+    let Some(hits) = body["hits"].as_array_mut() else {
+        return;
+    };
+    for hit in hits {
+        let Some(obj) = hit.as_object_mut() else {
+            continue;
+        };
+        obj.remove("origin");
+        if let Some(source) = obj.get_mut("source").and_then(Value::as_object_mut) {
+            source.remove("basis");
+        }
+    }
+}
+
 /// What `/v1/search` answers for `cue`, with at most `limit` hits chosen
 /// by relevance alone, and how many of them the writer chose. A writer
 /// that lists `rank=relevance` ([`ranks_by_relevance`]) is asked for it,
@@ -10296,6 +10366,12 @@ pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<(Vec<Hit>, bool)>
 /// keeps at its cut is arbitrary, and one it dropped would have come in
 /// as the atom. A body that does not parse, a NaN from a writer that is
 /// not packset, has no hits and no echo, so the stored atoms answer.
+///
+/// The read is sent first without this seat's token and has to come back
+/// 401, the same check as [`atom_now`]. The token goes out only after
+/// that refusal. A listener that answers without the token is still read,
+/// without the token, and origin and basis are removed, so a lesson can
+/// be shown as an agent's and nothing is the person's.
 fn search_relevant(
     client: &PacksetClient,
     cue: &str,
@@ -10304,21 +10380,30 @@ fn search_relevant(
     timeout: std::time::Duration,
 ) -> Result<(Value, usize)> {
     let url = format!("{}/v1/search", client.base().trim_end_matches('/'));
-    let ask = |rank: bool| {
-        let mut req = packset_client::authorize(ureq::get(&url))
-            .query("workspace", &client.workspace())
-            .query("q", &recall_query(cue))
-            .query("limit", &limit.to_string())
-            .timeout(timeout);
-        if rank {
-            req = req.query("rank", "relevance");
+    // The probe asks for no rank. Learning the rank reads `/v1/status`,
+    // and that read would carry the token before the listener is proven.
+    let probe = || search_query(client, &url, cue, limit, rerank, false);
+    let mut open = false;
+    let ranked = match proven_request("the search", client.base(), timeout, probe) {
+        Ok(_) => ranks_by_relevance(client, timeout, true),
+        Err(err) if listener_unproven(&err) => {
+            open = true;
+            ranks_by_relevance(client, timeout, false)
         }
-        if rerank {
-            req = req.query("rerank", "1");
-        }
-        req.call().map_err(Box::new)
+        Err(err) => bail!("search: GET /v1/search failed: {err}"),
     };
-    let ranked = ranks_by_relevance(client, timeout);
+    let ask = |rank: bool| {
+        let req = search_query(client, &url, cue, limit, rerank, rank);
+        let req = if open {
+            req
+        } else {
+            packset_client::authorize(req)
+        };
+        req.timeout(timeout).call().map_err(Box::new)
+    };
+    // A writer that lists the rank and answers it with a 4xx is an older
+    // writer for the rest of the process. The probe already separated a
+    // listener that does not ask from one that does.
     let answer = match ask(ranked) {
         Err(e) if ranked && matches!(*e, ureq::Error::Status(400..=499, _)) => {
             refuses_relevance(client);
@@ -10360,6 +10445,9 @@ fn search_relevant(
             hits.extend(extra);
         }
     }
+    if open {
+        redact_hit_provenance(&mut body);
+    }
     Ok((body, chosen))
 }
 
@@ -10367,8 +10455,13 @@ fn search_relevant(
 /// `/v1/status` lists it under `search.ranks`. An older writer omits
 /// `search`, and one that does not answer is taken as older. Its crate
 /// version did not move with the rank, so it is not read. Asked once a
-/// process per writer.
-fn ranks_by_relevance(client: &PacksetClient, timeout: std::time::Duration) -> bool {
+/// process per writer. `with_token` is false for a listener that did not
+/// ask, so the token is not handed to it.
+fn ranks_by_relevance(
+    client: &PacksetClient,
+    timeout: std::time::Duration,
+    with_token: bool,
+) -> bool {
     let base = client.base().trim_end_matches('/').to_string();
     let mut known = RANKS_KNOWN
         .lock()
@@ -10378,7 +10471,13 @@ fn ranks_by_relevance(client: &PacksetClient, timeout: std::time::Duration) -> b
             return *ranks;
         }
     }
-    let Some(status) = packset_client::authorize(ureq::get(&format!("{base}/v1/status")))
+    let req = ureq::get(&format!("{base}/v1/status"));
+    let req = if with_token {
+        packset_client::authorize(req)
+    } else {
+        req
+    };
+    let Some(status) = req
         .timeout(timeout)
         .call()
         .ok()
@@ -10449,7 +10548,7 @@ fn packset_search_relevant(query: &str, limit: u32) -> Result<Vec<Hit>> {
         let client = pack()?;
         let (body, _) = search_relevant(&client, q, limit, false, pack_timeout())?;
         let hits: Vec<Hit> = serde_json::from_value(body["hits"].clone()).unwrap_or_default();
-        keep_search_origins(&client, &body, &hits);
+        keep_search_origins(&client, &hits);
         Ok(hits)
     })?;
     count_recall(&hits);
@@ -10522,7 +10621,7 @@ fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> 
             unscored.extend(extra);
             merge_by_lexical(scored.into_iter().map(|(h, _)| h).collect(), unscored, q)
         };
-        keep_search_origins(&client, &body, &hits);
+        keep_search_origins(&client, &hits);
         Ok((hits, ran))
     })?;
     count_recall(&hits);
@@ -17239,15 +17338,21 @@ pub fn gate_read() -> (Vec<Rule>, Vec<(String, String)>) {
     legacy_pref::migrate_once();
     let kept = rules_cache_path();
     let listed = pack().and_then(|client| {
-        atoms_lean(&client, &client.workspace()).context("rules: GET /v1/atoms failed")
+        let atoms =
+            atoms_lean(&client, &client.workspace()).context("rules: GET /v1/atoms failed")?;
+        Ok((atoms, listing_asks(&client)))
     });
     match listed {
-        Ok(atoms) => {
+        Ok((atoms, asks)) => {
             let rules = rules_of(&atoms);
             if let Some(path) = &kept {
                 keep_rules(path, &rules);
             }
-            let theirs: Vec<Value> = atoms.into_iter().filter(person_stored).collect();
+            let theirs: Vec<Value> = if asks {
+                atoms.into_iter().filter(person_stored).collect()
+            } else {
+                Vec::new()
+            };
             (rules, preferences_of(&theirs))
         }
         Err(_) => (kept.map(|p| kept_rules(&p)).unwrap_or_default(), Vec::new()),
@@ -26405,6 +26510,7 @@ fn written_at(atom: &Value) -> Option<String> {
 /// [`issue_memories`] on a listing already read, ordered by when each
 /// memory was written, newest first.
 fn tagged_with_issue(atoms: &[Value], issue: &str) -> Vec<Hit> {
+    let proven = pack().ok().is_some_and(|client| listing_asks(&client));
     let tag = format!("issue:{issue}");
     let mut own: Vec<Hit> = atoms
         .iter()
@@ -26417,7 +26523,7 @@ fn tagged_with_issue(atoms: &[Value], issue: &str) -> Vec<Hit> {
         })
         .filter_map(|atom| {
             let mut hit = serde_json::from_value::<Hit>(atom.clone()).ok()?;
-            keep_origin(atom);
+            record_listed(atom, proven);
             hit.ts = written_at(atom).or(hit.ts);
             Some(hit)
         })
@@ -29245,9 +29351,30 @@ fn record_origin(id: &str, by: Option<StoredBy>) {
         .insert(id.to_string(), by);
 }
 
-/// Record the stored origin of `atom`, an atom or a search hit, by its id.
-/// A record that carries no origin, an island row or a milli hit, says
-/// nothing of the stored one and records nothing.
+/// Record each listing atom's origin when the listener asks for the
+/// token, and clear the person otherwise. One proof for the whole list.
+fn record_listed_origins(atoms: &[Value]) {
+    let proven = pack().ok().is_some_and(|client| listing_asks(&client));
+    for atom in atoms {
+        record_listed(atom, proven);
+    }
+}
+
+/// Record `atom`'s origin when `proven`, or clear the person for its id.
+fn record_listed(atom: &Value, proven: bool) {
+    let Some(id) = atom.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    if proven {
+        keep_origin(atom);
+    } else {
+        unrecord_person(id);
+    }
+}
+
+/// Record the stored origin of `atom`, an atom from a proven listing or
+/// by-id read, by its id. A record that carries no origin, an island row
+/// or a milli hit, says nothing of the stored one and records nothing.
 pub(crate) fn keep_origin(atom: &Value) {
     if carried_origin(atom).is_none() {
         return;
@@ -29267,6 +29394,10 @@ fn keep_origins_of<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'
     if ids.is_empty() {
         return;
     }
+    if !listing_asks(client) {
+        ids.into_iter().for_each(unrecord_person);
+        return;
+    }
     match atoms_lean(client, &client.workspace()) {
         Ok(atoms) => {
             atoms.iter().for_each(keep_origin);
@@ -29281,22 +29412,15 @@ fn keep_origins_of<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'
     }
 }
 
-/// Record the origin each hit of search answer `body` carries, and read
-/// the listing ([`keep_origins_of`]) for `hits`, parsed from it, only when
-/// a hit carries none.
-fn keep_search_origins<'a>(
-    client: &PacksetClient,
-    body: &Value,
-    hits: impl IntoIterator<Item = &'a Hit>,
-) {
-    let raw = body["hits"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    raw.iter().for_each(keep_origin);
-    if raw.iter().any(|v| carried_origin(v).is_none()) {
-        keep_origins_of(client, hits);
-    }
+/// Record the origin of each search hit from the pack's listing
+/// ([`keep_origins_of`]), never from the hit. A search answer names its
+/// own origin, and a listener can stamp `user-declared` on a hit the
+/// listing holds as an agent's. The listing is the record the pack
+/// stored. A hit it does not hold, or a listing that does not answer,
+/// is not the person's: [`keep_origins_of`] records the first as not
+/// held and clears the person for the second.
+fn keep_search_origins<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'a Hit>) {
+    keep_origins_of(client, hits);
 }
 
 /// Whether the pack stored `h` as the person's. A hit whose origin no
@@ -29354,6 +29478,56 @@ pub(crate) enum Stored {
 /// How long a read waits for the pack to answer for one atom id.
 const ATOM_NOW_MS: u64 = 400;
 
+/// Whether `err` from [`proven_request`] is a listener that did not ask
+/// for the token, rather than a pack that did not answer.
+fn listener_unproven(err: &str) -> bool {
+    err.contains("without this seat's token") || err.contains("no token")
+}
+
+/// How long a proof waits. A hook's pack timeout is already short; the
+/// by-id read's bound is the longer the proof may add.
+fn proof_timeout() -> std::time::Duration {
+    pack_timeout().min(std::time::Duration::from_millis(ATOM_NOW_MS))
+}
+
+/// The request `build` makes, after the same read without this seat's
+/// token came back 401 and the token really goes with it.
+/// [`packset_client::authorize`] keeps the token from a port another user
+/// holds. `label` names the read in the error.
+fn proven_request(
+    label: &str,
+    base: &str,
+    timeout: std::time::Duration,
+    build: impl Fn() -> ureq::Request,
+) -> std::result::Result<ureq::Request, String> {
+    match build().timeout(timeout).call() {
+        Err(ureq::Error::Status(401, _)) => {}
+        Err(ureq::Error::Transport(err)) => {
+            return Err(format!("the pack did not answer {label}: {err}"));
+        }
+        _ => {
+            return Err(format!(
+                "the listener at {base} answers {label} without this seat's token"
+            ));
+        }
+    }
+    let asked = packset_client::authorize(build()).timeout(timeout);
+    if asked.header("Authorization").is_none() {
+        return Err(format!(
+            "no token {label}: this seat has none, or another user holds the pack's port"
+        ));
+    }
+    Ok(asked)
+}
+
+/// Whether the listing at `client` asks for this seat's token, the same
+/// check [`atom_now`] makes of a by-id read.
+fn listing_asks(client: &PacksetClient) -> bool {
+    let base = client.base().trim_end_matches('/');
+    let url = format!("{base}/v1/atoms");
+    proven_request("the listing", base, proof_timeout(), || ureq::get(&url)).is_ok()
+}
+
 /// Atom `id` as this seat's pack answers for it now, both requests inside
 /// [`ATOM_NOW_MS`]: `Ok(Some(record))` when it holds it live, `Ok(None)`
 /// when it answered that it does not, and `Err` saying why when there is
@@ -29362,11 +29536,11 @@ const ATOM_NOW_MS: u64 = 400;
 /// Only a listener that asks for this seat's token answers. The read goes
 /// only with the token, which [`packset_client::authorize`] keeps from a
 /// port another user holds, and only after the same read without it was
-/// refused with 401. A stand-in that answers anyone, or a packsetd run
-/// with `PACKSET_AUTH=off`, confirms nothing. A process of this same user
-/// can read the token file and answer as packsetd would; no client check
-/// tells it apart, and only a pack that signs its answers or runs as its
-/// own user would.
+/// refused with 401, via [`proven_request`]. A stand-in that answers
+/// anyone, or a packsetd run with `PACKSET_AUTH=off`, confirms nothing. A
+/// process of this same user can read the token file and answer as
+/// packsetd would; no client check tells it apart, and only a pack that
+/// signs its answers or runs as its own user would.
 pub(crate) fn atom_now(id: &str) -> std::result::Result<Option<Value>, String> {
     let client = pack().map_err(|err| format!("no pack to ask for {id}: {err:#}"))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ATOM_NOW_MS);
@@ -29383,25 +29557,10 @@ pub(crate) fn atom_now(id: &str) -> std::result::Result<Option<Value>, String> {
         .extend(["v1", "atoms", id]);
     url.query_pairs_mut()
         .append_pair("workspace", &client.workspace());
-    match ureq::get(url.as_str()).timeout(left()).call() {
-        Err(ureq::Error::Status(401, _)) => {}
-        Err(ureq::Error::Transport(err)) => {
-            return Err(format!("the pack did not answer for {id}: {err}"));
-        }
-        _ => {
-            return Err(format!(
-                "the listener at {} answers for {id} without this seat's token",
-                client.base()
-            ));
-        }
-    }
-    let asked = packset_client::authorize(ureq::get(url.as_str())).timeout(left());
-    if asked.header("Authorization").is_none() {
-        return Err(format!(
-            "no token for {id}: this seat has none, or another user holds the pack's port"
-        ));
-    }
-    let atom: Value = match asked.call() {
+    let asked = proven_request(&format!("for {id}"), client.base(), left(), || {
+        ureq::get(url.as_str())
+    })?;
+    let atom: Value = match asked.timeout(left()).call() {
         Ok(answer) => answer
             .into_json()
             .map_err(|err| format!("the pack's answer for {id} is not JSON: {err}"))?,
@@ -37590,11 +37749,20 @@ mod tests {
     }
 
     /// A pack whose search sends the encoder's rank and cosine on each hit.
+    /// It asks for [`STUB_TOKEN`], and the listing holds the same hits, so
+    /// a preference is the person's only after that refusal.
     fn serve_signal_pack(hits: Value) -> String {
         let (url, _) = serve_http(move |req| {
+            if !stub_showed_token(req) {
+                return (401, r#"{"error":"token"}"#.into());
+            }
             let first = req.lines().next().unwrap_or("");
             if first.contains("/v1/search") {
                 return (200, serde_json::json!({ "hits": hits }).to_string());
+            }
+            if first.contains("/v1/atoms") {
+                let atoms = hits.as_array().cloned().unwrap_or_default();
+                return (200, serde_json::json!({ "atoms": atoms }).to_string());
             }
             (404, r#"{"error":"missing"}"#.into())
         });
@@ -38552,6 +38720,9 @@ mod tests {
         let statuses = Arc::new(AtomicUsize::new(0));
         let seen = Arc::clone(&statuses);
         let (url, _) = serve_http(move |req| {
+            if !stub_showed_token(req) {
+                return (401, r#"{"error":"token"}"#.into());
+            }
             let first = req.lines().next().unwrap_or("");
             if first.contains("/v1/status") {
                 let n = seen.fetch_add(1, Ordering::SeqCst);
@@ -50293,7 +50464,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let wrong = read(&asks, Some("another-token")).unwrap_err();
         assert!(wrong.contains("did not answer"), "{wrong}");
         assert!(
-            seen.lock().unwrap().iter().all(|line| line.contains(id)),
+            seen.lock().unwrap().iter().all(|line| {
+                let path = line.split_whitespace().nth(1).unwrap_or("");
+                !path.contains("/v1/atoms/") || path.contains(id)
+            }),
             "{:?}",
             seen.lock().unwrap()
         );
@@ -50301,9 +50475,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     /// A record or a hit with no origin, a null one or an empty one is no
     /// one's word for the claim, whatever basis it carries. A search hit
-    /// without one, as a milli document comes back, takes what the
-    /// pack's listing holds now, and none when the listing does not hold
-    /// it, never what this process recorded before.
+    /// takes what the pack's listing holds now, including one that names
+    /// its own origin, and none when the listing does not hold it, never
+    /// what this process recorded before.
     #[test]
     fn a_claim_without_an_origin_is_not_the_persons() {
         let _g = env_guard();
@@ -50326,8 +50500,18 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let unlisted = "0r1g1nle55000000000000000000000002";
         record_origin(listed, Some(StoredBy::Person));
         record_origin(unlisted, Some(StoredBy::Person));
+        const TOKEN: &str = "origin-pack-token";
         let (url, _) = serve_http(move |req| {
             let first = req.lines().next().unwrap_or("");
+            let showed = req.lines().any(|line| {
+                line.split_once(':').is_some_and(|(name, value)| {
+                    name.eq_ignore_ascii_case("authorization")
+                        && value.trim() == format!("Bearer {TOKEN}")
+                })
+            });
+            if !showed {
+                return (401, r#"{"error":"token"}"#.into());
+            }
             let hit = |id: &str| {
                 serde_json::json!({"id": id, "kind": "preference", "text": "Keep the form short.",
                        "score": 1.0, "source": {"basis": "person"}})
@@ -50346,7 +50530,11 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             }
             (404, r#"{"error":"no atom"}"#.into())
         });
-        let _pack = HoldEnv::set(&[("PACKSET_URL", &url), ("PACKSET_WORKSPACE", "seat")]);
+        let _pack = HoldEnv::set(&[
+            ("PACKSET_URL", &url),
+            ("PACKSET_WORKSPACE", "seat"),
+            ("PACKSET_TOKEN", TOKEN),
+        ]);
         let found = search_with_signals("the form", 8).unwrap();
         assert_eq!(found.len(), 2, "{found:?}");
         assert_eq!(recorded_origin(listed), Some(StoredBy::Agent));
@@ -50979,6 +51167,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         url: Option<String>,
         seat: Option<String>,
         timeout: Option<String>,
+        token: Option<String>,
     }
 
     impl PackUrl {
@@ -50988,11 +51177,15 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 url: take("PACKSET_URL"),
                 seat: take("LJOS_SEAT"),
                 timeout: take("PACKSET_TIMEOUT_MS"),
+                token: take("PACKSET_TOKEN"),
             };
             unsafe {
                 std::env::set_var("PACKSET_URL", url);
                 std::env::set_var("LJOS_SEAT", "inky");
                 std::env::set_var("PACKSET_TIMEOUT_MS", "2000");
+                // The stub packs that hold a person's preference refuse a
+                // read without this, the same check as packsetd.
+                std::env::set_var("PACKSET_TOKEN", STUB_TOKEN);
             }
             held
         }
@@ -51009,6 +51202,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             put("PACKSET_URL", &self.url);
             put("LJOS_SEAT", &self.seat);
             put("PACKSET_TIMEOUT_MS", &self.timeout);
+            put("PACKSET_TOKEN", &self.token);
         }
     }
 
@@ -51217,7 +51411,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                     let req = read_http(&mut s);
                     let first = req.lines().next().unwrap_or("").to_string();
                     let held = r#"{"id":"p1","text":"Tag a release with git push origin TAG; --follow-tags leaves v-tags behind.","score":2.0,"kind":"preference","ts":"2026-10-10T18:00:00.000Z","entities":[],"origin":"user-declared","source":{"basis":"person"},"ballots":3,"of":3}"#;
-                    let (status, body) = if first.contains("/v1/search") {
+                    let (status, body) = if !stub_showed_token(&req) {
+                        ("401 Unauthorized", r#"{"error":"token"}"#.to_string())
+                    } else if first.contains("/v1/search") {
                         if first.contains("rerank=1") {
                             std::thread::sleep(std::time::Duration::from_secs(20));
                         }
@@ -51374,6 +51570,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let stored: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
         let slot = Arc::clone(&stored);
         let (url, _) = serve_http(move |req| {
+            if !stub_showed_token(req) {
+                return (401, r#"{"error":"token"}"#.into());
+            }
             let first = req.lines().next().unwrap_or("");
             let body = req.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
             if first.contains("POST /v1/atoms") {
@@ -51382,6 +51581,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 atom["id"] = Value::String(format!("{:032x}", held.len() + 1));
                 held.push(atom.clone());
                 return (200, atom.to_string());
+            }
+            if first.contains("GET /v1/atoms") {
+                let held = slot.lock().unwrap().clone();
+                return (200, serde_json::json!({ "atoms": held }).to_string());
             }
             if first.contains("/v1/search") {
                 let hits: Vec<Value> = slot
@@ -52036,6 +52239,19 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             .map(String::as_str)
             .unwrap_or("");
         assert!(line.to_ascii_lowercase().contains("coi"), "{lines:?}");
+    }
+
+    /// The token [`PackUrl`] shows. A stub that holds a person's preference
+    /// refuses a read without it.
+    const STUB_TOKEN: &str = "stub-pack-token";
+
+    fn stub_showed_token(req: &str) -> bool {
+        req.lines().any(|line| {
+            line.split_once(':').is_some_and(|(name, value)| {
+                name.eq_ignore_ascii_case("authorization")
+                    && value.trim() == format!("Bearer {STUB_TOKEN}")
+            })
+        })
     }
 
     /// Many requests, each answered by `on`. The log is the request line
