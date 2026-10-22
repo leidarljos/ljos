@@ -28,7 +28,7 @@ impl Bench {
             &root,
             "vissue",
             &format!(
-                "#!/bin/sh\necho \"vissue $*\" >> '{}'\ncase \"$1\" in\n  show) echo '{{}}' ;;\n  list|board) echo '[]' ;;\nesac\nexit 0\n",
+                "#!/bin/sh\necho \"vissue $* VISSUE_AGENT=${{VISSUE_AGENT:-}}\" >> '{}'\ncase \"$1\" in\n  show) echo '{{}}' ;;\n  list|board) echo '[]' ;;\nesac\nexit 0\n",
                 log.display()
             ),
         );
@@ -176,4 +176,75 @@ fn a_conversation_the_seats_file_maps_writes_as_that_seat() {
     assert!(!err.contains("no seat is named"), "{err}");
     assert!(!err.contains("no seat named"), "{err}");
     assert!(b.calls().contains("vissue note proj-aaaa"), "{}", b.calls());
+}
+
+#[test]
+fn a_write_records_the_seat_the_seats_file_maps() {
+    let b = Bench::new();
+    b.seats("\"0b1c2d3e-0000-4000-8000-000000000000\" = \"saddle\"\n");
+    b.ljos_env(
+        &[(
+            "CURSOR_CONVERSATION_ID",
+            "0b1c2d3e-0000-4000-8000-000000000000",
+        )],
+        &["note", "proj-aaaa", "progress"],
+    );
+    let calls = b.calls();
+    let note = calls
+        .lines()
+        .find(|l| l.starts_with("vissue note proj-aaaa"))
+        .unwrap_or_else(|| panic!("no note: {calls}"));
+    assert!(note.ends_with("VISSUE_AGENT=saddle"), "{note}");
+}
+
+#[test]
+fn an_assignee_that_is_another_seat_is_refused() {
+    let b = Bench::new();
+    for args in [
+        &["claim", "proj-aaaa", "--assignee", "stranger"][..],
+        &["sitting", "proj-aaaa", "--assignee", "stranger"],
+        &[
+            "finish",
+            "proj-aaaa",
+            "--lesson",
+            "x",
+            "--assignee",
+            "stranger",
+        ],
+        &["complete", "proj-aaaa", "--assignee", "stranger"],
+    ] {
+        let out = b.ljos(Some("saddle"), args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{args:?} went through: {out:?}");
+        assert!(
+            err.contains("stranger is not this seat, saddle"),
+            "{args:?}: {err}"
+        );
+    }
+    assert_eq!(b.calls(), "", "nothing reached the tracker");
+}
+
+#[test]
+fn release_hands_back_only_to_a_seat_the_seats_file_lists() {
+    let b = Bench::new();
+    b.seats(
+        "\"0b1c2d3e-0000-4000-8000-000000000000\" = \"saddle\"\n\
+         \"1c2d3e4f-0000-4000-8000-000000000000\" = \"helper\"\n",
+    );
+    let refused = b.ljos(
+        Some("saddle"),
+        &["release", "proj-aaaa", "--assignee", "stranger"],
+    );
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(err.contains("no seat named stranger"), "{err}");
+    assert_eq!(b.calls(), "", "nothing reached the tracker");
+
+    let handed = b.ljos(
+        Some("saddle"),
+        &["release", "proj-aaaa", "--assignee", "helper"],
+    );
+    let err = String::from_utf8_lossy(&handed.stderr);
+    assert!(!err.contains("no seat named"), "{err}");
+    assert!(!err.contains("is not this seat"), "{err}");
 }

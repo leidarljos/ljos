@@ -1372,9 +1372,15 @@ fn run_command() -> Result<()> {
     {
         bail!("{}", ljos_cli::SUBAGENT_NO_SEAT);
     }
-    if let Some(verb) = tracker_write(&cmd) {
-        ljos_cli::write_seat(verb)?;
-    }
+    let checked = tracker_write(&cmd).map(ljos_cli::write_seat).transpose()?;
+    let _seated = checked.as_ref().map(ljos_cli::Seated::enter);
+    let assignee_for = |verb: &str, passed: Option<&str>, delegates: bool| -> Result<String> {
+        let name = cli_assignee(passed);
+        match &checked {
+            Some(seat) => ljos_cli::write_assignee(verb, seat, name, delegates),
+            None => Ok(name),
+        }
+    };
     match cmd {
         Cmd::Remember {
             text,
@@ -2329,7 +2335,7 @@ fn run_command() -> Result<()> {
             role,
             slack,
         } => {
-            let assignee = cli_assignee(assignee.as_deref());
+            let assignee = assignee_for("claim", assignee.as_deref(), false)?;
             if next || node.is_empty() {
                 let said = claim_next(&assignee, role.as_deref(), slack)?;
                 let taken = said.split_whitespace().next().unwrap_or("").to_string();
@@ -2343,7 +2349,10 @@ fn run_command() -> Result<()> {
             }
         }
         Cmd::Release { node, assignee } => {
-            print!("{}", release(&node, &cli_assignee(assignee.as_deref()))?);
+            // `release HEX --assignee NAME` hands back a claim another
+            // name still holds.
+            let assignee = assignee_for("release", assignee.as_deref(), true)?;
+            print!("{}", release(&node, &assignee)?);
             print!("{}", ljos_cli::persist_tracker(&node, "released"));
         }
         Cmd::Complete {
@@ -2356,7 +2365,7 @@ fn run_command() -> Result<()> {
             complete(
                 &node,
                 status.as_deref(),
-                &cli_assignee(assignee.as_deref()),
+                &assignee_for("complete", assignee.as_deref(), false)?,
                 gen
             )?
         ),
@@ -3425,7 +3434,7 @@ fn run_command() -> Result<()> {
         } => {
             let full = sitting_gated(
                 &issue,
-                &cli_assignee(assignee.as_deref()),
+                &assignee_for("sitting", assignee.as_deref(), false)?,
                 &cards_dir,
                 anyway,
                 playbook.as_deref(),
@@ -3461,7 +3470,7 @@ fn run_command() -> Result<()> {
                     outcome.as_deref(),
                     new_option,
                     beta,
-                    &cli_assignee(assignee.as_deref()),
+                    &assignee_for("finish", assignee.as_deref(), false)?,
                     gen,
                     close
                 )?
