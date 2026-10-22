@@ -3101,4 +3101,53 @@ mod tests {
             "a swapped symlink changed another file's mode"
         );
     }
+
+    /// O_NOFOLLOW on the last component still follows a symlink parent, so
+    /// chmod would change the file in the directory the link points at.
+    #[test]
+    fn mode_fix_refuses_a_symlink_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let path = real.join("cloud.age");
+        fs::write(&path, SECRET).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let via_dir = dir.path().join("via");
+        std::os::unix::fs::symlink(&real, &via_dir).unwrap();
+        let via = via_dir.join("cloud.age");
+
+        let err = set_mode_0600(&via).unwrap_err();
+        assert!(err.to_string().contains("symlink"), "{err}");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "a parent symlink changed the target's mode"
+        );
+
+        let err = match install_identity(&via, SECRET) {
+            Err(err) => err,
+            Ok(_) => panic!("parent symlink was accepted"),
+        };
+        assert!(err.to_string().contains("symlink"), "{err}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), SECRET);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        let err = match install_identity(&via, "AGE-SECRET-KEY-1OTHER\n") {
+            Err(err) => err,
+            Ok(_) => panic!("parent symlink was written through"),
+        };
+        assert!(err.to_string().contains("symlink"), "{err}");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            SECRET,
+            "the identity was written through the parent symlink"
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
 }
