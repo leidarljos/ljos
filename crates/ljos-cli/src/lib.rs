@@ -10087,11 +10087,16 @@ fn offers_approval(reason: &str) -> bool {
 /// would contradict it. A bare ask tells the agent to stop and leave the
 /// command. `stuck` is that sentence, with its leading space. A cited
 /// push (`LJOS_CITE=`) says the same line does not pass again unchanged.
+/// A force push's reason says the agent asks first; here no prompt comes,
+/// so it says the push needs the person's approval.
 fn denial_for_unasked(rule: &Rule, stuck: &str) -> String {
-    if offers_approval(&rule.reason) {
-        return format!("{} (ljos rule `{}`)", rule.reason, rule.pattern);
+    let reason = rule
+        .reason
+        .replace("the agent asks you first", "it needs the person's approval");
+    if offers_approval(&reason) {
+        return format!("{reason} (ljos rule `{}`)", rule.pattern);
     }
-    let (lead, tail) = if rule.reason.contains("LJOS_CITE=") {
+    let (lead, tail) = if reason.contains("LJOS_CITE=") {
         (
             "this push needs a cited decision: ",
             " The same line does not pass again unchanged.",
@@ -10099,10 +10104,7 @@ fn denial_for_unasked(rule: &Rule, stuck: &str) -> String {
     } else {
         ("ask the person before running this: ", stuck)
     };
-    format!(
-        "{lead}{} (ljos rule `{}`).{tail}",
-        rule.reason, rule.pattern
-    )
+    format!("{lead}{reason} (ljos rule `{}`).{tail}", rule.pattern)
 }
 
 /// What a runner that cannot ask is told when the ask carries no grant.
@@ -37907,6 +37909,12 @@ mod tests {
             codex_answer.contains("ask the person before running this"),
             "{codex_answer}"
         );
+        // Codex shows no prompt, so its reason does not promise one.
+        assert!(!codex_answer.contains("asks you first"), "{codex_answer}");
+        assert!(
+            codex_answer.contains("needs the person's approval"),
+            "{codex_answer}"
+        );
         let mut offered = rule.clone();
         offered.reason.push_str(
             " Reply `approve oak-abcdef` in this conversation, call the ljos_request_approval \
@@ -37923,6 +37931,10 @@ mod tests {
         );
         assert!(
             !offered_answer.contains("leave it for them"),
+            "{offered_answer}"
+        );
+        assert!(
+            !offered_answer.contains("asks you first"),
             "{offered_answer}"
         );
         let cursor = HookCall {
