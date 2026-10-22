@@ -1008,15 +1008,23 @@ fn taken_path(root: &Path, scope: &str, host: &str) -> PathBuf {
         .join(format!("{host}.taken"))
 }
 
+/// Where `.taken` was before its path named the tracker. Every checkout
+/// of the scope shared this one file.
+fn shared_taken_path(scope: &str, host: &str) -> PathBuf {
+    state_dir().join(scope).join(format!("{host}.taken"))
+}
+
 /// First line of a `.taken` file that lists [`memory_key`]s. A file
 /// without it lists one [`crate::work_id`] of the text a line, written
 /// before the ticket was in the key.
 const TAKEN_KEYS: &str = "# text and issue";
 
-/// The memories taken from `host` last time. A file of texts is read
-/// through the atoms this pack holds from `sender`: each text stands for
-/// every copy of it, so the first import after the change still retires
-/// what the host dropped and posts nothing again.
+/// The memories taken from `host` last time. A tracker with no file of
+/// its own reads the shared one, which is left for the other checkouts.
+/// A file of texts is read through the atoms this pack holds from
+/// `sender`: each text stands for every copy of it, so the first import
+/// after the change still retires what the host dropped and posts
+/// nothing again.
 fn read_taken(
     root: &Path,
     scope: &str,
@@ -1024,7 +1032,9 @@ fn read_taken(
     atoms: &[Value],
     sender: &str,
 ) -> BTreeSet<String> {
-    let Ok(text) = std::fs::read_to_string(taken_path(root, scope, host)) else {
+    let Ok(text) = std::fs::read_to_string(taken_path(root, scope, host))
+        .or_else(|_| std::fs::read_to_string(shared_taken_path(scope, host)))
+    else {
         return BTreeSet::new();
     };
     let mut lines = text.lines();
@@ -6136,20 +6146,31 @@ mod tests {
     /// text the host dropped, and rewrites the file by memory.
     #[test]
     fn an_import_reads_a_taken_file_of_texts() {
+        import_over_texts(|root| taken_path(root, "cloud", "peer"));
+    }
+
+    /// Before its path named the tracker, one `.taken` per scope and host
+    /// was shared. A tracker with no file of its own reads that one.
+    #[test]
+    fn an_import_reads_the_taken_file_trackers_shared() {
+        import_over_texts(|_| shared_taken_path("cloud", "peer"));
+    }
+
+    fn import_over_texts(old: impl Fn(&Path) -> PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let _env = begin(dir.path());
         let row = serde_json::json!({
             "text": "kept", "kind": "lesson", "issue": "proj-a", "entities": []
         });
         let (root, scope) = peer_log(dir.path(), std::slice::from_ref(&row));
-        let taken = taken_path(&root, "cloud", "peer");
-        std::fs::create_dir_all(taken.parent().unwrap()).unwrap();
+        let old = old(&root);
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
         let texts = format!(
             "{}\n{}\n",
             crate::work_id("kept"),
             crate::work_id("dropped")
         );
-        std::fs::write(&taken, texts).unwrap();
+        std::fs::write(&old, texts).unwrap();
         let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
         point_pack(&url);
         *store.lock().unwrap() = vec![
@@ -6163,6 +6184,8 @@ mod tests {
         );
         assert!(has(&store, 201));
         assert!(!has(&store, 202));
+        assert!(old.exists(), "the old file was not left in place");
+        let taken = taken_path(&root, "cloud", "peer");
         let rewritten = std::fs::read_to_string(&taken).unwrap();
         assert!(
             rewritten.contains(&memory_key(&row).unwrap()),
