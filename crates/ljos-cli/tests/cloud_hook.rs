@@ -1041,6 +1041,46 @@ fn a_wget_config_is_a_write_without_a_token_on_the_command() {
     );
 }
 
+/// Only a missing default config is no config. A directory, a fifo, or a
+/// symlink there could not be read, so the request is judged a write. A
+/// fifo must not hold the guard waiting for a writer.
+#[test]
+fn a_default_config_that_is_not_a_regular_file_is_a_write() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let curl = "curl -s https://api.github.com/user";
+    let wget = "wget -q https://api.github.com/user";
+    let real = root.path().join("real-dir");
+    fs::create_dir_all(&real).unwrap();
+
+    for (name, line) in [(".curlrc", curl), (".wgetrc", wget)] {
+        let path = home.join(name);
+        fs::create_dir(&path).unwrap();
+        refused(line, here);
+        fs::remove_dir(&path).unwrap();
+
+        let made = Command::new("mkfifo").arg(&path).status().unwrap();
+        assert!(made.success());
+        refused(line, here);
+        fs::remove_file(&path).unwrap();
+
+        std::os::unix::fs::symlink(&real, &path).unwrap();
+        refused(line, here);
+        fs::remove_file(&path).unwrap();
+    }
+
+    fs::create_dir(xdg.join("curlrc")).unwrap();
+    refused(curl, here);
+    allowed("curl -q -s https://api.github.com/user", here);
+    fs::remove_dir(xdg.join("curlrc")).unwrap();
+    allowed(curl, here);
+    allowed(wget, here);
+}
+
 #[test]
 fn send_pack_checks_the_destination_repository() {
     let _g = Guard::new();

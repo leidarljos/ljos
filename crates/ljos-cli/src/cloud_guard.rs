@@ -4575,16 +4575,28 @@ fn cfg_key(path: &Path) -> PathBuf {
     out
 }
 
+/// Only a missing path is no config. Anything else at that path that is
+/// not a regular file is opaque: a directory, a fifo, a device, or a
+/// symlink. `O_NONBLOCK` keeps a fifo from waiting for a writer, and
+/// `fstat` judges what was opened, not what the path named a moment ago.
 fn open_cfg(path: &Path) -> Result<Option<String>, ()> {
-    match std::fs::metadata(path) {
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(()),
-        Ok(meta) if !meta.is_file() => Ok(None),
-        Ok(_) => match std::fs::read_to_string(path) {
-            Ok(text) => Ok(Some(text)),
-            Err(_) => Err(()),
-        },
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    if !file.metadata().is_ok_and(|meta| meta.is_file()) {
+        return Err(());
     }
+    let mut text = String::new();
+    file.read_to_string(&mut text).map_err(|_| ())?;
+    Ok(Some(text))
 }
 
 fn wget_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) -> (HttpShape, bool) {
