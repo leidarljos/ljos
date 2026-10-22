@@ -42,6 +42,7 @@ encoder build, the installer warns and goes on without it. `--with-embed` is
 still accepted and changes nothing. `ljos doctor` names any part that is missing.
 `--version 0.29.0` installs that ljos release instead of the latest, and `--pin packset=0.14.0` holds another repository at a version; a pinned version with no release for the platform builds that version's crate, never a newer one.
 The installer also checks each tarball's GitHub build attestation, with `gh` 2.49 or newer or with `cosign`, and sums up in one line; `--attest` stops the install when one is missing or does not verify.
+packset, deedar and consensus gain a build attestation on their next release; until that release the summary counts each of them as not published.
 `ljos-hud`, the desktop pane, is optional, and the doctor lists it as `info`.
 An `ljos-policyd` built without phronesis checks commands with its table alone, and the doctor marks its policy row `warn`.
 Building from source (`cargo install`, or binstall on a platform with no release tarball) needs Rust 1.89 or newer; `rustc --version` says which you have, and `rustup update stable` gets a current one.
