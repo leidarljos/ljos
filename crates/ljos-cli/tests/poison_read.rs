@@ -6,6 +6,9 @@ use std::net::TcpListener;
 use std::process::{Command, Stdio};
 use std::thread;
 
+#[path = "common/terminal.rs"]
+mod terminal;
+
 fn read_http(stream: &mut std::net::TcpStream) -> String {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
@@ -1487,7 +1490,14 @@ fn an_agents_soft_prefer_is_never_the_persons() {
         .output()
         .unwrap();
     let typed = seat
-        .command(env!("CARGO_BIN_EXE_ljos"), &["prefer", KEEP_SHORT])
+        .command(
+            terminal::PYTHON,
+            &terminal::shape(
+                "terminal",
+                env!("CARGO_BIN_EXE_ljos"),
+                &["prefer", KEEP_SHORT],
+            ),
+        )
         .env_remove("CLAUDECODE")
         .stdin(Stdio::null())
         .output()

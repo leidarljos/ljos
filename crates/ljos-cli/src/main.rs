@@ -1386,18 +1386,18 @@ fn run_command() -> Result<()> {
             }
             ljos_cli::set_validity(valid_from.as_deref(), valid_to.as_deref())?;
             let text = join(&text);
-            // Under a runner the agent's own words are an unreviewed note.
-            // Words from the person's latest prompt are theirs and stand.
-            // The seat guard lets remember through, so this is the check.
-            let under = ljos_cli::under_a_runner();
-            let body = if under && !ljos_cli::capture::said_in_latest_prompt(&text) {
-                ljos_cli::packset_write_remember_note(&text, as_persona.as_deref())?
-            } else if under {
+            // Unless the person is at the terminal, the agent's own words
+            // are an unreviewed note. Words from the person's latest prompt
+            // are theirs and stand. The seat guard lets remember through,
+            // so this is the check.
+            let body = if ljos_cli::person_present() {
+                let horizon = ljos_cli::remember_horizon(transient, standing, false);
+                packset_write_as("Remember", &text, as_persona.as_deref(), horizon)?
+            } else if ljos_cli::capture::said_in_latest_prompt(&text) {
                 let horizon = transient.then_some(true);
                 ljos_cli::packset_write_mcp("Remember", &text, as_persona.as_deref(), horizon)?
             } else {
-                let horizon = ljos_cli::remember_horizon(transient, standing, false);
-                packset_write_as("Remember", &text, as_persona.as_deref(), horizon)?
+                ljos_cli::packset_write_remember_note(&text, as_persona.as_deref())?
             };
             println!("{}", write_ack(&body));
             eprintln!("{}", ljos_cli::remember_note(&body));
