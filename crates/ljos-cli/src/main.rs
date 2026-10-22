@@ -1014,8 +1014,9 @@ enum Cmd {
         deadline: Option<String>,
     },
     /// Sign a launch slot on the issue a cloud run is launched for: the
-    /// run's seat, the model asked for and the run id, under this seat's
-    /// pinned key. Written before the run's first ballot.
+    /// run's seat, the model asked for, the run id and the run's public
+    /// key, under this seat's pinned key. Written before the run's first
+    /// ballot.
     Slot {
         /// The issue the run is launched for.
         issue: String,
@@ -1028,6 +1029,10 @@ enum Cmd {
         /// The run id, the run's `CURSOR_AGENT_ID` or `GITHUB_RUN_ID`.
         #[arg(long)]
         run: String,
+        /// The run's public seat key, the hex `ljos cloud up` printed on
+        /// the run. Only ballots under this key count for the run.
+        #[arg(long, value_name = "HEX")]
+        key: String,
     },
     /// One trust row: FROM weighs TO at WEIGHT in (0, 1]. Written to the pack.
     Trust {
@@ -1836,8 +1841,12 @@ fn run_command() -> Result<()> {
             seat,
             model,
             run,
+            key,
         } => {
-            print!("{}", ljos_cli::slot::write(&issue, &seat, &model, &run)?);
+            print!(
+                "{}",
+                ljos_cli::slot::write(&issue, &seat, &model, &run, &key)?
+            );
             print!("{}", ljos_cli::persist_tracker(&issue, "slotted"));
         }
         Cmd::Log { seat } => print!("{}", ljos_cli::tracker_log(Some(&seat))?),
@@ -3000,10 +3009,8 @@ fn run_command() -> Result<()> {
             // the tally.
             ljos_cli::bind_settle_ballots(&mut steps, &ballots);
             // First what the push gate decides: seat ballots only.
-            let names: std::collections::BTreeSet<String> =
-                personas.iter().map(|p| p.name.trim().to_string()).collect();
             let (gate, gate_json) =
-                ljos_cli::push_cite_reading(&id, &ballots, &names, &ljos_cli::seat_name());
+                ljos_cli::push_cite_reading_on_roster(&id, &ballots, &ljos_cli::seat_name());
             // The named outcomes show which voters err together, and
             // those voters are discounted.
             let discount = settle_discount(&atoms).map(|(discount, line)| {

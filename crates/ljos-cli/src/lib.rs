@@ -11303,12 +11303,15 @@ impl SeatSignatures {
 /// under a slot this issue already held when its pin was introduced
 /// ([`slot::problems`]) is left out and named, and the rest still decide.
 /// `Ok` when every other seat ballot is signed under its pinned key or is
-/// legacy unsigned (committed to the tracker before signing began), or
+/// legacy unsigned (in its issue's entry before the tracker's first pin,
+/// by commit order: [`ballot_sig::recorded_before_signing`]), or
 /// when `LJOS_UNSIGNED_BALLOTS=allow`.
 ///
 /// # Errors
 ///
-/// The refusal naming each ballot that does not count.
+/// The refusal naming each ballot that does not count, or the pin file
+/// when it names a seat twice or has lost a pin the tracker committed:
+/// either would re-pin that seat or drop its ballots.
 pub fn check_seat_signatures(
     issue: &str,
     ballots: &[Value],
@@ -11327,12 +11330,19 @@ pub fn check_seat_signatures(
     let can_date_legacy = tracker_is_git == Some(true);
     let v = issue_record(issue).map_err(|e| format!("{issue}: not readable: {e:#}"))?;
     let legacy = |voter: &str, choice: &str| {
-        can_date_legacy
-            && ballot_sig::recorded_at(issue, voter, choice)
-                .is_some_and(|t| t < ballot_sig::SIGNING_SINCE)
+        can_date_legacy && ballot_sig::recorded_before_signing(issue, voter, choice)
     };
     let notes = ballot_sig::notes_of(&v);
-    let pins = ballot_sig::pins();
+    let (pins, _) = ballot_sig::pins_for_check().map_err(|e| {
+        format!("{issue}: the seat pins are not one key per seat, so it decides nothing for a push: {e:#}")
+    })?;
+    let dropped = slot::dropped_pins(&pins);
+    if !dropped.is_empty() {
+        return Err(format!(
+            "{issue}: the tracker committed the pin {} and the pin file no longer holds it, so it decides nothing for a push; a pin once committed stays",
+            dropped.join(", ")
+        ));
+    }
     let starts = slot::starts();
     let stands =
         |seat: &str| slot::stands(seat, pins.get(seat).map(String::as_str), starts.as_deref());
@@ -11346,6 +11356,7 @@ pub fn check_seat_signatures(
             .filter_map(|n| ballot_sig::parse_note(n))
             .any(|n| n.voter == voter)
     };
+    let tracker = slot::tracker_id();
     let mut left_out = Vec::new();
     let mut kept = Vec::new();
     for (voter, choice) in seats {
@@ -11354,6 +11365,7 @@ pub fn check_seat_signatures(
             None
         } else {
             slot::problems(
+                &tracker,
                 issue,
                 &[(voter, choice)],
                 &notes,
@@ -18835,16 +18847,29 @@ fn cite_ballots(
         .map_err(|e| format!("{cite}: the ballots are not readable: {e}"))?;
     let ballots =
         panel_gate::counted_ballots(cite, &ballots.as_array().cloned().unwrap_or_default());
-    let personas = personas_from_pack()
-        .map_err(|e| {
-            format!(
-                "{cite}: the roster is not readable, so persona ballots cannot be left out: {e:#}"
-            )
-        })?
-        .into_iter()
-        .map(|p| p.name.trim().to_string())
-        .collect();
-    Ok((ballots, personas))
+    Ok((ballots, cite_roster(cite)?))
+}
+
+/// The persona names a push cite leaves out: the pack's roster. A seat
+/// whose pack is off on purpose (`PACKSET_URL=off`) has no personas.
+///
+/// # Errors
+///
+/// The pack is on and its roster does not answer: a persona's ballot
+/// cannot be told from a seat's, so no cite stands until it does.
+pub fn cite_roster(cite: &str) -> std::result::Result<std::collections::BTreeSet<String>, String> {
+    match personas_from_pack() {
+        Ok(personas) => Ok(personas
+            .into_iter()
+            .map(|p| p.name.trim().to_string())
+            .collect()),
+        Err(_) if std::env::var("PACKSET_URL").is_ok_and(|url| url == "off") => {
+            Ok(std::collections::BTreeSet::new())
+        }
+        Err(e) => Err(format!(
+            "{cite}: the roster is not readable, so persona ballots cannot be left out: {e:#}"
+        )),
+    }
 }
 
 /// The files that are the seat's law and its reach into each runner: the
@@ -19301,7 +19326,9 @@ pub fn redirect_seat_verb(rule: Option<Rule>, line: &str) -> Option<Rule> {
 /// A tag push is ordinary.
 /// That ask does not wait for a seat rule. A seat rule that denies the
 /// dangerous push still denies it. A rule about some other command on the
-/// same line is left as it is when the push itself is ordinary.
+/// same line is left as it is when the push itself is ordinary. A push
+/// that carries `LJOS_CITE` is denied when the cite does not stand
+/// ([`cite_stands`]).
 #[must_use]
 pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<Rule> {
     // A temporary HOME and LJOS_OFF switch the whole guard off, the push
@@ -19312,6 +19339,15 @@ pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<R
     let Some(call) = push_call(line) else {
         return rule.cloned();
     };
+    if let Some(cite) = &call.cite {
+        if let Err(why) = cite_stands(cite) {
+            return Some(Rule {
+                pattern: "built-in push cite".into(),
+                verdict: "deny".into(),
+                reason: format!("LJOS_CITE={cite} does not stand: {why}"),
+            });
+        }
+    }
     let dir = push_dir(&call, cwd);
     let segment = push_segment(&call);
     let about_push = rule.is_some_and(|r| {
@@ -28844,6 +28880,23 @@ pub fn push_cite_reading(
         pusher,
         check_seat_signatures(issue, rows, personas),
     )
+}
+
+/// [`push_cite_reading`] under the pack's roster ([`cite_roster`]), the
+/// reading `ljos consensus` prints. A roster that is not readable is the
+/// refusal, the same one [`cite_stands`] gives.
+#[must_use]
+pub fn push_cite_reading_on_roster(issue: &str, rows: &[Value], pusher: &str) -> (String, Value) {
+    match cite_roster(issue) {
+        Ok(personas) => push_cite_reading(issue, rows, &personas, pusher),
+        Err(why) => push_cite_reading_signed(
+            issue,
+            rows,
+            &std::collections::BTreeSet::new(),
+            pusher,
+            Err(why),
+        ),
+    }
 }
 
 /// [`push_cite_reading`] with the signature check already made: a refusal
@@ -41179,12 +41232,19 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 "{line} -> {gated:?}"
             );
         }
-        assert!(gate_push(
-            None,
-            "LJOS_CITE=gpr_optim-1yg5 git push upstream develop",
-            None
-        )
-        .is_none());
+        let cited = "LJOS_CITE=gpr_optim-1yg5 git push upstream develop";
+        let refused = gate_push(None, cited, None).unwrap();
+        assert_eq!(
+            (refused.verdict.as_str(), refused.pattern.as_str()),
+            ("deny", "built-in push cite")
+        );
+        assert!(
+            refused
+                .reason
+                .starts_with("LJOS_CITE=gpr_optim-1yg5 does not stand: "),
+            "{}",
+            refused.reason
+        );
         assert!(gate_push(None, "git push -u origin feature/x", None).is_none());
         for tags in [
             "git push --tags",
@@ -41214,7 +41274,6 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         };
         for line in [
             "git push",
-            "LJOS_CITE=gpr_optim-1yg5 git push upstream develop",
             "git push origin main",
             "git push -u origin feature/x",
         ] {
@@ -41224,6 +41283,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             let gated = gate_push(ruled.as_ref(), line, None);
             assert!(gated.is_none(), "{line} via ruled_verdict stayed {gated:?}");
         }
+        let gated = gate_push(Some(&trust), cited, None);
+        assert_eq!(gated.map(|r| r.pattern), Some("built-in push cite".into()));
         let codex = hook_call(
             r#"{"hook_event_name":"PreToolUse","session_id":"c-1","turn_id":"t-1","tool_name":"Bash","tool_input":{"command":"git push"}}"#,
         );
@@ -41245,7 +41306,11 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             &cited.cue,
             None,
         );
-        assert!(gated.is_none(), "{gated:?}");
+        assert_eq!(
+            gated.map(|r| r.verdict),
+            Some("deny".into()),
+            "a cite that does not stand"
+        );
         for line in ["git status", "git commit -m save", "cargo build", "rg foo"] {
             let ruled = ruled_verdict(&[], line);
             let gated = gate_push(ruled.as_ref(), line, None);
