@@ -203,7 +203,7 @@ fn argv_of(pid: u32) -> Vec<String> {
         return Vec::new();
     }
     buf.truncate(size);
-    let Ok(argc) = buf
+    let Some(argc) = buf
         .get(..4)
         .and_then(|b| b.try_into().ok())
         .map(i32::from_ne_bytes)
@@ -367,7 +367,7 @@ fn tick(queue: &Kqueue) -> bool {
     // by this frame. A null changelist waits for an event already armed.
     unsafe {
         let mut event: libc::kevent = std::mem::zeroed();
-        let mut timeout = libc::timespec {
+        let timeout = libc::timespec {
             tv_sec: 0,
             tv_nsec: 200_000_000,
         };
