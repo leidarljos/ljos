@@ -5,13 +5,13 @@
 //! before any key is pinned for it.
 //!
 //! A pin alone is what any tracker writer can make, and the author date on
-//! that commit is whatever the writer sets. A seat stands when its name is
-//! on a list in this binary ([`standing`]), or when its pinned key was
-//! already committed when slots began in this tracker ([`stood`]): in the
-//! parents of the commit that brought the first slot note, by commit
-//! order. Any other seat counts toward a push cite only under a slot on
-//! that issue ([`problems`]), on a git tracker and on any other. The slot
-//! has to already be in that issue's own entry in the commit that
+//! that commit is whatever the writer sets. A seat stands when its pinned
+//! key was already committed when slots began in this tracker ([`stood`]):
+//! in the parents of the commit that brought the first slot note, by
+//! commit order. On a tracker that is not a git repository the names on a
+//! list in this binary stand instead ([`standing`]). Any other seat counts
+//! toward a push cite only under a slot on that issue ([`problems`]). The
+//! slot has to already be in that issue's own entry in the commit that
 //! introduced the pin. A copy of the line on another issue does not
 //! count, and a git date is not read.
 
@@ -32,8 +32,8 @@ pub const SLOTS_SINCE: i64 = 1_792_626_505;
 /// comment.
 const STANDING_SEATS: &str = include_str!("standing_seats.txt");
 
-/// Whether `seat` stood when slots began. A standing seat needs no slot
-/// and may sign one. Any other seat is a run seat.
+/// Whether `seat` is on the list that stands on a tracker that is not a
+/// git repository ([`stands`]).
 #[must_use]
 pub fn standing(seat: &str) -> bool {
     let seat = seat.trim();
@@ -97,15 +97,17 @@ pub fn stood(starts: &[Vec<String>], seat: &str, key: &str) -> bool {
         .all(|parents| !parents.is_empty() && parents.iter().all(|p| pin_line_at(p, seat, key)))
 }
 
-/// Whether `seat`, pinned to `key`, needs no slot and may sign one: it is
-/// on the list, or its pin [`stood`]. `starts` is `None` on a tracker that
-/// is not a git repository, where only the list stands.
+/// Whether `seat`, pinned to `key`, needs no slot and may sign one: its
+/// pin [`stood`]. A name alone does not stand on a git tracker, since the
+/// first writer to sign as an unpinned name pins it. `starts` is `None` on
+/// a tracker that is not a git repository, which keeps no order, and there
+/// the list stands.
 #[must_use]
 pub fn stands(seat: &str, key: Option<&str>, starts: Option<&[Vec<String>]>) -> bool {
-    standing(seat)
-        || key
-            .zip(starts)
-            .is_some_and(|(key, at)| stood(at, seat, key))
+    match starts {
+        None => standing(seat),
+        Some(at) => key.is_some_and(|key| stood(at, seat, key)),
+    }
 }
 
 /// A slot note's fields.
