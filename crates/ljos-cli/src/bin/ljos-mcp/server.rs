@@ -265,6 +265,30 @@ const SEAT_FREE_TOOLS: &[&str] = &[
     "ljos_mail_show",
 ];
 
+/// Tools that write the tracker under the call's seat. `ljos_deed`
+/// without an accession lists what an issue cites, which is a read.
+const TRACKER_WRITES: &[&str] = &[
+    "ljos_start",
+    "ljos_sitting",
+    "ljos_claim",
+    "ljos_note",
+    "ljos_finish",
+    "ljos_release",
+    "ljos_complete",
+    "ljos_file",
+    "ljos_options",
+    "ljos_deed",
+];
+
+fn writes_tracker(name: &str, args: Option<&serde_json::Map<String, serde_json::Value>>) -> bool {
+    if name == "ljos_deed" {
+        return args
+            .and_then(|a| a.get("add"))
+            .is_some_and(|add| !add.is_null());
+    }
+    TRACKER_WRITES.contains(&name)
+}
+
 fn runs_without_seat(name: &str) -> bool {
     SEAT_FREE_TOOLS.contains(&name)
 }
@@ -3566,6 +3590,11 @@ impl ServerHandler for LjosServer {
         };
         let seated = seat.is_some();
         if let Some(seat) = &seat {
+            if writes_tracker(&name, request.arguments.as_ref()) {
+                if let Err(e) = ljos_cli::registered_seat(&seat.seat) {
+                    return Ok(attach_next(&name, as_tool_error(refused(e))?));
+                }
+            }
             bind_seat_env(&seat.seat);
         }
         // A server spawned per call has no idle thread left running. The
