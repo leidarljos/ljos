@@ -37884,9 +37884,12 @@ mod tests {
     /// The relevance cut kept the old lesson on one ballot of two: where
     /// lessons tie on every word the pack scores, which of them a ballot
     /// keeps at its cut is arbitrary. It names the prompt's subject and
-    /// covers the most of it, so the prompt gets it. A line that shares
-    /// one rare word with a longer prompt does not name its subject, and
-    /// one ballot does not let it in.
+    /// covers the most of it, so the prompt gets it. A one-ballot lesson
+    /// sets the lexical floor too: one that carries all thirteen words of
+    /// a prompt with no small words in it puts the floor at 0.6, which a
+    /// line on both ballots that shares only `kebab` and `case` (0.58)
+    /// does not reach. Without that lesson the floor would be 0.6 of the
+    /// line that shares four words, and the kebab stand would get in.
     #[test]
     fn a_lesson_one_ballot_kept_still_reaches_the_prompt() {
         let _env = env_guard();
@@ -37918,12 +37921,18 @@ mod tests {
             "With pnpm the registry rejected the token because the CI secret expired",
             1,
         ));
-        hits.push(hit("case", "Name pytest fixtures by their case", 2));
         hits.push(hit(
-            "kebab",
-            "kebab kebab kebab: the kebab stand shuts at nine",
+            "snake",
+            "Kebab case in pytest fixtures breaks the conftest parametrize ids, \
+             the nightly coverage report and the tox matrix: name them in snake case",
             1,
         ));
+        hits.push(hit(
+            "case",
+            "Name pytest fixtures by their case in conftest",
+            2,
+        ));
+        hits.push(hit("kebab", "kebab case: the kebab stand shuts at nine", 2));
         let (url, _) = serve_http(move |req| {
             let first = req.lines().next().unwrap_or("");
             if first.contains("/v1/status") {
@@ -37943,17 +37952,17 @@ mod tests {
             session: Some(session.into()),
             shape: HookShape::default(),
         };
+        let cue = "kebab case pytest fixtures: conftest parametrize ids break nightly \
+                   coverage report, tox matrix";
+        let (note, _) = hook_note(&prompt("floor", cue), 5);
+        assert!(!note.contains("kebab stand"), "{note}");
+        assert!(note.contains("snake case"), "{note}");
+        assert!(note.contains("Name pytest fixtures"), "{note}");
         let (note, _) = hook_note(
             &prompt("one-ballot", "npm: the registry rejected my token"),
             5,
         );
         assert!(note.contains("CI secret expired"), "{note}");
-        let (note, _) = hook_note(
-            &prompt("rare-word", "kebab case for the pytest fixtures"),
-            5,
-        );
-        assert!(note.contains("Name pytest fixtures"), "{note}");
-        assert!(!note.contains("kebab stand"), "{note}");
     }
 
     /// A full relevance cut kept the old lesson on one ballot of two, and
