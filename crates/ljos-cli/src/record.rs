@@ -1179,6 +1179,10 @@ mod tests {
                 std::env::remove_var("LJOS_SEAT");
                 std::env::remove_var("VISSUE_AGENT");
                 std::env::remove_var("VISSUE_ROOT");
+                // A parallel record test used to leave this set. The
+                // fallback override key is named by the run, so a leaked
+                // id collapses two seats onto one file.
+                std::env::remove_var("CURSOR_AGENT_ID");
             }
         });
         (lock, home)
@@ -1311,34 +1315,80 @@ mod tests {
         assert_eq!(files.len(), names.len(), "{files:?}");
     }
 
+    /// Puts the captured variables back when it drops. The caller holds
+    /// the environment mutation lock across that drop, so a parallel test
+    /// cannot observe the temporary values, including after a panic.
+    struct RestoreEnv {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl RestoreEnv {
+        fn capture(keys: &[&'static str]) -> Self {
+            Self {
+                saved: keys
+                    .iter()
+                    .map(|key| (*key, std::env::var_os(key)))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            for (key, prev) in &self.saved {
+                // SAFETY: the caller holds the process environment lock.
+                unsafe {
+                    match prev {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_shared_override_key_splits_by_run_session() {
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
         let shared = root.path().join("shared.key");
-        crate::with_env_mutation(|| {
+        // Signing reads the run id. GitHub Actions exports GITHUB_RUN_ID,
+        // and that names the fallback key ahead of CURSOR_AGENT_ID, so
+        // both runs hash one key. Releasing the mutation lock between
+        // the set and the sign lets another test do the same, and leaves
+        // agent-run-2222 set for whoever runs next.
+        let (first, second) = crate::with_env_mutation(|| {
+            let _restore = RestoreEnv::capture(&[
+                "LJOS_SEAT_KEY",
+                "LJOS_SEAT",
+                "VISSUE_AGENT",
+                "CURSOR_AGENT_ID",
+                "GITHUB_RUN_ID",
+                "CLOUD_AGENT_ID",
+            ]);
             // SAFETY: this test holds the process environment lock.
             unsafe {
                 std::env::set_var("LJOS_SEAT_KEY", &shared);
                 std::env::remove_var("LJOS_SEAT");
                 std::env::remove_var("VISSUE_AGENT");
+                std::env::remove_var("GITHUB_RUN_ID");
+                std::env::remove_var("CLOUD_AGENT_ID");
                 std::env::set_var("CURSOR_AGENT_ID", "agent-run-1111");
             }
-        });
-        let first = sign_entry(
-            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
-            "alpha/seat-a",
-        )
-        .expect("run 1");
-        crate::with_env_mutation(|| {
+            let first = sign_entry(
+                ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+                "alpha/seat-a",
+            )
+            .expect("run 1");
             // SAFETY: this test holds the process environment lock.
             unsafe { std::env::set_var("CURSOR_AGENT_ID", "agent-run-2222") };
+            let second = sign_entry(
+                ballot_entry("beta/seat-b", "accept", "2026-10-21T11:00:00Z"),
+                "beta/seat-b",
+            )
+            .expect("run 2");
+            (first, second)
         });
-        let second = sign_entry(
-            ballot_entry("beta/seat-b", "accept", "2026-10-21T11:00:00Z"),
-            "beta/seat-b",
-        )
-        .expect("run 2");
         assert_ne!(
             first.signature.key, second.signature.key,
             "two runs shared one fallback override key"
