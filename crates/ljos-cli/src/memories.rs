@@ -158,7 +158,7 @@ pub fn reviews_path() -> PathBuf {
 /// The latest verdict per id.
 #[must_use]
 pub fn reviews() -> BTreeMap<String, Review> {
-    let bytes = std::fs::read(reviews_path()).unwrap_or_default();
+    let bytes = crate::read_state_file(&reviews_path()).unwrap_or_default();
     crate::complete_rows::<Review>(&bytes)
         .into_iter()
         .map(|r| (r.id.clone(), r))

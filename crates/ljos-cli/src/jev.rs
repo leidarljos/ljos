@@ -1596,7 +1596,7 @@ pub fn read_log() -> Vec<Value> {
     let Some(dir) = state_dir() else {
         return Vec::new();
     };
-    crate::complete_rows(&std::fs::read(dir.join("jev-log.jsonl")).unwrap_or_default())
+    crate::complete_rows(&crate::read_state_file(&dir.join("jev-log.jsonl")).unwrap_or_default())
 }
 
 /// Per-decision accuracy and calibration. A ballot joins `about.issue` to

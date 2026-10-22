@@ -169,7 +169,7 @@ pub fn post_kept(client: &PacksetClient, atom: &Value) -> Result<Value> {
 }
 
 fn read_latest() -> BTreeMap<String, Record> {
-    let bytes = std::fs::read(proposals_path()).unwrap_or_default();
+    let bytes = crate::read_state_file(&proposals_path()).unwrap_or_default();
     crate::complete_rows::<Record>(&bytes)
         .into_iter()
         .map(|rec| (rec.id.clone(), rec))

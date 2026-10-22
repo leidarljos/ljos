@@ -93,7 +93,7 @@ fn lock(dir: &Path) -> crate::CommitLock {
 }
 
 fn read(dir: &Path) -> Vec<Queued> {
-    crate::complete_rows(&std::fs::read(queue_file(dir)).unwrap_or_default())
+    crate::complete_rows(&crate::read_state_file(&queue_file(dir)).unwrap_or_default())
 }
 
 fn write(dir: &Path, notes: &[Queued]) -> Result<()> {
