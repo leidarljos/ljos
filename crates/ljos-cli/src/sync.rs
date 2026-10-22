@@ -688,7 +688,7 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
     }
     let client = crate::pack()?;
     let mut out = String::new();
-    for path in paths {
+    for path in &paths {
         let host = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -698,7 +698,7 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
         if host.is_empty() || host == me {
             continue;
         }
-        let Some(plain) = open_identities(&path, &identities)? else {
+        let Some(plain) = open_identities(path, &identities)? else {
             out.push_str(&format!(
                 "sync: {host}'s {} log is not sealed to this machine\n",
                 scope.name
@@ -756,6 +756,11 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
         ));
     }
     out.push_str(&retire_adopted(scope, &gone, &client)?);
+    // A retirement that found nothing is not news. A tracker with no log
+    // files still says so, as it did before adopt commits were read.
+    if out.is_empty() && paths.is_empty() {
+        return Ok(format!("sync: no {} logs yet\n", scope.name));
+    }
     Ok(out)
 }
 
@@ -3406,5 +3411,521 @@ mod tests {
         assert!(made.status.success(), "age-keygen must be installed");
         std::fs::write(cloud_identity_path(), "not a key\n").unwrap();
         assert_eq!(identities_for_open(), vec![own]);
+    }
+
+    const OLD_COMMIT: &str = "100000000 +0000";
+
+    fn begin(dir: &Path) -> crate::EnvLock {
+        let lock = hold_env(dir);
+        std::env::set_var("HOME", dir);
+        lock
+    }
+
+    fn point_pack(url: &str) {
+        std::env::set_var("PACKSET_URL", url);
+        std::env::set_var("PACKSET_WORKSPACE", "seat");
+        std::env::set_var("PACKSET_TIMEOUT_MS", "5000");
+    }
+
+    fn make_key() -> String {
+        let path = identity_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let made = Command::new("age-keygen")
+            .arg("-o")
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "age-keygen: {}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        let public = Command::new("age-keygen")
+            .arg("-y")
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            public.status.success(),
+            "{}",
+            String::from_utf8_lossy(&public.stderr)
+        );
+        String::from_utf8_lossy(&public.stdout).trim().to_string()
+    }
+
+    fn commit_dated(root: &Path, rels: &[&str], message: &str, date: Option<&str>) {
+        let mut add = vec!["add", "--"];
+        add.extend_from_slice(rels);
+        let out = git(root, &add).unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
+            .arg(root)
+            .args(["commit", "-q", "-m", message, "--"])
+            .args(rels);
+        if let Some(date) = date {
+            cmd.env("GIT_AUTHOR_DATE", date);
+            cmd.env("GIT_COMMITTER_DATE", date);
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn scope_of(public: &str) -> Scope {
+        Scope {
+            name: "cloud".into(),
+            recipients: vec![public.to_string()],
+            projects: BTreeMap::new(),
+        }
+    }
+
+    fn cloud_plain() -> String {
+        format!(
+            "{}\n{}\n{}\n",
+            serde_json::json!({
+                "text": "fresh", "kind": "lesson", "origin": "user-declared",
+                "level": "explicit", "entities": ["seat:x"]
+            }),
+            serde_json::json!({
+                "text": "fresh", "kind": "lesson", "issue": "ljos-b",
+                "entities": ["issue:ljos-b"]
+            }),
+            serde_json::json!({"text": "mine", "kind": "lesson", "entities": ["scope:cloud"]}),
+        )
+    }
+
+    struct Fixture {
+        root: PathBuf,
+        public: String,
+    }
+
+    /// A quiet cloud log sealed to this machine, and a taken file that
+    /// still names a text the log no longer carries.
+    fn fixture(dir: &Path, date: Option<&str>) -> Fixture {
+        assert_ne!(host(), "gone", "the fixture host would be this machine");
+        let public = make_key();
+        let root = tracker(dir);
+        std::fs::write(
+            root.join(".ljos/sync.toml"),
+            format!("name = \"cloud\"\nrecipients = [\"{public}\"]\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("config/ljos/sync.toml"),
+            "default_scope = \"private\"\n",
+        )
+        .unwrap();
+        let age = ".ljos/atoms/gone.jsonl.age";
+        seal(
+            &cloud_plain(),
+            std::slice::from_ref(&public),
+            &root.join(age),
+        )
+        .unwrap();
+        std::fs::write(root.join(".ljos/atoms/gone.digest"), "digest\n").unwrap();
+        commit_dated(
+            &root,
+            &[age, ".ljos/atoms/gone.digest", ".ljos/sync.toml"],
+            "log",
+            date,
+        );
+        let taken = taken_path("cloud", "gone");
+        std::fs::create_dir_all(taken.parent().unwrap()).unwrap();
+        std::fs::write(&taken, format!("{}\n", crate::work_id("old"))).unwrap();
+        Fixture { root, public }
+    }
+
+    fn hex_id(n: u64) -> String {
+        format!("{n:032x}")
+    }
+
+    fn seeded(n: u64, text: &str, issue: &str, tags: &[&str]) -> Value {
+        let mut atom = serde_json::json!({
+            "id": hex_id(n),
+            "text": text,
+            "kind": "lesson",
+            "entities": tags,
+        });
+        if !issue.is_empty() {
+            atom["issue"] = Value::String(issue.to_string());
+        }
+        atom
+    }
+
+    fn seed_cloud(store: &std::sync::Mutex<Vec<Value>>) {
+        *store.lock().unwrap() = vec![
+            seeded(101, "fresh", "", &["sync:gone", "scope:cloud"]),
+            seeded(
+                102,
+                "fresh",
+                "ljos-b",
+                &["sync:gone", "scope:cloud", "issue:ljos-b"],
+            ),
+            seeded(103, "mine", "", &["scope:cloud"]),
+            seeded(104, "fresh", "", &["scope:private"]),
+            seeded(105, "old", "", &["sync:gone"]),
+            seeded(106, "old", "", &["sync:gone", "scope:private"]),
+            seeded(107, "fresh", "", &["sync:gone", "scope:private"]),
+        ];
+    }
+
+    fn ids(store: &std::sync::Mutex<Vec<Value>>) -> BTreeSet<String> {
+        store
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|atom| atom["id"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    fn has(store: &std::sync::Mutex<Vec<Value>>, n: u64) -> bool {
+        ids(store).contains(&hex_id(n))
+    }
+
+    fn opts(force: bool, dry_run: bool) -> AdoptOpts {
+        AdoptOpts {
+            push: false,
+            force,
+            dry_run,
+        }
+    }
+
+    /// Both tickets are posted into the log's scope, the private copy does
+    /// not swallow them, and the log is deleted only after that is visible.
+    #[test]
+    fn an_adopt_posts_each_issue_then_drops_the_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let fix = fixture(dir.path(), Some(OLD_COMMIT));
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        seed_cloud(&store);
+        let said = adopt_in_repo(
+            &fix.root,
+            &scope_of(&fix.public),
+            "gone",
+            opts(false, false),
+        )
+        .unwrap();
+        assert!(
+            said.starts_with("sync: gone: 2 cloud atoms adopted, 0 refused, 2 moved, 1 retired\n"),
+            "{said}"
+        );
+        assert!(said.contains("not pushed"), "{said}");
+        assert!(!has(&store, 101), "the cloud sync copy was kept");
+        assert!(!has(&store, 102), "the other ticket's sync copy was kept");
+        assert!(!has(&store, 105), "a text the host dropped was kept");
+        assert!(has(&store, 103), "this machine's own atom was forgotten");
+        assert!(has(&store, 104), "the private copy was forgotten");
+        assert!(has(&store, 106), "another scope's sync copy was forgotten");
+        assert!(has(&store, 107), "another scope's live copy was forgotten");
+        let live = store.lock().unwrap().clone();
+        let posted: Vec<&Value> = live
+            .iter()
+            .filter(|atom| atom["origin"] == "peer")
+            .collect();
+        assert_eq!(posted.len(), 2, "{live:?}");
+        assert!(posted.iter().all(|atom| atom.get("level").is_none()));
+        assert!(posted.iter().all(|atom| {
+            let tags = atom["entities"].to_string();
+            tags.contains("scope:cloud") && !tags.contains("sync:")
+        }));
+        let cloud_log = log_plaintext(&live, "cloud", "private");
+        let rows: BTreeSet<(String, String)> = cloud_log
+            .lines()
+            .map(|line| {
+                let atom: Value = serde_json::from_str(line).unwrap();
+                (
+                    atom["text"].as_str().unwrap_or("").to_string(),
+                    atom["issue"].as_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            BTreeSet::from([
+                ("fresh".to_string(), String::new()),
+                ("fresh".to_string(), "ljos-b".to_string()),
+                ("mine".to_string(), String::new()),
+            ])
+        );
+        let private_log = log_plaintext(&live, "private", "private");
+        assert_eq!(private_log.lines().count(), 1, "{private_log}");
+        assert!(!private_log.contains("ljos-b"), "{private_log}");
+        let mine = log_dir(&fix.root).join(format!("{}.jsonl.age", host()));
+        let opened = open(&mine, &identity_path()).unwrap().unwrap();
+        assert_eq!(opened.lines().count(), 3, "{opened}");
+        assert!(opened.contains("scope:cloud"), "{opened}");
+        assert!(!opened.contains("sync:"), "{opened}");
+        assert!(!in_head(&fix.root, ".ljos/atoms/gone.jsonl.age"));
+        assert!(!in_head(&fix.root, ".ljos/atoms/gone.digest"));
+        assert!(!taken_path("cloud", "gone").exists());
+        let subject = git(&fix.root, &["log", "-1", "--format=%s"]).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&subject.stdout).trim(),
+            "chore(sync): adopt gone cloud atoms"
+        );
+    }
+
+    #[test]
+    fn a_refused_post_keeps_the_log_and_its_sync_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let fix = fixture(dir.path(), Some(OLD_COMMIT));
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::RefusePosts);
+        point_pack(&url);
+        seed_cloud(&store);
+        let before = std::fs::read(fix.root.join(".ljos/atoms/gone.jsonl.age")).unwrap();
+        let said = adopt_in_repo(
+            &fix.root,
+            &scope_of(&fix.public),
+            "gone",
+            opts(false, false),
+        )
+        .unwrap();
+        assert!(said.contains("2 refused"), "{said}");
+        assert!(said.contains("the log was kept"), "{said}");
+        assert_eq!(
+            std::fs::read(fix.root.join(".ljos/atoms/gone.jsonl.age")).unwrap(),
+            before
+        );
+        assert!(in_head(&fix.root, ".ljos/atoms/gone.jsonl.age"));
+        assert!(taken_path("cloud", "gone").exists());
+        assert!(has(&store, 101));
+        assert!(has(&store, 102));
+        assert!(!has(&store, 105), "the dropped text is still retired");
+        let subject = git(&fix.root, &["log", "-1", "--format=%s"]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&subject.stdout).trim(), "log");
+    }
+
+    #[test]
+    fn an_echoed_sync_atom_is_not_treated_as_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let fix = fixture(dir.path(), Some(OLD_COMMIT));
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::EchoText);
+        point_pack(&url);
+        seed_cloud(&store);
+        let said = adopt_in_repo(
+            &fix.root,
+            &scope_of(&fix.public),
+            "gone",
+            opts(false, false),
+        )
+        .unwrap();
+        assert!(said.contains("2 refused"), "{said}");
+        assert!(said.contains("the log was kept"), "{said}");
+        assert!(in_head(&fix.root, ".ljos/atoms/gone.jsonl.age"));
+        assert!(has(&store, 101));
+        assert!(has(&store, 102));
+        let live = store.lock().unwrap().clone();
+        assert!(live.iter().all(|atom| atom["origin"] != "peer"), "{live:?}");
+    }
+
+    #[test]
+    fn a_dry_run_prints_the_plan_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let fix = fixture(dir.path(), Some(OLD_COMMIT));
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        seed_cloud(&store);
+        let head = git(&fix.root, &["rev-parse", "HEAD"]).unwrap();
+        let said =
+            adopt_in_repo(&fix.root, &scope_of(&fix.public), "gone", opts(false, true)).unwrap();
+        assert!(
+            said.contains(
+                "would adopt 2 cloud atoms, retire 1, and drop .ljos/atoms/gone.jsonl.age"
+            ),
+            "{said}"
+        );
+        assert_eq!(ids(&store).len(), 7, "a dry run posted or forgot");
+        assert!(fix.root.join(".ljos/atoms/gone.jsonl.age").is_file());
+        assert!(taken_path("cloud", "gone").exists());
+        let again = git(&fix.root, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(head.stdout, again.stdout);
+    }
+
+    #[test]
+    fn a_young_log_needs_force_and_a_dry_run_still_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let fix = fixture(dir.path(), None);
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        seed_cloud(&store);
+        let err = adopt_in_repo(&fix.root, &scope_of(&fix.public), "gone", opts(false, true))
+            .unwrap_err();
+        assert!(err.to_string().contains("--force"), "{err}");
+        assert_eq!(ids(&store).len(), 7);
+        let head = git(&fix.root, &["rev-parse", "HEAD"]).unwrap();
+        let said =
+            adopt_in_repo(&fix.root, &scope_of(&fix.public), "gone", opts(true, true)).unwrap();
+        assert!(said.contains("would adopt 2"), "{said}");
+        assert_eq!(ids(&store).len(), 7);
+        assert!(fix.root.join(".ljos/atoms/gone.jsonl.age").is_file());
+        let again = git(&fix.root, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(head.stdout, again.stdout);
+    }
+
+    /// The worktree file is gone and the commit is not. Pack work runs
+    /// from the blob in HEAD, and a young log does not need `--force`
+    /// again: the deletion already started.
+    #[test]
+    fn a_missing_log_is_resumed_from_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let fix = fixture(dir.path(), None);
+        std::fs::remove_file(fix.root.join(".ljos/atoms/gone.jsonl.age")).unwrap();
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        seed_cloud(&store);
+        let said = adopt_in_repo(
+            &fix.root,
+            &scope_of(&fix.public),
+            "gone",
+            opts(false, false),
+        )
+        .unwrap();
+        assert!(
+            said.starts_with("sync: gone: 2 cloud atoms adopted, 0 refused, 2 moved, 1 retired\n"),
+            "{said}"
+        );
+        assert!(!in_head(&fix.root, ".ljos/atoms/gone.jsonl.age"));
+        assert!(!in_head(&fix.root, ".ljos/atoms/gone.digest"));
+        assert!(!taken_path("cloud", "gone").exists());
+        assert!(!has(&store, 101));
+        assert!(has(&store, 104));
+    }
+
+    fn adopt_deletion(root: &Path) {
+        let rel = ".ljos/atoms/gone.jsonl.age";
+        commit_rel(root, rel, "sealed\n", "log");
+        let out = git(root, &["rm", "-q", "--", rel]).unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let out = git(
+            root,
+            &["commit", "-q", "-m", "chore(sync): adopt gone cloud atoms"],
+        )
+        .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn an_import_retires_an_adopted_host_without_its_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let public = make_key();
+        let root = tracker(dir.path());
+        adopt_deletion(&root);
+        // The deletion is the only file under `.ljos`, so the directory may
+        // already be gone. Import has to retire without it.
+        if root.join(".ljos").exists() {
+            std::fs::remove_dir_all(root.join(".ljos")).unwrap();
+        }
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        *store.lock().unwrap() = vec![
+            seeded(101, "fresh", "", &["sync:gone", "scope:cloud"]),
+            seeded(105, "old", "", &["sync:gone"]),
+            seeded(106, "old", "", &["sync:gone", "scope:private"]),
+        ];
+        let said = import(&root, &scope_of(&public)).unwrap();
+        assert!(
+            said.contains("sync: gone: adopted away, 2 cloud atoms retired, 0 still held\n"),
+            "{said}"
+        );
+        assert!(!has(&store, 101));
+        assert!(!has(&store, 105));
+        assert!(has(&store, 106));
+
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::FailDeletes);
+        point_pack(&url);
+        *store.lock().unwrap() = vec![
+            seeded(101, "fresh", "", &["sync:gone", "scope:cloud"]),
+            seeded(105, "old", "", &["sync:gone"]),
+        ];
+        let said = import(&root, &scope_of(&public)).unwrap();
+        assert!(
+            said.contains("0 cloud atoms retired, 2 still held"),
+            "{said}"
+        );
+        assert!(has(&store, 101));
+        assert!(has(&store, 105));
+        let again = import(&root, &scope_of(&public)).unwrap();
+        assert!(again.contains("still held"), "{again}");
+        assert!(has(&store, 101));
+    }
+
+    #[test]
+    fn a_readded_log_is_imported_instead_of_retired() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let public = make_key();
+        let root = tracker(dir.path());
+        let rel = ".ljos/atoms/gone.jsonl.age";
+        let plain = "{\"text\":\"back\",\"kind\":\"lesson\",\"entities\":[]}\n";
+        seal(plain, std::slice::from_ref(&public), &root.join(rel)).unwrap();
+        commit_dated(&root, &[rel], "log", None);
+        let out = git(&root, &["rm", "-q", "--", rel]).unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let out = git(
+            &root,
+            &["commit", "-q", "-m", "chore(sync): adopt gone cloud atoms"],
+        )
+        .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
+        seal(plain, std::slice::from_ref(&public), &root.join(rel)).unwrap();
+        commit_dated(&root, &[rel], "bring the log back", None);
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        let said = import(&root, &scope_of(&public)).unwrap();
+        assert!(said.contains("1 cloud atoms taken"), "{said}");
+        assert!(!said.contains("adopted away"), "{said}");
+        let live = store.lock().unwrap().clone();
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert!(live[0]["entities"].to_string().contains("sync:gone"));
+    }
+
+    #[test]
+    fn an_import_with_nothing_to_retire_still_says_there_are_no_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let public = make_key();
+        let root = tracker(dir.path());
+        adopt_deletion(&root);
+        if root.join(".ljos").exists() {
+            std::fs::remove_dir_all(root.join(".ljos")).unwrap();
+        }
+        let (url, _store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        let said = import(&root, &scope_of(&public)).unwrap();
+        assert!(said.contains("no cloud logs yet"), "{said}");
+        assert!(!said.contains("adopted away"), "{said}");
     }
 }
