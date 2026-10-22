@@ -3268,28 +3268,128 @@ fn login_user() -> String {
 /// The seat is a process name nobody chose.
 pub fn ballot_seat(verb: &str) -> Result<String> {
     let who = whoami();
+    match derived_seat(&who) {
+        Some(Derived::LoginUser) => bail!(
+            "{verb}: this shell runs under an agent runner, and nothing names its seat, \
+             so this ballot would count for {}, the login user. \
+             Set LJOS_SEAT to the seat's name (`export LJOS_SEAT=NAME`) and run it again; nothing was written",
+            who.seat
+        ),
+        Some(Derived::ProcessTree) => bail!(
+            "{verb}: no seat is named, so this ballot would count for {}, the program above this shell. \
+             Set LJOS_SEAT to the seat's name (`export LJOS_SEAT=NAME`) and run it again; nothing was written",
+            who.seat
+        ),
+        None => Ok(who.seat),
+    }
+}
+
+/// Where a seat nobody named came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Derived {
+    /// The program above this shell.
+    ProcessTree,
+    /// The login user of a shell under an agent runner.
+    LoginUser,
+}
+
+impl std::fmt::Display for Derived {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ProcessTree => "the program above this shell",
+            Self::LoginUser => "the login user of a shell under an agent runner",
+        })
+    }
+}
+
+/// Whether `who` is a seat nobody named: `LJOS_SEAT`, `VISSUE_AGENT`, an
+/// MCP client's name, a tool call's seat or a runner's record would each
+/// have named it. A person at a terminal with no runner above is their
+/// login user, and that is named enough.
+#[must_use]
+pub fn derived_seat(who: &Seat) -> Option<Derived> {
     let named = CALL_SEAT.try_with(|_| ()).is_ok()
         || ANNOUNCED.get().is_some()
         || named_var("LJOS_SEAT").is_some()
         || named_var("VISSUE_AGENT").is_some()
         || seat_from_tree_records().is_some()
         || seat_from_runner_env().is_some();
-    if !named && who.seat == login_user() && under_a_runner() {
+    if named {
+        return None;
+    }
+    if who.seat == login_user() && under_a_runner() {
+        return Some(Derived::LoginUser);
+    }
+    if program_above().is_some_and(|p| p.seat == who.seat) {
+        return Some(Derived::ProcessTree);
+    }
+    None
+}
+
+/// The seat a tracker write (note, claim, sitting, finish, file, deed) is
+/// made under. Refused, as a ballot is, when nothing named the seat: a
+/// subagent shell wrote hundreds of notes as `exec-daemon` and `cursor`.
+///
+/// # Errors
+///
+/// The seat is the program above this shell, or the login user under a
+/// runner.
+pub fn write_seat(verb: &str) -> Result<Seat> {
+    let who = whoami();
+    if let Some(from) = derived_seat(&who) {
         bail!(
-            "{verb}: this shell runs under an agent runner, and nothing names its seat, \
-             so this ballot would count for {}, the login user. \
-             Set LJOS_SEAT to the seat's name (`export LJOS_SEAT=NAME`) and run it again; nothing was written",
-            who.seat
+            "{verb}: no seat is named, so this write would be made as {}, {from}. \
+             Export LJOS_SEAT=NAME with your seat's name (the seats file is {}) and run it again; nothing was written",
+            who.seat,
+            seats_file().display()
         );
     }
-    if !named && program_above().is_some_and(|p| p.seat == who.seat) {
-        bail!(
-            "{verb}: no seat is named, so this ballot would count for {}, the program above this shell. \
-             Set LJOS_SEAT to the seat's name (`export LJOS_SEAT=NAME`) and run it again; nothing was written",
-            who.seat
-        );
+    registered_seat(&who.seat)?;
+    Ok(who)
+}
+
+/// Refuse a tracker write from a seat the seats file does not list. A
+/// file that lists no seat, or is missing as on a fresh single-user
+/// install, refuses nothing.
+///
+/// # Errors
+///
+/// The seats file lists seats and `seat` is not one of them, or the file
+/// cannot be read as TOML.
+pub fn registered_seat(seat: &str) -> Result<()> {
+    let path = seats_file();
+    let Some(listed) = listed_seats(&path)? else {
+        return Ok(());
+    };
+    let slug = canonical_seat_name(seat);
+    if listed.contains(&slug) {
+        return Ok(());
     }
-    Ok(who.seat)
+    bail!(
+        "no seat named {slug} in {}, which lists {}. \
+         Set LJOS_SEAT to a seat it lists, or add yours to it; nothing was written",
+        path.display(),
+        listed.into_iter().collect::<Vec<_>>().join(", ")
+    )
+}
+
+/// The seat names `path` maps conversations to, slugged. `None` when the
+/// file is missing or names no seat.
+fn listed_seats(path: &Path) -> Result<Option<std::collections::BTreeSet<String>>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => bail!("cannot read the seats file {}: {e}", path.display()),
+    };
+    let table: toml::Table = toml::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("the seats file {} is not TOML: {e}", path.display()))?;
+    let listed: std::collections::BTreeSet<String> = table
+        .values()
+        .filter_map(toml::Value::as_str)
+        .map(canonical_seat_name)
+        .filter(|slug| !slug.is_empty())
+        .collect();
+    Ok((!listed.is_empty()).then_some(listed))
 }
 
 /// Append one line, `ts seat verb what`, to the state dir's recall.log, so
@@ -3390,6 +3490,28 @@ fn occupancy_scope(assignee: &str, issue: &str) -> String {
         assignee.to_string()
     } else {
         format!("{assignee}:{issue}")
+    }
+}
+
+/// The doctor's `seat source` row: where the seat tracker writes go under
+/// came from. A seat nobody named is a warning, not a failure: reads work,
+/// and only the writes [`write_seat`] guards are refused.
+#[must_use]
+pub fn seat_source_row(who: &Seat) -> Habitat {
+    match derived_seat(who) {
+        Some(from) => Habitat {
+            name: "seat source",
+            state: format!(
+                "{} is derived from {from}; tracker writes are refused until LJOS_SEAT names the seat",
+                who.seat
+            ),
+            ok: false,
+        },
+        None => Habitat {
+            name: "seat source",
+            state: format!("{} named by {}", who.seat, who.source),
+            ok: true,
+        },
     }
 }
 
@@ -23322,6 +23444,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
         state: format_seat_row(),
         ok: true,
     });
+    out.push(seat_source_row(&whoami()));
     out.push(cloud::mcp_row());
     out.push(cloud::guard_row());
     // Scope cloud is readable here when cloud up wrote its age identity.
@@ -24133,7 +24256,7 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     {
         return "warn";
     }
-    if row.name == "guard bypass" && !row.ok {
+    if (row.name == "guard bypass" || row.name == "seat source") && !row.ok {
         return "warn";
     }
     if row.ok && row.name == "policy" && row.state.ends_with(POLICY_TABLE_ONLY) {
@@ -50024,6 +50147,51 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
         unsafe {
             std::env::remove_var("ACME_SESSION_ID");
+            for (k, v) in saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_derived_seat_is_a_doctor_warning_that_fails_nothing() {
+        let _env = env_guard();
+        let keys = ["LJOS_SEAT", "VISSUE_AGENT", "XDG_RUNTIME_DIR"];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        let rt = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::remove_var("VISSUE_AGENT");
+            std::env::set_var("XDG_RUNTIME_DIR", rt.path());
+            std::env::set_var("LJOS_SEAT", "saddle");
+        }
+        let named = seat_source_row(&whoami());
+        assert!(named.ok, "{}", named.state);
+        assert_eq!(doctor_word(&named), "ok");
+        assert!(
+            named.state.contains("named by LJOS_SEAT"),
+            "{}",
+            named.state
+        );
+
+        unsafe { std::env::remove_var("LJOS_SEAT") };
+        let who = whoami();
+        let row = seat_source_row(&who);
+        assert_eq!(row.ok, derived_seat(&who).is_none(), "{}", row.state);
+        if !row.ok {
+            assert!(row.state.contains("LJOS_SEAT"), "{}", row.state);
+            assert_eq!(doctor_word(&row), "warn");
+        }
+        let warned = Habitat {
+            name: "seat source",
+            state: "exec-daemon is derived from the program above this shell".into(),
+            ok: false,
+        };
+        assert_eq!(doctor_word(&warned), "warn");
+        assert!(healthy(&[warned]), "a derived seat fails no doctor");
+        unsafe {
             for (k, v) in saved {
                 match v {
                     Some(v) => std::env::set_var(k, v),
