@@ -1,0 +1,1 @@
+A user rule promoted from a lesson is no longer stated when the pack answers without that lesson. The origin kept at promote time decides only when the pack does not answer. A pack that was down is asked again on the next read instead of being taken as empty for the rest of the process.

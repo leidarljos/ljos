@@ -282,7 +282,19 @@ pub fn path_is_temp(path: Option<&Path>) -> bool {
     temp_roots().iter().any(|root| path.starts_with(root))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Temp roots that stand in for the machine's on one test thread, so a
+    /// judgment of the working tree reads the same from a checkout in `/tmp`.
+    pub(crate) static TEST_TEMP_ROOTS: std::cell::RefCell<Option<Vec<PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn temp_roots() -> Vec<PathBuf> {
+    #[cfg(test)]
+    if let Some(roots) = TEST_TEMP_ROOTS.with(|r| r.borrow().clone()) {
+        return roots;
+    }
     let mut roots = vec![
         std::env::temp_dir(),
         PathBuf::from("/tmp"),

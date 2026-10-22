@@ -1687,8 +1687,7 @@ mod tests {
     fn a_known_dangerous_command_is_judged_before_the_inner_hook() {
         use std::os::unix::fs::PermissionsExt;
         let _lock = crate::test_env_lock();
-        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../target")
+        let dir = crate::test_seat_root::seat_root(crate::bookkeep::path_is_temp)
             .join(format!("ljos-early-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
