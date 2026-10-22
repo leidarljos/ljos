@@ -3,10 +3,10 @@
 //! `ljos cloud up` installs the release binaries into `~/.local/bin`,
 //! checks the published SHA-256 sums, puts that directory first on PATH,
 //! writes the harness MCP command, and clones `LJOS_TRACKER_REMOTE`.
-//! The command is the bare name when this directory is first, and the
-//! absolute path when an earlier directory would win. It writes a webhook
-//! wake for each `LJOS_WAKE_<SEAT>_URL`. Entries this command writes are
-//! marked `source = "env"`; any other wake stays. When
+//! The command is the bare name when PATH already runs this install, and
+//! the absolute path when another copy or none would run. It writes a
+//! webhook wake for each `LJOS_WAKE_<SEAT>_URL`. Entries this command
+//! writes are marked `source = "env"`; any other wake stays. When
 //! `LJOS_CLOUD_AGE_SECRET` names an environment variable, it writes that
 //! variable's age identity for scope `cloud` to a mode 0600 file. On a
 //! cloud VM it also installs the release's `packset-embed` and the ONNX
@@ -76,12 +76,18 @@ pub fn up(force: bool) -> Result<String> {
     lines.push(ensure_binaries(&bin_dir, force)?);
     lines.push(ensure_encoder(&bin_dir, force)?);
     let server = bin_dir.join("ljos-mcp");
-    // The command is the bare name when this directory is first on PATH,
-    // and the absolute path when an earlier directory would win. which()
-    // still sees that earlier install until PATH moves, so the choice is
-    // made first. Absent from PATH, the bare name stays once prepended.
-    let early = (bin_dir_later_on_path(&bin_dir) && server.is_file())
-        .then(|| crate::server_command_plan(&server, "cloud up"));
+    // Moving this directory first reaches this process and shells that
+    // read the edited profile, not a client started some other way. The
+    // bare name is only safe when PATH already runs this install, so the
+    // choice is made before PATH moves.
+    let plan = if server.is_file() {
+        crate::server_command_plan(&server, "cloud up")
+    } else {
+        crate::ServerCommandPlan {
+            command: crate::MCP_SERVER_COMMAND.to_string(),
+            note: None,
+        }
+    };
     lines.push(ensure_process_path(&bin_dir));
 
     if agent_id().is_some() && seat_matches_file() {
@@ -97,16 +103,6 @@ pub fn up(force: bool) -> Result<String> {
     let remote = nonempty_var("LJOS_TRACKER_REMOTE");
     let tracker = remote.as_ref().map(|_| tracker_dir(&home));
     lines.push(ensure_profile(&home, &bin_dir)?);
-    let plan = early.unwrap_or_else(|| {
-        if server.is_file() {
-            crate::server_command_plan(&server, "cloud up")
-        } else {
-            crate::ServerCommandPlan {
-                command: crate::MCP_SERVER_COMMAND.to_string(),
-                note: None,
-            }
-        }
-    });
     lines.push(write_mcp(
         &home,
         &server,
@@ -2230,21 +2226,6 @@ fn ensure_path_file(path: &Path, bin_dir: &Path, before_interactive_guard: bool)
         path.display(),
         bin_dir.display()
     ))
-}
-
-/// True when `bin_dir` is on PATH and some other directory comes first.
-/// `which` would then run that earlier copy.
-fn bin_dir_later_on_path(bin_dir: &Path) -> bool {
-    let dir = bin_dir.display().to_string();
-    let current = std::env::var("PATH").unwrap_or_default();
-    let mut saw_other = false;
-    for entry in current.split(':').filter(|entry| !entry.is_empty()) {
-        if entry == dir {
-            return saw_other;
-        }
-        saw_other = true;
-    }
-    false
 }
 
 /// Put `bin_dir` first on this process's PATH and drop a later copy.

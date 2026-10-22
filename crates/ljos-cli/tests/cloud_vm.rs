@@ -421,13 +421,10 @@ fn cloud_up_installs_points_the_harness_and_clones() {
     assert!(home.join(".local/bin/packsetd").is_file());
     let mcp = fs::read_to_string(home.join(".cursor/mcp.json")).unwrap();
     let doc: serde_json::Value = serde_json::from_str(&mcp).unwrap();
-    assert_eq!(doc["mcpServers"]["ljos"]["command"], "ljos-mcp", "{mcp}");
-    assert!(
-        !doc["mcpServers"]["ljos"]["command"]
-            .as_str()
-            .unwrap_or("")
-            .contains(home.to_str().unwrap()),
-        "{mcp}"
+    assert_eq!(
+        doc["mcpServers"]["ljos"]["command"],
+        server.display().to_string(),
+        "PATH did not have the install dir when cloud up started: {mcp}"
     );
     assert!(mcp.contains("\"LJOS_TRACKER_GIT\": \"push\""), "{mcp}");
     let env = fs::read_to_string(home.join(".config/ljos/env")).unwrap();
@@ -502,7 +499,11 @@ fn cloud_up_puts_ljos_mcp_on_path_before_the_config() {
     assert_eq!(fs::read_to_string(&marker).unwrap(), "ran");
     let mcp = fs::read_to_string(home.join(".cursor/mcp.json")).unwrap();
     let doc: serde_json::Value = serde_json::from_str(&mcp).unwrap();
-    assert_eq!(doc["mcpServers"]["ljos"]["command"], "ljos-mcp", "{mcp}");
+    assert_eq!(
+        doc["mcpServers"]["ljos"]["command"],
+        bin.join("ljos-mcp").display().to_string(),
+        "{mcp}"
+    );
     let bashrc = fs::read_to_string(home.join(".bashrc")).unwrap();
     let bin_line = format!("export PATH=\"{}:$PATH\"", bin.display());
     assert!(bashrc.contains(&bin_line), "{bashrc}");
@@ -596,6 +597,73 @@ fn cloud_up_puts_the_install_dir_ahead_of_a_stale_binary() {
     );
     assert!(said.contains(stale.to_str().unwrap()), "{said}");
     assert!(said.contains("cloud up wrote"), "{said}");
+}
+
+/// The Cursor command `cloud up` writes when it starts with `path` and
+/// installs into `bin`.
+fn cloud_up_command(root: &Path, bin: &Path, path: &str) -> String {
+    let home = root.join("home");
+    let rel = root.join("rel");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    let names = ["ljos", "ljos-mcp", "ljos-policyd"];
+    for name in names {
+        executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
+    }
+    fs::write(rel.join("SHA256SUMS"), sums(&rel, &names)).unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::set_var("LJOS_BIN_DIR", bin);
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::set_var("PATH", path);
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    clear_agent_ids();
+    let said = ljos_cli::cloud::up(false).unwrap();
+    let mcp = fs::read_to_string(home.join(".cursor/mcp.json")).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&mcp).unwrap();
+    let command = doc["mcpServers"]["ljos"]["command"].as_str();
+    command
+        .unwrap_or_else(|| panic!("{mcp}\n{said}"))
+        .to_string()
+}
+
+/// Putting the install dir first reaches this process and shells that
+/// read the edited profile. A client started any other way keeps the
+/// PATH `cloud up` found, so the bare name is written only when that PATH
+/// already runs this install. A trailing slash or a symlink names the
+/// same directory.
+#[test]
+fn cloud_up_writes_the_bare_name_only_when_path_already_runs_this_install() {
+    let _g = Guard::new();
+    for (shape, bare) in [
+        ("{stale}:/usr/bin:/bin", false),
+        ("{stale}:{bin}/:/usr/bin:/bin", false),
+        ("{stale}:{link}:/usr/bin:/bin", false),
+        ("{bin}/:/usr/bin:/bin", true),
+        ("{link}:{stale}:/usr/bin:/bin", true),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("custom/bin");
+        let stale = root.path().join("stale/bin");
+        let link = root.path().join("link");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&stale).unwrap();
+        executable(&stale.join("ljos-mcp"), "#!/bin/sh\nexit 1\n");
+        std::os::unix::fs::symlink(&bin, &link).unwrap();
+        let path = shape
+            .replace("{stale}", stale.to_str().unwrap())
+            .replace("{bin}", bin.to_str().unwrap())
+            .replace("{link}", link.to_str().unwrap());
+        let want = if bare {
+            "ljos-mcp".to_string()
+        } else {
+            bin.join("ljos-mcp").display().to_string()
+        };
+        assert_eq!(cloud_up_command(root.path(), &bin, &path), want, "{shape}");
+    }
 }
 
 #[test]
