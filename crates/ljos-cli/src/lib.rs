@@ -12885,6 +12885,27 @@ pub fn packset_write(label: &str, text: &str) -> Result<Value> {
     packset_write_as(label, text, None, None)
 }
 
+/// The preference `ljos prefer` writes.
+///
+/// Typed by the person, it is theirs. Under a runner the same person-words
+/// check as an MCP prefer applies: words from the latest prompt are stored
+/// as theirs, and any other text is agent-derived. The seat guard does not
+/// stop the verb, so the check is what keeps a planted sentence from
+/// becoming the person's words.
+///
+/// # Errors
+///
+/// An empty text, or the pack refusing the claim.
+pub fn packset_prefer(text: &str, persona: Option<&str>) -> Result<Value> {
+    if under_a_runner() {
+        if capture::said_in_latest_prompt(text) {
+            return packset_write_mcp("Prefer", text, persona, Some(false));
+        }
+        return packset_write_agent("Prefer", text, persona, Some(false));
+    }
+    packset_write_as("Prefer", text, persona, Some(false))
+}
+
 /// [`packset_write`] for a lesson learned on an issue: it carries an
 /// `issue:ID` entity naming where it was learned, the same id in the
 /// `issue` field, and a `scope:NAME` entity when one is given, so the
