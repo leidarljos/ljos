@@ -427,21 +427,22 @@ struct McpFile {
     path: PathBuf,
     probe: McpProbe,
     advice: String,
-    home: HomeExpand,
+    expand: Expand,
     /// Parse and read errors fail the row. Harness files are skipped when
     /// they are not the JSON this probe expects (Zed's settings are JSONC).
     strict: bool,
 }
 
-/// How a harness turns a command string into a path.
+/// How a harness substitutes variables in a command and its env.PATH.
 ///
 /// Codex stores `$HOME` as text. OpenCode substitutes `{env:VAR}` only.
 /// Cursor substitutes `${env:VAR}` and `${userHome}`. Claude Code
 /// substitutes `${VAR}` and `${VAR:-default}` and keeps an unset `${VAR}`
 /// as written. Any other client is read as a shell: `$HOME`, `${HOME}`,
-/// `${env:HOME}`, `${userHome}` and a leading `~/`.
+/// `${env:HOME}`, `${userHome}` and a leading `~/` in a command, and
+/// `$PATH`, `${PATH}` and `${env:PATH}` in env.PATH.
 #[derive(Clone, Copy)]
-enum HomeExpand {
+enum Expand {
     Literal,
     Opencode,
     Cursor,
@@ -527,7 +528,7 @@ fn mcp_files() -> Vec<McpFile> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     let mut push =
-        |path: PathBuf, probe: McpProbe, strict: bool, advice: String, home: HomeExpand| {
+        |path: PathBuf, probe: McpProbe, strict: bool, advice: String, expand: Expand| {
             let kind = match &probe {
                 McpProbe::Json(pointer) => format!("json:{pointer}"),
                 McpProbe::Text(marker) => format!("text:{marker}"),
@@ -537,7 +538,7 @@ fn mcp_files() -> Vec<McpFile> {
                     path,
                     probe,
                     advice,
-                    home,
+                    expand,
                     strict,
                 });
             }
@@ -548,7 +549,7 @@ fn mcp_files() -> Vec<McpFile> {
             McpProbe::Json("/mcpServers/ljos".into()),
             true,
             "ljos onboard --harness cursor".into(),
-            HomeExpand::Shell,
+            Expand::Shell,
         );
     }
     if let Ok(home) = crate::home() {
@@ -557,23 +558,23 @@ fn mcp_files() -> Vec<McpFile> {
             McpProbe::Json("/mcpServers/ljos".into()),
             true,
             cursor_mcp_advice(),
-            HomeExpand::Cursor,
+            Expand::Cursor,
         );
         push(
             home.join(".claude.json"),
             McpProbe::Json("/mcpServers/ljos".into()),
             false,
             "ljos onboard --harness claude".into(),
-            HomeExpand::Claude,
+            Expand::Claude,
         );
     }
     for harness in harness_shapes() {
         let advice = format!("ljos onboard --harness {}", harness.name);
-        let home = match harness.name.as_str() {
-            "codex" => HomeExpand::Literal,
-            "opencode" | "opencode-v2" => HomeExpand::Opencode,
-            "cursor" => HomeExpand::Cursor,
-            _ => HomeExpand::Shell,
+        let expand = match harness.name.as_str() {
+            "codex" => Expand::Literal,
+            "opencode" | "opencode-v2" => Expand::Opencode,
+            "cursor" => Expand::Cursor,
+            _ => Expand::Shell,
         };
         if let (Some(config), Some(pointer)) = (&harness.config_json, &harness.json_pointer) {
             if !pointer.is_empty() {
@@ -582,7 +583,7 @@ fn mcp_files() -> Vec<McpFile> {
                     McpProbe::Json(pointer.clone()),
                     false,
                     advice.clone(),
-                    home,
+                    expand,
                 );
             }
         }
@@ -593,7 +594,7 @@ fn mcp_files() -> Vec<McpFile> {
                     McpProbe::Text(marker.clone()),
                     false,
                     advice.clone(),
-                    home,
+                    expand,
                 );
             }
         }
@@ -638,7 +639,7 @@ fn command_and_args(entry: &serde_json::Value) -> Option<LaunchSpec> {
         .and_then(serde_json::Value::as_object)
         .and_then(|env| env.get("PATH"))
         .and_then(serde_json::Value::as_str)
-        .map(expand_json_path);
+        .map(str::to_string);
     match entry.get("command").or_else(|| entry.get("cmd"))? {
         serde_json::Value::String(command) => {
             let command = command.trim();
@@ -786,11 +787,22 @@ fn yaml_entry(text: &str, marker: &str) -> Option<String> {
     Some(out)
 }
 
-/// `${env:PATH}` and `$PATH` in a JSON `env.PATH`, the same kind of
-/// expansion a command already applies to `${env:HOME}`.
-fn expand_json_path(value: &str) -> String {
+/// The env.PATH the client hands the server, with this process's PATH
+/// substituted where the client would substitute its own.
+fn expand_env_path(value: &str, expand: Expand) -> String {
     let path = std::env::var("PATH").unwrap_or_default();
-    replace_dollar_path(&value.replace("${env:PATH}", &path), &path)
+    match expand {
+        Expand::Literal => value.to_string(),
+        Expand::Opencode => replace_opencode_env(value, "PATH", &path),
+        Expand::Cursor => expand_cursor(value),
+        Expand::Claude => expand_claude(value),
+        Expand::Shell => replace_dollar_path(
+            &value
+                .replace("${env:PATH}", &path)
+                .replace("${PATH}", &path),
+            &path,
+        ),
+    }
 }
 
 fn replace_dollar_path(value: &str, path: &str) -> String {
@@ -859,13 +871,13 @@ fn parse_scalar(rest: &str) -> String {
 }
 
 /// Substitute the home tokens this harness actually expands.
-fn expand_launch(command: &str, home: HomeExpand) -> String {
-    match home {
-        HomeExpand::Literal => command.to_string(),
-        HomeExpand::Opencode => expand_opencode_home(command),
-        HomeExpand::Cursor => expand_cursor(command),
-        HomeExpand::Claude => expand_claude(command),
-        HomeExpand::Shell => expand_shell_home(command),
+fn expand_launch(command: &str, expand: Expand) -> String {
+    match expand {
+        Expand::Literal => command.to_string(),
+        Expand::Opencode => expand_opencode_home(command),
+        Expand::Cursor => expand_cursor(command),
+        Expand::Claude => expand_claude(command),
+        Expand::Shell => expand_shell_home(command),
     }
 }
 
@@ -930,17 +942,22 @@ fn expand_opencode_home(command: &str) -> String {
     let Ok(home) = crate::home() else {
         return command.to_string();
     };
-    let home = home.display().to_string();
-    let token = "{env:HOME}";
+    replace_opencode_env(command, "HOME", &home.display().to_string())
+}
+
+/// OpenCode's `{env:NAME}` replaced by `value`. `${env:NAME}` is not
+/// OpenCode's form and stays text.
+fn replace_opencode_env(text: &str, name: &str, value: &str) -> String {
+    let token = format!("{{env:{name}}}");
     let mut out = String::new();
-    let mut rest = command;
-    while let Some(at) = rest.find(token) {
+    let mut rest = text;
+    while let Some(at) = rest.find(&token) {
         let shell_form = at > 0 && rest.as_bytes()[at - 1] == b'$';
         if shell_form {
             out.push_str(&rest[..at + token.len()]);
         } else {
             out.push_str(&rest[..at]);
-            out.push_str(&home);
+            out.push_str(value);
         }
         rest = &rest[at + token.len()..];
     }
@@ -970,9 +987,13 @@ fn expand_shell_home(command: &str) -> String {
 }
 
 fn launch_check(file: &McpFile, launch: &LaunchSpec) -> LaunchCheck {
-    let command = expand_launch(&launch.command, file.home);
-    let found_path = command_path(&command, launch.env_path.as_deref());
-    let search_path = launch.env_path.as_deref();
+    let command = expand_launch(&launch.command, file.expand);
+    let env_path = launch
+        .env_path
+        .as_deref()
+        .map(|path| expand_env_path(path, file.expand));
+    let search_path = env_path.as_deref();
+    let found_path = command_path(&command, search_path);
     let shell_path = if search_path.is_none() {
         shell_command_path(&command)
     } else {

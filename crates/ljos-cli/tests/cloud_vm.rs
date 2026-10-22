@@ -2485,24 +2485,90 @@ fn doctor_reads_path_from_the_ljos_entry_only() {
         owned.contains("not on env.PATH"),
         "the ljos table's own PATH still counts: {owned}"
     );
+}
 
-    fs::remove_file(home.join(".codex/config.toml")).unwrap();
-    fs::create_dir_all(home.join(".cursor")).unwrap();
-    for value in ["${env:PATH}", "$PATH"] {
-        fs::write(
+/// env.PATH is read with the client's own syntax: Cursor `${env:PATH}`
+/// (https://cursor.com/docs/context/mcp), Claude Code `${PATH}`
+/// (https://docs.claude.com/en/docs/claude-code/mcp), hermes `${PATH}` or
+/// `${env:PATH}` (https://hermes-agent.nousresearch.com/docs/reference/mcp-config-reference),
+/// and Codex none.
+#[test]
+fn doctor_expands_env_path_the_way_each_client_does() {
+    let _g = Guard::new();
+    clear_agent_ids();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    executable(&bin.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+    std::env::remove_var("LJOS_MCP_CONFIG");
+    let json = |path: &Path, value: &str| {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let doc = serde_json::json!({
+            "mcpServers": { "ljos": { "command": "ljos-mcp", "env": { "PATH": value } } }
+        });
+        fs::write(path, doc.to_string()).unwrap();
+        ljos_cli::cloud::missing_mcp_line()
+    };
+    let cases = [
+        (
             home.join(".cursor/mcp.json"),
+            "${env:PATH}",
+            ["$PATH", "${PATH}"],
+        ),
+        (
+            home.join(".claude.json"),
+            "${PATH}",
+            ["$PATH", "${env:PATH}"],
+        ),
+    ];
+    for (path, ready, literals) in cases {
+        let line = json(&path, ready);
+        assert!(
+            line.is_none(),
+            "{} expands {ready}: {line:?}",
+            path.display()
+        );
+        for literal in literals {
+            let line = json(&path, literal).unwrap_or_default();
+            assert!(
+                line.contains("ljos-mcp is not on env.PATH"),
+                "{} leaves {literal} as text: {line}",
+                path.display()
+            );
+        }
+        fs::remove_file(&path).unwrap();
+    }
+
+    let hermes = home.join(".hermes/config.yaml");
+    fs::create_dir_all(hermes.parent().unwrap()).unwrap();
+    for ready in ["${PATH}", "${env:PATH}"] {
+        fs::write(
+            &hermes,
             format!(
-                "{{\"mcpServers\":{{\"ljos\":{{\"command\":\"ljos-mcp\",\"args\":[],\"env\":{{\"PATH\":\"{value}\"}}}}}}}}\n"
+                "mcp_servers:\n  ljos:\n    command: ljos-mcp\n    env:\n      PATH: \"{ready}\"\n"
             ),
         )
         .unwrap();
-        let expanded = ljos_cli::cloud::missing_mcp_line();
-        assert!(
-            expanded.is_none(),
-            "{value} in JSON env.PATH should expand: {}",
-            expanded.unwrap_or_default()
-        );
+        let line = ljos_cli::cloud::missing_mcp_line();
+        assert!(line.is_none(), "hermes expands {ready}: {line:?}");
     }
+    fs::remove_file(&hermes).unwrap();
+
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(
+        home.join(".codex/config.toml"),
+        "[mcp_servers.ljos]\ncommand = \"ljos-mcp\"\n\n[mcp_servers.ljos.env]\nPATH = \"$PATH\"\n",
+    )
+    .unwrap();
+    let line = ljos_cli::cloud::missing_mcp_line().unwrap_or_default();
+    assert!(
+        line.contains("ljos-mcp is not on env.PATH"),
+        "Codex passes $PATH as text: {line}"
+    );
 }
 
 #[test]
