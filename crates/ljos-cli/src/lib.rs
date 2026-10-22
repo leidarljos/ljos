@@ -15466,7 +15466,7 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
             out.push('\n');
         }
     }
-    out.push_str("\nThe work:\n");
+    out.push_str("\nThe work (tracker recall may include unverified logbook notes):\n");
     out.push_str(&tracker_recall(issue)?.stdout);
     out.push_str(&format!(
         "\nWalk the island as yourself before the ballot: `ljos island` on the work with `--as {name}`. \
