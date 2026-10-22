@@ -17,7 +17,9 @@
 //! twice is an import once. Retirement travels by difference: the texts an
 //! import took from a host are remembered, and a text that host no longer
 //! sends retires the local copy that came from it, never a claim this
-//! machine wrote itself.
+//! machine wrote itself. Every log is retired before any log is posted.
+//! A text that moved scopes would otherwise be answered with the old claim,
+//! and the old scope's retirement would delete that answer.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -932,7 +934,12 @@ fn remembered_hosts(root: &Path) -> Vec<(String, String)> {
 }
 
 /// Import every other machine's log of the repository's scope into this
-/// seat's pack. Returns one line per host.
+/// seat's pack. Returns one line per host and scope.
+///
+/// Plans are taken from the pack as it stands. Every retirement runs,
+/// then every post. The pack answers a text it already holds with that
+/// claim, so posting a moved text and retiring the old scope afterwards
+/// deletes the claim the new scope just answered.
 ///
 /// # Errors
 ///
@@ -952,16 +959,38 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
     }
     let client = crate::pack()?;
     let workspace = client.workspace();
-    for job in jobs {
-        out.push_str(&import_plain(
-            &client,
-            root,
-            &workspace,
-            scope,
-            &job.host,
-            &job.scope_name,
-            &job.plain,
-        )?);
+    let atoms = crate::atoms_lean(&client, &workspace)?;
+    let plans: Vec<ImportPlan> = jobs
+        .into_iter()
+        .map(|job| {
+            let sender = sender_entity_for_scope(&job.host, scope, &job.scope_name);
+            let held = held_ids(&atoms, &sender);
+            let incoming = incoming_with_sender(
+                &job.plain,
+                &sender,
+                &read_taken(root, &job.scope_name, &job.host),
+                &held,
+            );
+            ImportPlan {
+                host: job.host,
+                scope_name: job.scope_name,
+                plain: job.plain,
+                sender,
+                incoming,
+            }
+        })
+        .collect();
+    let retired: Vec<usize> = plans
+        .iter()
+        .map(|plan| forget_retired(&atoms, &plan.sender, &plan.incoming.retired))
+        .collect();
+    for (plan, retired) in plans.iter().zip(retired) {
+        let (kept, refused) = post_incoming(&client, &workspace, &plan.incoming.post);
+        write_taken(root, &plan.scope_name, &plan.host, &plan.plain)?;
+        out.push_str(&format!(
+            "sync: {}: {kept} {} atoms taken, {refused} refused, {retired} retired\n",
+            plan.host, plan.scope_name
+        ));
     }
     Ok(out)
 }
@@ -987,7 +1016,10 @@ fn import_jobs(
             .map(|entry| entry.path())
             .filter(|path| path.to_string_lossy().ends_with(".jsonl.age"))
             .collect();
-        paths.sort();
+        // `+` sorts before `.`, so `<host>+cloud` would be read before
+        // `<host>`. The primary log comes first; retirement of every log
+        // still runs before any post, in `import`.
+        paths.sort_by_key(|path| import_log_rank(path));
         for path in paths {
             let Some((host, scope_name)) = host_scope_from_log_path(&path, scope) else {
                 continue;
@@ -1034,32 +1066,71 @@ fn import_jobs(
     Ok((jobs, out))
 }
 
-fn import_plain(
-    client: &packset_client::PacksetClient,
-    root: &Path,
-    workspace: &str,
-    scope: &Scope,
-    host: &str,
-    scope_name: &str,
-    plain: &str,
-) -> Result<String> {
-    let sender = sender_entity_for_scope(host, scope, scope_name);
-    // The pack names a posted atom afresh, so a text already taken
-    // from this host would be held twice; what is held is skipped.
-    let held: BTreeSet<String> = crate::atoms_lean(client, workspace)?
+struct ImportPlan {
+    host: String,
+    scope_name: String,
+    plain: String,
+    sender: String,
+    incoming: Incoming,
+}
+
+/// `<host>.jsonl.age` before `<host>+<scope>.jsonl.age`.
+fn import_log_rank(path: &Path) -> (u8, String) {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_string();
+    (u8::from(name.contains('+')), name)
+}
+
+fn has_entity(atom: &Value, entity: &str) -> bool {
+    atom["entities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|tag| tag.as_str() == Some(entity))
+}
+
+/// Texts this pack already holds from `sender`. A later post of one is
+/// skipped: the pack would answer with the claim it has.
+fn held_ids(atoms: &[Value], sender: &str) -> BTreeSet<String> {
+    atoms
         .iter()
-        .filter(|atom| {
-            atom["entities"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|entity| entity.as_str() == Some(sender.as_str()))
-        })
+        .filter(|atom| has_entity(atom, sender))
         .filter_map(|atom| atom["text"].as_str().map(crate::work_id))
-        .collect();
-    let got = incoming_with_sender(plain, &sender, &read_taken(root, scope_name, host), &held);
+        .collect()
+}
+
+fn forget_retired(atoms: &[Value], sender: &str, gone: &[String]) -> usize {
+    if gone.is_empty() {
+        return 0;
+    }
+    let mut retired = 0usize;
+    for atom in atoms {
+        let Some(text) = atom["text"].as_str() else {
+            continue;
+        };
+        if !gone.contains(&crate::work_id(text)) || !has_entity(atom, sender) {
+            continue;
+        }
+        if let Some(id) = atom["id"].as_str() {
+            if crate::packset_forget(id, None).is_ok() {
+                retired += 1;
+            }
+        }
+    }
+    retired
+}
+
+fn post_incoming(
+    client: &packset_client::PacksetClient,
+    workspace: &str,
+    post: &[Value],
+) -> (usize, usize) {
     let (mut kept, mut refused) = (0usize, 0usize);
-    for mut atom in got.post {
+    for atom in post {
+        let mut atom = atom.clone();
         if let Some(map) = atom.as_object_mut() {
             map.insert("workspace".into(), Value::String(workspace.to_string()));
         }
@@ -1068,28 +1139,7 @@ fn import_plain(
             Err(_) => refused += 1,
         }
     }
-    let mut retired = 0usize;
-    if !got.retired.is_empty() {
-        for atom in crate::atoms_lean(client, workspace)? {
-            let text = atom["text"].as_str().unwrap_or("");
-            let from_host = atom["entities"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|entity| entity.as_str() == Some(sender.as_str()));
-            if from_host && got.retired.contains(&crate::work_id(text)) {
-                if let Some(id) = atom["id"].as_str() {
-                    if crate::packset_forget(id, None).is_ok() {
-                        retired += 1;
-                    }
-                }
-            }
-        }
-    }
-    write_taken(root, scope_name, host, plain)?;
-    Ok(format!(
-        "sync: {host}: {kept} {scope_name} atoms taken, {refused} refused, {retired} retired\n"
-    ))
+    (kept, refused)
 }
 
 fn tracked_path(root: &Path, rel: &str) -> bool {
@@ -2241,6 +2291,109 @@ mod tests {
     fn atom(id: &str, text: &str, entities: &[&str]) -> Value {
         serde_json::json!({"id": id, "text": text, "kind": "lesson",
             "entities": entities, "embedding": [0.1, 0.2]})
+    }
+
+    fn lesson_line(text: &str, scope_name: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "kind": "lesson",
+                "level": "explicit",
+                "text": text,
+                "entities": [format!("scope:{scope_name}")],
+            })
+        )
+    }
+
+    fn seal_for(path: &Path, public: &str, plain: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let mut child = Command::new("age")
+            .args(["-r", public, "-o"])
+            .arg(path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write as _;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(plain.as_bytes())
+            .unwrap();
+        let done = child.wait_with_output().unwrap();
+        assert!(
+            done.status.success(),
+            "age: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+    }
+
+    fn age_keygen(path: &Path) -> String {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let made = Command::new("age-keygen")
+            .arg("-o")
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "age-keygen must be installed: {}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        let public = Command::new("age-keygen")
+            .arg("-y")
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(public.status.success());
+        String::from_utf8_lossy(&public.stdout).trim().to_string()
+    }
+
+    struct PackDaemon(std::process::Child);
+    impl Drop for PackDaemon {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// Caller holds [`crate::test_env_lock`] and sets the pack environment.
+    fn spawn_pack(pack_home: &Path) -> (u16, PackDaemon) {
+        std::fs::create_dir_all(pack_home).unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut daemon = Command::new(packsetd_bin())
+            .args(["--port", &port.to_string(), "--home"])
+            .arg(pack_home)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", pack_home)
+            .env("PACKSET_HOME", pack_home)
+            .env("PACKSET_AUTH", "off")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+            assert!(daemon.try_wait().unwrap().is_none(), "packsetd exited");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "packsetd did not listen"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        (port, PackDaemon(daemon))
     }
 
     /// `age` that writes its stdin to `-o`. The caller holds [`crate::test_env_lock`].
@@ -3693,5 +3846,159 @@ mod tests {
         assert!(made.status.success(), "age-keygen must be installed");
         std::fs::write(cloud_identity_path(), "not a key\n").unwrap();
         assert_eq!(identities_for_open(), vec![own]);
+    }
+
+    /// `<host>+cloud.jsonl.age` sorts before `<host>.jsonl.age` because
+    /// `+` is before `.`. Import has to read the primary log first.
+    #[test]
+    fn import_jobs_reads_the_primary_log_before_an_extra_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let public = age_keygen(&dir.path().join("age.key"));
+        std::fs::create_dir_all(root.join(".ljos")).unwrap();
+        std::fs::write(
+            root.join(".ljos/sync.toml"),
+            format!(
+                "name = \"grokbot\"\nrecipients = [\"{public}\"]\n[scopes]\ncloud = [\"{public}\"]\n"
+            ),
+        )
+        .unwrap();
+        let box_line = lesson_line("Kept on the box.", "grokbot");
+        let cloud_line = lesson_line("Kept on the cloud.", "cloud");
+        seal_for(
+            &root.join(".ljos/atoms/peer+cloud.jsonl.age"),
+            &public,
+            &cloud_line,
+        );
+        seal_for(&root.join(".ljos/atoms/peer.jsonl.age"), &public, &box_line);
+        let scope = scope_of_repo(root).unwrap().unwrap();
+        let (jobs, out) =
+            import_jobs(root, &scope, &[dir.path().join("age.key")], "this-host").unwrap();
+        assert!(out.is_empty(), "{out}");
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(
+            jobs[0].scope_name, "grokbot",
+            "the extra scope was read first"
+        );
+        assert!(
+            jobs[0].plain.contains("Kept on the box."),
+            "{}",
+            jobs[0].plain
+        );
+        assert_eq!(jobs[1].scope_name, "cloud");
+        assert!(
+            jobs[1].plain.contains("Kept on the cloud."),
+            "{}",
+            jobs[1].plain
+        );
+    }
+
+    /// Moving a text between scopes used to drop it for one sync: the pack
+    /// answers a duplicate with the claim it holds, and retiring the old
+    /// scope afterwards deleted that claim.
+    #[test]
+    fn a_text_moved_between_scopes_is_kept() {
+        let _g = crate::test_env_lock();
+        assert_ne!(
+            host(),
+            "peer",
+            "this machine's host would skip the peer logs"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let config = home.join(".config");
+        std::fs::create_dir_all(config.join("ljos")).unwrap();
+        let pack_home = dir.path().join("pack");
+        let (port, _daemon) = spawn_pack(&pack_home);
+        // SAFETY: this test holds the process env lock.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_CONFIG_HOME", &config);
+            std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
+            std::env::set_var("PACKSET_URL", format!("http://127.0.0.1:{port}"));
+            std::env::set_var("PACKSET_AUTH", "off");
+            std::env::set_var("PACKSET_HOME", &pack_home);
+            std::env::set_var("PACKSET_WORKSPACE", "move-scope");
+            std::env::remove_var(WRITE_SCOPE_KEY);
+        }
+        let public = age_keygen(&identity_path());
+        let client = crate::pack().unwrap();
+        for (from_scope, to_scope, text) in [
+            ("grokbot", "cloud", "The note moved to the cloud."),
+            ("cloud", "grokbot", "The note moved back to the box."),
+        ] {
+            let root = dir.path().join(format!("{from_scope}-to-{to_scope}"));
+            std::fs::create_dir_all(root.join(".ljos")).unwrap();
+            std::fs::write(
+                root.join(".ljos/sync.toml"),
+                format!(
+                    "name = \"grokbot\"\nrecipients = [\"{public}\"]\n[scopes]\ncloud = [\"{public}\"]\n"
+                ),
+            )
+            .unwrap();
+            let sender = if from_scope == "grokbot" {
+                "sync:peer".to_string()
+            } else {
+                format!("sync:peer+{from_scope}")
+            };
+            let posted = crate::admit::post_kept(
+                &client,
+                &serde_json::json!({
+                    "kind": "lesson",
+                    "level": "explicit",
+                    "text": text,
+                    "workspace": client.workspace(),
+                    "entities": [sender],
+                }),
+            )
+            .unwrap();
+            assert!(
+                posted["id"].is_string(),
+                "{from_scope}->{to_scope}: {posted}"
+            );
+            write_taken(
+                &root,
+                from_scope,
+                "peer",
+                &format!("{}\n", serde_json::json!({"text": text})),
+            )
+            .unwrap();
+            let scope = scope_of_repo(&root).unwrap().unwrap();
+            for name in ["grokbot", "cloud"] {
+                let [rel, _] = host_log_rels_for_scope("peer", "grokbot", name);
+                let plain = if name == to_scope {
+                    lesson_line(text, name)
+                } else {
+                    String::new()
+                };
+                seal_for(&root.join(rel), &public, &plain);
+            }
+            let said = import(&root, &scope).unwrap();
+            let expect_sender = if to_scope == "grokbot" {
+                "sync:peer".to_string()
+            } else {
+                format!("sync:peer+{to_scope}")
+            };
+            let left = crate::atoms_lean(&client, &client.workspace()).unwrap();
+            let hits: Vec<_> = left.iter().filter(|atom| atom["text"] == text).collect();
+            assert_eq!(
+                hits.len(),
+                1,
+                "{from_scope}->{to_scope} dropped or duplicated the text: {left:?}\n{said}"
+            );
+            assert!(
+                has_entity(hits[0], &expect_sender),
+                "{from_scope}->{to_scope} kept the old sender: {:?}\n{said}",
+                hits[0]["entities"]
+            );
+            assert!(
+                said.contains(&format!("1 {to_scope} atoms taken")),
+                "{from_scope}->{to_scope}: {said}"
+            );
+            assert!(
+                said.contains(&format!("0 {from_scope} atoms taken, 0 refused, 1 retired")),
+                "{from_scope}->{to_scope}: {said}"
+            );
+        }
     }
 }
