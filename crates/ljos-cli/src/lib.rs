@@ -46258,7 +46258,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     /// `panel_cloud` on probe-l0g0 against a pack whose persona atoms are
     /// `atoms`: the directory it ran in, the prompt directory, its answer.
-    fn cloud_panel(atoms: &'static str) -> (tempfile::TempDir, PathBuf, Result<String>) {
+    fn cloud_panel(atoms: impl Into<String>) -> (tempfile::TempDir, PathBuf, Result<String>) {
+        let atoms: String = atoms.into();
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("tracker");
@@ -46278,7 +46279,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let (url, _seen) = serve_http(move |req| {
             let line = req.lines().next().unwrap_or("");
             if line.starts_with("GET /v1/atoms") && line.contains("kind=persona") {
-                (200, atoms.into())
+                (200, atoms.clone())
             } else if line.starts_with("GET /v1/atoms") {
                 (200, r#"{"atoms":[]}"#.into())
             } else {
@@ -46369,6 +46370,44 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(err.contains("and ada-rider"), "{err}");
         assert!(err.contains("seat ada-rider"), "{err}");
         assert!(!out.exists(), "{err}");
+    }
+
+    /// A run's seat is what `whoami` reads from its `LJOS_SEAT`, which
+    /// strips an old pid tag and maps an old name. Two personas whose
+    /// slugs differ still boot as one seat when one is the other's legacy
+    /// form, so the panel names both and writes nothing. `eessi-bot` has
+    /// no pid tag and stays a seat of its own.
+    #[test]
+    fn a_cloud_panel_refuses_two_personas_that_boot_as_one_seat() {
+        let pair = |a: &str, b: &str| {
+            let atom = |id: &str, name: &str| {
+                format!(
+                    r#"{{"id":"atom-{id}","kind":"persona","name":"{name}","anchor":0.5,"text":"{name}","entities":["logo"],"ts":"2026-10-11T10:00:00Z"}}"#
+                )
+            };
+            format!(r#"{{"atoms":[{},{}]}}"#, atom("a", a), atom("b", b))
+        };
+        for (first, second, seat) in [
+            ("inky", "inky-n9o", "inky"),
+            ("ljos-bot", "ljosbot", "ljosbot"),
+            ("inky", "inky@n9o", "inky"),
+        ] {
+            let (_dir, out, said) = cloud_panel(pair(first, second));
+            let err = format!("{:#}", said.unwrap_err());
+            assert!(
+                err.contains(&format!("personas {first} and {second} ")),
+                "{err}"
+            );
+            assert!(err.contains(&format!("seat {seat};")), "{err}");
+            assert!(!out.exists(), "{err}");
+        }
+        let (_dir, out, said) = cloud_panel(pair("eessi", "eessi-bot"));
+        let said = said.unwrap();
+        assert!(said.contains("2 of 2 personas"), "{said}");
+        for name in ["eessi", "eessi-bot"] {
+            let text = std::fs::read_to_string(out.join(format!("{name}.md"))).unwrap();
+            assert!(text.contains(&format!("LJOS_SEAT={name}\n")), "{text}");
+        }
     }
 
     /// The pack's address, its request lines and its posted atoms.

@@ -3847,6 +3847,37 @@ fn a_launcher_slots_the_seat_its_run_takes() {
     assert!(err.contains("does not slot itself"), "{err}");
 }
 
+/// `ridley-review` on run `cafebabe0001abcd` boots as
+/// `ridley-review-cafebabe0001abcd`, and so would a seat already named
+/// that, so the launcher cannot tell from the slot which one it vouches
+/// for. The suffixed name is refused and the bare one is slotted.
+#[test]
+fn a_launcher_does_not_slot_a_seat_that_already_ends_with_the_run_id() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_origin, box_repo) = slot_world(root.path(), &["probe-slot"]);
+    pin_standing(&box_repo, "ljosbot");
+    let err = ljos_cli::slot::write(
+        "probe-slot",
+        "ridley-review-cafebabe0001abcd",
+        "grok-4",
+        "cafebabe0001abcd",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("ridley-review-cafebabe0001abcd already ends with run id cafebabe0001abcd"),
+        "{err}"
+    );
+    assert!(err.contains("ridley-review on that run"), "{err}");
+    let said =
+        ljos_cli::slot::write("probe-slot", "ridley-review", "grok-4", "cafebabe0001abcd").unwrap();
+    assert!(
+        said.contains("slot: ridley-review-cafebabe0001abcd on probe-slot"),
+        "{said}"
+    );
+}
+
 #[test]
 fn a_run_ballot_counts_for_a_push_under_its_slot_and_not_without_one() {
     let _g = Guard::new();
@@ -3861,7 +3892,7 @@ fn a_run_ballot_counts_for_a_push_under_its_slot_and_not_without_one() {
     std::env::set_var("VISSUE_ROOT", &vm);
     std::env::set_var("ISSUE_ROOT", &vm);
     std::env::set_var("XDG_DATA_HOME", root.path().join("vm-data"));
-    let seat = ljos_cli::cloud::run_seat("ridley-review", "cafebabe0001abcd");
+    let seat = ljos_cli::cloud::run_seat("ridley-review", "cafebabe0001abcd").unwrap();
     std::env::set_var("LJOS_SEAT", &seat);
     std::env::set_var("VISSUE_AGENT", &seat);
     let layout = vissue_core::Layout::resolve(None, None).unwrap();
