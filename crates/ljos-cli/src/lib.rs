@@ -10275,8 +10275,10 @@ pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<(Vec<Hit>, bool)>
 
 /// What `/v1/search` answers for `cue`, with at most `limit` hits chosen
 /// by relevance alone, and how many of them the writer chose. A writer
-/// that honours `rank=relevance` picks them by lexical, BM25 and cosine
-/// with no half-life, and echoes the rank. An older writer cuts its
+/// that lists `rank=relevance` ([`ranks_by_relevance`]) is asked for it,
+/// picks them by lexical, BM25 and cosine with no half-life, and echoes
+/// the rank; an answer without the echo is read as fused. An older writer
+/// is not asked, and cuts its
 /// fused list, which decays with age, so rank 21 of a pack full of fresh
 /// lookalikes never arrives: the stored atoms that best match the cue
 /// then follow its hits, so a relevant old memory still gets in. So they
@@ -10295,8 +10297,10 @@ fn search_relevant(
         .query("workspace", &client.workspace())
         .query("q", &recall_query(cue))
         .query("limit", &limit.to_string())
-        .query("rank", "relevance")
         .timeout(timeout);
+    if ranks_by_relevance(client, timeout) {
+        req = req.query("rank", "relevance");
+    }
     if rerank {
         req = req.query("rerank", "1");
     }
@@ -10322,6 +10326,38 @@ fn search_relevant(
         }
     }
     Ok((body, chosen))
+}
+
+/// Whether the writer at `client` takes `rank=relevance`: its
+/// `/v1/status` lists it under `search.ranks`. An older writer omits
+/// `search`, and one that does not answer is taken as older. Its crate
+/// version did not move with the rank, so it is not read. Asked once a
+/// process per writer.
+fn ranks_by_relevance(client: &PacksetClient, timeout: std::time::Duration) -> bool {
+    static KNOWN: std::sync::Mutex<Option<(String, bool)>> = std::sync::Mutex::new(None);
+    let base = client.base().trim_end_matches('/').to_string();
+    let mut known = KNOWN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((at, ranks)) = known.as_ref() {
+        if *at == base {
+            return *ranks;
+        }
+    }
+    let Some(status) = packset_client::authorize(ureq::get(&format!("{base}/v1/status")))
+        .timeout(timeout)
+        .call()
+        .ok()
+        .and_then(|r| r.into_json::<Value>().ok())
+    else {
+        return false;
+    };
+    let ranks = status
+        .pointer("/search/ranks")
+        .and_then(Value::as_array)
+        .is_some_and(|r| r.iter().any(|v| v.as_str() == Some("relevance")));
+    *known = Some((base, ranks));
+    ranks
 }
 
 /// The stored atoms that best match `cue` on [`lexical_match_scores`],
@@ -37333,6 +37369,63 @@ mod tests {
             (200, body.to_string())
         });
         url
+    }
+
+    /// A writer whose status lists `relevance` under `search.ranks` is
+    /// asked for it and its echo read; one whose status has no `search`
+    /// is never sent a rank, here by refusing any.
+    #[test]
+    fn the_relevance_rank_is_asked_only_of_a_writer_that_lists_it() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap())]);
+        let hits = serde_json::json!([{
+            "id": "a", "text": "The registry rejected the token", "score": 1.0,
+            "kind": "lesson", "ts": "2026-01-14T09:00:00.000Z",
+            "entities": ["horizon:standing"], "rerank_score": null
+        }]);
+        let writer = |ranks: bool| {
+            let hits = hits.clone();
+            serve_http(move |req| {
+                let first = req.lines().next().unwrap_or("");
+                if first.contains("/v1/status") {
+                    let status = if ranks {
+                        serde_json::json!({"search": {"ranks": ["fused", "relevance"]}})
+                    } else {
+                        serde_json::json!({})
+                    };
+                    return (200, status.to_string());
+                }
+                if !first.contains("/v1/search") {
+                    return (404, r#"{"error":"missing"}"#.into());
+                }
+                match (
+                    ranks,
+                    first.contains("rank=relevance"),
+                    first.contains("rank="),
+                ) {
+                    (true, true, _) => (
+                        200,
+                        serde_json::json!({"hits": hits, "rank": "relevance"}).to_string(),
+                    ),
+                    (_, _, true) => (400, r#"{"error":"unknown rank"}"#.into()),
+                    _ => (200, serde_json::json!({"hits": hits}).to_string()),
+                }
+            })
+        };
+        for ranks in [true, false] {
+            let (url, seen) = writer(ranks);
+            let _url = PackUrl::set(&url);
+            let found = packset_search_relevant("the registry rejected my token", 12)
+                .unwrap_or_else(|e| panic!("ranks={ranks}: {e:#}"));
+            assert_eq!(found.len(), 1, "ranks={ranks}");
+            let asked = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.lines().next().unwrap_or("").contains("rank=relevance"));
+            assert_eq!(asked, ranks, "{:?}", seen.lock().unwrap());
+        }
     }
 
     /// Every hit names the subject. The one that covers the whole prompt
