@@ -2337,16 +2337,18 @@ fn history_of_log_is_headed(
 /// Note that `host` writes headed logs of `scope_name`, and drop any
 /// pre-header blob [`adopt_legacy`] pinned: putting that blob back must not
 /// retire what the headed log added.
+///
+/// The short-circuit is the local file. [`was_headed`] is also true when
+/// git history holds a headed blob, and that answer is what a fresh clone
+/// uses. It is not the note itself: import still writes the file, and a
+/// pinned pre-header blob is still dropped.
 fn mark_headed(root: &Path, scope_name: &str, host: &str) -> Result<()> {
-    if was_headed(root, scope_name, host)? {
+    let base = state_base();
+    let rel = host_state_rel(root, scope_name, host, "headed");
+    if read_beneath(&base, &rel)?.is_some() {
         return Ok(());
     }
-    let base = state_base();
-    write_beneath(
-        &base,
-        &host_state_rel(root, scope_name, host, "headed"),
-        b"",
-    )?;
+    write_beneath(&base, &rel, b"")?;
     remove_beneath(&base, &host_state_rel(root, scope_name, host, "legacy"))
 }
 
