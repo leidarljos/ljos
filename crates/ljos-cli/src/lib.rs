@@ -1549,14 +1549,10 @@ pub fn conversation_tag(pid: u32) -> String {
 /// The login's runtime directory, where what belongs to a session and never
 /// to the pack is kept.
 pub(crate) fn runtime_dir() -> PathBuf {
-    if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|r| !r.is_empty()) {
-        return PathBuf::from(run).join("ljos");
+    let dir = runtime_dir_path();
+    if std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|r| !r.is_empty()) {
+        return dir;
     }
-    let dir = runtime_fallback(
-        &std::env::temp_dir(),
-        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
-        euid(),
-    );
     if !dir.exists() {
         use std::os::unix::fs::DirBuilderExt as _;
         let _ = std::fs::DirBuilder::new()
@@ -1565,6 +1561,18 @@ pub(crate) fn runtime_dir() -> PathBuf {
             .create(&dir);
     }
     dir
+}
+
+/// [`runtime_dir`] without creating it.
+fn runtime_dir_path() -> PathBuf {
+    if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|r| !r.is_empty()) {
+        return PathBuf::from(run).join("ljos");
+    }
+    runtime_fallback(
+        &std::env::temp_dir(),
+        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+        euid(),
+    )
 }
 
 /// This process's effective user id.
@@ -6530,9 +6538,15 @@ fn cue_for(v: &Value, input: &Value, event: &str) -> String {
             .as_str()
             .or_else(|| v["extra"]["user_message"].as_str()),
     );
+    // An MCP file tool names its target `path`; the body beside it is what
+    // tells a write from a search of the same directory.
+    let writes = ["content", "contents", "edits", "new_string", "new_str"]
+        .iter()
+        .any(|k| input.get(*k).is_some());
     let file = input["file_path"]
         .as_str()
         .or_else(|| input["notebook_path"].as_str())
+        .or_else(|| input["path"].as_str().filter(|_| writes))
         .map(str::trim)
         .filter(|path| !path.is_empty())
         .map(|path| {
@@ -18887,11 +18901,41 @@ pub const SEAT_PATHS: &[&str] = &[
     "/ljos/latest-prompt.bind",
 ];
 
+/// The file names of the prompt the hook kept and its bind, guarded by
+/// name wherever they are spelled: a relative name is the runtime one
+/// once a shell stands in that directory.
+const KEPT_PROMPT_NAMES: &[&str] = &["latest-prompt", "latest-prompt.bind"];
+
+/// Whether a shell word names the runtime ljos directory itself, as
+/// written or through `$XDG_RUNTIME_DIR`. Renaming, removing or linking
+/// it replaces the kept prompt along with everything else in it.
+fn names_runtime_dir(word: &str) -> bool {
+    let word = word.trim_end_matches('/');
+    if let Some(rest) = ["${XDG_RUNTIME_DIR}", "$XDG_RUNTIME_DIR"]
+        .iter()
+        .find_map(|v| word.strip_prefix(v))
+    {
+        return rest.trim_end_matches('/') == "/ljos";
+    }
+    let per_uid = word
+        .strip_prefix("/run/user/")
+        .and_then(|r| r.strip_suffix("/ljos"))
+        .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()));
+    per_uid || (word.starts_with('/') && Path::new(word) == runtime_dir_path())
+}
+
 /// Whether a path names one of [`SEAT_PATHS`]; a backup beside a binary
 /// (`ljos.bak`) is not the binary.
 #[must_use]
 pub fn is_seat_path(path: &str) -> bool {
     let p = path.trim_matches(|c| c == '"' || c == '\'');
+    let (parent, name) = p.trim_end_matches('/').rsplit_once('/').unwrap_or(("", p));
+    if KEPT_PROMPT_NAMES.contains(&name)
+        || names_runtime_dir(p)
+        || (name.contains(['*', '?', '[']) && names_runtime_dir(parent))
+    {
+        return true;
+    }
     SEAT_PATHS.iter().any(|s| {
         if s.ends_with('/') {
             p.contains(s)
