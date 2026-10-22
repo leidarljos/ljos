@@ -1,0 +1,1 @@
+A recalled claim the pack did not store as the person's, other than a lesson, now reads as an unverified agent note, and note provenance tags are compared after NFKC, with zero-width and format characters dropped and lookalike letters folded, so a Cyrillic or zero-width tag no longer passes a downgraded note off as a fact.
