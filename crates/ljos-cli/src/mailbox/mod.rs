@@ -5,6 +5,7 @@
 //! untrusted. `docs/design/mail.md` has the whole shape.
 
 pub mod config;
+pub mod export;
 pub mod html;
 pub mod notmuch;
 
