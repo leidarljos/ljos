@@ -359,6 +359,110 @@ fn an_encoder_checksum_mismatch_installs_neither_archive() {
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn repack(rel: &Path, archive: &str, work: &Path, top: &str, transform: Option<&str>) {
+    let dest = rel.join(archive);
+    let mut cmd = Command::new("tar");
+    cmd.arg("-C").arg(work);
+    if let Some(expr) = transform {
+        cmd.args(["--transform", expr]);
+    }
+    let out = cmd.arg("-czf").arg(&dest).arg(top).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let line = format!("{}  {archive}\n", sha256(&dest));
+    fs::write(rel.join(format!("{archive}.sha256")), line).unwrap();
+}
+
+/// Replace one release archive with a member `cloud up` must not install.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn plant_hostile(root: &Path, case: &str) -> (PathBuf, PathBuf) {
+    let (home, rel) = encoder_machine(root);
+    let outside = root.join("outside-secret");
+    fs::write(&outside, b"secret").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o644)).unwrap();
+    let work = root.join("work");
+    let embed = "packset-embed-x86_64-unknown-linux-gnu.tar.gz";
+    let runtime = "onnxruntime-x86_64-unknown-linux-gnu.tar.gz";
+    match case {
+        "symlink" => {
+            fs::create_dir_all(work.join("bin")).unwrap();
+            std::os::unix::fs::symlink(&outside, work.join("bin/packset-embed")).unwrap();
+            repack(&rel, embed, &work, "bin", None);
+        }
+        "runtime-symlink" => {
+            fs::create_dir_all(work.join("lib/onnxruntime")).unwrap();
+            std::os::unix::fs::symlink(&outside, work.join("lib/onnxruntime/libonnxruntime.so.1"))
+                .unwrap();
+            repack(&rel, runtime, &work, "lib", None);
+        }
+        "hardlink" => {
+            fs::create_dir_all(work.join("bin")).unwrap();
+            fs::write(work.join("bin/packset-embed"), b"#!/bin/sh\nexit 0\n").unwrap();
+            fs::hard_link(work.join("bin/packset-embed"), work.join("bin/also")).unwrap();
+            repack(&rel, embed, &work, "bin", None);
+        }
+        "absolute" => {
+            fs::create_dir_all(work.join("bin")).unwrap();
+            executable(&work.join("bin/packset-embed"), "#!/bin/sh\nexit 0\n");
+            repack(&rel, embed, &work, "bin", Some("s,^,/,"));
+        }
+        "dotdot" => {
+            fs::create_dir_all(work.join("bin")).unwrap();
+            executable(&work.join("bin/packset-embed"), "#!/bin/sh\nexit 0\n");
+            repack(&rel, embed, &work, "bin", Some("s,^bin,..,"));
+        }
+        "fifo" => {
+            fs::create_dir_all(work.join("bin")).unwrap();
+            let made = Command::new("mkfifo")
+                .arg(work.join("bin/packset-embed"))
+                .status()
+                .unwrap();
+            assert!(made.success(), "mkfifo");
+            repack(&rel, embed, &work, "bin", None);
+        }
+        other => panic!("unknown archive case {other}"),
+    }
+    (home, outside)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn a_hostile_encoder_archive_installs_nothing() {
+    for (case, needle) in [
+        ("symlink", "is a symlink"),
+        ("runtime-symlink", "is a symlink"),
+        ("hardlink", "is a hard link"),
+        ("absolute", "absolute path"),
+        ("dotdot", "absolute path"),
+        ("fifo", "not a regular file"),
+    ] {
+        let _g = Guard::new();
+        let root = tempfile::tempdir().unwrap();
+        let (home, outside) = plant_hostile(root.path(), case);
+        let err = ljos_cli::cloud::up(false).expect_err(case).to_string();
+        assert!(err.contains(needle), "{case}: {err}");
+        assert!(err.contains("nothing was installed"), "{case}: {err}");
+        assert!(
+            !home.join(".local/bin/packset-embed").exists(),
+            "{case}: encoder installed: {err}"
+        );
+        assert!(
+            !home.join(".local/lib/onnxruntime").exists(),
+            "{case}: runtime installed: {err}"
+        );
+        if case == "symlink" || case == "runtime-symlink" {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&outside).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o644, "{case} changed the link target: {err}");
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn a_ci_job_downloads_no_encoder() {
     let _g = Guard::new();
