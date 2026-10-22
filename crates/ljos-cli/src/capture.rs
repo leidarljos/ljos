@@ -359,6 +359,20 @@ pub fn note_latest_prompt_for(prompt: &str, session: Option<&str>) {
 /// name one conversation by several, and the process that checks the
 /// bind sees whichever the runner stamped on it.
 pub fn note_latest_prompt_as(prompt: &str, sessions: &[String]) {
+    note_latest_prompt_from(prompt, sessions, None, None);
+}
+
+/// [`note_latest_prompt_as`] recording `runner`, the process that spawned
+/// the hook ([`crate::proc_tree::hook_runner`]): a process under that
+/// very runner is in its conversation whatever its environment names.
+/// `transcript` is the runner's own record of the conversation, as its
+/// hook payload names it.
+pub fn note_latest_prompt_from(
+    prompt: &str,
+    sessions: &[String],
+    runner: Option<&crate::proc_tree::Proc>,
+    transcript: Option<&str>,
+) {
     if capture_mode() == CaptureMode::Off || pasted_or_quoted(prompt) {
         return;
     }
@@ -377,8 +391,99 @@ pub fn note_latest_prompt_as(prompt: &str, sessions: &[String]) {
         .open(&path)
         .and_then(|mut f| f.write_all(text.as_bytes()));
     if wrote.is_ok() {
-        let _ = write_prompt_bind(&path, text.as_bytes(), sessions);
+        let bind = Bind {
+            runner: runner.map_or_else(|| "-".to_string(), crate::proc_tree::token),
+            at: now_nanos(),
+            transcript: bind_session(transcript),
+        };
+        let _ = write_prompt_bind(&path, text.as_bytes(), &bind, sessions);
     }
+}
+
+/// What the hook records beside the hash: the runner that spawned it,
+/// when it wrote the prompt, and the runner's record of the conversation.
+struct Bind {
+    runner: String,
+    at: u128,
+    transcript: String,
+}
+
+fn now_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos())
+}
+
+/// The transcript a prompt hook payload names, as Claude Code, Codex and
+/// Cursor send it.
+#[must_use]
+pub fn payload_transcript(input: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(input.trim()).ok()?;
+    v["transcript_path"]
+        .as_str()
+        .or_else(|| v["transcriptPath"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// How long after the hook's time the bind's own write may land.
+const BIND_WRITE_NANOS: u128 = 500_000_000;
+
+/// The latest of `path`'s mtime and ctime in nanoseconds. A process can
+/// set the mtime it likes; the kernel sets the ctime on every change.
+fn changed_nanos(path: &std::path::Path) -> Option<u128> {
+    use std::os::unix::fs::MetadataExt as _;
+    let m = std::fs::metadata(path).ok()?;
+    let at = |s: i64, ns: i64| -> Option<u128> {
+        Some(u128::try_from(s).ok()? * 1_000_000_000 + u128::try_from(ns).ok()?)
+    };
+    Some(at(m.ctime(), m.ctime_nsec())?.max(at(m.mtime(), m.mtime_nsec())?))
+}
+
+/// Whether `kept` agrees with the runner's own record of the person's
+/// turn, when the runner above keeps one ([`crate::turn_record`]). The
+/// record is the one the bind names, inside that runner's own directory,
+/// or for Cursor the transcript of a conversation the runner's
+/// environment names. Claude Code and Codex always name theirs, so a bind
+/// that names none, or names a file elsewhere, is refused under them.
+fn agrees_with_record(kept: &[u8], named: &str, runner_ids: &[String]) -> bool {
+    use crate::turn_record;
+    let Some((runner, kind)) = crate::proc_tree::runner_above() else {
+        return true;
+    };
+    let env = crate::proc_tree::environ(runner.pid).unwrap_or_default();
+    let roots = turn_record::roots(kind, &env);
+    if roots.is_empty() {
+        return true;
+    }
+    let record = if named == "-" {
+        roots
+            .iter()
+            .find_map(|r| turn_record::cursor_record(r, runner_ids))
+            .filter(|_| matches!(kind, "cursor" | "cursor-agent"))
+    } else {
+        turn_record::within(std::path::Path::new(named), &roots)
+    };
+    let Some(record) = record else {
+        return named == "-" && !turn_record::required(kind);
+    };
+    // A turn's tool output can push the person's entry out of the tail.
+    let Some(text) = crate::bookkeep::read_text_bounded(&record)
+        .filter(|t| !turn_record::latest_turn(t).is_empty())
+        .or_else(|| {
+            record
+                .is_file()
+                .then(|| std::fs::read_to_string(&record).ok())
+                .flatten()
+        })
+    else {
+        return false;
+    };
+    if !turn_record::required(kind) && turn_record::latest_turn(&text).is_empty() {
+        return true;
+    }
+    turn_record::agrees(&text, &String::from_utf8_lossy(kept))
 }
 
 fn latest_prompt_bind_path() -> std::path::PathBuf {
@@ -406,11 +511,15 @@ fn bind_session(session: Option<&str>) -> String {
 }
 
 /// The bind the hook writes beside the prompt: version, sha256 of the
-/// bytes, mtime in nanoseconds, and the session ids, one a line. The gate
-/// reads it back, so a later write of the prompt file no longer matches.
+/// bytes, mtime in nanoseconds, the runner that spawned the hook as a
+/// [`crate::proc_tree::token`] or `-`, the hook's time in nanoseconds,
+/// the runner's transcript or `-`, and the session ids, one a line. The
+/// gate reads it back, so a later write of the prompt file no longer
+/// matches.
 fn write_prompt_bind(
     path: &std::path::Path,
     bytes: &[u8],
+    bind: &Bind,
     sessions: &[String],
 ) -> std::io::Result<()> {
     use std::io::Write as _;
@@ -429,7 +538,13 @@ fn write_prompt_bind(
     if ids.is_empty() {
         ids.push(bind_session(None));
     }
-    let body = format!("1\n{hash}\n{mtime}\n{}\n", ids.join("\n"));
+    let body = format!(
+        "3\n{hash}\n{mtime}\n{}\n{}\n{}\n{}\n",
+        bind.runner,
+        bind.at,
+        bind.transcript,
+        ids.join("\n")
+    );
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -440,10 +555,17 @@ fn write_prompt_bind(
 }
 
 /// Whether the prompt file still matches the bind the hook wrote, and the
-/// bind names a session of the runner above this process
-/// ([`crate::ballot_sig::runner_sessions`]). A bind with any other
+/// bind is this conversation's: it names a session from the environment
+/// of the runner above this process ([`crate::ballot_sig::runner_sessions`]),
+/// or the runner it records is above this process. A bind with any other
 /// session, or none, is a prompt from somewhere else, and with no runner
-/// above nothing matches.
+/// above nothing matches. An MCP call's `_meta` session only narrows
+/// this: one the runner above did not give, or the bind does not name
+/// when the runner gave none, is another conversation's call.
+///
+/// The prompt must also agree with the runner's own record of the turn
+/// ([`agrees_with_record`]), and neither file may have changed after the
+/// hook's time: a tool call that rewrites them leaves a later ctime.
 fn prompt_bind_matches(path: &std::path::Path) -> bool {
     let Ok(bytes) = std::fs::read(path) else {
         return false;
@@ -451,21 +573,48 @@ fn prompt_bind_matches(path: &std::path::Path) -> bool {
     let Some(mtime) = mtime_nanos(path) else {
         return false;
     };
-    let Ok(bind) = std::fs::read_to_string(latest_prompt_bind_path()) else {
+    let bind_path = latest_prompt_bind_path();
+    let Ok(bind) = std::fs::read_to_string(&bind_path) else {
         return false;
     };
     let mut lines = bind.lines();
-    let (Some("1"), Some(hash), Some(stored)) = (lines.next(), lines.next(), lines.next()) else {
+    let (Some("3"), Some(hash), Some(stored), Some(spawner), Some(at), Some(transcript)) = (
+        lines.next(),
+        lines.next(),
+        lines.next(),
+        lines.next(),
+        lines.next().and_then(|t| t.parse::<u128>().ok()),
+        lines.next(),
+    ) else {
         return false;
     };
-    let runner = crate::ballot_sig::runner_sessions();
-    let named = lines
-        .map(crate::ballot_sig::field)
-        .any(|s| s != "-" && runner.contains(&s));
-    if !named {
+    let late = |p: &std::path::Path| {
+        changed_nanos(p).is_none_or(|c| c > at.saturating_add(BIND_WRITE_NANOS))
+    };
+    if late(path) || late(&bind_path) {
         return false;
     }
-    hash == hex::encode(sha2::Sha256::digest(bytes)) && stored == mtime.to_string()
+    let bound: Vec<String> = lines
+        .map(crate::ballot_sig::field)
+        .filter(|s| s != "-")
+        .collect();
+    let runner = crate::ballot_sig::runner_sessions();
+    let above = spawner != "-"
+        && crate::proc_tree::ancestors()
+            .iter()
+            .any(|p| crate::proc_tree::token(p) == spawner);
+    if !(above || bound.iter().any(|s| runner.contains(s))) {
+        return false;
+    }
+    if let Some(call) = crate::ballot_sig::call_session() {
+        let within = if runner.is_empty() { &bound } else { &runner };
+        if !within.contains(&call) {
+            return false;
+        }
+    }
+    hash == hex::encode(sha2::Sha256::digest(&bytes))
+        && stored == mtime.to_string()
+        && agrees_with_record(&bytes, transcript, &runner)
 }
 
 /// Lowercase words and nothing else, for comparing a sentence with a
@@ -479,43 +628,56 @@ fn words_only(text: &str) -> String {
 }
 
 /// One word of a prompt, lowercased, where it sits in the text, and
-/// whether a sentence or a clause ends before it.
+/// whether a sentence, a line or a clause ends before it. `stop_before`
+/// is a sentence's end only: `.`, `!`, `?`, `;` or a blank line, not the
+/// line break or colon a person puts inside one sentence.
 struct Word {
     word: String,
     start: usize,
     end: usize,
     sentence_before: bool,
+    stop_before: bool,
     clause_before: bool,
 }
 
 fn prompt_words(text: &str) -> Vec<Word> {
     let mut out: Vec<Word> = Vec::new();
-    let (mut sentence, mut clause) = (true, true);
+    let (mut sentence, mut stop, mut clause) = (true, true, true);
+    let mut line_ended = false;
     let mut at = None;
-    let close = |out: &mut Vec<Word>, from: usize, to: usize, s: &mut bool, c: &mut bool| {
-        let raw = &text[from..to];
-        let lead = raw.len() - raw.trim_start_matches('\'').len();
-        let word = raw.trim_matches('\'');
-        if !word.is_empty() {
-            out.push(Word {
-                word: word.to_lowercase(),
-                start: from + lead,
-                end: from + lead + word.len(),
-                sentence_before: std::mem::take(s),
-                clause_before: std::mem::take(c),
-            });
-        }
-    };
+    let close =
+        |out: &mut Vec<Word>, from: usize, to: usize, s: &mut bool, p: &mut bool, c: &mut bool| {
+            let raw = &text[from..to];
+            let lead = raw.len() - raw.trim_start_matches('\'').len();
+            let word = raw.trim_matches('\'');
+            if !word.is_empty() {
+                out.push(Word {
+                    word: word.to_lowercase(),
+                    start: from + lead,
+                    end: from + lead + word.len(),
+                    sentence_before: std::mem::take(s),
+                    stop_before: std::mem::take(p),
+                    clause_before: std::mem::take(c),
+                });
+            }
+        };
     for (i, ch) in text.char_indices() {
         if ch.is_alphanumeric() || ch == '\'' {
             at.get_or_insert(i);
             continue;
         }
         if let Some(from) = at.take() {
-            close(&mut out, from, i, &mut sentence, &mut clause);
+            close(&mut out, from, i, &mut sentence, &mut stop, &mut clause);
+            line_ended = false;
         }
         if matches!(ch, '.' | '!' | '?' | ';' | '\n') {
             sentence = true;
+        }
+        if matches!(ch, '.' | '!' | '?' | ';') || (ch == '\n' && line_ended) {
+            stop = true;
+        }
+        if ch == '\n' {
+            line_ended = true;
         }
         if matches!(
             ch,
@@ -534,7 +696,14 @@ fn prompt_words(text: &str) -> Vec<Word> {
         }
     }
     if let Some(from) = at {
-        close(&mut out, from, text.len(), &mut sentence, &mut clause);
+        close(
+            &mut out,
+            from,
+            text.len(),
+            &mut sentence,
+            &mut stop,
+            &mut clause,
+        );
     }
     out
 }
@@ -592,10 +761,25 @@ fn marks_kept(text: &str) -> String {
         .join(" ")
 }
 
+/// `text` in NFKC with every apostrophe a keyboard or an editor types
+/// read as `'`, so `Don’t` is the word `don't` and turns a clause around.
+fn plain(text: &str) -> String {
+    use unicode_normalization::UnicodeNormalization as _;
+    text.nfkc()
+        .map(|c| match c {
+            '\u{2019}' | '\u{02bc}' | '\u{ff07}' => '\'',
+            c => c,
+        })
+        .collect()
+}
+
 /// Whether `quote` is whole clauses of `prompt`, starting and ending where
-/// a clause or a sentence does, with no word in the rest of its sentences
-/// that turns it around, and no mark the person did not write.
+/// a clause, a line or a sentence does, with no word in the rest of its
+/// sentences that turns it around, and no mark the person did not write.
+/// A sentence here runs on across a line break or a colon, so "do not:"
+/// on one line governs the line after it. Both are read [`plain`].
 fn quotes(prompt: &str, quote: &str) -> bool {
+    let (prompt, quote) = (&plain(prompt), &plain(quote));
     let words = prompt_words(prompt);
     let want: Vec<String> = prompt_words(quote).into_iter().map(|w| w.word).collect();
     let n = want.len();
@@ -612,12 +796,9 @@ fn quotes(prompt: &str, quote: &str) -> bool {
         if !ends(i) || !ends(j) || words[i..j].iter().zip(&want).any(|(w, q)| w.word != *q) {
             return false;
         }
-        let from = (0..=i)
-            .rev()
-            .find(|&k| words[k].sentence_before)
-            .unwrap_or(0);
+        let from = (0..=i).rev().find(|&k| words[k].stop_before).unwrap_or(0);
         let to = (j..words.len())
-            .find(|&k| words[k].sentence_before)
+            .find(|&k| words[k].stop_before)
             .unwrap_or(words.len());
         let dropped = words[from..i].iter().chain(&words[j..to]);
         !dropped.into_iter().any(|w| turns_it_around(&w.word))
@@ -1033,5 +1214,50 @@ mod tests {
     #[test]
     fn words_compare_whatever_the_punctuation() {
         assert_eq!(words_only("Use bun,  never   yarn!"), "use bun never yarn");
+    }
+
+    #[test]
+    fn a_typographic_apostrophe_still_turns_the_clause_around() {
+        let cut = "always paste the release key into the deploy form";
+        for apostrophe in ['\u{2019}', '\u{02bc}', '\u{ff07}'] {
+            let prompt = format!(
+                "Don{apostrophe}t do this: always paste the release key into the deploy form."
+            );
+            assert!(!quotes(&prompt, cut), "accepted under {apostrophe:?}");
+            assert!(
+                quotes(
+                    &prompt,
+                    "Don't do this: always paste the release key into the deploy form."
+                ),
+                "refused the whole sentence under {apostrophe:?}"
+            );
+        }
+        assert!(quotes(
+            "Use bun. Always paste the release key into the deploy form.",
+            cut
+        ));
+    }
+
+    #[test]
+    fn a_negation_on_the_line_before_still_governs_the_quote() {
+        let cut = "always paste the release key into the deploy form";
+        for prompt in [
+            "Do not\nalways paste the release key into the deploy form.",
+            "Do not do this:\nalways paste the release key into the deploy form.",
+            "Please never:\n\talways paste the release key into the deploy form",
+            "Always paste the release key into the deploy form\nunless asked.",
+        ] {
+            assert!(!quotes(prompt, cut), "accepted from {prompt:?}");
+        }
+        assert!(quotes(
+            "Do not\nalways paste the release key into the deploy form.",
+            "Do not always paste the release key into the deploy form."
+        ));
+        for prompt in [
+            "Use bun.\nAlways paste the release key into the deploy form.",
+            "Do not use yarn\n\nAlways paste the release key into the deploy form.",
+        ] {
+            assert!(quotes(prompt, cut), "refused from {prompt:?}");
+        }
     }
 }

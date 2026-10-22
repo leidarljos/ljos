@@ -1,6 +1,9 @@
 //! An MCP remember lands in the pack `ljos memories list` reads, and a
 //! search increments the use count that list prints.
 
+#[path = "common/runner.rs"]
+mod runner;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::{Command, Stdio};
@@ -99,14 +102,33 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
     std::fs::write(tracker.join("vissue.toml"), "seats = [\"saddle\"]\n").unwrap();
     let url = serve(Arc::new(Mutex::new(Vec::new())));
     let text = "Pin the review set before a release.";
+    let prompt = format!("Please remember this for next time: {text}");
+    let transcript = home.path().join(".claude/projects/-seat/person-1.jsonl");
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    let turn = serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": prompt},
+    });
+    std::fs::write(&transcript, format!("{turn}\n")).unwrap();
     let payload = serde_json::json!({
         "hook_event_name": "UserPromptSubmit",
         "session_id": "person-1",
-        "prompt": format!("Please remember this for next time: {text}"),
+        "prompt": prompt,
+        "transcript_path": transcript,
     })
     .to_string();
-    let mut noted = Command::new(env!("CARGO_BIN_EXE_ljos"))
-        .args(["hook"])
+    // The runner spawns the prompt hook and starts the server, and the
+    // prompt's session is the one that runner gave it.
+    let runner = home.path().join("claude");
+    runner::runner_at(&runner);
+    let mut noted = Command::new(&runner)
+        .args([
+            "-c",
+            "\"$@\"; exit $?",
+            "claude",
+            env!("CARGO_BIN_EXE_ljos"),
+            "hook",
+        ])
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))
         .env("XDG_STATE_HOME", &state)
@@ -135,10 +157,6 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
         "prompt hook failed: {}",
         String::from_utf8_lossy(&noted.stderr)
     );
-    // The runner starts the server, and the prompt's session is the one
-    // that runner gave it.
-    let runner = home.path().join("claude");
-    std::os::unix::fs::symlink("/bin/sh", &runner).unwrap();
     let mut child = Command::new(&runner)
         .args([
             "-c",

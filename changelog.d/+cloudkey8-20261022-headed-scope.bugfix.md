@@ -1,0 +1,1 @@
+Asking git history whether a host had written headers parsed `.ljos/sync.toml` to pick the log file. A primary scope named `cloud` is reserved, so that parse failed and adopt kept the log. The primary name and the `host+scope` name are both walked, and a scope file that does not parse is not a reason to stop.

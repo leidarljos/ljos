@@ -306,20 +306,42 @@ takes it back. =LJOS_CAPTURE=nudge= asks the agent to write it instead,
 and =off= leaves it. An agent's =remember= of the person's words from
 their latest prompt stands at once too, when it is a whole sentence or
 clause of that prompt and keeps its =not=, =never=, =unless= and
-=only=. That prompt counts only when the hook's bind beside it names
-a session of the runner above the process asking: read from the
-environment the runner started its child with, or from an MCP call's
-=_meta=, never from the asking process's own variables, and nothing
-counts with no runner above. The seat guard denies a tool call that
-writes, moves, links or touches either file or the runtime ljos
-directory, however its path is spelled, through interpreter code that
-names them, or through any argument of a file tool. It denies a session
-variable set on the line that runs ljos, and =ljos prefer=,
-=remember= or =accept= run through ssh, where ljos is not under the
-runner. A process of the same user that runs outside the guard, not as
-a tool call, can still write both files and forge the person's words,
-so a person basis is strong only against writes made through tool calls
-the guard sees.
+=only=. The quote and the prompt are read in NFKC with =’=, =ʼ= and =＇= as an apostrophe,
+and a negation counts back to where the sentence ends, across a line
+break or a colon, so "Don’t do this:" on one line still governs the
+next.
+Only the runner keeps that prompt. =ljos hook= keeps it when the
+process that spawned it is the runner, as the file the kernel runs it
+from names it, with nothing between them but the =sh -c= that runs the
+configured hook command, and when that runner does not itself run
+inside a tool call. Otherwise it keeps nothing and says why on stderr,
+and the seat guard denies a tool call that runs =ljos hook=, locally or
+through ssh. The bind beside the prompt records the runner process,
+the hook's time and the transcript the runner named. The prompt counts
+only when that runner is above the process asking, or the bind names a
+session the runner above started its child with; an MCP call's =_meta=
+session only narrows this, and one that differs is refused. It counts
+only when neither file changed after the hook's time, and when it
+agrees with the runner's own record of the turn:
+
+| runner | record checked |
+|--------+----------------|
+| Claude Code | the transcript the payload names, under =~/.claude/projects= or =$CLAUDE_CONFIG_DIR/projects=; required |
+| Codex | the rollout the payload names, under =~/.codex/sessions= or =$CODEX_HOME/sessions=; required |
+| Cursor | the agent transcript of the conversation, under =~/.cursor/projects=, when one is found |
+| Grok, OpenCode, Gemini, Antigravity | none; only the bind and the time |
+
+The seat guard also denies a tool call that writes, moves, links or
+touches either file or the runtime ljos directory, however its path is
+spelled, through interpreter code that names them, or through any
+argument of a file tool. It denies a session variable set on the line
+that runs ljos, and =ljos prefer=, =remember= or =accept= run through
+ssh, where ljos is not under the runner. A script that never spells the
+path now fails on the record and the time instead. What remains is code
+of the same user that forges the runner's transcript as well as both
+files, or that runs outside the guard, not as a tool call. This is a
+check on tool calls, not a sandbox: a person basis is strong only
+against writes made through tool calls the runner hooks.
 A prompt event is not always the person: Codex sends one inside a
 subagent with the parent agent's brief as the prompt. A prompt whose
 payload names a subagent (=agent_id=), or a Codex thread other than the

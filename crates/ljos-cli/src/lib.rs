@@ -19,6 +19,7 @@ pub mod bookkeep;
 pub mod capture;
 pub mod cloud;
 mod cloud_guard;
+mod cloud_hook;
 pub mod command_prefs;
 pub mod converge;
 mod deedbag;
@@ -49,6 +50,7 @@ pub mod sync;
 pub mod tools;
 mod tracker_push;
 pub mod tree_cleanup;
+pub mod turn_record;
 pub mod upgrade;
 pub mod user_rules;
 pub mod wake;
@@ -6965,7 +6967,11 @@ pub fn tool_error(input: &str) -> String {
 /// prompt hook's tests. It must also share [`FAILURE_SHARED_WORDS`] subject
 /// words with the command and the error, where a prompt needs one, since an
 /// error is long and noisy, and its lexical match on those words must reach
-/// [`FAILURE_LEXICAL_MIN`]. The floor is the lexical match of the hits that
+/// [`FAILURE_LEXICAL_MIN`], which only naming that subject reaches. Those
+/// are the second scorer, so the pack's count of the ballots that named a
+/// hit is not read: where many lessons tie on the words the pack scores,
+/// which of them a ballot keeps at its cut is arbitrary. The floor is the
+/// lexical match of the hits that
 /// pass those tests, not the fused score: the pack decays that score by
 /// age, and age only ranks. What passes is read most relevant first, see
 /// [`sort_by_relevance`]. One handed over earlier in the session is left
@@ -6979,9 +6985,9 @@ pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<
     }
     let pool = u32::try_from(limit.max(1) * POOL_PER_SHOWN).unwrap_or(u32::MAX);
     let Ok(hits) = with_pack_timeout(HOOK_RERANK_BUDGET_MS, || {
-        packset_search_opts(&cue, pool, false)
+        packset_search_relevant(&cue, pool)
     })
-    .or_else(|_| packset_search_opts(&cue, pool, false)) else {
+    .or_else(|_| packset_search_relevant(&cue, pool)) else {
         return (String::new(), Vec::new());
     };
     let subject = without_failure_words(&cue);
@@ -6993,7 +6999,6 @@ pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<
         .enumerate()
         .map(|(i, h)| {
             !UNREVIEWED_KINDS.contains(&h.kind.as_str())
-                && agreed(h)
                 && shared_failure_words(&h.text, &cue) >= FAILURE_SHARED_WORDS
                 && lexical[i] >= FAILURE_LEXICAL_MIN
                 && shown_on_prompt(h)
@@ -7296,14 +7301,20 @@ fn singular(w: &str) -> String {
 }
 
 /// The words a prompt and a claim are matched on: three letters or
-/// more, singular, not a stop word. A prompt says `npm` or `migration`
-/// where the preference says `npm` or `migrations`.
+/// more, singular, not a stop word or one of [`RULE_WORDS`]. A prompt
+/// says `npm` or `migration` where the preference says `npm` or
+/// `migrations`. Rule words go before the plural is taken off, since
+/// [`singular`] makes `always` into `alway`, which is on no list.
 fn prompt_words(text: &str) -> Vec<String> {
     let mut words: Vec<String> = text
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| w.len() >= 3)
         .map(str::to_lowercase)
-        .filter(|w| !CUE_STOP.contains(&w.as_str()) && !CUE_STOP_SHORT.contains(&w.as_str()))
+        .filter(|w| {
+            !CUE_STOP.contains(&w.as_str())
+                && !CUE_STOP_SHORT.contains(&w.as_str())
+                && !RULE_WORDS.contains(&w.as_str())
+        })
         .map(|w| singular(&w))
         .collect();
     words.sort_unstable();
@@ -7421,7 +7432,8 @@ fn alias_words(text: &str, claim: bool) -> Vec<String> {
 }
 
 /// The words a claim and a prompt are matched on: [`prompt_words`]
-/// without [`RULE_WORDS`], plus the alias groups each names.
+/// without a plural of [`RULE_WORDS`] (`keeps`), plus the alias groups
+/// each names.
 fn cue_terms(text: &str, claim: bool) -> Vec<String> {
     let mut words: Vec<String> = prompt_words(text)
         .into_iter()
@@ -7614,21 +7626,31 @@ fn without_failure_words(cue: &str) -> String {
 }
 
 /// How many subject words a lesson shares with a failed command and its
-/// error: the words [`names_the_subject`] matches on, less
-/// [`FAILURE_WORDS`].
+/// error: the words and alias groups [`names_the_subject`] matches on
+/// ([`cue_terms`]), less [`FAILURE_WORDS`]. Each word of the cue counts
+/// once, when the lesson has it or names one of its alias groups, so
+/// `npm` in both is one word, in however many groups, and `pnpm`
+/// against `npm` is one too.
 fn shared_failure_words(text: &str, cue: &str) -> usize {
-    let words = |t: &str| prompt_words(&without_failure_words(t));
-    let have = words(text);
-    words(cue)
+    let have = cue_terms(&without_failure_words(text), true);
+    cue_terms(&without_failure_words(cue), false)
         .iter()
-        .filter(|w| have.binary_search(w).is_ok())
+        .filter(|w| !w.starts_with("alias:"))
+        .filter(|w| {
+            have.binary_search(w).is_ok()
+                || (!CLAIM_ONLY_ALIASES.contains(&w.as_str())
+                    && CUE_ALIASES.iter().enumerate().any(|(i, group)| {
+                        group.iter().any(|a| a == w || singular(a) == **w)
+                            && have.binary_search(&format!("alias:{i}")).is_ok()
+                    }))
+        })
         .count()
 }
 
 /// The lexical match on its subject words a lesson needs before a failure
 /// note hands it over, however weak the rest of the pool is. Naming the
-/// subject scores 1; one word of the failure no other hit carries clears
-/// it alone.
+/// subject scores from 0.5 to 1; one word of the failure no other hit
+/// carries, without naming it, stays under.
 pub const FAILURE_LEXICAL_MIN: f64 = 0.5;
 
 #[cfg(test)]
@@ -7851,7 +7873,8 @@ fn with_issue_recall(call: &HookCall, text: String) -> String {
 /// for a long prompt (`kebab` in a task that also says `test` and
 /// `pytest`). The subject test still admits a short cue or two shared
 /// words, including a match that lives only in the atom's `source`.
-/// Empty when none of them bear on the prompt.
+/// Both are read on [`lexical_match_scores`], the hooks' scale, so the
+/// floor below is theirs. Empty when none of them bear on the prompt.
 fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, Vec<String>)> {
     let atoms = session_atoms(1_500).ok()?;
     let seen = seen_ids(call.session.as_deref());
@@ -7973,29 +7996,47 @@ fn bm25_distinctive(
     score
 }
 
-/// Rank of each body against `cue`, highest first. A shared abbreviation
+/// Rank of each body against `cue` on [`lexical_match_scores`], highest
+/// first, without the bodies that match nothing. A shared abbreviation
 /// counts as naming the subject.
 fn lexical_scores(bodies: &[&str], cue: &str) -> Vec<(usize, f64)> {
-    let docs: Vec<Vec<String>> = bodies.iter().map(|body| match_tokens(body)).collect();
-    let df = document_frequency(&docs);
-    let mut scored: Vec<(usize, f64)> = bodies
-        .iter()
+    let mut scored: Vec<(usize, f64)> = lexical_match_scores(bodies, cue)
+        .into_iter()
         .enumerate()
-        .filter_map(|(i, body)| {
-            let mut score = bm25_distinctive(&docs, &df, i, cue);
-            if names_the_subject(body, cue) {
-                score = score.max(1.0);
-            }
-            (score > 0.0).then_some((i, score))
-        })
+        .filter(|(_, score)| *score > 0.0)
         .collect();
     scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     scored
 }
 
+/// The share of what the cue names that `text` names too, from 0 to 1:
+/// its content words, alias groups and phrase abbreviations, each worth
+/// the same. A lesson that carries the whole prompt beats one that
+/// shares two of its words, however rare those are.
+fn cue_coverage(text: &str, cue: &str) -> f64 {
+    let terms = |t: &str, claim: bool| {
+        let mut words = cue_terms(t, claim);
+        words.extend(phrase_acronyms(t));
+        words.sort_unstable();
+        words.dedup();
+        words
+    };
+    let want = terms(cue, false);
+    if want.is_empty() {
+        return 0.0;
+    }
+    let have = terms(text, true);
+    let shared = want
+        .iter()
+        .filter(|w| have.binary_search(w).is_ok())
+        .count();
+    shared as f64 / want.len() as f64
+}
+
 /// Lexical match of each text against `cue`, in the same order, on one
-/// scale from 0 to 1. A text that names the subject scores 1. Any other
-/// text scores its BM25 squashed under 1, so one rare word cannot outrank
+/// scale from 0 to 1. A text that names the subject scores over 0.5, by
+/// how much of the cue it covers, see [`cue_coverage`]. Any other text
+/// scores its BM25 squashed under 0.5, so one rare word cannot outrank
 /// naming the subject. Zero when that text matches nothing. The pack's
 /// fused score adds recency on each ballot and then multiplies by
 /// retrievability, so this is the score that does not read the clock.
@@ -8007,23 +8048,24 @@ fn lexical_match_scores(texts: &[&str], cue: &str) -> Vec<f64> {
         .enumerate()
         .map(|(i, text)| {
             if names_the_subject(text, cue) {
-                1.0
+                0.5 + 0.5 * cue_coverage(text, cue)
             } else {
                 let bm25 = bm25_distinctive(&docs, &df, i, cue);
-                bm25 / (1.0 + bm25)
+                0.5 * bm25 / (1.0 + bm25)
             }
         })
         .collect()
 }
 
-/// How many hits a search asks the pack for, per hit it may show. The
-/// pack cuts its list by the fused score, which decays with age, so a
-/// relevant old memory has to be asked for before the floors run.
+/// How many hits a search asks the pack for, per hit it may show, so the
+/// floors choose from more than they show. [`search_relevant`] makes
+/// sure the cut is not by age.
 pub const POOL_PER_SHOWN: usize = 4;
 
 /// Indices of `rows`, most relevant to `cue` first: the lexical match,
-/// then BM25 among rows that match as well, then the fused score, which
-/// carries age, only to break a tie.
+/// which grades how much of the cue each row covers, then BM25 among rows
+/// that cover as much, then the fused score, which carries age, only to
+/// break an exact tie.
 fn relevance_order<H: std::borrow::Borrow<Hit>>(rows: &[H], cue: &str) -> Vec<usize> {
     let texts: Vec<&str> = rows.iter().map(|h| h.borrow().text.as_str()).collect();
     let docs: Vec<Vec<String>> = texts.iter().map(|text| match_tokens(text)).collect();
@@ -8294,14 +8336,15 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             } else {
                 Err(anyhow::anyhow!("search: rerank off"))
             };
-            let found = match (reranked, pool) {
+            let (found, cross_encoded) = match (reranked, pool) {
                 (Ok(found), _) => found,
-                (Err(_), Some(pool)) => pool,
+                (Err(_), Some(pool)) => (pool, false),
                 (Err(_), None) => return (nudge, pending),
             };
             hits = found;
-            // Age is in the fused score twice, so the floor and the order
-            // are the lexical match. The fused score only breaks a tie.
+            // Age is in the fused score twice, so the floor is the lexical
+            // match, and so is the order unless the cross-encoder ran: it
+            // read the prompt and each claim together, and its order stands.
             let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
             let lexical = lexical_match_scores(&texts, cue);
             let eligible: Vec<bool> = hits.iter().map(could).collect();
@@ -8312,7 +8355,9 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
                 .filter(|(_, ok)| *ok)
                 .map(|(h, _)| h)
                 .collect();
-            sort_by_relevance(&mut rows, cue);
+            if !cross_encoded {
+                sort_by_relevance(&mut rows, cue);
+            }
             rows
         }
     };
@@ -8411,10 +8456,7 @@ fn judged_prompt(call: &HookCall, cue: &str) -> Option<(Vec<Hit>, jev::Judgment)
         return None;
     }
     let seen = seen_ids(call.session.as_deref());
-    let hits = hook_timed("judge_search", || {
-        packset_search_opts(cue, RERANK_POOL, false)
-    })
-    .ok()?;
+    let hits = hook_timed("judge_search", || packset_search_relevant(cue, RERANK_POOL)).ok()?;
     let pool: Vec<Hit> = hits
         .into_iter()
         .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
@@ -8583,10 +8625,11 @@ pub fn admits_local(h: &Hit, s: DenseSignal, cue: &str, best: f64) -> bool {
         && cosine >= best - DENSE_WORD_BEHIND
 }
 
-/// The fused search with what the encoder said about each hit. A pack
-/// that sends `dense_rank` and `cosine` on its hits fills them in; the
-/// pack client does not read those fields yet, so the request is made
-/// here. Any failure falls back to the client's search with no signals.
+/// The search, chosen by relevance (see [`search_relevant`]), with what
+/// the encoder said about each hit. A pack that sends `dense_rank` and
+/// `cosine` on its hits fills them in; the pack client does not read
+/// those fields yet, so the request is made here. Any failure falls back
+/// to the client's search with no signals.
 ///
 /// # Errors
 ///
@@ -8594,28 +8637,18 @@ pub fn admits_local(h: &Hit, s: DenseSignal, cue: &str, best: f64) -> bool {
 pub fn search_with_signals(cue: &str, limit: u32) -> Result<Vec<(Hit, DenseSignal)>> {
     let raw = (|| -> Option<Vec<(Hit, DenseSignal)>> {
         let client = pack().ok()?;
-        let url = format!("{}/v1/search", client.base().trim_end_matches('/'));
         let ms = std::env::var("PACKSET_TIMEOUT_MS")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
             .filter(|ms| *ms > 0)
             .unwrap_or(HOOK_RERANK_BUDGET_MS);
-        let asked = recall_query(cue);
-        let body: Value = packset_client::authorize(ureq::get(&url))
-            .query("workspace", &client.workspace())
-            .query("q", &asked)
-            .query("limit", &limit.to_string())
-            .timeout(std::time::Duration::from_millis(ms))
-            .call()
-            .ok()?
-            .into_json()
-            .ok()?;
-        let raw = body["hits"].as_array()?;
-        let found: Vec<(Hit, DenseSignal)> = raw
+        let timeout = std::time::Duration::from_millis(ms);
+        let (body, _) = search_relevant(&client, cue, limit, false, timeout).ok()?;
+        let found: Vec<(Hit, DenseSignal)> = body["hits"]
+            .as_array()?
             .iter()
             .map(|v| {
                 let hit: Hit = serde_json::from_value(v.clone()).ok()?;
-                keep_origin(v);
                 let signal = DenseSignal {
                     rank: v["dense_rank"].as_u64().and_then(|r| u32::try_from(r).ok()),
                     cosine: v["cosine"].as_f64(),
@@ -8623,9 +8656,7 @@ pub fn search_with_signals(cue: &str, limit: u32) -> Result<Vec<(Hit, DenseSigna
                 Some((hit, signal))
             })
             .collect::<Option<_>>()?;
-        if raw.iter().any(|v| carried_origin(v).is_none()) {
-            keep_origins_of(&client, found.iter().map(|(h, _)| h));
-        }
+        keep_search_origins(&client, &body, found.iter().map(|(h, _)| h));
         Some(found)
     })();
     match raw {
@@ -10226,22 +10257,225 @@ pub const HOOK_RERANK_BUDGET_MS: u64 = 1000;
 /// rerank.
 const RERANK_POOL: u32 = 20;
 
-/// The reranked search, or an error once `ms` has passed. The request
-/// runs on its own thread: the pack client gives a reranked search at
-/// least a minute whatever `PACKSET_TIMEOUT_MS` says, and a hook cannot
-/// wait that long. A thread left waiting ends with the hook's process.
+/// The reranked search, and whether the cross-encoder ordered it, or an
+/// error once `ms` has passed. The request runs on its own thread: the
+/// pack client gives a reranked search at least a minute whatever
+/// `PACKSET_TIMEOUT_MS` says, and a hook cannot wait that long. A thread
+/// left waiting ends with the hook's process.
 ///
 /// # Errors
 ///
 /// The search's own error, or the budget running out first.
-pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<Vec<Hit>> {
+pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<(Vec<Hit>, bool)> {
     let (tx, rx) = std::sync::mpsc::channel();
     let cue = cue.to_string();
     std::thread::spawn(move || {
-        let _ = tx.send(packset_search_opts(&cue, limit, true));
+        let _ = tx.send(packset_search_reranked(&cue, limit));
     });
     rx.recv_timeout(std::time::Duration::from_millis(ms))
         .unwrap_or_else(|_| bail!("search: the reranked search took longer than {ms} ms"))
+}
+
+/// What `/v1/search` answers for `cue`, with at most `limit` hits chosen
+/// by relevance alone, and how many of them the writer chose. A writer
+/// that lists `rank=relevance` ([`ranks_by_relevance`]) is asked for it,
+/// picks them by lexical, BM25 and cosine with no half-life, and echoes
+/// the rank; an answer without the echo is read as fused. An older writer
+/// is not asked, and cuts its
+/// fused list, which decays with age, so rank 21 of a pack full of fresh
+/// lookalikes never arrives: the stored atoms that best match the cue
+/// then follow its hits, so a relevant old memory still gets in. So they
+/// do when a relevance cut comes back full, since the pack does not read
+/// the alias groups: to it `pnpm` does not match `npm`, and twenty-four
+/// lookalikes tie the lesson that says it.
+fn search_relevant(
+    client: &PacksetClient,
+    cue: &str,
+    limit: u32,
+    rerank: bool,
+    timeout: std::time::Duration,
+) -> Result<(Value, usize)> {
+    let url = format!("{}/v1/search", client.base().trim_end_matches('/'));
+    let mut req = packset_client::authorize(ureq::get(&url))
+        .query("workspace", &client.workspace())
+        .query("q", &recall_query(cue))
+        .query("limit", &limit.to_string())
+        .timeout(timeout);
+    if ranks_by_relevance(client, timeout) {
+        req = req.query("rank", "relevance");
+    }
+    if rerank {
+        req = req.query("rerank", "1");
+    }
+    let mut body: Value = req
+        .call()
+        .map_err(|e| packset_client::Error::Http(Box::new(e)))
+        .context("search: GET /v1/search failed")?
+        .into_json()?;
+    let chosen = body["hits"].as_array().map_or(0, Vec::len);
+    if body["rank"].as_str() != Some("relevance") || chosen >= limit as usize {
+        let have: std::collections::HashSet<String> = body["hits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|h| h["id"].as_str().map(str::to_string))
+            .collect();
+        let extra: Vec<Value> = relevant_atoms(client, cue, limit as usize)
+            .into_iter()
+            .filter(|a| a["id"].as_str().is_none_or(|id| !have.contains(id)))
+            .collect();
+        if let Some(hits) = body["hits"].as_array_mut() {
+            hits.extend(extra);
+        }
+    }
+    Ok((body, chosen))
+}
+
+/// Whether the writer at `client` takes `rank=relevance`: its
+/// `/v1/status` lists it under `search.ranks`. An older writer omits
+/// `search`, and one that does not answer is taken as older. Its crate
+/// version did not move with the rank, so it is not read. Asked once a
+/// process per writer.
+fn ranks_by_relevance(client: &PacksetClient, timeout: std::time::Duration) -> bool {
+    static KNOWN: std::sync::Mutex<Option<(String, bool)>> = std::sync::Mutex::new(None);
+    let base = client.base().trim_end_matches('/').to_string();
+    let mut known = KNOWN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((at, ranks)) = known.as_ref() {
+        if *at == base {
+            return *ranks;
+        }
+    }
+    let Some(status) = packset_client::authorize(ureq::get(&format!("{base}/v1/status")))
+        .timeout(timeout)
+        .call()
+        .ok()
+        .and_then(|r| r.into_json::<Value>().ok())
+    else {
+        return false;
+    };
+    let ranks = status
+        .pointer("/search/ranks")
+        .and_then(Value::as_array)
+        .is_some_and(|r| r.iter().any(|v| v.as_str() == Some("relevance")));
+    *known = Some((base, ranks));
+    ranks
+}
+
+/// The stored atoms that best match `cue` on [`lexical_match_scores`],
+/// which reads no clock, at most `limit`. They stand in for the pack's
+/// own search, so each shares a word with the cue as the pack splits
+/// words: `ljos-none` is one word there and does not match `ljos-l9qq`.
+/// Empty when the listing fails.
+fn relevant_atoms(client: &PacksetClient, cue: &str, limit: usize) -> Vec<Value> {
+    let Ok(atoms) = atoms_lean_shared(client, &client.workspace()) else {
+        return Vec::new();
+    };
+    let pack_words = |text: &str| -> std::collections::HashSet<String> {
+        text.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
+            .map(str::to_lowercase)
+            .filter(|w| !is_lesson_filler(w))
+            .map(|w| singular(&w))
+            .collect()
+    };
+    let asked = pack_words(cue);
+    let texts: Vec<&str> = atoms
+        .iter()
+        .map(|a| a["text"].as_str().unwrap_or(""))
+        .collect();
+    let scores = lexical_match_scores(&texts, cue);
+    let mut order: Vec<usize> = (0..atoms.len())
+        .filter(|&i| scores[i] > 0.0 && !pack_words(texts[i]).is_disjoint(&asked))
+        .collect();
+    order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
+    order.truncate(limit);
+    order.into_iter().map(|i| atoms[i].clone()).collect()
+}
+
+/// [`packset_search_opts`] without the rerank, chosen by relevance, see
+/// [`search_relevant`]. For the hooks, a recall and a brief, which order
+/// what they keep by how well it matches.
+fn packset_search_relevant(query: &str, limit: u32) -> Result<Vec<Hit>> {
+    let q = query.trim();
+    if q.is_empty() {
+        bail!("search: empty query");
+    }
+    let hits = with_writer(|| {
+        let client = pack()?;
+        let (body, _) = search_relevant(&client, q, limit, false, pack_timeout())?;
+        let hits: Vec<Hit> = serde_json::from_value(body["hits"].clone()).unwrap_or_default();
+        keep_search_origins(&client, &body, &hits);
+        Ok(hits)
+    })?;
+    count_recall(&hits);
+    Ok(hits)
+}
+
+/// `judged` in its own order, with `extra` merged in by the lexical
+/// match against `cue`: an extra goes ahead of the first judged hit it
+/// beats, so neither list's order is changed.
+fn merge_by_lexical(judged: Vec<Hit>, mut extra: Vec<Hit>, cue: &str) -> Vec<Hit> {
+    sort_by_relevance(&mut extra, cue);
+    let texts: Vec<&str> = judged
+        .iter()
+        .chain(&extra)
+        .map(|h| h.text.as_str())
+        .collect();
+    let lexical = lexical_match_scores(&texts, cue);
+    let (head, tail) = lexical.split_at(judged.len());
+    let mut out = Vec::with_capacity(texts.len());
+    let mut extra = extra.into_iter().zip(tail.iter().copied()).peekable();
+    for (hit, score) in judged.into_iter().zip(head.iter().copied()) {
+        while let Some((x, _)) = extra.next_if(|(_, s)| *s > score) {
+            out.push(x);
+        }
+        out.push(hit);
+    }
+    out.extend(extra.map(|(x, _)| x));
+    out
+}
+
+/// The search with the cross-encoder asked for, and whether it ordered
+/// the hits. A writer without one says `absent` and returns the fused
+/// order, which carries age. When every hit the writer chose carries a
+/// `rerank_score`, which is null on a hit it did not rerank, they are read
+/// by it. An atom [`search_relevant`] added, which the cross-encoder did
+/// not read, goes in ahead of the first hit its lexical match beats.
+fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> {
+    let q = query.trim();
+    if q.is_empty() {
+        bail!("search: empty query");
+    }
+    let (hits, ran) = with_writer(|| {
+        let client = pack()?;
+        let (body, chosen) = search_relevant(&client, q, limit, true, pack_timeout())?;
+        let mut scored: Vec<(Hit, Option<f64>)> = body["hits"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|v| {
+                let hit: Hit = serde_json::from_value(v.clone()).ok()?;
+                Some((hit, v["rerank_score"].as_f64()))
+            })
+            .collect();
+        let chosen = chosen.min(scored.len());
+        let scored_all = chosen > 0 && scored[..chosen].iter().all(|(_, s)| s.is_some());
+        if scored_all {
+            scored[..chosen].sort_by(|a, b| b.1.unwrap_or(0.0).total_cmp(&a.1.unwrap_or(0.0)));
+        }
+        let ran = scored_all || body["rerank"].as_str() == Some("cross-encoder");
+        let mut hits: Vec<Hit> = scored.into_iter().map(|(h, _)| h).collect();
+        if ran && hits.len() > chosen {
+            let extra = hits.split_off(chosen);
+            hits = merge_by_lexical(hits, extra, q);
+        }
+        keep_search_origins(&client, &body, &hits);
+        Ok((hits, ran))
+    })?;
+    count_recall(&hits);
+    Ok((hits, ran))
 }
 
 thread_local! {
@@ -13468,14 +13702,12 @@ fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Resu
 /// doctor run after the pack comes back empties the queue.
 fn note_queue_row() -> Habitat {
     let queue = note_queue::state_dir().join("note-queue.jsonl");
-    if let Err(err) = read_state_file(&queue) {
-        if let Some(state) = state_log_damage("note queue", &queue, &err) {
-            return Habitat {
-                name: "note queue",
-                ok: false,
-                state,
-            };
-        }
+    if let Err(state) = doctor_state_log("note queue", &queue) {
+        return Habitat {
+            name: "note queue",
+            ok: false,
+            state,
+        };
     }
     let (ok, state) = match flush_note_queue() {
         Ok(done) if done == note_queue::Drained::default() => (true, "empty".to_string()),
@@ -15833,7 +16065,7 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
     const PER_DOMAIN: usize = 5;
     let pool = u32::try_from(PER_DOMAIN * POOL_PER_SHOWN).unwrap_or(u32::MAX);
     for cue in &cues {
-        let Ok(hits) = packset_search_opts(cue, pool, false) else {
+        let Ok(hits) = packset_search_relevant(cue, pool) else {
             continue;
         };
         let mut hits: Vec<Hit> = hits
@@ -19723,6 +19955,19 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
             cwd = kept_prompt::after_cd(&words, cwd.as_deref());
             continue;
         }
+        // `ljos hook` keeps the prompt it is handed as the person's, so a
+        // tool call that runs it writes their words, whatever it reads.
+        let plugin = usize::from(first == "ljos-plugin");
+        let program = words.get(plugin).map(|w| w.rsplit('/').next().unwrap_or(w));
+        if program == Some("ljos") && words.get(plugin + 1).map(String::as_str) == Some("hook") {
+            return Some(Rule {
+                pattern: "seat-guard".into(),
+                verdict: "deny".into(),
+                reason: "`ljos hook` keeps the prompt it is handed as the person's words, and \
+                         only the runner runs it. Say what you need and stop."
+                    .into(),
+            });
+        }
         let reads = READERS.contains(&first) || first == "ljos" || kept_prompt::reads_only(first);
         if let Some(t) = kept_prompt::reached(&words, cwd.as_deref(), reads)
             .or_else(|| kept_prompt::code_reaches(&words, line))
@@ -21804,16 +22049,24 @@ fn clear_nonblock(fd: std::os::unix::io::RawFd) -> std::io::Result<()> {
 /// `O_NONBLOCK` would wait, and reading a device such as `/dev/zero`
 /// would not end.
 pub(crate) fn read_state_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    read_state_file_dated(path).map(|(bytes, _)| bytes)
+}
+
+/// [`read_state_file`] with the log's mtime, taken from the same
+/// descriptor once the read is done, so a row appended during the read
+/// leaves the time no older than its bytes. A missing log has none.
+fn read_state_file_dated(path: &Path) -> std::io::Result<(Vec<u8>, Option<std::time::SystemTime>)> {
     use std::io::Read;
     let (dir, name) = open_state_dir(path)?;
     let mut file = match open_regular_at(&dir, &name, path, libc::O_RDONLY, 0) {
         Ok(file) => file,
-        Err(err) if err.raw_os_error() == Some(libc::ENOENT) => return Ok(Vec::new()),
+        Err(err) if err.raw_os_error() == Some(libc::ENOENT) => return Ok((Vec::new(), None)),
         Err(err) => return Err(err),
     };
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
-    Ok(bytes)
+    let modified = file.metadata()?.modified().ok();
+    Ok((bytes, modified))
 }
 
 /// Replace `path` with `bytes` through the directory ljos made, refusing a
@@ -22107,10 +22360,9 @@ fn bypass_skip_note(path: &Path, err: &std::io::Error) -> String {
 fn bypass_row() -> Habitat {
     let state = match bypass_log_path() {
         None => "no command has run past the guard".to_string(),
-        Some(path) => match read_state_file(&path) {
+        Some(path) => match doctor_state_log("guard bypass log", &path) {
             Ok(bytes) => bypass_summary(&bytes, &path.display().to_string()),
-            Err(err) => state_log_damage("guard bypass log", &path, &err)
-                .unwrap_or_else(|| "no command has run past the guard".to_string()),
+            Err(state) => state,
         },
     };
     Habitat {
@@ -22120,13 +22372,37 @@ fn bypass_row() -> Habitat {
     }
 }
 
-/// A doctor row's text for a state log [`read_state_file`] could not
-/// read, or `None` when the log is simply not there. Only `NotFound` is
-/// an empty log: a symlink, a fifo, a socket, a directory or a log ljos
-/// may not read is damaged, since calling it empty would hide the swap.
-fn state_log_damage(what: &str, path: &Path, err: &std::io::Error) -> Option<String> {
-    (err.kind() != std::io::ErrorKind::NotFound)
-        .then(|| format!("the {what} at {} is damaged: {err}", path.display()))
+/// How long a state log's last row may sit without its newline before
+/// the doctor calls it damaged. A writer puts a row down in one
+/// `write_all` under the lock, so a live append ends well inside this.
+const UNFINISHED_ROW_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A state log's bytes for a doctor row, or the row's text when the log
+/// is damaged. A missing log is empty. Any other refusal from
+/// [`read_state_file`], a symlink, a fifo, a socket, a directory or a log
+/// ljos may not read, is damaged, since calling it empty would hide the
+/// swap. So is a last row without its newline that has not been written
+/// to for [`UNFINISHED_ROW_GRACE`]: [`complete_rows`] leaves it for a
+/// live writer to finish, and nobody is finishing it.
+fn doctor_state_log(what: &str, path: &Path) -> std::result::Result<Vec<u8>, String> {
+    let damaged =
+        |why: &dyn std::fmt::Display| format!("the {what} at {} is damaged: {why}", path.display());
+    let (bytes, modified) = match read_state_file_dated(path) {
+        Ok(read) => read,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(damaged(&err)),
+    };
+    let unfinished = bytes.last().is_some_and(|&b| b != b'\n');
+    let idle = modified
+        .and_then(|at| at.elapsed().ok())
+        .is_some_and(|age| age >= UNFINISHED_ROW_GRACE);
+    if unfinished && idle {
+        return Err(damaged(&format_args!(
+            "an unfinished last row, unchanged for over {}s",
+            UNFINISHED_ROW_GRACE.as_secs()
+        )));
+    }
+    Ok(bytes)
 }
 
 /// [`bypass_row`]'s text from the log's rows.
@@ -25872,7 +26148,7 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> String {
     let pool = u32::try_from(RELATED_MEMORY_CAP * POOL_PER_SHOWN).unwrap_or(u32::MAX);
     let mut related = Vec::new();
     for cue in &cues {
-        match ask(&|| packset_search_opts(cue, pool, false)) {
+        match ask(&|| packset_search_relevant(cue, pool)) {
             Ok(hits) => related.extend(hits),
             Err(e) if own.is_empty() && related.is_empty() => return recall_down(&e),
             Err(_) => break,
@@ -28772,6 +29048,24 @@ fn keep_origins_of<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'
             }
         }
         Err(_) => ids.into_iter().for_each(unrecord_person),
+    }
+}
+
+/// Record the origin each hit of search answer `body` carries, and read
+/// the listing ([`keep_origins_of`]) for `hits`, parsed from it, only when
+/// a hit carries none.
+fn keep_search_origins<'a>(
+    client: &PacksetClient,
+    body: &Value,
+    hits: impl IntoIterator<Item = &'a Hit>,
+) {
+    let raw = body["hits"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    raw.iter().for_each(keep_origin);
+    if raw.iter().any(|v| carried_origin(v).is_none()) {
+        keep_origins_of(client, hits);
     }
 }
 
@@ -34996,17 +35290,17 @@ mod tests {
     fn doctor_names_adopt_legacy_for_a_headerless_log() {
         let row = Habitat {
             name: "sync",
-            state: "`ljos sync --adopt-legacy alice`; `ljos sync --adopt-legacy bob`".into(),
+            state: "`ljos sync --adopt-legacy=alice`; `ljos sync --adopt-legacy=bob`".into(),
             ok: false,
         };
         assert_eq!(doctor_word(&row), "warn");
         assert!(healthy(std::slice::from_ref(&row)));
         let short = format_doctor_short(std::slice::from_ref(&row));
         assert!(
-            short.contains("`ljos sync --adopt-legacy alice`"),
+            short.contains("`ljos sync --adopt-legacy=alice`"),
             "{short}"
         );
-        assert!(short.contains("`ljos sync --adopt-legacy bob`"), "{short}");
+        assert!(short.contains("`ljos sync --adopt-legacy=bob`"), "{short}");
     }
 
     #[test]
@@ -36706,9 +37000,65 @@ mod tests {
         }
     }
 
+    /// `always` is a rule word in a prompt and in a rule. Taking its `s`
+    /// off first made it `alway`, a content word the two shared, so a
+    /// short prompt named every rule that says always, and Jev's sure
+    /// path let such a rule in.
+    #[test]
+    fn always_is_a_rule_word_and_names_no_subject() {
+        let rule = "Always squash commits before merging to main.";
+        let cue = "always run the formatter";
+        assert!(prompt_words(cue).iter().all(|w| w != "alway"), "{cue}");
+        assert!(!names_the_cue(rule, cue));
+        assert!(!names_the_subject(rule, cue));
+        let hit = Hit {
+            id: Some("squash".into()),
+            text: rule.into(),
+            score: 1.0,
+            kind: "lesson".into(),
+            ts: None,
+            entities: vec!["horizon:standing".into()],
+            ballots: None,
+            of: None,
+        };
+        assert!(!admits_judged(&hit, true, 0.9, cue, 0.0, 0.0));
+    }
+
     /// `conflict of interest` and `COI` name one another. The phrase's
     /// other words are common in the pack, so without the abbreviation the
     /// claim shares nothing with the query and is not ranked.
+    /// A cold prompt reads the stored atoms on the scale the hooks use, so
+    /// a rare word repeated in an atom that does not name the subject
+    /// stays under one that names most of the prompt.
+    #[test]
+    fn a_cold_recall_ranks_by_the_graded_match_not_raw_bm25() {
+        let cue = "kebab case for the pytest fixtures";
+        let named = "Name pytest fixtures by their case";
+        let rare = "kebab kebab kebab";
+        let mut docs = vec![named, rare];
+        docs.extend(["Every pytest fixture keeps its case in this repo"; 6]);
+        assert!(names_the_subject(named, cue) && !names_the_subject(rare, cue));
+        let order: Vec<usize> = lexical_scores(&docs, cue)
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect();
+        let at = |i: usize| order.iter().position(|&x| x == i);
+        assert!(at(0) < at(1), "{order:?}");
+    }
+
+    /// A failed command and a lesson share `pnpm` against `npm` through
+    /// their alias group, and `npm` in both counts once, though it sits
+    /// in two groups.
+    #[test]
+    fn a_failure_word_is_shared_once_through_its_alias() {
+        let cue = "npm publish failed: 403 from the registry";
+        assert_eq!(
+            shared_failure_words("Use pnpm against the private registry", cue),
+            2
+        );
+        assert_eq!(shared_failure_words("npm is slow on this host", cue), 1);
+    }
+
     #[test]
     fn a_phrase_ranks_its_abbreviation_and_the_abbreviation_ranks_the_phrase() {
         let cue = "JOSS conflict of interest rule";
@@ -37094,6 +37444,177 @@ mod tests {
         let (note, _) = failure_note(&failed, "E401: the registry rejected the token", 3);
         let first = note.lines().nth(1).unwrap_or("");
         assert!(first.contains("acme scope needs"), "{note}");
+    }
+
+    /// An atom the cross-encoder did not read goes in ahead of the first
+    /// hit it covers more of the prompt than, and the cross-encoder's own
+    /// order is left as it was.
+    #[test]
+    fn an_unread_atom_merges_into_the_cross_encoder_order_by_its_match() {
+        let hit = |id: &str, text: &str| Hit {
+            id: Some(id.into()),
+            text: text.into(),
+            score: 0.0,
+            kind: "lesson".into(),
+            ts: None,
+            entities: Vec::new(),
+            ballots: None,
+            of: None,
+        };
+        let cue = "the registry rejected my token";
+        let judged = vec![
+            hit("a", "Figma rejected the token after the move"),
+            hit("b", "The registry rejected the token on host 13"),
+            hit("c", "Sentry rejected the token after the move"),
+        ];
+        let extra = vec![
+            hit("weak", "The token lives in the vault"),
+            hit(
+                "full",
+                "The registry rejected the token because the CI secret expired",
+            ),
+        ];
+        let merged: Vec<String> = merge_by_lexical(judged, extra, cue)
+            .into_iter()
+            .filter_map(|h| h.id)
+            .collect();
+        assert_eq!(merged, ["full", "a", "b", "c", "weak"]);
+    }
+
+    /// A pack whose reranked search answers with `reranked` and says which
+    /// stage ordered it; any other search answers with `fused`.
+    fn serve_reranking_pack(fused: Vec<Value>, reranked: Vec<Value>, stage: &str) -> String {
+        let stage = stage.to_string();
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if !first.contains("/v1/search") {
+                return (404, r#"{"error":"missing"}"#.into());
+            }
+            let body = if first.contains("rerank=1") {
+                serde_json::json!({ "hits": reranked, "rerank": stage })
+            } else {
+                serde_json::json!({ "hits": fused, "rerank": "off" })
+            };
+            (200, body.to_string())
+        });
+        url
+    }
+
+    /// A writer whose status lists `relevance` under `search.ranks` is
+    /// asked for it and its echo read; one whose status has no `search`
+    /// is never sent a rank, here by refusing any.
+    #[test]
+    fn the_relevance_rank_is_asked_only_of_a_writer_that_lists_it() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap())]);
+        let hits = serde_json::json!([{
+            "id": "a", "text": "The registry rejected the token", "score": 1.0,
+            "kind": "lesson", "ts": "2026-01-14T09:00:00.000Z",
+            "entities": ["horizon:standing"], "rerank_score": null
+        }]);
+        let writer = |ranks: bool| {
+            let hits = hits.clone();
+            serve_http(move |req| {
+                let first = req.lines().next().unwrap_or("");
+                if first.contains("/v1/status") {
+                    let status = if ranks {
+                        serde_json::json!({"search": {"ranks": ["fused", "relevance"]}})
+                    } else {
+                        serde_json::json!({})
+                    };
+                    return (200, status.to_string());
+                }
+                if !first.contains("/v1/search") {
+                    return (404, r#"{"error":"missing"}"#.into());
+                }
+                match (
+                    ranks,
+                    first.contains("rank=relevance"),
+                    first.contains("rank="),
+                ) {
+                    (true, true, _) => (
+                        200,
+                        serde_json::json!({"hits": hits, "rank": "relevance"}).to_string(),
+                    ),
+                    (_, _, true) => (400, r#"{"error":"unknown rank"}"#.into()),
+                    _ => (200, serde_json::json!({"hits": hits}).to_string()),
+                }
+            })
+        };
+        for ranks in [true, false] {
+            let (url, seen) = writer(ranks);
+            let _url = PackUrl::set(&url);
+            let found = packset_search_relevant("the registry rejected my token", 12)
+                .unwrap_or_else(|e| panic!("ranks={ranks}: {e:#}"));
+            assert_eq!(found.len(), 1, "ranks={ranks}");
+            let asked = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.lines().next().unwrap_or("").contains("rank=relevance"));
+            assert_eq!(asked, ranks, "{:?}", seen.lock().unwrap());
+        }
+    }
+
+    /// Every hit names the subject. The one that covers the whole prompt
+    /// leads the hook's own order, but when the cross-encoder ran and
+    /// put it fourth, the cross-encoder's order is the one the cap reads.
+    /// A writer whose cross-encoder is absent leaves the hook's order.
+    #[test]
+    fn the_cross_encoder_order_stands_when_it_ran() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let hit = |id: &str, text: &str, score: f64| {
+            serde_json::json!({
+                "id": id, "text": text, "score": score, "kind": "lesson",
+                "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"],
+                "ballots": 2, "of": 2
+            })
+        };
+        let full = hit(
+            "full",
+            "The registry rejected the token because the CI secret expired",
+            3.0,
+        );
+        let others: Vec<Value> = ["Figma", "quokka", "host13"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                hit(
+                    name,
+                    &format!("{name} rejected the token after the move"),
+                    2.0 - i as f64 * 0.1,
+                )
+            })
+            .collect();
+        let mut fused = vec![full.clone()];
+        fused.extend(others.iter().cloned());
+        let mut reranked = others.clone();
+        reranked.push(full);
+        let cue = "the registry rejected my token";
+        for (stage, shows_full) in [("cross-encoder", false), ("absent", true)] {
+            let url = serve_reranking_pack(fused.clone(), reranked.clone(), stage);
+            let _url = PackUrl::set(&url);
+            let prompt = HookCall {
+                event: "UserPromptSubmit".into(),
+                cue: cue.into(),
+                session: Some(format!("rerank-{stage}")),
+                shape: HookShape::default(),
+            };
+            let (note, _) = hook_note(&prompt, 5);
+            assert_eq!(
+                note.contains("CI secret expired"),
+                shows_full,
+                "{stage}: {note}"
+            );
+            assert_eq!(note.contains("host13"), !shows_full, "{stage}: {note}");
+        }
     }
 
     /// The prompt hook hands over a paraphrase the encoder ranked first
@@ -41797,6 +42318,106 @@ mod tests {
         );
     }
 
+    /// A last row without its newline is left for the writer while the
+    /// log was touched within the grace period. Once it has sat longer,
+    /// nobody is finishing it, and the doctor says the log is damaged.
+    /// A healthy, an empty, a missing and a v0.32.1-written log are not.
+    #[test]
+    fn doctor_names_a_stale_unfinished_last_row_damaged() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("bypass.jsonl");
+        let row =
+            b"{\"kind\":\"switch\",\"command\":\"ok\",\"how\":\"h\",\"rule\":\"r\",\"ts\":\"t\"}\n";
+        let mut torn = row.to_vec();
+        torn.extend_from_slice(b"{\"kind\":\"switch\",\"command\":\"to");
+        let v0_32_1 = concat!(
+            r#"{"ts":"2026-10-21T09:00:00Z","kind":"switch","how":"LJOS_ASK_PACK=off","command":"terraform destroy","rule":"ask pack: cloud","verdict":"ask","reason":"infra-destroy","seat":null}"#,
+            "\n",
+            r#"{"issue":"ljos-abc","text":"kept","workspace":"w","at":1792573200}"#,
+            "\n",
+        );
+        let cases: [(&str, &[u8], bool, bool); 6] = [
+            ("stale unfinished", &torn, true, true),
+            ("fresh unfinished", &torn, false, false),
+            ("healthy", row, true, false),
+            ("empty", b"", true, false),
+            ("v0.32.1", v0_32_1.as_bytes(), true, false),
+            ("missing", b"", true, false),
+        ];
+        for (case, bytes, stale, damaged) in cases {
+            let _ = std::fs::remove_file(&log);
+            if case != "missing" {
+                std::fs::write(&log, bytes).unwrap();
+                if stale {
+                    age_by(&log, std::time::Duration::from_secs(60));
+                }
+            }
+            let said = doctor_state_log("guard bypass log", &log);
+            if damaged {
+                let said = said.expect_err(case);
+                assert!(
+                    said.contains(&log.display().to_string())
+                        && said.contains("an unfinished last row"),
+                    "{case}: {said}"
+                );
+            } else {
+                assert_eq!(said.as_deref(), Ok(bytes), "{case}");
+            }
+        }
+    }
+
+    /// Both doctor rows that read a state log go through the same check,
+    /// so a stale unfinished row in either is named damaged.
+    #[test]
+    fn both_doctor_state_log_rows_name_a_stale_unfinished_row() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let state = dir.path().join("state");
+        let home = dir.path().join("home");
+        for path in [&data.join("ljos"), &state.join("ljos"), &home] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let _env = HoldEnv::set(&[
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_DATA_HOME", data.to_str().unwrap()),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+        ]);
+        let bypass = bypass_log_path().unwrap();
+        let queue = note_queue::state_dir().join("note-queue.jsonl");
+        std::fs::write(&bypass, b"{\"kind\":\"switch\",\"command\":\"to").unwrap();
+        std::fs::write(&queue, b"{\"issue\":\"ljos-abc\",\"te").unwrap();
+        for log in [&bypass, &queue] {
+            age_by(log, std::time::Duration::from_secs(60));
+        }
+        let row = bounded("doctor bypass", bypass_row);
+        assert!(
+            row.state.contains("damaged") && row.state.contains("an unfinished last row"),
+            "{}",
+            row.state
+        );
+        let row = bounded("doctor note queue", note_queue_row);
+        assert!(
+            row.state.contains("damaged") && row.state.contains("an unfinished last row"),
+            "{}",
+            row.state
+        );
+        assert!(!row.ok, "{}", row.state);
+        assert_eq!(
+            std::fs::read(&queue).unwrap(),
+            b"{\"issue\":\"ljos-abc\",\"te"
+        );
+    }
+
+    fn age_by(path: &std::path::Path, by: std::time::Duration) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - by)
+            .unwrap();
+    }
+
     /// The `ljos` directory is ljos's own, so a symlink put there is not
     /// written through. An XDG base the person made a symlink still is.
     #[test]
@@ -45054,6 +45675,38 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
     }
 
+    /// `ljos hook` keeps the prompt it reads as the person's, so a tool
+    /// call never runs it, here, through the plugin launcher or over ssh;
+    /// reading the kept prompt and running ljos otherwise still pass.
+    #[test]
+    fn a_tool_call_running_ljos_hook_is_denied() {
+        let _g = env_guard();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
+        for line in [
+            "ljos hook < plant.json",
+            "printf '%s' \"$payload\" | ljos hook",
+            "~/.cargo/bin/ljos hook < /tmp/p.json",
+            "env LJOS_CAPTURE=save ljos hook < plant.json",
+            "\"$CLAUDE_PLUGIN_ROOT/bin/ljos-plugin\" ljos hook < plant.json",
+            "ssh localhost ljos hook < plant.json",
+            "ssh localhost 'ljos hook' < plant.json",
+            "sh -c 'ljos hook < plant.json'",
+        ] {
+            let rule = seat_guard(line).unwrap_or_else(|| panic!("allowed: {line}"));
+            assert!(rule.reason.contains("ljos hook"), "{line}: {}", rule.reason);
+        }
+        for line in [
+            "cat /run/user/1000/ljos/latest-prompt",
+            "ljos status",
+            "ljos recall hook",
+            "ljos doctor",
+            "rg -n 'ljos hook' hooks/",
+            "printf x > notes.txt",
+        ] {
+            assert!(seat_guard(line).is_none(), "refused: {line}");
+        }
+    }
+
     /// The bare name `latest-prompt` says where a write lands only when a
     /// command writes what it is given. Searching for it, printing it or
     /// testing for it touches nothing.
@@ -45763,6 +46416,44 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             3,
         );
         assert!(note.contains("VITE_API_URL"), "{note}");
+    }
+
+    /// Twenty-four lessons tie the old one on every word the pack scores,
+    /// so one ballot's cut keeps it or not by chance. Kept by one of two,
+    /// it still names the failure, and the note hands it over.
+    #[test]
+    fn a_failed_tool_admits_a_lesson_one_ballot_cut_at_a_tie() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap())]);
+        let hit = |id: &str, text: &str, ballots: u32| {
+            serde_json::json!({
+                "id": id, "text": text, "score": 1.0, "kind": "lesson",
+                "ts": "2026-01-14T09:00:00.000Z", "entities": ["horizon:standing"],
+                "ballots": ballots, "of": 2
+            })
+        };
+        let url = serve_signal_pack(serde_json::json!([
+            hit(
+                "old",
+                "With pnpm the registry rejected the token because the CI secret expired",
+                1
+            ),
+            hit(
+                "fresh",
+                "Mapbox registry rejected the tile token after the plan downgrade",
+                2
+            ),
+        ]));
+        let _url = PackUrl::set(&url);
+        let call = HookCall {
+            event: "PostToolUseFailure".into(),
+            cue: "npm publish".into(),
+            session: Some("tie-fail".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = failure_note(&call, "E401: the registry rejected the token", 3);
+        assert!(note.contains("CI secret expired"), "{note}");
     }
 
     /// "Clear the npm cache weekly" is the only hit that says `npm`, so
