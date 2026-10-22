@@ -173,6 +173,10 @@ The tracker pin file is `.ljos-seat-keys` at `$VISSUE_ROOT`, one
   key seen in this check is the pin for this check only
 - ingesting pins durably is what makes that pin persist across checks
 - a later entry from the same voter under another key is rejected
+- a seat, the part of the voter id after `/`, holds one key across the
+  check whatever identity signs for it: `alpha/inky` under one key and
+  `beta/inky` under another fail the check whichever file comes first.
+  Pin the seat, or sign under one key
 
 ## Tally rule
 
@@ -187,8 +191,10 @@ they differ only in hex case or in a small-order part.
   same voter (key fingerprint), on the same question. A missing target,
   or another voter's or another question's ballot, fails the check.
 - a ballot named by another entry's `replaces` never counts
-- with one seat under two keys on one question, the first key seen for
-  that seat keeps counting and the later key for that seat is refused
+- a seat under two keys on one question counts under neither key
+  there, whatever order the ballots come in. `ljos record check` fails
+  on it (see [Key pinning](#key-pinning)), so file order never picks
+  which key holds the seat
 - of what remains, the latest `cast_at` per `(question, voter)` counts
 - a latest stance of `withdrawn` contributes no vote
 - two unreplaced ballots from one voter on one question in that
