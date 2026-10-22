@@ -691,8 +691,8 @@ fn export_all(root: &Path, scope: &Scope, atoms: &[Value]) -> Result<String> {
     Ok(out)
 }
 
-/// What one host's log asks of this pack: the atoms to post, and the texts
-/// it sent last time and sends no longer.
+/// What one host's log asks of this pack: the atoms to post, and the
+/// memories it sent last time and sends no longer.
 #[derive(Debug, Default, PartialEq)]
 pub struct Incoming {
     pub post: Vec<Value>,
@@ -809,9 +809,10 @@ fn adopt_plan(plain: &str, scope: &str, own: &BTreeSet<String>) -> AdoptPlan {
     plan
 }
 
-/// Read one host's log against the texts taken from it last time
-/// (`before`, for what it retired) and the texts from it this pack
-/// already holds (`held`, which are not posted again).
+/// Read one host's log against the memories taken from it last time
+/// (`before`, for what it retired) and the memories from it this pack
+/// already holds (`held`, which are not posted again). Both are
+/// [`memory_key`]s, so the same words on another ticket are not held.
 #[must_use]
 pub fn incoming(
     plain: &str,
@@ -835,13 +836,11 @@ fn incoming_with_sender(
         let Ok(mut atom) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        let text = atom["text"].as_str().unwrap_or("").to_string();
-        if text.is_empty() {
+        let Some(key) = memory_key(&atom) else {
             continue;
-        }
-        let id = crate::work_id(&text);
-        now.insert(id.clone());
-        if held.contains(&id) {
+        };
+        now.insert(key.clone());
+        if held.contains(&key) {
             continue;
         }
         if let Some(map) = atom.as_object_mut() {
@@ -870,10 +869,33 @@ fn taken_path(scope: &str, host: &str) -> PathBuf {
     state_dir().join(scope).join(format!("{host}.taken"))
 }
 
-fn read_taken(scope: &str, host: &str) -> BTreeSet<String> {
-    std::fs::read_to_string(taken_path(scope, host))
-        .map(|t| t.lines().map(str::to_string).collect())
-        .unwrap_or_default()
+/// First line of a `.taken` file that lists [`memory_key`]s. A file
+/// without it lists one [`crate::work_id`] of the text a line, written
+/// before the ticket was in the key.
+const TAKEN_KEYS: &str = "# text and issue";
+
+/// The memories taken from `host` last time. A file of texts is read
+/// through `copies`, the atoms this pack holds from that host: each text
+/// stands for every copy of it, so the first import after the change
+/// still retires what the host dropped and posts nothing again.
+fn read_taken(scope: &str, host: &str, copies: &[Value]) -> BTreeSet<String> {
+    let Ok(text) = std::fs::read_to_string(taken_path(scope, host)) else {
+        return BTreeSet::new();
+    };
+    let mut lines = text.lines();
+    if lines.next() == Some(TAKEN_KEYS) {
+        return lines.map(str::to_string).collect();
+    }
+    let texts: BTreeSet<&str> = text.lines().collect();
+    copies
+        .iter()
+        .filter(|atom| {
+            atom["text"]
+                .as_str()
+                .is_some_and(|text| texts.contains(crate::work_id(text).as_str()))
+        })
+        .filter_map(memory_key)
+        .collect()
 }
 
 fn write_taken(scope: &str, host: &str, plain: &str) -> Result<()> {
@@ -881,13 +903,33 @@ fn write_taken(scope: &str, host: &str, plain: &str) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let ids: BTreeSet<String> = plain
-        .lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .filter_map(|a| a["text"].as_str().map(crate::work_id))
-        .collect();
-    std::fs::write(path, ids.into_iter().map(|i| i + "\n").collect::<String>())?;
+    let keys: String = log_keys(plain).into_iter().map(|key| key + "\n").collect();
+    std::fs::write(path, format!("{TAKEN_KEYS}\n{keys}"))?;
     Ok(())
+}
+
+/// [`memory_key`] of every atom in a log.
+fn log_keys(plain: &str) -> BTreeSet<String> {
+    plain
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|atom| memory_key(&atom))
+        .collect()
+}
+
+/// This pack's copies of one log: the atoms tagged `sender`.
+fn copies_from(atoms: &[Value], sender: &str) -> Vec<Value> {
+    atoms
+        .iter()
+        .filter(|atom| {
+            atom["entities"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|entity| entity.as_str() == Some(sender))
+        })
+        .cloned()
+        .collect()
 }
 
 fn sender_entity_for_scope(host: &str, scope: &Scope, scope_name: &str) -> String {
@@ -966,20 +1008,12 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
     for (host, scope_name, plain) in opened {
         let workspace = client.workspace();
         let sender = sender_entity_for_scope(&host, scope, &scope_name);
-        // The pack names a posted atom afresh, so a text already taken
+        // The pack names a posted atom afresh, so a memory already taken
         // from this host would be held twice; what is held is skipped.
-        let held: BTreeSet<String> = crate::atoms_lean(&client, &workspace)?
-            .iter()
-            .filter(|a| {
-                a["entities"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(|e| e.as_str() == Some(sender.as_str()))
-            })
-            .filter_map(|a| a["text"].as_str().map(crate::work_id))
-            .collect();
-        let got = incoming_with_sender(&plain, &sender, &read_taken(&scope_name, &host), &held);
+        let copies = copies_from(&crate::atoms_lean(&client, &workspace)?, &sender);
+        let held: BTreeSet<String> = copies.iter().filter_map(memory_key).collect();
+        let before = read_taken(&scope_name, &host, &copies);
+        let got = incoming_with_sender(&plain, &sender, &before, &held);
         let (mut kept, mut refused) = (0usize, 0usize);
         for mut atom in got.post {
             if let Some(map) = atom.as_object_mut() {
@@ -993,13 +1027,12 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
         let mut retired = 0usize;
         if !got.retired.is_empty() {
             for atom in crate::atoms_lean(&client, &workspace)? {
-                let text = atom["text"].as_str().unwrap_or("");
                 let from_host = atom["entities"]
                     .as_array()
                     .into_iter()
                     .flatten()
                     .any(|e| e.as_str() == Some(sender.as_str()));
-                if from_host && got.retired.contains(&crate::work_id(text)) {
+                if from_host && memory_key(&atom).is_some_and(|key| got.retired.contains(&key)) {
                     if let Some(id) = atom["id"].as_str() {
                         if crate::packset_forget(id, None).is_ok() {
                             retired += 1;
@@ -1264,20 +1297,11 @@ fn sealed_plain(root: &Path, rel: &str, identities: &[PathBuf]) -> Result<Option
     open_sealed_bytes(&bytes, identities)
 }
 
-/// Texts in `before` (the ids [`read_taken`] stored) that `plain` no longer
-/// carries. The same difference import uses to retire a host's copies.
-fn retired_text_ids(plain: &str, before: &BTreeSet<String>) -> BTreeSet<String> {
-    let mut now = BTreeSet::new();
-    for line in plain.lines().filter(|line| !line.trim().is_empty()) {
-        let Ok(atom) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let Some(text) = atom["text"].as_str().filter(|text| !text.is_empty()) else {
-            continue;
-        };
-        now.insert(crate::work_id(text));
-    }
-    before.difference(&now).cloned().collect()
+/// Memories in `before` (the keys [`read_taken`] returned) that `plain` no
+/// longer carries. The same difference import uses to retire a host's
+/// copies.
+fn retired_keys(plain: &str, before: &BTreeSet<String>) -> BTreeSet<String> {
+    before.difference(&log_keys(plain)).cloned().collect()
 }
 
 /// Forget atoms tagged `sender` for which `keep` is true. The count is
@@ -1339,16 +1363,14 @@ fn adopt_pack(scope_name: &str, gone: &str, plain: &str, sender: &str) -> Result
     let workspace = client.workspace();
     let before = crate::atoms_lean(&client, &workspace)?;
     let own = own_memory_keys(&before, scope_name);
-    // Import's retirement, run before the log is dropped. It is by text,
-    // as `.taken` records texts: a ticket the gone host dropped while the
-    // same words remain on another ticket is still in the log, so it is
-    // not retired here.
-    let retired_ids = retired_text_ids(plain, &read_taken(scope_name, gone));
+    // Import's retirement, run before the log is dropped. It is by
+    // memory, so a ticket the gone host dropped is retired even while the
+    // same words remain on another ticket.
+    let taken = read_taken(scope_name, gone, &copies_from(&before, sender));
+    let dropped = retired_keys(plain, &taken);
     let (retired, retire_failed) = forget_tagged(&before, sender, |atom| {
         in_adopted_scope(atom, scope_name)
-            && atom["text"]
-                .as_str()
-                .is_some_and(|text| retired_ids.contains(&crate::work_id(text)))
+            && memory_key(atom).is_some_and(|key| dropped.contains(&key))
     });
     let plan = adopt_plan(plain, scope_name, &own);
     for atom in &plan.post {
@@ -1385,12 +1407,19 @@ fn adopt_pack(scope_name: &str, gone: &str, plain: &str, sender: &str) -> Result
     })
 }
 
-fn dry_adopt_line(scope_name: &str, gone: &str, plain: &str, rel: &str) -> Result<String> {
+fn dry_adopt_line(
+    scope_name: &str,
+    gone: &str,
+    plain: &str,
+    rel: &str,
+    sender: &str,
+) -> Result<String> {
     let client = crate::pack()?;
     let atoms = crate::atoms_lean(&client, &client.workspace())?;
     let own = own_memory_keys(&atoms, scope_name);
     let plan = adopt_plan(plain, scope_name, &own);
-    let retired = retired_text_ids(plain, &read_taken(scope_name, gone));
+    let taken = read_taken(scope_name, gone, &copies_from(&atoms, sender));
+    let retired = retired_keys(plain, &taken);
     Ok(format!(
         "sync: {gone}: would adopt {} {scope_name} atoms, retire {}, and drop {rel}\n",
         plan.post.len(),
@@ -1682,7 +1711,14 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
     if opts.dry_run {
         let mut out = String::new();
         for (log, plain) in present.iter().zip(&plains) {
-            out.push_str(&dry_adopt_line(&log.scope_name, &gone, plain, &log.age)?);
+            let sender = sender_entity_for_scope(&gone, scope, &log.scope_name);
+            out.push_str(&dry_adopt_line(
+                &log.scope_name,
+                &gone,
+                plain,
+                &log.age,
+                &sender,
+            )?);
         }
         return Ok(out);
     }
@@ -4902,6 +4938,97 @@ mod tests {
         let said = import(&root, &scope_of(&public)).unwrap();
         assert!(said.contains("no cloud logs yet"), "{said}");
         assert!(!said.contains("adopted away"), "{said}");
+    }
+
+    fn same_words(issue: &str) -> Value {
+        serde_json::json!({
+            "text": "same words", "kind": "lesson", "issue": issue, "entities": []
+        })
+    }
+
+    fn peer_log(dir: &Path, rows: &[Value]) -> (PathBuf, Scope) {
+        assert_ne!(host(), "peer", "the log's host would be this machine");
+        let public = make_key();
+        let root = tracker(dir);
+        let plain: String = rows.iter().map(|row| format!("{row}\n")).collect();
+        let rel = ".ljos/atoms/peer.jsonl.age";
+        seal(&plain, std::slice::from_ref(&public), &root.join(rel)).unwrap();
+        commit_dated(&root, &[rel], "log", None);
+        (root, scope_of(&public))
+    }
+
+    /// The same words on two tickets are two memories. A log that moved
+    /// them to another ticket is taken, and the copy of the ticket it
+    /// dropped is retired.
+    #[test]
+    fn an_import_keys_each_text_by_its_ticket() {
+        let same: BTreeSet<String> = [crate::work_id("same words")].into();
+        let row = format!("{}\n", same_words("proj-b"));
+        let got = incoming(&row, "peer", &same, &same);
+        assert_eq!(got.post.len(), 1, "the other ticket was taken as held");
+        assert_eq!(got.retired.len(), 1, "the dropped ticket was not retired");
+
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let (root, scope) = peer_log(dir.path(), &[same_words("proj-b")]);
+        write_taken("cloud", "peer", &format!("{}\n", same_words("proj-a"))).unwrap();
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        *store.lock().unwrap() = vec![seeded(201, "same words", "proj-a", &["sync:peer"])];
+        let said = import(&root, &scope).unwrap();
+        assert!(
+            said.contains("sync: peer: 1 cloud atoms taken, 0 refused, 1 retired\n"),
+            "{said}"
+        );
+        let live = store.lock().unwrap().clone();
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert_eq!(live[0]["issue"], "proj-b", "{live:?}");
+    }
+
+    /// A `.taken` written before the key carried the ticket names texts.
+    /// The first import after the change posts nothing again, retires the
+    /// text the host dropped, and rewrites the file by memory.
+    #[test]
+    fn an_import_reads_a_taken_file_of_texts() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let row = serde_json::json!({
+            "text": "kept", "kind": "lesson", "issue": "proj-a", "entities": []
+        });
+        let (root, scope) = peer_log(dir.path(), std::slice::from_ref(&row));
+        let taken = taken_path("cloud", "peer");
+        std::fs::create_dir_all(taken.parent().unwrap()).unwrap();
+        let texts = format!(
+            "{}\n{}\n",
+            crate::work_id("kept"),
+            crate::work_id("dropped")
+        );
+        std::fs::write(&taken, texts).unwrap();
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        *store.lock().unwrap() = vec![
+            seeded(201, "kept", "proj-a", &["sync:peer"]),
+            seeded(202, "dropped", "proj-a", &["sync:peer"]),
+        ];
+        let said = import(&root, &scope).unwrap();
+        assert!(
+            said.contains("sync: peer: 0 cloud atoms taken, 0 refused, 1 retired\n"),
+            "{said}"
+        );
+        assert!(has(&store, 201));
+        assert!(!has(&store, 202));
+        let rewritten = std::fs::read_to_string(&taken).unwrap();
+        assert!(
+            rewritten.contains(&memory_key(&row).unwrap()),
+            "{rewritten}"
+        );
+        assert!(!rewritten.contains(&crate::work_id("kept")), "{rewritten}");
+        let again = import(&root, &scope).unwrap();
+        assert!(
+            again.contains("sync: peer: 0 cloud atoms taken, 0 refused, 0 retired\n"),
+            "{again}"
+        );
+        assert!(has(&store, 201));
     }
 
     /// Primary `box` plus an extra `cloud` log. Both are adopted in one
