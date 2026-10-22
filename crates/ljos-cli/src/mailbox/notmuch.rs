@@ -17,6 +17,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{bail, Context as _, Result};
+use icu_properties::{props::DefaultIgnorableCodePoint, CodePointSetData};
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
@@ -677,15 +678,15 @@ pub(crate) fn clean(text: &str) -> String {
         .collect()
 }
 
-/// Control characters other than tab and newline, the bidirectional
-/// marks, overrides and isolates, the invisible format characters `fold`
-/// strips, and the line and paragraph separators: each can hide,
-/// reorder or break text a person reads.
+/// Control characters other than tab and newline, the
+/// Default_Ignorable_Code_Point characters `fold` strips (bidirectional
+/// marks, overrides and isolates, zero-width characters, variation
+/// selectors, tag characters), and the line and paragraph separators:
+/// each can hide, reorder or break text a person reads.
 pub(crate) fn hiding(c: char) -> bool {
     (c.is_control() && c != '\t' && c != '\n')
-        || matches!(c,
-            '\u{00AD}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}'
-            | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+        || matches!(c, '\u{2028}' | '\u{2029}')
+        || CodePointSetData::new::<DefaultIgnorableCodePoint>().contains(c)
 }
 
 #[cfg(test)]

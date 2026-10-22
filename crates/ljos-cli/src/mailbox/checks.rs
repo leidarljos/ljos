@@ -2,8 +2,9 @@
 //!
 //! An empty list of refusals grants nothing: a draft still needs the
 //! ballot, the policy check and the owner's yes. Every comparison runs on
-//! folded text (invisible format characters removed, NFKC, lower case), so
-//! a full-width letter or a zero-width space does not slip a term past.
+//! folded text (default-ignorable characters removed, NFKC, lower case),
+//! so a full-width letter, a zero-width space or a variation selector does
+//! not slip a term past.
 //! The term, pair and attribution scans read the body twice, as written
 //! and as a client that sniffs HTML would show it, and refuse when
 //! either hits. A draft the checks cannot read, such as a base64 body,
@@ -14,6 +15,7 @@ use std::io::Read as _;
 use std::path::Path;
 
 use anyhow::{bail, Context as _, Result};
+use icu_properties::{props::DefaultIgnorableCodePoint, CodePointSetData};
 use unicode_normalization::UnicodeNormalization as _;
 
 use super::config::MailConfig;
@@ -411,16 +413,12 @@ fn addresses(value: &str) -> Vec<String> {
     out
 }
 
-/// Invisible format characters removed, then NFKC, then lower case.
+/// Default_Ignorable_Code_Point characters removed, then NFKC, then
+/// lower case. NFKC keeps variation selectors and tag characters, so a
+/// term split by one would otherwise not match.
 fn fold(text: &str) -> String {
-    let visible: String = text
-        .chars()
-        .filter(|c| {
-            !matches!(c,
-                '\u{00AD}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
-                | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
-        })
-        .collect();
+    let ignorable = CodePointSetData::new::<DefaultIgnorableCodePoint>();
+    let visible: String = text.chars().filter(|c| !ignorable.contains(*c)).collect();
     visible.nfkc().collect::<String>().to_lowercase()
 }
 
