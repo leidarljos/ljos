@@ -11229,6 +11229,8 @@ pub fn check_seat_signatures(
     ballots: &[Value],
     personas: &std::collections::BTreeSet<String>,
 ) -> std::result::Result<SeatSignatures, String> {
+    const LEGACY_DATING_UNAVAILABLE: &str =
+        "not a git checkout: pre-signing ballots cannot be dated, reported as unsigned";
     if ballot_sig::unsigned_allowed() {
         return Ok(SeatSignatures::default());
     }
@@ -11236,9 +11238,13 @@ pub fn check_seat_signatures(
     if seats.is_empty() {
         return Ok(SeatSignatures::default());
     }
+    let tracker_is_git = ballot_sig::tracker_is_git_checkout();
+    let can_date_legacy = tracker_is_git == Some(true);
     let v = issue_record(issue).map_err(|e| format!("{issue}: not readable: {e:#}"))?;
     let legacy = |voter: &str, choice: &str| {
-        ballot_sig::recorded_at(issue, voter, choice).is_some_and(|t| t < ballot_sig::SIGNING_SINCE)
+        can_date_legacy
+            && ballot_sig::recorded_at(issue, voter, choice)
+                .is_some_and(|t| t < ballot_sig::SIGNING_SINCE)
     };
     let notes = ballot_sig::notes_of(&v);
     let pins = ballot_sig::pins();
@@ -11278,7 +11284,14 @@ pub fn check_seat_signatures(
             None => kept.push((voter, choice)),
         }
     }
-    let (problems, old) = ballot_sig::seat_check(issue, &kept, &notes, &pins, &legacy);
+    let (mut problems, old) = ballot_sig::seat_check(issue, &kept, &notes, &pins, &legacy);
+    if tracker_is_git == Some(false)
+        && problems
+            .iter()
+            .any(|problem| problem.ends_with("ballot is unsigned"))
+    {
+        problems.push(LEGACY_DATING_UNAVAILABLE.to_string());
+    }
     if !problems.is_empty() {
         return Err(format!(
             "the seat ballots on {issue} are not all signed, so it decides nothing for a push: {}",
@@ -11289,6 +11302,78 @@ pub fn check_seat_signatures(
         legacy: old,
         left_out,
     })
+}
+
+#[cfg(test)]
+mod seat_signature_tests {
+    use super::*;
+
+    fn with_env_var<R>(key: &str, val: Option<&std::ffi::OsStr>, f: impl FnOnce() -> R) -> R {
+        crate::with_env_mutation(|| {
+            let saved = std::env::var_os(key);
+            match val {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+            struct Reset {
+                key: String,
+                saved: Option<std::ffi::OsString>,
+            }
+            impl Drop for Reset {
+                fn drop(&mut self) {
+                    match &self.saved {
+                        Some(v) => std::env::set_var(&self.key, v),
+                        None => std::env::remove_var(&self.key),
+                    }
+                }
+            }
+            let _reset = Reset {
+                key: key.to_string(),
+                saved,
+            };
+            f()
+        })
+    }
+
+    #[test]
+    fn a_non_git_tracker_root_is_named_when_legacy_dating_is_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("tracker");
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        let vissue = bin.join("vissue");
+        std::fs::write(
+            &vissue,
+            "#!/bin/sh\ncase \"$1\" in\n  show) printf '{\"id\":\"%s\",\"logbook\":[]}' \"$2\" ;;\n  *) exit 1 ;;\nesac\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut mode = std::fs::metadata(&vissue).unwrap().permissions();
+            mode.set_mode(0o755);
+            std::fs::set_permissions(&vissue, mode).unwrap();
+        }
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let joined =
+            std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&path)))
+                .unwrap();
+        let ballots: Vec<Value> =
+            serde_json::from_str(r#"[{"agent":"ljosbot","choice":"rail"}]"#).unwrap();
+        let err = with_env_var("PATH", Some(joined.as_os_str()), || {
+            with_env_var("VISSUE_ROOT", Some(root.as_os_str()), || {
+                check_seat_signatures("probe-old", &ballots, &std::collections::BTreeSet::new())
+                    .unwrap_err()
+            })
+        });
+        assert!(
+            err.contains(
+                "not a git checkout: pre-signing ballots cannot be dated, reported as unsigned"
+            ),
+            "{err}"
+        );
+    }
 }
 
 /// `raw` with a leading `~` or `~/` put against `home`; `None` when there is
