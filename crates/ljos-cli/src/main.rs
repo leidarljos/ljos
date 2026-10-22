@@ -1536,7 +1536,7 @@ fn run_command() -> Result<()> {
             } else {
                 Vec::new()
             };
-            let basis = ljos_cli::Basis::of_typed(&text);
+            let basis = ljos_cli::Basis::of_rule();
             let body = ljos_cli::packset_prefer(&text, as_persona.as_deref())?;
             println!("{}", write_ack(&body));
             for rule in &rules {
@@ -2376,7 +2376,7 @@ fn run_command() -> Result<()> {
             user,
         } => {
             if user {
-                let basis = ljos_cli::Basis::of_typed(&why);
+                let basis = ljos_cli::Basis::of_rule();
                 let rule = ljos_cli::user_rules::write_argv(
                     &Rule {
                         pattern,
@@ -2394,7 +2394,7 @@ fn run_command() -> Result<()> {
                     println!("{}", ljos_cli::user_rules::ack(&rule));
                 }
             } else {
-                let basis = ljos_cli::Basis::of_typed(&why);
+                let basis = ljos_cli::Basis::of_rule();
                 let body = write_rule(
                     &Rule {
                         pattern,

@@ -13348,6 +13348,20 @@ impl Basis {
             Self::of(text)
         }
     }
+
+    /// The basis of a rule a CLI verb writes: the person's only when
+    /// [`person_present`]. The prompt check does not raise a rule. The
+    /// kept prompt, its bind and the runner's transcript are all files the
+    /// agent's login can rewrite, and a reason clause in the prompt says
+    /// nothing of the pattern and verdict the rule enforces.
+    #[must_use]
+    pub fn of_rule() -> Self {
+        if person_present() {
+            Self::Person
+        } else {
+            Self::Agent
+        }
+    }
 }
 
 /// Refuse `text` unless it is the person's own words from their latest prompt.
