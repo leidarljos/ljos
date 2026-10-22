@@ -47015,8 +47015,17 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let body = packset_write_as("Remember", "kept without the field", None, None).unwrap();
         assert_eq!(body["id"], "atom-1");
         let lines = log.lock().unwrap().clone();
-        assert!(lines[0].contains("origin"), "{lines:?}");
-        assert!(!lines[1].contains("origin"), "{lines:?}");
+        // A parallel test can search this server before the write. The
+        // claim is the atom posts: origin on the first, gone after the
+        // refusal.
+        let posts: Vec<_> = lines
+            .iter()
+            .filter(|line| line.contains("POST /v1/atoms"))
+            .cloned()
+            .collect();
+        assert_eq!(posts.len(), 2, "{lines:?}");
+        assert!(posts[0].contains("origin"), "{posts:?}");
+        assert!(!posts[1].contains("origin"), "{posts:?}");
     }
 
     #[test]
@@ -49896,28 +49905,34 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// deedar at the commit in `.github/deedar-pin`, whose import reads
     /// `bytes/` and digest sidecars. CI builds that same file. The binary
     /// is installed on PATH the way CI installs deedar. A failed build
-    /// fails the test.
+    /// fails the test. One process builds that pin once. The tree is
+    /// named by the pin sha, and an existing tree is left in place: two
+    /// tests call this, and deleting the shared directory races the build.
     fn deedimport_deedar() -> std::path::PathBuf {
-        // Two tests call this at once, and one would clear the cache the
-        // other is still building in.
-        static BUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _build = BUILD
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        static BUILT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        BUILT.get_or_init(build_pinned_deedar).clone()
+    }
+
+    fn build_pinned_deedar() -> std::path::PathBuf {
         let sha = deedar_pin();
-        let cache = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/deedimport2-deedar");
+        // Compiled into the test binary. Reading the variable at run time
+        // races tests that edit the process environment.
+        let target_root = option_env!("CARGO_TARGET_DIR")
+            .filter(|path| !path.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")
+            });
+        let cache = target_root.join(format!("deedimport2-{sha}"));
         let bin_dir = cache.join("bin");
         let bin = bin_dir.join("deedar");
         let stamp = cache.join("sha");
         if bin.is_file() && std::fs::read_to_string(&stamp).ok().as_deref() == Some(sha.as_str()) {
             return bin_dir;
         }
-        if cache.exists() {
-            std::fs::remove_dir_all(&cache)
-                .unwrap_or_else(|e| panic!("clear {}: {e}", cache.display()));
-        }
         let src = cache.join("src");
+        std::fs::create_dir_all(&src)
+            .unwrap_or_else(|e| panic!("deedar src {}: {e}", src.display()));
         let src_arg = src.to_str().unwrap();
         // GIT_DIR overrides -C. A parallel test exports it, and the pin
         // checkout would then land in that repository.
@@ -49941,28 +49956,50 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             );
             out
         };
-        git(&["init", "-q", src_arg]);
-        git(&[
-            "-C",
-            src_arg,
-            "remote",
-            "add",
-            "origin",
-            "https://github.com/leidarljos/deedar.git",
-        ]);
-        git(&[
-            "-C",
-            src_arg,
-            "fetch",
-            "--depth",
-            "1",
-            "origin",
-            sha.as_str(),
-        ]);
-        git(&["-C", src_arg, "checkout", "--detach", "FETCH_HEAD"]);
-        let head = git(&["-C", src_arg, "rev-parse", "HEAD"]);
-        let head = String::from_utf8_lossy(&head.stdout);
-        assert_eq!(head.trim(), sha.as_str(), "deedar pin checkout");
+        if !src.join(".git").is_dir() {
+            git(&["init", "-q", src_arg]);
+        }
+        let remotes = git(&["-C", src_arg, "remote"]);
+        if !String::from_utf8_lossy(&remotes.stdout)
+            .lines()
+            .any(|line| line == "origin")
+        {
+            git(&[
+                "-C",
+                src_arg,
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/leidarljos/deedar.git",
+            ]);
+        }
+        let head = std::process::Command::new("git")
+            .args(["-C", src_arg, "rev-parse", "HEAD"])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_NAMESPACE")
+            .output()
+            .unwrap_or_else(|e| panic!("git rev-parse: {e}"));
+        let have = head.status.success() && String::from_utf8_lossy(&head.stdout).trim() == sha;
+        if !have {
+            git(&[
+                "-C",
+                src_arg,
+                "fetch",
+                "--depth",
+                "1",
+                "origin",
+                sha.as_str(),
+            ]);
+            git(&["-C", src_arg, "checkout", "--detach", "FETCH_HEAD"]);
+            let head = git(&["-C", src_arg, "rev-parse", "HEAD"]);
+            let head = String::from_utf8_lossy(&head.stdout);
+            assert_eq!(head.trim(), sha.as_str(), "deedar pin checkout");
+        }
         let built = std::process::Command::new("cargo")
             .args(["build", "--locked", "--manifest-path"])
             .arg(src.join("Cargo.toml"))
