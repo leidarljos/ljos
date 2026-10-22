@@ -653,6 +653,12 @@ fn github_clients_allow_only_a_resolved_get() {
         "gh api repos/acme/widgets/issues -ftitle=t",
         "gh api repos/acme/widgets/issues -if title=x",
         "gh api graphql -fquery='mutation { deleteRef(input: {refId: \"R\"}) { clientMutationId } }'",
+        "curl -X DELETE HTTPS://api.github.com/repos/acme/widgets/git/refs/heads/main",
+        "curl -X DELETE https://x-access-token:$GH_TOKEN@api.github.com/repos/acme/widgets/git/refs/heads/main",
+        "curl -X DELETE https://api.github.com./repos/acme/widgets/git/refs/heads/main",
+        "curl --proto-default https -X DELETE api.github.com/repos/acme/widgets/git/refs/heads/main",
+        "http DELETE api.github.com/repos/acme/widgets/git/refs/heads/main \"Authorization:token $GH_TOKEN\"",
+        "curl -X POST --data-binary @pack https://x:$GH_TOKEN@github.com/acme/widgets.git/git-receive-pack",
     ] {
         let hit = refused(line, here);
         assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {}", hit.reason);
