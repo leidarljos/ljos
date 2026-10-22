@@ -5450,6 +5450,97 @@ mod tests {
         assert!(!tracked.contains("gonehost+cloud"), "{tracked}");
     }
 
+    /// A peer's `gonehost+cloud.jsonl.age` is a symlink to a local file
+    /// sealed only to this machine. Adopting it would decrypt that file
+    /// with the machine key and reseal the plaintext to the cloud recipients.
+    #[test]
+    fn a_symlinked_cloud_log_is_not_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let machine = make_key();
+        let cloud_public = age_keygen(&dir.path().join("cloud.key"));
+        let root = tracker(dir.path());
+        std::fs::write(
+            root.join(".ljos/sync.toml"),
+            format!(
+                "name = \"grokbot\"\nrecipients = [\"{machine}\"]\n[scopes]\ncloud = [\"{cloud_public}\"]\n"
+            ),
+        )
+        .unwrap();
+        let scope = scope_of_repo(&root).unwrap().unwrap();
+        let secret = "machine-only local secret";
+        let local = dir.path().join("local.jsonl.age");
+        seal(
+            &format!("{}\n", atom("local", secret, &["scope:notes"])),
+            std::slice::from_ref(&machine),
+            &local,
+        )
+        .unwrap();
+        let local_bytes = std::fs::read(&local).unwrap();
+        let link = root.join(".ljos/atoms/gonehost+cloud.jsonl.age");
+        std::os::unix::fs::symlink(&local, &link).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        git(&[
+            "add",
+            ".ljos/sync.toml",
+            ".ljos/atoms/gonehost+cloud.jsonl.age",
+        ]);
+        git(&["commit", "-q", "-m", "peer symlink"]);
+        let mode = git(&[
+            "ls-files",
+            "--stage",
+            "--",
+            ".ljos/atoms/gonehost+cloud.jsonl.age",
+        ]);
+        assert!(mode.starts_with("120000"), "{mode}");
+        let posted = std::sync::Arc::default();
+        std::env::set_var("PACKSET_URL", serve_pack(std::sync::Arc::clone(&posted)));
+        std::env::set_var("PACKSET_WORKSPACE", "seat");
+        std::env::set_var("PACKSET_TIMEOUT_MS", "5000");
+
+        let err = adopt_in_repo(&root, &scope, "gonehost", opts(true, false)).unwrap_err();
+        assert!(err.to_string().contains("not a regular file"), "{err}");
+        assert!(err.to_string().contains("cloud"), "{err}");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "git rm removed the link"
+        );
+        assert_eq!(std::fs::read(&local).unwrap(), local_bytes);
+        assert!(
+            posted_texts(&posted).is_empty(),
+            "followed symlink was posted: {:?}",
+            posted_texts(&posted)
+        );
+        let mine = root.join(format!(".ljos/atoms/{}+cloud.jsonl.age", host()));
+        assert!(
+            !mine.exists(),
+            "the local file was resealed to the cloud recipients"
+        );
+        let still = git(&[
+            "ls-files",
+            "--stage",
+            "--",
+            ".ljos/atoms/gonehost+cloud.jsonl.age",
+        ]);
+        assert!(still.starts_with("120000"), "{still}");
+    }
+
     #[test]
     fn adopt_reads_a_gone_hosts_primary_log_without_the_cloud_identity() {
         let dir = tempfile::tempdir().unwrap();
