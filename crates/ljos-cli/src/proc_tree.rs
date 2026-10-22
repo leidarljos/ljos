@@ -481,6 +481,15 @@ fn hook_shell(_pid: u32) -> bool {
     false
 }
 
+/// The nearest process above this one that is a runner by the file the
+/// kernel runs it from ([`exe_runner`]), and which runner it is.
+#[must_use]
+pub fn runner_above() -> Option<(Proc, &'static str)> {
+    ancestors()
+        .into_iter()
+        .find_map(|p| exe_runner(p.pid).map(|r| (p, r)))
+}
+
 /// Variables a runner gives the shell of a tool call. A runner started
 /// with one runs inside another runner's tool call.
 fn tool_call_stamp(env: &[(String, String)]) -> Option<&str> {
