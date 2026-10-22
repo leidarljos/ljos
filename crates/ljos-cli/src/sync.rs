@@ -3572,6 +3572,9 @@ mod tests {
     /// terminated, and cleans up, before anything kills it.
     #[test]
     fn a_commit_past_its_budget_leaves_no_index_lock() {
+        // git comes from PATH. A parallel test points PATH at a directory
+        // with no git while this one is running.
+        let _env = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let rel = hooked_repo(root, "#!/bin/sh\nsleep 30\n");
@@ -3594,6 +3597,10 @@ mod tests {
     /// any git starts, instead of leaving git no time to finish.
     #[test]
     fn a_held_checkout_stops_the_commit_at_the_budget() {
+        // The budget wait sits between the setup git and the commit. A
+        // parallel test can replace PATH for that wait, and the later
+        // git add is then ENOENT.
+        let _env = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let rel = hooked_repo(root, "#!/bin/sh\nexit 0\n");
