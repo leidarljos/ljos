@@ -34660,6 +34660,28 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "a digit suffix folded")]
+    fn a_last_part_of_digits_alone_stays_in_the_seat() {
+        let known = std::collections::BTreeSet::new();
+        for (a, b) in [
+            ("node-01", "node-02"),
+            ("qwen-72", "qwen"),
+            ("inky-10", "inky"),
+            ("run-12", "run-34"),
+        ] {
+            assert!(!same_holder(a, b), "a digit suffix folded: {a} {b}");
+            assert!(!same_seat(a, b, &known), "a digit suffix folded: {a} {b}");
+        }
+        for name in ["node-01", "qwen-72", "inky-10", "inky-12345"] {
+            assert_eq!(
+                holder_parts(name),
+                (name.to_string(), None),
+                "a digit suffix folded: {name}"
+            );
+        }
+    }
+
+    #[test]
     fn a_claim_under_a_legacy_holder_is_held_as_the_seat() {
         assert_eq!(claim_holder("inky-n9o").unwrap(), "inky");
         assert_eq!(claim_holder("disk-saver-t4t").unwrap(), "disk-saver");
