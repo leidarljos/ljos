@@ -5850,7 +5850,7 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
 }
 
 /// The directory the tool executes in, including an explicit tool override.
-/// Relative overrides are resolved against the hook's directory.
+/// Relative overrides are resolved lexically against the hook's directory.
 pub fn hook_directory(input: &str) -> Result<PathBuf> {
     let value = serde_json::from_str::<Value>(input).unwrap_or(Value::Null);
     let base = session_path_raw(&value)
@@ -5859,6 +5859,10 @@ pub fn hook_directory(input: &str) -> Result<PathBuf> {
         .unwrap_or_else(std::env::current_dir)?;
     if !base.is_absolute() {
         bail!("hook working directory must be absolute");
+    }
+    let base = std::fs::canonicalize(base).context("hook working directory is unavailable")?;
+    if !base.is_dir() {
+        bail!("hook working directory is not a directory");
     }
     let args = value
         .get("tool_input")
@@ -5873,15 +5877,56 @@ pub fn hook_directory(input: &str) -> Result<PathBuf> {
         })
         .filter(|v| !v.is_null());
     let directory = match override_dir {
-        Some(v) => base.join(v.as_str().context("invalid tool working directory")?),
+        Some(v) => {
+            let raw = v.as_str().context("invalid tool working directory")?;
+            std::fs::canonicalize(resolve_tool_directory(&base, raw))
+                .context("tool working directory is unavailable")?
+        }
         None => base,
     };
-    let directory =
-        std::fs::canonicalize(directory).context("tool working directory is unavailable")?;
     if !directory.is_dir() {
         bail!("tool working directory is not a directory");
     }
     Ok(directory)
+}
+
+/// Resolve one tool workdir the way opencode does: lexical path resolution.
+fn resolve_tool_directory(base: &Path, raw: &str) -> PathBuf {
+    let expanded = if raw == "~" {
+        home().unwrap_or_else(|_| PathBuf::from(raw))
+    } else {
+        expand(raw)
+    };
+    let joined = if expanded.is_absolute() {
+        expanded
+    } else {
+        base.join(expanded)
+    };
+    lexical_path(&joined)
+}
+
+/// Lexical path normalization (`path.resolve` semantics).
+fn lexical_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(part.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let pop = out
+                    .components()
+                    .next_back()
+                    .is_some_and(|tail| matches!(tail, Component::Normal(_)));
+                if pop {
+                    out.pop();
+                }
+            }
+            Component::Normal(piece) => out.push(piece),
+        }
+    }
+    out
 }
 
 /// Directory a tool command is judged in.
@@ -46132,6 +46177,37 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(
             command_directory(&missing.to_string()).unwrap(),
             root.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn opencode_workdir_resolves_lexically_and_expands_tilde() {
+        let _g = env_guard();
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("base");
+        let elsewhere = root.path().join("elsewhere/leaf");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, base.join("lnk")).unwrap();
+        let lexical = serde_json::json!({
+            "cwd": base,
+            "tool_input": {"command": "git status", "workdir": "lnk/.."}
+        });
+        assert_eq!(
+            hook_directory(&lexical.to_string()).unwrap(),
+            base.canonicalize().unwrap()
+        );
+
+        let home = root.path().join("home");
+        std::fs::create_dir_all(home.join("proj")).unwrap();
+        let _env = HoldEnv::set(&[("HOME", home.to_str().unwrap())]);
+        let tilde = serde_json::json!({
+            "cwd": root.path(),
+            "tool_input": {"command":"git status", "workdir":"~/proj"}
+        });
+        assert_eq!(
+            hook_directory(&tilde.to_string()).unwrap(),
+            home.join("proj").canonicalize().unwrap()
         );
     }
 
