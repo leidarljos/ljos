@@ -2,7 +2,7 @@
 //! Force, a `+refspec`, a `--force-with-lease` push onto main, master or
 //! develop, deleting a remote branch or tag, and a mirror push ask. A plain
 //! branch push, a tag push and a lease push onto a feature branch stay
-//! allowed.
+//! allowed. A push whose `LJOS_CITE` does not stand is denied.
 
 use std::process::Command;
 
@@ -140,7 +140,6 @@ fn a_plain_push_stays_allowed() {
         "git push --force-with-lease origin feature",
         "git push --force-with-lease --force-if-includes origin feature/x",
         "git push --force-with-lease=feature:abc123 origin HEAD:feature",
-        "LJOS_CITE=gpr_optim-1yg5 git push upstream develop",
         "git push --tags",
         "git push --follow-tags",
         "git push --follow-tags origin main",
@@ -155,4 +154,16 @@ fn a_plain_push_stays_allowed() {
             "{line} -> {heads:?}\n{text}"
         );
     }
+}
+
+#[test]
+fn a_push_whose_cite_does_not_stand_is_denied() {
+    let line = "LJOS_CITE=gpr_optim-1yg5 git push upstream develop";
+    let text = stdout_of(line);
+    assert!(
+        text.contains("deny: LJOS_CITE=gpr_optim-1yg5 does not stand: ")
+            && text.contains("(rule: built-in push cite)"),
+        "{text}"
+    );
+    assert!(!verdict_heads(&text).contains(&"allow"), "{text}");
 }

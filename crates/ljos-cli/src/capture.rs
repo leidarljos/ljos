@@ -13,6 +13,7 @@
 //! line asking the agent to write it), or `off`.
 
 use serde_json::Value;
+use sha2::Digest as _;
 
 use super::{
     add_entities, admit, atom_body, mark_seen, pack, pasted_or_quoted, runtime_dir, seen_ids,
@@ -340,8 +341,15 @@ fn latest_prompt_path() -> std::path::PathBuf {
 /// Keep the person's prompt, so an agent's `ljos remember` of their words
 /// can be told from the agent's own lesson. The file sits in the login's
 /// runtime directory, readable by its owner only, and each prompt
-/// replaces it. Off when [`capture_mode`] is off.
+/// replaces it. Off when [`capture_mode`] is off. A bind beside the file
+/// records the hash, mtime and session, and [`said_in_latest_prompt`]
+/// requires it: a plain write of the prompt file does not count.
 pub fn note_latest_prompt(prompt: &str) {
+    note_latest_prompt_for(prompt, None);
+}
+
+/// [`note_latest_prompt`] recording `session`, the hook's session id.
+pub fn note_latest_prompt_for(prompt: &str, session: Option<&str>) {
     if capture_mode() == CaptureMode::Off || pasted_or_quoted(prompt) {
         return;
     }
@@ -352,15 +360,87 @@ pub fn note_latest_prompt(prompt: &str) {
     let text: String = prompt.chars().take(LATEST_PROMPT_CHARS).collect();
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
+    let wrote = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
         .open(&path)
-    {
-        let _ = f.write_all(text.as_bytes());
+        .and_then(|mut f| f.write_all(text.as_bytes()));
+    if wrote.is_ok() {
+        let _ = write_prompt_bind(&path, text.as_bytes(), session);
     }
+}
+
+fn latest_prompt_bind_path() -> std::path::PathBuf {
+    runtime_dir().join("latest-prompt.bind")
+}
+
+fn mtime_nanos(path: &std::path::Path) -> Option<u128> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|age| age.as_nanos())
+}
+
+fn bind_session(session: Option<&str>) -> String {
+    match session
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.contains(['\n', '\r']))
+    {
+        Some(s) => s.to_string(),
+        None => "-".to_string(),
+    }
+}
+
+/// The bind the hook writes beside the prompt: version, sha256 of the
+/// bytes, mtime in nanoseconds, and the session id. The gate reads it
+/// back, so a later write of the prompt file no longer matches.
+fn write_prompt_bind(
+    path: &std::path::Path,
+    bytes: &[u8],
+    session: Option<&str>,
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let Some(mtime) = mtime_nanos(path) else {
+        return Err(std::io::Error::other("prompt mtime"));
+    };
+    let hash = hex::encode(sha2::Sha256::digest(bytes));
+    let body = format!("1\n{hash}\n{mtime}\n{}\n", bind_session(session));
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(latest_prompt_bind_path())?;
+    f.write_all(body.as_bytes())
+}
+
+/// Whether the prompt file still matches the bind the hook wrote.
+fn prompt_bind_matches(path: &std::path::Path) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let Some(mtime) = mtime_nanos(path) else {
+        return false;
+    };
+    let Ok(bind) = std::fs::read_to_string(latest_prompt_bind_path()) else {
+        return false;
+    };
+    let mut lines = bind.lines();
+    let (Some("1"), Some(hash), Some(stored), Some(session)) =
+        (lines.next(), lines.next(), lines.next(), lines.next())
+    else {
+        return false;
+    };
+    if session.is_empty() {
+        return false;
+    }
+    hash == hex::encode(sha2::Sha256::digest(bytes)) && stored == mtime.to_string()
 }
 
 /// Lowercase words and nothing else, for comparing a sentence with a
@@ -374,8 +454,9 @@ fn words_only(text: &str) -> String {
 }
 
 /// Whether `text` is the person's words: it appears in the prompt they
-/// sent last, within [`LATEST_PROMPT_SECS`]. Four words or more, so "use
-/// bun" alone is not taken as a quote.
+/// sent last, within [`LATEST_PROMPT_SECS`], and the file still matches
+/// the bind the hook wrote. Four words or more, so "use bun" alone is
+/// not taken as a quote. A file written without that bind does not count.
 #[must_use]
 pub fn said_in_latest_prompt(text: &str) -> bool {
     let want = words_only(text);
@@ -388,7 +469,7 @@ pub fn said_in_latest_prompt(text: &str) -> bool {
         .ok()
         .and_then(|t| t.elapsed().ok())
         .is_some_and(|age| age.as_secs() <= LATEST_PROMPT_SECS);
-    if !fresh {
+    if !fresh || !prompt_bind_matches(&path) {
         return false;
     }
     let Ok(prompt) = std::fs::read_to_string(&path) else {

@@ -119,6 +119,14 @@ pub struct Harness {
     /// A JSON config file the runner reads its MCP servers from, for a
     /// runner an appended snippet cannot serve.
     pub config_json: Option<String>,
+    /// That file on macOS, for a runner that keeps it somewhere else there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_json_macos: Option<String>,
+    /// On macOS the runner is an app launchd starts from the Dock or
+    /// Finder, so the servers it spawns search [`LAUNCHD_PATH`], not a
+    /// shell's PATH.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub launchd: bool,
     /// Where in that file the entry goes, as a JSON pointer (`/mcp/ljos`).
     pub json_pointer: Option<String>,
     /// The entry to set there, as JSON text; `{server}` and `{name}` are
@@ -213,6 +221,34 @@ pub struct Harness {
     /// as `<name>.env`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_file: Option<String>,
+}
+
+impl Harness {
+    /// The JSON config this runner reads on `os`, a
+    /// [`std::env::consts::OS`] name.
+    fn config_json_on(&self, os: &str) -> Option<&str> {
+        match (os, &self.config_json_macos) {
+            ("macos", Some(path)) => Some(path),
+            _ => self.config_json.as_deref(),
+        }
+    }
+
+    /// The JSON config this runner reads on this machine.
+    pub(crate) fn json_config(&self) -> Option<&str> {
+        self.config_json_on(std::env::consts::OS)
+    }
+
+    /// The PATH this runner starts its MCP server with on `os`, when that
+    /// is not a shell's.
+    fn launch_path_on(&self, os: &str) -> Option<&'static str> {
+        (os == "macos" && self.launchd).then_some(LAUNCHD_PATH)
+    }
+
+    /// The PATH this runner starts its MCP server with on this machine,
+    /// when that is not a shell's.
+    pub(crate) fn launch_path(&self) -> Option<&'static str> {
+        self.launch_path_on(std::env::consts::OS)
+    }
 }
 
 fn is_false(value: &bool) -> bool {
@@ -654,8 +690,9 @@ pub const HARNESSES_EXAMPLE: &str = r#"# ~/.config/ljos/harnesses.toml: runners 
 # Optional: `ljos onboard` alone prints the one entry any runner takes.
 # {server} is ljos-mcp when that name on PATH is this install, and the
 # absolute path when it is not. {name} is the runner's name. An absolute
-# path is kept while the file exists here, and rewritten when a synced
-# config names a missing file.
+# path is kept while it is this install, and rewritten when it names a
+# missing file or another binary. A bare ljos-mcp that PATH does not
+# resolve to this install becomes the absolute path.
 # Paths may start with ~. The seat names itself after the client that
 # connects; nothing is passed in env.
 
@@ -862,6 +899,8 @@ skills = "~/.config/Code/User/skills"
 [[harness]]
 name = "claude-desktop"
 config_json = "~/.config/Claude/claude_desktop_config.json"
+config_json_macos = "~/Library/Application Support/Claude/claude_desktop_config.json"
+launchd = true
 json_pointer = "/mcpServers/ljos"
 json_entry = '{"command": "{server}", "args": []}'
 skills = "~/.config/Claude/skills"
@@ -1203,6 +1242,10 @@ pub fn shipped_differences(path: &Path) -> Vec<String> {
 /// binary.
 pub(crate) const MCP_SERVER_COMMAND: &str = "ljos-mcp";
 
+/// The PATH launchd gives a macOS app opened from the Dock or Finder, and
+/// so every server that app starts.
+pub(crate) const LAUNCHD_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
 #[derive(Debug, Clone)]
 pub(crate) struct ServerCommandPlan {
     pub(crate) command: String,
@@ -1238,7 +1281,20 @@ fn same_binary(a: &Path, b: &Path) -> bool {
 }
 
 pub(crate) fn server_command_plan(server: &Path, who: &str) -> ServerCommandPlan {
-    match which::which(MCP_SERVER_COMMAND) {
+    server_command_plan_in(server, who, None)
+}
+
+/// [`server_command_plan`] for a client that searches `search` for a bare
+/// command instead of this process's PATH.
+fn server_command_plan_in(server: &Path, who: &str, search: Option<&str>) -> ServerCommandPlan {
+    let (found, path) = match search {
+        Some(dirs) => (
+            which::which_in(MCP_SERVER_COMMAND, Some(dirs), "/"),
+            format!("PATH {dirs}"),
+        ),
+        None => (which::which(MCP_SERVER_COMMAND), "PATH".to_string()),
+    };
+    match found {
         Ok(found) if same_binary(&found, server) => ServerCommandPlan {
             command: MCP_SERVER_COMMAND.to_string(),
             note: None,
@@ -1246,7 +1302,7 @@ pub(crate) fn server_command_plan(server: &Path, who: &str) -> ServerCommandPlan
         Ok(found) => ServerCommandPlan {
             command: server.display().to_string(),
             note: Some(format!(
-                "PATH resolves {MCP_SERVER_COMMAND} to {}, so {who} wrote {}",
+                "{path} resolves {MCP_SERVER_COMMAND} to {}, so {who} wrote {}",
                 found.display(),
                 server.display()
             )),
@@ -1254,7 +1310,7 @@ pub(crate) fn server_command_plan(server: &Path, who: &str) -> ServerCommandPlan
         Err(_) => ServerCommandPlan {
             command: server.display().to_string(),
             note: Some(format!(
-                "PATH does not resolve {MCP_SERVER_COMMAND}, so {who} wrote {}",
+                "{path} does not resolve {MCP_SERVER_COMMAND}, so {who} wrote {}",
                 server.display()
             )),
         },
@@ -3503,7 +3559,7 @@ fn is_registered(h: &Harness, server: &Path) -> Option<bool> {
     if let (Some(config), Some(marker)) = (&h.config, &h.marker) {
         return Some(std::fs::read_to_string(expand(config)).is_ok_and(|t| t.contains(marker)));
     }
-    if let (Some(config), Some(pointer)) = (&h.config_json, &h.json_pointer) {
+    if let (Some(config), Some(pointer)) = (h.json_config(), &h.json_pointer) {
         return Some(
             std::fs::read_to_string(expand(config))
                 .ok()
@@ -3595,24 +3651,32 @@ fn heal_detail(base: &str, healed: &Result<Option<String>>) -> String {
 }
 
 /// An absolute path whose file name is the MCP server. It may name another
-/// machine. A path that is a file here is this install and is left alone.
+/// machine, or a stale copy on this one.
 fn is_absolute_ljos_mcp(value: &str) -> bool {
     let path = Path::new(value);
     path.is_absolute() && path.file_name().and_then(|n| n.to_str()) == Some(MCP_SERVER_COMMAND)
 }
 
-fn needs_portable_rewrite(value: &str) -> bool {
-    is_absolute_ljos_mcp(value) && !Path::new(value).is_file()
+/// An `ljos-mcp` command that would not start `server`: an absolute path
+/// that is missing here or is another binary, or the bare name when PATH
+/// does not resolve it to this install, which is when `replacement` is
+/// not the bare name. A path to this install, or a link to it, is left
+/// alone.
+fn needs_portable_rewrite(value: &str, server: &Path, replacement: &str) -> bool {
+    if value == MCP_SERVER_COMMAND {
+        return replacement != MCP_SERVER_COMMAND;
+    }
+    is_absolute_ljos_mcp(value) && !same_binary(Path::new(value), server)
 }
 
-fn command_made_portable(command: &mut Value, replacement: &str) -> bool {
+fn command_made_portable(command: &mut Value, server: &Path, replacement: &str) -> bool {
     match command {
-        Value::String(text) if needs_portable_rewrite(text) => {
+        Value::String(text) if needs_portable_rewrite(text, server, replacement) => {
             *text = replacement.to_string();
             true
         }
         Value::Array(args) => match args.first_mut() {
-            Some(Value::String(text)) if needs_portable_rewrite(text) => {
+            Some(Value::String(text)) if needs_portable_rewrite(text, server, replacement) => {
                 *text = replacement.to_string();
                 true
             }
@@ -3622,13 +3686,13 @@ fn command_made_portable(command: &mut Value, replacement: &str) -> bool {
     }
 }
 
-/// Rewrite an existing JSON entry whose command is an absolute `ljos-mcp`
-/// that is not a file here. The replacement is the bare name, or this
-/// install's path when the bare name would not run it. A path that exists
-/// is left alone.
+/// Rewrite an existing JSON entry whose `ljos-mcp` command would not start
+/// `server`. The replacement is the bare name, or this install's path when
+/// the bare name would not run it.
 fn heal_json_command(
     path: &Path,
     pointer: &str,
+    server: &Path,
     replacement: &str,
     dry: bool,
 ) -> Result<Option<String>> {
@@ -3646,7 +3710,7 @@ fn heal_json_command(
     let Some(command) = entry.get_mut("command") else {
         return Ok(None);
     };
-    if !command_made_portable(command, replacement) {
+    if !command_made_portable(command, server, replacement) {
         return Ok(None);
     }
     let note = format!("set the command in {} to {replacement}", path.display());
@@ -3704,27 +3768,33 @@ fn command_value_span(line: &str) -> Option<(usize, usize)> {
     None
 }
 
+/// The end of the entry that starts at `start`: the next table for a TOML
+/// marker, and for YAML the next line indented no deeper than the
+/// marker's own, which is a sibling or the parent's next key.
 fn marker_section_end(text: &str, start: usize, marker: &str) -> usize {
     let marker_toml = marker.trim_start().starts_with('[');
-    let mut lines = 0usize;
     let mut end = start;
-    let mut first = true;
+    let mut indent = None;
     for line in text[start..].split_inclusive('\n') {
         let trimmed = line.trim_start();
-        if marker_toml && !first && trimmed.starts_with('[') {
-            break;
+        let depth = line.len() - trimmed.len();
+        match indent {
+            None => indent = Some(depth),
+            Some(_) if marker_toml && trimmed.starts_with('[') => break,
+            Some(first) if !marker_toml && !trimmed.trim().is_empty() && depth <= first => break,
+            Some(_) => {}
         }
         end += line.len();
-        lines += 1;
-        first = false;
-        if !marker_toml && lines >= 24 {
-            break;
-        }
     }
     end
 }
 
-fn rewrite_marker_command(text: &str, marker: &str, replacement: &str) -> (String, bool) {
+fn rewrite_marker_command(
+    text: &str,
+    marker: &str,
+    server: &Path,
+    replacement: &str,
+) -> (String, bool) {
     let Some(found) = text.find(marker) else {
         return (text.to_string(), false);
     };
@@ -3744,7 +3814,7 @@ fn rewrite_marker_command(text: &str, marker: &str, replacement: &str) -> (Strin
             let value_start = at + value_start;
             let value_end = at + value_end;
             let value = &text[value_start..value_end];
-            if needs_portable_rewrite(value) {
+            if needs_portable_rewrite(value, server, replacement) {
                 let mut out = String::with_capacity(
                     text.len()
                         .saturating_sub(value.len())
@@ -3765,6 +3835,7 @@ fn rewrite_marker_command(text: &str, marker: &str, replacement: &str) -> (Strin
 fn heal_text_command(
     path: &Path,
     marker: &str,
+    server: &Path,
     replacement: &str,
     dry: bool,
 ) -> Result<Option<String>> {
@@ -3775,7 +3846,7 @@ fn heal_text_command(
         return Ok(None);
     }
     let text = std::fs::read_to_string(path).with_context(|| path.display().to_string())?;
-    let (rewritten, changed) = rewrite_marker_command(&text, marker, replacement);
+    let (rewritten, changed) = rewrite_marker_command(&text, marker, server, replacement);
     if !changed {
         return Ok(None);
     }
@@ -3789,12 +3860,18 @@ fn heal_text_command(
     )))
 }
 
-fn heal_registered(h: &Harness, replacement: &str, dry: bool) -> Result<Option<String>> {
+fn heal_registered(
+    h: &Harness,
+    server: &Path,
+    replacement: &str,
+    dry: bool,
+) -> Result<Option<String>> {
     let mut notes = Vec::new();
-    if let Some(config) = &h.config_json {
+    if let Some(config) = h.json_config() {
         if let Some(note) = heal_json_command(
             &expand(config),
             h.json_pointer.as_deref().unwrap_or(""),
+            server,
             replacement,
             dry,
         )? {
@@ -3805,6 +3882,7 @@ fn heal_registered(h: &Harness, replacement: &str, dry: bool) -> Result<Option<S
         if let Some(note) = heal_text_command(
             &expand(config),
             h.marker.as_deref().unwrap_or(""),
+            server,
             replacement,
             dry,
         )? {
@@ -3818,6 +3896,7 @@ fn heal_registered(h: &Harness, replacement: &str, dry: bool) -> Result<Option<S
             if let Some(note) = heal_json_command(
                 &home.join(".claude.json"),
                 "/mcpServers/ljos",
+                server,
                 replacement,
                 dry,
             )? {
@@ -3837,10 +3916,10 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             ok: false,
         };
     }
-    let plan = server_command_plan(server, "onboard");
+    let plan = server_command_plan_in(server, "onboard", h.launch_path());
     match is_registered(h, server) {
         Some(true) => {
-            let healed = heal_registered(h, &plan.command, dry);
+            let healed = heal_registered(h, server, &plan.command, dry);
             let config = expand(h.config.as_deref().unwrap_or_default());
             match bump_ljos_mcp_generation(&config, env!("CARGO_PKG_VERSION"), dry) {
                 Ok(Some(v)) => Step {
@@ -3896,8 +3975,8 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
                 },
             }
         }
-        Some(false) if h.config_json.is_some() => {
-            let config = expand(h.config_json.as_deref().unwrap_or_default());
+        Some(false) if h.json_config().is_some() => {
+            let config = expand(h.json_config().unwrap_or_default());
             let pointer = h.json_pointer.clone().unwrap_or_default();
             let entry_text = h
                 .json_entry
@@ -4097,11 +4176,16 @@ pub fn detect_runners(
             .find(|(name, _)| *name == h.name)
             .map_or(&[][..], |(_, cmds)| *cmds);
         let by_command = on_path(&h.name) || extra.iter().any(|c| on_path(c));
-        let by_dir = [&h.config, &h.config_json, &h.hooks, &h.hooks_named]
-            .into_iter()
-            .flatten()
-            .filter_map(|p| under_home(p))
-            .any(|p| p.parent().is_some_and(Path::is_dir));
+        let by_dir = [
+            h.config.as_deref(),
+            h.json_config(),
+            h.hooks.as_deref(),
+            h.hooks_named.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(under_home)
+        .any(|p| p.parent().is_some_and(Path::is_dir));
         if by_command || by_dir {
             found.push(h.name.clone());
         }
@@ -7769,14 +7853,13 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             .as_ref()
             .filter(|p| p.iter().any(|(_, s)| s.cosine.is_some()))
         {
-            let top = pool.iter().map(|(h, _)| h.score).fold(0.0_f64, f64::max);
             let best = pool
                 .iter()
                 .filter_map(|(_, s)| s.cosine)
                 .fold(0.0_f64, f64::max);
             let mut admitted: Vec<(Hit, f64)> = pool
                 .iter()
-                .filter(|(h, s)| admits_local(h, *s, cue, top, best))
+                .filter(|(h, s)| admits_local(h, *s, cue, best))
                 .filter(|(h, _)| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
                 .map(|(h, s)| (h.clone(), s.cosine.unwrap_or(0.0)))
                 .collect();
@@ -8067,11 +8150,13 @@ pub const DENSE_WORD_BEHIND: f64 = 0.05;
 /// sends the encoder's cosine. A preference, a standing lesson or a
 /// transient lesson gets in when the encoder ranked it first at
 /// [`DENSE_ALONE_AT`] or more, or when it names the prompt's subject,
-/// clears [`HOOK_SCORE_FLOOR`] of the top score and sits within
-/// [`DENSE_WORD_BEHIND`] of `best`, the highest cosine in the pool.
+/// clears [`HOOK_SCORE_FLOOR`] of `best`, the highest cosine in the
+/// pool, and sits within [`DENSE_WORD_BEHIND`] of it. Both read the
+/// cosine, which carries no age: the pack decays the fused score by the
+/// memory's age, and a correct memory is not dropped for being old.
 /// A lesson with no horizon tag stays out.
 #[must_use]
-pub fn admits_local(h: &Hit, s: DenseSignal, cue: &str, top: f64, best: f64) -> bool {
+pub fn admits_local(h: &Hit, s: DenseSignal, cue: &str, best: f64) -> bool {
     if UNREVIEWED_KINDS.contains(&h.kind.as_str()) || !shown_on_prompt(h) {
         return false;
     }
@@ -8082,7 +8167,7 @@ pub fn admits_local(h: &Hit, s: DenseSignal, cue: &str, top: f64, best: f64) -> 
         return true;
     }
     names_the_subject(&h.text, cue)
-        && h.score >= top * HOOK_SCORE_FLOOR
+        && cosine >= best * HOOK_SCORE_FLOOR
         && cosine >= best - DENSE_WORD_BEHIND
 }
 
@@ -9031,7 +9116,7 @@ pub fn limit_stop(input: &str, session: Option<&str>) -> Option<String> {
     Some(format!(
         "The usage limit is reached; record the work before the turn ends, in this order and \
          with nothing else: `ljos note {on} \"done: ...; left: ...\"`; `ljos file \"TITLE\"` for \
-         each item left{}; `ljos remember \"...\"` for each lesson that holds next time. Then \
+         each item left{}; `ljos note {on} \"lesson: ...\"` for a lesson of your own. Then \
          stop and tell the person the limit was reached, what is done and what is left.",
         if issue.is_some() {
             ""
@@ -9127,7 +9212,7 @@ pub fn work_nudge(call: &HookCall, subagent: bool) -> Option<String> {
         Some(issue) => format!(
             "{count} tool calls on {issue} since the seat last heard from this conversation. \
              Record what the work has shown: progress is `ljos note {issue} \"...\"`, a lesson \
-             that holds next time is `ljos remember \"...\"`, an artifact is `ljos deed {issue} \
+             of your own is `ljos note {issue} \"lesson: ...\"`, an artifact is `ljos deed {issue} \
              --add ACCESSION`; the work closes with `ljos finish {issue} --lesson \"...\"`."
         ),
         None => format!(
@@ -9313,8 +9398,8 @@ pub fn subagent_brief(kind: &str, issue: &str, decision: bool) -> String {
     format!(
         "You are a subagent ({kind}) working under {issue}, which your parent holds. Do not open a sitting \
          on it. Record on {issue} with `ljos vote {issue}` or `ljos note {issue}` even when the task \
-         does not name {issue}. {judge} A lesson that will hold next time is `ljos remember \"...\" --as ROLE`; a \
-         finding is `ljos note {issue} \"...\"`. ROLE is a persona from `ljos personas` when one fits \
+         does not name {issue}. {judge} A finding or a lesson of your own is `ljos note {issue} \"...\"`. \
+         ROLE is a persona from `ljos personas` when one fits \
          your task, else `{kind}`."
     )
 }
@@ -9341,8 +9426,8 @@ pub fn subagent_stop_reason(
     } else {
         format!(
             "You worked under {issue}. Before you stop: if your result settles a choice, \
-             `ljos vote {issue} --for OPTION --expect OPTION --as ROLE`; if it taught something that holds next time, \
-             `ljos remember \"...\" --as ROLE`. Otherwise stop."
+             `ljos vote {issue} --for OPTION --expect OPTION --as ROLE`; if it taught something to keep, \
+             `ljos note {issue} \"...\"`. Otherwise stop."
         )
     })
 }
@@ -11218,17 +11303,22 @@ impl SeatSignatures {
 /// under a slot this issue already held when its pin was introduced
 /// ([`slot::problems`]) is left out and named, and the rest still decide.
 /// `Ok` when every other seat ballot is signed under its pinned key or is
-/// legacy unsigned (committed to the tracker before signing began), or
+/// legacy unsigned (in its issue's entry before the tracker's first pin,
+/// by commit order: [`ballot_sig::recorded_before_signing`]), or
 /// when `LJOS_UNSIGNED_BALLOTS=allow`.
 ///
 /// # Errors
 ///
-/// The refusal naming each ballot that does not count.
+/// The refusal naming each ballot that does not count, or the pin file
+/// when it names a seat twice or has lost a pin the tracker committed:
+/// either would re-pin that seat or drop its ballots.
 pub fn check_seat_signatures(
     issue: &str,
     ballots: &[Value],
     personas: &std::collections::BTreeSet<String>,
 ) -> std::result::Result<SeatSignatures, String> {
+    const LEGACY_DATING_UNAVAILABLE: &str =
+        "not a git checkout: pre-signing ballots cannot be dated, reported as unsigned";
     if ballot_sig::unsigned_allowed() {
         return Ok(SeatSignatures::default());
     }
@@ -11236,12 +11326,23 @@ pub fn check_seat_signatures(
     if seats.is_empty() {
         return Ok(SeatSignatures::default());
     }
+    let tracker_is_git = ballot_sig::tracker_is_git_checkout();
+    let can_date_legacy = tracker_is_git == Some(true);
     let v = issue_record(issue).map_err(|e| format!("{issue}: not readable: {e:#}"))?;
     let legacy = |voter: &str, choice: &str| {
-        ballot_sig::recorded_at(issue, voter, choice).is_some_and(|t| t < ballot_sig::SIGNING_SINCE)
+        can_date_legacy && ballot_sig::recorded_before_signing(issue, voter, choice)
     };
     let notes = ballot_sig::notes_of(&v);
-    let pins = ballot_sig::pins();
+    let (pins, _) = ballot_sig::pins_for_check().map_err(|e| {
+        format!("{issue}: the seat pins are not one key per seat, so it decides nothing for a push: {e:#}")
+    })?;
+    let dropped = slot::dropped_pins(&pins);
+    if !dropped.is_empty() {
+        return Err(format!(
+            "{issue}: the tracker committed the pin {} and the pin file no longer holds it, so it decides nothing for a push; a pin once committed stays",
+            dropped.join(", ")
+        ));
+    }
     let starts = slot::starts();
     let stands =
         |seat: &str| slot::stands(seat, pins.get(seat).map(String::as_str), starts.as_deref());
@@ -11255,6 +11356,7 @@ pub fn check_seat_signatures(
             .filter_map(|n| ballot_sig::parse_note(n))
             .any(|n| n.voter == voter)
     };
+    let tracker = slot::tracker_id();
     let mut left_out = Vec::new();
     let mut kept = Vec::new();
     for (voter, choice) in seats {
@@ -11263,6 +11365,7 @@ pub fn check_seat_signatures(
             None
         } else {
             slot::problems(
+                &tracker,
                 issue,
                 &[(voter, choice)],
                 &notes,
@@ -11278,7 +11381,14 @@ pub fn check_seat_signatures(
             None => kept.push((voter, choice)),
         }
     }
-    let (problems, old) = ballot_sig::seat_check(issue, &kept, &notes, &pins, &legacy);
+    let (mut problems, old) = ballot_sig::seat_check(issue, &kept, &notes, &pins, &legacy);
+    if tracker_is_git == Some(false)
+        && problems
+            .iter()
+            .any(|problem| problem.ends_with("ballot is unsigned"))
+    {
+        problems.push(LEGACY_DATING_UNAVAILABLE.to_string());
+    }
     if !problems.is_empty() {
         return Err(format!(
             "the seat ballots on {issue} are not all signed, so it decides nothing for a push: {}",
@@ -11289,6 +11399,78 @@ pub fn check_seat_signatures(
         legacy: old,
         left_out,
     })
+}
+
+#[cfg(test)]
+mod seat_signature_tests {
+    use super::*;
+
+    fn with_env_var<R>(key: &str, val: Option<&std::ffi::OsStr>, f: impl FnOnce() -> R) -> R {
+        crate::with_env_mutation(|| {
+            let saved = std::env::var_os(key);
+            match val {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+            struct Reset {
+                key: String,
+                saved: Option<std::ffi::OsString>,
+            }
+            impl Drop for Reset {
+                fn drop(&mut self) {
+                    match &self.saved {
+                        Some(v) => std::env::set_var(&self.key, v),
+                        None => std::env::remove_var(&self.key),
+                    }
+                }
+            }
+            let _reset = Reset {
+                key: key.to_string(),
+                saved,
+            };
+            f()
+        })
+    }
+
+    #[test]
+    fn a_non_git_tracker_root_is_named_when_legacy_dating_is_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("tracker");
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        let vissue = bin.join("vissue");
+        std::fs::write(
+            &vissue,
+            "#!/bin/sh\ncase \"$1\" in\n  show) printf '{\"id\":\"%s\",\"logbook\":[]}' \"$2\" ;;\n  *) exit 1 ;;\nesac\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut mode = std::fs::metadata(&vissue).unwrap().permissions();
+            mode.set_mode(0o755);
+            std::fs::set_permissions(&vissue, mode).unwrap();
+        }
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let joined =
+            std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&path)))
+                .unwrap();
+        let ballots: Vec<Value> =
+            serde_json::from_str(r#"[{"agent":"ljosbot","choice":"rail"}]"#).unwrap();
+        let err = with_env_var("PATH", Some(joined.as_os_str()), || {
+            with_env_var("VISSUE_ROOT", Some(root.as_os_str()), || {
+                check_seat_signatures("probe-old", &ballots, &std::collections::BTreeSet::new())
+                    .unwrap_err()
+            })
+        });
+        assert!(
+            err.contains(
+                "not a git checkout: pre-signing ballots cannot be dated, reported as unsigned"
+            ),
+            "{err}"
+        );
+    }
 }
 
 /// `raw` with a leading `~` or `~/` put against `home`; `None` when there is
@@ -12127,6 +12309,22 @@ pub fn packset_write_agent(
 /// hit, so recall can put the person's words ahead of an agent's.
 pub const SAID_ENTITY: &str = "via:prompt";
 
+/// Drop a claim that the words are the person's.
+///
+/// An import keeps kind and horizon. [`SAID_ENTITY`] and `source.basis`
+/// of `person` are that claim, and a peer must not supply them. Removing
+/// a basis that is already absent is a no-op, so a second pass is safe.
+pub(crate) fn strip_person_basis(atom: &mut Value) {
+    if let Some(entities) = atom.get_mut("entities").and_then(Value::as_array_mut) {
+        entities.retain(|entity| entity.as_str() != Some(SAID_ENTITY));
+    }
+    if atom.pointer("/source/basis").and_then(Value::as_str) == Some(Basis::Person.as_str()) {
+        if let Some(source) = atom.get_mut("source").and_then(Value::as_object_mut) {
+            source.remove("basis");
+        }
+    }
+}
+
 /// Who a claim written through MCP comes from, kept as `source.basis`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Basis {
@@ -12159,6 +12357,23 @@ impl Basis {
             Self::Agent
         }
     }
+}
+
+/// Refuse `text` unless it is the person's own words from their latest prompt.
+///
+/// User rules and the MCP prefer of them reach every prompt. A sentence the
+/// prompt hook did not keep is not those words.
+///
+/// # Errors
+///
+/// `text` is not in the person's latest prompt.
+pub fn refuse_unless_person_words(label: &str, text: &str) -> Result<()> {
+    if Basis::of(text) != Basis::Person {
+        bail!(
+            "{label}: the text is not in the person's latest prompt; only the person's own words can be stored here"
+        );
+    }
+    Ok(())
 }
 
 /// The atom an MCP `ljos_remember` or `ljos_prefer` posts, with its basis.
@@ -12933,7 +13148,8 @@ pub(crate) fn stamp_issue(atom: &mut Value, issue: &str) {
 /// A preference is a rule. A lesson is an episode until a recalled review
 /// or a consolidation promotes it, unless the caller said which it is.
 /// `ljos remember` typed by the person says standing; see
-/// [`remember_horizon`].
+/// [`remember_horizon`]. An agent's own remember is a note and carries
+/// no horizon tag.
 fn stamp_horizon(atom: &mut Value, kind: &str, _text: &str, force: Option<bool>) {
     let transient = match (kind, force) {
         ("preference", _) => false,
@@ -12948,26 +13164,37 @@ fn stamp_horizon(atom: &mut Value, kind: &str, _text: &str, force: Option<bool>)
     add_entities(atom, [tag.to_string()]);
 }
 
-/// The horizon `ljos remember` writes when neither `--transient` nor
-/// `--standing` is given: standing, whoever wrote it, like `prefer` and
-/// `rule`. Under an agent runner the lesson keeps origin `agent-derived`
-/// and its provenance, and `ljos memories review` prunes it later.
+/// The horizon `ljos remember` writes for the person: standing, unless
+/// `--transient`. Under a runner the result is transient. The remember
+/// command stores the agent's own words as a note instead of calling
+/// this, and the transient result keeps a leftover caller from stamping
+/// `horizon:standing` on text the person did not say. `--standing` does
+/// not override that.
 #[must_use]
 pub fn remember_horizon(transient: bool, standing: bool, under_runner: bool) -> Option<bool> {
-    // An agent's lesson stands when written, like the person's: no review
-    // gates it. `ljos memories review` keeps, edits or drops it afterwards.
-    let _ = (standing, under_runner);
-    Some(transient)
+    let _ = standing;
+    if transient || under_runner {
+        Some(true)
+    } else {
+        Some(false)
+    }
 }
 
 /// The line `ljos remember` prints after the write, saying when the hook
 /// shows the lesson.
 #[must_use]
 pub fn remember_note(body: &Value) -> &'static str {
-    let standing = body["entities"]
-        .as_array()
-        .is_some_and(|e| e.iter().any(|v| v == "horizon:standing"));
-    if standing {
+    let has = |tag: &str| {
+        body["entities"]
+            .as_array()
+            .is_some_and(|e| e.iter().any(|v| v == tag))
+    };
+    if body["kind"].as_str() == Some(packset_core::record::NOTE_KIND)
+        || (!has("horizon:standing") && !has("horizon:transient"))
+    {
+        return "unreviewed note: the prompt does not treat it as a fact";
+    }
+    if has("horizon:standing") {
         "standing: the hook shows it from the next prompt it bears on"
     } else {
         "episode: the hook shows it when a prompt bears on it, and `ljos due` with `ljos graded` promotes it to standing"
@@ -12976,6 +13203,74 @@ pub fn remember_note(body: &Value) -> &'static str {
 
 pub fn packset_write(label: &str, text: &str) -> Result<Value> {
     packset_write_as(label, text, None, None)
+}
+
+/// The preference `ljos prefer` writes.
+///
+/// Typed by the person, it is theirs. Under a runner the same person-words
+/// check as an MCP prefer applies: words from the latest prompt are stored
+/// as theirs, and any other text is agent-derived. The seat guard does not
+/// stop the verb, so the check is what keeps a planted sentence from
+/// becoming the person's words.
+///
+/// # Errors
+///
+/// An empty text, or the pack refusing the claim.
+/// An agent's `ljos remember` of words that are not the person's.
+///
+/// Stored as an unreviewed note: kind `note`, origin `agent-derived`,
+/// no horizon tag and no [`SAID_ENTITY`], so the prompt does not treat it
+/// as a fact. A pack that does not know kind `note` takes the same text as
+/// a `summary`, still agent-derived and untagged. Posted with the origin
+/// set, not through the agent writer that relabels soft prose as the
+/// person's.
+///
+/// # Errors
+///
+/// An empty text, or the pack refusing the note.
+pub fn packset_write_remember_note(text: &str, persona: Option<&str>) -> Result<Value> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        bail!("Remember: empty text is not a claim");
+    }
+    let client = pack()?;
+    let mut atom = atom_body(
+        packset_core::record::NOTE_KIND,
+        trimmed,
+        &client.workspace(),
+    );
+    atom["source"]["basis"] = Value::String(Basis::Agent.as_str().into());
+    let mut tags = vec![
+        format!("{NOTE_BASIS_ENTITY}agent"),
+        format!("{NOTE_SOURCE_ENTITY}ljos-remember"),
+    ];
+    if let Some(name) = persona.map(str::trim).filter(|n| !n.is_empty()) {
+        tags.push(persona_entity(name));
+        atom["set"] = Value::String(persona_set(name));
+    }
+    add_entities(&mut atom, tags);
+    admit::stamp_origin(&mut atom, admit::ORIGIN_AGENT);
+    let prefix = "Remember: POST /v1/atoms failed";
+    match with_writer(|| admit::post_kept(&client, &atom).map_err(|e| with_post_failure(prefix, e)))
+    {
+        Err(e) if note_kind_unknown(&e) => {
+            atom["kind"] = Value::String("summary".into());
+            with_writer(|| {
+                admit::post_kept(&client, &atom).map_err(|e| with_post_failure(prefix, e))
+            })
+        }
+        other => other,
+    }
+}
+
+pub fn packset_prefer(text: &str, persona: Option<&str>) -> Result<Value> {
+    if under_a_runner() {
+        if capture::said_in_latest_prompt(text) {
+            return packset_write_mcp("Prefer", text, persona, Some(false));
+        }
+        return packset_write_agent("Prefer", text, persona, Some(false));
+    }
+    packset_write_as("Prefer", text, persona, Some(false))
 }
 
 /// [`packset_write`] for a lesson learned on an issue: it carries an
@@ -15106,7 +15401,7 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
          --used none records that the ballot drew on no deed. \
          The line it prints is a count. `ljos consensus {issue}` is the settle. \
          Only the tracker is proof: your ballot is cast when `vissue vote {issue} --json` holds your row and `ljos vote` printed `recorded on the tracker`. Never report a ballot, claim or finish the tracker does not show. \
-         A lesson of your own goes in with `ljos remember --as {name} \"...\"`.\n",
+         A lesson of your own is `ljos note {issue} \"...\"`.\n",
         name = p.name,
     ));
     Ok(user_rules::prepend(out))
@@ -15659,8 +15954,8 @@ pub fn persona_ballot_task(brief: &str, persona: &str, issue: &str) -> String {
          (`ljos search \"...\"`). Write your reasoning in two or three sentences with \
          `ljos note {issue} \"{persona}: ...\"`, then cast \
          `ljos vote {issue} --for OPTION --expect OPTION --as {persona} --used none` (name the \
-         deeds you used instead of none). A lesson that will hold next time is \
-         `ljos remember \"...\" --as {persona}`. Do not open a sitting, change files or push."
+         deeds you used instead of none). A lesson of your own is \
+         `ljos note {issue} \"...\"`. Do not open a sitting, change files or push."
     )
 }
 
@@ -18583,16 +18878,29 @@ fn cite_ballots(
         .map_err(|e| format!("{cite}: the ballots are not readable: {e}"))?;
     let ballots =
         panel_gate::counted_ballots(cite, &ballots.as_array().cloned().unwrap_or_default());
-    let personas = personas_from_pack()
-        .map_err(|e| {
-            format!(
-                "{cite}: the roster is not readable, so persona ballots cannot be left out: {e:#}"
-            )
-        })?
-        .into_iter()
-        .map(|p| p.name.trim().to_string())
-        .collect();
-    Ok((ballots, personas))
+    Ok((ballots, cite_roster(cite)?))
+}
+
+/// The persona names a push cite leaves out: the pack's roster. A seat
+/// whose pack is off on purpose (`PACKSET_URL=off`) has no personas.
+///
+/// # Errors
+///
+/// The pack is on and its roster does not answer: a persona's ballot
+/// cannot be told from a seat's, so no cite stands until it does.
+pub fn cite_roster(cite: &str) -> std::result::Result<std::collections::BTreeSet<String>, String> {
+    match personas_from_pack() {
+        Ok(personas) => Ok(personas
+            .into_iter()
+            .map(|p| p.name.trim().to_string())
+            .collect()),
+        Err(_) if std::env::var("PACKSET_URL").is_ok_and(|url| url == "off") => {
+            Ok(std::collections::BTreeSet::new())
+        }
+        Err(e) => Err(format!(
+            "{cite}: the roster is not readable, so persona ballots cannot be left out: {e:#}"
+        )),
+    }
 }
 
 /// The files that are the seat's law and its reach into each runner: the
@@ -18609,10 +18917,30 @@ pub const SEAT_PATHS: &[&str] = &[
     "/.gemini/config/mcp_config.json",
     "/.claude/settings.json",
     "/.grok/hooks/ljos.json",
+    "/.cursor/hooks.json",
+    "/.codeium/windsurf/hooks.json",
+    "/.factory/hooks.json",
+    "/.kiro/hooks/ljos.json",
+    "/.copilot/hooks/ljos.json",
+    "/.qwen/settings.json",
+    "/.config/crush/crush.json",
+    "/Documents/Cline/Hooks",
+    "/Documents/Cline/Hooks/",
+    "/.augment/settings.json",
+    "/.augment/ljos-guard-auggie.sh",
+    "/.config/amp/settings.json",
+    "/.config/amp/ljos-guard-amp.sh",
+    "/.agents/plugins/ljos/hooks/hooks.json",
+    "/.openhands/hooks.json",
+    "/.gemini/settings.json",
     "/.config/opencode/plugins/ljos.ts",
     "/.omp/agent/extensions/ljos.ts",
     "/ljos/approvals",
     "/ljos/approvals/",
+    // The prompt the hook kept, and the bind the gate checks. A plain
+    // write would make a sentence count as the person's words.
+    "/ljos/latest-prompt",
+    "/ljos/latest-prompt.bind",
 ];
 
 /// Whether a path names one of [`SEAT_PATHS`]; a backup beside a binary
@@ -19029,7 +19357,9 @@ pub fn redirect_seat_verb(rule: Option<Rule>, line: &str) -> Option<Rule> {
 /// A tag push is ordinary.
 /// That ask does not wait for a seat rule. A seat rule that denies the
 /// dangerous push still denies it. A rule about some other command on the
-/// same line is left as it is when the push itself is ordinary.
+/// same line is left as it is when the push itself is ordinary. A push
+/// that carries `LJOS_CITE` is denied when the cite does not stand
+/// ([`cite_stands`]).
 #[must_use]
 pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<Rule> {
     // A temporary HOME and LJOS_OFF switch the whole guard off, the push
@@ -19040,6 +19370,15 @@ pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<R
     let Some(call) = push_call(line) else {
         return rule.cloned();
     };
+    if let Some(cite) = &call.cite {
+        if let Err(why) = cite_stands(cite) {
+            return Some(Rule {
+                pattern: "built-in push cite".into(),
+                verdict: "deny".into(),
+                reason: format!("LJOS_CITE={cite} does not stand: {why}"),
+            });
+        }
+    }
     let dir = push_dir(&call, cwd);
     let segment = push_segment(&call);
     let about_push = rule.is_some_and(|r| {
@@ -20634,6 +20973,7 @@ pub fn doctor() -> Vec<Habitat> {
     out.push(git_hooks::doctor_row());
     out.push(policy_row());
     out.extend(guard_off_row());
+    out.extend(guard_fail_open_row());
     out.push(bypass_row());
     out.push(panes_row());
     out.push(note_queue_row());
@@ -20647,6 +20987,19 @@ fn guard_off_row() -> Option<Habitat> {
     bookkeep::guard_off_reason().map(|state| Habitat {
         name: "guard",
         state,
+        ok: false,
+    })
+}
+
+/// A row while `LJOS_GUARD_FAIL_OPEN` lets a faulted guard allow the
+/// line. The bypass log records each of those allows. The guard is on,
+/// and the row is a warning, the same way an off guard is.
+fn guard_fail_open_row() -> Option<Habitat> {
+    guard_fail_open().then(|| Habitat {
+        name: "guard",
+        state: "fail-open: LJOS_GUARD_FAIL_OPEN=1 allows a line the guard could not judge, \
+                and the bypass log records it"
+            .into(),
         ok: false,
     })
 }
@@ -20806,29 +21159,48 @@ pub fn bypass_summary(text: &str, path: &str) -> String {
 
 fn policy_row() -> Habitat {
     let state = match policyd_bin() {
-        None if policyd_required() => {
-            Err(format!(
-                "ljos-policyd is not installed and POLICYD_REQUIRED=1: every shell command is refused; {POLICYD_INSTALL_FIX}"
-            ))
-        }
-        None => Err(
-            format!(
-                "ljos-policyd is not installed: shell commands are judged only by seat rules; {POLICYD_INSTALL_FIX}"
-            ),
-        ),
-        Some(bin) => match run_captured(&bin.display().to_string(), &["version"]) {
-            Ok(said) => policy_state(said.stdout.trim(), &bin.display().to_string()),
-            Err(e) => Err(format!(
-                "{} does not answer `version`: {e:#}; reinstall with {POLICYD_INSTALL_FIX}",
-                bin.display()
-            )),
-        },
+        None if policyd_required() => Err(format!(
+            "ljos-policyd is not installed and POLICYD_REQUIRED=1: every shell command is refused; {POLICYD_INSTALL_FIX}"
+        )),
+        None => Err(format!(
+            "ljos-policyd is not installed: shell commands are judged only by seat rules; {POLICYD_INSTALL_FIX}"
+        )),
+        Some(bin) if !bin.is_file() => Err(format!(
+            "POLICYD_BIN points at {} which is missing",
+            bin.display()
+        )),
+        Some(bin) => policy_answered(&bin),
     };
     Habitat {
         name: "policy",
         ok: state.is_ok(),
         state: state.unwrap_or_else(|e| e),
     }
+}
+
+/// `version`, then a real `check`. A hang on either is unresponsive:
+/// `version` alone used to call a wedged `check` healthy. The wait is
+/// [`guard_timeout`], so a doctor does not sit on it for the long capture.
+fn policy_answered(bin: &Path) -> std::result::Result<String, String> {
+    let at = bin.display().to_string();
+    let version = match policy_probe(&at, &["version"]) {
+        Ok(said) => said,
+        Err(e) if capture_timed_out(&e) => return Err(format!("{at} is unresponsive")),
+        Err(e) => {
+            return Err(format!(
+                "{at} does not answer `version`: {e:#}; reinstall with {POLICYD_INSTALL_FIX}"
+            ));
+        }
+    };
+    match policy_probe(&at, &["check", "--", "true"]) {
+        Err(e) if capture_timed_out(&e) => Err(format!("{at} is unresponsive")),
+        Err(e) => Err(format!("{at} answered `version` but `check` failed: {e:#}")),
+        Ok(_) => policy_state(version.stdout.trim(), &at),
+    }
+}
+
+fn policy_probe(bin: &str, args: &[&str]) -> Result<Said> {
+    run_captured_within(bin, args, None, guard_timeout())
 }
 
 /// Whether the `ljos` the hooks run is this binary. A runner that swaps
@@ -22380,6 +22752,7 @@ pub fn receive(
                     Value::String(admit::ORIGIN_PEER.to_string()),
                 );
             }
+            strip_person_basis(&mut atom);
             match admit::post_kept(&client, &atom) {
                 Ok(_) => kept += 1,
                 Err(e) => refused.push(e.to_string()),
@@ -27561,7 +27934,8 @@ pub fn policyd_bin() -> Option<std::path::PathBuf> {
 /// `ljos-policyd` on that whole line, and the first deny stands. A heredoc
 /// body is data the shell feeds a command, and it is not sent as argv.
 /// With the TCB required and absent, the line is refused. A policyd that
-/// times out or crashes does not refuse a line the fast check allowed.
+/// is present but times out, crashes, or prints no verdict refuses the
+/// line, unless `LJOS_GUARD_FAIL_OPEN` is set.
 #[must_use]
 pub fn tcb_verdict(line: &str) -> Option<Rule> {
     tcb_verdict_in(line, None)
@@ -27590,6 +27964,7 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         return Some(rule);
     }
     let mut answered = false;
+    let mut opened = false;
     // The whole shell line is judged as one call. The substitutions and
     // scripts inside the line run too, so each of their pipelines is judged
     // as well: `echo $(git push -f)` is a push.
@@ -27624,6 +27999,19 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
                     answered = true;
                     continue;
                 }
+                // A faulted guard still lets the repair through: `ljos
+                // doctor` and `ljos onboard`, and nothing else on the line.
+                // A real deny is not a fault and still stands.
+                if code == "guard-fault" && repair_line(line) {
+                    let why = token
+                        .split_once(':')
+                        .map(|(_, detail)| detail.trim())
+                        .filter(|detail| !detail.is_empty())
+                        .unwrap_or("did not start");
+                    set_guard_note(unhealthy_note(why));
+                    answered = true;
+                    continue;
+                }
                 return Some(Rule {
                     pattern: if ask {
                         code.to_string()
@@ -27635,6 +28023,12 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
                 });
             }
             Some(t) => {
+                // Only the fail-open marker is a fault the switch let
+                // through. An unready token is an allow with a note and
+                // is not a bypass.
+                if t.trim().starts_with("allow\tfail-open\t") {
+                    opened = true;
+                }
                 if let Some(note) = guard_note_of(&t) {
                     set_guard_note(note);
                 }
@@ -27643,13 +28037,78 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
             None => {}
         }
     }
+    if opened {
+        log_bypass(
+            "switch",
+            "LJOS_GUARD_FAIL_OPEN=1",
+            line,
+            &Rule {
+                pattern: "ljos-policyd".into(),
+                verdict: "deny".into(),
+                reason: "guard-fault".into(),
+            },
+        );
+    }
     (!answered && policyd_required()).then(|| Rule {
         pattern: "ljos-policyd".into(),
         verdict: "deny".into(),
-        reason: "POLICYD_REQUIRED is set and no ljos-policyd answered, so no \
-                 shell command runs until `cargo install --locked ljos-policyd` puts it on PATH"
-            .to_string(),
+        reason: policyd_required_reason(),
     })
+}
+
+/// A line whose every pipeline is `ljos doctor` or `ljos onboard`,
+/// arguments included. `ljos doctor && rm -rf` is not one: the other
+/// command would run while the guard cannot judge it. A pipe is another
+/// command too, and `pipelines` keeps it inside the segment.
+fn repair_line(line: &str) -> bool {
+    let mut saw = false;
+    for part in nested_lines(line, 0) {
+        for seg in pipelines(&part) {
+            let seg = seg.trim();
+            if seg.is_empty() {
+                continue;
+            }
+            saw = true;
+            let words = shell_words(seg);
+            let (at, _) = prefix_end(&words);
+            let words = &words[at..];
+            let Some(first) = words.first() else {
+                return false;
+            };
+            if words.iter().any(|w| w == "|") {
+                return false;
+            }
+            if base_name(first) != "ljos" {
+                return false;
+            }
+            match words.get(1).map(String::as_str) {
+                Some("doctor" | "onboard") => {}
+                _ => return false,
+            }
+        }
+    }
+    saw
+}
+
+/// What a faulted guard tells the agent. The repair is the person's:
+/// they run `ljos doctor` in their own terminal. `LJOS_GUARD_FAIL_OPEN=1`
+/// is the switch that allows other lines until then.
+#[must_use]
+pub fn guard_fault_reason(why: &str) -> String {
+    format!(
+        "the ljos guard failed ({why}); ask the person to run `ljos doctor` in their own \
+         terminal. LJOS_GUARD_FAIL_OPEN=1 allows other lines until the guard is repaired, and \
+         `ljos doctor` or `ljos onboard` still runs."
+    )
+}
+
+/// What a person reads when `POLICYD_REQUIRED` is set and no policyd
+/// answered. A missing file is that absence too: CI and a fresh install
+/// have no binary, and only this switch locks them out.
+fn policyd_required_reason() -> String {
+    "POLICYD_REQUIRED is set and no ljos-policyd answered, so no \
+     shell command runs until `cargo install --locked ljos-policyd` puts it on PATH"
+        .to_string()
 }
 
 /// Most pairs [`fetch_pairs`] hands the TCB for one line.
@@ -27727,6 +28186,10 @@ pub fn take_guard_note() -> Option<String> {
 
 fn guard_note_of(text: &str) -> Option<String> {
     let rest = text.trim().strip_prefix("allow\t")?;
+    // `fail-open` marks an allow `LJOS_GUARD_FAIL_OPEN` chose. The person
+    // reads the sentence after it; the marker stays on the raw line so a
+    // later log can tell this allow from an unready token.
+    let rest = rest.strip_prefix("fail-open\t").unwrap_or(rest);
     rest.contains("unhealthy").then(|| rest.to_string())
 }
 
@@ -27742,7 +28205,8 @@ pub fn unhealthy_note(why: &str) -> String {
 
 /// A force push, a seat deny rule, an `rm -rf` outside a temp directory,
 /// or a commit, push, or merge the gates refuse, judged in this process.
-/// `None` means the slow check may run: a timeout there allows the line.
+/// `None` means the slow check may run. A timeout there denies the line
+/// unless `LJOS_GUARD_FAIL_OPEN` is set.
 /// A temp home is not a seat unless `LJOS_GUARD=on`, and this returns
 /// `None` there too. A temp working directory is still judged.
 ///
@@ -28038,6 +28502,7 @@ pub fn policyd_reason(token: &str) -> String {
             "this runs git on another machine, so the gate cannot read the tip, the identity, or \
              CI. Run the git command in the local checkout"
         }
+        "guard-fault" => return guard_fault_reason(detail),
         _ => return token.to_string(),
     };
     if detail.is_empty() {
@@ -28049,9 +28514,10 @@ pub fn policyd_reason(token: &str) -> String {
 
 /// One line from `ljos-policyd check -- argv`. None only when there is no
 /// binary to ask: absence is not a deny unless `POLICYD_REQUIRED` says so.
-/// A binary that fails to start, crashes, hangs past [`guard_timeout`], or
-/// prints something that is not a verdict allows the line and says the
-/// guard is unhealthy. A line [`static_guard`] already judged does not
+/// A binary that is there but fails to start, crashes, hangs past
+/// [`guard_timeout`], or prints something that is not a verdict denies the
+/// line. `LJOS_GUARD_FAIL_OPEN=1` allows that fault and says the guard is
+/// unhealthy. A line [`static_guard`] already judged does not
 /// wait for that binary. The binary keeps this process's directory;
 /// [`tcb_verdict_in`] starts it in the hook's directory instead.
 pub fn tcb_check(argv: &[String]) -> Option<String> {
@@ -28085,7 +28551,19 @@ pub fn tcb_answer_in(
     cwd: Option<&Path>,
 ) -> String {
     use std::io::Read as _;
+    // A missing file is not a fault. CI and a fresh install have no
+    // policyd, and locking those out is a later, explicit switch
+    // (`POLICYD_REQUIRED`). A file that is there and still fails is a
+    // fault: Claude Code, Codex and Cursor call this path directly, and
+    // an allow there used to let the tool run with no note on Cursor.
     let unhealthy = |why: &str| format!("allow\t{}", unhealthy_note(why));
+    let faulted = |why: &str| {
+        if guard_fail_open() {
+            format!("allow\tfail-open\t{}", unhealthy_note(why))
+        } else {
+            format!("deny\tguard-fault: {why}")
+        }
+    };
     let run_dir = match cwd {
         Some(_) => match guard_start_directory(cwd) {
             Ok(dir) => Some(dir),
@@ -28093,6 +28571,12 @@ pub fn tcb_answer_in(
         },
         None => None,
     };
+    if !bin.is_file() {
+        if policyd_required() {
+            return format!("deny\t{}", policyd_required_reason());
+        }
+        return unhealthy("did not start");
+    }
     // A binary just written, by an install or a test, can be busy for a
     // moment: another thread's fork still holds the write descriptor until
     // its exec, and the kernel answers ETXTBSY. That is not a guard that
@@ -28113,7 +28597,7 @@ pub fn tcb_answer_in(
         cmd.spawn()
     };
     let Ok(mut child) = spawn_while_busy(spawn) else {
-        return unhealthy("did not start");
+        return faulted("did not start");
     };
     let start = std::time::Instant::now();
     let status = loop {
@@ -28125,7 +28609,7 @@ pub fn tcb_answer_in(
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return unhealthy("did not answer in time");
+                return faulted("did not answer in time");
             }
         }
     };
@@ -28144,7 +28628,7 @@ pub fn tcb_answer_in(
             None => text,
         },
         ("allow", true) => text,
-        _ => unhealthy("gave no verdict"),
+        _ => faulted("gave no verdict"),
     }
 }
 
@@ -28462,6 +28946,23 @@ pub fn push_cite_reading(
         pusher,
         check_seat_signatures(issue, rows, personas),
     )
+}
+
+/// [`push_cite_reading`] under the pack's roster ([`cite_roster`]), the
+/// reading `ljos consensus` prints. A roster that is not readable is the
+/// refusal, the same one [`cite_stands`] gives.
+#[must_use]
+pub fn push_cite_reading_on_roster(issue: &str, rows: &[Value], pusher: &str) -> (String, Value) {
+    match cite_roster(issue) {
+        Ok(personas) => push_cite_reading(issue, rows, &personas, pusher),
+        Err(why) => push_cite_reading_signed(
+            issue,
+            rows,
+            &std::collections::BTreeSet::new(),
+            pusher,
+            Err(why),
+        ),
+    }
 }
 
 /// [`push_cite_reading`] with the signature check already made: a refusal
@@ -28824,6 +29325,11 @@ pub fn run_captured(bin: &str, args: &[impl AsRef<str>]) -> Result<Said> {
     run_captured_as(bin, args, None)
 }
 
+/// How long [`run_captured`] waits. A habitat that never exits used to
+/// hold the caller with it. A tracker write can be slow; this is long
+/// enough for one, and a doctor probes policyd on a shorter wait.
+const CAPTURE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(180);
+
 /// [`run_captured`] with `VISSUE_AGENT` set to `identity`, for a tracker
 /// write whose output the caller has to hand on. `None` leaves the
 /// environment as it is.
@@ -28832,9 +29338,26 @@ pub fn run_captured_as(
     args: &[impl AsRef<str>],
     identity: Option<&str>,
 ) -> Result<Said> {
+    run_captured_within(bin, args, identity, CAPTURE_DEADLINE)
+}
+
+fn capture_timed_out(err: &anyhow::Error) -> bool {
+    err.to_string().contains("did not answer in time")
+}
+
+/// [`run_captured_as`] that stops the child at `deadline`. Stdout and
+/// stderr are drained while it runs, so a full pipe cannot stall it
+/// past the wait.
+fn run_captured_within(
+    bin: &str,
+    args: &[impl AsRef<str>],
+    identity: Option<&str>,
+    deadline: std::time::Duration,
+) -> Result<Said> {
+    use std::io::Read as _;
     use std::process::{Command, Stdio};
     let path = which::which(bin).with_context(|| format!("{bin} not on PATH"))?;
-    let mut cmd = Command::new(path);
+    let mut cmd = Command::new(&path);
     if let Some(who) = identity {
         cmd.env("VISSUE_AGENT", who);
     }
@@ -28843,16 +29366,63 @@ pub fn run_captured_as(
         cmd.arg(a.as_ref());
     }
     git_hooks::hook_child_env(&mut cmd);
-    let out = cmd
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .spawn()
         .with_context(|| format!("{bin}: could not start"))?;
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    if !out.status.success() {
-        bail!("{}", tool_failure(bin, &out.status, &stdout, &stderr));
+    let mut out_pipe = match child.stdout.take() {
+        Some(pipe) => pipe,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("{bin}: no stdout");
+        }
+    };
+    let mut err_pipe = match child.stderr.take() {
+        Some(pipe) => pipe,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("{bin}: no stderr");
+        }
+    };
+    let out_task = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = out_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let err_task = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = err_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_task.join();
+                let _ = err_task.join();
+                bail!("{bin} did not answer in time");
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_task.join();
+                let _ = err_task.join();
+                bail!("{bin}: {e}");
+            }
+        }
+    };
+    let stdout = String::from_utf8_lossy(&out_task.join().unwrap_or_default()).into_owned();
+    let stderr = String::from_utf8_lossy(&err_task.join().unwrap_or_default()).into_owned();
+    if !status.success() {
+        bail!("{}", tool_failure(bin, &status, &stdout, &stderr));
     }
     Ok(Said { stdout, stderr })
 }
@@ -32410,15 +32980,41 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dead = dir.path().join("ljos-policyd-missing");
         let _down = HoldEnv::set(&[("POLICYD_BIN", dead.to_str().unwrap())]);
+        let stale = policy_row();
+        assert!(!stale.ok);
+        assert_eq!(
+            stale.state,
+            format!("POLICYD_BIN points at {} which is missing", dead.display())
+        );
+        assert!(!stale.state.contains("cargo install"), "{}", stale.state);
+        let hangs = fake_policyd(
+            dir.path(),
+            "hangs",
+            "if [ \"$1\" = version ]; then\n\
+             printf '%s\\n' 'ljos-policyd 0.4.5 (phronesis)'\n\
+             exit 0\n\
+             fi\n\
+             exec /bin/sleep 30",
+        );
+        let _hang = HoldEnv::set(&[
+            ("POLICYD_BIN", hangs.to_str().unwrap()),
+            ("LJOS_GUARD_TIMEOUT", "0.4"),
+        ]);
+        let started = std::time::Instant::now();
         let unresponsive = policy_row();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "a hung check waited {:?}",
+            started.elapsed()
+        );
         assert!(!unresponsive.ok);
         assert!(
-            unresponsive.state.contains("does not answer `version`"),
+            unresponsive.state.contains("unresponsive"),
             "{}",
             unresponsive.state
         );
         assert!(
-            unresponsive.state.contains(POLICYD_INSTALL_FIX),
+            !unresponsive.state.contains("does not answer `version`"),
             "{}",
             unresponsive.state
         );
@@ -33972,18 +34568,18 @@ mod tests {
             rank: Some(1),
             cosine: Some(DENSE_ALONE_AT + 0.05),
         };
-        assert!(admits_local(&pref, near, cue, 1.0, 0.71));
+        assert!(admits_local(&pref, near, cue, 0.71));
         let far = DenseSignal {
             rank: Some(1),
             cosine: Some(DENSE_ALONE_AT - 0.05),
         };
-        assert!(!admits_local(&pref, far, cue, 1.0, 0.61));
+        assert!(!admits_local(&pref, far, cue, 0.61));
         let low = DenseSignal {
             rank: Some(DENSE_ALONE_RANK + 1),
             cosine: Some(0.9),
         };
-        assert!(!admits_local(&pref, low, cue, 1.0, 0.95));
-        assert!(!admits_local(&pref, DenseSignal::default(), cue, 1.0, 0.0));
+        assert!(!admits_local(&pref, low, cue, 0.95));
+        assert!(!admits_local(&pref, DenseSignal::default(), cue, 0.0));
     }
 
     #[test]
@@ -34101,25 +34697,27 @@ mod tests {
             cosine: Some(best - DENSE_WORD_BEHIND + 0.01),
         };
         // One ordinary word of a longer cue is a coincidence, even close to the best.
-        assert!(!admits_local(&lesson, near, long, 1.0, best));
+        assert!(!admits_local(&lesson, near, long, best));
         // That word is the subject when the cue has two content words or fewer.
-        assert!(admits_local(&lesson, near, "wrong URL", 1.0, best));
+        assert!(admits_local(&lesson, near, "wrong URL", best));
         // Two content words name the subject on a longer cue.
         let two = "the API base URL is wrong after deploying";
-        assert!(admits_local(&lesson, near, two, 1.0, best));
+        assert!(admits_local(&lesson, near, two, best));
         let behind = DenseSignal {
             rank: Some(5),
             cosine: Some(best - DENSE_WORD_BEHIND - 0.01),
         };
-        assert!(!admits_local(&lesson, behind, two, 1.0, best));
-        // Below the floor of the top score it stays out.
-        assert!(!admits_local(&lesson, near, "wrong URL", 10.0, best));
+        assert!(!admits_local(&lesson, behind, two, best));
+        // A fused score far under the pool's top does not keep it out:
+        // the pack decays that score by age.
+        let mut old = lesson.clone();
+        old.score = 0.01;
+        assert!(admits_local(&old, near, "wrong URL", best));
         // A word in common and no cosine: the encoder said nothing.
         assert!(!admits_local(
             &lesson,
             DenseSignal::default(),
             "wrong URL",
-            1.0,
             best
         ));
         // An alias names the subject even under the confidence line.
@@ -34137,7 +34735,6 @@ mod tests {
             &uv,
             alias,
             "set up a virtualenv and install black",
-            1.0,
             0.61
         ));
         // One ordinary word on a longer unrelated cue stays out below the line.
@@ -34155,7 +34752,6 @@ mod tests {
             &tests,
             weak,
             "Run the tests and tell me what fails",
-            1.0,
             0.60
         ));
         // A transient lesson the encoder ranks first at the confidence line is shown.
@@ -34165,13 +34761,13 @@ mod tests {
             rank: Some(1),
             cosine: Some(DENSE_ALONE_AT),
         };
-        assert!(admits_local(&episode, sure, long, 1.0, DENSE_ALONE_AT));
+        assert!(admits_local(&episode, sure, long, DENSE_ALONE_AT));
         // The same episode stays out on one ordinary word of a long cue.
-        assert!(!admits_local(&episode, near, long, 1.0, best));
+        assert!(!admits_local(&episode, near, long, best));
         // A lesson written before the horizon tag stays out whatever the encoder says.
         let mut untagged = lesson.clone();
         untagged.entities.clear();
-        assert!(!admits_local(&untagged, sure, long, 1.0, DENSE_ALONE_AT));
+        assert!(!admits_local(&untagged, sure, long, DENSE_ALONE_AT));
     }
 
     fn pin_hit(id: &str, text: &str) -> Hit {
@@ -34385,6 +34981,54 @@ mod tests {
         };
         let (note, _) = hook_note(&call, 5);
         assert_eq!(note.matches("Run the lint step").count(), 3, "{note}");
+    }
+
+    /// A memory that names the prompt's subject reaches it however old it
+    /// is. The pack's fused score for a three-month-old memory sits under
+    /// 0.6 of a fresh one's on age alone; its cosine does not.
+    #[test]
+    fn the_hook_admits_an_old_memory_that_names_the_subject() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let hit = |id: &str, text: &str, score: f64, ts: &str, rank: u32, cos: f64| {
+            serde_json::json!({
+                "id": id, "text": text, "score": score, "kind": "lesson",
+                "ts": ts, "entities": ["horizon:standing"],
+                "ballots": 2, "of": 3, "dense_rank": rank, "cosine": cos
+            })
+        };
+        let url = serve_signal_pack(serde_json::json!([
+            hit(
+                "fresh",
+                "Restart the worker after every deploy so it reads the new config",
+                2.0,
+                "2026-10-20T09:00:00.000Z",
+                1,
+                0.62
+            ),
+            hit(
+                "old",
+                "The frontend reads its API base URL from VITE_API_URL at build time, not at runtime",
+                0.8,
+                "2026-07-22T09:00:00.000Z",
+                2,
+                0.60
+            ),
+        ]));
+        let _url = PackUrl::set(&url);
+        let call = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "the API base URL is wrong after deploying".into(),
+            session: Some("aged-one".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(&call, 5);
+        assert!(note.contains("VITE_API_URL"), "{note}");
     }
 
     /// A cold encoder and a paraphrase share no word, so the atom list
@@ -37500,6 +38144,56 @@ mod tests {
         assert!(!step.ok, "an unknown template writes nothing: {step:?}");
     }
 
+    /// Claude Desktop keeps its config under ~/Library/Application Support
+    /// on macOS and under ~/.config on Linux. A runner with one place
+    /// keeps it on both.
+    #[test]
+    fn claude_desktop_config_is_where_the_os_keeps_it() {
+        let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
+        let find = |name: &str| all.harness.iter().find(|h| h.name == name).expect(name);
+        let desktop = find("claude-desktop");
+        assert_eq!(
+            desktop.config_json_on("macos"),
+            Some("~/Library/Application Support/Claude/claude_desktop_config.json")
+        );
+        assert_eq!(
+            desktop.config_json_on("linux"),
+            Some("~/.config/Claude/claude_desktop_config.json")
+        );
+        let cursor = find("cursor");
+        assert_eq!(cursor.config_json_on("macos"), Some("~/.cursor/mcp.json"));
+    }
+
+    /// Claude Desktop opened from the Dock or Finder starts its servers
+    /// with launchd's PATH, which holds no user bin directory. Onboard
+    /// writes this install's path there unless that PATH runs it.
+    #[test]
+    fn a_launchd_app_gets_the_absolute_server_unless_its_path_runs_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
+        let find = |name: &str| all.harness.iter().find(|h| h.name == name).expect(name);
+        let desktop = find("claude-desktop");
+        assert_eq!(desktop.launch_path_on("macos"), Some(super::LAUNCHD_PATH));
+        assert_eq!(desktop.launch_path_on("linux"), None);
+        assert_eq!(find("cursor").launch_path_on("macos"), None);
+
+        let scratch = tempfile::tempdir().unwrap();
+        let bin = scratch.path().join("bin");
+        let empty = scratch.path().join("empty");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&empty).unwrap();
+        let server = bin.join("ljos-mcp");
+        std::fs::write(&server, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let elsewhere = empty.to_str().unwrap();
+        let plan = super::server_command_plan_in(&server, "onboard", Some(elsewhere));
+        assert_eq!(plan.command, server.display().to_string());
+        let note = plan.note.unwrap_or_default();
+        assert!(note.contains(elsewhere), "{note}");
+        let plan = super::server_command_plan_in(&server, "onboard", bin.to_str());
+        assert_eq!(plan.command, super::MCP_SERVER_COMMAND);
+    }
+
     /// The deny a failed gate writes exits 2, and omp still blocks on it.
     #[test]
     fn the_omp_plugin_reads_a_deny_on_any_exit() {
@@ -39230,6 +39924,27 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(!said.to_string().contains("exit status"), "{said}");
     }
 
+    /// A habitat that never exits used to hold the caller. The capture
+    /// stops it and says so.
+    #[test]
+    fn run_captured_stops_when_the_command_does_not_answer() {
+        let _g = env_guard();
+        let started = std::time::Instant::now();
+        let err = run_captured_within(
+            "sh",
+            &["-c", "exec sleep 30"],
+            None,
+            std::time::Duration::from_millis(400),
+        )
+        .unwrap_err();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "waited {:?}",
+            started.elapsed()
+        );
+        assert!(err.to_string().contains("did not answer in time"), "{err}");
+    }
+
     #[test]
     fn join_keeps_spaces() {
         assert_eq!(
@@ -39253,10 +39968,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     #[test]
-    fn a_remember_stands_whoever_writes_it_and_an_episode_waits() {
+    fn a_persons_remember_stands_and_an_agents_does_not() {
         assert_eq!(remember_horizon(false, false, false), Some(false));
         assert_eq!(remember_horizon(true, false, false), Some(true));
-        assert_eq!(remember_horizon(false, true, true), Some(false));
+        assert_eq!(remember_horizon(false, true, true), Some(true));
         let mut person = atom_body("lesson", "Run the linter before the push.", "w");
         stamp_horizon(
             &mut person,
@@ -39266,8 +39981,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         );
         assert_eq!(
             remember_horizon(false, false, true),
-            Some(false),
-            "an agent's lesson stands at once"
+            Some(true),
+            "an agent's lesson does not stand"
         );
         let mut agent = atom_body("lesson", "Run the linter before the push.", "w");
         stamp_horizon(
@@ -39303,7 +40018,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             cosine: Some(DENSE_ALONE_AT),
         };
         assert!(
-            admits_local(&hit(&agent), sure, "anything", 1.0, DENSE_ALONE_AT),
+            admits_local(&hit(&agent), sure, "anything", DENSE_ALONE_AT),
             "the hook shows an episode the encoder ranks first"
         );
     }
@@ -40222,6 +40937,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             marker: None,
             snippet: None,
             config_json: Some(config.display().to_string()),
+            config_json_macos: None,
+            launchd: false,
             json_pointer: Some("/mcp/ljos".into()),
             json_entry: None,
             skills: None,
@@ -40373,7 +41090,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(
             task.contains("ljos vote surf-ab12 --for OPTION --expect OPTION --as buildengineer ")
         );
-        assert!(task.contains("ljos remember"));
+        assert!(task.contains("ljos note"));
+        assert!(!task.contains("ljos remember"));
         assert!(task.contains("Do not open a sitting"));
         let p = Persona {
             name: "buildengineer".into(),
@@ -40660,12 +41378,19 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 "{line} -> {gated:?}"
             );
         }
-        assert!(gate_push(
-            None,
-            "LJOS_CITE=gpr_optim-1yg5 git push upstream develop",
-            None
-        )
-        .is_none());
+        let cited = "LJOS_CITE=gpr_optim-1yg5 git push upstream develop";
+        let refused = gate_push(None, cited, None).unwrap();
+        assert_eq!(
+            (refused.verdict.as_str(), refused.pattern.as_str()),
+            ("deny", "built-in push cite")
+        );
+        assert!(
+            refused
+                .reason
+                .starts_with("LJOS_CITE=gpr_optim-1yg5 does not stand: "),
+            "{}",
+            refused.reason
+        );
         assert!(gate_push(None, "git push -u origin feature/x", None).is_none());
         for tags in [
             "git push --tags",
@@ -40695,7 +41420,6 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         };
         for line in [
             "git push",
-            "LJOS_CITE=gpr_optim-1yg5 git push upstream develop",
             "git push origin main",
             "git push -u origin feature/x",
         ] {
@@ -40705,6 +41429,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             let gated = gate_push(ruled.as_ref(), line, None);
             assert!(gated.is_none(), "{line} via ruled_verdict stayed {gated:?}");
         }
+        let gated = gate_push(Some(&trust), cited, None);
+        assert_eq!(gated.map(|r| r.pattern), Some("built-in push cite".into()));
         let codex = hook_call(
             r#"{"hook_event_name":"PreToolUse","session_id":"c-1","turn_id":"t-1","tool_name":"Bash","tool_input":{"command":"git push"}}"#,
         );
@@ -40726,7 +41452,11 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             &cited.cue,
             None,
         );
-        assert!(gated.is_none(), "{gated:?}");
+        assert_eq!(
+            gated.map(|r| r.verdict),
+            Some("deny".into()),
+            "a cite that does not stand"
+        );
         for line in ["git status", "git commit -m save", "cargo build", "rg foo"] {
             let ruled = ruled_verdict(&[], line);
             let gated = gate_push(ruled.as_ref(), line, None);
@@ -41047,11 +41777,41 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             seat_guard("cat ~/.gemini/config/hooks.json").is_none(),
             "reading is fine"
         );
+        for path in [
+            "~/.cursor/hooks.json",
+            "~/.codeium/windsurf/hooks.json",
+            "~/.factory/hooks.json",
+            "~/.kiro/hooks/ljos.json",
+            "~/.copilot/hooks/ljos.json",
+            "~/.qwen/settings.json",
+            "~/.config/crush/crush.json",
+            "~/Documents/Cline/Hooks",
+            "~/Documents/Cline/Hooks/PreToolUse",
+            "~/.augment/settings.json",
+            "~/.augment/ljos-guard-auggie.sh",
+            "~/.config/amp/settings.json",
+            "~/.config/amp/ljos-guard-amp.sh",
+            "~/.agents/plugins/ljos/hooks/hooks.json",
+            "~/.openhands/hooks.json",
+            "~/.gemini/settings.json",
+        ] {
+            assert!(
+                seat_guard(&format!("sed -i s/a/b/ {path}")).is_some(),
+                "{path}"
+            );
+            assert!(
+                seat_guard(&format!("cat {path}")).is_none(),
+                "reading {path}"
+            );
+        }
+        assert!(seat_guard("sed -i s/a/b/ ~/notes/hooks.json").is_none());
         assert!(seat_guard("sha256sum ~/.local/bin/ljos ~/.local/bin/ljos.bak").is_none());
         assert!(
             seat_guard("cp ~/.local/bin/ljos /tmp/copy").is_some(),
             "a writer naming it is refused"
         );
+        assert!(seat_guard("printf x > /run/user/1000/ljos/latest-prompt").is_some());
+        assert!(seat_guard("printf x > /run/user/1000/ljos/latest-prompt.bind").is_some());
         assert!(seat_guard("ljos onboard --harness grok").is_none());
         assert!(seat_guard("cargo build --release").is_none());
         assert!(!is_seat_path("~/.local/bin/ljos.bak"));
@@ -42121,8 +42881,17 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
     }
 
+    /// A policyd that hangs, crashes, or prints garbage used to allow the
+    /// tool call. Claude Code, Codex and Cursor call `ljos hook` directly,
+    /// so that allow reached the runner, and Cursor's was a bare allow
+    /// with no note. The fault is a deny in every runner's contract.
+    /// `LJOS_GUARD_FAIL_OPEN=1` restores the allow with a note. A missing
+    /// binary, and a deny that is only the seat not being ready, still
+    /// allow. A `cwd` that does not resolve stays `cwd-unresolved`.
     #[test]
-    fn a_tcb_that_crashes_or_times_out_allows_the_line() {
+    fn a_tcb_that_crashes_or_times_out_denies_on_every_runner() {
+        let _g = env_guard();
+        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         let dir = tempfile::tempdir().unwrap();
         let argv = vec!["git".to_string(), "status".to_string()];
         let quick = std::time::Duration::from_millis(200);
@@ -42136,12 +42905,16 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         );
         let empty = answer("empty-reason", "printf 'deny\\tphronesis\\n'; exit 2");
         assert!(
-            empty.starts_with("allow\t") && empty.contains("unhealthy"),
+            empty.starts_with("allow\t")
+                && empty.contains("unhealthy")
+                && !empty.contains("fail-open"),
             "{empty}"
         );
         let unbound = answer("bind-failed", "printf 'deny\\tbind-failed\\n'; exit 2");
         assert!(
-            unbound.starts_with("allow\t") && unbound.contains("unhealthy"),
+            unbound.starts_with("allow\t")
+                && unbound.contains("unhealthy")
+                && !unbound.contains("fail-open"),
             "{unbound}"
         );
         assert_eq!(
@@ -42155,24 +42928,20 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ),
             "deny\tphronesis: seat could not open"
         );
-        for (name, body) in [
-            ("crashes", "kill -SEGV $$"),
-            ("fails", "echo oops; exit 1"),
-            ("garbage", "echo ok"),
-            ("silent", "exit 0"),
-            ("allows-then-fails", "echo allow; exit 3"),
-            ("hangs", "sleep 30"),
+        for (name, body, why) in [
+            ("crashes", "kill -SEGV $$", "gave no verdict"),
+            ("fails", "echo oops; exit 1", "gave no verdict"),
+            ("garbage", "echo ok", "gave no verdict"),
+            ("silent", "exit 0", "gave no verdict"),
+            ("allows-then-fails", "echo allow; exit 3", "gave no verdict"),
+            ("hangs", "sleep 30", "did not answer in time"),
         ] {
             let said = answer(name, body);
-            assert!(
-                said.starts_with("allow\t") && said.contains("unhealthy"),
-                "{name}: {said}"
-            );
-            assert!(!said.contains("refused unchecked"), "{name}: {said}");
+            assert_eq!(said, format!("deny\tguard-fault: {why}"), "{name}: {said}");
         }
         let gone = tcb_answer_in(&dir.path().join("missing"), &argv, quick, None);
         assert!(
-            gone.starts_with("allow\t") && gone.contains("did not start"),
+            gone.starts_with("allow\t") && gone.contains("did not start") && !gone.contains("deny"),
             "{gone}"
         );
         let home = dir.path().join("home");
@@ -42209,24 +42978,118 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             unresolved.starts_with("deny\tcwd-unresolved:"),
             "{unresolved}"
         );
+        drop(_home);
+
+        let seat = SeatDir::new("fault-deny");
+        let _seat = HoldEnv::set(&[
+            ("HOME", seat.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", seat.path().join("data").to_str().unwrap()),
+            ("LJOS_OFF", "0"),
+            ("LJOS_GUARD", "on"),
+            ("PACKSET_URL", "off"),
+            (
+                "POLICYD_BIN",
+                fake_policyd(seat.path(), "hook-fault", "echo oops; exit 1")
+                    .to_str()
+                    .unwrap(),
+            ),
+        ]);
+        let _ = take_guard_note();
+        let rule = tcb_verdict("echo hi").expect("a crashed policyd denies the line");
+        assert_eq!(rule.verdict, "deny");
+        assert!(
+            rule.reason
+                .contains("ask the person to run `ljos doctor` in their own terminal"),
+            "{}",
+            rule.reason
+        );
+        assert!(
+            rule.reason.contains("LJOS_GUARD_FAIL_OPEN=1"),
+            "{}",
+            rule.reason
+        );
+        assert!(take_guard_note().is_none());
+        let direct = [
+            ("claude", HookShape::Asks),
+            ("codex", HookShape::DenyOnly),
+            ("cursor", HookShape::Cursor),
+            ("cursor-shell", HookShape::CursorShell),
+        ];
+        for (name, shape) in direct {
+            let call = HookCall {
+                event: "PreToolUse".into(),
+                cue: "echo hi".into(),
+                session: None,
+                shape,
+            };
+            let out = hook_output_ruled(&call, "", Some(&rule));
+            assert!(answer_denies(&out), "{name}: {out}");
+            assert!(out.contains("LJOS_GUARD_FAIL_OPEN=1"), "{name}: {out}");
+            if shape.is_cursor() {
+                let v: Value = serde_json::from_str(out.trim()).unwrap();
+                assert_eq!(v["permission"], "deny", "{name}: {out}");
+                assert!(
+                    v["user_message"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("LJOS_GUARD_FAIL_OPEN=1"),
+                    "{name}: {out}"
+                );
+                assert!(
+                    v["agent_message"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("LJOS_GUARD_FAIL_OPEN=1"),
+                    "{name}: {out}"
+                );
+            }
+        }
+        let inner = hook_output_ruled(
+            &HookCall {
+                event: "PreToolUse".into(),
+                cue: "echo hi".into(),
+                session: None,
+                shape: HookShape::CamelCase,
+            },
+            "",
+            Some(&rule),
+        );
+        for runner in runner_hooks::RUNNERS {
+            let (stdout, stderr, code) = runner_hooks::answer(runner, "PreToolUse", &inner);
+            let body = format!("{stdout}{stderr}");
+            let denied = match *runner {
+                "copilot" | "auggie" => {
+                    code == 0 && stdout.contains(r#""permissionDecision":"deny""#)
+                }
+                "gemini" => code == 0 && stdout.contains(r#""decision":"deny""#),
+                "cline" => code == 0 && stdout.contains(r#""cancel":true"#),
+                "windsurf" | "factory" | "kiro" | "qwen" | "crush" | "goose" | "amp"
+                | "openhands" => code == 2,
+                _ => false,
+            };
+            assert!(denied, "{runner}: code {code} {body}");
+            assert!(body.contains("LJOS_GUARD_FAIL_OPEN=1"), "{runner}: {body}");
+        }
+
+        let _open = HoldEnv::set(&[("LJOS_GUARD_FAIL_OPEN", "1")]);
+        let opened = answer("fails-open", "echo oops; exit 1");
+        assert!(
+            opened.starts_with("allow\tfail-open\t") && opened.contains("unhealthy"),
+            "{opened}"
+        );
+        let _ = take_guard_note();
+        assert!(
+            tcb_verdict("echo hi").is_none(),
+            "fail-open allows the line"
+        );
+        let note = take_guard_note().expect("the allow keeps its note");
+        assert!(note.contains("unhealthy"), "{note}");
+        assert!(!note.starts_with("fail-open"), "{note}");
     }
 
     #[test]
     fn the_guard_waits_five_seconds_unless_told_otherwise() {
         let _g = env_guard();
-        let saved = std::env::var_os("LJOS_GUARD_TIMEOUT");
-        struct Restore(Option<std::ffi::OsString>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                unsafe {
-                    match &self.0 {
-                        Some(v) => std::env::set_var("LJOS_GUARD_TIMEOUT", v),
-                        None => std::env::remove_var("LJOS_GUARD_TIMEOUT"),
-                    }
-                }
-            }
-        }
-        let _restore = Restore(saved);
         unsafe { std::env::remove_var("LJOS_GUARD_TIMEOUT") };
         assert_eq!(guard_timeout(), std::time::Duration::from_secs(5));
         assert_eq!(GUARD_TIMEOUT, std::time::Duration::from_secs(5));
@@ -42238,6 +43101,28 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(guard_timeout(), GUARD_TIMEOUT);
         unsafe { std::env::set_var("LJOS_GUARD_TIMEOUT", "nope") };
         assert_eq!(guard_timeout(), GUARD_TIMEOUT);
+    }
+
+    /// EnvLock puts the process environment back when it drops. A second
+    /// restore in a test that already holds one, and a changelog note
+    /// about that test, would be published as if a person could see it.
+    #[test]
+    fn a_test_lock_is_the_only_env_restore() {
+        let needle = ["struct ", "Restore"].concat();
+        for src in [include_str!("lib.rs"), include_str!("runner_hooks.rs")] {
+            assert!(
+                !src.contains(&needle),
+                "a second restore is still in the source"
+            );
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../changelog.d");
+        for name in [
+            "+rgkz-20261021-guard-fault-test-env-lock.misc.md",
+            "+rgkz-20261021-guard-fault-test-env-lock-2.misc.md",
+            "+rgkz-20261021-guard-fault-test-shape.misc.md",
+        ] {
+            assert!(!root.join(name).exists(), "{name}");
+        }
     }
 
     /// A checkout whose tip already has a passing `true` evidence record.
@@ -42465,7 +43350,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     #[test]
-    fn a_plain_command_is_allowed_when_the_guard_is_unhealthy() {
+    fn a_plain_command_is_denied_when_the_guard_is_unhealthy() {
         let _g = env_guard();
         let home = SeatDir::new("unhealthy-guard");
         let bin = fake_policyd(home.path(), "policyd", "echo oops; exit 1");
@@ -42475,16 +43360,197 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ("POLICYD_BIN", bin.to_str().unwrap()),
             ("PACKSET_WORKSPACE", "unhealthy-guard"),
             ("LJOS_OFF", "0"),
+            ("LJOS_GUARD", "on"),
         ]);
+        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         let _ = take_guard_note();
-        assert!(tcb_verdict("git status").is_none());
-        let note = take_guard_note().expect("the unhealthy note");
-        assert!(note.contains("unhealthy"), "{note}");
-        assert!(!note.contains("refused unchecked"), "{note}");
-        let rule = tcb_verdict("rm -rf /home/u/proj").expect("still denied");
+        let rule = tcb_verdict("git status").expect("a crashed policyd denies");
         assert_eq!(rule.verdict, "deny");
-        assert_eq!(rule.pattern, "rm-rf-outside-tmp");
+        assert!(
+            rule.reason
+                .contains("ask the person to run `ljos doctor` in their own terminal"),
+            "{}",
+            rule.reason
+        );
+        assert!(
+            rule.reason.contains("LJOS_GUARD_FAIL_OPEN=1"),
+            "{}",
+            rule.reason
+        );
         assert!(take_guard_note().is_none());
+        let kept = tcb_verdict("rm -rf /home/u/proj").expect("still denied");
+        assert_eq!(kept.verdict, "deny");
+        assert_eq!(kept.pattern, "rm-rf-outside-tmp");
+        assert!(take_guard_note().is_none());
+    }
+
+    /// A missing policyd allows the line and says so. CI and a fresh
+    /// install have no binary. `POLICYD_REQUIRED=1` is the switch that
+    /// refuses instead, including when `POLICYD_BIN` names a file that
+    /// is not there.
+    #[test]
+    fn a_missing_policyd_allows_unless_it_is_required() {
+        let _g = env_guard();
+        let home = SeatDir::new("missing-policyd");
+        let missing = home.path().join("no-such-policyd");
+        let _env = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", home.path().join("data").to_str().unwrap()),
+            ("POLICYD_BIN", missing.to_str().unwrap()),
+            ("PACKSET_URL", "off"),
+            ("LJOS_OFF", "0"),
+            ("LJOS_GUARD", "on"),
+        ]);
+        unsafe {
+            std::env::remove_var("POLICYD_REQUIRED");
+            std::env::remove_var("LJOS_GUARD_FAIL_OPEN");
+        }
+        let _ = take_guard_note();
+        assert!(tcb_verdict("echo hi").is_none(), "a missing policyd allows");
+        let note = take_guard_note().expect("the allow carries a note");
+        assert!(note.contains("unhealthy"), "{note}");
+        assert!(note.contains("did not start"), "{note}");
+        let _req = HoldEnv::set(&[("POLICYD_REQUIRED", "1")]);
+        let rule = tcb_verdict("echo hi").expect("POLICYD_REQUIRED denies");
+        assert_eq!(rule.verdict, "deny");
+        assert!(rule.reason.contains("POLICYD_REQUIRED"), "{}", rule.reason);
+        assert!(rule.reason.contains("cargo install"), "{}", rule.reason);
+        assert!(take_guard_note().is_none());
+    }
+
+    /// A faulted guard still runs `ljos doctor` and `ljos onboard`, so the
+    /// seat can be repaired. Another command on the same line stays denied.
+    #[test]
+    fn a_faulted_guard_lets_doctor_and_onboard_through() {
+        let _g = env_guard();
+        let home = SeatDir::new("repair-guard");
+        let bin = fake_policyd(home.path(), "policyd", "echo oops; exit 1");
+        let _env = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", home.path().join("data").to_str().unwrap()),
+            ("POLICYD_BIN", bin.to_str().unwrap()),
+            ("PACKSET_URL", "off"),
+            ("LJOS_OFF", "0"),
+            ("LJOS_GUARD", "on"),
+        ]);
+        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
+        for line in [
+            "ljos doctor",
+            "ljos doctor --fix",
+            "ljos onboard",
+            "ljos onboard --example",
+        ] {
+            let _ = take_guard_note();
+            assert!(tcb_verdict(line).is_none(), "{line} should run");
+            let note = take_guard_note().expect(line);
+            assert!(note.contains("unhealthy"), "{line}: {note}");
+        }
+        for line in [
+            "ljos doctor && echo hi",
+            "ljos doctor | cat",
+            "echo hi && ljos doctor",
+        ] {
+            let mixed = tcb_verdict(line).expect("another command stays denied");
+            assert_eq!(mixed.verdict, "deny", "{line}");
+            assert!(
+                mixed
+                    .reason
+                    .contains("ask the person to run `ljos doctor` in their own terminal"),
+                "{line}: {}",
+                mixed.reason
+            );
+            assert!(
+                mixed.reason.contains("LJOS_GUARD_FAIL_OPEN=1"),
+                "{line}: {}",
+                mixed.reason
+            );
+        }
+        let wiped = tcb_verdict("ljos doctor && rm -rf /home/u/proj").expect("still denied");
+        assert_eq!(wiped.verdict, "deny");
+        assert_eq!(wiped.pattern, "rm-rf-outside-tmp");
+        let other = tcb_verdict("echo hi").expect("a plain line is still denied");
+        assert_eq!(other.verdict, "deny");
+        assert!(
+            other.reason.contains("run `ljos doctor`"),
+            "{}",
+            other.reason
+        );
+    }
+
+    /// `LJOS_GUARD_FAIL_OPEN=1` allows a fault and writes that allow to
+    /// the bypass log. An unready token is not that allow, and the doctor
+    /// names the switch.
+    #[test]
+    fn a_fail_open_allow_is_logged_and_the_doctor_names_it() {
+        let _g = env_guard();
+        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
+        assert!(guard_fail_open_row().is_none());
+        let home = SeatDir::new("fail-open-log");
+        let data = home.path().join("data");
+        let crash = fake_policyd(home.path(), "crash", "echo oops; exit 1");
+        let _env = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", data.to_str().unwrap()),
+            ("POLICYD_BIN", crash.to_str().unwrap()),
+            ("PACKSET_URL", "off"),
+            ("LJOS_OFF", "0"),
+            ("LJOS_GUARD", "on"),
+            ("LJOS_GUARD_FAIL_OPEN", "1"),
+        ]);
+        let row = guard_fail_open_row().expect("the switch has a row");
+        assert!(!row.ok);
+        assert_eq!(row.name, "guard");
+        assert!(
+            row.state.contains("LJOS_GUARD_FAIL_OPEN=1"),
+            "{}",
+            row.state
+        );
+        let _ = take_guard_note();
+        assert!(
+            tcb_verdict("echo hi").is_none(),
+            "fail-open allows the line"
+        );
+        let path = bypass_log_path().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rows: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 1, "{text}");
+        assert_eq!(rows[0]["kind"], "switch");
+        assert_eq!(rows[0]["how"], "LJOS_GUARD_FAIL_OPEN=1");
+        assert_eq!(rows[0]["command"], "echo hi");
+        assert_eq!(rows[0]["rule"], "ljos-policyd");
+        let empty = fake_policyd(
+            home.path(),
+            "empty-reason",
+            "printf 'deny\\tphronesis\\n'; exit 2",
+        );
+        let _empty = HoldEnv::set(&[("POLICYD_BIN", empty.to_str().unwrap())]);
+        assert!(
+            tcb_verdict("git status").is_none(),
+            "an unready token allows"
+        );
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            after.lines().count(),
+            1,
+            "an unready token is not a bypass: {after}"
+        );
+        drop(_empty);
+        drop(_env);
+        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
+        let _closed = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", data.to_str().unwrap()),
+            ("POLICYD_BIN", crash.to_str().unwrap()),
+            ("PACKSET_URL", "off"),
+            ("LJOS_OFF", "0"),
+            ("LJOS_GUARD", "on"),
+        ]);
+        assert!(tcb_verdict("echo hi").is_some(), "a fault denies again");
+        let still = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(still.lines().count(), 1, "{still}");
     }
 
     /// `ljos-policyd` prints `deny\tphronesis` when a decision has no reason
@@ -48675,6 +49741,12 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// is installed on PATH the way CI installs deedar. A failed build
     /// fails the test.
     fn deedimport_deedar() -> std::path::PathBuf {
+        // Two tests call this at once, and one would clear the cache the
+        // other is still building in.
+        static BUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _build = BUILD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let sha = deedar_pin();
         let cache = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/deedimport2-deedar");

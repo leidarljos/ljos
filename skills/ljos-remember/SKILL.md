@@ -11,7 +11,7 @@ a prompt back to the agent. Three verbs write to it. Pick by what was said.
 | the person said | verb | when it comes back |
 |---|---|---|
 | "I prefer X over Y", "always do X" | `ljos prefer "..."` | from now on |
-| a lesson from this work | `ljos remember "..."` | when a prompt bears on it; a review promotes it to standing. `--standing` makes it standing now |
+| a lesson the person stated | `ljos remember "..."` | at once, when the words are theirs. Under a runner the agent's own words are `ljos note` |
 | "never run X", "ask me before X" | `ljos rule 'PATTERN' --verdict deny --why "..."` | the hook stops the command before it runs |
 
 Examples:
@@ -31,6 +31,13 @@ ljos rule '*--force*' --verdict deny --why "Never force push."
   bun", "never push to main"), the prompt hook saves it in their words and
   says `Saved the person's preference`. Do not write it again. A lesson the
   person dictates, written with `ljos remember` in their words, stands at once.
+  Under a runner those words have to be in the prompt the hook kept. A
+  runner with no prompt hook, `LJOS_CAPTURE=off`, a paraphrase, or a prompt
+  older than an hour does not count, and the write is refused on the MCP
+  path. The match is four or more contiguous words of that prompt. It does
+  not check that the person asserted the claim, and it is left that way
+  because tightening it is more than a one-line change. The agent's own
+  words are an unreviewed note, which the prompt does not treat as a fact.
 - A correction from the person ("you should have", "I told you") goes in as
   `ljos prefer` with their words, after you confirm the wording with them.
 - `--verdict ask` hands the command to the person instead of refusing it.
