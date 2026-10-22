@@ -30,6 +30,13 @@
 //!   `tool-echo`. Session-end extraction stamps `via:session-end` and
 //!   `session:`. None of those read as the person before, and they are
 //!   not promoted.
+//!
+//! packset refuses an update that raises `source.basis` from none to
+//! `person`, and accept takes only a write the pack itself held as a
+//! proposal. A promoted atom is raised by storing a copy as the person's
+//! and retiring the original. The copy keeps the text, kind, entities,
+//! `ts` and `valid_from`, so a rule that cites the text and a lesson hash
+//! read it as the same claim. Its id is new.
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -119,7 +126,9 @@ pub(crate) fn review_sentence(n: usize) -> String {
 /// Stamp basis `person` on every legacy atom the old person-path writers
 /// marked. Recorded per pack, so a later run does nothing. The pack is
 /// the one this process is configured for; nothing is fetched elsewhere.
-/// A pack that does not answer is left for the next run.
+/// A pack that does not answer is left for the next run. One the pack
+/// refuses is written on the record and said once, by the run that wrote
+/// it, and is not sent again.
 pub fn migrate_once() {
     // A bounded pack read already holds the environment lock, then
     // searches, and the search calls this. The marker path takes that
@@ -131,8 +140,28 @@ pub fn migrate_once() {
         if recorded() {
             return;
         }
-        if stamp_marked().is_ok() {
-            let _ = record();
+        match stamp_marked() {
+            Ok(refused) if refused.is_empty() => {
+                let _ = record("once\n");
+            }
+            Ok(refused) => {
+                let list = refused.join("\n");
+                if record(&format!("refused\n{list}\n")).unwrap_or(false) {
+                    let path = marker_path().map(|p| p.display().to_string());
+                    eprintln!(
+                        "ljos: the pack refused {} older {} as the person's, and the \
+                         upgrade will not try again; remove {} to retry:\n{list}",
+                        refused.len(),
+                        if refused.len() == 1 {
+                            "preference"
+                        } else {
+                            "preferences"
+                        },
+                        path.unwrap_or_default(),
+                    );
+                }
+            }
+            Err(_) => {}
         }
     });
 }
@@ -166,7 +195,7 @@ pub fn list() -> Result<String> {
 /// # Errors
 ///
 /// The id is not a held-back preference, this process is under a runner
-/// or not a terminal, or the pack refused the update.
+/// or not a terminal, or the pack refused the person's copy.
 pub fn keep(id: &str) -> Result<String> {
     if under_a_runner() {
         bail!(
@@ -197,8 +226,11 @@ pub fn keep(id: &str) -> Result<String> {
         bail!("prefer: {id} is not an older preference awaiting review");
     }
     let client = pack()?;
-    stamp_basis(&client, atom).with_context(|| format!("prefer: could not keep {id}"))?;
-    Ok(format!("kept {id} as the person's preference\n"))
+    let stored =
+        stamp_basis(&client, atom).with_context(|| format!("prefer: could not keep {id}"))?;
+    Ok(format!(
+        "kept {id} as the person's preference, now {stored}\n"
+    ))
 }
 
 fn prompt_hook(atom: &Value) -> bool {
@@ -244,9 +276,9 @@ fn field<'a>(source: &'a serde_json::Map<String, Value>, key: &str) -> &'a str {
     source.get(key).and_then(Value::as_str).unwrap_or("").trim()
 }
 
-/// How long one update may take. A hook is killed at 10s, so the listing
-/// and this update stop at the hook's bound. `PACKSET_TIMEOUT_MS` still
-/// shortens it.
+/// How long one request may take. A hook is killed at 10s, so the listing
+/// and each request of a raise stop at the hook's bound.
+/// `PACKSET_TIMEOUT_MS` still shortens it.
 fn http_timeout() -> std::time::Duration {
     let from_env = std::env::var("PACKSET_TIMEOUT_MS")
         .ok()
@@ -285,52 +317,109 @@ fn live() -> Result<Vec<Value>> {
     atoms_lean(&client, &client.workspace()).context("prefer: GET /v1/atoms failed")
 }
 
-fn stamp_marked() -> Result<usize> {
+/// Raise every promoted atom. One the pack refuses does not stop the
+/// rest; each comes back as `id: why`.
+fn stamp_marked() -> Result<Vec<String>> {
     let client = pack()?;
     let atoms = atoms_lean(&client, &client.workspace())?;
-    let mut n = 0;
+    let mut refused = Vec::new();
     for atom in &atoms {
         if legacy(atom) != Some(Legacy::Promote) {
             continue;
         }
-        stamp_basis(&client, atom)?;
-        n += 1;
+        if let Err(e) = stamp_basis(&client, atom) {
+            if e.downcast_ref::<Refused>().is_none() {
+                return Err(e);
+            }
+            refused.push(format!("{}: {e:#}", id_of(atom).unwrap_or("?")));
+        }
     }
-    Ok(n)
+    Ok(refused)
 }
 
-fn stamp_basis(client: &packset_client::PacksetClient, atom: &Value) -> Result<()> {
-    let id = atom
-        .get("id")
+/// Store `atom` again as the person's and retire the original. Returns
+/// the id the person's copy is stored under.
+///
+/// The pack runs its checks on a post before it answers a live text with
+/// the record that already holds it, so the first post is the dry run: a
+/// refusal there leaves the original as it was.
+fn stamp_basis(client: &packset_client::PacksetClient, atom: &Value) -> Result<String> {
+    let id = id_of(atom).context("legacy preference has no id")?;
+    let mut copy = atom.clone();
+    if let Some(map) = copy.as_object_mut() {
+        for key in ["id", "embedding", "links", "provenance_floor", "tombstone"] {
+            map.remove(key);
+        }
+        if !map.get("source").is_some_and(Value::is_object) {
+            map.insert("source".into(), json!({}));
+        }
+        map.insert("workspace".into(), json!(client.workspace()));
+    }
+    crate::admit::stamp_person(&mut copy);
+    let held = post(client, "/v1/atoms", &copy)?;
+    post(
+        client,
+        "/v1/atoms/delete",
+        &json!({"workspace": client.workspace(), "id": id}),
+    )?;
+    let stored = if crate::person_stored(&held) && id_of(&held) != Some(id) {
+        held
+    } else {
+        post(client, "/v1/atoms", &copy)
+            .with_context(|| format!("{id} was retired before its copy was stored"))?
+    };
+    if !crate::person_stored(&stored) {
+        bail!("the pack holds {id}'s text under a record that is not the person's");
+    }
+    id_of(&stored)
+        .map(str::to_string)
+        .with_context(|| format!("the pack stored the copy of {id} without an id"))
+}
+
+fn id_of(atom: &Value) -> Option<&str> {
+    atom.get("id")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|id| !id.is_empty())
-        .context("legacy preference has no id")?;
-    let mut source = atom
-        .get("source")
-        .cloned()
-        .filter(Value::is_object)
-        .unwrap_or_else(|| json!({}));
-    source["basis"] = json!("person");
-    let url = format!("{}/v1/atoms/update", client.base());
-    let body = json!({
-        "workspace": client.workspace(),
-        "id": id,
-        "fields": {"source": source},
-    });
-    let timeout = http_timeout();
+}
+
+fn post(client: &packset_client::PacksetClient, path: &str, body: &Value) -> Result<Value> {
+    let url = format!("{}{path}", client.base());
     match packset_client::authorize(ureq::post(&url))
-        .timeout(timeout)
+        .timeout(http_timeout())
         .send_json(body)
     {
-        Ok(_) => Ok(()),
+        Ok(resp) => resp
+            .into_json()
+            .with_context(|| format!("POST {path}: the answer is not JSON")),
         Err(ureq::Error::Status(code, resp)) => {
             let text = resp.into_string().unwrap_or_default();
-            bail!("POST /v1/atoms/update failed: {code}: {text}");
+            let why = serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v.get("error")?.as_str().map(str::to_string))
+                .unwrap_or(text);
+            let why = format!("POST {path} failed: {code}: {}", why.trim());
+            if (400..500).contains(&code) && !matches!(code, 401 | 408 | 429) {
+                return Err(Refused(why).into());
+            }
+            bail!(why);
         }
-        Err(e) => bail!("POST /v1/atoms/update failed: {e}"),
+        Err(e) => bail!("POST {path} failed: {e}"),
     }
 }
+
+/// A 4xx the pack will answer again for the same body. Auth, a timeout
+/// and a rate limit are not one: the next run may get through.
+#[derive(Debug)]
+struct Refused(String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
 
 fn gate() -> &'static Mutex<()> {
     static GATE: Mutex<()> = Mutex::new(());
@@ -355,9 +444,11 @@ fn recorded() -> bool {
     marker_path().is_some_and(|p| p.is_file())
 }
 
-fn record() -> Result<()> {
+/// Write `body` as this pack's record. `Ok(false)` when another run wrote
+/// it first, or there is no pack to name it after.
+fn record(body: &str) -> Result<bool> {
     let Some(path) = marker_path() else {
-        return Ok(());
+        return Ok(false);
     };
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -371,9 +462,10 @@ fn record() -> Result<()> {
         .open(&path)
     {
         Ok(mut f) => f
-            .write_all(b"once\n")
+            .write_all(body.as_bytes())
+            .map(|()| true)
             .context("recording the preference migration"),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
         Err(e) => Err(e).context("recording the preference migration"),
     }
 }

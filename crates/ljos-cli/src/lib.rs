@@ -8644,19 +8644,20 @@ pub fn search_with_signals(cue: &str, limit: u32) -> Result<Vec<(Hit, DenseSigna
             .unwrap_or(HOOK_RERANK_BUDGET_MS);
         let timeout = std::time::Duration::from_millis(ms);
         let (body, _) = search_relevant(&client, cue, limit, false, timeout).ok()?;
-        body["hits"]
+        let found: Vec<(Hit, DenseSignal)> = body["hits"]
             .as_array()?
             .iter()
             .map(|v| {
                 let hit: Hit = serde_json::from_value(v.clone()).ok()?;
-                keep_origin(v);
                 let signal = DenseSignal {
                     rank: v["dense_rank"].as_u64().and_then(|r| u32::try_from(r).ok()),
                     cosine: v["cosine"].as_f64(),
                 };
                 Some((hit, signal))
             })
-            .collect()
+            .collect::<Option<_>>()?;
+        keep_search_origins(&client, &body, found.iter().map(|(h, _)| h));
+        Some(found)
     })();
     match raw {
         Some(found) => Ok(found),
@@ -10277,8 +10278,10 @@ pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<(Vec<Hit>, bool)>
 
 /// What `/v1/search` answers for `cue`, with at most `limit` hits chosen
 /// by relevance alone, and how many of them the writer chose. A writer
-/// that honours `rank=relevance` picks them by lexical, BM25 and cosine
-/// with no half-life, and echoes the rank. An older writer cuts its
+/// that lists `rank=relevance` ([`ranks_by_relevance`]) is asked for it,
+/// picks them by lexical, BM25 and cosine with no half-life, and echoes
+/// the rank; an answer without the echo is read as fused. An older writer
+/// is not asked, and cuts its
 /// fused list, which decays with age, so rank 21 of a pack full of fresh
 /// lookalikes never arrives: the stored atoms that best match the cue
 /// then follow its hits, so a relevant old memory still gets in. So they
@@ -10297,8 +10300,10 @@ fn search_relevant(
         .query("workspace", &client.workspace())
         .query("q", &recall_query(cue))
         .query("limit", &limit.to_string())
-        .query("rank", "relevance")
         .timeout(timeout);
+    if ranks_by_relevance(client, timeout) {
+        req = req.query("rank", "relevance");
+    }
     if rerank {
         req = req.query("rerank", "1");
     }
@@ -10324,6 +10329,38 @@ fn search_relevant(
         }
     }
     Ok((body, chosen))
+}
+
+/// Whether the writer at `client` takes `rank=relevance`: its
+/// `/v1/status` lists it under `search.ranks`. An older writer omits
+/// `search`, and one that does not answer is taken as older. Its crate
+/// version did not move with the rank, so it is not read. Asked once a
+/// process per writer.
+fn ranks_by_relevance(client: &PacksetClient, timeout: std::time::Duration) -> bool {
+    static KNOWN: std::sync::Mutex<Option<(String, bool)>> = std::sync::Mutex::new(None);
+    let base = client.base().trim_end_matches('/').to_string();
+    let mut known = KNOWN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((at, ranks)) = known.as_ref() {
+        if *at == base {
+            return *ranks;
+        }
+    }
+    let Some(status) = packset_client::authorize(ureq::get(&format!("{base}/v1/status")))
+        .timeout(timeout)
+        .call()
+        .ok()
+        .and_then(|r| r.into_json::<Value>().ok())
+    else {
+        return false;
+    };
+    let ranks = status
+        .pointer("/search/ranks")
+        .and_then(Value::as_array)
+        .is_some_and(|r| r.iter().any(|v| v.as_str() == Some("relevance")));
+    *known = Some((base, ranks));
+    ranks
 }
 
 /// The stored atoms that best match `cue` on [`lexical_match_scores`],
@@ -10368,7 +10405,7 @@ fn packset_search_relevant(query: &str, limit: u32) -> Result<Vec<Hit>> {
         let client = pack()?;
         let (body, _) = search_relevant(&client, q, limit, false, pack_timeout())?;
         let hits: Vec<Hit> = serde_json::from_value(body["hits"].clone()).unwrap_or_default();
-        keep_origins_of(&client, &hits);
+        keep_search_origins(&client, &body, &hits);
         Ok(hits)
     })?;
     count_recall(&hits);
@@ -10401,7 +10438,8 @@ fn merge_by_lexical(judged: Vec<Hit>, mut extra: Vec<Hit>, cue: &str) -> Vec<Hit
 
 /// The search with the cross-encoder asked for, and whether it ordered
 /// the hits. A writer without one says `absent` and returns the fused
-/// order, which carries age. Hits that carry a `rerank_score` are read
+/// order, which carries age. When every hit the writer chose carries a
+/// `rerank_score`, which is null on a hit it did not rerank, they are read
 /// by it. An atom [`search_relevant`] added, which the cross-encoder did
 /// not read, goes in ahead of the first hit its lexical match beats.
 fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> {
@@ -10422,9 +10460,10 @@ fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> 
                 Some((hit, v["rerank_score"].as_f64()))
             })
             .collect();
-        let scored_all = !scored.is_empty() && scored.iter().all(|(_, s)| s.is_some());
+        let chosen = chosen.min(scored.len());
+        let scored_all = chosen > 0 && scored[..chosen].iter().all(|(_, s)| s.is_some());
         if scored_all {
-            scored.sort_by(|a, b| b.1.unwrap_or(0.0).total_cmp(&a.1.unwrap_or(0.0)));
+            scored[..chosen].sort_by(|a, b| b.1.unwrap_or(0.0).total_cmp(&a.1.unwrap_or(0.0)));
         }
         let ran = scored_all || body["rerank"].as_str() == Some("cross-encoder");
         let mut hits: Vec<Hit> = scored.into_iter().map(|(h, _)| h).collect();
@@ -10432,7 +10471,7 @@ fn packset_search_reranked(query: &str, limit: u32) -> Result<(Vec<Hit>, bool)> 
             let extra = hits.split_off(chosen);
             hits = merge_by_lexical(hits, extra, q);
         }
-        keep_origins_of(&client, &hits);
+        keep_search_origins(&client, &body, &hits);
         Ok((hits, ran))
     })?;
     count_recall(&hits);
@@ -29029,11 +29068,10 @@ fn hit_line(h: &Hit, now: &str) -> String {
 
 /// Whether the pack's stored record says the person stands behind `atom`,
 /// an atom or a search hit: `origin` `user-declared` and `source.basis`
-/// `person`, which only a person-path writer stamps. A missing origin
-/// reads as `user-declared`, as the pack reads it, and still needs the
-/// basis: a direct post, a pack default or a record written before the
-/// basis is not the person's. Kind and entities are the writer's and are
-/// not read.
+/// `person`, which only a person-path writer stamps. A missing or empty
+/// origin is not the person's, and neither is a direct post, a pack
+/// default or a record written before the basis. Kind and entities are
+/// the writer's and are not read.
 #[must_use]
 pub fn person_stored(atom: &Value) -> bool {
     stored_by(atom) == StoredBy::Person
@@ -29088,15 +29126,16 @@ fn person_basis(atom: &Value) -> bool {
         .is_some_and(|b| b.trim().eq_ignore_ascii_case(Basis::Person.as_str()))
 }
 
-/// [`StoredBy`] of `atom`, an atom or a search hit. A missing origin reads
-/// as `user-declared`, as the pack reads it. Entities are never read.
+/// [`StoredBy`] of `atom`, an atom or a search hit. One with no origin, a
+/// null one or an empty one reads as an agent's. packsetd stores every
+/// record with an origin, filling `user-declared` for a write that sent
+/// none, so a body without one is a hit that dropped it, as a milli
+/// document does, or not the pack's record at all. Entities are never
+/// read.
 pub(crate) fn stored_by(atom: &Value) -> StoredBy {
-    let origin = atom
-        .get("origin")
-        .and_then(Value::as_str)
-        .map(|o| o.trim().to_ascii_lowercase())
-        .filter(|o| !o.is_empty())
-        .unwrap_or_else(|| admit::ORIGIN_USER.to_string());
+    let Some(origin) = carried_origin(atom) else {
+        return StoredBy::Agent;
+    };
     match origin.as_str() {
         admit::ORIGIN_USER if person_basis(atom) => StoredBy::Person,
         admit::ORIGIN_PEER => StoredBy::Peer,
@@ -29104,6 +29143,15 @@ pub(crate) fn stored_by(atom: &Value) -> StoredBy {
         "external" => StoredBy::External,
         _ => StoredBy::Agent,
     }
+}
+
+/// The origin `atom` carries, trimmed and lowercased, or `None` when it
+/// carries none or an empty one.
+fn carried_origin(atom: &Value) -> Option<String> {
+    atom.get("origin")
+        .and_then(Value::as_str)
+        .map(|o| o.trim().to_ascii_lowercase())
+        .filter(|o| !o.is_empty())
 }
 
 /// [`stored_by`] for each atom id this process read, or `None` for an id
@@ -29125,9 +29173,10 @@ fn record_origin(id: &str, by: Option<StoredBy>) {
 }
 
 /// Record the stored origin of `atom`, an atom or a search hit, by its id.
+/// A record that carries no origin, an island row or a milli hit, says
+/// nothing of the stored one and records nothing.
 pub(crate) fn keep_origin(atom: &Value) {
-    // An island row drops the origin, which says nothing of the stored one.
-    if atom.get("origin").is_none() && atom.get("activation").is_some() {
+    if carried_origin(atom).is_none() {
         return;
     }
     if let Some(id) = atom.get("id").and_then(Value::as_str) {
@@ -29138,13 +29187,42 @@ pub(crate) fn keep_origin(atom: &Value) {
 /// Record the stored origin of each hit from the pack's listing, read
 /// fresh: the pack can change a held atom's origin in place, and a
 /// long-lived process must not name a hit by the origin it read before.
-/// A hit the listing does not hold keeps what was recorded.
-fn keep_origins_of(client: &PacksetClient, hits: &[Hit]) {
-    if hits.iter().all(|h| h.id.is_none()) {
+/// A hit the listing does not hold is recorded as not held, and a listing
+/// that does not answer clears the person recorded for every hit.
+fn keep_origins_of<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'a Hit>) {
+    let ids: Vec<&str> = hits.into_iter().filter_map(|h| h.id.as_deref()).collect();
+    if ids.is_empty() {
         return;
     }
-    if let Ok(atoms) = atoms_lean(client, &client.workspace()) {
-        atoms.iter().for_each(keep_origin);
+    match atoms_lean(client, &client.workspace()) {
+        Ok(atoms) => {
+            atoms.iter().for_each(keep_origin);
+            for id in ids {
+                let held = atoms
+                    .iter()
+                    .find(|a| a.get("id").and_then(Value::as_str) == Some(id));
+                record_origin(id, held.map(stored_by));
+            }
+        }
+        Err(_) => ids.into_iter().for_each(unrecord_person),
+    }
+}
+
+/// Record the origin each hit of search answer `body` carries, and read
+/// the listing ([`keep_origins_of`]) for `hits`, parsed from it, only when
+/// a hit carries none.
+fn keep_search_origins<'a>(
+    client: &PacksetClient,
+    body: &Value,
+    hits: impl IntoIterator<Item = &'a Hit>,
+) {
+    let raw = body["hits"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    raw.iter().for_each(keep_origin);
+    if raw.iter().any(|v| carried_origin(v).is_none()) {
+        keep_origins_of(client, hits);
     }
 }
 
@@ -29166,6 +29244,18 @@ fn recorded_origin(id: &str) -> Option<StoredBy> {
     recorded(id).flatten()
 }
 
+/// Clear the person recorded for `id`, so a read that did not stand
+/// leaves the claim no one's. Any other record stays: it already says
+/// less than the person.
+fn unrecord_person(id: &str) {
+    let mut seen = stored_origins()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if seen.get(id) == Some(&Some(StoredBy::Person)) {
+        seen.remove(id);
+    }
+}
+
 /// The pack's last answer for `id` in this process: `Some(None)` when it
 /// answered it does not hold the atom, `None` when it was never asked.
 fn recorded(id: &str) -> Option<Option<StoredBy>> {
@@ -29183,36 +29273,96 @@ pub(crate) enum Stored {
     Origin(StoredBy),
     /// The pack answered and does not hold it.
     Absent,
-    /// The pack did not answer.
-    Unreachable,
+    /// No answer this read can stand on: the pack did not answer inside
+    /// the bound, or answered with a record under another id.
+    Unverified,
 }
 
-/// [`person_stored`] for atom `id` in this seat's pack, asked of the pack
-/// inside a short bound on every read. A long-lived process (the MCP
-/// server, a hook daemon) outlives a forget or a retraction, so what it
-/// recorded earlier never answers ahead of the pack. Only when the pack
-/// does not answer does the last answer recorded here stand, a held
-/// origin or the pack's not holding it. A failure is never recorded, so
-/// a pack that was down is asked again on the next read.
+/// How long a read waits for the pack to answer for one atom id.
+const ATOM_NOW_MS: u64 = 400;
+
+/// Atom `id` as this seat's pack answers for it now, both requests inside
+/// [`ATOM_NOW_MS`]: `Ok(Some(record))` when it holds it live, `Ok(None)`
+/// when it answered that it does not, and `Err` saying why when there is
+/// no answer to stand on.
+///
+/// Only a listener that asks for this seat's token answers. The read goes
+/// only with the token, which [`packset_client::authorize`] keeps from a
+/// port another user holds, and only after the same read without it was
+/// refused with 401. A stand-in that answers anyone, or a packsetd run
+/// with `PACKSET_AUTH=off`, confirms nothing. A process of this same user
+/// can read the token file and answer as packsetd would; no client check
+/// tells it apart, and only a pack that signs its answers or runs as its
+/// own user would.
+pub(crate) fn atom_now(id: &str) -> std::result::Result<Option<Value>, String> {
+    let client = pack().map_err(|err| format!("no pack to ask for {id}: {err:#}"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ATOM_NOW_MS);
+    let left = || {
+        deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .max(std::time::Duration::from_millis(1))
+    };
+    let mut url = url::Url::parse(client.base())
+        .map_err(|err| format!("the pack URL {} is not a URL: {err}", client.base()))?;
+    url.path_segments_mut()
+        .map_err(|()| format!("the pack URL {} has no path", client.base()))?
+        .pop_if_empty()
+        .extend(["v1", "atoms", id]);
+    url.query_pairs_mut()
+        .append_pair("workspace", &client.workspace());
+    match ureq::get(url.as_str()).timeout(left()).call() {
+        Err(ureq::Error::Status(401, _)) => {}
+        Err(ureq::Error::Transport(err)) => {
+            return Err(format!("the pack did not answer for {id}: {err}"));
+        }
+        _ => {
+            return Err(format!(
+                "the listener at {} answers for {id} without this seat's token",
+                client.base()
+            ));
+        }
+    }
+    let asked = packset_client::authorize(ureq::get(url.as_str())).timeout(left());
+    if asked.header("Authorization").is_none() {
+        return Err(format!(
+            "no token for {id}: this seat has none, or another user holds the pack's port"
+        ));
+    }
+    let atom: Value = match asked.call() {
+        Ok(answer) => answer
+            .into_json()
+            .map_err(|err| format!("the pack's answer for {id} is not JSON: {err}"))?,
+        Err(ureq::Error::Status(404, _)) => return Ok(None),
+        Err(err) => return Err(format!("the pack did not answer for {id}: {err}")),
+    };
+    if atom.get("id").and_then(Value::as_str) != Some(id) {
+        return Err(format!("the pack answered for {id} with another atom"));
+    }
+    Ok((atom.get("tombstone") != Some(&Value::Bool(true))).then_some(atom))
+}
+
+/// [`stored_by`] for atom `id` in this seat's pack, from the by-id read
+/// [`atom_now`] makes now. Only that read names the person. A long-lived
+/// process (the MCP server, a hook daemon) outlives a forget, a
+/// retraction or a downgrade, so nothing it recorded earlier answers for
+/// the pack: a read that does not stand clears the person recorded for
+/// the id, and the next label names the claim no one's until the pack
+/// answers again.
 pub(crate) fn stored_origin_of(id: &str) -> Stored {
-    let asked = with_pack_timeout(400, || {
-        pack().map(|client| client.get_atom(&client.workspace(), id))
-    });
-    match asked {
-        Ok(Ok(atom)) => {
+    match atom_now(id) {
+        Ok(Some(atom)) => {
             let by = stored_by(&atom);
             record_origin(id, Some(by));
             Stored::Origin(by)
         }
-        Ok(Err(packset_client::Error::Bad(_))) => {
+        Ok(None) => {
             record_origin(id, None);
             Stored::Absent
         }
-        _ => match recorded(id) {
-            Some(Some(by)) => Stored::Origin(by),
-            Some(None) => Stored::Absent,
-            None => Stored::Unreachable,
-        },
+        Err(_) => {
+            unrecord_person(id);
+            Stored::Unverified
+        }
     }
 }
 
@@ -37507,6 +37657,63 @@ mod tests {
         url
     }
 
+    /// A writer whose status lists `relevance` under `search.ranks` is
+    /// asked for it and its echo read; one whose status has no `search`
+    /// is never sent a rank, here by refusing any.
+    #[test]
+    fn the_relevance_rank_is_asked_only_of_a_writer_that_lists_it() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap())]);
+        let hits = serde_json::json!([{
+            "id": "a", "text": "The registry rejected the token", "score": 1.0,
+            "kind": "lesson", "ts": "2026-01-14T09:00:00.000Z",
+            "entities": ["horizon:standing"], "rerank_score": null
+        }]);
+        let writer = |ranks: bool| {
+            let hits = hits.clone();
+            serve_http(move |req| {
+                let first = req.lines().next().unwrap_or("");
+                if first.contains("/v1/status") {
+                    let status = if ranks {
+                        serde_json::json!({"search": {"ranks": ["fused", "relevance"]}})
+                    } else {
+                        serde_json::json!({})
+                    };
+                    return (200, status.to_string());
+                }
+                if !first.contains("/v1/search") {
+                    return (404, r#"{"error":"missing"}"#.into());
+                }
+                match (
+                    ranks,
+                    first.contains("rank=relevance"),
+                    first.contains("rank="),
+                ) {
+                    (true, true, _) => (
+                        200,
+                        serde_json::json!({"hits": hits, "rank": "relevance"}).to_string(),
+                    ),
+                    (_, _, true) => (400, r#"{"error":"unknown rank"}"#.into()),
+                    _ => (200, serde_json::json!({"hits": hits}).to_string()),
+                }
+            })
+        };
+        for ranks in [true, false] {
+            let (url, seen) = writer(ranks);
+            let _url = PackUrl::set(&url);
+            let found = packset_search_relevant("the registry rejected my token", 12)
+                .unwrap_or_else(|e| panic!("ranks={ranks}: {e:#}"));
+            assert_eq!(found.len(), 1, "ranks={ranks}");
+            let asked = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.lines().next().unwrap_or("").contains("rank=relevance"));
+            assert_eq!(asked, ranks, "{:?}", seen.lock().unwrap());
+        }
+    }
+
     /// Every hit names the subject. The one that covers the whole prompt
     /// leads the hook's own order, but when the cross-encoder ran and
     /// put it fourth, the cross-encoder's order is the one the cap reads.
@@ -37583,7 +37790,7 @@ mod tests {
             serde_json::json!({
                 "id": id, "text": text, "score": score, "kind": kind,
                 "ts": "2026-10-11T15:00:00.000Z", "entities": ["horizon:standing"],
-                "source": {"basis": "person"},
+                "origin": "user-declared", "source": {"basis": "person"},
                 "ballots": 1, "of": 3, "dense_rank": rank, "cosine": cos
             })
         };
@@ -37946,6 +38153,7 @@ mod tests {
                         "kind": "preference",
                         "text": memory,
                         "entities": ["horizon:standing"],
+                        "origin": "user-declared",
                         "source": {"basis": "person"},
                         "ts": "2020-01-01T00:00:00Z"
                     }]})
@@ -37962,6 +38170,7 @@ mod tests {
                         "kind": "preference",
                         "ts": "2020-01-01T00:00:00.000Z",
                         "entities": ["horizon:standing"],
+                        "origin": "user-declared",
                         "source": {"basis": "person"},
                         "ballots": 2,
                         "of": 3,
@@ -38353,6 +38562,14 @@ mod tests {
         );
         bare.id = Some("bare-claim".into());
         keep_origin(&serde_json::json!({"id": "bare-claim", "source": {"basis": "person"}}));
+        assert_eq!(
+            hit_line(&bare, "2026-09-12T00:00:00.000Z"),
+            "- [unverified agent note (origin agent-derived)] x",
+            "a person basis with no origin read as the person's"
+        );
+        keep_origin(&serde_json::json!({
+            "id": "bare-claim", "origin": "user-declared", "source": {"basis": "person"},
+        }));
         assert_eq!(hit_line(&bare, "2026-09-12T00:00:00.000Z"), "- [claim] x");
     }
 
@@ -49581,10 +49798,32 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         drop(down);
         {
             let _pack = HoldEnv::set(&[("PACKSET_URL", &dead), ("PACKSET_WORKSPACE", "seat")]);
-            assert_eq!(stored_origin_of(id), Stored::Unreachable);
+            assert_eq!(stored_origin_of(id), Stored::Unverified);
         }
-        let (url, _) = serve_http(move |req| {
+        let (url, _) = serve_lesson_pack(id, true);
+        let _pack = HoldEnv::set(&[
+            ("PACKSET_URL", &url),
+            ("PACKSET_WORKSPACE", "seat"),
+            ("PACKSET_TOKEN", LESSON_PACK_TOKEN),
+        ]);
+        assert_eq!(stored_origin_of(id), Stored::Origin(StoredBy::Person));
+        assert_eq!(
+            stored_origin_of("5707ed0000000000000000000000d0e6"),
+            Stored::Absent
+        );
+    }
+
+    const LESSON_PACK_TOKEN: &str = "lesson-pack-token";
+
+    /// A pack holding the person's lesson `id`. One that `asks` refuses a
+    /// request without [`LESSON_PACK_TOKEN`] with 401, as packsetd does;
+    /// one that does not answers anyone.
+    fn serve_lesson_pack(id: &'static str, asks: bool) -> (String, Arc<Mutex<Vec<String>>>) {
+        serve_http(move |req| {
             let first = req.lines().next().unwrap_or("");
+            if asks && !req.contains(&format!("Bearer {LESSON_PACK_TOKEN}")) {
+                return (401, r#"{"error":"token"}"#.into());
+            }
             if first.contains(&format!("/v1/atoms/{id}")) {
                 let atom = serde_json::json!({
                     "id": id, "kind": "lesson", "text": "Keep the form short.",
@@ -49594,13 +49833,104 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 return (200, atom.to_string());
             }
             (404, r#"{"error":"no atom"}"#.into())
+        })
+    }
+
+    /// A by-id read stands only on a pack that asks for this seat's token
+    /// and gets it: a listener that answers without it, or a seat with no
+    /// token to show, confirms nothing.
+    #[test]
+    fn only_a_pack_that_asks_for_the_token_answers_for_an_atom() {
+        let _g = env_guard();
+        let id = "5707ed0000000000000000000000d0e7";
+        let token = tempfile::tempdir().unwrap();
+        let missing = token.path().join("token");
+        let (asks, seen) = serve_lesson_pack(id, true);
+        let (open, _) = serve_lesson_pack(id, false);
+        let read = |url: &str, token: Option<&str>| {
+            // SAFETY: under the lock every environment-reading test takes,
+            // which puts the environment back when it drops.
+            unsafe {
+                std::env::set_var("PACKSET_URL", url);
+                std::env::set_var("PACKSET_WORKSPACE", "seat");
+                std::env::set_var("PACKSET_TOKEN_FILE", &missing);
+                match token {
+                    Some(token) => std::env::set_var("PACKSET_TOKEN", token),
+                    None => std::env::remove_var("PACKSET_TOKEN"),
+                }
+            }
+            atom_now(id)
+        };
+        assert!(read(&asks, Some(LESSON_PACK_TOKEN)).is_ok_and(|a| a.is_some()));
+        let open_read = read(&open, Some(LESSON_PACK_TOKEN)).unwrap_err();
+        assert!(
+            open_read.contains("without this seat's token"),
+            "{open_read}"
+        );
+        let bare = read(&asks, None).unwrap_err();
+        assert!(bare.contains("no token"), "{bare}");
+        let wrong = read(&asks, Some("another-token")).unwrap_err();
+        assert!(wrong.contains("did not answer"), "{wrong}");
+        assert!(
+            seen.lock().unwrap().iter().all(|line| line.contains(id)),
+            "{:?}",
+            seen.lock().unwrap()
+        );
+    }
+
+    /// A record or a hit with no origin, a null one or an empty one is no
+    /// one's word for the claim, whatever basis it carries. A search hit
+    /// without one, as a milli document comes back, takes what the
+    /// pack's listing holds now, and none when the listing does not hold
+    /// it, never what this process recorded before.
+    #[test]
+    fn a_claim_without_an_origin_is_not_the_persons() {
+        let _g = env_guard();
+        for origin in [
+            None,
+            Some(Value::Null),
+            Some(serde_json::json!("")),
+            Some(serde_json::json!(" ")),
+        ] {
+            let mut atom = serde_json::json!({"id": "0r1g1nle55000000000000000000000000", "kind": "lesson", "text": "t", "source": {"basis": "person"}});
+            if let Some(origin) = origin {
+                atom["origin"] = origin;
+            }
+            assert_eq!(stored_by(&atom), StoredBy::Agent, "{atom}");
+            keep_origin(&atom);
+            assert_eq!(recorded(atom["id"].as_str().unwrap()), None, "{atom}");
+        }
+
+        let listed = "0r1g1nle55000000000000000000000001";
+        let unlisted = "0r1g1nle55000000000000000000000002";
+        record_origin(listed, Some(StoredBy::Person));
+        record_origin(unlisted, Some(StoredBy::Person));
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            let hit = |id: &str| {
+                serde_json::json!({"id": id, "kind": "preference", "text": "Keep the form short.",
+                       "score": 1.0, "source": {"basis": "person"}})
+            };
+            if first.starts_with("GET /v1/search") {
+                return (
+                    200,
+                    serde_json::json!({"hits": [hit(listed), hit(unlisted)]}).to_string(),
+                );
+            }
+            if first.starts_with("GET /v1/atoms") {
+                let held = serde_json::json!({"id": listed, "kind": "preference", "text": "Keep the form short.",
+                                  "workspace": "seat", "origin": "agent-derived",
+                                  "source": {"basis": "agent"}});
+                return (200, serde_json::json!({"atoms": [held]}).to_string());
+            }
+            (404, r#"{"error":"no atom"}"#.into())
         });
         let _pack = HoldEnv::set(&[("PACKSET_URL", &url), ("PACKSET_WORKSPACE", "seat")]);
-        assert_eq!(stored_origin_of(id), Stored::Origin(StoredBy::Person));
-        assert_eq!(
-            stored_origin_of("5707ed0000000000000000000000d0e6"),
-            Stored::Absent
-        );
+        let found = search_with_signals("the form", 8).unwrap();
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(recorded_origin(listed), Some(StoredBy::Agent));
+        assert_eq!(recorded(unlisted), Some(None));
+        assert!(found.iter().all(|(h, _)| !person_origin(h)), "{found:?}");
     }
 
     #[test]
@@ -49789,7 +50119,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     fn a_session_start_says_ljos_is_on_in_one_line() {
         let now = "2026-10-11T12:00:00Z";
         let atoms = vec![
-            serde_json::json!({"kind":"preference","text":"Plain words in denials.","due_at":"2026-10-01T00:00:00Z","source":{"basis":"person"}}),
+            serde_json::json!({"kind":"preference","text":"Plain words in denials.","due_at":"2026-10-01T00:00:00Z","origin":"user-declared","source":{"basis":"person"}}),
             serde_json::json!({"kind":"lesson","text":"BM25+ beat BM25.","due_at":"2027-01-01T00:00:00Z"}),
         ];
         let line = session_start_line_from(Some(&atoms), now, true);
@@ -50465,14 +50795,14 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 std::thread::spawn(move || {
                     let req = read_http(&mut s);
                     let first = req.lines().next().unwrap_or("").to_string();
+                    let held = r#"{"id":"p1","text":"Tag a release with git push origin TAG; --follow-tags leaves v-tags behind.","score":2.0,"kind":"preference","ts":"2026-10-10T18:00:00.000Z","entities":[],"origin":"user-declared","source":{"basis":"person"},"ballots":3,"of":3}"#;
                     let (status, body) = if first.contains("/v1/search") {
                         if first.contains("rerank=1") {
                             std::thread::sleep(std::time::Duration::from_secs(20));
                         }
-                        (
-                            "200 OK",
-                            r#"{"hits":[{"id":"p1","text":"Tag a release with git push origin TAG; --follow-tags leaves v-tags behind.","score":2.0,"kind":"preference","ts":"2026-10-10T18:00:00.000Z","entities":[],"source":{"basis":"person"},"ballots":3,"of":3}]}"#.to_string(),
-                        )
+                        ("200 OK", format!(r#"{{"hits":[{held}]}}"#))
+                    } else if first.starts_with("GET /v1/atoms") {
+                        ("200 OK", format!(r#"{{"atoms":[{held}]}}"#))
                     } else {
                         ("404 Not Found", r#"{"error":"not here"}"#.to_string())
                     };
@@ -51311,6 +51641,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 let status = match code {
                     200 => "200 OK",
                     400 => "400 Bad Request",
+                    401 => "401 Unauthorized",
                     403 => "403 Forbidden",
                     404 => "404 Not Found",
                     _ => "500 Internal Server Error",
