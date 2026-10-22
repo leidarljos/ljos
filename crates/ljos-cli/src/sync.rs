@@ -1287,6 +1287,11 @@ fn import_jobs(root: &Path, scope: &Scope, me: &str) -> Result<(Vec<ImportJob>, 
             if host.is_empty() || machine_name(&host) == me {
                 continue;
             }
+            if let Some(why) = bad_log_name(&host, &scope_name) {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                out.push_str(&format!("sync: .ljos/atoms/{name} was not read: {why}\n"));
+                continue;
+            }
             seen.insert((host.clone(), scope_name.clone()));
             if !scope_is_configured(scope, &scope_name) {
                 // The scope was removed or renamed. Do not read the log.
@@ -1493,10 +1498,29 @@ fn require_host_name(raw: &str) -> Result<String> {
     if gone.is_empty() {
         bail!("sync: pass a host after --adopt");
     }
-    if machine_name(gone) != gone {
+    if !valid_host_name(gone) {
         bail!("sync: {gone} is not a host name");
     }
     Ok(gone.to_string())
+}
+
+/// A host name is already a [`machine_name`]: one path component that is
+/// neither `.` nor `..`.
+fn valid_host_name(host: &str) -> bool {
+    machine_name(host) == host
+}
+
+/// Why a log's file name cannot be read as its host and scope. Both name
+/// the log's `.taken` file: `peer+...jsonl.age` named scope `..`, and its
+/// taken file was written outside the tracker's directory.
+fn bad_log_name(host: &str, scope_name: &str) -> Option<String> {
+    if !valid_host_name(host) {
+        return Some(format!("`{host}` is not a host name"));
+    }
+    if !valid_scope_name(scope_name) {
+        return Some(format!("`{scope_name}` is not a scope name"));
+    }
+    None
 }
 
 fn host_log_rels(host: &str) -> [String; 2] {
@@ -6270,6 +6294,48 @@ mod tests {
         point_pack(&url);
         assert!(import(&root, &scope).is_err());
         assert!(shared.exists(), "the shared file went before a write");
+    }
+
+    /// A removed scope's log is still read for its name, but only a host
+    /// and scope name become a `.taken` path. Scope `..` wrote one outside
+    /// the tracker's directory; host `..` named a sender of `sync:..`.
+    #[test]
+    fn an_import_skips_a_log_named_outside_host_and_scope_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let (root, scope) = peer_log(dir.path(), &[same_words("proj-a")]);
+        for name in ["peer+...jsonl.age", "...jsonl.age"] {
+            seal("", &scope.recipients, &root.join(".ljos/atoms").join(name)).unwrap();
+        }
+        let (url, _store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        let said = import(&root, &scope).unwrap();
+        assert!(
+            said.contains(
+                "sync: .ljos/atoms/peer+...jsonl.age was not read: `..` is not a scope name\n"
+            ),
+            "{said}"
+        );
+        assert!(
+            said.contains("sync: .ljos/atoms/...jsonl.age was not read: `..` is not a host name\n"),
+            "{said}"
+        );
+        assert!(said.contains("sync: peer: 1 cloud atoms taken"), "{said}");
+        assert!(!said.contains("sync: ..:"), "{said}");
+        assert!(!state_dir().join("peer.taken").exists());
+        let tracker = state_dir().join(crate::work_id(&root.display().to_string()));
+        let scopes: Vec<_> = std::fs::read_dir(tracker)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(scopes, ["cloud"], "{scopes:?}");
+        let hosts: Vec<_> = std::fs::read_dir(taken_path(&root, "cloud", "peer").parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(hosts, ["peer.taken"], "{hosts:?}");
     }
 
     /// Primary `box` plus an extra `cloud` log. Both are adopted in one
