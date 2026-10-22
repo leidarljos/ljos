@@ -2889,8 +2889,20 @@ fn run_command() -> Result<()> {
                     // Only the person's own prompt grants, saves or
                     // corrects: a subagent's brief or an unattended run's
                     // prompt is an agent's words in that channel.
-                    let person = call.event == "UserPromptSubmit"
-                        && ljos_cli::capture::not_the_person(&input).is_none();
+                    // A tool call can run `ljos hook` with a payload of its
+                    // own; only a hook the runner itself spawned carries
+                    // the person's prompt.
+                    let spawner = (call.event == "UserPromptSubmit"
+                        && ljos_cli::capture::not_the_person(&input).is_none())
+                    .then(|| match ljos_cli::proc_tree::hook_runner() {
+                        Ok((runner, _)) => Some(runner),
+                        Err(why) => {
+                            eprintln!("ljos hook: this prompt is not kept as the person's: {why}.");
+                            None
+                        }
+                    })
+                    .flatten();
+                    let person = spawner.is_some();
                     let granted = person
                         .then(|| {
                             ljos_cli::hook_timed("approve", || {
@@ -2912,7 +2924,12 @@ fn run_command() -> Result<()> {
                                 sessions.push(s);
                             }
                         }
-                        ljos_cli::capture::note_latest_prompt_as(&call.cue, &sessions);
+                        ljos_cli::capture::note_latest_prompt_from(
+                            &call.cue,
+                            &sessions,
+                            spawner.as_ref(),
+                            ljos_cli::capture::payload_transcript(&input).as_deref(),
+                        );
                         ljos_cli::hook_timed("capture", || ljos_cli::capture::capture_stated(&call))
                     } else {
                         None
