@@ -11101,7 +11101,7 @@ mod read_back_tests {
 /// The seat ballots on `issue` that fail their signature check, said as
 /// one refusal. `Ok` when every seat ballot is signed under its pinned key
 /// or is legacy unsigned (committed to the tracker before signing began),
-/// and every signed seat first pinned after slots began is under a slot
+/// and every signed seat that is not standing is under a slot
 /// ([`slot::problems`]), or when `LJOS_UNSIGNED_BALLOTS=allow`; the `Ok`
 /// names the legacy ones.
 ///
