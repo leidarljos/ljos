@@ -537,8 +537,18 @@ pub fn raw_event(input: &str) -> String {
 /// when it lapses, so the relay answers first.
 pub const INNER_TIMEOUT: std::time::Duration = crate::GUARD_TIMEOUT;
 
-/// A deny for an inner hook fault. `what` says how it failed.
+/// A deny for an inner hook fault. `what` says how it failed. With
+/// `LJOS_GUARD_FAIL_OPEN=1`, this falls back to an allow with a note.
 fn fault_output(event: &str, what: &str) -> String {
+    if crate::guard_fail_open() {
+        return json!({
+            "hookSpecificOutput": {
+                "hookEventName": if event.is_empty() { "PreToolUse" } else { event },
+                "additionalContext": crate::unhealthy_note(what),
+            }
+        })
+        .to_string();
+    }
     let reason =
         format!("the ljos guard failed while checking this command ({what}); run `ljos doctor`");
     json!({
@@ -608,7 +618,8 @@ fn early_answer(normalized: &str, event: &str) -> Option<String> {
 /// what it printed. A spawn error, a kill by signal, a non-zero exit, or
 /// no exit within `timeout` is a deny that says how the guard failed.
 /// A non-zero exit that still printed a deny or an ask keeps it. A
-/// successful exit that still says the guard was unhealthy is denied too.
+/// successful exit that still says the guard was unhealthy is denied too,
+/// unless `LJOS_GUARD_FAIL_OPEN=1`.
 #[must_use]
 pub fn run_inner(
     mut cmd: std::process::Command,
@@ -670,6 +681,9 @@ pub fn run_inner(
         return out;
     }
     if let Some(why) = unhealthy_fault(&said.context) {
+        if crate::guard_fail_open() {
+            return out;
+        }
         return fault_output(event, &why);
     }
     if status.success() {
@@ -1365,6 +1379,33 @@ mod tests {
         }
     }
 
+    fn shows_context(runner: &str) -> bool {
+        matches!(
+            runner,
+            "gemini" | "openhands" | "auggie" | "kiro" | "cline" | "crush" | "factory" | "qwen"
+        )
+    }
+
+    fn allows_fault(out: &str, why: &str) {
+        let said = read_answer(out);
+        assert!(said.decision.is_none(), "{out}");
+        assert!(said.context.contains("unhealthy"), "{out}");
+        assert!(said.context.contains(why), "{out}");
+        for runner in RUNNERS {
+            let (stdout, stderr, code) = answer(runner, "PreToolUse", out);
+            let body = format!("{stdout}{stderr}");
+            assert_eq!(code, 0, "{runner}: {body}");
+            assert!(
+                !runner_denied(runner, &stdout, &stderr, code),
+                "{runner}: {body}"
+            );
+            if shows_context(runner) {
+                assert!(body.contains("unhealthy"), "{runner}: {body}");
+                assert!(body.contains(why), "{runner}: {body}");
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn an_inner_hook_fault_denies_in_every_runner_shape() {
@@ -1414,6 +1455,39 @@ mod tests {
         let said = read_answer(&note);
         assert_eq!(said.decision.as_deref(), Some("deny"), "{note}");
         assert!(said.reason.contains("exited with status 1"), "{note}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guard_fail_open_restores_allow_with_note() {
+        let _lock = crate::test_env_lock();
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.0 {
+                        Some(v) => std::env::set_var("LJOS_GUARD_FAIL_OPEN", v),
+                        None => std::env::remove_var("LJOS_GUARD_FAIL_OPEN"),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("LJOS_GUARD_FAIL_OPEN"));
+        unsafe { std::env::set_var("LJOS_GUARD_FAIL_OPEN", "1") };
+        allows_fault(
+            &fault_output("PreToolUse", "exited with status 3"),
+            "exited with status 3",
+        );
+        allows_fault(&inner("exit 3", 30_000), "exited with status 3");
+        let unhealthy = json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "additionalContext": crate::unhealthy_note("did not answer in time"),
+            }
+        })
+        .to_string();
+        let from_policyd = inner(&format!("printf '%s' '{unhealthy}'"), 30_000);
+        allows_fault(&from_policyd, "did not answer in time");
     }
 
     #[test]
