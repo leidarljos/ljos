@@ -1386,18 +1386,18 @@ fn run_command() -> Result<()> {
             }
             ljos_cli::set_validity(valid_from.as_deref(), valid_to.as_deref())?;
             let text = join(&text);
-            // Under a runner the agent's own words are an unreviewed note.
-            // Words from the person's latest prompt are theirs and stand.
-            // The seat guard lets remember through, so this is the check.
-            let under = ljos_cli::under_a_runner();
-            let body = if under && !ljos_cli::capture::said_in_latest_prompt(&text) {
-                ljos_cli::packset_write_remember_note(&text, as_persona.as_deref())?
-            } else if under {
+            // Unless the person is at the terminal, the agent's own words
+            // are an unreviewed note. Words from the person's latest prompt
+            // are theirs and stand. The seat guard lets remember through,
+            // so this is the check.
+            let body = if ljos_cli::person_present() {
+                let horizon = ljos_cli::remember_horizon(transient, standing, false);
+                packset_write_as("Remember", &text, as_persona.as_deref(), horizon)?
+            } else if ljos_cli::capture::said_in_latest_prompt(&text) {
                 let horizon = transient.then_some(true);
                 ljos_cli::packset_write_mcp("Remember", &text, as_persona.as_deref(), horizon)?
             } else {
-                let horizon = ljos_cli::remember_horizon(transient, standing, false);
-                packset_write_as("Remember", &text, as_persona.as_deref(), horizon)?
+                ljos_cli::packset_write_remember_note(&text, as_persona.as_deref())?
             };
             println!("{}", write_ack(&body));
             eprintln!("{}", ljos_cli::remember_note(&body));
@@ -1538,13 +1538,13 @@ fn run_command() -> Result<()> {
             } else {
                 Vec::new()
             };
-            let basis = ljos_cli::Basis::of_typed(&text);
+            let basis = ljos_cli::Basis::of_rule();
             let body = ljos_cli::packset_prefer(&text, as_persona.as_deref())?;
             println!("{}", write_ack(&body));
             for rule in &rules {
                 println!("{}", write_ack(&write_rule(rule, basis)?));
             }
-            if !proposed.is_empty() && ljos_cli::under_a_runner() {
+            if !proposed.is_empty() && !ljos_cli::person_present() {
                 for rule in &proposed {
                     println!(
                         "this preference can carry an ask over {}: `ljos rule {} --verdict ask --why {}`",
@@ -2378,11 +2378,15 @@ fn run_command() -> Result<()> {
             user,
         } => {
             if user {
-                let rule = ljos_cli::user_rules::write_argv(&Rule {
-                    pattern,
-                    verdict,
-                    reason: why,
-                })?;
+                let basis = ljos_cli::Basis::of_rule();
+                let rule = ljos_cli::user_rules::write_argv(
+                    &Rule {
+                        pattern,
+                        verdict,
+                        reason: why,
+                    },
+                    basis,
+                )?;
                 if json {
                     println!(
                         "{}",
@@ -2392,7 +2396,7 @@ fn run_command() -> Result<()> {
                     println!("{}", ljos_cli::user_rules::ack(&rule));
                 }
             } else {
-                let basis = ljos_cli::Basis::of_typed(&why);
+                let basis = ljos_cli::Basis::of_rule();
                 let body = write_rule(
                     &Rule {
                         pattern,
@@ -2918,6 +2922,9 @@ fn run_command() -> Result<()> {
                     // A tool call can run `ljos hook` with a payload of its
                     // own; only a hook the runner itself spawned carries
                     // the person's prompt.
+                    if call.event == "UserPromptSubmit" {
+                        ljos_cli::capture::forget_latest_prompt();
+                    }
                     let spawner = (call.event == "UserPromptSubmit"
                         && ljos_cli::capture::not_the_person(&input).is_none())
                     .then(|| match ljos_cli::proc_tree::hook_runner() {

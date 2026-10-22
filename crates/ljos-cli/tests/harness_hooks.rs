@@ -1609,7 +1609,7 @@ fn a_cold_first_prompt_shows_rules_and_memory() {
     std::fs::create_dir_all(&rules).unwrap();
     std::fs::write(
         rules.join("user-rules.json"),
-        r#"{"rules":[{"id":"ur-slugify","text":"Never rename the slugify helper.","author":"ada","reason":"the seat asked","written_at":"2026-10-01T00:00:00Z"}]}
+        r#"{"rules":[{"id":"ur-slugify","text":"Never rename the slugify helper.","author":"ada","reason":"the seat asked","basis":"person","written_at":"2026-10-01T00:00:00Z"}]}
 "#,
     )
     .unwrap();

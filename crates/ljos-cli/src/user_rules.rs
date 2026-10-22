@@ -57,6 +57,12 @@ pub struct UserRule {
     /// The lesson id a promote copied, when this row came from one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
+    /// Who stands behind a rule written as words or an argv law, as
+    /// `source.basis` on a seat atom: `person` only when the person typed
+    /// it or said it in their latest prompt. A row with neither this nor
+    /// `from` is not the person's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis: Option<String>,
     /// [`lesson_hash`] of that lesson's record as the promote read it. A
     /// record under `from` that hashes otherwise is another lesson.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -335,6 +341,7 @@ fn fresh(text: &str, reason: &str, from: Option<String>) -> Result<UserRule> {
         updated_at: now,
         deleted: false,
         from,
+        basis: None,
         lesson_hash: None,
         due_at: None,
     })
@@ -363,21 +370,24 @@ pub fn write_preference(
         super::refuse_unless_person_words("prefer", text)?;
     }
     let mut rule = fresh(text, reason, None)?;
+    rule.basis = Some(super::Basis::of_typed(text).as_str().to_string());
     rule.deny_mention = clean_people(deny_mention)?;
     rule.deny_reply_to = clean_people(deny_reply_to)?;
     append(rule)
 }
 
-/// Write one argv law into the user file, under the same checks as a seat rule.
+/// Write one argv law into the user file, under the same checks as a seat
+/// rule, with `basis` as the caller decided it, as a seat rule takes it.
 ///
 /// # Errors
 ///
 /// [`super::validate_rule`] refuses the pattern, or the file cannot be written.
-pub fn write_argv(rule: &Rule) -> Result<UserRule> {
+pub fn write_argv(rule: &Rule, basis: super::Basis) -> Result<UserRule> {
     super::validate_rule(rule)?;
     let mut row = fresh(rule.reason.trim(), rule.reason.trim(), None)?;
     row.pattern = Some(rule.pattern.trim().to_string());
     row.verdict = Some(rule.verdict.clone());
+    row.basis = Some(basis.as_str().to_string());
     append(row)
 }
 
@@ -604,7 +614,7 @@ pub fn format_list() -> String {
         out.push_str(&persons);
     }
     if !unverified.is_empty() {
-        out.push_str("promoted user rules the pack did not confirm (unverified):\n");
+        out.push_str("user rules not confirmed as the person's (unverified):\n");
         out.push_str(&unverified);
     }
     out
@@ -634,7 +644,8 @@ pub fn preface() -> String {
 }
 
 /// Whether the preface may state `rule` as the person's. A rule written
-/// as words is. A rule promoted from a lesson is only when this read got
+/// as words or an argv law is when its basis is the person's. A rule
+/// promoted from a lesson is only when this read got
 /// that lesson from this seat's pack just now, under its id, stored as
 /// the person's, and it is the record the rule was promoted from: its
 /// [`lesson_hash`] is the one the row kept. A row with no hash kept has
@@ -648,7 +659,11 @@ fn persons_rule(rule: &UserRule) -> bool {
 /// Why `rule` may not be read as the person's, or `None` when it may: the
 /// test [`persons_rule`] states.
 fn unconfirmed(rule: &UserRule) -> Option<String> {
-    let id = rule.from.as_deref()?;
+    let Some(id) = rule.from.as_deref() else {
+        return (rule.basis.as_deref() != Some(super::Basis::Person.as_str())).then(|| {
+            "written without the person at the terminal or in their latest prompt".to_string()
+        });
+    };
     let Some(kept) = rule.lesson_hash.as_deref() else {
         return Some(format!(
             "promoted from lesson {id} with no hash of its record kept; promote it again"
@@ -1232,6 +1247,7 @@ mod tests {
             std::env::set_var("PACKSET_WORKSPACE", "seat-a");
             std::env::set_var("LJOS_USER_RULES_SYNC", "off");
         }
+        super::super::PERSON_AT_TERMINAL.with(|p| p.set(true));
         (lock, dir)
     }
 
@@ -1370,6 +1386,7 @@ mod tests {
             updated_at: "2020-01-01T00:00:00Z".into(),
             deleted: false,
             from: None,
+            basis: None,
             lesson_hash: None,
             due_at: Some("2020-01-02T00:00:00Z".into()),
         });
@@ -1796,14 +1813,29 @@ mod tests {
         assert!(err.contains("reason"), "{err}");
     }
 
+    /// A row with no basis and no lesson behind it, as rows were written
+    /// before they carried one, is not stated as the person's.
+    #[test]
+    fn a_row_with_no_basis_and_no_lesson_is_unverified() {
+        let (_lock, _dir) = isolated();
+        let mut row = alan();
+        row.basis = None;
+        std::fs::write(rules_path().unwrap(), render_rules(&[row]).unwrap()).unwrap();
+        assert!(preface().is_empty(), "{}", preface());
+        assert!(format_list().contains("unverified\t"), "{}", format_list());
+    }
+
     #[test]
     fn an_argv_user_rule_denies_in_the_static_guard() {
         let (_lock, _dir) = isolated();
-        write_argv(&Rule {
-            pattern: "gh pr comment*".into(),
-            verdict: "deny".into(),
-            reason: "no pull request comments from this seat".into(),
-        })
+        write_argv(
+            &Rule {
+                pattern: "gh pr comment*".into(),
+                verdict: "deny".into(),
+                reason: "no pull request comments from this seat".into(),
+            },
+            super::super::Basis::Person,
+        )
         .unwrap();
         let denied = super::super::static_guard("gh pr comment 12 --body 'tests passed'").unwrap();
         assert_eq!(denied.verdict, "deny");
@@ -1843,11 +1875,14 @@ mod tests {
                 "an unconfirmed rule's denial read as the person's: {denied:?}"
             );
         }
-        write_argv(&Rule {
-            pattern: "git log*".into(),
-            verdict: "deny".into(),
-            reason: "leave the log alone".into(),
-        })
+        write_argv(
+            &Rule {
+                pattern: "git log*".into(),
+                verdict: "deny".into(),
+                reason: "leave the log alone".into(),
+            },
+            super::super::Basis::Person,
+        )
         .unwrap();
         let denied = super::super::static_guard("git log").unwrap();
         assert_eq!(denied.reason, "leave the log alone");
