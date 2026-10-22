@@ -161,6 +161,24 @@ The hook blocks a turn's stop once if the turn used tools, had no issue
 and never touched the seat. A turn asked for a decision that cast no
 ballot is held too. It also audits the turn when Jev is on.
 
+* Threat model
+
+The seat sends its pack token only after two refusals from the address
+the writer's URL resolved to: an atom id the pack does not hold, once
+with no token and once with a token of the same shape that is not this
+seat's. Both answers have to be 401. The writer closes the socket after
+each answer, so those two refusals and the request that carries the
+token are three connections, and the next request proves again. A
+redirect is the answer, not a second request, and the process
+environment's proxy is not consulted.
+
+A process of the same user can read the token file. It can answer 401 to
+those two probes and then read the token off the next request, or it can
+skip the probes and answer as the pack. The proof cannot tell that
+process from packsetd. What would is a writer that signs its answers, or
+one that runs as a user this seat is not. A listener that already learnt
+the token passes for the same reason.
+
 * Islands
 
 #+ATTR_HTML: :alt Landfold of the pack: this task's island versus other work :width 100%
