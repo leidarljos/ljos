@@ -1754,7 +1754,9 @@ impl LjosServer {
         ljos_cli::log_recall("recall", &args.issue);
         // The same answer as `ljos recall`: the tracker's working set, then
         // the memories on the issue, notes included.
-        let mut said = habitat("vissue", &["recall", &args.issue])?;
+        let mut said = ljos_cli::tracker_recall(&args.issue)
+            .map(said)
+            .map_err(refused)?;
         said.0
             .text
             .push_str(&ljos_cli::recall_memories(&args.issue));
