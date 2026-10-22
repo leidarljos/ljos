@@ -20,7 +20,8 @@
 //! origin `peer` and this log's scope, then deletes the host's log. The
 //! deletion is committed only after every post and forget has landed, and
 //! the subject `chore(sync): adopt HOST SCOPE atoms` is how another
-//! machine's import learns the host is gone.
+//! machine's import learns the host is gone and retires that host's
+//! copies in this scope.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -670,17 +671,23 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
         return Ok("sync: no age identity on this machine; `ljos sync --key` makes one\n".into());
     }
     let dir = log_dir(root);
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Ok(format!("sync: no {} logs yet\n", scope.name));
-    };
-    let client = crate::pack()?;
-    let mut out = String::new();
-    let mut paths: Vec<PathBuf> = entries
+    // A missing directory is not a failure. The adopt commit removes the
+    // gone host's log, and an empty atoms directory is not in the tree, so
+    // the retirement below still has to run.
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.to_string_lossy().ends_with(".jsonl.age"))
         .collect();
     paths.sort();
+    let gone = adopted_hosts(root, &me);
+    if paths.is_empty() && gone.is_empty() {
+        return Ok(format!("sync: no {} logs yet\n", scope.name));
+    }
+    let client = crate::pack()?;
+    let mut out = String::new();
     for path in paths {
         let host = path
             .file_name()
@@ -745,6 +752,64 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
         write_taken(&scope.name, &host, &plain)?;
         out.push_str(&format!(
             "sync: {host}: {kept} {} atoms taken, {refused} refused, {retired} retired\n",
+            scope.name
+        ));
+    }
+    out.push_str(&retire_adopted(scope, &gone, &client)?);
+    Ok(out)
+}
+
+/// Hosts whose newest deletion of `.ljos/atoms/<host>.jsonl.age` is an
+/// adopt commit, and whose log is not back in HEAD. A re-added log is
+/// imported above; this set is what the other machines still hold as
+/// `sync:<host>` after the file is gone.
+fn adopted_hosts(root: &Path, me: &str) -> BTreeSet<String> {
+    let Ok(out) = git(
+        root,
+        &[
+            "log",
+            "--diff-filter=D",
+            "--pretty=format:%x1e%s",
+            "--name-only",
+            "--",
+            ".ljos/atoms",
+        ],
+    ) else {
+        return BTreeSet::new();
+    };
+    if !out.status.success() {
+        return BTreeSet::new();
+    }
+    let mine = machine_name(me);
+    hosts_removed_by_adopt(&String::from_utf8_lossy(&out.stdout))
+        .into_iter()
+        .filter(|host| host != me && host != &mine)
+        .filter(|host| !in_head(root, &format!(".ljos/atoms/{host}.jsonl.age")))
+        .collect()
+}
+
+/// Forget this scope's `sync:<host>` atoms for hosts [`adopted_hosts`]
+/// named. A forget that does not land is counted and tried again on the
+/// next import; it does not fail the import, and it does not skip the
+/// other hosts. Quiet when there was nothing to forget.
+fn retire_adopted(
+    scope: &Scope,
+    hosts: &BTreeSet<String>,
+    client: &crate::PacksetClient,
+) -> Result<String> {
+    if hosts.is_empty() {
+        return Ok(String::new());
+    }
+    let atoms = crate::atoms_lean(client, &client.workspace())?;
+    let mut out = String::new();
+    for host in hosts {
+        let (retired, failed) =
+            forget_tagged(&atoms, host, |atom| in_adopted_scope(atom, &scope.name));
+        if retired == 0 && failed == 0 {
+            continue;
+        }
+        out.push_str(&format!(
+            "sync: {host}: adopted away, {retired} {} atoms retired, {failed} still held\n",
             scope.name
         ));
     }
