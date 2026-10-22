@@ -455,30 +455,28 @@ fn install_roots(home: Option<&Path>) -> Vec<PathBuf> {
     roots
 }
 
-/// The `/nix/store/HASH-NAME` entry `path` sits in, HASH being 32
-/// characters of Nix's base 32.
-fn nix_entry(path: &Path) -> Option<PathBuf> {
-    let name = path
-        .strip_prefix("/nix/store")
-        .ok()?
-        .iter()
-        .next()?
-        .to_str()?;
+/// Where Nix keeps what it builds.
+const NIX_STORE: &str = "/nix/store";
+
+/// The `STORE/HASH-NAME` entry `path` sits in, STORE being Nix's store
+/// ([`NIX_STORE`]) and HASH 32 characters of Nix's base 32.
+fn nix_entry(path: &Path, store: &Path) -> Option<PathBuf> {
+    let name = path.strip_prefix(store).ok()?.iter().next()?.to_str()?;
     let (hash, rest) = name.split_at_checked(32)?;
     let hashed = hash
         .chars()
         .all(|c| "0123456789abcdfghijklmnpqrsvwxyz".contains(c));
-    (hashed && rest.len() > 1 && rest.starts_with('-')).then(|| Path::new("/nix/store").join(name))
+    (hashed && rest.len() > 1 && rest.starts_with('-')).then(|| store.join(name))
 }
 
 /// The runner `path` names when it sits strictly below one of `roots` or
-/// in a Nix store entry, and that root: the nearest component that is not
+/// in an entry of the Nix store `store`, and that root: the nearest component that is not
 /// packing layout ([`layout_component`]), read from the file up to the
 /// root's own name, so `share/claude/versions/2.1.3` is Claude Code. The
 /// path must be absolute and plain, since a `..` after the root would
 /// leave it. A path the kernel marks ` (deleted)` is not the file that
 /// was installed.
-fn runner_below(path: &Path, roots: &[PathBuf]) -> Option<(&'static str, PathBuf)> {
+fn runner_below(path: &Path, roots: &[PathBuf], store: &Path) -> Option<(&'static str, PathBuf)> {
     let plain = path.is_absolute()
         && path.components().all(|c| {
             matches!(
@@ -492,7 +490,7 @@ fn runner_below(path: &Path, roots: &[PathBuf]) -> Option<(&'static str, PathBuf
     let root = roots
         .iter()
         .cloned()
-        .chain(nix_entry(path))
+        .chain(nix_entry(path, store))
         .find(|root| path != root.as_path() && path.starts_with(root))?;
     let parts = root
         .file_name()
@@ -645,12 +643,14 @@ fn group_is_private(accounts: &dyn Accounts, uid: u32, gid: u32) -> bool {
         && primary.iter().all(|other| *other == uid)
 }
 
-/// Who [`person_keeps`] judges a file for: this process's user and
-/// primary group, and whether that group is the user's alone, asked
+/// Who [`person_keeps`] judges a file for: this process's user,
+/// primary group and supplementary groups (`None` when they could not
+/// be read), and whether the primary group is the user's alone, asked
 /// only when a file is group-writable.
 struct Person<'a> {
     uid: u32,
     gid: u32,
+    groups: Option<Vec<u32>>,
     accounts: &'a dyn Accounts,
     private_group: std::cell::OnceCell<bool>,
 }
@@ -663,15 +663,76 @@ impl<'a> Person<'a> {
         Person {
             uid,
             gid,
+            groups: supplementary_groups(),
             accounts,
             private_group: std::cell::OnceCell::new(),
         }
+    }
+
+    /// Whether the person writes what group `gid` may write. Groups that
+    /// could not be read count as every group.
+    fn in_group(&self, gid: u32) -> bool {
+        gid == self.gid
+            || self
+                .groups
+                .as_ref()
+                .is_none_or(|groups| groups.contains(&gid))
     }
 
     fn private_group(&self) -> bool {
         *self
             .private_group
             .get_or_init(|| group_is_private(self.accounts, self.uid, self.gid))
+    }
+}
+
+/// This process's supplementary groups.
+fn supplementary_groups() -> Option<Vec<u32>> {
+    // SAFETY: a size of zero asks only for the count and writes nothing.
+    let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+    let mut groups = vec![0; usize::try_from(count).ok()?];
+    // SAFETY: getgroups writes at most `count` ids into groups.
+    let got = unsafe { libc::getgroups(count, groups.as_mut_ptr()) };
+    groups.truncate(usize::try_from(got).ok()?);
+    Some(groups)
+}
+
+/// A file's owner, group and mode.
+#[derive(Clone, Copy)]
+struct Owner {
+    uid: u32,
+    gid: u32,
+    mode: u32,
+}
+
+impl Owner {
+    fn of(path: &Path) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt as _;
+        let meta = std::fs::metadata(path).ok()?;
+        Some(Owner {
+            uid: meta.uid(),
+            gid: meta.gid(),
+            mode: meta.mode(),
+        })
+    }
+}
+
+/// Whether a Nix store and an entry in it are as Nix leaves them, so
+/// that only Nix can change what the entry holds. The store is root's,
+/// the person cannot write it, and it is sticky if its group or anyone
+/// may write it; the entry is then root's, as the daemon builds it. On
+/// a single-user install the store is the person's and no one else may
+/// write it, and the entry is the person's or root's.
+fn store_keeps(store: Owner, entry: Owner, person: &Person) -> bool {
+    let group = store.mode & 0o020 != 0;
+    let anyone = store.mode & 0o002 != 0;
+    if store.uid == 0 {
+        let person_writes = anyone
+            || (group && person.in_group(store.gid))
+            || (person.uid == 0 && store.mode & 0o200 != 0);
+        !person_writes && (!group || store.mode & 0o1000 != 0) && entry.uid == 0
+    } else {
+        store.uid == person.uid && !group && !anyone && (entry.uid == 0 || entry.uid == person.uid)
     }
 }
 
@@ -697,8 +758,15 @@ fn person_keeps(path: &Path, person: &Person) -> bool {
 /// name is the runner, in a temp directory, a project tree or a `.local`
 /// of its own making, is not: the name alone is what a tool call can
 /// choose. Nor is a file that someone other than the person could have
-/// written, or swapped through a directory between it and its root.
-fn runner_of_file(path: &Path, home: Option<&Path>, person: &Person) -> Option<&'static str> {
+/// written, or swapped through a directory between it and its root, or
+/// an entry of a Nix store `store` that Nix does not keep
+/// ([`store_keeps`]).
+fn runner_of_file(
+    path: &Path,
+    home: Option<&Path>,
+    store: &Path,
+    person: &Person,
+) -> Option<&'static str> {
     let file = std::fs::canonicalize(path).ok()?;
     if crate::bookkeep::path_is_temp(Some(&file)) {
         return None;
@@ -707,7 +775,16 @@ fn runner_of_file(path: &Path, home: Option<&Path>, person: &Person) -> Option<&
         .iter()
         .filter_map(|root| std::fs::canonicalize(root).ok())
         .collect();
-    let (runner, root) = runner_below(&file, &roots)?;
+    let store = std::fs::canonicalize(store).unwrap_or_else(|_| store.to_path_buf());
+    let (runner, root) = runner_below(&file, &roots, &store)?;
+    if root.parent() == Some(store.as_path()) {
+        let kept = Owner::of(&store)
+            .zip(Owner::of(&root))
+            .is_some_and(|(store, entry)| store_keeps(store, entry, person));
+        if !kept {
+            return None;
+        }
+    }
     file.ancestors()
         .take_while(|dir| dir.starts_with(&root))
         .all(|dir| person_keeps(dir, person))
@@ -723,7 +800,7 @@ pub fn exe_runner(pid: u32) -> Option<&'static str> {
     let home = own_home();
     let person = Person::new(&SystemAccounts);
     let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
-    if let Some(r) = runner_of_file(&exe, home.as_deref(), &person) {
+    if let Some(r) = runner_of_file(&exe, home.as_deref(), Path::new(NIX_STORE), &person) {
         return Some(r);
     }
     let base = exe.file_name()?.to_str()?;
@@ -738,7 +815,7 @@ pub fn exe_runner(pid: u32) -> Option<&'static str> {
         .find(|a| !a.is_empty() && !a.starts_with('-'))?;
     let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
     let script = std::fs::canonicalize(cwd.join(script.as_ref())).ok()?;
-    runner_of_file(&script, home.as_deref(), &person)
+    runner_of_file(&script, home.as_deref(), Path::new(NIX_STORE), &person)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1234,7 +1311,8 @@ mod tests {
                 None,
             ),
         ] {
-            let got = runner_below(Path::new(path), &roots).map(|(runner, _)| runner);
+            let got = runner_below(Path::new(path), &roots, Path::new(NIX_STORE))
+                .map(|(runner, _)| runner);
             assert_eq!(got, want, "{path}");
         }
     }
@@ -1253,6 +1331,7 @@ mod tests {
             .unwrap();
         let home = base.path().join("u");
         let person = Person::new(&SystemAccounts);
+        let store = PathBuf::from(NIX_STORE);
         let program = |dir: &Path, name: &str| {
             std::fs::create_dir_all(dir).unwrap();
             let path = dir.join(name);
@@ -1263,29 +1342,112 @@ mod tests {
         let bin = home.join(".local/bin");
         let claude = program(&bin, "claude");
         assert_eq!(
-            runner_of_file(&claude, Some(&home), &person),
+            runner_of_file(&claude, Some(&home), &store, &person),
             Some("claude")
         );
 
         let away = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(program(away.path(), "codex"), bin.join("codex")).unwrap();
         assert_eq!(
-            runner_of_file(&bin.join("codex"), Some(&home), &person),
+            runner_of_file(&bin.join("codex"), Some(&home), &store, &person),
             None
         );
 
         program(&base.path().join("other/.local/bin"), "claude");
         let climbed = home.join("../other/.local/bin/claude");
-        assert_eq!(runner_of_file(&climbed, Some(&home), &person), None);
+        assert_eq!(runner_of_file(&climbed, Some(&home), &store, &person), None);
 
         std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o757)).unwrap();
-        assert_eq!(runner_of_file(&claude, Some(&home), &person), None);
+        assert_eq!(runner_of_file(&claude, Some(&home), &store, &person), None);
 
         let open = bin.join("open");
         let grok = program(&open, "grok");
-        assert_eq!(runner_of_file(&grok, Some(&home), &person), Some("grok"));
+        assert_eq!(
+            runner_of_file(&grok, Some(&home), &store, &person),
+            Some("grok")
+        );
         std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
-        assert_eq!(runner_of_file(&grok, Some(&home), &person), None);
+        assert_eq!(runner_of_file(&grok, Some(&home), &store, &person), None);
+    }
+
+    /// A Nix store entry is a runner only while Nix alone keeps it. A
+    /// store the person owns counts as a single-user install only while
+    /// no one else may write it; a root's store must be closed to the
+    /// person, sticky when its group may write it, and hold root's
+    /// entries.
+    #[test]
+    fn a_nix_entry_is_a_runner_only_in_a_store_nix_keeps() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let base = tempfile::Builder::new()
+            .prefix(".ljos-store-")
+            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .unwrap();
+        let store = base.path().join("store");
+        let bin = store.join("0c9yapqd0b8y4mj5xj7mrpmhy3l5ykh8-claude-code-2.0.1/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let claude = bin.join("claude");
+        std::fs::write(&claude, "").unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let person = Person::new(&SystemAccounts);
+        let set = |mode| {
+            std::fs::set_permissions(&store, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let runner = || runner_of_file(&claude, None, &store, &person);
+
+        set(0o755);
+        assert_eq!(runner(), Some("claude"));
+        for mode in [0o775, 0o757, 0o777, 0o1775, 0o1777] {
+            set(mode);
+            assert_eq!(runner(), None, "{mode:o}");
+        }
+        set(0o755);
+
+        let uid = person.uid;
+        let nixbld = person.gid + 1;
+        let owner = |uid, gid, mode| Owner { uid, gid, mode };
+        let outsider = Person {
+            groups: Some(vec![]),
+            ..Person::new(&SystemAccounts)
+        };
+        let builder = Person {
+            groups: Some(vec![nixbld]),
+            ..Person::new(&SystemAccounts)
+        };
+        let unread = Person {
+            groups: None,
+            ..Person::new(&SystemAccounts)
+        };
+        let root_entry = owner(0, 0, 0o555);
+        let own_entry = owner(uid, uid, 0o555);
+        for (store, entry, who, want) in [
+            (owner(0, nixbld, 0o1775), root_entry, &outsider, true),
+            (owner(0, 0, 0o755), root_entry, &outsider, true),
+            (owner(0, nixbld, 0o1775), own_entry, &outsider, false),
+            (owner(0, nixbld, 0o775), root_entry, &outsider, false),
+            (owner(0, nixbld, 0o1775), root_entry, &builder, false),
+            (owner(0, nixbld, 0o1775), root_entry, &unread, false),
+            (owner(0, 0, 0o1777), root_entry, &outsider, false),
+            (owner(uid, uid, 0o755), own_entry, &outsider, true),
+            (owner(uid, uid, 0o755), root_entry, &outsider, true),
+            (owner(uid, uid, 0o775), own_entry, &outsider, false),
+            (owner(uid, uid, 0o1777), own_entry, &outsider, false),
+            (
+                owner(uid, uid, 0o755),
+                owner(uid + 1, 0, 0o555),
+                &outsider,
+                false,
+            ),
+            (owner(uid + 1, 0, 0o755), own_entry, &outsider, false),
+        ] {
+            assert_eq!(
+                store_keeps(store, entry, who),
+                want,
+                "{}:{} {:o}",
+                store.uid,
+                store.gid,
+                store.mode
+            );
+        }
     }
 
     /// One user `u`, the name and members of whatever group is asked
@@ -1354,19 +1516,20 @@ mod tests {
         let claude = bin.join("claude");
         std::fs::write(&claude, "").unwrap();
         std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let store = PathBuf::from(NIX_STORE);
 
         for accounts in [alone(&[], vec![uid]), alone(&["u"], vec![uid, uid])] {
             assert!(group_is_private(&accounts, uid, 0));
             let person = Person::new(&accounts);
             assert_eq!(
-                runner_of_file(&claude, Some(&home), &person),
+                runner_of_file(&claude, Some(&home), &store, &person),
                 Some("claude")
             );
         }
         for accounts in &shared {
             assert!(!group_is_private(accounts, uid, 0));
             let person = Person::new(accounts);
-            assert_eq!(runner_of_file(&claude, Some(&home), &person), None);
+            assert_eq!(runner_of_file(&claude, Some(&home), &store, &person), None);
         }
     }
 
