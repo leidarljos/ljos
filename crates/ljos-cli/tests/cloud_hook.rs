@@ -1149,6 +1149,63 @@ fn a_curl_config_that_hides_the_target_may_be_github() {
     );
 }
 
+/// Windows curl also loads `.curlrc` or `_curlrc` from `USERPROFILE`,
+/// `APPDATA`, and `USERPROFILE\Application Data` after `HOME`. A seat that
+/// sets those variables is judged as Windows curl would be.
+#[test]
+fn a_windows_curlrc_is_judged_where_its_variable_is_set() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let rc = "request = DELETE\nheader = Authorization: Bearer x\n";
+    let win = root.path().join("win");
+    let legacy = win.join("Application Data");
+    fs::create_dir_all(&legacy).unwrap();
+    let line = |key: &str| {
+        format!(
+            "{key}={} curl -s https://api.github.com/user",
+            win.display()
+        )
+    };
+
+    allowed(&line("APPDATA"), here);
+    allowed(&line("USERPROFILE"), here);
+    for (dir, name, key) in [
+        (&win, "_curlrc", "APPDATA"),
+        (&win, ".curlrc", "APPDATA"),
+        (&win, "_curlrc", "USERPROFILE"),
+        (&win, ".curlrc", "USERPROFILE"),
+        (&legacy, "_curlrc", "USERPROFILE"),
+    ] {
+        fs::write(dir.join(name), rc).unwrap();
+        refused(&line(key), here);
+        allowed(
+            &format!(
+                "{key}={} curl -q -s https://api.github.com/user",
+                win.display()
+            ),
+            here,
+        );
+        fs::remove_file(dir.join(name)).unwrap();
+    }
+
+    fs::write(win.join("_curlrc"), rc).unwrap();
+    fs::write(home.join(".curlrc"), "silent\n").unwrap();
+    allowed(&line("APPDATA"), here);
+    fs::remove_file(home.join(".curlrc")).unwrap();
+    fs::remove_file(win.join("_curlrc")).unwrap();
+
+    #[cfg(not(windows))]
+    {
+        fs::write(home.join("_curlrc"), rc).unwrap();
+        allowed("curl -s https://api.github.com/user", here);
+        fs::remove_file(home.join("_curlrc")).unwrap();
+    }
+}
+
 /// Only a missing default config is no config. A directory, a fifo, or a
 /// symlink there could not be read, so the request is judged a write. A
 /// fifo must not hold the guard waiting for a writer.

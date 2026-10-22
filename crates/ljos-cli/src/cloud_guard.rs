@@ -4187,35 +4187,71 @@ fn curl_named_file(
 
 /// Default curlrc search. `CURL_HOME` replaces the others: a missing file
 /// there is opaque, because the variable says a config applies and it
-/// could not be read. Otherwise the first of the XDG file and `~/.curlrc`
-/// that exists is the one curl would load.
+/// could not be read. Otherwise the first file that exists, in curl's
+/// order, is the one curl would load: the XDG file, then `HOME`, then the
+/// Windows `USERPROFILE`, `APPDATA`, and `USERPROFILE\Application Data`.
+/// Windows curl also takes `_curlrc` after `.curlrc` in each. The Windows
+/// variables are read wherever they are set, so a seat that sets one is
+/// judged as Windows curl would be.
 fn curl_default_files(
     env: &[(String, String)],
     cwd: Option<&Path>,
     tune: &mut Tune,
     seen: &mut HashSet<PathBuf>,
 ) -> Option<HttpShape> {
-    if let Some(dir) = prefixed_or_process(env, "CURL_HOME") {
-        if !dir.is_empty() {
-            let path = PathBuf::from(dir).join(".curlrc");
-            return read_curl_file(&path, cwd, tune, seen, true);
-        }
+    let dir_of = |key: &str| {
+        prefixed_or_process(env, key)
+            .filter(|dir| !dir.is_empty())
+            .map(PathBuf::from)
+    };
+    if let Some(dir) = dir_of("CURL_HOME") {
+        let found = first_curl_file(&curl_rc_names(&dir, cfg!(windows)), cwd, tune, seen);
+        return found.unwrap_or_else(|| {
+            tune.unreadable = true;
+            Some(HttpShape::Opaque)
+        });
     }
-    if let Some(xdg) = prefixed_or_process(env, "XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            let path = PathBuf::from(xdg).join("curlrc");
-            if let Some(shape) = read_curl_file(&path, cwd, tune, seen, false) {
-                return Some(shape);
-            }
-            if tune.unreadable || seen.iter().any(|have| have == &cfg_key(&path)) {
-                return None;
-            }
-        }
+    let mut paths = Vec::new();
+    if let Some(xdg) = dir_of("XDG_CONFIG_HOME") {
+        paths.push(xdg.join("curlrc"));
     }
-    if let Some(home) = prefixed_or_process(env, "HOME") {
-        if !home.is_empty() {
-            let path = PathBuf::from(home).join(".curlrc");
-            return read_curl_file(&path, cwd, tune, seen, false);
+    if let Some(home) = dir_of("HOME") {
+        paths.extend(curl_rc_names(&home, cfg!(windows)));
+    }
+    if let Some(profile) = dir_of("USERPROFILE") {
+        paths.extend(curl_rc_names(&profile, true));
+    }
+    if let Some(appdata) = dir_of("APPDATA") {
+        paths.extend(curl_rc_names(&appdata, true));
+    }
+    if let Some(profile) = dir_of("USERPROFILE") {
+        paths.extend(curl_rc_names(&profile.join("Application Data"), true));
+    }
+    first_curl_file(&paths, cwd, tune, seen).flatten()
+}
+
+fn curl_rc_names(dir: &Path, windows: bool) -> Vec<PathBuf> {
+    let mut names = vec![dir.join(".curlrc")];
+    if windows {
+        names.push(dir.join("_curlrc"));
+    }
+    names
+}
+
+/// The judgement of the first of `paths` that exists, or None when none
+/// does.
+fn first_curl_file(
+    paths: &[PathBuf],
+    cwd: Option<&Path>,
+    tune: &mut Tune,
+    seen: &mut HashSet<PathBuf>,
+) -> Option<Option<HttpShape>> {
+    for path in paths {
+        if let Some(shape) = read_curl_file(path, cwd, tune, seen, false) {
+            return Some(Some(shape));
+        }
+        if tune.unreadable || seen.contains(&cfg_key(path)) {
+            return Some(None);
         }
     }
     None
