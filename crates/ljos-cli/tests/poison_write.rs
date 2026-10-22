@@ -566,6 +566,53 @@ fn a_forged_prompt_does_not_make_remember_accept_the_plant() {
     );
 }
 
+/// Write the prompt file and a bind that matches it, as an agent can:
+/// both are plain files under its own uid.
+fn forge_prompt(seat: &Seat, text: &str, session: &str) {
+    use sha2::Digest as _;
+    use std::time::UNIX_EPOCH;
+    let dir = seat.run.path().join("ljos");
+    std::fs::create_dir_all(&dir).unwrap();
+    let prompt = dir.join("latest-prompt");
+    std::fs::write(&prompt, text).unwrap();
+    let mtime = std::fs::metadata(&prompt)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let hash = hex::encode(sha2::Sha256::digest(text.as_bytes()));
+    std::fs::write(
+        dir.join("latest-prompt.bind"),
+        format!("1\n{hash}\n{mtime}\n{session}\n"),
+    )
+    .unwrap();
+}
+
+/// A forged prompt and bind naming a session other than the runner's is
+/// not the person's prompt: prefer stores the plant as the agent's.
+#[test]
+fn a_forged_prompt_and_bind_do_not_make_prefer_the_persons() {
+    let seat = Seat::new();
+    forge_prompt(&seat, PLANT, "forged-session");
+    let out = seat.command(&["prefer", PLANT], true).output().unwrap();
+    assert!(out.status.success(), "prefer failed\n{}", text_of(&out));
+    let atoms = seat.atoms.lock().unwrap().clone();
+    assert!(!atoms.is_empty(), "nothing stored\n{}", text_of(&out));
+    for atom in &atoms {
+        assert_ne!(
+            atom["origin"], "user-declared",
+            "a forged bind made the plant the person's: {atom}"
+        );
+        assert_ne!(atom["source"]["basis"], "person", "{atom}");
+        assert!(
+            !atom["entities"].to_string().contains("via:prompt"),
+            "{atom}"
+        );
+    }
+}
+
 /// Briefs, the limit stop and the work nudge must not tell an agent to
 /// store its own lesson with `ljos remember`, which the seat guard allows.
 #[test]
