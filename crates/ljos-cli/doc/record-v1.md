@@ -153,17 +153,17 @@ The tracker pin file is `.ljos-seat-keys` at `$VISSUE_ROOT`, one
   zero-width space before a voter fails the check instead of leaving
   that pin unread.
 - every voter id is pinned to one key, including a question's `opened_by`
-- a pin file row for the voter id wins
+- a pin file row for the voter id wins over a seat row
 - seat cross-check: a voter id with any other spelling of its seat is
   refused before this check (see [Voter ids](#voter-ids)), so the part
   after `/` is looked up as written. Each bare row pins the seat it
-  reads as under the same rules: `inky`, `inky@39u` and `inky-n9o` all
-  pin `inky`, `ljos-bot` pins `ljosbot`, `judge:model-1.5` pins
-  `judge-model-1-5` and `run-101` pins `run-101`. Rows that pin one seat
-  must pin one key, up to hex case and a small-order part: `inky <key1>`
-  beside `inky@39u <key2>` fails the check, since one seat would vote
-  under two keys. When rows pin the voter's seat, the entry must be
-  signed under that key.
+  reads as under the same rules: `inky`, `inky@39u`, `inky-10`,
+  `run-inky` and `judge-inky` all pin `inky`; `ljos-bot` pins
+  `ljosbot`; `judge:model-1.5` pins `judge-model-1-5`; and `run-101`
+  pins `run-101`. Rows that pin one seat must pin one key, up to hex
+  case and a small-order part: `inky <key1>` beside `inky@39u <key2>`
+  fails the check, since one seat would vote under two keys. When rows
+  pin the voter's seat, the entry must be signed under that key.
 - with no pin file row for the voter id and none for its seat, the first
   key seen in this check is the pin for this check only
 - ingesting pins durably is what makes that pin persist across checks
@@ -171,24 +171,20 @@ The tracker pin file is `.ljos-seat-keys` at `$VISSUE_ROOT`, one
 
 ## Tally rule
 
-Tally is pure over signed ballot entries and counts voters, not voter
-ids. Ballots that share a seat or a signing key are one voter, and so
-are ballots joined through a chain of those: a seat is one vote on a
-question whatever identities and keys it signs under, and a key is one
-vote whatever voter ids it signs under. The seat is the part of the
-voter id after `/`, so `alpha/inky` and `beta/inky` are one voter. Two
-keys are one key when they differ only in the case of a hex digit or in
-a small-order part, since one secret signs under eight public keys that
-differ only there.
+Tally is pure over signed ballot entries and counts per question. A
+voter is a signing key fingerprint: two key strings are one voter when
+they differ only in hex case or in a small-order part.
 
 - `replaces` must name the id of a ballot in the same check, from the
-  same voter, on the same question. A missing target, or another voter's
-  or another question's ballot, fails the check.
+  same voter (key fingerprint), on the same question. A missing target,
+  or another voter's or another question's ballot, fails the check.
 - a ballot named by another entry's `replaces` never counts
-- of the rest, the latest `cast_at` per `(question, voter)` counts
+- with one seat under two keys on one question, the first key seen for
+  that seat keeps counting and the later key for that seat is refused
+- of what remains, the latest `cast_at` per `(question, voter)` counts
 - a latest stance of `withdrawn` contributes no vote
 - two unreplaced ballots from one voter on one question in the same
-  hour are an error, whichever voter ids and keys they name. `cast_at`
+  hour are ambiguous and are dropped on that question only. `cast_at`
   does not break that tie, and neither does file order
 
 ## What the check cannot see
