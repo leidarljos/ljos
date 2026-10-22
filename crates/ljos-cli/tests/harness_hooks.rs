@@ -1740,6 +1740,54 @@ fn a_missing_workdir_is_not_a_seat_rule_deny() {
     assert_ordinary(&out, &as_cwd);
 }
 
+/// The hook process may run outside a repo while the payload carries `cwd`.
+/// The guard must judge in that payload directory.
+#[test]
+fn payload_cwd_is_used_when_hook_process_runs_elsewhere() {
+    let (_dir, hab) = habitat();
+    let repo = std::fs::canonicalize(&hab.repo).unwrap();
+    script(
+        &hab.bin,
+        "ljos-policyd",
+        &format!(
+            "#!/bin/sh\n\
+             if [ \"$(/bin/pwd -P)\" = \"{}\" ]; then\n\
+             printf 'deny\\tpayload-cwd\\n'\n\
+             exit 2\n\
+             fi\n\
+             printf 'allow\\n'\n",
+            repo.display()
+        ),
+    );
+    let policyd = hab.bin.join("ljos-policyd");
+    let policyd = policyd.to_str().unwrap().to_string();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let payload = pretool(repo.to_str().unwrap(), None, "echo hi");
+    let out = hook_in(
+        &hab,
+        &payload,
+        elsewhere.path(),
+        true,
+        &[
+            ("LJOS_GUARD", "on"),
+            ("LJOS_OFF", "0"),
+            ("POLICYD_BIN", policyd.as_str()),
+        ],
+    );
+    assert!(
+        !out.status.success(),
+        "guard should deny in payload cwd\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let joined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(joined.contains("payload-cwd"), "{joined}");
+}
+
 /// ljos-qpiw: the opencode plugin reports each bash call, and no post
 /// cites these commits: one ran from a script, so no command names
 /// `git commit`, and one was chained before a push that exited 128. The

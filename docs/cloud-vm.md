@@ -1,6 +1,6 @@
 # A fresh machine
 
-`ljos cloud up` installs `ljos`, `ljos-mcp`, `ljos-policyd`, and `packsetd` when the release lists it, into `~/.local/bin`, and on a cloud VM the encoder `packset-embed`. It checks the SHA-256 sums, puts that directory on PATH for this process and in `~/.profile` and `~/.bashrc`, then writes `~/.cursor/mcp.json` so the command is `ljos-mcp` on PATH, and clones `LJOS_TRACKER_REMOTE`. Run it again and it only refreshes the clone and the MCP command.
+`ljos cloud up` installs `ljos`, `ljos-mcp`, `ljos-policyd`, and `packsetd` when the release lists it, into `~/.local/bin`, and on a cloud VM the encoder `packset-embed`. It checks the SHA-256 sums, puts that directory first on PATH for this process and in `~/.profile` and `~/.bashrc`, then writes `~/.cursor/mcp.json`. The command is `ljos-mcp` when that directory is already first, and the absolute path when an earlier directory would still win at the moment of the write. It clones `LJOS_TRACKER_REMOTE`. Run it again and it refreshes the clone and the MCP command, rewrites env-owned wake entries from `LJOS_WAKE_<SEAT>_URL`, and refreshes the scope `cloud` age identity from the named secret.
 
 `sh scripts/install.sh --cloud` is the same bootstrap. When the binaries are already installed and `ljos cloud up` answers, that command is all that runs. `--force` downloads again. From this repository, if the installed `ljos` has no `cloud up`, the script builds this tree's `ljos` and `ljos-mcp` and leaves them in place.
 
@@ -26,7 +26,7 @@ Each seat signs its ballots and its handovers with `~/.local/share/ljos/seats/SE
 
 `LJOS_WAKE_<SEAT>_URL` is the webhook that wakes a seat when mail from this machine reaches it. A wake fires on the sender's machine, so a VM that writes to a box seat needs one. `cloud up` writes each into `~/.config/ljos/wake.toml` with `key_env = "LJOS_WAKE_<SEAT>_KEY"` and `source = "env"`, so the bearer key is read from that variable when the wake fires and is never written to disk. `LJOS_WAKE_INKY_URL` and `LJOS_WAKE_INKY_KEY` wake the seat `inky`, and `LJOS_WAKE_GROK_BOT_URL` wakes `grok-bot`. The URL has to be https, or http when the host is exactly localhost, an IPv4 loopback address, or ::1. Pass both as secrets, so neither is in `environment.json`. Each run writes the `source = "env"` entries again. A wake without that source stays, and the line says so. Two variables that name one seat are refused, and the line names both. Other seats' wakes stay.
 
-`ljos doctor` warns while the tracker has commits the remote lacks. A harness MCP command that will not run on this machine fails the `mcp` row, and the row says to run `ljos cloud up`. The row reads every harness file ljos writes, not only Cursor's `mcp.json`.
+`ljos doctor` warns while the tracker has commits the remote lacks. A harness MCP command that will not run on this machine fails the `mcp` row. On a cloud VM, a codespace, or CI the row says to run `ljos cloud up`. Anywhere else it names `ljos onboard --harness` for that file, including Cursor's `mcp.json`. The row reads every harness file ljos writes.
 
 A `STARTED` claim whose process is gone, older than the lease (`LJOS_LEASE_SECS`, default 900 seconds), goes back to `TODO` when `ljos cloud up` or a sitting runs under `LJOS_TRACKER_GIT=push`. The release is pushed with the other tracker writes. A claim this machine still holds is kept. The hold is the nearest program above the command that is not a shell, and it keeps only the issue it names, for as long as that program is still running. `ljos claim` commits and pushes that issue the same way a note does.
 
@@ -85,7 +85,7 @@ Another repository, once a release contains `cloud up`:
 
 Set `LJOS_TRACKER_REMOTE` in the environment. The tracker repository has to be one the git credentials on the machine can clone. The URL stays out of `environment.json`. Set `LJOS_CLOUD_AGE_SECRET` to the name of the secret that holds the age identity for scope `cloud`. The identity stays out of `environment.json` too. Until a release contains `cloud up`, use `scripts/install.sh` from this tree.
 
-`cloud up` rewrites the harness MCP command to `ljos-mcp` on PATH. A claim, a note and a vote then push to the tracker, and another clone sees them after a fetch. A `STARTED` claim whose program has exited returns to `TODO` after `LJOS_LEASE_SECS`. A claim whose program is still running stays. The tracker URL has to be one the machine's git credentials can clone.
+`cloud up` rewrites the harness MCP command to `ljos-mcp` when this directory is already first on PATH, and to the absolute path when an earlier directory would still win. A claim, a note and a vote then push to the tracker, and another clone sees them after a fetch. A `STARTED` claim whose program has exited returns to `TODO` after `LJOS_LEASE_SECS`. A claim whose program is still running stays. The tracker URL has to be one the machine's git credentials can clone.
 
 ## Deeds
 
@@ -93,13 +93,13 @@ A cloud seat's finish exports the deeds that seat cited on the issue into `.ljos
 
 ## Slots
 
-A run's seat is new, and the tracker pins its key the first time it signs. Any writer with push to the tracker can pin a name that way, so a seat first pinned after slots began counts toward a push cite only under a slot. The seat that launches a cloud agent or a job writes one on the issue it hands over, before the run's first ballot:
+A run's seat is new, and the tracker pins its key the first time it signs. Any writer with push to the tracker can pin a name that way, and can set the author date on that commit, so the date is not what decides. The seats that stood when slots began are a list in ljos: `disk-saver`, `inky`, and `ljosbot`. A seat on the list needs no slot and may sign one. Every other seat counts toward a push cite only under a slot. The seat that launches a cloud agent or a job writes one on the issue it hands over, before the run's first ballot:
 
 ```sh
 ljos slot ISSUE ridley-review --model grok-4 --run "$AGENT_ID"
 ```
 
-`ridley-review` is the run's `LJOS_SEAT`, and the run id is appended the way `cloud up` appends it. The slot is signed under the launcher's pinned key, and the launcher has to be a seat pinned before slots began. `ljos consensus` and the push gate count the run's ballot on that issue when the slot verifies and the run's key was pinned after it. A seat pinned before slots began needs no slot. On a tracker that is not a git repository, no seat needs one.
+`ridley-review` is the run's `LJOS_SEAT`, and the run id is appended the way `cloud up` appends it. The slot is signed under the launcher's pinned key, and the launcher has to be a standing seat. `ljos consensus` and the push gate count the run's ballot on that issue when the slot verifies and that issue's own entry already held the line in the commit that introduced the run seat's pin. A copy of the line on another issue does not count, and an author date is not read. The push gate counts the same ballots `ljos consensus` counts: one session is one ballot. A standing seat needs no slot. The same list applies on a tracker that is not a git repository, where that order is not checked.
 
 ## A panel
 

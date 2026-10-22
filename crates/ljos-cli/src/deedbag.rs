@@ -1,12 +1,18 @@
 //! A cloud seat's finish writes the deeds it cited into the tracker.
 //!
 //! The box imports that bag after the machine is gone. `deedar export
-//! --into` writes the deed frame and the inclusion receipt. It has no flag
-//! for the write-once file bytes or the supersedes sidecar, and a bag
-//! without them is not enough to import. Finish copies both into the deed's
-//! own folder after export. A sibling directory would be another deed to
+//! --into` writes the deed frame and the inclusion receipt. Import also
+//! requires the product bytes under `bytes/` and, when a deed supersedes
+//! another or was made from one, a sidecar that names that deed and its
+//! digest. Export on the import branch writes that two-line form, and
+//! the host signature in its own file. Finish leaves a sidecar that
+//! already names a sha256 digest, and writes the two-line form when
+//! export left the store's one-line id or nothing. A carried deed made
+//! from one this bag does not carry gets a tab-separated `sources` line
+//! when export wrote none. A sibling directory would be another deed to
 //! `deedar check`, which requires `proof.txt` in every folder.
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -59,6 +65,7 @@ fn export_cited(issue: &str) -> Result<(String, Vec<String>)> {
 struct Row {
     id: String,
     hexes: Vec<String>,
+    sources: String,
 }
 
 fn rows_for(cited: &[String]) -> Result<Vec<Row>> {
@@ -78,6 +85,7 @@ fn rows_for(cited: &[String]) -> Result<Vec<Row>> {
         rows.push(Row {
             id: id.clone(),
             hexes: hexes_of(field(&text, "paths").unwrap_or(""))?,
+            sources: field(&text, "sources").unwrap_or("").to_string(),
         });
     }
     Ok(rows)
@@ -132,7 +140,9 @@ fn hexes_of(paths: &str) -> Result<Vec<String>> {
         let Some(hex) = part.strip_prefix("sha256:") else {
             bail!("deed path {part} is not a sha256 digest");
         };
-        if hex.is_empty() || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        // Import accepts only a content address: 64 lowercase hex digits.
+        // Anything shorter, longer or upper case is a different name.
+        if !is_sha256_hex(hex) {
             bail!("deed path {part} is not a sha256 digest");
         }
         out.push(hex.to_string());
@@ -170,32 +180,257 @@ fn export_into(dir: &Path, rows: &[Row]) -> Result<()> {
 }
 
 fn seam(store: &Path, bag: &Path, rows: &[Row]) -> Result<()> {
+    let mut digests = HashMap::new();
     for row in rows {
         let folder = bag.join(&row.id);
         if !folder.is_dir() {
             bail!("export wrote no folder for {}", row.id);
         }
         for hex in &row.hexes {
-            let src = store.join("bytes").join(hex);
-            if !src.is_file() {
-                bail!("file bytes sha256:{hex} are not in the store");
-            }
-            std::fs::copy(&src, folder.join(hex))
-                .with_context(|| format!("copying sha256:{hex}"))?;
+            copy_payload(store, hex, &folder)?;
         }
-        copy_link(store, &row.id, "supersedes", &folder)?;
-        copy_link(store, &row.id, "successor", &folder)?;
+        write_link(store, &row.id, "supersedes", &folder, &mut digests)?;
+        write_link(store, &row.id, "successor", &folder, &mut digests)?;
+        write_sources(&row.sources, &folder, &mut digests)?;
     }
     Ok(())
 }
 
-fn copy_link(store: &Path, id: &str, name: &str, folder: &Path) -> Result<()> {
+/// Product bytes live at `<deed>/bytes/<hex>`. The importer hashes the file
+/// and requires the name to be that digest. `is_file` follows a symlink, so
+/// the kind comes from `symlink_metadata` and a link is refused.
+fn copy_payload(store: &Path, hex: &str, folder: &Path) -> Result<()> {
+    let src = store.join("bytes").join(hex);
+    match file_kind(&src)? {
+        Kind::File => {}
+        Kind::Symlink => bail!("file bytes sha256:{hex} are a symlink"),
+        Kind::Missing | Kind::Other => {
+            bail!("file bytes sha256:{hex} are not in the store");
+        }
+    }
+    let dir = folder.join("bytes");
+    std::fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
+    std::fs::copy(&src, dir.join(hex)).with_context(|| format!("copying sha256:{hex}"))?;
+    Ok(())
+}
+
+/// A link sidecar is `<id>\nsha256:<digest>\n`. Export writes that, and may
+/// carry a signature on a later line. The store file is the id alone.
+/// Copying it over the export drops the digest, and rewriting a file that
+/// already names one would drop the signature. A missing sidecar, or that
+/// one-line id, is written in the two-line form.
+fn write_link(
+    store: &Path,
+    id: &str,
+    name: &str,
+    folder: &Path,
+    digests: &mut HashMap<String, String>,
+) -> Result<()> {
+    let dest = folder.join(name);
+    match file_kind(&dest)? {
+        Kind::Symlink => bail!("{id} {name} is a symlink"),
+        Kind::Other => bail!("{id} {name} is not a file"),
+        Kind::File => {
+            if link_keeps_digest(&dest)? {
+                return Ok(());
+            }
+            let Some(linked) = read_lone_id(&dest)? else {
+                return Ok(());
+            };
+            return write_two_line(&dest, &linked, digests);
+        }
+        Kind::Missing => {}
+    }
     let src = store.join("deeds").join(format!("{id}.{name}"));
-    if !src.is_file() {
+    let linked = match file_kind(&src)? {
+        Kind::Missing | Kind::Other => return Ok(()),
+        Kind::Symlink => bail!("{id}.{name} is a symlink"),
+        Kind::File => match read_lone_id(&src)? {
+            Some(linked) => linked,
+            None => return Ok(()),
+        },
+    };
+    write_two_line(&dest, &linked, digests)
+}
+
+fn write_two_line(dest: &Path, linked: &str, digests: &mut HashMap<String, String>) -> Result<()> {
+    let digest = deed_digest(digests, linked)?;
+    let body = format!("{linked}\n{digest}\n");
+    std::fs::write(dest, body).with_context(|| format!("writing {}", dest.display()))?;
+    Ok(())
+}
+
+/// True when the file already names a deed and a sha256 digest. Later lines
+/// stay, so a signature export wrote is not stripped.
+fn link_keeps_digest(path: &Path) -> Result<bool> {
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut lines = raw.lines().map(str::trim).filter(|line| !line.is_empty());
+    let (Some(id), Some(digest)) = (lines.next(), lines.next()) else {
+        return Ok(false);
+    };
+    Ok(one_component(id).is_ok() && is_sha256_addr(digest))
+}
+
+/// The id in a one-line sidecar. Two lines that are not a digest are refused
+/// rather than rewritten.
+fn read_lone_id(path: &Path) -> Result<Option<String>> {
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut lines = raw.lines().map(str::trim).filter(|line| !line.is_empty());
+    let Some(id) = lines.next() else {
+        return Ok(None);
+    };
+    if lines.next().is_some() {
+        bail!("{} is not an id and a sha256 digest", path.display());
+    }
+    one_component(id).with_context(|| format!("{} is not a deed id", path.display()))?;
+    Ok(Some(id.to_string()))
+}
+
+/// `sources=` lines from `deedar get`: `deed:<id>`, then that deed's own
+/// sources, one `<id><tab><digest>` a line. Path and url sources are not
+/// deeds, so they have no sidecar line. A file export already wrote in
+/// that form is left in place.
+fn write_sources(
+    sources: &str,
+    folder: &Path,
+    digests: &mut HashMap<String, String>,
+) -> Result<()> {
+    let dest = folder.join("sources");
+    match file_kind(&dest)? {
+        Kind::Symlink => bail!("sources is a symlink"),
+        Kind::Other => bail!("sources is not a file"),
+        Kind::File => {
+            if sources_keep_digests(&dest)? {
+                return Ok(());
+            }
+            bail!("sources is not a digest sidecar");
+        }
+        Kind::Missing => {}
+    }
+    let lines = source_lines(sources, digests)?;
+    if lines.is_empty() {
         return Ok(());
     }
-    std::fs::copy(&src, folder.join(name)).with_context(|| format!("copying {id}.{name}"))?;
+    let mut body = String::new();
+    for (id, digest) in lines {
+        body.push_str(&id);
+        body.push('\t');
+        body.push_str(&digest);
+        body.push('\n');
+    }
+    std::fs::write(&dest, body).context("writing sources")?;
     Ok(())
+}
+
+/// True when the file already binds at least one deed to a sha256 digest.
+/// Other lines stay, so a signature export wrote is not stripped.
+fn sources_keep_digests(path: &Path) -> Result<bool> {
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .any(|line| {
+            line.split_once('\t')
+                .is_some_and(|(id, digest)| one_component(id).is_ok() && is_sha256_addr(digest))
+        }))
+}
+
+/// Every deed this one was made from, including a source's own sources.
+/// Import looks each of them up in this file when the bag does not carry it.
+fn source_lines(
+    sources: &str,
+    digests: &mut HashMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    let mut lines = BTreeMap::new();
+    let mut pending = deed_ids(sources)?;
+    while let Some(id) = pending.pop() {
+        if lines.contains_key(&id) {
+            continue;
+        }
+        let digest = deed_digest(digests, &id)?;
+        lines.insert(id.clone(), digest);
+        let Some(text) = deed_text(&id)? else {
+            bail!("source {id} is not in the store");
+        };
+        pending.extend(deed_ids(field(&text, "sources").unwrap_or(""))?);
+    }
+    Ok(lines)
+}
+
+fn deed_ids(sources: &str) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for part in sources.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let Some(id) = part.strip_prefix("deed:") else {
+            continue;
+        };
+        one_component(id).with_context(|| format!("source {part} is not a deed id"))?;
+        out.push(id.to_string());
+    }
+    Ok(out)
+}
+
+fn deed_digest(cache: &mut HashMap<String, String>, id: &str) -> Result<String> {
+    if let Some(have) = cache.get(id) {
+        return Ok(have.clone());
+    }
+    let said = crate::run_captured("deedar", &["log", "prove", id])
+        .with_context(|| format!("deedar log prove {id}"))?;
+    let digest = said
+        .stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("digest="))
+        .map(str::trim)
+        .filter(|text| is_sha256_addr(text))
+        .with_context(|| format!("deedar log prove {id} did not report a sha256 digest"))?
+        .to_string();
+    cache.insert(id.to_string(), digest.clone());
+    Ok(digest)
+}
+
+fn is_sha256_addr(text: &str) -> bool {
+    let Some(hex) = text.strip_prefix("sha256:") else {
+        return false;
+    };
+    is_sha256_hex(hex)
+}
+
+fn is_sha256_hex(hex: &str) -> bool {
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+enum Kind {
+    Missing,
+    Symlink,
+    Other,
+    File,
+}
+
+fn file_kind(path: &Path) -> Result<Kind> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            let kind = meta.file_type();
+            if kind.is_symlink() {
+                Ok(Kind::Symlink)
+            } else if kind.is_file() {
+                Ok(Kind::File)
+            } else {
+                Ok(Kind::Other)
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Kind::Missing),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
 }
 
 fn store_dir() -> Result<PathBuf> {
@@ -243,25 +478,73 @@ fn one_component(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Put `scratch` at `dest`. The old bag stays until a finished tree has been
+/// staged beside it: a copy that fails, including one across filesystems,
+/// leaves `dest` as it was.
 fn publish(scratch: &Path, dest: &Path) -> Result<()> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("could not create {}", parent.display()))?;
+    let parent = dest.parent().context("the deed bag has no directory")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("could not create {}", parent.display()))?;
+    let name = dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("the deed bag has no name")?;
+    let staged = parent.join(format!(".{name}.incoming"));
+    let backup = parent.join(format!(".{name}.previous"));
+    clear_dir(&staged)?;
+    // A crash after dest moved aside and before the new tree took its place
+    // leaves the published bag at `backup`. Put it back before touching it.
+    if !dest.exists() && backup.exists() {
+        std::fs::rename(&backup, dest)
+            .with_context(|| format!("could not restore {}", dest.display()))?;
     }
-    if dest.exists() {
-        std::fs::remove_dir_all(dest)
-            .with_context(|| format!("could not replace {}", dest.display()))?;
+    clear_dir(&backup)?;
+
+    stage_into(scratch, &staged)?;
+
+    let replacing = dest.exists();
+    if replacing {
+        if let Err(e) = std::fs::rename(dest, &backup) {
+            let _ = std::fs::remove_dir_all(&staged);
+            return Err(e).with_context(|| format!("could not move {} aside", dest.display()));
+        }
     }
-    // The scratch dir may sit on another filesystem than the tracker.
-    if std::fs::rename(scratch, dest).is_ok() {
-        return Ok(());
-    }
-    if let Err(e) = copy_tree(scratch, dest) {
-        let _ = std::fs::remove_dir_all(dest);
+    if let Err(e) = std::fs::rename(&staged, dest) {
+        if replacing {
+            let _ = std::fs::rename(&backup, dest);
+        }
+        let _ = std::fs::remove_dir_all(&staged);
         return Err(e).with_context(|| format!("could not place {}", dest.display()));
+    }
+    if replacing {
+        let _ = std::fs::remove_dir_all(&backup);
     }
     let _ = std::fs::remove_dir_all(scratch);
     Ok(())
+}
+
+fn clear_dir(path: &Path) -> Result<()> {
+    if path.exists() {
+        std::fs::remove_dir_all(path)
+            .with_context(|| format!("could not clear {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn stage_into(scratch: &Path, staged: &Path) -> Result<()> {
+    // Same filesystem: the rename is the stage. Across filesystems the
+    // copy has to finish before dest is touched, or a failure would
+    // publish nothing.
+    if std::fs::rename(scratch, staged).is_ok() {
+        return Ok(());
+    }
+    match copy_tree(scratch, staged) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(staged);
+            Err(e).context("could not stage the deed bag")
+        }
+    }
 }
 
 fn copy_tree(from: &Path, to: &Path) -> Result<()> {
@@ -269,10 +552,15 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
         let dest = to.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            bail!("{} is a symlink", entry.path().display());
+        } else if kind.is_dir() {
             copy_tree(&entry.path(), &dest)?;
-        } else {
+        } else if kind.is_file() {
             std::fs::copy(entry.path(), &dest)?;
+        } else {
+            bail!("{} is not a regular file", entry.path().display());
         }
     }
     Ok(())
@@ -306,5 +594,274 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uppercase_and_short_hex_are_refused() {
+        let good = "ab".repeat(32);
+        assert_eq!(
+            hexes_of(&format!("sha256:{good}")).unwrap(),
+            vec![good.clone()]
+        );
+        let upper = hexes_of(&format!("sha256:{}", "AB".repeat(32)));
+        assert!(upper.is_err(), "uppercase hex was accepted");
+        let short = hexes_of("sha256:abcd");
+        assert!(short.is_err(), "short hex was accepted");
+        let long = hexes_of(&format!("sha256:{good}aa"));
+        assert!(long.is_err(), "a 66 digit hex was accepted");
+    }
+
+    /// Export already wrote id, digest, and a signature line. The store
+    /// still holds the one-line id. Seam must not copy that over the export.
+    #[test]
+    fn an_exported_digest_sidecar_is_left_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+        let bag = dir.path().join("bag");
+        let id = "deed-file-new";
+        let prior = "deed-file-old";
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        std::fs::create_dir_all(store.join("deeds")).unwrap();
+        std::fs::write(
+            store.join("deeds").join(format!("{id}.supersedes")),
+            format!("{prior}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            store.join("deeds").join(format!("{prior}.successor")),
+            format!("{id}\n"),
+        )
+        .unwrap();
+        let folder = bag.join(id);
+        let prior_folder = bag.join(prior);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(&prior_folder).unwrap();
+        let signed = format!("{prior}\n{digest}\ned25519:keep\n");
+        std::fs::write(folder.join("supersedes"), &signed).unwrap();
+        let successor = format!("{id}\n{digest}\n");
+        std::fs::write(prior_folder.join("successor"), &successor).unwrap();
+        let sources = format!("{prior}\t{digest}\ned25519:keep\n");
+        std::fs::write(folder.join("sources"), &sources).unwrap();
+        seam(
+            &store,
+            &bag,
+            &[
+                Row {
+                    id: id.to_string(),
+                    hexes: Vec::new(),
+                    sources: format!("deed:{prior}"),
+                },
+                Row {
+                    id: prior.to_string(),
+                    hexes: Vec::new(),
+                    sources: String::new(),
+                },
+            ],
+        )
+        .unwrap_or_else(|e| panic!("seam rewrote an exported sidecar: {e:#}"));
+        assert_eq!(
+            std::fs::read(folder.join("supersedes")).unwrap(),
+            signed.into_bytes()
+        );
+        assert_eq!(
+            std::fs::read(prior_folder.join("successor")).unwrap(),
+            successor.into_bytes()
+        );
+        assert_eq!(
+            std::fs::read(folder.join("sources")).unwrap(),
+            sources.into_bytes()
+        );
+    }
+
+    #[test]
+    fn a_symlinked_link_sidecar_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+        let bag = dir.path().join("bag");
+        let id = "deed-file-note";
+        let outside = dir.path().join("outside");
+        std::fs::write(&outside, b"not a digest\n").unwrap();
+        std::fs::create_dir_all(store.join("deeds")).unwrap();
+        std::fs::write(
+            store.join("deeds").join(format!("{id}.supersedes")),
+            "deed-file-old\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(bag.join(id)).unwrap();
+        std::os::unix::fs::symlink(&outside, bag.join(id).join("supersedes")).unwrap();
+        let err = seam(
+            &store,
+            &bag,
+            &[Row {
+                id: id.to_string(),
+                hexes: Vec::new(),
+                sources: String::new(),
+            }],
+        )
+        .expect_err("a symlinked sidecar was followed");
+        let text = format!("{err:#}");
+        assert!(text.contains("symlink"), "{text}");
+        assert_eq!(std::fs::read(&outside).unwrap(), b"not a digest\n");
+        std::fs::remove_file(bag.join(id).join("supersedes")).unwrap();
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        std::fs::write(
+            bag.join(id).join("supersedes"),
+            format!("deed-file-old\n{digest}\n"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside, bag.join(id).join("sources")).unwrap();
+        let err = seam(
+            &store,
+            &bag,
+            &[Row {
+                id: id.to_string(),
+                hexes: Vec::new(),
+                sources: "deed:deed-file-old".to_string(),
+            }],
+        )
+        .expect_err("a symlinked sources file was followed");
+        let text = format!("{err:#}");
+        assert!(text.contains("symlink"), "{text}");
+        assert_eq!(std::fs::read(&outside).unwrap(), b"not a digest\n");
+    }
+
+    #[test]
+    fn a_symlinked_store_link_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+        let bag = dir.path().join("bag");
+        let id = "deed-file-note";
+        let outside = dir.path().join("outside");
+        std::fs::write(&outside, b"deed-file-old\n").unwrap();
+        std::fs::create_dir_all(store.join("deeds")).unwrap();
+        std::os::unix::fs::symlink(
+            &outside,
+            store.join("deeds").join(format!("{id}.supersedes")),
+        )
+        .unwrap();
+        std::fs::create_dir_all(bag.join(id)).unwrap();
+        let err = seam(
+            &store,
+            &bag,
+            &[Row {
+                id: id.to_string(),
+                hexes: Vec::new(),
+                sources: String::new(),
+            }],
+        )
+        .expect_err("a symlinked store link was copied");
+        let text = format!("{err:#}");
+        assert!(text.contains("symlink"), "{text}");
+        assert!(bag.join(id).join("supersedes").symlink_metadata().is_err());
+    }
+
+    #[test]
+    fn a_symlinked_store_entry_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+        let bag = dir.path().join("bag");
+        let id = "deed-file-note";
+        let hex = "cd".repeat(32);
+        let outside = dir.path().join("outside.txt");
+        std::fs::write(&outside, b"secret outside the store").unwrap();
+        std::fs::create_dir_all(store.join("bytes")).unwrap();
+        std::os::unix::fs::symlink(&outside, store.join("bytes").join(&hex)).unwrap();
+        std::fs::create_dir_all(bag.join(id)).unwrap();
+        let err = seam(
+            &store,
+            &bag,
+            &[Row {
+                id: id.to_string(),
+                hexes: vec![hex.clone()],
+                sources: String::new(),
+            }],
+        )
+        .expect_err("a symlinked store entry was copied");
+        let text = format!("{err:#}");
+        assert!(text.contains("symlink"), "{text}");
+        assert!(
+            std::fs::symlink_metadata(bag.join(id).join("bytes").join(&hex)).is_err(),
+            "{text}"
+        );
+        assert!(
+            std::fs::symlink_metadata(bag.join(id).join(&hex)).is_err(),
+            "{text}"
+        );
+        assert!(
+            !bag_holds(&bag, b"secret outside the store"),
+            "symlink target was copied into the bag"
+        );
+    }
+
+    #[test]
+    fn a_failed_publish_keeps_the_old_bag() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("seat");
+        std::fs::create_dir_all(dest.join("kept")).unwrap();
+        std::fs::write(dest.join("kept").join("marker"), b"old bag").unwrap();
+        let here = std::fs::metadata(dir.path()).unwrap().dev();
+        let shm = std::fs::metadata("/dev/shm")
+            .unwrap_or_else(|e| panic!("/dev/shm: {e}"))
+            .dev();
+        assert_ne!(
+            here, shm,
+            "/dev/shm is not a separate filesystem, so the copy path cannot fail on its own"
+        );
+        // SAFETY: geteuid only reads this process's credentials.
+        assert_ne!(
+            unsafe { libc::geteuid() },
+            0,
+            "root can read a mode 000 file, so the copy would not fail"
+        );
+        let scratch = tempfile::tempdir_in("/dev/shm").unwrap();
+        std::fs::create_dir_all(scratch.path().join("fresh")).unwrap();
+        let blocked = scratch.path().join("fresh").join("blocked");
+        std::fs::write(&blocked, b"new").unwrap();
+        let mut perms = std::fs::metadata(&blocked).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&blocked, perms).unwrap();
+        let err = publish(scratch.path(), &dest);
+        let mut perms = std::fs::metadata(&blocked).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&blocked, perms).unwrap();
+        let err = err.expect_err("publish of an unreadable tree succeeded");
+        let text = format!("{err:#}");
+        assert_eq!(
+            std::fs::read(dest.join("kept").join("marker")).unwrap(),
+            b"old bag",
+            "{text}"
+        );
+        assert!(!dest.join("fresh").exists(), "{text}");
+        assert!(
+            !dir.path().join(".seat.incoming").exists(),
+            "staged tree left behind: {text}"
+        );
+        assert!(
+            !dir.path().join(".seat.previous").exists(),
+            "old bag was moved aside: {text}"
+        );
+    }
+
+    fn bag_holds(dir: &Path, secret: &[u8]) -> bool {
+        let Ok(read) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            let kind = entry.file_type();
+            if kind.as_ref().is_ok_and(|k| k.is_dir()) && bag_holds(&path, secret) {
+                return true;
+            }
+            if std::fs::read(&path).ok().as_deref() == Some(secret) {
+                return true;
+            }
+        }
+        false
     }
 }
