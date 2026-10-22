@@ -25592,6 +25592,61 @@ impl Drop for CommitLock {
 /// The file ljos locks around every write to a tracker checkout's index.
 pub const TRACKER_LOCK: &str = ".ljos-commit.lock";
 
+/// A child git command that follows `-C` in `dir` and does not inherit an
+/// exported repository from the parent process.
+pub(crate) fn git_at(dir: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_PREFIX",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+    ] {
+        cmd.env_remove(key);
+    }
+    cmd.arg("-C").arg(dir);
+    cmd
+}
+
+/// Discovery should not walk up from a scratch path under `target/` into an
+/// enclosing checkout; those are separate repositories when they are
+/// initialized. A path that already has its own `.git` keeps normal discovery.
+pub(crate) fn checkout_ceiling(dir: &Path) -> Option<PathBuf> {
+    let start = if let Ok(canon) = std::fs::canonicalize(dir) {
+        canon
+    } else if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(dir)
+    };
+    let mut cur = start.clone();
+    loop {
+        if cur.join(".git").exists() {
+            return None;
+        }
+        if cur.file_name().is_some_and(|name| name == "target") {
+            if cur == start {
+                return cur.parent().map(Path::to_path_buf);
+            }
+            return Some(cur);
+        }
+        if !cur.pop() {
+            return None;
+        }
+    }
+}
+
+fn tracker_git_at(dir: &Path) -> std::process::Command {
+    let mut cmd = git_at(dir);
+    if let Some(ceiling) = checkout_ceiling(dir) {
+        cmd.env("GIT_CEILING_DIRECTORIES", ceiling);
+    }
+    cmd
+}
+
 /// `TRACKER_LOCK` at the top of the worktree that holds `dir`, kept out of
 /// `git status` by the repository's `info/exclude`. Not in `.git`, where a
 /// hand clearing `*.lock` after a crash would unlink it under a live holder
@@ -26195,11 +26250,8 @@ fn persist_tracker_paths(path: &Path, issue: &str, verb: &str, also: &[String]) 
     };
     let dir: &Path = &git_dir;
     let git = |args: &[&str]| {
-        let mut cmd = std::process::Command::new("git");
-        cmd.arg("-C")
-            .arg(dir)
-            .args(args)
-            .stdin(std::process::Stdio::null());
+        let mut cmd = tracker_git_at(dir);
+        cmd.args(args).stdin(std::process::Stdio::null());
         git_hooks::hook_child_env(&mut cmd);
         cmd.output()
     };
@@ -30705,6 +30757,64 @@ mod tests {
         assert!(!said.contains("nothing to commit"), "{said}");
         assert_eq!(run(&["log", "-1", "--format=%s"]).trim(), "seed");
         for var in ["VISSUE_ROOT", "VISSUE_NO_ROUTE", "LJOS_TRACKER_GIT"] {
+            std::env::remove_var(var);
+        }
+    }
+
+    /// A path under another checkout's ignored `target/` is not itself a
+    /// tracker checkout. Persisting that file must not touch the outer
+    /// checkout's lock or exclude list.
+    #[test]
+    fn an_unprepared_nested_tracker_path_does_not_touch_the_enclosing_checkout() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let outer = dir.path();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(outer)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "seat@example.invalid"]);
+        run(&["config", "user.name", "seat"]);
+        run(&["config", "core.hooksPath", "/dev/null"]);
+        std::fs::write(outer.join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(outer.join("README.md"), "seed\n").unwrap();
+        run(&["add", ".gitignore", "README.md"]);
+        run(&["commit", "-q", "-m", "seed"]);
+
+        let nested = outer.join("target/tracker-home/Software/probe");
+        std::fs::create_dir_all(&nested).unwrap();
+        let issues = nested.join("issues.org");
+        std::fs::write(
+            &issues,
+            "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
+        )
+        .unwrap();
+        let before_exclude =
+            std::fs::read_to_string(outer.join(".git/info/exclude")).unwrap_or_default();
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+
+        let said = persist_tracker_file(&issues, "probe-a1b2", "claimed");
+        assert!(said.contains("the tracker is not a git checkout"), "{said}");
+        assert!(
+            !outer.join(TRACKER_LOCK).exists(),
+            "outer checkout gained {}",
+            TRACKER_LOCK
+        );
+        let after_exclude =
+            std::fs::read_to_string(outer.join(".git/info/exclude")).unwrap_or_default();
+        assert_eq!(after_exclude, before_exclude, "outer exclude changed");
+        for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
             std::env::remove_var(var);
         }
     }
