@@ -93,9 +93,9 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      # The mail reader tests build a notmuch database; they fail without it.
-      - name: Install age and notmuch
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends age notmuch
+      # Mail reader tests build a notmuch database. Detach tests need tmux.
+      - name: Install age, tmux and notmuch
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends age tmux notmuch
       - name: Build packset from develop
         run: |
           set -euo pipefail
