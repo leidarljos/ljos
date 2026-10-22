@@ -147,7 +147,9 @@ fn damaged_file(dir: &Path) -> PathBuf {
 }
 
 /// The damaged files a rewrite left in `dir`, with their sizes, oldest
-/// day first. Listed without following a link and without opening one.
+/// day first. Listed without following a link and without opening one;
+/// a link or anything else that is not a regular file is left out, since
+/// a send never writes through one.
 #[must_use]
 pub fn set_aside_in(dir: &Path) -> Vec<(PathBuf, u64)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -160,7 +162,9 @@ pub fn set_aside_in(dir: &Path) -> Vec<(PathBuf, u64)> {
             let name = name.to_str()?;
             let dated = name.strip_prefix("note-queue.jsonl.")?;
             dated.strip_suffix(".damaged")?;
-            Some((entry.path(), entry.metadata().ok()?.len()))
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path).ok()?;
+            meta.is_file().then_some((path, meta.len()))
         })
         .collect();
     found.sort();
@@ -541,6 +545,28 @@ mod tests {
         );
         assert_eq!(std::fs::read(queue_file(&dir)).unwrap(), b"");
         assert_eq!(tidy_in(&dir, |notes| notes).unwrap(), None);
+    }
+
+    /// A damaged name that is a link, to a file outside the state dir or
+    /// to nothing, is not listed, and its target is neither read nor
+    /// changed.
+    #[test]
+    fn a_linked_damaged_name_is_not_followed() {
+        let dir = dir("linked");
+        let real = dir.join("note-queue.jsonl.2026-01-01.damaged");
+        std::fs::write(&real, b"cut").unwrap();
+        let outside = dir.parent().unwrap().join("linked-outside");
+        std::fs::write(&outside, b"not ljos's own").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("note-queue.jsonl.2026-01-02.damaged"))
+            .unwrap();
+        std::os::unix::fs::symlink(
+            dir.join("gone"),
+            dir.join("note-queue.jsonl.2026-01-03.damaged"),
+        )
+        .unwrap();
+        assert_eq!(set_aside_in(&dir), [(real, 3)]);
+        assert_eq!(std::fs::read(&outside).unwrap(), b"not ljos's own");
+        assert!(!dir.join("gone").exists());
     }
 
     #[test]
