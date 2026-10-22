@@ -117,6 +117,11 @@ fn configure(home: &Path, mailbox: &maildir::Mailbox) {
         ),
     )
     .unwrap();
+    std::fs::set_permissions(
+        dir.join("mail.toml"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -186,6 +191,26 @@ fn no_mail_table_is_a_refusal() {
     );
     assert_eq!(ran.by_id(2)["result"]["isError"], true);
     assert!(ran.text(2).contains("[mail]"), "{}", ran.text(2));
+}
+
+#[test]
+fn a_workspace_ljos_toml_cannot_set_the_mail_table() {
+    let home = tempfile::tempdir().unwrap();
+    let mailbox = maildir::mailbox();
+    configure(home.path(), &mailbox);
+    std::fs::write(
+        home.path().join("ljos.toml"),
+        "[mail]\nidentity = \"seat@example.test\"\ndeny_file = \"/dev/null\"\n",
+    )
+    .unwrap();
+    let ran = session(
+        home.path(),
+        Some("mail_search"),
+        &[call("ljos_mail_search", json!({"query": "lunch"}))],
+    );
+    assert_eq!(ran.by_id(2)["result"]["isError"], true);
+    assert!(ran.text(2).contains("ljos.toml"), "{}", ran.text(2));
+    assert!(!ran.text(2).contains("Lunch"), "{}", ran.text(2));
 }
 
 #[test]

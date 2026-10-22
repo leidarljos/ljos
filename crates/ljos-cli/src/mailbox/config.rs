@@ -1,10 +1,16 @@
 //! The optional `[mail]` table.
 //!
-//! It is read from the same layers as the panel budget, plus
-//! `mail.toml` in the ljos config dir. A later layer overrides the keys it
-//! sets. Unlike the budget, a layer that does not parse is an error: a
-//! typo in `deny_file` must not quietly drop the deny list.
+//! It names the identity drafts are sent as, the deny list, and the
+//! notmuch database, so only the user may set it. It is read from the
+//! user's own files, `ljos.toml` then `mail.toml` in the ljos config dir,
+//! each owned by the user and not group or world writable. Any other
+//! config layer (`./ljos.toml`, `./vissue.toml`, `VISSUE_CONFIG`,
+//! `LJOS_CONFIG`, the vissue config) that carries a `[mail]` table is an
+//! error, as is a layer that cannot be read or parsed: a seat that can
+//! write the working directory must not swap the identity or the deny
+//! list.
 
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context as _, Result};
@@ -13,7 +19,7 @@ use serde::Deserialize;
 /// What the `[mail]` layers say. Every key is optional.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MailConfig {
-    /// `NOTMUCH_CONFIG` for every read.
+    /// `NOTMUCH_CONFIG` for every read. The reader refuses without it.
     pub notmuch_config: Option<PathBuf>,
     /// The notmuch binary: an absolute path, or a bare name found on PATH.
     pub notmuch: Option<PathBuf>,
@@ -40,19 +46,43 @@ struct Table {
     attribution: Option<Vec<String>>,
 }
 
-/// The `[mail]` config from the usual layers. `None` when no layer has
-/// the table.
+/// The `[mail]` config from the user's files, after checking that no
+/// other layer sets it. `None` when no user file has the table.
 pub fn load() -> Result<Option<MailConfig>> {
-    load_from(&crate::converge::config_paths(Some("mail.toml")))
+    let user: Vec<PathBuf> = crate::converge::config_base()
+        .map(|base| vec![base.join("ljos/ljos.toml"), base.join("ljos/mail.toml")])
+        .unwrap_or_default();
+    let shared: Vec<PathBuf> = crate::converge::config_paths(None)
+        .into_iter()
+        .filter(|path| !user.contains(path))
+        .collect();
+    load_from(&user, &shared)
 }
 
-/// The `[mail]` config from `paths`, in order. A missing file is skipped.
-pub fn load_from(paths: &[PathBuf]) -> Result<Option<MailConfig>> {
-    let mut config: Option<MailConfig> = None;
-    for path in paths {
-        let Ok(text) = std::fs::read_to_string(path) else {
+/// The `[mail]` config from the `user` files, in order, a later one
+/// overriding the keys it sets. A `shared` file with a `[mail]` table is
+/// an error. A missing file is skipped; any other read failure is an
+/// error.
+pub fn load_from(user: &[PathBuf], shared: &[PathBuf]) -> Result<Option<MailConfig>> {
+    for path in shared {
+        let Some(text) = read(path)? else {
             continue;
         };
+        let layer: toml::Value =
+            toml::from_str(&text).with_context(|| format!("mail config {}", path.display()))?;
+        if layer.get("mail").is_some() {
+            bail!(
+                "mail config {}: [mail] may be set only in the user's own ljos.toml or mail.toml",
+                path.display()
+            );
+        }
+    }
+    let mut config: Option<MailConfig> = None;
+    for path in user {
+        let Some(text) = read(path)? else {
+            continue;
+        };
+        owned_by_user(path)?;
         let layer: Layer =
             toml::from_str(&text).with_context(|| format!("mail config {}", path.display()))?;
         let Some(table) = layer.mail else {
@@ -77,6 +107,26 @@ pub fn load_from(paths: &[PathBuf]) -> Result<Option<MailConfig>> {
         }
     }
     Ok(config)
+}
+
+fn read(path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("mail config {}: cannot read", path.display())),
+    }
+}
+
+fn owned_by_user(path: &Path) -> Result<()> {
+    let meta = std::fs::metadata(path)
+        .with_context(|| format!("mail config {}: cannot stat", path.display()))?;
+    if meta.uid() != crate::euid() {
+        bail!("mail config {}: not owned by this user", path.display());
+    }
+    if meta.mode() & 0o022 != 0 {
+        bail!("mail config {}: group or world writable", path.display());
+    }
+    Ok(())
 }
 
 fn check(table: &Table) -> Result<()> {
