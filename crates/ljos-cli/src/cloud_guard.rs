@@ -4255,14 +4255,14 @@ fn curl_named_file(
     read_curl_file(&resolve_cfg(value, cwd), cwd, tune, seen, true)
 }
 
-/// Default curlrc search. `CURL_HOME` replaces the others: a missing file
-/// there is opaque, because the variable says a config applies and it
-/// could not be read. Otherwise the first file that exists, in curl's
-/// order, is the one curl would load: the XDG file, then `HOME`, then the
-/// Windows `USERPROFILE`, `APPDATA`, and `USERPROFILE\Application Data`.
-/// Windows curl also takes `_curlrc` after `.curlrc` in each. The Windows
-/// variables are read wherever they are set, so a seat that sets one is
-/// judged as Windows curl would be.
+/// Default curlrc search, in curl 8's order. The first file that exists
+/// is the one curl loads: `$CURL_HOME/.curlrc`, `$XDG_CONFIG_HOME/.curlrc`,
+/// `$HOME/.curlrc`, then, only while `XDG_CONFIG_HOME` is unset,
+/// `$CURL_HOME/.config/curlrc` and `$HOME/.config/curlrc`, and last
+/// `.curlrc` in the passwd home. An empty variable is unset. Windows curl
+/// also tries `_curlrc` and `USERPROFILE` and `APPDATA` after `HOME`; curl
+/// on Linux reads neither, so a file there must not stand in for the one
+/// it does read.
 fn curl_default_files(
     env: &[(String, String)],
     cwd: Option<&Path>,
@@ -4274,28 +4274,30 @@ fn curl_default_files(
             .filter(|dir| !dir.is_empty())
             .map(PathBuf::from)
     };
-    if let Some(dir) = dir_of("CURL_HOME") {
-        let found = first_curl_file(&curl_rc_names(&dir, cfg!(windows)), cwd, tune, seen);
-        return found.unwrap_or_else(|| {
-            tune.unreadable = true;
-            Some(HttpShape::Opaque)
-        });
-    }
+    let windows = cfg!(windows);
+    let (curl_home, xdg, home) = (
+        dir_of("CURL_HOME"),
+        dir_of("XDG_CONFIG_HOME"),
+        dir_of("HOME"),
+    );
     let mut paths = Vec::new();
-    if let Some(xdg) = dir_of("XDG_CONFIG_HOME") {
-        paths.push(xdg.join("curlrc"));
+    for dir in [&curl_home, &xdg, &home].into_iter().flatten() {
+        paths.extend(curl_rc_names(dir, windows));
     }
-    if let Some(home) = dir_of("HOME") {
-        paths.extend(curl_rc_names(&home, cfg!(windows)));
+    if windows {
+        let profile = dir_of("USERPROFILE");
+        let legacy = profile.as_ref().map(|dir| dir.join("Application Data"));
+        for dir in [profile, dir_of("APPDATA"), legacy].iter().flatten() {
+            paths.extend(curl_rc_names(dir, true));
+        }
     }
-    if let Some(profile) = dir_of("USERPROFILE") {
-        paths.extend(curl_rc_names(&profile, true));
+    if xdg.is_none() {
+        for dir in [&curl_home, &home].into_iter().flatten() {
+            paths.push(dir.join(".config/curlrc"));
+        }
     }
-    if let Some(appdata) = dir_of("APPDATA") {
-        paths.extend(curl_rc_names(&appdata, true));
-    }
-    if let Some(profile) = dir_of("USERPROFILE") {
-        paths.extend(curl_rc_names(&profile.join("Application Data"), true));
+    if let Some(own) = crate::proc_tree::own_home() {
+        paths.push(own.join(".curlrc"));
     }
     first_curl_file(&paths, cwd, tune, seen).flatten()
 }

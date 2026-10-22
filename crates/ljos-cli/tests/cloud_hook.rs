@@ -969,9 +969,9 @@ fn a_curl_config_is_a_write_without_a_token_on_the_command() {
         here,
     );
 
-    fs::write(xdg.join("curlrc"), rc).unwrap();
+    fs::write(xdg.join(".curlrc"), rc).unwrap();
     refused("curl -s https://api.github.com/user", here);
-    fs::remove_file(xdg.join("curlrc")).unwrap();
+    fs::remove_file(xdg.join(".curlrc")).unwrap();
 
     let inner = root.path().join("inner.cfg");
     fs::write(&inner, rc).unwrap();
@@ -1693,11 +1693,11 @@ fn a_percent_encoded_host_is_decoded_before_the_github_check() {
     fs::remove_file(home.join(".curlrc")).unwrap();
 }
 
-/// Windows curl also loads `.curlrc` or `_curlrc` from `USERPROFILE`,
-/// `APPDATA`, and `USERPROFILE\Application Data` after `HOME`. A seat that
-/// sets those variables is judged as Windows curl would be.
+/// Curl on Linux reads neither `_curlrc` nor the Windows places,
+/// `USERPROFILE`, `APPDATA`, and `USERPROFILE\Application Data`. A file
+/// there is not judged, and does not stand in for the file curl loads.
 #[test]
-fn a_windows_curlrc_is_judged_where_its_variable_is_set() {
+fn a_windows_curlrc_is_not_read_off_windows() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (home, _xdg) = seat_env(root.path());
@@ -1710,44 +1710,92 @@ fn a_windows_curlrc_is_judged_where_its_variable_is_set() {
     fs::create_dir_all(&legacy).unwrap();
     let line = |key: &str| {
         format!(
-            "{key}={} curl -s https://api.github.com/user",
+            "{key}={} XDG_CONFIG_HOME= curl -s https://api.github.com/user",
             win.display()
         )
     };
 
-    allowed(&line("APPDATA"), here);
-    allowed(&line("USERPROFILE"), here);
-    for (dir, name, key) in [
-        (&win, "_curlrc", "APPDATA"),
-        (&win, ".curlrc", "APPDATA"),
-        (&win, "_curlrc", "USERPROFILE"),
-        (&win, ".curlrc", "USERPROFILE"),
-        (&legacy, "_curlrc", "USERPROFILE"),
+    for (dir, name) in [
+        (&win, "_curlrc"),
+        (&win, ".curlrc"),
+        (&legacy, "_curlrc"),
+        (&legacy, ".curlrc"),
     ] {
         fs::write(dir.join(name), rc).unwrap();
-        refused(&line(key), here);
-        allowed(
-            &format!(
-                "{key}={} curl -q -s https://api.github.com/user",
-                win.display()
-            ),
-            here,
-        );
+        allowed(&line("APPDATA"), here);
+        allowed(&line("USERPROFILE"), here);
         fs::remove_file(dir.join(name)).unwrap();
     }
+    fs::write(home.join("_curlrc"), rc).unwrap();
+    allowed("curl -s https://api.github.com/user", here);
+    fs::remove_file(home.join("_curlrc")).unwrap();
 
-    fs::write(win.join("_curlrc"), rc).unwrap();
+    fs::write(win.join(".curlrc"), "silent\n").unwrap();
+    fs::create_dir_all(home.join(".config")).unwrap();
+    fs::write(home.join(".config/curlrc"), rc).unwrap();
+    refused(&line("APPDATA"), here);
+    refused(&line("USERPROFILE"), here);
+}
+
+/// Curl 8 loads the first of `$CURL_HOME/.curlrc`,
+/// `$XDG_CONFIG_HOME/.curlrc`, and `$HOME/.curlrc`, then, while
+/// `XDG_CONFIG_HOME` is unset, `$CURL_HOME/.config/curlrc` and
+/// `$HOME/.config/curlrc`. A missing file in one falls through to the
+/// next, and a write to any of them is refused.
+#[test]
+fn the_default_curlrc_is_the_one_curl_8_loads() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let rc = "request = DELETE\n";
+    let get = "curl -s https://api.github.com/user";
+    let no_xdg = format!("XDG_CONFIG_HOME= {get}");
+    let dot_config = home.join(".config/curlrc");
+    fs::create_dir_all(home.join(".config")).unwrap();
+
+    fs::write(&dot_config, rc).unwrap();
+    refused(&no_xdg, here);
+    allowed(get, here);
     fs::write(home.join(".curlrc"), "silent\n").unwrap();
-    allowed(&line("APPDATA"), here);
+    allowed(&no_xdg, here);
     fs::remove_file(home.join(".curlrc")).unwrap();
-    fs::remove_file(win.join("_curlrc")).unwrap();
+    fs::remove_file(&dot_config).unwrap();
 
-    #[cfg(not(windows))]
-    {
-        fs::write(home.join("_curlrc"), rc).unwrap();
-        allowed("curl -s https://api.github.com/user", here);
-        fs::remove_file(home.join("_curlrc")).unwrap();
+    fs::write(xdg.join(".curlrc"), rc).unwrap();
+    refused(get, here);
+    allowed(&no_xdg, here);
+    fs::remove_file(xdg.join(".curlrc")).unwrap();
+    fs::write(xdg.join("curlrc"), rc).unwrap();
+    allowed(get, here);
+    fs::remove_file(xdg.join("curlrc")).unwrap();
+
+    let curl_home = root.path().join("curlhome");
+    fs::create_dir_all(curl_home.join(".config")).unwrap();
+    let in_curl_home = |line: &str| format!("CURL_HOME={} {line}", curl_home.display());
+    allowed(&in_curl_home(get), here);
+    allowed(&in_curl_home(&no_xdg), here);
+    fs::write(curl_home.join(".config/curlrc"), rc).unwrap();
+    refused(&in_curl_home(&no_xdg), here);
+    allowed(&in_curl_home(get), here);
+    fs::write(home.join(".curlrc"), "silent\n").unwrap();
+    allowed(&in_curl_home(&no_xdg), here);
+    fs::remove_file(home.join(".curlrc")).unwrap();
+
+    for path in [
+        dot_config,
+        xdg.join(".curlrc"),
+        curl_home.join(".curlrc"),
+        curl_home.join(".config/curlrc"),
+    ] {
+        refused(
+            &format!("printf 'request = DELETE\\n' > {}", path.display()),
+            here,
+        );
     }
+    refused("printf 'request = DELETE\\n' > ~/.config/curlrc", here);
 }
 
 /// Only a missing default config is no config. A directory, a fifo, or a
@@ -1782,10 +1830,10 @@ fn a_default_config_that_is_not_a_regular_file_is_a_write() {
         fs::remove_file(&path).unwrap();
     }
 
-    fs::create_dir(xdg.join("curlrc")).unwrap();
+    fs::create_dir(xdg.join(".curlrc")).unwrap();
     refused(curl, here);
     allowed("curl -q -s https://api.github.com/user", here);
-    fs::remove_dir(xdg.join("curlrc")).unwrap();
+    fs::remove_dir(xdg.join(".curlrc")).unwrap();
     allowed(curl, here);
     allowed(wget, here);
 }

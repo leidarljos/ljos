@@ -694,17 +694,22 @@ pub(crate) fn protected_write_targets() -> Vec<PathBuf> {
         out.push(home.join(".gitconfig"));
         out.push(home.join(".config/git/config"));
         out.push(home.join(".curlrc"));
+        out.push(home.join(".config/curlrc"));
         out.push(home.join(".wgetrc"));
+    }
+    if let Some(own) = crate::proc_tree::own_home() {
+        out.push(own.join(".curlrc"));
     }
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
         let xdg = PathBuf::from(xdg);
         out.push(xdg.join("git/config"));
-        out.push(xdg.join("curlrc"));
+        out.push(xdg.join(".curlrc"));
     }
     if let Some(path) = std::env::var_os("CURL_HOME") {
         let path = PathBuf::from(&path);
         if !path.as_os_str().is_empty() {
             out.push(path.join(".curlrc"));
+            out.push(path.join(".config/curlrc"));
         }
     }
     for key in ["WGETRC", "SYSTEM_WGETRC"] {
@@ -792,6 +797,7 @@ fn config_file_name(path: &str) -> bool {
         || path.ends_with(".git/config")
         || path == ".curlrc"
         || path.ends_with("/.curlrc")
+        || path.ends_with("/.config/curlrc")
         || path == ".wgetrc"
         || path.ends_with("/.wgetrc")
 }
