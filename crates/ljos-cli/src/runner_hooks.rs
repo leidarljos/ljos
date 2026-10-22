@@ -1460,6 +1460,20 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_inner_hook_that_answers_keeps_its_answer() {
+        let _lock = crate::test_env_lock();
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.0 {
+                        Some(v) => std::env::set_var("LJOS_GUARD_FAIL_OPEN", v),
+                        None => std::env::remove_var("LJOS_GUARD_FAIL_OPEN"),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("LJOS_GUARD_FAIL_OPEN"));
+        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         assert_eq!(inner("true", 30_000), "", "a clean allow");
         assert_eq!(inner(&format!("printf '%s' '{DENY}'"), 30_000), DENY);
         assert_eq!(
