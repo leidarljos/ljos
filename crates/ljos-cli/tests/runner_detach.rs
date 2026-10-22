@@ -158,11 +158,7 @@ fn basis(atom: &Value) -> Option<&str> {
 /// detached child inherits a scope the check can see.
 fn ensure_runner_scope() {
     let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
-    let runners = ["cursor", "claude", "codex"];
-    let already = text
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|word| word.len() >= 4 && runners.contains(&word));
-    if already {
+    if cgroup_names_runner(&text) {
         return;
     }
     let path = text
@@ -173,11 +169,59 @@ fn ensure_runner_scope() {
     let dir = PathBuf::from("/sys/fs/cgroup")
         .join(path.trim_start_matches('/'))
         .join("claude");
-    std::fs::create_dir_all(&dir)
-        .unwrap_or_else(|err| panic!("could not create {dir:?} for the detach test: {err}"));
+    // A hosted runner keeps this process in a service cgroup the test
+    // user cannot extend. Root creates the child scope and moves the
+    // process; detached children inherit that scope.
+    if std::fs::create_dir_all(&dir).is_err() {
+        let made = Command::new("sudo")
+            .args(["-n", "mkdir", "-p"])
+            .arg(&dir)
+            .output()
+            .unwrap_or_else(|err| panic!("sudo mkdir {dir:?} failed to start: {err}"));
+        assert!(
+            made.status.success(),
+            "could not create {dir:?} for the detach test\n{}",
+            text_of(&made)
+        );
+    }
     let procs = dir.join("cgroup.procs");
-    std::fs::write(&procs, std::process::id().to_string())
-        .unwrap_or_else(|err| panic!("could not move into {procs:?}: {err}; cgroup was {text}"));
+    let pid = std::process::id().to_string();
+    if std::fs::write(&procs, &pid).is_err() {
+        let mut tee = Command::new("sudo");
+        tee.args(["-n", "tee"])
+            .arg(&procs)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let mut child = tee
+            .spawn()
+            .unwrap_or_else(|err| panic!("sudo tee {procs:?} failed to start: {err}"));
+        child
+            .stdin
+            .take()
+            .expect("tee stdin")
+            .write_all(pid.as_bytes())
+            .unwrap_or_else(|err| panic!("could not write {pid} into {procs:?}: {err}"));
+        let done = child
+            .wait_with_output()
+            .unwrap_or_else(|err| panic!("sudo tee {procs:?} failed: {err}"));
+        assert!(
+            done.status.success(),
+            "could not move into {procs:?}; cgroup was {text}\n{}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+    }
+    let moved = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+    assert!(
+        cgroup_names_runner(&moved),
+        "cgroup {moved:?} still names no runner after moving into {dir:?}"
+    );
+}
+
+fn cgroup_names_runner(text: &str) -> bool {
+    let runners = ["cursor", "claude", "codex"];
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| word.len() >= 4 && runners.contains(&word))
 }
 
 fn keep_refused(out: &std::process::Output, how: &str) {
