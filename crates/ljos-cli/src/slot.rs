@@ -151,22 +151,33 @@ pub fn stands(
     }
 }
 
-/// The refusal when pin order cannot be read. Names the deepen a caller runs.
+/// The refusal when pin order cannot be read. Names the cause: the
+/// deepen a caller runs, a `refs/replace` ref, or a grafts file.
 pub const HISTORY_INCOMPLETE: &str = "tracker history incomplete";
 
 /// Make `root`'s history readable for pin order. A shallow checkout, or
 /// one whose objects are missing, is deepened with `git fetch --unshallow`
 /// when it has a remote, then with a deepen of that remote if it is still
-/// shallow. A tracker that is not a git repository is left alone.
+/// shallow. `refs/replace` and a grafts file rewrite parents without
+/// removing objects, so those are refused instead of deepened. A tracker
+/// that is not a git repository is left alone.
 ///
 /// # Errors
 ///
-/// History is still incomplete. The error is [`HISTORY_INCOMPLETE`] and
-/// names `git fetch --unshallow`. Missing history is not "stood".
+/// History is still incomplete, or parents are rewritten. The error is
+/// [`HISTORY_INCOMPLETE`]. A shallow checkout names `git fetch
+/// --unshallow`. A replace ref or a grafts file names that cause.
+/// Missing history is not "stood".
 pub fn require_tracker_history(root: &Path) -> std::result::Result<(), String> {
     if ballot_sig::git_in(root, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true")
     {
         return Ok(());
+    }
+    // A deepen does not delete replace refs or a grafts file. Refuse
+    // before the ready cache: a checkout that was complete can gain
+    // either later, and the cached answer would then be the rewrite.
+    if let Some(why) = parent_rewrite(root) {
+        return Err(format!("{HISTORY_INCOMPLETE}: {why}"));
     }
     let key = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let (ready, deepened) = {
@@ -214,8 +225,70 @@ fn history_cache() -> std::sync::MutexGuard<'static, HistoryCache> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Shallow history, missing objects, or parents rewritten by a replace
+/// ref or a grafts file. The rewrite is also refused up front in
+/// [`require_tracker_history`]: fetching does not remove it.
 fn history_gap(root: &Path) -> bool {
-    shallow_repo(root) || missing_objects(root)
+    shallow_repo(root) || missing_objects(root) || parent_rewrite(root).is_some()
+}
+
+/// Why `root`'s parent list is not the one in the commit objects, or
+/// `None` when pin order can be read from those objects.
+fn parent_rewrite(root: &Path) -> Option<String> {
+    let replace = replace_refs(root);
+    let grafts = grafts_file(root);
+    let why = match (replace, grafts) {
+        (false, false) => return None,
+        (true, false) => {
+            "refs/replace rewrites the parents a pin's order is read from. \
+             Remove the replace refs and retry"
+        }
+        (false, true) => {
+            ".git/info/grafts rewrites the parents a pin's order is read from. \
+             Remove the grafts file and retry"
+        }
+        (true, true) => {
+            "refs/replace and .git/info/grafts rewrite the parents a pin's order is read from. \
+             Remove the replace refs and the grafts file and retry"
+        }
+    };
+    Some(why.to_string())
+}
+
+fn replace_refs(root: &Path) -> bool {
+    ballot_sig::git_in(
+        root,
+        &["for-each-ref", "--format=%(refname)", "refs/replace"],
+    )
+    .is_some_and(|text| text.lines().any(|line| line.starts_with("refs/replace/")))
+}
+
+fn grafts_file(root: &Path) -> bool {
+    let mut paths = Vec::new();
+    if let Some(path) = git_abs(
+        root,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "info/grafts",
+        ],
+    ) {
+        paths.push(path);
+    }
+    if let Some(dir) = git_abs(
+        root,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ) {
+        paths.push(dir.join("info").join("grafts"));
+    }
+    paths.push(root.join(".git").join("info").join("grafts"));
+    paths.iter().any(|path| path.is_file())
+}
+
+fn git_abs(root: &Path, args: &[&str]) -> Option<std::path::PathBuf> {
+    let text = ballot_sig::git_in(root, args)?;
+    (!text.is_empty()).then(|| std::path::PathBuf::from(text))
 }
 
 fn shallow_repo(root: &Path) -> bool {
@@ -257,12 +330,7 @@ fn git_fetch(root: &Path, args: &[&str]) {
 }
 
 fn git_stdout(root: &Path, args: &[&str]) -> String {
-    let Ok(out) = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .output()
-    else {
+    let Ok(out) = ballot_sig::git_history(root).args(args).output() else {
         return String::new();
     };
     String::from_utf8_lossy(&out.stdout).trim().to_string()
@@ -1136,5 +1204,102 @@ mod tests {
             "true",
             "a clone with no remote was deepened"
         );
+    }
+
+    /// A pin, then the pin removed, then the first slot. The slot's parent
+    /// does not hold the pin, so the seat does not stand.
+    fn pin_removed_before_slots(dir: &std::path::Path) -> (String, String) {
+        init_repo(dir);
+        let board = "\
+* TODO [#C] old
+:PROPERTIES:
+:ID:         probe-old
+:END:
+- [X] elder: rail
+";
+        std::fs::write(dir.join("issues.org"), board).unwrap();
+        std::fs::write(dir.join(".ljos-seat-keys"), "eessi aa\n").unwrap();
+        commit_all(dir, "root");
+        let root = git_ok(dir, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(dir.join(".ljos-seat-keys"), "").unwrap();
+        commit_all(dir, "middle");
+        let middle = git_ok(dir, &["rev-parse", "HEAD"]).trim().to_string();
+        let with_slot =
+            format!("{board}- Note: \"slot: eessi model=m run=r key=k ljosbot aa bb\"\n");
+        std::fs::write(dir.join("issues.org"), with_slot).unwrap();
+        commit_all(dir, "tip");
+        (root, middle)
+    }
+
+    fn assert_real_order(dir: &std::path::Path) {
+        std::env::set_var("VISSUE_ROOT", dir);
+        let at = starts().unwrap().expect("a git tracker");
+        assert!(
+            !stood(&at, "eessi", "aa").unwrap(),
+            "a pin removed before slots stood: {at:?}"
+        );
+    }
+
+    fn assert_rewrite_refused(dir: &std::path::Path, cause: &str) {
+        let err = starts().unwrap_err();
+        assert!(err.contains("tracker history incomplete"), "{err}");
+        assert!(err.contains(cause), "{err}");
+        let err = stood(&[], "eessi", "aa").unwrap_err();
+        assert!(err.contains(cause), "rewritten history stood: {err}");
+        let err = recorded_before_pin(
+            "probe-old",
+            "slot: eessi model=m run=r key=k ljosbot aa bb",
+            "eessi",
+            "aa",
+        )
+        .unwrap_err();
+        assert!(err.contains(cause), "{err}");
+        let err = crate::ballot_sig::recorded_before_signing_in(dir, "probe-old", "elder", "rail")
+            .unwrap_err();
+        assert!(err.contains(cause), "{err}");
+    }
+
+    #[test]
+    fn a_replace_ref_does_not_make_a_removed_pin_stand() {
+        let _lock = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        quiet_git_config(root.path());
+        let repo = root.path().join("repo");
+        let (root_sha, middle) = pin_removed_before_slots(&repo);
+        assert_real_order(&repo);
+
+        git_ok(&repo, &["replace", &middle, &root_sha]);
+        let shown =
+            crate::ballot_sig::git_in(&repo, &["show", &format!("{middle}:.ljos-seat-keys")])
+                .expect("pin file at the middle commit");
+        assert!(
+            !shown.split_whitespace().any(|word| word == "eessi"),
+            "a replace ref changed the pin git show reads: {shown:?}"
+        );
+        assert_rewrite_refused(&repo, "refs/replace");
+    }
+
+    #[test]
+    fn a_grafts_file_does_not_make_a_removed_pin_stand() {
+        let _lock = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        quiet_git_config(root.path());
+        let repo = root.path().join("repo");
+        let (root_sha, middle) = pin_removed_before_slots(&repo);
+        assert_real_order(&repo);
+        let tip = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        let grafts = repo.join(".git").join("info").join("grafts");
+        std::fs::create_dir_all(grafts.parent().unwrap()).unwrap();
+        // The slot commit's parent becomes the root, which still holds
+        // the pin the middle commit removed.
+        std::fs::write(&grafts, format!("{tip} {root_sha}\n")).unwrap();
+
+        let parents = crate::ballot_sig::git_in(&repo, &["log", "-1", "--format=%P"]).unwrap();
+        assert_eq!(
+            parents.trim(),
+            middle,
+            "a grafts file changed the parent pin order reads: {parents}"
+        );
+        assert_rewrite_refused(&repo, "grafts");
     }
 }
