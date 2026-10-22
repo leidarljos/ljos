@@ -39,6 +39,7 @@ pub mod record;
 pub mod runner_env;
 pub mod runner_hooks;
 pub mod runner_skills;
+pub mod slot;
 pub mod subagent;
 pub mod sync;
 pub mod tools;
@@ -11074,7 +11075,9 @@ mod read_back_tests {
 /// The seat ballots on `issue` that fail their signature check, said as
 /// one refusal. `Ok` when every seat ballot is signed under its pinned key
 /// or is legacy unsigned (committed to the tracker before signing began),
-/// or when `LJOS_UNSIGNED_BALLOTS=allow`; the `Ok` names the legacy ones.
+/// and every signed seat first pinned after slots began is under a slot
+/// ([`slot::problems`]), or when `LJOS_UNSIGNED_BALLOTS=allow`; the `Ok`
+/// names the legacy ones.
 ///
 /// # Errors
 ///
@@ -11095,19 +11098,33 @@ pub fn check_seat_signatures(
     let legacy = |voter: &str, choice: &str| {
         ballot_sig::recorded_at(issue, voter, choice).is_some_and(|t| t < ballot_sig::SIGNING_SINCE)
     };
-    let (problems, old) = ballot_sig::seat_check(
+    let notes = ballot_sig::notes_of(&v);
+    let pins = ballot_sig::pins();
+    let (problems, old) = ballot_sig::seat_check(issue, &seats, &notes, &pins, &legacy);
+    if !problems.is_empty() {
+        return Err(format!(
+            "the seat ballots on {issue} are not all signed, so it decides nothing for a push: {}",
+            problems.join("; ")
+        ));
+    }
+    let signed: Vec<(&str, &str)> = seats
+        .into_iter()
+        .filter(|(voter, _)| !old.iter().any(|o| o == voter))
+        .collect();
+    let unslotted = slot::problems(
         issue,
-        &seats,
-        &ballot_sig::notes_of(&v),
-        &ballot_sig::pins(),
-        &legacy,
+        &signed,
+        &notes,
+        &pins,
+        &slot::pinned_at,
+        &slot::noted_at,
     );
-    if problems.is_empty() {
+    if unslotted.is_empty() {
         Ok(old)
     } else {
         Err(format!(
-            "the seat ballots on {issue} are not all signed, so it decides nothing for a push: {}",
-            problems.join("; ")
+            "a run seat on {issue} is not under a slot, so it decides nothing for a push: {}",
+            unslotted.join("; ")
         ))
     }
 }
@@ -20675,6 +20692,9 @@ pub fn doctor_seat() -> Vec<Habitat> {
     });
     out.push(cloud::mcp_row());
     out.push(cloud::guard_row());
+    // Scope cloud is readable here when cloud up wrote its age identity.
+    // The key is not in the tracker.
+    out.push(cloud::cloud_age_row());
     // A fresh install has no writer until its first memory verb starts one;
     // doctor starts it the same way, so the rows below ask a live pack.
     wake_writer();
@@ -21382,7 +21402,8 @@ pub fn failing(rows: &[Habitat]) -> Vec<&str> {
                 && (REQUIRED.contains(&h.name)
                     || h.name == "pack"
                     || h.name == "pack token"
-                    || h.name == "mcp")
+                    || h.name == "mcp"
+                    || h.name == "cloud age")
         })
         .map(|h| h.name)
         .collect()
@@ -21452,6 +21473,9 @@ fn optional_bin(name: &str) -> bool {
 /// wrote is a warning `ljos doctor --fix` rewrites, not a failure.
 #[must_use]
 pub fn doctor_word(row: &Habitat) -> &'static str {
+    if cloud::cloud_age_is_unset(row.name, &row.state) {
+        return "info";
+    }
     if row.name == "tracker" && names_unpushed(&row.state) {
         return "warn";
     }
@@ -29179,17 +29203,23 @@ mod tests {
             "#!/bin/sh\ncase \"$*\" in\n*push*--force*) printf 'deny\\tgit-force-push\\n'; exit 2;;\n*) printf 'allow\\n';;\nesac\n",
         );
         let real_git = which::which("git").expect("git on PATH");
+        // A parallel test may set GIT_DIR on this process. These git
+        // commands have to see this checkout, not that one.
+        let scrub = |cmd: &mut std::process::Command| {
+            cmd.env_remove("GIT_DIR");
+            cmd.env_remove("GIT_WORK_TREE");
+        };
         let plain = |args: &[&str]| {
-            let out = std::process::Command::new(&real_git)
-                .arg("-C")
+            let mut cmd = std::process::Command::new(&real_git);
+            cmd.arg("-C")
                 .arg(&repo)
                 .args(args)
                 .env("GIT_AUTHOR_NAME", "Rohit Goswami")
                 .env("GIT_AUTHOR_EMAIL", "rgoswami@ieee.org")
                 .env("GIT_COMMITTER_NAME", "Rohit Goswami")
-                .env("GIT_COMMITTER_EMAIL", "rgoswami@ieee.org")
-                .output()
-                .unwrap();
+                .env("GIT_COMMITTER_EMAIL", "rgoswami@ieee.org");
+            scrub(&mut cmd);
+            let out = cmd.output().unwrap();
             assert!(
                 out.status.success(),
                 "{args:?}: {}",
@@ -29201,8 +29231,8 @@ mod tests {
         plain(&["commit", "-q", "--allow-empty", "-m", "seed"]);
         plain(&["checkout", "-q", "-b", "feature"]);
         let shim = |args: &[&str]| {
-            std::process::Command::new(guard.join("git"))
-                .args(args)
+            let mut cmd = std::process::Command::new(guard.join("git"));
+            cmd.args(args)
                 .current_dir(&repo)
                 .env("HOME", &home)
                 .env(
@@ -29215,9 +29245,9 @@ mod tests {
                     ),
                 )
                 .env_remove("LJOS_OFF")
-                .env("LJOS_GUARD", "on")
-                .output()
-                .unwrap()
+                .env("LJOS_GUARD", "on");
+            scrub(&mut cmd);
+            cmd.output().unwrap()
         };
         // There is no remote, so git itself fails once the shim lets the
         // push through; the shim's own refusal is exit 126.

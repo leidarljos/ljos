@@ -3,8 +3,10 @@
 //! `ljos cloud up` installs the release binaries into `~/.local/bin`,
 //! checks the published SHA-256 sums, puts that directory on PATH, writes
 //! the harness MCP command as `ljos-mcp`, clones `LJOS_TRACKER_REMOTE`, and
-//! writes a webhook wake for each `LJOS_WAKE_<SEAT>_URL`. A later boot with
-//! the binaries already installed only refreshes the clone.
+//! writes a webhook wake for each `LJOS_WAKE_<SEAT>_URL`. When
+//! `LJOS_CLOUD_AGE_SECRET` names an environment variable, it writes that
+//! variable's age identity for scope `cloud` to a mode 0600 file. A later
+//! boot with the binaries already installed only refreshes the clone.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -28,6 +30,15 @@ const OPTIONAL_BINS: &[&str] = &[
 ];
 const INSTALL_URL: &str = "https://github.com/leidarljos/ljos/releases/latest/download/install.sh";
 const CLOUD_GUARD_RULES_FILE: &str = "cloud-guard-rules.json";
+
+/// Names the environment variable that holds the age identity for scope
+/// `cloud`. The value is an identity file as `age-keygen` writes it, not a
+/// path. The identity stays out of the tracker.
+pub const CLOUD_AGE_SECRET: &str = "LJOS_CLOUD_AGE_SECRET";
+
+/// An identity file longer than this is refused. `age-keygen` writes a
+/// few hundred bytes.
+const CLOUD_AGE_MAX: usize = 8192;
 
 /// Install binaries, point the harness at them, and clone the shared tracker.
 ///
@@ -95,6 +106,7 @@ pub fn up(force: bool) -> Result<String> {
         }
     });
     lines.push(ensure_cloud_guard_rules()?);
+    lines.push(ensure_cloud_age()?);
     lines.extend(ensure_wakes()?);
     let reaped = reap_gone_owners(crate::lease_secs());
     if !reaped.trim().is_empty() {
@@ -119,6 +131,13 @@ pub fn default_seat() -> String {
         return crate::seat_slug(&format!("{}-{id}", harness_kind()));
     }
     crate::seat_slug(&format!("vm-{}", hostname()))
+}
+
+/// The seat a run with id `run` takes when it boots with `LJOS_SEAT` set
+/// to `base`, as [`default_seat`] names it there.
+#[must_use]
+pub fn run_seat(base: &str, run: &str) -> String {
+    with_run(&crate::seat_slug(base), run_slug(run).as_deref())
 }
 
 fn with_run(base: &str, id: Option<&str>) -> String {
@@ -208,6 +227,48 @@ pub fn guard_row() -> crate::Habitat {
         name: "cloud guard",
         state,
         ok: false,
+    }
+}
+
+/// Whether a `cloud age` row is the unset case: no secret was named and
+/// no identity file is on disk. That row is `info`. A file with the wrong
+/// mode, or a named secret that was not written, is a failure.
+#[must_use]
+pub(crate) fn cloud_age_is_unset(name: &str, state: &str) -> bool {
+    name == "cloud age" && state.starts_with("unset;")
+}
+
+/// What `ljos doctor` says about the age identity for scope `cloud`.
+#[must_use]
+pub fn cloud_age_row() -> crate::Habitat {
+    let path = crate::sync::cloud_identity_path();
+    match inspect_cloud_age(&path) {
+        CloudAge::Good => crate::Habitat {
+            name: "cloud age",
+            state: format!("scope cloud identity at {} (0600)", path.display()),
+            ok: true,
+        },
+        CloudAge::BadMode(mode) => crate::Habitat {
+            name: "cloud age",
+            state: format!("{} is mode {mode:04o}; want 0600", path.display()),
+            ok: false,
+        },
+        CloudAge::NotIdentity => crate::Habitat {
+            name: "cloud age",
+            state: format!("{} is not an age identity", path.display()),
+            ok: false,
+        },
+        CloudAge::Symlink => crate::Habitat {
+            name: "cloud age",
+            state: format!("{} is a symlink; want a mode 0600 file", path.display()),
+            ok: false,
+        },
+        CloudAge::Unreadable => crate::Habitat {
+            name: "cloud age",
+            state: format!("{} cannot be read", path.display()),
+            ok: false,
+        },
+        CloudAge::Missing => missing_cloud_age(&path),
     }
 }
 
@@ -1230,6 +1291,251 @@ fn cloud_guard_rules() -> Vec<crate::Rule> {
     ]
 }
 
+/// `LJOS_CLOUD_AGE_SECRET` is the name of another variable. The identity
+/// itself is never a legal name, so a value pasted into this variable is
+/// refused without being written or echoed.
+enum NamedSecret {
+    Unset,
+    Bad(&'static str),
+    Name(String),
+}
+
+fn named_secret() -> NamedSecret {
+    let Ok(raw) = std::env::var(CLOUD_AGE_SECRET) else {
+        return NamedSecret::Unset;
+    };
+    let name = raw.trim();
+    if name.is_empty() {
+        return NamedSecret::Unset;
+    }
+    if raw.contains("AGE-SECRET-KEY-") || raw.contains('\n') || raw.contains('\0') {
+        return NamedSecret::Bad("holds an age identity; set it to the variable's name");
+    }
+    if name == CLOUD_AGE_SECRET {
+        return NamedSecret::Bad("cannot name itself");
+    }
+    if !valid_env_name(name) {
+        return NamedSecret::Bad("is not an environment variable name");
+    }
+    NamedSecret::Name(name.to_string())
+}
+
+fn valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    name.len() <= 128 && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+enum CloudAge {
+    Missing,
+    Good,
+    BadMode(u32),
+    NotIdentity,
+    Symlink,
+    Unreadable,
+}
+
+fn inspect_cloud_age(path: &Path) -> CloudAge {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return CloudAge::Missing,
+        Err(_) => return CloudAge::Unreadable,
+    };
+    if meta.file_type().is_symlink() {
+        return CloudAge::Symlink;
+    }
+    if !meta.is_file() || meta.len() > CLOUD_AGE_MAX as u64 {
+        return CloudAge::NotIdentity;
+    }
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(_) => return CloudAge::Unreadable,
+    };
+    if !crate::sync::age_identity(&text) {
+        return CloudAge::NotIdentity;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let mode = meta.permissions().mode() & 0o777;
+    if mode == 0o600 {
+        CloudAge::Good
+    } else {
+        CloudAge::BadMode(mode)
+    }
+}
+
+fn missing_cloud_age(path: &Path) -> crate::Habitat {
+    match named_secret() {
+        NamedSecret::Unset => crate::Habitat {
+            name: "cloud age",
+            state: format!(
+                "unset; no identity for scope cloud. Set {CLOUD_AGE_SECRET} to the secret's name and run `ljos cloud up`"
+            ),
+            ok: true,
+        },
+        NamedSecret::Bad(why) => crate::Habitat {
+            name: "cloud age",
+            state: format!("{CLOUD_AGE_SECRET} {why}"),
+            ok: false,
+        },
+        NamedSecret::Name(name) => {
+            let problem = secret_problem(&name);
+            let state = match problem {
+                Some(problem) => format!("{name} {problem}, and {} is missing", path.display()),
+                None => format!(
+                    "{name} is set, and {} is missing. Run `ljos cloud up`",
+                    path.display()
+                ),
+            };
+            crate::Habitat {
+                name: "cloud age",
+                state,
+                ok: false,
+            }
+        }
+    }
+}
+
+/// What is wrong with the named variable, when it cannot be written.
+/// `None` when it holds an age identity. The value is not returned.
+fn secret_problem(name: &str) -> Option<&'static str> {
+    match std::env::var(name) {
+        Err(std::env::VarError::NotPresent) => Some("is unset"),
+        Err(std::env::VarError::NotUnicode(_)) => Some("is not text"),
+        Ok(value) if value.trim().is_empty() => Some("is empty"),
+        Ok(value) if value.len() > CLOUD_AGE_MAX => Some("is not an age identity"),
+        Ok(value) if !crate::sync::age_identity(&normalize_identity(&value)) => {
+            Some("is not an age identity")
+        }
+        Ok(_) => None,
+    }
+}
+
+fn normalize_identity(text: &str) -> String {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut out = String::new();
+    for line in text.trim().lines() {
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
+fn ensure_cloud_age() -> Result<String> {
+    let name = match named_secret() {
+        NamedSecret::Unset => {
+            return Ok(format!(
+                "cloud age: {CLOUD_AGE_SECRET} is unset, so scope cloud has no identity on this machine"
+            ));
+        }
+        NamedSecret::Bad(why) => bail!("cloud up: {CLOUD_AGE_SECRET} {why}"),
+        NamedSecret::Name(name) => name,
+    };
+    let value = match std::env::var(&name) {
+        Err(std::env::VarError::NotPresent) => {
+            bail!("cloud up: {name} is unset, so the scope cloud identity was not written")
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("cloud up: {name} is not text, so the scope cloud identity was not written")
+        }
+        Ok(value) => value,
+    };
+    if value.trim().is_empty() {
+        bail!("cloud up: {name} is empty, so the scope cloud identity was not written");
+    }
+    if value.len() > CLOUD_AGE_MAX {
+        bail!("cloud up: {name} is too long to be an age identity");
+    }
+    let text = normalize_identity(&value);
+    if !crate::sync::age_identity(&text) {
+        bail!(
+            "cloud up: {name} is not an age identity, so the scope cloud identity was not written"
+        );
+    }
+    let path = crate::sync::cloud_identity_path();
+    match install_identity(&path, &text)? {
+        Install::Wrote => Ok(format!("cloud age: wrote {} mode 0600", path.display())),
+        Install::Mode => Ok(format!("cloud age: set {} to mode 0600", path.display())),
+        Install::Same => Ok(format!(
+            "cloud age: {} already holds the scope cloud identity (0600)",
+            path.display()
+        )),
+    }
+}
+
+enum Install {
+    Wrote,
+    Mode,
+    Same,
+}
+
+fn install_identity(path: &Path, text: &str) -> Result<Install> {
+    // Follow a symlink and the identity would be written into the target,
+    // or the target's mode would change. Replace the link instead.
+    let regular = fs::symlink_metadata(path)
+        .ok()
+        .is_some_and(|meta| meta.file_type().is_file());
+    if regular && fs::read_to_string(path).ok().as_deref() == Some(text) {
+        if file_mode(path) == Some(0o600) {
+            return Ok(Install::Same);
+        }
+        set_mode_0600(path)?;
+        return Ok(Install::Mode);
+    }
+    write_private(path, text)?;
+    Ok(Install::Wrote)
+}
+
+fn file_mode(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::symlink_metadata(path)
+        .ok()
+        .filter(|meta| meta.file_type().is_file())
+        .map(|meta| meta.permissions().mode() & 0o777)
+}
+
+fn set_mode_0600(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("mode 0600 {}", path.display()))
+}
+
+/// Write `text` to `path` as mode 0600. A symlink at `path` is replaced,
+/// so the identity is not stored through a link to another file.
+fn write_private(path: &Path, text: &str) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    }
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("cloud.age");
+    let tmp = path.with_file_name(format!(".{name}.tmp-{}", std::process::id()));
+    let write = (|| -> Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .with_context(|| format!("write {}", tmp.display()))?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        set_mode_0600(&tmp)?;
+        fs::rename(&tmp, path).with_context(|| format!("install {}", path.display()))?;
+        set_mode_0600(path)?;
+        Ok(())
+    })();
+    if write.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    write
+}
+
 fn path_export_line(bin_dir: &Path) -> String {
     format!("export PATH=\"{}:$PATH\"", bin_dir.display())
 }
@@ -1455,11 +1761,15 @@ fn agent_id() -> Option<String> {
 }
 
 fn id_slug(key: &str) -> Option<String> {
-    let id = nonempty_var(key)?;
-    if matches!(id.as_str(), "0" | "1" | "true" | "false") {
+    run_slug(&nonempty_var(key)?)
+}
+
+fn run_slug(id: &str) -> Option<String> {
+    let id = id.trim();
+    if matches!(id, "0" | "1" | "true" | "false") {
         return None;
     }
-    let slug = crate::seat_slug(&id);
+    let slug = crate::seat_slug(id);
     if slug.is_empty() || slug == "runner" {
         return None;
     }
