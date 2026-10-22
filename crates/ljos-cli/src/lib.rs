@@ -348,25 +348,11 @@ pub fn session_start_for(session: Option<&str>) -> String {
         wake_for_recall();
         atoms = session_atoms(2_000);
     }
-    // The preface names preferences as this seat's. An open listener's
-    // listing is not that word, the same as a search hit is not.
-    let asks = atoms.is_ok() && pack().ok().is_some_and(|client| listing_asks(&client));
-    let stripped = if asks {
-        None
-    } else {
-        atoms.as_ref().ok().map(|list| {
-            list.iter()
-                .cloned()
-                .map(without_person_claim)
-                .collect::<Vec<_>>()
-        })
-    };
-    let for_line = if asks {
-        atoms.as_ref().ok().map(|list| list.as_slice())
-    } else {
-        stripped.as_deref()
-    };
-    let mut line = session_start_line_from(for_line, &now_utc(), on_path("ljos-policyd"));
+    let mut line = session_start_line_from(
+        atoms.as_ref().ok().map(|v| v.as_slice()),
+        &now_utc(),
+        on_path("ljos-policyd"),
+    );
     // A guard that switched itself off says so where the session starts,
     // not only in `ljos doctor`.
     if let Some(off) = bookkeep::guard_off_reason() {
@@ -388,27 +374,26 @@ pub fn session_start_for(session: Option<&str>) -> String {
     user_rules::prepend(line)
 }
 
-/// `atom` with a person claim removed, so a line built from an unproven
-/// listing does not state it.
-fn without_person_claim(mut atom: Value) -> Value {
-    if person_stored(&atom) {
-        if let Some(obj) = atom.as_object_mut() {
-            obj.insert(
-                "origin".to_string(),
-                Value::String(admit::ORIGIN_AGENT.to_string()),
-            );
-            if let Some(source) = obj.get_mut("source").and_then(Value::as_object_mut) {
-                source.remove("basis");
-            }
+/// `atom` as an agent's: origin `agent-derived` and no basis, for a
+/// listing from a listener [`pack_proven`] did not prove.
+fn as_agents(mut atom: Value) -> Value {
+    if let Some(obj) = atom.as_object_mut() {
+        obj.insert(
+            "origin".to_string(),
+            Value::String(admit::ORIGIN_AGENT.to_string()),
+        );
+        if let Some(source) = obj.get_mut("source").and_then(Value::as_object_mut) {
+            source.remove("basis");
         }
     }
     atom
 }
 
+/// The listing the preface and the cold prompt read, via [`atoms_read`].
 fn session_atoms(ms: u64) -> Result<Vec<Value>> {
     with_pack_timeout(ms, || {
         let client = pack()?;
-        atoms_lean(&client, &client.workspace())
+        atoms_read(&client, &client.workspace())
     })
 }
 
@@ -440,7 +425,7 @@ pub fn session_start_line_from(atoms: Option<&[Value]>, now: &str, guard: bool) 
     let prefs: Vec<String> = kept
         .iter()
         .filter(|a| a.get("kind").and_then(Value::as_str) == Some("preference"))
-        .filter(|a| person_stored(a))
+        .filter(|a| person_stored(a) && live_now(a, now))
         .filter_map(|a| a.get("text").and_then(Value::as_str))
         .map(|t| {
             let t = t.trim().trim_end_matches('.');
@@ -10776,6 +10761,25 @@ fn search_query(
     req
 }
 
+/// [`PacksetClient::search_opts`] without this seat's token, for a
+/// listener [`pack_proven`] did not prove. A hit carries no origin here;
+/// [`keep_origins_of`] names each an agent's.
+fn search_without_token(
+    client: &PacksetClient,
+    q: &str,
+    limit: u32,
+    as_of: Option<&str>,
+    rerank: bool,
+) -> Result<Vec<Hit>> {
+    let url = format!("{}/v1/search", client.base().trim_end_matches('/'));
+    let mut req = search_query(client, &url, q, limit, rerank, false).timeout(pack_timeout());
+    if let Some(at) = as_of {
+        req = req.query("as_of", at);
+    }
+    let body: Value = req.call().map_err(Box::new)?.into_json()?;
+    Ok(serde_json::from_value(body["hits"].clone()).unwrap_or_default())
+}
+
 /// Drop origin and basis from search hits. An open listener's body is
 /// not a word for who stored them; the texts stay, so a lesson can still
 /// be shown as an agent's.
@@ -10818,14 +10822,13 @@ fn redact_hit_provenance(body: &mut Value) {
 /// as the atom. A body that does not parse, a NaN from a writer that is
 /// not packset, is an error, so a pool the hook already holds stands.
 ///
-/// The read is sent first without this seat's token and has to come back
-/// 401, the same check as [`atom_now`]. The token goes out only after
-/// that refusal. A listener that answers without the token is still read,
-/// without the token, and origin and basis are removed, so a lesson can
-/// be shown as an agent's and nothing is the person's. A seat with no
-/// token, or a token file that cannot be read, is not that listener:
-/// the search is the stored atoms alone, and the miss is said. Taking
-/// the listener's answer then would let it choose the recall.
+/// The token goes only to a listener [`pack_proven`] proved, before any
+/// read here. A listener that is not proven is still read, without the
+/// token, and origin and basis are removed, so a lesson can be shown as
+/// an agent's and nothing is the person's. A seat with no token, a token
+/// file that cannot be read, or a port another user holds, is not that
+/// listener: the search is the stored atoms alone, and the miss is said.
+/// Taking the listener's answer then would let it choose the recall.
 fn search_relevant(
     client: &PacksetClient,
     cue: &str,
@@ -10834,22 +10837,15 @@ fn search_relevant(
     timeout: std::time::Duration,
 ) -> Result<(Value, usize)> {
     let url = format!("{}/v1/search", client.base().trim_end_matches('/'));
-    // The probe asks for no rank. Learning the rank reads `/v1/status`,
-    // and that read would carry the token before the listener is proven.
-    let probe = || search_query(client, &url, cue, limit, rerank, false);
-    let mut open = false;
-    let ranked = match proven_request("the search", client.base(), timeout, probe) {
-        Ok(_) => ranks_by_relevance(client, timeout, true),
-        Err(ProofMiss::Open { .. }) => {
-            open = true;
-            ranks_by_relevance(client, timeout, false)
-        }
-        Err(err @ ProofMiss::NoToken { .. }) => {
-            say_search_miss(&err);
+    let open = match search_seat(client) {
+        SearchSeat::Proven => false,
+        SearchSeat::Open => true,
+        SearchSeat::NoToken => {
+            say_search_miss();
             return Ok(stored_only(client, cue, limit));
         }
-        Err(err) => bail!("search: GET /v1/search failed: {err}"),
     };
+    let ranked = ranks_by_relevance(client, timeout, !open);
     // The writer's answer, or the status and body of a 4xx it gave.
     let ask = |rank: bool| -> Result<std::result::Result<ureq::Response, (u16, String)>> {
         let req = search_query(client, &url, cue, limit, rerank, rank);
@@ -11012,22 +11008,21 @@ fn warn_search_refused(base: &str, code: u16) {
 }
 
 /// What doctor reports when an authenticated search is still refused.
-/// `None` when search answers, the listener does not ask, or this seat
+/// `None` when search answers, the listener is not proven, or this seat
 /// has no token: a working seat gains no row, and a missing token is the
-/// pack token row.
+/// pack token row. The token is not sent until [`pack_proven`].
 fn search_auth_habitat(client: &PacksetClient) -> Option<Habitat> {
+    if !matches!(search_seat(client), SearchSeat::Proven) {
+        return None;
+    }
     let timeout = std::time::Duration::from_secs(2).min(pack_timeout());
     let url = format!("{}/v1/search", client.base().trim_end_matches('/'));
-    let probe = || {
+    let asked = packset_client::authorize(
         ureq::get(&url)
             .query("workspace", &client.workspace())
             .query("q", "ljos")
-            .query("limit", "1")
-    };
-    let asked = match proven_request("the search", client.base(), timeout, probe) {
-        Ok(req) => req,
-        Err(_) => return None,
-    };
+            .query("limit", "1"),
+    );
     let code = match asked.timeout(timeout).call() {
         Err(ureq::Error::Status(code @ (401 | 403), _)) => code,
         _ => return None,
@@ -11041,13 +11036,43 @@ fn search_auth_habitat(client: &PacksetClient) -> Option<Habitat> {
     })
 }
 
-/// Say `err` on stderr. A missing token used to be read as an open
-/// listener, and the recall then followed whatever that listener answered.
-fn say_search_miss(err: &ProofMiss) {
-    let line = format!("ljos: {err}");
+/// Whether this search may carry the token. [`pack_proven`] is false both
+/// when the listener did not prove and when this seat has nothing to
+/// send. Those are different seats: only the first is read without a token.
+enum SearchSeat {
+    /// [`pack_proven`] and the token will be sent.
+    Proven,
+    /// The listener did not prove. Read it with no token.
+    Open,
+    /// No token, a token file that cannot be read, or another user's port.
+    NoToken,
+}
+
+fn search_seat(client: &PacksetClient) -> SearchSeat {
+    if packset_client::token().is_none() {
+        return SearchSeat::NoToken;
+    }
+    let held = ureq::get(client.base());
+    if packset_client::authorize(held)
+        .header("Authorization")
+        .is_none()
+    {
+        return SearchSeat::NoToken;
+    }
+    if pack_proven(client) {
+        SearchSeat::Proven
+    } else {
+        SearchSeat::Open
+    }
+}
+
+/// Say that this seat cannot show a token. That used to be read as an
+/// open listener, and the recall then followed whatever it answered.
+fn say_search_miss() {
+    let line = "ljos: no token the search: this seat has none, the token file cannot be read, or another user holds the pack's port";
     *SEARCH_MISS
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(line.clone());
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(line.to_string());
     eprintln!("{line}");
 }
 
@@ -11201,7 +11226,7 @@ fn refuses_relevance(client: &PacksetClient, with_token: bool) {
 /// words: `ljos-none` is one word there and does not match `ljos-l9qq`.
 /// Empty when the listing fails.
 fn relevant_atoms(client: &PacksetClient, cue: &str, limit: usize) -> Vec<Value> {
-    let Ok(atoms) = atoms_lean_shared(client, &client.workspace()) else {
+    let Ok(atoms) = atoms_read(client, &client.workspace()) else {
         return Vec::new();
     };
     let pack_words = |text: &str| -> std::collections::HashSet<String> {
@@ -13342,6 +13367,24 @@ pub(crate) fn atoms_lean_shared(client: &PacksetClient, workspace: &str) -> Resu
 ///
 /// The pack not answering, or an answer that is not atoms.
 pub fn atoms_lean(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>> {
+    atoms_listed(client, workspace, true)
+}
+
+/// The listing for a reader that names the person: [`atoms_lean`] when
+/// [`pack_proven`], else the same read without the token, with every
+/// atom an agent's.
+fn atoms_read(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>> {
+    if pack_proven(client) {
+        return atoms_lean(client, workspace);
+    }
+    Ok(atoms_listed(client, workspace, false)?
+        .into_iter()
+        .map(as_agents)
+        .collect())
+}
+
+/// [`atoms_lean`], with this seat's token only when `token`.
+fn atoms_listed(client: &PacksetClient, workspace: &str, token: bool) -> Result<Vec<Value>> {
     let url = format!("{}/v1/atoms", client.base());
     // A runner kills PreToolUse at 10s and then ignores the hook, which
     // drops a deny. Inside a hook the listing stops at 2s so the local
@@ -13353,7 +13396,13 @@ pub fn atoms_lean(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>>
     let mut tries = 0;
     let answered = loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
-        let got = packset_client::authorize(ureq::get(&url))
+        let req = ureq::get(&url);
+        let req = if token {
+            packset_client::authorize(req)
+        } else {
+            req
+        };
+        let got = req
             .query("workspace", workspace)
             .query("embedding", "omit")
             .timeout(left.max(std::time::Duration::from_millis(1)))
@@ -18025,8 +18074,9 @@ pub fn rules_of(atoms: &[Value], proven: bool) -> Vec<Rule> {
 /// The rules in the seat's pack.
 pub fn rules_from_pack() -> Result<Vec<Rule>> {
     let client = pack()?;
-    let atoms = atoms_lean(&client, &client.workspace()).context("rules: GET /v1/atoms failed")?;
-    Ok(rules_of(&atoms, listing_asks(&client)))
+    let proven = pack_proven(&client);
+    let atoms = atoms_read(&client, &client.workspace()).context("rules: GET /v1/atoms failed")?;
+    Ok(rules_of(&atoms, proven))
 }
 
 /// The rules a gate judges by. A read from the pack is kept on disk, and
@@ -18044,21 +18094,18 @@ pub fn rules_for_gate() -> Vec<Rule> {
 pub fn gate_read() -> (Vec<Rule>, Vec<(String, String)>) {
     let kept = rules_cache_path();
     let listed = pack().and_then(|client| {
+        let proven = pack_proven(&client);
         let atoms =
-            atoms_lean(&client, &client.workspace()).context("rules: GET /v1/atoms failed")?;
-        Ok((atoms, listing_asks(&client)))
+            atoms_read(&client, &client.workspace()).context("rules: GET /v1/atoms failed")?;
+        Ok((atoms, proven))
     });
     match listed {
-        Ok((atoms, asks)) => {
-            let rules = rules_of(&atoms, asks);
+        Ok((atoms, proven)) => {
+            let rules = rules_of(&atoms, proven);
             if let Some(path) = &kept {
                 keep_rules(path, &rules);
             }
-            let theirs: Vec<Value> = if asks {
-                atoms.into_iter().filter(person_stored).collect()
-            } else {
-                Vec::new()
-            };
+            let theirs: Vec<Value> = atoms.into_iter().filter(person_stored).collect();
             (rules, preferences_of(&theirs))
         }
         Err(_) => (kept.map(|p| kept_rules(&p)).unwrap_or_default(), Vec::new()),
@@ -26196,15 +26243,20 @@ pub fn packset_search_as_of(
     let found = with_writer(|| {
         let client = pack()?;
         let workspace = client.workspace();
-        let hits = client
-            .search_opts(
-                &workspace,
-                &recall_query(q),
-                limit,
-                stamp.as_deref(),
-                rerank,
-            )
-            .context("search: GET /v1/search failed")?;
+        let hits = if pack_proven(&client) {
+            client
+                .search_opts(
+                    &workspace,
+                    &recall_query(q),
+                    limit,
+                    stamp.as_deref(),
+                    rerank,
+                )
+                .map_err(anyhow::Error::from)
+        } else {
+            search_without_token(&client, q, limit, stamp.as_deref(), rerank)
+        }
+        .context("search: GET /v1/search failed")?;
         keep_origins_of(&client, &hits);
         Ok(hits)
     })?;
@@ -27231,10 +27283,7 @@ fn most_relevant<'a>(rows: &[&'a Hit], cue: &str, cap: usize) -> Vec<&'a Hit> {
 fn issue_memories(issue: &str) -> Result<Vec<Hit>> {
     let atoms = with_writer(|| {
         let client = pack()?;
-        let workspace = client.workspace();
-        client
-            .atoms_without_vectors(&workspace, None)
-            .context("recall: GET /v1/atoms failed")
+        atoms_read(&client, &client.workspace()).context("recall: GET /v1/atoms failed")
     })?;
     Ok(tagged_with_issue(&atoms, issue))
 }
@@ -27253,7 +27302,7 @@ fn written_at(atom: &Value) -> Option<String> {
 /// [`issue_memories`] on a listing already read, ordered by when each
 /// memory was written, newest first.
 fn tagged_with_issue(atoms: &[Value], issue: &str) -> Vec<Hit> {
-    let proven = pack().ok().is_some_and(|client| listing_asks(&client));
+    let proven = pack().ok().is_some_and(|client| pack_proven(&client));
     let tag = format!("issue:{issue}");
     let mut own: Vec<Hit> = atoms
         .iter()
@@ -30088,16 +30137,83 @@ fn stored_origins() -> &'static std::sync::Mutex<Origins> {
 }
 
 fn record_origin(id: &str, by: Option<StoredBy>) {
+    forget_body(id);
     stored_origins()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(id.to_string(), by);
 }
 
+fn forget_body(id: &str) {
+    stored_bodies()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(id);
+}
+
+/// The kind and text of the record each origin was read from, by id. A
+/// search hit, an island row or an activate row can carry a person's id
+/// on other words; a hit takes its id's origin only with that record's
+/// own kind and text.
+fn stored_bodies() -> &'static std::sync::Mutex<std::collections::BTreeMap<String, (String, String)>>
+{
+    static BODIES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<String, (String, String)>>,
+    > = std::sync::OnceLock::new();
+    BODIES.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+}
+
+/// Record `atom`'s origin, and its kind and text, by its id. A tombstone,
+/// or a record whose `valid_to` has passed, is not held: packsetd lists
+/// one that is still due, and its by-id read answers 404.
+fn record_held(id: &str, atom: &Value) {
+    if !live_now(atom, &now_utc()) {
+        record_origin(id, None);
+        return;
+    }
+    record_origin(id, Some(stored_by(atom)));
+    let field = |name: &str| atom[name].as_str().unwrap_or("").trim().to_string();
+    stored_bodies()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(id.to_string(), (field("kind"), field("text")));
+}
+
+/// Whether `atom` is live at `now`, as packsetd reads it: not a
+/// tombstone, and no `valid_to` at or before `now`.
+fn live_now(atom: &Value, now: &str) -> bool {
+    atom.as_object()
+        .is_some_and(|fields| packset_core::record::is_live(fields, now))
+}
+
+/// Whether `h` carries the kind and text of the record its id's origin
+/// was read from. A hit no record was kept for does not.
+fn same_record(h: &Hit) -> bool {
+    let Some(id) = h.id.as_deref() else {
+        return false;
+    };
+    stored_bodies()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(id)
+        .is_some_and(|(kind, text)| kind == h.kind.trim() && text == h.text.trim())
+}
+
+/// Whether `h` names a record this process read under its id with
+/// another kind or text.
+fn substituted(h: &Hit) -> bool {
+    h.id.as_deref().is_some_and(|id| {
+        stored_bodies()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(id)
+    }) && !same_record(h)
+}
+
 /// Record each listing atom's origin when the listener asks for the
 /// token, and clear the person otherwise. One proof for the whole list.
 fn record_listed_origins(atoms: &[Value]) {
-    let proven = pack().ok().is_some_and(|client| listing_asks(&client));
+    let proven = pack().ok().is_some_and(|client| pack_proven(&client));
     for atom in atoms {
         record_listed(atom, proven);
     }
@@ -30115,15 +30231,13 @@ fn record_listed(atom: &Value, proven: bool) {
     }
 }
 
-/// Record the stored origin of `atom`, an atom from a proven listing or
-/// by-id read, by its id. A record that carries no origin, an island row
-/// or a milli hit, says nothing of the stored one and records nothing.
+/// Record the stored origin of `atom`, a row from a proven listing, by
+/// its id. A row with no origin, a null one or an empty one is an
+/// agent's, as [`stored_by`] reads it, and overwrites a person recorded
+/// before: an older packsetd lists a stored row without its origin.
 pub(crate) fn keep_origin(atom: &Value) {
-    if carried_origin(atom).is_none() {
-        return;
-    }
     if let Some(id) = atom.get("id").and_then(Value::as_str) {
-        record_origin(id, Some(stored_by(atom)));
+        record_held(id, atom);
     }
 }
 
@@ -30137,7 +30251,7 @@ fn keep_origins_of<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'
     if ids.is_empty() {
         return;
     }
-    if !listing_asks(client) {
+    if !pack_proven(client) {
         ids.into_iter().for_each(unrecord_person);
         return;
     }
@@ -30145,10 +30259,13 @@ fn keep_origins_of<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'
         Ok(atoms) => {
             atoms.iter().for_each(keep_origin);
             for id in ids {
-                let held = atoms
+                match atoms
                     .iter()
-                    .find(|a| a.get("id").and_then(Value::as_str) == Some(id));
-                record_origin(id, held.map(stored_by));
+                    .find(|a| a.get("id").and_then(Value::as_str) == Some(id))
+                {
+                    Some(held) => record_held(id, held),
+                    None => record_origin(id, None),
+                }
             }
         }
         Err(_) => ids.into_iter().for_each(unrecord_person),
@@ -30173,10 +30290,11 @@ fn person_origin(h: &Hit) -> bool {
 }
 
 /// [`StoredBy`] of `h` as a reader recorded it; [`StoredBy::Agent`] when
-/// none did.
+/// none did, or when `h` does not carry that record's kind and text.
 fn hit_stored_by(h: &Hit) -> StoredBy {
     h.id.as_deref()
         .and_then(recorded_origin)
+        .filter(|_| same_record(h))
         .unwrap_or(StoredBy::Agent)
 }
 
@@ -30185,9 +30303,10 @@ fn recorded_origin(id: &str) -> Option<StoredBy> {
 }
 
 /// Clear the person recorded for `id`, so a read that did not stand
-/// leaves the claim no one's. Any other record stays: it already says
-/// less than the person.
+/// leaves the claim no one's. Any other origin stays: it already says
+/// less than the person. The kind and text read for `id` go either way.
 fn unrecord_person(id: &str) {
+    forget_body(id);
     let mut seen = stored_origins()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -30221,84 +30340,101 @@ pub(crate) enum Stored {
 /// How long a read waits for the pack to answer for one atom id.
 const ATOM_NOW_MS: u64 = 400;
 
-/// Why [`proven_request`] did not hand back a request carrying the token.
-/// The two refusals are different kinds: an open listener answered without
-/// asking, and a seat with no token cannot show one. Matching the words
-/// of the message treated the second as the first.
-enum ProofMiss {
-    /// `base` answered `label` with no token on the request.
-    Open { base: String, label: String },
-    /// This seat has no token, the token file cannot be read, or another
-    /// user holds the pack's port, so nothing may be sent.
-    NoToken { label: String },
-    /// The pack did not answer `label`.
-    Silent { label: String, detail: String },
-}
-
-impl std::fmt::Display for ProofMiss {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Open { base, label } => write!(
-                f,
-                "the listener at {base} answers {label} without this seat's token"
-            ),
-            Self::NoToken { label } => write!(
-                f,
-                "no token {label}: this seat has none, the token file cannot be read, or another user holds the pack's port"
-            ),
-            Self::Silent { label, detail } => {
-                write!(f, "the pack did not answer {label}: {detail}")
-            }
-        }
-    }
-}
-
 /// How long a proof waits. A hook's pack timeout is already short; the
 /// by-id read's bound is the longer the proof may add.
 fn proof_timeout() -> std::time::Duration {
     pack_timeout().min(std::time::Duration::from_millis(ATOM_NOW_MS))
 }
 
-/// The request `build` makes, after the same read without this seat's
-/// token came back 401 and the token really goes with it.
-/// [`packset_client::authorize`] keeps the token from a port another user
-/// holds. `label` names the read in the error.
-fn proven_request(
-    label: &str,
-    base: &str,
-    timeout: std::time::Duration,
-    build: impl Fn() -> ureq::Request,
-) -> std::result::Result<ureq::Request, ProofMiss> {
-    match build().timeout(timeout).call() {
-        Err(ureq::Error::Status(401, _)) => {}
-        Err(ureq::Error::Transport(err)) => {
-            return Err(ProofMiss::Silent {
-                label: label.to_string(),
-                detail: err.to_string(),
-            });
-        }
-        _ => {
-            return Err(ProofMiss::Open {
-                base: base.to_string(),
-                label: label.to_string(),
-            });
-        }
-    }
-    let asked = packset_client::authorize(build()).timeout(timeout);
-    if asked.header("Authorization").is_none() {
-        return Err(ProofMiss::NoToken {
-            label: label.to_string(),
-        });
-    }
-    Ok(asked)
+/// Whether the listener at `client`'s origin (scheme, host and port) is
+/// the writer that holds this seat's token. Every read that names the
+/// person asks this before it sends the token, and one that is not proven
+/// sends none. A proof stands for the rest of the process, per origin and
+/// token; a failed one is asked again next time.
+///
+/// The proof reads an atom id no pack holds, under a fresh nonce, three
+/// times: with no token and with a bogus one of the same shape, which
+/// both have to come back 401, then with this seat's, which must not.
+/// A listener that does not check the bearer cannot pass that, and one
+/// that refuses only some URLs is asked a URL it did not choose. A
+/// listener that already learnt the token, or a process of this user
+/// that reads the token file, passes; only a pack that signs its answers
+/// would tell either apart.
+pub(crate) fn pack_proven(client: &PacksetClient) -> bool {
+    listener_proof(client) == Some(true)
 }
 
-/// Whether the listing at `client` asks for this seat's token, the same
-/// check [`atom_now`] makes of a by-id read.
-fn listing_asks(client: &PacksetClient) -> bool {
-    let base = client.base().trim_end_matches('/');
-    let url = format!("{base}/v1/atoms");
-    proven_request("the listing", base, proof_timeout(), || ureq::get(&url)).is_ok()
+/// [`pack_proven`], with `None` for a listener that did not answer.
+fn listener_proof(client: &PacksetClient) -> Option<bool> {
+    static PROVEN: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let Ok(base) = url::Url::parse(client.base()) else {
+        return Some(false);
+    };
+    let Some(token) = packset_client::token() else {
+        return Some(false);
+    };
+    let key = format!(
+        "{} {}",
+        base.origin().ascii_serialization(),
+        hex::encode(&<sha2::Sha256 as sha2::Digest>::digest(token.as_bytes())[..8])
+    );
+    let mut proven = PROVEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if proven.contains(&key) {
+        return Some(true);
+    }
+    let holds = prove_listener(&base, &client.workspace());
+    if holds == Some(true) {
+        proven.insert(key);
+    }
+    holds
+}
+
+/// The three reads [`pack_proven`] makes of the listener at `base`, or
+/// `None` when one of them had no answer or a busy one.
+fn prove_listener(base: &url::Url, workspace: &str) -> Option<bool> {
+    let (Some(nonce), Some(bogus)) = (proof_nonce(), proof_nonce()) else {
+        return Some(false);
+    };
+    let mut probe = base.clone();
+    match probe.path_segments_mut() {
+        Ok(mut path) => {
+            path.pop_if_empty().extend(["v1", "atoms", &nonce[..32]]);
+        }
+        Err(()) => return Some(false),
+    }
+    probe.query_pairs_mut().append_pair("workspace", workspace);
+    let status = |req: ureq::Request| match req.timeout(proof_timeout()).call() {
+        Ok(answer) => Some(answer.status()),
+        Err(ureq::Error::Status(code, _)) if code < 500 => Some(code),
+        Err(_) => None,
+    };
+    let get = || ureq::get(probe.as_str());
+    if status(get())? != 401 {
+        return Some(false);
+    }
+    if status(get().set("Authorization", &format!("Bearer {bogus}")))? != 401 {
+        return Some(false);
+    }
+    let asked = packset_client::authorize(get());
+    if asked.header("Authorization").is_none() {
+        return Some(false);
+    }
+    Some(status(asked)? != 401)
+}
+
+/// 64 hex digits from `/dev/urandom`, the shape of a packsetd token.
+/// `None` when it cannot be read: the time is not a secret, so a seat
+/// without it proves nothing.
+fn proof_nonce() -> Option<String> {
+    use std::io::Read;
+    let mut raw = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut raw))
+        .ok()
+        .map(|()| hex::encode(raw))
 }
 
 /// Atom `id` as this seat's pack answers for it now, both requests inside
@@ -30308,12 +30444,10 @@ fn listing_asks(client: &PacksetClient) -> bool {
 ///
 /// Only a listener that asks for this seat's token answers. The read goes
 /// only with the token, which [`packset_client::authorize`] keeps from a
-/// port another user holds, and only after the same read without it was
-/// refused with 401, via [`proven_request`]. A stand-in that answers
-/// anyone, or a packsetd run with `PACKSET_AUTH=off`, confirms nothing. A
-/// process of this same user can read the token file and answer as
-/// packsetd would; no client check tells it apart, and only a pack that
-/// signs its answers or runs as its own user would.
+/// port another user holds, only after the same read without it was
+/// refused with 401, and only to a listener [`pack_proven`] proved. A
+/// stand-in that answers anyone, or a packsetd run with
+/// `PACKSET_AUTH=off`, confirms nothing.
 pub(crate) fn atom_now(id: &str) -> std::result::Result<Option<Value>, String> {
     let client = pack().map_err(|err| format!("no pack to ask for {id}: {err:#}"))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ATOM_NOW_MS);
@@ -30330,10 +30464,34 @@ pub(crate) fn atom_now(id: &str) -> std::result::Result<Option<Value>, String> {
         .extend(["v1", "atoms", id]);
     url.query_pairs_mut()
         .append_pair("workspace", &client.workspace());
-    let asked = proven_request(&format!("for {id}"), client.base(), left(), || {
-        ureq::get(url.as_str())
-    })
-    .map_err(|err| err.to_string())?;
+    let asked = packset_client::authorize(ureq::get(url.as_str()));
+    if asked.header("Authorization").is_none() {
+        return Err(format!(
+            "no token for {id}: this seat has none, or another user holds the pack's port"
+        ));
+    }
+    match ureq::get(url.as_str()).timeout(left()).call() {
+        Err(ureq::Error::Status(401, _)) => {}
+        Err(ureq::Error::Transport(err)) => {
+            return Err(format!("the pack did not answer for {id}: {err}"));
+        }
+        _ => {
+            return Err(format!(
+                "the listener at {} answers for {id} without this seat's token",
+                client.base()
+            ));
+        }
+    }
+    match listener_proof(&client) {
+        Some(true) => {}
+        Some(false) => {
+            return Err(format!(
+                "the listener at {} is not proven to hold this seat's token",
+                client.base()
+            ));
+        }
+        None => return Err(format!("the pack did not answer for {id}")),
+    }
     let atom: Value = match asked.timeout(left()).call() {
         Ok(answer) => answer
             .into_json()
@@ -30357,9 +30515,8 @@ pub(crate) fn atom_now(id: &str) -> std::result::Result<Option<Value>, String> {
 pub(crate) fn stored_origin_of(id: &str) -> Stored {
     match atom_now(id) {
         Ok(Some(atom)) => {
-            let by = stored_by(&atom);
-            record_origin(id, Some(by));
-            Stored::Origin(by)
+            record_held(id, &atom);
+            Stored::Origin(stored_by(&atom))
         }
         Ok(None) => {
             record_origin(id, None);
@@ -30381,7 +30538,9 @@ pub(crate) fn stored_origin_of(id: &str) -> Stored {
 /// a zero-width character does not slip past.
 fn unverified_note_hit(h: &Hit) -> bool {
     let kind = tag_skeleton(&h.kind);
-    kind == packset_core::record::NOTE_KIND || (kind != "lesson" && !person_origin(h))
+    kind == packset_core::record::NOTE_KIND
+        || substituted(h)
+        || (kind != "lesson" && !person_origin(h))
 }
 
 /// `tag` as a reader compares it: NFKC, with format, zero-width and space
@@ -30482,9 +30641,14 @@ fn unverified_label(h: &Hit, kind: &str) -> String {
 /// stored origin, a lesson in the person's words says so, and a lesson the
 /// pack did not store as the person's names its origin, so a standing
 /// lesson an agent or a peer wrote never reads like one the person stated.
-/// `ljos search`, the island, the timeline and MCP name it the same.
+/// A hit whose kind or text is not that of the record its id was read
+/// from is an unverified note. `ljos search`, the island, the timeline
+/// and MCP name it the same.
 #[must_use]
 pub fn kind_label(h: &Hit) -> String {
+    if substituted(h) {
+        return unverified_label(h, "note");
+    }
     if agent_preference(h) {
         return unverified_label(h, "preference");
     }
@@ -34596,7 +34760,8 @@ mod tests {
         );
         person.id = Some("label-person".into());
         super::keep_origin(&serde_json::json!({
-            "id": "label-person", "origin": "user-declared", "source": {"basis": "person"}
+            "id": "label-person", "kind": "lesson", "text": "t",
+            "origin": "user-declared", "source": {"basis": "person"}
         }));
         assert_eq!(super::kind_label(&person), "lesson, the person's words");
     }
@@ -38129,7 +38294,8 @@ mod tests {
     fn signal_hit(kind: &str, text: &str, score: f64, ballots: u32) -> Hit {
         let id = format!("id-{}", text.len());
         keep_origin(&serde_json::json!({
-            "id": id, "origin": admit::ORIGIN_USER, "source": {"basis": "person"}
+            "id": id, "kind": kind, "text": text,
+            "origin": admit::ORIGIN_USER, "source": {"basis": "person"}
         }));
         Hit {
             id: Some(id),
@@ -39059,8 +39225,8 @@ mod tests {
 
     /// A listener that answers 401, met by a seat with no token or a token
     /// file that cannot be read, is not read as an open listener. The
-    /// search is the stored atom alone, the miss is said, and a later
-    /// unauthenticated answer is not taken.
+    /// search is the stored atom alone, the miss is said, and the
+    /// listener is not asked.
     #[test]
     fn a_missing_token_does_not_read_the_listener() {
         let _env = env_guard();
@@ -39132,7 +39298,7 @@ mod tests {
                 .iter()
                 .filter(|r| r.contains("/v1/search"))
                 .count();
-            assert_eq!(searches, 1, "{token_file:?} {:?}", seen.lock().unwrap());
+            assert_eq!(searches, 0, "{token_file:?} {:?}", seen.lock().unwrap());
             let said = SEARCH_MISS
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -39393,6 +39559,20 @@ mod tests {
                             && value.trim() == "Bearer search-auth-token"
                     })
                 });
+                // The proof asks for an atom id no pack holds: 401 with no
+                // token and with a bogus one, and not 401 with this seat's.
+                let proof = first.split_whitespace().nth(1).is_some_and(|path| {
+                    path.split(['/', '?']).nth(3).is_some_and(|id| {
+                        id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
+                    })
+                });
+                if proof {
+                    return if authed {
+                        (404, r#"{"error":"no atom"}"#.into())
+                    } else {
+                        (401, r#"{"error":"token"}"#.into())
+                    };
+                }
                 if first.contains("/v1/search") && !authed {
                     return (401, r#"{"error":"token"}"#.into());
                 }
@@ -39460,8 +39640,25 @@ mod tests {
 
         let (open, _) = serve_http(|req| {
             let first = req.lines().next().unwrap_or("");
-            if first.contains("/v1/search") && !req.to_ascii_lowercase().contains("authorization:")
-            {
+            let authed = req.lines().any(|line| {
+                line.split_once(':').is_some_and(|(name, value)| {
+                    name.eq_ignore_ascii_case("authorization")
+                        && value.trim() == "Bearer search-auth-token"
+                })
+            });
+            let proof = first.split_whitespace().nth(1).is_some_and(|path| {
+                path.split(['/', '?'])
+                    .nth(3)
+                    .is_some_and(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+            });
+            if proof {
+                return if authed {
+                    (404, r#"{"error":"no atom"}"#.into())
+                } else {
+                    (401, r#"{"error":"token"}"#.into())
+                };
+            }
+            if first.contains("/v1/search") && !authed {
                 return (401, r#"{"error":"token"}"#.into());
             }
             if first.contains("/v1/search") {
@@ -40398,14 +40595,16 @@ mod tests {
             "a claim with no stored origin read as a fact"
         );
         bare.id = Some("bare-claim".into());
-        keep_origin(&serde_json::json!({"id": "bare-claim", "source": {"basis": "person"}}));
+        keep_origin(
+            &serde_json::json!({"id": "bare-claim", "text": "x", "source": {"basis": "person"}}),
+        );
         assert_eq!(
             hit_line(&bare, "2026-09-12T00:00:00.000Z"),
             "- [unverified agent note (origin agent-derived)] x",
             "a person basis with no origin read as the person's"
         );
         keep_origin(&serde_json::json!({
-            "id": "bare-claim", "origin": "user-declared", "source": {"basis": "person"},
+            "id": "bare-claim", "text": "x", "origin": "user-declared", "source": {"basis": "person"},
         }));
         assert_eq!(hit_line(&bare, "2026-09-12T00:00:00.000Z"), "- [claim] x");
     }
@@ -51827,11 +52026,16 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let bare = read(&asks, None).unwrap_err();
         assert!(bare.contains("no token"), "{bare}");
         let wrong = read(&asks, Some("another-token")).unwrap_err();
-        assert!(wrong.contains("did not answer"), "{wrong}");
+        assert!(wrong.contains("not proven"), "{wrong}");
+        let proof = |path: &str| {
+            path.split(['/', '?'])
+                .nth(3)
+                .is_some_and(|probe| probe.len() == 32 && hex::decode(probe).is_ok())
+        };
         assert!(
             seen.lock().unwrap().iter().all(|line| {
                 let path = line.split_whitespace().nth(1).unwrap_or("");
-                !path.contains("/v1/atoms/") || path.contains(id)
+                !path.contains("/v1/atoms/") || path.contains(id) || proof(path)
             }),
             "{:?}",
             seen.lock().unwrap()
@@ -51857,8 +52061,16 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 atom["origin"] = origin;
             }
             assert_eq!(stored_by(&atom), StoredBy::Agent, "{atom}");
-            keep_origin(&atom);
-            assert_eq!(recorded(atom["id"].as_str().unwrap()), None, "{atom}");
+            let id = atom["id"].as_str().unwrap();
+            let readers: [fn(&Value); 2] = [keep_origin, |a| record_listed(a, true)];
+            for listed in readers {
+                let mut persons = atom.clone();
+                persons["origin"] = serde_json::json!("user-declared");
+                keep_origin(&persons);
+                assert_eq!(recorded(id), Some(Some(StoredBy::Person)), "{persons}");
+                listed(&atom);
+                assert_eq!(recorded(id), Some(Some(StoredBy::Agent)), "{atom}");
+            }
         }
 
         let listed = "0r1g1nle55000000000000000000000001";
@@ -53176,7 +53388,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 admit::ORIGIN_AGENT
             };
             keep_origin(&serde_json::json!({
-                "id": id, "origin": origin, "source": {"basis": if origin == admit::ORIGIN_USER { "person" } else { "agent" }}
+                "id": id, "kind": kind, "text": id, "origin": origin,
+                "source": {"basis": if origin == admit::ORIGIN_USER { "person" } else { "agent" }}
             }));
             Hit {
                 id: Some(id.into()),
