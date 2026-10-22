@@ -414,6 +414,14 @@ pub fn note_latest_prompt_as(prompt: &str, sessions: &[String]) {
     note_latest_prompt_from(prompt, sessions, None, None);
 }
 
+/// Drop the kept prompt and its bind. The prompt hook calls this on every
+/// prompt before it keeps one, so a prompt it skips or does not take as
+/// the person's leaves no earlier turn's words behind to quote.
+pub fn forget_latest_prompt() {
+    let _ = std::fs::remove_file(latest_prompt_path());
+    let _ = std::fs::remove_file(latest_prompt_bind_path());
+}
+
 /// [`note_latest_prompt_as`] recording `runner`, the process that spawned
 /// the hook ([`crate::proc_tree::hook_runner`]): a process under that
 /// very runner is in its conversation whatever its environment names.
