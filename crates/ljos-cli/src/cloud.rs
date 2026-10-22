@@ -8,8 +8,9 @@
 //! `LJOS_CLOUD_AGE_SECRET` names an environment variable, it writes that
 //! variable's age identity for scope `cloud` to a mode 0600 file. On a
 //! cloud VM it also installs the release's `packset-embed` and the ONNX
-//! Runtime it links. A later boot with the binaries already installed only
-//! refreshes the clone.
+//! Runtime it links. A later boot with the binaries already installed
+//! refreshes the clone, rewrites env-owned wakes, and refreshes the scope
+//! cloud identity from the named secret.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
