@@ -26,6 +26,8 @@ use anyhow::{bail, Context as _, Result};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use sha2::{Digest as _, Sha256};
 
+use super::config::MailConfig;
+
 /// The longest an approval file stays valid.
 pub const MAX_LIFETIME: Duration = Duration::hours(24);
 
@@ -48,7 +50,15 @@ pub struct Approval {
     pub expires: DateTime<Utc>,
 }
 
-pub fn export(draft: &Draft<'_>, expires: DateTime<Utc>, now: DateTime<Utc>) -> Result<Approval> {
+/// The approval file for `draft`, refused when the content checks under
+/// `config` refuse the message: no file is minted for a draft that could
+/// not be sent.
+pub fn export(
+    draft: &Draft<'_>,
+    config: &MailConfig,
+    expires: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<Approval> {
     for (name, value) in [
         ("draft", draft.id),
         ("reachbook-hash", draft.reachbook_hash),
@@ -84,6 +94,13 @@ pub fn export(draft: &Draft<'_>, expires: DateTime<Utc>, now: DateTime<Utc>) -> 
     }
     if fields.iter().any(|(n, _)| n == "bcc" || n == "resent-bcc") {
         bail!("export: sendmail -t strips Bcc, so the sent bytes would not be H; use To or Cc");
+    }
+    let refused = super::checks::refusals(draft.message, config);
+    if !refused.is_empty() {
+        bail!(
+            "export: the checks refuse this draft: {}",
+            refused.join("; ")
+        );
     }
     let hash = hex::encode(Sha256::digest(draft.message));
     if draft.reachbook_hash != hash {
