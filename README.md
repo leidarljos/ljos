@@ -374,6 +374,7 @@ ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the relea
 ljos brief reviewer vissue-xxxx                # what a subagent playing reviewer starts from
 ljos remember --as reviewer "..."              # a lesson the persona keeps; its next brief opens with it
 ljos panel vissue-xxxx --out panel             # every persona's brief as a file, for a runner without MCP
+ljos panel vissue-xxxx --cloud                  # one prompt file per persona: seat env, slot, push rules
 ljos vote vissue-xxxx --for hold --as reviewer
 ljos panel vissue-xxxx --jev                   # with Jev on: cast when every seat is sure and agrees, else briefs for subagents
 ljos learn vissue-xxxx --outcome ship
