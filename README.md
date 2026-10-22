@@ -23,9 +23,16 @@ Continue, Roo Code and Kilo Code.
 
 ```
 curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
+export PATH="$HOME/.local/bin:$PATH"
 ljos prefer "Push a tag with git push origin TAG; --follow-tags skips lightweight tags."
 ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the release runbook."
 ```
+
+The programs land in `~/.local/bin`, and the `export` line puts it on PATH
+in the shell you pasted into. From the next release on, when `~/.local/bin`
+is not on PATH, the installer also adds that line to `~/.profile` and
+`~/.bashrc`, and to `~/.zshrc` when there is one, so a new shell finds
+`ljos`; `--no-modify-path` leaves them alone.
 
 The installer downloads each program from its GitHub release, checks it
 against the published SHA-256 sum, and builds from source with `cargo` where a
