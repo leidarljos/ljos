@@ -72,6 +72,8 @@ ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the relea
 `auggie`, `amp`, `goose`, `openhands`, `continue`, `roo` or `kilo`.
 Cursor's IDE and its `agent` CLI share `~/.cursor/mcp.json`.
 A fresh machine runs `ljos cloud up`, or `sh scripts/install.sh --cloud`.
+Both arrive in the next release; the release the install line above fetches has neither.
+Until then they work from `develop`: run `sh scripts/install.sh --cloud` in a checkout of it, and the script builds that tree's `ljos` with `cargo` when the installed one has no `cloud up`.
 The binaries land in `~/.local/bin`, `~/.cursor/mcp.json` names `ljos-mcp` on PATH, and `LJOS_TRACKER_REMOTE` is cloned as the shared tracker. `docs/cloud-vm.md` has the environment file, the push mode, and a job step.
 Codex runs a hook only once you trust it. After `ljos onboard`, open
 `/hooks` in Codex and trust each ljos hook before the guard runs, and
