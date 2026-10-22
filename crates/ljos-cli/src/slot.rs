@@ -471,14 +471,14 @@ fn pin_line_at(commit: &str, seat: &str, key: &str) -> bool {
     })
 }
 
-fn file_at(commit: &str, path: &str) -> Option<String> {
+pub(crate) fn file_at(commit: &str, path: &str) -> Option<String> {
     if path.is_empty() {
         return None;
     }
     ballot_sig::tracker_git(&["--no-pager", "show", &format!("{commit}:{path}")])
 }
 
-fn note_on_issue_at(commit: &str, issue: &str, note: &str) -> bool {
+pub(crate) fn note_on_issue_at(commit: &str, issue: &str, note: &str) -> bool {
     let pattern = format!(":ID:[[:space:]]+{}[[:space:]]*$", ere_escape(issue));
     let Some(hits) =
         ballot_sig::tracker_git(&["--no-pager", "grep", "-l", "-E", "-e", &pattern, commit])

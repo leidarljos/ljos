@@ -2,11 +2,11 @@
 //! ed25519 key, made on its first vote at
 //! `$XDG_DATA_HOME/ljos/seats/SEAT/ballot.key` (or `LJOS_SEAT_KEY`), so
 //! seats sharing one HOME still sign apart. The signature rides on the
-//! issue as a `ballot-sig:` note. A ballot the tracker committed before
-//! signing began ([`SIGNING_SINCE`]) is legacy unsigned and still counts. The tracker
-//! pins each seat's public key the first time it signs (`.ljos-seat-keys`
-//! at the tracker root, committed), so a later ballot under that name signed
-//! by another key is a mismatch. The push gate counts a seat ballot only
+//! issue as a `ballot-sig:` note. A ballot the tracker held before its
+//! first pin, by commit order ([`recorded_before_signing`]), is legacy
+//! unsigned and still counts. The tracker pins each seat's public key the
+//! first time it signs (`.ljos-seat-keys` at the tracker root, committed),
+//! so a later ballot under that name signed by another key is a mismatch. The push gate counts a seat ballot only
 //! when its latest signature covers exactly that voter, issue and choice
 //! under the pinned key.
 //!
@@ -287,11 +287,6 @@ pub(crate) fn key_from_file(path: &std::path::Path) -> Result<SigningKey> {
     Ok(SigningKey::from_bytes(&seed))
 }
 
-/// The commit time of the signing change: a ballot the tracker recorded
-/// before it is legacy unsigned and still counts; one after needs a
-/// signature.
-pub const SIGNING_SINCE: i64 = 1_791_984_778;
-
 /// Where `seat`'s ballot key lives: `LJOS_SEAT_KEY` when that path is this
 /// seat's own key and not the machine key, else
 /// `$XDG_DATA_HOME/ljos/seats/SEAT/ballot.key` (`~/.local/share` when unset).
@@ -409,19 +404,44 @@ pub fn load_or_create(path: &std::path::Path) -> Result<SigningKey> {
     key_from_file(path)
 }
 
-/// When the tracker recorded `voter`'s ballot for `choice` on `issue`: the
-/// newest commit that added or removed its `] VOTER: CHOICE` line in the
-/// file holding the issue. `None` when the tracker is not a git repository
-/// or the ballot is not committed yet.
+/// Whether `voter`'s ballot for `choice` on `issue` was recorded before
+/// signing began in this tracker, by commit order: its `] VOTER: CHOICE`
+/// line is in that issue's own entry in every parent of each commit that
+/// brought the pin file into a tree none of its parents held it in. No
+/// git date is read. `false` on a tracker that is not a git repository or
+/// has no pin committed; `LJOS_UNSIGNED_BALLOTS=allow` is for a tracker
+/// that never signed.
 #[must_use]
-pub fn recorded_at(issue: &str, voter: &str, choice: &str) -> Option<i64> {
-    let pattern = format!(":ID:[[:space:]]+{issue}[[:space:]]*$");
-    let files = tracker_git(&["grep", "-l", "-E", &pattern])?;
-    let file = files.lines().next()?.to_string();
+pub fn recorded_before_signing(issue: &str, voter: &str, choice: &str) -> bool {
+    let log = tracker_git(&[
+        "--no-pager",
+        "log",
+        "--full-history",
+        "-m",
+        "--diff-filter=A",
+        "--format=%H %P",
+        "--",
+        PIN_FILE,
+    ])
+    .unwrap_or_default();
+    let held = |commit: &str| crate::slot::file_at(commit, PIN_FILE).is_some();
+    let starts: Vec<Vec<&str>> = log
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let commit = parts.next()?;
+            let parents: Vec<&str> = parts.collect();
+            (held(commit) && !parents.iter().any(|p| held(p))).then_some(parents)
+        })
+        .collect();
     let needle = format!("] {}: {}", voter.trim(), choice.trim());
-    tracker_git(&["log", "-1", "--format=%ct", "-S", &needle, "--", &file])?
-        .parse()
-        .ok()
+    !starts.is_empty()
+        && starts.iter().all(|parents| {
+            !parents.is_empty()
+                && parents
+                    .iter()
+                    .all(|p| crate::slot::note_on_issue_at(p, issue, &needle))
+        })
 }
 
 /// What `git ARGS` prints in the tracker at `VISSUE_ROOT`, trimmed, when
