@@ -469,41 +469,109 @@ pub struct Incoming {
     pub retired: Vec<String>,
 }
 
-/// What adopting one gone host's log asks of this pack: which texts are
+/// What adopting one gone host's log asks of this pack: which memories are
 /// still live there, and which atoms this host should post as its own.
 #[derive(Debug, Default, PartialEq)]
 struct AdoptPlan {
+    /// [`memory_key`] of every live atom in the log, including ones this
+    /// host already holds and so will not post again.
     live: BTreeSet<String>,
     post: Vec<Value>,
 }
 
-/// The atoms to adopt from one gone host log: one live text once, and never
-/// a text this host already holds as its own.
+/// The ticket an atom belongs to. The pack treats the same words on two
+/// tickets as two memories; the `issue` field is that identity, and an
+/// `issue:` entity is the same fact when the field was left off.
+fn atom_issue(atom: &Value) -> String {
+    atom.get("issue")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|issue| !issue.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            atom.get("entities")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .find_map(|tag| tag.strip_prefix("issue:"))
+                .map(str::trim)
+                .filter(|issue| !issue.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
+}
+
+/// One memory: the text and the ticket. Scope is not in the key. The
+/// caller passes only the keys of the scope being adopted, so a private
+/// copy of the same words does not swallow the cloud copy.
+fn memory_key(atom: &Value) -> Option<String> {
+    let text = atom
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(crate::work_id(&format!("{text}\n{}", atom_issue(atom))))
+}
+
+/// Keys this host holds as its own in `scope`. An import tagged `sync:` is
+/// not its own, and an atom of another scope is not this log's memory.
+fn own_memory_keys(atoms: &[Value], scope: &str) -> BTreeSet<String> {
+    let default = default_scope(scope);
+    atoms
+        .iter()
+        .filter(|atom| is_own(atom) && atom_scope(atom, &default) == scope)
+        .filter_map(memory_key)
+        .collect()
+}
+
+/// The atoms to adopt from one gone host log.
+///
+/// One memory once. A memory this host already holds in `scope` is not
+/// posted again. The repost is origin `peer`, whatever origin the sender
+/// wrote, and it carries `scope:<scope>` so it stays in this log rather
+/// than falling into the machine's default scope. Sender tags are dropped:
+/// the atom is this host's own after the post.
 #[must_use]
-fn adopt_plan(plain: &str, own: &BTreeSet<String>) -> AdoptPlan {
+fn adopt_plan(plain: &str, scope: &str, own: &BTreeSet<String>) -> AdoptPlan {
     let mut plan = AdoptPlan::default();
-    for line in plain.lines().filter(|l| !l.trim().is_empty()) {
+    let scope_tag = format!("scope:{scope}");
+    for line in plain.lines().filter(|line| !line.trim().is_empty()) {
         let Ok(mut atom) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        let text = atom["text"].as_str().unwrap_or("").to_string();
-        if text.is_empty() {
+        let Some(key) = memory_key(&atom) else {
             continue;
-        }
-        let id = crate::work_id(&text);
-        if !plan.live.insert(id.clone()) || own.contains(&id) {
+        };
+        if !plan.live.insert(key.clone()) || own.contains(&key) {
             continue;
         }
         if let Some(map) = atom.as_object_mut() {
             map.remove("id");
-            let entities: Vec<Value> = map
+            // The sender's level would keep a user-declared atom explicit.
+            // Origin `peer` is what the writer is asked to store; the level
+            // is the writer's, from that origin, not the one in the log.
+            map.remove("level");
+            map.insert(
+                "origin".into(),
+                Value::String(crate::admit::ORIGIN_PEER.to_string()),
+            );
+            let mut entities: Vec<Value> = map
                 .get("entities")
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter(|e| !e.as_str().is_some_and(|tag| tag.starts_with("sync:")))
+                .filter(|entity| {
+                    !entity
+                        .as_str()
+                        .is_some_and(|tag| tag.starts_with("sync:") || tag.starts_with("scope:"))
+                })
                 .cloned()
                 .collect();
+            entities.push(Value::String(scope_tag.clone()));
             map.insert("entities".into(), Value::Array(entities));
         }
         plan.post.push(atom);
@@ -677,7 +745,26 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
     Ok(out)
 }
 
+/// A host name that is safe as one path segment under `.ljos/atoms`.
+///
+/// [`machine_name`] folds `../x` into a different name. Adopting that
+/// folded name would open some other host's log, so a name that is not
+/// already a machine name is refused. The path is still built from
+/// [`machine_name`], so a caller that skips this check cannot leave the
+/// atoms directory.
+fn require_host_name(raw: &str) -> Result<String> {
+    let gone = raw.trim();
+    if gone.is_empty() {
+        bail!("sync: pass a host after --adopt");
+    }
+    if machine_name(gone) != gone {
+        bail!("sync: {gone} is not a host name");
+    }
+    Ok(gone.to_string())
+}
+
 fn host_log_rels(host: &str) -> [String; 2] {
+    let host = machine_name(host);
     [
         format!(".ljos/atoms/{host}.jsonl.age"),
         format!(".ljos/atoms/{host}.digest"),
@@ -693,6 +780,7 @@ fn stageable_path(root: &Path, rel: &str) -> bool {
 }
 
 fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, push: bool) -> Result<String> {
+    let gone = require_host_name(gone)?;
     let me = host();
     if gone == me {
         bail!("sync: {gone} is this machine; pass a gone host");
@@ -701,7 +789,7 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, push: bool) -> Result<S
     if identities.is_empty() {
         return Ok("sync: no age identity on this machine; `ljos sync --key` makes one\n".into());
     }
-    let [gone_log, gone_digest] = host_log_rels(gone);
+    let [gone_log, gone_digest] = host_log_rels(&gone);
     let log_path = root.join(&gone_log);
     if !log_path.is_file() {
         return Ok(format!(
@@ -718,34 +806,26 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, push: bool) -> Result<S
     let client = crate::pack()?;
     let workspace = client.workspace();
     let before = crate::atoms_lean(&client, &workspace)?;
-    let own: BTreeSet<String> = before
-        .iter()
-        .filter(|a| is_own(a))
-        .filter_map(|a| a["text"].as_str().map(crate::work_id))
-        .collect();
-    let plan = adopt_plan(&plain, &own);
+    let own = own_memory_keys(&before, &scope.name);
+    let plan = adopt_plan(&plain, &scope.name, &own);
     let mut adopted = BTreeSet::new();
     let (mut kept, mut refused) = (0usize, 0usize);
     for mut atom in plan.post {
-        let text = atom["text"].as_str().unwrap_or("");
-        let id = crate::work_id(text);
+        let key = memory_key(&atom).unwrap_or_default();
         if let Some(map) = atom.as_object_mut() {
             map.insert("workspace".into(), Value::String(workspace.clone()));
         }
         match crate::admit::post_kept(&client, &atom) {
             Ok(_) => {
-                adopted.insert(id);
+                adopted.insert(key);
                 kept += 1;
             }
             Err(_) => refused += 1,
         }
     }
-    let tag = sender_entity(gone);
+    let tag = sender_entity(&gone);
     let mut moved = 0usize;
     for atom in before {
-        let Some(text) = atom["text"].as_str() else {
-            continue;
-        };
         let from_gone = atom["entities"]
             .as_array()
             .into_iter()
@@ -754,11 +834,13 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, push: bool) -> Result<S
         if !from_gone {
             continue;
         }
-        let text_id = crate::work_id(text);
-        if !plan.live.contains(&text_id) {
+        let Some(key) = memory_key(&atom) else {
+            continue;
+        };
+        if !plan.live.contains(&key) {
             continue;
         }
-        if !(own.contains(&text_id) || adopted.contains(&text_id)) {
+        if !(own.contains(&key) || adopted.contains(&key)) {
             continue;
         }
         if let Some(id) = atom["id"].as_str() {
@@ -783,13 +865,13 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, push: bool) -> Result<S
             std::fs::remove_file(path)?;
         }
     }
-    let _ = std::fs::remove_file(taken_path(&scope.name, gone));
+    let _ = std::fs::remove_file(taken_path(&scope.name, &gone));
     for rel in host_log_rels(&me) {
         if stageable_path(root, &rel) {
             stage.push(rel);
         }
     }
-    let committed = commit_adopt(root, &scope.name, gone, &stage, push);
+    let committed = commit_adopt(root, &scope.name, &gone, &stage, push);
     let mut out = format!(
         "sync: {gone}: {kept} {} atoms adopted, {refused} refused, {moved} moved\n",
         scope.name
@@ -1053,10 +1135,7 @@ fn sync_roots() -> Result<Vec<PathBuf>> {
 /// A missing host name, trying to adopt this machine's own host name, a
 /// scope file that does not parse, the pack not answering, or age refusing.
 pub fn adopt(target: &str) -> Result<String> {
-    let gone = target.trim();
-    if gone.is_empty() {
-        bail!("sync: pass a host after --adopt");
-    }
+    let gone = require_host_name(target)?;
     if gone == host() {
         bail!("sync: {gone} is this machine; pass a gone host");
     }
@@ -1073,7 +1152,7 @@ pub fn adopt(target: &str) -> Result<String> {
             continue;
         };
         out.push_str(&catch_up(&root));
-        out.push_str(&adopt_in_repo(&root, &scope, gone, true)?);
+        out.push_str(&adopt_in_repo(&root, &scope, &gone, true)?);
     }
     Ok(out)
 }
@@ -2190,27 +2269,79 @@ mod tests {
     }
 
     #[test]
-    fn an_adopt_plan_posts_each_live_text_once_without_sync_tags() {
+    fn an_adopt_plan_keeps_each_issue_in_the_logs_scope() {
         let plain = format!(
-            "{}\n{}\n{}\nnot-json\n",
-            atom("a", "fresh", &["seat:x", "sync:gone"]),
-            atom("b", "mine", &["scope:cloud"]),
-            atom("c", "fresh", &["sync:stale"])
+            "{}\n{}\n{}\n{}\nnot-json\n",
+            serde_json::json!({
+                "id": "a", "text": "fresh", "kind": "lesson",
+                "origin": "user-declared", "level": "explicit",
+                "entities": ["seat:x", "sync:gone"]
+            }),
+            serde_json::json!({
+                "id": "b", "text": "mine", "kind": "lesson",
+                "entities": ["scope:cloud"]
+            }),
+            serde_json::json!({
+                "id": "c", "text": "fresh", "kind": "lesson", "issue": "ljos-b",
+                "entities": ["sync:stale", "issue:ljos-b"]
+            }),
+            serde_json::json!({
+                "id": "d", "text": "fresh", "kind": "lesson",
+                "entities": ["sync:gone"]
+            })
         );
-        let own: BTreeSet<String> = [crate::work_id("mine")].into_iter().collect();
-        let plan = adopt_plan(&plain, &own);
-        let live: BTreeSet<String> = [crate::work_id("fresh"), crate::work_id("mine")]
-            .into_iter()
-            .collect();
-        assert_eq!(plan.live, live);
-        assert_eq!(plan.post.len(), 1);
-        assert_eq!(plan.post[0]["text"], "fresh");
-        assert!(plan.post[0].get("id").is_none());
-        assert!(plan.post[0]["entities"]
-            .as_array()
-            .unwrap()
+        let held = [
+            serde_json::json!({
+                "id": "o", "text": "mine", "kind": "lesson",
+                "entities": ["scope:cloud"]
+            }),
+            serde_json::json!({
+                "id": "p", "text": "fresh", "kind": "lesson",
+                "entities": ["scope:private"]
+            }),
+        ];
+        let own = own_memory_keys(&held, "cloud");
+        assert_eq!(own.len(), 1, "a private copy is not this scope's own");
+        let plan = adopt_plan(&plain, "cloud", &own);
+        assert_eq!(
+            plan.post.len(),
+            2,
+            "same words on two tickets are two posts"
+        );
+        assert!(plan.post.iter().all(|atom| atom["origin"] == "peer"));
+        assert!(plan.post.iter().all(|atom| atom.get("id").is_none()));
+        assert!(plan.post.iter().all(|atom| atom.get("level").is_none()));
+        let issues: BTreeSet<&str> = plan
+            .post
             .iter()
-            .all(|e| !e.as_str().is_some_and(|tag| tag.starts_with("sync:"))));
+            .map(|atom| atom["issue"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(issues, BTreeSet::from(["", "ljos-b"]));
+        for atom in &plan.post {
+            let tags: Vec<&str> = atom["entities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            assert!(tags.contains(&"scope:cloud"), "{tags:?}");
+            assert!(tags.iter().all(|tag| !tag.starts_with("sync:")), "{tags:?}");
+        }
+        assert!(plan.live.contains(&memory_key(&held[0]).unwrap()));
+    }
+
+    #[test]
+    fn a_host_name_cannot_leave_the_atoms_directory() {
+        let err = require_host_name("../x").unwrap_err().to_string();
+        assert!(err.contains("not a host name"), "{err}");
+        assert!(require_host_name("").is_err());
+        assert_eq!(require_host_name("gone-host").unwrap(), "gone-host");
+        let rels = host_log_rels("../x");
+        assert!(
+            rels.iter()
+                .all(|rel| rel.starts_with(".ljos/atoms/") && !rel.contains("..")),
+            "{rels:?}"
+        );
     }
 
     #[test]
