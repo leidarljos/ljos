@@ -27,6 +27,7 @@ pub mod gates;
 pub mod git_hooks;
 pub mod hud;
 pub mod jev;
+pub mod legacy_pref;
 pub mod mail;
 pub mod memories;
 pub mod note_queue;
@@ -335,13 +336,19 @@ pub fn session_start_for(session: Option<&str>) -> String {
     // Other machines' rules arrive before the preface is built. A tracker
     // that does not answer leaves the local file, and the hook does not wait.
     user_rules::sync_for_hook();
+    // A preference stored before a basis existed is stamped first, so this
+    // line still shows the ones the person wrote.
+    legacy_pref::migrate_once();
     let mut atoms = session_atoms(400);
     if atoms.is_err() {
         wake_for_recall();
         atoms = session_atoms(2_000);
     }
-    let mut line =
-        session_start_line_from(atoms.ok().as_deref(), &now_utc(), on_path("ljos-policyd"));
+    let mut line = session_start_line_from(
+        atoms.as_ref().ok().map(|v| v.as_slice()),
+        &now_utc(),
+        on_path("ljos-policyd"),
+    );
     // A guard that switched itself off says so where the session starts,
     // not only in `ljos doctor`.
     if let Some(off) = bookkeep::guard_off_reason() {
@@ -350,6 +357,14 @@ pub fn session_start_for(session: Option<&str>) -> String {
     if let Some(issue) = bookkeep::session_issue(session) {
         if !line.contains(&issue) {
             line.push_str(&format!(" This session's issue is {issue}."));
+        }
+    }
+    if let Ok(got) = &atoms {
+        let n = legacy_pref::awaiting(got).len();
+        if n > 0 {
+            line.push(' ');
+            line.push_str(&legacy_pref::review_sentence(n));
+            line.push('.');
         }
     }
     user_rules::prepend(line)
@@ -16717,6 +16732,7 @@ pub fn rules_for_gate() -> Vec<Rule> {
 /// empty when the pack does not answer: a reminder is not worth a wait.
 #[must_use]
 pub fn gate_read() -> (Vec<Rule>, Vec<(String, String)>) {
+    legacy_pref::migrate_once();
     let kept = rules_cache_path();
     let listed = pack().and_then(|client| {
         atoms_lean(&client, &client.workspace()).context("rules: GET /v1/atoms failed")
@@ -16798,21 +16814,29 @@ pub fn preferences_line(enforced: usize, could: usize, total: usize) -> String {
 }
 
 fn preferences_row() -> Habitat {
+    legacy_pref::migrate_once();
     let listed = pack().and_then(|client| {
         atoms_lean(&client, &client.workspace()).context("preferences: GET /v1/atoms failed")
     });
-    let state = match listed {
+    let (state, held) = match listed {
         Ok(atoms) => {
+            let held = legacy_pref::awaiting(&atoms).len();
             let (enforced, could, total) =
                 preferences_enforced(&preferences_of(&atoms), &rules_of(&atoms));
-            preferences_line(enforced, could, total)
+            let mut line = preferences_line(enforced, could, total);
+            if held > 0 {
+                line.push_str(&format!("; {}", legacy_pref::review_sentence(held)));
+            }
+            (line, held)
         }
-        Err(e) => format!("not counted: {e:#}"),
+        Err(e) => (format!("not counted: {e:#}"), 0),
     };
     Habitat {
         name: "preferences",
         state,
-        ok: true,
+        // Held-back preferences are a warning the short doctor shows.
+        // They do not mean the seat failed to start.
+        ok: held == 0,
     }
 }
 
@@ -22905,6 +22929,10 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     if row.name == "sync" && !row.ok {
         return "warn";
     }
+    // Older preferences awaiting review are named, not a failed seat.
+    if row.name == "preferences" && !row.ok {
+        return "warn";
+    }
     if row.ok && row.name == "mcp" && row.state.starts_with("warning:") {
         return "warn";
     }
@@ -24253,6 +24281,7 @@ pub fn packset_island(cue: &str, fire: bool) -> Result<Value> {
 /// weights that persona fired, and a fire writes its weights and not the
 /// seat's. The seat's own island is the one with no lens.
 pub fn packset_island_as(cue: &str, fire: bool, lens: Option<&str>) -> Result<Value> {
+    legacy_pref::migrate_once();
     let cue = cue.trim();
     if cue.is_empty() {
         bail!("island: pass the task or question at hand");
@@ -24579,6 +24608,7 @@ pub fn packset_search_as_of(
     as_of: Option<&str>,
     rerank: bool,
 ) -> Result<Vec<Hit>> {
+    legacy_pref::migrate_once();
     let q = query.trim();
     if q.is_empty() {
         bail!("search: empty query");
