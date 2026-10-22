@@ -455,30 +455,28 @@ fn install_roots(home: Option<&Path>) -> Vec<PathBuf> {
     roots
 }
 
-/// The `/nix/store/HASH-NAME` entry `path` sits in, HASH being 32
-/// characters of Nix's base 32.
-fn nix_entry(path: &Path) -> Option<PathBuf> {
-    let name = path
-        .strip_prefix("/nix/store")
-        .ok()?
-        .iter()
-        .next()?
-        .to_str()?;
+/// Where Nix keeps what it builds.
+const NIX_STORE: &str = "/nix/store";
+
+/// The `STORE/HASH-NAME` entry `path` sits in, STORE being Nix's store
+/// ([`NIX_STORE`]) and HASH 32 characters of Nix's base 32.
+fn nix_entry(path: &Path, store: &Path) -> Option<PathBuf> {
+    let name = path.strip_prefix(store).ok()?.iter().next()?.to_str()?;
     let (hash, rest) = name.split_at_checked(32)?;
     let hashed = hash
         .chars()
         .all(|c| "0123456789abcdfghijklmnpqrsvwxyz".contains(c));
-    (hashed && rest.len() > 1 && rest.starts_with('-')).then(|| Path::new("/nix/store").join(name))
+    (hashed && rest.len() > 1 && rest.starts_with('-')).then(|| store.join(name))
 }
 
 /// The runner `path` names when it sits strictly below one of `roots` or
-/// in a Nix store entry, and that root: the nearest component that is not
+/// in an entry of the Nix store `store`, and that root: the nearest component that is not
 /// packing layout ([`layout_component`]), read from the file up to the
 /// root's own name, so `share/claude/versions/2.1.3` is Claude Code. The
 /// path must be absolute and plain, since a `..` after the root would
 /// leave it. A path the kernel marks ` (deleted)` is not the file that
 /// was installed.
-fn runner_below(path: &Path, roots: &[PathBuf]) -> Option<(&'static str, PathBuf)> {
+fn runner_below(path: &Path, roots: &[PathBuf], store: &Path) -> Option<(&'static str, PathBuf)> {
     let plain = path.is_absolute()
         && path.components().all(|c| {
             matches!(
@@ -492,7 +490,7 @@ fn runner_below(path: &Path, roots: &[PathBuf]) -> Option<(&'static str, PathBuf
     let root = roots
         .iter()
         .cloned()
-        .chain(nix_entry(path))
+        .chain(nix_entry(path, store))
         .find(|root| path != root.as_path() && path.starts_with(root))?;
     let parts = root
         .file_name()
@@ -504,19 +502,297 @@ fn runner_below(path: &Path, roots: &[PathBuf]) -> Option<(&'static str, PathBuf
     Some((hook_name(name)?, root))
 }
 
-/// Whether root or this user owns `path`, and no one else can write it
-/// but this user's primary group, which on most systems is theirs alone.
-fn person_keeps(path: &Path) -> bool {
+/// A group as the group database lists it.
+struct GroupEntry {
+    name: std::ffi::OsString,
+    members: Vec<std::ffi::OsString>,
+}
+
+/// The account lookups [`group_is_private`] makes. `None` is a lookup
+/// that failed, which is never read as an empty answer.
+trait Accounts {
+    fn user_name(&self, uid: u32) -> Option<std::ffi::OsString>;
+    fn group(&self, gid: u32) -> Option<GroupEntry>;
+    /// The uid of every passwd entry whose primary group is `gid`.
+    fn primary_members(&self, gid: u32) -> Option<Vec<u32>>;
+}
+
+/// The passwd and group databases, through the C library.
+struct SystemAccounts;
+
+/// Runs a `get*_r` lookup with a buffer that grows while it is too small.
+fn with_buf<T>(mut lookup: impl FnMut(&mut [u8]) -> Result<Option<T>, i32>) -> Option<T> {
+    let mut buf = vec![0u8; 1024];
+    loop {
+        match lookup(&mut buf) {
+            Err(libc::ERANGE) if buf.len() < 1 << 20 => buf.resize(buf.len() * 2, 0),
+            Ok(found) => return found,
+            Err(_) => return None,
+        }
+    }
+}
+
+/// # Safety
+/// `ptr` is a NUL-terminated string.
+unsafe fn os_string(ptr: *const libc::c_char) -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStrExt as _;
+    // SAFETY: the caller's contract.
+    let bytes = unsafe { std::ffi::CStr::from_ptr(ptr) }.to_bytes();
+    std::ffi::OsStr::from_bytes(bytes).to_os_string()
+}
+
+impl Accounts for SystemAccounts {
+    fn user_name(&self, uid: u32) -> Option<std::ffi::OsString> {
+        with_buf(|buf| {
+            // SAFETY: passwd is plain data, so all zeroes is a valid value.
+            let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+            let mut found: *mut libc::passwd = std::ptr::null_mut();
+            // SAFETY: getpwuid_r writes at most buf.len() bytes into buf
+            // and points entry's fields into it.
+            let rc = unsafe {
+                libc::getpwuid_r(
+                    uid,
+                    &mut entry,
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                    &mut found,
+                )
+            };
+            if rc != 0 {
+                return Err(rc);
+            }
+            // SAFETY: a found entry's pw_name is a string inside buf.
+            Ok((!found.is_null() && !entry.pw_name.is_null())
+                .then(|| unsafe { os_string(entry.pw_name) }))
+        })
+    }
+
+    fn group(&self, gid: u32) -> Option<GroupEntry> {
+        with_buf(|buf| {
+            // SAFETY: group is plain data, so all zeroes is a valid value.
+            let mut entry: libc::group = unsafe { std::mem::zeroed() };
+            let mut found: *mut libc::group = std::ptr::null_mut();
+            // SAFETY: getgrgid_r writes at most buf.len() bytes into buf
+            // and points entry's fields into it.
+            let rc = unsafe {
+                libc::getgrgid_r(
+                    gid,
+                    &mut entry,
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                    &mut found,
+                )
+            };
+            if rc != 0 {
+                return Err(rc);
+            }
+            if found.is_null() || entry.gr_name.is_null() || entry.gr_mem.is_null() {
+                return Ok(None);
+            }
+            let mut members = Vec::new();
+            // SAFETY: gr_mem is a NULL-terminated array of strings in buf.
+            unsafe {
+                let mut at = entry.gr_mem;
+                while !(*at).is_null() {
+                    members.push(os_string(*at));
+                    at = at.add(1);
+                }
+            }
+            // SAFETY: gr_name is a string inside buf.
+            let name = unsafe { os_string(entry.gr_name) };
+            Ok(Some(GroupEntry { name, members }))
+        })
+    }
+
+    fn primary_members(&self, gid: u32) -> Option<Vec<u32>> {
+        static WALK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _walk = WALK.lock().ok()?;
+        let mut uids = Vec::new();
+        // SAFETY: the enumeration state is the C library's own, and WALK
+        // keeps this the only walk over it; each entry is read before
+        // the next call replaces it.
+        unsafe {
+            libc::setpwent();
+            loop {
+                let entry = libc::getpwent();
+                if entry.is_null() {
+                    break;
+                }
+                if (*entry).pw_gid == gid {
+                    uids.push((*entry).pw_uid);
+                }
+            }
+            libc::endpwent();
+        }
+        Some(uids)
+    }
+}
+
+/// Whether group `gid` holds no one but user `uid`: it bears the user's
+/// name, lists no other member, and is no other account's primary group.
+fn group_is_private(accounts: &dyn Accounts, uid: u32, gid: u32) -> bool {
+    let (Some(user), Some(group), Some(primary)) = (
+        accounts.user_name(uid),
+        accounts.group(gid),
+        accounts.primary_members(gid),
+    ) else {
+        return false;
+    };
+    group.name == user
+        && group.members.iter().all(|member| *member == user)
+        && primary.iter().all(|other| *other == uid)
+}
+
+/// Who [`person_keeps`] judges a file for: this process's user,
+/// primary group and supplementary groups (`None` when they could not
+/// be read), and whether the primary group is the user's alone, asked
+/// only when a file is group-writable.
+struct Person<'a> {
+    uid: u32,
+    gid: u32,
+    groups: Option<Vec<u32>>,
+    accounts: &'a dyn Accounts,
+    private_group: std::cell::OnceCell<bool>,
+}
+
+impl<'a> Person<'a> {
+    fn new(accounts: &'a dyn Accounts) -> Self {
+        // SAFETY: getuid and getgid take no arguments and only read the
+        // process identity.
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        Person {
+            uid,
+            gid,
+            groups: supplementary_groups(),
+            accounts,
+            private_group: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// Whether the person writes what group `gid` may write. Groups that
+    /// could not be read count as every group.
+    fn in_group(&self, gid: u32) -> bool {
+        gid == self.gid
+            || self
+                .groups
+                .as_ref()
+                .is_none_or(|groups| groups.contains(&gid))
+    }
+
+    fn private_group(&self) -> bool {
+        *self
+            .private_group
+            .get_or_init(|| group_is_private(self.accounts, self.uid, self.gid))
+    }
+}
+
+/// This process's supplementary groups.
+fn supplementary_groups() -> Option<Vec<u32>> {
+    // SAFETY: a size of zero asks only for the count and writes nothing.
+    let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+    let mut groups = vec![0; usize::try_from(count).ok()?];
+    // SAFETY: getgroups writes at most `count` ids into groups.
+    let got = unsafe { libc::getgroups(count, groups.as_mut_ptr()) };
+    groups.truncate(usize::try_from(got).ok()?);
+    Some(groups)
+}
+
+/// A file's owner, group and mode.
+#[derive(Clone, Copy)]
+struct Owner {
+    uid: u32,
+    gid: u32,
+    mode: u32,
+}
+
+impl From<&std::fs::Metadata> for Owner {
+    fn from(meta: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+        Owner {
+            uid: meta.uid(),
+            gid: meta.gid(),
+            mode: meta.mode(),
+        }
+    }
+}
+
+/// The owner of `/` and of each directory below it down to `file`, and
+/// of `file`, each read from a descriptor opened beneath the one before
+/// without following a link, so a directory swapped for a link or for
+/// another directory after `file` was resolved is never walked through.
+/// `None` unless every component above `file` is a directory and `file`
+/// a regular file that, when `expect` is given, is that (device, inode).
+#[cfg(target_os = "linux")]
+fn pinned_walk(file: &Path, expect: Option<(u64, u64)>) -> Option<Vec<Owner>> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::unix::ffi::OsStrExt as _;
     use std::os::unix::fs::MetadataExt as _;
-    // SAFETY: getuid and getgid take no arguments and only read the
-    // process identity.
-    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
-    std::fs::metadata(path).is_ok_and(|meta| {
-        let mode = meta.mode();
-        (meta.uid() == 0 || meta.uid() == uid)
-            && mode & 0o002 == 0
-            && (mode & 0o020 == 0 || meta.gid() == gid)
-    })
+    let open = |dir: libc::c_int, name: &std::ffi::CStr| {
+        // SAFETY: name is NUL-terminated, and openat only reads it.
+        let fd = unsafe {
+            libc::openat(
+                dir,
+                name.as_ptr(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        // SAFETY: a descriptor openat returned is open and owned here.
+        (fd >= 0).then(|| std::fs::File::from(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) }))
+    };
+    let mut parts = file.components();
+    if parts.next() != Some(std::path::Component::RootDir) {
+        return None;
+    }
+    let mut at = open(libc::AT_FDCWD, c"/")?;
+    let mut meta = at.metadata().ok()?;
+    let mut owners = vec![Owner::from(&meta)];
+    for part in parts {
+        let std::path::Component::Normal(name) = part else {
+            return None;
+        };
+        if !meta.is_dir() {
+            return None;
+        }
+        at = open(
+            at.as_raw_fd(),
+            &std::ffi::CString::new(name.as_bytes()).ok()?,
+        )?;
+        meta = at.metadata().ok()?;
+        owners.push(Owner::from(&meta));
+    }
+    (meta.is_file() && expect.is_none_or(|id| id == (meta.dev(), meta.ino()))).then_some(owners)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pinned_walk(_file: &Path, _expect: Option<(u64, u64)>) -> Option<Vec<Owner>> {
+    None
+}
+
+/// Whether a Nix store and an entry in it are as Nix leaves them, so
+/// that only Nix can change what the entry holds. The store is root's,
+/// the person cannot write it, and it is sticky if its group or anyone
+/// may write it; the entry is then root's, as the daemon builds it. On
+/// a single-user install the store is the person's and no one else may
+/// write it, and the entry is the person's or root's.
+fn store_keeps(store: Owner, entry: Owner, person: &Person) -> bool {
+    let group = store.mode & 0o020 != 0;
+    let anyone = store.mode & 0o002 != 0;
+    if store.uid == 0 {
+        let person_writes = anyone
+            || (group && person.in_group(store.gid))
+            || (person.uid == 0 && store.mode & 0o200 != 0);
+        !person_writes && (!group || store.mode & 0o1000 != 0) && entry.uid == 0
+    } else {
+        store.uid == person.uid && !group && !anyone && (entry.uid == 0 || entry.uid == person.uid)
+    }
+}
+
+/// Whether root or `person` owns a file, and no one else can write it
+/// but `person`'s primary group when that group is theirs alone.
+fn person_keeps(file: Owner, person: &Person) -> bool {
+    (file.uid == 0 || file.uid == person.uid)
+        && file.mode & 0o002 == 0
+        && (file.mode & 0o020 == 0 || (file.gid == person.gid && person.private_group()))
 }
 
 /// The runner a program file is, when the file is an installed copy for
@@ -529,21 +805,69 @@ fn person_keeps(path: &Path) -> bool {
 /// name is the runner, in a temp directory, a project tree or a `.local`
 /// of its own making, is not: the name alone is what a tool call can
 /// choose. Nor is a file that someone other than the person could have
-/// written, or swapped through a directory between it and its root.
-fn runner_of_file(path: &Path, home: Option<&Path>) -> Option<&'static str> {
-    let file = std::fs::canonicalize(path).ok()?;
-    if crate::bookkeep::path_is_temp(Some(&file)) {
+/// written, or swapped through a directory between it and its root, or
+/// an entry of a Nix store `store` that Nix does not keep
+/// ([`store_keeps`]). The directories and the file are judged as they
+/// were opened ([`pinned_walk`]), and the file must be `expect` when
+/// that (device, inode) is given.
+fn runner_of_file(
+    path: &Path,
+    home: Option<&Path>,
+    store: &Path,
+    person: &Person,
+    expect: Option<(u64, u64)>,
+) -> Option<&'static str> {
+    runner_at(
+        &std::fs::canonicalize(path).ok()?,
+        home,
+        store,
+        person,
+        expect,
+    )
+}
+
+/// [`runner_of_file`] for `file`, a path already resolved.
+fn runner_at(
+    file: &Path,
+    home: Option<&Path>,
+    store: &Path,
+    person: &Person,
+    expect: Option<(u64, u64)>,
+) -> Option<&'static str> {
+    if crate::bookkeep::path_is_temp(Some(file)) {
         return None;
     }
     let roots: Vec<PathBuf> = install_roots(home)
         .iter()
         .filter_map(|root| std::fs::canonicalize(root).ok())
         .collect();
-    let (runner, root) = runner_below(&file, &roots)?;
-    file.ancestors()
-        .take_while(|dir| dir.starts_with(&root))
-        .all(person_keeps)
-        .then_some(runner)
+    let store = std::fs::canonicalize(store).unwrap_or_else(|_| store.to_path_buf());
+    let (runner, root) = runner_below(file, &roots, &store)?;
+    let owners = pinned_walk(file, expect)?;
+    let at = root.components().count().checked_sub(1)?;
+    let in_store = root.parent() == Some(store.as_path());
+    walk_kept(&owners, at, in_store, person).then_some(runner)
+}
+
+/// Whether the owners [`pinned_walk`] read leave a file to the person,
+/// its install root being at `at`. The directory holding the root, the
+/// root, and all below it are kept by the person ([`person_keeps`]),
+/// since whoever may write the root's directory may rename the root.
+/// For an entry of a Nix store, the store and the entry are as Nix keeps
+/// them ([`store_keeps`]) instead.
+fn walk_kept(owners: &[Owner], at: usize, in_store: bool, person: &Person) -> bool {
+    let (Some(&above), Some(&root)) = (
+        at.checked_sub(1).and_then(|above| owners.get(above)),
+        owners.get(at),
+    ) else {
+        return false;
+    };
+    let top = if in_store {
+        store_keeps(above, root, person)
+    } else {
+        person_keeps(above, person)
+    };
+    top && owners[at..].iter().all(|dir| person_keeps(*dir, person))
 }
 
 /// The runner `pid` is, from the file the kernel runs it from, never
@@ -552,9 +876,15 @@ fn runner_of_file(path: &Path, home: Option<&Path>) -> Option<&'static str> {
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn exe_runner(pid: u32) -> Option<&'static str> {
+    use std::os::unix::fs::MetadataExt as _;
     let home = own_home();
+    let person = Person::new(&SystemAccounts);
     let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
-    if let Some(r) = runner_of_file(&exe, home.as_deref()) {
+    let running = std::fs::metadata(format!("/proc/{pid}/exe"))
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()));
+    let store = Path::new(NIX_STORE);
+    if let Some(r) = runner_of_file(&exe, home.as_deref(), store, &person, running) {
         return Some(r);
     }
     let base = exe.file_name()?.to_str()?;
@@ -569,7 +899,7 @@ pub fn exe_runner(pid: u32) -> Option<&'static str> {
         .find(|a| !a.is_empty() && !a.starts_with('-'))?;
     let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
     let script = std::fs::canonicalize(cwd.join(script.as_ref())).ok()?;
-    runner_of_file(&script, home.as_deref())
+    runner_of_file(&script, home.as_deref(), store, &person, None)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1065,7 +1395,8 @@ mod tests {
                 None,
             ),
         ] {
-            let got = runner_below(Path::new(path), &roots).map(|(runner, _)| runner);
+            let got = runner_below(Path::new(path), &roots, Path::new(NIX_STORE))
+                .map(|(runner, _)| runner);
             assert_eq!(got, want, "{path}");
         }
     }
@@ -1083,6 +1414,8 @@ mod tests {
             .tempdir_in(own_home().expect("this user's passwd entry names a home"))
             .unwrap();
         let home = base.path().join("u");
+        let person = Person::new(&SystemAccounts);
+        let store = PathBuf::from(NIX_STORE);
         let program = |dir: &Path, name: &str| {
             std::fs::create_dir_all(dir).unwrap();
             let path = dir.join(name);
@@ -1092,24 +1425,312 @@ mod tests {
         };
         let bin = home.join(".local/bin");
         let claude = program(&bin, "claude");
-        assert_eq!(runner_of_file(&claude, Some(&home)), Some("claude"));
+        assert_eq!(
+            runner_of_file(&claude, Some(&home), &store, &person, None),
+            Some("claude")
+        );
 
         let away = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(program(away.path(), "codex"), bin.join("codex")).unwrap();
-        assert_eq!(runner_of_file(&bin.join("codex"), Some(&home)), None);
+        assert_eq!(
+            runner_of_file(&bin.join("codex"), Some(&home), &store, &person, None),
+            None
+        );
 
         program(&base.path().join("other/.local/bin"), "claude");
         let climbed = home.join("../other/.local/bin/claude");
-        assert_eq!(runner_of_file(&climbed, Some(&home)), None);
+        assert_eq!(
+            runner_of_file(&climbed, Some(&home), &store, &person, None),
+            None
+        );
 
         std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o757)).unwrap();
-        assert_eq!(runner_of_file(&claude, Some(&home)), None);
+        assert_eq!(
+            runner_of_file(&claude, Some(&home), &store, &person, None),
+            None
+        );
 
         let open = bin.join("open");
         let grok = program(&open, "grok");
-        assert_eq!(runner_of_file(&grok, Some(&home)), Some("grok"));
+        assert_eq!(
+            runner_of_file(&grok, Some(&home), &store, &person, None),
+            Some("grok")
+        );
         std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
-        assert_eq!(runner_of_file(&grok, Some(&home)), None);
+        assert_eq!(
+            runner_of_file(&grok, Some(&home), &store, &person, None),
+            None
+        );
+    }
+
+    /// Whoever may write the directory an install root sits in may swap
+    /// the root, so that directory is judged as the root is: each root
+    /// under the person's home is refused once its own directory is
+    /// writable by anyone or by a group the person shares.
+    #[test]
+    fn a_root_in_a_directory_others_may_write_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let base = tempfile::Builder::new()
+            .prefix(".ljos-above-")
+            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .unwrap();
+        let home = base.path().join("u");
+        let store = PathBuf::from(NIX_STORE);
+        let person = Person::new(&SystemAccounts);
+        let staff = FakeAccounts {
+            user: Some("u"),
+            group: "staff",
+            members: &["u", "v"],
+            primary: vec![person.uid],
+        };
+        let sharing = Person::new(&staff);
+        let mut files: Vec<PathBuf> = vec![
+            home.join(".local/bin/claude"),
+            home.join(".cargo/bin/codex"),
+            home.join(".npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js"),
+        ];
+        files.extend(
+            HOOK_RUNNERS
+                .iter()
+                .map(|(name, _)| home.join(".local/share").join(name).join(name)),
+        );
+        for file in &files {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "").unwrap();
+        }
+        let set = |dir: &Path, mode| {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        for root in install_roots(Some(&home))
+            .iter()
+            .filter(|r| r.starts_with(&home))
+        {
+            let file = files.iter().find(|f| f.starts_with(root)).unwrap();
+            let above = root.parent().unwrap();
+            let runner = |who| runner_of_file(file, Some(&home), &store, who, None);
+            assert!(runner(&person).is_some(), "{}", root.display());
+            set(above, 0o757);
+            assert_eq!(runner(&person), None, "{}", root.display());
+            set(above, 0o775);
+            assert_eq!(runner(&sharing), None, "{}", root.display());
+            set(above, 0o755);
+        }
+
+        let uid = person.uid;
+        let owner = |uid, mode| Owner {
+            uid,
+            gid: person.gid,
+            mode,
+        };
+        let walk = |above| [owner(0, 0o755), above, owner(uid, 0o755), owner(uid, 0o755)];
+        assert!(walk_kept(&walk(owner(uid, 0o755)), 2, false, &person));
+        assert!(walk_kept(&walk(owner(0, 0o755)), 2, false, &person));
+        assert!(!walk_kept(&walk(owner(uid + 1, 0o755)), 2, false, &person));
+        assert!(!walk_kept(&walk(owner(uid, 0o757)), 2, false, &person));
+        assert!(!walk_kept(&walk(owner(uid, 0o775)), 2, false, &sharing));
+    }
+
+    /// The file judged is the one opened. A directory swapped after the
+    /// path resolved, for a link or for another directory holding a file
+    /// of the same name, is not walked through, and a file that is not
+    /// the one the process runs is not its runner.
+    #[test]
+    fn a_parent_swapped_after_the_path_resolved_is_refused() {
+        use std::os::unix::fs::MetadataExt as _;
+        let base = tempfile::Builder::new()
+            .prefix(".ljos-swap-")
+            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .unwrap();
+        let home = std::fs::canonicalize(base.path()).unwrap().join("u");
+        let person = Person::new(&SystemAccounts);
+        let store = PathBuf::from(NIX_STORE);
+        let versions = home.join(".local/share/claude/versions");
+        let other = home.join("other");
+        for dir in [&versions, &other] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("2.1.3"), "").unwrap();
+        }
+        let file = versions.join("2.1.3");
+        let meta = std::fs::metadata(&file).unwrap();
+        let running = Some((meta.dev(), meta.ino()));
+        let runner = |expect| runner_at(&file, Some(&home), &store, &person, expect);
+        assert_eq!(runner(running), Some("claude"));
+
+        std::fs::rename(&versions, home.join("held")).unwrap();
+        std::os::unix::fs::symlink(&other, &versions).unwrap();
+        assert_eq!(runner(None), None);
+        assert_eq!(runner(running), None);
+
+        std::fs::remove_file(&versions).unwrap();
+        std::fs::rename(&other, &versions).unwrap();
+        assert_eq!(runner(running), None);
+        assert_eq!(runner(None), Some("claude"));
+    }
+
+    /// A Nix store entry is a runner only while Nix alone keeps it. A
+    /// store the person owns counts as a single-user install only while
+    /// no one else may write it; a root's store must be closed to the
+    /// person, sticky when its group may write it, and hold root's
+    /// entries.
+    #[test]
+    fn a_nix_entry_is_a_runner_only_in_a_store_nix_keeps() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let base = tempfile::Builder::new()
+            .prefix(".ljos-store-")
+            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .unwrap();
+        let store = base.path().join("store");
+        let bin = store.join("0c9yapqd0b8y4mj5xj7mrpmhy3l5ykh8-claude-code-2.0.1/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let claude = bin.join("claude");
+        std::fs::write(&claude, "").unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let person = Person::new(&SystemAccounts);
+        let set = |mode| {
+            std::fs::set_permissions(&store, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let runner = || runner_of_file(&claude, None, &store, &person, None);
+
+        set(0o755);
+        assert_eq!(runner(), Some("claude"));
+        for mode in [0o775, 0o757, 0o777, 0o1775, 0o1777] {
+            set(mode);
+            assert_eq!(runner(), None, "{mode:o}");
+        }
+        set(0o755);
+
+        let uid = person.uid;
+        let nixbld = person.gid + 1;
+        let owner = |uid, gid, mode| Owner { uid, gid, mode };
+        let outsider = Person {
+            groups: Some(vec![]),
+            ..Person::new(&SystemAccounts)
+        };
+        let builder = Person {
+            groups: Some(vec![nixbld]),
+            ..Person::new(&SystemAccounts)
+        };
+        let unread = Person {
+            groups: None,
+            ..Person::new(&SystemAccounts)
+        };
+        let root_entry = owner(0, 0, 0o555);
+        let own_entry = owner(uid, uid, 0o555);
+        for (store, entry, who, want) in [
+            (owner(0, nixbld, 0o1775), root_entry, &outsider, true),
+            (owner(0, 0, 0o755), root_entry, &outsider, true),
+            (owner(0, nixbld, 0o1775), own_entry, &outsider, false),
+            (owner(0, nixbld, 0o775), root_entry, &outsider, false),
+            (owner(0, nixbld, 0o1775), root_entry, &builder, false),
+            (owner(0, nixbld, 0o1775), root_entry, &unread, false),
+            (owner(0, 0, 0o1777), root_entry, &outsider, false),
+            (owner(uid, uid, 0o755), own_entry, &outsider, true),
+            (owner(uid, uid, 0o755), root_entry, &outsider, true),
+            (owner(uid, uid, 0o775), own_entry, &outsider, false),
+            (owner(uid, uid, 0o1777), own_entry, &outsider, false),
+            (
+                owner(uid, uid, 0o755),
+                owner(uid + 1, 0, 0o555),
+                &outsider,
+                false,
+            ),
+            (owner(uid + 1, 0, 0o755), own_entry, &outsider, false),
+        ] {
+            assert_eq!(
+                store_keeps(store, entry, who),
+                want,
+                "{}:{} {:o}",
+                store.uid,
+                store.gid,
+                store.mode
+            );
+        }
+    }
+
+    /// One user `u`, the name and members of whatever group is asked
+    /// for, and the uids whose primary group it is.
+    struct FakeAccounts {
+        user: Option<&'static str>,
+        group: &'static str,
+        members: &'static [&'static str],
+        primary: Vec<u32>,
+    }
+
+    impl Accounts for FakeAccounts {
+        fn user_name(&self, _uid: u32) -> Option<std::ffi::OsString> {
+            self.user.map(Into::into)
+        }
+
+        fn group(&self, _gid: u32) -> Option<GroupEntry> {
+            Some(GroupEntry {
+                name: self.group.into(),
+                members: self.members.iter().map(Into::into).collect(),
+            })
+        }
+
+        fn primary_members(&self, _gid: u32) -> Option<Vec<u32>> {
+            Some(self.primary.clone())
+        }
+    }
+
+    /// A runner file the person's primary group may write is theirs only
+    /// when that group is: named for them, listing no one else, and no
+    /// other account's primary group. An account lookup that fails is
+    /// not such a group.
+    #[test]
+    fn a_group_write_counts_only_from_a_group_the_person_has_alone() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // SAFETY: getuid takes no arguments and only reads the process
+        // identity.
+        let uid = unsafe { libc::getuid() };
+        let alone = |members, primary| FakeAccounts {
+            user: Some("u"),
+            group: "u",
+            members,
+            primary,
+        };
+        let shared = [
+            FakeAccounts {
+                group: "staff",
+                ..alone(&[], vec![uid])
+            },
+            alone(&["u", "v"], vec![uid]),
+            alone(&["v"], vec![uid]),
+            alone(&[], vec![uid, uid + 1]),
+            FakeAccounts {
+                user: None,
+                ..alone(&[], vec![uid])
+            },
+        ];
+
+        let base = tempfile::Builder::new()
+            .prefix(".ljos-group-")
+            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .unwrap();
+        let home = base.path().join("u");
+        let bin = home.join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let claude = bin.join("claude");
+        std::fs::write(&claude, "").unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let store = PathBuf::from(NIX_STORE);
+
+        for accounts in [alone(&[], vec![uid]), alone(&["u"], vec![uid, uid])] {
+            assert!(group_is_private(&accounts, uid, 0));
+            let person = Person::new(&accounts);
+            assert_eq!(
+                runner_of_file(&claude, Some(&home), &store, &person, None),
+                Some("claude")
+            );
+        }
+        for accounts in &shared {
+            assert!(!group_is_private(accounts, uid, 0));
+            let person = Person::new(accounts);
+            assert_eq!(
+                runner_of_file(&claude, Some(&home), &store, &person, None),
+                None
+            );
+        }
     }
 
     /// A process younger than a recorded tool call, in that call's cgroup
