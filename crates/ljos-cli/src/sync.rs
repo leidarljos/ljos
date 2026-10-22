@@ -1582,7 +1582,7 @@ fn import_jobs(root: &Path, scope: &Scope, me: &str) -> Result<(Vec<ImportJob>, 
             let Some(bytes) = read_beneath(root, &rel)? else {
                 continue;
             };
-            match open_log(&bytes, &host, &scope_name, &rel)? {
+            match open_log(root, &bytes, &host, &scope_name, &rel)? {
                 Opened::Atoms(plain) => jobs.push(ImportJob {
                     host,
                     scope_name,
@@ -2082,24 +2082,90 @@ enum Opened {
 /// would be resealed to the cloud recipients. A header naming another host
 /// or scope is refused. A log with no header names nobody: one peer can
 /// commit it under every host's name, and an older blob can replace a
-/// host's headed log and retire what that log added. It is left unread,
-/// whichever key opens it.
-fn open_log(bytes: &[u8], host: &str, scope_name: &str, label: &str) -> Result<Opened> {
+/// host's headed log and retire what that log added. It is read only when
+/// [`adopt_legacy`] pinned these bytes for this host and scope and no log
+/// of theirs has opened with a header since.
+fn open_log(
+    root: &Path,
+    bytes: &[u8],
+    host: &str,
+    scope_name: &str,
+    label: &str,
+) -> Result<Opened> {
     let identities = identities_for_open(scope_name);
     let Some(plain) = open_sealed_bytes(bytes, &identities)? else {
         return Ok(Opened::Miss);
     };
     if let Some((named_host, named_scope, body)) = split_header(&plain) {
         if named_host == host && named_scope == scope_name {
+            mark_headed(root, scope_name, host)?;
             return Ok(Opened::Atoms(body.to_string()));
         }
         return Ok(Opened::Refused(format!(
             "sync: {label} holds {named_host}'s {named_scope} log, not {host}'s {scope_name} log; it was left unread\n"
         )));
     }
+    if legacy_pinned(root, scope_name, host, bytes)? {
+        return Ok(Opened::Atoms(plain));
+    }
+    let hint = if was_headed(root, scope_name, host)? {
+        format!("{host} has written headed logs, so none without one is read again")
+    } else {
+        format!("`ljos sync --adopt-legacy {host}` reads this blob if it is {host}'s")
+    };
     Ok(Opened::Refused(format!(
-        "sync: {label} has no scope header, so nothing binds it to {host}'s {scope_name} log; it was left unread\n"
+        "sync: {label} has no scope header, so nothing binds it to {host}'s {scope_name} log; it was left unread ({hint})\n"
     )))
+}
+
+/// Where this tracker's state notes `host`'s logs of `scope_name`: `.taken`,
+/// and the `.headed` and `.legacy` files below.
+fn host_state_rel(root: &Path, scope_name: &str, host: &str, ext: &str) -> String {
+    format!("{}/{scope_name}/{host}.{ext}", tracker_state_rel(root))
+}
+
+/// Whether a log of `host`'s in `scope_name` has opened here with its header.
+/// Kept apart from `.taken`, which adopt removes.
+fn was_headed(root: &Path, scope_name: &str, host: &str) -> Result<bool> {
+    let rel = host_state_rel(root, scope_name, host, "headed");
+    Ok(read_beneath(&state_base(), &rel)?.is_some())
+}
+
+/// Note that `host` writes headed logs of `scope_name`, and drop any
+/// pre-header blob [`adopt_legacy`] pinned: putting that blob back must not
+/// retire what the headed log added.
+fn mark_headed(root: &Path, scope_name: &str, host: &str) -> Result<()> {
+    if was_headed(root, scope_name, host)? {
+        return Ok(());
+    }
+    let base = state_base();
+    write_beneath(
+        &base,
+        &host_state_rel(root, scope_name, host, "headed"),
+        b"",
+    )?;
+    remove_beneath(&base, &host_state_rel(root, scope_name, host, "legacy"))
+}
+
+fn blob_digest(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    format!("sha256:{}", hex::encode(sha2::Sha256::digest(bytes)))
+}
+
+/// Whether `bytes` is a pre-header blob this reader pinned for `host`'s
+/// `scope_name` log, and `host` has not written a headed one since.
+fn legacy_pinned(root: &Path, scope_name: &str, host: &str, bytes: &[u8]) -> Result<bool> {
+    if was_headed(root, scope_name, host)? {
+        return Ok(false);
+    }
+    let rel = host_state_rel(root, scope_name, host, "legacy");
+    let Some(pinned) = read_beneath(&state_base(), &rel)? else {
+        return Ok(false);
+    };
+    let digest = blob_digest(bytes);
+    Ok(String::from_utf8_lossy(&pinned)
+        .lines()
+        .any(|line| line == digest))
 }
 
 fn sealed_bytes(root: &Path, rel: &str) -> Result<Option<Vec<u8>>> {
@@ -2547,7 +2613,7 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
     let mut skipped_scopes = Vec::new();
     for log in &present {
         let result = sealed_bytes(root, &log.age).and_then(|bytes| match bytes {
-            Some(bytes) => open_log(&bytes, &gone, &log.scope_name, &log.age),
+            Some(bytes) => open_log(root, &bytes, &gone, &log.scope_name, &log.age),
             None => Ok(Opened::Miss),
         });
         match result {
@@ -3188,6 +3254,88 @@ pub fn adopt(target: &str, force: bool, dry_run: bool) -> Result<String> {
                 dry_run,
             },
         )?);
+    }
+    Ok(out)
+}
+
+/// Read `target`'s logs from before the scope header as `target`'s, in
+/// each configured tracker repository.
+///
+/// A log with no header names no host, so import leaves it unread. This
+/// pins the SHA-256 of each such blob filed under `target` now, per scope,
+/// in this machine's state. Import and `--adopt` then read exactly those
+/// bytes under that name: a copy under another host's name, or another
+/// blob under this one, is still refused. Once a log of `target`'s opens
+/// with its header, the pin is dropped and no blob without one is read
+/// again. Nothing in the tracker can make the pin; only this command can.
+///
+/// # Errors
+///
+/// A missing host name, this machine's own, a scope file that does not
+/// parse, a tracker that is not current, or a log that does not open.
+pub fn adopt_legacy(target: &str) -> Result<String> {
+    let legacy = require_host_name(target)?;
+    if legacy == host() {
+        bail!("sync: {legacy} is this machine; pass the host whose old log to read");
+    }
+    let mut out = String::new();
+    for root in sync_roots()? {
+        let Some(scope) = scope_of_repo(&root)? else {
+            out.push_str(&format!("sync: {} names no scope\n", root.display()));
+            continue;
+        };
+        let caught = catch_up(&root);
+        if catch_up_failed(&caught) {
+            bail!(
+                "sync: nothing of {legacy}'s was pinned in {}; the tracker is not current\n{caught}",
+                root.display()
+            );
+        }
+        out.push_str(&caught);
+        out.push_str(&adopt_legacy_in_repo(&root, &scope, &legacy)?);
+    }
+    Ok(out)
+}
+
+fn adopt_legacy_in_repo(root: &Path, scope: &Scope, host: &str) -> Result<String> {
+    let base = state_base();
+    let mut out = String::new();
+    for log in logs_of_host(scope, host) {
+        let Some(bytes) = read_beneath(root, &log.age)? else {
+            continue;
+        };
+        let said = |what: &str| format!("sync: {host}'s {} log {what}\n", log.scope_name);
+        let Some(plain) = open_sealed_bytes(&bytes, &identities_for_open(&log.scope_name))? else {
+            out.push_str(&said("is not sealed to this machine"));
+            continue;
+        };
+        if split_header(&plain).is_some() {
+            out.push_str(&said("has its header; import reads it as it is"));
+            continue;
+        }
+        if was_headed(root, &log.scope_name, host)? {
+            out.push_str(&said(
+                "has no header, and one of theirs had it here, so it stays unread",
+            ));
+            continue;
+        }
+        let rel = host_state_rel(root, &log.scope_name, host, "legacy");
+        let digest = blob_digest(&bytes);
+        let mut pinned = read_beneath(&base, &rel)?
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        if !pinned.lines().any(|line| line == digest) {
+            pinned.push_str(&digest);
+            pinned.push('\n');
+            write_beneath(&base, &rel, pinned.as_bytes())?;
+        }
+        out.push_str(&said(&format!(
+            "has no header; {} atoms in {digest} are pinned as {host}'s, and `ljos sync` takes them",
+            log_keys(&plain).len()
+        )));
+    }
+    if out.is_empty() {
+        out = format!("sync: {host} has no log in this tracker\n");
     }
     Ok(out)
 }
@@ -7169,12 +7317,14 @@ mod tests {
             .map(|entry| entry.file_name())
             .collect();
         assert_eq!(scopes, ["cloud"], "{scopes:?}");
-        let hosts: Vec<_> = std::fs::read_dir(taken_path(&root, "cloud", "peer").parent().unwrap())
-            .unwrap()
-            .flatten()
-            .map(|entry| entry.file_name())
-            .collect();
-        assert_eq!(hosts, ["peer.taken"], "{hosts:?}");
+        let mut hosts: Vec<_> =
+            std::fs::read_dir(taken_path(&root, "cloud", "peer").parent().unwrap())
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name())
+                .collect();
+        hosts.sort();
+        assert_eq!(hosts, ["peer.headed", "peer.taken"], "{hosts:?}");
     }
 
     /// Primary `box` plus an extra `cloud` log. Both are adopted in one
@@ -8399,7 +8549,7 @@ mod tests {
     impl Shared {
         fn new(dir: &Path) -> Self {
             let env = crate::test_env_lock();
-            for name in ["alice", "bob", "carol", "dave"] {
+            for name in ["alice", "bob", "carol", "dave", "erin", "frank"] {
                 assert_ne!(host(), name, "this machine would skip {name}'s logs");
             }
             let home = dir.join("home");
@@ -8659,6 +8809,64 @@ mod tests {
         assert!(!merged.contains("CANARY"), "{driven:?}: {merged}");
         let err = driven.unwrap_err();
         assert!(err.contains("not a regular file"), "{err}");
+    }
+
+    /// A gone box sealed its cloud log before the header, to this host's
+    /// machine key, a cloud recipient; this host holds no cloud.age. The
+    /// log stays unread until this host pins that blob as the box's. A copy
+    /// under another name, another blob under the box's name, and the
+    /// pinned blob once the box has written a headed log are all refused.
+    #[test]
+    fn a_legacy_log_is_read_only_as_the_blob_the_reader_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let fix = Shared::new(dir.path());
+        std::fs::remove_file(cloud_identity_path()).unwrap();
+        let machine = [fix.machine.as_str()];
+        let old = fix.sealed(None, &lesson_line("Erin's old note.", "cloud"), &machine);
+        fix.push(&[
+            ("erin+cloud.jsonl.age", &old),
+            ("frank+cloud.jsonl.age", &old),
+        ]);
+        let said = fix.import();
+        assert!(fix.held().is_empty(), "{said}");
+        assert!(said.contains("--adopt-legacy erin"), "{said}");
+
+        let pinned = adopt_legacy_in_repo(&fix.root, &fix.scope(), "erin").unwrap();
+        assert!(
+            pinned.contains("erin's cloud log has no header; 1 atoms"),
+            "{pinned}"
+        );
+        assert!(!pinned.contains("grokbot"), "{pinned}");
+        let said = fix.import();
+        assert_eq!(fix.held(), vec!["Erin's old note."], "{said}");
+        assert!(said.contains("erin: 1 cloud atoms taken"), "{said}");
+        assert!(
+            said.contains("frank+cloud.jsonl.age has no scope header"),
+            "{said}"
+        );
+
+        let planted = fix.sealed(None, &lesson_line("Planted as Erin's.", "cloud"), &machine);
+        fix.push(&[("erin+cloud.jsonl.age", &planted)]);
+        let said = fix.import();
+        assert_eq!(fix.held(), vec!["Erin's old note."], "{said}");
+        assert!(
+            said.contains("erin+cloud.jsonl.age has no scope header"),
+            "{said}"
+        );
+
+        let headed = fix.sealed(
+            Some(("erin", CLOUD_SCOPE)),
+            &lesson_line("Erin's old note.", "cloud"),
+            &machine,
+        );
+        fix.push(&[("erin+cloud.jsonl.age", &headed)]);
+        fix.import();
+        fix.push(&[("erin+cloud.jsonl.age", &old)]);
+        let said = fix.import();
+        assert_eq!(fix.held(), vec!["Erin's old note."], "{said}");
+        assert!(said.contains("none without one is read again"), "{said}");
+        let again = adopt_legacy_in_repo(&fix.root, &fix.scope(), "erin").unwrap();
+        assert!(again.contains("stays unread"), "{again}");
     }
 
     /// Headed logs still import through a symlinked `$HOME`, a checkout
