@@ -1,0 +1,1 @@
+Sending the note queue rewrote it with only the rows that parse, so a line cut short and a last line without its newline were deleted. Those bytes now move, unchanged, to a dated `note-queue.jsonl.<date>.damaged` file beside the queue before the rewrite, `ljos note` and `ljos finish` name that file, and a queue holding nothing readable is emptied into it.

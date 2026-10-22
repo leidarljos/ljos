@@ -4,8 +4,9 @@
 //! `ljos note` writes the logbook line first, then a `note` atom to the
 //! pack. When the pack is off, not answering, or answers 401, the fitted
 //! copy waits here, one JSON line per copy, and the next note that reaches
-//! the pack, `ljos finish`, `ljos doctor`, or the next session start sends
-//! it. A refusal is not queued: the pack would refuse it again. A line left
+//! the pack, `ljos finish`, or the next session start sends it. `ljos
+//! doctor` only counts it. A refusal is not queued: the pack would refuse
+//! it again. A line left
 //! from before that rule is cut to what the pack takes, or dropped, on the
 //! next send. The queue holds one entry per issue, text, workspace, kind
 //! and, for a lesson, the atoms it closes. packsetd answers an identical
@@ -70,6 +71,17 @@ pub struct Drained {
     pub left: usize,
     /// Why the first waiting note did not go, when one did not.
     pub waiting_on: Option<String>,
+    /// Queue bytes that were not a note, moved out before a rewrite.
+    pub set_aside: Vec<SetAside>,
+}
+
+/// Bytes of the queue a rewrite moved to a file beside it rather than
+/// drop: complete lines that did not parse and a last line without its
+/// newline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetAside {
+    pub path: PathBuf,
+    pub bytes: usize,
 }
 
 /// The state dir that holds the queue: `$XDG_STATE_HOME/ljos`, else
@@ -87,23 +99,102 @@ fn queue_file(dir: &Path) -> PathBuf {
     dir.join("note-queue.jsonl")
 }
 
+fn lock_file(dir: &Path) -> PathBuf {
+    dir.join("note-queue.lock")
+}
+
 fn lock(dir: &Path) -> crate::CommitLock {
     let _ = std::fs::create_dir_all(dir);
-    crate::CommitLock::acquire_private(&dir.join("note-queue.lock"))
+    crate::CommitLock::acquire_private(&lock_file(dir))
+}
+
+/// The queue lock in `dir` when another ljos holds it now, queueing or
+/// sending; tried without waiting for it.
+#[must_use]
+pub fn busy_in(dir: &Path) -> Option<PathBuf> {
+    let lock = lock_file(dir);
+    crate::CommitLock::is_held_private(&lock).then_some(lock)
 }
 
 fn read(dir: &Path) -> Vec<Queued> {
-    crate::complete_rows(&crate::read_state_file(&queue_file(dir)).unwrap_or_default())
+    read_split(dir).0
 }
 
-fn write(dir: &Path, notes: &[Queued]) -> Result<()> {
+/// The queue's notes, and its bytes that are not one: each complete line
+/// that does not parse, and a last line without its newline. Under the
+/// lock no writer is part way through that last line; every append holds
+/// it.
+fn read_split(dir: &Path) -> (Vec<Queued>, Vec<u8>) {
+    let bytes = crate::read_state_file(&queue_file(dir)).unwrap_or_default();
+    let mut notes = Vec::new();
+    let mut unread = Vec::new();
+    for line in bytes.split_inclusive(|&b| b == b'\n') {
+        match line.strip_suffix(b"\n").map(serde_json::from_slice) {
+            Some(Ok(note)) => notes.push(note),
+            _ if line == b"\n" => {}
+            _ => unread.extend_from_slice(line),
+        }
+    }
+    (notes, unread)
+}
+
+/// Where a rewrite on this day puts the queue bytes it could not read.
+fn damaged_file(dir: &Path) -> PathBuf {
+    dir.join(format!(
+        "note-queue.jsonl.{}.damaged",
+        chrono::Utc::now().format("%Y-%m-%d")
+    ))
+}
+
+/// The damaged files a rewrite left in `dir`, with their sizes, oldest
+/// day first. Listed without following a link and without opening one.
+#[must_use]
+pub fn set_aside_in(dir: &Path) -> Vec<(PathBuf, u64)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(PathBuf, u64)> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            let dated = name.strip_prefix("note-queue.jsonl.")?;
+            dated.strip_suffix(".damaged")?;
+            Some((entry.path(), entry.metadata().ok()?.len()))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// Add `unread` to the day's damaged file and put it on disk, before the
+/// rewrite that leaves those bytes out of the queue.
+fn set_aside(dir: &Path, unread: &[u8]) -> Result<Option<SetAside>> {
+    if unread.is_empty() {
+        return Ok(None);
+    }
+    let path = damaged_file(dir);
+    crate::append_locked_row(&path, unread, crate::Durability::Durable)
+        .and_then(|()| crate::sync_state_file(&path))
+        .with_context(|| format!("set aside unreadable queue bytes in {}", path.display()))?;
+    Ok(Some(SetAside {
+        path,
+        bytes: unread.len(),
+    }))
+}
+
+/// Rewrite the queue to `notes`. `unread`, what [`read_split`] could not
+/// read, is set aside first, so a rewrite drops no byte it could not
+/// parse.
+fn write(dir: &Path, notes: &[Queued], unread: &[u8]) -> Result<Option<SetAside>> {
+    let aside = set_aside(dir, unread)?;
     let path = queue_file(dir);
     if notes.is_empty() {
         if path.exists() {
             crate::rewrite_state_file(&path, b"")
                 .with_context(|| format!("empty {}", path.display()))?;
         }
-        return Ok(());
+        return Ok(aside);
     }
     let mut body = String::new();
     for note in notes {
@@ -111,7 +202,8 @@ fn write(dir: &Path, notes: &[Queued]) -> Result<()> {
         body.push('\n');
     }
     crate::rewrite_state_file(&path, body.as_bytes())
-        .with_context(|| format!("replace {}", path.display()))
+        .with_context(|| format!("replace {}", path.display()))?;
+    Ok(aside)
 }
 
 /// The notes waiting in `dir`, oldest first.
@@ -128,7 +220,29 @@ pub fn pending_in(dir: &Path) -> Vec<Queued> {
 /// The queue file cannot be rewritten.
 pub fn replace_in(dir: &Path, notes: Vec<Queued>) -> Result<()> {
     let _held = lock(dir);
-    write(dir, &notes)
+    let (_, unread) = read_split(dir);
+    write(dir, &notes, &unread).map(drop)
+}
+
+/// Fit the waiting memories in `dir` with `fit` and set aside the bytes
+/// that are not a memory, rewriting the queue only when either changes
+/// it. Reading and rewriting under one lock keeps a note queued between
+/// them.
+///
+/// # Errors
+///
+/// The queue file cannot be rewritten, or the bytes cannot be set aside.
+pub fn tidy_in(
+    dir: &Path,
+    fit: impl FnOnce(Vec<Queued>) -> Vec<Queued>,
+) -> Result<Option<SetAside>> {
+    let _held = lock(dir);
+    let (notes, unread) = read_split(dir);
+    let fitted = fit(notes.clone());
+    if fitted == notes && unread.is_empty() {
+        return Ok(None);
+    }
+    write(dir, &fitted, &unread)
 }
 
 /// Add `note` to the queue in `dir`. `false` when the same copy already
@@ -159,9 +273,9 @@ pub fn push_in(dir: &Path, note: Queued) -> Result<bool> {
 /// The queue file cannot be rewritten.
 pub fn drain_in(dir: &Path, mut send: impl FnMut(&Queued) -> Sent) -> Result<Drained> {
     let _held = lock(dir);
-    let notes = read(dir);
+    let (notes, unread) = read_split(dir);
     let mut done = Drained::default();
-    if notes.is_empty() {
+    if notes.is_empty() && unread.is_empty() {
         return Ok(done);
     }
     let mut rest = Vec::new();
@@ -177,7 +291,7 @@ pub fn drain_in(dir: &Path, mut send: impl FnMut(&Queued) -> Sent) -> Result<Dra
         }
     }
     done.left = rest.len();
-    write(dir, &rest)?;
+    done.set_aside.extend(write(dir, &rest, &unread)?);
     Ok(done)
 }
 
@@ -201,6 +315,13 @@ pub fn drained_lines(done: &Drained) -> String {
     for (issue, why) in &done.refused {
         out.push_str(&format!(
             "memory: the pack refused the queued note on {issue} ({why}); it stays on the logbook\n"
+        ));
+    }
+    for aside in &done.set_aside {
+        out.push_str(&format!(
+            "memory: moved {} byte(s) of the note queue that are not a note to {}; they were not sent\n",
+            aside.bytes,
+            aside.path.display()
         ));
     }
     if done.left > 0 {
@@ -360,6 +481,66 @@ mod tests {
         std::os::unix::fs::symlink(&outside, &path).unwrap();
         assert!(replace_in(&dir, vec![note("p-9", "forged")]).is_err());
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "kept\n");
+    }
+
+    /// A drain rewrites the queue with the notes left. A line that does
+    /// not parse and a last line without its newline, even one that
+    /// would, go to the day's damaged file byte for byte, not out with
+    /// the rewrite.
+    #[test]
+    fn a_drain_sets_aside_what_it_cannot_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = dir("aside");
+        let sent = format!("{}\n", serde_json::to_string(&note("p-1", "sent")).unwrap());
+        let waits = format!(
+            "{}\n",
+            serde_json::to_string(&note("p-2", "waits")).unwrap()
+        );
+        let cut: &[u8] = b"{\"issue\":\"p-3\",\"te\n";
+        let tail: &[u8] =
+            br#"{"issue":"p-4","text":"no newline","workspace":"ws","at":1,"kind":"note"}"#;
+        let mut bytes = sent.into_bytes();
+        bytes.extend_from_slice(cut);
+        bytes.extend_from_slice(waits.as_bytes());
+        bytes.extend_from_slice(tail);
+        std::fs::write(queue_file(&dir), &bytes).unwrap();
+        let done = drain_in(&dir, |n| match n.issue.as_str() {
+            "p-1" => Sent::Kept("id".into()),
+            _ => Sent::Wait("down".into()),
+        })
+        .unwrap();
+        assert_eq!(done.left, 1, "{done:?}");
+        assert_eq!(std::fs::read_to_string(queue_file(&dir)).unwrap(), waits);
+        let unread = [cut, tail].concat();
+        let [aside] = done.set_aside.as_slice() else {
+            panic!("{done:?}");
+        };
+        assert_eq!(aside.bytes, unread.len());
+        assert_eq!(std::fs::read(&aside.path).unwrap(), unread);
+        let name = aside.path.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.starts_with("note-queue.jsonl.") && name.ends_with(".damaged"),
+            "{name}"
+        );
+        let mode = std::fs::metadata(&aside.path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "damaged file mode {mode:o}");
+        let lines = drained_lines(&done);
+        assert!(lines.contains(&aside.path.display().to_string()), "{lines}");
+    }
+
+    /// A queue of nothing but bytes that are not a note is emptied into
+    /// the damaged file, and the next tidy finds nothing to move.
+    #[test]
+    fn a_tidy_sets_aside_a_queue_with_no_note_in_it() {
+        let dir = dir("tidy");
+        std::fs::write(queue_file(&dir), b"{\"issue\":\"p-1\",\"te").unwrap();
+        let aside = tidy_in(&dir, |notes| notes).unwrap().expect("set aside");
+        assert_eq!(
+            std::fs::read(&aside.path).unwrap(),
+            b"{\"issue\":\"p-1\",\"te"
+        );
+        assert_eq!(std::fs::read(queue_file(&dir)).unwrap(), b"");
+        assert_eq!(tidy_in(&dir, |notes| notes).unwrap(), None);
     }
 
     #[test]

@@ -1059,7 +1059,7 @@ enum Cmd {
         #[arg(long, value_delimiter = ',')]
         about: Vec<String>,
     },
-    /// Whether ljos is ready, and the rows that need action. Exit 1 when a required part does not answer.
+    /// Whether ljos is ready, and the rows that need action. Exit 1 when a required part does not answer or the note queue is damaged.
     Doctor {
         /// Print every row, the ones that answer included.
         #[arg(long, visible_alias = "verbose")]
@@ -1860,7 +1860,7 @@ fn run_command() -> Result<()> {
                     }
                     match mem.queued {
                         Some(true) => println!(
-                            "memory: queued the copy; the next note, finish or doctor that reaches the pack sends it"
+                            "memory: queued the copy; the next note or finish that reaches the pack, or a session start, sends it"
                         ),
                         Some(false) => println!("memory: the same note is already queued"),
                         None => {}
@@ -2659,6 +2659,20 @@ fn run_command() -> Result<()> {
             let on_tool = call.event == "PreToolUse" || call.event == "argv";
             if on_tool {
                 let _ = ljos_cli::take_guard_note();
+            }
+            // The tool shell does not exist yet. Record the session, cgroup
+            // and this hook's start time while the runner that spawned the
+            // guard is still the parent, so a later detach is still the call.
+            if call.event == "PreToolUse" {
+                match ljos_cli::proc_tree::hook_runner() {
+                    Ok((runner, _)) => {
+                        let _ = ljos_cli::proc_tree::note_tool_call(&runner);
+                    }
+                    Err(why) if why.contains("cannot be read") => {
+                        ljos_cli::proc_tree::seal_unreadable_tool_call();
+                    }
+                    Err(_) => {}
+                }
             }
             let resolved = ljos_cli::command_directory(input.trim());
             let cwd = match &resolved {
