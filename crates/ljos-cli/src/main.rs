@@ -2763,7 +2763,10 @@ fn run_command() -> Result<()> {
                     // repeat it and the correction hook does not file it
                     // again as a proposal.
                     let captured = if person {
-                        ljos_cli::capture::note_latest_prompt(&call.cue);
+                        ljos_cli::capture::note_latest_prompt_for(
+                            &call.cue,
+                            call.session.as_deref(),
+                        );
                         ljos_cli::hook_timed("capture", || ljos_cli::capture::capture_stated(&call))
                     } else {
                         None

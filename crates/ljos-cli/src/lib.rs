@@ -18619,6 +18619,10 @@ pub const SEAT_PATHS: &[&str] = &[
     "/.omp/agent/extensions/ljos.ts",
     "/ljos/approvals",
     "/ljos/approvals/",
+    // The prompt the hook kept, and the bind the gate checks. A plain
+    // write would make a sentence count as the person's words.
+    "/ljos/latest-prompt",
+    "/ljos/latest-prompt.bind",
 ];
 
 /// Whether a path names one of [`SEAT_PATHS`]; a backup beside a binary
@@ -40900,6 +40904,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             seat_guard("cp ~/.local/bin/ljos /tmp/copy").is_some(),
             "a writer naming it is refused"
         );
+        assert!(seat_guard("printf x > /run/user/1000/ljos/latest-prompt").is_some());
+        assert!(seat_guard("printf x > /run/user/1000/ljos/latest-prompt.bind").is_some());
         assert!(seat_guard("ljos onboard --harness grok").is_none());
         assert!(seat_guard("cargo build --release").is_none());
         assert!(!is_seat_path("~/.local/bin/ljos.bak"));
