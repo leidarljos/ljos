@@ -5,6 +5,7 @@
 //! option's value and the body of a comment are never what is refused.
 
 use std::cell::OnceCell;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -42,6 +43,7 @@ pub(crate) fn cursor_push(line: &str, cwd: Option<&Path>) -> Option<String> {
     let mut here = cwd
         .map(Path::to_path_buf)
         .or_else(|| std::env::current_dir().ok());
+    let mut line_aliases: Vec<(String, String)> = Vec::new();
     for seg in crate::nested_lines(line, 0)
         .iter()
         .flat_map(|l| crate::raw_segments(l))
@@ -51,7 +53,11 @@ pub(crate) fn cursor_push(line: &str, cwd: Option<&Path>) -> Option<String> {
             Some("cd" | "pushd") => here = moved(here, &words[1..]),
             Some("popd") => here = None,
             Some("git") => {
-                if let Some(why) = git_push(&words[1..], here.clone()).and_then(|p| p.cursor_ref())
+                if let Some(alias) = git_alias_write(&words[1..]) {
+                    line_aliases.push(alias);
+                }
+                if let Some(why) =
+                    git_push(&words[1..], here.clone(), &line_aliases).and_then(|p| p.cursor_ref())
                 {
                     return Some(why);
                 }
@@ -136,32 +142,33 @@ fn moved(here: Option<PathBuf>, args: &[String]) -> Option<PathBuf> {
 
 /// The push `args` (the words after `git`) make, or `None` when they run
 /// another subcommand. An alias set with `-c alias.NAME=push` is a push.
-fn git_push(args: &[String], dir: Option<PathBuf>) -> Option<Push> {
+fn git_push(
+    args: &[String],
+    dir: Option<PathBuf>,
+    line_aliases: &[(String, String)],
+) -> Option<Push> {
     let mut at = Checkout {
         dir,
         ..Checkout::default()
     };
-    let mut aliases: Vec<(&str, &str)> = Vec::new();
     let mut i = 0;
     while let Some(word) = args.get(i).map(String::as_str) {
         if GIT_VALUED.contains(&word) {
             let value = args.get(i + 1)?;
             match word {
                 "-c" => {
-                    if let Some(alias) = value
-                        .strip_prefix("alias.")
-                        .and_then(|kv| kv.split_once('='))
-                    {
-                        aliases.push(alias);
-                    }
                     at.config.extend(["-c".to_string(), value.clone()]);
                 }
+                "--config-env" => at.config.extend([word.to_string(), value.clone()]),
                 "-C" | "--git-dir" | "--work-tree" => {
                     at.place.extend([word.to_string(), value.clone()]);
                 }
                 _ => {}
             }
             i += 2;
+        } else if word.starts_with("--config-env=") {
+            at.config.push(word.to_string());
+            i += 1;
         } else if word.starts_with("--git-dir=") || word.starts_with("--work-tree=") {
             at.place.push(word.to_string());
             i += 1;
@@ -172,18 +179,44 @@ fn git_push(args: &[String], dir: Option<PathBuf>) -> Option<Push> {
         }
     }
     let sub = args.get(i)?;
-    let mut words: Vec<String> = match aliases.iter().rev().find(|(name, _)| *name == sub.as_str())
-    {
-        Some((_, value)) if !value.starts_with('!') => {
-            value.split_whitespace().map(str::to_string).collect()
-        }
-        _ => vec![sub.clone()],
-    };
+    let mut words: Vec<String> = vec![sub.clone()];
     words.extend(args[i + 1..].iter().cloned());
+    words = at.expand_aliases(words, line_aliases);
     if words.first().map(String::as_str) != Some("push") {
         return None;
     }
     Some(Push::read(&words[1..], at))
+}
+
+/// A `git config alias.NAME VALUE` assignment from one command line segment.
+fn git_alias_write(args: &[String]) -> Option<(String, String)> {
+    let mut i = 0;
+    while let Some(word) = args.get(i).map(String::as_str) {
+        if GIT_VALUED.contains(&word) {
+            i += 2;
+        } else if word.starts_with('-') {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    if args.get(i).map(String::as_str) != Some("config") {
+        return None;
+    }
+    let mut key_at = i + 1;
+    while args
+        .get(key_at)
+        .is_some_and(|word| word.starts_with('-') && word.len() > 1)
+    {
+        key_at += 1;
+    }
+    let key = args.get(key_at)?;
+    let (name, value) = match key.split_once('=') {
+        Some((name, value)) => (name, value.to_string()),
+        None => (key.as_str(), args.get(key_at + 1)?.clone()),
+    };
+    let name = name.strip_prefix("alias.")?;
+    Some((name.to_string(), value))
 }
 
 /// A `git push` as its words give it.
@@ -376,6 +409,47 @@ impl Checkout {
                 )
             })
             .as_deref()
+    }
+
+    fn alias_setting(&self, sub: &str) -> Option<String> {
+        let key = format!("alias.{sub}");
+        self.settings()?
+            .iter()
+            .rev()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v.clone())
+    }
+
+    fn expand_aliases(&self, words: Vec<String>, line_aliases: &[(String, String)]) -> Vec<String> {
+        let mut words = words;
+        let mut seen = HashSet::new();
+        while let Some(sub) = words.first().cloned() {
+            if !seen.insert(sub.clone()) {
+                break;
+            }
+            let value = line_aliases
+                .iter()
+                .rev()
+                .find(|(name, _)| *name == sub)
+                .map(|(_, value)| value.clone())
+                .or_else(|| self.alias_setting(&sub));
+            let Some(value) = value else { break };
+            let mut expanded = if let Some(script) = value.strip_prefix('!') {
+                let mut script_words = argv(script);
+                if script_words.first().map(String::as_str) == Some("git") {
+                    script_words.remove(0);
+                }
+                script_words
+            } else {
+                value.split_whitespace().map(str::to_string).collect()
+            };
+            if expanded.is_empty() {
+                break;
+            }
+            expanded.extend(words.into_iter().skip(1));
+            words = expanded;
+        }
+        words
     }
 
     /// Every ref in the checkout, by its full name.
