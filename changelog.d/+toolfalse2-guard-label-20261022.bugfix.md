@@ -1,1 +1,0 @@
-The guard labels the reason of a rule the pack does not record as the person's, an agent rule or one with no basis, as an unverified agent note. Before, a hook denial or ask stated any stored rule's reason as though the person had written it.

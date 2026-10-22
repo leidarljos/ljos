@@ -1,1 +1,0 @@
-`ljos slot` refuses a seat that already ends with the run id, such as `ridley-review-RUN` for run `RUN`, because `ridley-review` on that run boots as the same seat and the slot could not say which one it vouches for.

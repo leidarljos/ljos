@@ -1,1 +1,0 @@
-Legacy ballot dating now resolves the specific ballot line inside the issue entry before reading git history, so another issue with the same voter and choice text no longer changes that issue's legacy status.

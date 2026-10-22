@@ -1,1 +1,0 @@
-A release tag publishes the docs. The github-pages environment allows the main branch only, so the deploy runs as a workflow_run on the default branch and checks out the tagged commit. The tag's own run still builds and checks the site.

@@ -1,1 +1,0 @@
-Concurrent fail-open hooks used to split one `bypass.jsonl` row across several writes, so the only record of a command the guard let through could no longer be read. Each row is now one locked write, and the file is mode 0600.

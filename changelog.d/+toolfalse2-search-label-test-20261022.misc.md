@@ -1,1 +1,0 @@
-The search label test now writes a rule from a pipe and one from the person's terminal and pins the exact label of each, so it fails on a writer that leaves a rule without a basis. The fixture-only test it replaces passed before the writer was fixed.

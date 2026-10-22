@@ -320,10 +320,10 @@ fn install_with_no_coding_tool_leaves_a_seat_a_sitting_opens_on() {
         ),
     );
     for (name, version) in [
-        ("ljos-policyd", "ljos-policyd 0.4.6 (phronesis)"),
+        ("ljos-policyd", "ljos-policyd 0.5.0 (phronesis)"),
         ("ljos-consensus", "ljos-consensus 0.7.0"),
         ("vissue-mcp", "vissue-mcp 0.21.0"),
-        ("packset-mcp", "packset-mcp 0.15.3"),
+        ("packset-mcp", "packset-mcp 0.16.0"),
     ] {
         script(
             &progs,
