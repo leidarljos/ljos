@@ -143,3 +143,26 @@ fn a_listed_seat_cannot_write_as_another_assignee() {
         );
     }
 }
+
+#[test]
+fn a_listed_seat_cannot_vote_or_withdraw_as_another() {
+    let root = tempfile::tempdir().unwrap();
+    let call = server(root.path());
+    let seats = root.path().join("config/ljos/seats.toml");
+    std::fs::create_dir_all(seats.parent().unwrap()).unwrap();
+    std::fs::write(&seats, "seats = [\"saddle\", \"stranger\"]\n").unwrap();
+    for args in [
+        serde_json::json!({"issue": "proj-aaaa", "choice": "accept", "used": "none"}),
+        serde_json::json!({"issue": "proj-aaaa", "withdraw": true}),
+    ] {
+        let mut args = args;
+        args["seat"] = "saddle".into();
+        args["as"] = "stranger".into();
+        let said = call("ljos_vote", args);
+        assert!(said.contains("\"isError\":true"), "{said}");
+        assert!(
+            said.contains("--as stranger is not this seat, saddle"),
+            "{said}"
+        );
+    }
+}
