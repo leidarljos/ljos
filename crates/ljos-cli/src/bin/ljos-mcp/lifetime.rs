@@ -1,20 +1,24 @@
 //! When the server stops. The end of stdin is held back from rmcp until
 //! the tool calls already read have answered: rmcp waits five seconds for
 //! a handler after the input ends and then drops its answer, and a pack
-//! write may take thirty. The death of the client ends the input the same
-//! way. A shell or a launcher that only started the server is not the
-//! client: the nearest ancestor that is not one of those is, recorded by
-//! pid and start time so a reused pid is not taken for it.
+//! write may take as long as it was configured to. The death of the client
+//! ends the input the same way. A shell or a launcher that only started
+//! the server is not the client: the nearest ancestor that is not one of
+//! those is, recorded by pid and start time so a reused pid is not taken
+//! for it.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::task::Waker;
 use std::time::Duration;
 
-/// How long the end of input waits for calls in flight. A pack request
-/// gives up at 30 s unless `PACKSET_TIMEOUT_MS` says otherwise, and the
-/// drain has to outlast that request.
-pub const SETTLE: Duration = Duration::from_secs(35);
+/// How long the end of input waits for calls in flight. A pack request,
+/// a listing, the guard and a durable row lock each have their own limit;
+/// the drain is the longest of those plus a few seconds, so a call that
+/// was allowed to run is allowed to answer.
+pub fn settle_window() -> Duration {
+    ljos_cli::longest_call_timeout() + Duration::from_secs(5)
+}
 
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static READER: Mutex<Option<Waker>> = Mutex::new(None);
@@ -534,6 +538,21 @@ mod tests {
             "python3",
             &["python3".into(), "launch.py".into()]
         ));
+    }
+
+    #[test]
+    fn the_drain_outlasts_a_raised_pack_timeout() {
+        let previous = std::env::var("PACKSET_TIMEOUT_MS").ok();
+        std::env::set_var("PACKSET_TIMEOUT_MS", "45000");
+        let window = settle_window();
+        match previous {
+            Some(value) => std::env::set_var("PACKSET_TIMEOUT_MS", value),
+            None => std::env::remove_var("PACKSET_TIMEOUT_MS"),
+        }
+        assert!(
+            window >= Duration::from_secs(50),
+            "drain {window:?} is shorter than a 45 s pack call plus margin"
+        );
     }
 
     #[test]

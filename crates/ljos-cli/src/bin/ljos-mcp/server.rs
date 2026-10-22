@@ -3438,7 +3438,7 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for InboundOrder<R> {
         }
         let settle = this
             .settle
-            .get_or_insert_with(|| Box::pin(tokio::time::sleep(crate::lifetime::SETTLE)));
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep(crate::lifetime::settle_window())));
         if std::future::Future::poll(settle.as_mut(), cx).is_ready() {
             return std::task::Poll::Ready(Ok(()));
         }

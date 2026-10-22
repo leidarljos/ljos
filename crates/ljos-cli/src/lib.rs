@@ -13018,6 +13018,17 @@ fn pack_timeout() -> std::time::Duration {
         )
 }
 
+/// The longest a tool call is allowed to run. The drain after stdin ends
+/// has to outlast this: a pack request (`PACKSET_TIMEOUT_MS`), a listing,
+/// the guard, and a durable row lock, whichever was configured longest.
+#[must_use]
+pub fn longest_call_timeout() -> std::time::Duration {
+    pack_timeout()
+        .max(atoms_timeout())
+        .max(guard_timeout())
+        .max(ROW_LOCK_WAIT_DURABLE)
+}
+
 /// Start the default writer when a memory verb could not connect.
 /// `PACKSET_URL=off` is left alone. A URL pointed somewhere else is not
 /// replaced with the default writer. `LJOS_OFF` gets no daemon and no
@@ -13741,6 +13752,7 @@ pub fn packset_write_mcp(
     persona: Option<&str>,
     transient: Option<bool>,
 ) -> Result<Value> {
+    let _durable = bookkeep::durable_write();
     let basis = Basis::of(text);
     let _ = atom_kind(label)?;
     if basis == Basis::Agent {
@@ -13952,6 +13964,7 @@ fn atom_supersedes(atom: &Value) -> Vec<String> {
 ///
 /// An empty text, or the queue file cannot be written.
 pub fn packset_write_note(issue: &str, text: &str) -> Result<NoteMemory> {
+    let _durable = bookkeep::durable_write();
     match pack() {
         Ok(client) => write_note_with(&client, issue, text, true),
         Err(e) if note_can_wait(&e) => {

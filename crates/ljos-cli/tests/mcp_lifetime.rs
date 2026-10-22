@@ -12,7 +12,7 @@ use std::net::TcpListener;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-fn slow_pack() -> String {
+fn slow_pack(delay: Duration) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
@@ -23,7 +23,7 @@ fn slow_pack() -> String {
                 let n = stream.read(&mut head).unwrap_or(0);
                 let line = String::from_utf8_lossy(&head[..n]);
                 let payload = if line.starts_with("GET /v1/search") {
-                    std::thread::sleep(Duration::from_secs(7));
+                    std::thread::sleep(delay);
                     r#"{"hits":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","text":"Pin the review set before a release.","kind":"preference","score":1.0}]}"#
                 } else {
                     "{}"
@@ -69,7 +69,7 @@ fn initialize() -> [serde_json::Value; 2] {
 fn stdin_eof_answers_the_call_in_flight_then_exits() {
     let home = tempfile::tempdir().unwrap();
     let mut child = server(home.path())
-        .env("PACKSET_URL", slow_pack())
+        .env("PACKSET_URL", slow_pack(Duration::from_secs(7)))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -94,6 +94,53 @@ fn stdin_eof_answers_the_call_in_flight_then_exits() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(out.status.success(), "{:?}\n{stdout}", out.status);
     assert!(took < Duration::from_secs(45), "took {took:?}");
+    let answer = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|value| value["id"] == 2)
+        .unwrap_or_else(|| panic!("no answer to the search after {took:?}:\n{stdout}"));
+    assert!(
+        answer.to_string().contains("Pin the review set"),
+        "{answer}"
+    );
+}
+
+/// A search slower than the old fixed 35 s drain. The pack is allowed 45 s,
+/// so the server has to hold the end of stdin until the answer is written.
+#[test]
+fn a_call_longer_than_the_old_drain_still_answers_on_eof() {
+    let home = tempfile::tempdir().unwrap();
+    let mut child = server(home.path())
+        .env("PACKSET_URL", slow_pack(Duration::from_secs(36)))
+        .env("PACKSET_TIMEOUT_MS", "45000")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(90));
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    });
+    let mut stdin = child.stdin.take().unwrap();
+    for line in initialize() {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    let search = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "ljos_search", "arguments": {"query": "review set"}}});
+    writeln!(stdin, "{search}").unwrap();
+    let started = Instant::now();
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    let took = started.elapsed();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(out.status.success(), "{:?}\n{stdout}", out.status);
+    assert!(
+        took > Duration::from_secs(35),
+        "the call returned in {took:?}, inside the old 35 s drain"
+    );
+    assert!(took < Duration::from_secs(80), "took {took:?}");
     let answer = stdout
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())

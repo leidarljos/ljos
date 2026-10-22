@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -23,6 +23,34 @@ const COMMAND_DEADLINE: Duration = Duration::from_secs(2);
 /// been touched, and the idle watcher does not finish a session it has
 /// not seen.
 static LAST_ACTIVITY: AtomicU64 = AtomicU64::new(0);
+
+/// Writes that must finish or not start. The server's shutdown cap stays
+/// short unless one of these is still inside the write, because a blocked
+/// stdin read would otherwise hold the process for the whole drain.
+static DURABLE_WRITES: AtomicUsize = AtomicUsize::new(0);
+
+/// Held for the body of a write that replaces a file or posts a pack atom.
+pub struct DurableWrite(());
+
+impl Drop for DurableWrite {
+    fn drop(&mut self) {
+        DURABLE_WRITES.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Mark one write in progress. Drop the guard when the write returns,
+/// including when the task that started it has already been dropped.
+#[must_use]
+pub fn durable_write() -> DurableWrite {
+    DURABLE_WRITES.fetch_add(1, Ordering::AcqRel);
+    DurableWrite(())
+}
+
+/// A [`durable_write`] guard is still held.
+#[must_use]
+pub fn durable_pending() -> bool {
+    DURABLE_WRITES.load(Ordering::Acquire) > 0
+}
 
 /// Events that keep the book. A subagent stop and a bare argv line do not:
 /// the parent session is the one that claimed.
@@ -1215,6 +1243,7 @@ fn load_book(path: &Path) -> Book {
 }
 
 fn store_book(path: &Path, book: &Book) {
+    let _durable = durable_write();
     let Ok(text) = serde_json::to_string(book) else {
         return;
     };
@@ -1632,6 +1661,7 @@ fn claim_index(issue: &str) -> PathBuf {
 }
 
 fn remember_owner(issue: &str, path: &Path) {
+    let _durable = durable_write();
     let index = claim_index(issue);
     if let Some(dir) = index.parent() {
         let _ = std::fs::create_dir_all(dir);
