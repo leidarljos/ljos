@@ -1870,6 +1870,62 @@ mod tests {
         assert_eq!(counted(&read, "reject"), None, "{read:?}");
     }
 
+    fn orders<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
+        if items.len() <= 1 {
+            return vec![items.to_vec()];
+        }
+        let mut out = Vec::new();
+        for at in 0..items.len() {
+            let mut rest = items.to_vec();
+            let first = rest.remove(at);
+            for mut tail in orders(&rest) {
+                tail.insert(0, first.clone());
+                out.push(tail);
+            }
+        }
+        out
+    }
+
+    #[test]
+    #[should_panic(expected = "file order changed the result")]
+    fn a_seat_under_two_keys_reads_the_same_in_every_order() {
+        let _home = test_home();
+        let entries = [
+            sign_as(
+                ballot_entry("alpha/inky", "accept", "2026-10-21T10:00:00Z"),
+                1,
+            ),
+            sign_as(
+                ballot_entry("beta/inky", "reject", "2026-10-21T11:00:00Z"),
+                2,
+            ),
+            sign_as(
+                ballot_entry("gamma/seat-c", "accept", "2026-10-21T10:00:00Z"),
+                3,
+            ),
+            sign_as(
+                ballot_entry("delta/seat-d", "reject", "2026-10-21T11:00:00Z"),
+                4,
+            ),
+        ];
+        let read = |order: &[SignedEntry]| {
+            let check = check_entries(order).map_err(|err| err_chain(&err));
+            (
+                check.map(|report| report.questions_with_live_ballots),
+                tally(order).expect("tally"),
+            )
+        };
+        let first = read(&entries);
+        for order in orders(&entries) {
+            assert_eq!(read(&order), first, "file order changed the result");
+        }
+        let (check, tallied) = first;
+        let err = check.expect_err("a seat signed under two keys passed the check");
+        assert!(err.contains("seat inky"), "{err}");
+        assert_eq!(counted(&tallied, "accept"), Some(1), "{tallied:?}");
+        assert_eq!(counted(&tallied, "reject"), Some(1), "{tallied:?}");
+    }
+
     #[test]
     fn a_digit_suffix_is_a_seat_of_its_own() {
         let _home = test_home();
