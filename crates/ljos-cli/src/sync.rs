@@ -2277,22 +2277,41 @@ fn was_headed(root: &Path, scope_name: &str, host: &str) -> Result<bool> {
 /// header naming `host` and `scope_name`. A blob that does not open is
 /// skipped: one unreadable commit must not hide a headed one, and it must
 /// not make import fail.
+///
+/// The file is `.ljos/atoms/{host}.jsonl.age` when this scope is primary
+/// and `.ljos/atoms/{host}+{scope}.jsonl.age` otherwise. Either name may
+/// be the one that was committed. Choosing between them with
+/// [`scope_of_repo`] refuses a primary scope named `cloud`, and adopt
+/// opens every log through this check, so that refusal kept the log.
 fn headed_in_history(root: &Path, scope_name: &str, host: &str) -> Result<bool> {
-    let Some(scope) = scope_of_repo(root)? else {
-        return Ok(false);
-    };
-    let [rel, _] = host_log_rels_for_scope(host, &scope.name, scope_name);
-    let out = match git(root, &["rev-list", "HEAD", "--", &rel]) {
-        Ok(out) => out,
-        Err(_) => return Ok(false),
-    };
-    if !out.status.success() {
-        return Ok(false);
-    }
     let identities = identities_for_open(scope_name);
     if identities.is_empty() {
         return Ok(false);
     }
+    for rel in [
+        format!(".ljos/atoms/{host}.jsonl.age"),
+        format!(".ljos/atoms/{host}+{scope_name}.jsonl.age"),
+    ] {
+        if history_of_log_is_headed(root, &rel, &identities, host, scope_name) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether any committed blob of `rel` opens with a header naming `host`
+/// and `scope_name`. Git and decrypt failures are skipped.
+fn history_of_log_is_headed(
+    root: &Path,
+    rel: &str,
+    identities: &[PathBuf],
+    host: &str,
+    scope_name: &str,
+) -> bool {
+    let out = match git(root, &["rev-list", "HEAD", "--", rel]) {
+        Ok(out) if out.status.success() => out,
+        _ => return false,
+    };
     for commit in String::from_utf8_lossy(&out.stdout).lines() {
         if commit.is_empty() {
             continue;
@@ -2302,17 +2321,17 @@ fn headed_in_history(root: &Path, scope_name: &str, host: &str) -> Result<bool> 
             Ok(blob) if blob.status.success() => blob.stdout,
             _ => continue,
         };
-        let plain = match open_sealed_bytes(&blob, &identities) {
+        let plain = match open_sealed_bytes(&blob, identities) {
             Ok(Some(plain)) => plain,
             _ => continue,
         };
         if let Some((named_host, named_scope, _)) = split_header(&plain) {
             if named_host == host && named_scope == scope_name {
-                return Ok(true);
+                return true;
             }
         }
     }
-    Ok(false)
+    false
 }
 
 /// Note that `host` writes headed logs of `scope_name`, and drop any
