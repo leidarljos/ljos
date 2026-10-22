@@ -26,8 +26,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use crate::PacksetClient;
 use anyhow::{bail, Context, Result};
-use packset_client::PacksetClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -524,25 +524,27 @@ fn relabel_agent(client: &PacksetClient, workspace: &str, accepted: Value) -> Re
             "accept stored the lesson without an id, so its origin could not be put back to agent-derived"
         );
     };
-    let url = format!("{}/v1/atoms/update", client.base());
     let body = serde_json::json!({
         "workspace": workspace,
         "id": id,
         "fields": {"origin": ORIGIN_AGENT},
     });
-    match packset_client::authorize(ureq::post(&url))
-        .timeout(http_timeout())
-        .send_json(body)
-    {
-        Ok(resp) => resp
-            .into_json()
+    let bytes = serde_json::to_vec(&body).unwrap_or_default();
+    match client.roundtrip(
+        "POST",
+        "/v1/atoms/update",
+        &[],
+        Some(&bytes),
+        true,
+        http_timeout(),
+    ) {
+        Ok(answer) if (200..300).contains(&answer.status) => serde_json::from_str(&answer.body)
             .context("update: the pack's answer was not json"),
-        Err(ureq::Error::Status(code, resp)) => {
-            let text = resp.into_string().unwrap_or_default();
-            bail!(
-                "the lesson {id} was stored as {origin}; putting the origin back to agent-derived failed: {code}: {text}"
-            );
-        }
+        Ok(answer) => bail!(
+            "the lesson {id} was stored as {origin}; putting the origin back to agent-derived failed: {}: {}",
+            answer.status,
+            answer.body
+        ),
         Err(e) => bail!(
             "the lesson {id} was stored as {origin}; putting the origin back to agent-derived failed: {e}"
         ),
@@ -550,18 +552,25 @@ fn relabel_agent(client: &PacksetClient, workspace: &str, accepted: Value) -> Re
 }
 
 fn accept_on_writer(client: &PacksetClient, workspace: &str, id: &str) -> Result<Value> {
-    let url = format!("{}/v1/proposals/accept", client.base());
     let body = serde_json::json!({"workspace": workspace, "id": id});
-    match packset_client::authorize(ureq::post(&url))
-        .timeout(http_timeout())
-        .send_json(body)
-    {
-        Ok(resp) => resp
-            .into_json()
-            .context("accept: the pack's answer was not json"),
-        Err(ureq::Error::Status(code, resp)) => {
-            let text = resp.into_string().unwrap_or_default();
-            bail!("accept: POST /v1/proposals/accept failed: {code}: {text}");
+    let bytes = serde_json::to_vec(&body).unwrap_or_default();
+    match client.roundtrip(
+        "POST",
+        "/v1/proposals/accept",
+        &[],
+        Some(&bytes),
+        true,
+        http_timeout(),
+    ) {
+        Ok(answer) if (200..300).contains(&answer.status) => {
+            serde_json::from_str(&answer.body).context("accept: the pack's answer was not json")
+        }
+        Ok(answer) => {
+            bail!(
+                "accept: POST /v1/proposals/accept failed: {}: {}",
+                answer.status,
+                answer.body
+            )
         }
         Err(e) => bail!("accept: POST /v1/proposals/accept failed: {e}"),
     }

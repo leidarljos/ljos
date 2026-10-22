@@ -687,7 +687,7 @@ fn is_mail_atom(atom: &Value) -> bool {
     matches!(atom["kind"].as_str(), Some("message" | "receipt" | "group"))
 }
 
-fn writer_version(client: &packset_client::PacksetClient) -> Option<String> {
+fn writer_version(client: &crate::PacksetClient) -> Option<String> {
     client
         .status(Some(&client.workspace()))
         .ok()
@@ -706,7 +706,7 @@ fn writer_version(client: &packset_client::PacksetClient) -> Option<String> {
 /// kind, so it reads the same from a pack that keeps mail and from one
 /// that does not. The probe names a level the pack does not keep. The
 /// kind is refused, or the level is, and neither answer is stored.
-fn ensure_mail(client: &packset_client::PacksetClient, verb: &str) -> Result<()> {
+fn ensure_mail(client: &crate::PacksetClient, verb: &str) -> Result<()> {
     // The writer's version decides when it gives one. Without a version
     // the probe below is the check.
     if let Some(version) = writer_version(client) {
