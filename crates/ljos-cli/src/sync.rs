@@ -2208,15 +2208,22 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
     let mut skipped_scopes = Vec::new();
     for log in &present {
         let identities = identities_for_open(&log.scope_name);
-        match sealed_plain(root, &log.age, &identities)? {
-            Some(plain) => {
+        match sealed_plain(root, &log.age, &identities) {
+            Ok(Some(plain)) => {
                 adopted_scopes.push(log.scope_name.clone());
                 opened.push((log, plain));
             }
-            None => {
+            Ok(None) => {
                 skipped_scopes.push(log.scope_name.clone());
                 out.push_str(&format!(
                     "sync: {gone}'s {} log is not sealed to this machine\n",
+                    log.scope_name
+                ));
+            }
+            Err(err) => {
+                let why = err.to_string().replace('\n', " ");
+                out.push_str(&format!(
+                    "sync: {gone}'s {} log could not be opened ({why}); the log was kept\n",
                     log.scope_name
                 ));
             }
