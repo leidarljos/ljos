@@ -11373,12 +11373,18 @@ pub fn check_seat_signatures(
     let can_date_legacy = tracker_is_git == Some(true);
     let v = issue_record(issue).map_err(|e| format!("{issue}: not readable: {e:#}"))?;
     let legacy = |voter: &str, choice: &str| {
-        can_date_legacy && ballot_sig::recorded_before_signing(issue, voter, choice)
+        can_date_legacy
+            && ballot_sig::recorded_before_signing(issue, voter, choice).unwrap_or(false)
     };
     let notes = ballot_sig::notes_of(&v);
     let (pins, _) = ballot_sig::pins_for_check().map_err(|e| {
         format!("{issue}: the seat pins are not one key per seat, so it decides nothing for a push: {e:#}")
     })?;
+    if can_date_legacy {
+        if let Some(root) = ballot_sig::env_root() {
+            slot::require_tracker_history(&root)?;
+        }
+    }
     let dropped = slot::dropped_pins(&pins);
     if !dropped.is_empty() {
         return Err(format!(
@@ -11386,12 +11392,19 @@ pub fn check_seat_signatures(
             dropped.join(", ")
         ));
     }
-    let starts = slot::starts();
-    let stands =
-        |seat: &str| slot::stands(seat, pins.get(seat).map(String::as_str), starts.as_deref());
-    let before_pin = |note: &str, voter: &str| {
-        pins.get(voter)
-            .is_some_and(|key| slot::recorded_before_pin(issue, note, voter, key).unwrap_or(true))
+    let starts = slot::starts()?;
+    let stands = |seat: &str| {
+        slot::stands(seat, pins.get(seat).map(String::as_str), starts.as_deref()).unwrap_or(false)
+    };
+    let before_pin = |note: &str, voter: &str| match pins.get(voter) {
+        Some(key) => match slot::recorded_before_pin(issue, note, voter, key) {
+            Ok(Some(before)) => before,
+            // Not a git checkout: there is no commit order to refuse on.
+            Ok(None) => true,
+            // Incomplete history must not count the slot.
+            Err(_) => false,
+        },
+        None => false,
     };
     let signed = |voter: &str| {
         notes

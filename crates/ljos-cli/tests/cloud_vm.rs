@@ -4716,12 +4716,12 @@ fn a_slot_line_replayed_from_another_issue_does_not_backdate_it() {
     );
     assert_eq!(
         ljos_cli::slot::recorded_before_pin("probe-other", &note, run, &public),
-        Some(true),
+        Ok(Some(true)),
         "the other issue's own entry did not hold the replayed line"
     );
     assert_eq!(
         ljos_cli::slot::recorded_before_pin("probe-slot", &note, run, &public),
-        Some(false),
+        Ok(Some(false)),
         "the replay counted as this issue's slot"
     );
 
@@ -4740,7 +4740,7 @@ fn a_slot_line_replayed_from_another_issue_does_not_backdate_it() {
     );
     assert_eq!(
         ljos_cli::slot::recorded_before_pin("probe-slot", &note, run, &public),
-        Some(false),
+        Ok(Some(false)),
         "a later copy on this issue backdated the pin"
     );
     let rows = [serde_json::json!({"agent": run, "choice": "ship"})];
