@@ -46647,8 +46647,17 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let body = packset_write_as("Remember", "kept without the field", None, None).unwrap();
         assert_eq!(body["id"], "atom-1");
         let lines = log.lock().unwrap().clone();
-        assert!(lines[0].contains("origin"), "{lines:?}");
-        assert!(!lines[1].contains("origin"), "{lines:?}");
+        // A parallel test can search this server before the write. The
+        // claim is the atom posts: origin on the first, gone after the
+        // refusal.
+        let posts: Vec<_> = lines
+            .iter()
+            .filter(|line| line.contains("POST /v1/atoms"))
+            .cloned()
+            .collect();
+        assert_eq!(posts.len(), 2, "{lines:?}");
+        assert!(posts[0].contains("origin"), "{posts:?}");
+        assert!(!posts[1].contains("origin"), "{posts:?}");
     }
 
     #[test]
