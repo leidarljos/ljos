@@ -10288,7 +10288,11 @@ pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<(Vec<Hit>, bool)>
 /// then follow its hits, so a relevant old memory still gets in. So they
 /// do when a relevance cut comes back full, since the pack does not read
 /// the alias groups: to it `pnpm` does not match `npm`, and twenty-four
-/// lookalikes tie the lesson that says it.
+/// lookalikes tie the lesson that says it. A hit the cut kept on fewer
+/// ballots than [`agreed`] asks, whose stored atom is among them, takes
+/// that atom's count, which is none: which of the tied lessons a ballot
+/// keeps at its cut is arbitrary, and one it dropped would have come in
+/// as the atom.
 fn search_relevant(
     client: &PacksetClient,
     cue: &str,
@@ -10315,16 +10319,26 @@ fn search_relevant(
         .into_json()?;
     let chosen = body["hits"].as_array().map_or(0, Vec::len);
     if body["rank"].as_str() != Some("relevance") || chosen >= limit as usize {
-        let have: std::collections::HashSet<String> = body["hits"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|h| h["id"].as_str().map(str::to_string))
-            .collect();
-        let extra: Vec<Value> = relevant_atoms(client, cue, limit as usize)
-            .into_iter()
-            .filter(|a| a["id"].as_str().is_none_or(|id| !have.contains(id)))
-            .collect();
+        let mut extra = Vec::new();
+        for atom in relevant_atoms(client, cue, limit as usize) {
+            let kept = atom["id"].as_str().and_then(|id| {
+                body["hits"]
+                    .as_array_mut()?
+                    .iter_mut()
+                    .find(|h| h["id"].as_str() == Some(id))
+            });
+            match kept {
+                Some(hit) => {
+                    let short =
+                        serde_json::from_value::<Hit>(hit.clone()).is_ok_and(|h| !agreed(&h));
+                    if let Some(fields) = hit.as_object_mut().filter(|_| short) {
+                        fields.remove("ballots");
+                        fields.remove("of");
+                    }
+                }
+                None => extra.push(atom),
+            }
+        }
         if let Some(hits) = body["hits"].as_array_mut() {
             hits.extend(extra);
         }
@@ -37580,6 +37594,73 @@ mod tests {
         );
         assert!(note.contains("Name pytest fixtures"), "{note}");
         assert!(!note.contains("kebab stand"), "{note}");
+    }
+
+    /// A full relevance cut kept the old lesson on one ballot of two, and
+    /// it is among the stored atoms that best match. It takes that atom's
+    /// count, which is none, as it would have had the cut left it out. A
+    /// hit both ballots named keeps its count, and no atom comes twice.
+    #[test]
+    fn a_hit_kept_on_one_ballot_reads_as_its_stored_atom() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap())]);
+        let atom = |id: &str, text: &str| {
+            serde_json::json!({
+                "id": id, "text": text, "kind": "lesson",
+                "ts": "2026-01-14T09:00:00.000Z", "entities": ["horizon:standing"]
+            })
+        };
+        let mut atoms: Vec<Value> = ["Figma", "Grafana", "Sentry"]
+            .iter()
+            .map(|who| {
+                atom(
+                    who,
+                    &format!("Operator {who} recorded that the registry rejected the token"),
+                )
+            })
+            .collect();
+        atoms.push(atom(
+            "old",
+            "With pnpm the registry rejected the token because the CI secret expired",
+        ));
+        let hits: Vec<Value> = atoms
+            .iter()
+            .map(|a| {
+                let mut hit = a.clone();
+                let ballots = if a["id"] == "old" { 1 } else { 2 };
+                hit["score"] = 1.0.into();
+                hit["ballots"] = ballots.into();
+                hit["of"] = 2.into();
+                hit
+            })
+            .collect();
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/status") {
+                let status = serde_json::json!({"search": {"ranks": ["fused", "relevance"]}});
+                return (200, status.to_string());
+            }
+            if first.contains("/v1/search") {
+                let body = serde_json::json!({"hits": hits, "rank": "relevance"});
+                return (200, body.to_string());
+            }
+            if first.contains("/v1/atoms") {
+                return (200, serde_json::json!({"atoms": atoms}).to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let found = packset_search_relevant("npm: the registry rejected my token", 4).unwrap();
+        let old: Vec<&Hit> = found
+            .iter()
+            .filter(|h| h.id.as_deref() == Some("old"))
+            .collect();
+        assert_eq!(old.len(), 1, "{found:?}");
+        assert_eq!((old[0].ballots, old[0].of), (None, None), "{found:?}");
+        let figma = found.iter().find(|h| h.id.as_deref() == Some("Figma"));
+        assert_eq!(figma.and_then(|h| h.ballots), Some(2), "{found:?}");
+        assert_eq!(found.len(), 4, "{found:?}");
     }
 
     /// The prompt hook hands over a paraphrase the encoder ranked first
