@@ -11229,6 +11229,78 @@ pub fn check_seat_signatures(
     }
 }
 
+#[cfg(test)]
+mod seat_signature_tests {
+    use super::*;
+
+    fn with_env_var<R>(key: &str, val: Option<&std::ffi::OsStr>, f: impl FnOnce() -> R) -> R {
+        crate::with_env_mutation(|| {
+            let saved = std::env::var_os(key);
+            match val {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+            struct Reset {
+                key: String,
+                saved: Option<std::ffi::OsString>,
+            }
+            impl Drop for Reset {
+                fn drop(&mut self) {
+                    match &self.saved {
+                        Some(v) => std::env::set_var(&self.key, v),
+                        None => std::env::remove_var(&self.key),
+                    }
+                }
+            }
+            let _reset = Reset {
+                key: key.to_string(),
+                saved,
+            };
+            f()
+        })
+    }
+
+    #[test]
+    fn a_non_git_tracker_root_is_named_when_legacy_dating_is_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("tracker");
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        let vissue = bin.join("vissue");
+        std::fs::write(
+            &vissue,
+            "#!/bin/sh\ncase \"$1\" in\n  show) printf '{\"id\":\"%s\",\"logbook\":[]}' \"$2\" ;;\n  *) exit 1 ;;\nesac\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut mode = std::fs::metadata(&vissue).unwrap().permissions();
+            mode.set_mode(0o755);
+            std::fs::set_permissions(&vissue, mode).unwrap();
+        }
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let joined =
+            std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&path)))
+                .unwrap();
+        let ballots: Vec<Value> =
+            serde_json::from_str(r#"[{"agent":"elder","choice":"rail"}]"#).unwrap();
+        let err = with_env_var("PATH", Some(joined.as_os_str()), || {
+            with_env_var("VISSUE_ROOT", Some(root.as_os_str()), || {
+                check_seat_signatures("probe-old", &ballots, &std::collections::BTreeSet::new())
+                    .unwrap_err()
+            })
+        });
+        assert!(
+            err.contains(
+                "not a git checkout: pre-signing ballots cannot be dated, reported as unsigned"
+            ),
+            "{err}"
+        );
+    }
+}
+
 /// `raw` with a leading `~` or `~/` put against `home`; `None` when there is
 /// nothing to expand.
 pub fn expand_leading_tilde(raw: &str, home: &str) -> Option<String> {
