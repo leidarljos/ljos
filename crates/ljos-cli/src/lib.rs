@@ -9270,7 +9270,7 @@ pub fn hook_trace(input: &str, call: &HookCall, subagent: Option<&str>) {
         .as_str()
         .or_else(|| v["hookEventName"].as_str())
         .unwrap_or("");
-    let line = serde_json::json!({
+    let row = serde_json::json!({
         "ts": now_utc(),
         "event": call.event,
         "raw": raw,
@@ -9281,14 +9281,11 @@ pub fn hook_trace(input: &str, call: &HookCall, subagent: Option<&str>) {
         "tree_holder": runner_record_holders().first().cloned(),
         "held": subagent.and_then(|_| held_issue()),
     });
-    use std::io::Write as _;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("hook-trace.jsonl"))
-    {
-        let _ = writeln!(f, "{line}");
-    }
+    let Ok(mut line) = serde_json::to_string(&row) else {
+        return;
+    };
+    line.push('\n');
+    let _ = append_locked_row(&dir.join("hook-trace.jsonl"), line.as_bytes());
 }
 
 /// The holders the seat records above this process name, nearest first,
@@ -21089,6 +21086,38 @@ pub fn bypass_log_path() -> Option<PathBuf> {
     Some(data_base()?.join("ljos").join("bypass.jsonl"))
 }
 
+/// Append `bytes` as one row. The caller includes the trailing newline.
+///
+/// `writeln!` of a JSON value issues a `write(2)` per token, and those
+/// calls interleave when two processes append together. An exclusive
+/// advisory lock and one `write_all` keep the row whole. The file is
+/// created mode 0600, and a symlink is not followed: the row would
+/// otherwise land in whatever the link names. A row that cannot be
+/// written is the caller's to skip.
+pub(crate) fn append_locked_row(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::io::AsRawFd;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    // SAFETY: this descriptor stays open until the matching unlock. The
+    // lock is advisory, so the row is written on this same descriptor
+    // while it is held, or not at all.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let wrote = file.write_all(bytes);
+    // SAFETY: the same descriptor, still open. Close would drop the lock
+    // as well; unlock first so the next writer can take it.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+    wrote
+}
+
 /// Write a row when the guard is passed over on a command it would have
 /// stopped: `approval` when a one-use grant let an asked command run, and
 /// `switch` when a setting such as `LJOS_ASK_PACK=off` turned off the rule
@@ -21108,15 +21137,12 @@ pub fn log_bypass(kind: &str, how: &str, command: &str, rule: &Rule) {
         "reason": rule.reason.split(':').next().unwrap_or(""),
         "seat": std::env::var("LJOS_SEAT").ok(),
     });
+    let Ok(mut line) = serde_json::to_string(&row) else {
+        return;
+    };
+    line.push('\n');
     let _ = path.parent().map(std::fs::create_dir_all);
-    use std::io::Write as _;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        let _ = writeln!(f, "{row}");
-    }
+    let _ = append_locked_row(&path, line.as_bytes());
 }
 
 /// The doctor's line on the bypass log: how many commands ran past the
@@ -39101,6 +39127,137 @@ mod tests {
             bypass_summary("", "LOG"),
             "no command has run past the guard"
         );
+    }
+
+    /// Several hooks can pass the guard at once. Each row has to stay one
+    /// JSON line: this file is the only record of a fail-open bypass, and
+    /// a line that does not parse is a bypass the doctor cannot count.
+    #[test]
+    fn concurrent_bypass_rows_each_parse() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", dir.path().to_str().unwrap())]);
+        let rule = Rule {
+            pattern: "ask pack: cloud".into(),
+            verdict: "ask".into(),
+            reason: "infra-destroy: this tears down infrastructure".into(),
+        };
+        const THREADS: usize = 32;
+        const EACH: usize = 8;
+        let mut handles = Vec::with_capacity(THREADS);
+        for thread in 0..THREADS {
+            let rule = rule.clone();
+            handles.push(std::thread::spawn(move || {
+                for n in 0..EACH {
+                    let command = format!("terraform destroy {thread}-{n}");
+                    log_bypass("switch", "LJOS_GUARD_FAIL_OPEN=1", &command, &rule);
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("bypass writer");
+        }
+        let text = std::fs::read_to_string(bypass_log_path().unwrap()).unwrap();
+        let rows: Vec<Value> = text
+            .lines()
+            .map(|line| {
+                serde_json::from_str(line).unwrap_or_else(|err| {
+                    panic!("bypass row does not parse ({err}): {line}");
+                })
+            })
+            .collect();
+        assert_eq!(rows.len(), THREADS * EACH, "{text}");
+        let mut commands: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| row["command"].as_str())
+            .collect();
+        commands.sort_unstable();
+        commands.dedup();
+        assert_eq!(commands.len(), THREADS * EACH, "{text}");
+    }
+
+    /// The bypass file is the record of commands the guard let through, so
+    /// it stays mode 0600 and a swapped symlink is not written through.
+    #[test]
+    fn a_bypass_log_is_private_and_ignores_a_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", dir.path().to_str().unwrap())]);
+        let rule = Rule {
+            pattern: "ask pack: cloud".into(),
+            verdict: "ask".into(),
+            reason: "infra-destroy: this tears down infrastructure".into(),
+        };
+        log_bypass("switch", "LJOS_ASK_PACK=off", "terraform destroy", &rule);
+        let path = bypass_log_path().unwrap();
+        let mode = std::fs::symlink_metadata(&path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "bypass log mode {mode:o}");
+        let outside = dir.path().join("outside");
+        std::fs::write(&outside, "kept\n").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        log_bypass("approval", "grant 0a1b", "terraform destroy", &rule);
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "kept\n");
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    /// `hook-trace.jsonl` is the same append as the bypass log: one JSON
+    /// value per line, written from many hooks at once. A torn line drops
+    /// the event the trace was kept to show.
+    #[test]
+    fn concurrent_hook_trace_rows_each_parse() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_RUNTIME_DIR", dir.path().to_str().unwrap())]);
+        let trace_dir = dir.path().join("ljos");
+        std::fs::create_dir_all(&trace_dir).unwrap();
+        std::fs::write(trace_dir.join("hook-trace"), "").unwrap();
+        const THREADS: usize = 32;
+        const EACH: usize = 8;
+        let mut handles = Vec::with_capacity(THREADS);
+        for thread in 0..THREADS {
+            handles.push(std::thread::spawn(move || {
+                for n in 0..EACH {
+                    let call = HookCall {
+                        event: "PreToolUse".into(),
+                        cue: format!("terraform {thread}-{n}"),
+                        session: Some(format!("s-{thread}-{n}")),
+                        shape: HookShape::Asks,
+                    };
+                    let input = format!(r#"{{"hook_event_name":"PreToolUse","n":"{thread}-{n}"}}"#);
+                    hook_trace(&input, &call, None);
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("trace writer");
+        }
+        let path = trace_dir.join("hook-trace.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rows: Vec<Value> = text
+            .lines()
+            .map(|line| {
+                serde_json::from_str(line).unwrap_or_else(|err| {
+                    panic!("trace row does not parse ({err}): {line}");
+                })
+            })
+            .collect();
+        assert_eq!(rows.len(), THREADS * EACH, "{text}");
+        let mode = std::fs::symlink_metadata(&path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "hook trace mode {mode:o}");
     }
 
     #[test]
