@@ -10283,8 +10283,11 @@ pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<(Vec<Hit>, bool)>
 /// that lists `rank=relevance` ([`ranks_by_relevance`]) is asked for it,
 /// picks them by lexical, BM25 and cosine with no half-life, and echoes
 /// the rank; an answer without the echo is read as fused. One that lists
-/// it and answers it with a 4xx is asked again as an older writer. An
-/// older writer is not asked, and cuts its
+/// it and answers it 400 with a body that names `rank` refuses it, and
+/// is asked again as an older writer. Any other 4xx, a 401, a 429 or a
+/// 400 about something else, refuses nothing: that search has no hits
+/// of the writer's, and the stored atoms that best match answer alone.
+/// An older writer is not asked, and cuts its
 /// fused list, which decays with age, so rank 21 of a pack full of fresh
 /// lookalikes never arrives: the stored atoms that best match the cue
 /// then follow its hits, so a relevant old memory still gets in. So they
@@ -10304,7 +10307,8 @@ fn search_relevant(
     timeout: std::time::Duration,
 ) -> Result<(Value, usize)> {
     let url = format!("{}/v1/search", client.base().trim_end_matches('/'));
-    let ask = |rank: bool| {
+    // The writer's answer, or the status and body of a 4xx it gave.
+    let ask = |rank: bool| -> Result<std::result::Result<ureq::Response, (u16, String)>> {
         let mut req = packset_client::authorize(ureq::get(&url))
             .query("workspace", &client.workspace())
             .query("q", &recall_query(cue))
@@ -10316,24 +10320,28 @@ fn search_relevant(
         if rerank {
             req = req.query("rerank", "1");
         }
-        req.call().map_err(Box::new)
+        let failed = match req.call() {
+            Ok(answer) => return Ok(Ok(answer)),
+            Err(ureq::Error::Status(code @ 400..=499, answer)) => {
+                return Ok(Err((code, answer.into_string().unwrap_or_default())));
+            }
+            Err(e @ ureq::Error::Status(..)) => packset_client::Error::Bad(e.to_string()),
+            Err(e) => packset_client::Error::Http(Box::new(e)),
+        };
+        Err(failed).context("search: GET /v1/search failed")
     };
     let ranked = ranks_by_relevance(client, timeout);
-    let answer = match ask(ranked) {
-        Err(e) if ranked && matches!(*e, ureq::Error::Status(400..=499, _)) => {
-            refuses_relevance(client);
-            ask(false)
-        }
-        other => other,
+    let mut answer = ask(ranked)?;
+    if matches!(&answer, Err((400, why)) if ranked && names_the_rank(why)) {
+        refuses_relevance(client);
+        answer = ask(false)?;
+    }
+    let mut body: Value = match answer {
+        Ok(answer) => answer
+            .into_json()
+            .unwrap_or_else(|_| serde_json::json!({ "hits": [] })),
+        Err(_) => serde_json::json!({ "hits": [] }),
     };
-    let mut body: Value = answer
-        .map_err(|e| match *e {
-            ureq::Error::Status(..) => packset_client::Error::Bad(e.to_string()),
-            _ => packset_client::Error::Http(e),
-        })
-        .context("search: GET /v1/search failed")?
-        .into_json()
-        .unwrap_or_else(|_| serde_json::json!({ "hits": [] }));
     let chosen = body["hits"].as_array().map_or(0, Vec::len);
     if body["rank"].as_str() != Some("relevance") || chosen >= limit as usize {
         let mut extra = Vec::new();
@@ -10397,9 +10405,17 @@ fn ranks_by_relevance(client: &PacksetClient, timeout: std::time::Duration) -> b
 /// The last writer [`ranks_by_relevance`] asked, and its answer.
 static RANKS_KNOWN: std::sync::Mutex<Option<(String, bool)>> = std::sync::Mutex::new(None);
 
-/// The writer at `client` answered a ranked search with a 4xx though its
-/// status lists the rank: for the rest of the process it is asked as an
-/// older writer.
+/// Whether a 400's body names the `rank` parameter, as packset's `rank
+/// must be fused or relevance` does. `rerank` is another parameter and
+/// another word.
+fn names_the_rank(body: &str) -> bool {
+    body.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|w| w.eq_ignore_ascii_case("rank"))
+}
+
+/// The writer at `client` answered a ranked search 400 naming `rank`
+/// though its status lists it: for the rest of the process it is asked
+/// as an older writer.
 fn refuses_relevance(client: &PacksetClient) {
     let base = client.base().trim_end_matches('/').to_string();
     *RANKS_KNOWN
@@ -38060,16 +38076,80 @@ mod tests {
             .iter()
             .any(|r| r.lines().next().unwrap_or("").contains("rank=relevance"));
         assert!(asked, "{:?}", seen.lock().unwrap());
-        let (refusing, _) = serve_http(|req| {
+        let (failing, _) = serve_http(|req| {
             if req.lines().next().unwrap_or("").contains("/v1/status") {
                 return (200, r#"{"search":{"ranks":["relevance"]}}"#.into());
             }
-            (400, r#"{"error":"q required"}"#.into())
+            (500, r#"{"error":"store locked"}"#.into())
         });
-        let _url = PackUrl::set(&refusing);
+        let _url = PackUrl::set(&failing);
         let err = packset_search_relevant("npm: the registry rejected my token", 20).unwrap_err();
         assert!(!writer_unreachable(&err), "{err:#}");
         assert!(!format!("{err:#}").contains("not answering"), "{err:#}");
+    }
+
+    /// Only a 400 whose body names `rank` refuses the rank. A 429, a 401
+    /// or a 400 about `rerank` fails that search closed, with the stored
+    /// atoms alone and no fused retry, and the next search asks for the
+    /// rank again.
+    #[test]
+    fn only_a_400_that_names_the_rank_refuses_it() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap())]);
+        let atoms = serde_json::json!([{
+            "id": "old", "kind": "lesson",
+            "text": "With pnpm the registry rejected the token because the CI secret expired",
+            "ts": "2026-01-14T09:00:00.000Z", "entities": ["horizon:standing"]
+        }]);
+        let fused = serde_json::json!([{
+            "id": "fused", "kind": "lesson", "score": 1.0,
+            "text": "Operator Figma recorded that the registry rejected the token",
+            "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"]
+        }]);
+        let script = Arc::new(Mutex::new(std::collections::VecDeque::from([
+            (429, r#"{"error":"slow down"}"#),
+            (401, r#"{"error":"unauthorized"}"#),
+            (400, r#"{"error":"rerank must be on or off"}"#),
+            (400, r#"{"error":"rank must be fused or relevance"}"#),
+        ])));
+        let (url, seen) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/status") {
+                return (200, r#"{"search":{"ranks":["fused","relevance"]}}"#.into());
+            }
+            if first.contains("/v1/search") && first.contains("rank=") {
+                let (code, body) = script.lock().unwrap().pop_front().unwrap();
+                return (code, body.into());
+            }
+            if first.contains("/v1/search") {
+                return (200, serde_json::json!({"hits": fused}).to_string());
+            }
+            if first.contains("/v1/atoms") {
+                return (200, serde_json::json!({"atoms": atoms}).to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let ranked = || {
+            let seen = seen.lock().unwrap();
+            seen.iter().filter(|r| r.contains("rank=relevance")).count()
+        };
+        let search = || -> Vec<String> {
+            packset_search_relevant("npm: the registry rejected my token", 20)
+                .unwrap()
+                .into_iter()
+                .filter_map(|h| h.id)
+                .collect()
+        };
+        for asked in 1..=3 {
+            assert_eq!(search(), ["old"], "{:?}", seen.lock().unwrap());
+            assert_eq!(ranked(), asked, "{:?}", seen.lock().unwrap());
+        }
+        assert_eq!(search(), ["fused", "old"]);
+        assert_eq!(ranked(), 4);
+        assert_eq!(search(), ["fused", "old"]);
+        assert_eq!(ranked(), 4, "{:?}", seen.lock().unwrap());
     }
 
     /// The hits the writer chose are read by their `rerank_score`, highest
@@ -52065,6 +52145,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                     401 => "401 Unauthorized",
                     403 => "403 Forbidden",
                     404 => "404 Not Found",
+                    429 => "429 Too Many Requests",
                     _ => "500 Internal Server Error",
                 };
                 let resp = format!(
