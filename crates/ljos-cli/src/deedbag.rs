@@ -53,8 +53,7 @@ fn export_cited(issue: &str) -> Result<(String, Vec<String>)> {
     seam(&store_dir()?, scratch.path(), &rows)?;
     let bag = scratch.path().display().to_string();
     crate::run_captured("deedar", &["check", bag.as_str()]).context("deedar check")?;
-    let dest = bag_dest(&root, &seat)?;
-    publish(scratch.path(), &dest)?;
+    publish_bag(&root, &seat, scratch.path())?;
     let n = rows.len();
     Ok((
         format!("deeds: exported {n} deeds cited by {seat} into .ljos/deeds/{seat}\n"),
@@ -478,103 +477,325 @@ fn one_component(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// `.ljos/deeds/<seat>` in the tracker. `.ljos/deeds` is opened, or made,
-/// one component at a time without following a symlink: the tracker can
-/// commit either directory as a link, and the bag would be published
-/// wherever it points.
-fn bag_dest(root: &Path, seat: &str) -> Result<PathBuf> {
-    crate::sync::open_dir_beneath(root, ".ljos/deeds", true)?;
-    let dest = root.join(".ljos").join("deeds").join(seat);
-    if std::fs::symlink_metadata(&dest).is_ok_and(|meta| !meta.is_dir()) {
-        bail!(
-            "{} is not a directory; the deeds were not written",
-            dest.display()
-        );
-    }
-    Ok(dest)
+/// Publish `scratch` as `.ljos/deeds/<seat>`. The deeds directory is opened,
+/// or made, one component at a time without following a symlink, and every
+/// later step uses that file descriptor: a symlink swapped in for `.ljos`
+/// or `.ljos/deeds` after the open is not where the bag is written.
+fn publish_bag(root: &Path, seat: &str, scratch: &Path) -> Result<()> {
+    let dir = open_deeds(root)?;
+    refuse_seat(&dir, root, seat)?;
+    before_publish();
+    publish(&dir, seat, scratch)
 }
 
-/// Put `scratch` at `dest`. The old bag stays until a finished tree has been
-/// staged beside it: a copy that fails, including one across filesystems,
-/// leaves `dest` as it was.
-fn publish(scratch: &Path, dest: &Path) -> Result<()> {
-    let parent = dest.parent().context("the deed bag has no directory")?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("could not create {}", parent.display()))?;
-    let name = dest
-        .file_name()
-        .and_then(|n| n.to_str())
-        .context("the deed bag has no name")?;
-    let staged = parent.join(format!(".{name}.incoming"));
-    let backup = parent.join(format!(".{name}.previous"));
-    clear_dir(&staged)?;
-    // A crash after dest moved aside and before the new tree took its place
-    // leaves the published bag at `backup`. Put it back before touching it.
-    if !dest.exists() && backup.exists() {
-        std::fs::rename(&backup, dest)
-            .with_context(|| format!("could not restore {}", dest.display()))?;
-    }
-    clear_dir(&backup)?;
+fn open_deeds(root: &Path) -> Result<std::fs::File> {
+    crate::sync::open_dir_beneath(root, ".ljos/deeds", true)?
+        .with_context(|| format!("sync: {} was not made", root.join(".ljos/deeds").display()))
+}
 
-    stage_into(scratch, &staged)?;
-
-    let replacing = dest.exists();
-    if replacing {
-        if let Err(e) = std::fs::rename(dest, &backup) {
-            let _ = std::fs::remove_dir_all(&staged);
-            return Err(e).with_context(|| format!("could not move {} aside", dest.display()));
+fn refuse_seat(dir: &std::fs::File, root: &Path, seat: &str) -> Result<()> {
+    let name = c_component(seat)?;
+    if let Some(st) = stat_at(dir, &name)? {
+        if !is_dir(st.st_mode) {
+            bail!(
+                "{} is not a directory; the deeds were not written",
+                root.join(".ljos/deeds").join(seat).display()
+            );
         }
     }
-    if let Err(e) = std::fs::rename(&staged, dest) {
+    Ok(())
+}
+
+/// Runs after the deeds directory is open and the seat entry has been
+/// checked, and before anything is written. Tests swap a symlink in here.
+fn before_publish() {
+    #[cfg(test)]
+    BEFORE_PUBLISH.with(|hook| {
+        if let Some(mut run) = hook.borrow_mut().take() {
+            run();
+        }
+    });
+}
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_PUBLISH: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Put `scratch` in `parent` under `seat`. The old bag stays until a
+/// finished tree has been staged beside it: a copy that fails, including
+/// one across filesystems, leaves `seat` as it was. `parent` is the open
+/// deeds directory; staging, the swap and the publish are mkdirat, openat
+/// and renameat on it, then an fsync of that directory.
+fn publish(parent: &std::fs::File, seat: &str, scratch: &Path) -> Result<()> {
+    let staged = c_component(&format!(".{seat}.incoming"))?;
+    let backup = c_component(&format!(".{seat}.previous"))?;
+    let dest = c_component(seat)?;
+    let where_ = root_label(seat);
+    clear_entry(parent, &staged).with_context(|| format!("could not clear {where_}"))?;
+    // A crash after the seat moved aside and before the new tree took its
+    // place leaves the published bag at the backup name. Put it back
+    // before touching it.
+    if stat_at(parent, &dest)?.is_none() && stat_at(parent, &backup)?.is_some() {
+        rename_at(parent, &backup, parent, &dest)
+            .with_context(|| format!("could not restore {where_}"))?;
+    }
+    clear_entry(parent, &backup).with_context(|| format!("could not clear {where_}"))?;
+
+    stage_into(scratch, parent, &staged)?;
+
+    let replacing = stat_at(parent, &dest)?.is_some();
+    if replacing {
+        if let Err(e) = rename_at(parent, &dest, parent, &backup) {
+            let _ = clear_entry(parent, &staged);
+            return Err(e).with_context(|| format!("could not move {where_} aside"));
+        }
+    }
+    if let Err(e) = rename_at(parent, &staged, parent, &dest) {
         if replacing {
-            let _ = std::fs::rename(&backup, dest);
+            let _ = rename_at(parent, &backup, parent, &dest);
         }
-        let _ = std::fs::remove_dir_all(&staged);
-        return Err(e).with_context(|| format!("could not place {}", dest.display()));
+        let _ = clear_entry(parent, &staged);
+        return Err(e).with_context(|| format!("could not place {where_}"));
     }
     if replacing {
-        let _ = std::fs::remove_dir_all(&backup);
+        let _ = clear_entry(parent, &backup);
     }
     let _ = std::fs::remove_dir_all(scratch);
-    Ok(())
+    parent
+        .sync_all()
+        .with_context(|| format!("could not record {where_}"))
 }
 
-fn clear_dir(path: &Path) -> Result<()> {
-    if path.exists() {
-        std::fs::remove_dir_all(path)
-            .with_context(|| format!("could not clear {}", path.display()))?;
+fn root_label(seat: &str) -> String {
+    format!(".ljos/deeds/{seat}")
+}
+
+fn c_component(name: &str) -> Result<std::ffi::CString> {
+    if name.is_empty() || name.contains('/') || name.contains('\0') {
+        bail!("{name} is not a folder name");
+    }
+    std::ffi::CString::new(name).map_err(|_| anyhow::anyhow!("NUL in `{name}`"))
+}
+
+fn is_dir(mode: libc::mode_t) -> bool {
+    (mode & libc::S_IFMT) == libc::S_IFDIR
+}
+
+fn stat_at(dir: &std::fs::File, name: &std::ffi::CStr) -> Result<Option<libc::stat>> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: dir is an open directory fd and name is NUL-terminated. stat
+    // is zeroed and only read when fstatat fills it.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            &mut st,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc == 0 {
+        return Ok(Some(st));
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ENOENT) {
+        Ok(None)
+    } else {
+        Err(err.into())
+    }
+}
+
+fn rename_at(
+    from_dir: &std::fs::File,
+    from: &std::ffi::CStr,
+    to_dir: &std::fs::File,
+    to: &std::ffi::CStr,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: both fds are open directories and both names are
+    // NUL-terminated. renameat follows neither name.
+    if unsafe {
+        libc::renameat(
+            from_dir.as_raw_fd(),
+            from.as_ptr(),
+            to_dir.as_raw_fd(),
+            to.as_ptr(),
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
     }
     Ok(())
 }
 
-fn stage_into(scratch: &Path, staged: &Path) -> Result<()> {
+fn open_subdir(dir: &std::fs::File, name: &std::ffi::CStr) -> Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    // SAFETY: dir is an open directory fd and name is NUL-terminated.
+    // O_NOFOLLOW refuses a symlink swapped in for this entry.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: fd is new, owned here, and opened with O_CLOEXEC.
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+fn clear_entry(dir: &std::fs::File, name: &std::ffi::CStr) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    let Some(st) = stat_at(dir, name)? else {
+        return Ok(());
+    };
+    if is_dir(st.st_mode) {
+        let child = open_subdir(dir, name)?;
+        for entry in list_names(&child)? {
+            clear_entry(&child, &entry)?;
+        }
+        // SAFETY: dir is an open directory fd and name is NUL-terminated.
+        // AT_REMOVEDIR removes the directory itself, not a link target.
+        if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    } else {
+        // SAFETY: dir is an open directory fd and name is NUL-terminated.
+        // A symlink is removed, not followed.
+        if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+    Ok(())
+}
+
+fn list_names(dir: &std::fs::File) -> Result<Vec<std::ffi::CString>> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: dup makes an fd fdopendir can take. dir stays open.
+    let fd = unsafe { libc::dup(dir.as_raw_fd()) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: fd is an open directory fd owned here; fdopendir takes it.
+    let stream = unsafe { libc::fdopendir(fd) };
+    if stream.is_null() {
+        let err = std::io::Error::last_os_error();
+        // SAFETY: fdopendir failed, so fd is still ours to close.
+        unsafe { libc::close(fd) };
+        return Err(err.into());
+    }
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: stream is open; readdir returns null at the end.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        // SAFETY: d_name is NUL-terminated inside the entry readdir returned.
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            continue;
+        }
+        names.push(name.to_owned());
+    }
+    // SAFETY: stream is open and closed once; this closes fd too.
+    unsafe { libc::closedir(stream) };
+    Ok(names)
+}
+
+fn stage_into(scratch: &Path, parent: &std::fs::File, staged: &std::ffi::CStr) -> Result<()> {
     // Same filesystem: the rename is the stage. Across filesystems the
-    // copy has to finish before dest is touched, or a failure would
-    // publish nothing.
-    if std::fs::rename(scratch, staged).is_ok() {
+    // copy has to finish before the seat is touched, or a failure would
+    // publish nothing. The destination name is created from `parent`.
+    if rename_scratch(scratch, parent, staged).is_ok() {
         return Ok(());
     }
-    match copy_tree(scratch, staged) {
+    match copy_scratch(scratch, parent, staged) {
         Ok(()) => Ok(()),
         Err(e) => {
-            let _ = std::fs::remove_dir_all(staged);
+            let _ = clear_entry(parent, staged);
             Err(e).context("could not stage the deed bag")
         }
     }
 }
 
-fn copy_tree(from: &Path, to: &Path) -> Result<()> {
-    std::fs::create_dir_all(to)?;
+fn rename_scratch(scratch: &Path, parent: &std::fs::File, staged: &std::ffi::CStr) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let from_dir = scratch.parent().context("the deed bag has no directory")?;
+    let from_name = scratch
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("the deed bag has no name")?;
+    let from = c_component(from_name)?;
+    let src = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(from_dir)
+        .with_context(|| format!("could not open {}", from_dir.display()))?;
+    rename_at(&src, &from, parent, staged)?;
+    Ok(())
+}
+
+fn copy_scratch(scratch: &Path, parent: &std::fs::File, staged: &std::ffi::CStr) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: parent is an open directory fd and staged is NUL-terminated.
+    if unsafe { libc::mkdirat(parent.as_raw_fd(), staged.as_ptr(), 0o777) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let dest = open_subdir(parent, staged)?;
+    copy_children(scratch, &dest)?;
+    dest.sync_all()?;
+    Ok(())
+}
+
+fn copy_children(from: &Path, dest: &std::fs::File) -> Result<()> {
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd};
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
-        let dest = to.join(entry.file_name());
         let kind = entry.file_type()?;
+        let name = entry.file_name();
+        let Some(text) = name.to_str() else {
+            bail!("{} is not a folder name", entry.path().display());
+        };
+        let cname = c_component(text)?;
         if kind.is_symlink() {
             bail!("{} is a symlink", entry.path().display());
         } else if kind.is_dir() {
-            copy_tree(&entry.path(), &dest)?;
+            // SAFETY: dest is an open directory fd and cname is NUL-terminated.
+            if unsafe { libc::mkdirat(dest.as_raw_fd(), cname.as_ptr(), 0o777) } != 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            let child = open_subdir(dest, &cname)?;
+            copy_children(&entry.path(), &child)?;
+            child.sync_all()?;
         } else if kind.is_file() {
-            std::fs::copy(entry.path(), &dest)?;
+            let bytes = std::fs::read(entry.path())?;
+            // SAFETY: dest is an open directory fd and cname is NUL-terminated.
+            // O_EXCL with O_NOFOLLOW makes a new file or fails.
+            let fd = unsafe {
+                libc::openat(
+                    dest.as_raw_fd(),
+                    cname.as_ptr(),
+                    libc::O_WRONLY
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC,
+                    0o666,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            // SAFETY: fd is new, owned here, and opened with O_CLOEXEC.
+            let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+            file.write_all(&bytes)?;
+            file.sync_all()?;
         } else {
             bail!("{} is not a regular file", entry.path().display());
         }
@@ -842,7 +1063,8 @@ mod tests {
         let mut perms = std::fs::metadata(&blocked).unwrap().permissions();
         perms.set_mode(0o000);
         std::fs::set_permissions(&blocked, perms).unwrap();
-        let err = publish(scratch.path(), &dest);
+        let parent = std::fs::File::open(dir.path()).unwrap();
+        let err = publish(&parent, "seat", scratch.path());
         let mut perms = std::fs::metadata(&blocked).unwrap().permissions();
         perms.set_mode(0o644);
         std::fs::set_permissions(&blocked, perms).unwrap();
@@ -940,10 +1162,59 @@ mod tests {
             let scratch = dir.path().join("scratch");
             std::fs::create_dir_all(scratch.join("deed-1")).unwrap();
             std::fs::write(scratch.join("deed-1/proof.txt"), b"the new bag").unwrap();
-            let placed = bag_dest(&root, "cloudseat").and_then(|dest| publish(&scratch, &dest));
+            let placed = publish_bag(&root, "cloudseat", &scratch);
             assert!(!bag_holds(&outside, b"the new bag"), "{linked}: {placed:?}");
             let err = format!("{:#}", placed.unwrap_err());
             assert!(err.contains("symlink"), "{linked}: {err}");
+        }
+    }
+
+    /// The deeds directory is a real directory when it is opened. A hook
+    /// then swaps `.ljos` or `.ljos/deeds` for a symlink to a directory
+    /// outside the tracker. The bag is written through the directory fd
+    /// from the open, so the outside directory stays empty.
+    #[test]
+    fn a_deeds_directory_swapped_after_the_open_is_not_written_through() {
+        for linked in [".ljos", ".ljos/deeds"] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("tracker");
+            let outside = dir.path().join("outside");
+            std::fs::create_dir_all(root.join(".ljos/deeds")).unwrap();
+            std::fs::create_dir_all(&outside).unwrap();
+            let scratch = dir.path().join("scratch");
+            std::fs::create_dir_all(scratch.join("deed-1")).unwrap();
+            std::fs::write(scratch.join("deed-1/proof.txt"), b"the new bag").unwrap();
+            let hook_root = root.clone();
+            let hook_outside = outside.clone();
+            let which = linked.to_string();
+            BEFORE_PUBLISH.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    let path = hook_root.join(&which);
+                    let saved = hook_root.join(format!("{which}.real"));
+                    if let Some(parent) = saved.parent() {
+                        std::fs::create_dir_all(parent).unwrap();
+                    }
+                    std::fs::rename(&path, &saved).unwrap();
+                    std::os::unix::fs::symlink(&hook_outside, &path).unwrap();
+                }));
+            });
+            let placed = publish_bag(&root, "cloudseat", &scratch);
+            BEFORE_PUBLISH.with(|hook| *hook.borrow_mut() = None);
+            assert!(placed.is_ok(), "{linked}: {placed:?}");
+            assert!(
+                !bag_holds(&outside, b"the new bag"),
+                "{linked}: bag landed outside the tracker"
+            );
+            let saved = root.join(format!("{linked}.real"));
+            let kept = if linked == ".ljos" {
+                saved.join("deeds")
+            } else {
+                saved
+            };
+            assert!(
+                bag_holds(&kept, b"the new bag"),
+                "{linked}: bag missing from the directory that was opened"
+            );
         }
     }
 
