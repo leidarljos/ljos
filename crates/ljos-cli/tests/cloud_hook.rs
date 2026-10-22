@@ -893,3 +893,17 @@ fn a_token_and_a_client_config_hide_the_method() {
         here,
     );
 }
+
+#[test]
+fn send_pack_checks_the_destination_repository() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    refused("git send-pack /tmp/not-the-seat.git develop", here);
+    refused("git send-pack other develop", here);
+    allowed("git send-pack --dry-run origin develop", here);
+    allowed("git push other develop", here);
+}

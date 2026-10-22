@@ -127,6 +127,24 @@ pub(crate) fn write_push_allowlist(
     )
 }
 
+/// Whether `url` is a code or tracker repository on the allowlist.
+/// `Err` when the allowlist is missing, so a caller that cannot see the
+/// hook fails closed.
+pub(crate) fn repo_on_allowlist(url: &str) -> std::result::Result<bool, String> {
+    let key = push_repo_key(url);
+    if key.is_empty() {
+        return Err("the destination repository could not be read".to_string());
+    }
+    let path = allow_path().ok_or_else(|| "no push allowlist".to_string())?;
+    let text = fs::read_to_string(&path).map_err(|_| "no push allowlist".to_string())?;
+    Ok(text.lines().any(|line| {
+        let Some((tag, val)) = line.split_once('\t') else {
+            return false;
+        };
+        (tag == "code" || tag == "tracker") && val == key
+    }))
+}
+
 /// The work tree `cloud up` recorded. Absent while a cargo test of this
 /// package is still sitting in the workspace.
 pub(crate) fn recorded_seat() -> Option<PathBuf> {
