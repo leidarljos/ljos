@@ -14,7 +14,9 @@
 //! only that block, and deletes a file that held nothing else.
 //!
 //! `post-commit` and `post-rewrite` book the commit. Booking never fails
-//! the hook.
+//! the hook. `pre-commit` and `pre-push` run the sitting gate under an
+//! agent runner: a commit or a push needs a live sitting. That refusal
+//! fails the hook. `pre-push` copies stdin like `post-rewrite`.
 //!
 //! `pre-commit install` follows `core.hooksPath` and would replace stubs
 //! ljos owns. Install the framework into the repository, then let the stub
@@ -40,7 +42,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
 /// Every hook git looks up by name. A global `core.hooksPath` hides the
 /// repository's copy of each of these, so the stub has to exist for each.
@@ -705,19 +707,62 @@ pub fn run_git_commit(hook: &str) -> Result<()> {
 
 /// Run the ljos part of git hook `name`.
 ///
-/// `post-commit` and `post-rewrite` book the commit. Any other name
-/// succeeds and does nothing. Arguments git passed the hook are ignored.
+/// `post-commit` and `post-rewrite` book the commit. `pre-commit` and
+/// `pre-push` run the sitting gate ([`gate`]). Any other name succeeds
+/// and does nothing. Arguments git passed the hook are ignored.
 ///
 /// # Errors
 ///
-/// None. Booking that did not land is a line in the book log.
+/// The sitting gate's refusal. Booking that did not land is a line in
+/// the book log.
 pub fn run_named(name: &str) -> Result<()> {
     let name = name.trim();
     if books_commit(name) {
         run_git_commit(name)
+    } else if gates_git(name) {
+        gate(name)
     } else {
         Ok(())
     }
+}
+
+/// The guard's sitting gate for a commit or push it did not see, such as
+/// one a script runs: under a runner, `pre-commit` and `pre-push` need a
+/// live sitting. A store or a tracker checkout, which ljos writes itself,
+/// is not gated, and nor is the person.
+fn gate(name: &str) -> Result<()> {
+    if !crate::under_a_runner() {
+        return Ok(());
+    }
+    let repo = git_line(&["rev-parse", "--show-toplevel"])
+        .map(PathBuf::from)
+        .or_else(git_dir);
+    if repo
+        .as_deref()
+        .is_some_and(|repo| is_store(repo) || holds_tracker(repo))
+    {
+        return Ok(());
+    }
+    // In a hook the process tree names the hook's own shell. The seat a
+    // booking would take is the one the sitting was taken under; without
+    // one, the runner's seat records still name its holder.
+    let seat = crate::git_hook_seat();
+    let _actor = seat.as_deref().map(crate::HookActor::enter);
+    let verb = if name == "pre-push" { "push" } else { "commit" };
+    crate::sitting_gate::live_sitting()
+        .map(drop)
+        .map_err(|why| {
+            anyhow!(
+                "sitting-gate: {}",
+                crate::sitting_gate::no_sitting(verb, &why)
+            )
+        })
+}
+
+/// Whether `repo` is a tracker checkout: it holds `vissue.toml` or
+/// `Software/`, as `vissue` reads a tracker root.
+fn holds_tracker(repo: &Path) -> bool {
+    repo.join("vissue.toml").is_file() || repo.join("Software").is_dir()
 }
 
 fn book_commit(hook: &str) -> Result<()> {
@@ -1291,7 +1336,7 @@ mod tests {
 
     #[test]
     fn a_hook_that_does_not_book_succeeds() {
-        super::run_named("pre-push").unwrap();
+        super::run_named("post-checkout").unwrap();
     }
 
     #[test]

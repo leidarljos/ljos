@@ -1539,6 +1539,71 @@ fn a_repo_pre_commit_still_blocks_and_later_hooks_still_run() {
     assert!(text.contains("refs/heads/"), "{text}");
 }
 
+/// Under a runner, the installed `pre-commit` and `pre-push` hold what no
+/// shell line showed the guard: a commit or a push waits for a live
+/// sitting. The person is not gated.
+#[test]
+fn the_installed_hooks_hold_a_runner_to_its_sitting() {
+    let hab = Hab::new("repo");
+    install(&hab);
+    let bare = hab.root.join("bare.git");
+    fs::create_dir_all(&bare).unwrap();
+    git_bare(&bare, &["init", "--bare", "-q"]);
+    hab.git(
+        &hab.repo,
+        &["remote", "add", "origin", bare.to_str().unwrap()],
+    );
+    let runner = [("GROK_SESSION_ID", "5b0c2a71-9d1e-4f3a-8c6b-2e7f1a0d9c43")];
+    let as_runner = |args: &[&str]| {
+        Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(&hab.repo)
+            .args(args)
+            .current_dir(&hab.repo)
+            .env_clear()
+            .envs(commit_env(&hab, &runner, false))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let refused = |out: &Output, why: &str| {
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "the hook let it through: {err}");
+        assert!(err.contains("sitting-gate"), "{err}");
+        assert!(err.contains(why), "wanted {why:?}: {err}");
+    };
+
+    fs::write(hab.repo.join("work.txt"), "x\n").unwrap();
+    hab.git(&hab.repo, &["add", "work.txt"]);
+    refused(
+        &as_runner(&["commit", "-q", "-m", "work"]),
+        "ljos sitting ID",
+    );
+    refused(
+        &as_runner(&["push", "-q", "origin", "HEAD:topic"]),
+        "`git push` writes history",
+    );
+
+    sit(&hab, "probe-51a1", "grokbot@sit", "grokbot");
+    for args in [
+        &["commit", "-q", "-m", "work"][..],
+        &["push", "-q", "origin", "HEAD:topic"],
+    ] {
+        let out = as_runner(args);
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let person = git_status(&hab, &["push", "-q", "origin", "HEAD:main"]);
+    assert!(
+        person.status.success(),
+        "{}",
+        String::from_utf8_lossy(&person.stderr)
+    );
+}
+
 /// A path listed in `[git_hooks] skip` is not booked, and reinstall leaves
 /// that file alone.
 #[test]
