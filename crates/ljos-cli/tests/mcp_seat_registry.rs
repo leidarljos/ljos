@@ -166,3 +166,18 @@ fn a_listed_seat_cannot_vote_or_withdraw_as_another() {
         );
     }
 }
+
+#[test]
+fn a_listed_seat_cannot_forecast_as_another() {
+    let root = tempfile::tempdir().unwrap();
+    let call = server(root.path());
+    let said = call(
+        "ljos_predict",
+        serde_json::json!({"seat": "saddle", "issue": "proj-aaaa", "expect": "accept", "as": "stranger"}),
+    );
+    assert!(said.contains("\"isError\":true"), "{said}");
+    assert!(
+        said.contains("--as stranger is not this seat, saddle"),
+        "{said}"
+    );
+}

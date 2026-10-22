@@ -640,7 +640,7 @@ pub struct PredictArgs {
     pub issue: String,
     /// The option you expect to win, or an object of option to share.
     pub expect: serde_json::Value,
-    /// Forecast as this persona; absent, the seat's identity.
+    /// This seat's own name; another seat is refused.
     #[serde(rename = "as")]
     pub as_persona: Option<String>,
 }
@@ -2345,8 +2345,7 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<PredictArgs>,
     ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
-        let who =
-            identity_or_seat(args.as_persona.as_deref()).unwrap_or_else(|| "seat".to_string());
+        let who = ljos_cli::ballot_voter("predict", args.as_persona.as_deref()).map_err(refused)?;
         let expect = match &args.expect {
             serde_json::Value::String(s) => s.clone(),
             other => other.to_string(),

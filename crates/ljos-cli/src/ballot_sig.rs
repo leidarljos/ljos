@@ -1220,15 +1220,17 @@ pub fn sign_own_ballot(issue: &str) -> Result<String> {
     sign_ballot(issue, &voter, &choice)
 }
 
-/// The name this process's seat casts and signs under: `VISSUE_AGENT`,
-/// else `LJOS_SEAT`.
+/// The name this process's seat casts and signs under: the seat its write
+/// check named, else `VISSUE_AGENT`, else `LJOS_SEAT`.
 #[must_use]
 pub fn own_voter() -> Option<String> {
-    ["VISSUE_AGENT", "LJOS_SEAT"].iter().find_map(|key| {
-        std::env::var(key)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+    crate::checked_seat().or_else(|| {
+        ["VISSUE_AGENT", "LJOS_SEAT"].iter().find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
     })
 }
 

@@ -3765,6 +3765,15 @@ pub fn seat_name() -> String {
         .unwrap_or_else(|| whoami().seat)
 }
 
+/// The seat this process's write check named: a git hook's, a [`Seated`]
+/// guard's, or an MCP call's. `None` outside one.
+#[must_use]
+pub fn checked_seat() -> Option<String> {
+    hook_actor()
+        .or_else(|| seated().map(|s| s.seat))
+        .or_else(|| CALL_SEAT.try_with(|s| s.seat.clone()).ok())
+}
+
 /// Whether a conversation under a runner may accept a proposal: only one
 /// another conversation filed, such as a worker it started. `proposer` is
 /// the holder the proposal's atom names, `holder` this conversation's.

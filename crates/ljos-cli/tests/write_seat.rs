@@ -378,9 +378,15 @@ fn a_playbook_binding_records_the_seat_the_seats_file_maps() {
 }
 
 #[test]
-fn a_slot_is_signed_only_by_a_listed_seat() {
+fn a_slot_is_signed_as_the_seat_the_check_named() {
     let b = Bench::new();
     b.seats("seats = [\"saddle\"]\n");
+    let key: String = ed25519_dalek::SigningKey::from_bytes(&[7; 32])
+        .verifying_key()
+        .to_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     let out = b.ljos_env(
         &[("LJOS_SEAT", "saddle"), ("VISSUE_AGENT", "stranger")],
         &[
@@ -392,13 +398,81 @@ fn a_slot_is_signed_only_by_a_listed_seat() {
             "--run",
             "r1",
             "--key",
-            "00",
+            &key,
         ],
     );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "{out:?}");
-    assert!(err.contains("slot: no seat named stranger"), "{err}");
+    assert!(err.contains("slot: saddle has no pinned key"), "{err}");
+    assert!(!err.contains("stranger"), "{err}");
     assert_eq!(b.calls(), "", "nothing reached the tracker");
+}
+
+/// A pack that answers each request with the body it was sent.
+fn echo_pack() -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let body = loop {
+                let n = stream.read(&mut chunk).unwrap_or(0);
+                if n == 0 {
+                    break String::new();
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&buf);
+                let Some((head, body)) = text.split_once("\r\n\r\n") else {
+                    continue;
+                };
+                let need = head
+                    .lines()
+                    .filter_map(|l| l.split_once(':'))
+                    .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if body.len() >= need {
+                    break body.to_string();
+                }
+            };
+            let body = if body.is_empty() { "{}".into() } else { body };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    url
+}
+
+#[test]
+fn a_forecast_is_recorded_as_the_seat_the_check_named() {
+    let b = Bench::new();
+    b.seats("seats = [\"saddle\", \"inky\"]\n");
+    let pack = echo_pack();
+    let out = b.ljos_env(
+        &[
+            ("LJOS_SEAT", "saddle"),
+            ("VISSUE_AGENT", "inky"),
+            ("PACKSET_URL", &pack),
+        ],
+        &["predict", "proj-aaaa", "--expect", "accept"],
+    );
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{out:?}");
+    assert!(said.contains("\"agent\": \"saddle\""), "{said}");
+
+    let refused = b.ljos_env(
+        &[("LJOS_SEAT", "saddle"), ("PACKSET_URL", &pack)],
+        &["predict", "proj-aaaa", "--expect", "accept", "--as", "inky"],
+    );
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(err.contains("--as inky is not this seat, saddle"), "{err}");
 }
 
 #[test]

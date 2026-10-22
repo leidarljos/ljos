@@ -903,7 +903,7 @@ enum Cmd {
         /// The option you expect to win, or a JSON object of option to share.
         #[arg(long)]
         expect: String,
-        /// Forecast as this persona instead of the seat's identity.
+        /// This seat's own name; another seat is refused.
         #[arg(long = "as")]
         as_persona: Option<String>,
     },
@@ -2404,9 +2404,7 @@ fn run_command() -> Result<()> {
             expect,
             as_persona,
         } => {
-            let who = as_persona
-                .or_else(|| std::env::var("VISSUE_AGENT").ok())
-                .unwrap_or_else(whoami_tracker);
+            let who = ljos_cli::ballot_voter("predict", as_persona.as_deref())?;
             let body = write_prediction(&issue, &who, &expect)?;
             println!("{}", serde_json::to_string_pretty(&body)?);
         }
@@ -3631,16 +3629,6 @@ fn tracker_write(cmd: &Cmd) -> Option<&'static str> {
         Cmd::Slot { .. } => "slot",
         _ => return None,
     })
-}
-
-/// The identity the tracker records ballots under, so a forecast and a
-/// ballot from the same seat carry the same name.
-fn whoami_tracker() -> String {
-    run_captured("vissue", &["whoami"])
-        .ok()
-        .and_then(|s| s.stdout.lines().next().map(|l| l.trim().to_string()))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "seat".to_string())
 }
 
 /// The pack's rows, or none with a note: a seat without a pack still settles.
