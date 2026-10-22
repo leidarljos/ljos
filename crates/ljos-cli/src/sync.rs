@@ -590,7 +590,11 @@ fn seal_bytes(plain: &str, recipients: &[String]) -> Result<Vec<u8>> {
 /// symlink to a local directory, and reading through it imports logs
 /// that never were in the tracker. `create` makes a missing component.
 /// None when one is missing.
-fn open_dir_beneath(root: &Path, rel: &str, create: bool) -> Result<Option<std::fs::File>> {
+pub(crate) fn open_dir_beneath(
+    root: &Path,
+    rel: &str,
+    create: bool,
+) -> Result<Option<std::fs::File>> {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::fs::OpenOptionsExt;
     let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
