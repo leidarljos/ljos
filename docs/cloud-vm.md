@@ -14,7 +14,7 @@
 
 The wake envelope names the tracker commit that holds the log. A command sees it as `LJOS_WAKE_COMMIT`, and a webhook as `commit` in the JSON. The field is absent when no log commit was made.
 
-The woken seat runs `ljos inbox --sync COMMIT`. That fetches until the commit is present, or the remote head when it is not, imports the sealed logs, and lists. With no remote the flag only lists.
+The woken seat runs `ljos inbox --sync COMMIT`. That fetches until the remote has the commit, for up to 30 seconds (`LJOS_INBOX_SYNC_WAIT`), or else takes the remote head, imports the sealed logs, and lists. With no remote the flag only lists.
 
 `LJOS_SEAT` is the seat name. `ljos cloud up` appends the run id when one is present, at most 16 characters. On GitHub Actions that id is `GITHUB_RUN_ID`. Otherwise it is `CURSOR_AGENT_ID`, `CLOUD_AGENT_ID`, `AGENT_ID`, `CURSOR_CONVERSATION_ID`, or `CODESPACE_NAME`. `LJOS_SEAT=ridley-ci-a` with run `555001` is the seat `ridley-ci-a-555001`. Unset, the seat is the harness name and that id, or the machine name when there is no id. A seat left in `~/.config/ljos/env` by an earlier boot does not hide a new id.
 
