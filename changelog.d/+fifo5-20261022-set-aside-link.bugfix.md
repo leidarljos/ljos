@@ -1,0 +1,1 @@
+`ljos doctor` counted a `note-queue.jsonl.*.damaged` name in the state dir by looking through it when it was a symlink, so a link to a file outside the state dir showed as bytes a send had set aside. A damaged name that is a link, dangling or not, is now left out of the note queue row without following it or opening its target.
