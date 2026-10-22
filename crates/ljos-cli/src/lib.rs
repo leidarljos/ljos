@@ -27,6 +27,7 @@ pub mod extract;
 pub mod gates;
 pub mod git_hooks;
 pub mod hud;
+pub mod idle_drop;
 pub mod jev;
 mod kept_prompt;
 pub mod legacy_pref;
@@ -12609,6 +12610,19 @@ pub fn atoms_timeout() -> std::time::Duration {
     }
 }
 
+type Listing = Option<(std::time::Instant, String, Vec<Value>)>;
+
+/// The listing [`atoms_lean_shared`] last fetched. A whole pack, so a
+/// long-lived server drops it once idle.
+static LAST_LISTING: std::sync::Mutex<Listing> = std::sync::Mutex::new(None);
+
+/// Forget the listing [`atoms_lean_shared`] holds.
+pub fn drop_listing_cache() {
+    *LAST_LISTING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+
 /// [`atoms_lean`] for the reads one prompt makes side by side (the due line
 /// and the mail): the second takes the listing the first fetched when it is
 /// under two seconds old, so the prompt pays for the listing once.
@@ -12617,10 +12631,8 @@ pub fn atoms_timeout() -> std::time::Duration {
 ///
 /// The pack not answering, or an answer that is not atoms.
 pub(crate) fn atoms_lean_shared(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>> {
-    type Listing = Option<(std::time::Instant, String, Vec<Value>)>;
-    static LAST: std::sync::Mutex<Listing> = std::sync::Mutex::new(None);
     let key = format!("{}|{workspace}", client.base());
-    let mut last = LAST
+    let mut last = LAST_LISTING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some((at, held, atoms)) = last.as_ref() {
