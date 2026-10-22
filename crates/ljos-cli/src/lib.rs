@@ -20473,6 +20473,7 @@ fn panes_row() -> Habitat {
 /// alone refuses less than the table with phronesis after it.
 const POLICY_TABLE_ONLY: &str =
     "phronesis is not linked; install an ljos-policyd release built with it";
+const POLICYD_INSTALL_FIX: &str = "`cargo install --locked ljos-policyd`";
 
 /// The oldest `ljos-policyd` this ljos runs with. A Rust older than the
 /// workspace's `rust-version` can leave an older one installed: `cargo
@@ -20605,15 +20606,21 @@ pub fn bypass_summary(text: &str, path: &str) -> String {
 fn policy_row() -> Habitat {
     let state = match policyd_bin() {
         None if policyd_required() => {
-            Err("ljos-policyd is not installed and POLICYD_REQUIRED=1: every shell command is refused; `cargo install --locked ljos-policyd`".to_string())
+            Err(format!(
+                "ljos-policyd is not installed and POLICYD_REQUIRED=1: every shell command is refused; {POLICYD_INSTALL_FIX}"
+            ))
         }
         None => Err(
-            "ljos-policyd is not installed: shell commands are judged only by seat rules; `cargo install --locked ljos-policyd`"
-                .to_string(),
+            format!(
+                "ljos-policyd is not installed: shell commands are judged only by seat rules; {POLICYD_INSTALL_FIX}"
+            ),
         ),
         Some(bin) => match run_captured(&bin.display().to_string(), &["version"]) {
             Ok(said) => policy_state(said.stdout.trim(), &bin.display().to_string()),
-            Err(e) => Err(format!("{} does not answer `version`: {e:#}", bin.display())),
+            Err(e) => Err(format!(
+                "{} does not answer `version`: {e:#}; reinstall with {POLICYD_INSTALL_FIX}",
+                bin.display()
+            )),
         },
     };
     Habitat {
@@ -31535,6 +31542,35 @@ mod tests {
         assert!(short.contains("older than 0.4.5"), "{short}");
         assert!(short.contains("rustup update stable"), "{short}");
         assert!(short.contains("Rust older than 1.89"), "{short}");
+    }
+
+    #[test]
+    fn doctor_policy_row_fails_missing_or_unresponsive_policyd_with_fix() {
+        let _g = env_guard();
+        let _missing = HoldEnv::set(&[("PATH", "/nonexistent"), ("POLICYD_BIN", "")]);
+        let missing = policy_row();
+        assert!(!missing.ok);
+        assert!(missing.state.contains("not installed"), "{}", missing.state);
+        assert!(
+            missing.state.contains(POLICYD_INSTALL_FIX),
+            "{}",
+            missing.state
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let dead = dir.path().join("ljos-policyd-missing");
+        let _down = HoldEnv::set(&[("POLICYD_BIN", dead.to_str().unwrap())]);
+        let unresponsive = policy_row();
+        assert!(!unresponsive.ok);
+        assert!(
+            unresponsive.state.contains("does not answer `version`"),
+            "{}",
+            unresponsive.state
+        );
+        assert!(
+            unresponsive.state.contains(POLICYD_INSTALL_FIX),
+            "{}",
+            unresponsive.state
+        );
     }
 
     #[test]
