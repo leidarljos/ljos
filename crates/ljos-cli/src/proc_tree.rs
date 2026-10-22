@@ -764,12 +764,14 @@ impl From<&std::fs::Metadata> for Owner {
 
 /// The owner of `/` and of each directory below it down to `file`, and
 /// of `file`, each read from a descriptor opened beneath the one before
-/// without following a link, so a directory swapped for a link or for
-/// another directory after `file` was resolved is never walked through.
-/// `None` unless every component above `file` is a directory and `file`
-/// a regular file that, when `expect` is given, is that (device, inode).
+/// without following a link, so a directory swapped for a link after
+/// `file` was resolved is not walked through. One swapped for another
+/// directory leads to another file than `expect`, the (device, inode)
+/// the caller holds for `file`. `None` unless every component above
+/// `file` is a directory and the file the walk ends on is a regular
+/// file that is `expect`.
 #[cfg(target_os = "linux")]
-fn pinned_walk(file: &Path, expect: Option<(u64, u64)>) -> Option<Vec<Owner>> {
+fn pinned_walk(file: &Path, expect: (u64, u64)) -> Option<Vec<Owner>> {
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
     use std::os::unix::ffi::OsStrExt as _;
     use std::os::unix::fs::MetadataExt as _;
@@ -806,11 +808,11 @@ fn pinned_walk(file: &Path, expect: Option<(u64, u64)>) -> Option<Vec<Owner>> {
         meta = at.metadata().ok()?;
         owners.push(Owner::from(&meta));
     }
-    (meta.is_file() && expect.is_none_or(|id| id == (meta.dev(), meta.ino()))).then_some(owners)
+    (meta.is_file() && expect == (meta.dev(), meta.ino())).then_some(owners)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn pinned_walk(_file: &Path, _expect: Option<(u64, u64)>) -> Option<Vec<Owner>> {
+fn pinned_walk(_file: &Path, _expect: (u64, u64)) -> Option<Vec<Owner>> {
     None
 }
 
@@ -854,14 +856,15 @@ fn person_keeps(file: Owner, person: &Person) -> bool {
 /// written, or swapped through a directory between it and its root, or
 /// an entry of a Nix store `store` that Nix does not keep
 /// ([`store_keeps`]). The directories and the file are judged as they
-/// were opened ([`pinned_walk`]), and the file must be `expect` when
-/// that (device, inode) is given.
+/// were opened ([`pinned_walk`]) from `path` resolved once, and the
+/// file the walk ends on must be `expect`, the (device, inode) the
+/// caller holds for the file it means.
 fn runner_of_file(
     path: &Path,
     home: Option<&Path>,
     store: &Path,
     person: &Person,
-    expect: Option<(u64, u64)>,
+    expect: (u64, u64),
 ) -> Option<&'static str> {
     runner_at(
         &std::fs::canonicalize(path).ok()?,
@@ -878,9 +881,9 @@ fn runner_at(
     home: Option<&Path>,
     store: &Path,
     person: &Person,
-    expect: Option<(u64, u64)>,
+    expect: (u64, u64),
 ) -> Option<&'static str> {
-    if crate::bookkeep::path_is_temp(Some(file)) {
+    if crate::bookkeep::resolved_path_is_temp(file) {
         return None;
     }
     let roots: Vec<PathBuf> = install_roots(home)
@@ -963,8 +966,9 @@ fn runner_from(
     store: &Path,
     person: &Person,
 ) -> Option<&'static str> {
+    use std::os::unix::fs::MetadataExt as _;
     let running = running?;
-    if let Some(r) = runner_of_file(exe, home, store, person, Some(running)) {
+    if let Some(r) = runner_of_file(exe, home, store, person, running) {
         return Some(r);
     }
     let base = exe.file_name()?.to_str()?;
@@ -972,7 +976,8 @@ fn runner_from(
         return None;
     }
     let script = std::fs::canonicalize(script()?).ok()?;
-    runner_of_file(&script, home, store, person, None)
+    let meta = std::fs::metadata(&script).ok()?;
+    runner_of_file(&script, home, store, person, (meta.dev(), meta.ino()))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1399,6 +1404,18 @@ pub fn hook_runner() -> Result<(Proc, &'static str), String> {
 mod tests {
     use super::*;
 
+    /// [`runner_of_file`] for the file `path` names now.
+    fn runner_here(
+        path: &Path,
+        home: Option<&Path>,
+        store: &Path,
+        person: &Person,
+    ) -> Option<&'static str> {
+        use std::os::unix::fs::MetadataExt as _;
+        let meta = std::fs::metadata(path).ok()?;
+        runner_of_file(path, home, store, person, (meta.dev(), meta.ino()))
+    }
+
     #[test]
     fn a_runner_is_read_from_the_file_it_runs_from() {
         let roots = install_roots(Some(Path::new("/home/u")));
@@ -1499,41 +1516,32 @@ mod tests {
         let bin = home.join(".local/bin");
         let claude = program(&bin, "claude");
         assert_eq!(
-            runner_of_file(&claude, Some(&home), &store, &person, None),
+            runner_here(&claude, Some(&home), &store, &person),
             Some("claude")
         );
 
         let away = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(program(away.path(), "codex"), bin.join("codex")).unwrap();
         assert_eq!(
-            runner_of_file(&bin.join("codex"), Some(&home), &store, &person, None),
+            runner_here(&bin.join("codex"), Some(&home), &store, &person),
             None
         );
 
         program(&base.path().join("other/.local/bin"), "claude");
         let climbed = home.join("../other/.local/bin/claude");
-        assert_eq!(
-            runner_of_file(&climbed, Some(&home), &store, &person, None),
-            None
-        );
+        assert_eq!(runner_here(&climbed, Some(&home), &store, &person), None);
 
         std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o757)).unwrap();
-        assert_eq!(
-            runner_of_file(&claude, Some(&home), &store, &person, None),
-            None
-        );
+        assert_eq!(runner_here(&claude, Some(&home), &store, &person), None);
 
         let open = bin.join("open");
         let grok = program(&open, "grok");
         assert_eq!(
-            runner_of_file(&grok, Some(&home), &store, &person, None),
+            runner_here(&grok, Some(&home), &store, &person),
             Some("grok")
         );
         std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
-        assert_eq!(
-            runner_of_file(&grok, Some(&home), &store, &person, None),
-            None
-        );
+        assert_eq!(runner_here(&grok, Some(&home), &store, &person), None);
     }
 
     /// Whoever may write the directory an install root sits in may swap
@@ -1580,7 +1588,7 @@ mod tests {
         {
             let file = files.iter().find(|f| f.starts_with(root)).unwrap();
             let above = root.parent().unwrap();
-            let runner = |who| runner_of_file(file, Some(&home), &store, who, None);
+            let runner = |who| runner_here(file, Some(&home), &store, who);
             assert!(runner(&person).is_some(), "{}", root.display());
             set(above, 0o757);
             assert_eq!(runner(&person), None, "{}", root.display());
@@ -1623,21 +1631,23 @@ mod tests {
             std::fs::create_dir_all(dir).unwrap();
             std::fs::write(dir.join("2.1.3"), "").unwrap();
         }
+        let id = |path: &Path| {
+            let meta = std::fs::metadata(path).unwrap();
+            (meta.dev(), meta.ino())
+        };
         let file = versions.join("2.1.3");
-        let meta = std::fs::metadata(&file).unwrap();
-        let running = Some((meta.dev(), meta.ino()));
+        let (running, planted) = (id(&file), id(&other.join("2.1.3")));
         let runner = |expect| runner_at(&file, Some(&home), &store, &person, expect);
         assert_eq!(runner(running), Some("claude"));
 
         std::fs::rename(&versions, home.join("held")).unwrap();
         std::os::unix::fs::symlink(&other, &versions).unwrap();
-        assert_eq!(runner(None), None);
         assert_eq!(runner(running), None);
+        assert_eq!(runner(planted), None);
 
         std::fs::remove_file(&versions).unwrap();
         std::fs::rename(&other, &versions).unwrap();
         assert_eq!(runner(running), None);
-        assert_eq!(runner(None), Some("claude"));
     }
 
     /// A process is its runner only through the (device, inode) the
@@ -1687,7 +1697,7 @@ mod tests {
         let set = |mode| {
             std::fs::set_permissions(&store, std::fs::Permissions::from_mode(mode)).unwrap();
         };
-        let runner = || runner_of_file(&claude, None, &store, &person, None);
+        let runner = || runner_here(&claude, None, &store, &person);
 
         set(0o755);
         assert_eq!(runner(), Some("claude"));
@@ -1825,17 +1835,14 @@ mod tests {
             assert!(group_is_private(&accounts, uid, 0));
             let person = Person::new(&accounts);
             assert_eq!(
-                runner_of_file(&claude, Some(&home), &store, &person, None),
+                runner_here(&claude, Some(&home), &store, &person),
                 Some("claude")
             );
         }
         for accounts in &shared {
             assert!(!group_is_private(accounts, uid, 0));
             let person = Person::new(accounts);
-            assert_eq!(
-                runner_of_file(&claude, Some(&home), &store, &person, None),
-                None
-            );
+            assert_eq!(runner_here(&claude, Some(&home), &store, &person), None);
         }
     }
 

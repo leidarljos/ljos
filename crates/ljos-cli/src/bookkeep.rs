@@ -279,6 +279,13 @@ pub fn path_is_temp(path: Option<&Path>) -> bool {
         return false;
     }
     let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    resolved_path_is_temp(&path)
+}
+
+/// [`path_is_temp`] for a path already resolved, read as written so the
+/// name is not resolved a second time.
+#[must_use]
+pub fn resolved_path_is_temp(path: &Path) -> bool {
     temp_roots().iter().any(|root| path.starts_with(root))
 }
 
