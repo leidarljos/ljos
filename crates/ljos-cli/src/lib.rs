@@ -21273,6 +21273,13 @@ pub fn doctor() -> Vec<Habitat> {
     out.push(bypass_row());
     out.push(panes_row());
     out.push(note_queue_row());
+    if let Some(state) = sync::legacy_doctor_state() {
+        out.push(Habitat {
+            name: "sync",
+            state,
+            ok: false,
+        });
+    }
     out
 }
 
@@ -22810,6 +22817,11 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
         return "info";
     }
     if row.name == "tracker" && names_unpushed(&row.state) {
+        return "warn";
+    }
+    // A headerless log is left unread until someone pins it. The row names
+    // the command; it does not mean the seat failed to start.
+    if row.name == "sync" && !row.ok {
         return "warn";
     }
     if row.ok && row.name == "mcp" && row.state.starts_with("warning:") {
@@ -34250,6 +34262,25 @@ mod tests {
         assert_eq!(doctor_word(&linked), "ok");
         // A warning does not fail the doctor.
         assert!(healthy(&[table, old]));
+    }
+
+    /// A headerless log is reported, with the command that pins it, and the
+    /// seat still counts as up: the log was refused on purpose.
+    #[test]
+    fn doctor_names_adopt_legacy_for_a_headerless_log() {
+        let row = Habitat {
+            name: "sync",
+            state: "`ljos sync --adopt-legacy alice`; `ljos sync --adopt-legacy bob`".into(),
+            ok: false,
+        };
+        assert_eq!(doctor_word(&row), "warn");
+        assert!(healthy(std::slice::from_ref(&row)));
+        let short = format_doctor_short(std::slice::from_ref(&row));
+        assert!(
+            short.contains("`ljos sync --adopt-legacy alice`"),
+            "{short}"
+        );
+        assert!(short.contains("`ljos sync --adopt-legacy bob`"), "{short}");
     }
 
     #[test]
