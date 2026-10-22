@@ -740,3 +740,23 @@ fn the_hook_ignores_home_xdg_and_path() {
     }
     assert!(!has_ref(&other_origin, "refs/heads/develop"));
 }
+
+#[test]
+fn cloud_up_keeps_the_recorded_repository() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, xdg) = seat_env(root.path());
+    clear_ids();
+    let (_origin, repo) = bare_repo(root.path(), "seat");
+    let (_other_origin, other) = bare_repo(root.path(), "other");
+    std::env::set_current_dir(&repo).unwrap();
+    ljos_cli::cloud::up(false).unwrap();
+    let allow = fs::read_to_string(xdg.join("ljos/push-allow")).unwrap();
+    std::env::set_current_dir(&other).unwrap();
+    let err = ljos_cli::cloud::up(false).unwrap_err().to_string();
+    assert!(err.contains("already recorded"), "{err}");
+    std::env::set_current_dir(root.path()).unwrap();
+    let after = fs::read_to_string(xdg.join("ljos/push-allow")).unwrap();
+    assert_eq!(allow, after, "a second cloud up rewrote the allowlist");
+    refused("ljos cloud up --repoint", root.path());
+}
