@@ -782,8 +782,24 @@ fn is_work_tree(root: &Path) -> bool {
     if !root.is_dir() {
         return false;
     }
-    let out = git(root, &["rev-parse", "--is-inside-work-tree"]);
-    out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true"
+    let Some(top) = checkout_root(root) else {
+        return false;
+    };
+    let want = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let have = std::fs::canonicalize(&top).unwrap_or(top);
+    have == want
+}
+
+fn checkout_root(root: &Path) -> Option<PathBuf> {
+    let out = git(root, &["rev-parse", "--show-toplevel"]);
+    if !out.status.success() {
+        return None;
+    }
+    let top = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if top.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(top))
 }
 
 fn write_attributes(root: &Path) -> Result<(), String> {
@@ -1510,6 +1526,91 @@ body b
                 None => std::env::remove_var("LJOS_ATOMS_DRIVER"),
             }
         }
+    }
+
+    #[test]
+    fn prepare_tracker_inits_the_nested_tracker_not_the_enclosing_checkout() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let outer = dir.path().join("repo");
+        let nested = outer.join("target/tracker-home");
+        std::fs::create_dir_all(&outer).unwrap();
+        let run_outer = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&outer)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        run_outer(&["init", "-q", "-b", "main"]);
+        run_outer(&["config", "user.email", "seat@example.invalid"]);
+        run_outer(&["config", "user.name", "seat"]);
+        run_outer(&["config", "core.hooksPath", "/dev/null"]);
+        let config_get = |key: &str| -> String {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&outer)
+                .args(["config", "--local", "--get", key])
+                .output()
+                .unwrap();
+            if out.status.success() {
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            } else {
+                String::new()
+            }
+        };
+        let before_exclude =
+            std::fs::read_to_string(outer.join(".git/info/exclude")).unwrap_or_default();
+        let before_driver = config_get("merge.ljos-atoms.driver");
+
+        prepare_tracker(&nested, true, false).unwrap();
+        let _held = crate::tracker_commit_lock(&nested);
+
+        let top_nested = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&nested)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            .unwrap();
+        assert!(
+            top_nested.status.success(),
+            "nested rev-parse failed: {}",
+            String::from_utf8_lossy(&top_nested.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&top_nested.stdout).trim(),
+            nested.display().to_string()
+        );
+        assert!(
+            nested.join(".gitattributes").is_file(),
+            "nested tracker owns attributes"
+        );
+        assert!(
+            nested.join(crate::TRACKER_LOCK).is_file(),
+            "nested tracker owns the commit lock"
+        );
+        assert!(
+            !outer.join(crate::TRACKER_LOCK).exists(),
+            "enclosing checkout gained no lock"
+        );
+        let after_exclude =
+            std::fs::read_to_string(outer.join(".git/info/exclude")).unwrap_or_default();
+        assert_eq!(
+            after_exclude, before_exclude,
+            "enclosing checkout exclude changed"
+        );
+        let after_driver = config_get("merge.ljos-atoms.driver");
+        assert_eq!(
+            after_driver, before_driver,
+            "enclosing checkout gained a merge driver"
+        );
     }
 
     #[test]
