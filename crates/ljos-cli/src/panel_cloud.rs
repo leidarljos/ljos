@@ -63,9 +63,10 @@ This line is recorded for the launcher to sign, as \
 model {family}.
 
 == push
-Push the tracker through ljos with LJOS_TRACKER_GIT=push. Do not push a \
-ref under cursor/. Do not run `gh pr create` or `gh pr merge`. Do not \
-force-push.
+Push the tracker through ljos with LJOS_TRACKER_GIT=push. Push only this \
+seat's named branches and develop. Do not push a ref under cursor/. Do \
+not run `gh pr create` or `gh pr merge`. Do not force-push. Do not delete \
+a ref.
 "
     )
 }

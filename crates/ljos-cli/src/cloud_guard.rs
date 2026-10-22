@@ -1,9 +1,10 @@
 //! What a cloud seat refuses once `ljos cloud up` installed its rules,
-//! read from the words each command runs rather than matched as text: a
-//! `git push` that updates a `cursor/*` branch or tag, and a `gh` command
-//! that opens, readies, reopens or merges a pull request. The source side
-//! of a refspec, a remote URL, an option's value and the body of a comment
-//! are never what is refused.
+//! read from the words each command runs rather than matched as text.
+//! A ref write may name only the seat's branches and `develop`. Anything
+//! else, and any force or delete, is refused. A `gh` command that opens,
+//! readies, reopens or merges a pull request is refused too. The source
+//! side of a refspec, a remote URL, an option's value and the body of a
+//! comment are never what is refused.
 
 use std::cell::OnceCell;
 use std::collections::HashSet;
@@ -11,9 +12,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use serde_json::Value;
-
-/// The branch and tag prefix a cloud seat never pushes to.
-const CURSOR: &str = "cursor/";
 
 /// git's own options before the subcommand that take the next word.
 const GIT_VALUED: &[&str] = &[
@@ -39,58 +37,152 @@ const CURRENT_BRANCH: &[&str] = &[
 
 const UNREAD: &str = "this push goes where the checkout says, and the checkout could not be read";
 
-/// Why a `git push` in `line` would update a `cursor/*` ref, or `None`
-/// when none would. `cwd` is where the line runs, the process directory
-/// when absent; a `cd DIR` before the push and `git -C DIR` move it.
-/// A `$NAME` bound by an earlier assignment on the same line is the
-/// destination the shell pushes, so that name is what is judged.
-pub(crate) fn cursor_push(line: &str, cwd: Option<&Path>) -> Option<String> {
-    let mut here = cwd
-        .map(Path::to_path_buf)
-        .or_else(|| std::env::current_dir().ok());
-    let mut line_aliases: Vec<(String, String)> = Vec::new();
-    for l in crate::nested_lines(line, 0) {
-        let mut names: Vec<(String, String)> = Vec::new();
-        for seg in crate::raw_segments(&l) {
-            if crate::assignment_segment(&seg) {
-                bound_names(&mut names, &seg);
-                continue;
-            }
-            let ifs = names
-                .iter()
-                .rev()
-                .find(|(k, _)| k == "IFS")
-                .map(|(_, v)| v.clone());
-            let expanded = crate::expand_names(&seg, &names, ifs.as_deref());
-            let seg = expanded.as_deref().unwrap_or(&seg);
-            let words = argv(seg);
-            let run = prefix_context(seg, here.clone());
-            match words.first().map(String::as_str) {
-                Some("cd" | "pushd") => here = moved(here, &words[1..]),
-                Some("popd") => here = None,
-                Some("git") => {
-                    if let Some(alias) = git_alias_write(&words[1..]) {
-                        line_aliases.push(alias);
-                    }
-                    if let Some(why) =
-                        git_push(&words[1..], run.dir, &line_aliases, &run.env, run.via_xargs)
-                            .and_then(|p| p.cursor_ref())
-                    {
-                        return Some(why);
-                    }
-                }
-                Some("gh") => {
-                    if let Some(why) =
-                        gh_command_cursor_ref(&words, &prefix_env(seg), here.as_deref(), 0)
-                    {
-                        return Some(why);
-                    }
-                }
-                _ => {}
+/// Why a destination is not one this seat may update.
+const ALLOW_RULE: &str =
+    "a cloud seat may push only its named branches and develop, and may not force or delete a ref";
+
+/// Branches this seat may update: `develop`, plus each branch named in the
+/// seat's `ljos.toml` under `[cloud] branches`. `Err` when that file is
+/// present and cannot be read, so a ref write fails closed.
+fn seat_allowlist() -> Result<HashSet<String>, String> {
+    let mut allow = HashSet::new();
+    allow.insert("develop".to_string());
+    let Some(path) = seat_branch_file() else {
+        return Ok(allow);
+    };
+    if !path.is_file() {
+        return Ok(allow);
+    }
+    let text = std::fs::read_to_string(&path).map_err(|_| {
+        format!(
+            "the seat config {} could not be read; {ALLOW_RULE}",
+            path.display()
+        )
+    })?;
+    if text.trim().is_empty() {
+        return Ok(allow);
+    }
+    let value: toml::Value = toml::from_str(&text).map_err(|_| {
+        format!(
+            "the seat config {} does not parse; {ALLOW_RULE}",
+            path.display()
+        )
+    })?;
+    let Some(root) = value.as_table() else {
+        return Err(format!(
+            "the seat config {} is not a table; {ALLOW_RULE}",
+            path.display()
+        ));
+    };
+    let branches = root
+        .get("cloud")
+        .and_then(toml::Value::as_table)
+        .and_then(|cloud| cloud.get("branches"))
+        .or_else(|| root.get("branches"));
+    let Some(branches) = branches else {
+        return Ok(allow);
+    };
+    let Some(items) = branches.as_array() else {
+        return Err(format!(
+            "the seat config {} key `branches` must be a list of strings; {ALLOW_RULE}",
+            path.display()
+        ));
+    };
+    for item in items {
+        let Some(name) = item.as_str() else {
+            return Err(format!(
+                "the seat config {} key `branches` must be a list of strings; {ALLOW_RULE}",
+                path.display()
+            ));
+        };
+        let name = short_branch(name);
+        if !name.is_empty() {
+            allow.insert(name);
+        }
+    }
+    Ok(allow)
+}
+
+/// `~/.config/ljos/seats/$LJOS_SEAT/ljos.toml`, or the same file under
+/// `$XDG_CONFIG_HOME`. `LJOS_SEAT` is the process environment, then the
+/// env file `ljos cloud up` writes.
+fn seat_branch_file() -> Option<PathBuf> {
+    let base = crate::config_base()?;
+    let seat = std::env::var("LJOS_SEAT")
+        .ok()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| seat_from_env_file(&base))?;
+    let seat = seat.trim();
+    if seat.is_empty() || seat.contains('/') || seat.contains('\\') || seat.contains("..") {
+        return None;
+    }
+    Some(base.join("ljos").join("seats").join(seat).join("ljos.toml"))
+}
+
+fn seat_from_env_file(base: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(base.join("ljos").join("env")).ok()?;
+    for line in text.lines() {
+        let line = line.trim();
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() == "LJOS_SEAT" {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
             }
         }
     }
     None
+}
+
+/// The branch `name` names, with `refs/heads/` or `heads/` taken off.
+/// A tag or any other ref is left unchanged, so it is not a branch name.
+fn short_branch(name: &str) -> String {
+    let name = name.trim();
+    name.strip_prefix("refs/heads/")
+        .or_else(|| name.strip_prefix("heads/"))
+        .unwrap_or(name)
+        .to_string()
+}
+
+/// Whether `name` is a branch this seat may update. A tag or a ref outside
+/// `refs/heads/` is not.
+fn branch_permitted(name: &str) -> Result<bool, String> {
+    let allow = seat_allowlist()?;
+    if is_tag_ref(name) || is_other_ref(name) {
+        return Ok(false);
+    }
+    Ok(allow.contains(&short_branch(name)))
+}
+
+fn is_tag_ref(name: &str) -> bool {
+    let name = name.trim();
+    name.starts_with("refs/tags/") || name.starts_with("tags/")
+}
+
+fn is_other_ref(name: &str) -> bool {
+    let name = name.trim();
+    name.starts_with("refs/") && !name.starts_with("refs/heads/")
+}
+
+/// Why `name` may not be the destination of a ref write, or `None` when
+/// it may. The reason states the allowlist rule.
+fn dest_refused(name: &str) -> Option<String> {
+    match branch_permitted(name) {
+        Err(why) => Some(why),
+        Ok(true) => None,
+        Ok(false) => Some(format!("this push updates {name}; {ALLOW_RULE}")),
+    }
+}
+
+/// Why a `git push` in `line` would update a ref this seat may not write,
+/// or `None` when none would. `cwd` is where the line runs, the process
+/// directory when absent; a `cd DIR` before the push and `git -C DIR` move
+/// it. A `$NAME` bound by an earlier assignment on the same line is the
+/// destination the shell pushes, so that name is what is judged.
+pub(crate) fn cursor_push(line: &str, cwd: Option<&Path>) -> Option<String> {
+    judge(line, cwd).push
 }
 
 /// Names a bare assignment binds, in order. A `NAME=value` prefix on the
@@ -133,36 +225,238 @@ impl GhActs {
     }
 }
 
-/// The pull-request actions `line` runs. gh's flags before the noun and
-/// between `pr` and the verb are skipped, `-R` and `--repo` with their
-/// value. A name `gh alias list` expands is read as that expansion, so
-/// `gh pc` is whatever `pc` stands for. Words after a `pr` verb are its
-/// arguments and are never read.
+/// The pull-request actions `line` runs. The same walk reads a ref write,
+/// so a `git` alias whose script runs `gh` is not a separate pass.
 pub(crate) fn gh_acts(line: &str, cwd: Option<&Path>) -> GhActs {
-    if !line.contains("gh") {
-        return GhActs::default();
+    judge(line, cwd).acts
+}
+
+/// What one walk of a line found. `push` is a ref write the seat may not
+/// make. `saw_ref` is a ref-writing command the walk did read, allowed or
+/// not, so a script that only pushes `develop` is not failed closed for
+/// mentioning `git push`.
+#[derive(Clone, Default)]
+struct Verdict {
+    push: Option<String>,
+    acts: GhActs,
+    saw_ref: bool,
+}
+
+impl Verdict {
+    fn either(mut self, other: Self) -> Self {
+        if self.push.is_none() {
+            self.push = other.push;
+        }
+        self.acts = self.acts.either(other.acts);
+        self.saw_ref |= other.saw_ref;
+        self
+    }
+
+    fn closed(why: impl Into<String>) -> Self {
+        Self {
+            push: Some(why.into()),
+            saw_ref: true,
+            ..Self::default()
+        }
+    }
+}
+
+/// Aliases and config already seen on the way into this line. A `!` script
+/// is judged by the same walk, with these carried in.
+#[derive(Clone, Default)]
+struct WalkIn {
+    depth: usize,
+    tainted: bool,
+    gh_unreadable: bool,
+    git_aliases: Vec<(String, String)>,
+    gh_aliases: Vec<(String, String)>,
+}
+
+fn judge(line: &str, cwd: Option<&Path>) -> Verdict {
+    judge_depth(line, cwd, &WalkIn::default())
+}
+
+fn judge_depth(line: &str, cwd: Option<&Path>, incoming: &WalkIn) -> Verdict {
+    if incoming.depth > ALIAS_DEPTH {
+        return Verdict {
+            push: Some(format!("alias expansion could not be read; {ALLOW_RULE}")),
+            acts: GhActs {
+                open: true,
+                merge: true,
+            },
+            saw_ref: true,
+        };
     }
     let mut here = cwd
         .map(Path::to_path_buf)
         .or_else(|| std::env::current_dir().ok());
-    let mut acts = GhActs::default();
+    let mut git_aliases = incoming.git_aliases.clone();
+    let mut gh_aliases = incoming.gh_aliases.clone();
+    let mut tainted = incoming.tainted;
+    let mut gh_unreadable = incoming.gh_unreadable;
+    let mut verdict = Verdict::default();
     for l in crate::nested_lines(line, 0) {
+        let mut names: Vec<(String, String)> = Vec::new();
         for seg in crate::raw_segments(&l) {
-            let words = argv(&seg);
-            match words.first().map(String::as_str) {
-                Some("cd" | "pushd") => here = moved(here, &words[1..]),
-                Some("popd") => here = None,
-                Some("gh") => {
-                    acts = acts.either(gh_command(&words, &prefix_env(&seg), here.as_deref(), 0));
+            if crate::assignment_segment(&seg) {
+                bound_names(&mut names, &seg);
+                continue;
+            }
+            let ifs = names
+                .iter()
+                .rev()
+                .find(|(k, _)| k == "IFS")
+                .map(|(_, v)| v.clone());
+            let expanded = crate::expand_names(&seg, &names, ifs.as_deref());
+            let seg = expanded.as_deref().unwrap_or(&seg);
+            let words = argv(seg);
+            let Some(cmd) = words.first().map(String::as_str) else {
+                continue;
+            };
+            let run = prefix_context(seg, here.clone());
+            if cmd == "bash" {
+                if let Some(path) = env_value(&run.env, &names, "BASH_ENV") {
+                    let child = walk_child(
+                        incoming.depth,
+                        tainted,
+                        gh_unreadable,
+                        &git_aliases,
+                        &gh_aliases,
+                    );
+                    verdict = verdict.either(script_verdict(&path, here.as_deref(), &child));
+                }
+            }
+            match cmd {
+                "cd" | "pushd" => here = moved(here, &words[1..]),
+                "popd" => here = None,
+                "git" => {
+                    if let Some(alias) = git_alias_write(&words[1..]) {
+                        git_aliases.push(alias);
+                    }
+                    if config_affects_push(&words[1..]) {
+                        tainted = true;
+                    }
+                    let Some(outcome) =
+                        git_push(&words[1..], run.dir, &git_aliases, &run.env, run.via_xargs)
+                    else {
+                        continue;
+                    };
+                    match outcome {
+                        GitOutcome::Shell(script) => {
+                            let child = walk_child(
+                                incoming.depth,
+                                tainted,
+                                gh_unreadable,
+                                &git_aliases,
+                                &gh_aliases,
+                            );
+                            verdict = verdict.either(judge_depth(&script, here.as_deref(), &child));
+                        }
+                        GitOutcome::Push(push) => {
+                            verdict.saw_ref = true;
+                            if push.dry_run {
+                                continue;
+                            }
+                            let why = if tainted {
+                                Some(format!(
+                                    "a git config on this line changes where a push writes; {ALLOW_RULE}"
+                                ))
+                            } else {
+                                push.cursor_ref()
+                            };
+                            if let Some(why) = why {
+                                if verdict.push.is_none() {
+                                    verdict.push = Some(why);
+                                }
+                            }
+                        }
+                    }
+                }
+                "gh" => {
+                    if let Some(set) = gh_alias_set(&words) {
+                        if unreadable_token(&set.0) || unreadable_token(&set.1) || set.1.is_empty()
+                        {
+                            gh_unreadable = true;
+                        } else {
+                            let exp = if set.2 { format!("!{}", set.1) } else { set.1 };
+                            gh_aliases.push((set.0, exp));
+                        }
+                        continue;
+                    }
+                    let child = walk_child(
+                        incoming.depth,
+                        tainted,
+                        gh_unreadable,
+                        &git_aliases,
+                        &gh_aliases,
+                    );
+                    verdict = verdict.either(gh_command(
+                        &words,
+                        &prefix_env(seg),
+                        here.as_deref(),
+                        &child,
+                        run.via_xargs,
+                    ));
+                }
+                "source" | "." | "bash" | "sh" | "dash" | "zsh" | "ksh" => {
+                    if let Some(file) = shell_script_file(&words) {
+                        let child = walk_child(
+                            incoming.depth,
+                            tainted,
+                            gh_unreadable,
+                            &git_aliases,
+                            &gh_aliases,
+                        );
+                        verdict = verdict.either(script_verdict(&file, here.as_deref(), &child));
+                    }
+                }
+                "curl" | "wget" | "http" | "https" => {
+                    if let Some(why) = http_ref_write(&words, &run.env, &names) {
+                        verdict.saw_ref = true;
+                        if verdict.push.is_none() {
+                            verdict.push = Some(why);
+                        }
+                    }
                 }
                 _ => {}
             }
-            if acts.open && acts.merge {
-                return acts;
-            }
         }
     }
-    acts
+    verdict
+}
+
+fn walk_child(
+    depth: usize,
+    tainted: bool,
+    gh_unreadable: bool,
+    git_aliases: &[(String, String)],
+    gh_aliases: &[(String, String)],
+) -> WalkIn {
+    WalkIn {
+        depth: depth + 1,
+        tainted,
+        gh_unreadable,
+        git_aliases: git_aliases.to_vec(),
+        gh_aliases: gh_aliases.to_vec(),
+    }
+}
+
+fn env_value(env: &[(String, String)], names: &[(String, String)], key: &str) -> Option<String> {
+    env.iter()
+        .rev()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.clone())
+        .or_else(|| {
+            names
+                .iter()
+                .rev()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+        })
+}
+
+fn unreadable_token(word: &str) -> bool {
+    word.contains(['$', '`'])
 }
 
 /// How many times an alias may expand into another alias before the line
@@ -173,48 +467,56 @@ fn gh_command(
     words: &[String],
     env: &[(String, String)],
     cwd: Option<&Path>,
-    depth: usize,
-) -> GhActs {
-    if depth > ALIAS_DEPTH {
-        return GhActs {
-            open: true,
-            merge: true,
+    incoming: &WalkIn,
+    via_xargs: bool,
+) -> Verdict {
+    if incoming.depth > ALIAS_DEPTH {
+        return Verdict {
+            push: Some(format!(
+                "gh alias expansion could not be read; {ALLOW_RULE}"
+            )),
+            acts: GhActs {
+                open: true,
+                merge: true,
+            },
+            saw_ref: true,
         };
     }
     let mut rest = words.iter().map(String::as_str).skip(1);
     let Some(noun) = gh_word(&mut rest) else {
-        return GhActs::default();
+        return Verdict::default();
     };
+    if unreadable_token(noun) || (via_xargs && noun == "api") {
+        return Verdict::closed(format!(
+            "`gh {noun}` takes arguments the line does not show; {ALLOW_RULE}"
+        ));
+    }
     match noun {
-        "pr" => pr_verb(gh_word(&mut rest)),
+        "pr" => Verdict {
+            acts: pr_verb(gh_word(&mut rest)),
+            ..Verdict::default()
+        },
         "api" => gh_api(rest, cwd),
+        "release" => gh_release(rest),
+        "repo" => gh_repo_sync(rest),
         other => {
-            let Some(exp) = alias_expansion(env, other) else {
-                return GhActs::default();
+            let exp = incoming
+                .gh_aliases
+                .iter()
+                .rev()
+                .find(|(name, _)| name == other)
+                .map(|(_, exp)| exp.clone())
+                .or_else(|| alias_expansion(env, other));
+            let Some(exp) = exp else {
+                if incoming.gh_unreadable {
+                    return Verdict::closed(format!(
+                        "a gh alias set on this line could not be read; {ALLOW_RULE}"
+                    ));
+                }
+                return Verdict::default();
             };
             let extra: Vec<&str> = rest.collect();
-            expand_alias(&exp, &extra, env, cwd, depth)
-        }
-    }
-}
-
-fn gh_command_cursor_ref(
-    words: &[String],
-    env: &[(String, String)],
-    cwd: Option<&Path>,
-    depth: usize,
-) -> Option<String> {
-    if depth > ALIAS_DEPTH {
-        return Some("gh alias expansion could not be read".into());
-    }
-    let mut rest = words.iter().map(String::as_str).skip(1);
-    let noun = gh_word(&mut rest)?;
-    match noun {
-        "api" => gh_api_cursor_ref(rest, cwd),
-        other => {
-            let exp = alias_expansion(env, other)?;
-            let extra: Vec<&str> = rest.collect();
-            expand_alias_cursor_ref(&exp, &extra, env, cwd, depth)
+            expand_alias(&exp, &extra, env, cwd, incoming)
         }
     }
 }
@@ -238,77 +540,163 @@ fn expand_alias(
     extra: &[&str],
     env: &[(String, String)],
     cwd: Option<&Path>,
-    depth: usize,
-) -> GhActs {
+    incoming: &WalkIn,
+) -> Verdict {
     // A shell alias is `!script`. gh appends the words typed after the
-    // alias, then the script runs. Anything that is not a gh pull request
-    // is left alone.
+    // alias. The script is the same walk as the line that named the alias,
+    // so a script that does not push is allowed.
     if let Some(script) = exp.strip_prefix('!') {
         let mut line = script.trim().to_string();
         if !extra.is_empty() {
             line.push(' ');
             line.push_str(&extra.join(" "));
         }
-        return gh_script(&line, env, cwd, depth + 1);
+        let child = walk_child(
+            incoming.depth,
+            incoming.tainted,
+            incoming.gh_unreadable,
+            &incoming.git_aliases,
+            &incoming.gh_aliases,
+        );
+        return judge_depth(&line, cwd, &child);
     }
     let mut words = vec!["gh".to_string()];
     words.extend(crate::shell_words(exp));
     words.extend(extra.iter().map(|word| (*word).to_string()));
-    gh_command(&words, env, cwd, depth + 1)
+    let child = walk_child(
+        incoming.depth,
+        incoming.tainted,
+        incoming.gh_unreadable,
+        &incoming.git_aliases,
+        &incoming.gh_aliases,
+    );
+    gh_command(&words, env, cwd, &child, false)
 }
 
-fn expand_alias_cursor_ref(
-    exp: &str,
-    extra: &[&str],
-    env: &[(String, String)],
-    cwd: Option<&Path>,
-    depth: usize,
-) -> Option<String> {
-    if let Some(script) = exp.strip_prefix('!') {
-        let mut line = script.trim().to_string();
-        if !extra.is_empty() {
-            line.push(' ');
-            line.push_str(&extra.join(" "));
+/// `gh alias set [-s] NAME EXPANSION`. `None` when this is not that command.
+/// The bool is `--shell` / `-s`.
+fn gh_alias_set(words: &[String]) -> Option<(String, String, bool)> {
+    let strs: Vec<&str> = words.iter().skip(1).map(String::as_str).collect();
+    let mut i = 0;
+    let mut shell = false;
+    let mut noun = None;
+    while i < strs.len() {
+        let word = strs[i];
+        if word == "-R" || word == "--repo" {
+            i += 2;
+            continue;
         }
-        return gh_script_cursor_ref(&line, env, cwd, depth + 1);
+        if word == "-s" || word == "--shell" {
+            shell = true;
+            i += 1;
+            continue;
+        }
+        if word.starts_with('-') && word.len() > 1 {
+            i += 1;
+            continue;
+        }
+        noun = Some(word);
+        i += 1;
+        break;
     }
-    let mut words = vec!["gh".to_string()];
-    words.extend(crate::shell_words(exp));
-    words.extend(extra.iter().map(|word| (*word).to_string()));
-    gh_command_cursor_ref(&words, env, cwd, depth + 1)
+    if noun != Some("alias") {
+        return None;
+    }
+    while i < strs.len() {
+        let word = strs[i];
+        if word == "-s" || word == "--shell" {
+            shell = true;
+            i += 1;
+            continue;
+        }
+        if word.starts_with('-') && word.len() > 1 {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    if strs.get(i) != Some(&"set") {
+        return None;
+    }
+    i += 1;
+    while i < strs.len() {
+        let word = strs[i];
+        if word == "-s" || word == "--shell" {
+            shell = true;
+            i += 1;
+            continue;
+        }
+        if word.starts_with('-') && word.len() > 1 {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    let name = strs.get(i)?.to_string();
+    i += 1;
+    if i >= strs.len() {
+        return Some((name, String::new(), shell));
+    }
+    Some((name, strs[i..].join(" "), shell))
 }
 
-fn gh_script(line: &str, env: &[(String, String)], cwd: Option<&Path>, depth: usize) -> GhActs {
-    let mut acts = GhActs::default();
-    for l in crate::nested_lines(line, 0) {
-        for seg in crate::raw_segments(&l) {
-            let words = argv(&seg);
-            if words.first().map(String::as_str) == Some("gh") {
-                acts = acts.either(gh_command(&words, env, cwd, depth));
-            }
-        }
+fn gh_release<'a>(mut words: impl Iterator<Item = &'a str>) -> Verdict {
+    let verb = gh_word(&mut words);
+    if verb == Some("create") {
+        return Verdict::closed(format!("`gh release create` writes a tag; {ALLOW_RULE}"));
     }
-    acts
+    Verdict::default()
 }
 
-fn gh_script_cursor_ref(
-    line: &str,
-    env: &[(String, String)],
-    cwd: Option<&Path>,
-    depth: usize,
-) -> Option<String> {
-    for l in crate::nested_lines(line, 0) {
-        for seg in crate::raw_segments(&l) {
-            let words = argv(&seg);
-            if words.first().map(String::as_str) != Some("gh") {
-                continue;
-            }
-            if let Some(why) = gh_command_cursor_ref(&words, env, cwd, depth) {
-                return Some(why);
-            }
-        }
+fn gh_repo_sync<'a>(mut words: impl Iterator<Item = &'a str>) -> Verdict {
+    let verb = gh_word(&mut words);
+    if verb != Some("sync") {
+        return Verdict::default();
     }
-    None
+    let mut branch: Option<String> = None;
+    let mut force = false;
+    let rest: Vec<&str> = words.collect();
+    let mut i = 0;
+    while i < rest.len() {
+        let word = rest[i];
+        if word == "-b" || word == "--branch" {
+            branch = rest.get(i + 1).map(|value| (*value).to_string());
+            i += 2;
+            continue;
+        }
+        if let Some(value) = word.strip_prefix("--branch=") {
+            branch = Some(value.to_string());
+            i += 1;
+            continue;
+        }
+        if word == "--force" {
+            force = true;
+        }
+        i += 1;
+    }
+    if force {
+        return Verdict::closed(format!(
+            "`gh repo sync --force` rewrites a ref; {ALLOW_RULE}"
+        ));
+    }
+    let Some(branch) = branch else {
+        return Verdict::closed(format!(
+            "`gh repo sync` does not name the branch it updates; {ALLOW_RULE}"
+        ));
+    };
+    if unreadable_token(&branch) {
+        return Verdict::closed(format!(
+            "`gh repo sync` names `{branch}`, which is only known once the shell expands it; {ALLOW_RULE}"
+        ));
+    }
+    match branch_permitted(&branch) {
+        Err(why) => Verdict::closed(why),
+        Ok(false) => Verdict::closed(format!("`gh repo sync` updates {branch}; {ALLOW_RULE}")),
+        Ok(true) => Verdict {
+            saw_ref: true,
+            ..Verdict::default()
+        },
+    }
 }
 
 /// `NAME=value` words in front of `gh`, so `gh alias list` sees the config
@@ -402,57 +790,100 @@ struct ApiCall {
     endpoint: String,
     fields: Vec<(String, String)>,
     input: Option<String>,
+    /// A `-F` `@file` or an `--input` body that could not be read.
+    opaque: bool,
+    method_unreadable: bool,
+    endpoint_unreadable: bool,
 }
 
-fn gh_api<'a>(words: impl Iterator<Item = &'a str>, cwd: Option<&Path>) -> GhActs {
-    let Some(call) = parse_api_call(words) else {
-        return GhActs::default();
+fn gh_api<'a>(words: impl Iterator<Item = &'a str>, cwd: Option<&Path>) -> Verdict {
+    let Some(call) = parse_api_call(words, cwd) else {
+        return Verdict::closed(format!("`gh api` endpoint could not be read; {ALLOW_RULE}"));
     };
-    classify_api(
+    if call.method_unreadable || call.endpoint_unreadable || unreadable_token(&call.endpoint) {
+        return Verdict::closed(format!(
+            "`gh api` method or endpoint could not be read; {ALLOW_RULE}"
+        ));
+    }
+    let acts = classify_api(
         &call.endpoint,
         call.method.as_deref(),
         &call.fields,
         call.input.as_deref(),
         cwd,
-    )
-}
-
-fn gh_api_cursor_ref<'a>(
-    words: impl Iterator<Item = &'a str>,
-    cwd: Option<&Path>,
-) -> Option<String> {
-    let call = parse_api_call(words)?;
-    classify_api_cursor_ref(
+    );
+    let why = classify_api_cursor_ref(
         &call.endpoint,
         call.method.as_deref(),
         &call.fields,
         call.input.as_deref(),
         cwd,
-    )
+        call.opaque,
+    );
+    let has_body = !call.fields.is_empty() || call.input.is_some() || call.opaque;
+    let saw_ref =
+        why.is_some() || endpoint_writes_ref(&call.endpoint, call.method.as_deref(), has_body);
+    Verdict {
+        push: why,
+        acts,
+        saw_ref,
+    }
 }
 
-fn parse_api_call<'a>(words: impl Iterator<Item = &'a str>) -> Option<ApiCall> {
+fn endpoint_writes_ref(endpoint: &str, method: Option<&str>, has_body: bool) -> bool {
+    if !api_writes(method, has_body) {
+        return false;
+    }
+    let path = api_path(endpoint);
+    if graphql_path(&path) || git_refs_tail(&path).is_some() {
+        return true;
+    }
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    parts
+        .iter()
+        .any(|part| matches!(*part, "releases" | "merges" | "contents" | "branches"))
+}
+
+fn parse_api_call<'a>(words: impl Iterator<Item = &'a str>, cwd: Option<&Path>) -> Option<ApiCall> {
     let mut method: Option<String> = None;
     let mut endpoint: Option<String> = None;
     let mut fields: Vec<(String, String)> = Vec::new();
     let mut input: Option<String> = None;
+    let mut opaque = false;
+    let mut method_unreadable = false;
+    let mut endpoint_unreadable = false;
     let mut it = words;
+    let note_method = |value: &str, method: &mut Option<String>, bad: &mut bool| {
+        if unreadable_token(value) {
+            *bad = true;
+        }
+        *method = Some(value.to_string());
+    };
     while let Some(word) = it.next() {
         if word == "--" {
             if endpoint.is_none() {
-                endpoint = it.next().map(str::to_string);
+                if let Some(value) = it.next() {
+                    if unreadable_token(value) {
+                        endpoint_unreadable = true;
+                    }
+                    endpoint = Some(value.to_string());
+                }
             }
             continue;
         }
         if let Some(rest) = word.strip_prefix("--method=") {
-            method = Some(rest.to_string());
+            note_method(rest, &mut method, &mut method_unreadable);
             continue;
         }
-        if let Some(rest) = word
-            .strip_prefix("--raw-field=")
-            .or_else(|| word.strip_prefix("--field="))
-        {
+        if let Some(rest) = word.strip_prefix("--raw-field=") {
             fields.push(field_pair(rest));
+            continue;
+        }
+        if let Some(rest) = word.strip_prefix("--field=") {
+            match resolve_typed_field(rest, cwd) {
+                Ok(pair) => fields.push(pair),
+                Err(()) => opaque = true,
+            }
             continue;
         }
         if let Some(rest) = word.strip_prefix("--input=") {
@@ -461,7 +892,7 @@ fn parse_api_call<'a>(words: impl Iterator<Item = &'a str>) -> Option<ApiCall> {
         }
         if let Some(inline) = word.strip_prefix("-X") {
             if !word.starts_with("--") && !inline.is_empty() {
-                method = Some(inline.to_string());
+                note_method(inline, &mut method, &mut method_unreadable);
                 continue;
             }
         }
@@ -470,8 +901,12 @@ fn parse_api_call<'a>(words: impl Iterator<Item = &'a str>) -> Option<ApiCall> {
                 continue;
             };
             match word {
-                "-X" | "--method" => method = Some(value.to_string()),
-                "-f" | "--raw-field" | "-F" | "--field" => fields.push(field_pair(value)),
+                "-X" | "--method" => note_method(value, &mut method, &mut method_unreadable),
+                "-f" | "--raw-field" => fields.push(field_pair(value)),
+                "-F" | "--field" => match resolve_typed_field(value, cwd) {
+                    Ok(pair) => fields.push(pair),
+                    Err(()) => opaque = true,
+                },
                 "--input" => input = Some(value.to_string()),
                 _ => {}
             }
@@ -481,6 +916,9 @@ fn parse_api_call<'a>(words: impl Iterator<Item = &'a str>) -> Option<ApiCall> {
             continue;
         }
         if endpoint.is_none() {
+            if unreadable_token(word) {
+                endpoint_unreadable = true;
+            }
             endpoint = Some(word.to_string());
         }
     }
@@ -490,7 +928,24 @@ fn parse_api_call<'a>(words: impl Iterator<Item = &'a str>) -> Option<ApiCall> {
         endpoint,
         fields,
         input,
+        opaque,
+        method_unreadable,
+        endpoint_unreadable,
     })
+}
+
+/// `-F` / `--field` reads `@file` as the field's value. `-f` does not.
+/// `Err` when that file is missing, unreadable, or itself a substitution.
+fn resolve_typed_field(raw: &str, cwd: Option<&Path>) -> Result<(String, String), ()> {
+    let (key, value) = field_pair(raw);
+    let Some(path) = value.strip_prefix('@') else {
+        return Ok((key, value));
+    };
+    if path.is_empty() || path == "-" || unreadable_token(path) {
+        return Err(());
+    }
+    let text = read_query(cwd, path).ok_or(())?;
+    Ok((key, text.trim_end_matches('\n').to_string()))
 }
 
 fn field_pair(raw: &str) -> (String, String) {
@@ -523,16 +978,17 @@ fn classify_api_cursor_ref(
     fields: &[(String, String)],
     input: Option<&str>,
     cwd: Option<&Path>,
+    opaque: bool,
 ) -> Option<String> {
-    let has_body = !fields.is_empty() || input.is_some();
+    let has_body = !fields.is_empty() || input.is_some() || opaque;
     if !api_writes(method, has_body) {
         return None;
     }
     let path = api_path(endpoint);
     if graphql_path(&path) {
-        return graphql_cursor_ref(fields, input, cwd);
+        return graphql_cursor_ref(fields, input, cwd, opaque);
     }
-    rest_cursor_ref(&path, method, fields, input, cwd)
+    rest_ref_write(endpoint, &path, method, fields, input, cwd, opaque)
 }
 
 /// gh's default is GET, and POST when a field or a body was given. An
@@ -701,15 +1157,16 @@ fn git_refs_tail(path: &str) -> Option<Vec<&str>> {
     Some(parts[at + 2..].to_vec())
 }
 
-fn rest_cursor_ref(
+fn rest_ref_write(
+    endpoint: &str,
     path: &str,
     method: Option<&str>,
     fields: &[(String, String)],
     input: Option<&str>,
     cwd: Option<&Path>,
+    opaque: bool,
 ) -> Option<String> {
-    let tail = git_refs_tail(path)?;
-    let has_body = !fields.is_empty() || input.is_some();
+    let has_body = !fields.is_empty() || input.is_some() || opaque;
     let method = method.map(|m| m.to_ascii_uppercase()).unwrap_or_else(|| {
         if has_body {
             "POST".into()
@@ -717,29 +1174,52 @@ fn rest_cursor_ref(
             "GET".into()
         }
     });
+    if let Some(why) = rest_other_ref(endpoint, path, &method, fields, input, cwd, opaque) {
+        return Some(why);
+    }
+    let tail = git_refs_tail(path)?;
+    let mut body = read_ref_body(fields, input, cwd);
+    if opaque {
+        body.opaque = true;
+    }
     match method.as_str() {
         "DELETE" => Some("`gh api` can delete refs through /git/refs".into()),
         "POST" if tail.is_empty() => {
-            let body = read_ref_body(fields, input, cwd);
-            if body.opaque {
-                return Some(
-                    "`gh api` can create refs through /git/refs with an unread request body".into(),
-                );
+            if body.opaque || body.refs.is_empty() {
+                return Some(format!(
+                    "`gh api` can create refs through /git/refs and the destination could not be read; {ALLOW_RULE}"
+                ));
             }
             body.refs
                 .into_iter()
-                .find(|name| under_cursor(name))
-                .map(|name| format!("`gh api` can create {name} through /git/refs"))
+                .find_map(|name| match branch_permitted(&name) {
+                    Err(why) => Some(why),
+                    Ok(false) => Some(format!("`gh api` can create {name} through /git/refs")),
+                    Ok(true) => None,
+                })
         }
         "PATCH" if !tail.is_empty() => {
-            let body = read_ref_body(fields, input, cwd);
+            if body.opaque {
+                return Some(format!(
+                    "`gh api` can force-update refs through /git/refs with an unread request body; {ALLOW_RULE}"
+                ));
+            }
             match body.force {
                 ForceFlag::True => Some("`gh api` can force-update refs through /git/refs".into()),
                 ForceFlag::Unknown => Some(
                     "`gh api` can force-update refs through /git/refs with an unread force value"
                         .into(),
                 ),
-                _ => None,
+                _ => {
+                    let name = tail.join("/");
+                    match branch_permitted(&name) {
+                        Err(why) => Some(why),
+                        Ok(false) => Some(format!(
+                            "`gh api` can update {name} through /git/refs; {ALLOW_RULE}"
+                        )),
+                        Ok(true) => None,
+                    }
+                }
             }
         }
         _ => None,
@@ -827,18 +1307,6 @@ fn quoted_strings(text: &str) -> Vec<String> {
     out
 }
 
-fn quoted_ref_names(text: &str) -> Vec<String> {
-    quoted_strings(text)
-        .into_iter()
-        .filter(|value| {
-            value.starts_with("refs/")
-                || value.starts_with("heads/")
-                || value.starts_with("tags/")
-                || value.starts_with("cursor/")
-        })
-        .collect()
-}
-
 fn force_in_text(text: &str) -> ForceFlag {
     let mut force = ForceFlag::Absent;
     let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
@@ -864,6 +1332,11 @@ fn force_in_text(text: &str) -> ForceFlag {
         while rest.peek().is_some_and(|c| c.is_whitespace()) {
             rest.next();
         }
+        if rest.peek() == Some(&'$') {
+            force = merge_force(force, ForceFlag::Unknown);
+            at = end;
+            continue;
+        }
         let mut literal = String::new();
         while rest
             .peek()
@@ -878,32 +1351,134 @@ fn force_in_text(text: &str) -> ForceFlag {
     force
 }
 
+fn rest_other_ref(
+    endpoint: &str,
+    path: &str,
+    method: &str,
+    fields: &[(String, String)],
+    input: Option<&str>,
+    cwd: Option<&Path>,
+    opaque: bool,
+) -> Option<String> {
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    let ends = |name: &str| parts.last() == Some(&name);
+    if method == "POST" && ends("releases") {
+        return Some(format!("`gh api` can create a release tag; {ALLOW_RULE}"));
+    }
+    if method == "POST" && ends("rename") && parts.contains(&"branches") {
+        return Some(format!(
+            "`gh api` can rename a branch, which deletes the old ref; {ALLOW_RULE}"
+        ));
+    }
+    if method == "POST" && ends("merges") {
+        return named_branch_field(fields, input, cwd, opaque, "base", "`gh api` merge");
+    }
+    if method == "PUT" && parts.contains(&"contents") {
+        if let Some(branch) =
+            query_param(endpoint, "branch").or_else(|| query_param(endpoint, "ref"))
+        {
+            return judge_named_branch(&branch, "`gh api` contents");
+        }
+        return named_branch_field(fields, input, cwd, opaque, "branch", "`gh api` contents");
+    }
+    None
+}
+
+fn named_branch_field(
+    fields: &[(String, String)],
+    input: Option<&str>,
+    cwd: Option<&Path>,
+    opaque: bool,
+    key: &str,
+    what: &str,
+) -> Option<String> {
+    match body_string(fields, input, cwd, key) {
+        Some(name) if !unreadable_token(&name) => judge_named_branch(&name, what),
+        _ if opaque => Some(format!(
+            "{what} does not show the branch it writes; {ALLOW_RULE}"
+        )),
+        Some(name) => Some(format!(
+            "{what} names `{name}`, which is only known once the shell expands it; {ALLOW_RULE}"
+        )),
+        None => Some(format!(
+            "{what} does not show the branch it writes; {ALLOW_RULE}"
+        )),
+    }
+}
+
+fn judge_named_branch(name: &str, what: &str) -> Option<String> {
+    match branch_permitted(name) {
+        Err(why) => Some(why),
+        Ok(true) => None,
+        Ok(false) => Some(format!("{what} updates {name}; {ALLOW_RULE}")),
+    }
+}
+
+fn body_string(
+    fields: &[(String, String)],
+    input: Option<&str>,
+    cwd: Option<&Path>,
+    key: &str,
+) -> Option<String> {
+    if let Some((_, value)) = fields.iter().rev().find(|(k, _)| k == key) {
+        if !value.is_empty() {
+            return Some(value.clone());
+        }
+    }
+    let path = input?;
+    if path == "-" {
+        return None;
+    }
+    let text = read_query(cwd, path)?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    value.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+fn query_param(endpoint: &str, key: &str) -> Option<String> {
+    let query = endpoint.split_once('?')?.1.split('#').next()?;
+    for pair in query.split('&') {
+        let (name, value) = pair.split_once('=')?;
+        if name == key && !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
 fn graphql_cursor_ref(
     fields: &[(String, String)],
     input: Option<&str>,
     cwd: Option<&Path>,
+    extra_opaque: bool,
 ) -> Option<String> {
     let (texts, opaque) = graphql_texts(fields, input, cwd);
-    let mut saw_ref_mutation = false;
+    if extra_opaque || (opaque && texts.is_empty()) {
+        return Some(format!(
+            "`gh api graphql` body could write refs and could not be read; {ALLOW_RULE}"
+        ));
+    }
     for text in &texts {
-        if has_ident(text, "deleteRef") {
+        let code = without_strings(text);
+        if has_ident(&code, "deleteRef") {
             return Some("`gh api graphql` can delete refs with deleteRef".into());
         }
-        if has_ident(text, "createRef") {
-            saw_ref_mutation = true;
-            let refs = quoted_ref_names(text);
-            if refs.is_empty() {
-                return Some(
-                    "`gh api graphql` can create refs with createRef and an unread ref name".into(),
-                );
-            }
-            if let Some(name) = refs.into_iter().find(|name| under_cursor(name)) {
-                return Some(format!("`gh api graphql` can create {name} with createRef"));
+        if has_ident(&code, "createRef") {
+            if let Some(why) = graphql_destinations(text, "name", "createRef") {
+                return Some(why);
             }
         }
-        if has_ident(text, "updateRef") || has_ident(text, "updateRefs") {
-            saw_ref_mutation = true;
-            match force_in_text(text) {
+        if has_ident(&code, "createCommitOnBranch") {
+            if let Some(why) = graphql_destinations(text, "branchName", "createCommitOnBranch") {
+                return Some(why);
+            }
+        }
+        if has_ident(&code, "mergeBranch") {
+            if let Some(why) = graphql_destinations(text, "base", "mergeBranch") {
+                return Some(why);
+            }
+        }
+        if has_ident(&code, "updateRef") || has_ident(&code, "updateRefs") {
+            match force_in_text(&code) {
                 ForceFlag::True => {
                     return Some("`gh api graphql` can force-update refs with force: true".into());
                 }
@@ -914,12 +1489,145 @@ fn graphql_cursor_ref(
                 }
                 _ => {}
             }
+            if !has_literal_oid(&code) {
+                return Some(format!(
+                    "`gh api graphql` updateRefs shows no oid, so the ref it writes cannot be read; {ALLOW_RULE}"
+                ));
+            }
+            if let Some(why) = graphql_destinations(text, "name", "updateRef") {
+                return Some(why);
+            }
         }
     }
-    if opaque && saw_ref_mutation {
-        return Some("`gh api graphql` body could write refs and could not be read".into());
+    if opaque {
+        return Some(format!(
+            "`gh api graphql` body could write refs and could not be read; {ALLOW_RULE}"
+        ));
     }
     None
+}
+
+fn graphql_destinations(text: &str, key: &str, what: &str) -> Option<String> {
+    let fields = string_fields(text, key);
+    if fields.is_empty() {
+        return Some(format!(
+            "`gh api graphql` {what} does not name a branch; {ALLOW_RULE}"
+        ));
+    }
+    for field in fields {
+        match field {
+            FieldRead::Unknown => {
+                return Some(format!(
+                    "`gh api graphql` {what} names a branch the line does not show; {ALLOW_RULE}"
+                ));
+            }
+            FieldRead::Value(name) => match branch_permitted(&name) {
+                Err(why) => return Some(why),
+                Ok(false) => {
+                    return Some(format!(
+                        "`gh api graphql` {what} updates {name}; {ALLOW_RULE}"
+                    ));
+                }
+                Ok(true) => {}
+            },
+        }
+    }
+    None
+}
+
+enum FieldRead {
+    Unknown,
+    Value(String),
+}
+
+fn string_fields(text: &str, key: &str) -> Vec<FieldRead> {
+    let mut out = Vec::new();
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut at = 0usize;
+    while let Some(found) = text[at..].find(key) {
+        let start = at + found;
+        let before = text[..start].chars().next_back();
+        let end = start + key.len();
+        let after = text[end..].chars().next();
+        if before.is_some_and(ident) || after.is_some_and(ident) {
+            at = end;
+            continue;
+        }
+        let rest = text[end..].trim_start();
+        if !rest.starts_with(':') {
+            at = end;
+            continue;
+        }
+        let rest = rest[1..].trim_start();
+        if rest.starts_with('$') || rest.starts_with('`') {
+            out.push(FieldRead::Unknown);
+        } else if rest.starts_with('"') {
+            let value = quoted_strings(rest).into_iter().next().unwrap_or_default();
+            out.push(FieldRead::Value(value));
+        } else {
+            out.push(FieldRead::Unknown);
+        }
+        at = end;
+    }
+    out
+}
+
+/// Query text with each double-quoted string emptied, so an identifier
+/// inside a comment is not a mutation. Escapes keep their character.
+fn without_strings(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] != '"' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        out.push('"');
+        out.push('"');
+        i += 1;
+        while i < chars.len() {
+            if chars[i] == '\\' {
+                i += 1;
+                if i < chars.len() {
+                    i += 1;
+                }
+                continue;
+            }
+            if chars[i] == '"' {
+                i += 1;
+                break;
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+/// An `oid: "..."` argument, not `afterOid` or `beforeOid`, and not a
+/// variable. `updateRefs` with only `afterOid` has no literal oid.
+fn has_literal_oid(text: &str) -> bool {
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut at = 0usize;
+    while let Some(found) = text[at..].find("oid") {
+        let start = at + found;
+        let before = text[..start].chars().next_back();
+        let end = start + "oid".len();
+        let after = text[end..].chars().next();
+        if before.is_some_and(ident) || after.is_some_and(ident) {
+            at = end;
+            continue;
+        }
+        let rest = text[end..].trim_start();
+        if let Some(rest) = rest.strip_prefix(':') {
+            if rest.trim_start().starts_with('"') {
+                return true;
+            }
+        }
+        at = end;
+    }
+    false
 }
 
 fn read_query(cwd: Option<&Path>, path: &str) -> Option<String> {
@@ -939,9 +1647,10 @@ fn read_query(cwd: Option<&Path>, path: &str) -> Option<String> {
 }
 
 fn mutation_acts(text: &str) -> GhActs {
+    let code = without_strings(text);
     GhActs {
-        open: OPEN_MUTATIONS.iter().any(|name| has_ident(text, name)),
-        merge: MERGE_MUTATIONS.iter().any(|name| has_ident(text, name)),
+        open: OPEN_MUTATIONS.iter().any(|name| has_ident(&code, name)),
+        merge: MERGE_MUTATIONS.iter().any(|name| has_ident(&code, name)),
     }
 }
 
@@ -985,22 +1694,15 @@ fn argv(segment: &str) -> Vec<String> {
     out
 }
 
-/// The git argv a shell alias script runs. `None` when the script never
-/// reaches a plain `git ...` command that can be read from words.
-fn alias_script_words(script: &str) -> Option<Vec<String>> {
-    for line in crate::nested_lines(script, 0) {
-        for segment in crate::raw_segments(&line) {
-            let mut words = argv(&segment);
-            if words.first().map(String::as_str) != Some("git") {
-                continue;
-            }
-            words.remove(0);
-            if !words.is_empty() {
-                return Some(words);
-            }
-        }
-    }
-    None
+enum GitOutcome {
+    Push(Box<Push>),
+    /// A `!` alias. The whole script is judged by the same walk.
+    Shell(String),
+}
+
+enum Expanded {
+    Argv(Vec<String>),
+    Shell(String),
 }
 
 /// Where `cd ARGS` leaves the line, `None` when it cannot be told: `-`,
@@ -1131,7 +1833,7 @@ fn git_push(
     line_aliases: &[(String, String)],
     env: &[(String, String)],
     via_xargs: bool,
-) -> Option<Push> {
+) -> Option<GitOutcome> {
     let mut at = Checkout {
         dir,
         env: env.to_vec(),
@@ -1168,31 +1870,116 @@ fn git_push(
     let mut words: Vec<String> = vec![sub.clone()];
     words.extend(args[i + 1..].iter().cloned());
     words = match at.expand_aliases(words, line_aliases) {
-        Ok(words) => words,
-        Err(why) => return Some(Push::refuse(at, why)),
+        Ok(Expanded::Argv(words)) => words,
+        Ok(Expanded::Shell(script)) => return Some(GitOutcome::Shell(script)),
+        Err(why) => return Some(GitOutcome::Push(Box::new(Push::refuse(at, why)))),
     };
     let sub = words.first().map(String::as_str)?;
     if unresolved_subcommand(sub) {
-        return Some(Push::refuse(
+        return Some(GitOutcome::Push(Box::new(Push::refuse(
             at,
             format!("`{sub}` is only known once the shell expands it; name the git subcommand"),
-        ));
+        ))));
     }
     match sub {
         "push" => {
             if via_xargs {
-                return Some(Push::refuse(
+                return Some(GitOutcome::Push(Box::new(Push::refuse(
                     at,
                     "xargs fills git push arguments at run time; name each refspec directly"
                         .to_string(),
-                ));
+                ))));
             }
-            Some(Push::read(&words[1..], at))
+            Some(GitOutcome::Push(Box::new(Push::read(&words[1..], at))))
         }
-        "send-pack" => send_pack_cursor_ref(&words, &at).map(|why| Push::refuse(at, why)),
-        "subtree" => subtree_push_cursor_ref(&words, &at).map(|why| Push::refuse(at, why)),
-        "submodule" => submodule_foreach_cursor_ref(&words, &at).map(|why| Push::refuse(at, why)),
+        "send-pack" => Some(GitOutcome::Push(Box::new(send_pack_push(&words, at)))),
+        "subtree" => subtree_push_cursor_ref(&words, &at)
+            .map(|why| GitOutcome::Push(Box::new(Push::refuse(at, why)))),
+        "submodule" => submodule_foreach_cursor_ref(&words, &at)
+            .map(|why| GitOutcome::Push(Box::new(Push::refuse(at, why)))),
         _ => None,
+    }
+}
+
+/// A `git config` write whose key changes where a later push on this line
+/// sends refs. An alias assignment is not one: that alias is judged.
+fn config_affects_push(args: &[String]) -> bool {
+    let mut i = 0;
+    while let Some(word) = args.get(i).map(String::as_str) {
+        if GIT_VALUED.contains(&word) {
+            i += 2;
+            continue;
+        }
+        if word.starts_with('-') && word.len() > 1 {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    if args.get(i).map(String::as_str) != Some("config") {
+        return false;
+    }
+    i += 1;
+    let mut read = false;
+    let mut positional: Vec<&str> = Vec::new();
+    while let Some(word) = args.get(i).map(String::as_str) {
+        if matches!(
+            word,
+            "--get"
+                | "--get-all"
+                | "--get-regexp"
+                | "--get-urlmatch"
+                | "--list"
+                | "-l"
+                | "--show-origin"
+                | "--show-scope"
+                | "--get-color"
+        ) {
+            read = true;
+            i += 1;
+            continue;
+        }
+        if matches!(
+            word,
+            "--file" | "-f" | "--blob" | "--default" | "--comment" | "--type"
+        ) {
+            i += 2;
+            continue;
+        }
+        if word.starts_with('-') && word.len() > 1 {
+            i += 1;
+            continue;
+        }
+        positional.push(word);
+        i += 1;
+    }
+    if read || positional.is_empty() {
+        return false;
+    }
+    let key = positional[0];
+    let key = key.split_once('=').map(|(key, _)| key).unwrap_or(key);
+    if unreadable_token(key) {
+        return true;
+    }
+    affects_push_key(key)
+}
+
+fn affects_push_key(key: &str) -> bool {
+    if key == "push.default" || key == "remote.pushdefault" {
+        return true;
+    }
+    let Some((head, tail)) = key.split_once('.') else {
+        return false;
+    };
+    match head {
+        "remote" => tail.ends_with(".push") || tail.ends_with(".mirror"),
+        "branch" => {
+            tail.ends_with(".merge")
+                || tail.ends_with(".remote")
+                || tail.ends_with(".pushRemote")
+                || tail.ends_with(".pushremote")
+        }
+        _ => false,
     }
 }
 
@@ -1231,68 +2018,85 @@ fn unresolved_subcommand(sub: &str) -> bool {
     sub.contains(['$', '`', '(', ')', '{', '}', '[', ']', '*', '?'])
 }
 
-fn send_pack_cursor_ref(words: &[String], at: &Checkout) -> Option<String> {
-    if words.first().map(String::as_str) != Some("send-pack") {
-        return None;
-    }
-    let mut remote = None;
-    let mut specs: Vec<&str> = Vec::new();
-    let mut bulk: Vec<&str> = Vec::new();
-    let mut i = 1;
-    while let Some(word) = words.get(i).map(String::as_str) {
+/// `git send-pack`, flags included after the remote. `--stdin` names no
+/// refspec on the line, so it fails closed. The result is judged as a push.
+fn send_pack_push(words: &[String], at: Checkout) -> Push {
+    let mut remote: Option<String> = None;
+    let mut specs: Vec<String> = Vec::new();
+    let mut bulk: Vec<String> = Vec::new();
+    let mut dry = false;
+    let mut force = false;
+    let mut stdin = false;
+    let mut i = 1usize;
+    while i < words.len() {
+        let word = words[i].as_str();
         if word == "--" {
+            let rest = &words[i + 1..];
             if remote.is_none() {
-                remote = words.get(i + 1).map(String::as_str);
-                specs.extend(words.iter().skip(i + 2).map(String::as_str));
+                if let Some(name) = rest.first() {
+                    remote = Some(name.clone());
+                    specs.extend(rest.iter().skip(1).cloned());
+                }
             } else {
-                specs.extend(words.iter().skip(i + 1).map(String::as_str));
+                specs.extend(rest.iter().cloned());
             }
             break;
         }
-        if remote.is_none() {
-            match word {
-                "--all" | "--branches" | "--mirror" | "--tags" => {
-                    bulk.push(word);
-                    i += 1;
-                    continue;
-                }
-                "--receive-pack" | "--exec" => {
-                    i += 2;
-                    continue;
-                }
-                _ if word.starts_with("--receive-pack=") || word.starts_with("--exec=") => {
-                    i += 1;
-                    continue;
-                }
-                _ if word.starts_with('-') && word.len() > 1 => {
-                    i += 1;
-                    continue;
-                }
-                _ => {
-                    remote = Some(word);
-                    i += 1;
-                    continue;
-                }
-            }
-        } else {
-            specs.push(word);
+        if matches!(word, "--receive-pack" | "--exec") {
+            i += 2;
+            continue;
+        }
+        if word.starts_with("--receive-pack=") || word.starts_with("--exec=") {
             i += 1;
+            continue;
         }
-    }
-    for flag in &bulk {
-        let under: &[&str] = match *flag {
-            "--all" | "--branches" => &["refs/heads/"],
-            "--mirror" => &["refs/heads/", "refs/tags/"],
-            _ => &["refs/tags/"],
-        };
-        if let Some(why) = at.local(under, &format!("`{flag}`")) {
-            return Some(why);
+        if matches!(
+            word,
+            "--all" | "--branches" | "--mirror" | "--tags" | "--stdin" | "--dry-run"
+        ) || is_force_flag(word)
+        {
+            match word {
+                "--all" | "--branches" | "--mirror" | "--tags" => bulk.push(word.to_string()),
+                "--stdin" => stdin = true,
+                "--dry-run" => dry = true,
+                _ => force = true,
+            }
+            i += 1;
+            continue;
         }
+        if word.starts_with('-') && word.len() > 1 {
+            i += 1;
+            continue;
+        }
+        if remote.is_none() {
+            remote = Some(word.to_string());
+        } else {
+            specs.push(word.to_string());
+        }
+        i += 1;
     }
-    if bulk.contains(&"--mirror") {
-        return Some("`--mirror` can delete remote cursor/* branches and tags".into());
+    if stdin {
+        return Push::refuse(
+            at,
+            format!("git send-pack --stdin reads refspecs the line does not show; {ALLOW_RULE}"),
+        );
     }
-    specs.into_iter().find_map(|spec| at.spec(spec, remote))
+    let mut pushed = Vec::new();
+    if let Some(name) = remote {
+        pushed.push(name);
+    }
+    pushed.extend(specs);
+    Push {
+        reason: None,
+        at,
+        words: pushed,
+        repo: None,
+        bulk,
+        prune: false,
+        dry_run: dry,
+        force,
+        delete: false,
+    }
 }
 
 fn subtree_push_cursor_ref(words: &[String], at: &Checkout) -> Option<String> {
@@ -1359,6 +2163,12 @@ struct Push {
     /// `--prune`, which deletes remote refs with no local counterpart under
     /// its destination patterns.
     prune: bool,
+    /// `--dry-run` or `-n`: the command writes nothing.
+    dry_run: bool,
+    /// `--force`, a short cluster containing `f`, or a lease force.
+    force: bool,
+    /// `--delete` or `-d`.
+    delete: bool,
 }
 
 impl Push {
@@ -1370,6 +2180,9 @@ impl Push {
             repo: None,
             bulk: Vec::new(),
             prune: false,
+            dry_run: false,
+            force: false,
+            delete: false,
         };
         let mut it = args.iter();
         while let Some(word) = it.next() {
@@ -1384,6 +2197,12 @@ impl Push {
                 push.repo = Some(value.to_string());
             } else if word == "--prune" {
                 push.prune = true;
+            } else if word == "--dry-run" || short_dry_run(word) {
+                push.dry_run = true;
+            } else if word == "--delete" || short_delete(word) {
+                push.delete = true;
+            } else if is_force_flag(word) {
+                push.force = true;
             } else if crate::PUSH_VALUED.contains(&word) || short_cluster_takes_value(word) {
                 it.next();
             } else if matches!(
@@ -1406,15 +2225,36 @@ impl Push {
             repo: None,
             bulk: Vec::new(),
             prune: false,
+            dry_run: false,
+            force: false,
+            delete: false,
         }
     }
 
-    /// Why this push would update a `cursor/*` ref.
+    /// Why this push would write a ref the seat may not update.
     fn cursor_ref(&self) -> Option<String> {
+        if self.dry_run {
+            return None;
+        }
         if let Some(reason) = &self.reason {
             return Some(reason.clone());
         }
+        if self.delete {
+            return Some("this push deletes a ref; a cloud seat may not delete a ref".to_string());
+        }
+        if self.prune {
+            return Some(
+                "`--prune` can delete remote refs; a cloud seat may not delete a ref".to_string(),
+            );
+        }
+        // `--follow-tags` also pushes the branch checked out. Judge that
+        // branch before the tags, so a `cursor/*` checkout still says so
+        // when a tag is present too.
+        let follow_tags = self.bulk.iter().any(|f| f == "--follow-tags");
         for flag in &self.bulk {
+            if flag == "--follow-tags" {
+                continue;
+            }
             let under: &[&str] = match flag.as_str() {
                 "--all" | "--branches" => &["refs/heads/"],
                 "--mirror" => &["refs/heads/", "refs/tags/"],
@@ -1425,7 +2265,10 @@ impl Push {
             }
         }
         if self.bulk.iter().any(|f| f == "--mirror") {
-            return Some("`--mirror` can delete remote cursor/* branches and tags".into());
+            return Some(
+                "`--mirror` can delete remote branches and tags; a cloud seat may not delete a ref"
+                    .to_string(),
+            );
         }
         // git reads the first word as the remote even beside `--repo`, and
         // a writer may mean every word as a refspec; both readings are
@@ -1435,9 +2278,6 @@ impl Push {
         } else {
             (self.words.first(), self.words.get(1..).unwrap_or(&[]))
         };
-        if self.prune && specs.iter().any(|spec| prune_covers_heads(spec)) {
-            return Some("`--prune` can delete remote cursor/* branches under refs/heads/".into());
-        }
         let mut words = specs.iter();
         while let Some(word) = words.next() {
             let spec = match (word.as_str(), words.clone().next()) {
@@ -1458,13 +2298,50 @@ impl Push {
             .bulk
             .iter()
             .any(|f| matches!(f.as_str(), "--all" | "--branches" | "--mirror"));
-        let follow_tags = self.bulk.iter().any(|f| f == "--follow-tags");
         let tags_only = self.bulk.iter().any(|f| f == "--tags") && !covers_heads && !follow_tags;
         if self.words.len() <= 1 && !covers_heads && !tags_only {
-            return self.at.implicit(remote.map(String::as_str));
+            if let Some(why) = self.at.implicit(remote.map(String::as_str)) {
+                return Some(why);
+            }
+        }
+        if follow_tags {
+            if let Some(why) = self.at.local(&["refs/tags/"], "`--follow-tags`") {
+                return Some(why);
+            }
+        }
+        if self.force {
+            return Some(format!("a cloud seat may not force a ref; {ALLOW_RULE}"));
         }
         None
     }
+}
+
+/// A short option cluster (`-n`, `-fu`), not a long option.
+fn short_cluster(word: &str) -> Option<&str> {
+    let flags = word.strip_prefix('-')?;
+    if flags.is_empty() || flags.starts_with('-') {
+        return None;
+    }
+    flags
+        .chars()
+        .all(|c| c.is_ascii_alphabetic())
+        .then_some(flags)
+}
+
+fn short_dry_run(word: &str) -> bool {
+    short_cluster(word).is_some_and(|flags| flags.contains('n'))
+}
+
+fn short_delete(word: &str) -> bool {
+    short_cluster(word).is_some_and(|flags| flags.contains('d'))
+}
+
+fn is_force_flag(word: &str) -> bool {
+    word == "--force"
+        || word == "--force-with-lease"
+        || word.starts_with("--force-with-lease=")
+        || word == "--force-if-includes"
+        || short_cluster(word).is_some_and(|flags| flags.contains('f'))
 }
 
 /// `-fo VALUE`: a short cluster whose last letter is `-o`, which takes
@@ -1508,21 +2385,11 @@ fn refspec_sides(spec: &str) -> Option<(&str, &str)> {
     Some((&spec[..at], &spec[at + 1..]))
 }
 
-fn prune_covers_heads(spec: &str) -> bool {
-    let spec = spec.strip_prefix('+').unwrap_or(spec);
-    let dst = spec.split_once(':').map(|(_, dst)| dst).unwrap_or(spec);
-    dst.starts_with("refs/heads/") && dst.contains('*')
-}
-
-/// A ref name under `cursor/`, written short or under `refs/heads/` or
-/// `refs/tags/`.
-fn under_cursor(name: &str) -> bool {
-    name.strip_prefix("refs/heads/")
-        .or_else(|| name.strip_prefix("refs/tags/"))
-        .or_else(|| name.strip_prefix("heads/"))
-        .or_else(|| name.strip_prefix("tags/"))
-        .unwrap_or(name)
-        .starts_with(CURSOR)
+/// A full refname is allowed when it is `refs/heads/<branch>` and that
+/// branch is on the seat allowlist. Tags and other namespaces are not.
+fn local_ref_allowed(allow: &HashSet<String>, full: &str) -> bool {
+    full.strip_prefix("refs/heads/")
+        .is_some_and(|name| allow.contains(name))
 }
 
 /// Where `name` lands under the pattern pair `src:dst`, each holding one
@@ -1625,7 +2492,7 @@ impl Checkout {
         &self,
         words: Vec<String>,
         line_aliases: &[(String, String)],
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Expanded, String> {
         let mut words = words;
         let mut seen = HashSet::new();
         while let Some(sub) = words.first().cloned() {
@@ -1639,22 +2506,25 @@ impl Checkout {
                 .map(|(_, value)| value.clone())
                 .or_else(|| self.alias_setting(&sub));
             let Some(value) = value else { break };
-            let mut expanded = if let Some(script) = value.strip_prefix('!') {
-                alias_script_words(script).ok_or_else(|| {
-                    format!(
-                        "`!` alias `{sub}` runs a shell command whose git argv could not be read"
-                    )
-                })?
-            } else {
-                value.split_whitespace().map(str::to_string).collect()
-            };
+            if let Some(script) = value.strip_prefix('!') {
+                let mut line = script.trim().to_string();
+                let extra: Vec<String> = words.iter().skip(1).cloned().collect();
+                if !extra.is_empty() {
+                    if !line.is_empty() {
+                        line.push(' ');
+                    }
+                    line.push_str(&extra.join(" "));
+                }
+                return Ok(Expanded::Shell(line));
+            }
+            let mut expanded: Vec<String> = value.split_whitespace().map(str::to_string).collect();
             if expanded.is_empty() {
                 break;
             }
             expanded.extend(words.into_iter().skip(1));
             words = expanded;
         }
-        Ok(words)
+        Ok(Expanded::Argv(words))
     }
 
     /// Every ref in the checkout, by its full name.
@@ -1667,29 +2537,30 @@ impl Checkout {
             .as_deref()
     }
 
-    /// Why a push of local refs under one of `under` reaches `cursor/`.
+    /// Why a push of local refs under one of `under` leaves the allowlist.
     fn local(&self, under: &[&str], what: &str) -> Option<String> {
         let Some(refs) = self.refs() else {
             return Some(UNREAD.into());
         };
+        let allow = match seat_allowlist() {
+            Ok(allow) => allow,
+            Err(why) => return Some(why),
+        };
         refs.iter()
-            .find(|r| {
-                under
-                    .iter()
-                    .any(|p| r.strip_prefix(p).is_some_and(|n| n.starts_with(CURSOR)))
-            })
+            .find(|r| under.iter().any(|p| r.starts_with(p)) && !local_ref_allowed(&allow, r))
             .map(|r| format!("{what} pushes {r}"))
     }
 
-    /// Why the refspec `spec` would update a `cursor/*` ref: its
-    /// destination (`dst` of `src:dst`, else the refspec itself, a leading
-    /// `+` off), the branch checked out for `HEAD`, or each local ref a
-    /// wildcard maps there. A destination the shell still has to expand
-    /// cannot be told, and is refused.
+    /// Why the refspec `spec` would write a ref outside the allowlist, or
+    /// force or delete one. The destination is `dst` of `src:dst`, else
+    /// the refspec itself, a leading `+` off. `HEAD` is the branch checked
+    /// out. A wildcard is each local ref it maps. A destination the shell
+    /// still has to expand cannot be told, and is refused.
     fn spec(&self, spec: &str, remote: Option<&str>) -> Option<String> {
+        let forced = spec.starts_with('+');
         let spec = spec.strip_prefix('+').unwrap_or(spec);
         if spec == ":" {
-            return self.local(&["refs/heads/"], "a matching push");
+            return Some(format!("a matching push can delete refs; {ALLOW_RULE}"));
         }
         // A destination of `HEAD` is a branch named `HEAD` to git; only a
         // bare `HEAD` or `@` pushes the branch checked out. A colon inside
@@ -1698,20 +2569,40 @@ impl Checkout {
             Some((src, dst)) => (src, dst, false),
             None => (spec, spec, true),
         };
-        if bare && !under_cursor(dst) {
+        if src.is_empty() {
+            return Some(format!(
+                "this push deletes {dst}; a cloud seat may not delete a ref"
+            ));
+        }
+        if bare {
             if let Some(landed) = self.map_bare_destination(src, remote) {
-                if landed != dst && under_cursor(&landed) {
-                    return Some(format!("`{spec}` pushes {src} to {landed}"));
+                if landed != dst {
+                    if dest_refused(&landed).is_some() {
+                        return Some(format!("`{spec}` pushes {src} to {landed}"));
+                    }
+                    return forced.then(|| {
+                        format!("this push updates {landed}; a cloud seat may not force a ref")
+                    });
                 }
             }
         }
         if CURRENT_BRANCH.contains(&dst) || (bare && matches!(dst, "HEAD" | "@")) {
             return match self.branch() {
                 None => Some(UNREAD.into()),
-                Some(Some(branch)) if under_cursor(branch) => Some(format!(
-                    "this push updates {branch}, the branch checked out"
-                )),
-                Some(_) => None,
+                Some(Some(branch)) => match branch_permitted(branch) {
+                    Err(why) => Some(why),
+                    Ok(false) => Some(format!(
+                        "this push updates {branch}, the branch checked out"
+                    )),
+                    Ok(true) if forced => Some(format!(
+                        "this push updates {branch}; a cloud seat may not force a ref"
+                    )),
+                    Ok(true) => None,
+                },
+                Some(None) if forced => {
+                    Some(format!("a cloud seat may not force a ref; {ALLOW_RULE}"))
+                }
+                Some(None) => None,
             };
         }
         // An earlier assignment has already been substituted. What remains
@@ -1725,16 +2616,23 @@ impl Checkout {
             let Some(refs) = self.refs() else {
                 return Some(UNREAD.into());
             };
-            return refs.iter().find_map(|r| {
+            let hit = refs.iter().find_map(|r| {
                 let landed = land(src, dst, r).or_else(|| {
                     (!src.starts_with("refs/"))
                         .then(|| land(&format!("refs/heads/{src}"), dst, r))
                         .flatten()
                 })?;
-                under_cursor(&landed).then(|| format!("`{spec}` pushes {r} to {landed}"))
+                dest_refused(&landed).map(|_| format!("`{spec}` pushes {r} to {landed}"))
             });
+            if hit.is_some() {
+                return hit;
+            }
+            return forced.then(|| format!("a wildcard push may not be forced; {ALLOW_RULE}"));
         }
-        under_cursor(dst).then(|| format!("this push updates {dst}"))
+        if let Some(why) = dest_refused(dst) {
+            return Some(why);
+        }
+        forced.then(|| format!("this push updates {dst}; a cloud seat may not force a ref"))
     }
 
     /// Why a push with no refspec would update a `cursor/*` ref, read as
@@ -1779,15 +2677,22 @@ impl Checkout {
             "nothing" => None,
             "matching" => self.local(&["refs/heads/"], "a matching push"),
             "upstream" | "tracking" => {
-                of_branch("merge")
-                    .filter(|merge| under_cursor(merge))
-                    .map(|merge| {
-                        format!("this push updates {merge}, the upstream of the branch checked out")
-                    })
+                of_branch("merge").and_then(|merge| match branch_permitted(merge) {
+                    Err(why) => Some(why),
+                    Ok(false) => Some(format!(
+                        "this push updates {merge}, the upstream of the branch checked out"
+                    )),
+                    Ok(true) => None,
+                })
             }
-            _ => branch
-                .filter(|b| under_cursor(b))
-                .map(|b| format!("this push updates {b}, the branch checked out")),
+            _ => match branch {
+                Some(b) => match branch_permitted(b) {
+                    Err(why) => Some(why),
+                    Ok(false) => Some(format!("this push updates {b}, the branch checked out")),
+                    Ok(true) => None,
+                },
+                None => None,
+            },
         }
     }
 
@@ -1838,4 +2743,279 @@ fn map_push_spec(spec: &str, src: &str) -> Option<String> {
     }
     let from = from.strip_prefix("refs/heads/").unwrap_or(from);
     (from == src).then(|| to.to_string())
+}
+
+fn shell_script_file(words: &[String]) -> Option<String> {
+    let cmd = words.first()?.rsplit('/').next()?;
+    match cmd {
+        "source" | "." => words
+            .iter()
+            .skip(1)
+            .find(|word| !word.starts_with('-'))
+            .cloned(),
+        "bash" | "sh" | "dash" | "zsh" | "ksh" => {
+            if words.iter().any(|word| word == "-c" || word == "--command") {
+                return None;
+            }
+            let mut it = words.iter().skip(1);
+            while let Some(word) = it.next() {
+                if word == "--" {
+                    return it.next().cloned();
+                }
+                if matches!(word.as_str(), "-o" | "--rcfile" | "--init-file") {
+                    it.next();
+                    continue;
+                }
+                if word.starts_with('-') && word.len() > 1 {
+                    continue;
+                }
+                return Some(word.clone());
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn script_verdict(file: &str, cwd: Option<&Path>, state: &WalkIn) -> Verdict {
+    if unreadable_token(file) {
+        return Verdict::closed(format!(
+            "`{file}` is only known once the shell expands it; a script it names can write refs; {ALLOW_RULE}"
+        ));
+    }
+    match read_script(cwd, file) {
+        ScriptBody::Missing => Verdict::default(),
+        ScriptBody::Unreadable => {
+            Verdict::closed(format!("the script {file} could not be read; {ALLOW_RULE}"))
+        }
+        ScriptBody::Text(text) => {
+            let inner = judge_depth(&text, cwd, state);
+            if inner.push.is_some() || inner.acts.any() {
+                return inner;
+            }
+            if !inner.saw_ref && script_mentions_ref_write(&text) {
+                return Verdict::closed(format!(
+                    "the script {file} mentions a ref write the guard could not resolve; {ALLOW_RULE}"
+                ));
+            }
+            inner
+        }
+    }
+}
+
+enum ScriptBody {
+    Missing,
+    Unreadable,
+    Text(String),
+}
+
+fn read_script(cwd: Option<&Path>, file: &str) -> ScriptBody {
+    if file.is_empty() || file.contains('\0') {
+        return ScriptBody::Unreadable;
+    }
+    let path = Path::new(file);
+    let full = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        let Some(base) = cwd
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())
+        else {
+            return ScriptBody::Unreadable;
+        };
+        base.join(path)
+    };
+    match std::fs::metadata(&full) {
+        Ok(meta) if meta.is_file() => match std::fs::read_to_string(&full) {
+            Ok(text) => ScriptBody::Text(text),
+            Err(_) => ScriptBody::Unreadable,
+        },
+        Ok(_) => ScriptBody::Unreadable,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => ScriptBody::Missing,
+        Err(_) => ScriptBody::Unreadable,
+    }
+}
+
+fn script_mentions_ref_write(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("git push")
+        || lower.contains("git send-pack")
+        || lower.contains("gh api")
+        || lower.contains("gh release create")
+        || lower.contains("gh repo sync")
+        || ((lower.contains("curl") || lower.contains("wget") || lower.contains("http"))
+            && lower.contains("github.com"))
+}
+
+fn http_ref_write(
+    words: &[String],
+    env: &[(String, String)],
+    names: &[(String, String)],
+) -> Option<String> {
+    let cmd = words.first()?.rsplit('/').next()?;
+    if !matches!(cmd, "curl" | "wget" | "http" | "https") {
+        return None;
+    }
+    let joined = words.join(" ");
+    let aimed = joined.contains("api.github.com")
+        || joined.contains("github.com")
+        || joined.contains("github.ghe.com");
+    let url_hidden = words.iter().any(|word| {
+        (word.starts_with("http://") || word.starts_with("https://") || word.contains("github"))
+            && unreadable_token(word)
+    }) || words
+        .iter()
+        .any(|word| unreadable_token(word) && word.contains("://"));
+    let auth = http_has_auth(words, env, names);
+    if !(aimed || auth && url_hidden) {
+        return None;
+    }
+    if !auth {
+        return None;
+    }
+    if http_is_get(cmd, words) {
+        return None;
+    }
+    Some(format!(
+        "an HTTP client can write refs on GitHub and the destination is not limited to this seat; {ALLOW_RULE}"
+    ))
+}
+
+fn http_has_auth(words: &[String], env: &[(String, String)], names: &[(String, String)]) -> bool {
+    let joined = words.join(" ");
+    if joined.to_ascii_lowercase().contains("authorization") {
+        return true;
+    }
+    const TOKENS: &[&str] = &[
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
+        "GITHUB_PAT",
+    ];
+    let mentions = |text: &str| {
+        TOKENS
+            .iter()
+            .any(|name| text.contains(&format!("${name}")) || text.contains(&format!("${{{name}")))
+    };
+    if mentions(&joined) {
+        return true;
+    }
+    env.iter()
+        .chain(names.iter())
+        .any(|(key, value)| TOKENS.contains(&key.as_str()) && !value.is_empty())
+}
+
+fn http_is_get(cmd: &str, words: &[String]) -> bool {
+    match cmd {
+        "curl" => curl_is_get(words),
+        "wget" => wget_is_get(words),
+        "http" | "https" => httpie_is_get(words),
+        _ => false,
+    }
+}
+
+fn curl_is_get(words: &[String]) -> bool {
+    let mut method: Option<String> = None;
+    let mut body = false;
+    let mut forced_get = false;
+    let mut i = 1usize;
+    while i < words.len() {
+        let word = words[i].as_str();
+        if word == "-X" || word == "--request" {
+            method = words.get(i + 1).map(|value| value.to_ascii_uppercase());
+            i += 2;
+            continue;
+        }
+        if let Some(value) = word.strip_prefix("--request=") {
+            method = Some(value.to_ascii_uppercase());
+            i += 1;
+            continue;
+        }
+        if let Some(value) = word.strip_prefix("-X") {
+            if !value.is_empty() && !word.starts_with("--") {
+                method = Some(value.to_ascii_uppercase());
+                i += 1;
+                continue;
+            }
+        }
+        if matches!(
+            word,
+            "-d" | "--data"
+                | "--data-raw"
+                | "--data-binary"
+                | "--data-urlencode"
+                | "--json"
+                | "-T"
+                | "--upload-file"
+                | "-F"
+                | "--form"
+        ) || word.starts_with("--data=")
+            || word.starts_with("--data-raw=")
+            || word.starts_with("--json=")
+            || word.starts_with("--upload-file=")
+        {
+            body = true;
+            if !word.contains('=') && !word.starts_with("--json") {
+                i += 2;
+                continue;
+            }
+        }
+        if word == "-G" || word == "--get" || word == "-I" || word == "--head" {
+            forced_get = true;
+        }
+        i += 1;
+    }
+    if forced_get && method.is_none() {
+        return true;
+    }
+    match method.as_deref() {
+        Some("GET" | "HEAD") => !body || forced_get,
+        Some(_) => false,
+        None => !body,
+    }
+}
+
+fn wget_is_get(words: &[String]) -> bool {
+    for word in words.iter().skip(1) {
+        let lower = word.to_ascii_lowercase();
+        if lower.starts_with("--post-")
+            || lower.starts_with("--body-")
+            || lower.starts_with("--method=post")
+            || lower.starts_with("--method=put")
+            || lower.starts_with("--method=patch")
+            || lower.starts_with("--method=delete")
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn httpie_is_get(words: &[String]) -> bool {
+    let mut saw_method = false;
+    let mut body = false;
+    for word in words.iter().skip(1) {
+        if word.starts_with('-') {
+            continue;
+        }
+        if !saw_method
+            && matches!(
+                word.to_ascii_uppercase().as_str(),
+                "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS"
+            )
+        {
+            saw_method = true;
+            if !matches!(
+                word.to_ascii_uppercase().as_str(),
+                "GET" | "HEAD" | "OPTIONS"
+            ) {
+                return false;
+            }
+            continue;
+        }
+        if word.contains('=') && !word.starts_with("http") {
+            body = true;
+        }
+    }
+    !body
 }
