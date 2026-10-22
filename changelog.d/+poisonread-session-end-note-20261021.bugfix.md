@@ -1,0 +1,1 @@
+Session-end extraction now keeps each sentence from an assistant reply as an unverified agent note rather than a lesson, so the agent's own prose no longer becomes a fact the hook shows on later prompts.

@@ -183,8 +183,10 @@ pub fn kept() -> BTreeSet<String> {
 }
 
 /// Read the session's transcript (the hook payload's `transcript_path`),
-/// write each new fact as an agent-derived lesson, and return how many were
-/// written. Quiet on every failure: a hook must not stop a runner ending.
+/// write each new sentence as an unverified agent note, and return how many
+/// were written. Assistant prose is the agent's own reading, so it is kept
+/// as a note the hook never shows as a fact, not a lesson. Quiet on every
+/// failure: a hook must not stop a runner ending.
 pub fn at_session_end(input: &str, session: Option<&str>) -> usize {
     if std::env::var("LJOS_EXTRACT").is_ok_and(|v| v == "off") {
         return 0;
@@ -214,7 +216,7 @@ pub fn at_session_end(input: &str, session: Option<&str>) -> usize {
         if let Some(s) = session {
             tags.push(format!("session:{s}"));
         }
-        match crate::packset_write_agent_tagged("Remember", &f, &tags) {
+        match crate::packset_write_agent_note_tagged(&f, &tags) {
             Ok(_) => {
                 written += 1;
                 keys.push(normal(&f));
