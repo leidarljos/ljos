@@ -1758,15 +1758,20 @@ mod tests {
             &counted,
             &personas,
             "seat-c",
-            Ok(Vec::new()),
+            Ok(Default::default()),
         );
         assert!(words.contains("decides hold"), "{words}");
         assert!(!words.contains("split"), "{words}");
         assert_eq!(json["push_cite"]["stands"].as_bool(), Some(true), "{json}");
         let (only, _) = tally_of(&rows[..1], &notes, &authors);
         assert!(only.is_empty(), "{only:?}");
-        let (words, json) =
-            crate::push_cite_reading_signed("cite-1", &only, &personas, "seat-c", Ok(Vec::new()));
+        let (words, json) = crate::push_cite_reading_signed(
+            "cite-1",
+            &only,
+            &personas,
+            "seat-c",
+            Ok(Default::default()),
+        );
         assert!(
             words.contains("does not stand") && words.contains("no seat voted"),
             "{words}"

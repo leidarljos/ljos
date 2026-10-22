@@ -1287,6 +1287,20 @@ fn write_ack(body: &serde_json::Value) -> String {
     }
 }
 
+/// Print a relay fault in the runner's contract and exit with its code.
+/// A prompt has no such deny; the caller then returns the error.
+fn exit_relay_fault(runner: &str, event: &str, what: &str) -> Result<()> {
+    let Some((out, err, code)) = ljos_cli::runner_hooks::relay_fault_deny(runner, event, what)
+    else {
+        anyhow::bail!("hook: {what}");
+    };
+    print!("{out}");
+    eprint!("{err}");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    std::process::exit(code);
+}
+
 fn main() -> Result<()> {
     let ran = run_command();
     if let Err(e) = &ran {
@@ -2382,8 +2396,28 @@ fn run_command() -> Result<()> {
                 return Ok(());
             }
             use std::io::Read;
-            let mut input = String::new();
-            std::io::stdin().read_to_string(&mut input)?;
+            let mut bytes = Vec::new();
+            std::io::stdin().read_to_end(&mut bytes)?;
+            let input = match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(_) => {
+                    // The relay reads stdin before the gate's panic hook is
+                    // armed. Invalid text used to exit 1 with no output,
+                    // which nine runners read as an allow.
+                    if let Some(name) = runner.as_deref() {
+                        if ljos_cli::runner_hooks::is_runner(name)
+                            && ljos_cli::runner_hooks::relay_event_is_gate(event.as_deref())
+                        {
+                            return exit_relay_fault(
+                                name,
+                                event.as_deref().unwrap_or(""),
+                                "stdin is not utf-8",
+                            );
+                        }
+                    }
+                    anyhow::bail!("hook: stdin is not utf-8");
+                }
+            };
             ljos_cli::log_recall("hook", event.as_deref().unwrap_or("-"));
             if let Some(runner) = runner.as_deref() {
                 if !ljos_cli::runner_hooks::is_runner(runner) {
@@ -2392,8 +2426,38 @@ fn run_command() -> Result<()> {
                         ljos_cli::runner_hooks::RUNNERS.join(", ")
                     );
                 }
-                let code = ljos_cli::runner_hooks::relay(runner, &input, limit, event.as_deref())?;
-                std::process::exit(code);
+                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    ljos_cli::runner_hooks::relay(runner, &input, limit, event.as_deref())
+                }));
+                match caught {
+                    Ok(Ok(code)) => std::process::exit(code),
+                    Ok(Err(err))
+                        if ljos_cli::runner_hooks::relay_input_is_gate(
+                            &input,
+                            event.as_deref(),
+                        ) =>
+                    {
+                        return exit_relay_fault(
+                            runner,
+                            event.as_deref().unwrap_or(""),
+                            &format!("{err:#}"),
+                        );
+                    }
+                    Ok(Err(err)) => return Err(err),
+                    Err(_)
+                        if ljos_cli::runner_hooks::relay_input_is_gate(
+                            &input,
+                            event.as_deref(),
+                        ) =>
+                    {
+                        return exit_relay_fault(
+                            runner,
+                            event.as_deref().unwrap_or(""),
+                            "panicked",
+                        );
+                    }
+                    Err(_) => anyhow::bail!("hook: relay panicked"),
+                }
             }
             let call = if prompt {
                 ljos_cli::prompt_call(&input)

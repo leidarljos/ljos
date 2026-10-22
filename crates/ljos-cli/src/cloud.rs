@@ -3,10 +3,10 @@
 //! `ljos cloud up` installs the release binaries into `~/.local/bin`,
 //! checks the published SHA-256 sums, puts that directory first on PATH,
 //! writes the harness MCP command, and clones `LJOS_TRACKER_REMOTE`.
-//! The command is the bare name when this directory is first, and the
-//! absolute path when an earlier directory would win. It writes a webhook
-//! wake for each `LJOS_WAKE_<SEAT>_URL`. Entries this command writes are
-//! marked `source = "env"`; any other wake stays. When
+//! The command is the bare name when PATH already runs this install, and
+//! the absolute path when another copy or none would run. It writes a
+//! webhook wake for each `LJOS_WAKE_<SEAT>_URL`. Entries this command
+//! writes are marked `source = "env"`; any other wake stays. When
 //! `LJOS_CLOUD_AGE_SECRET` names an environment variable, it writes that
 //! variable's age identity for scope `cloud` to a mode 0600 file. On a
 //! cloud VM it also installs the release's `packset-embed` and the ONNX
@@ -83,12 +83,18 @@ pub fn up(force: bool) -> Result<String> {
     lines.push(ensure_binaries(&bin_dir, force)?);
     lines.push(ensure_encoder(&bin_dir, force)?);
     let server = bin_dir.join("ljos-mcp");
-    // The command is the bare name when this directory is first on PATH,
-    // and the absolute path when an earlier directory would win. which()
-    // still sees that earlier install until PATH moves, so the choice is
-    // made first. Absent from PATH, the bare name stays once prepended.
-    let early = (bin_dir_later_on_path(&bin_dir) && server.is_file())
-        .then(|| crate::server_command_plan(&server, "cloud up"));
+    // Moving this directory first reaches this process and shells that
+    // read the edited profile, not a client started some other way. The
+    // bare name is only safe when PATH already runs this install, so the
+    // choice is made before PATH moves.
+    let plan = if server.is_file() {
+        crate::server_command_plan(&server, "cloud up")
+    } else {
+        crate::ServerCommandPlan {
+            command: crate::MCP_SERVER_COMMAND.to_string(),
+            note: None,
+        }
+    };
     lines.push(ensure_process_path(&bin_dir));
 
     if agent_id().is_some() && seat_matches_file() {
@@ -104,16 +110,6 @@ pub fn up(force: bool) -> Result<String> {
     let remote = nonempty_var("LJOS_TRACKER_REMOTE");
     let tracker = remote.as_ref().map(|_| tracker_dir(&home));
     lines.push(ensure_profile(&home, &bin_dir)?);
-    let plan = early.unwrap_or_else(|| {
-        if server.is_file() {
-            crate::server_command_plan(&server, "cloud up")
-        } else {
-            crate::ServerCommandPlan {
-                command: crate::MCP_SERVER_COMMAND.to_string(),
-                note: None,
-            }
-        }
-    });
     lines.push(write_mcp(
         &home,
         &server,
@@ -187,9 +183,24 @@ pub fn default_seat() -> String {
 
 /// The seat a run with id `run` takes when it boots with `LJOS_SEAT` set
 /// to `base`, as [`default_seat`] names it there.
-#[must_use]
-pub fn run_seat(base: &str, run: &str) -> String {
-    with_run(&crate::seat_slug(base), run_slug(run).as_deref())
+///
+/// # Errors
+///
+/// `base` already ends with the run id. [`default_seat`] keeps such a
+/// seat as it is, so a boot that runs `cloud up` again does not append
+/// the id twice, and the bare name on that run boots as the same seat.
+pub fn run_seat(base: &str, run: &str) -> Result<String> {
+    let base = crate::seat_slug(base);
+    let id = run_slug(run);
+    if let Some(id) = id.as_deref() {
+        if let Some(bare) = base.strip_suffix(id).and_then(|b| b.strip_suffix('-')) {
+            bail!(
+                "{base} already ends with run id {id}, and {bare} on that run boots as {base} \
+                 too; name the seat as LJOS_SEAT holds it before `cloud up` appends the id"
+            );
+        }
+    }
+    Ok(with_run(&base, id.as_deref()))
 }
 
 fn with_run(base: &str, id: Option<&str>) -> String {
@@ -447,21 +458,29 @@ struct McpFile {
     path: PathBuf,
     probe: McpProbe,
     advice: String,
-    home: HomeExpand,
+    expand: Expand,
+    /// The PATH the client searches for a bare command when that is not a
+    /// shell's: launchd's, for a macOS app opened from the Dock.
+    launch_path: Option<String>,
     /// Parse and read errors fail the row. Harness files are skipped when
     /// they are not the JSON this probe expects (Zed's settings are JSONC).
     strict: bool,
 }
 
-/// How a harness turns a command string into a path.
+/// How a harness substitutes variables in a command and its env.PATH.
 ///
 /// Codex stores `$HOME` as text. OpenCode substitutes `{env:VAR}` only.
-/// A shell client expands `$HOME`, `${HOME}`, `${env:HOME}`, `${userHome}`
-/// and a leading `~/`.
+/// Cursor substitutes `${env:VAR}` and `${userHome}`. Claude Code
+/// substitutes `${VAR}` and `${VAR:-default}` and keeps an unset `${VAR}`
+/// as written. Any other client is read as a shell: `$HOME`, `${HOME}`,
+/// `${env:HOME}`, `${userHome}` and a leading `~/` in a command, and
+/// `$PATH`, `${PATH}` and `${env:PATH}` in env.PATH.
 #[derive(Clone, Copy)]
-enum HomeExpand {
+enum Expand {
     Literal,
     Opencode,
+    Cursor,
+    Claude,
     Shell,
 }
 
@@ -542,29 +561,35 @@ fn mcp_problem() -> McpProblem {
 fn mcp_files() -> Vec<McpFile> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
-    let mut push =
-        |path: PathBuf, probe: McpProbe, strict: bool, advice: String, home: HomeExpand| {
-            let kind = match &probe {
-                McpProbe::Json(pointer) => format!("json:{pointer}"),
-                McpProbe::Text(marker) => format!("text:{marker}"),
-            };
-            if seen.insert(format!("{kind}:{}", path.display())) {
-                out.push(McpFile {
-                    path,
-                    probe,
-                    advice,
-                    home,
-                    strict,
-                });
-            }
+    let mut push = |path: PathBuf,
+                    probe: McpProbe,
+                    strict: bool,
+                    advice: String,
+                    expand: Expand,
+                    launch_path: Option<&str>| {
+        let kind = match &probe {
+            McpProbe::Json(pointer) => format!("json:{pointer}"),
+            McpProbe::Text(marker) => format!("text:{marker}"),
         };
+        if seen.insert(format!("{kind}:{}", path.display())) {
+            out.push(McpFile {
+                path,
+                probe,
+                advice,
+                expand,
+                launch_path: launch_path.map(str::to_string),
+                strict,
+            });
+        }
+    };
     if let Some(path) = std::env::var_os("LJOS_MCP_CONFIG").filter(|p| !p.is_empty()) {
         push(
             PathBuf::from(path),
             McpProbe::Json("/mcpServers/ljos".into()),
             true,
             "ljos onboard --harness cursor".into(),
-            HomeExpand::Shell,
+            Expand::Shell,
+            None,
         );
     }
     if let Ok(home) = crate::home() {
@@ -573,31 +598,35 @@ fn mcp_files() -> Vec<McpFile> {
             McpProbe::Json("/mcpServers/ljos".into()),
             true,
             cursor_mcp_advice(),
-            HomeExpand::Shell,
+            Expand::Cursor,
+            None,
         );
         push(
             home.join(".claude.json"),
             McpProbe::Json("/mcpServers/ljos".into()),
             false,
             "ljos onboard --harness claude".into(),
-            HomeExpand::Shell,
+            Expand::Claude,
+            None,
         );
     }
     for harness in harness_shapes() {
         let advice = format!("ljos onboard --harness {}", harness.name);
-        let home = match harness.name.as_str() {
-            "codex" => HomeExpand::Literal,
-            "opencode" | "opencode-v2" => HomeExpand::Opencode,
-            _ => HomeExpand::Shell,
+        let expand = match harness.name.as_str() {
+            "codex" => Expand::Literal,
+            "opencode" | "opencode-v2" => Expand::Opencode,
+            "cursor" => Expand::Cursor,
+            _ => Expand::Shell,
         };
-        if let (Some(config), Some(pointer)) = (&harness.config_json, &harness.json_pointer) {
+        if let (Some(config), Some(pointer)) = (harness.json_config(), &harness.json_pointer) {
             if !pointer.is_empty() {
                 push(
                     crate::expand(config),
                     McpProbe::Json(pointer.clone()),
                     false,
                     advice.clone(),
-                    home,
+                    expand,
+                    harness.launch_path(),
                 );
             }
         }
@@ -608,7 +637,8 @@ fn mcp_files() -> Vec<McpFile> {
                     McpProbe::Text(marker.clone()),
                     false,
                     advice.clone(),
-                    home,
+                    expand,
+                    harness.launch_path(),
                 );
             }
         }
@@ -653,7 +683,7 @@ fn command_and_args(entry: &serde_json::Value) -> Option<LaunchSpec> {
         .and_then(serde_json::Value::as_object)
         .and_then(|env| env.get("PATH"))
         .and_then(serde_json::Value::as_str)
-        .map(expand_json_path);
+        .map(str::to_string);
     match entry.get("command").or_else(|| entry.get("cmd"))? {
         serde_json::Value::String(command) => {
             let command = command.trim();
@@ -800,11 +830,22 @@ fn yaml_entry(text: &str, marker: &str) -> Option<String> {
     Some(out)
 }
 
-/// `${env:PATH}` and `$PATH` in a JSON `env.PATH`, the same kind of
-/// expansion a command already applies to `${env:HOME}`.
-fn expand_json_path(value: &str) -> String {
+/// The env.PATH the client hands the server, with this process's PATH
+/// substituted where the client would substitute its own.
+fn expand_env_path(value: &str, expand: Expand) -> String {
     let path = std::env::var("PATH").unwrap_or_default();
-    replace_dollar_path(&value.replace("${env:PATH}", &path), &path)
+    match expand {
+        Expand::Literal => value.to_string(),
+        Expand::Opencode => replace_opencode_env(value, "PATH", &path),
+        Expand::Cursor => expand_cursor(value),
+        Expand::Claude => expand_claude(value),
+        Expand::Shell => replace_dollar_path(
+            &value
+                .replace("${env:PATH}", &path)
+                .replace("${PATH}", &path),
+            &path,
+        ),
+    }
 }
 
 fn replace_dollar_path(value: &str, path: &str) -> String {
@@ -873,12 +914,69 @@ fn parse_scalar(rest: &str) -> String {
 }
 
 /// Substitute the home tokens this harness actually expands.
-fn expand_launch(command: &str, home: HomeExpand) -> String {
-    match home {
-        HomeExpand::Literal => command.to_string(),
-        HomeExpand::Opencode => expand_opencode_home(command),
-        HomeExpand::Shell => expand_shell_home(command),
+fn expand_launch(command: &str, expand: Expand) -> String {
+    match expand {
+        Expand::Literal => command.to_string(),
+        Expand::Opencode => expand_opencode_home(command),
+        Expand::Cursor => expand_cursor(command),
+        Expand::Claude => expand_claude(command),
+        Expand::Shell => expand_shell_home(command),
     }
+}
+
+/// Cursor's `${env:NAME}` and `${userHome}`. `$HOME`, `${HOME}` and `~/`
+/// stay text.
+fn expand_cursor(text: &str) -> String {
+    expand_braced(text, |inner| match inner {
+        "userHome" => crate::home().ok().map(|h| h.display().to_string()),
+        _ => std::env::var(inner.strip_prefix("env:")?).ok(),
+    })
+}
+
+/// Claude Code's `${VAR}` and `${VAR:-default}`. An unset `${VAR}` with no
+/// default stays as written, as do `$HOME`, `~/` and Cursor's forms.
+fn expand_claude(text: &str) -> String {
+    expand_braced(text, |inner| {
+        let (name, default) = match inner.split_once(":-") {
+            Some((name, default)) => (name, Some(default)),
+            None => (inner, None),
+        };
+        if !is_env_name(name) {
+            return None;
+        }
+        std::env::var(name)
+            .ok()
+            .or_else(|| default.map(str::to_string))
+    })
+}
+
+fn is_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Each `${...}` in `text` replaced by what `resolve` gives for its inside,
+/// or kept as written when it gives nothing.
+fn expand_braced(text: &str, resolve: impl Fn(&str) -> Option<String>) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("${") {
+        let inner = &rest[at + 2..];
+        let Some(len) = inner.find('}') else {
+            break;
+        };
+        out.push_str(&rest[..at]);
+        match resolve(&inner[..len]) {
+            Some(value) => out.push_str(&value),
+            None => out.push_str(&rest[at..at + len + 3]),
+        }
+        rest = &inner[len + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// OpenCode substitutes `{env:HOME}` only. `$HOME`, `${HOME}`, `~/` and
@@ -887,17 +985,22 @@ fn expand_opencode_home(command: &str) -> String {
     let Ok(home) = crate::home() else {
         return command.to_string();
     };
-    let home = home.display().to_string();
-    let token = "{env:HOME}";
+    replace_opencode_env(command, "HOME", &home.display().to_string())
+}
+
+/// OpenCode's `{env:NAME}` replaced by `value`. `${env:NAME}` is not
+/// OpenCode's form and stays text.
+fn replace_opencode_env(text: &str, name: &str, value: &str) -> String {
+    let token = format!("{{env:{name}}}");
     let mut out = String::new();
-    let mut rest = command;
-    while let Some(at) = rest.find(token) {
+    let mut rest = text;
+    while let Some(at) = rest.find(&token) {
         let shell_form = at > 0 && rest.as_bytes()[at - 1] == b'$';
         if shell_form {
             out.push_str(&rest[..at + token.len()]);
         } else {
             out.push_str(&rest[..at]);
-            out.push_str(&home);
+            out.push_str(value);
         }
         rest = &rest[at + token.len()..];
     }
@@ -927,9 +1030,13 @@ fn expand_shell_home(command: &str) -> String {
 }
 
 fn launch_check(file: &McpFile, launch: &LaunchSpec) -> LaunchCheck {
-    let command = expand_launch(&launch.command, file.home);
-    let found_path = command_path(&command, launch.env_path.as_deref());
-    let search_path = launch.env_path.as_deref();
+    let command = expand_launch(&launch.command, file.expand);
+    let env_path = launch
+        .env_path
+        .as_deref()
+        .map(|path| expand_env_path(path, file.expand));
+    let search_path = env_path.as_deref().or(file.launch_path.as_deref());
+    let found_path = command_path(&command, search_path);
     let shell_path = if search_path.is_none() {
         shell_command_path(&command)
     } else {
@@ -940,8 +1047,10 @@ fn launch_check(file: &McpFile, launch: &LaunchSpec) -> LaunchCheck {
     let Some(chosen) = chosen else {
         return LaunchCheck::Missing(if pathy {
             format!("{} does not exist", launch.command)
-        } else if search_path.is_some() {
+        } else if env_path.is_some() {
             format!("{} is not on env.PATH", launch.command)
+        } else if let Some(path) = &file.launch_path {
+            format!("{} is not on the app's PATH, {path}", launch.command)
         } else {
             format!("{} is not on PATH", launch.command)
         });
@@ -953,21 +1062,23 @@ fn launch_check(file: &McpFile, launch: &LaunchSpec) -> LaunchCheck {
             chosen.display()
         ));
     }
-    if !pathy {
-        let own = crate::server_path().ok();
-        if let Some(own) = own {
-            let name = Path::new(&command).file_name().and_then(|n| n.to_str());
-            if name == Some(crate::MCP_SERVER_COMMAND) && !same_binary(&chosen, &own) {
-                return LaunchCheck::Warn(format!(
-                    "{} resolves to {}, not {}",
-                    launch.command,
-                    chosen.display(),
-                    own.display()
-                ));
+    let name = Path::new(&command).file_name().and_then(|n| n.to_str());
+    if name == Some(crate::MCP_SERVER_COMMAND) {
+        if let Ok(own) = crate::server_path() {
+            if !same_binary(&chosen, &own) {
+                return LaunchCheck::Warn(if pathy {
+                    format!("{} is not this install's {}", launch.command, own.display())
+                } else {
+                    format!(
+                        "{} resolves to {}, not {}",
+                        launch.command,
+                        chosen.display(),
+                        own.display()
+                    )
+                });
             }
         }
     }
-    let name = Path::new(&command).file_name().and_then(|n| n.to_str());
     if name == Some("ljos-plugin") {
         if let Some(bin) = launch.args.first() {
             if !bin.contains('/')
@@ -2245,10 +2356,15 @@ fn first_interactive_guard(text: &str) -> Option<usize> {
         let one_line =
             (trimmed.contains("$PS1") || trimmed.contains("$-")) && trimmed.contains("return");
         // Ubuntu's skel bashrc splits the test and the return:
-        // `case $- in` / `*i*) ;;` / `*) return;;` / `esac`.
-        // A one-line search appends PATH after that return, so a
+        // `case $- in` / `*i*) ;;` / `*) return;;` / `esac`, and an
+        // `if [ -z "$PS1" ]; then` / `return` / `fi` splits them the same
+        // way. A one-line search appends PATH after that return, so a
         // non-interactive shell never sees it.
-        if one_line || (case_tests_shell(trimmed) && case_body_returns(&lines[i + 1..])) {
+        let rest = &lines[i + 1..];
+        if one_line
+            || (case_tests_shell(trimmed) && block_returns(rest, "esac"))
+            || (if_tests_shell(trimmed) && block_returns(rest, "fi"))
+        {
             return Some(at);
         }
         at += line.len();
@@ -2267,11 +2383,19 @@ fn case_tests_shell(trimmed: &str) -> bool {
     word == "$-" || word == "$PS1"
 }
 
-/// Whether this `case` returns before `esac`. A `case "$TERM"` does not.
-fn case_body_returns(lines: &[&str]) -> bool {
+/// `if [ -z "$PS1" ]; then` or `if [[ $- != *i* ]]`, an `if` that tests
+/// for an interactive shell.
+fn if_tests_shell(trimmed: &str) -> bool {
+    trimmed.starts_with("if ") && (trimmed.contains("$PS1") || trimmed.contains("$-"))
+}
+
+/// Whether the block returns before the `esac` or `fi` that closes it. A
+/// `case "$TERM"` does not.
+fn block_returns(lines: &[&str], end: &str) -> bool {
     for line in lines {
         let trimmed = line.trim();
-        if trimmed.starts_with("esac") {
+        let first = trimmed.split([';', ' ', '\t']).next().unwrap_or("");
+        if first == end {
             return false;
         }
         if trimmed.contains("return") {
@@ -2323,21 +2447,6 @@ fn ensure_path_file(path: &Path, bin_dir: &Path, before_interactive_guard: bool)
         path.display(),
         bin_dir.display()
     ))
-}
-
-/// True when `bin_dir` is on PATH and some other directory comes first.
-/// `which` would then run that earlier copy.
-fn bin_dir_later_on_path(bin_dir: &Path) -> bool {
-    let dir = bin_dir.display().to_string();
-    let current = std::env::var("PATH").unwrap_or_default();
-    let mut saw_other = false;
-    for entry in current.split(':').filter(|entry| !entry.is_empty()) {
-        if entry == dir {
-            return saw_other;
-        }
-        saw_other = true;
-    }
-    false
 }
 
 /// Put `bin_dir` first on this process's PATH and drop a later copy.
@@ -2930,6 +3039,43 @@ mod tests {
             0o600
         );
         assert!(!tmp.exists());
+    }
+
+    /// A Dock app looks for a bare `ljos-mcp` on its own PATH, not on this
+    /// process's PATH or a login shell's.
+    #[test]
+    fn a_launchd_app_looks_for_a_bare_server_on_its_own_path() {
+        let scratch = tempfile::tempdir().unwrap();
+        let bin = scratch.path().join("bin");
+        let empty = scratch.path().join("empty");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&empty).unwrap();
+        let server = bin.join("ljos-mcp");
+        fs::write(&server, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&server, fs::Permissions::from_mode(0o755)).unwrap();
+        let launch = LaunchSpec {
+            command: "ljos-mcp".into(),
+            args: Vec::new(),
+            env_path: None,
+        };
+        let file = |launch_path: &Path| McpFile {
+            path: scratch.path().join("claude_desktop_config.json"),
+            probe: McpProbe::Json("/mcpServers/ljos".into()),
+            advice: "ljos onboard --harness claude-desktop".into(),
+            expand: Expand::Shell,
+            launch_path: Some(launch_path.display().to_string()),
+            strict: false,
+        };
+        match launch_check(&file(&empty), &launch) {
+            LaunchCheck::Missing(why) => {
+                assert!(why.contains(&empty.display().to_string()), "{why}");
+            }
+            _ => panic!("ljos-mcp is not on the app's PATH"),
+        }
+        assert!(!matches!(
+            launch_check(&file(&bin), &launch),
+            LaunchCheck::Missing(_)
+        ));
     }
 
     #[test]

@@ -590,8 +590,7 @@ fn fault_output(event: &str, what: &str) -> String {
         })
         .to_string();
     }
-    let reason =
-        format!("the ljos guard failed while checking this command ({what}); run `ljos doctor`");
+    let reason = crate::guard_fault_reason(what);
     json!({
         "hookSpecificOutput": {
             "hookEventName": if event.is_empty() { "PreToolUse" } else { event },
@@ -602,14 +601,46 @@ fn fault_output(event: &str, what: &str) -> String {
     .to_string()
 }
 
-/// The fault text from [`crate::unhealthy_note`], when this context is one.
-fn unhealthy_fault(context: &str) -> Option<String> {
-    let tail = ") and did not judge this call, so it is allowed. No ljos rule would refuse it. Run `ljos doctor`.";
-    let why = context
-        .trim()
-        .strip_prefix("the ljos guard is unhealthy (")?
-        .strip_suffix(tail)?;
-    Some(why.to_string())
+/// Whether `event` is a tool call the relay must fail closed. An unnamed
+/// event is a tool call: Amp sends the arguments alone, and stdin that is
+/// not text has no event to read.
+#[must_use]
+pub fn relay_event_is_gate(event: Option<&str>) -> bool {
+    match event {
+        Some(name) if !name.is_empty() => gate_event(name),
+        _ => true,
+    }
+}
+
+/// Whether this payload is a tool call. The event in the payload wins;
+/// otherwise the `--event` flag, and an unnamed one is a gate.
+#[must_use]
+pub fn relay_input_is_gate(input: &str, event: Option<&str>) -> bool {
+    let raw = raw_event(input);
+    if raw.is_empty() {
+        relay_event_is_gate(event)
+    } else {
+        gate_event(&raw)
+    }
+}
+
+/// A deny for a relay that failed before it could judge, in the runner's
+/// own contract. `None` when `event` is a prompt: that error still exits
+/// 1, and denying it would block the person. Exit 2 with no JSON allows
+/// the command on Gemini, Copilot, Cline and Auggie, so those runners
+/// get their deny object and the exit their contract uses.
+#[must_use]
+pub fn relay_fault_deny(runner: &str, event: &str, what: &str) -> Option<(String, String, i32)> {
+    if !event.is_empty() && !gate_event(event) {
+        return None;
+    }
+    let what: String = what
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(240)
+        .collect();
+    let text = fault_output(event, &what);
+    Some(answer(runner, event, &text))
 }
 
 /// The command a normalized payload would run, or empty when it has none.
@@ -660,8 +691,10 @@ fn early_answer(normalized: &str, event: &str) -> Option<String> {
 /// non-zero exit, or no exit within `timeout` is a deny that says how the
 /// guard failed. A prompt keeps the old allow with a note: the person's
 /// turn is not a command. A non-zero exit that still printed a deny or an
-/// ask keeps it. A successful exit that still says the guard was unhealthy
-/// is denied on a tool call too, unless `LJOS_GUARD_FAIL_OPEN=1`.
+/// ask keeps it. A successful exit is that answer, including an allow
+/// that carries the unhealthy-guard sentence: the check already denied
+/// a real fault, and matching the sentence again missed it once a push
+/// warning was joined on.
 #[must_use]
 pub fn run_inner(
     mut cmd: std::process::Command,
@@ -719,16 +752,7 @@ pub fn run_inner(
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default();
     let said = read_answer(&out);
-    if said.decision.is_some() {
-        return out;
-    }
-    if let Some(why) = unhealthy_fault(&said.context) {
-        if !gate_event(event) || crate::guard_fail_open() {
-            return out;
-        }
-        return fault_output(event, &why);
-    }
-    if status.success() {
+    if said.decision.is_some() || status.success() {
         return out;
     }
     let what = match status.code() {
@@ -1410,6 +1434,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_relay_fault_denies_in_the_runners_contract() {
+        for runner in RUNNERS {
+            let (stdout, stderr, code) =
+                relay_fault_deny(runner, "", "stdin is not utf-8").expect(runner);
+            let body = format!("{stdout}{stderr}");
+            assert!(
+                runner_denied(runner, &stdout, &stderr, code),
+                "{runner}: code {code} {body}"
+            );
+            assert!(body.contains("stdin is not utf-8"), "{runner}: {body}");
+            assert!(body.contains("run `ljos doctor`"), "{runner}: {body}");
+        }
+        for runner in ["gemini", "copilot", "cline", "auggie"] {
+            let (stdout, _, code) =
+                relay_fault_deny(runner, "BeforeTool", "stdin is not utf-8").expect(runner);
+            assert_eq!(code, 0, "{runner} exit 2 alone would allow the command");
+            assert!(
+                stdout.contains("deny") || stdout.contains("cancel"),
+                "{runner}: {stdout}"
+            );
+        }
+        assert!(relay_fault_deny("windsurf", "UserPromptSubmit", "stdin is not utf-8").is_none());
+        assert!(relay_fault_deny("gemini", "BeforeAgent", "stdin is not utf-8").is_none());
+        assert!(relay_event_is_gate(None));
+        assert!(relay_event_is_gate(Some("")));
+        assert!(!relay_event_is_gate(Some("BeforeAgent")));
+        assert!(relay_input_is_gate(
+            r#"{"hook_event_name":"PreToolUse"}"#,
+            Some("UserPromptSubmit")
+        ));
+        assert!(!relay_input_is_gate(
+            r#"{"hook_event_name":"UserPromptSubmit","prompt":"hi"}"#,
+            None
+        ));
+    }
+
     fn denies_fault(out: &str, why: &str) {
         let said = read_answer(out);
         assert_eq!(said.decision.as_deref(), Some("deny"), "{out}");
@@ -1456,18 +1517,6 @@ mod tests {
     #[test]
     fn an_inner_hook_fault_denies_in_every_runner_shape() {
         let _lock = crate::test_env_lock();
-        struct Restore(Option<std::ffi::OsString>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                unsafe {
-                    match &self.0 {
-                        Some(v) => std::env::set_var("LJOS_GUARD_FAIL_OPEN", v),
-                        None => std::env::remove_var("LJOS_GUARD_FAIL_OPEN"),
-                    }
-                }
-            }
-        }
-        let _restore = Restore(std::env::var_os("LJOS_GUARD_FAIL_OPEN"));
         unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         // The timeout, the exit, and the signal are injected. A wall-clock
         // race is what made a slow runner report the timeout instead of
@@ -1482,15 +1531,6 @@ mod tests {
             denies_fault(&fault_output("PreToolUse", why), why);
         }
         denies_fault(&inner("exit 3", 30_000), "exited with status 3");
-        let unhealthy = json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "additionalContext": crate::unhealthy_note("did not answer in time"),
-            }
-        })
-        .to_string();
-        let from_policyd = inner(&format!("printf '%s' '{unhealthy}'"), 30_000);
-        denies_fault(&from_policyd, "did not answer in time");
         let missing = run_inner(
             std::process::Command::new("/nonexistent/ljos"),
             "{}",
@@ -1570,22 +1610,44 @@ mod tests {
         assert!(said.context.contains("unhealthy"), "{out}");
     }
 
+    /// The relay used to deny a tool call whose answer was the exact
+    /// unhealthy-guard sentence. A push warning joined onto that sentence
+    /// defeated the match, so the same fault was allowed. The check denies
+    /// a real fault itself. An allow that carries the sentence, alone or
+    /// with a warning, stays that allow.
+    #[cfg(unix)]
+    #[test]
+    fn an_unhealthy_note_is_not_a_second_deny() {
+        let _lock = crate::test_env_lock();
+        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
+        let why = "did not answer in time";
+        let exact = json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "additionalContext": crate::unhealthy_note(why),
+            }
+        })
+        .to_string();
+        let merged = json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "additionalContext": format!(
+                    "{}\nthe tip has no passing test record",
+                    crate::unhealthy_note(why)
+                ),
+            }
+        })
+        .to_string();
+        for body in [exact, merged] {
+            let out = inner(&format!("printf '%s' '{body}'"), 30_000);
+            allows_fault(&out, why);
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn an_inner_hook_that_answers_keeps_its_answer() {
         let _lock = crate::test_env_lock();
-        struct Restore(Option<std::ffi::OsString>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                unsafe {
-                    match &self.0 {
-                        Some(v) => std::env::set_var("LJOS_GUARD_FAIL_OPEN", v),
-                        None => std::env::remove_var("LJOS_GUARD_FAIL_OPEN"),
-                    }
-                }
-            }
-        }
-        let _restore = Restore(std::env::var_os("LJOS_GUARD_FAIL_OPEN"));
         unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         assert_eq!(inner("true", 30_000), "", "a clean allow");
         assert_eq!(inner(&format!("printf '%s' '{DENY}'"), 30_000), DENY);
@@ -1604,18 +1666,6 @@ mod tests {
     #[test]
     fn guard_fail_open_restores_allow_with_note() {
         let _lock = crate::test_env_lock();
-        struct Restore(Option<std::ffi::OsString>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                unsafe {
-                    match &self.0 {
-                        Some(v) => std::env::set_var("LJOS_GUARD_FAIL_OPEN", v),
-                        None => std::env::remove_var("LJOS_GUARD_FAIL_OPEN"),
-                    }
-                }
-            }
-        }
-        let _restore = Restore(std::env::var_os("LJOS_GUARD_FAIL_OPEN"));
         unsafe { std::env::set_var("LJOS_GUARD_FAIL_OPEN", "1") };
         allows_fault(
             &fault_output("PreToolUse", "exited with status 3"),
@@ -1643,31 +1693,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let keys = [
-            "HOME",
-            "XDG_DATA_HOME",
-            "LJOS_OFF",
-            "POLICYD_BIN",
-            "PACKSET_WORKSPACE",
-        ];
-        struct RestoreEnv(Vec<(String, Option<std::ffi::OsString>)>);
-        impl Drop for RestoreEnv {
-            fn drop(&mut self) {
-                for (k, v) in &self.0 {
-                    unsafe {
-                        match v {
-                            Some(v) => std::env::set_var(k, v),
-                            None => std::env::remove_var(k),
-                        }
-                    }
-                }
-            }
-        }
-        let saved = RestoreEnv(
-            keys.iter()
-                .map(|k| ((*k).to_string(), std::env::var_os(k)))
-                .collect(),
-        );
         let data = dir.join("data");
         unsafe {
             std::env::set_var("HOME", &dir);
@@ -1722,7 +1747,6 @@ mod tests {
             Some("deny"),
             "{wind}"
         );
-        drop(saved);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
