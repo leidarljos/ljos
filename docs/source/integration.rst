@@ -153,9 +153,18 @@ it can see one.
 The runners from Copilot down call ``ljos hook --runner NAME``. That
 command reads the runner's payload as Claude Code's, runs the same hook,
 and writes the answer back in the runner's field names and exit code.
-The relay denies when the inner hook crashes, exits non-zero without
-an answer, or runs past 12 seconds. The reason names the failure and
-says to run ``ljos doctor``.
+The relay itself judges a force push, a seat deny rule, an ``rm -rf``
+outside a temp directory, and a commit, push or merge the gates refuse,
+before the inner hook runs. For any other command it waits on the inner
+hook for ``GUARD_TIMEOUT``, which is 5 seconds unless ``LJOS_GUARD_TIMEOUT``
+names another number of seconds. When the inner hook cannot start, is
+killed by a signal, exits non-zero without a decision, or gives no
+answer in that time, the relay exits 0 and the command runs. Its answer
+carries a note that names the failure and says to run ``ljos doctor``. A
+non-zero exit that still printed a deny or an ask keeps that verdict.
+Inside the hook, an ``ljos-policyd`` that crashes or runs past the same
+timeout lets the command run with the same kind of note, and a missing
+``ljos-policyd`` lets it run unless ``POLICYD_REQUIRED=1`` is set.
 
 When a hook fails
 -----------------
@@ -192,15 +201,18 @@ ahead unchecked.
 | Crush                    | runs; only exit 2 blocks                                                                                                 | runs           | not read; the exit code decides                | `hooks <https://github.com/charmbracelet/crush/blob/main/docs/hooks/README.md>`__                                                                                                                    |
 +--------------------------+--------------------------------------------------------------------------------------------------------------------------+----------------+------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
-Three things on the seat's side close part of the gap. ``POLICYD_REQUIRED=1``
+Two things on the seat's side close part of the gap. ``POLICYD_REQUIRED=1``
 makes a missing ``ljos-policyd`` a deny instead of an allow. The hook
 files the seat writes give the runner a timeout of 10 to 20 seconds; a
-check that takes longer meets the "times out" column. On the runners
-from Copilot down, ``ljos hook --runner`` denies when the hook it runs
-crashes, exits non-zero without an answer, or runs past 12 seconds, so
-those failures reach the runner as a deny. None of these helps when
-the ``ljos`` binary itself is gone: on Copilot and Kiro that blocks every
-shell command, and on every other runner the commands run unchecked.
+check that takes longer meets the "times out" column. The relay on the
+runners from Copilot down does not close it: when the hook it runs
+crashes, exits non-zero without an answer, or runs past ``GUARD_TIMEOUT``
+(5 seconds, or ``LJOS_GUARD_TIMEOUT``), ``ljos hook --runner`` exits 0 and
+the command runs with a note that the guard is unhealthy. Only the
+commands the relay judges itself are refused whatever the inner hook
+does. None of these helps when the ``ljos`` binary itself is gone: on
+Copilot and Kiro that blocks every shell command, and on every other
+runner the commands run unchecked.
 
 When the seat's own hook fails on a permission event, with an error, a
 panic, or on Cursor no verdict in 8 seconds, it does not leave the
