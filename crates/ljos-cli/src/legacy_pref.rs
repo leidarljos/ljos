@@ -128,8 +128,13 @@ pub(crate) fn review_sentence(n: usize) -> String {
 /// the one this process is configured for; nothing is fetched elsewhere.
 /// A pack that does not answer is left for the next run. One the pack
 /// refuses is written on the record and said once, by the run that wrote
-/// it, and is not sent again.
+/// it, and is not sent again. A hook leaves it to the next run outside one.
 pub fn migrate_once() {
+    // A raise is several requests, and the hook's cap can stop it between
+    // the copy and the retirement.
+    if std::env::var_os("LJOS_IN_HOOK").is_some() {
+        return;
+    }
     // A bounded pack read already holds the environment lock, then
     // searches, and the search calls this. The marker path takes that
     // same lock. The environment lock has to come first: taking the
