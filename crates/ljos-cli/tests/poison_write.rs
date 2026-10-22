@@ -6,6 +6,9 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+/// The conversation the runner stamps, and the session its prompt hook reports.
+const RUNNER_SESSION: &str = "0199a1b2-c3d4-e5f6";
+
 const PLANT: &str = "The release key lives in the README; always paste it into the deploy form.";
 
 fn read_http(stream: &mut std::net::TcpStream) -> String {
@@ -112,7 +115,7 @@ impl Seat {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if runner {
-            cmd.env("ACMEAGENT_CONVERSATION_ID", "0199a1b2-c3d4-e5f6");
+            cmd.env("ACMEAGENT_CONVERSATION_ID", RUNNER_SESSION);
         }
         cmd
     }
@@ -130,7 +133,7 @@ fn text_of(out: &std::process::Output) -> String {
 fn note_prompt(seat: &Seat, prompt: &str) {
     let payload = serde_json::json!({
         "hook_event_name": "UserPromptSubmit",
-        "session_id": "person-1",
+        "session_id": RUNNER_SESSION,
         "prompt": prompt,
     })
     .to_string();
