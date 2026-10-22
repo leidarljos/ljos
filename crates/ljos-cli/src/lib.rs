@@ -3181,12 +3181,13 @@ const LEGACY_SEATS: &[(&str, &str)] = &[("ljos-bot", "ljosbot")];
 /// ljos writes. ljos-mcp 0.31 and earlier wrote `SEAT-TAG`, with the tag
 /// a pid in base 36 (`inky-n9o`, `disk-saver-t4t`, `free-claude-8h`,
 /// `free-opencode-1vmow`); a last part of one to six lowercase letters and
-/// digits with at least one digit is read as that tag, so `eessi-bot` and
-/// `disk-saver` stay whole seats. The same suffix on the seat side of
-/// `SEAT@TAG` (`inky-n9o@deadbeef`) is that tag too. An old tag comes back
-/// as `None`: the server that wrote it is gone and no conversation holds
-/// under it again, so the seat is its holder now and any conversation of
-/// that seat may finish or release the claim.
+/// digits with at least one of each is read as that tag, so `eessi-bot`
+/// and `disk-saver` stay whole seats, and so does a version or a run
+/// number such as `gpt-5` or `ridley-ci-a-555001`. The same suffix on the
+/// seat side of `SEAT@TAG` (`inky-n9o@deadbeef`) is that tag too. An old
+/// tag comes back as `None`: the server that wrote it is gone and no
+/// conversation holds under it again, so the seat is its holder now and
+/// any conversation of that seat may finish or release the claim.
 #[must_use]
 pub fn holder_parts(holder: &str) -> (String, Option<String>) {
     let holder = holder.trim();
@@ -3207,6 +3208,7 @@ fn legacy_tag(tag: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
         && tag.bytes().any(|b| b.is_ascii_digit())
+        && tag.bytes().any(|b| b.is_ascii_lowercase())
 }
 
 /// Drop a pid-shaped suffix (`n9o`, `1vmow`) from a seat. A name that has
@@ -11695,7 +11697,7 @@ pub fn atom_body(kind: &str, text: &str, workspace: &str) -> Value {
     if let Some(citation) = citation {
         source["citation"] = Value::String(citation);
     }
-    serde_json::json!({
+    let mut atom = serde_json::json!({
         "schema": "inside.atom/v1",
         "kind": kind,
         "level": "explicit",
@@ -11703,7 +11705,19 @@ pub fn atom_body(kind: &str, text: &str, workspace: &str) -> Value {
         "workspace": workspace,
         "entities": entities,
         "source": source,
-    })
+    });
+    // A VM `cloud up` prepared tags memory explicitly. Other atoms stay
+    // unscoped, and a box with the variable unset is unchanged.
+    if memory_write(kind) {
+        if let Some(scope) = sync::machine_write_scope() {
+            add_entities(&mut atom, [format!("scope:{scope}")]);
+        }
+    }
+    atom
+}
+
+fn memory_write(kind: &str) -> bool {
+    kind == "lesson" || kind == "preference" || kind == packset_core::record::NOTE_KIND
 }
 
 /// Take citation tails off `text`. The claim is unchanged when nothing
@@ -18127,6 +18141,7 @@ fn git_out(dir: Option<&str>, args: &[&str]) -> Option<String> {
     if let Some(d) = dir {
         cmd.arg("-C").arg(d);
     }
+    apply_git_command_env(&mut cmd);
     let out = cmd
         .args(args)
         .stdin(std::process::Stdio::null())
@@ -20476,6 +20491,7 @@ fn panes_row() -> Habitat {
 /// alone refuses less than the table with phronesis after it.
 const POLICY_TABLE_ONLY: &str =
     "phronesis is not linked; install an ljos-policyd release built with it";
+const POLICYD_INSTALL_FIX: &str = "`cargo install --locked ljos-policyd`";
 
 /// The oldest `ljos-policyd` this ljos runs with. A Rust older than the
 /// workspace's `rust-version` can leave an older one installed: `cargo
@@ -20608,15 +20624,21 @@ pub fn bypass_summary(text: &str, path: &str) -> String {
 fn policy_row() -> Habitat {
     let state = match policyd_bin() {
         None if policyd_required() => {
-            Err("ljos-policyd is not installed and POLICYD_REQUIRED=1: every shell command is refused; `cargo install --locked ljos-policyd`".to_string())
+            Err(format!(
+                "ljos-policyd is not installed and POLICYD_REQUIRED=1: every shell command is refused; {POLICYD_INSTALL_FIX}"
+            ))
         }
         None => Err(
-            "ljos-policyd is not installed: shell commands are judged only by seat rules; `cargo install --locked ljos-policyd`"
-                .to_string(),
+            format!(
+                "ljos-policyd is not installed: shell commands are judged only by seat rules; {POLICYD_INSTALL_FIX}"
+            ),
         ),
         Some(bin) => match run_captured(&bin.display().to_string(), &["version"]) {
             Ok(said) => policy_state(said.stdout.trim(), &bin.display().to_string()),
-            Err(e) => Err(format!("{} does not answer `version`: {e:#}", bin.display())),
+            Err(e) => Err(format!(
+                "{} does not answer `version`: {e:#}; reinstall with {POLICYD_INSTALL_FIX}",
+                bin.display()
+            )),
         },
     };
     Habitat {
@@ -25323,7 +25345,7 @@ pub fn lesson_claims(text: &str) -> Vec<String> {
 
 fn finish_lesson(issue: &str, text: &str) -> String {
     let filed = (|| -> Result<String> {
-        let scope = sync::scope_for_issue(issue);
+        let scope = sync::scope_for_lesson(sync::scope_for_issue(issue));
         let persons = lesson_is_the_persons(under_a_runner(), std::io::stdin().is_terminal());
         let prefix = "finish: POST /v1/atoms failed for the lesson";
         let client = pack()?;
@@ -25599,6 +25621,9 @@ pub const TRACKER_LOCK: &str = ".ljos-commit.lock";
 /// exported repository from the parent process.
 pub(crate) fn git_at(dir: &Path) -> std::process::Command {
     let mut cmd = std::process::Command::new("git");
+    // A test may name a decoy on this command. Drop it with the variables
+    // a hook would have exported, so `-C` is the checkout.
+    apply_git_command_env(&mut cmd);
     for key in [
         "GIT_DIR",
         "GIT_WORK_TREE",
@@ -25662,6 +25687,7 @@ fn tracker_lock_path(dir: &Path) -> Option<PathBuf> {
         .args(["rev-parse", "--show-toplevel", "--git-common-dir"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    apply_git_command_env(&mut cmd);
     git_hooks::hook_child_env(&mut cmd);
     let out = cmd.output().ok().filter(|o| o.status.success())?;
     let text = String::from_utf8_lossy(&out.stdout);
@@ -26080,6 +26106,7 @@ pub fn commit_paths(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
             .arg("--")
             .args(paths)
             .stdin(std::process::Stdio::null());
+        apply_git_command_env(&mut cmd);
         git_hooks::hook_child_env(&mut cmd);
         cmd.output()
     };
@@ -26142,6 +26169,7 @@ pub fn orphaned_index_lock(dir: &Path) -> Option<String> {
         .args(["rev-parse", "--absolute-git-dir", "--show-toplevel"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    apply_git_command_env(&mut cmd);
     git_hooks::hook_child_env(&mut cmd);
     let out = cmd.output().ok().filter(|o| o.status.success())?;
     let text = String::from_utf8_lossy(&out.stdout);
@@ -27153,11 +27181,20 @@ pub fn command_refused(text: &str) -> bool {
 }
 
 /// Operator switch: missing TCB is a deny. Unset, absence stays open.
-pub fn policyd_required() -> bool {
+fn env_switch(name: &str) -> bool {
     matches!(
-        std::env::var("POLICYD_REQUIRED").as_deref(),
+        std::env::var(name).as_deref(),
         Ok("1") | Ok("true") | Ok("TRUE")
     )
+}
+
+pub fn policyd_required() -> bool {
+    env_switch("POLICYD_REQUIRED")
+}
+
+/// Operator switch: guard faults allow with a note. Unset, they deny.
+pub fn guard_fail_open() -> bool {
+    env_switch("LJOS_GUARD_FAIL_OPEN")
 }
 
 /// `POLICYD_BIN`, else `ljos-policyd` on PATH.
@@ -29288,6 +29325,64 @@ impl Drop for EnvLock {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static GIT_COMMAND_ENV: std::cell::RefCell<Vec<(std::ffi::OsString, std::ffi::OsString)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Environment entries copied onto git commands this thread starts.
+///
+/// A checkout that exists only as `GIT_DIR` and `GIT_WORK_TREE` has to hand
+/// those to git. Putting them on the process would hand them to every other
+/// test thread as well, including one that spawns git and does not hold
+/// [`test_env_lock`]. Dropping the guard restores the previous list. The
+/// process environment is not changed.
+#[cfg(test)]
+#[must_use = "the git environment lasts until this guard drops"]
+pub(crate) struct GitCommandEnv {
+    previous: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+}
+
+#[cfg(test)]
+impl GitCommandEnv {
+    pub(crate) fn set<I, K, V>(pairs: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<std::ffi::OsString>,
+        V: Into<std::ffi::OsString>,
+    {
+        let next = pairs
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+        let previous =
+            GIT_COMMAND_ENV.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), next));
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for GitCommandEnv {
+    fn drop(&mut self) {
+        let previous = std::mem::take(&mut self.previous);
+        GIT_COMMAND_ENV.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+/// Copy a test's git environment onto `cmd`. Outside the test build this
+/// does nothing, and git keeps the process environment.
+pub(crate) fn apply_git_command_env(cmd: &mut std::process::Command) {
+    #[cfg(test)]
+    GIT_COMMAND_ENV.with(|slot| {
+        for (key, value) in slot.borrow().iter() {
+            cmd.env(key, value);
+        }
+    });
+    #[cfg(not(test))]
+    let _ = cmd;
+}
+
 /// The lock every test that changes the process environment takes.
 /// Bookkeeping tests live in another module and take the same one.
 #[cfg(test)]
@@ -30489,6 +30584,9 @@ mod tests {
 
     /// A bare `GIT_DIR` plus `GIT_WORK_TREE` checkout keeps its lock and push
     /// semantics. `git -C` in that worktree must still see the configured repo.
+    /// The variables ride on the git commands. The process environment is one
+    /// for every test thread, and a thread that does not hold it would
+    /// otherwise run git in this checkout.
     #[test]
     fn a_dotfiles_git_dir_checkout_keeps_locks_and_lease_pushes() {
         let _env = env_guard();
@@ -30540,8 +30638,12 @@ mod tests {
         git(&["push", "-q", "-u", "origin", "feature/dots"]);
         std::fs::write(home.join(".vimrc"), "set number\nset list\n").unwrap();
 
-        std::env::set_var("GIT_DIR", &bare);
-        std::env::set_var("GIT_WORK_TREE", &home);
+        let before_dir = std::env::var_os("GIT_DIR");
+        let before_tree = std::env::var_os("GIT_WORK_TREE");
+        let _checkout = super::GitCommandEnv::set([
+            ("GIT_DIR", bare.as_os_str()),
+            ("GIT_WORK_TREE", home.as_os_str()),
+        ]);
         let lock_path = super::tracker_lock_path(&home).expect("GIT_DIR checkout stays visible");
         assert_eq!(lock_path, home.join(TRACKER_LOCK));
         let held = tracker_commit_lock(&home);
@@ -30556,12 +30658,13 @@ mod tests {
             gate_push(None, "git push --force-with-lease", Some(&cwd)).is_none(),
             "a bare lease push stays ordinary with GIT_DIR/GIT_WORK_TREE"
         );
-        std::env::remove_var("GIT_DIR");
-        std::env::remove_var("GIT_WORK_TREE");
+        assert_eq!(std::env::var_os("GIT_DIR"), before_dir);
+        assert_eq!(std::env::var_os("GIT_WORK_TREE"), before_tree);
     }
 
     /// In hook-child mode, lock-path discovery must ignore the hook's
-    /// exported git directory and stay on the checkout passed to `-C`.
+    /// git directory and stay on the checkout passed to `-C`. The directory
+    /// is named on the git command, not on the process.
     #[test]
     fn hook_children_ignore_exported_git_dir_for_lock_paths() {
         let _env = env_guard();
@@ -30577,8 +30680,12 @@ mod tests {
         file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120))
             .unwrap();
         drop(file);
-        std::env::set_var("GIT_DIR", decoy.join(".git"));
-        std::env::set_var("GIT_WORK_TREE", &decoy);
+        let before_dir = std::env::var_os("GIT_DIR");
+        let before_tree = std::env::var_os("GIT_WORK_TREE");
+        let _decoy = super::GitCommandEnv::set([
+            ("GIT_DIR", decoy.join(".git").as_os_str()),
+            ("GIT_WORK_TREE", decoy.as_os_str()),
+        ]);
         let tracker = crate::git_hooks::with_hook_children_for_test(|| {
             super::tracker_lock_path(&real).expect("checkout lock path")
         });
@@ -30590,12 +30697,13 @@ mod tests {
             orphan.contains(&lock.display().to_string()),
             "wrong lock path under hook child env: {orphan}"
         );
-        std::env::remove_var("GIT_DIR");
-        std::env::remove_var("GIT_WORK_TREE");
+        assert_eq!(std::env::var_os("GIT_DIR"), before_dir);
+        assert_eq!(std::env::var_os("GIT_WORK_TREE"), before_tree);
     }
 
     /// A hook-child tracker write must check pin ignores in that tracker,
-    /// not in an exported `GIT_DIR` from the parent hook process.
+    /// not in a `GIT_DIR` named on the git command. The process environment
+    /// stays shared with the other tests.
     #[test]
     fn hook_children_check_pin_ignores_in_the_tracker_checkout() {
         let _env = env_guard();
@@ -30634,14 +30742,18 @@ mod tests {
         std::fs::write(real.join(ballot_sig::PIN_FILE), "saddle deadbeef\n").unwrap();
         std::env::set_var("LJOS_TRACKER_GIT", "commit");
         std::env::set_var("LJOS_SEAT", "saddle");
-        std::env::set_var("GIT_DIR", decoy.join(".git"));
-        std::env::set_var("GIT_WORK_TREE", &decoy);
+        let before_dir = std::env::var_os("GIT_DIR");
+        let before_tree = std::env::var_os("GIT_WORK_TREE");
+        let _decoy = super::GitCommandEnv::set([
+            ("GIT_DIR", decoy.join(".git").as_os_str()),
+            ("GIT_WORK_TREE", decoy.as_os_str()),
+        ]);
         let said = crate::git_hooks::with_hook_children_for_test(|| {
             persist_tracker_file(&issues, "probe-a1b2", "claimed")
         });
         assert!(said.contains("committed chore(issues): probe-a1b2 claimed by saddle"));
-        std::env::remove_var("GIT_DIR");
-        std::env::remove_var("GIT_WORK_TREE");
+        assert_eq!(std::env::var_os("GIT_DIR"), before_dir);
+        assert_eq!(std::env::var_os("GIT_WORK_TREE"), before_tree);
         let log = std::process::Command::new("git")
             .arg("-C")
             .arg(&real)
@@ -31782,6 +31894,35 @@ mod tests {
         assert!(short.contains("older than 0.4.5"), "{short}");
         assert!(short.contains("rustup update stable"), "{short}");
         assert!(short.contains("Rust older than 1.89"), "{short}");
+    }
+
+    #[test]
+    fn doctor_policy_row_fails_missing_or_unresponsive_policyd_with_fix() {
+        let _g = env_guard();
+        let _missing = HoldEnv::set(&[("PATH", "/nonexistent"), ("POLICYD_BIN", "")]);
+        let missing = policy_row();
+        assert!(!missing.ok);
+        assert!(missing.state.contains("not installed"), "{}", missing.state);
+        assert!(
+            missing.state.contains(POLICYD_INSTALL_FIX),
+            "{}",
+            missing.state
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let dead = dir.path().join("ljos-policyd-missing");
+        let _down = HoldEnv::set(&[("POLICYD_BIN", dead.to_str().unwrap())]);
+        let unresponsive = policy_row();
+        assert!(!unresponsive.ok);
+        assert!(
+            unresponsive.state.contains("does not answer `version`"),
+            "{}",
+            unresponsive.state
+        );
+        assert!(
+            unresponsive.state.contains(POLICYD_INSTALL_FIX),
+            "{}",
+            unresponsive.state
+        );
     }
 
     #[test]
@@ -34115,6 +34256,22 @@ mod tests {
     }
 
     #[test]
+    fn guard_fail_open_is_the_operator_switch() {
+        let _g = env_guard();
+        let before = std::env::var_os("LJOS_GUARD_FAIL_OPEN");
+        std::env::remove_var("LJOS_GUARD_FAIL_OPEN");
+        assert!(!guard_fail_open());
+        std::env::set_var("LJOS_GUARD_FAIL_OPEN", "1");
+        assert!(guard_fail_open());
+        std::env::set_var("LJOS_GUARD_FAIL_OPEN", "0");
+        assert!(!guard_fail_open());
+        match before {
+            Some(v) => std::env::set_var("LJOS_GUARD_FAIL_OPEN", v),
+            None => std::env::remove_var("LJOS_GUARD_FAIL_OPEN"),
+        }
+    }
+
+    #[test]
     fn stamps_of_every_shape_key_the_same() {
         assert_eq!(
             stamp_key(Some("[2026-09-12 Sat 21:54]")),
@@ -34230,6 +34387,11 @@ mod tests {
             ("ljosbot".to_string(), Some("q4s23e2cxd".to_string()))
         );
         assert_eq!(holder_parts("eessi-bot"), ("eessi-bot".to_string(), None));
+        assert_eq!(holder_parts("gpt-5"), ("gpt-5".to_string(), None));
+        assert_eq!(
+            holder_parts("ridley-ci-a-555001"),
+            ("ridley-ci-a-555001".to_string(), None)
+        );
         assert_eq!(
             holder_parts("grokbot-sand-sub"),
             ("grokbot-sand-sub".to_string(), None)
@@ -47403,7 +47565,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// `bytes/` and digest sidecars. The binary is installed on PATH the
     /// way CI installs deedar. A failed build fails the test.
     fn deedimport_deedar() -> std::path::PathBuf {
-        const SHA: &str = "89e2574f6432bfc0451315f552f048eec747f59a";
+        const SHA: &str = "0cf75a3f647968ffce5eb466c22b0d3320837032";
         let cache = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/deedimport2-deedar");
         let bin_dir = cache.join("bin");

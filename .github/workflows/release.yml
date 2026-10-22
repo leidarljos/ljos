@@ -113,15 +113,17 @@ jobs:
           sudo apt-get install -y --no-install-recommends build-essential cmake python3 protobuf-compiler pkg-config libssl-dev
           test "$(/usr/bin/protoc --version)" = "libprotoc 3.21.12"
           echo "0.0.0.0 cdn.pyke.io" | sudo tee -a /etc/hosts
-      # A tag run reads only caches saved by its own tag or by the default
-      # branch, so this saves the build on a rerun and on a run from main.
+      # A release builds ONNX Runtime from source. A cache saved on another
+      # ref would ship that build, so a tag and a run by hand do not restore
+      # it. Other runs still save the build for a rerun.
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         id: ort
+        if: github.ref_type != 'tag' && github.event_name != 'workflow_dispatch'
         with:
           path: ${{ runner.temp }}/onnxruntime
           key: onnxruntime-${{ env.ORT_VERSION }}-shared-telemetry-off-protoc-3.21.12-${{ env.TARGET }}
       - name: Build ONNX Runtime from source
-        if: steps.ort.outputs.cache-hit != 'true'
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch' || steps.ort.outputs.cache-hit != 'true'
         env:
           CC: gcc
           CXX: g++
@@ -164,13 +166,16 @@ jobs:
           fi
       # Each archive unpacks into a prefix such as ~/.local. Unpacked side by
       # side, the encoder starts with the archive's library and no other.
+      # cloud up refuses a symlink, so the soname is copied as a regular file.
+      # cmake install leaves it as a link beside the versioned library.
       - name: Package
         run: |
           set -eu
           rt="onnxruntime-$TARGET"
           embed="packset-embed-$TARGET"
           mkdir -p "dist/$rt/lib/onnxruntime" "dist/$embed/bin"
-          cp -a "$RUNNER_TEMP"/onnxruntime/lib/libonnxruntime.so* "dist/$rt/lib/onnxruntime/"
+          cp -L "$RUNNER_TEMP/onnxruntime/lib/libonnxruntime.so.1" "dist/$rt/lib/onnxruntime/"
+          find "$RUNNER_TEMP/onnxruntime/lib" -type f -name 'libonnxruntime.so*' -exec cp {} "dist/$rt/lib/onnxruntime/" \;
           cp "$RUNNER_TEMP/onnxruntime/LICENSE" "$RUNNER_TEMP/onnxruntime/ThirdPartyNotices.txt" "dist/$rt/lib/onnxruntime/"
           cp "$RUNNER_TEMP/embed/bin/packset-embed" "dist/$embed/bin/"
           tar -C "dist/$rt" -czf "dist/$rt.tar.gz" lib
@@ -186,6 +191,7 @@ jobs:
           for f in "$rt.tar.gz" "$embed.tar.gz"; do
             sha256sum "$f" > "$f.sha256"
           done
+          sha256sum "$RUNNER_TEMP/onnxruntime/lib/libonnxruntime.so.1" >> "$rt.tar.gz.sha256"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: encoder-${{ env.TARGET }}
