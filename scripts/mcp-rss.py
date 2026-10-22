@@ -121,7 +121,7 @@ def main():
             env[key] = os.environ[key]
 
     proc = subprocess.Popen(
-        [args.bin],
+        [binary],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
