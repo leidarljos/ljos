@@ -1,0 +1,1 @@
+A recalled claim reads as the person's words only when the pack stored it as the person's; the `via:prompt` tag alone, which a direct post can carry, no longer makes an agent's lesson the person's words in the prompt hook, recall or a brief.
