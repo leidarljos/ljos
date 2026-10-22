@@ -268,3 +268,36 @@ fn a_cloud_seat_is_refused_even_with_a_mailbox() {
         assert!(!ran.text(id).contains("Lunch"), "{}", ran.text(id));
     }
 }
+
+#[test]
+fn any_cloud_marker_refuses_the_mail_tools() {
+    let mailbox = maildir::mailbox();
+    let extra = serde_json::to_string(&json!([
+        ["cloud-cursor-push", "deny", "r"],
+        ["cloud-gh-pr-create", "deny", "r"],
+        ["cloud-gh-pr-merge", "deny", "r"],
+        ["rm -rf *", "deny", "an extra rule"]
+    ]))
+    .unwrap();
+    for (name, text) in [
+        ("cloud-guard-rules.json", extra.as_str()),
+        ("cloud-guard-rules.json", "not json"),
+        ("cloud-guard-rules.json", "[]"),
+        ("push-allow", ""),
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        configure(home.path(), &mailbox);
+        std::fs::write(home.path().join("config/ljos").join(name), text).unwrap();
+        let ran = session(
+            home.path(),
+            Some("mail_search"),
+            &[call("ljos_mail_search", json!({"query": "lunch"}))],
+        );
+        assert_eq!(ran.by_id(2)["result"]["isError"], true, "{name} {text}");
+        assert!(
+            ran.text(2).contains("cloud seat"),
+            "{name}: {}",
+            ran.text(2)
+        );
+    }
+}

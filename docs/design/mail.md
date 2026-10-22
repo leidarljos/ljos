@@ -46,9 +46,12 @@ attribution = ["drafted by the assistant"]
 
 `ljos_mail_search` and `ljos_mail_show` are not in the core tool set, so a
 session that does not ask for them pays nothing for them. Add them with
-`LJOS_MCP_TOOLS=core,mail_search,mail_show`. A cloud seat (one that ran
-`ljos cloud up`) gets a refusal: it has no database, and personal mail
-stays on the machine that holds it.
+`LJOS_MCP_TOOLS=core,mail_search,mail_show`; a call to either tool
+without that is refused. A cloud seat gets a refusal: it has no
+database, and personal mail stays on the machine that holds it. Any
+file `ljos cloud up` leaves in the ljos config dir (the cloud guard
+rules or the push allowlist), whatever it holds, counts as a cloud seat
+here.
 
 - `ljos_mail_search {query, limit}` runs notmuch with a fixed argv. The
   query is one argv element after `--`, so it cannot become an option. The
