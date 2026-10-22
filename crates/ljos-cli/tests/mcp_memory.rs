@@ -143,6 +143,7 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
         .env("VISSUE_ROOT", &tracker)
         .env("PACKSET_URL", &url)
         .env("PACKSET_WORKSPACE", "seat")
+        .env("LJOS_HARNESS_SESSION", "person-1")
         .env_remove("LJOS_SEAT")
         .env_remove("LJOS_OFF")
         .stdin(Stdio::piped())
