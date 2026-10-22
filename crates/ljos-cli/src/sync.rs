@@ -175,6 +175,7 @@ fn state_base() -> PathBuf {
         .join("ljos")
 }
 
+#[cfg(test)]
 fn state_dir() -> PathBuf {
     state_base().join("sync")
 }
@@ -540,6 +541,7 @@ fn scope_is_configured(scope: &Scope, name: &str) -> bool {
 }
 
 /// Seal `plain` to the recipients into `out`.
+#[cfg(test)]
 fn seal(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
     let sealed = seal_bytes(plain, recipients)?;
     let tmp = out.with_extension("age.tmp");
@@ -867,6 +869,7 @@ fn open(path: &Path, identity: &Path) -> Result<Option<String>> {
 /// of them is a recipient. `age` and `rage` run with `LC_ALL`, `LANG`,
 /// `LANGUAGE`, and `LC_MESSAGES` set to C, so a French miss stays a miss
 /// instead of aborting the rest of the import.
+#[cfg(test)]
 fn open_identities(path: &Path, identities: &[PathBuf]) -> Result<Option<String>> {
     if identities.is_empty() {
         return Ok(None);
@@ -3381,27 +3384,20 @@ fn looks_like_git(root: &Path) -> bool {
     git.is_dir() || git.is_file()
 }
 
-fn repo_rows(root: &Path) -> Vec<crate::user_rules::UserRule> {
-    let dir = root.join(".ljos").join("user-rules");
-    let Ok(read) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut paths: Vec<PathBuf> = read
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .collect();
-    paths.sort();
+fn repo_rows(root: &Path) -> Result<Vec<crate::user_rules::UserRule>> {
     let mut rows = Vec::new();
-    for path in paths {
-        let Ok(text) = std::fs::read_to_string(&path) else {
+    for name in list_beneath(root, ".ljos/user-rules")? {
+        if !name.ends_with(".json") {
+            continue;
+        }
+        let Ok(Some(bytes)) = read_beneath(root, &format!(".ljos/user-rules/{name}")) else {
             continue;
         };
-        if let Ok(parsed) = crate::user_rules::parse_rules(&text) {
+        if let Ok(parsed) = crate::user_rules::parse_rules(&String::from_utf8_lossy(&bytes)) {
             rows.extend(parsed);
         }
     }
-    rows
+    Ok(rows)
 }
 
 /// How long a git past its budget has to clean up after SIGTERM.
@@ -3622,32 +3618,26 @@ fn plain_rules_rel(name: &str) -> String {
 /// it could not: sealed to other machines, or `age` missing. The files are
 /// sealed to the tracker's primary scope, `scope_name`, which is empty
 /// when the tracker names none.
-fn sealed_rows(root: &Path, scope_name: &str) -> (Vec<crate::user_rules::UserRule>, usize) {
-    let dir = root.join(".ljos").join("user-rules");
-    let Ok(read) = std::fs::read_dir(&dir) else {
-        return (Vec::new(), 0);
-    };
-    let mut paths: Vec<PathBuf> = read
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| path.to_string_lossy().ends_with(".json.age"))
-        .collect();
-    paths.sort();
+fn sealed_rows(root: &Path, scope_name: &str) -> Result<(Vec<crate::user_rules::UserRule>, usize)> {
     let identities = identities_for_open(scope_name);
     let mut rows = Vec::new();
     let mut closed = 0;
-    for path in paths {
-        let opened = if identities.is_empty() {
-            None
-        } else {
-            open_identities(&path, &identities).ok().flatten()
+    for name in list_beneath(root, ".ljos/user-rules")? {
+        if !name.ends_with(".json.age") {
+            continue;
+        }
+        let opened = match read_beneath(root, &format!(".ljos/user-rules/{name}")) {
+            Ok(Some(bytes)) if !identities.is_empty() => {
+                open_sealed_bytes(&bytes, &identities).ok().flatten()
+            }
+            _ => None,
         };
         match opened.and_then(|text| crate::user_rules::parse_rules(&text).ok()) {
             Some(parsed) => rows.extend(parsed),
             None => closed += 1,
         }
     }
-    (rows, closed)
+    Ok((rows, closed))
 }
 
 /// Merge `rows` into the local file and return the merged rows. Nothing
@@ -3670,11 +3660,11 @@ fn merge_into_local(
 /// unchanged set of rules is not sealed and committed again. It stays on
 /// this machine: a digest of the rules in the tracker would say something
 /// about them.
-fn rules_stamp_path(root: &Path, name: &str) -> PathBuf {
-    state_dir()
-        .join("user-rules")
-        .join(crate::work_id(&root.display().to_string()))
-        .join(format!("{name}.digest"))
+fn rules_stamp_rel(root: &Path, name: &str) -> String {
+    format!(
+        "sync/user-rules/{}/{name}.digest",
+        crate::work_id(&root.display().to_string())
+    )
 }
 
 /// What sealing this host's rules did.
@@ -3686,32 +3676,29 @@ enum Sealed {
 }
 
 fn seal_rules(root: &Path, scope: &Scope, rendered: &str, name: &str) -> Result<Sealed> {
-    let out = root.join(sealed_rules_rel(name));
-    let stamp = rules_stamp_path(root, name);
+    let out = sealed_rules_rel(name);
+    let base = state_base();
+    let stamp = rules_stamp_rel(root, name);
     let digest = format!(
         "{} {}\n",
         crate::work_id(rendered),
         crate::work_id(&scope.recipients.join(","))
     );
-    if out.is_file() && std::fs::read_to_string(&stamp).is_ok_and(|have| have == digest) {
+    if read_beneath(root, &out)?.is_some()
+        && read_beneath(&base, &stamp)?.is_some_and(|have| have == digest.as_bytes())
+    {
         return Ok(Sealed::Unchanged);
     }
     if !age_on_path() {
         return Ok(Sealed::AgeMissing);
     }
-    if let Some(parent) = out.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if let Err(err) = seal(rendered, &scope.recipients, &out) {
-        if age_missing(&err) {
-            return Ok(Sealed::AgeMissing);
-        }
-        return Err(err);
-    }
-    if let Some(parent) = stamp.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&stamp, digest)?;
+    let sealed = match seal_bytes(rendered, &scope.recipients) {
+        Ok(sealed) => sealed,
+        Err(err) if age_missing(&err) => return Ok(Sealed::AgeMissing),
+        Err(err) => return Err(err),
+    };
+    write_beneath(root, &out, &sealed)?;
+    write_beneath(&base, &stamp, digest.as_bytes())?;
     Ok(Sealed::Wrote)
 }
 
@@ -3752,8 +3739,8 @@ pub fn exchange_user_rules(
     let scope = scope_of_repo(root)?;
     let sealed_to = scope.as_ref().map(|s| s.name.clone()).unwrap_or_default();
     let Some(scope) = scope.filter(|_| mode != TrackerGit::Off) else {
-        let (mut rows, _) = sealed_rows(root, &sealed_to);
-        rows.extend(repo_rows(root));
+        let (mut rows, _) = sealed_rows(root, &sealed_to)?;
+        rows.extend(repo_rows(root)?);
         let merged = merge_into_local(rows)?;
         if !asked {
             return Ok(String::new());
@@ -3773,8 +3760,8 @@ pub fn exchange_user_rules(
     if remote {
         integrate_remote(root, deadline)?;
     }
-    let (mut rows, closed) = sealed_rows(root, &scope.name);
-    rows.extend(repo_rows(root));
+    let (mut rows, closed) = sealed_rows(root, &scope.name)?;
+    rows.extend(repo_rows(root)?);
     let merged = merge_into_local(rows)?;
     let mut out = String::new();
     if remote {
@@ -3787,7 +3774,7 @@ pub fn exchange_user_rules(
         ));
     }
     let live = merged.iter().filter(|rule| !rule.deleted).count();
-    if merged.is_empty() && !root.join(plain_rules_rel(&machine_name(host))).exists() {
+    if merged.is_empty() && read_beneath(root, &plain_rules_rel(&machine_name(host)))?.is_none() {
         out.push_str("sync: user rules: 0 on this machine\n");
         return Ok(out);
     }
@@ -3807,9 +3794,7 @@ pub fn exchange_user_rules(
     }
     let mut rels = vec![sealed_rules_rel(&name)];
     let plain = plain_rules_rel(&name);
-    if root.join(&plain).exists() {
-        std::fs::remove_file(root.join(&plain))?;
-    }
+    remove_beneath(root, &plain)?;
     if tracked(root, &plain) {
         rels.push(plain);
     }
