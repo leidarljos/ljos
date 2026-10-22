@@ -2793,4 +2793,69 @@ mod tests {
         assert!(said.contains("gonehost: 1 cloud atoms taken"), "{said}");
         assert_eq!(posted_texts(&posted), vec!["cloud only"]);
     }
+
+    /// A VM holds cloud.age and no machine key. Adopting a gone host of
+    /// scope cloud reads that host's log with the cloud identity, keeps
+    /// its atoms in this host's log, and drops the gone host's log.
+    #[test]
+    fn adopt_reads_a_gone_hosts_cloud_log_with_only_the_cloud_identity() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let public = vm_with_only_the_cloud_identity(dir.path());
+        let root = dir.path().join("tracker");
+        let atoms = log_dir(&root);
+        std::fs::create_dir_all(&atoms).unwrap();
+        std::fs::write(
+            root.join(".ljos/sync.toml"),
+            format!("name = \"cloud\"\nrecipients = [\"{public}\"]\n"),
+        )
+        .unwrap();
+        let scope = scope_of_repo(&root).unwrap().unwrap();
+        let plain = format!("{}\n", atom("a", "from the gone host", &["scope:cloud"]));
+        seal(
+            &plain,
+            std::slice::from_ref(&public),
+            &atoms.join("gonehost.jsonl.age"),
+        )
+        .unwrap();
+        std::fs::write(atoms.join("gonehost.digest"), "digest\n").unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "seat@example.invalid"]);
+        git(&["config", "user.name", "seat"]);
+        git(&["config", "core.hooksPath", "/dev/null"]);
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "seed"]);
+        let posted = std::sync::Arc::default();
+        std::env::set_var("PACKSET_URL", serve_pack(std::sync::Arc::clone(&posted)));
+
+        let said = adopt_in_repo(&root, &scope, "gonehost", false).unwrap();
+        assert!(
+            said.contains("gonehost: 1 cloud atoms adopted, 0 refused"),
+            "{said}"
+        );
+        assert_eq!(posted_texts(&posted), vec!["from the gone host"]);
+        let mine = atoms.join(format!("{}.jsonl.age", host()));
+        let kept = open_identities(&mine, &identities_for_open(CLOUD_SCOPE))
+            .unwrap()
+            .unwrap_or_default();
+        assert!(kept.contains("from the gone host"), "{kept}");
+        assert!(!atoms.join("gonehost.jsonl.age").exists());
+        assert!(git(&["log", "-1", "--format=%s"]).contains("adopt gonehost cloud atoms"));
+        let tracked = git(&["ls-files", ".ljos/atoms"]);
+        assert!(!tracked.contains("gonehost"), "{tracked}");
+    }
 }
