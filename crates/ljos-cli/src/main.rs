@@ -587,7 +587,8 @@ enum Cmd {
         #[arg(long, conflicts_with_all = ["webhook", "clear", "fire"])]
         command: Option<String>,
         /// POST the message's envelope (never its body) here, such as a Grok
-        /// Bot routine's webhook. https, or http on this machine.
+        /// Bot routine's webhook. https, or http on localhost, an IPv4
+        /// loopback address, or ::1.
         #[arg(long, conflicts_with_all = ["clear", "fire"])]
         webhook: Option<String>,
         /// A file holding the webhook's bearer key.
