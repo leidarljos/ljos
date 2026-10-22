@@ -38,28 +38,59 @@ const UNREAD: &str = "this push goes where the checkout says, and the checkout c
 /// Why a `git push` in `line` would update a `cursor/*` ref, or `None`
 /// when none would. `cwd` is where the line runs, the process directory
 /// when absent; a `cd DIR` before the push and `git -C DIR` move it.
+/// A `$NAME` bound by an earlier assignment on the same line is the
+/// destination the shell pushes, so that name is what is judged.
 pub(crate) fn cursor_push(line: &str, cwd: Option<&Path>) -> Option<String> {
     let mut here = cwd
         .map(Path::to_path_buf)
         .or_else(|| std::env::current_dir().ok());
-    for seg in crate::nested_lines(line, 0)
-        .iter()
-        .flat_map(|l| crate::raw_segments(l))
-    {
-        let words = argv(&seg);
-        match words.first().map(String::as_str) {
-            Some("cd" | "pushd") => here = moved(here, &words[1..]),
-            Some("popd") => here = None,
-            Some("git") => {
-                if let Some(why) = git_push(&words[1..], here.clone()).and_then(|p| p.cursor_ref())
-                {
-                    return Some(why);
-                }
+    for l in crate::nested_lines(line, 0) {
+        let mut names: Vec<(String, String)> = Vec::new();
+        for seg in crate::raw_segments(&l) {
+            if crate::assignment_segment(&seg) {
+                bound_names(&mut names, &seg);
+                continue;
             }
-            _ => {}
+            let ifs = names
+                .iter()
+                .rev()
+                .find(|(k, _)| k == "IFS")
+                .map(|(_, v)| v.clone());
+            let expanded = crate::expand_names(&seg, &names, ifs.as_deref());
+            let seg = expanded.as_deref().unwrap_or(&seg);
+            let words = argv(seg);
+            match words.first().map(String::as_str) {
+                Some("cd" | "pushd") => here = moved(here, &words[1..]),
+                Some("popd") => here = None,
+                Some("git") => {
+                    if let Some(why) =
+                        git_push(&words[1..], here.clone()).and_then(|p| p.cursor_ref())
+                    {
+                        return Some(why);
+                    }
+                }
+                _ => {}
+            }
         }
     }
     None
+}
+
+/// Names a bare assignment binds, in order. A `NAME=value` prefix on the
+/// command itself is that command's environment, not a shell assignment,
+/// so it does not name a later `$NAME` on the same command.
+fn bound_names(names: &mut Vec<(String, String)>, seg: &str) {
+    let words = crate::shell_words(seg);
+    let bare = if words.first().is_some_and(|w| w == "export") {
+        &words[1..]
+    } else {
+        &words[..]
+    };
+    for w in bare {
+        if let Some((k, v)) = w.split_once('=') {
+            names.push((k.to_string(), v.to_string()));
+        }
+    }
 }
 
 /// Which pull-request actions `line` runs through `gh`. `open` is create,
@@ -522,13 +553,17 @@ fn argv(segment: &str) -> Vec<String> {
 
 /// Where `cd ARGS` leaves the line, `None` when it cannot be told: `-`,
 /// a variable, or a directory that was already unknown.
+/// `cd "$(git rev-parse --show-toplevel)"` is this checkout's top.
 fn moved(here: Option<PathBuf>, args: &[String]) -> Option<PathBuf> {
     let home = || crate::home().ok();
     let Some(to) = args.iter().find(|a| !a.starts_with('-') || *a == "-") else {
         return home();
     };
-    if to == "-" || to.contains(['$', '`']) {
+    if to == "-" {
         return None;
+    }
+    if to.contains(['$', '`']) {
+        return toplevel_cd(here, to);
     }
     if to == "~" {
         return home();
@@ -540,6 +575,29 @@ fn moved(here: Option<PathBuf>, args: &[String]) -> Option<PathBuf> {
         return None;
     }
     Some(here?.join(to))
+}
+
+/// The checkout top `cd` named with `git rev-parse --show-toplevel`, or
+/// `None` for any other substitution. The command is run in `here`, so a
+/// subdirectory and the top resolve to the same repository.
+fn toplevel_cd(here: Option<PathBuf>, to: &str) -> Option<PathBuf> {
+    if to != "$(git rev-parse --show-toplevel)" && to != "`git rev-parse --show-toplevel`" {
+        return None;
+    }
+    let here = here?;
+    let out = Command::new("git")
+        .current_dir(here)
+        .args(["rev-parse", "--show-toplevel"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(out.stdout).ok()?;
+    let path = path.trim();
+    (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
 /// The push `args` (the words after `git`) make, or `None` when they run
@@ -672,11 +730,16 @@ impl Push {
                 return Some(why);
             }
         }
-        let mirrors_or_all = self
+        // `--all`, `--branches` and `--mirror` already judged the local
+        // branches. `--tags` pushes tags and not the branch checked out.
+        // `--follow-tags` pushes that branch as well, so it is read below.
+        let covers_heads = self
             .bulk
             .iter()
             .any(|f| matches!(f.as_str(), "--all" | "--branches" | "--mirror"));
-        if self.words.len() <= 1 && !mirrors_or_all {
+        let follow_tags = self.bulk.iter().any(|f| f == "--follow-tags");
+        let tags_only = self.bulk.iter().any(|f| f == "--tags") && !covers_heads && !follow_tags;
+        if self.words.len() <= 1 && !covers_heads && !tags_only {
             return self.at.implicit(remote.map(String::as_str));
         }
         None
@@ -689,6 +752,39 @@ fn short_cluster_takes_value(word: &str) -> bool {
     word.strip_prefix('-').is_some_and(|flags| {
         flags.len() > 1 && flags.chars().all(|c| c.is_ascii_alphabetic()) && flags.ends_with('o')
     })
+}
+
+/// The last `:` that splits a refspec into `src:dst`. Colons inside
+/// `$(...)`, `${...}` and backticks stay inside that side, so
+/// `$(echo HEAD:cursor/x)` is one destination and not `cursor/x)`.
+fn refspec_sides(spec: &str) -> Option<(&str, &str)> {
+    let mut paren = 0i32;
+    let mut brace = 0i32;
+    let mut tick = false;
+    let mut colon = None;
+    let mut chars = spec.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '`' => tick = !tick,
+            '$' if !tick => match chars.peek().map(|(_, n)| *n) {
+                Some('(') => {
+                    paren += 1;
+                    chars.next();
+                }
+                Some('{') => {
+                    brace += 1;
+                    chars.next();
+                }
+                _ => {}
+            },
+            ')' if !tick && paren > 0 => paren -= 1,
+            '}' if !tick && brace > 0 => brace -= 1,
+            ':' if !tick && paren == 0 && brace == 0 => colon = Some(i),
+            _ => {}
+        }
+    }
+    let at = colon?;
+    Some((&spec[..at], &spec[at + 1..]))
 }
 
 /// A ref name under `cursor/`, written short or under `refs/heads/` or
@@ -819,8 +915,9 @@ impl Checkout {
             return self.local(&["refs/heads/"], "a matching push");
         }
         // A destination of `HEAD` is a branch named `HEAD` to git; only a
-        // bare `HEAD` or `@` pushes the branch checked out.
-        let (src, dst, bare) = match spec.rsplit_once(':') {
+        // bare `HEAD` or `@` pushes the branch checked out. A colon inside
+        // `$(...)`, `${...}` or backticks belongs to that substitution.
+        let (src, dst, bare) = match refspec_sides(spec) {
             Some((src, dst)) => (src, dst, false),
             None => (spec, spec, true),
         };
@@ -833,7 +930,9 @@ impl Checkout {
                 Some(_) => None,
             };
         }
-        if spec.contains(['$', '`']) && dst.contains(['$', '`', '(', ')', '{', '}']) {
+        // An earlier assignment has already been substituted. What remains
+        // is a destination the shell has not expanded, named in full.
+        if dst.contains(['$', '`']) {
             return Some(format!(
                 "`{dst}` is only known once the shell expands it; push a named branch"
             ));

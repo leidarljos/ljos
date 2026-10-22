@@ -37,6 +37,31 @@ impl Drop for Guard {
     }
 }
 
+fn sh_at(dir: &Path, script: &str) -> std::process::Output {
+    Command::new("sh")
+        .current_dir(dir)
+        .arg("-c")
+        .arg(script)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .unwrap_or_else(|e| panic!("sh -c in {}: {e}", dir.display()))
+}
+
+fn sh_ok(dir: &Path, script: &str) -> String {
+    let out = sh_at(dir, script);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.success(),
+        "sh -c {script:?} in {}: {text}",
+        dir.display()
+    );
+    text
+}
+
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .arg("-C")
@@ -1745,6 +1770,134 @@ fn bare_checkout(root: &Path) -> (PathBuf, PathBuf) {
     git(&repo, &["branch", "feature-x"]);
     git(&repo, &["branch", "cursor/probe"]);
     (origin, repo)
+}
+
+/// An earlier assignment, `cd` to the checkout top, and `git push --tags`
+/// do not update a `cursor/*` ref. The bare remote is where those commands
+/// actually push.
+#[test]
+fn cloud_guard_allows_resolved_destinations_toplevel_and_tags() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let (origin, repo) = bare_checkout(root.path());
+    let sub = repo.join("sub");
+    fs::create_dir(&sub).unwrap();
+    let remote_has = |needle: &str| {
+        git(&origin, &["show-ref"])
+            .lines()
+            .any(|l| l.ends_with(needle))
+    };
+
+    allowed(r#"B=feature-x; git push origin "$B""#, &repo);
+    sh_ok(&repo, r#"B=feature-x; git push origin "$B""#);
+    assert!(
+        remote_has("refs/heads/feature-x"),
+        "feature-x was not pushed"
+    );
+    assert!(
+        !remote_has("refs/heads/cursor/probe"),
+        "the assignment pushed cursor/probe"
+    );
+    allowed(r#"export B=feature-x; git push origin "${B}""#, &repo);
+    allowed(r#"sh -c 'B=feature-x; git push origin "$B"'"#, &repo);
+    allowed(r#"B=feature-x; git push origin "$B":develop"#, &repo);
+    allowed(r#"git push origin "$(echo HEAD):develop""#, &repo);
+
+    let onto = refused(r#"B=cursor/probe; git push origin "$B""#, &repo);
+    assert!(
+        onto.reason.contains("this push updates cursor/probe"),
+        "{}",
+        onto.reason
+    );
+    let unresolved = refused(r#"git push origin "$B""#, &repo);
+    assert!(
+        unresolved.reason.contains("`$B` is only known"),
+        "{}",
+        unresolved.reason
+    );
+    let named = refused(r#"git push origin "$(echo HEAD:cursor/x)""#, &repo);
+    assert!(
+        named
+            .reason
+            .contains("`$(echo HEAD:cursor/x)` is only known"),
+        "{}",
+        named.reason
+    );
+    assert!(
+        !named.reason.contains("`cursor/x)` is only known"),
+        "{}",
+        named.reason
+    );
+
+    let up = r#"cd "$(git rev-parse --show-toplevel)" && git push -u origin HEAD"#;
+    let up_tick = "cd `git rev-parse --show-toplevel` && git push -u origin HEAD";
+    allowed(up, &sub);
+    allowed(up_tick, &sub);
+    sh_ok(&sub, up);
+    assert!(!remote_has("refs/heads/cursor/probe"));
+
+    git(&repo, &["checkout", "-q", "cursor/probe"]);
+    let hit = refused(up, &sub);
+    assert!(
+        hit.reason.contains("cursor/probe, the branch checked out"),
+        "{}",
+        hit.reason
+    );
+    let dry = sh_at(
+        &sub,
+        r#"cd "$(git rev-parse --show-toplevel)" && git push --dry-run -u origin HEAD"#,
+    );
+    let dry_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&dry.stdout),
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    assert!(
+        dry.status.success() && dry_text.contains("cursor/probe"),
+        "{dry_text}"
+    );
+    assert!(!remote_has("refs/heads/cursor/probe"));
+
+    git(&repo, &["tag", "v1"]);
+    allowed("git push --tags", &repo);
+    sh_ok(&repo, "git push --tags");
+    assert!(remote_has("refs/tags/v1"));
+    assert!(
+        !remote_has("refs/heads/cursor/probe"),
+        "--tags pushed the branch"
+    );
+    let followed = refused("git push --follow-tags", &repo);
+    assert!(
+        followed
+            .reason
+            .contains("cursor/probe, the branch checked out"),
+        "{}",
+        followed.reason
+    );
+    refused("git push --tags --follow-tags", &repo);
+
+    git(&repo, &["tag", "cursor/mark"]);
+    let tagged = refused("git push --tags", &repo);
+    assert!(
+        tagged
+            .reason
+            .contains("`--tags` pushes refs/tags/cursor/mark"),
+        "{}",
+        tagged.reason
+    );
+    let tag_dry = sh_at(&repo, "git push --dry-run --tags");
+    let tag_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&tag_dry.stdout),
+        String::from_utf8_lossy(&tag_dry.stderr)
+    );
+    assert!(
+        tag_dry.status.success() && tag_text.contains("cursor/mark"),
+        "{tag_text}"
+    );
+    assert!(!remote_has("refs/tags/cursor/mark"));
 }
 
 #[test]
