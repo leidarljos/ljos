@@ -26965,6 +26965,7 @@ pub fn tcb_verdict(line: &str) -> Option<Rule> {
 }
 
 /// [`tcb_verdict`] for a command whose working directory is `cwd`.
+/// `ljos-policyd` is started there when that path is a directory.
 #[must_use]
 pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     clear_guard_note();
@@ -26994,7 +26995,7 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         if argv.is_empty() {
             continue;
         }
-        match tcb_check(&argv) {
+        match tcb_check_in(&argv, cwd) {
             Some(t) if t.starts_with("deny") => {
                 clear_guard_note();
                 let token = policyd_token(&t);
@@ -27437,15 +27438,31 @@ pub fn policyd_reason(token: &str) -> String {
 /// A binary that fails to start, crashes, hangs past [`guard_timeout`], or
 /// prints something that is not a verdict allows the line and says the
 /// guard is unhealthy. A line [`static_guard`] already judged does not
-/// wait for that binary.
+/// wait for that binary. The binary keeps this process's directory;
+/// [`tcb_verdict_in`] starts it in the hook's directory instead.
 pub fn tcb_check(argv: &[String]) -> Option<String> {
+    tcb_check_in(argv, None)
+}
+
+/// [`tcb_check`] for a command that will run in `cwd`.
+fn tcb_check_in(argv: &[String], cwd: Option<&Path>) -> Option<String> {
     let bin = policyd_bin()?;
-    Some(tcb_answer(&bin, argv, guard_timeout()))
+    Some(tcb_answer(&bin, argv, guard_timeout(), cwd))
 }
 
 /// What `bin check -- argv` says within `deadline`, as a verdict line.
+///
+/// `cwd` is the directory the checked command will run in. The binary
+/// starts there, so it reads that tree's Makefile or package.json. When
+/// `cwd` is missing or not a directory, the binary keeps this process's
+/// directory.
 #[must_use]
-pub fn tcb_answer(bin: &Path, argv: &[String], deadline: std::time::Duration) -> String {
+pub fn tcb_answer(
+    bin: &Path,
+    argv: &[String],
+    deadline: std::time::Duration,
+    cwd: Option<&Path>,
+) -> String {
     use std::io::Read as _;
     let unhealthy = |why: &str| format!("allow\t{}", unhealthy_note(why));
     // A binary just written, by an install or a test, can be busy for a
@@ -27453,14 +27470,21 @@ pub fn tcb_answer(bin: &Path, argv: &[String], deadline: std::time::Duration) ->
     // its exec, and the kernel answers ETXTBSY. That is not a guard that
     // failed, so the spawn is tried again for about a second.
     let spawn = || {
-        std::process::Command::new(bin)
-            .arg("check")
+        let mut cmd = std::process::Command::new(bin);
+        cmd.arg("check")
             .arg("--")
             .args(argv)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
+            .stderr(std::process::Stdio::null());
+        // ljos-policyd reads a Makefile or package.json from the directory
+        // the command will run in. The hook already has that directory.
+        // A missing path, or one that is not a directory, leaves this
+        // process's directory, which is what the spawn did before.
+        if let Some(dir) = cwd.filter(|path| path.is_dir()) {
+            cmd.current_dir(dir);
+        }
+        cmd.spawn()
     };
     let Ok(mut child) = spawn_while_busy(spawn) else {
         return unhealthy("did not start");
@@ -40752,13 +40776,62 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         });
     }
 
+    /// ljos-policyd reads a Makefile or package.json from its own working
+    /// directory, which is where the hook's command will run. A fake
+    /// policyd that prints `pwd -P` shows that directory reached it. A
+    /// missing path, or a path that is not a directory, leaves the process
+    /// directory, which is what the spawn did before.
+    #[test]
+    fn the_hook_directory_is_where_policyd_runs() {
+        let _g = env_guard();
+        let home = SeatDir::new("policyd-cwd");
+        let bin = fake_policyd(
+            home.path(),
+            "ljos-policyd",
+            "printf 'deny\\t'\n/bin/pwd -P\nexit 2",
+        );
+        let work = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
+            (
+                "XDG_CONFIG_HOME",
+                home.path().join("config").to_str().unwrap(),
+            ),
+            ("XDG_DATA_HOME", home.path().join("data").to_str().unwrap()),
+            ("POLICYD_BIN", bin.to_str().unwrap()),
+            ("PACKSET_WORKSPACE", "policyd-cwd"),
+            ("LJOS_CONFIG", ""),
+            ("LJOS_OFF", "0"),
+        ]);
+        let process = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        let here = std::fs::canonicalize(work.path()).unwrap();
+        assert_ne!(
+            here, process,
+            "the hook directory must differ from the process directory"
+        );
+        let printed = |cwd: Option<&std::path::Path>| {
+            let rule = tcb_verdict_in("make clean-all", cwd).expect("policyd answered");
+            assert_eq!(rule.verdict, "deny", "{}", rule.reason);
+            assert_eq!(rule.pattern, "ljos-policyd", "{}", rule.reason);
+            rule.reason
+        };
+        assert_eq!(printed(Some(work.path())), here.display().to_string());
+        let missing = elsewhere.path().join("gone");
+        assert_eq!(printed(Some(&missing)), process.display().to_string());
+        let file = elsewhere.path().join("not-a-dir");
+        std::fs::write(&file, "x").unwrap();
+        assert_eq!(printed(Some(&file)), process.display().to_string());
+        assert_eq!(printed(None), process.display().to_string());
+    }
+
     #[test]
     fn a_tcb_that_crashes_or_times_out_allows_the_line() {
         let dir = tempfile::tempdir().unwrap();
         let argv = vec!["git".to_string(), "status".to_string()];
         let quick = std::time::Duration::from_millis(200);
         let answer = |name: &str, body: &str| {
-            tcb_answer(&fake_policyd(dir.path(), name, body), &argv, quick)
+            tcb_answer(&fake_policyd(dir.path(), name, body), &argv, quick, None)
         };
         assert_eq!(answer("allows", "echo allow"), "allow");
         assert_eq!(
@@ -40801,7 +40874,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             );
             assert!(!said.contains("refused unchecked"), "{name}: {said}");
         }
-        let gone = tcb_answer(&dir.path().join("missing"), &argv, quick);
+        let gone = tcb_answer(&dir.path().join("missing"), &argv, quick, None);
         assert!(
             gone.starts_with("allow\t") && gone.contains("did not start"),
             "{gone}"
