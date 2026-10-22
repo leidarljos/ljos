@@ -369,6 +369,9 @@ enum Cmd {
         /// Print what --adopt would post, retire, and delete, and write nothing.
         #[arg(long, requires = "adopt")]
         dry_run: bool,
+        /// Read HOST's logs from before the scope header: pin the blobs filed under HOST now, and import only those bytes as HOST's until HOST writes a headed log.
+        #[arg(long, value_name = "HOST", conflicts_with_all = ["key", "import", "export", "adopt"])]
+        adopt_legacy: Option<String>,
     },
     /// Re-export this machine's atoms over a conflicted tracker log. git calls
     /// this as the `ljos-atoms` merge driver (`%A` then `%P`).
@@ -1563,9 +1566,12 @@ fn run_command() -> Result<()> {
             adopt,
             force,
             dry_run,
+            adopt_legacy,
         } => {
             if let Some(host) = adopt {
                 print!("{}", ljos_cli::sync::adopt(&host, force, dry_run)?);
+            } else if let Some(host) = adopt_legacy {
+                print!("{}", ljos_cli::sync::adopt_legacy(&host)?);
             } else if key {
                 println!("{}", ljos_cli::sync::public_key()?);
             } else {

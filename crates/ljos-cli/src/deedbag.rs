@@ -53,7 +53,7 @@ fn export_cited(issue: &str) -> Result<(String, Vec<String>)> {
     seam(&store_dir()?, scratch.path(), &rows)?;
     let bag = scratch.path().display().to_string();
     crate::run_captured("deedar", &["check", bag.as_str()]).context("deedar check")?;
-    let dest = root.join(".ljos").join("deeds").join(&seat);
+    let dest = bag_dest(&root, &seat)?;
     publish(scratch.path(), &dest)?;
     let n = rows.len();
     Ok((
@@ -478,6 +478,22 @@ fn one_component(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// `.ljos/deeds/<seat>` in the tracker. `.ljos/deeds` is opened, or made,
+/// one component at a time without following a symlink: the tracker can
+/// commit either directory as a link, and the bag would be published
+/// wherever it points.
+fn bag_dest(root: &Path, seat: &str) -> Result<PathBuf> {
+    crate::sync::open_dir_beneath(root, ".ljos/deeds", true)?;
+    let dest = root.join(".ljos").join("deeds").join(seat);
+    if std::fs::symlink_metadata(&dest).is_ok_and(|meta| !meta.is_dir()) {
+        bail!(
+            "{} is not a directory; the deeds were not written",
+            dest.display()
+        );
+    }
+    Ok(dest)
+}
+
 /// Put `scratch` at `dest`. The old bag stays until a finished tree has been
 /// staged beside it: a copy that fails, including one across filesystems,
 /// leaves `dest` as it was.
@@ -846,6 +862,89 @@ mod tests {
             !dir.path().join(".seat.previous").exists(),
             "old bag was moved aside: {text}"
         );
+    }
+
+    /// A peer commits `.ljos/deeds`, or `.ljos`, as a link to a directory
+    /// outside the tracker. The bag was published wherever the link
+    /// pointed.
+    #[test]
+    fn a_linked_deeds_directory_is_not_written_through() {
+        let git = |cwd: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        for linked in [".ljos/deeds", ".ljos"] {
+            let dir = tempfile::tempdir().unwrap();
+            let outside = dir.path().join("outside");
+            std::fs::create_dir_all(outside.join("deeds")).unwrap();
+            let origin = dir.path().join("origin.git");
+            let peer = dir.path().join("peer");
+            let root = dir.path().join("tracker");
+            git(
+                dir.path(),
+                &[
+                    "init",
+                    "-q",
+                    "--bare",
+                    "-b",
+                    "main",
+                    origin.to_str().unwrap(),
+                ],
+            );
+            git(
+                dir.path(),
+                &[
+                    "clone",
+                    "-q",
+                    origin.to_str().unwrap(),
+                    peer.to_str().unwrap(),
+                ],
+            );
+            for (key, value) in [
+                ("user.email", "seat@example.invalid"),
+                ("user.name", "seat"),
+                ("core.hooksPath", "/dev/null"),
+                ("commit.gpgsign", "false"),
+            ] {
+                git(&peer, &["config", key, value]);
+            }
+            let link = peer.join(linked);
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            let target = if linked == ".ljos" {
+                outside.clone()
+            } else {
+                outside.join("deeds")
+            };
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            git(&peer, &["add", "-A"]);
+            git(&peer, &["commit", "-q", "-m", "link"]);
+            git(&peer, &["push", "-q", "-u", "origin", "HEAD"]);
+            git(
+                dir.path(),
+                &[
+                    "clone",
+                    "-q",
+                    origin.to_str().unwrap(),
+                    root.to_str().unwrap(),
+                ],
+            );
+            let scratch = dir.path().join("scratch");
+            std::fs::create_dir_all(scratch.join("deed-1")).unwrap();
+            std::fs::write(scratch.join("deed-1/proof.txt"), b"the new bag").unwrap();
+            let placed = bag_dest(&root, "cloudseat").and_then(|dest| publish(&scratch, &dest));
+            assert!(!bag_holds(&outside, b"the new bag"), "{linked}: {placed:?}");
+            let err = format!("{:#}", placed.unwrap_err());
+            assert!(err.contains("symlink"), "{linked}: {err}");
+        }
     }
 
     fn bag_holds(dir: &Path, secret: &[u8]) -> bool {
