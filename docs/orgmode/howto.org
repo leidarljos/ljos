@@ -228,8 +228,11 @@ that can display one. Otherwise the person replies =approve REQUEST_ID=
 in the same conversation, where the prompt hook records the grant, or runs
 =ljos approve REQUEST_ID= in a terminal of their own. The command refuses under an agent
 runner or without a terminal, a request from another conversation is not
-granted from this one, and the seat guard refuses typing an approval into
-a pane, so an agent cannot grant itself consent. Once the person has
+granted from this one, and the seat guard refuses typing an approval,
+=ljos prefer= or =ljos remember= into a pane or a terminal, so an agent
+cannot grant itself consent or store its words as the person's. A typer
+fed from stdin or a file, and a program that pushes keys with
+=TIOCSTI=, are refused whatever they type. Once the person has
 approved, the agent retries the original tool call.
 
 #+begin_src console
