@@ -340,7 +340,18 @@ pub fn keep(id: &str) -> Result<String> {
     } else {
         "preference"
     };
-    Ok(format!("kept {id} as the person's {noun}\n"))
+    let shown = live()
+        .ok()
+        .and_then(|atoms| {
+            atoms.into_iter().find(|stored| {
+                stored.get("text") == atom.get("text")
+                    && stored.get("kind") == atom.get("kind")
+                    && basis_of(stored) == Some("person")
+            })
+        })
+        .and_then(|stored| atom_id(&stored))
+        .unwrap_or_else(|| id.clone());
+    Ok(format!("kept {id} as the person's {noun}, now {shown}\n"))
 }
 
 /// The shape `post_claim_horizon` left when no runner ancestor and no
@@ -726,8 +737,9 @@ fn person_copy(atoms: &[Value], successor: &Value, old: &str) -> bool {
     })
 }
 
-/// The same claim, born with basis `person`. No id, no clock, no floor:
-/// those belong to the record the pack already holds.
+/// The same claim, born with basis `person`. No id and no floor: those
+/// belong to the record the pack already holds. The clock stays, so a
+/// lesson hash still names this claim.
 fn successor_of(client: &packset_client::PacksetClient, atom: &Value) -> Value {
     let mut source = atom
         .get("source")
@@ -747,6 +759,16 @@ fn successor_of(client: &packset_client::PacksetClient, atom: &Value) -> Value {
     });
     if let Some(set) = atom.get("set").filter(|set| !set.is_null()) {
         body["set"] = set.clone();
+    }
+    for key in ["ts", "valid_from"] {
+        if let Some(stamp) = atom
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|stamp| !stamp.is_empty())
+        {
+            body[key] = json!(stamp);
+        }
     }
     body
 }

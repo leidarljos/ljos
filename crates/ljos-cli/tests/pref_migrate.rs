@@ -905,3 +905,62 @@ fn preferences_from_v0_32_1_follow_the_writer_that_stored_them() {
     let doctor_out = String::from_utf8_lossy(&doctor.stdout);
     assert!(!doctor_out.contains("awaits review"), "{doctor_out}");
 }
+
+/// A held preference kept at a terminal is born with the person's basis
+/// and the clock the pack already stored. The original is no longer live.
+#[test]
+fn a_kept_preference_keeps_its_clock() {
+    let daemon = Daemon::start();
+    let seat = Seat::on(daemon.url.clone());
+    let bin = env!("CARGO_BIN_EXE_ljos");
+    let held = post_atom(
+        &daemon.url,
+        json!({
+            "schema": "inside.atom/v1",
+            "workspace": "seat",
+            "kind": "preference",
+            "level": "explicit",
+            "origin": "user-declared",
+            "text": TERMINAL,
+            "entities": ["seat:claude", "horizon:standing"],
+            "source": {
+                "harness": "claude",
+                "seat": "claude",
+                "session": "claude@4f1c",
+                "host": "box",
+                "via": "ljos",
+            },
+        }),
+    );
+    let id = held["id"].as_str().unwrap();
+    let listed = succeeded(&seat.output(bin, &["prefer", "--review"]), "review");
+    assert!(listed.contains(id), "{listed}");
+
+    let said = succeeded(&keep_on_a_terminal(&seat, bin, id), "keep");
+    let after = atoms(&daemon.url);
+    let new = by_text(&after, "release notes");
+    let new_id = new["id"].as_str().unwrap();
+    assert_ne!(new_id, id, "{new}");
+    assert!(
+        said.contains(&format!(
+            "kept {id} as the person's preference, now {new_id}"
+        )),
+        "{said}"
+    );
+    assert_eq!(basis(new), Some("person"), "{new}");
+    assert_eq!(new["origin"], "user-declared", "{new}");
+    for key in ["kind", "level", "entities", "ts", "valid_from"] {
+        assert_eq!(new[key], held[key], "{key}: {new} held {held}");
+    }
+    let mut source = new["source"].clone();
+    source.as_object_mut().unwrap().remove("basis");
+    assert_eq!(source, held["source"], "{new}");
+    let quiet = succeeded(
+        &seat.output(bin, &["prefer", "--review"]),
+        "review after keep",
+    );
+    assert!(
+        quiet.contains("no older preferences await review"),
+        "{quiet}"
+    );
+}
