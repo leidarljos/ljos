@@ -122,6 +122,11 @@ pub struct Harness {
     /// That file on macOS, for a runner that keeps it somewhere else there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_json_macos: Option<String>,
+    /// On macOS the runner is an app launchd starts from the Dock or
+    /// Finder, so the servers it spawns search [`LAUNCHD_PATH`], not a
+    /// shell's PATH.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub launchd: bool,
     /// Where in that file the entry goes, as a JSON pointer (`/mcp/ljos`).
     pub json_pointer: Option<String>,
     /// The entry to set there, as JSON text; `{server}` and `{name}` are
@@ -231,6 +236,18 @@ impl Harness {
     /// The JSON config this runner reads on this machine.
     pub(crate) fn json_config(&self) -> Option<&str> {
         self.config_json_on(std::env::consts::OS)
+    }
+
+    /// The PATH this runner starts its MCP server with on `os`, when that
+    /// is not a shell's.
+    fn launch_path_on(&self, os: &str) -> Option<&'static str> {
+        (os == "macos" && self.launchd).then_some(LAUNCHD_PATH)
+    }
+
+    /// The PATH this runner starts its MCP server with on this machine,
+    /// when that is not a shell's.
+    pub(crate) fn launch_path(&self) -> Option<&'static str> {
+        self.launch_path_on(std::env::consts::OS)
     }
 }
 
@@ -883,6 +900,7 @@ skills = "~/.config/Code/User/skills"
 name = "claude-desktop"
 config_json = "~/.config/Claude/claude_desktop_config.json"
 config_json_macos = "~/Library/Application Support/Claude/claude_desktop_config.json"
+launchd = true
 json_pointer = "/mcpServers/ljos"
 json_entry = '{"command": "{server}", "args": []}'
 skills = "~/.config/Claude/skills"
@@ -1224,6 +1242,10 @@ pub fn shipped_differences(path: &Path) -> Vec<String> {
 /// binary.
 pub(crate) const MCP_SERVER_COMMAND: &str = "ljos-mcp";
 
+/// The PATH launchd gives a macOS app opened from the Dock or Finder, and
+/// so every server that app starts.
+pub(crate) const LAUNCHD_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
 #[derive(Debug, Clone)]
 pub(crate) struct ServerCommandPlan {
     pub(crate) command: String,
@@ -1259,7 +1281,20 @@ fn same_binary(a: &Path, b: &Path) -> bool {
 }
 
 pub(crate) fn server_command_plan(server: &Path, who: &str) -> ServerCommandPlan {
-    match which::which(MCP_SERVER_COMMAND) {
+    server_command_plan_in(server, who, None)
+}
+
+/// [`server_command_plan`] for a client that searches `search` for a bare
+/// command instead of this process's PATH.
+fn server_command_plan_in(server: &Path, who: &str, search: Option<&str>) -> ServerCommandPlan {
+    let (found, path) = match search {
+        Some(dirs) => (
+            which::which_in(MCP_SERVER_COMMAND, Some(dirs), "/"),
+            format!("PATH {dirs}"),
+        ),
+        None => (which::which(MCP_SERVER_COMMAND), "PATH".to_string()),
+    };
+    match found {
         Ok(found) if same_binary(&found, server) => ServerCommandPlan {
             command: MCP_SERVER_COMMAND.to_string(),
             note: None,
@@ -1267,7 +1302,7 @@ pub(crate) fn server_command_plan(server: &Path, who: &str) -> ServerCommandPlan
         Ok(found) => ServerCommandPlan {
             command: server.display().to_string(),
             note: Some(format!(
-                "PATH resolves {MCP_SERVER_COMMAND} to {}, so {who} wrote {}",
+                "{path} resolves {MCP_SERVER_COMMAND} to {}, so {who} wrote {}",
                 found.display(),
                 server.display()
             )),
@@ -1275,7 +1310,7 @@ pub(crate) fn server_command_plan(server: &Path, who: &str) -> ServerCommandPlan
         Err(_) => ServerCommandPlan {
             command: server.display().to_string(),
             note: Some(format!(
-                "PATH does not resolve {MCP_SERVER_COMMAND}, so {who} wrote {}",
+                "{path} does not resolve {MCP_SERVER_COMMAND}, so {who} wrote {}",
                 server.display()
             )),
         },
@@ -3876,7 +3911,7 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
             ok: false,
         };
     }
-    let plan = server_command_plan(server, "onboard");
+    let plan = server_command_plan_in(server, "onboard", h.launch_path());
     match is_registered(h, server) {
         Some(true) => {
             let healed = heal_registered(h, server, &plan.command, dry);
@@ -36969,6 +37004,36 @@ mod tests {
         assert_eq!(cursor.config_json_on("macos"), Some("~/.cursor/mcp.json"));
     }
 
+    /// Claude Desktop opened from the Dock or Finder starts its servers
+    /// with launchd's PATH, which holds no user bin directory. Onboard
+    /// writes this install's path there unless that PATH runs it.
+    #[test]
+    fn a_launchd_app_gets_the_absolute_server_unless_its_path_runs_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
+        let find = |name: &str| all.harness.iter().find(|h| h.name == name).expect(name);
+        let desktop = find("claude-desktop");
+        assert_eq!(desktop.launch_path_on("macos"), Some(super::LAUNCHD_PATH));
+        assert_eq!(desktop.launch_path_on("linux"), None);
+        assert_eq!(find("cursor").launch_path_on("macos"), None);
+
+        let scratch = tempfile::tempdir().unwrap();
+        let bin = scratch.path().join("bin");
+        let empty = scratch.path().join("empty");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&empty).unwrap();
+        let server = bin.join("ljos-mcp");
+        std::fs::write(&server, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let elsewhere = empty.to_str().unwrap();
+        let plan = super::server_command_plan_in(&server, "onboard", Some(elsewhere));
+        assert_eq!(plan.command, server.display().to_string());
+        let note = plan.note.unwrap_or_default();
+        assert!(note.contains(elsewhere), "{note}");
+        let plan = super::server_command_plan_in(&server, "onboard", bin.to_str());
+        assert_eq!(plan.command, super::MCP_SERVER_COMMAND);
+    }
+
     /// The example file parses, and onboarding a config-file runner from it
     /// appends the entry once and writes the skill once; a dry run writes
     /// nothing; an unnamed runner is refused with the names the file holds.
@@ -39614,6 +39679,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             snippet: None,
             config_json: Some(config.display().to_string()),
             config_json_macos: None,
+            launchd: false,
             json_pointer: Some("/mcp/ljos".into()),
             json_entry: None,
             skills: None,
