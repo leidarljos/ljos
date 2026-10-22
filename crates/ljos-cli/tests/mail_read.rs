@@ -204,11 +204,16 @@ fn an_attachment_over_the_cap_is_listed_without_a_hash() {
 #[test]
 fn an_endless_attachment_does_not_stall_show() {
     let dir = tempfile::tempdir().unwrap();
-    let json = r#"[[[{"id":"big@example.test","timestamp":0,"tags":[],"headers":{},"body":[{"id":1,"content-type":"multipart/mixed","content":[{"id":2,"content-type":"application/octet-stream","filename":"big.bin"}]}]},[]]]]"#;
+    let mail = dir.path().join("Mail");
+    std::fs::create_dir_all(mail.join("cur")).unwrap();
+    std::fs::write(mail.join("cur/1"), "From: big@example.test\n\n").unwrap();
+    let json = r#"[[[{"id":"big@example.test","timestamp":0,"tags":[],"headers":{},"filename":["MAIL/cur/1"],"body":[{"id":1,"content-type":"multipart/mixed","content":[{"id":2,"content-type":"application/octet-stream","filename":"big.bin"}]}]},[]]]]"#
+        .replace("MAIL", &mail.display().to_string());
     let reader = fake(
         &dir,
         &format!(
-            "case \"$*\" in *--format=raw*) exec yes attachment ;; *) printf '%s' '{json}' ;; esac"
+            "case \"$*\" in config*) echo '{}' ;; *--format=raw*) exec yes attachment ;; *) printf '%s' '{json}' ;; esac",
+            mail.display()
         ),
     )
     .with_attachment_max(1 << 20);
@@ -267,4 +272,37 @@ fn an_attachment_of_a_message_whose_id_has_quotes_is_hashed() {
         receipt.sha256,
         Some(hex::encode(Sha256::digest(b"Receipt 9")))
     );
+}
+
+#[test]
+fn a_message_file_that_is_a_symlink_or_outside_the_root_is_not_shown() {
+    let mailbox = maildir::mailbox();
+    let outside = mailbox.dir.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let message = |id: &str| {
+        format!("From: a@example.test\nMessage-ID: <{id}>\nSubject: linked\n\nsecret outside\n")
+    };
+    std::fs::write(outside.join("one.eml"), message("link-1@example.test")).unwrap();
+    std::os::unix::fs::symlink(outside.join("one.eml"), mailbox.maildir().join("cur/9:2,"))
+        .unwrap();
+    let away = mailbox.dir.path().join("away");
+    std::fs::create_dir_all(away.join("cur")).unwrap();
+    std::fs::write(away.join("cur/1:2,"), message("away-1@example.test")).unwrap();
+    std::os::unix::fs::symlink(&away, mailbox.maildir().join("away")).unwrap();
+    mailbox.notmuch(&["new", "--quiet"]);
+    let reader = reader(&mailbox);
+    for (id, why) in [
+        ("link-1@example.test", "symlink"),
+        ("away-1@example.test", "outside"),
+    ] {
+        let thread = mailbox.thread_of(id);
+        assert_eq!(thread.len(), 16, "notmuch did not index {id}");
+        let err = reader.show(&thread).unwrap_err().to_string();
+        assert!(err.contains(why), "{id}: {err}");
+        assert!(
+            !err.contains("secret") && !err.contains(&mailbox.dir.path().display().to_string())
+        );
+    }
+    let plain = mailbox.thread_of("plain-1@example.test");
+    assert!(reader.show(&plain).is_ok());
 }
