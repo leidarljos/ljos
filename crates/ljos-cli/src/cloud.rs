@@ -5,10 +5,11 @@
 //! writes the harness MCP command, and clones `LJOS_TRACKER_REMOTE`.
 //! The command is the bare name when this directory is first, and the
 //! absolute path when an earlier directory would win. It writes a webhook
-//! wake for each `LJOS_WAKE_<SEAT>_URL`. When `LJOS_CLOUD_AGE_SECRET`
-//! names an environment variable, it writes that variable's age identity
-//! for scope `cloud` to a mode 0600 file. A later boot with the binaries
-//! already installed only refreshes the clone.
+//! wake for each `LJOS_WAKE_<SEAT>_URL`. Entries this command writes are
+//! marked `source = "env"`; any other wake stays. When
+//! `LJOS_CLOUD_AGE_SECRET` names an environment variable, it writes that
+//! variable's age identity for scope `cloud` to a mode 0600 file. A later
+//! boot with the binaries already installed only refreshes the clone.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -1387,45 +1388,109 @@ fn write_env(path: &Path, pairs: &[(&str, String)]) -> Result<()> {
     Ok(())
 }
 
+/// One `LJOS_WAKE_<SEAT>_URL` read from the environment.
+struct WakeVar {
+    name: String,
+    mid: String,
+    url: String,
+}
+
 /// A webhook wake for each `LJOS_WAKE_<SEAT>_URL`, keyed by the variable
 /// `LJOS_WAKE_<SEAT>_KEY`. The launcher passes the key by name, so it is
 /// read when the wake fires and never written down. `GROK_BOT` is the seat
 /// `grok-bot`. The lines name the variables and not the URL.
+///
+/// Two variables whose names slug to one seat are refused, and the line
+/// names both. An entry without `source = "env"` was not written by this
+/// command and is left in place. Entries this command wrote are written
+/// again.
 fn ensure_wakes() -> Result<Vec<String>> {
-    let vars: BTreeMap<String, String> = std::env::vars_os()
-        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
-        .collect();
+    let existing = crate::wake::load();
     let mut lines = Vec::new();
-    for (name, url) in &vars {
-        let Some(mid) = name
-            .strip_prefix("LJOS_WAKE_")
-            .and_then(|rest| rest.strip_suffix("_URL"))
-        else {
-            continue;
-        };
-        let url = url.trim();
-        if url.is_empty() || !mid.bytes().any(|b| b.is_ascii_alphanumeric()) {
+    for (seat, group) in wake_vars_by_seat() {
+        if group.len() > 1 {
+            lines.push(collision_line(&seat, &group));
             continue;
         }
-        let seat = crate::seat_slug(mid);
-        if crate::wake::check_webhook(url).is_err() {
+        let one = &group[0];
+        if crate::wake::check_webhook(&one.url).is_err() {
             lines.push(format!(
-                "wake {seat}: {name} is not https, nor http on this machine, so no wake was written"
+                "wake {seat}: {} is not https, nor http on this machine, so no wake was written",
+                one.name
             ));
             continue;
         }
-        let key_env = format!("LJOS_WAKE_{mid}_KEY");
-        crate::wake::set_webhook(&seat, url, None, Some(&key_env))?;
+        let hand_set = existing
+            .get(&seat)
+            .is_some_and(|wake| wake.source.as_deref() != Some(crate::wake::ENV_SOURCE));
+        if hand_set {
+            lines.push(format!(
+                "wake {seat}: left the wake cloud up did not write; {} did not replace it",
+                one.name
+            ));
+            continue;
+        }
+        let key_env = format!("LJOS_WAKE_{}_KEY", one.mid);
+        crate::wake::set_env_webhook(&seat, &one.url, &key_env)?;
         let unset = if nonempty_var(&key_env).is_some() {
             ""
         } else {
             ", which is unset now"
         };
         lines.push(format!(
-            "wake {seat}: posts to {name} with the key in {key_env}{unset}"
+            "wake {seat}: posts to {} with the key in {key_env}{unset}",
+            one.name
         ));
     }
     Ok(lines)
+}
+
+fn wake_vars_by_seat() -> BTreeMap<String, Vec<WakeVar>> {
+    let vars: BTreeMap<String, String> = std::env::vars_os()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+        .collect();
+    let mut by_seat: BTreeMap<String, Vec<WakeVar>> = BTreeMap::new();
+    for (name, value) in vars {
+        let Some(mid) = name
+            .strip_prefix("LJOS_WAKE_")
+            .and_then(|rest| rest.strip_suffix("_URL"))
+        else {
+            continue;
+        };
+        let url = value.trim();
+        if url.is_empty() || !mid.bytes().any(|b| b.is_ascii_alphanumeric()) {
+            continue;
+        }
+        let seat = crate::seat_slug(mid);
+        by_seat.entry(seat).or_default().push(WakeVar {
+            mid: mid.to_string(),
+            url: url.to_string(),
+            name,
+        });
+    }
+    by_seat
+}
+
+fn collision_line(seat: &str, group: &[WakeVar]) -> String {
+    let mut names: Vec<&str> = group.iter().map(|var| var.name.as_str()).collect();
+    names.sort_unstable();
+    format!(
+        "wake {seat}: {} name the same seat, so no wake was written",
+        list_names(&names)
+    )
+}
+
+fn list_names(names: &[&str]) -> String {
+    let Some((last, rest)) = names.split_last() else {
+        return String::new();
+    };
+    if rest.is_empty() {
+        return (*last).to_string();
+    }
+    let mut line = rest.join(", ");
+    line.push_str(" and ");
+    line.push_str(last);
+    line
 }
 
 fn ensure_profile(home: &Path, bin_dir: &Path) -> Result<String> {
