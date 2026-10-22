@@ -418,7 +418,13 @@ login session. The process holding the session's tty, or the session
 leader, is a terminal emulator, a multiplexer or a login. =systemd-run
 --scope=, a container (=docker=, =podman=) and a CI runner
 (=GITHUB_ACTIONS=, =Runner.Worker=) are not that session, even when
-the environment was cleared and a pty is open.
+the environment was cleared and a pty is open. Between the terminal and
+ljos only a shell or a wrapper such as =env= or =sudo= may run:
+=python=, =node=, =make=, =expect= or any other program there typed the
+command. A terminal whose holder init adopted is not the person's
+either. A double fork and a second =setsid= leave that shape, and so
+does a multiplexer server started over ssh; type the command in the
+login shell there instead.
 A prompt event is not always the person: Codex sends one inside a
 subagent with the parent agent's brief as the prompt. A prompt whose
 payload names a subagent (=agent_id=), or a Codex thread other than the

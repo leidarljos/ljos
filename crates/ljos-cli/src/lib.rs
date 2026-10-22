@@ -2643,7 +2643,12 @@ fn hosted_runner_comm(comm: &str) -> bool {
 /// chain is read whole to pid 1, past any name: no process on it is a
 /// runner by name, program, install path or seat record, and none was
 /// reparented, which a process outside its own session with a parent in
-/// another shows. Names prove nothing here; a tool call picks its own.
+/// another shows. The holder's parent is not init: a double fork and a
+/// second `setsid` leave a session leader there, and so does a
+/// multiplexer server that daemonized, and neither says who opened it.
+/// Between the holder and this process only wrappers and terminals run;
+/// python, node, make, expect or any other program there typed the
+/// command. Names prove nothing here; a tool call picks its own.
 #[cfg(target_os = "linux")]
 fn host_at_terminal() -> bool {
     // SAFETY: isatty reads one descriptor's mode and cannot fail.
@@ -2701,6 +2706,12 @@ fn host_at_terminal() -> bool {
     let Some(holder) = chain.get(leader + 1) else {
         return false;
     };
+    let adopted = holder.ppid <= 1;
+    let programmed = chain
+        .iter()
+        .take(leader + 1)
+        .skip(1)
+        .any(|r| !WRAPPERS.contains(&r.comm.as_str()) && !login_holder(&r.comm));
     let runners: Vec<String> = harnesses_with_shipped(&harnesses_path())
         .map(|all| all.harness.into_iter().map(|h| h.name).collect())
         .unwrap_or_default();
@@ -2709,7 +2720,7 @@ fn host_at_terminal() -> bool {
             || is_harness_program(&r.comm, &program_name(r.pid, &r.comm), &runners)
             || proc_tree::exe_runner(r.pid).is_some()
     });
-    if reparented || runner || !holds_pty(holder.pid, index) {
+    if reparented || adopted || programmed || runner || !holds_pty(holder.pid, index) {
         return false;
     }
     // The pty is the person's only when a terminal, a multiplexer or a
