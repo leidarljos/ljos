@@ -1,0 +1,1 @@
+A replayed record ballot no longer erases its voter. A byte-identical copy of a ballot file, or the same ballot with its key and signature hex upper-cased, counts as that one ballot, so it neither drops the voter as two ballots in one hour nor, as a copy of an older ballot, hides the voter's current one.

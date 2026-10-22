@@ -3213,16 +3213,21 @@ pub fn same_holder(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
-    let (seat_a, tag_a) = holder_parts(a);
-    let (seat_b, tag_b) = holder_parts(b);
-    let invalid = |raw: &str, tag: &Option<String>| raw.contains('@') && tag.is_none();
-    if invalid(a, &tag_a) || invalid(b, &tag_b) {
+    let (Some((seat_a, tag_a)), Some((seat_b, tag_b))) = (holder_seat(a), holder_seat(b)) else {
         return false;
-    }
-    let seat_a = seat_slug(&seat_a);
-    let seat_b = seat_slug(&seat_b);
+    };
     // Two tags of one seat are two conversations, not one holder.
     seat_a == seat_b && (tag_a.is_none() || tag_b.is_none())
+}
+
+/// [`holder_parts`] of a well-formed holder. `None` for a name with no
+/// seat before `@` or nothing after it, which no conversation writes.
+/// The seat is compared as parsed, not slugged: `ljosbot-` and `@abc`
+/// would slug to `ljosbot` and `runner`.
+fn holder_seat(holder: &str) -> Option<(String, Option<String>)> {
+    let (seat, tag) = holder_parts(holder);
+    let dangling = holder.contains('@') && tag.is_none();
+    (!seat.is_empty() && !dangling).then_some((seat, tag))
 }
 
 /// Whether `held`, the name a tracker row is claimed under, belongs to
@@ -3230,21 +3235,33 @@ pub fn same_holder(a: &str, b: &str) -> bool {
 /// apart; this does not. The bookkeeping that asks already looks only at
 /// one checkout, where a git hook (`SEAT@TAG`, or `SEAT-TAG` from ljos
 /// 0.31 and earlier) and the MCP server (the bare seat, or its own tag)
-/// are one conversation booking under two names. A `SEAT-TAG` whose seat
-/// part is this seat counts when the tag is one to six lowercase letters
-/// and digits, a pid in base 36 (`free-claude-8h`, `free-opencode-1v8am`),
-/// and the whole name is not itself a seat in `known`, so `eessi-bot`
-/// stays apart from `eessi`.
+/// are one conversation booking under two names. Past what
+/// [`holder_parts`] folds, a `SEAT-TAG` whose seat part is this seat
+/// counts when the tag is a pid in base 36 that may be all letters
+/// (`free-agy-aak`, `free-opencode-nrv`) and the whole name is not itself
+/// a seat in `known`, so `eessi-bot` stays apart from `eessi`. A tag of
+/// digits alone is a number and never folds, and a run, judge or
+/// subagent keeps its id whole.
 #[must_use]
 pub fn same_seat(held: &str, holder: &str, known: &std::collections::BTreeSet<String>) -> bool {
-    let _ = known;
     let (held, holder) = (held.trim(), holder.trim());
     if held.is_empty() || holder.is_empty() {
         return false;
     }
-    let (seat_a, _) = holder_parts(held);
-    let (seat_b, _) = holder_parts(holder);
-    seat_slug(&seat_a) == seat_slug(&seat_b)
+    let (Some((seat_a, _)), Some((seat_b, _))) = (holder_seat(held), holder_seat(holder)) else {
+        return false;
+    };
+    if seat_a == seat_b {
+        return true;
+    }
+    let suffixed = |name: &str, seat: &str| {
+        !known.contains(name)
+            && name
+                .strip_prefix(seat)
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|tag| pid_shaped(seat, tag))
+    };
+    suffixed(&seat_a, &seat_b) || suffixed(&seat_b, &seat_a)
 }
 
 /// [`same_seat`] against the seats this tracker lists.
@@ -3262,8 +3279,12 @@ const LEGACY_SEATS: &[(&str, &str)] = &[("ljos-bot", "ljosbot")];
 /// a pid in base 36 (`inky-n9o`, `disk-saver-t4t`, `free-claude-8h`,
 /// `free-opencode-1vmow`); a last part of one to six lowercase letters and
 /// digits with at least one of each is read as that tag, so `eessi-bot`
-/// and `disk-saver` stay whole seats, and so does a version or a run
-/// number such as `gpt-5` or `ridley-ci-a-555001`. The same suffix on the
+/// and `disk-saver` stay whole seats, and so does a version or a number
+/// such as `gpt-5`, `node-01` or `ridley-ci-a-555001`. A run, a judge
+/// and a subagent (`run-pr-1234`, `judge-gpt-oss-120b`,
+/// `sand-subagent-0e61`) keep every part. An all-letter tag cannot be
+/// told from a seat's own last part here; [`same_seat`] settles it
+/// against the seats a tracker knows. The same suffix on the
 /// seat side of `SEAT@TAG` (`inky-n9o@deadbeef`) is that tag too. An old
 /// tag comes back as `None`: the server that wrote it is gone and no
 /// conversation holds under it again, so the seat is its holder now and
@@ -3282,7 +3303,10 @@ pub fn holder_parts(holder: &str) -> (String, Option<String>) {
     (seat, tag)
 }
 
-fn legacy_tag(head: &str, tag: &str) -> bool {
+/// Whether `tag` after `head` has the shape of a pid in base 36: one to
+/// six lower-case letters and digits with at least one letter. A run,
+/// judge or subagent name keeps every part.
+fn pid_shaped(head: &str, tag: &str) -> bool {
     if head.starts_with("run-")
         || head == "run"
         || head.starts_with("judge-")
@@ -3291,20 +3315,17 @@ fn legacy_tag(head: &str, tag: &str) -> bool {
     {
         return false;
     }
-    if !(1..=6).contains(&tag.len())
-        || !tag
+    (1..=6).contains(&tag.len())
+        && tag
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-        || !tag.bytes().any(|b| b.is_ascii_digit())
-    {
-        return false;
-    }
-    // Old pid tags can be all digits (`inky-10`), but keep one-digit model
-    // suffixes (`gpt-5`) and long build numbers (`ridley-ci-a-555001`) whole.
-    if tag.bytes().all(|b| b.is_ascii_digit()) && (tag.len() == 1 || tag.len() > 5) {
-        return false;
-    }
-    true
+        && tag.bytes().any(|b| b.is_ascii_lowercase())
+}
+
+/// An old pid tag [`holder_parts`] drops whatever seats exist: a
+/// [`pid_shaped`] tag with a digit, so `eessi-bot` keeps its last part.
+fn legacy_tag(head: &str, tag: &str) -> bool {
+    pid_shaped(head, tag) && tag.bytes().any(|b| b.is_ascii_digit())
 }
 
 /// Drop a pid-shaped suffix (`n9o`, `1vmow`) from a seat. A name that has
@@ -37826,7 +37847,7 @@ mod tests {
             holder_parts("ridley-ci-a-555001"),
             ("ridley-ci-a-555001".to_string(), None)
         );
-        assert_eq!(holder_parts("inky-10"), ("inky".to_string(), None));
+        assert_eq!(holder_parts("inky-10"), ("inky-10".to_string(), None));
         assert_eq!(
             holder_parts("sand-subagent-0e61"),
             ("sand-subagent-0e61".to_string(), None)
@@ -37848,6 +37869,75 @@ mod tests {
             holder_parts("saddle-review"),
             ("saddle-review".to_string(), None)
         );
+    }
+
+    #[test]
+    fn a_last_part_of_digits_alone_stays_in_the_seat() {
+        let known = std::collections::BTreeSet::new();
+        for (a, b) in [
+            ("node-01", "node-02"),
+            ("qwen-72", "qwen"),
+            ("inky-10", "inky"),
+            ("run-12", "run-34"),
+        ] {
+            assert!(!same_holder(a, b), "a digit suffix folded: {a} {b}");
+            assert!(!same_seat(a, b, &known), "a digit suffix folded: {a} {b}");
+        }
+        for name in ["node-01", "qwen-72", "inky-10", "inky-12345"] {
+            assert_eq!(
+                holder_parts(name),
+                (name.to_string(), None),
+                "a digit suffix folded: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dangling_separator_is_not_the_seat() {
+        let known = std::collections::BTreeSet::new();
+        for (a, b) in [
+            ("ljosbot@", "ljosbot"),
+            ("ljosbot-", "ljosbot"),
+            ("ljosbot.", "ljosbot"),
+            ("@abc", "runner"),
+            ("-", "runner"),
+        ] {
+            for (x, y) in [(a, b), (b, a)] {
+                assert!(!same_holder(x, y), "a dangling separator matched: {x} {y}");
+                assert!(
+                    !same_seat(x, y, &known),
+                    "a dangling separator matched: {x} {y}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_all_letter_pid_tag_folds_to_a_known_seat() {
+        let known: std::collections::BTreeSet<String> = ["free-agy", "eessi", "eessi-bot"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        for (held, holder) in [
+            ("free-agy-aak", "free-agy@q4s23e2cxd"),
+            ("free-opencode-nrv", "free-opencode"),
+            ("free-opencode", "free-opencode-nrv"),
+        ] {
+            assert!(
+                same_seat(held, holder, &known),
+                "an all-letter pid tag did not fold: {held} {holder}"
+            );
+        }
+        for (held, holder) in [
+            ("eessi-bot", "eessi"),
+            ("qwen-72", "qwen"),
+            ("node-01", "node"),
+            ("judge-qwen-ab", "judge-qwen"),
+            ("run-pr-abc", "run-pr"),
+            ("free-claude-sandbox", "free-claude"),
+        ] {
+            assert!(!same_seat(held, holder, &known), "{held} {holder}");
+        }
     }
 
     #[test]
@@ -37883,9 +37973,9 @@ mod tests {
                 .collect();
         assert!(same_seat("free-claude-8h", "free-claude", &known));
         assert!(same_seat("free-claude", "free-claude-8h", &known));
-        assert!(!same_seat("free-agy-aak", "free-agy@q4s23e2cxd", &known));
+        assert!(same_seat("free-agy-aak", "free-agy@q4s23e2cxd", &known));
         assert!(same_seat("free-opencode@abc", "free-opencode@xyz", &known));
-        assert!(!same_seat("free-opencode-nrv", "free-opencode", &known));
+        assert!(same_seat("free-opencode-nrv", "free-opencode", &known));
         assert!(!same_seat("eessi-bot", "eessi", &known));
         assert!(!same_seat("free-claude-8h", "free-codex", &known));
         assert!(same_seat("free-opencode-1v8am", "free-opencode", &known));
