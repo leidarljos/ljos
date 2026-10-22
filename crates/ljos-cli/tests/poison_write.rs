@@ -277,6 +277,41 @@ fn a_runner_prefer_of_the_persons_words_stays_theirs() {
     );
 }
 
+/// The kept prompt is this turn's. A later prompt the hook skips, here a
+/// pasted block, leaves the earlier turn's words nothing to be quoted from.
+#[test]
+fn a_skipped_prompt_leaves_no_earlier_turn_to_quote() {
+    let seat = Seat::new();
+    let said = "Always build the release with the checked fuse never a guessed one.";
+    let first = format!("From now on: {said}");
+    let pasted = "Here is the log:\n```\nbuild ok\n```";
+    note_prompt(&seat, &first);
+    // Both prompts queued before the model spoke: one turn in the record.
+    let record = seat
+        .home
+        .path()
+        .join(".claude/projects/-seat/session.jsonl");
+    let typed = |p: &str| {
+        serde_json::json!({"type": "user", "message": {"role": "user", "content": p}}).to_string()
+    };
+    std::fs::write(&record, format!("{}\n{}\n", typed(&first), typed(pasted))).unwrap();
+    let payload = serde_json::json!({
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": RUNNER_SESSION,
+        "prompt": pasted,
+        "transcript_path": record,
+    });
+    hook_stdout(&seat, &payload.to_string());
+    let out = seat.command(&["prefer", said], true).output().unwrap();
+    assert!(out.status.success(), "prefer failed\n{}", text_of(&out));
+    let atoms = seat.atoms.lock().unwrap().clone();
+    let pref = atoms
+        .iter()
+        .find(|atom| atom["text"] == said && atom["kind"] == "preference")
+        .unwrap_or_else(|| panic!("no preference stored\n{atoms:?}"));
+    assert_eq!(pref["origin"], "agent-derived", "{pref}");
+}
+
 fn rules_text(seat: &Seat) -> String {
     let path = seat.home.path().join(".config/ljos/user-rules.json");
     std::fs::read_to_string(path).unwrap_or_default()

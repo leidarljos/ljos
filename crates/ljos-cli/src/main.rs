@@ -2920,6 +2920,9 @@ fn run_command() -> Result<()> {
                     // A tool call can run `ljos hook` with a payload of its
                     // own; only a hook the runner itself spawned carries
                     // the person's prompt.
+                    if call.event == "UserPromptSubmit" {
+                        ljos_cli::capture::forget_latest_prompt();
+                    }
                     let spawner = (call.event == "UserPromptSubmit"
                         && ljos_cli::capture::not_the_person(&input).is_none())
                     .then(|| match ljos_cli::proc_tree::hook_runner() {
