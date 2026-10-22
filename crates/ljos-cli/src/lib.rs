@@ -36562,6 +36562,24 @@ mod tests {
         assert!(!step.ok, "an unknown template writes nothing: {step:?}");
     }
 
+    /// The deny a failed gate writes exits 2, and omp still blocks on it.
+    #[test]
+    fn the_omp_plugin_reads_a_deny_on_any_exit() {
+        let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
+        let h = all.harness.iter().find(|h| h.name == "omp").unwrap();
+        let text = super::plugin_text(h, Path::new("/opt/seat/bin/ljos")).unwrap();
+        assert!(
+            !text.contains("!== 0 || !text.trim()"),
+            "stdout is read on a non-zero exit"
+        );
+        let refused = format!("code !== {}", super::GATE_REFUSED_EXIT);
+        assert!(text.contains(&refused), "exit 2 is a deny");
+        assert!(
+            text.contains("stderr: \"pipe\"") && text.contains("err.trim()"),
+            "the reason of an exit 2 comes from stderr"
+        );
+    }
+
     /// The example file parses, and onboarding a config-file runner from it
     /// appends the entry once and writes the skill once; a dry run writes
     /// nothing; an unnamed runner is refused with the names the file holds.
