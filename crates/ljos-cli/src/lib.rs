@@ -11217,7 +11217,8 @@ impl SeatSignatures {
 /// # Errors
 ///
 /// The refusal naming each ballot that does not count, or the pin file
-/// when it names a seat twice: a second line would re-pin that seat.
+/// when it names a seat twice or has lost a pin the tracker committed:
+/// either would re-pin that seat or drop its ballots.
 pub fn check_seat_signatures(
     issue: &str,
     ballots: &[Value],
@@ -11238,6 +11239,13 @@ pub fn check_seat_signatures(
     let (pins, _) = ballot_sig::pins_for_check().map_err(|e| {
         format!("{issue}: the seat pins are not one key per seat, so it decides nothing for a push: {e:#}")
     })?;
+    let dropped = slot::dropped_pins(&pins);
+    if !dropped.is_empty() {
+        return Err(format!(
+            "{issue}: the tracker committed the pin {} and the pin file no longer holds it, so it decides nothing for a push; a pin once committed stays",
+            dropped.join(", ")
+        ));
+    }
     let starts = slot::starts();
     let stands =
         |seat: &str| slot::stands(seat, pins.get(seat).map(String::as_str), starts.as_deref());

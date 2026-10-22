@@ -3486,6 +3486,89 @@ fn an_appended_pin_line_does_not_re_pin_a_standing_seat() {
     assert!(err.contains("duplicate pin voter `ljosbot`"), "{err}");
 }
 
+/// Rewrite `.ljos-seat-keys` line by line with `edit`, dropping a line it
+/// maps to `None`, then commit and push it.
+fn rewrite_pins(repo: &Path, edit: impl Fn(&str) -> Option<String>) {
+    let path = repo.join(".ljos-seat-keys");
+    let text: String = fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .filter_map(edit)
+        .map(|line| format!("{line}\n"))
+        .collect();
+    fs::write(&path, text).unwrap();
+    git(repo, &["commit", "-q", "-am", "rewrite pins"]);
+    git(repo, &["push", "-q", "origin", "HEAD"]);
+}
+
+/// A standing seat's pin changed in place to another key does not re-pin
+/// it: a pin once committed stays.
+#[test]
+fn a_pin_changed_in_place_does_not_re_pin_a_standing_seat() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_origin, repo) = slot_world(root.path(), &["probe-c"]);
+    pin_standing(&repo, "ljosbot");
+    std::env::set_var("XDG_DATA_HOME", root.path().join("mallory-data"));
+    let key = ljos_cli::ballot_sig::load_or_create(
+        &ljos_cli::cloud::prepare_seat_key("ljosbot").unwrap(),
+    )
+    .unwrap();
+    let (mine, _) = ljos_cli::ballot_sig::signed_hex(&key, b"pin");
+    rewrite_pins(&repo, |line| {
+        Some(if line.starts_with("ljosbot ") {
+            format!("ljosbot {mine}")
+        } else {
+            line.to_string()
+        })
+    });
+    cast("ljosbot", "probe-c", "hold");
+
+    let rows = [serde_json::json!({"agent": "ljosbot", "choice": "hold"})];
+    let err = ljos_cli::check_seat_signatures("probe-c", &rows, &std::collections::BTreeSet::new())
+        .unwrap_err();
+    assert!(
+        err.contains("the tracker committed the pin ljosbot ")
+            && err.contains("no longer holds it"),
+        "{err}"
+    );
+}
+
+/// A run seat's pin removed after it voted is refused. Before, the run's
+/// ballot was only left out, so dropping its pin dropped its vote.
+#[test]
+fn a_removed_pin_does_not_drop_a_run_ballot() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_origin, repo) = slot_world(root.path(), &["probe-d"]);
+    pin_standing(&repo, "ljosbot");
+    ljos_cli::slot::write("probe-d", "ridley-review", "grok-4", "cafebabe0001abcd").unwrap();
+    let pushed = ljos_cli::persist_tracker("probe-d", "slotted");
+    assert!(pushed.contains("pushed"), "{pushed}");
+    cast("ljosbot", "probe-d", "ship");
+    std::env::set_var("XDG_DATA_HOME", root.path().join("vm-data"));
+    let run = ljos_cli::cloud::run_seat("ridley-review", "cafebabe0001abcd");
+    cast(&run, "probe-d", "hold");
+
+    let rows = [
+        serde_json::json!({"agent": "ljosbot", "choice": "ship"}),
+        serde_json::json!({"agent": run, "choice": "hold"}),
+    ];
+    let personas = std::collections::BTreeSet::new();
+    assert_eq!(
+        ljos_cli::check_seat_signatures("probe-d", &rows, &personas),
+        Ok(ljos_cli::SeatSignatures::default())
+    );
+    rewrite_pins(&repo, |line| {
+        (!line.starts_with(&format!("{run} "))).then(|| line.to_string())
+    });
+    let err = ljos_cli::check_seat_signatures("probe-d", &rows, &personas).unwrap_err();
+    assert!(
+        err.contains(&format!("the tracker committed the pin {run} ")),
+        "{err}"
+    );
+}
+
 /// A pin whose author date is before slots began, committed after the
 /// first slot, does not make a seat standing, and a standing seat still
 /// launches when its pin is dated after.

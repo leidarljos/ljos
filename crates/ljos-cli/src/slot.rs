@@ -350,6 +350,40 @@ fn pin_introductions(seat: &str, key: &str) -> Vec<String> {
     out
 }
 
+/// The pin lines some commit in this tracker's history held that `pins`
+/// no longer does, as `seat key…`. A pin once committed stays: a line
+/// changed in place re-pins a seat, and a line removed drops its ballots.
+/// Empty on a tracker that is not a git repository.
+#[must_use]
+pub fn dropped_pins(pins: &BTreeMap<String, String>) -> Vec<String> {
+    let log = ballot_sig::tracker_git(&[
+        "--no-pager",
+        "log",
+        "--full-history",
+        "--format=%H",
+        "--",
+        ballot_sig::PIN_FILE,
+    ])
+    .unwrap_or_default();
+    let mut out = std::collections::BTreeSet::new();
+    for commit in log.lines() {
+        let Some(text) = file_at(commit.trim(), ballot_sig::PIN_FILE) else {
+            continue;
+        };
+        for line in text.lines() {
+            let mut words = line.split_whitespace();
+            let (Some(seat), Some(key)) = (words.next(), words.next()) else {
+                continue;
+            };
+            if pins.get(seat).map(String::as_str) != Some(key) {
+                let short: String = key.chars().take(12).collect();
+                out.insert(format!("{seat} {short}…"));
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
 fn pin_line_at(commit: &str, seat: &str, key: &str) -> bool {
     let Some(text) = file_at(commit, ballot_sig::PIN_FILE) else {
         return false;
