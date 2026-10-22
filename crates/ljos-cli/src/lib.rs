@@ -29159,6 +29159,10 @@ mod tests {
     #[test]
     fn a_guard_shim_lets_a_feature_lease_push_run_and_asks_about_main() {
         use std::os::unix::fs::PermissionsExt;
+        // The shim inherits this process. Another test's GIT_DIR would
+        // make rev-parse leave the fixture, and a protected branch would
+        // be pushed instead of asked about.
+        let _g = env_guard();
         // A temp home with the explicit guard-on setting, not a directory
         // moved out of /tmp.
         let root = tempfile::tempdir().unwrap();
