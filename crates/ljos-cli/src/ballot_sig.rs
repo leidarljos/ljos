@@ -288,11 +288,6 @@ pub(crate) fn key_from_file(path: &std::path::Path) -> Result<SigningKey> {
     Ok(SigningKey::from_bytes(&seed))
 }
 
-/// The commit time of the signing change: a ballot the tracker recorded
-/// before it is legacy unsigned and still counts; one after needs a
-/// signature.
-pub const SIGNING_SINCE: i64 = 1_791_984_778;
-
 /// Where `seat`'s ballot key lives: `LJOS_SEAT_KEY` when that path is this
 /// seat's own key and not the machine key, else
 /// `$XDG_DATA_HOME/ljos/seats/SEAT/ballot.key` (`~/.local/share` when unset).
@@ -458,18 +453,27 @@ pub fn load_or_create(path: &std::path::Path) -> Result<SigningKey> {
 /// that never signed.
 #[must_use]
 pub fn recorded_before_signing(issue: &str, voter: &str, choice: &str) -> bool {
-    let log = tracker_git(&[
-        "--no-pager",
-        "log",
-        "--full-history",
-        "-m",
-        "--diff-filter=A",
-        "--format=%H %P",
-        "--",
-        PIN_FILE,
-    ])
+    env_root().is_some_and(|root| recorded_before_signing_in(&root, issue, voter, choice))
+}
+
+/// [`recorded_before_signing`] in the tracker at `root`.
+#[must_use]
+pub fn recorded_before_signing_in(root: &Path, issue: &str, voter: &str, choice: &str) -> bool {
+    let log = git_in(
+        root,
+        &[
+            "--no-pager",
+            "log",
+            "--full-history",
+            "-m",
+            "--diff-filter=A",
+            "--format=%H %P",
+            "--",
+            PIN_FILE,
+        ],
+    )
     .unwrap_or_default();
-    let held = |commit: &str| crate::slot::file_at(commit, PIN_FILE).is_some();
+    let held = |commit: &str| crate::slot::file_at_in(root, commit, PIN_FILE).is_some();
     let starts: Vec<Vec<&str>> = log
         .lines()
         .filter_map(|line| {
@@ -485,35 +489,11 @@ pub fn recorded_before_signing(issue: &str, voter: &str, choice: &str) -> bool {
             !parents.is_empty()
                 && parents
                     .iter()
-                    .all(|p| crate::slot::note_on_issue_at(p, issue, &needle))
+                    .all(|p| crate::slot::note_on_issue_at_in(root, p, issue, &needle))
         })
 }
 
-/// When the tracker recorded `voter`'s ballot for `choice` on `issue`: the
-/// newest commit that added or removed its `] VOTER: CHOICE` line in the
-/// file holding the issue. `None` when the tracker is not a git repository
-/// or the ballot is not committed yet.
-#[must_use]
-pub fn recorded_at(issue: &str, voter: &str, choice: &str) -> Option<i64> {
-    recorded_at_in(&env_root()?, issue, voter, choice)
-}
-
-/// [`recorded_at`] in the tracker at `root`.
-#[must_use]
-pub fn recorded_at_in(root: &Path, issue: &str, voter: &str, choice: &str) -> Option<i64> {
-    let pattern = format!(":ID:[[:space:]]+{issue}[[:space:]]*$");
-    let files = git_in(root, &["grep", "-l", "-E", &pattern])?;
-    let file = files.lines().next()?.to_string();
-    let needle = format!("] {}: {}", voter.trim(), choice.trim());
-    git_in(
-        root,
-        &["log", "-1", "--format=%ct", "-S", &needle, "--", &file],
-    )?
-    .parse()
-    .ok()
-}
-
-fn env_root() -> Option<PathBuf> {
+pub(crate) fn env_root() -> Option<PathBuf> {
     std::env::var_os("VISSUE_ROOT")
         .filter(|r| !r.is_empty())
         .map(PathBuf::from)
@@ -525,7 +505,7 @@ pub(crate) fn tracker_git(args: &[&str]) -> Option<String> {
     git_in(&env_root()?, args)
 }
 
-fn git_in(root: &Path, args: &[&str]) -> Option<String> {
+pub(crate) fn git_in(root: &Path, args: &[&str]) -> Option<String> {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(root)

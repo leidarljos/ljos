@@ -19,6 +19,7 @@
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::SigningKey;
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use crate::ballot_sig;
 
@@ -471,25 +472,34 @@ fn pin_line_at(commit: &str, seat: &str, key: &str) -> bool {
     })
 }
 
-pub(crate) fn file_at(commit: &str, path: &str) -> Option<String> {
+fn file_at(commit: &str, path: &str) -> Option<String> {
+    file_at_in(&ballot_sig::env_root()?, commit, path)
+}
+
+pub(crate) fn file_at_in(root: &Path, commit: &str, path: &str) -> Option<String> {
     if path.is_empty() {
         return None;
     }
-    ballot_sig::tracker_git(&["--no-pager", "show", &format!("{commit}:{path}")])
+    ballot_sig::git_in(root, &["--no-pager", "show", &format!("{commit}:{path}")])
 }
 
-pub(crate) fn note_on_issue_at(commit: &str, issue: &str, note: &str) -> bool {
+fn note_on_issue_at(commit: &str, issue: &str, note: &str) -> bool {
+    ballot_sig::env_root().is_some_and(|root| note_on_issue_at_in(&root, commit, issue, note))
+}
+
+pub(crate) fn note_on_issue_at_in(root: &Path, commit: &str, issue: &str, note: &str) -> bool {
     let pattern = format!(":ID:[[:space:]]+{}[[:space:]]*$", ere_escape(issue));
-    let Some(hits) =
-        ballot_sig::tracker_git(&["--no-pager", "grep", "-l", "-E", "-e", &pattern, commit])
-    else {
+    let Some(hits) = ballot_sig::git_in(
+        root,
+        &["--no-pager", "grep", "-l", "-E", "-e", &pattern, commit],
+    ) else {
         return false;
     };
     let prefix = format!("{commit}:");
     hits.lines().any(|hit| {
         let hit = hit.trim();
         let path = hit.strip_prefix(&prefix).unwrap_or(hit);
-        file_at(commit, path)
+        file_at_in(root, commit, path)
             .is_some_and(|text| issue_entry(&text, issue).is_some_and(|block| block.contains(note)))
     })
 }

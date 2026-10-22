@@ -362,7 +362,7 @@ pub struct TrackerReport {
     /// Issues that hold a ballot.
     pub issues: usize,
     pub ballots: usize,
-    /// `ISSUE VOTER` for each unsigned ballot committed before signing began.
+    /// `ISSUE VOTER` for each unsigned ballot held before the first pin.
     pub legacy: Vec<String>,
     pub bad: Vec<BadBallot>,
 }
@@ -373,9 +373,10 @@ pub struct TrackerReport {
 /// under the key `.ljos-seat-keys` pins for that voter and for no other
 /// seat or voter on the issue, so one key does not count as several
 /// voters. A persona's or a judge's ballot is held to it too, since every
-/// cast signs. An unsigned ballot the tracker committed before signing
-/// began is legacy, as at the push gate. Only files are read, and git for
-/// the commit dates.
+/// cast signs. An unsigned ballot the tracker held before its first pin,
+/// by commit order, is legacy, as at the push gate
+/// ([`crate::ballot_sig::recorded_before_signing_in`]). Only files are
+/// read, and git for that order.
 ///
 /// # Errors
 ///
@@ -419,8 +420,7 @@ pub fn check_tracker(root: &Path) -> Result<TrackerReport> {
             }
             let span = (file == board).then_some((heading.line_start, heading.line_end));
             let legacy = |voter: &str, choice: &str| {
-                crate::ballot_sig::recorded_at_in(root, issue, voter, choice)
-                    .is_some_and(|t| t < crate::ballot_sig::SIGNING_SINCE)
+                crate::ballot_sig::recorded_before_signing_in(root, issue, voter, choice)
             };
             let cast: Vec<&str> = ballots.iter().map(|b| b.agent.as_str()).collect();
             for ballot in &ballots {
