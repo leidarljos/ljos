@@ -2302,10 +2302,71 @@ fn cgroup_text_is_transient(text: &str) -> bool {
     })
 }
 
+/// What [`own_cgroup`] returns while this crate is built for unit tests.
+/// The default is a login scope, so a host cgroup that names a runner
+/// does not become the test. A test that must follow the machine asks
+/// for [`CgroupRead::Host`]. Absent from every binary: `cfg(test)` is
+/// off there, so a release build has no way to select it.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CgroupRead {
+    Login,
+    Host,
+}
+
+#[cfg(test)]
+thread_local! {
+    static CGROUP_READ: std::cell::Cell<CgroupRead> = const { std::cell::Cell::new(CgroupRead::Login) };
+}
+
+/// Holds [`CgroupRead::Host`] until dropped, then puts the previous
+/// choice back. Unit tests share a thread, so the host file must not
+/// leak into the next test.
+#[cfg(test)]
+#[must_use = "the host cgroup applies while this guard is held"]
+pub(crate) struct CgroupReadGuard {
+    prev: CgroupRead,
+}
+
+#[cfg(test)]
+impl CgroupReadGuard {
+    /// [`own_cgroup`] reads `/proc/self/cgroup` until this drops.
+    pub(crate) fn host() -> Self {
+        let prev = CGROUP_READ.with(|cell| cell.replace(CgroupRead::Host));
+        Self { prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for CgroupReadGuard {
+    fn drop(&mut self) {
+        CGROUP_READ.with(|cell| cell.set(self.prev));
+    }
+}
+
+/// A login scope, the shape `/proc/self/cgroup` has for a person at a
+/// seat. Unit tests read this unless they ask for the host file.
+#[cfg(test)]
+const LOGIN_CGROUP: &str = "0::/user.slice/user-1000.slice/session-1.scope\n";
+
 /// Linux: this process's cgroup, or an error when it cannot be read.
 /// An empty string is a cgroup that was read and names nothing. An error
 /// is not that: the scope is hidden, and a hidden scope counts as a runner.
-#[cfg(target_os = "linux")]
+///
+/// Unit tests read [`LOGIN_CGROUP`] unless [`CgroupReadGuard::host`] is
+/// held. That stand-in is compiled out of the binaries.
+#[cfg(all(target_os = "linux", test))]
+fn own_cgroup() -> Result<String, ()> {
+    if CGROUP_READ.with(std::cell::Cell::get) == CgroupRead::Host {
+        return std::fs::read_to_string("/proc/self/cgroup").map_err(|_| ());
+    }
+    Ok(LOGIN_CGROUP.to_string())
+}
+
+/// Linux: this process's cgroup, or an error when it cannot be read.
+/// An empty string is a cgroup that was read and names nothing. An error
+/// is not that: the scope is hidden, and a hidden scope counts as a runner.
+#[cfg(all(target_os = "linux", not(test)))]
 fn own_cgroup() -> Result<String, ()> {
     std::fs::read_to_string("/proc/self/cgroup").map_err(|_| ())
 }
@@ -47823,6 +47884,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     #[test]
     fn a_runner_variable_at_a_terminal_does_not_hide_the_person() {
         let _g = env_guard();
+        let _host = super::CgroupReadGuard::host();
         let saved = std::env::var_os("CURSOR_AGENT");
         unsafe { std::env::set_var("CURSOR_AGENT", "1") };
         super::PERSON_AT_TERMINAL.with(|p| p.set(true));
@@ -47860,6 +47922,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     #[test]
     fn this_process_follows_its_cgroup() {
         let _g = env_guard();
+        let _host = super::CgroupReadGuard::host();
         let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
         let named = super::cgroup_read_is_runner(Ok(&text), &super::runner_names());
         super::PERSON_AT_TERMINAL.with(|p| p.set(true));
@@ -47870,6 +47933,23 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         } else {
             assert!(!under, "no runner in the cgroup or the tree");
         }
+    }
+
+    /// The host cgroup is not the test's. A login scope stands in for it,
+    /// so a runner scope around `cargo test` does not hide the person at
+    /// the terminal hook. [`this_process_follows_its_cgroup`] is the test
+    /// that still reads the host file.
+    #[test]
+    fn a_unit_test_stands_in_a_login_scope() {
+        let _g = env_guard();
+        super::PERSON_AT_TERMINAL.with(|p| p.set(true));
+        let under = super::under_a_runner();
+        let present = super::person_present();
+        super::PERSON_AT_TERMINAL.with(|p| p.set(false));
+        assert!(
+            !under && present,
+            "the host cgroup leaked into the unit test: under {under}, present {present}"
+        );
     }
 
     #[test]
