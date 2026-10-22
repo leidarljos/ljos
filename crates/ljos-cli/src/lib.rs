@@ -3699,22 +3699,23 @@ fn command_value_span(line: &str) -> Option<(usize, usize)> {
     None
 }
 
+/// The end of the entry that starts at `start`: the next table for a TOML
+/// marker, and for YAML the next line indented no deeper than the
+/// marker's own, which is a sibling or the parent's next key.
 fn marker_section_end(text: &str, start: usize, marker: &str) -> usize {
     let marker_toml = marker.trim_start().starts_with('[');
-    let mut lines = 0usize;
     let mut end = start;
-    let mut first = true;
+    let mut indent = None;
     for line in text[start..].split_inclusive('\n') {
         let trimmed = line.trim_start();
-        if marker_toml && !first && trimmed.starts_with('[') {
-            break;
+        let depth = line.len() - trimmed.len();
+        match indent {
+            None => indent = Some(depth),
+            Some(_) if marker_toml && trimmed.starts_with('[') => break,
+            Some(first) if !marker_toml && !trimmed.trim().is_empty() && depth <= first => break,
+            Some(_) => {}
         }
         end += line.len();
-        lines += 1;
-        first = false;
-        if !marker_toml && lines >= 24 {
-            break;
-        }
     }
     end
 }

@@ -376,3 +376,33 @@ fn onboard_does_not_rewrite_a_sibling_hermes_command() {
     );
     assert!(text.contains("  ljos:\n    command: ljos-mcp"), "{text}");
 }
+
+/// The goose marker opens the `ljos:` extension. A sibling listed after
+/// it is not part of that entry, however close it sits.
+#[test]
+fn onboard_does_not_rewrite_a_sibling_goose_command() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join(".cargo/bin");
+    install_pair(&bin);
+    fs::create_dir_all(home.join(".config/goose")).unwrap();
+    let config = "extensions:\n  ljos:\n    enabled: true\n    type: stdio\n  developer:\n    enabled: true\n    cmd: /home/otherbox/.cargo/bin/ljos-mcp\n";
+    fs::write(home.join(".config/goose/config.yaml"), config).unwrap();
+    let out = onboard(&bin.join("ljos"), &home, &["onboard", "--harness", "goose"]);
+    assert!(out.status.success(), "{}", said(&out));
+    let text = fs::read_to_string(home.join(".config/goose/config.yaml")).unwrap();
+    assert_eq!(text, config);
+
+    let stale = config.replace(
+        "    type: stdio\n",
+        "    type: stdio\n    cmd: /home/otherbox/.cargo/bin/ljos-mcp\n",
+    );
+    fs::write(home.join(".config/goose/config.yaml"), &stale).unwrap();
+    let out = onboard(&bin.join("ljos"), &home, &["onboard", "--harness", "goose"]);
+    assert!(out.status.success(), "{}", said(&out));
+    let text = fs::read_to_string(home.join(".config/goose/config.yaml")).unwrap();
+    assert_eq!(
+        text,
+        stale.replacen("/home/otherbox/.cargo/bin/ljos-mcp", "ljos-mcp", 1)
+    );
+}
