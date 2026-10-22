@@ -259,6 +259,119 @@ fn a_checksum_mismatch_installs_nothing() {
     assert!(!bins.join("ljos-mcp").exists());
 }
 
+/// A home and a release directory with the required binaries and the
+/// encoder archives as the release workflow packs them, each beside its
+/// `.sha256`.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn encoder_machine(root: &Path) -> (PathBuf, PathBuf) {
+    let home = root.join("home");
+    let rel = root.join("rel");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(rel.join("rt/lib/onnxruntime")).unwrap();
+    fs::create_dir_all(rel.join("embed/bin")).unwrap();
+    let names = ["ljos", "ljos-mcp", "ljos-policyd"];
+    for name in names {
+        executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
+    }
+    fs::write(rel.join("SHA256SUMS"), sums(&rel, &names)).unwrap();
+    fs::write(
+        rel.join("rt/lib/onnxruntime/libonnxruntime.so.1"),
+        b"runtime",
+    )
+    .unwrap();
+    executable(&rel.join("embed/bin/packset-embed"), "#!/bin/sh\nexit 0\n");
+    for (dir, top, base) in [
+        ("rt", "lib", "onnxruntime"),
+        ("embed", "bin", "packset-embed"),
+    ] {
+        let name = format!("{base}-x86_64-unknown-linux-gnu.tar.gz");
+        let out = Command::new("tar")
+            .arg("-C")
+            .arg(rel.join(dir))
+            .arg("-czf")
+            .arg(rel.join(&name))
+            .arg(top)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let line = format!("{}  {name}\n", sha256(&rel.join(&name)));
+        fs::write(rel.join(format!("{name}.sha256")), line).unwrap();
+    }
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::remove_var("LJOS_BIN_DIR");
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    clear_agent_ids();
+    std::env::set_var("CURSOR_AGENT_ID", "bc-encoder-run");
+    (home, rel)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn cloud_up_installs_the_release_encoder_on_a_cloud_vm() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _rel) = encoder_machine(root.path());
+    let said = ljos_cli::cloud::up(false).unwrap();
+    assert!(said.contains("encoder: installed"), "{said}");
+    assert!(said.contains("(checksums match)"), "{said}");
+    assert!(home.join(".local/bin/packset-embed").is_file(), "{said}");
+    assert_eq!(
+        fs::read(home.join(".local/lib/onnxruntime/libonnxruntime.so.1")).unwrap(),
+        b"runtime",
+        "the rpath $ORIGIN/../lib/onnxruntime finds the runtime here"
+    );
+    let left: Vec<_> = fs::read_dir(home.join(".local/lib"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(left, ["onnxruntime"], "the staging directory stays behind");
+    let again = ljos_cli::cloud::up(false).unwrap();
+    assert!(
+        again.contains("encoder: packset-embed already in"),
+        "{again}"
+    );
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn an_encoder_checksum_mismatch_installs_neither_archive() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, rel) = encoder_machine(root.path());
+    let name = "packset-embed-x86_64-unknown-linux-gnu.tar.gz";
+    let forged = format!("{}  {name}\n", "0".repeat(64));
+    fs::write(rel.join(format!("{name}.sha256")), forged).unwrap();
+    let err = ljos_cli::cloud::up(false).unwrap_err().to_string();
+    assert!(err.contains("checksum mismatch"), "{err}");
+    assert!(err.contains("nothing was installed"), "{err}");
+    assert!(!home.join(".local/bin/packset-embed").exists());
+    assert_eq!(
+        fs::read_dir(home.join(".local/lib")).unwrap().count(),
+        0,
+        "the runtime's own sum matched, and it still waits for both"
+    );
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn a_ci_job_downloads_no_encoder() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _rel) = encoder_machine(root.path());
+    std::env::set_var("GITHUB_ACTIONS", "true");
+    std::env::set_var("GITHUB_RUN_ID", "555001");
+    let said = ljos_cli::cloud::up(false).unwrap();
+    assert!(said.contains("encoder: not a cloud VM"), "{said}");
+    assert!(!home.join(".local/bin/packset-embed").exists());
+    assert!(!home.join(".local/lib/onnxruntime").exists());
+}
+
 #[test]
 fn cloud_up_installs_points_the_harness_and_clones() {
     let _g = Guard::new();

@@ -24,11 +24,13 @@
 #                   for each repository to hold
 #   --attest        refuse a tarball whose GitHub build attestation is
 #                   missing or does not verify
-#   --cloud         install the binaries, skip onboarding and the encoder,
-#                   then run `ljos cloud up` (clone LJOS_TRACKER_REMOTE,
-#                   write the harness MCP command). Idempotent: when the
-#                   binaries are already installed and `ljos cloud up`
-#                   answers, that command is all that runs
+#   --cloud         install the binaries, skip onboarding and packset's
+#                   encoder, then run `ljos cloud up` (clone
+#                   LJOS_TRACKER_REMOTE, write the harness MCP command, and
+#                   on a cloud VM install the ljos release's encoder).
+#                   Idempotent: when the binaries are already installed
+#                   and `ljos cloud up` answers, that command is all that
+#                   runs
 #   --force         with --cloud, download again instead of reusing the
 #                   binaries already in --bin-dir
 #   --help          this text
