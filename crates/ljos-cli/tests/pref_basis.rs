@@ -130,6 +130,18 @@ impl Daemon {
         )
     }
 
+    /// The live record `id` names, or none.
+    fn get(&self, id: &str) -> Option<Value> {
+        match ureq::get(&format!("{}/v1/atoms/{id}", self.url))
+            .query("workspace", "seat")
+            .call()
+        {
+            Ok(resp) => Some(resp.into_json().unwrap()),
+            Err(ureq::Error::Status(404, _)) => None,
+            Err(e) => panic!("GET /v1/atoms/{id}: {e}"),
+        }
+    }
+
     fn atoms(&self) -> Vec<Value> {
         let got: Value = ureq::get(&format!("{}/v1/atoms", self.url))
             .query("workspace", "seat")
@@ -394,6 +406,11 @@ fn an_older_preference_is_raised_by_a_person_copy() {
         let held: Vec<&&Value> = held.iter().filter(|a| a["kind"] == old["kind"]).collect();
         assert_eq!(held.len(), 1, "{after:?}");
         let new = held[0];
+        // An update in place would pass every check below; the copy is a
+        // new record and the original is retired.
+        assert_ne!(new["id"], old["id"], "{new}");
+        let id = old["id"].as_str().unwrap();
+        assert!(daemon.get(id).is_none(), "{id} is still live");
         assert_eq!(basis(new), Some("person"), "{new}");
         assert_eq!(new["origin"], "user-declared", "{new}");
         for key in ["kind", "level", "entities", "ts", "valid_from"] {
