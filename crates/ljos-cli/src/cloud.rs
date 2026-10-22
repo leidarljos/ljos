@@ -424,6 +424,9 @@ struct McpFile {
     probe: McpProbe,
     advice: String,
     expand: Expand,
+    /// The PATH the client searches for a bare command when that is not a
+    /// shell's: launchd's, for a macOS app opened from the Dock.
+    launch_path: Option<String>,
     /// Parse and read errors fail the row. Harness files are skipped when
     /// they are not the JSON this probe expects (Zed's settings are JSONC).
     strict: bool,
@@ -523,22 +526,27 @@ fn mcp_problem() -> McpProblem {
 fn mcp_files() -> Vec<McpFile> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
-    let mut push =
-        |path: PathBuf, probe: McpProbe, strict: bool, advice: String, expand: Expand| {
-            let kind = match &probe {
-                McpProbe::Json(pointer) => format!("json:{pointer}"),
-                McpProbe::Text(marker) => format!("text:{marker}"),
-            };
-            if seen.insert(format!("{kind}:{}", path.display())) {
-                out.push(McpFile {
-                    path,
-                    probe,
-                    advice,
-                    expand,
-                    strict,
-                });
-            }
+    let mut push = |path: PathBuf,
+                    probe: McpProbe,
+                    strict: bool,
+                    advice: String,
+                    expand: Expand,
+                    launch_path: Option<&str>| {
+        let kind = match &probe {
+            McpProbe::Json(pointer) => format!("json:{pointer}"),
+            McpProbe::Text(marker) => format!("text:{marker}"),
         };
+        if seen.insert(format!("{kind}:{}", path.display())) {
+            out.push(McpFile {
+                path,
+                probe,
+                advice,
+                expand,
+                launch_path: launch_path.map(str::to_string),
+                strict,
+            });
+        }
+    };
     if let Some(path) = std::env::var_os("LJOS_MCP_CONFIG").filter(|p| !p.is_empty()) {
         push(
             PathBuf::from(path),
@@ -546,6 +554,7 @@ fn mcp_files() -> Vec<McpFile> {
             true,
             "ljos onboard --harness cursor".into(),
             Expand::Shell,
+            None,
         );
     }
     if let Ok(home) = crate::home() {
@@ -555,6 +564,7 @@ fn mcp_files() -> Vec<McpFile> {
             true,
             cursor_mcp_advice(),
             Expand::Cursor,
+            None,
         );
         push(
             home.join(".claude.json"),
@@ -562,6 +572,7 @@ fn mcp_files() -> Vec<McpFile> {
             false,
             "ljos onboard --harness claude".into(),
             Expand::Claude,
+            None,
         );
     }
     for harness in harness_shapes() {
@@ -580,6 +591,7 @@ fn mcp_files() -> Vec<McpFile> {
                     false,
                     advice.clone(),
                     expand,
+                    harness.launch_path(),
                 );
             }
         }
@@ -591,6 +603,7 @@ fn mcp_files() -> Vec<McpFile> {
                     false,
                     advice.clone(),
                     expand,
+                    harness.launch_path(),
                 );
             }
         }
@@ -988,7 +1001,7 @@ fn launch_check(file: &McpFile, launch: &LaunchSpec) -> LaunchCheck {
         .env_path
         .as_deref()
         .map(|path| expand_env_path(path, file.expand));
-    let search_path = env_path.as_deref();
+    let search_path = env_path.as_deref().or(file.launch_path.as_deref());
     let found_path = command_path(&command, search_path);
     let shell_path = if search_path.is_none() {
         shell_command_path(&command)
@@ -1000,8 +1013,10 @@ fn launch_check(file: &McpFile, launch: &LaunchSpec) -> LaunchCheck {
     let Some(chosen) = chosen else {
         return LaunchCheck::Missing(if pathy {
             format!("{} does not exist", launch.command)
-        } else if search_path.is_some() {
+        } else if env_path.is_some() {
             format!("{} is not on env.PATH", launch.command)
+        } else if let Some(path) = &file.launch_path {
+            format!("{} is not on the app's PATH, {path}", launch.command)
         } else {
             format!("{} is not on PATH", launch.command)
         });
@@ -2497,4 +2512,47 @@ fn hostname() -> String {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "vm".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Dock app looks for a bare `ljos-mcp` on its own PATH, not on this
+    /// process's PATH or a login shell's.
+    #[test]
+    fn a_launchd_app_looks_for_a_bare_server_on_its_own_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = tempfile::tempdir().unwrap();
+        let bin = scratch.path().join("bin");
+        let empty = scratch.path().join("empty");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&empty).unwrap();
+        let server = bin.join("ljos-mcp");
+        fs::write(&server, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&server, fs::Permissions::from_mode(0o755)).unwrap();
+        let launch = LaunchSpec {
+            command: "ljos-mcp".into(),
+            args: Vec::new(),
+            env_path: None,
+        };
+        let file = |launch_path: &Path| McpFile {
+            path: scratch.path().join("claude_desktop_config.json"),
+            probe: McpProbe::Json("/mcpServers/ljos".into()),
+            advice: "ljos onboard --harness claude-desktop".into(),
+            expand: Expand::Shell,
+            launch_path: Some(launch_path.display().to_string()),
+            strict: false,
+        };
+        match launch_check(&file(&empty), &launch) {
+            LaunchCheck::Missing(why) => {
+                assert!(why.contains(&empty.display().to_string()), "{why}");
+            }
+            _ => panic!("ljos-mcp is not on the app's PATH"),
+        }
+        assert!(!matches!(
+            launch_check(&file(&bin), &launch),
+            LaunchCheck::Missing(_)
+        ));
+    }
 }
