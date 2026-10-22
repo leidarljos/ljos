@@ -2892,6 +2892,7 @@ fn run_command() -> Result<()> {
                             &call.cue,
                             &sessions,
                             spawner.as_ref(),
+                            ljos_cli::capture::payload_transcript(&input).as_deref(),
                         );
                         ljos_cli::hook_timed("capture", || ljos_cli::capture::capture_stated(&call))
                     } else {

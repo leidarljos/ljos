@@ -359,16 +359,19 @@ pub fn note_latest_prompt_for(prompt: &str, session: Option<&str>) {
 /// name one conversation by several, and the process that checks the
 /// bind sees whichever the runner stamped on it.
 pub fn note_latest_prompt_as(prompt: &str, sessions: &[String]) {
-    note_latest_prompt_from(prompt, sessions, None);
+    note_latest_prompt_from(prompt, sessions, None, None);
 }
 
 /// [`note_latest_prompt_as`] recording `runner`, the process that spawned
 /// the hook ([`crate::proc_tree::hook_runner`]): a process under that
 /// very runner is in its conversation whatever its environment names.
+/// `transcript` is the runner's own record of the conversation, as its
+/// hook payload names it.
 pub fn note_latest_prompt_from(
     prompt: &str,
     sessions: &[String],
     runner: Option<&crate::proc_tree::Proc>,
+    transcript: Option<&str>,
 ) {
     if capture_mode() == CaptureMode::Off || pasted_or_quoted(prompt) {
         return;
@@ -388,9 +391,99 @@ pub fn note_latest_prompt_from(
         .open(&path)
         .and_then(|mut f| f.write_all(text.as_bytes()));
     if wrote.is_ok() {
-        let runner = runner.map_or_else(|| "-".to_string(), crate::proc_tree::token);
-        let _ = write_prompt_bind(&path, text.as_bytes(), &runner, sessions);
+        let bind = Bind {
+            runner: runner.map_or_else(|| "-".to_string(), crate::proc_tree::token),
+            at: now_nanos(),
+            transcript: bind_session(transcript),
+        };
+        let _ = write_prompt_bind(&path, text.as_bytes(), &bind, sessions);
     }
+}
+
+/// What the hook records beside the hash: the runner that spawned it,
+/// when it wrote the prompt, and the runner's record of the conversation.
+struct Bind {
+    runner: String,
+    at: u128,
+    transcript: String,
+}
+
+fn now_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos())
+}
+
+/// The transcript a prompt hook payload names, as Claude Code, Codex and
+/// Cursor send it.
+#[must_use]
+pub fn payload_transcript(input: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(input.trim()).ok()?;
+    v["transcript_path"]
+        .as_str()
+        .or_else(|| v["transcriptPath"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// How long after the hook's time the bind's own write may land.
+const BIND_WRITE_NANOS: u128 = 500_000_000;
+
+/// The latest of `path`'s mtime and ctime in nanoseconds. A process can
+/// set the mtime it likes; the kernel sets the ctime on every change.
+fn changed_nanos(path: &std::path::Path) -> Option<u128> {
+    use std::os::unix::fs::MetadataExt as _;
+    let m = std::fs::metadata(path).ok()?;
+    let at = |s: i64, ns: i64| -> Option<u128> {
+        Some(u128::try_from(s).ok()? * 1_000_000_000 + u128::try_from(ns).ok()?)
+    };
+    Some(at(m.ctime(), m.ctime_nsec())?.max(at(m.mtime(), m.mtime_nsec())?))
+}
+
+/// Whether `kept` agrees with the runner's own record of the person's
+/// turn, when the runner above keeps one ([`crate::turn_record`]). The
+/// record is the one the bind names, inside that runner's own directory,
+/// or for Cursor the transcript of a conversation the runner's
+/// environment names. Claude Code and Codex always name theirs, so a bind
+/// that names none, or names a file elsewhere, is refused under them.
+fn agrees_with_record(kept: &[u8], named: &str, runner_ids: &[String]) -> bool {
+    use crate::turn_record;
+    let Some((runner, kind)) = crate::proc_tree::runner_above() else {
+        return true;
+    };
+    let env = crate::proc_tree::environ(runner.pid).unwrap_or_default();
+    let roots = turn_record::roots(kind, &env);
+    if roots.is_empty() {
+        return true;
+    }
+    let record = if named == "-" {
+        roots
+            .iter()
+            .find_map(|r| turn_record::cursor_record(r, runner_ids))
+            .filter(|_| matches!(kind, "cursor" | "cursor-agent"))
+    } else {
+        turn_record::within(std::path::Path::new(named), &roots)
+    };
+    let Some(record) = record else {
+        return named == "-" && !turn_record::required(kind);
+    };
+    // A turn's tool output can push the person's entry out of the tail.
+    let Some(text) = crate::bookkeep::read_text_bounded(&record)
+        .filter(|t| !turn_record::latest_turn(t).is_empty())
+        .or_else(|| {
+            record
+                .is_file()
+                .then(|| std::fs::read_to_string(&record).ok())
+                .flatten()
+        })
+    else {
+        return false;
+    };
+    if !turn_record::required(kind) && turn_record::latest_turn(&text).is_empty() {
+        return true;
+    }
+    turn_record::agrees(&text, &String::from_utf8_lossy(kept))
 }
 
 fn latest_prompt_bind_path() -> std::path::PathBuf {
@@ -419,13 +512,14 @@ fn bind_session(session: Option<&str>) -> String {
 
 /// The bind the hook writes beside the prompt: version, sha256 of the
 /// bytes, mtime in nanoseconds, the runner that spawned the hook as a
-/// [`crate::proc_tree::token`] or `-`, and the session ids, one a line.
-/// The gate reads it back, so a later write of the prompt file no longer
+/// [`crate::proc_tree::token`] or `-`, the hook's time in nanoseconds,
+/// the runner's transcript or `-`, and the session ids, one a line. The
+/// gate reads it back, so a later write of the prompt file no longer
 /// matches.
 fn write_prompt_bind(
     path: &std::path::Path,
     bytes: &[u8],
-    runner: &str,
+    bind: &Bind,
     sessions: &[String],
 ) -> std::io::Result<()> {
     use std::io::Write as _;
@@ -444,7 +538,13 @@ fn write_prompt_bind(
     if ids.is_empty() {
         ids.push(bind_session(None));
     }
-    let body = format!("2\n{hash}\n{mtime}\n{runner}\n{}\n", ids.join("\n"));
+    let body = format!(
+        "3\n{hash}\n{mtime}\n{}\n{}\n{}\n{}\n",
+        bind.runner,
+        bind.at,
+        bind.transcript,
+        ids.join("\n")
+    );
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -462,6 +562,10 @@ fn write_prompt_bind(
 /// above nothing matches. An MCP call's `_meta` session only narrows
 /// this: one the runner above did not give, or the bind does not name
 /// when the runner gave none, is another conversation's call.
+///
+/// The prompt must also agree with the runner's own record of the turn
+/// ([`agrees_with_record`]), and neither file may have changed after the
+/// hook's time: a tool call that rewrites them leaves a later ctime.
 fn prompt_bind_matches(path: &std::path::Path) -> bool {
     let Ok(bytes) = std::fs::read(path) else {
         return false;
@@ -469,15 +573,27 @@ fn prompt_bind_matches(path: &std::path::Path) -> bool {
     let Some(mtime) = mtime_nanos(path) else {
         return false;
     };
-    let Ok(bind) = std::fs::read_to_string(latest_prompt_bind_path()) else {
+    let bind_path = latest_prompt_bind_path();
+    let Ok(bind) = std::fs::read_to_string(&bind_path) else {
         return false;
     };
     let mut lines = bind.lines();
-    let (Some("2"), Some(hash), Some(stored), Some(spawner)) =
-        (lines.next(), lines.next(), lines.next(), lines.next())
-    else {
+    let (Some("3"), Some(hash), Some(stored), Some(spawner), Some(at), Some(transcript)) = (
+        lines.next(),
+        lines.next(),
+        lines.next(),
+        lines.next(),
+        lines.next().and_then(|t| t.parse::<u128>().ok()),
+        lines.next(),
+    ) else {
         return false;
     };
+    let late = |p: &std::path::Path| {
+        changed_nanos(p).is_none_or(|c| c > at.saturating_add(BIND_WRITE_NANOS))
+    };
+    if late(path) || late(&bind_path) {
+        return false;
+    }
     let bound: Vec<String> = lines
         .map(crate::ballot_sig::field)
         .filter(|s| s != "-")
@@ -496,7 +612,9 @@ fn prompt_bind_matches(path: &std::path::Path) -> bool {
             return false;
         }
     }
-    hash == hex::encode(sha2::Sha256::digest(bytes)) && stored == mtime.to_string()
+    hash == hex::encode(sha2::Sha256::digest(&bytes))
+        && stored == mtime.to_string()
+        && agrees_with_record(&bytes, transcript, &runner)
 }
 
 /// Lowercase words and nothing else, for comparing a sentence with a

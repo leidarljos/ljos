@@ -102,10 +102,19 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
     std::fs::write(tracker.join("vissue.toml"), "seats = [\"saddle\"]\n").unwrap();
     let url = serve(Arc::new(Mutex::new(Vec::new())));
     let text = "Pin the review set before a release.";
+    let prompt = format!("Please remember this for next time: {text}");
+    let transcript = home.path().join(".claude/projects/-seat/person-1.jsonl");
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    let turn = serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": prompt},
+    });
+    std::fs::write(&transcript, format!("{turn}\n")).unwrap();
     let payload = serde_json::json!({
         "hook_event_name": "UserPromptSubmit",
         "session_id": "person-1",
-        "prompt": format!("Please remember this for next time: {text}"),
+        "prompt": prompt,
+        "transcript_path": transcript,
     })
     .to_string();
     // The runner spawns the prompt hook and starts the server, and the
