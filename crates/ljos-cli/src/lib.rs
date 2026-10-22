@@ -18499,6 +18499,22 @@ pub const SEAT_PATHS: &[&str] = &[
     "/.gemini/config/mcp_config.json",
     "/.claude/settings.json",
     "/.grok/hooks/ljos.json",
+    "/.cursor/hooks.json",
+    "/.codeium/windsurf/hooks.json",
+    "/.factory/hooks.json",
+    "/.kiro/hooks/ljos.json",
+    "/.copilot/hooks/ljos.json",
+    "/.qwen/settings.json",
+    "/.config/crush/crush.json",
+    "/Documents/Cline/Hooks",
+    "/Documents/Cline/Hooks/",
+    "/.augment/settings.json",
+    "/.augment/ljos-guard-auggie.sh",
+    "/.config/amp/settings.json",
+    "/.config/amp/ljos-guard-amp.sh",
+    "/.agents/plugins/ljos/hooks/hooks.json",
+    "/.openhands/hooks.json",
+    "/.gemini/settings.json",
     "/.config/opencode/plugins/ljos.ts",
     "/.omp/agent/extensions/ljos.ts",
     "/ljos/approvals",
@@ -40860,6 +40876,34 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             seat_guard("cat ~/.gemini/config/hooks.json").is_none(),
             "reading is fine"
         );
+        for path in [
+            "~/.cursor/hooks.json",
+            "~/.codeium/windsurf/hooks.json",
+            "~/.factory/hooks.json",
+            "~/.kiro/hooks/ljos.json",
+            "~/.copilot/hooks/ljos.json",
+            "~/.qwen/settings.json",
+            "~/.config/crush/crush.json",
+            "~/Documents/Cline/Hooks",
+            "~/Documents/Cline/Hooks/PreToolUse",
+            "~/.augment/settings.json",
+            "~/.augment/ljos-guard-auggie.sh",
+            "~/.config/amp/settings.json",
+            "~/.config/amp/ljos-guard-amp.sh",
+            "~/.agents/plugins/ljos/hooks/hooks.json",
+            "~/.openhands/hooks.json",
+            "~/.gemini/settings.json",
+        ] {
+            assert!(
+                seat_guard(&format!("sed -i s/a/b/ {path}")).is_some(),
+                "{path}"
+            );
+            assert!(
+                seat_guard(&format!("cat {path}")).is_none(),
+                "reading {path}"
+            );
+        }
+        assert!(seat_guard("sed -i s/a/b/ ~/notes/hooks.json").is_none());
         assert!(seat_guard("sha256sum ~/.local/bin/ljos ~/.local/bin/ljos.bak").is_none());
         assert!(
             seat_guard("cp ~/.local/bin/ljos /tmp/copy").is_some(),
