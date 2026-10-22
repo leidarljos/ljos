@@ -337,9 +337,9 @@ pub fn session_start_for(session: Option<&str>) -> String {
     // Other machines' rules arrive before the preface is built. A tracker
     // that does not answer leaves the local file, and the hook does not wait.
     user_rules::sync_for_hook();
-    // A preference stored before a basis existed is stamped first, so this
-    // line still shows the ones the person wrote.
-    legacy_pref::migrate_once();
+    // Older preferences are counted when a cutoff receipt is already in
+    // the pack. Session start does not write one: it runs under the
+    // runner, and the cutoff is a person-side record.
     let mut atoms = session_atoms(400);
     if atoms.is_err() {
         wake_for_recall();
@@ -17241,7 +17241,6 @@ pub fn rules_for_gate() -> Vec<Rule> {
 /// empty when the pack does not answer: a reminder is not worth a wait.
 #[must_use]
 pub fn gate_read() -> (Vec<Rule>, Vec<(String, String)>) {
-    legacy_pref::migrate_once();
     let kept = rules_cache_path();
     let listed = pack().and_then(|client| {
         atoms_lean(&client, &client.workspace()).context("rules: GET /v1/atoms failed")
@@ -17323,6 +17322,8 @@ pub fn preferences_line(enforced: usize, could: usize, total: usize) -> String {
 }
 
 fn preferences_row() -> Habitat {
+    // The doctor is a person-side run, so it records the cutoff. Under a
+    // runner the call does nothing and the count below still stands.
     legacy_pref::migrate_once();
     let listed = pack().and_then(|client| {
         atoms_lean(&client, &client.workspace()).context("preferences: GET /v1/atoms failed")
@@ -24895,7 +24896,6 @@ pub fn packset_island(cue: &str, fire: bool) -> Result<Value> {
 /// weights that persona fired, and a fire writes its weights and not the
 /// seat's. The seat's own island is the one with no lens.
 pub fn packset_island_as(cue: &str, fire: bool, lens: Option<&str>) -> Result<Value> {
-    legacy_pref::migrate_once();
     let cue = cue.trim();
     if cue.is_empty() {
         bail!("island: pass the task or question at hand");
@@ -25222,7 +25222,6 @@ pub fn packset_search_as_of(
     as_of: Option<&str>,
     rerank: bool,
 ) -> Result<Vec<Hit>> {
-    legacy_pref::migrate_once();
     let q = query.trim();
     if q.is_empty() {
         bail!("search: empty query");

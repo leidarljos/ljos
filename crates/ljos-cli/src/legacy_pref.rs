@@ -4,14 +4,24 @@
 //! A preference written before that has no basis, so it stopped showing.
 //! The old store cannot tell a person's preference from an agent's soft
 //! prose, so only a mark an old person-path writer actually left is
-//! promoted. Anything else stays unverified until the person keeps it.
+//! promoted, and only when the atom is older than the cutoff recorded in
+//! the pack. Anything else stays unverified until the person keeps it.
+//!
+//! The cutoff is one receipt, entity `receipt:pref-basis-cutoff`, written
+//! once by the first person-side run. Its server `ts` is the bound. An
+//! atom at that time or after is not an older preference, whatever marks
+//! it carries. `via:prompt` alone never promotes: the hook runs under the
+//! runner, and a direct post can wear the tag. Search, the island, the
+//! command gate, session start and any process under a runner do not
+//! write the receipt and do not stamp a basis.
 //!
 //! The writers at v0.32.1, and the same writers through d47b69bd, left
 //! these marks:
 //!
 //! * The prompt hook (`capture::save` on `UserPromptSubmit`) stamps entity
 //!   `via:prompt` and origin `user-declared`, and no basis. It runs under
-//!   the runner, so `source.session` may name that runner's holder.
+//!   the runner, so `source.session` may name that runner's holder. The
+//!   tag is not promoted.
 //! * A terminal `ljos prefer` or `ljos remember` (`post_claim_horizon`)
 //!   stamps origin `user-declared`, `source.via` `ljos`, and no basis. With
 //!   no runner ancestor and no runner session id, `source.harness`,
@@ -32,21 +42,28 @@
 //!   not promoted.
 
 use std::io::IsTerminal;
-use std::path::PathBuf;
 use std::sync::Mutex;
 
 use anyhow::{bail, Context, Result};
+use chrono::{DateTime, FixedOffset};
 use serde_json::{json, Value};
 
 use crate::admit::ORIGIN_USER;
-use crate::{atoms_lean, pack, under_a_runner, SAID_ENTITY};
+use crate::{atoms_lean, pack, under_a_runner};
+
+/// The receipt that records the cutoff. Its server `ts` is the bound.
+const CUTOFF_ENTITY: &str = "receipt:pref-basis-cutoff";
+
+/// Stable text, so a second post of the same receipt is the first one.
+const CUTOFF_TEXT: &str = "Recorded the cutoff for preference basis migration.";
 
 /// What a legacy atom is. `None` from [`legacy`] means it is not one: it
 /// has a basis, it is not a preference or a lesson, or its origin was
 /// never the person's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Legacy {
-    /// Unambiguous person-path evidence. The upgrade stamps basis `person`.
+    /// A terminal write. The upgrade stamps basis `person` when the atom
+    /// is older than the pack's cutoff.
     Promote,
     /// No such evidence. It stays unverified.
     Hold,
@@ -79,20 +96,27 @@ pub(crate) fn legacy(atom: &Value) -> Option<Legacy> {
     // A missing origin is the pack's default, not a writer saying the
     // person stood behind it. It waits for review.
     let persons_origin = origin.is_some_and(|o| o.eq_ignore_ascii_case(ORIGIN_USER));
-    if persons_origin && (prompt_hook(atom) || terminal_write(atom)) {
+    // `via:prompt` is not read. The hook runs under the runner, and a
+    // direct post can wear the tag.
+    if persons_origin && terminal_write(atom) {
         Some(Legacy::Promote)
     } else {
         Some(Legacy::Hold)
     }
 }
 
-/// Preferences with no basis that the upgrade did not promote.
+/// Preferences with no basis, older than the pack's cutoff, that the
+/// upgrade did not promote. No cutoff means nothing is older yet.
 #[must_use]
 pub(crate) fn awaiting(atoms: &[Value]) -> Vec<(String, String)> {
+    let Some(cutoff) = earliest_cutoff(atoms) else {
+        return Vec::new();
+    };
     atoms
         .iter()
         .filter(|a| legacy(a) == Some(Legacy::Hold))
         .filter(|a| a.get("kind").and_then(Value::as_str) == Some("preference"))
+        .filter(|a| older_than(a, cutoff))
         .filter_map(|a| {
             let id = a.get("id").and_then(Value::as_str)?.trim();
             let text = a.get("text").and_then(Value::as_str)?.trim();
@@ -116,24 +140,20 @@ pub(crate) fn review_sentence(n: usize) -> String {
     format!("{n} older {noun} {verb} review (`ljos prefer --review`)")
 }
 
-/// Stamp basis `person` on every legacy atom the old person-path writers
-/// marked. Recorded per pack, so a later run does nothing. The pack is
-/// the one this process is configured for; nothing is fetched elsewhere.
-/// A pack that does not answer is left for the next run.
+/// Stamp basis `person` on every legacy atom a terminal writer marked,
+/// when that atom is older than this pack's cutoff.
+///
+/// The cutoff is a receipt written once, by the first run of this that
+/// is not under a runner. A later run finds that receipt and does not
+/// write another. Search, the island, the command gate and session start
+/// do not call this. A pack that does not answer is left for the next run.
 pub fn migrate_once() {
-    // A bounded pack read already holds the environment lock, then
-    // searches, and the search calls this. The marker path takes that
-    // same lock. The environment lock has to come first: taking the
-    // gate first lets one search hold the gate while it waits for the
-    // lock the other search still holds.
+    if under_a_runner() {
+        return;
+    }
     crate::with_env_mutation(|| {
         let _guard = gate().lock().unwrap_or_else(|e| e.into_inner());
-        if recorded() {
-            return;
-        }
-        if stamp_marked().is_ok() {
-            let _ = record();
-        }
+        let _ = stamp_marked();
     });
 }
 
@@ -199,10 +219,6 @@ pub fn keep(id: &str) -> Result<String> {
     let client = pack()?;
     stamp_basis(&client, atom).with_context(|| format!("prefer: could not keep {id}"))?;
     Ok(format!("kept {id} as the person's preference\n"))
-}
-
-fn prompt_hook(atom: &Value) -> bool {
-    entities(atom).iter().any(|e| e == SAID_ENTITY) && !agent_mark(atom)
 }
 
 /// The shape `post_claim_horizon` left when no runner ancestor and no
@@ -288,15 +304,72 @@ fn live() -> Result<Vec<Value>> {
 fn stamp_marked() -> Result<usize> {
     let client = pack()?;
     let atoms = atoms_lean(&client, &client.workspace())?;
+    // The receipt is written before any stamp, so a later refusal cannot
+    // move the window. Atoms read above are the ones this run may stamp;
+    // one posted after the receipt is newer than it.
+    let cutoff = match earliest_cutoff(&atoms) {
+        Some(at) => at,
+        None => record_cutoff(&client)?,
+    };
     let mut n = 0;
     for atom in &atoms {
         if legacy(atom) != Some(Legacy::Promote) {
+            continue;
+        }
+        if !older_than(atom, cutoff) {
             continue;
         }
         stamp_basis(&client, atom)?;
         n += 1;
     }
     Ok(n)
+}
+
+/// The earliest cutoff receipt in `atoms`, compared as a time. A `Z`
+/// stamp and a millisecond stamp are the same instant either way; a
+/// string compare is not.
+fn earliest_cutoff(atoms: &[Value]) -> Option<DateTime<FixedOffset>> {
+    atoms
+        .iter()
+        .filter(|atom| is_cutoff(atom))
+        .filter_map(instant_of)
+        .min()
+}
+
+fn is_cutoff(atom: &Value) -> bool {
+    atom.get("kind").and_then(Value::as_str) == Some("receipt")
+        && entities(atom).iter().any(|e| e == CUTOFF_ENTITY)
+}
+
+fn older_than(atom: &Value, cutoff: DateTime<FixedOffset>) -> bool {
+    instant_of(atom).is_some_and(|ts| ts < cutoff)
+}
+
+fn instant_of(atom: &Value) -> Option<DateTime<FixedOffset>> {
+    let raw = atom.get("ts").and_then(Value::as_str)?.trim();
+    if raw.is_empty() {
+        None
+    } else {
+        DateTime::parse_from_rfc3339(raw).ok()
+    }
+}
+
+fn record_cutoff(client: &packset_client::PacksetClient) -> Result<DateTime<FixedOffset>> {
+    let seat = crate::seat_name();
+    let atom = json!({
+        "schema": "inside.atom/v1",
+        "kind": "receipt",
+        "level": "explicit",
+        "origin": ORIGIN_USER,
+        "text": CUTOFF_TEXT,
+        "workspace": client.workspace(),
+        "entities": [format!("seat:{seat}"), CUTOFF_ENTITY],
+        "source": crate::atom_source(),
+    });
+    let posted = client
+        .post_atom(&atom)
+        .context("prefer: could not record the preference cutoff")?;
+    instant_of(&posted).context("prefer: the preference cutoff has no time")
 }
 
 fn stamp_basis(client: &packset_client::PacksetClient, atom: &Value) -> Result<()> {
@@ -337,47 +410,6 @@ fn gate() -> &'static Mutex<()> {
     &GATE
 }
 
-fn marker_path() -> Option<PathBuf> {
-    let client = pack().ok()?;
-    let name = crate::work_id(&format!("{}\n{}", client.base(), client.workspace()));
-    Some(state_dir().join("pref-basis").join(name))
-}
-
-fn state_dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
-        .unwrap_or_else(|| PathBuf::from(".local/state"))
-        .join("ljos")
-}
-
-fn recorded() -> bool {
-    marker_path().is_some_and(|p| p.is_file())
-}
-
-fn record() -> Result<()> {
-    let Some(path) = marker_path() else {
-        return Ok(());
-    };
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path)
-    {
-        Ok(mut f) => f
-            .write_all(b"once\n")
-            .context("recording the preference migration"),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        Err(e) => Err(e).context("recording the preference migration"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,6 +422,7 @@ mod tests {
             "origin": origin,
             "entities": entities,
             "source": source,
+            "ts": "2026-10-20T00:00:00Z",
         })
     }
 
@@ -476,7 +509,7 @@ mod tests {
             .push(json!("session:read-1"));
 
         let fixtures = [
-            (&hook, Some(Legacy::Promote)),
+            (&hook, Some(Legacy::Hold)),
             (&typed, Some(Legacy::Promote)),
             (&remembered, Some(Legacy::Promote)),
             (&hook_and_session, Some(Legacy::Hold)),
@@ -501,10 +534,31 @@ mod tests {
                 None => left += 1,
             }
         }
-        assert_eq!((promote, hold, left), (3, 6, 4), "fixture split");
+        assert_eq!((promote, hold, left), (2, 7, 4), "fixture split");
         runner["id"] = json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-        let waiting = awaiting(&[hook, typed, runner]);
-        assert_eq!(waiting.len(), 1);
+        // No cutoff receipt: nothing is older yet, so nothing awaits.
+        assert!(awaiting(&[hook.clone(), typed.clone(), runner.clone()]).is_empty());
+        let mut late = runner.clone();
+        late["id"] = json!("cccccccccccccccccccccccccccccccc");
+        late["ts"] = json!("2026-10-22T00:00:00Z");
+        // A fraction sorts before `Z`, so this later instant looks older
+        // as a string than the cutoff of the same second.
+        let mut fraction = runner.clone();
+        fraction["id"] = json!("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+        fraction["ts"] = json!("2026-10-21T00:00:00.100Z");
+        let cutoff = json!({
+            "id": "dddddddddddddddddddddddddddddddd",
+            "kind": "receipt",
+            "text": CUTOFF_TEXT,
+            "origin": "user-declared",
+            "entities": ["seat:person", CUTOFF_ENTITY],
+            "ts": "2026-10-21T00:00:00Z",
+        });
+        assert!("2026-10-21T00:00:00.100Z" < "2026-10-21T00:00:00Z");
+        let waiting = awaiting(&[hook, typed, runner, late, fraction, cutoff]);
+        assert_eq!(waiting.len(), 2, "{waiting:?}");
+        assert_eq!(waiting[0].0, "0123456789abcdef0123456789abcdef");
+        assert_eq!(waiting[1].0, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         assert!(review_sentence(1).contains("ljos prefer --review"));
         assert!(review_sentence(2).contains("preferences await"));
     }
