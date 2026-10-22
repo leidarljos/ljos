@@ -1692,16 +1692,13 @@ pub fn score_log(entries: &[Value], outcomes: &BTreeMap<String, String>) -> Stri
 /// Every answer Jev gave, one JSON line each in the state directory, so
 /// its probabilities can be scored once the outcomes are known.
 fn log(entry: &Value) {
-    use std::io::Write;
     let Some(dir) = state_dir() else { return };
     let _ = std::fs::create_dir_all(&dir);
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("jev-log.jsonl"))
-    {
-        let _ = writeln!(f, "{entry}");
-    }
+    let Ok(mut line) = serde_json::to_string(entry) else {
+        return;
+    };
+    line.push('\n');
+    let _ = crate::append_locked_row(&dir.join("jev-log.jsonl"), line.as_bytes());
 }
 
 /// Add a call's cost to this month's running total in the state directory,
@@ -2332,5 +2329,51 @@ mod tests {
             std::env::remove_var("XDG_STATE_HOME");
             std::env::remove_var("XDG_CACHE_HOME");
         }
+    }
+
+    /// The judge log is one JSON object per answer. Two answers landing
+    /// together used to split a row across write calls, and a line that
+    /// does not parse is an answer that cannot be scored.
+    #[test]
+    fn concurrent_log_rows_each_parse() {
+        let _lock = env_lock();
+        let state = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("XDG_STATE_HOME", state.path()) };
+        const THREADS: usize = 32;
+        const EACH: usize = 8;
+        let mut handles = Vec::with_capacity(THREADS);
+        for thread in 0..THREADS {
+            handles.push(std::thread::spawn(move || {
+                for n in 0..EACH {
+                    log(&serde_json::json!({
+                        "kind": "hook",
+                        "status": "ok",
+                        "thread": thread,
+                        "n": n,
+                        "prompt_hash": "abc",
+                    }));
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("judge log writer");
+        }
+        let path = state.path().join("ljos/jev-log.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rows: Vec<Value> = text
+            .lines()
+            .map(|line| {
+                serde_json::from_str(line).unwrap_or_else(|err| {
+                    panic!("judge log row does not parse ({err}): {line}");
+                })
+            })
+            .collect();
+        assert_eq!(rows.len(), THREADS * EACH, "{text}");
+        let mode = std::fs::symlink_metadata(&path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "judge log mode {mode:o}");
     }
 }
