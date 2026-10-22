@@ -1,0 +1,1 @@
+A terminal-shaped preference or lesson is promoted only when both its `ts` and the pack's own `updated` stamp are before the migration cutoff, so one posted after the cutoff with a backdated `ts` stays unverified and is listed for review.
