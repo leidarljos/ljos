@@ -7113,14 +7113,20 @@ fn singular(w: &str) -> String {
 }
 
 /// The words a prompt and a claim are matched on: three letters or
-/// more, singular, not a stop word. A prompt says `npm` or `migration`
-/// where the preference says `npm` or `migrations`.
+/// more, singular, not a stop word or one of [`RULE_WORDS`]. A prompt
+/// says `npm` or `migration` where the preference says `npm` or
+/// `migrations`. Rule words go before the plural is taken off, since
+/// [`singular`] makes `always` into `alway`, which is on no list.
 fn prompt_words(text: &str) -> Vec<String> {
     let mut words: Vec<String> = text
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| w.len() >= 3)
         .map(str::to_lowercase)
-        .filter(|w| !CUE_STOP.contains(&w.as_str()) && !CUE_STOP_SHORT.contains(&w.as_str()))
+        .filter(|w| {
+            !CUE_STOP.contains(&w.as_str())
+                && !CUE_STOP_SHORT.contains(&w.as_str())
+                && !RULE_WORDS.contains(&w.as_str())
+        })
         .map(|w| singular(&w))
         .collect();
     words.sort_unstable();
@@ -7238,7 +7244,8 @@ fn alias_words(text: &str, claim: bool) -> Vec<String> {
 }
 
 /// The words a claim and a prompt are matched on: [`prompt_words`]
-/// without [`RULE_WORDS`], plus the alias groups each names.
+/// without a plural of [`RULE_WORDS`] (`keeps`), plus the alias groups
+/// each names.
 fn cue_terms(text: &str, claim: bool) -> Vec<String> {
     let mut words: Vec<String> = prompt_words(text)
         .into_iter()
@@ -35717,6 +35724,30 @@ mod tests {
             assert!(!names_the_subject(pnpm, cue), "{cue}");
             assert!(!names_the_subject(pg, cue), "{cue}");
         }
+    }
+
+    /// `always` is a rule word in a prompt and in a rule. Taking its `s`
+    /// off first made it `alway`, a content word the two shared, so a
+    /// short prompt named every rule that says always, and Jev's sure
+    /// path let such a rule in.
+    #[test]
+    fn always_is_a_rule_word_and_names_no_subject() {
+        let rule = "Always squash commits before merging to main.";
+        let cue = "always run the formatter";
+        assert!(prompt_words(cue).iter().all(|w| w != "alway"), "{cue}");
+        assert!(!names_the_cue(rule, cue));
+        assert!(!names_the_subject(rule, cue));
+        let hit = Hit {
+            id: Some("squash".into()),
+            text: rule.into(),
+            score: 1.0,
+            kind: "lesson".into(),
+            ts: None,
+            entities: vec!["horizon:standing".into()],
+            ballots: None,
+            of: None,
+        };
+        assert!(!admits_judged(&hit, true, 0.9, cue, 0.0, 0.0));
     }
 
     /// `conflict of interest` and `COI` name one another. The phrase's
