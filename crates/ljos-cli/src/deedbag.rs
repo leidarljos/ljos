@@ -478,9 +478,6 @@ fn one_component(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Put `scratch` at `dest`. The old bag stays until a finished tree has been
-/// staged beside it: a copy that fails, including one across filesystems,
-/// leaves `dest` as it was.
 /// `.ljos/deeds/<seat>` in the tracker. `.ljos/deeds` is opened, or made,
 /// one component at a time without following a symlink: the tracker can
 /// commit either directory as a link, and the bag would be published
@@ -497,6 +494,9 @@ fn bag_dest(root: &Path, seat: &str) -> Result<PathBuf> {
     Ok(dest)
 }
 
+/// Put `scratch` at `dest`. The old bag stays until a finished tree has been
+/// staged beside it: a copy that fails, including one across filesystems,
+/// leaves `dest` as it was.
 fn publish(scratch: &Path, dest: &Path) -> Result<()> {
     let parent = dest.parent().context("the deed bag has no directory")?;
     std::fs::create_dir_all(parent)
