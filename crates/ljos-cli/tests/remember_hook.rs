@@ -56,6 +56,9 @@ impl Home {
     }
 
     fn env(&self, cmd: &mut Command, home: &Path) {
+        // The pack asks for its token. A preference is this seat's only
+        // when a read without the token is refused; the daemon and the
+        // client share the token file under this home.
         cmd.env_clear()
             .current_dir(home)
             .env("HOME", home)
@@ -68,7 +71,6 @@ impl Home {
             .env("XDG_CACHE_HOME", home.join(".cache"))
             .env("XDG_RUNTIME_DIR", home.join("run"))
             .env("PACKSET_PORT", self.port.to_string())
-            .env("PACKSET_AUTH", "off")
             .env("LJOS_TRACKER_GIT", "off");
     }
 }
