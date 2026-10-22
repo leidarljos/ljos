@@ -1,8 +1,8 @@
 //! What a cloud seat refuses once `ljos cloud up` installed its rules,
 //! read from the words each command runs rather than matched as text: a
-//! `git push` that updates a `cursor/*` branch or tag. The source side of
-//! a refspec, a remote URL and an option's value are never the
-//! destination, so naming `cursor/` there is not refused.
+//! `git push` that updates a `cursor/*` branch or tag, and `gh pr create`
+//! or `gh pr merge`. The source side of a refspec, a remote URL, an
+//! option's value and the body of a comment are never what is refused.
 
 use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
@@ -56,6 +56,37 @@ pub(crate) fn cursor_push(line: &str, cwd: Option<&Path>) -> Option<String> {
                 }
             }
             _ => {}
+        }
+    }
+    None
+}
+
+/// Whether `line` runs `gh pr` with one of `verbs`. gh's flags before the
+/// noun and between the noun and the verb are skipped, `-R` and `--repo`
+/// with their value; the words after the verb are its arguments and are
+/// never read.
+pub(crate) fn gh_pr(line: &str, verbs: &[&str]) -> bool {
+    crate::nested_lines(line, 0)
+        .iter()
+        .flat_map(|l| crate::raw_segments(l))
+        .any(|seg| {
+            let words = argv(&seg);
+            if words.first().map(String::as_str) != Some("gh") {
+                return false;
+            }
+            let mut rest = words[1..].iter().map(String::as_str);
+            gh_word(&mut rest) == Some("pr")
+                && gh_word(&mut rest).is_some_and(|verb| verbs.contains(&verb))
+        })
+}
+
+/// The next word of a gh command that is not a flag or a flag's value.
+fn gh_word<'a>(words: &mut impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    while let Some(word) = words.next() {
+        if word == "-R" || word == "--repo" {
+            words.next();
+        } else if !(word.starts_with('-') && word.len() > 1) {
+            return Some(word);
         }
     }
     None

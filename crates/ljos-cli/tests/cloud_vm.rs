@@ -675,6 +675,59 @@ fn cloud_guard_refuses_every_push_onto_a_cursor_ref() {
 }
 
 #[test]
+fn cloud_guard_reads_the_gh_pr_verb_and_never_its_arguments() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+
+    for line in [
+        "gh pr create --fill",
+        "gh pr new --fill",
+        "gh pr --repo owner/name create",
+        "gh pr --repo=owner/name create",
+        "gh pr -R owner/name create",
+        "gh pr create --repo owner/name",
+        "gh --repo owner/name pr create",
+        "FOO=1 gh pr create",
+        "'gh' pr \"create\" --fill",
+        "git push origin develop && gh pr create --fill",
+    ] {
+        let hit = refused(line, here);
+        assert_eq!(hit.pattern, "cloud-gh-pr-create", "{line}: {hit:?}");
+        assert!(hit.reason.contains("never open pull requests"), "{hit:?}");
+    }
+    for line in [
+        "gh pr merge 7",
+        "gh pr --repo owner/name merge",
+        "gh pr -R owner/name merge",
+        "gh -R owner/name pr merge 7",
+        "env GH_TOKEN=x gh pr --repo=owner/name merge 7",
+        "/usr/local/bin/gh pr merge --squash 7",
+        "sh -c 'gh pr merge 7'",
+    ] {
+        let hit = refused(line, here);
+        assert_eq!(hit.pattern, "cloud-gh-pr-merge", "{line}: {hit:?}");
+        assert!(hit.reason.contains("never merge pull requests"), "{hit:?}");
+    }
+    for line in [
+        "gh pr comment --body 'please pr create a follow-up'",
+        "gh pr comment -b 'do not pr merge yet'",
+        "gh pr review 5 --comment 'LGTM, pr merge when green'",
+        "gh help pr create",
+        "gh pr list",
+        "gh pr view 7 --repo owner/name",
+        "gh pr -R owner/name checks 7",
+        "gh issue create --title 'pr create'",
+        "FOO=1 gh pr comment 7 --body \"pr merge\"",
+        "echo gh pr create",
+    ] {
+        allowed(line, here);
+    }
+}
+
+#[test]
 fn cloud_guard_allows_pushes_that_leave_cursor_refs_alone() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
