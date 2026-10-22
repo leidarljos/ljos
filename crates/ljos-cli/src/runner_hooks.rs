@@ -537,17 +537,28 @@ pub fn raw_event(input: &str) -> String {
 /// when it lapses, so the relay answers first.
 pub const INNER_TIMEOUT: std::time::Duration = crate::GUARD_TIMEOUT;
 
-/// An allow, with a note, for an inner hook that gave no verdict. `what`
-/// says how it failed. A command no rule would refuse is allowed; the
-/// dangerous ones are judged before this runs.
+/// A deny for an inner hook fault. `what` says how it failed.
 fn fault_output(event: &str, what: &str) -> String {
+    let reason =
+        format!("the ljos guard failed while checking this command ({what}); run `ljos doctor`");
     json!({
         "hookSpecificOutput": {
             "hookEventName": if event.is_empty() { "PreToolUse" } else { event },
-            "additionalContext": crate::unhealthy_note(what),
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
         }
     })
     .to_string()
+}
+
+/// The fault text from [`crate::unhealthy_note`], when this context is one.
+fn unhealthy_fault(context: &str) -> Option<String> {
+    let tail = ") and did not judge this call, so it is allowed. No ljos rule would refuse it. Run `ljos doctor`.";
+    let why = context
+        .trim()
+        .strip_prefix("the ljos guard is unhealthy (")?
+        .strip_suffix(tail)?;
+    Some(why.to_string())
 }
 
 /// The command a normalized payload would run, or empty when it has none.
@@ -595,8 +606,9 @@ fn early_answer(normalized: &str, event: &str) -> Option<String> {
 
 /// Run `cmd` as the inner hook with `stdin` as its input, and give back
 /// what it printed. A spawn error, a kill by signal, a non-zero exit, or
-/// no exit within `timeout` is an allow that says the guard is unhealthy.
-/// A non-zero exit that still printed a deny or an ask keeps it.
+/// no exit within `timeout` is a deny that says how the guard failed.
+/// A non-zero exit that still printed a deny or an ask keeps it. A
+/// successful exit that still says the guard was unhealthy is denied too.
 #[must_use]
 pub fn run_inner(
     mut cmd: std::process::Command,
@@ -653,7 +665,14 @@ pub fn run_inner(
         .and_then(|r| r.join().ok())
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default();
-    if status.success() || read_answer(&out).decision.is_some() {
+    let said = read_answer(&out);
+    if said.decision.is_some() {
+        return out;
+    }
+    if let Some(why) = unhealthy_fault(&said.context) {
+        return fault_output(event, &why);
+    }
+    if status.success() {
         return out;
     }
     let what = match status.code() {
@@ -668,7 +687,7 @@ pub fn run_inner(
 /// code the runner reads. A force push, a seat deny, and an `rm -rf` are
 /// judged here, before the inner hook. An inner hook that crashes, exits
 /// non-zero without a decision, or runs past [`crate::guard_timeout`]
-/// allows the call and says the guard is unhealthy.
+/// denies the call and says the guard failed.
 pub fn relay(runner: &str, input: &str, limit: usize, event: Option<&str>) -> anyhow::Result<i32> {
     let normalized = normalize_input(runner, input);
     let raw = raw_event(input);
@@ -1320,39 +1339,35 @@ mod tests {
         )
     }
 
-    /// Runners that show an allow's note. The others drop it and still
-    /// exit 0, which is an allow.
-    fn shows_context(runner: &str) -> bool {
-        matches!(
-            runner,
-            "gemini" | "openhands" | "auggie" | "kiro" | "cline" | "crush" | "factory" | "qwen"
-        )
+    fn runner_denied(runner: &str, stdout: &str, _stderr: &str, code: i32) -> bool {
+        match runner {
+            "copilot" => code == 0 && stdout.contains(r#""permissionDecision":"deny""#),
+            "gemini" | "crush" => code == 0 && stdout.contains(r#""decision":"deny""#),
+            "windsurf" | "factory" | "kiro" | "qwen" | "goose" | "amp" | "openhands" => code == 2,
+            "cline" => code == 0 && stdout.contains(r#""cancel":true"#),
+            "auggie" => code == 0 && stdout.contains(r#""permissionDecision":"deny""#),
+            _ => false,
+        }
     }
 
-    fn allows_unhealthy(out: &str, why: &str) {
+    fn denies_fault(out: &str, why: &str) {
         let said = read_answer(out);
-        assert!(said.decision.is_none(), "{out}");
-        assert!(out.contains("unhealthy"), "{out}");
-        assert!(out.contains(why), "{out}");
-        assert!(!out.contains("refused unchecked"), "{out}");
+        assert_eq!(said.decision.as_deref(), Some("deny"), "{out}");
+        assert!(said.reason.contains(why), "{out}");
+        assert!(said.reason.contains("run `ljos doctor`"), "{out}");
         for runner in RUNNERS {
             let (stdout, stderr, code) = answer(runner, "PreToolUse", out);
             let body = format!("{stdout}{stderr}");
-            assert_eq!(code, 0, "{runner}: {body}");
             assert!(
-                !body.contains("\"deny\"") && !body.contains("\"cancel\":true"),
+                runner_denied(runner, &stdout, &stderr, code),
                 "{runner}: {body}"
             );
-            if shows_context(runner) {
-                assert!(body.contains("unhealthy"), "{runner}: {body}");
-                assert!(body.contains(why), "{runner}: {body}");
-            }
         }
     }
 
     #[cfg(unix)]
     #[test]
-    fn an_inner_hook_that_fails_allows_and_says_the_guard_is_unhealthy() {
+    fn an_inner_hook_fault_denies_in_every_runner_shape() {
         // The timeout, the exit, and the signal are injected. A wall-clock
         // race is what made a slow runner report the timeout instead of
         // the signal.
@@ -1363,16 +1378,25 @@ mod tests {
             "was killed by a signal".to_string(),
         ];
         for why in &injected {
-            allows_unhealthy(&fault_output("PreToolUse", why), why);
+            denies_fault(&fault_output("PreToolUse", why), why);
         }
-        allows_unhealthy(&inner("exit 3", 30_000), "exited with status 3");
+        denies_fault(&inner("exit 3", 30_000), "exited with status 3");
+        let unhealthy = json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "additionalContext": crate::unhealthy_note("did not answer in time"),
+            }
+        })
+        .to_string();
+        let from_policyd = inner(&format!("printf '%s' '{unhealthy}'"), 30_000);
+        denies_fault(&from_policyd, "did not answer in time");
         let missing = run_inner(
             std::process::Command::new("/nonexistent/ljos"),
             "{}",
             "PreToolUse",
             std::time::Duration::from_secs(1),
         );
-        allows_unhealthy(&missing, "did not start");
+        denies_fault(&missing, "did not start");
         assert_eq!(INNER_TIMEOUT, crate::GUARD_TIMEOUT);
     }
 
@@ -1387,9 +1411,9 @@ mod tests {
             "a deny printed before a non-zero exit stands"
         );
         let note = inner(&format!("printf '%s' '{NOTE}'; exit 1"), 30_000);
-        assert!(read_answer(&note).decision.is_none(), "{note}");
-        assert!(note.contains("unhealthy"), "{note}");
-        assert!(note.contains("exited with status 1"), "{note}");
+        let said = read_answer(&note);
+        assert_eq!(said.decision.as_deref(), Some("deny"), "{note}");
+        assert!(said.reason.contains("exited with status 1"), "{note}");
     }
 
     #[test]
