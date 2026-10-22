@@ -2853,8 +2853,20 @@ fn run_command() -> Result<()> {
                     // Only the person's own prompt grants, saves or
                     // corrects: a subagent's brief or an unattended run's
                     // prompt is an agent's words in that channel.
+                    // A tool call can run `ljos hook` with a payload of its
+                    // own; only a hook the runner itself spawned carries
+                    // the person's prompt.
                     let person = call.event == "UserPromptSubmit"
-                        && ljos_cli::capture::not_the_person(&input).is_none();
+                        && ljos_cli::capture::not_the_person(&input).is_none()
+                        && match ljos_cli::proc_tree::hook_runner() {
+                            Ok(_) => true,
+                            Err(why) => {
+                                eprintln!(
+                                    "ljos hook: this prompt is not kept as the person's: {why}."
+                                );
+                                false
+                            }
+                        };
                     let granted = person
                         .then(|| {
                             ljos_cli::hook_timed("approve", || {
