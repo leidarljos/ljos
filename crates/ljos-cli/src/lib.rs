@@ -31030,7 +31030,11 @@ mod tests {
 
         let id = |r: &str| format!("vissue 0.16.2\nprotocol: 1\nroot={r}\nprefix=Software\n");
         let root_s = root.display().to_string();
-        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "5");
+        // The product default is five seconds. That is not enough in this
+        // test: the age is read after several git calls, and a busy suite
+        // spends that long inside git. A long wait still means younger than
+        // the wait. The zero below is what fails the row.
+        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "600");
         std::env::set_var("XDG_RUNTIME_DIR", dir.path());
 
         let (state, ok) = super::tracker_state(&id(&root_s), "VISSUE_ROOT=x");
