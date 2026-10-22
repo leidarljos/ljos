@@ -2722,6 +2722,48 @@ fn install_sh_cloud_reuses_binaries_that_already_answer() {
     assert!(!said.contains("Installing ljos"), "{said}");
 }
 
+#[test]
+fn cloud_up_tags_vm_writes_scope_cloud_without_a_default_scope() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let rel = root.path().join("rel");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
+    }
+    fs::write(
+        rel.join("SHA256SUMS"),
+        sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::remove_var("LJOS_BIN_DIR");
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::remove_var("LJOS_WRITE_SCOPE");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    clear_agent_ids();
+    let said = ljos_cli::cloud::up(false).unwrap();
+    let env = fs::read_to_string(home.join(".config/ljos/env")).unwrap();
+    assert!(env.contains("LJOS_WRITE_SCOPE=cloud\n"), "{env}\n{said}");
+    assert!(
+        !env.contains("default_scope"),
+        "cloud up set a default scope:\n{env}"
+    );
+    let sync_toml = home.join(".config/ljos/sync.toml");
+    if sync_toml.exists() {
+        let text = fs::read_to_string(&sync_toml).unwrap();
+        assert!(!text.contains("default_scope"), "{text}");
+    }
+    assert_eq!(std::env::var("LJOS_WRITE_SCOPE").unwrap(), "cloud");
+}
+
 fn clear_agent_ids() {
     for key in [
         "CURSOR_AGENT_ID",
