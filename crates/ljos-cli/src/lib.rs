@@ -11393,12 +11393,18 @@ pub fn check_seat_signatures(
     let can_date_legacy = tracker_is_git == Some(true);
     let v = issue_record(issue).map_err(|e| format!("{issue}: not readable: {e:#}"))?;
     let legacy = |voter: &str, choice: &str| {
-        can_date_legacy && ballot_sig::recorded_before_signing(issue, voter, choice)
+        can_date_legacy
+            && ballot_sig::recorded_before_signing(issue, voter, choice).unwrap_or(false)
     };
     let notes = ballot_sig::notes_of(&v);
     let (pins, _) = ballot_sig::pins_for_check().map_err(|e| {
         format!("{issue}: the seat pins are not one key per seat, so it decides nothing for a push: {e:#}")
     })?;
+    if can_date_legacy {
+        if let Some(root) = ballot_sig::env_root() {
+            slot::require_tracker_history(&root)?;
+        }
+    }
     let dropped = slot::dropped_pins(&pins);
     if !dropped.is_empty() {
         return Err(format!(
@@ -11406,12 +11412,19 @@ pub fn check_seat_signatures(
             dropped.join(", ")
         ));
     }
-    let starts = slot::starts();
-    let stands =
-        |seat: &str| slot::stands(seat, pins.get(seat).map(String::as_str), starts.as_deref());
-    let before_pin = |note: &str, voter: &str| {
-        pins.get(voter)
-            .is_some_and(|key| slot::recorded_before_pin(issue, note, voter, key).unwrap_or(true))
+    let starts = slot::starts()?;
+    let stands = |seat: &str| {
+        slot::stands(seat, pins.get(seat).map(String::as_str), starts.as_deref()).unwrap_or(false)
+    };
+    let before_pin = |note: &str, voter: &str| match pins.get(voter) {
+        Some(key) => match slot::recorded_before_pin(issue, note, voter, key) {
+            Ok(Some(before)) => before,
+            // Not a git checkout: there is no commit order to refuse on.
+            Ok(None) => true,
+            // Incomplete history must not count the slot.
+            Err(_) => false,
+        },
+        None => false,
     };
     let signed = |voter: &str| {
         notes
@@ -18948,22 +18961,20 @@ fn cite_ballots(
     Ok((ballots, cite_roster(cite)?))
 }
 
-/// The persona names a push cite leaves out: the pack's roster. A seat
-/// whose pack is off on purpose (`PACKSET_URL=off`) has no personas.
+/// The persona names a push cite leaves out: the pack's roster. An empty
+/// roster is an answer from the pack. `PACKSET_URL=off` is not an answer.
 ///
 /// # Errors
 ///
-/// The pack is on and its roster does not answer: a persona's ballot
-/// cannot be told from a seat's, so no cite stands until it does.
+/// The roster cannot be read, including when the pack is off. A persona's
+/// ballot cannot be told from a seat's, so no cite stands until the pack
+/// answers.
 pub fn cite_roster(cite: &str) -> std::result::Result<std::collections::BTreeSet<String>, String> {
     match personas_from_pack() {
         Ok(personas) => Ok(personas
             .into_iter()
             .map(|p| p.name.trim().to_string())
             .collect()),
-        Err(_) if std::env::var("PACKSET_URL").is_ok_and(|url| url == "off") => {
-            Ok(std::collections::BTreeSet::new())
-        }
         Err(e) => Err(format!(
             "{cite}: the roster is not readable, so persona ballots cannot be left out: {e:#}"
         )),
@@ -21186,6 +21197,25 @@ pub fn bypass_log_path() -> Option<PathBuf> {
     Some(data_base()?.join("ljos").join("bypass.jsonl"))
 }
 
+/// The rows of a log written by [`append_locked_row`], read without its
+/// lock.
+///
+/// A row whose write is still under way has no newline yet, so a last
+/// line without one is left for the next read. A line that does not
+/// parse, including one with bytes that are not UTF-8, is skipped and
+/// the rest are kept: an older ljos wrote rows that could tear.
+pub(crate) fn complete_rows<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Vec<T> {
+    let end = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    bytes[..end]
+        .split(|&b| b == b'\n')
+        .filter_map(|line| serde_json::from_slice(line).ok())
+        .collect()
+}
+
+/// How long [`append_locked_row`] tries for the lock before it skips
+/// the row.
+pub(crate) const ROW_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Append `bytes` as one row. The caller includes the trailing newline.
 ///
 /// `writeln!` of a JSON value issues a `write(2)` per token, and those
@@ -21194,22 +21224,88 @@ pub fn bypass_log_path() -> Option<PathBuf> {
 /// created mode 0600, and a symlink is not followed: the row would
 /// otherwise land in whatever the link names. A row that cannot be
 /// written is the caller's to skip.
+///
+/// Hooks call this on the path of the person's command, so the lock is
+/// tried for [`ROW_LOCK_WAIT`] and then given up with `WouldBlock`. A
+/// writer holds it for one `write(2)`; a lock held longer than that is
+/// not one of ours, and the row is skipped rather than the command.
+///
+/// The directory `path` sits in is one ljos made, such as
+/// `$XDG_STATE_HOME/ljos`, and a symlink there is refused as well: it
+/// is opened first and the file is opened from that descriptor, so the
+/// link cannot be swapped in between. What lies above it, `$HOME` or
+/// an XDG base the person pointed elsewhere, is followed as set.
 pub(crate) fn append_locked_row(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    use std::os::unix::io::AsRawFd;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    // SAFETY: this descriptor stays open until the matching unlock. The
-    // lock is advisory, so the row is written on this same descriptor
-    // while it is held, or not at all.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "row path has no directory",
+        ));
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    let dir = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(dir)
+    {
+        Ok(dir) => dir,
+        // Linux answers ENOTDIR, not ELOOP, when O_DIRECTORY meets a link.
+        Err(err) if matches!(err.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} is a symlink or not a directory", dir.display()),
+            ));
+        }
+        Err(err) => return Err(err),
+    };
+    let name = std::ffi::CString::new(name.as_bytes())
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+    // SAFETY: dir is an open directory descriptor and name is a
+    // NUL-terminated string with no interior NUL. openat returns a new
+    // descriptor or -1.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600 as libc::c_uint,
+        )
+    };
+    if fd < 0 {
         return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: fd was just opened above and nothing else owns it.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    let deadline = std::time::Instant::now() + ROW_LOCK_WAIT;
+    loop {
+        // SAFETY: this descriptor stays open until the matching unlock.
+        // The lock is advisory, so the row is written on this same
+        // descriptor while it is held, or not at all.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            break;
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EWOULDBLOCK | libc::EINTR) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            Some(libc::EWOULDBLOCK) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    format!("still locked after {}ms", ROW_LOCK_WAIT.as_millis()),
+                ));
+            }
+            _ => return Err(err),
+        }
     }
     let wrote = file.write_all(bytes);
     // SAFETY: the same descriptor, still open. Close would drop the lock
@@ -21242,18 +21338,22 @@ pub fn log_bypass(kind: &str, how: &str, command: &str, rule: &Rule) {
     };
     line.push('\n');
     let _ = path.parent().map(std::fs::create_dir_all);
-    let _ = append_locked_row(&path, line.as_bytes());
+    if let Err(err) = append_locked_row(&path, line.as_bytes()) {
+        eprintln!(
+            "ljos: the bypass row for `{command}` was not written to {}: {err}",
+            path.display()
+        );
+    }
 }
 
 /// The doctor's line on the bypass log: how many commands ran past the
 /// guard, and the last one. Passing over the guard is allowed, so the row
 /// stays green; it is there to be read.
 fn bypass_row() -> Habitat {
-    let state =
-        match bypass_log_path().and_then(|p| std::fs::read_to_string(&p).ok().map(|t| (p, t))) {
-            None => "no command has run past the guard".to_string(),
-            Some((path, text)) => bypass_summary(&text, &path.display().to_string()),
-        };
+    let state = match bypass_log_path().and_then(|p| std::fs::read(&p).ok().map(|t| (p, t))) {
+        None => "no command has run past the guard".to_string(),
+        Some((path, bytes)) => bypass_summary(&bytes, &path.display().to_string()),
+    };
     Habitat {
         name: "guard bypass",
         state,
@@ -21263,11 +21363,8 @@ fn bypass_row() -> Habitat {
 
 /// [`bypass_row`]'s text from the log's rows.
 #[must_use]
-pub fn bypass_summary(text: &str, path: &str) -> String {
-    let rows: Vec<Value> = text
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
+pub fn bypass_summary(bytes: &[u8], path: &str) -> String {
+    let rows: Vec<Value> = complete_rows(bytes);
     let Some(last) = rows.last() else {
         return "no command has run past the guard".to_string();
     };
@@ -30741,6 +30838,8 @@ mod tests {
         );
         let victim = dir.path().join("victim");
         std::fs::create_dir_all(&victim).unwrap();
+        // The shim steps aside under LJOS_OFF or a temporary HOME, and the
+        // suite may run under either.
         let run = |args: &str| {
             std::process::Command::new("sh")
                 .arg("-c")
@@ -30749,6 +30848,8 @@ mod tests {
                     "PATH",
                     format!("{}:{}:/usr/bin:/bin", guard.display(), fake.display()),
                 )
+                .env_remove("LJOS_OFF")
+                .env("LJOS_GUARD", "on")
                 .output()
                 .unwrap()
         };
@@ -39633,7 +39734,7 @@ mod tests {
         assert_eq!(rows[0]["kind"], "switch");
         assert_eq!(rows[0]["reason"], "infra-destroy");
         assert_eq!(rows[1]["how"], "grant 0a1b");
-        let said = bypass_summary(&text, "LOG");
+        let said = bypass_summary(text.as_bytes(), "LOG");
         assert!(
             said.starts_with("2 commands ran past the guard")
                 && said.contains("`terraform destroy` past ask pack: cloud (grant 0a1b)")
@@ -39641,7 +39742,7 @@ mod tests {
             "{said}"
         );
         assert_eq!(
-            bypass_summary("", "LOG"),
+            bypass_summary(b"", "LOG"),
             "no command has run past the guard"
         );
     }
@@ -39724,6 +39825,100 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    /// The doctor reads the bypass log while hooks append to it. A row
+    /// cut mid-character is the one still being written; the count is
+    /// of the rows before it.
+    #[test]
+    fn a_torn_bypass_row_leaves_the_count() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", dir.path().to_str().unwrap())]);
+        let rule = Rule {
+            pattern: "ask pack: cloud".into(),
+            verdict: "ask".into(),
+            reason: "infra-destroy: this tears down infrastructure".into(),
+        };
+        log_bypass("switch", "LJOS_ASK_PACK=off", "terraform destroy", &rule);
+        log_bypass("approval", "grant 0a1b", "terraform destroy", &rule);
+        let path = bypass_log_path().unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"{\"kind\":\"switch\",\"command\":\"caf\xc3");
+        std::fs::write(&path, bytes).unwrap();
+        let state = bypass_row().state;
+        assert!(
+            state.starts_with("2 commands ran past the guard"),
+            "{state}"
+        );
+    }
+
+    /// The `ljos` directory is ljos's own, so a symlink put there is not
+    /// written through. An XDG base the person made a symlink still is.
+    #[test]
+    fn a_symlinked_ljos_dir_is_refused_and_a_linked_base_is_not() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let rule = Rule {
+            pattern: "ask pack: cloud".into(),
+            verdict: "ask".into(),
+            reason: "infra-destroy: this tears down infrastructure".into(),
+        };
+        let data = dir.path().join("data");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, data.join("ljos")).unwrap();
+        {
+            let _env = HoldEnv::set(&[("XDG_DATA_HOME", data.to_str().unwrap())]);
+            log_bypass("switch", "LJOS_ASK_PACK=off", "terraform destroy", &rule);
+        }
+        assert!(!elsewhere.join("bypass.jsonl").exists());
+
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let linked = dir.path().join("linked");
+        std::os::unix::fs::symlink(&real, &linked).unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", linked.to_str().unwrap())]);
+        log_bypass("switch", "LJOS_ASK_PACK=off", "terraform destroy", &rule);
+        let text = std::fs::read_to_string(real.join("ljos/bypass.jsonl")).unwrap();
+        assert_eq!(text.lines().count(), 1, "{text}");
+    }
+
+    /// The fail-open path writes its row before the command runs. A lock
+    /// on the log that is never let go skips the row; it does not hold
+    /// the command.
+    #[test]
+    fn a_held_bypass_lock_skips_the_row_and_returns() {
+        use std::os::unix::io::AsRawFd;
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", dir.path().to_str().unwrap())]);
+        let path = bypass_log_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        // SAFETY: `held` is open for the rest of the test.
+        assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
+        let (done, wait) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rule = Rule {
+                pattern: "ljos-policyd".into(),
+                verdict: "deny".into(),
+                reason: "guard-fault".into(),
+            };
+            log_bypass("switch", "LJOS_GUARD_FAIL_OPEN=1", "rm -rf build", &rule);
+            let _ = done.send(());
+        });
+        assert!(
+            wait.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
+            "log_bypass waited on a held lock"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        drop(held);
     }
 
     /// `hook-trace.jsonl` is the same append as the bypass log: one JSON

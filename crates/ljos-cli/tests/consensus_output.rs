@@ -1,6 +1,8 @@
 //! `ljos consensus` refuses an issue with no ballots, and `--json` prints
 //! one JSON document a caller can parse whole. A pack that does not
 //! answer leaves the push cite standing on nothing, as at the push gate.
+//! `PACKSET_URL=off` is that same unread roster. A document whose cite
+//! stands is read against a pack that answers with no personas.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -76,10 +78,36 @@ fn one_document(stdout: &[u8]) -> serde_json::Value {
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("not one JSON document ({e}): {text}"))
 }
 
+/// A writer that answers `GET /v1/atoms` with an empty roster.
+fn empty_pack() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = std::io::Read::read(&mut stream, &mut buf).unwrap_or(0);
+                if n == 0 || buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let body = r#"{"atoms":[]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = std::io::Write::write_all(&mut stream, resp.as_bytes());
+        }
+    });
+    format!("http://{addr}")
+}
+
 #[test]
 fn json_is_one_document() {
     let (dir, home) = fakes(r#"[{"agent":"alice","choice":"rrf"},{"agent":"bob","choice":"rrf"}]"#);
-    let out = consensus(dir.path(), &home, &["proj-v0te", "--json"]);
+    let pack = empty_pack();
+    let out = consensus_on(dir.path(), &home, &["proj-v0te", "--json"], &pack);
     assert!(out.status.success(), "{out:?}");
     let doc = one_document(&out.stdout);
     assert_eq!(doc["push_cite"]["stands"], true, "{doc}");
@@ -87,7 +115,12 @@ fn json_is_one_document() {
     assert_eq!(doc["settle"]["winner"], "rrf", "{doc}");
     assert!(doc.get("tracker").is_none(), "{doc}");
 
-    let compared = consensus(dir.path(), &home, &["proj-v0te", "--json", "--compare"]);
+    let compared = consensus_on(
+        dir.path(),
+        &home,
+        &["proj-v0te", "--json", "--compare"],
+        &pack,
+    );
     assert!(compared.status.success(), "{compared:?}");
     let doc = one_document(&compared.stdout);
     assert_eq!(doc["settle"]["winner"], "rrf", "{doc}");
