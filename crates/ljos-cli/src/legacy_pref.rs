@@ -121,13 +121,20 @@ pub(crate) fn review_sentence(n: usize) -> String {
 /// the one this process is configured for; nothing is fetched elsewhere.
 /// A pack that does not answer is left for the next run.
 pub fn migrate_once() {
-    let _guard = gate().lock().unwrap_or_else(|e| e.into_inner());
-    if recorded() {
-        return;
-    }
-    if stamp_marked().is_ok() {
-        let _ = record();
-    }
+    // A bounded pack read already holds the environment lock, then
+    // searches, and the search calls this. The marker path takes that
+    // same lock. The environment lock has to come first: taking the
+    // gate first lets one search hold the gate while it waits for the
+    // lock the other search still holds.
+    crate::with_env_mutation(|| {
+        let _guard = gate().lock().unwrap_or_else(|e| e.into_inner());
+        if recorded() {
+            return;
+        }
+        if stamp_marked().is_ok() {
+            let _ = record();
+        }
+    });
 }
 
 /// List the preferences the upgrade held back.
