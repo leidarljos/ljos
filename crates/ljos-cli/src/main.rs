@@ -534,6 +534,18 @@ enum Cmd {
         /// Include mail this seat has already read.
         #[arg(long)]
         all: bool,
+        /// Fetch the tracker and import its sealed logs before listing.
+        /// `COMMIT` waits until that commit is present. Without it, use
+        /// `LJOS_WAKE_COMMIT` when that is set, otherwise the remote head.
+        /// A commit the remote does not have imports the remote head. No
+        /// remote: list only.
+        #[arg(
+            long,
+            value_name = "COMMIT",
+            num_args = 0..=1,
+            default_missing_value = ""
+        )]
+        sync: Option<String>,
     },
     /// Write a read receipt for one message.
     Read {
@@ -575,7 +587,8 @@ enum Cmd {
         #[arg(long, conflicts_with_all = ["webhook", "clear", "fire"])]
         command: Option<String>,
         /// POST the message's envelope (never its body) here, such as a Grok
-        /// Bot routine's webhook. https, or http on this machine.
+        /// Bot routine's webhook. https, or http on localhost, an IPv4
+        /// loopback address, or ::1.
         #[arg(long, conflicts_with_all = ["clear", "fire"])]
         webhook: Option<String>,
         /// A file holding the webhook's bearer key.
@@ -672,14 +685,14 @@ enum Cmd {
         #[arg(short = 'n', long, default_value_t = 60)]
         limit: usize,
     },
-    /// A panel without MCP: one brief per persona, or `run` to spawn each designer and persona in its own harness session.
+    /// A panel without MCP: one brief per persona, `run` to spawn each designer and persona in its own harness session, or `--cloud` for one prompt file per persona.
     Panel {
         /// The issue id. `run` spawns the panel (`ljos panel run ISSUE`).
         issue: String,
         /// The issue id when the first argument is `run`.
         #[arg(value_name = "ISSUE")]
         run_issue: Option<String>,
-        /// Where the briefs go, one `<persona>.md` each.
+        /// Where the briefs go, one `<persona>.md` each. With `--cloud`, the prompt files.
         #[arg(long, default_value = "panel")]
         out: PathBuf,
         /// Ask Jev for every ballot first; only the personas it is unsure
@@ -695,6 +708,10 @@ enum Cmd {
         /// Print the sessions and prompts and do not spawn.
         #[arg(long)]
         dry_run: bool,
+        /// Write one prompt file per persona for a cloud seat: the seat
+        /// environment, the slot and the push rules. Does not spawn.
+        #[arg(long, conflicts_with_all = ["jev", "harness", "dry_run"])]
+        cloud: bool,
     },
     /// A voter with a view: NAME holds its ballot by ANCHOR in [0, 1] (0 never moves).
     Persona {
@@ -980,6 +997,22 @@ enum Cmd {
         /// timed out` once and this exits 3.
         #[arg(long, value_name = "RFC3339", requires = "quorum")]
         deadline: Option<String>,
+    },
+    /// Sign a launch slot on the issue a cloud run is launched for: the
+    /// run's seat, the model asked for and the run id, under this seat's
+    /// pinned key. Written before the run's first ballot.
+    Slot {
+        /// The issue the run is launched for.
+        issue: String,
+        /// The `LJOS_SEAT` the run boots with. The run id is appended the
+        /// way `ljos cloud up` appends it.
+        seat: String,
+        /// The model the run was launched on.
+        #[arg(long)]
+        model: String,
+        /// The run id, the run's `CURSOR_AGENT_ID` or `GITHUB_RUN_ID`.
+        #[arg(long)]
+        run: String,
     },
     /// One trust row: FROM weighs TO at WEIGHT in (0, 1]. Written to the pack.
     Trust {
@@ -1279,6 +1312,7 @@ fn run_command() -> Result<()> {
             | Cmd::Sitting { .. }
             | Cmd::Claim { .. }
             | Cmd::Note { .. }
+            | Cmd::Slot { .. }
             | Cmd::Finish { .. }
             | Cmd::Release { .. }
             | Cmd::Complete { .. }
@@ -1750,6 +1784,15 @@ fn run_command() -> Result<()> {
             }
             print!("{}", ljos_cli::persist_tracker(&issue, "noted"));
         }
+        Cmd::Slot {
+            issue,
+            seat,
+            model,
+            run,
+        } => {
+            print!("{}", ljos_cli::slot::write(&issue, &seat, &model, &run)?);
+            print!("{}", ljos_cli::persist_tracker(&issue, "slotted"));
+        }
         Cmd::Log { seat } => print!("{}", ljos_cli::tracker_log(Some(&seat))?),
         Cmd::Usage { since } => print!("{}", ljos_cli::tracker_usage(&since)?),
         Cmd::Send {
@@ -1781,7 +1824,9 @@ fn run_command() -> Result<()> {
                 })?
             );
         }
-        Cmd::Inbox { all } => print!("{}", ljos_cli::mail::inbox(all)?),
+        Cmd::Inbox { all, sync } => {
+            print!("{}", ljos_cli::mail::inbox_sync(all, sync.as_deref())?)
+        }
         Cmd::Read { id } => print!("{}", ljos_cli::mail::read(&id)?),
         Cmd::Reply {
             id,
@@ -1822,6 +1867,8 @@ fn run_command() -> Result<()> {
                     msg: msg.unwrap_or_default(),
                     issue,
                     interrupt,
+                    // Push mode fills this after the sealed log is committed.
+                    commit: None,
                 })?
             } else {
                 ljos_cli::wake::show(&seat)
@@ -2002,8 +2049,16 @@ fn run_command() -> Result<()> {
             harness,
             designers,
             dry_run,
+            cloud,
         } => {
-            if issue == "run" {
+            if cloud {
+                if issue == "run" || run_issue.is_some() {
+                    bail!(
+                        "panel --cloud writes one prompt file per persona for one issue; it does not spawn"
+                    );
+                }
+                print!("{}", ljos_cli::panel_cloud::panel_cloud(&issue, &out)?);
+            } else if issue == "run" {
                 let issue = run_issue.context("`ljos panel run` needs an issue")?;
                 print!(
                     "{}",

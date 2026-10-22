@@ -2738,6 +2738,7 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "ureq",
+ "url",
  "vissue-core",
  "webpki-roots 1.0.10",
  "which",
