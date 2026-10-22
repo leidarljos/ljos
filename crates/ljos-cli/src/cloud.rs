@@ -1279,14 +1279,10 @@ fn install_encoder(stage: &Path, target: &str, bin_dir: &Path, lib: &Path) -> Re
 }
 
 /// A cloud VM. A CI job is not one, and the box and a laptop build
-/// packset-embed from source.
+/// packset-embed from source. The same [`runtime`] answers doctor.
 fn cloud_vm() -> bool {
-    if github_actions() {
-        return false;
-    }
-    nonempty_var("CURSOR_AGENT_ID").is_some()
-        || nonempty_var("CLOUD_AGENT_ID").is_some()
-        || Path::new("/run/cursor/api.sock").exists()
+    let rt = runtime();
+    !rt.ci && (rt.cloud_id || rt.api_socket)
 }
 
 fn encoder_target() -> Option<&'static str> {
@@ -2294,36 +2290,73 @@ fn cursor_mcp_advice() -> String {
 }
 
 fn on_cloud_vm() -> bool {
-    if agent_id().is_some() {
+    let rt = runtime();
+    if agent_id().is_some() || rt.ci || rt.codespace {
         return true;
     }
-    match harness_kind() {
-        "codespace" | "ci" => return true,
-        "cursor" if cursor_agent_env() => return true,
-        _ => {}
-    }
-    // harness_kind answers "cursor" when /run/cursor/api.sock exists, and
-    // that hides CI. The variables themselves are still this job.
-    if std::env::var_os("GITHUB_ACTIONS").is_some()
-        || std::env::var_os("GITLAB_CI").is_some()
-        || std::env::var_os("CODESPACES").is_some()
-        || std::env::var_os("CODESPACE_NAME").is_some()
-    {
+    // A desktop terminal sets CURSOR_AGENT=1 and nothing else. The api
+    // socket is not enough either: doctor is often aimed at another home.
+    if rt.cursor_harness && rt.cloud_agent {
         return true;
     }
     cloud_env_file_seat()
 }
 
-fn cursor_agent_env() -> bool {
-    [
-        "CURSOR_AGENT",
-        "CURSOR_AGENT_SOCKET",
-        "CURSOR_CONVERSATION_ID",
-        "CURSOR_AGENT_ID",
-        "CLOUD_AGENT_ID",
-    ]
-    .iter()
-    .any(|key| std::env::var_os(key).is_some())
+/// Where this process is running. [`cloud_vm`], [`on_cloud_vm`] and
+/// [`harness_kind`] all read this, so a CI value cannot count in one and
+/// not the other.
+fn runtime() -> Runtime {
+    let github_actions = env_is_true("GITHUB_ACTIONS");
+    let cloud_id =
+        nonempty_var("CURSOR_AGENT_ID").is_some() || nonempty_var("CLOUD_AGENT_ID").is_some();
+    let api_socket = Path::new("/run/cursor/api.sock").exists();
+    // CURSOR_AGENT=1 is the desktop agent terminal. The socket path and
+    // the conversation id are set on a cloud VM and are not that flag.
+    let cloud_agent = cloud_id
+        || nonempty_var("CURSOR_AGENT_SOCKET").is_some()
+        || nonempty_var("CURSOR_CONVERSATION_ID").is_some();
+    let cursor_harness = cloud_agent
+        || api_socket
+        || std::env::var_os("CURSOR_AGENT").is_some()
+        || std::env::var_os("CURSOR_AGENT_ID").is_some();
+    let codespace = env_is_true("CODESPACES") || nonempty_var("CODESPACE_NAME").is_some();
+    // By value, as each system documents it. Presence of `false` is not a job.
+    // GitHub Actions: GITHUB_ACTIONS=true. GitLab: GITLAB_CI=true and CI=true.
+    // Buildkite: BUILDKITE=true. Azure Pipelines: TF_BUILD=True.
+    // CircleCI: CIRCLECI=true. Jenkins: JENKINS_URL is the controller URL.
+    let ci = github_actions
+        || env_is_true("GITLAB_CI")
+        || env_is_true("CI")
+        || env_is_true("BUILDKITE")
+        || env_is_true("TF_BUILD")
+        || env_is_true("CIRCLECI")
+        || nonempty_var("JENKINS_URL").is_some();
+    Runtime {
+        github_actions,
+        ci,
+        codespace,
+        cloud_id,
+        api_socket,
+        cursor_harness,
+        cloud_agent,
+    }
+}
+
+struct Runtime {
+    github_actions: bool,
+    ci: bool,
+    codespace: bool,
+    cloud_id: bool,
+    api_socket: bool,
+    cursor_harness: bool,
+    cloud_agent: bool,
+}
+
+/// The value `true`, ignoring case and surrounding space.
+fn env_is_true(key: &str) -> bool {
+    std::env::var(key)
+        .ok()
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
 }
 
 /// `cloud up` records `cursor-ID`, `ci-ID`, or `codespace-ID` in the env
@@ -2369,10 +2402,7 @@ fn agent_id() -> Option<String> {
 }
 
 fn github_actions() -> bool {
-    std::env::var("GITHUB_ACTIONS").ok().is_some_and(|v| {
-        let v = v.trim();
-        !v.is_empty() && !matches!(v, "0" | "false")
-    })
+    runtime().github_actions
 }
 
 fn id_slug(key: &str) -> Option<String> {
@@ -2392,20 +2422,12 @@ fn run_slug(id: &str) -> Option<String> {
 }
 
 fn harness_kind() -> &'static str {
-    if std::env::var_os("CURSOR_AGENT").is_some()
-        || std::env::var_os("CURSOR_AGENT_SOCKET").is_some()
-        || std::env::var_os("CURSOR_CONVERSATION_ID").is_some()
-        || std::env::var_os("CURSOR_AGENT_ID").is_some()
-        || Path::new("/run/cursor/api.sock").exists()
-    {
+    let rt = runtime();
+    if rt.cursor_harness {
         "cursor"
-    } else if std::env::var_os("CODESPACES").is_some()
-        || std::env::var_os("CODESPACE_NAME").is_some()
-    {
+    } else if rt.codespace {
         "codespace"
-    } else if std::env::var_os("GITHUB_ACTIONS").is_some()
-        || std::env::var_os("GITLAB_CI").is_some()
-    {
+    } else if rt.ci {
         "ci"
     } else {
         "vm"
