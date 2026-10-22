@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": "\"$HOME/.local/bin/ljos\" hook",
+        "timeout": 10,
+        "failClosed": true
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": "\"$HOME/.local/bin/ljos\" hook",
+        "timeout": 10,
+        "failClosed": true
+      }
+    ],
+    "beforeMCPExecution": [
+      {
+        "command": "\"$HOME/.local/bin/ljos\" hook",
+        "timeout": 10,
+        "failClosed": true
+      }
+    ],
+    "beforeReadFile": [
+      {
+        "command": "\"$HOME/.local/bin/ljos\" hook",
+        "timeout": 10,
+        "failClosed": true
+      }
+    ]
+  }
+}

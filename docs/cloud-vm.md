@@ -61,33 +61,31 @@ A GitHub Actions job, including a self-hosted ephemeral runner, uses the same bo
     ljos note ISSUE "the job result"
 ```
 
-The step fetches the latest release's script, which takes `--cloud` from the next release on. Until then, check out `develop` of this repository and run `sh scripts/install.sh --cloud` from it. On this repository the install line is `sh scripts/install.sh --cloud`. The tracker URL stays in the job environment. The runner's git credentials have to be able to clone it.
+The step fetches the latest release's script, which takes `--cloud` from the next release on. Until then, check out `develop` of this repository and run `sh scripts/install.sh --cloud` from it. The cloud environment on this repository clones `develop` and runs that tree's script, so an image built from another commit still installs `develop`. The tracker URL stays in the job environment. The runner's git credentials have to be able to clone it.
 
 ## Cloud agent environment
 
 `install` runs once, on the image build. `start` runs on every boot. The harness can sync an MCP config from another machine over the file `install` wrote, and the tracker clone has to be fetched again, so `start` runs `ljos cloud up` as well. Nothing waits on `start`.
 
-This repository:
+This repository, and any other repository that wants the same guard:
 
 ```json
 {
   "name": "ljos",
-  "install": "sh scripts/install.sh --cloud",
+  "install": "git clone --depth 1 --branch develop https://github.com/leidarljos/ljos.git /tmp/ljos-develop && sh /tmp/ljos-develop/scripts/install.sh --cloud",
   "start": "\"$HOME/.local/bin/ljos\" cloud up"
 }
 ```
 
-Another repository, once a release contains `cloud up`:
+`install.sh --cloud` runs `ljos onboard --harness cursor` and then `ljos cloud up`. The clone is `develop`, so a snapshot that is not `develop` still gets that script. Once a release contains `cloud up`, another repository can replace the install line with `curl -fsSL -o /tmp/ljos-install.sh https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh /tmp/ljos-install.sh --cloud`.
 
-```json
-{
-  "name": "ljos",
-  "install": "curl -fsSL -o /tmp/ljos-install.sh https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh /tmp/ljos-install.sh --cloud",
-  "start": "\"$HOME/.local/bin/ljos\" cloud up"
-}
-```
+Commit `.cursor/hooks.json` beside it. The permission events `beforeShellExecution`, `preToolUse`, `beforeMCPExecution`, and `beforeReadFile` each run `"$HOME/.local/bin/ljos" hook` with `failClosed` and a timeout of 10 seconds. The daemon's PATH does not include `~/.local/bin`. When that program is not installed, the shell cannot start it, and `failClosed` denies the command, the tool, the MCP call, and the read. That is the guard on the first command, before onboard has written `~/.cursor/hooks.json`.
 
-Set `LJOS_TRACKER_REMOTE` in the environment. The tracker repository has to be one the git credentials on the machine can clone. The URL stays out of `environment.json`. Set `LJOS_CLOUD_AGE_SECRET` to the name of the secret that holds the age identity for scope `cloud`. The identity stays out of `environment.json` too. Until a release contains `cloud up`, use `scripts/install.sh` from this tree.
+The daemon reads project hooks only as it starts. A `.cursor/hooks.json` written after that start does not run until the daemon starts again. `ljos doctor` fails the runner hook when the user hooks file is newer than that process.
+
+The daemon refuses the project hooks when a directory from the project root to `.cursor/hooks.json` is a symlink. It reports `refusing to load config path that contains a symlink` and `Refusing to load project config via symlink path`. The checkout has to be a real directory, or those hooks do not load and the guard does not run.
+
+Set `LJOS_TRACKER_REMOTE` in the environment. The tracker repository has to be one the git credentials on the machine can clone. The URL stays out of `environment.json`. Set `LJOS_CLOUD_AGE_SECRET` to the name of the secret that holds the age identity for scope `cloud`. The identity stays out of `environment.json` too.
 
 `cloud up` rewrites the harness MCP command to `ljos-mcp` when PATH already runs this install, and to the absolute path when another copy or none would run. A claim, a note and a vote then push to the tracker, and another clone sees them after a fetch. A `STARTED` claim whose program has exited returns to `TODO` after `LJOS_LEASE_SECS`. A claim whose program is still running stays. The tracker URL has to be one the machine's git credentials can clone.
 

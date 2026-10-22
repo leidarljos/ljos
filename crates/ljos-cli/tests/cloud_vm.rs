@@ -593,6 +593,48 @@ fn the_cloud_vm_doc_matches_the_encoder_install() {
 }
 
 #[test]
+fn the_repo_hooks_fail_closed_until_ljos_is_installed() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let hooks: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".cursor/hooks.json")).unwrap())
+            .unwrap();
+    assert_eq!(hooks["version"], 1);
+    for event in [
+        "beforeShellExecution",
+        "preToolUse",
+        "beforeMCPExecution",
+        "beforeReadFile",
+    ] {
+        let entry = &hooks["hooks"][event][0];
+        assert_eq!(entry["failClosed"], true, "{event}");
+        assert_eq!(entry["timeout"], 10, "{event}");
+        let command = entry["command"].as_str().unwrap();
+        assert!(
+            command.contains("$HOME/.local/bin/ljos") && command.ends_with(" hook"),
+            "{event}: {command}"
+        );
+    }
+    let env: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".cursor/environment.json")).unwrap())
+            .unwrap();
+    let install = env["install"].as_str().unwrap();
+    assert!(
+        install.contains("--branch develop") && install.contains("install.sh --cloud"),
+        "{install}"
+    );
+    assert_eq!(
+        env["start"].as_str().unwrap(),
+        "\"$HOME/.local/bin/ljos\" cloud up"
+    );
+    let docs = fs::read_to_string(root.join("docs/cloud-vm.md")).unwrap();
+    assert!(docs.contains(install), "docs and environment.json differ");
+    assert!(
+        docs.contains("refusing to load config path that contains a symlink"),
+        "docs omit the symlink refusal"
+    );
+}
+
+#[test]
 fn a_release_build_does_not_reuse_another_onnx_runtime() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/release.yml");
     let yml = fs::read_to_string(&path).unwrap();

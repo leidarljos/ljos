@@ -1,5 +1,5 @@
 {
   "name": "ljos",
-  "install": "sh scripts/install.sh --cloud",
+  "install": "git clone --depth 1 --branch develop https://github.com/leidarljos/ljos.git /tmp/ljos-develop && sh /tmp/ljos-develop/scripts/install.sh --cloud",
   "start": "\"$HOME/.local/bin/ljos\" cloud up"
 }
