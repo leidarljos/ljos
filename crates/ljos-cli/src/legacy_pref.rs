@@ -183,18 +183,92 @@ pub fn migrate_once() {
 /// The pack did not answer.
 pub fn list() -> Result<String> {
     migrate_once();
-    let rows = awaiting(&live()?);
+    let atoms = live()?;
+    let rows = awaiting(&atoms);
     if rows.is_empty() {
         return Ok("no older preferences await review\n".to_string());
     }
     let mut out = format!("{}\n", review_sentence(&rows));
     for (id, kind, text) in &rows {
+        let Some(atom) = atoms
+            .iter()
+            .find(|a| a.get("id").and_then(Value::as_str) == Some(id.as_str()))
+        else {
+            continue;
+        };
         let short = id.get(..8).unwrap_or(id);
         out.push_str(&format!(
-            "{short}  {kind}  {text}\n  ljos prefer --review --keep {id}\n"
+            "{short}  {}  {}  {}  {kind}  {text}\n  ljos prefer --review --keep {id}\n",
+            shown_when(atom),
+            shown_seat(atom),
+            shown_source(atom),
         ));
     }
     Ok(out)
+}
+
+/// The day the pack stored the atom, or the writer's own clock when the
+/// pack has no `ts`.
+fn shown_when(atom: &Value) -> String {
+    let raw = atom
+        .get("ts")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            atom.pointer("/source/at")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+        })
+        .unwrap_or("")
+        .trim();
+    if raw.len() >= 10
+        && raw.as_bytes().get(4) == Some(&b'-')
+        && raw.as_bytes().get(7) == Some(&b'-')
+    {
+        raw[..10].to_string()
+    } else if raw.is_empty() {
+        "-".to_string()
+    } else {
+        raw.to_string()
+    }
+}
+
+/// `source.seat`, else the harness, else a `seat:` entity.
+fn shown_seat(atom: &Value) -> String {
+    for key in ["seat", "harness"] {
+        let word = source_field(atom, key);
+        if !word.is_empty() {
+            return word.to_string();
+        }
+    }
+    entities(atom)
+        .into_iter()
+        .find_map(|e| e.strip_prefix("seat:").map(str::to_string))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+/// `via/harness/session`, dropping whichever the writer left out.
+fn shown_source(atom: &Value) -> String {
+    let bits: Vec<&str> = ["via", "harness", "session"]
+        .into_iter()
+        .map(|key| source_field(atom, key))
+        .filter(|s| !s.is_empty())
+        .collect();
+    if bits.is_empty() {
+        "-".to_string()
+    } else {
+        bits.join("/")
+    }
+}
+
+fn source_field<'a>(atom: &'a Value, key: &str) -> &'a str {
+    atom.get("source")
+        .and_then(Value::as_object)
+        .and_then(|s| s.get(key))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
 }
 
 /// Keep one held-back preference or lesson as the person's.
@@ -630,5 +704,44 @@ mod tests {
         assert!(review_sentence(std::slice::from_ref(&lesson)).contains("1 older lesson awaits"));
         assert!(review_sentence(&[pref, lesson.clone()]).contains("2 older memories await"));
         assert!(review_sentence(&[lesson.clone(), lesson]).contains("ljos prefer --review"));
+    }
+
+    #[test]
+    fn the_review_line_names_date_seat_and_source() {
+        let with_seat = json!({
+            "ts": "2026-10-20T00:00:00.000Z",
+            "source": {
+                "seat": "person",
+                "harness": "person",
+                "session": "person",
+                "via": "ljos",
+                "at": "2026-10-19T00:00:00Z",
+            },
+            "entities": ["seat:other"],
+        });
+        assert_eq!(shown_when(&with_seat), "2026-10-20");
+        assert_eq!(shown_seat(&with_seat), "person");
+        assert_eq!(shown_source(&with_seat), "ljos/person/person");
+
+        // No ts and no seat: the writer's clock and the harness.
+        let old = json!({
+            "source": {
+                "harness": "person",
+                "session": "person",
+                "via": "ljos",
+                "at": "2026-10-18T01:02:03Z",
+            },
+            "entities": ["seat:ignored"],
+        });
+        assert_eq!(shown_when(&old), "2026-10-18");
+        assert_eq!(shown_seat(&old), "person");
+        assert_eq!(shown_source(&old), "ljos/person/person");
+
+        let entity_only = json!({
+            "entities": ["horizon:standing", "seat:claude"],
+        });
+        assert_eq!(shown_when(&entity_only), "-");
+        assert_eq!(shown_seat(&entity_only), "claude");
+        assert_eq!(shown_source(&entity_only), "-");
     }
 }

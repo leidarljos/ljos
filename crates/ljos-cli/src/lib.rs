@@ -35447,6 +35447,30 @@ mod tests {
         assert_eq!(sitting_warn_line(&[calm]), None);
     }
 
+    /// Older preferences and lessons are a warning. They are named, and
+    /// they are not a habitat that failed to answer.
+    #[test]
+    fn held_memories_warn_and_the_doctor_stays_healthy() {
+        let prefs = Habitat {
+            name: "preferences",
+            state: "no preferences stored; 1 older lesson awaits review (`ljos prefer --review`)"
+                .into(),
+            ok: false,
+        };
+        assert_eq!(doctor_word(&prefs), "warn");
+        let mut rows: Vec<Habitat> = REQUIRED
+            .iter()
+            .map(|name| Habitat {
+                name,
+                state: "answers".into(),
+                ok: true,
+            })
+            .collect();
+        rows.push(prefs);
+        assert!(failing(&rows).is_empty(), "{:?}", failing(&rows));
+        assert!(healthy(&rows));
+    }
+
     /// the tarball the release workflow uploads for each target is the one
     /// binstall's metadata asks for, holding every binary of both crates,
     /// and each target's standard library is added to the toolchain that
