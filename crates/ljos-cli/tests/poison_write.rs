@@ -147,6 +147,8 @@ impl Seat {
     }
 
     fn seat_env(&self, cmd: &mut Command) {
+        // A seat's tracker file lands where ljos stands, not the crate.
+        cmd.current_dir(self.home.path());
         cmd.env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", self.home.path())
@@ -292,6 +294,7 @@ fn a_runner_user_rule_of_a_plant_is_refused() {
 fn mcp_user_prefer_of_a_plant_is_refused() {
     let seat = Seat::new();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
+        .current_dir(seat.home.path())
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", seat.home.path())
