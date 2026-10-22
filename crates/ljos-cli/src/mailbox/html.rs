@@ -26,13 +26,13 @@
 //! they apply. When the HTML does what the reducer cannot follow
 //! (`@import`, a concealing rule on any selector other than a class or
 //! id, a rule nested in a style rule or blocks nested more than 8 deep,
-//! a stylesheet color within 16 of a background set anywhere, of white
-//! when its rule sets no background, or a stylesheet background within
-//! 16 of black when its rule sets no color, a linked stylesheet, or a
-//! `style`, `class`, `id` or `hidden` attribute holding a reference the
-//! reducer cannot decode), the text is withheld rather than guessed. A
-//! link keeps its text and gains its target as plain text, so a
-//! mismatched link is visible.
+//! a stylesheet color within 16 of a background set anywhere or, when
+//! its rule sets no background, of white, a stylesheet background within
+//! 16 of a color set anywhere or, when its rule sets no color, of black,
+//! a linked stylesheet, or a `style`, `class`, `id` or `hidden`
+//! attribute holding a reference the reducer cannot decode), the text is
+//! withheld rather than guessed. A link keeps its text and gains its
+//! target as plain text, so a mismatched link is visible.
 
 /// The visible text and what the HTML hid.
 #[derive(Debug, Clone, PartialEq, Eq)]
