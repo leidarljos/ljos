@@ -172,16 +172,20 @@ pub fn verify_entry(entry: &SignedEntry) -> Result<()> {
 
 /// Run schema + signature checks over many entries, including voter-key pinning.
 ///
-/// Every voter id is pinned, including a question's `opened_by` and a
-/// seat. The tracker pin file wins when it already names that voter;
-/// otherwise the first key seen in this check is the pin. A later entry
-/// under another key is a mismatch. A run id is `<identity>/run-<id>`.
+/// Every voter id is pinned, including a question's `opened_by`, and so
+/// is the seat after its `/`. A pin file row for the voter id or its seat
+/// is the pin; otherwise the first key seen in this check is. A later
+/// entry under another key is a mismatch, and so is a seat seen under two
+/// keys, whichever comes first. A run id is `<identity>/run-<id>`. Two
+/// ballots of one voter in one hour are not an error here: the tally
+/// drops that voter on that question.
 ///
 /// # Errors
 ///
 /// Any entry fails validation or signature verification, a pin file voter
-/// is not spelled the way the check looks it up, voter-key pinning detects
-/// a mismatch, or two unreplaced ballots under one key share an hour.
+/// is not spelled the way the check looks it up, the pin file pins one
+/// seat to two keys, an entry's voter or seat is pinned to another key,
+/// or a `replaces` names no ballot of the same voter and question.
 pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
     let mut report = CheckReport {
         entries: entries.len(),

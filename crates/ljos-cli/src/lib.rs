@@ -3191,8 +3191,12 @@ const LEGACY_SEATS: &[(&str, &str)] = &[("ljos-bot", "ljosbot")];
 /// a pid in base 36 (`inky-n9o`, `disk-saver-t4t`, `free-claude-8h`,
 /// `free-opencode-1vmow`); a last part of one to six lowercase letters and
 /// digits with at least one of each is read as that tag, so `eessi-bot`
-/// and `disk-saver` stay whole seats, and so does a version or a run
-/// number such as `gpt-5` or `ridley-ci-a-555001`. The same suffix on the
+/// and `disk-saver` stay whole seats, and so does a version or a number
+/// such as `gpt-5`, `node-01` or `ridley-ci-a-555001`. A run, a judge
+/// and a subagent (`run-pr-1234`, `judge-gpt-oss-120b`,
+/// `sand-subagent-0e61`) keep every part. An all-letter tag cannot be
+/// told from a seat's own last part here; [`same_seat`] settles it
+/// against the seats a tracker knows. The same suffix on the
 /// seat side of `SEAT@TAG` (`inky-n9o@deadbeef`) is that tag too. An old
 /// tag comes back as `None`: the server that wrote it is gone and no
 /// conversation holds under it again, so the seat is its holder now and
