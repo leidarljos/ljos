@@ -4383,8 +4383,13 @@ fn apply_curl_opt(
     seen: &mut HashSet<PathBuf>,
 ) -> Option<HttpShape> {
     let value = value.unwrap_or("");
-    // `--no-get` can turn a query back into a body.
+    // `--no-globoff` turns globbing back on, and `--no-get` can turn a
+    // query back into a body.
     if hit.off {
+        if hit.long == "globoff" {
+            tune.globoff = false;
+            return None;
+        }
         return (hit.kind != CurlOpt::Flag).then_some(HttpShape::Opaque);
     }
     match hit.kind {

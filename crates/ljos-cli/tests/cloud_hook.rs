@@ -1356,6 +1356,10 @@ fn a_curl_glob_in_the_host_may_be_github() {
     allowed("curl -X POST 'https://example.com/{a,b}'", here);
     allowed("curl -g -X POST 'https://git{hub,xxx}.com/'", here);
     allowed("curl -X POST --globoff 'https://git{hub,xxx}.com/'", here);
+    refused(
+        "curl -g --no-globoff -X POST 'https://git{hub,xxx}.com/'",
+        here,
+    );
 
     fs::write(
         home.join(".curlrc"),
