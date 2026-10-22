@@ -227,6 +227,13 @@ pub fn weak_key(key_hex: &str) -> bool {
     VerifyingKey::from_bytes(&key).is_ok_and(|key| key.is_weak())
 }
 
+/// One name per signing key, for counting keys. A key verifies in either
+/// case of hex digit, so the fingerprint is the hex in lower case.
+#[must_use]
+pub fn key_fingerprint(key_hex: &str) -> String {
+    key_hex.to_ascii_lowercase()
+}
+
 /// Public key and signature, both lower-case hex, for `message` under `key`.
 #[must_use]
 pub fn signed_hex(key: &SigningKey, message: &[u8]) -> (String, String) {
