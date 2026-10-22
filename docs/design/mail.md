@@ -64,7 +64,9 @@ stays on the machine that holds it.
   most 64 MiB of one attachment; past that notmuch is stopped, `sha256`
   is null and `size` is a lower bound.
 
-Every notmuch run has a 30 s deadline. At the deadline notmuch and its
+A message whose MIME parts nest more than 16 deep is refused, and replies
+nested more than 64 deep in one thread are left out with `truncated`
+set. Every notmuch run has a 30 s deadline. At the deadline notmuch and its
 process group are killed and the tool refuses, so a hung database or a
 slow part cannot stall the MCP server.
 
