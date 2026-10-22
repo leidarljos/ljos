@@ -162,7 +162,7 @@ Every seat on this machine reads it. The row does not decay and it is not review
 =--promote ID= copies that lesson into a user rule and leaves the lesson in the pack.
 A promoted rule is stated ahead of a prompt only when the pack answers for that lesson within 400 ms, under the same id, stored as the person's; a pack that is slow, down or answers otherwise leaves it out of the prompt.
 The row keeps a hash of the lesson's kind, text, =ts=, =valid_from= and stored origin, and a record under that id that hashes otherwise, such as an id retracted and posted again, is another lesson; a rule promoted before the hash was kept is not stated until it is promoted again.
-The read goes only with this seat's pack token, and only after the same read without it was refused, so a listener that answers without the token, or a packsetd run with =PACKSET_AUTH=off=, confirms no promoted rule; a process of the same user that reads the token file can still answer as the pack.
+The read goes only with this seat's pack token, and only after the same read without it was refused, so a listener that answers without the token, or a packsetd run with =PACKSET_AUTH=off=, confirms no promoted rule.
 =ljos rules= lists a promoted rule the pack does not confirm apart from the user rules, as =unverified= with the reason.
 The guards still enforce such a rule's pattern and its mention and reply denials, and the denial says the rule is unverified and why.
 =--forget ID= leaves a tombstone so a later sync does not bring the row back.
@@ -170,6 +170,11 @@ The guards still enforce such a rule's pattern and its mention and reply denials
 =--deny-mention HANDLE=, =--deny-name NAME=, =--deny-reply-to HANDLE= and =--deny-reply-name NAME= may be repeated.
 =ljos rule --user PATTERN --verdict deny|ask --why TEXT= writes the argv law into the same file instead of the seat pack.
 Without =--user=, both commands keep writing the seat pack.
+
+* Threat model
+
+The pack token is sent only to the socket address the writer's URL resolved to, and only after that address has refused an unknown atom id with no token and with a token that is not this seat's. The request that carries the token may be the next connection; a later request proves again. A redirect is not followed, and a proxy in the environment is not used.
+A process of the same user that reads the token file can still answer as the pack. The proof cannot tell that process from packsetd; a writer that signs its answers, or that runs as another user, would.
 
 * Git hooks
 
