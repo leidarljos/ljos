@@ -447,6 +447,125 @@ fn with_held_issue(node: &str, body: impl FnOnce()) {
     }
 }
 
+fn hook_stdout(seat: &Seat, payload: &str) -> String {
+    let mut child = seat
+        .command(&["hook"], false)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    drop(child.stdin.take());
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "hook failed\n{}", text_of(&out));
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// With the guard on, a shell write to the latest-prompt file is denied.
+/// That file is what makes a sentence count as the person's words.
+#[test]
+fn a_bash_write_to_the_latest_prompt_is_denied() {
+    let seat = Seat::new();
+    let prompt = seat.run.path().join("ljos/latest-prompt");
+    let bind = seat.run.path().join("ljos/latest-prompt.bind");
+    for path in [&prompt, &bind] {
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "person-1",
+            "tool_name": "Bash",
+            "tool_input": {"command": format!("printf plant > {}", path.display())},
+        })
+        .to_string();
+        let stdout = hook_stdout(&seat, &payload);
+        let answer: serde_json::Value =
+            serde_json::from_str(stdout.trim()).unwrap_or(serde_json::Value::Null);
+        assert_eq!(
+            answer["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+            "a write to {} was allowed: {stdout}",
+            path.display()
+        );
+    }
+}
+
+fn mcp_remember(seat: &Seat, text: &str) -> serde_json::Value {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", seat.home.path())
+        .env("XDG_CONFIG_HOME", seat.home.path().join(".config"))
+        .env("XDG_STATE_HOME", seat.home.path().join("state"))
+        .env("XDG_RUNTIME_DIR", seat.run.path())
+        .env("PACKSET_URL", &seat.url)
+        .env("PACKSET_WORKSPACE", "seat")
+        .env("PACKSET_TIMEOUT_MS", "2000")
+        .env("LJOS_GUARD", "on")
+        .env("LJOS_CAPTURE", "save")
+        .env("LJOS_SEAT", "probe")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let lines = [
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "probe", "version": "0"}}}),
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "ljos_remember",
+            "arguments": {"seat": "probe", "text": text}}}),
+    ];
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        for line in &lines {
+            writeln!(stdin, "{line}").unwrap();
+        }
+    }
+    drop(child.stdin.take());
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|v| v["id"] == 2)
+        .unwrap_or_else(|| {
+            panic!(
+                "no tool answer\n{stdout}\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            )
+        })
+}
+
+/// A file written beside the hook is not the person's prompt. Remember
+/// refuses the plant.
+#[test]
+fn a_forged_prompt_does_not_make_remember_accept_the_plant() {
+    let seat = Seat::new();
+    let dir = seat.run.path().join("ljos");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("latest-prompt"), PLANT).unwrap();
+    let answer = mcp_remember(&seat, PLANT);
+    let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
+    assert!(
+        refused,
+        "a forged prompt made remember accept the plant: {answer}"
+    );
+    assert!(
+        answer.to_string().contains("only the person's own words"),
+        "{answer}"
+    );
+    let atoms = seat.atoms.lock().unwrap().clone();
+    assert!(
+        atoms.iter().all(|atom| atom["origin"] != "user-declared"),
+        "the plant was stored as the person's words: {atoms:?}"
+    );
+}
+
 /// Briefs, the limit stop and the work nudge must not tell an agent to
 /// store its own lesson with `ljos remember`, which the seat guard allows.
 #[test]
