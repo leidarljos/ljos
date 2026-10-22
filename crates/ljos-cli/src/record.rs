@@ -192,6 +192,7 @@ pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
         validate_pin_voter(voter).with_context(|| format!("pin source: {pin_source}"))?;
     }
     let seat_pins = seat_pins(&pins).with_context(|| format!("pin source: {pin_source}"))?;
+    let mut seat_keys = BTreeMap::new();
     for entry in entries {
         verify_entry(entry)?;
         match &entry.entry {
@@ -205,6 +206,7 @@ pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
                     &entry.signature.key,
                 )
                 .with_context(|| format!("pin source: {pin_source}"))?;
+                observe_seat_key(&mut seat_keys, &question.opened_by, &entry.signature.key)?;
             }
             Entry::Ballot(ballot) => {
                 report.ballots += 1;
@@ -212,6 +214,7 @@ pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
                     .with_context(|| format!("pin source: {pin_source}"))?;
                 crate::ballot_sig::observe_pin(&mut pins, &ballot.voter, &entry.signature.key)
                     .with_context(|| format!("pin source: {pin_source}"))?;
+                observe_seat_key(&mut seat_keys, &ballot.voter, &entry.signature.key)?;
             }
         }
     }
@@ -296,6 +299,32 @@ fn observe_seat_pin(
         "{voter} is pinned through seat {seat} to key {}, got {}…",
         pinned.join(" or "),
         &key[..12.min(key.len())]
+    );
+}
+
+/// Hold the seat `voter` sits as to one key across the check. A seat
+/// seen under two keys fails whichever file comes first, and the error
+/// names the keys in one order, so file order cannot pick the seat's key.
+fn observe_seat_key(seats: &mut BTreeMap<String, String>, voter: &str, key: &str) -> Result<()> {
+    let Some((_, seat)) = split_voter(voter) else {
+        return Ok(());
+    };
+    let fingerprint = crate::ballot_sig::key_fingerprint(key);
+    let held = seats
+        .entry(seat.to_string())
+        .or_insert_with(|| fingerprint.clone());
+    if *held == fingerprint {
+        return Ok(());
+    }
+    let (one, two) = if *held < fingerprint {
+        (held.as_str(), fingerprint.as_str())
+    } else {
+        (fingerprint.as_str(), held.as_str())
+    };
+    bail!(
+        "seat {seat} signs under two keys, {}… and {}…; a seat holds one key, so pin it or sign under one",
+        &one[..12.min(one.len())],
+        &two[..12.min(two.len())]
     );
 }
 
@@ -571,8 +600,8 @@ pub fn ballot_id(ballot: &BallotEntry) -> Result<String> {
 /// of one ballot under one key count as that ballot once. A ballot named
 /// by another entry's `replaces` never counts. Of what remains, the
 /// latest `cast_at` per key wins, and a latest `withdrawn` contributes no
-/// vote. When one seat appears under a second key on the same question,
-/// only the first key's ballot keeps counting. Two unreplaced ballots in
+/// vote. A seat that appears under two keys on one question counts under
+/// neither there, whatever order the ballots come in. Two unreplaced ballots in
 /// a voter's latest hour are ambiguous and that voter is dropped on that
 /// question only; a tie in an earlier hour is superseded like any older
 /// ballot.
@@ -649,24 +678,22 @@ pub fn tally(entries: &[SignedEntry]) -> Result<BTreeMap<String, BTreeMap<String
     }
     let mut counts: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
     for (question, group) in grouped {
-        let mut seat_keys: BTreeMap<String, String> = BTreeMap::new();
-        let mut refused = BTreeSet::new();
+        let mut seat_keys: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
         for (at, _) in &group {
-            let Some(seat) = ballots[*at].2.as_deref() else {
-                continue;
-            };
-            let key = ballots[*at].1.as_str();
-            if let Some(held) = seat_keys.get(seat) {
-                if held != key {
-                    refused.insert(*at);
-                }
-            } else {
-                seat_keys.insert(seat.to_string(), key.to_string());
+            if let Some(seat) = ballots[*at].2.as_deref() {
+                seat_keys
+                    .entry(seat)
+                    .or_default()
+                    .insert(ballots[*at].1.as_str());
             }
         }
         let mut by_key: BTreeMap<String, Vec<(i64, usize)>> = BTreeMap::new();
         for (at, stamp) in group {
-            if refused.contains(&at) {
+            let shared = ballots[at]
+                .2
+                .as_deref()
+                .is_some_and(|seat| seat_keys[seat].len() > 1);
+            if shared {
                 continue;
             }
             by_key
@@ -1852,7 +1879,7 @@ mod tests {
     }
 
     #[test]
-    fn one_seat_counts_once_under_two_keys() {
+    fn one_seat_under_two_keys_counts_under_neither() {
         let _home = test_home();
         let entries = [
             sign_as(
@@ -1864,10 +1891,14 @@ mod tests {
                 2,
             ),
         ];
-        check_entries(&entries).expect("no pin file");
+        let err = check_entries(&entries).expect_err("one seat under two keys");
+        assert!(
+            err_chain(&err).contains("seat inky signs under two keys"),
+            "{}",
+            err_chain(&err)
+        );
         let read = tally(&entries).expect("tally");
-        assert_eq!(counted(&read, "accept"), Some(1), "{read:?}");
-        assert_eq!(counted(&read, "reject"), None, "{read:?}");
+        assert!(read.is_empty(), "{read:?}");
     }
 
     fn orders<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
@@ -1887,7 +1918,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "file order changed the result")]
     fn a_seat_under_two_keys_reads_the_same_in_every_order() {
         let _home = test_home();
         let entries = [
@@ -2677,14 +2707,14 @@ mod tests {
         };
         let text = err_chain(&err);
         assert!(text.contains("seat inky is pinned to two keys"), "{text}");
-        let read = tally(&entries).expect("one seat keeps its first key");
-        assert_eq!(counted(&read, "accept"), Some(1), "{read:?}");
+        let read = tally(&entries).expect("one seat under two keys");
+        assert!(read.is_empty(), "{read:?}");
         let later = sign_as(
             ballot_entry("beta/inky", "accept", "2026-10-21T11:00:00Z"),
             2,
         );
-        let read = tally(&[bare.clone(), later]).expect("tally");
-        assert_eq!(counted(&read, "accept"), Some(1), "{read:?}");
+        let read = tally(&[later, bare.clone()]).expect("tally");
+        assert!(read.is_empty(), "{read:?}");
         std::fs::write(&pin_path, format!("inky {key1}\ninky@39u {key1}\n")).expect("pin");
         check_entries(std::slice::from_ref(&bare)).expect("one key under both names");
         let err = check_entries(std::slice::from_ref(&tagged)).expect_err("an unpinned key");
