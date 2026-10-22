@@ -512,3 +512,52 @@ fn tracker_recall_is_fenced_as_unverified() {
         "a logbook note reached MCP recall unmarked: {answer}"
     );
 }
+
+/// The note tool and the session-end extractor say what the read side
+/// does with what they write: a note memory and fenced tracker text, not
+/// an agent-derived lesson.
+#[test]
+fn the_note_tool_text_matches_the_read_side() {
+    let seat = Seat::new(vec![]);
+    let mut child = seat
+        .command(env!("CARGO_BIN_EXE_ljos-mcp"), &[])
+        .env("LJOS_MCP_TOOLS", "all")
+        .spawn()
+        .unwrap();
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        for line in [
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {},
+                "clientInfo": {"name": "probe", "version": "0"}}}),
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+        ] {
+            writeln!(stdin, "{line}").unwrap();
+        }
+    }
+    drop(child.stdin.take());
+    let out = child.wait_with_output().unwrap();
+    let listed = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|v| v["id"] == 2)
+        .unwrap_or_else(|| panic!("no tools/list answer\n{}", text_of(&out)));
+    let note = listed["result"]["tools"]
+        .as_array()
+        .and_then(|tools| tools.iter().find(|t| t["name"] == "ljos_note"))
+        .and_then(|t| t["description"].as_str())
+        .unwrap_or_default();
+    assert!(note.contains("unverified tracker text"), "{note}");
+    assert!(note.contains("note in memory"), "{note}");
+    let header: String = include_str!("../src/extract.rs")
+        .lines()
+        .take_while(|l| l.starts_with("//!"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        !header.contains("`agent-derived` lesson"),
+        "the extractor's header names a lesson it no longer writes: {header}"
+    );
+    assert!(header.contains("`source.basis` is `agent`"), "{header}");
+}
