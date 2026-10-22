@@ -1692,12 +1692,27 @@ fn scope_names(scopes: &[String]) -> String {
     }
 }
 
-fn adopt_scope_summary(gone: &str, adopted: &[String], skipped: &[String]) -> String {
-    format!(
-        "sync: {gone}: adopted scopes {}; skipped scopes {}\n",
-        scope_names(adopted),
-        scope_names(skipped)
-    )
+/// Scopes that posted, then scopes that were not sealed here. A dry run
+/// has not posted, so it says "would adopt". A scope with nothing to post
+/// is left out: opening the log is not the same as adopting it.
+fn adopt_scope_summary(
+    gone: &str,
+    adopted: &[String],
+    skipped: &[String],
+    dry_run: bool,
+) -> String {
+    let mut parts = Vec::new();
+    if !adopted.is_empty() {
+        let verb = if dry_run { "would adopt" } else { "adopted" };
+        parts.push(format!("{verb} scopes {}", scope_names(adopted)));
+    }
+    if !skipped.is_empty() {
+        parts.push(format!("skipped scopes {}", scope_names(skipped)));
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!("sync: {gone}: {}\n", parts.join("; "))
 }
 
 fn head_blob(root: &Path, rel: &str) -> Result<Vec<u8>> {
@@ -1905,17 +1920,20 @@ fn dry_adopt_line(
     plain: &str,
     rel: &str,
     sender: &str,
-) -> Result<String> {
+) -> Result<(String, usize)> {
     let client = crate::pack()?;
     let atoms = crate::atoms_lean(&client, &client.workspace())?;
     let own = own_memory_keys(&atoms, scope_name);
     let plan = adopt_plan(plain, scope_name, &own);
     let taken = read_taken(root, scope_name, gone, &atoms, sender);
     let retired = retired_keys(plain, &taken);
-    Ok(format!(
-        "sync: {gone}: would adopt {} {scope_name} atoms, retire {}, and drop {rel}\n",
-        plan.post.len(),
-        retired.len()
+    let posts = plan.post.len();
+    Ok((
+        format!(
+            "sync: {gone}: would adopt {posts} {scope_name} atoms, retire {}, and drop {rel}\n",
+            retired.len()
+        ),
+        posts,
     ))
 }
 
@@ -2204,13 +2222,11 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
     }
     let mut out = String::new();
     let mut opened = Vec::with_capacity(present.len());
-    let mut adopted_scopes = Vec::new();
     let mut skipped_scopes = Vec::new();
     for log in &present {
         let identities = identities_for_open(&log.scope_name);
         match sealed_plain(root, &log.age, &identities) {
             Ok(Some(plain)) => {
-                adopted_scopes.push(log.scope_name.clone());
                 opened.push((log, plain));
             }
             Ok(None) => {
@@ -2230,30 +2246,21 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
         }
     }
     if opened.is_empty() {
-        out.push_str(&adopt_scope_summary(
-            &gone,
-            &adopted_scopes,
-            &skipped_scopes,
-        ));
+        out.push_str(&adopt_scope_summary(&gone, &[], &skipped_scopes, false));
         return Ok(out);
     }
     if opts.dry_run {
+        let mut would = Vec::new();
         for (log, plain) in &opened {
             let sender = sender_entity_for_scope(&gone, scope, &log.scope_name);
-            out.push_str(&dry_adopt_line(
-                root,
-                &log.scope_name,
-                &gone,
-                plain,
-                &log.age,
-                &sender,
-            )?);
+            let (line, posts) =
+                dry_adopt_line(root, &log.scope_name, &gone, plain, &log.age, &sender)?;
+            if posts > 0 {
+                would.push(log.scope_name.clone());
+            }
+            out.push_str(&line);
         }
-        out.push_str(&adopt_scope_summary(
-            &gone,
-            &adopted_scopes,
-            &skipped_scopes,
-        ));
+        out.push_str(&adopt_scope_summary(&gone, &would, &skipped_scopes, true));
         return Ok(out);
     }
     let mut rows = Vec::with_capacity(opened.len());
@@ -2264,7 +2271,11 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
         failed |= done.failed;
         rows.push(done);
     }
+    let mut posted_scopes = Vec::new();
     for ((log, _), done) in opened.iter().zip(&rows) {
+        if done.kept > 0 {
+            posted_scopes.push(log.scope_name.clone());
+        }
         out.push_str(&format!(
             "sync: {gone}: {} {} atoms adopted, {} refused, {} moved, {} retired",
             done.kept, log.scope_name, done.refused, done.moved, done.retired
@@ -2279,8 +2290,9 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
     }
     out.push_str(&adopt_scope_summary(
         &gone,
-        &adopted_scopes,
+        &posted_scopes,
         &skipped_scopes,
+        false,
     ));
     if failed {
         return Ok(out);
