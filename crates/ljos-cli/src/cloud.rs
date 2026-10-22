@@ -1,13 +1,17 @@
 //! One command for a fresh machine that should share the tracker.
 //!
 //! `ljos cloud up` installs the release binaries into `~/.local/bin`,
-//! checks the published SHA-256 sums, puts that directory on PATH, writes
-//! the harness MCP command as `ljos-mcp`, clones `LJOS_TRACKER_REMOTE`, and
-//! writes a webhook wake for each `LJOS_WAKE_<SEAT>_URL`. Entries this
-//! command writes are marked `source = "env"`; any other wake stays. When
+//! checks the published SHA-256 sums, puts that directory first on PATH,
+//! writes the harness MCP command, and clones `LJOS_TRACKER_REMOTE`.
+//! The command is the bare name when this directory is first, and the
+//! absolute path when an earlier directory would win. It writes a webhook
+//! wake for each `LJOS_WAKE_<SEAT>_URL`. Entries this command writes are
+//! marked `source = "env"`; any other wake stays. When
 //! `LJOS_CLOUD_AGE_SECRET` names an environment variable, it writes that
-//! variable's age identity for scope `cloud` to a mode 0600 file. A later
-//! boot with the binaries already installed only refreshes the clone.
+//! variable's age identity for scope `cloud` to a mode 0600 file. On a
+//! cloud VM it also installs the release's `packset-embed` and the ONNX
+//! Runtime it links. A later boot with the binaries already installed only
+//! refreshes the clone.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -31,6 +35,12 @@ const OPTIONAL_BINS: &[&str] = &[
 ];
 const INSTALL_URL: &str = "https://github.com/leidarljos/ljos/releases/latest/download/install.sh";
 const CLOUD_GUARD_RULES_FILE: &str = "cloud-guard-rules.json";
+/// The release workflow's encoder archives, the runtime before the binary
+/// that links it. Each unpacks into the prefix above the binary directory.
+const ENCODER_ARCHIVES: &[&str] = &["onnxruntime", "packset-embed"];
+/// Where the encoder's rpath, `$ORIGIN/../lib/onnxruntime`, finds the runtime.
+const ENCODER_LIB: &str = "lib/onnxruntime";
+const ENCODER_SONAME: &str = "libonnxruntime.so.1";
 
 /// Names the environment variable that holds the age identity for scope
 /// `cloud`. The value is an identity file as `age-keygen` writes it, not a
@@ -55,8 +65,14 @@ pub fn up(force: bool) -> Result<String> {
     let bin_dir = bin_dir(&home);
     let mut lines = Vec::new();
     lines.push(ensure_binaries(&bin_dir, force)?);
-    // The config names a bare `ljos-mcp`. The directory has to be on PATH
-    // before anything reads that file, including a later step in this process.
+    lines.push(ensure_encoder(&bin_dir, force)?);
+    let server = bin_dir.join("ljos-mcp");
+    // The command is the bare name when this directory is first on PATH,
+    // and the absolute path when an earlier directory would win. which()
+    // still sees that earlier install until PATH moves, so the choice is
+    // made first. Absent from PATH, the bare name stays once prepended.
+    let early = (bin_dir_later_on_path(&bin_dir) && server.is_file())
+        .then(|| crate::server_command_plan(&server, "cloud up"));
     lines.push(ensure_process_path(&bin_dir));
 
     if agent_id().is_some() && seat_matches_file() {
@@ -72,9 +88,20 @@ pub fn up(force: bool) -> Result<String> {
     let remote = nonempty_var("LJOS_TRACKER_REMOTE");
     let tracker = remote.as_ref().map(|_| tracker_dir(&home));
     lines.push(ensure_profile(&home, &bin_dir)?);
+    let plan = early.unwrap_or_else(|| {
+        if server.is_file() {
+            crate::server_command_plan(&server, "cloud up")
+        } else {
+            crate::ServerCommandPlan {
+                command: crate::MCP_SERVER_COMMAND.to_string(),
+                note: None,
+            }
+        }
+    });
     lines.push(write_mcp(
         &home,
-        &bin_dir.join("ljos-mcp"),
+        &server,
+        &plan,
         &seat,
         &key,
         tracker.as_deref(),
@@ -363,10 +390,22 @@ struct McpFile {
     path: PathBuf,
     probe: McpProbe,
     advice: String,
-    expands_home: bool,
+    home: HomeExpand,
     /// Parse and read errors fail the row. Harness files are skipped when
     /// they are not the JSON this probe expects (Zed's settings are JSONC).
     strict: bool,
+}
+
+/// How a harness turns a command string into a path.
+///
+/// Codex stores `$HOME` as text. OpenCode substitutes `{env:VAR}` only.
+/// A shell client expands `$HOME`, `${HOME}`, `${env:HOME}`, `${userHome}`
+/// and a leading `~/`.
+#[derive(Clone, Copy)]
+enum HomeExpand {
+    Literal,
+    Opencode,
+    Shell,
 }
 
 enum McpProbe {
@@ -447,7 +486,7 @@ fn mcp_files() -> Vec<McpFile> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     let mut push =
-        |path: PathBuf, probe: McpProbe, strict: bool, advice: String, expands_home: bool| {
+        |path: PathBuf, probe: McpProbe, strict: bool, advice: String, home: HomeExpand| {
             let kind = match &probe {
                 McpProbe::Json(pointer) => format!("json:{pointer}"),
                 McpProbe::Text(marker) => format!("text:{marker}"),
@@ -457,7 +496,7 @@ fn mcp_files() -> Vec<McpFile> {
                     path,
                     probe,
                     advice,
-                    expands_home,
+                    home,
                     strict,
                 });
             }
@@ -468,7 +507,7 @@ fn mcp_files() -> Vec<McpFile> {
             McpProbe::Json("/mcpServers/ljos".into()),
             true,
             "ljos onboard --harness cursor".into(),
-            true,
+            HomeExpand::Shell,
         );
     }
     if let Ok(home) = crate::home() {
@@ -476,20 +515,24 @@ fn mcp_files() -> Vec<McpFile> {
             home.join(".cursor/mcp.json"),
             McpProbe::Json("/mcpServers/ljos".into()),
             true,
-            "ljos cloud up".into(),
-            true,
+            cursor_mcp_advice(),
+            HomeExpand::Shell,
         );
         push(
             home.join(".claude.json"),
             McpProbe::Json("/mcpServers/ljos".into()),
             false,
             "ljos onboard --harness claude".into(),
-            true,
+            HomeExpand::Shell,
         );
     }
     for harness in harness_shapes() {
         let advice = format!("ljos onboard --harness {}", harness.name);
-        let expands_home = harness.name != "codex";
+        let home = match harness.name.as_str() {
+            "codex" => HomeExpand::Literal,
+            "opencode" | "opencode-v2" => HomeExpand::Opencode,
+            _ => HomeExpand::Shell,
+        };
         if let (Some(config), Some(pointer)) = (&harness.config_json, &harness.json_pointer) {
             if !pointer.is_empty() {
                 push(
@@ -497,7 +540,7 @@ fn mcp_files() -> Vec<McpFile> {
                     McpProbe::Json(pointer.clone()),
                     false,
                     advice.clone(),
-                    expands_home,
+                    home,
                 );
             }
         }
@@ -508,7 +551,7 @@ fn mcp_files() -> Vec<McpFile> {
                     McpProbe::Text(marker.clone()),
                     false,
                     advice.clone(),
-                    expands_home,
+                    home,
                 );
             }
         }
@@ -553,7 +596,7 @@ fn command_and_args(entry: &serde_json::Value) -> Option<LaunchSpec> {
         .and_then(serde_json::Value::as_object)
         .and_then(|env| env.get("PATH"))
         .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
+        .map(expand_json_path);
     match entry.get("command").or_else(|| entry.get("cmd"))? {
         serde_json::Value::String(command) => {
             let command = command.trim();
@@ -598,8 +641,7 @@ fn string_list(value: Option<&serde_json::Value>) -> Vec<String> {
 /// The `command` or `cmd` in the section the harness marker names.
 fn read_text_launch(path: &Path, marker: &str) -> Option<LaunchSpec> {
     let text = fs::read_to_string(path).ok()?;
-    let idx = text.find(marker)?;
-    let window: String = text[idx..].lines().take(24).collect::<Vec<_>>().join("\n");
+    let window = entry_text(&text, marker)?;
     let command = keyed_value(&window, "command").or_else(|| keyed_value(&window, "cmd"))?;
     if command.is_empty() {
         None
@@ -612,12 +654,131 @@ fn read_text_launch(path: &Path, marker: &str) -> Option<LaunchSpec> {
     }
 }
 
+/// The marker's own table, including dotted children such as
+/// `[mcp_servers.ljos.env]`. A fixed window runs into the next server,
+/// and `NODE_PATH` used to count as `PATH`.
+fn entry_text(text: &str, marker: &str) -> Option<String> {
+    if !text.contains(marker) {
+        return None;
+    }
+    let header = marker.trim();
+    if header.starts_with('[') && header.ends_with(']') && !header.contains('\n') {
+        return toml_entry(text, header);
+    }
+    yaml_entry(text, marker)
+}
+
+fn toml_entry(text: &str, header: &str) -> Option<String> {
+    let name = header.trim_matches(|c| c == '[' || c == ']').trim();
+    if name.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    let mut keeping = false;
+    let mut seen = false;
+    for line in text.split_inclusive('\n') {
+        if let Some(table) = toml_table_name(line) {
+            keeping = table == name
+                || table
+                    .strip_prefix(name)
+                    .is_some_and(|rest| rest.starts_with('.'));
+            if keeping {
+                seen = true;
+            }
+        }
+        if keeping {
+            out.push_str(line);
+        }
+    }
+    seen.then_some(out)
+}
+
+fn toml_table_name(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    if trimmed.starts_with('#') {
+        return None;
+    }
+    let header = trimmed.split('#').next().unwrap_or(trimmed).trim();
+    let inner = if let Some(rest) = header.strip_prefix("[[") {
+        rest.strip_suffix("]]")?
+    } else if let Some(rest) = header.strip_prefix('[') {
+        let rest = rest.strip_suffix(']')?;
+        if rest.contains('[') {
+            return None;
+        }
+        rest
+    } else {
+        return None;
+    };
+    let name = inner.trim();
+    (!name.is_empty()).then_some(name)
+}
+
+fn yaml_entry(text: &str, marker: &str) -> Option<String> {
+    let found = text.find(marker)?;
+    let start = if marker.starts_with('\n') {
+        found + 1
+    } else {
+        text[..found].rfind('\n').map_or(0, |at| at + 1)
+    };
+    let rest = &text[start..];
+    let mut lines = rest.split_inclusive('\n');
+    let first = lines.next()?;
+    let indent = first.chars().take_while(|c| *c == ' ').count();
+    let mut out = String::new();
+    out.push_str(first);
+    if !first.ends_with('\n') {
+        out.push('\n');
+    }
+    for line in lines {
+        if line.trim().is_empty() {
+            out.push_str(line);
+            continue;
+        }
+        let ind = line.chars().take_while(|c| *c == ' ').count();
+        if ind <= indent {
+            break;
+        }
+        out.push_str(line);
+    }
+    Some(out)
+}
+
+/// `${env:PATH}` and `$PATH` in a JSON `env.PATH`, the same kind of
+/// expansion a command already applies to `${env:HOME}`.
+fn expand_json_path(value: &str) -> String {
+    let path = std::env::var("PATH").unwrap_or_default();
+    replace_dollar_path(&value.replace("${env:PATH}", &path), &path)
+}
+
+fn replace_dollar_path(value: &str, path: &str) -> String {
+    let mut out = String::new();
+    let mut rest = value;
+    while let Some(at) = rest.find("$PATH") {
+        let after = at + "$PATH".len();
+        let boundary = rest[after..].chars().next().is_none_or(|c| !is_key_char(c));
+        out.push_str(&rest[..at]);
+        if boundary {
+            out.push_str(path);
+        } else {
+            out.push_str("$PATH");
+        }
+        rest = &rest[after..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn is_key_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
 fn keyed_value(window: &str, key: &str) -> Option<String> {
     let mut rest = window;
     while let Some(at) = rest.find(key) {
-        let before = at == 0 || !rest.as_bytes()[at - 1].is_ascii_alphanumeric();
+        let before = at == 0 || !is_key_byte(rest.as_bytes()[at - 1]);
         let after_idx = at + key.len();
-        let after = after_idx >= rest.len() || !rest.as_bytes()[after_idx].is_ascii_alphanumeric();
+        let after = after_idx >= rest.len() || !is_key_byte(rest.as_bytes()[after_idx]);
         if before && after {
             let tail = rest[after_idx..].trim_start();
             if let Some(value) = tail.strip_prefix('=').or_else(|| tail.strip_prefix(':')) {
@@ -630,6 +791,10 @@ fn keyed_value(window: &str, key: &str) -> Option<String> {
         rest = &rest[after_idx..];
     }
     None
+}
+
+fn is_key_byte(b: u8) -> bool {
+    is_key_char(char::from(b))
 }
 
 fn parse_scalar(rest: &str) -> String {
@@ -651,12 +816,41 @@ fn parse_scalar(rest: &str) -> String {
     }
 }
 
-/// `$HOME`, `${HOME}`, `${env:HOME}`, `${userHome}` and a leading `~/` are
-/// the home directory at launch when the client expands them.
-fn expand_launch(command: &str, expands_home: bool) -> String {
-    if !expands_home {
-        return command.to_string();
+/// Substitute the home tokens this harness actually expands.
+fn expand_launch(command: &str, home: HomeExpand) -> String {
+    match home {
+        HomeExpand::Literal => command.to_string(),
+        HomeExpand::Opencode => expand_opencode_home(command),
+        HomeExpand::Shell => expand_shell_home(command),
     }
+}
+
+/// OpenCode substitutes `{env:HOME}` only. `$HOME`, `${HOME}`, `~/` and
+/// `${env:HOME}` stay text: the docs say shell expressions are not expanded.
+fn expand_opencode_home(command: &str) -> String {
+    let Ok(home) = crate::home() else {
+        return command.to_string();
+    };
+    let home = home.display().to_string();
+    let token = "{env:HOME}";
+    let mut out = String::new();
+    let mut rest = command;
+    while let Some(at) = rest.find(token) {
+        let shell_form = at > 0 && rest.as_bytes()[at - 1] == b'$';
+        if shell_form {
+            out.push_str(&rest[..at + token.len()]);
+        } else {
+            out.push_str(&rest[..at]);
+            out.push_str(&home);
+        }
+        rest = &rest[at + token.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `$HOME`, `${HOME}`, `${env:HOME}`, `${userHome}` and a leading `~/`.
+fn expand_shell_home(command: &str) -> String {
     let Ok(home) = crate::home() else {
         return command.to_string();
     };
@@ -677,7 +871,7 @@ fn expand_launch(command: &str, expands_home: bool) -> String {
 }
 
 fn launch_check(file: &McpFile, launch: &LaunchSpec) -> LaunchCheck {
-    let command = expand_launch(&launch.command, file.expands_home);
+    let command = expand_launch(&launch.command, file.home);
     let found_path = command_path(&command, launch.env_path.as_deref());
     let search_path = launch.env_path.as_deref();
     let shell_path = if search_path.is_none() {
@@ -935,6 +1129,173 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(hash.to_ascii_lowercase())
 }
 
+/// `packset-embed` and the ONNX Runtime it links, from this version's
+/// release, on a cloud VM only. Elsewhere the encoder is built from source.
+/// A release without them leaves search lexical. Both sums are checked
+/// before either archive is unpacked.
+fn ensure_encoder(bin_dir: &Path, force: bool) -> Result<String> {
+    if !cloud_vm() {
+        return Ok("encoder: not a cloud VM, so packset-embed is not downloaded".into());
+    }
+    let Some(target) = encoder_target() else {
+        return Ok(format!(
+            "encoder: no release build of packset-embed for {}-{}; search stays lexical",
+            std::env::consts::ARCH,
+            std::env::consts::OS
+        ));
+    };
+    let lib = bin_dir
+        .parent()
+        .context("cloud up: the binary directory has no parent for lib/")?
+        .join(ENCODER_LIB);
+    let bin = bin_dir.join("packset-embed");
+    if !force && executable(&bin) && lib.join(ENCODER_SONAME).is_file() {
+        return Ok(format!(
+            "encoder: packset-embed already in {}",
+            bin_dir.display()
+        ));
+    }
+    let parent = lib.parent().context("cloud up: no lib directory")?;
+    let stage = parent.join(format!(".onnxruntime-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&stage);
+    fs::create_dir_all(&stage).with_context(|| format!("create {}", stage.display()))?;
+    let said = install_encoder(&stage, target, bin_dir, &lib);
+    let _ = fs::remove_dir_all(&stage);
+    said
+}
+
+fn install_encoder(stage: &Path, target: &str, bin_dir: &Path, lib: &Path) -> Result<String> {
+    let mut archives = Vec::new();
+    for base in ENCODER_ARCHIVES {
+        let name = format!("{base}-{target}.tar.gz");
+        let file = stage.join(&name);
+        let sums = stage.join(format!("{name}.sha256"));
+        match release_asset(&name, &file) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(format!(
+                    "encoder: {} has no {name}; search stays lexical",
+                    release_source()
+                ))
+            }
+            Err(e) => return Ok(format!("encoder: {e}; search stays lexical")),
+        }
+        match release_asset(&format!("{name}.sha256"), &sums) {
+            Ok(true) => {}
+            Ok(false) => bail!("{name} has no published checksum; nothing was installed"),
+            Err(e) => return Ok(format!("encoder: {e}; nothing was installed")),
+        }
+        let want = crate::upgrade::digest_of(&fs::read_to_string(&sums)?).with_context(|| {
+            format!("{name}.sha256 is not a sha256 line; nothing was installed")
+        })?;
+        let got = sha256_file(&file)?;
+        if got != want {
+            bail!(
+                "{name}: checksum mismatch (published {want}, file {got}); nothing was installed"
+            );
+        }
+        archives.push(file);
+    }
+    let tree = stage.join("tree");
+    fs::create_dir_all(&tree)?;
+    for file in &archives {
+        let out = Command::new("tar")
+            .arg("-xzf")
+            .arg(file)
+            .arg("-C")
+            .arg(&tree)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .context("tar")?;
+        if !out.status.success() {
+            bail!(
+                "tar {}: {}; nothing was installed",
+                file.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    }
+    let new_lib = tree.join(ENCODER_LIB);
+    let new_bin = tree.join("bin/packset-embed");
+    if !new_lib.join(ENCODER_SONAME).is_file() || !new_bin.is_file() {
+        bail!("the encoder archives lack bin/packset-embed or {ENCODER_LIB}/{ENCODER_SONAME}; nothing was installed");
+    }
+    // A running encoder keeps the files it opened; the new ones are renamed in.
+    let old = stage.join("old");
+    if lib.exists() {
+        fs::rename(lib, &old).with_context(|| format!("move {} aside", lib.display()))?;
+    }
+    if let Err(e) = fs::rename(&new_lib, lib) {
+        let _ = fs::rename(&old, lib);
+        return Err(e).with_context(|| format!("install {}", lib.display()));
+    }
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&new_bin, fs::Permissions::from_mode(0o755))?;
+    fs::create_dir_all(bin_dir)?;
+    let bin = bin_dir.join("packset-embed");
+    fs::rename(&new_bin, &bin).with_context(|| format!("install {}", bin.display()))?;
+    Ok(format!(
+        "encoder: installed {} and ONNX Runtime in {} (checksums match)",
+        bin.display(),
+        lib.display()
+    ))
+}
+
+/// A cloud VM. A CI job is not one, and the box and a laptop build
+/// packset-embed from source.
+fn cloud_vm() -> bool {
+    if github_actions() {
+        return false;
+    }
+    nonempty_var("CURSOR_AGENT_ID").is_some()
+        || nonempty_var("CLOUD_AGENT_ID").is_some()
+        || Path::new("/run/cursor/api.sock").exists()
+}
+
+fn encoder_target() -> Option<&'static str> {
+    match (std::env::consts::ARCH, std::env::consts::OS) {
+        ("x86_64", "linux") => Some("x86_64-unknown-linux-gnu"),
+        _ => None,
+    }
+}
+
+fn release_source() -> String {
+    match std::env::var_os("LJOS_RELEASE_DIR").filter(|p| !p.is_empty()) {
+        Some(dir) => Path::new(&dir).display().to_string(),
+        None => format!("release v{}", env!("CARGO_PKG_VERSION")),
+    }
+}
+
+/// An asset of this version's release into `to`, from `LJOS_RELEASE_DIR`
+/// when it is set. `Ok(false)` when the release has no such asset.
+fn release_asset(name: &str, to: &Path) -> Result<bool> {
+    if let Some(dir) = std::env::var_os("LJOS_RELEASE_DIR").filter(|p| !p.is_empty()) {
+        let src = Path::new(&dir).join(name);
+        if !src.is_file() {
+            return Ok(false);
+        }
+        fs::copy(&src, to).with_context(|| format!("copy {}", src.display()))?;
+        return Ok(true);
+    }
+    let url = format!(
+        "https://github.com/{}/releases/download/v{}/{name}",
+        crate::upgrade::RELEASE_REPO,
+        env!("CARGO_PKG_VERSION")
+    );
+    let resp = match ureq::get(&url).timeout(Duration::from_secs(300)).call() {
+        Ok(resp) => resp,
+        Err(ureq::Error::Status(404, _)) => return Ok(false),
+        Err(e) => bail!("{url}: {e}"),
+    };
+    let mut file = fs::File::create(to).with_context(|| format!("write {}", to.display()))?;
+    std::io::copy(
+        &mut std::io::Read::take(resp.into_reader(), 512 * 1024 * 1024),
+        &mut file,
+    )
+    .with_context(|| format!("read {url}"))?;
+    Ok(true)
+}
+
 fn run_installer(bin_dir: &Path) -> Result<()> {
     let script = installer_script()?;
     let mut cmd = Command::new("sh");
@@ -1107,6 +1468,7 @@ fn is_work_tree(dir: &Path) -> bool {
 fn write_mcp(
     home: &Path,
     server: &Path,
+    plan: &crate::ServerCommandPlan,
     seat: &str,
     key: &Path,
     tracker: Option<&Path>,
@@ -1145,20 +1507,33 @@ fn write_mcp(
     if let Some(remote) = remote {
         env.insert("LJOS_TRACKER_REMOTE".into(), serde_json::json!(remote));
     }
+    let command = plan.command.as_str();
     let entry = serde_json::json!({
         "type": "stdio",
-        "command": crate::MCP_SERVER_COMMAND,
+        "command": command,
         "args": [],
         "env": env,
     });
     let path = home.join(".cursor/mcp.json");
     crate::set_json_entry(&path, "/mcpServers/ljos", &entry)?;
-    Ok(format!(
-        "mcp: {} starts {} on PATH ({})",
-        path.display(),
-        crate::MCP_SERVER_COMMAND,
-        server.display()
-    ))
+    let mut line = if command == crate::MCP_SERVER_COMMAND {
+        format!(
+            "mcp: {} starts {command} on PATH ({})",
+            path.display(),
+            server.display()
+        )
+    } else {
+        format!(
+            "mcp: {} starts {command} ({})",
+            path.display(),
+            server.display()
+        )
+    };
+    if let Some(note) = &plan.note {
+        line.push_str("; ");
+        line.push_str(note);
+    }
+    Ok(line)
 }
 
 fn write_env(path: &Path, pairs: &[(&str, String)]) -> Result<()> {
@@ -1302,7 +1677,15 @@ fn ensure_profile(home: &Path, bin_dir: &Path) -> Result<String> {
     Ok(notes.join("; "))
 }
 
-fn ensure_cloud_guard_rules() -> Result<String> {
+/// Whether this machine is a cloud seat: `ljos cloud up` wrote the guard
+/// file, and the file still holds the refusals that command writes. A box
+/// that never ran it has no such file, so finish exports no deeds.
+#[must_use]
+pub(crate) fn cloud_seat() -> bool {
+    cloud_guard_rules_path().is_some_and(|path| crate::kept_rules(&path) == cloud_guard_rules())
+}
+
+pub(crate) fn ensure_cloud_guard_rules() -> Result<String> {
     let path =
         cloud_guard_rules_path().context("cloud up: no config home for cloud guard rules")?;
     let wanted = cloud_guard_rules();
@@ -1606,17 +1989,47 @@ fn path_export_line(bin_dir: &Path) -> String {
 }
 
 fn first_interactive_guard(text: &str) -> Option<usize> {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
     let mut at = 0usize;
-    for line in text.split_inclusive('\n') {
+    for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        let guard =
+        let one_line =
             (trimmed.contains("$PS1") || trimmed.contains("$-")) && trimmed.contains("return");
-        if guard {
+        // Ubuntu's skel bashrc splits the test and the return:
+        // `case $- in` / `*i*) ;;` / `*) return;;` / `esac`.
+        // A one-line search appends PATH after that return, so a
+        // non-interactive shell never sees it.
+        if one_line || (case_tests_shell(trimmed) && case_body_returns(&lines[i + 1..])) {
             return Some(at);
         }
         at += line.len();
     }
     None
+}
+
+/// `case $- in` or `case "$PS1" in`, the interactive test on its own line.
+fn case_tests_shell(trimmed: &str) -> bool {
+    let Some(rest) = trimmed.strip_prefix("case") else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    let word = rest.split_whitespace().next().unwrap_or("");
+    let word = word.trim_matches(|c| c == '"' || c == '\'');
+    word == "$-" || word == "$PS1"
+}
+
+/// Whether this `case` returns before `esac`. A `case "$TERM"` does not.
+fn case_body_returns(lines: &[&str]) -> bool {
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with("esac") {
+            return false;
+        }
+        if trimmed.contains("return") {
+            return true;
+        }
+    }
+    false
 }
 
 fn ensure_path_file(path: &Path, bin_dir: &Path, before_interactive_guard: bool) -> Result<String> {
@@ -1663,18 +2076,38 @@ fn ensure_path_file(path: &Path, bin_dir: &Path, before_interactive_guard: bool)
     ))
 }
 
-/// Prepend `bin_dir` to this process's PATH when it is not already there.
+/// True when `bin_dir` is on PATH and some other directory comes first.
+/// `which` would then run that earlier copy.
+fn bin_dir_later_on_path(bin_dir: &Path) -> bool {
+    let dir = bin_dir.display().to_string();
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut saw_other = false;
+    for entry in current.split(':').filter(|entry| !entry.is_empty()) {
+        if entry == dir {
+            return saw_other;
+        }
+        saw_other = true;
+    }
+    false
+}
+
+/// Put `bin_dir` first on this process's PATH and drop a later copy.
+/// Presence is not enough: an earlier directory hides this install.
 fn ensure_process_path(bin_dir: &Path) -> String {
     let dir = bin_dir.display().to_string();
     let current = std::env::var("PATH").unwrap_or_default();
-    if current.split(':').any(|entry| entry == dir) {
-        return format!("path: PATH already names {dir}");
+    let entries: Vec<&str> = current
+        .split(':')
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    if entries.first() == Some(&dir.as_str()) {
+        return format!("path: PATH already starts with {dir}");
     }
-    let next = if current.is_empty() {
-        dir.clone()
-    } else {
-        format!("{dir}:{current}")
-    };
+    let mut next = dir.clone();
+    for entry in entries.into_iter().filter(|entry| *entry != dir) {
+        next.push(':');
+        next.push_str(entry);
+    }
     crate::with_env_mutation(|| std::env::set_var("PATH", &next));
     format!("path: PATH starts with {dir}")
 }
@@ -1791,6 +2224,61 @@ fn env_file_value(key: &str) -> Option<String> {
     None
 }
 
+/// `ljos cloud up` on a cloud VM, codespace, or CI job. A desktop Cursor
+/// file is onboarded with the cursor harness; the api socket on a cloud
+/// image is not enough, because doctor is often aimed at another home.
+fn cursor_mcp_advice() -> String {
+    if on_cloud_vm() {
+        "ljos cloud up".into()
+    } else {
+        "ljos onboard --harness cursor".into()
+    }
+}
+
+fn on_cloud_vm() -> bool {
+    if agent_id().is_some() {
+        return true;
+    }
+    match harness_kind() {
+        "codespace" | "ci" => return true,
+        "cursor" if cursor_agent_env() => return true,
+        _ => {}
+    }
+    // harness_kind answers "cursor" when /run/cursor/api.sock exists, and
+    // that hides CI. The variables themselves are still this job.
+    if std::env::var_os("GITHUB_ACTIONS").is_some()
+        || std::env::var_os("GITLAB_CI").is_some()
+        || std::env::var_os("CODESPACES").is_some()
+        || std::env::var_os("CODESPACE_NAME").is_some()
+    {
+        return true;
+    }
+    cloud_env_file_seat()
+}
+
+fn cursor_agent_env() -> bool {
+    [
+        "CURSOR_AGENT",
+        "CURSOR_AGENT_SOCKET",
+        "CURSOR_CONVERSATION_ID",
+        "CURSOR_AGENT_ID",
+        "CLOUD_AGENT_ID",
+    ]
+    .iter()
+    .any(|key| std::env::var_os(key).is_some())
+}
+
+/// `cloud up` records `cursor-ID`, `ci-ID`, or `codespace-ID` in the env
+/// file. A later shell without the agent variables still is that VM.
+fn cloud_env_file_seat() -> bool {
+    let Some(seat) = env_file_value("LJOS_SEAT") else {
+        return false;
+    };
+    ["cursor-", "ci-", "codespace-"]
+        .iter()
+        .any(|prefix| seat.starts_with(prefix))
+}
+
 fn nonempty_var(key: &str) -> Option<String> {
     std::env::var(key)
         .ok()
@@ -1801,10 +2289,7 @@ fn nonempty_var(key: &str) -> Option<String> {
 fn agent_id() -> Option<String> {
     // A GitHub Actions job is one run, including when a cloud-agent id is
     // also present in the environment. The run id is the suffix.
-    if std::env::var("GITHUB_ACTIONS").ok().is_some_and(|v| {
-        let v = v.trim();
-        !v.is_empty() && !matches!(v, "0" | "false")
-    }) {
+    if github_actions() {
         if let Some(id) = id_slug("GITHUB_RUN_ID") {
             return Some(id);
         }
@@ -1823,6 +2308,13 @@ fn agent_id() -> Option<String> {
         }
     }
     None
+}
+
+fn github_actions() -> bool {
+    std::env::var("GITHUB_ACTIONS").ok().is_some_and(|v| {
+        let v = v.trim();
+        !v.is_empty() && !matches!(v, "0" | "false")
+    })
 }
 
 fn id_slug(key: &str) -> Option<String> {

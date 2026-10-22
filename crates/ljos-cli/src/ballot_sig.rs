@@ -227,6 +227,24 @@ pub fn weak_key(key_hex: &str) -> bool {
     VerifyingKey::from_bytes(&key).is_ok_and(|key| key.is_weak())
 }
 
+/// One name per signing key, for counting keys: the key with its
+/// small-order part cleared, in lower-case hex. Strict verification
+/// refuses a small-order key but not a key with a small-order part, so
+/// one secret signs under eight public keys that differ only there, and
+/// under either case of hex digit. A string that is not a key is its hex
+/// in lower case.
+#[must_use]
+pub fn key_fingerprint(key_hex: &str) -> String {
+    let key = hex::decode(key_hex)
+        .ok()
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+        .and_then(|bytes| VerifyingKey::from_bytes(&bytes).ok());
+    match key {
+        Some(key) => hex::encode(key.to_edwards().mul_by_cofactor().compress().to_bytes()),
+        None => key_hex.to_ascii_lowercase(),
+    }
+}
+
 /// Public key and signature, both lower-case hex, for `message` under `key`.
 #[must_use]
 pub fn signed_hex(key: &SigningKey, message: &[u8]) -> (String, String) {
