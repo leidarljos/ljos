@@ -1429,6 +1429,7 @@ fn commit_host(
     host: &str,
     deadline: std::time::Instant,
 ) -> Result<bool> {
+    crate::refuse_ljos_checkout(root).map_err(|why| anyhow::anyhow!("sync: user rules: {why}"))?;
     let held = held_by(root, deadline)?;
     let paths: Vec<&str> = rels.iter().map(String::as_str).collect();
     let mut add = vec!["add", "-A", "--"];
@@ -2215,8 +2216,58 @@ mod tests {
     #[test]
     fn an_adopt_names_a_missing_scope() {
         let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tracker");
+        std::fs::create_dir_all(&root).unwrap();
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(config.join("ljos")).unwrap();
+        let listed = root.display().to_string();
+        assert!(
+            !listed.contains('"'),
+            "the temporary path is not a toml string"
+        );
+        std::fs::write(
+            config.join("ljos/sync.toml"),
+            format!("repos = [\"{listed}\"]\n"),
+        )
+        .unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &config);
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let head = git(&source, &["rev-parse", "HEAD"]).unwrap();
         let said = adopt("otherhost").unwrap();
+        let again = git(&source, &["rev-parse", "HEAD"]).unwrap();
         assert!(said.contains("names no scope"), "{said}");
+        assert!(
+            !said.contains("ljos checkout"),
+            "adopt fell back to the source tree: {said}"
+        );
+        assert_eq!(
+            head.stdout, again.stdout,
+            "adopt committed the ljos checkout"
+        );
+        assert!(!source.join(".gitattributes").exists());
+    }
+
+    /// The suite's working directory is inside the ljos checkout. A tracker
+    /// root that falls back there must not commit, and must not write the
+    /// attributes file the stray commit `3df31c6` added.
+    #[test]
+    fn a_test_cannot_commit_the_ljos_checkout() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let head = git(&root, &["rev-parse", "HEAD"]).unwrap();
+        assert!(head.status.success());
+        let err = crate::tracker_push::prepare_tracker(&root, false, true).unwrap_err();
+        assert!(err.contains("ljos checkout"), "{err}");
+        assert!(
+            !root.join(".gitattributes").exists(),
+            "prepare_tracker wrote attributes into the crate"
+        );
+        match crate::commit_paths(&root, &["Cargo.toml"], "do not commit the checkout") {
+            crate::PathCommit::Refused(why) => assert!(why.contains("ljos checkout"), "{why}"),
+            other => panic!("commit was not refused: {other:?}"),
+        }
+        let again = git(&root, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(head.stdout, again.stdout);
     }
 
     #[test]

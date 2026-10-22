@@ -714,6 +714,9 @@ fn first_line(text: &str) -> String {
 /// `git init` failed, the attributes could not be written, or the
 /// attributes commit was refused.
 pub(crate) fn prepare_tracker(root: &Path, init: bool, commit: bool) -> Result<(), String> {
+    // Before any write. A test whose tracker root falls back to the crate
+    // directory used to commit `.gitattributes` into the ljos checkout.
+    crate::refuse_ljos_checkout(root)?;
     if !is_work_tree(root) {
         if !init {
             return Ok(());
@@ -1034,6 +1037,7 @@ fn is_this_host_atoms(rel: &str) -> bool {
 }
 
 fn merge_onto(dir: &Path, onto: &str) -> Result<(), String> {
+    crate::refuse_ljos_checkout(dir)?;
     let started = git(dir, &["merge", "-q", "--no-commit", "--no-edit", onto]);
     let stopped = merge_in_progress(dir) || has_unmerged(dir);
     if !started.status.success() && !stopped {
@@ -1066,6 +1070,7 @@ fn merge_onto(dir: &Path, onto: &str) -> Result<(), String> {
 }
 
 fn fold_orgs(dir: &Path) -> Result<(), String> {
+    crate::refuse_ljos_checkout(dir)?;
     let mut changed = Vec::new();
     for file in tracked(dir, "*.org") {
         let path = dir.join(&file);

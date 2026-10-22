@@ -25842,6 +25842,61 @@ pub enum PathCommit {
     Refused(String),
 }
 
+/// Refuse to commit into the checkout that holds this crate.
+///
+/// `cargo test` runs with the package directory as its working directory.
+/// A tracker root that falls back there makes `prepare_tracker` commit
+/// `.gitattributes` into the ljos history. That is how `3df31c6` appeared.
+/// The check is on in tests only: a seat that really uses this checkout
+/// as its tracker is a person, and this function does not second-guess one.
+pub(crate) fn refuse_ljos_checkout(root: &Path) -> Result<(), String> {
+    #[cfg(test)]
+    if ljos_source_checkout(root) {
+        return Err(format!(
+            "refusing to commit into the ljos checkout at {}; a test uses a temporary tracker",
+            root.display()
+        ));
+    }
+    let _ = root;
+    Ok(())
+}
+
+/// Whether `root` is the git checkout that contains this crate.
+#[cfg(test)]
+fn ljos_source_checkout(root: &Path) -> bool {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let Some(source) = git_toplevel(&manifest) else {
+        return false;
+    };
+    match git_toplevel(root) {
+        Some(top) => same_dir(&source, &top),
+        None => same_dir(&source, root),
+    }
+}
+
+#[cfg(test)]
+fn git_toplevel(start: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(start)
+        .args(["rev-parse", "--show-toplevel"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    (!path.as_os_str().is_empty() && path.is_dir()).then_some(path)
+}
+
+#[cfg(test)]
+fn same_dir(a: &Path, b: &Path) -> bool {
+    let canon = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    canon(a) == canon(b)
+}
+
 /// Stage `paths` and commit them alone (`--only`) in the checkout at
 /// `dir`, so another seat's staged work is left out. The caller holds
 /// [`tracker_commit_lock`]. A git process outside ljos that holds the
@@ -25851,6 +25906,9 @@ pub enum PathCommit {
 /// for a file git never took in reports a pathspec error that hides why
 /// the add failed. An untracked file is added here, that file only.
 pub fn commit_paths(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
+    if let Err(why) = refuse_ljos_checkout(dir) {
+        return PathCommit::Refused(why);
+    }
     let git = |head: &[&str]| {
         let mut cmd = std::process::Command::new("git");
         cmd.arg("-C")
