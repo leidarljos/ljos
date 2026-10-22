@@ -471,6 +471,45 @@ fn a_raise_cut_off_after_the_retirement_is_finished_later() {
     assert_eq!(basis(live[0]), Some("person"), "{}", live[0]);
 }
 
+/// Another live record making the same claim would answer the copy once
+/// the original is gone, so the raise is refused with nothing retired.
+#[test]
+fn a_raise_another_record_would_answer_retires_nothing() {
+    let daemon = Daemon::start();
+    let seat = Seat::on(&daemon);
+    let preference = daemon.legacy("preference", PREFERENCE);
+    let other = daemon.post(
+        "/v1/atoms",
+        &json!({
+            "schema": "inside.atom/v1",
+            "workspace": "seat",
+            "kind": "preference",
+            "level": "derived",
+            "origin": "agent-derived",
+            "text": "Keep the release notes somewhere.",
+            "entities": ["seat:claude"],
+            "source": {"via": "ljos", "basis": "agent"},
+        }),
+    );
+    daemon.post(
+        "/v1/atoms/update",
+        &json!({"workspace": "seat", "id": other["id"], "fields": {"text": PREFERENCE}}),
+    );
+    let before = daemon.atoms();
+
+    let out = reviewed(&seat);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("will not try again"), "{}", text_of(&out));
+    assert_eq!(daemon.atoms(), before, "{}", text_of(&out));
+    let marks = seat.markers();
+    assert_eq!(marks.len(), 1, "{marks:?}");
+    let written = std::fs::read_to_string(&marks[0]).unwrap();
+    assert!(
+        written.contains(preference["id"].as_str().unwrap()),
+        "{written}"
+    );
+}
+
 /// A record the pack will not take back is left as it was, said once on
 /// stderr and written down, and the next run does not send it again. The
 /// other older preference is still raised.
