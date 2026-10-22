@@ -10105,7 +10105,10 @@ pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<(Vec<Hit>, bool)>
 /// with no half-life, and echoes the rank. An older writer cuts its
 /// fused list, which decays with age, so rank 21 of a pack full of fresh
 /// lookalikes never arrives: the stored atoms that best match the cue
-/// then follow its hits, so a relevant old memory still gets in.
+/// then follow its hits, so a relevant old memory still gets in. So they
+/// do when a relevance cut comes back full, since the pack does not read
+/// the alias groups: to it `pnpm` does not match `npm`, and twenty-four
+/// lookalikes tie the lesson that says it.
 fn search_relevant(
     client: &PacksetClient,
     cue: &str,
@@ -10129,7 +10132,7 @@ fn search_relevant(
         .context("search: GET /v1/search failed")?
         .into_json()?;
     let chosen = body["hits"].as_array().map_or(0, Vec::len);
-    if body["rank"].as_str() != Some("relevance") {
+    if body["rank"].as_str() != Some("relevance") || chosen >= limit as usize {
         let have: std::collections::HashSet<String> = body["hits"]
             .as_array()
             .into_iter()
