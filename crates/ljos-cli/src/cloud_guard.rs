@@ -298,6 +298,9 @@ struct Push {
     /// `--all`, `--branches`, `--mirror`, `--tags` and `--follow-tags`,
     /// which push local refs the words do not name.
     bulk: Vec<String>,
+    /// `--prune`, which deletes remote refs with no local counterpart under
+    /// its destination patterns.
+    prune: bool,
 }
 
 impl Push {
@@ -307,6 +310,7 @@ impl Push {
             words: Vec::new(),
             repo: None,
             bulk: Vec::new(),
+            prune: false,
         };
         let mut it = args.iter();
         while let Some(word) = it.next() {
@@ -319,6 +323,8 @@ impl Push {
                 push.repo = it.next().cloned();
             } else if let Some(value) = word.strip_prefix("--repo=") {
                 push.repo = Some(value.to_string());
+            } else if word == "--prune" {
+                push.prune = true;
             } else if crate::PUSH_VALUED.contains(&word) || short_cluster_takes_value(word) {
                 it.next();
             } else if matches!(
@@ -345,6 +351,9 @@ impl Push {
                 return Some(why);
             }
         }
+        if self.bulk.iter().any(|f| f == "--mirror") {
+            return Some("`--mirror` can delete remote cursor/* branches and tags".into());
+        }
         // git reads the first word as the remote even beside `--repo`, and
         // a writer may mean every word as a refspec; both readings are
         // judged.
@@ -353,6 +362,9 @@ impl Push {
         } else {
             (self.words.first(), self.words.get(1..).unwrap_or(&[]))
         };
+        if self.prune && specs.iter().any(|spec| prune_covers_heads(spec)) {
+            return Some("`--prune` can delete remote cursor/* branches under refs/heads/".into());
+        }
         let mut words = specs.iter();
         while let Some(word) = words.next() {
             let spec = match (word.as_str(), words.clone().next()) {
@@ -383,6 +395,12 @@ fn short_cluster_takes_value(word: &str) -> bool {
     word.strip_prefix('-').is_some_and(|flags| {
         flags.len() > 1 && flags.chars().all(|c| c.is_ascii_alphabetic()) && flags.ends_with('o')
     })
+}
+
+fn prune_covers_heads(spec: &str) -> bool {
+    let spec = spec.strip_prefix('+').unwrap_or(spec);
+    let dst = spec.split_once(':').map(|(_, dst)| dst).unwrap_or(spec);
+    dst.starts_with("refs/heads/") && dst.contains('*')
 }
 
 /// A ref name under `cursor/`, written short or under `refs/heads/` or
