@@ -602,16 +602,6 @@ fn fault_output(event: &str, what: &str) -> String {
     .to_string()
 }
 
-/// The fault text from [`crate::unhealthy_note`], when this context is one.
-fn unhealthy_fault(context: &str) -> Option<String> {
-    let tail = ") and did not judge this call, so it is allowed. No ljos rule would refuse it. Run `ljos doctor`.";
-    let why = context
-        .trim()
-        .strip_prefix("the ljos guard is unhealthy (")?
-        .strip_suffix(tail)?;
-    Some(why.to_string())
-}
-
 /// The command a normalized payload would run, or empty when it has none.
 fn tool_command(normalized: &str) -> String {
     serde_json::from_str::<Value>(normalized.trim())
@@ -660,8 +650,10 @@ fn early_answer(normalized: &str, event: &str) -> Option<String> {
 /// non-zero exit, or no exit within `timeout` is a deny that says how the
 /// guard failed. A prompt keeps the old allow with a note: the person's
 /// turn is not a command. A non-zero exit that still printed a deny or an
-/// ask keeps it. A successful exit that still says the guard was unhealthy
-/// is denied on a tool call too, unless `LJOS_GUARD_FAIL_OPEN=1`.
+/// ask keeps it. A successful exit is that answer, including an allow
+/// that carries the unhealthy-guard sentence: the check already denied
+/// a real fault, and matching the sentence again missed it once a push
+/// warning was joined on.
 #[must_use]
 pub fn run_inner(
     mut cmd: std::process::Command,
@@ -719,16 +711,7 @@ pub fn run_inner(
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default();
     let said = read_answer(&out);
-    if said.decision.is_some() {
-        return out;
-    }
-    if let Some(why) = unhealthy_fault(&said.context) {
-        if !gate_event(event) || crate::guard_fail_open() {
-            return out;
-        }
-        return fault_output(event, &why);
-    }
-    if status.success() {
+    if said.decision.is_some() || status.success() {
         return out;
     }
     let what = match status.code() {
@@ -1482,15 +1465,6 @@ mod tests {
             denies_fault(&fault_output("PreToolUse", why), why);
         }
         denies_fault(&inner("exit 3", 30_000), "exited with status 3");
-        let unhealthy = json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "additionalContext": crate::unhealthy_note("did not answer in time"),
-            }
-        })
-        .to_string();
-        let from_policyd = inner(&format!("printf '%s' '{unhealthy}'"), 30_000);
-        denies_fault(&from_policyd, "did not answer in time");
         let missing = run_inner(
             std::process::Command::new("/nonexistent/ljos"),
             "{}",
@@ -1568,6 +1542,40 @@ mod tests {
         assert!(said.decision.is_none(), "{out}");
         assert!(!out.contains("while checking this command"), "{out}");
         assert!(said.context.contains("unhealthy"), "{out}");
+    }
+
+    /// The relay used to deny a tool call whose answer was the exact
+    /// unhealthy-guard sentence. A push warning joined onto that sentence
+    /// defeated the match, so the same fault was allowed. The check denies
+    /// a real fault itself. An allow that carries the sentence, alone or
+    /// with a warning, stays that allow.
+    #[cfg(unix)]
+    #[test]
+    fn an_unhealthy_note_is_not_a_second_deny() {
+        let _lock = crate::test_env_lock();
+        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
+        let why = "did not answer in time";
+        let exact = json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "additionalContext": crate::unhealthy_note(why),
+            }
+        })
+        .to_string();
+        let merged = json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "additionalContext": format!(
+                    "{}\nthe tip has no passing test record",
+                    crate::unhealthy_note(why)
+                ),
+            }
+        })
+        .to_string();
+        for body in [exact, merged] {
+            let out = inner(&format!("printf '%s' '{body}'"), 30_000);
+            allows_fault(&out, why);
+        }
     }
 
     #[cfg(unix)]
