@@ -2396,23 +2396,25 @@ fn transient_scope() -> bool {
 
 /// Whether this process runs under an agent runner.
 ///
-/// Any one of these is enough. The environment carries a runner's
-/// conversation. A process above this one is a runner, one whose server
-/// left a seat record or one [`runner_names`] lists. Or the chain above
-/// is only shells and wrappers, which is what `setsid`, a double fork,
-/// `script`, a detached tmux and `systemd-run --user --scope` leave, and
-/// the scope still names a runner or is a transient scope: the cgroup on
-/// Linux, the responsible process on macOS. A cleared environment does
-/// not leave that scope. Consent is the person's, so the verbs that
-/// grant it refuse here.
+/// A runner in the process tree, or a scope that still names one when the
+/// chain above is only shells, is enough on its own. That scope is the
+/// cgroup on Linux, including a transient `run-*.scope` from `systemd-run`
+/// or a D-Bus scope, and the responsible process on macOS. A runner
+/// variable ([`runner_mark_set`]) counts only when this is not a person's
+/// terminal: a hook, a pipe, a process with no controlling tty. On a
+/// terminal whose tree and scope show no runner, the variable does not
+/// count. One left over from a runner that started the shell is not a
+/// runner. The same variable with that evidence does count. Consent is
+/// the person's, so the verbs that grant it refuse when this is true.
 #[must_use]
 pub fn under_a_runner() -> bool {
-    if std::env::vars().any(|(k, v)| runner_session_var(&k, &v))
-        || std::env::var_os("CLAUDECODE").is_some()
-    {
+    if runner_scope_or_tree() {
         return true;
     }
-    runner_scope_or_tree()
+    if person_at_terminal() {
+        return false;
+    }
+    runner_mark_set()
 }
 
 /// Variables a runner, or the hook it spawned, leaves on what it starts.
@@ -2431,16 +2433,17 @@ fn runner_mark_set() -> bool {
 
 /// Whether the person is at this process, on positive evidence.
 ///
-/// [`person_at_terminal`] must hold, and [`under_a_runner`] must not. The
-/// runner check reads the cgroup on Linux and the responsible process on
-/// macOS, so a detached runner, `systemd-run --user --scope` and a D-Bus
-/// scope are not the person even when they cleared the environment and
-/// opened a terminal. A runner's variable ([`runner_mark_set`]) hides the
-/// person on its own. Every basis of person a CLI verb decides asks this;
+/// [`person_at_terminal`] must hold, and [`under_a_runner`] must not. A
+/// detached runner, `systemd-run --user --scope` and a D-Bus scope are
+/// not the person even when they cleared the environment and opened a
+/// terminal. A runner variable alone does not hide the person at a
+/// terminal whose tree and scope show no runner. The same variable with
+/// that evidence does, and so does the variable when there is no
+/// terminal. Every basis of person a CLI verb decides asks this;
 /// anything less is the agent's.
 #[must_use]
 pub fn person_present() -> bool {
-    person_at_terminal() && !runner_mark_set() && !under_a_runner()
+    person_at_terminal() && !under_a_runner()
 }
 
 /// One `/proc/PID/stat` row, the fields [`person_at_terminal`] reads.
@@ -47213,6 +47216,34 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(!super::host_lacks_person_check());
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         assert!(super::host_lacks_person_check());
+    }
+
+    /// A runner variable in a real terminal, with no runner in the tree or
+    /// the scope, is the person's shell. The same variable with no
+    /// terminal is a runner: a hook and a pipe have no terminal.
+    #[test]
+    fn a_runner_variable_at_a_terminal_does_not_hide_the_person() {
+        let _g = env_guard();
+        let saved = std::env::var_os("CURSOR_AGENT");
+        unsafe { std::env::set_var("CURSOR_AGENT", "1") };
+        super::PERSON_AT_TERMINAL.with(|p| p.set(true));
+        let at_terminal = (super::under_a_runner(), super::person_present());
+        super::PERSON_AT_TERMINAL.with(|p| p.set(false));
+        let no_terminal = (super::under_a_runner(), super::person_present());
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("CURSOR_AGENT", value),
+                None => std::env::remove_var("CURSOR_AGENT"),
+            }
+        }
+        assert!(
+            !at_terminal.0 && at_terminal.1,
+            "a variable alone hid the person at a terminal: {at_terminal:?}"
+        );
+        assert!(
+            no_terminal.0 && !no_terminal.1,
+            "a variable with no terminal was not a runner: {no_terminal:?}"
+        );
     }
 
     /// The test process is not a detached shell, so a runner-shaped cgroup
