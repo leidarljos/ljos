@@ -2263,6 +2263,10 @@ enum Install {
 }
 
 fn install_identity(path: &Path, text: &str) -> Result<Install> {
+    // A symlink anywhere in the path would make the read, the chmod, and
+    // the replace land in the directory the link points at. The final
+    // component is still refused below; this catches a parent.
+    refuse_symlink_parent(path)?;
     // Follow a symlink and the identity would be written into the target,
     // or the target's mode would change. A link is left to write_private,
     // which refuses it.
@@ -2288,13 +2292,113 @@ fn file_mode(path: &Path) -> Option<u32> {
         .map(|meta| meta.permissions().mode() & 0o777)
 }
 
-fn set_mode_0600(path: &Path) -> Result<()> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let file = fs::OpenOptions::new()
+/// True when a parent of `path` is a symlink. The final component is not
+/// looked at. Missing parents are not links.
+fn ancestor_is_symlink(path: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let mut walked = PathBuf::new();
+    for component in parent.components() {
+        match component {
+            std::path::Component::RootDir => walked.push(component),
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(name) => {
+                walked.push(name);
+                if fs::symlink_metadata(&walked).is_ok_and(|meta| meta.file_type().is_symlink()) {
+                    return true;
+                }
+            }
+            _ => return true,
+        }
+    }
+    false
+}
+
+fn refuse_symlink_parent(path: &Path) -> Result<()> {
+    if ancestor_is_symlink(path) {
+        bail!(
+            "cloud up: {} is reached through a symlink, so the scope cloud identity was not written",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Open `path` by walking from `/` with `O_NOFOLLOW`, so a symlink in any
+/// component is not followed. The returned fd is the last component.
+fn open_nofollow(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    let absolute;
+    let path = if path.is_absolute() {
+        path
+    } else {
+        absolute = std::env::current_dir()?.join(path);
+        absolute.as_path()
+    };
+    let mut names = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::RootDir | std::path::Component::CurDir => {}
+            std::path::Component::Normal(name) => names.push(name),
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "path is not direct",
+                ));
+            }
+        }
+    }
+    let mut current = fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .with_context(|| format!("mode 0600 {}", path.display()))?;
+        .custom_flags(libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open("/")?;
+    for (index, name) in names.iter().enumerate() {
+        let last = index + 1 == names.len();
+        let mut bytes = name.as_bytes().to_vec();
+        if bytes.contains(&0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "nul in path",
+            ));
+        }
+        bytes.push(0);
+        let mut flags = libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_RDONLY;
+        if !last {
+            flags |= libc::O_DIRECTORY;
+        }
+        // SAFETY: current is an open directory fd. The name is a NUL-terminated
+        // byte string with no interior NUL. openat returns a new fd or -1.
+        let fd = unsafe { libc::openat(current.as_raw_fd(), bytes.as_ptr().cast(), flags) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: fd is newly created, not shared, and was opened with O_CLOEXEC.
+        current = unsafe { fs::File::from_raw_fd(fd) };
+    }
+    Ok(current)
+}
+
+fn set_mode_0600(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    // Linux returns ENOTDIR, not ELOOP, when O_DIRECTORY meets a symlink
+    // parent. Name that before opening so the chmod is not the probe.
+    let linked = ancestor_is_symlink(path)
+        || fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink());
+    if linked {
+        bail!("mode 0600 {}: path is a symlink", path.display());
+    }
+    let file = match open_nofollow(path) {
+        Ok(file) => file,
+        Err(err) if matches!(err.raw_os_error(), Some(libc::ELOOP) | Some(libc::ENOTDIR)) => {
+            bail!("mode 0600 {}: path is a symlink", path.display());
+        }
+        Err(err) => {
+            return Err(err).with_context(|| format!("mode 0600 {}", path.display()));
+        }
+    };
     if !file.metadata().is_ok_and(|meta| meta.file_type().is_file()) {
         bail!("mode 0600 {}: target is not a file", path.display());
     }
@@ -2309,6 +2413,7 @@ fn set_mode_0600(path: &Path) -> Result<()> {
 /// through, so no other user can read the identity even for a moment.
 fn write_private(path: &Path, text: &str) -> Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    refuse_symlink_parent(path)?;
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
@@ -3099,6 +3204,62 @@ mod tests {
             fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
             0o644,
             "a swapped symlink changed another file's mode"
+        );
+    }
+
+    /// O_NOFOLLOW on the last component still follows a symlink parent, so
+    /// chmod would change the file in the directory the link points at.
+    #[test]
+    fn mode_fix_refuses_a_symlink_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let path = real.join("cloud.age");
+        fs::write(&path, SECRET).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let via_dir = dir.path().join("via");
+        std::os::unix::fs::symlink(&real, &via_dir).unwrap();
+        let via = via_dir.join("cloud.age");
+
+        let err = set_mode_0600(&via).unwrap_err();
+        assert!(err.to_string().contains("symlink"), "{err}");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "a parent symlink changed the target's mode"
+        );
+
+        let err = match install_identity(&via, SECRET) {
+            Err(err) => err,
+            Ok(_) => panic!("parent symlink was accepted"),
+        };
+        assert!(err.to_string().contains("symlink"), "{err}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), SECRET);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        let err = match install_identity(&via, "AGE-SECRET-KEY-1OTHER\n") {
+            Err(err) => err,
+            Ok(_) => panic!("parent symlink was written through"),
+        };
+        assert!(err.to_string().contains("symlink"), "{err}");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            SECRET,
+            "the identity was written through the parent symlink"
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        set_mode_0600(&path).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "a direct path is still mode 0600"
         );
     }
 }
