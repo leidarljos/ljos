@@ -169,7 +169,7 @@ pub fn post_kept(client: &PacksetClient, atom: &Value) -> Result<Value> {
 }
 
 fn read_latest() -> BTreeMap<String, Record> {
-    let bytes = std::fs::read(proposals_path()).unwrap_or_default();
+    let bytes = crate::read_state_file(&proposals_path()).unwrap_or_default();
     crate::complete_rows::<Record>(&bytes)
         .into_iter()
         .map(|rec| (rec.id.clone(), rec))
@@ -183,7 +183,7 @@ fn append(rec: &Record) -> Result<()> {
     }
     let mut line = serde_json::to_string(rec)?;
     line.push('\n');
-    crate::append_locked_row(&path, line.as_bytes())
+    crate::append_locked_row(&path, line.as_bytes(), crate::Durability::Durable)
         .with_context(|| format!("admit: cannot write {}", path.display()))
 }
 
@@ -457,7 +457,15 @@ pub fn satisfy_text(text: &str) {
         .collect();
     for mut rec in open {
         rec.status = "satisfied".into();
-        let _ = append(&rec);
+        // A satisfied row that is not written leaves the proposal open, so a
+        // later `ljos accept` reposts it. Name the log and the error, not the
+        // proposal's text, which a row could carry a secret in.
+        if let Err(e) = append(&rec) {
+            eprintln!(
+                "ljos: a satisfied proposal was not recorded in {}: {e:#}",
+                proposals_path().display()
+            );
+        }
         close_remote(&rec);
     }
 }
