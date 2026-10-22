@@ -24350,7 +24350,7 @@ pub fn recall_memories(issue: &str) -> String {
 
 /// [`recall_memories`] for prompt injection: note memories are left out so
 /// a working note cannot come back as a fact on the next prompt.
-fn recall_memories_for_prompt(issue: &str) -> String {
+pub(crate) fn recall_memories_for_prompt(issue: &str) -> String {
     recall_memories_with(issue, false)
 }
 
@@ -24444,13 +24444,13 @@ fn recall_lines(own: &[Hit], related: Vec<Hit>, now: &str, include_notes: bool) 
     let key = |h: &Hit| h.id.clone().unwrap_or_else(|| h.text.clone());
     let own: Vec<&Hit> = own
         .iter()
-        .filter(|h| include_notes || h.kind != packset_core::record::NOTE_KIND)
+        .filter(|h| include_notes || !unverified_note_hit(h))
         .collect();
     let mut seen: std::collections::BTreeSet<String> = own.iter().map(|h| key(h)).collect();
     let related: Vec<Hit> = related
         .into_iter()
         .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
-        .filter(|h| include_notes || h.kind != packset_core::record::NOTE_KIND)
+        .filter(|h| include_notes || !unverified_note_hit(h))
         .filter(|h| seen.insert(key(h)))
         .take(RELATED_MEMORY_CAP)
         .collect();
@@ -27058,6 +27058,17 @@ fn note_entity<'a>(h: &'a Hit, prefix: &str) -> Option<&'a str> {
         .find_map(|e| e.strip_prefix(prefix))
         .map(str::trim)
         .filter(|v| !v.is_empty())
+}
+
+/// Whether a recalled hit is an unverified working note, by kind or by the
+/// note provenance it carries. A refused note that was downgraded to another
+/// kind keeps its `note-source:`/`note-basis:` entities, so it is still kept
+/// out of prompt facts.
+fn unverified_note_hit(h: &Hit) -> bool {
+    h.kind == packset_core::record::NOTE_KIND
+        || h.entities
+            .iter()
+            .any(|e| e.starts_with(NOTE_BASIS_ENTITY) || e.starts_with(NOTE_SOURCE_ENTITY))
 }
 
 fn note_kind_label(h: &Hit) -> String {
