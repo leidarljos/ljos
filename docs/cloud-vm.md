@@ -4,6 +4,8 @@
 
 `sh scripts/install.sh --cloud` is the same bootstrap. When the binaries are already installed and `ljos cloud up` answers, that command is all that runs. `--force` downloads again. From this repository, if the installed `ljos` has no `cloud up`, the script builds this tree's `ljos` and `ljos-mcp` and leaves them in place.
 
+`ljos cloud up` and `install.sh --cloud` arrive in the next release; the latest release has neither. Until then they work from `develop`: run `sh scripts/install.sh --cloud` in a checkout of it.
+
 ## Environment
 
 `LJOS_TRACKER_REMOTE` is the https git URL of the shared tracker. Unset, `cloud up` installs the binaries and does not turn push mode on.
@@ -59,7 +61,7 @@ A GitHub Actions job, including a self-hosted ephemeral runner, uses the same bo
     ljos note ISSUE "the job result"
 ```
 
-On this repository the install line is `sh scripts/install.sh --cloud`. The tracker URL stays in the job environment. The runner's git credentials have to be able to clone it.
+The step fetches the latest release's script, which takes `--cloud` from the next release on. Until then, check out `develop` of this repository and run `sh scripts/install.sh --cloud` from it. On this repository the install line is `sh scripts/install.sh --cloud`. The tracker URL stays in the job environment. The runner's git credentials have to be able to clone it.
 
 ## Cloud agent environment
 
