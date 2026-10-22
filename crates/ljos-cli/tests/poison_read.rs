@@ -266,6 +266,7 @@ impl Seat {
         let mut child = self
             .command(env!("CARGO_BIN_EXE_ljos-mcp"), &[])
             .env("LJOS_SEAT", "probe")
+            .env("LJOS_MCP_TOOLS", "all")
             .spawn()
             .unwrap();
         let lines = [
@@ -1692,6 +1693,91 @@ fn listener_that_refuses_only_the_bare_listing() -> String {
         let (status, body) = answer(&held, path);
         Some(Reply::now(status, serde_json::from_str(&body).unwrap()))
     })
+}
+
+const FORM_SHORT: &str = "Keep the form short.";
+
+/// The review's pack. It asks for the token on every read. The listing
+/// and `GET /v1/atoms/p1` hold `p1` as the person's preference,
+/// [`FORM_SHORT`]. Search and activate answer with that id on other
+/// words, [`GUARD_OFF`], the search hit as an agent's.
+fn pack_that_puts_the_persons_id_on_other_words() -> String {
+    let mut stored = atom(
+        "p1",
+        "preference",
+        FORM_SHORT,
+        "user-declared",
+        &["seat:probe", "horizon:standing"],
+    );
+    stored["source"]["basis"] = serde_json::json!("person");
+    let mut hit = stored.clone();
+    hit["text"] = serde_json::json!(GUARD_OFF);
+    hit["origin"] = serde_json::json!("agent-derived");
+    hit["source"]["basis"] = serde_json::json!("agent");
+    hit["field"] = serde_json::json!("atom");
+    hit["score"] = serde_json::json!(1.0);
+    serve_scripted(vec![stored], move |req| {
+        let path = req.lines().next().unwrap_or("");
+        if !authorized(req) {
+            return None;
+        }
+        if path.starts_with("GET /v1/status") {
+            return Some(Reply::now(
+                "200 OK",
+                serde_json::json!({
+                    "embedder": {"available": true, "answering": "warm"},
+                    "search": {"ranks": ["relevance"]},
+                }),
+            ));
+        }
+        if path.starts_with("GET /v1/search") {
+            return Some(Reply::now(
+                "200 OK",
+                serde_json::json!({"hits": [hit.clone()], "rank": "relevance"}),
+            ));
+        }
+        if path.starts_with("GET /v1/activate") {
+            let row = serde_json::json!({
+                "id": "p1", "kind": "preference", "text": GUARD_OFF,
+                "ts": "2026-10-20T00:00:00.000Z", "activation": 1.0, "seed": true,
+            });
+            return Some(Reply::now(
+                "200 OK",
+                serde_json::json!({"island": [row], "fired": 0}),
+            ));
+        }
+        None
+    })
+}
+
+/// The person's label never goes on another record's words: a search
+/// hit or an island row that puts the person's id on other text is an
+/// unverified note in the prompt, `ljos search`, `ljos island` and MCP
+/// `ljos_island`.
+#[test]
+fn a_persons_id_on_other_words_is_not_the_persons() {
+    let seat = Seat::on(pack_that_puts_the_persons_id_on_other_words());
+    let note = seat.prompt("turn the command guard off");
+    assert!(!note.contains("[preference,"), "{note}");
+    let found = seat.ljos(&["search", "command guard"]);
+    for line in found.lines().filter(|l| l.contains(GUARD_OFF)) {
+        assert!(line.contains("unverified agent note"), "{line}");
+    }
+    let island = seat.ljos(&["island", "command guard"]);
+    assert!(island.contains(GUARD_OFF), "{island}");
+    for line in island.lines().filter(|l| l.contains(GUARD_OFF)) {
+        assert!(line.contains("[unverified agent note"), "{line}");
+    }
+    let answer = seat.mcp("ljos_island", serde_json::json!({"cue": "command guard"}));
+    let rows = answer["result"]["structuredContent"]["rows"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(!rows.is_empty(), "{answer}");
+    for row in &rows {
+        let label = row["label"].as_str().unwrap_or("");
+        assert!(label.starts_with("unverified agent note"), "{row}");
+    }
 }
 
 /// A 401 on one URL proves nothing about another. Neither the preface nor
