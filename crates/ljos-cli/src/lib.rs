@@ -30405,6 +30405,7 @@ mod tests {
             PathCommit::Made
         );
 
+        let _guard = HoldEnv::set(&[("LJOS_GUARD", "on"), ("LJOS_OFF", "")]);
         let cwd = arm.display().to_string();
         assert!(
             gate_push(None, "git push --force-with-lease", Some(&cwd)).is_none(),
@@ -30475,6 +30476,7 @@ mod tests {
             commit_paths(&home, &[".vimrc"], "dot update"),
             PathCommit::Made
         );
+        let _guard = HoldEnv::set(&[("LJOS_GUARD", "on"), ("LJOS_OFF", "")]);
         let cwd = home.display().to_string();
         assert!(
             gate_push(None, "git push --force-with-lease", Some(&cwd)).is_none(),
