@@ -31,7 +31,7 @@ A wake name ending in `-` matches every longer seat that starts with it, so mail
 `ljos send` starts the recipient's wake for you.
 In push mode (`LJOS_TRACKER_GIT=push`) the wake pushes the sealed log first, so a seat on another machine can read the letter. The send does not wait. A failed push is written to the wake log and the wake still runs.
 The envelope carries that commit: `LJOS_WAKE_COMMIT` for a command, and `commit` in the webhook JSON. It is left out when no log commit was made.
-`ljos inbox --sync [COMMIT]` fetches that commit, or the remote head when it is absent, imports, and lists. With no remote it only lists.
+`ljos inbox --sync [COMMIT]` fetches until the remote has that commit, for up to 30 seconds (`LJOS_INBOX_SYNC_WAIT`), or else takes the remote head, imports, and lists. With no remote it only lists.
 An agent still working gets interrupt mail when it is about to stop, so use `--interrupt` when the work cannot wait.
 A seat name ljos has never seen is refused with the closest one it knows.
 
