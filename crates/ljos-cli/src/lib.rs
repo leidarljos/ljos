@@ -18773,6 +18773,22 @@ pub const SEAT_PATHS: &[&str] = &[
     "/.gemini/config/mcp_config.json",
     "/.claude/settings.json",
     "/.grok/hooks/ljos.json",
+    "/.cursor/hooks.json",
+    "/.codeium/windsurf/hooks.json",
+    "/.factory/hooks.json",
+    "/.kiro/hooks/ljos.json",
+    "/.copilot/hooks/ljos.json",
+    "/.qwen/settings.json",
+    "/.config/crush/crush.json",
+    "/Documents/Cline/Hooks",
+    "/Documents/Cline/Hooks/",
+    "/.augment/settings.json",
+    "/.augment/ljos-guard-auggie.sh",
+    "/.config/amp/settings.json",
+    "/.config/amp/ljos-guard-amp.sh",
+    "/.agents/plugins/ljos/hooks/hooks.json",
+    "/.openhands/hooks.json",
+    "/.gemini/settings.json",
     "/.config/opencode/plugins/ljos.ts",
     "/.omp/agent/extensions/ljos.ts",
     "/ljos/approvals",
@@ -20809,6 +20825,7 @@ pub fn doctor() -> Vec<Habitat> {
     out.push(git_hooks::doctor_row());
     out.push(policy_row());
     out.extend(guard_off_row());
+    out.extend(guard_fail_open_row());
     out.push(bypass_row());
     out.push(panes_row());
     out.push(note_queue_row());
@@ -20822,6 +20839,19 @@ fn guard_off_row() -> Option<Habitat> {
     bookkeep::guard_off_reason().map(|state| Habitat {
         name: "guard",
         state,
+        ok: false,
+    })
+}
+
+/// A row while `LJOS_GUARD_FAIL_OPEN` lets a faulted guard allow the
+/// line. The bypass log records each of those allows. The guard is on,
+/// and the row is a warning, the same way an off guard is.
+fn guard_fail_open_row() -> Option<Habitat> {
+    guard_fail_open().then(|| Habitat {
+        name: "guard",
+        state: "fail-open: LJOS_GUARD_FAIL_OPEN=1 allows a line the guard could not judge, \
+                and the bypass log records it"
+            .into(),
         ok: false,
     })
 }
@@ -20981,29 +21011,48 @@ pub fn bypass_summary(text: &str, path: &str) -> String {
 
 fn policy_row() -> Habitat {
     let state = match policyd_bin() {
-        None if policyd_required() => {
-            Err(format!(
-                "ljos-policyd is not installed and POLICYD_REQUIRED=1: every shell command is refused; {POLICYD_INSTALL_FIX}"
-            ))
-        }
-        None => Err(
-            format!(
-                "ljos-policyd is not installed: shell commands are judged only by seat rules; {POLICYD_INSTALL_FIX}"
-            ),
-        ),
-        Some(bin) => match run_captured(&bin.display().to_string(), &["version"]) {
-            Ok(said) => policy_state(said.stdout.trim(), &bin.display().to_string()),
-            Err(e) => Err(format!(
-                "{} does not answer `version`: {e:#}; reinstall with {POLICYD_INSTALL_FIX}",
-                bin.display()
-            )),
-        },
+        None if policyd_required() => Err(format!(
+            "ljos-policyd is not installed and POLICYD_REQUIRED=1: every shell command is refused; {POLICYD_INSTALL_FIX}"
+        )),
+        None => Err(format!(
+            "ljos-policyd is not installed: shell commands are judged only by seat rules; {POLICYD_INSTALL_FIX}"
+        )),
+        Some(bin) if !bin.is_file() => Err(format!(
+            "POLICYD_BIN points at {} which is missing",
+            bin.display()
+        )),
+        Some(bin) => policy_answered(&bin),
     };
     Habitat {
         name: "policy",
         ok: state.is_ok(),
         state: state.unwrap_or_else(|e| e),
     }
+}
+
+/// `version`, then a real `check`. A hang on either is unresponsive:
+/// `version` alone used to call a wedged `check` healthy. The wait is
+/// [`guard_timeout`], so a doctor does not sit on it for the long capture.
+fn policy_answered(bin: &Path) -> std::result::Result<String, String> {
+    let at = bin.display().to_string();
+    let version = match policy_probe(&at, &["version"]) {
+        Ok(said) => said,
+        Err(e) if capture_timed_out(&e) => return Err(format!("{at} is unresponsive")),
+        Err(e) => {
+            return Err(format!(
+                "{at} does not answer `version`: {e:#}; reinstall with {POLICYD_INSTALL_FIX}"
+            ));
+        }
+    };
+    match policy_probe(&at, &["check", "--", "true"]) {
+        Err(e) if capture_timed_out(&e) => Err(format!("{at} is unresponsive")),
+        Err(e) => Err(format!("{at} answered `version` but `check` failed: {e:#}")),
+        Ok(_) => policy_state(version.stdout.trim(), &at),
+    }
+}
+
+fn policy_probe(bin: &str, args: &[&str]) -> Result<Said> {
+    run_captured_within(bin, args, None, guard_timeout())
 }
 
 /// Whether the `ljos` the hooks run is this binary. A runner that swaps
@@ -27701,7 +27750,8 @@ pub fn policyd_bin() -> Option<std::path::PathBuf> {
 /// `ljos-policyd` on that whole line, and the first deny stands. A heredoc
 /// body is data the shell feeds a command, and it is not sent as argv.
 /// With the TCB required and absent, the line is refused. A policyd that
-/// times out or crashes does not refuse a line the fast check allowed.
+/// is present but times out, crashes, or prints no verdict refuses the
+/// line, unless `LJOS_GUARD_FAIL_OPEN` is set.
 #[must_use]
 pub fn tcb_verdict(line: &str) -> Option<Rule> {
     tcb_verdict_in(line, None)
@@ -27730,6 +27780,7 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         return Some(rule);
     }
     let mut answered = false;
+    let mut opened = false;
     // The whole shell line is judged as one call. The substitutions and
     // scripts inside the line run too, so each of their pipelines is judged
     // as well: `echo $(git push -f)` is a push.
@@ -27764,6 +27815,19 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
                     answered = true;
                     continue;
                 }
+                // A faulted guard still lets the repair through: `ljos
+                // doctor` and `ljos onboard`, and nothing else on the line.
+                // A real deny is not a fault and still stands.
+                if code == "guard-fault" && repair_line(line) {
+                    let why = token
+                        .split_once(':')
+                        .map(|(_, detail)| detail.trim())
+                        .filter(|detail| !detail.is_empty())
+                        .unwrap_or("did not start");
+                    set_guard_note(unhealthy_note(why));
+                    answered = true;
+                    continue;
+                }
                 return Some(Rule {
                     pattern: if ask {
                         code.to_string()
@@ -27775,6 +27839,12 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
                 });
             }
             Some(t) => {
+                // Only the fail-open marker is a fault the switch let
+                // through. An unready token is an allow with a note and
+                // is not a bypass.
+                if t.trim().starts_with("allow\tfail-open\t") {
+                    opened = true;
+                }
                 if let Some(note) = guard_note_of(&t) {
                     set_guard_note(note);
                 }
@@ -27783,13 +27853,78 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
             None => {}
         }
     }
+    if opened {
+        log_bypass(
+            "switch",
+            "LJOS_GUARD_FAIL_OPEN=1",
+            line,
+            &Rule {
+                pattern: "ljos-policyd".into(),
+                verdict: "deny".into(),
+                reason: "guard-fault".into(),
+            },
+        );
+    }
     (!answered && policyd_required()).then(|| Rule {
         pattern: "ljos-policyd".into(),
         verdict: "deny".into(),
-        reason: "POLICYD_REQUIRED is set and no ljos-policyd answered, so no \
-                 shell command runs until `cargo install --locked ljos-policyd` puts it on PATH"
-            .to_string(),
+        reason: policyd_required_reason(),
     })
+}
+
+/// A line whose every pipeline is `ljos doctor` or `ljos onboard`,
+/// arguments included. `ljos doctor && rm -rf` is not one: the other
+/// command would run while the guard cannot judge it. A pipe is another
+/// command too, and `pipelines` keeps it inside the segment.
+fn repair_line(line: &str) -> bool {
+    let mut saw = false;
+    for part in nested_lines(line, 0) {
+        for seg in pipelines(&part) {
+            let seg = seg.trim();
+            if seg.is_empty() {
+                continue;
+            }
+            saw = true;
+            let words = shell_words(seg);
+            let (at, _) = prefix_end(&words);
+            let words = &words[at..];
+            let Some(first) = words.first() else {
+                return false;
+            };
+            if words.iter().any(|w| w == "|") {
+                return false;
+            }
+            if base_name(first) != "ljos" {
+                return false;
+            }
+            match words.get(1).map(String::as_str) {
+                Some("doctor" | "onboard") => {}
+                _ => return false,
+            }
+        }
+    }
+    saw
+}
+
+/// What a faulted guard tells the agent. The repair is the person's:
+/// they run `ljos doctor` in their own terminal. `LJOS_GUARD_FAIL_OPEN=1`
+/// is the switch that allows other lines until then.
+#[must_use]
+pub fn guard_fault_reason(why: &str) -> String {
+    format!(
+        "the ljos guard failed ({why}); ask the person to run `ljos doctor` in their own \
+         terminal. LJOS_GUARD_FAIL_OPEN=1 allows other lines until the guard is repaired, and \
+         `ljos doctor` or `ljos onboard` still runs."
+    )
+}
+
+/// What a person reads when `POLICYD_REQUIRED` is set and no policyd
+/// answered. A missing file is that absence too: CI and a fresh install
+/// have no binary, and only this switch locks them out.
+fn policyd_required_reason() -> String {
+    "POLICYD_REQUIRED is set and no ljos-policyd answered, so no \
+     shell command runs until `cargo install --locked ljos-policyd` puts it on PATH"
+        .to_string()
 }
 
 /// Most pairs [`fetch_pairs`] hands the TCB for one line.
@@ -27867,6 +28002,10 @@ pub fn take_guard_note() -> Option<String> {
 
 fn guard_note_of(text: &str) -> Option<String> {
     let rest = text.trim().strip_prefix("allow\t")?;
+    // `fail-open` marks an allow `LJOS_GUARD_FAIL_OPEN` chose. The person
+    // reads the sentence after it; the marker stays on the raw line so a
+    // later log can tell this allow from an unready token.
+    let rest = rest.strip_prefix("fail-open\t").unwrap_or(rest);
     rest.contains("unhealthy").then(|| rest.to_string())
 }
 
@@ -27882,7 +28021,8 @@ pub fn unhealthy_note(why: &str) -> String {
 
 /// A force push, a seat deny rule, an `rm -rf` outside a temp directory,
 /// or a commit, push, or merge the gates refuse, judged in this process.
-/// `None` means the slow check may run: a timeout there allows the line.
+/// `None` means the slow check may run. A timeout there denies the line
+/// unless `LJOS_GUARD_FAIL_OPEN` is set.
 /// A temp home is not a seat unless `LJOS_GUARD=on`, and this returns
 /// `None` there too. A temp working directory is still judged.
 ///
@@ -28178,6 +28318,7 @@ pub fn policyd_reason(token: &str) -> String {
             "this runs git on another machine, so the gate cannot read the tip, the identity, or \
              CI. Run the git command in the local checkout"
         }
+        "guard-fault" => return guard_fault_reason(detail),
         _ => return token.to_string(),
     };
     if detail.is_empty() {
@@ -28189,9 +28330,10 @@ pub fn policyd_reason(token: &str) -> String {
 
 /// One line from `ljos-policyd check -- argv`. None only when there is no
 /// binary to ask: absence is not a deny unless `POLICYD_REQUIRED` says so.
-/// A binary that fails to start, crashes, hangs past [`guard_timeout`], or
-/// prints something that is not a verdict allows the line and says the
-/// guard is unhealthy. A line [`static_guard`] already judged does not
+/// A binary that is there but fails to start, crashes, hangs past
+/// [`guard_timeout`], or prints something that is not a verdict denies the
+/// line. `LJOS_GUARD_FAIL_OPEN=1` allows that fault and says the guard is
+/// unhealthy. A line [`static_guard`] already judged does not
 /// wait for that binary. The binary keeps this process's directory;
 /// [`tcb_verdict_in`] starts it in the hook's directory instead.
 pub fn tcb_check(argv: &[String]) -> Option<String> {
@@ -28225,7 +28367,19 @@ pub fn tcb_answer_in(
     cwd: Option<&Path>,
 ) -> String {
     use std::io::Read as _;
+    // A missing file is not a fault. CI and a fresh install have no
+    // policyd, and locking those out is a later, explicit switch
+    // (`POLICYD_REQUIRED`). A file that is there and still fails is a
+    // fault: Claude Code, Codex and Cursor call this path directly, and
+    // an allow there used to let the tool run with no note on Cursor.
     let unhealthy = |why: &str| format!("allow\t{}", unhealthy_note(why));
+    let faulted = |why: &str| {
+        if guard_fail_open() {
+            format!("allow\tfail-open\t{}", unhealthy_note(why))
+        } else {
+            format!("deny\tguard-fault: {why}")
+        }
+    };
     let run_dir = match cwd {
         Some(_) => match guard_start_directory(cwd) {
             Ok(dir) => Some(dir),
@@ -28233,6 +28387,12 @@ pub fn tcb_answer_in(
         },
         None => None,
     };
+    if !bin.is_file() {
+        if policyd_required() {
+            return format!("deny\t{}", policyd_required_reason());
+        }
+        return unhealthy("did not start");
+    }
     // A binary just written, by an install or a test, can be busy for a
     // moment: another thread's fork still holds the write descriptor until
     // its exec, and the kernel answers ETXTBSY. That is not a guard that
@@ -28253,7 +28413,7 @@ pub fn tcb_answer_in(
         cmd.spawn()
     };
     let Ok(mut child) = spawn_while_busy(spawn) else {
-        return unhealthy("did not start");
+        return faulted("did not start");
     };
     let start = std::time::Instant::now();
     let status = loop {
@@ -28265,7 +28425,7 @@ pub fn tcb_answer_in(
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return unhealthy("did not answer in time");
+                return faulted("did not answer in time");
             }
         }
     };
@@ -28284,7 +28444,7 @@ pub fn tcb_answer_in(
             None => text,
         },
         ("allow", true) => text,
-        _ => unhealthy("gave no verdict"),
+        _ => faulted("gave no verdict"),
     }
 }
 
@@ -28981,6 +29141,11 @@ pub fn run_captured(bin: &str, args: &[impl AsRef<str>]) -> Result<Said> {
     run_captured_as(bin, args, None)
 }
 
+/// How long [`run_captured`] waits. A habitat that never exits used to
+/// hold the caller with it. A tracker write can be slow; this is long
+/// enough for one, and a doctor probes policyd on a shorter wait.
+const CAPTURE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(180);
+
 /// [`run_captured`] with `VISSUE_AGENT` set to `identity`, for a tracker
 /// write whose output the caller has to hand on. `None` leaves the
 /// environment as it is.
@@ -28989,9 +29154,26 @@ pub fn run_captured_as(
     args: &[impl AsRef<str>],
     identity: Option<&str>,
 ) -> Result<Said> {
+    run_captured_within(bin, args, identity, CAPTURE_DEADLINE)
+}
+
+fn capture_timed_out(err: &anyhow::Error) -> bool {
+    err.to_string().contains("did not answer in time")
+}
+
+/// [`run_captured_as`] that stops the child at `deadline`. Stdout and
+/// stderr are drained while it runs, so a full pipe cannot stall it
+/// past the wait.
+fn run_captured_within(
+    bin: &str,
+    args: &[impl AsRef<str>],
+    identity: Option<&str>,
+    deadline: std::time::Duration,
+) -> Result<Said> {
+    use std::io::Read as _;
     use std::process::{Command, Stdio};
     let path = which::which(bin).with_context(|| format!("{bin} not on PATH"))?;
-    let mut cmd = Command::new(path);
+    let mut cmd = Command::new(&path);
     if let Some(who) = identity {
         cmd.env("VISSUE_AGENT", who);
     }
@@ -29000,16 +29182,63 @@ pub fn run_captured_as(
         cmd.arg(a.as_ref());
     }
     git_hooks::hook_child_env(&mut cmd);
-    let out = cmd
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .spawn()
         .with_context(|| format!("{bin}: could not start"))?;
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    if !out.status.success() {
-        bail!("{}", tool_failure(bin, &out.status, &stdout, &stderr));
+    let mut out_pipe = match child.stdout.take() {
+        Some(pipe) => pipe,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("{bin}: no stdout");
+        }
+    };
+    let mut err_pipe = match child.stderr.take() {
+        Some(pipe) => pipe,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("{bin}: no stderr");
+        }
+    };
+    let out_task = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = out_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let err_task = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = err_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_task.join();
+                let _ = err_task.join();
+                bail!("{bin} did not answer in time");
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_task.join();
+                let _ = err_task.join();
+                bail!("{bin}: {e}");
+            }
+        }
+    };
+    let stdout = String::from_utf8_lossy(&out_task.join().unwrap_or_default()).into_owned();
+    let stderr = String::from_utf8_lossy(&err_task.join().unwrap_or_default()).into_owned();
+    if !status.success() {
+        bail!("{}", tool_failure(bin, &status, &stdout, &stderr));
     }
     Ok(Said { stdout, stderr })
 }
@@ -32487,15 +32716,41 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dead = dir.path().join("ljos-policyd-missing");
         let _down = HoldEnv::set(&[("POLICYD_BIN", dead.to_str().unwrap())]);
+        let stale = policy_row();
+        assert!(!stale.ok);
+        assert_eq!(
+            stale.state,
+            format!("POLICYD_BIN points at {} which is missing", dead.display())
+        );
+        assert!(!stale.state.contains("cargo install"), "{}", stale.state);
+        let hangs = fake_policyd(
+            dir.path(),
+            "hangs",
+            "if [ \"$1\" = version ]; then\n\
+             printf '%s\\n' 'ljos-policyd 0.4.5 (phronesis)'\n\
+             exit 0\n\
+             fi\n\
+             exec /bin/sleep 30",
+        );
+        let _hang = HoldEnv::set(&[
+            ("POLICYD_BIN", hangs.to_str().unwrap()),
+            ("LJOS_GUARD_TIMEOUT", "0.4"),
+        ]);
+        let started = std::time::Instant::now();
         let unresponsive = policy_row();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "a hung check waited {:?}",
+            started.elapsed()
+        );
         assert!(!unresponsive.ok);
         assert!(
-            unresponsive.state.contains("does not answer `version`"),
+            unresponsive.state.contains("unresponsive"),
             "{}",
             unresponsive.state
         );
         assert!(
-            unresponsive.state.contains(POLICYD_INSTALL_FIX),
+            !unresponsive.state.contains("does not answer `version`"),
             "{}",
             unresponsive.state
         );
@@ -39405,6 +39660,27 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(!said.to_string().contains("exit status"), "{said}");
     }
 
+    /// A habitat that never exits used to hold the caller. The capture
+    /// stops it and says so.
+    #[test]
+    fn run_captured_stops_when_the_command_does_not_answer() {
+        let _g = env_guard();
+        let started = std::time::Instant::now();
+        let err = run_captured_within(
+            "sh",
+            &["-c", "exec sleep 30"],
+            None,
+            std::time::Duration::from_millis(400),
+        )
+        .unwrap_err();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "waited {:?}",
+            started.elapsed()
+        );
+        assert!(err.to_string().contains("did not answer in time"), "{err}");
+    }
+
     #[test]
     fn join_keeps_spaces() {
         assert_eq!(
@@ -41236,6 +41512,34 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             seat_guard("cat ~/.gemini/config/hooks.json").is_none(),
             "reading is fine"
         );
+        for path in [
+            "~/.cursor/hooks.json",
+            "~/.codeium/windsurf/hooks.json",
+            "~/.factory/hooks.json",
+            "~/.kiro/hooks/ljos.json",
+            "~/.copilot/hooks/ljos.json",
+            "~/.qwen/settings.json",
+            "~/.config/crush/crush.json",
+            "~/Documents/Cline/Hooks",
+            "~/Documents/Cline/Hooks/PreToolUse",
+            "~/.augment/settings.json",
+            "~/.augment/ljos-guard-auggie.sh",
+            "~/.config/amp/settings.json",
+            "~/.config/amp/ljos-guard-amp.sh",
+            "~/.agents/plugins/ljos/hooks/hooks.json",
+            "~/.openhands/hooks.json",
+            "~/.gemini/settings.json",
+        ] {
+            assert!(
+                seat_guard(&format!("sed -i s/a/b/ {path}")).is_some(),
+                "{path}"
+            );
+            assert!(
+                seat_guard(&format!("cat {path}")).is_none(),
+                "reading {path}"
+            );
+        }
+        assert!(seat_guard("sed -i s/a/b/ ~/notes/hooks.json").is_none());
         assert!(seat_guard("sha256sum ~/.local/bin/ljos ~/.local/bin/ljos.bak").is_none());
         assert!(
             seat_guard("cp ~/.local/bin/ljos /tmp/copy").is_some(),
@@ -42310,8 +42614,17 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
     }
 
+    /// A policyd that hangs, crashes, or prints garbage used to allow the
+    /// tool call. Claude Code, Codex and Cursor call `ljos hook` directly,
+    /// so that allow reached the runner, and Cursor's was a bare allow
+    /// with no note. The fault is a deny in every runner's contract.
+    /// `LJOS_GUARD_FAIL_OPEN=1` restores the allow with a note. A missing
+    /// binary, and a deny that is only the seat not being ready, still
+    /// allow. A `cwd` that does not resolve stays `cwd-unresolved`.
     #[test]
-    fn a_tcb_that_crashes_or_times_out_allows_the_line() {
+    fn a_tcb_that_crashes_or_times_out_denies_on_every_runner() {
+        let _g = env_guard();
+        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         let dir = tempfile::tempdir().unwrap();
         let argv = vec!["git".to_string(), "status".to_string()];
         let quick = std::time::Duration::from_millis(200);
@@ -42325,12 +42638,16 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         );
         let empty = answer("empty-reason", "printf 'deny\\tphronesis\\n'; exit 2");
         assert!(
-            empty.starts_with("allow\t") && empty.contains("unhealthy"),
+            empty.starts_with("allow\t")
+                && empty.contains("unhealthy")
+                && !empty.contains("fail-open"),
             "{empty}"
         );
         let unbound = answer("bind-failed", "printf 'deny\\tbind-failed\\n'; exit 2");
         assert!(
-            unbound.starts_with("allow\t") && unbound.contains("unhealthy"),
+            unbound.starts_with("allow\t")
+                && unbound.contains("unhealthy")
+                && !unbound.contains("fail-open"),
             "{unbound}"
         );
         assert_eq!(
@@ -42344,24 +42661,20 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ),
             "deny\tphronesis: seat could not open"
         );
-        for (name, body) in [
-            ("crashes", "kill -SEGV $$"),
-            ("fails", "echo oops; exit 1"),
-            ("garbage", "echo ok"),
-            ("silent", "exit 0"),
-            ("allows-then-fails", "echo allow; exit 3"),
-            ("hangs", "sleep 30"),
+        for (name, body, why) in [
+            ("crashes", "kill -SEGV $$", "gave no verdict"),
+            ("fails", "echo oops; exit 1", "gave no verdict"),
+            ("garbage", "echo ok", "gave no verdict"),
+            ("silent", "exit 0", "gave no verdict"),
+            ("allows-then-fails", "echo allow; exit 3", "gave no verdict"),
+            ("hangs", "sleep 30", "did not answer in time"),
         ] {
             let said = answer(name, body);
-            assert!(
-                said.starts_with("allow\t") && said.contains("unhealthy"),
-                "{name}: {said}"
-            );
-            assert!(!said.contains("refused unchecked"), "{name}: {said}");
+            assert_eq!(said, format!("deny\tguard-fault: {why}"), "{name}: {said}");
         }
         let gone = tcb_answer_in(&dir.path().join("missing"), &argv, quick, None);
         assert!(
-            gone.starts_with("allow\t") && gone.contains("did not start"),
+            gone.starts_with("allow\t") && gone.contains("did not start") && !gone.contains("deny"),
             "{gone}"
         );
         let home = dir.path().join("home");
@@ -42398,24 +42711,118 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             unresolved.starts_with("deny\tcwd-unresolved:"),
             "{unresolved}"
         );
+        drop(_home);
+
+        let seat = SeatDir::new("fault-deny");
+        let _seat = HoldEnv::set(&[
+            ("HOME", seat.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", seat.path().join("data").to_str().unwrap()),
+            ("LJOS_OFF", "0"),
+            ("LJOS_GUARD", "on"),
+            ("PACKSET_URL", "off"),
+            (
+                "POLICYD_BIN",
+                fake_policyd(seat.path(), "hook-fault", "echo oops; exit 1")
+                    .to_str()
+                    .unwrap(),
+            ),
+        ]);
+        let _ = take_guard_note();
+        let rule = tcb_verdict("echo hi").expect("a crashed policyd denies the line");
+        assert_eq!(rule.verdict, "deny");
+        assert!(
+            rule.reason
+                .contains("ask the person to run `ljos doctor` in their own terminal"),
+            "{}",
+            rule.reason
+        );
+        assert!(
+            rule.reason.contains("LJOS_GUARD_FAIL_OPEN=1"),
+            "{}",
+            rule.reason
+        );
+        assert!(take_guard_note().is_none());
+        let direct = [
+            ("claude", HookShape::Asks),
+            ("codex", HookShape::DenyOnly),
+            ("cursor", HookShape::Cursor),
+            ("cursor-shell", HookShape::CursorShell),
+        ];
+        for (name, shape) in direct {
+            let call = HookCall {
+                event: "PreToolUse".into(),
+                cue: "echo hi".into(),
+                session: None,
+                shape,
+            };
+            let out = hook_output_ruled(&call, "", Some(&rule));
+            assert!(answer_denies(&out), "{name}: {out}");
+            assert!(out.contains("LJOS_GUARD_FAIL_OPEN=1"), "{name}: {out}");
+            if shape.is_cursor() {
+                let v: Value = serde_json::from_str(out.trim()).unwrap();
+                assert_eq!(v["permission"], "deny", "{name}: {out}");
+                assert!(
+                    v["user_message"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("LJOS_GUARD_FAIL_OPEN=1"),
+                    "{name}: {out}"
+                );
+                assert!(
+                    v["agent_message"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("LJOS_GUARD_FAIL_OPEN=1"),
+                    "{name}: {out}"
+                );
+            }
+        }
+        let inner = hook_output_ruled(
+            &HookCall {
+                event: "PreToolUse".into(),
+                cue: "echo hi".into(),
+                session: None,
+                shape: HookShape::CamelCase,
+            },
+            "",
+            Some(&rule),
+        );
+        for runner in runner_hooks::RUNNERS {
+            let (stdout, stderr, code) = runner_hooks::answer(runner, "PreToolUse", &inner);
+            let body = format!("{stdout}{stderr}");
+            let denied = match *runner {
+                "copilot" | "auggie" => {
+                    code == 0 && stdout.contains(r#""permissionDecision":"deny""#)
+                }
+                "gemini" => code == 0 && stdout.contains(r#""decision":"deny""#),
+                "cline" => code == 0 && stdout.contains(r#""cancel":true"#),
+                "windsurf" | "factory" | "kiro" | "qwen" | "crush" | "goose" | "amp"
+                | "openhands" => code == 2,
+                _ => false,
+            };
+            assert!(denied, "{runner}: code {code} {body}");
+            assert!(body.contains("LJOS_GUARD_FAIL_OPEN=1"), "{runner}: {body}");
+        }
+
+        let _open = HoldEnv::set(&[("LJOS_GUARD_FAIL_OPEN", "1")]);
+        let opened = answer("fails-open", "echo oops; exit 1");
+        assert!(
+            opened.starts_with("allow\tfail-open\t") && opened.contains("unhealthy"),
+            "{opened}"
+        );
+        let _ = take_guard_note();
+        assert!(
+            tcb_verdict("echo hi").is_none(),
+            "fail-open allows the line"
+        );
+        let note = take_guard_note().expect("the allow keeps its note");
+        assert!(note.contains("unhealthy"), "{note}");
+        assert!(!note.starts_with("fail-open"), "{note}");
     }
 
     #[test]
     fn the_guard_waits_five_seconds_unless_told_otherwise() {
         let _g = env_guard();
-        let saved = std::env::var_os("LJOS_GUARD_TIMEOUT");
-        struct Restore(Option<std::ffi::OsString>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                unsafe {
-                    match &self.0 {
-                        Some(v) => std::env::set_var("LJOS_GUARD_TIMEOUT", v),
-                        None => std::env::remove_var("LJOS_GUARD_TIMEOUT"),
-                    }
-                }
-            }
-        }
-        let _restore = Restore(saved);
         unsafe { std::env::remove_var("LJOS_GUARD_TIMEOUT") };
         assert_eq!(guard_timeout(), std::time::Duration::from_secs(5));
         assert_eq!(GUARD_TIMEOUT, std::time::Duration::from_secs(5));
@@ -42427,6 +42834,28 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(guard_timeout(), GUARD_TIMEOUT);
         unsafe { std::env::set_var("LJOS_GUARD_TIMEOUT", "nope") };
         assert_eq!(guard_timeout(), GUARD_TIMEOUT);
+    }
+
+    /// EnvLock puts the process environment back when it drops. A second
+    /// restore in a test that already holds one, and a changelog note
+    /// about that test, would be published as if a person could see it.
+    #[test]
+    fn a_test_lock_is_the_only_env_restore() {
+        let needle = ["struct ", "Restore"].concat();
+        for src in [include_str!("lib.rs"), include_str!("runner_hooks.rs")] {
+            assert!(
+                !src.contains(&needle),
+                "a second restore is still in the source"
+            );
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../changelog.d");
+        for name in [
+            "+rgkz-20261021-guard-fault-test-env-lock.misc.md",
+            "+rgkz-20261021-guard-fault-test-env-lock-2.misc.md",
+            "+rgkz-20261021-guard-fault-test-shape.misc.md",
+        ] {
+            assert!(!root.join(name).exists(), "{name}");
+        }
     }
 
     /// A checkout whose tip already has a passing `true` evidence record.
@@ -42654,7 +43083,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     #[test]
-    fn a_plain_command_is_allowed_when_the_guard_is_unhealthy() {
+    fn a_plain_command_is_denied_when_the_guard_is_unhealthy() {
         let _g = env_guard();
         let home = SeatDir::new("unhealthy-guard");
         let bin = fake_policyd(home.path(), "policyd", "echo oops; exit 1");
@@ -42664,16 +43093,197 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ("POLICYD_BIN", bin.to_str().unwrap()),
             ("PACKSET_WORKSPACE", "unhealthy-guard"),
             ("LJOS_OFF", "0"),
+            ("LJOS_GUARD", "on"),
         ]);
+        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         let _ = take_guard_note();
-        assert!(tcb_verdict("git status").is_none());
-        let note = take_guard_note().expect("the unhealthy note");
-        assert!(note.contains("unhealthy"), "{note}");
-        assert!(!note.contains("refused unchecked"), "{note}");
-        let rule = tcb_verdict("rm -rf /home/u/proj").expect("still denied");
+        let rule = tcb_verdict("git status").expect("a crashed policyd denies");
         assert_eq!(rule.verdict, "deny");
-        assert_eq!(rule.pattern, "rm-rf-outside-tmp");
+        assert!(
+            rule.reason
+                .contains("ask the person to run `ljos doctor` in their own terminal"),
+            "{}",
+            rule.reason
+        );
+        assert!(
+            rule.reason.contains("LJOS_GUARD_FAIL_OPEN=1"),
+            "{}",
+            rule.reason
+        );
         assert!(take_guard_note().is_none());
+        let kept = tcb_verdict("rm -rf /home/u/proj").expect("still denied");
+        assert_eq!(kept.verdict, "deny");
+        assert_eq!(kept.pattern, "rm-rf-outside-tmp");
+        assert!(take_guard_note().is_none());
+    }
+
+    /// A missing policyd allows the line and says so. CI and a fresh
+    /// install have no binary. `POLICYD_REQUIRED=1` is the switch that
+    /// refuses instead, including when `POLICYD_BIN` names a file that
+    /// is not there.
+    #[test]
+    fn a_missing_policyd_allows_unless_it_is_required() {
+        let _g = env_guard();
+        let home = SeatDir::new("missing-policyd");
+        let missing = home.path().join("no-such-policyd");
+        let _env = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", home.path().join("data").to_str().unwrap()),
+            ("POLICYD_BIN", missing.to_str().unwrap()),
+            ("PACKSET_URL", "off"),
+            ("LJOS_OFF", "0"),
+            ("LJOS_GUARD", "on"),
+        ]);
+        unsafe {
+            std::env::remove_var("POLICYD_REQUIRED");
+            std::env::remove_var("LJOS_GUARD_FAIL_OPEN");
+        }
+        let _ = take_guard_note();
+        assert!(tcb_verdict("echo hi").is_none(), "a missing policyd allows");
+        let note = take_guard_note().expect("the allow carries a note");
+        assert!(note.contains("unhealthy"), "{note}");
+        assert!(note.contains("did not start"), "{note}");
+        let _req = HoldEnv::set(&[("POLICYD_REQUIRED", "1")]);
+        let rule = tcb_verdict("echo hi").expect("POLICYD_REQUIRED denies");
+        assert_eq!(rule.verdict, "deny");
+        assert!(rule.reason.contains("POLICYD_REQUIRED"), "{}", rule.reason);
+        assert!(rule.reason.contains("cargo install"), "{}", rule.reason);
+        assert!(take_guard_note().is_none());
+    }
+
+    /// A faulted guard still runs `ljos doctor` and `ljos onboard`, so the
+    /// seat can be repaired. Another command on the same line stays denied.
+    #[test]
+    fn a_faulted_guard_lets_doctor_and_onboard_through() {
+        let _g = env_guard();
+        let home = SeatDir::new("repair-guard");
+        let bin = fake_policyd(home.path(), "policyd", "echo oops; exit 1");
+        let _env = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", home.path().join("data").to_str().unwrap()),
+            ("POLICYD_BIN", bin.to_str().unwrap()),
+            ("PACKSET_URL", "off"),
+            ("LJOS_OFF", "0"),
+            ("LJOS_GUARD", "on"),
+        ]);
+        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
+        for line in [
+            "ljos doctor",
+            "ljos doctor --fix",
+            "ljos onboard",
+            "ljos onboard --example",
+        ] {
+            let _ = take_guard_note();
+            assert!(tcb_verdict(line).is_none(), "{line} should run");
+            let note = take_guard_note().expect(line);
+            assert!(note.contains("unhealthy"), "{line}: {note}");
+        }
+        for line in [
+            "ljos doctor && echo hi",
+            "ljos doctor | cat",
+            "echo hi && ljos doctor",
+        ] {
+            let mixed = tcb_verdict(line).expect("another command stays denied");
+            assert_eq!(mixed.verdict, "deny", "{line}");
+            assert!(
+                mixed
+                    .reason
+                    .contains("ask the person to run `ljos doctor` in their own terminal"),
+                "{line}: {}",
+                mixed.reason
+            );
+            assert!(
+                mixed.reason.contains("LJOS_GUARD_FAIL_OPEN=1"),
+                "{line}: {}",
+                mixed.reason
+            );
+        }
+        let wiped = tcb_verdict("ljos doctor && rm -rf /home/u/proj").expect("still denied");
+        assert_eq!(wiped.verdict, "deny");
+        assert_eq!(wiped.pattern, "rm-rf-outside-tmp");
+        let other = tcb_verdict("echo hi").expect("a plain line is still denied");
+        assert_eq!(other.verdict, "deny");
+        assert!(
+            other.reason.contains("run `ljos doctor`"),
+            "{}",
+            other.reason
+        );
+    }
+
+    /// `LJOS_GUARD_FAIL_OPEN=1` allows a fault and writes that allow to
+    /// the bypass log. An unready token is not that allow, and the doctor
+    /// names the switch.
+    #[test]
+    fn a_fail_open_allow_is_logged_and_the_doctor_names_it() {
+        let _g = env_guard();
+        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
+        assert!(guard_fail_open_row().is_none());
+        let home = SeatDir::new("fail-open-log");
+        let data = home.path().join("data");
+        let crash = fake_policyd(home.path(), "crash", "echo oops; exit 1");
+        let _env = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", data.to_str().unwrap()),
+            ("POLICYD_BIN", crash.to_str().unwrap()),
+            ("PACKSET_URL", "off"),
+            ("LJOS_OFF", "0"),
+            ("LJOS_GUARD", "on"),
+            ("LJOS_GUARD_FAIL_OPEN", "1"),
+        ]);
+        let row = guard_fail_open_row().expect("the switch has a row");
+        assert!(!row.ok);
+        assert_eq!(row.name, "guard");
+        assert!(
+            row.state.contains("LJOS_GUARD_FAIL_OPEN=1"),
+            "{}",
+            row.state
+        );
+        let _ = take_guard_note();
+        assert!(
+            tcb_verdict("echo hi").is_none(),
+            "fail-open allows the line"
+        );
+        let path = bypass_log_path().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rows: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 1, "{text}");
+        assert_eq!(rows[0]["kind"], "switch");
+        assert_eq!(rows[0]["how"], "LJOS_GUARD_FAIL_OPEN=1");
+        assert_eq!(rows[0]["command"], "echo hi");
+        assert_eq!(rows[0]["rule"], "ljos-policyd");
+        let empty = fake_policyd(
+            home.path(),
+            "empty-reason",
+            "printf 'deny\\tphronesis\\n'; exit 2",
+        );
+        let _empty = HoldEnv::set(&[("POLICYD_BIN", empty.to_str().unwrap())]);
+        assert!(
+            tcb_verdict("git status").is_none(),
+            "an unready token allows"
+        );
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            after.lines().count(),
+            1,
+            "an unready token is not a bypass: {after}"
+        );
+        drop(_empty);
+        drop(_env);
+        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
+        let _closed = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", data.to_str().unwrap()),
+            ("POLICYD_BIN", crash.to_str().unwrap()),
+            ("PACKSET_URL", "off"),
+            ("LJOS_OFF", "0"),
+            ("LJOS_GUARD", "on"),
+        ]);
+        assert!(tcb_verdict("echo hi").is_some(), "a fault denies again");
+        let still = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(still.lines().count(), 1, "{still}");
     }
 
     /// `ljos-policyd` prints `deny\tphronesis` when a decision has no reason
