@@ -11401,16 +11401,6 @@ fn seat_has_no_token(client: &PacksetClient) -> bool {
         .is_none()
 }
 
-/// Say that this seat cannot show a token. That used to be read as an
-/// open listener, and the recall then followed whatever it answered.
-fn say_search_miss() {
-    let line = "ljos: no token the search: this seat has none, the token file cannot be read, or another user holds the pack's port";
-    *SEARCH_MISS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(line.to_string());
-    eprintln!("{line}");
-}
-
 /// Writers whose last search did not carry the token. The next search
 /// asks the bare rank cache, so a refusal there is not read again as the
 /// authenticated mode.
@@ -11442,6 +11432,16 @@ fn note_search_trust(client: &PacksetClient, trusted: bool) {
     } else {
         open.insert(key);
     }
+}
+
+/// Say that this seat cannot show a token. That used to be read as an
+/// open listener, and the recall then followed whatever it answered.
+fn say_search_miss() {
+    let line = "ljos: no token the search: this seat has none, the token file cannot be read, or another user holds the pack's port";
+    *SEARCH_MISS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(line.to_string());
+    eprintln!("{line}");
 }
 
 /// Whether the writer at `client` takes `rank=relevance` in this
@@ -53455,15 +53455,29 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let captured = Arc::new(Mutex::new(String::new()));
         let slot = captured.clone();
         std::thread::spawn(move || {
-            if let Ok((mut s, _)) = listener.accept() {
-                *slot.lock().unwrap() = read_http(&mut s);
+            // A seat token proves on this socket before the POST, and each
+            // proof is its own connection. The POST is the request the
+            // caller reads. A writer with no token has only that POST.
+            for _ in 0..6 {
+                let Ok((mut s, _)) = listener.accept() else {
+                    break;
+                };
+                let req = read_http(&mut s);
+                let post = req.starts_with("POST ") || req.contains("\nPOST ");
+                if post {
+                    *slot.lock().unwrap() = req;
+                }
                 let body =
                     r#"{"id":"atom-1","kind":"lesson","text":"the default fuse is CombMNZ"}"#;
+                let status = if post { "200 OK" } else { "401 Unauthorized" };
                 let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 let _ = s.write_all(resp.as_bytes());
+                if post {
+                    break;
+                }
             }
         });
         (format!("http://{addr}"), captured)
