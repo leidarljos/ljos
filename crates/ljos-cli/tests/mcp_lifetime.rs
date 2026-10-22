@@ -253,6 +253,50 @@ fn the_clients_death_ends_the_server_with_stdin_still_open() {
     assert!(ended, "the server outlived its client by 10 s\n{stderr}");
 }
 
+/// No request for the orphan window. An editor still above the server
+/// keeps it; otherwise it exits. Stdin stays open either way.
+#[test]
+#[cfg(unix)]
+fn an_orphan_exits_only_when_no_editor_holds_it() {
+    let home = tempfile::tempdir().unwrap();
+    let mut child = server(home.path())
+        .env("LJOS_MCP_ORPHAN_IDLE", "2")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let watch = pid;
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(30));
+        stop(watch);
+    });
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+    for line in initialize() {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    await_initialize(&mut stdout);
+    let held = ljos_cli::proc_tree::editor_above();
+    if held {
+        std::thread::sleep(Duration::from_secs(6));
+        let alive = !process_ended(pid);
+        let _ = child.kill();
+        let _ = child.wait();
+        drop(stdin);
+        assert!(alive, "an editor above the server and it still exited");
+    } else {
+        let ended = ended_within(pid, Duration::from_secs(12));
+        if !ended {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
+        drop(stdin);
+        assert!(ended, "no editor above the server and it stayed up");
+    }
+}
+
 /// A shell between the client and the server stays up. The server still
 /// exits, because the client it recorded was the process behind the shell.
 #[test]

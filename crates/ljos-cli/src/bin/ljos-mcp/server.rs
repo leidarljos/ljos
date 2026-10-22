@@ -3348,7 +3348,11 @@ fn register_inbound_line(line: &[u8]) {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
         return;
     };
-    if value.get("method").and_then(|method| method.as_str()) != Some("tools/call") {
+    let method = value.get("method").and_then(|method| method.as_str());
+    if method.is_some() {
+        crate::lifetime::note_request();
+    }
+    if method != Some("tools/call") {
         return;
     }
     let Some(name) = value

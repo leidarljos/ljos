@@ -6,7 +6,7 @@
 //! client: the nearest ancestor that is not one of those is, recorded by
 //! pid and start time so a reused pid is not taken for it.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::task::Waker;
 use std::time::Duration;
@@ -20,6 +20,8 @@ static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static READER: Mutex<Option<Waker>> = Mutex::new(None);
 static CLOSING: AtomicBool = AtomicBool::new(false);
 static PRCTL_LOGGED: AtomicBool = AtomicBool::new(false);
+/// Unix seconds of the last client request, or zero before the watch starts.
+static LAST_REQUEST: AtomicU64 = AtomicU64::new(0);
 
 /// End the input as if stdin had closed.
 fn close() {
@@ -391,13 +393,48 @@ fn tick(_queue: &Kqueue) -> bool {
     false
 }
 
-fn watch(client: Option<Watched>) {
+/// Note one client request, so an orphan is measured from the last one.
+pub fn note_request() {
+    LAST_REQUEST.store(ljos_cli::bookkeep::now_secs(), Ordering::Relaxed);
+}
+
+fn note_request_if_unset() {
+    let now = ljos_cli::bookkeep::now_secs();
+    let _ = LAST_REQUEST.compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed);
+}
+
+/// The quiet window has passed and no editor is still above this process.
+/// The editor walk reads the filesystem, so a chain that still holds one
+/// is not walked again for half a minute.
+fn orphaned(limit: Option<Duration>, looked: &mut std::time::Instant, held: &mut bool) -> bool {
+    let Some(limit) = limit else {
+        return false;
+    };
+    let last = LAST_REQUEST.load(Ordering::Relaxed);
+    if !ljos_cli::bookkeep::idle_due(ljos_cli::bookkeep::now_secs(), last, limit) {
+        return false;
+    }
+    if *held && looked.elapsed() < Duration::from_secs(30) {
+        return false;
+    }
+    *looked = std::time::Instant::now();
+    *held = ljos_cli::proc_tree::editor_above();
+    !*held
+}
+
+fn watch(client: Option<Watched>, orphan: Option<Duration>) {
+    note_request_if_unset();
     let queue = client
         .as_ref()
         .map(|c| open_kqueue(c.pid))
         .unwrap_or(Kqueue::Idle);
+    let mut looked = std::time::Instant::now()
+        .checked_sub(Duration::from_secs(60))
+        .unwrap_or_else(std::time::Instant::now);
+    let mut held = false;
     loop {
-        if client.as_ref().is_some_and(|c| !still_there(c)) || stdin_finished() || tick(&queue) {
+        let gone = client.as_ref().is_some_and(|c| !still_there(c));
+        if gone || stdin_finished() || orphaned(orphan, &mut looked, &mut held) || tick(&queue) {
             close();
             return;
         }
@@ -416,10 +453,12 @@ pub fn watch_parent() {
     #[cfg(target_os = "linux")]
     arm_pdeathsig();
     let client = client_ancestor();
+    // Read once. An idle server must not reopen `ljos.toml` on every tick.
+    let orphan = ljos_cli::idle_drop::orphan_after();
     let _ = std::thread::Builder::new()
         .name("ljos-mcp-client".into())
         .stack_size(64 * 1024)
-        .spawn(move || watch(client));
+        .spawn(move || watch(client, orphan));
 }
 
 /// One tool call between the line being read and its answer being built.

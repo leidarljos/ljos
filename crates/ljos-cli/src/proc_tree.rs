@@ -908,6 +908,152 @@ pub fn exe_runner(_pid: u32) -> Option<&'static str> {
     None
 }
 
+/// Editors and agents. A server whose chain still holds one of these is
+/// not an orphan. Matched on the file name, without regard to case.
+const EDITORS: &[&str] = &[
+    "claude",
+    "claude-code",
+    "codex",
+    "cursor",
+    "cursor-agent",
+    "opencode",
+    "opencode-ai",
+    "agy",
+    "antigravity",
+    "grok",
+    "gemini",
+    "aider",
+    "code",
+    "code-oss",
+    "codium",
+    "vscodium",
+    "zed",
+    "zed-editor",
+    "windsurf",
+    "goland",
+    "idea",
+    "pycharm",
+    "webstorm",
+    "rustrover",
+    "sublime_text",
+    "emacs",
+    "nvim",
+    "vim",
+    "gvim",
+    "helix",
+    "lapce",
+    "kate",
+    "gedit",
+    "cursor helper",
+];
+
+/// Whether `name` is an editor or an agent. A path uses its file name.
+#[must_use]
+pub fn is_editor_name(name: &str) -> bool {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name).trim();
+    EDITORS.iter().any(|item| base.eq_ignore_ascii_case(item))
+}
+
+#[cfg(target_os = "linux")]
+fn command_base(pid: u32) -> Option<String> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let first = raw.split(|b| *b == 0).find(|word| !word.is_empty())?;
+    let text = String::from_utf8_lossy(first);
+    Some(text.rsplit(['/', '\\']).next().unwrap_or(&text).to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn command_base(pid: u32) -> Option<String> {
+    let mut mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROCARGS2,
+        libc::c_int::try_from(pid).ok()?,
+    ];
+    let mut size: libc::size_t = 0;
+    // SAFETY: a null buffer asks sysctl for the size alone.
+    let asked = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if asked != 0 || size < 4 {
+        return None;
+    }
+    let mut buf = vec![0u8; size];
+    // SAFETY: buf holds the size sysctl reported.
+    let read = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if read != 0 {
+        return None;
+    }
+    buf.truncate(size);
+    let argc = usize::try_from(i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?)).ok()?;
+    if argc == 0 {
+        return None;
+    }
+    let word = buf[4..]
+        .split(|b| *b == 0)
+        .skip(1)
+        .find(|word| !word.is_empty())?;
+    let text = String::from_utf8_lossy(word);
+    Some(text.rsplit(['/', '\\']).next().unwrap_or(&text).to_string())
+}
+
+/// Whether an editor or an agent is still above this process. Linux also
+/// accepts the runner named by the file the process is running, so a
+/// `node` that is only hosting an editor still counts.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn editor_above() -> bool {
+    ancestors().into_iter().any(|proc| {
+        is_editor_name(&proc.comm)
+            || command_base(proc.pid).is_some_and(|name| is_editor_name(&name))
+            || exe_runner(proc.pid).is_some_and(is_editor_name)
+    })
+}
+
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn editor_above() -> bool {
+    // SAFETY: getppid has no preconditions.
+    let mut pid = unsafe { libc::getppid() } as u32;
+    for _ in 0..DEPTH {
+        if pid <= 1 {
+            return false;
+        }
+        let Some((ppid, comm)) = parent_and_name(pid) else {
+            return false;
+        };
+        if is_editor_name(&comm) || command_base(pid).is_some_and(|name| is_editor_name(&name)) {
+            return true;
+        }
+        if ppid == pid {
+            return false;
+        }
+        pid = ppid;
+    }
+    false
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[must_use]
+pub fn editor_above() -> bool {
+    false
+}
+
 /// Whether `cmd`, a shell's `-c` line, runs `ljos hook` and nothing else:
 /// the program (`ljos`, a path to it, or the plugin launcher with `ljos`),
 /// `hook`, and flags. `${NAME}` and double quotes are the runner's own
@@ -1325,6 +1471,15 @@ pub fn hook_runner() -> Result<(Proc, &'static str), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_editor_name_matches_the_file_and_not_a_shell() {
+        assert!(is_editor_name("Cursor"));
+        assert!(is_editor_name("/Applications/Cursor Helper"));
+        assert!(is_editor_name("cursor-agent"));
+        assert!(!is_editor_name("bash"));
+        assert!(!is_editor_name("python3"));
+    }
 
     #[test]
     fn a_runner_is_read_from_the_file_it_runs_from() {
