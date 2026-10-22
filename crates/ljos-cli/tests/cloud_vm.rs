@@ -5047,10 +5047,9 @@ fn the_push_gate_denies_a_cite_that_does_not_stand() {
 }
 
 /// The push gate and the push cite `ljos consensus` prints read the
-/// roster the same way. A pack that does not answer leaves the cite
-/// standing on nothing in both, for the same reason, since a persona's
-/// ballot cannot be told from a seat's. A pack off on purpose is an empty
-/// roster in both.
+/// roster the same way. A pack that does not answer, and a pack that is
+/// off, both leave the cite standing on nothing, for the same reason: a
+/// persona's ballot cannot be told from a seat's.
 #[test]
 fn the_gate_and_consensus_agree_when_the_roster_is_not_readable() {
     let _g = Guard::new();
@@ -5071,8 +5070,60 @@ fn the_gate_and_consensus_agree_when_the_roster_is_not_readable() {
     assert_eq!(refused.map(|r| r.verdict), Some("deny".to_string()));
 
     std::env::set_var("PACKSET_URL", "off");
-    let stands = ljos_cli::cite_stands("probe-cite");
-    assert!(stands.is_ok(), "{stands:?}");
+    let why = ljos_cli::cite_stands("probe-cite").unwrap_err();
+    assert!(why.contains("the roster is not readable"), "{why}");
     let (words, json) = ljos_cli::push_cite_reading_on_roster("probe-cite", &rows, "ljosbot");
-    assert_eq!(json["push_cite"]["stands"], true, "{words}");
+    assert_eq!(json["push_cite"]["stands"], false, "{words}");
+    assert_eq!(json["push_cite"]["refusal"], why.as_str(), "{words}");
+}
+
+/// `hn-skeptic` is a persona: pinned and signed, and the only ballot on
+/// the issue besides the pusher's absence. With the pack off that ballot
+/// used to count as a seat, and the push cite stood on it.
+#[test]
+fn a_persona_ballot_does_not_count_as_a_seat_when_the_pack_is_off() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_origin, repo) = slot_world(root.path(), &["probe-cite"]);
+    pin_standing(&repo, "hn-skeptic");
+    cast("hn-skeptic", "probe-cite", "ship");
+
+    let bin = root.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    executable(
+        &bin.join("vissue"),
+        "#!/bin/sh\n[ \"$1\" = vote ] || exit 1\nprintf '%s\\n' '[{\"agent\":\"hn-skeptic\",\"choice\":\"ship\"}]'\n",
+    );
+    std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+    std::env::set_var("PACKSET_URL", "off");
+    std::env::set_var("PACKSET_WORKSPACE", "seat");
+    std::env::set_var("LJOS_GUARD", "on");
+    std::env::remove_var("LJOS_UNSIGNED_BALLOTS");
+    std::env::set_var("LJOS_SEAT", "ljosbot");
+    std::env::set_var("VISSUE_AGENT", "ljosbot");
+
+    let why = ljos_cli::cite_stands("probe-cite").unwrap_err();
+    assert!(why.contains("the roster is not readable"), "{why}");
+    assert!(
+        !why.contains("counted hn-skeptic"),
+        "a persona was counted as a seat: {why}"
+    );
+    let rows = [serde_json::json!({"agent": "hn-skeptic", "choice": "ship"})];
+    let (words, json) = ljos_cli::push_cite_reading_on_roster("probe-cite", &rows, "ljosbot");
+    assert_eq!(json["push_cite"]["stands"], false, "{words}");
+    assert!(
+        json["push_cite"]["refusal"]
+            .as_str()
+            .unwrap_or("")
+            .contains("the roster is not readable"),
+        "{words}"
+    );
+    let refused = ljos_cli::gate_push(None, "LJOS_CITE=probe-cite git push origin main", None)
+        .expect("a persona ballot let a push through");
+    assert_eq!(refused.verdict, "deny");
+    assert!(
+        refused.reason.contains("the roster is not readable"),
+        "{}",
+        refused.reason
+    );
 }
