@@ -11175,13 +11175,51 @@ mod read_back_tests {
     }
 }
 
+/// What the signature check made of an issue's seat ballots: the legacy
+/// unsigned ones it let count, and the ones it left out, each with why.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SeatSignatures {
+    pub legacy: Vec<String>,
+    pub left_out: Vec<(String, String)>,
+}
+
+impl SeatSignatures {
+    /// `ballots` without the ones left out.
+    #[must_use]
+    pub fn counted(&self, ballots: &[Value]) -> Vec<Value> {
+        ballots
+            .iter()
+            .filter(|b| {
+                let agent = b["agent"].as_str().map(str::trim);
+                !self.left_out.iter().any(|(v, _)| Some(v.as_str()) == agent)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// What a cite says after its count: the legacy and the left-out
+    /// ballots, by name.
+    #[must_use]
+    pub fn said(&self) -> String {
+        let mut out = String::new();
+        if !self.legacy.is_empty() {
+            out.push_str(&format!("; legacy unsigned: {}", self.legacy.join(", ")));
+        }
+        if !self.left_out.is_empty() {
+            let why: Vec<&str> = self.left_out.iter().map(|(_, w)| w.as_str()).collect();
+            out.push_str(&format!("; left out: {}", why.join("; ")));
+        }
+        out
+    }
+}
+
 /// The seat ballots on `issue` that fail their signature check, said as
-/// one refusal. `Ok` when every seat ballot is signed under its pinned key
-/// or is legacy unsigned (committed to the tracker before signing began),
-/// and every signed seat that is not standing is under a slot that this
-/// issue already held when its pin was introduced
-/// ([`slot::problems`]), or when `LJOS_UNSIGNED_BALLOTS=allow`; the `Ok`
-/// names the legacy ones.
+/// one refusal. A seat that does not stand ([`slot::stands`]) and is not
+/// under a slot this issue already held when its pin was introduced
+/// ([`slot::problems`]) is left out and named, and the rest still decide.
+/// `Ok` when every other seat ballot is signed under its pinned key or is
+/// legacy unsigned (committed to the tracker before signing began), or
+/// when `LJOS_UNSIGNED_BALLOTS=allow`.
 ///
 /// # Errors
 ///
@@ -11190,13 +11228,13 @@ pub fn check_seat_signatures(
     issue: &str,
     ballots: &[Value],
     personas: &std::collections::BTreeSet<String>,
-) -> std::result::Result<Vec<String>, String> {
+) -> std::result::Result<SeatSignatures, String> {
     if ballot_sig::unsigned_allowed() {
-        return Ok(Vec::new());
+        return Ok(SeatSignatures::default());
     }
     let seats = seat_ballots(ballots, personas);
     if seats.is_empty() {
-        return Ok(Vec::new());
+        return Ok(SeatSignatures::default());
     }
     let v = issue_record(issue).map_err(|e| format!("{issue}: not readable: {e:#}"))?;
     let legacy = |voter: &str, choice: &str| {
@@ -11204,29 +11242,53 @@ pub fn check_seat_signatures(
     };
     let notes = ballot_sig::notes_of(&v);
     let pins = ballot_sig::pins();
-    let (problems, old) = ballot_sig::seat_check(issue, &seats, &notes, &pins, &legacy);
+    let starts = slot::starts();
+    let stands =
+        |seat: &str| slot::stands(seat, pins.get(seat).map(String::as_str), starts.as_deref());
+    let before_pin = |note: &str, voter: &str| {
+        pins.get(voter)
+            .is_some_and(|key| slot::recorded_before_pin(issue, note, voter, key).unwrap_or(true))
+    };
+    let signed = |voter: &str| {
+        notes
+            .iter()
+            .filter_map(|n| ballot_sig::parse_note(n))
+            .any(|n| n.voter == voter)
+    };
+    let mut left_out = Vec::new();
+    let mut kept = Vec::new();
+    for (voter, choice) in seats {
+        let old = !signed(voter) && legacy(voter, choice);
+        let why = if old || stands(voter) {
+            None
+        } else {
+            slot::problems(
+                issue,
+                &[(voter, choice)],
+                &notes,
+                &pins,
+                &stands,
+                &before_pin,
+            )
+            .into_iter()
+            .next()
+        };
+        match why {
+            Some(why) => left_out.push((voter.to_string(), why)),
+            None => kept.push((voter, choice)),
+        }
+    }
+    let (problems, old) = ballot_sig::seat_check(issue, &kept, &notes, &pins, &legacy);
     if !problems.is_empty() {
         return Err(format!(
             "the seat ballots on {issue} are not all signed, so it decides nothing for a push: {}",
             problems.join("; ")
         ));
     }
-    let signed: Vec<(&str, &str)> = seats
-        .into_iter()
-        .filter(|(voter, _)| !old.iter().any(|o| o == voter))
-        .collect();
-    let unslotted = slot::problems(issue, &signed, &notes, &pins, &|note, voter| {
-        pins.get(voter)
-            .is_some_and(|key| slot::recorded_before_pin(issue, note, voter, key).unwrap_or(true))
-    });
-    if unslotted.is_empty() {
-        Ok(old)
-    } else {
-        Err(format!(
-            "a run seat on {issue} is not under a slot, so it decides nothing for a push: {}",
-            unslotted.join("; ")
-        ))
-    }
+    Ok(SeatSignatures {
+        legacy: old,
+        left_out,
+    })
 }
 
 /// `raw` with a leading `~` or `~/` put against `home`; `None` when there is
@@ -18357,12 +18419,10 @@ pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
             return Err(why);
         }
         let (ballots, personas) = cite_ballots(cite)?;
-        let old = check_seat_signatures(cite, &ballots, &personas)?;
-        let mut d = seats_decide(cite, &ballots, &personas, &seat_name())?;
-        if !old.is_empty() {
-            d.counted
-                .push_str(&format!("; legacy unsigned: {}", old.join(", ")));
-        }
+        let signed = check_seat_signatures(cite, &ballots, &personas)?;
+        let mut d = seats_decide(cite, &signed.counted(&ballots), &personas, &seat_name())
+            .map_err(|e| format!("{e}{}", signed.said()))?;
+        d.counted.push_str(&signed.said());
         let closed = if v["state"].as_str() == Some("DONE") && is_decision(&v) {
             ", closed as a decision"
         } else {
@@ -28506,16 +28566,15 @@ pub fn push_cite_reading_signed(
     rows: &[Value],
     personas: &std::collections::BTreeSet<String>,
     pusher: &str,
-    signed: std::result::Result<Vec<String>, String>,
+    signed: std::result::Result<SeatSignatures, String>,
 ) -> (String, Value) {
-    let decided = signed.and_then(|old| {
-        seats_decide(issue, rows, personas, pusher).map(|mut d| {
-            if !old.is_empty() {
-                d.counted
-                    .push_str(&format!("; legacy unsigned: {}", old.join(", ")));
-            }
-            d
-        })
+    let decided = signed.and_then(|s| {
+        seats_decide(issue, &s.counted(rows), personas, pusher)
+            .map(|mut d| {
+                d.counted.push_str(&s.said());
+                d
+            })
+            .map_err(|e| format!("{e}{}", s.said()))
     });
     let (mut words, json) = match decided {
         Ok(d) => (
@@ -35718,7 +35777,7 @@ mod tests {
             .map(|s| (*s).to_string())
             .collect();
         let (words, json) =
-            push_cite_reading_signed("x-1", &rows, &personas, "ljos-bot", Ok(vec![]));
+            push_cite_reading_signed("x-1", &rows, &personas, "ljos-bot", Ok(Default::default()));
         assert_eq!(
             words,
             "push cite: x-1 decides guard-fix for a push by ljos-bot; counted ljos-bot for guard-fix, \
@@ -35728,8 +35787,13 @@ mod tests {
         );
         assert_eq!(json["push_cite"]["stands"], true);
         assert_eq!(json["push_cite"]["choice"], "guard-fix");
-        let (words, json) =
-            push_cite_reading_signed("x-1", &rows[..4], &personas, "ljos-bot", Ok(vec![]));
+        let (words, json) = push_cite_reading_signed(
+            "x-1",
+            &rows[..4],
+            &personas,
+            "ljos-bot",
+            Ok(Default::default()),
+        );
         assert!(
             words.starts_with("push cite: does not stand for ljos-bot: the only seat ballot on x-1 is from ljos-bot"),
             "{words}"
@@ -46804,7 +46868,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     /// `panel_cloud` on probe-l0g0 against a pack whose persona atoms are
     /// `atoms`: the directory it ran in, the prompt directory, its answer.
-    fn cloud_panel(atoms: &'static str) -> (tempfile::TempDir, PathBuf, Result<String>) {
+    fn cloud_panel(atoms: impl Into<String>) -> (tempfile::TempDir, PathBuf, Result<String>) {
+        let atoms: String = atoms.into();
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("tracker");
@@ -46824,7 +46889,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let (url, _seen) = serve_http(move |req| {
             let line = req.lines().next().unwrap_or("");
             if line.starts_with("GET /v1/atoms") && line.contains("kind=persona") {
-                (200, atoms.into())
+                (200, atoms.clone())
             } else if line.starts_with("GET /v1/atoms") {
                 (200, r#"{"atoms":[]}"#.into())
             } else {
@@ -46915,6 +46980,44 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(err.contains("and ada-rider"), "{err}");
         assert!(err.contains("seat ada-rider"), "{err}");
         assert!(!out.exists(), "{err}");
+    }
+
+    /// A run's seat is what `whoami` reads from its `LJOS_SEAT`, which
+    /// strips an old pid tag and maps an old name. Two personas whose
+    /// slugs differ still boot as one seat when one is the other's legacy
+    /// form, so the panel names both and writes nothing. `eessi-bot` has
+    /// no pid tag and stays a seat of its own.
+    #[test]
+    fn a_cloud_panel_refuses_two_personas_that_boot_as_one_seat() {
+        let pair = |a: &str, b: &str| {
+            let atom = |id: &str, name: &str| {
+                format!(
+                    r#"{{"id":"atom-{id}","kind":"persona","name":"{name}","anchor":0.5,"text":"{name}","entities":["logo"],"ts":"2026-10-11T10:00:00Z"}}"#
+                )
+            };
+            format!(r#"{{"atoms":[{},{}]}}"#, atom("a", a), atom("b", b))
+        };
+        for (first, second, seat) in [
+            ("inky", "inky-n9o", "inky"),
+            ("ljos-bot", "ljosbot", "ljosbot"),
+            ("inky", "inky@n9o", "inky"),
+        ] {
+            let (_dir, out, said) = cloud_panel(pair(first, second));
+            let err = format!("{:#}", said.unwrap_err());
+            assert!(
+                err.contains(&format!("personas {first} and {second} ")),
+                "{err}"
+            );
+            assert!(err.contains(&format!("seat {seat};")), "{err}");
+            assert!(!out.exists(), "{err}");
+        }
+        let (_dir, out, said) = cloud_panel(pair("eessi", "eessi-bot"));
+        let said = said.unwrap();
+        assert!(said.contains("2 of 2 personas"), "{said}");
+        for name in ["eessi", "eessi-bot"] {
+            let text = std::fs::read_to_string(out.join(format!("{name}.md"))).unwrap();
+            assert!(text.contains(&format!("LJOS_SEAT={name}\n")), "{text}");
+        }
     }
 
     /// The pack's address, its request lines and its posted atoms.
