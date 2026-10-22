@@ -2054,10 +2054,15 @@ fn first_interactive_guard(text: &str) -> Option<usize> {
         let one_line =
             (trimmed.contains("$PS1") || trimmed.contains("$-")) && trimmed.contains("return");
         // Ubuntu's skel bashrc splits the test and the return:
-        // `case $- in` / `*i*) ;;` / `*) return;;` / `esac`.
-        // A one-line search appends PATH after that return, so a
+        // `case $- in` / `*i*) ;;` / `*) return;;` / `esac`, and an
+        // `if [ -z "$PS1" ]; then` / `return` / `fi` splits them the same
+        // way. A one-line search appends PATH after that return, so a
         // non-interactive shell never sees it.
-        if one_line || (case_tests_shell(trimmed) && case_body_returns(&lines[i + 1..])) {
+        let rest = &lines[i + 1..];
+        if one_line
+            || (case_tests_shell(trimmed) && block_returns(rest, "esac"))
+            || (if_tests_shell(trimmed) && block_returns(rest, "fi"))
+        {
             return Some(at);
         }
         at += line.len();
@@ -2076,11 +2081,19 @@ fn case_tests_shell(trimmed: &str) -> bool {
     word == "$-" || word == "$PS1"
 }
 
-/// Whether this `case` returns before `esac`. A `case "$TERM"` does not.
-fn case_body_returns(lines: &[&str]) -> bool {
+/// `if [ -z "$PS1" ]; then` or `if [[ $- != *i* ]]`, an `if` that tests
+/// for an interactive shell.
+fn if_tests_shell(trimmed: &str) -> bool {
+    trimmed.starts_with("if ") && (trimmed.contains("$PS1") || trimmed.contains("$-"))
+}
+
+/// Whether the block returns before the `esac` or `fi` that closes it. A
+/// `case "$TERM"` does not.
+fn block_returns(lines: &[&str], end: &str) -> bool {
     for line in lines {
         let trimmed = line.trim();
-        if trimmed.starts_with("esac") {
+        let first = trimmed.split([';', ' ', '\t']).next().unwrap_or("");
+        if first == end {
             return false;
         }
         if trimmed.contains("return") {
