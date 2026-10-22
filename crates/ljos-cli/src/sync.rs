@@ -6554,6 +6554,35 @@ mod tests {
         assert!(live.iter().all(|atom| atom["origin"] != "peer"), "{live:?}");
     }
 
+    /// One scope log that age cannot decrypt must not abort the other scopes.
+    /// The bad file stays; the one that opens is adopted.
+    #[test]
+    fn a_bad_ciphertext_keeps_that_scope_and_adopts_the_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let (root, scope) = two_scope_logs(dir.path());
+        let cloud = root.join(".ljos/atoms/gone+cloud.jsonl.age");
+        std::fs::write(&cloud, b"not-age\n").unwrap();
+        commit_dated(
+            &root,
+            &[".ljos/atoms/gone+cloud.jsonl.age"],
+            "corrupt cloud",
+            Some(OLD_COMMIT),
+        );
+        let (url, _store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        let said = adopt_in_repo(&root, &scope, "gone", opts(false, false)).unwrap();
+        assert!(
+            said.contains("gone's cloud log could not be opened"),
+            "{said}"
+        );
+        assert!(said.contains("the log was kept"), "{said}");
+        assert!(said.contains("1 box atoms adopted"), "{said}");
+        assert!(!in_head(&root, ".ljos/atoms/gone.jsonl.age"));
+        assert!(in_head(&root, ".ljos/atoms/gone+cloud.jsonl.age"));
+        assert_eq!(std::fs::read(&cloud).unwrap(), b"not-age\n");
+    }
+
     #[test]
     fn a_young_extra_scope_blocks_the_adopt() {
         let dir = tempfile::tempdir().unwrap();
