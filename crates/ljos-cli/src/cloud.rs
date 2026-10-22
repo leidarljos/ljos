@@ -157,6 +157,10 @@ pub fn up(force: bool) -> Result<String> {
         }
     });
     lines.push(ensure_cloud_guard_rules()?);
+    // After the rule file, so a second `cloud up` still says the refusals
+    // are already installed. Git runs this hook for every push; the rule
+    // file cannot see a push a script starts.
+    lines.push(crate::cloud_hook::ensure()?);
     // Retire env-owned wakes before any later step can fail, so a removed
     // `LJOS_WAKE_<SEAT>_URL` cannot leave a stale URL that still sees a new key.
     lines.extend(ensure_wakes()?);
@@ -272,13 +276,23 @@ pub fn guard_row() -> crate::Habitat {
     };
     let have = crate::kept_rules(&path);
     if current_rules(&have) {
-        return crate::Habitat {
-            name: "cloud guard",
-            state: format!(
-                "{} denies cursor/* pushes and `gh pr create|merge`",
-                path.display()
-            ),
-            ok: true,
+        let base = format!(
+            "{} denies cursor/* pushes and `gh pr create|merge`",
+            path.display()
+        );
+        // The rule file can be current while the hook was removed. Say
+        // both: the refusals are in place, and the hook is not.
+        return match crate::cloud_hook::hook_line() {
+            Ok(line) => crate::Habitat {
+                name: "cloud guard",
+                state: format!("{base}; {line}"),
+                ok: true,
+            },
+            Err(why) => crate::Habitat {
+                name: "cloud guard",
+                state: format!("{base}; {why}"),
+                ok: false,
+            },
         };
     }
     let state = if have.is_empty() {
@@ -305,7 +319,9 @@ pub fn guard_row() -> crate::Habitat {
 /// stays `info`.
 #[must_use]
 pub(crate) fn guard_row_is_warning(state: &str) -> bool {
-    state.contains("is stale;") || state.contains("differs from the cloud seat refusals")
+    state.contains("is stale;")
+        || state.contains("differs from the cloud seat refusals")
+        || state.contains("pre-push hook")
 }
 
 /// Whether a `cloud age` row is the unset case: no secret was named and
@@ -2032,6 +2048,16 @@ fn current_rules(rules: &[crate::Rule]) -> bool {
         seen[index] = true;
     }
     seen == [true, true, true]
+}
+
+/// Replace the push allowlist `ljos cloud up` writes. `code` and `tracker`
+/// are remote URLs. Branch names are the short names (`develop`).
+///
+/// # Errors
+///
+/// No config home, or the allowlist file cannot be replaced.
+pub fn write_push_allowlist(code: &[&str], tracker: &[&str], branches: &[&str]) -> Result<()> {
+    crate::cloud_hook::write_push_allowlist(code, tracker, branches)
 }
 
 pub(crate) fn ensure_cloud_guard_rules() -> Result<String> {
