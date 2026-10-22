@@ -39,6 +39,8 @@ chrono = "0.4"
 ed25519-dalek = "2"
 hex = "0.4"
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+# Same parser ureq posts with, so the host we allow is the host it connects to.
+url = "2"
 anyhow.workspace = true
 clap.workspace = true
 packset-client.workspace = true

@@ -10,6 +10,12 @@
 
 `LJOS_TRACKER_GIT=push` commits each tracker write, fetches, rebases with the per-issue field merge, and pushes. It retries a few times and never forces. A failed push stays committed. The next write and the end of the session try again. `commit` commits and does not fetch or push. `off` skips the commit.
 
+`ljos send` and `ljos reply` in push mode push the sealed log from the detached wake before the wake fires, so the woken seat does not read an empty inbox. The send does not wait on that push. A failed push is a line in the wake log, and the wake still runs.
+
+The wake envelope names the tracker commit that holds the log. A command sees it as `LJOS_WAKE_COMMIT`, and a webhook as `commit` in the JSON. The field is absent when no log commit was made.
+
+The woken seat runs `ljos inbox --sync COMMIT`. That fetches until the commit is present, or the remote head when it is not, imports the sealed logs, and lists. With no remote the flag only lists.
+
 `LJOS_SEAT` is the seat name. `ljos cloud up` appends the run id when one is present, at most 16 characters. On GitHub Actions that id is `GITHUB_RUN_ID`. Otherwise it is `CURSOR_AGENT_ID`, `CLOUD_AGENT_ID`, `AGENT_ID`, `CURSOR_CONVERSATION_ID`, or `CODESPACE_NAME`. `LJOS_SEAT=ridley-ci-a` with run `555001` is the seat `ridley-ci-a-555001`. Unset, the seat is the harness name and that id, or the machine name when there is no id. A seat left in `~/.config/ljos/env` by an earlier boot does not hide a new id.
 
 Each seat signs its ballots and its handovers with `~/.local/share/ljos/seats/SEAT/ballot.key`. `cloud up` points `LJOS_SEAT_KEY` and `DEEDAR_HOST_SIGNING_KEY` at that file, and writes `VISSUE_AGENT` as the same seat. The machine key `~/.config/deedar/host.key` stays where it is. A later process on that machine does not sign a ballot or a handover that already has a signature.
@@ -18,7 +24,7 @@ Each seat signs its ballots and its handovers with `~/.local/share/ljos/seats/SE
 
 `LJOS_TRACKER_DIR` is the clone. The default is `~/.local/share/ljos/tracker`. `LJOS_BIN_DIR` is the binary directory. The default is `~/.local/bin`. `LJOS_RELEASE_DIR` is an offline directory of binaries and a `SHA256SUMS` file. `LJOS_TRACKER_PUSH_WAIT` is how many seconds `ljos doctor` waits before an unpushed commit counts as stuck. The default is 5.
 
-`LJOS_WAKE_<SEAT>_URL` is the webhook that wakes a seat when mail from this machine reaches it. A wake fires on the sender's machine, so a VM that writes to a box seat needs one. `cloud up` writes each into `~/.config/ljos/wake.toml` with `key_env = "LJOS_WAKE_<SEAT>_KEY"`, so the bearer key is read from that variable when the wake fires and is never written to disk. `LJOS_WAKE_INKY_URL` and `LJOS_WAKE_INKY_KEY` wake the seat `inky`, and `LJOS_WAKE_GROK_BOT_URL` wakes `grok-bot`. The URL has to be https. Pass both as secrets, so neither is in `environment.json`. Each run writes them again and keeps the other seats' wakes.
+`LJOS_WAKE_<SEAT>_URL` is the webhook that wakes a seat when mail from this machine reaches it. A wake fires on the sender's machine, so a VM that writes to a box seat needs one. `cloud up` writes each into `~/.config/ljos/wake.toml` with `key_env = "LJOS_WAKE_<SEAT>_KEY"` and `source = "env"`, so the bearer key is read from that variable when the wake fires and is never written to disk. `LJOS_WAKE_INKY_URL` and `LJOS_WAKE_INKY_KEY` wake the seat `inky`, and `LJOS_WAKE_GROK_BOT_URL` wakes `grok-bot`. The URL has to be https, or http when the host is exactly localhost, an IPv4 loopback address, or ::1. Pass both as secrets, so neither is in `environment.json`. Each run writes the `source = "env"` entries again. A wake without that source stays, and the line says so. Two variables that name one seat are refused, and the line names both. Other seats' wakes stay.
 
 `ljos doctor` warns while the tracker has commits the remote lacks. A harness MCP command that will not run on this machine fails the `mcp` row, and the row says to run `ljos cloud up`. The row reads every harness file ljos writes, not only Cursor's `mcp.json`.
 
@@ -72,6 +78,10 @@ Another repository, once a release contains `cloud up`:
 Set `LJOS_TRACKER_REMOTE` in the environment. The tracker repository has to be one the git credentials on the machine can clone. The URL stays out of `environment.json`. Set `LJOS_CLOUD_AGE_SECRET` to the name of the secret that holds the age identity for scope `cloud`. The identity stays out of `environment.json` too. Until a release contains `cloud up`, use `scripts/install.sh` from this tree.
 
 `cloud up` rewrites the harness MCP command to `ljos-mcp` on PATH. A claim, a note and a vote then push to the tracker, and another clone sees them after a fetch. A `STARTED` claim whose program has exited returns to `TODO` after `LJOS_LEASE_SECS`. A claim whose program is still running stays. The tracker URL has to be one the machine's git credentials can clone.
+
+## Deeds
+
+A cloud seat's finish exports the deeds that seat cited on the issue into `.ljos/deeds/<seat>/`. The bag carries the deed, the inclusion receipt, the file bytes and any supersedes link. The tracker commit takes the bag, so a fetch brings it to the box. A machine that never ran `ljos cloud up` writes no bag on finish.
 
 ## Slots
 
