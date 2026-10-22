@@ -219,6 +219,29 @@ fn onboard_replaces_an_absolute_server_path() {
     assert!(!command.contains("/home/box"), "{command}");
 }
 
+/// A stale `ljos-mcp` left in another directory still exists, but it is
+/// not this install, so it is replaced like a missing one.
+#[test]
+fn onboard_replaces_an_absolute_server_path_from_another_install() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join(".local/bin");
+    install_pair(&bin);
+    let old = home.join("old/bin/ljos-mcp");
+    stub(&old);
+    fs::create_dir_all(home.join(".cursor")).unwrap();
+    let doc = serde_json::json!({ "mcpServers": { "ljos": { "command": old, "args": [] } } });
+    fs::write(home.join(".cursor/mcp.json"), doc.to_string()).unwrap();
+    let out = onboard(
+        &bin.join("ljos"),
+        &home,
+        &["onboard", "--harness", "cursor"],
+    );
+    assert!(out.status.success(), "{}", said(&out));
+    let (command, _) = json_command(&home.join(".cursor/mcp.json"));
+    assert_eq!(command, "ljos-mcp", "{}", said(&out));
+}
+
 #[test]
 fn onboard_keeps_an_absolute_server_path_that_exists_here() {
     let root = tempfile::tempdir().unwrap();
@@ -322,6 +345,44 @@ fn onboard_writes_an_absolute_command_when_path_points_to_another_install() {
     );
 }
 
+/// Doctor warns when a bare `ljos-mcp` resolves to a stale copy earlier on
+/// PATH and says to run onboard. Onboard has to change the command, or
+/// the next doctor warns again.
+#[test]
+fn onboard_replaces_a_bare_command_that_runs_another_binary() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join(".cargo/bin");
+    install_pair(&bin);
+    let stale = root.path().join("stale/bin");
+    stub(&stale.join("ljos-mcp"));
+    let config = home.join(".codex/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let bare = "[mcp_servers.ljos]\ncommand = \"ljos-mcp\"\nargs = []\n";
+    fs::write(&config, bare).unwrap();
+    let path = format!("{}:{}:/usr/bin:/bin", stale.display(), bin.display());
+    let out = onboard_with_path(
+        &bin.join("ljos"),
+        &home,
+        &path,
+        &["onboard", "--harness", "codex"],
+    );
+    assert!(out.status.success(), "{}", said(&out));
+    let text = fs::read_to_string(&config).unwrap();
+    assert_eq!(
+        toml_command(&text),
+        bin.join("ljos-mcp").display().to_string(),
+        "{text}\n{}",
+        said(&out)
+    );
+
+    fs::write(&config, bare).unwrap();
+    let out = onboard(&bin.join("ljos"), &home, &["onboard", "--harness", "codex"]);
+    assert!(out.status.success(), "{}", said(&out));
+    let text = fs::read_to_string(&config).unwrap();
+    assert_eq!(toml_command(&text), "ljos-mcp", "{text}");
+}
+
 #[test]
 fn onboard_rewrites_only_the_ljos_entry_in_toml() {
     let root = tempfile::tempdir().unwrap();
@@ -375,4 +436,34 @@ fn onboard_does_not_rewrite_a_sibling_hermes_command() {
         "{text}"
     );
     assert!(text.contains("  ljos:\n    command: ljos-mcp"), "{text}");
+}
+
+/// The goose marker opens the `ljos:` extension. A sibling listed after
+/// it is not part of that entry, however close it sits.
+#[test]
+fn onboard_does_not_rewrite_a_sibling_goose_command() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join(".cargo/bin");
+    install_pair(&bin);
+    fs::create_dir_all(home.join(".config/goose")).unwrap();
+    let config = "extensions:\n  ljos:\n    enabled: true\n    type: stdio\n  developer:\n    enabled: true\n    cmd: /home/otherbox/.cargo/bin/ljos-mcp\n";
+    fs::write(home.join(".config/goose/config.yaml"), config).unwrap();
+    let out = onboard(&bin.join("ljos"), &home, &["onboard", "--harness", "goose"]);
+    assert!(out.status.success(), "{}", said(&out));
+    let text = fs::read_to_string(home.join(".config/goose/config.yaml")).unwrap();
+    assert_eq!(text, config);
+
+    let stale = config.replace(
+        "    type: stdio\n",
+        "    type: stdio\n    cmd: /home/otherbox/.cargo/bin/ljos-mcp\n",
+    );
+    fs::write(home.join(".config/goose/config.yaml"), &stale).unwrap();
+    let out = onboard(&bin.join("ljos"), &home, &["onboard", "--harness", "goose"]);
+    assert!(out.status.success(), "{}", said(&out));
+    let text = fs::read_to_string(home.join(".config/goose/config.yaml")).unwrap();
+    assert_eq!(
+        text,
+        stale.replacen("/home/otherbox/.cargo/bin/ljos-mcp", "ljos-mcp", 1)
+    );
 }
