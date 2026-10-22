@@ -1,0 +1,1 @@
+A fresh clone offered `ljos sync --adopt-legacy` for a headerless log that replaced a host who had already committed a headed one. The note that the host writes headers lived under the tracker path, so the new checkout did not have it. Any committed headed blob of that log now counts, and adoption is not offered again.

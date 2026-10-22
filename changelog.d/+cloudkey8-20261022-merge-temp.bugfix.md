@@ -1,0 +1,1 @@
+A conflicted atom log aborted every real merge. git runs the atoms driver with the work tree as its cwd and passes `%A` as a relative `.merge_file_XXXX`, and that path never sits under the absolute checkout, so the driver refused it and catch-up and the user-rules pull stopped. A relative temp is resolved against the cwd, and it still has to land inside the work tree.

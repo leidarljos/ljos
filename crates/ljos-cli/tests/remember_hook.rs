@@ -4,6 +4,9 @@
 //! on a free port: `ljos remember`, then a matching prompt through the
 //! `UserPromptSubmit` command onboard put in `settings.json`.
 
+#[path = "common/runner.rs"]
+mod runner;
+
 use std::io::Write;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -178,8 +181,13 @@ fn prompt_through(home: &Home, hook: &str, session: &str, prompt: &str) -> Strin
         "prompt": prompt,
     })
     .to_string();
-    let mut cmd = Command::new("/bin/sh");
-    cmd.args(["-c", hook]);
+    // Claude Code runs the command in `sh -c`; the hook keeps the prompt
+    // only when that runner, a program the kernel runs from a file named
+    // `claude`, opened the shell.
+    let runner = home.dir.path().join("claude");
+    runner::runner_at(&runner);
+    let mut cmd = Command::new(&runner);
+    cmd.args(["-c", "\"$@\"; exit $?", "claude", "/bin/sh", "-c", hook]);
     home.env(&mut cmd, home.dir.path());
     let said = run(cmd, Some(&payload));
     assert!(said.status.success(), "{hook}: {}", text(&said));
