@@ -4399,8 +4399,8 @@ mod tests {
         assert_eq!(card_named("file:///etc/passwd"), None);
     }
 
-    /// The guard tool and the hook share one verdict. A denial is a tool
-    /// error, the same way every other refusal is.
+    /// The guard tool mirrors the hook's outcome mapping: allowed commands
+    /// return a verdict, and refused commands are surfaced as tool errors.
     #[tokio::test]
     async fn guard_check_allows_an_ordinary_command_and_refuses_a_bad_commit() {
         let _env_lock = ENV_TEST_LOCK.lock().await;
