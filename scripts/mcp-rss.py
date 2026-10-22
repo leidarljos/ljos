@@ -98,6 +98,7 @@ def main():
     ap.add_argument("--bin", default="target/release/ljos-mcp")
     ap.add_argument("--idle", type=int, default=140)
     args = ap.parse_args()
+    binary = os.path.abspath(args.bin)
 
     home = tempfile.mkdtemp(prefix="ljos-rss-")
     tracker = os.path.join(home, "tracker")
