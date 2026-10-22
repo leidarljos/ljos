@@ -10281,8 +10281,9 @@ pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<(Vec<Hit>, bool)>
 /// by relevance alone, and how many of them the writer chose. A writer
 /// that lists `rank=relevance` ([`ranks_by_relevance`]) is asked for it,
 /// picks them by lexical, BM25 and cosine with no half-life, and echoes
-/// the rank; an answer without the echo is read as fused. An older writer
-/// is not asked, and cuts its
+/// the rank; an answer without the echo is read as fused. One that lists
+/// it and answers it with a 4xx is asked again as an older writer. An
+/// older writer is not asked, and cuts its
 /// fused list, which decays with age, so rank 21 of a pack full of fresh
 /// lookalikes never arrives: the stored atoms that best match the cue
 /// then follow its hits, so a relevant old memory still gets in. So they
@@ -10301,20 +10302,33 @@ fn search_relevant(
     timeout: std::time::Duration,
 ) -> Result<(Value, usize)> {
     let url = format!("{}/v1/search", client.base().trim_end_matches('/'));
-    let mut req = packset_client::authorize(ureq::get(&url))
-        .query("workspace", &client.workspace())
-        .query("q", &recall_query(cue))
-        .query("limit", &limit.to_string())
-        .timeout(timeout);
-    if ranks_by_relevance(client, timeout) {
-        req = req.query("rank", "relevance");
-    }
-    if rerank {
-        req = req.query("rerank", "1");
-    }
-    let mut body: Value = req
-        .call()
-        .map_err(|e| packset_client::Error::Http(Box::new(e)))
+    let ask = |rank: bool| {
+        let mut req = packset_client::authorize(ureq::get(&url))
+            .query("workspace", &client.workspace())
+            .query("q", &recall_query(cue))
+            .query("limit", &limit.to_string())
+            .timeout(timeout);
+        if rank {
+            req = req.query("rank", "relevance");
+        }
+        if rerank {
+            req = req.query("rerank", "1");
+        }
+        req.call().map_err(Box::new)
+    };
+    let ranked = ranks_by_relevance(client, timeout);
+    let answer = match ask(ranked) {
+        Err(e) if ranked && matches!(*e, ureq::Error::Status(400..=499, _)) => {
+            refuses_relevance(client);
+            ask(false)
+        }
+        other => other,
+    };
+    let mut body: Value = answer
+        .map_err(|e| match *e {
+            ureq::Error::Status(..) => packset_client::Error::Bad(e.to_string()),
+            _ => packset_client::Error::Http(e),
+        })
         .context("search: GET /v1/search failed")?
         .into_json()?;
     let chosen = body["hits"].as_array().map_or(0, Vec::len);
@@ -10352,9 +10366,8 @@ fn search_relevant(
 /// version did not move with the rank, so it is not read. Asked once a
 /// process per writer.
 fn ranks_by_relevance(client: &PacksetClient, timeout: std::time::Duration) -> bool {
-    static KNOWN: std::sync::Mutex<Option<(String, bool)>> = std::sync::Mutex::new(None);
     let base = client.base().trim_end_matches('/').to_string();
-    let mut known = KNOWN
+    let mut known = RANKS_KNOWN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some((at, ranks)) = known.as_ref() {
@@ -10376,6 +10389,19 @@ fn ranks_by_relevance(client: &PacksetClient, timeout: std::time::Duration) -> b
         .is_some_and(|r| r.iter().any(|v| v.as_str() == Some("relevance")));
     *known = Some((base, ranks));
     ranks
+}
+
+/// The last writer [`ranks_by_relevance`] asked, and its answer.
+static RANKS_KNOWN: std::sync::Mutex<Option<(String, bool)>> = std::sync::Mutex::new(None);
+
+/// The writer at `client` answered a ranked search with a 4xx though its
+/// status lists the rank: for the rest of the process it is asked as an
+/// older writer.
+fn refuses_relevance(client: &PacksetClient) {
+    let base = client.base().trim_end_matches('/').to_string();
+    *RANKS_KNOWN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((base, false));
 }
 
 /// The stored atoms that best match `cue` on [`lexical_match_scores`],
@@ -37661,6 +37687,89 @@ mod tests {
         let figma = found.iter().find(|h| h.id.as_deref() == Some("Figma"));
         assert_eq!(figma.and_then(|h| h.ballots), Some(2), "{found:?}");
         assert_eq!(found.len(), 4, "{found:?}");
+    }
+
+    /// A writer whose status lists `relevance` but answers a ranked search
+    /// with 400 is asked again as an older writer, so the stored lesson its
+    /// fused cut of fresh lookalikes leaves out still reaches the prompt,
+    /// with `PACKSET_URL` set.
+    #[test]
+    fn a_writer_that_refuses_the_rank_it_lists_is_read_as_older() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let lookalikes: Vec<Value> = (0..20)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("fresh{i}"), "kind": "lesson",
+                    "text": format!(
+                        "Operator op{i} recorded that the registry rejected the token"
+                    ),
+                    "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"]
+                })
+            })
+            .collect();
+        let mut atoms = lookalikes.clone();
+        atoms.push(serde_json::json!({
+            "id": "old", "kind": "lesson",
+            "text": "With pnpm the registry rejected the token because the CI secret expired",
+            "ts": "2026-01-14T09:00:00.000Z", "entities": ["horizon:standing"]
+        }));
+        let hits: Vec<Value> = lookalikes
+            .into_iter()
+            .map(|mut hit| {
+                hit["score"] = 1.0.into();
+                hit["ballots"] = 2.into();
+                hit["of"] = 2.into();
+                hit
+            })
+            .collect();
+        let (url, seen) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/status") {
+                let status = serde_json::json!({"search": {"ranks": ["fused", "relevance"]}});
+                return (200, status.to_string());
+            }
+            if first.contains("/v1/search") && first.contains("rank=") {
+                return (400, r#"{"error":"unknown rank"}"#.into());
+            }
+            if first.contains("/v1/search") {
+                return (200, serde_json::json!({"hits": hits}).to_string());
+            }
+            if first.contains("/v1/atoms") {
+                return (200, serde_json::json!({"atoms": atoms}).to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let prompt = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "npm: the registry rejected my token".into(),
+            session: Some("refused-rank".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(&prompt, 5);
+        assert!(note.contains("CI secret expired"), "{note}");
+        let asked = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.lines().next().unwrap_or("").contains("rank=relevance"));
+        assert!(asked, "{:?}", seen.lock().unwrap());
+        let (refusing, _) = serve_http(|req| {
+            if req.lines().next().unwrap_or("").contains("/v1/status") {
+                return (200, r#"{"search":{"ranks":["relevance"]}}"#.into());
+            }
+            (400, r#"{"error":"q required"}"#.into())
+        });
+        let _url = PackUrl::set(&refusing);
+        let err = packset_search_relevant("npm: the registry rejected my token", 20).unwrap_err();
+        assert!(!writer_unreachable(&err), "{err:#}");
+        assert!(!format!("{err:#}").contains("not answering"), "{err:#}");
     }
 
     /// The prompt hook hands over a paraphrase the encoder ranked first
