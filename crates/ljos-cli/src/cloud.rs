@@ -121,6 +121,13 @@ pub fn default_seat() -> String {
     crate::seat_slug(&format!("vm-{}", hostname()))
 }
 
+/// The seat a run with id `run` takes when it boots with `LJOS_SEAT` set
+/// to `base`, as [`default_seat`] names it there.
+#[must_use]
+pub fn run_seat(base: &str, run: &str) -> String {
+    with_run(&crate::seat_slug(base), run_slug(run).as_deref())
+}
+
 fn with_run(base: &str, id: Option<&str>) -> String {
     let Some(id) = id else {
         return base.to_string();
@@ -1455,11 +1462,15 @@ fn agent_id() -> Option<String> {
 }
 
 fn id_slug(key: &str) -> Option<String> {
-    let id = nonempty_var(key)?;
-    if matches!(id.as_str(), "0" | "1" | "true" | "false") {
+    run_slug(&nonempty_var(key)?)
+}
+
+fn run_slug(id: &str) -> Option<String> {
+    let id = id.trim();
+    if matches!(id, "0" | "1" | "true" | "false") {
         return None;
     }
-    let slug = crate::seat_slug(&id);
+    let slug = crate::seat_slug(id);
     if slug.is_empty() || slug == "runner" {
         return None;
     }
