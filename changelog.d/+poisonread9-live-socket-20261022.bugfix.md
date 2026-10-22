@@ -1,0 +1,1 @@
+The pack token stays in one client and is written only after the address the writer's URL resolved to has refused an unknown atom twice. The request uses that socket, ignores a proxy and does not follow a redirect. packsetd closes the socket, so the next call proves again instead of trusting a proof remembered for the process.

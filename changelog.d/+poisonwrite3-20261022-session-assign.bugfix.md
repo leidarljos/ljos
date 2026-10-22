@@ -1,1 +1,0 @@
-The seat guard now denies a tool call that assigns or exports a runner session variable (`LJOS_HARNESS_SESSION`, `CURSOR_*SESSION*`, or any `*_SESSION_ID`, `*_THREAD_ID` or `*_CONVERSATION_ID`) before it runs `ljos` or `ljos-mcp`, as a prefix, through `env`, `export` or `declare`, on an earlier line or inside `sh -c`.

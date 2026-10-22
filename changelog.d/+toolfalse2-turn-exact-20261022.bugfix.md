@@ -1,1 +1,0 @@
-The kept prompt is the person's only when it is a whole entry the person typed in the runner's record of the latest turn, with spacing and Cursor's `<user_query>` wrapper set aside. Before, any span of that entry agreed, so a tool call could cut the kept prompt down to the one clause it wanted and still pass the record check.

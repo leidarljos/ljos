@@ -1,0 +1,1 @@
+`ljos hook` and `prefer --user` refuse a process whose executable cannot be stat'ed through `/proc/<pid>/exe`, where they used to judge the path that link names without checking it is the file the process runs.

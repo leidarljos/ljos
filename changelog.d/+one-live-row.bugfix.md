@@ -1,2 +1,0 @@
-A hook and the MCP server share one live row for a seat and a conversation, so a later write, start, or note joins that issue instead of filing another.
-A commit whose command names an open issue is booked on it. A sitting that never claimed, and an MCP shutdown, leave no row without an issue. A stale claim is reaped when its runner is gone or the row is old. Releasing a claim puts a STARTED issue with nobody on it back to TODO.

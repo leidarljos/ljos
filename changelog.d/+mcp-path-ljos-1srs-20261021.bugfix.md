@@ -1,1 +1,0 @@
-Harness MCP configs name `ljos-mcp` on PATH instead of an absolute path from the machine that wrote them, so a file synced onto another home still starts. `ljos doctor` reports a configured command that is not runnable here. `ljos cloud up` puts `~/.local/bin` on PATH before it writes that config.

@@ -1,1 +1,0 @@
-The seat guard now also denies a tool call that renames, removes or links the runtime ljos directory, writes `latest-prompt` or its bind by a relative name or a glob, or writes one through an MCP file tool that names its target `path`.

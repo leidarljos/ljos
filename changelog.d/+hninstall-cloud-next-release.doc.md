@@ -1,1 +1,0 @@
-The README and `docs/cloud-vm.md` say that `ljos cloud up` and `install.sh --cloud` arrive in the next release, which the install line and the job step fetch; the latest release has neither. Until then both work from a checkout of `develop`, where `sh scripts/install.sh --cloud` builds that tree's `ljos`.

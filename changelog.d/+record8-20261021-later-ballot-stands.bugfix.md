@@ -1,1 +1,0 @@
-A record ballot cast after a same-hour tie now counts. Two ballots from one voter in one hour no longer drop every later ballot of that voter on the question: only a tie in the voter's latest hour is ambiguous.

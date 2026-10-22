@@ -5,6 +5,1437 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.33.0 (2026-10-22)
+
+### Features
+
+- A GitHub Actions run and a cloud agent take `LJOS_SEAT` plus the run id as the seat. That seat signs its vote and its handover with its own key, and a later process on the machine does not sign them again.
+- A cloud seat's finish exports the deeds that seat cited on the issue into `.ljos/deeds/<seat>/`.
+  The bag carries the file bytes, the inclusion receipts and any supersedes links, and the tracker commit takes it.
+  A box finish writes no bag.
+- A wake name that ends in `-` matches every longer seat that starts with it.
+  Mail to a run then wakes the launcher named by that prefix, and the envelope still carries the run's seat.
+  An exact wake wins, and the longest prefix wins when several match.
+- An optional `[mail]` table (`notmuch_config`, `notmuch`, `identity`, `deny_file`, `attribution`) is read from the usual config layers and from `~/.config/ljos/mail.toml`. Without it nothing changes; a layer that does not parse or names an unknown key is an error.
+- The release builds the Open Neural Network Exchange (ONNX) Runtime 1.28.3 from source with telemetry off and attaches it with `packset-embed` linked to it, each archive beside its SHA-256 sum.
+  `ljos cloud up` installs the pair on a cloud VM only and installs neither when a sum does not match.
+- The wake envelope names the tracker commit that holds the letter.
+  A command receives it as `LJOS_WAKE_COMMIT`, and a webhook as `commit` in the JSON.
+  The field is left out when push mode did not make a log commit.
+- `LJOS_TRACKER_GIT=push` commits a tracker write, rebases with the per-issue field merge, and pushes. A failed push stays queued for the next write and the end of the session, and `ljos doctor` names unpushed commits.
+- `ljos cloud up` installs the release binaries into `~/.local/bin`, checks their SHA-256 sums, writes the harness MCP command as a path that exists on this machine, and clones `LJOS_TRACKER_REMOTE`.
+- `ljos cloud up` writes a webhook wake to `wake.toml` for each `LJOS_WAKE_<SEAT>_URL`, with `key_env = "LJOS_WAKE_<SEAT>_KEY"`, so a cloud VM wakes a box seat with its key passed by name and never written to disk.
+- `ljos cloud up` writes the age identity for scope `cloud` from the environment variable named by `LJOS_CLOUD_AGE_SECRET` into `~/.config/ljos/cloud.age` with mode 0600, and `ljos doctor` reports that file.
+  A virtual machine can read scope `cloud` with that identity, which stays out of the tracker.
+- `ljos file --options` and `ljos options` write an `Options:` line a Jev ballot can read.
+- `ljos finish --lesson`, `ljos findings --remember` and the correction hook file a proposal instead of writing the memory.
+  An agent's lesson starts at L0, packset's `derived` level, with origin `agent-derived`.
+  A campaign finding is tool output, origin `tool-echo`, and stays at L0 until `ljos accept` promotes the proposal to `explicit`.
+  The correction hook files the person's words as origin `user-declared`.
+- `ljos inbox --sync` fetches the tracker until the named commit is present, imports the sealed logs, and then lists.
+  A commit that is not on the remote falls back to the remote head.
+  With no remote the flag only lists.
+- `ljos panel ISSUE --cloud` writes one prompt file per persona with the seat environment, the slot and the push rules, so a panel can start one cloud seat from each file.
+- `ljos record check --tracker ROOT` checks every ballot on a vissue tracker for a CI gate. A ballot stands when its voter's newest `ballot-sig:` note names its choice, verifies, and is under the key `.ljos-seat-keys` pins for that voter and for no other seat; an unsigned ballot committed before signing began is legacy, as at the push gate.
+  Each ballot that does not stand prints as `FILE:LINE: ISSUE: REASON`, and any one exits 1. The check reads the tracker and writes nothing to it, the pack or the network.
+- `ljos record check DIR` now validates schema-v1 question and ballot entries,
+  including canonical ballot ids, ed25519 signatures, run-key pinning, and the
+  latest-per-voter tally rule where withdrawn ballots do not count.
+- `ljos slot ISSUE SEAT --model MODEL --run RUN` signs a launch slot for a cloud run on the issue it is launched for, under the launching seat's pinned key. A seat the tracker first pins after slots began counts toward a push cite only under a slot on that issue from a seat pinned before then, and only when its own key was pinned after the slot. A pinned key alone no longer makes a voter.
+- `ljos sync --adopt HOST` reposts that host's live atoms as this machine's, with origin `peer` and in that log's scope, then forgets the imported copies and drops the log.
+  A log committed within the last 14 days is refused unless `--force`, and `--dry-run` prints the plan and writes nothing.
+  Adoption stops without deleting the log when a post, a forget, or the fetch fails, and another machine retires its `sync:HOST` copies when it imports the adopt commit.
+  A repository that names extra scopes adopts each of that host's logs in one commit, and the next import retires the `sync:HOST+SCOPE` copies of each extra scope whose log that commit removed.
+- `ljos sync --adopt-legacy HOST` reads a host's logs from before the scope
+  header, such as a gone box's cloud log sealed to this machine's key. It
+  pins the SHA-256 of each such blob filed under HOST now, in this
+  machine's state, and import and `--adopt` read exactly those bytes as
+  HOST's. A copy under another name and any other blob stay unread, and
+  the pin lapses once HOST writes a headed log.
+- `ljos sync` now supports tracker repositories that name more than one scope in
+  `.ljos/sync.toml` with a `[scopes]` table, each with its own age recipients.
+  The primary scope keeps the existing `name` and `recipients` keys, and each
+  extra scope exports to its own host log file under `.ljos/atoms/`.
+
+  Exports and imports now preserve scope boundaries per host log so a cloud scope
+  can be shared without exposing atoms from box-only scopes. Existing
+  single-scope tracker configs keep their current behavior unchanged.
+- `ljos_cli::mailbox::checks::refusals` refuses a draft whose From is not the configured identity, whose routing headers or recipients name a denied address, domain or handle, that carries a denied term or pair, that carries attribution text, or that the checks cannot read. The deny list is read from `[mail] deny_file`; matching runs after NFKC, case folding and removing invisible characters. The checks only refuse: no result approves a send.
+- `ljos_cli::mailbox::export` writes a draft as an `ljos-outbox v1` approval file (draft id, outbox hash, an expiry at most 24 h out, a random nonce, then the exact message bytes) and returns its sha256. It refuses control characters other than tab and newline, and the bidirectional overrides, anywhere in the message, and a message without its own `Message-ID` and `Date`.
+- `ljos_cli::mailbox::notmuch` reads a notmuch database for search and show with a fixed argv and a cleared environment. Message text comes back between nonce-marked untrusted markers, HTML is reduced to its visible text with `display:none` text dropped and flagged, links are shown as text, and attachments are listed by name, type, size and sha256 only. CI installs notmuch for its tests.
+- `ljos_mail_search` and `ljos_mail_show` read the mailbox the `[mail]` table names. They are not in the core set; add them with `LJOS_MCP_TOOLS=core,mail_search,mail_show`. A cloud seat, or a machine with no `[mail]` table, gets a refusal.
+
+### Fixes
+
+- - When `ljos onboard` heals a TOML or YAML harness config, it now rewrites
+    only the harness's own `ljos` command entry. Other server entries and
+    comments in the same file are left untouched.
+- - `ljos cloud up` now writes the real install directory (including
+    `LJOS_BIN_DIR` overrides) into both `.profile` and `.bashrc`.
+  - In `.bashrc`, the PATH export is inserted before interactive-shell guards
+    so non-interactive launches still see `ljos-mcp`.
+- - `ljos doctor` now gives file-specific MCP advice: harness configs point to
+    `ljos onboard --harness NAME`, while `~/.cursor/mcp.json` points to
+    `ljos cloud up`.
+  - MCP command checks no longer fail only because the current process has a
+    short PATH: doctor also checks `$SHELL -lc 'command -v ljos-mcp'`, warns
+    when only the login shell can resolve the name, warns on a mismatched
+    `ljos-mcp` binary, respects `env.PATH`, and treats Codex `$HOME/...` paths
+    as literal.
+- - `ljos onboard` now keeps an absolute `.../ljos-mcp` command when that
+    path exists on this machine, and rewrites it only when the path is
+    missing.
+- - `ljos onboard` now writes a bare `ljos-mcp` command only when that name
+    resolves to the same server binary this `ljos` ships with. When PATH
+    cannot find it (or finds another install), onboard writes the absolute
+    server path and reports why.
+- A Claude Code subagent's `ljos vote` binds the ballot to the parent session plus the subagent's `agent_id`, which the `PreToolUse` hook reads from the payload.
+  Two subagents of one session both count, the parent and a subagent count as two, and one subagent still casts one ballot.
+- A Claude Stop whose payload matches the previous one within ten seconds is still booked when the transcript has grown, so that turn's deeds and lessons are kept.
+- A Codex subagent's `ljos vote` binds the ballot to the root session plus the subagent's thread: `CODEX_SESSION_ID`, then `CODEX_THREAD_ID` when the two differ.
+- A GitHub host written with a capital scheme, a trailing dot,
+  userinfo in front of the host, or no scheme after
+  `--proto-default` was not recognised. The same request that
+  the guard used to refuse then passed, including a DELETE and
+  a receive-pack upload.
+
+  The host is taken from the authority after the last `@`, with
+  the scheme's case and one trailing dot ignored. A schemeless
+  URL counts when curl's default protocol or httpie supplies it.
+- A `git config include.path`, `--remove-section`, `sed -i`, `perl -i`,
+  `dd`, or a redirect onto `.git/config` could point `core.hooksPath`
+  somewhere else. Doctor still read one global key, so the row stayed
+  ok and the next push skipped the hook.
+
+  A write is refused when the path is a gitconfig, whichever tool
+  names it. Doctor asks git which hooksPath the seat would run. A
+  throwaway repository's own local hooksPath stays available.
+- A backslash at the end of a line now joins the next line before the
+  hook and `ljos_guard_check` hand the line to `ljos-policyd`, as the
+  shell joins them, so `cd project && \` followed by `make clean-all` is
+  judged in `project`. Single quotes, `$'...'`, comments and an escaped
+  backslash keep the newline, as in the shell.
+- A ballot cast with no conversation id is bound to its run: the GitHub Actions run, else the Cursor cloud agent (`CURSOR_AGENT_ID` or `CLOUD_AGENT_ID`).
+  Claude Code's `CLAUDE_CODE_SESSION_ID` and opencode's `OPENCODE_SESSION_ID` name the session even when other runner ids are set.
+  Two reviewers on one seat, each voting from its own run, both count, and one run still casts one ballot.
+- A ballot is no longer bound to the `NAME-shell` holder a shell runner's env file shares across every conversation on a box: with no other session the seat is the session, and `ljos vote` and the tally call it unverified, so two seats on one box are two voices and a hooked subagent binds its own session.
+- A claim Jev is sure of reaches the prompt only when it shares a word
+  or an alias with the prompt, or names its subject. At a probability
+  of 0.75 or more Jev's answer alone let in a claim that had nothing in
+  common with what was asked. The check is still free of age.
+- A cloud finish writes a deed bag that `deedar import` can take.
+  Product bytes sit in `bytes/` under a 64-digit lowercase sha256 name.
+  A supersedes or successor file that already names a sha256 digest is left as export wrote it, signature line included. The store's one-line id is written as `<id>` and `sha256:<digest>` instead of being copied over that file.
+  A carried deed made from a deed this bag does not carry gets a tab-separated `sources` file when export wrote none.
+  A symlink in the store is refused, and a bag already published stays in place when the new one cannot replace it.
+- A cloud guard rule file written by an older ljos is still a cloud seat, so finish keeps exporting deeds, and those rules are read from the command's arguments. `ljos doctor` warns that the file is stale, and `ljos doctor --fix` replaces a known older file. A missing file stays information and is not created. A file that is not one of those versions is left in place, and `ljos doctor` warns to run `ljos cloud up`.
+- A cloud seat's finish refuses a tracker whose `.ljos` or `.ljos/deeds` is
+  a symlink, or whose `.ljos/deeds/<seat>` is not a directory, instead of
+  publishing the deed bag wherever the link points.
+- A cold first prompt waits up to a second for the encoder and then recalls the memory the prompt bears on.
+  It still says the pack is starting when the encoder has not answered in that time.
+- A commit that no after-hook named, one made from a script or chained before a step that fails, is cited when the session stops.
+  Only the commits HEAD's reflog says the checkout wrote since the sitting began are cited, so a pull or a branch switch brings in no deed.
+- A conflicted atom log aborted every real merge. git runs the atoms driver with the work tree as its cwd and passes `%A` as a relative `.merge_file_XXXX`, and that path never sits under the absolute checkout, so the driver refused it and catch-up and the user-rules pull stopped. A relative temp is resolved against the cwd, and it still has to land inside the work tree.
+- A curlrc could set the method and the token, and a plain curl
+  to GitHub was still allowed. The guard treated that file as
+  opaque only when the command already carried a token.
+
+  The default curlrc, `CURL_HOME`, the XDG curlrc, and `-K` are
+  judged for the method and body they set, including a nested
+  config. A file that cannot be read is a write. `-q` or
+  `--disable` as the first argument leaves the default file unread.
+- A curlrc line the guard could not read, a `variable` or `expand-`
+  option, or a `-K -` config could add a URL, and the guard still
+  took the host on the command line as the whole target. A POST to
+  another host was allowed while the config could send it to
+  GitHub. Those now leave the target unknown, and an unknown target
+  is judged as GitHub.
+- A default curlrc or wgetrc path that held a directory, a fifo, or
+  a symlink counted as no config, so a curl or wget to GitHub was
+  allowed. Only a missing path is no config now. Anything else that
+  is not a regular file is a write, and a fifo does not hold the
+  guard waiting for a writer.
+- A depth-1 tracker checkout has no parent commits. Reading a missing
+  parent as "the pin was not there" refused a seat that had been pinned
+  before slots, and reading it as "no slots yet" treated a pin at HEAD
+  as standing. When the checkout is shallow or missing objects, ljos
+  fetches `--unshallow` from the tracker remote (and deepens if it is
+  still shallow). If the history is still incomplete, the refusal says
+  `tracker history incomplete` and names `git fetch --unshallow`.
+- A failed command no longer drops the lesson that names it by chance.
+  The failure note asked for two of the pack's ballots to name a hit.
+  Where many lessons tie on the words the pack scores, which of them a
+  ballot keeps at its cut is arbitrary, so the same old lesson came
+  and went from run to run. The note already asks a lesson to name the
+  failure's subject and share two of its words with it, and those now
+  stand alone.
+- A failed command no longer recalls lessons that only share the words
+  every failure and every rule say. `build`, `failed`, `test`, `error`,
+  `always` and `never` counted toward the two words a lesson has to
+  share with the error, so a pool of such lessons all cleared the
+  floor of a best that was just as weak. Those words no longer count,
+  and a lesson's match on what failed has to reach a fixed minimum.
+- A failed command recalls a lesson that names its tool by another name
+  in the same family. The two words a lesson has to share with the
+  failure were counted without aliases, so a lesson on `pnpm` and the
+  registry shared one word with an `npm` registry error. Aliases now
+  count, and a word in several alias groups still counts once.
+- A failed command recalls a memory that shares its words however
+  old that memory is. The failure note held a hit to 0.6 of the top
+  fused score, and the pack decays that score by age, so a lesson
+  that names the failure lost its place to a fresh hit. The floor
+  is now 0.6 of the best lexical match, which carries no age, and
+  the lessons it lets in are ordered by that match, not by the
+  pack's fused score.
+- A failed encoder install no longer leaves the new ONNX Runtime in place and drops the previous one.
+  `ljos cloud up` stages the runtime and `packset-embed`, swaps them together, and puts the previous pair back if either rename fails.
+- A fifo in place of a state log made `ljos doctor` wait in open until a writer appeared.
+  State-log opens now use O_NONBLOCK, keep only a regular file, and the doctor reports that log as damaged.
+- A fine-grained token that cannot read the check rollup falls back to workflow runs and the combined commit status.
+  The gate message names the source it used, the rollup or the REST fallback.
+  A completed run must conclude success, neutral, or skipped.
+  A failed, cancelled, timed out, or action-required run is refused, and a queued or in-progress run is refused as pending.
+  The combined commit status must be success when any status exists, and zero statuses is fine.
+  When both are empty the merge asks, and the ask names a local evidence record when one exists for that sha.
+  When those REST calls fail, the refusal still says gh could not read the pull request and does not say that CI is missing.
+- A fresh clone offered `ljos sync --adopt-legacy` for a headerless log that replaced a host who had already committed a headed one. The note that the host writes headers lived under the tracker path, so the new checkout did not have it. Any committed headed blob of that log now counts, and adoption is not offered again.
+- A gate refusal puts a full stop between the rule's reason and the detail after it.
+  The warning a plain push prints with no passing test record keeps its own words.
+- A global `core.hooksPath` the user already set is left alone.
+  `ljos git-hooks install` appends a block that runs `ljos git-hook <name>` to each hook in that directory, creating a missing hook executable and keeping the existing text.
+  `ljos doctor` passes when those hooks run ljos, and otherwise names `ljos git-hooks install`.
+  `ljos git-hooks uninstall` removes only that block.
+- A guard bypass log or note queue whose last row had no newline was read as healthy by `ljos doctor` for good, since that row was taken for one still being written.
+  Both doctor rows now name the log damaged, with "an unfinished last row", once that row has gone unchanged for five seconds; a row a writer is still appending is left alone.
+- A guard fault now tells the agent to ask the person to run
+  `ljos doctor` in their own terminal, and names
+  `LJOS_GUARD_FAIL_OPEN=1` as the switch that allows other lines.
+
+  `ljos doctor`, `ljos doctor --fix` and `ljos onboard` still run
+  while the guard is faulted, so the seat can be repaired. A line
+  that also runs another command stays denied.
+- A guard fault on a prompt is an allow with a note again. The relay
+  was denying those events, and its five-second wait is shorter than
+  the prompt hook's eight-second deadline, so a wedged memory pack
+  blocked the person's prompt on Gemini, Qwen, Factory, OpenHands,
+  goose and Cline.
+
+  Fail-closed denies stay on tool calls. A prompt waits out the hook's
+  own deadline.
+- A harness MCP command that does not exist is a failing `ljos doctor` row, and the plugin says the MCP server has no tools.
+- A held proposal used to be appended to `proposals.jsonl` with a plain open, so the file kept the default mode and a symlink in its place was written through. Each proposal is now one locked write, and the file is mode 0600.
+- A here-document body is no longer read by `ljos-policyd` as commands
+  unless a shell runs it. `cat <<'EOF'` over a line `sudo reboot` was
+  refused, while `bash <<'EOF'` over `make clean-all` was judged where
+  the line started. A body fed to a shell, directly, down a pipe or to a
+  command that may run it, is now judged as the script it is, in the
+  directory the line is in by then; the substitutions of an unquoted data
+  body still are; a quoted data body is not judged at all. A `<<` inside
+  `$((...))`, `${...}`, `$[...]` or `<<<` opens no here-document, and a
+  delimiter the hook does not read leaves the body to be judged as
+  commands.
+- A hit the hooks leave out no longer sets the bar for the ones they
+  let in. One hit with a word no other hit carries scored near 2 on
+  the lexical match, the floor rose above 1, and every memory that
+  named the subject was dropped. The floor is now taken over the hits
+  that pass the other tests, and naming the subject is worth as much
+  as a rare word.
+- A hit the pack's cross-encoder did not score no longer freezes the
+  order of a prompt's memories. When one hit the writer chose came back
+  with a null score, ljos kept the writer's order as it stood, and a
+  lesson the writer put last behind three scored lookalikes was cut by
+  the cap of three. Hits with a score are now read by it, and one
+  without goes in ahead of the first scored hit it matches the prompt
+  better than.
+- A hook and the MCP server share one live row for a seat and a conversation, so a later write, start, or note joins that issue instead of filing another.
+  A commit whose command names an open issue is booked on it. A sitting that never claimed, and an MCP shutdown, leave no row without an issue. A stale claim is reaped when its runner is gone or the row is old. Releasing a claim puts a STARTED issue with nobody on it back to TODO.
+- A hook holder whose old pid tag is all letters, such as `free-agy-aak` or `free-opencode-nrv`, again counts as its seat in the checkout's bookkeeping, unless the whole name is a seat the tracker knows (`eessi-bot` stays apart from `eessi`). A tag of digits alone still never folds.
+- A hook's call record now names a session only for an `ljos` that runs under the process that ran the hook.
+  The `PreToolUse` hook keeps its own ancestors with each shell call, and `ljos vote` takes a record only when the nearest of them still alive is one of its own ancestors and the line matches, so a record written by hand or left by a hook in another process tree binds nothing.
+- A hook-filed issue takes its project from the tracker whose remote matches the checkout, or from the origin stored in the checkout, and a promptless title uses that same name.
+  A clone folder is no longer the project when `git remote get-url` fails, follows `GIT_DIR`, or rewrites the URL.
+- A hostile encoder archive can no longer install a symlink, a hard link, or a path that leaves the tree.
+  `ljos cloud up` lists both archives before it unpacks either, and it keeps only regular files.
+- A kept prompt is the person's only when it agrees with the runner's own record of the turn: the Claude Code transcript or Codex rollout the hook payload names, inside that runner's own directory, or the Cursor agent transcript of the conversation the runner's environment names. A script that rewrites the kept prompt and its bind without spelling their path is refused, and so is a kept prompt or bind whose ctime or mtime is later than the hook's time.
+- A kept prompt now counts as the person's words only when its bind names the runner session of the process asking. A forged `latest-prompt` and `latest-prompt.bind` with any other session, or none, no longer make `ljos prefer` or `ljos remember` store a sentence as user-declared.
+- A last part of digits alone stays part of a holder or a seat again: `node-01` and `node-02` are two holders, `qwen-72` is not `qwen`, and `inky-10` is its own seat. Only an old pid tag with both a letter and a digit, such as `inky-39u`, folds to its seat.
+- A lesson or a note the pack would refuse for its length is stored as shorter copies inside packset's sentence, word and character limits, and the ticket still gets the note as it was written.
+  The error from a refused POST /v1/atoms names the status and the pack's reason.
+  A copy the pack refused is not left in the note queue, and a copy that could not be sent because the pack was down or answered 401 is queued and sent on the next note, finish, doctor or session start.
+  The opencode plugin passes the session id and the process environment through to ljos hook, so the lesson is written for that session with the owner token.
+- A lesson read by id now stands only on a pack that asks for this seat's token: the read goes only with the token, and only after the same read without it was refused.
+  A listener on the pack URL that answers without the token, or a packsetd run with `PACKSET_AUTH=off`, no longer confirms a promoted rule or an island lesson as the person's.
+  A process of the same user that reads the token file can still answer as the pack, and only a pack that signs its answers or runs as its own user would tell it apart.
+- A lesson the pack's relevance cut kept on one of its two ballots now
+  counts as the stored memory it is. When a cut comes back full, ljos
+  adds the stored memories that best match, but it skipped one the cut
+  already held, so a lesson kept on one ballot stayed short of the
+  agreement the judged prompt path asks for, while the same lesson cut
+  out came in whole.
+- A lesson written again after an amend or a rebase closes the lesson it replaces, so the next session is not handed the replaced commit.
+- A lock held on `bypass.jsonl` or another ljos state log used to stall the hook that wanted to append to it, and with it the command the guard had already let through. The lock is now tried for 50ms; past that the row is skipped, and a skipped bypass row is reported on stderr.
+- A log sealed to another machine stays a skip when `PACKSET_URL=off`, including when `age-keygen -y` cannot name this machine's recipient. Import no longer replaces those skip lines with a pack error, and a keygen miss does not stop the later hosts.
+- A long-lived reader (the MCP server, a hook daemon) no longer keeps stating a user rule after the pack deletes or retracts the lesson it was promoted from. The pack is asked for the lesson on every read, and nothing the process recorded earlier stands in for its answer. A search in such a process also names each hit by the origin the pack holds now, so a preference the pack downgraded from the person's no longer reads as theirs.
+- A memory Jev says bears on the prompt reaches it however old the
+  memory is. The judged path held it to 0.6 of the top fused score,
+  and the pack decays that score by age, so a correct old memory
+  lost its place to a fresh one. The floor no longer reads the clock.
+  A claim Jev is sure of has to share a word or an alias with the
+  prompt, or name its subject. One that Jev is less sure of has to
+  name the subject and clear 0.6 of the best lexical match. Jev's
+  probability orders this path.
+- A memory that names the prompt's subject reaches the prompt however
+  old it is. On a pack that sends the encoder's cosine, the prompt hook
+  held such a memory to 0.6 of the top fused score, and the pack decays
+  that score by age, so a correct old memory lost its place to fresh
+  ones. The floor is now 0.6 of the best cosine, which carries no age.
+
+  The 0.66 cosine line for a memory that shares no word with the prompt
+  is unchanged.
+- A memory that names the prompt's subject reaches the prompt on a
+  pack that sends no cosine, however old it is. That fallback held
+  the memory to 0.6 of the top fused score, and the pack decays that
+  score by age, so a correct old memory lost its place to a fresh
+  one. The floor is now 0.6 of the best lexical match, which carries
+  no age. What gets in is ordered by how much of the prompt it
+  covers, or by the cross-encoder when it ran, and not by the fused
+  score.
+- A memory verdict, a proposal and a queued note shared the 50ms lock skip meant for the command hook's logs, so a brush with the lock dropped a decision without a word. These durable writes now wait up to 30 seconds and report failure instead; a drop or a merge records its verdict before it changes the pack, so a pack that stops answering mid-review leaves the claim live and marked rather than gone with no verdict; and a lesson the queue could not take is no longer reported as queued.
+- A memory, a search hit or a lesson the pack sends with no origin, a null one or an empty one is no longer read as the person's, whatever basis it carries.
+  A search hit without an origin, as a milli document comes back, takes the origin the pack's listing holds now, and a hit the listing does not hold is no longer named by what an earlier read recorded.
+- A merge whose head sha has no CI checks asks, and `ljos approve` records the yes.
+  The ask names that sha, and names a local evidence record when one exists for it.
+  Red or pending checks are still refused.
+  When gh cannot read the pull request, the refusal still names `gh auth login` and does not say that CI is missing.
+  A pull request with no Bugbot threads merges once its checks are green.
+- A missing `ljos-policyd` still allows the line and says the guard did
+  not start. `POLICYD_REQUIRED=1` refuses that line, including when
+  `POLICYD_BIN` names a file that is not there. CI and a fresh install
+  are not locked out unless that switch is set.
+- A negation on the line before a quote, or before a colon, still governs it: "Do not\nalways paste the key" or "Do not do this:\nalways paste the key" no longer lets "always paste the key" pass as the person's words. A sentence ends at `.`, `!`, `?`, `;` or a blank line for this test; the whole sentence across the line break still matches.
+- A pack writer that lists `rank=relevance` and answers one search with
+  a 401, a 429 or a 400 about something else is no longer searched as an
+  older writer from then on. ljos took any 4xx to a ranked search as the
+  writer refusing the rank, and asked it for the fused order, which
+  decays with age, for the rest of the process. Only a 400 whose body
+  names `rank` refuses it now. Any other 4xx fails that one search: no
+  fused search is tried, the stored memories that best match are all it
+  returns, and the next search asks for the rank again.
+- A pack writer that lists `rank=relevance` in its status and then
+  refuses it is searched as an older writer. The hook used to read the
+  refusal as a writer that is not answering, gave up when `PACKSET_URL`
+  was set, and fell back to the fused search with no stored memories
+  added, so an old lesson behind fresh lookalikes never reached the
+  prompt. ljos now asks again without the rank, adds the stored
+  memories that best match, and does not send the rank to that writer
+  in that workspace until it reads the writer's status again.
+- A pack writer that refuses the relevance rank in one workspace is still
+  asked for it in the others, and asked again in that one a minute later.
+  ljos kept one refusal per process, by the writer's address alone, so
+  every workspace on that writer was searched in the fused order, which
+  decays with age, until the process ended, even once the writer listed
+  the rank again. It now keeps what a writer said per workspace and reads
+  the writer's status again after a minute.
+- A persona brief lists what bears on the persona's domains, however
+  old. It took the first five hits of a ten-hit search in the pack's
+  order, which decays with age, so an old lesson on the domain could
+  be cut for a fresher one that did not name it. It now asks for four
+  times as many and keeps the five that best match each domain.
+- A persona brief no longer lists unverified working notes under what the seat knows, and it labels the tracker recall, which may include logbook notes, as unverified.
+- A persona brief's "What you remembered yourself" block now leaves out the persona's working notes and labels its own lessons agent-derived, as the domain section already did.
+- A plain `git push` is never refused for a missing or stale test record, and neither is a commit and a push on one line. With `test` set in `.ljos/gates.toml`, the push runs, and the hook and `ljos_guard_check` carry a warning that names `ljos evidence record`. A merge pushed to your own repository no longer waits on pull request CI or Cursor Bugbot threads; `gh pr merge` still does. A push onto a protected branch asks only when `owners` is set and the remote's owner is not in it. A gate file that does not parse is a warning on a push, not a refusal. The ljos repository's own gate file no longer sets `test`.
+- A policyd that hangs, crashes, or prints something that is not a
+  verdict now denies the tool call. Claude Code, Codex and Cursor call
+  `ljos hook` directly, so that fault used to allow the command, and
+  Cursor's answer was a bare allow with no note.
+
+  `LJOS_GUARD_FAIL_OPEN=1` keeps the old allow with a note. A missing
+  `ljos-policyd` still allows, and so does a deny that only says the
+  seat was not ready.
+- A preference migration stamps `source.basis` `person` only when the atom's server time is older than a cutoff receipt written once into the pack by the first person-side run, and a `via:prompt` tag alone does not qualify.
+  Search, the island, the command gate and session start do not run that write, and a process under a runner does not either.
+  An atom newer than the cutoff stays unstamped and is not listed as an older preference.
+- A preference stored before a basis existed is stamped `source.basis` `person` on upgrade when an old person-path writer left a mark: the prompt hook's `via:prompt` tag, or a terminal `ljos prefer` whose harness, seat and session are the same word with no turn.
+  A runner session, a turn, a session-end tag, or an origin other than `user-declared` stays unverified, and a basis already set is left as it is.
+  The stamp runs once per pack. `ljos doctor` counts the preferences still waiting, session start names that count, and `ljos prefer --review` lists them.
+  Keeping one is refused under a runner and from a pipe, so the person runs `ljos prefer --review --keep ID` from a terminal of their own.
+- A preference the pack stored as agent-derived is no longer handed to a prompt as a standing rule, named in the session-start line, or shown before a command it names; recall labels it an unverified agent preference.
+- A preference the pack will not raise in place is stored again with the clock it already had.
+  `ljos prefer --review --keep` names the id of that copy.
+  A lesson hash still reads the same claim, and the original is closed.
+- A primary scope named `cloud` is refused.
+  That name is reserved for the shared extra scope, so unscoped atoms and finish lessons stay on the box scope.
+- A process that leaves its runner with setsid, a double fork, script or a detached tmux still counts as under that runner when its cgroup, or on macOS the responsible process, names one.
+  A keep and a prefer from that process stay the runner's.
+  Leaving the cgroup, or handing the process to launchd, still gets past the check. A cleared environment does not.
+- A prompt hook the runner's own program spawned still saves the person's stated preference.
+  A payload piped into `ljos hook` from a shell, including one that detached from the runner, is not saved.
+- A prompt is the person's on Cursor only when Cursor's own transcript holds it. With no transcript the prefer is refused as unverified, and a stated choice is not saved.
+  Grok, OpenCode, Gemini and Antigravity keep no record ljos reads, so a typed prompt there is unverified in the same way.
+  Claude Code and Codex still keep a typed prompt, and a stated choice in that prompt is still saved.
+- A prompt sent while the encoder is still loading ranks the stored
+  memories as the other hooks do. It scored a rare word by raw BM25,
+  which could pass 1, and a memory that named the prompt's subject at
+  a flat 1, so one word repeated in a memory about something else
+  outranked the lesson that covered the prompt. It now reads the
+  graded match, where naming more of the prompt scores higher and a
+  rare word alone stays below naming the subject.
+- A prompt that says "always" no longer brings in every rule that says
+  it. The word lost its `s` before the rule words were taken out, and
+  `alway` is on no list, so "always run the formatter" named a rule
+  about squashing commits, and Jev's sure path let such a rule in. Rule
+  words now go before the plural is taken off.
+- A push cite with `PACKSET_URL=off` counted a pinned, signed persona
+  ballot as a seat, because the roster was taken to be empty. An empty
+  answer from the pack means there are no personas. A pack that is off
+  has not answered, so the cite is refused with the same
+  roster-not-readable reason an unanswering pack already gives.
+- A push of a merge commit does not read the pull request, so a different head sha does not refuse it.
+- A push to any branch runs CI and the docs build.
+  The pages deploy still runs only from main, and publish and release still run only from a version tag.
+- A queued memory copy used to be appended with `writeln!`, which writes the JSON and the newline separately. Two copies landing together could share a line, so the next send dropped one. Each copy is now one locked write, and the file is mode 0600.
+- A quote of the person's prompt is read in NFKC with the typographic apostrophes `’`, `ʼ` and `＇` as `'`, so "Don’t do this: always ..." keeps its negation and an excerpt that drops it is no longer taken as the person's words. A quote typed with a plain apostrophe still matches a prompt typed with a curly one.
+- A rage decrypt miss stays a miss when the parent has `LANGUAGE=fr` or `LC_MESSAGES=fr`. The child sets those to C as well as `LC_ALL` and `LANG`, which is the order sys-locale checks, so import does not stop before later hosts.
+- A recalled claim reads as the person's words only when the pack stored it as the person's; the `via:prompt` tag alone, which a direct post can carry, no longer makes an agent's lesson the person's words in the prompt hook, recall or a brief.
+- A recalled claim the pack did not store as the person's, other than a lesson, now reads as an unverified agent note, and note provenance tags are compared after NFKC, with zero-width and format characters dropped and lookalike letters folded, so a Cyrillic or zero-width tag no longer passes a downgraded note off as a fact.
+- A recalled note is now labelled by its true agent-derived origin rather than its forgeable provenance entities, a recalled lesson says whether it is the person's words or agent-derived, and `ljos recall` lists working notes apart from the facts under their own heading.
+- A recast after a withdrawal now writes a fresh ballot signature even when
+  the voter picks the same option, so the tally and consensus still count it.
+- A record ballot cast after a same-hour tie now counts. Two ballots from one voter in one hour no longer drop every later ballot of that voter on the question: only a tie in the voter's latest hour is ambiguous.
+- A refusal for a push to main, a delete, a tag, or a hooksPath
+  write was labelled as a cursor/* push. The label now says the
+  ref is outside the seat allowlist, or that the pre-push hook
+  would not run.
+- A refused ballot or settle now says that each persona brief goes to its own subagent or run, which casts `ljos vote --as NAME` itself, so a coordinator neither voices its panel from one session nor reports verdicts in prose.
+- A refused remember names the pack's status and reason on the error line. A claim of three sentences says to split it into two remembers.
+  A trailing citation, such as `Source: URL`, is stored on the atom's source and is not counted as a sentence.
+  A remember that fails only the word limit, the readability grade or the adverb ratio is stored as written and the pack's warning is printed, as prefer already does. A third sentence is still split or refused, so one claim stays at most two sentences.
+  Recall matches a phrase to its abbreviation and an abbreviation to its phrase, so a query for the JOSS conflict of interest rule ranks a claim that says COI.
+- A relay that cannot read its stdin, or whose hook panics, now denies
+  a tool call in that runner's own contract. Exit 1 with no output used
+  to let the command run on nine of the twelve runners. Gemini, Copilot,
+  Cline and Auggie get a deny object, because exit 2 alone allows the
+  command there. A prompt error still exits 1.
+- A release tag publishes the docs. The github-pages environment allows the main branch only, so the deploy runs as a workflow_run on the default branch and checks out the tagged commit. The tag's own run still builds and checks the site.
+- A replayed record ballot no longer erases its voter. A byte-identical copy of a ballot file, or the same ballot with its key and signature hex upper-cased, counts as that one ballot, so it neither drops the voter as two ballots in one hour nor, as a copy of an older ballot, hides the voter's current one.
+- A rewritten lesson keeps the title it was written under, instead of the prompt that arrived later.
+  Switching a sitting row to a different issue clears that row's bookkeeping for the prior issue, including its deeds, failures, asks and lesson linkage, so a later rewrite does not reuse the old title or supersede the earlier issue's atom.
+  A lesson queued while the pack is down still names the atom it closes.
+- A rule promoted from a lesson the pack does not confirm as the person's still denies or asks in the shell, outbound-post and MCP guards, and its denial now says the rule is unverified and why instead of reading as the person's rule.
+  A deny or an ask only takes a command away, so enforcing an unconfirmed one never widens what an agent may run, and a slow, down or forged pack cannot lift it.
+- A rule written through MCP `ljos_rule`, or by `ljos rule` and `ljos prefer --deny`/`--ask` anywhere but a terminal the person is at, is always stored with basis `agent`. Before, a reason clause found in the person's latest prompt raised the whole rule, pattern and verdict included, to the person's, and the kept prompt it was read from is a file the agent's login can rewrite.
+- A run seat pinned to its key in upper-case hex now counts under a slot
+  that names the same key in lower case. The check that the run's pin is
+  the key its slot names compared the hex text, where every other seat
+  and slot key check compares key fingerprints.
+- A run's ballot no longer counts under its slot when the same pin line
+  was also committed on a branch whose issue had no slot and then merged
+  in. Before, the merge hid that branch's pin, so the slot looked older
+  than every pin it vouched for.
+- A runner env file ljos wrote is refreshed the first time a new version runs.
+  Lines the user added stay, and ljos says what it changed.
+  An env file ljos did not write is left alone.
+- A runner skill ljos wrote is refreshed the first time a new version runs, and `ljos doctor --fix` refreshes it too.
+  The sha256 of the bytes ljos wrote is kept beside the skill, and a file that no longer matches that hash is left in place.
+  `ljos doctor` warns about a stale skill ljos wrote and does not fail the command for it.
+- A runner's `ljos remember`, `ljos prefer --user` and `--promote`, and the MCP words path now take a sentence as the person's only when it is a whole sentence or clause of their latest prompt that keeps the negation or condition the person put on it (`not`, `never`, `don't`, `no`, `without`, `avoid`, `unless`, `except`, `if`, `only`, `until`). "always paste the release key" is no longer accepted from "do not always paste the release key". The stored text may differ from the prompt only in plain punctuation, so a quote cannot add a backtick or another mark the person did not write.
+- A search hit no longer names its own origin. The hook, a recall and a search take each hit's origin from the pack's listing, and a hit the listing does not hold, or a listing that does not answer, is not the person's.
+  A listener that stamps `user-declared` on a search hit the listing holds as an agent's can no longer hand that preference to a prompt as the person's.
+- A search that already holds the environment lock migrates legacy preferences by taking that lock before the migration gate, so two searches cannot each wait for the lock the other holds.
+- A search, a listing and a by-id read now share one proof that the listener asks for this seat's token. The token goes out only after the same read without it was refused.
+  A listener that answers without the token no longer supplies a person's memory. Its hits can still be shown as an agent's, with origin and basis removed.
+- A seat counts toward a push cite without a launch slot only when its name
+  is on the standing list compiled into ljos (`disk-saver`, `inky`, `ljosbot`).
+  A git author date no longer makes a newly pinned seat look older than slots.
+- A seat whose key the tracker pinned before its first slot stands again
+  without a slot, so the box seats' ballots count toward a push cite.
+  A ballot from a seat that does not stand and has no slot is left out of
+  the cite and named; it no longer refuses the whole issue.
+- A seat whose shell names no session, as on a shared box, no longer binds every subagent's ballot to the seat: `ljos vote` takes the session and the subagent the `PreToolUse` hook saw run that line, so each subagent counts once and the parent counts apart from them.
+- A send of the note queue at session start moved the bytes it could not read to the dated `.damaged` file without a word, since the hook prints nothing of it. `ljos doctor` now makes the note queue row a `warn` while such a file sits beside the queue, naming it and how many bytes it holds, until the file is read and deleted.
+- A session's signature on one issue no longer refuses a ballot on a sibling issue.
+- A slot counts only when the issue's own entry already held that line in
+  the commit that introduced the run seat's pin.
+  The same line on another issue no longer backdates it, and the slot
+  check does not read a git author or committer date.
+- A slot now signs the tracker's root commits beside the issue id, so a
+  slot copied to an issue with the same id on another tracker, where the
+  launcher is pinned to the same key, no longer verifies there. A slot
+  signed before this no longer verifies.
+- A socket, a symlink, a directory or an unreadable file in place of the guard bypass log or the note queue made `ljos doctor` report "no command has run past the guard" or an empty queue.
+  The state-log opens now return a typed refusal, and both doctor rows name any read failure other than a missing file as damaged, with the path.
+- A state log whose last row had torn off without its newline would glue the next row onto it, so both failed to parse and a good write vanished. An append now caps a torn tail with a newline first, under the lock, so the new row lands on its own line. A reader counts the lines it could not parse, and `ljos doctor` reports a damaged guard bypass log rather than calling it healthy and empty.
+- A stated choice split after a dangling negation is read as one sentence. "Do not" at the end of a line no longer lets the next line be saved as its opposite.
+  A line that already ends, and a blank line, still start a new sentence.
+- A sync import that reads the taken list shared by scope name and host now removes it once the tracker's own list is written.
+  Left in place, it was read again whenever the tracker had no list of its own, such as after an adopt; a failed write keeps it for the next import.
+- A tag release and a release run by hand build ONNX Runtime from source instead of restoring a cache from another ref.
+  The encoder archive carries the library as a regular file, and the release sums record that library's sha256 after the archive hash.
+- A terminal preference or lesson written by v0.17 through v0.29, which left no `source.seat`, is stamped `person` when harness and session are the same word.
+  A lesson the upgrade holds back is counted, listed and kept the same way as a preference.
+  A lesson stored as the agent's is left out of that list.
+- A terminal, a multiplexer or init that ran a hook's shell no longer owns the hook's sitting: tmux, screen, zellij, herdr, systemd, init, sshd, login and the terminal emulators the seat walk already refuses, `gnome-terminal-server` among them.
+  Each outlives every sitting under it, so a sitting whose own shell had exited was never finished as orphaned while that terminal stayed open.
+  The walk from the hook stops below them, and when only shells sit there, the outermost of them owns the sitting.
+  A known harness (claude, codex, cursor-agent, agy, opencode and the rest ljos knows by name) now owns the sitting over a nearer `uv`, `npx` or `node` that only started the hook and exited with it, which had closed the Write's claim on the next `ljos_start`.
+  A harness that runs as plain `node` still owns its sitting when no known harness sits above it.
+  The book keeps the owner's start time next to its pid, so a pid the kernel has handed to another process no longer keeps a finished runner's sitting open.
+  The walk reads pid 1 too, so a harness that is a container's pid 1 owns its sitting; any other pid 1 is the init and owns none.
+  The walk reads `/proc` and holds on Linux only. On macOS the hook's parent still owns the sitting, so there `ljos_start` after a Write still finishes the Write's claim and files a new one.
+- A text that moved from one scope to another stays in the pack across the sync that moves it.
+  Import retires every log before it posts any, and it reads the primary log before `<host>+<scope>` logs.
+- A tracker `index.lock` more than a minute old, with no git process working in the checkout, is now named when a commit meets it: its path, its age, that a killed git left it, and the `rm` that clears it.
+  Every later commit used to fail on it with git's `File exists` after six seconds of retries, and the hooks that commit in passing failed without a word.
+- A tracker commit that finds HEAD already holding the file, because another seat's commit carried it, now reads `tracker git: nothing to commit` instead of `commit refused: On branch master`.
+  A refused commit always says why: git's first line on stderr, else on stdout, else that git was killed by a signal or exited without a word, where the line used to end at `commit refused: `.
+  The seat-key pin and sync's log commit go through the same staging, with the same backoff on a busy index.
+- A tracker git call that runs past a hook's budget, as the user-rules sync at every session start does, is now terminated and given two seconds to clean up before it is killed.
+  Killed outright in the middle of an add or a commit, git left an empty `.git/index.lock` that refused every later commit on the tracker until someone removed it by hand.
+  The sync also waits for the tracker's commit lock only until its deadline, and its merges hold that lock, so a session start behind a seat's commit no longer spends its budget waiting and then cuts its own git off.
+- A tracker git command ignores an inherited `GIT_DIR`. That variable names the repository in place of `-C`, so one test exporting it could make another test miss `issues.org`. A dotfiles checkout named on the command still uses its own `GIT_DIR`.
+- A tracker write aimed at an unprepared path under `target/` now reports that the path is not a tracker checkout instead of writing lock or exclude state into the enclosing repository.
+- A user rule promoted from a lesson is no longer stated when the pack answers without that lesson. A pack that was down is asked again on the next read instead of being taken as empty for the rest of the process.
+- A user rule promoted from a lesson is now bound to the record it was promoted from: its text, its `ts` and `valid_from`, and the origin the pack stored it under.
+  A record the pack later holds under the same id is another lesson and does not state the rule, whether the id was retracted and posted again, in other words or in the same ones, or an update with an empty or null origin set an agent's lesson back to the person's.
+  A rule promoted before this release kept no such record and is not stated until it is promoted again.
+- A user rule promoted from a lesson is stated as the person's only when this read got that lesson from the pack within 400 ms, under the same id, stored as the person's.
+  A pack that is slow, down, holds the read open or answers with another atom now leaves the rule out of the prompt, in every fresh hook and in a long-lived reader alike, where it used to state the rule from the origin kept at promote time or from an earlier read.
+  Such a read also clears the person an MCP server recorded for that lesson, so its island no longer labels the lesson the person's.
+  Rows no longer keep a promote-time origin.
+- A voter that already holds a ballot is told how to replace it: `ljos vote ISSUE --withdraw --as NAME`, then cast again.
+  A ballot cast after its voter withdrew now counts, where before the session's first ballot stood and the voter could not vote again.
+- A wgetrc could set the method and the token, and a plain wget
+  to GitHub was still allowed. The guard treated that file as
+  opaque only when the command already carried a token.
+
+  The system wgetrc, `WGETRC`, `~/.wgetrc`, and `--config` are
+  judged for the method and body they set. A file that cannot
+  be read is a write. `--no-config` leaves those files unread.
+- A wgetrc or `-e` command could set an input file, a base, a proxy,
+  or a `Host:` header, and the guard still took the host on the
+  command line as the target. A POST to another host was allowed
+  while the file could send it to GitHub. Those commands now leave
+  the target unknown, and an unknown target is judged as GitHub.
+- A withdrawn ballot leaves the tally and no longer decides a push.
+- Added an end-to-end harness hook test that runs `ljos hook` from one process
+  directory while sending a different payload `cwd`, and verifies the guard
+  judges in the payload directory.
+- Agy commits are cited when the after-hook payload names no event and no command, and from the git hook when agy stamped a conversation id.
+  Opencode commits made from its shell or a subprocess are cited by the git hook into that session.
+  An amend or a rebase moves the deed and the lesson onto the new commit and drops the citation of the replaced sha.
+  The git hook claims as the same SEAT@TAG holder `ljos claim` uses.
+  The env file `ljos onboard` writes names the same git hooks directory as the install, and `ljos doctor` reports an env file that names a different one.
+- An MCP ballot from a Claude Code subagent binds the parent session plus the subagent's `agent_id`.
+  The plugin and `ljos onboard` add a second `PreToolUse` group, matcher `^mcp__.+__ljos_.+$`, whose hook notes which subagent made each seat MCP call, and the server reads it back by the call's `_meta` tool use id.
+  On those calls the hook says nothing else; the server still judges them.
+- An MCP ballot from a Codex subagent binds the root session plus the thread the call's `_meta` names, as its shell ballot does.
+  An MCP call from opencode is bound to the session in `_meta` (`ai.opencode/sessionID`), which is a subagent's own.
+- An agent's claim is always stored as agent-derived with an agent basis, so soft prose from `ljos prefer` under a runner is refused by the pack instead of being kept as the person's. Every reader takes a claim as the person's only when it carries the person basis that the person-path writers now stamp. A preference stored before this change carries no basis and no longer reads as the person's until it is preferred again.
+- An agy server that `ljos onboard` gave `LJOS_SEAT=antigravity` now sits as the tracker's agy seat, such as `free-agy`, the seat its hooks sit as.
+  It sat as `antigravity`, so on the willma-20261021g seat replay the server's finish of the claim the write hook took under `free-agy@TAG` was refused as not the assignee, and the issue stayed STARTED.
+  A harness id the tracker does not list is that harness's one seat on the tracker, and `antigravity` now also finds a seat named after `agy`.
+- An explicit `LJOS_SEAT_KEY` is used as given again. When neither `LJOS_SEAT` nor `VISSUE_AGENT` was set and a run or conversation id was in the environment, signing swapped it for a fresh key minted beside it, so the ballot was signed under a key its caller never saw.
+- An extra scope with no recipients is skipped on export, and the other scopes are still sealed and committed.
+  An empty primary recipient list is still an error.
+- An http wake URL is accepted only when its host is localhost, an IPv4 loopback address, or ::1.
+  `ljos cloud up` refuses `LJOS_WAKE_*_URL` names that slug to one seat, marks the wakes it writes with `source = "env"`, and leaves any other wake for that seat in place.
+- An idle `ljos-mcp` is cheap again. It runs on two workers and a capped
+  blocking pool instead of one worker per core, and two minutes after its
+  last call it drops the pack listing it caches and hands freed memory
+  back to the system. A server that grew to 90 MiB answering a burst of
+  calls now settles near 18 MiB. `LJOS_MCP_IDLE_DROP`, or `[mcp]
+  idle_drop` in `ljos.toml`, sets the window; `0` or `off` keeps
+  everything.
+
+  The server also stops when the process that started it dies, even with
+  stdin still open, and on either ending it answers the calls it already
+  read before it exits.
+- An imported memory keeps its kind and its horizon, and no longer keeps `via:prompt` or a person basis. A peer cannot supply the person's words.
+- An unscoped atom is no longer sealed into an extra scope when `default_scope` names that scope.
+  Extra-scope logs take only atoms whose `scope:` entity names them, and a `default_scope` that names an extra scope is refused.
+- An unsigned seat ballot counts as legacy only when its issue's entry
+  already held it in the tracker commit that brought the first seat pin,
+  by commit order. The gate read the committer date of the ballot's commit
+  before, which any tracker writer sets, so a ballot cast after signing
+  with a backdated commit counted unsigned. A tracker that never committed
+  a pin has no legacy ballots; `LJOS_UNSIGNED_BALLOTS=allow` is for that.
+- Asking git history whether a host had written headers parsed `.ljos/sync.toml` to pick the log file. A primary scope named `cloud` is reserved, so that parse failed and adopt kept the log. The primary name and the `host+scope` name are both walked, and a scope file that does not parse is not a reason to stop.
+- CI and the cloud-finish import test build the deedar commit named in `.github/deedar-pin`.
+  That commit binds each `bytes/<sha256>` file to its contents, so check refuses swapped product bytes.
+- CI and the cloud-finish import test build the deedar commit named in `.github/deedar-pin`.
+  That commit refuses a forged link and a deed folder named for another deed.
+- Cloud guard now follows git's remapping for a bare refspec name
+  (`git push origin branch`), including `remote.<name>.push` and
+  `push.default=upstream`, before deciding whether the destination is under
+  `cursor/*`.
+- Cloud guard now reads `GIT_*` command-line environment and `env -C` chdir
+  context when it checks a push, so repository, config, and branch reads
+  match the checkout git will actually use.
+- Cloud guard now refuses `git push --prune` refspec patterns that cover
+  `refs/heads/*`, and refuses `git push --mirror`, because both forms can
+  delete remote-only `cursor/*` branches.
+- Cloud guard now refuses additional shell-trick push forms: unresolved git
+  subcommand words, xargs-fed push arguments, `git send-pack`, `git subtree
+  push`, and `git submodule foreach` scripts that would push to `cursor/*`.
+  It also decodes ANSI-C `$'...'` escapes in shell words.
+- Cloud guard now resolves git push aliases from configured
+  `alias.<name>` entries (including `!git push` forms), from `--config-env`,
+  and from earlier `git config alias.*` commands in the same line.
+- Cloud guard now treats `git --attr-source` and
+  `git push --recurse-submodules <mode>` as valued options while it parses a
+  push command, so `cursor/*` destinations are still denied through those
+  forms.
+- Cloud guard now treats `heads/cursor/*` and `tags/cursor/*` as
+  `cursor/*` destinations, matching git's short ref aliases for
+  `refs/heads/*` and `refs/tags/*`.
+- Concurrent fail-open hooks used to split one `bypass.jsonl` row across several writes, so the only record of a command the guard let through could no longer be read. Each row is now one locked write, and the file is mode 0600.
+- Concurrent hooks used to split one `hook-trace.jsonl` row across several writes, so a live session's hook contract could no longer be read back. Each trace row is now one locked write, and the file is mode 0600.
+- Concurrent judge answers used to split one `jev-log.jsonl` row across several writes, so a probability that should have been scored could no longer be read. Each answer is now one locked write, and the file is mode 0600.
+- Concurrent memory reviews used to split one `memory-reviews.jsonl` row across two writes, so a keep, edit, or drop could no longer be read back. Each verdict is now one locked write, and the file is mode 0600.
+- Develop and main finish the workflow run already in progress, and a newer push on those branches waits.
+  Every other branch still cancels the run it replaces.
+  The docs workflow uses the same cancel rule.
+- Each seat and record voter now gets its own ballot key file: `a/b_c` and `a_b/c` used to share `seats/a_b_c/ballot.key` and sign with one key.
+  Key directory names escape every byte other than ASCII letters, digits, `-` and `.` as `%HH`.
+  A key at the old folded name, such as a judge's `judge_<model>`, moves to the new name on first use, so its tracker pin still matches.
+- Every ljos write to a tracker checkout's index now holds one lock, `.ljos-commit.lock` at the top of the worktree, kept out of `git status` through `info/exclude`.
+  A tracker commit holds it from the status read through the logbook stamp, the add, the commit and the seat-key pin; sync's commits, the push's rebase or merge, and the merge-attributes commit take it too.
+  A seat's first key pin is written under it and by rename instead of being rewritten in place and staged with no lock, so parallel first ballots no longer lose a pin or meet on `index.lock`.
+- Every surface reads who stands behind a memory from one stored origin. The basis and origin are read without case, so a peer import strips a `Person` basis just as the reader honours it. Note tags no longer turn the person's record into an unverified note. A peer's preference, lesson or note is labelled as a peer's instead of an agent's.
+- File order no longer decides which key holds a seat in the record. `ljos record check` now fails when one seat signs under two unpinned keys, whichever file comes first, and the tally counts that seat under neither key on the question instead of keeping the first one it read.
+- First-run runner refresh no longer keys only on the semantic version.
+  Skill and env refresh stamps now key on the bytes this ljos would write, so
+  same-version upgrades still refresh stale files ljos wrote when shipped
+  content changes.
+- Guard-fault handling now has an explicit escape hatch:
+  `LJOS_GUARD_FAIL_OPEN=1` restores the legacy allow-with-note behavior.
+
+  By default, guard faults fail closed in runner relays. The switch is
+  parsed with the same truthy forms as `POLICYD_REQUIRED`.
+- Harness MCP configs name `ljos-mcp` on PATH instead of an absolute path from the machine that wrote them, so a file synced onto another home still starts. `ljos doctor` reports a configured command that is not runnable here. `ljos cloud up` puts `~/.local/bin` on PATH before it writes that config.
+- Held-issue recall on session start and prompts, and the recall `ljos_start` returns, now leave working notes out so an agent's own note cannot come back as a fact.
+- Holder and seat matching no longer read a name with a dangling separator as the seat: `ljosbot@`, `ljosbot-` and `ljosbot.` are not `ljosbot`, and `@abc` is not `runner`.
+- Holder and seat matching now use one folding rule across
+  `holder_parts`, `same_holder`, `same_seat`, `claim_holder`,
+  `seat_key` and `adopts_holder`.
+  Legacy pid tags still fold, including all-digit tags such as `inky-10`,
+  while `sand-subagent-*`, `run-*` and `judge-*` names stay whole.
+  Seat matching now folds case consistently (`GPT-5` and `gpt-5` are one
+  seat; `Ridley-CI-A-555001` and `ridley-ci-a-555001` are one seat).
+- Hook directory resolution now reads Gemini's `tool_input.dir_path` and Qwen's
+  `tool_input.directory` as workdir overrides, matching the runner payloads those
+  tools emit.
+- In hook-child mode, tracker pin commits now run their ignore check in the tracker checkout itself, so an exported parent `GIT_DIR` cannot suppress the seat-key pin commit.
+- Keep a live claim with the conversation that holds it, including a row adopted from a hold record, when two conversations share a seat.
+  A tool call before the client identifies itself does not record the seat as runner.
+- Legacy ballot dating now resolves the specific ballot line inside the issue entry before reading git history, so another issue with the same voter and choice text no longer changes that issue's legacy status.
+- Legacy holders claim as their seat: `inky-n9o` and `disk-saver-t4t` as `inky` and `disk-saver`, and `ljos-bot` as `ljosbot`.
+  `grokbot-sand-sub` is not a seat, so a claim under that name is refused and nothing is written.
+- Long blocking findings now use the same truncation and normalization when
+  matching filed dissent children, so repeated reads do not file duplicates.
+- MCP `remember` and `prefer` refuse a claim that is not in the person's latest prompt and point the agent to `ljos_note` for its own findings.
+  Recall, session start and a persona brief now keep those notes out of the prompt fact block, and `ljos recall` lists them apart from the facts, so an agent's own note no longer returns as a fact.
+- On a git tracker a name on the standing list (`disk-saver`, `inky`,
+  `ljosbot`) no longer stands by itself. The first writer to sign as a
+  listed name the tracker had not pinned when slots began now needs a slot
+  like any other seat. The list still stands on a tracker that is not a git
+  repository.
+- On macOS, `ljos doctor` looks for Claude Desktop's bare `ljos-mcp` on launchd's PATH, `/usr/bin:/bin:/usr/sbin:/sbin`, which is what the app opened from the Dock or Finder searches.
+  It used to look on its own PATH and a login shell's, and call a command ready that the app could not start.
+- On macOS, `ljos onboard --harness claude-desktop` and `ljos doctor` use `~/Library/Application Support/Claude/claude_desktop_config.json`, the file Claude Desktop reads there, instead of the Linux path.
+  A harness row can name its macOS file with `config_json_macos`.
+- On macOS, `ljos onboard --harness claude-desktop` writes this install's absolute `ljos-mcp` path unless launchd's PATH, `/usr/bin:/bin:/usr/sbin:/sbin`, runs it.
+  Claude Desktop opened from the Dock or Finder starts its servers with that PATH, so a bare name found only on the shell's PATH did not start.
+  A harness row marks such an app with `launchd = true`.
+- One preference the pack refuses no longer stops the migration. The cutoff receipt is written first, a permanent refusal is recorded on it as `source.refused`, and that atom is not tried again. A pack that did not answer is tried on the next person-side run.
+  A v0.32.1 prefer with `CLAUDECODE=1` and no runner ancestor was stored with harness, seat and session all `person` and is still promoted. Those bytes are not proof the person typed them.
+  An atom that arrives with no origin is not a legacy preference. The pack stamps `user-declared` when a post leaves origin out.
+- Only the tracker's `seats` roster decides whether an MCP server's harness id, such as the `LJOS_SEAT=antigravity` that `ljos onboard` writes for agy, is a seat of its own or sits as that harness's seat on the roster.
+  An old `:CLAIMED_BY: antigravity@...` line from before the seat was `free-agy` had kept the harness id, so the server's finish of the claim the agy hook took under `free-agy` was refused as not held by `antigravity`.
+  A roster that lists the harness id still keeps it.
+  A harness id now sits only as its fixed `free-<command>` seat: `antigravity` and `agy` as `free-agy`, `codex` as `free-codex`, `claude` as `free-claude`, and so on for each harness ljos knows by name.
+  It no longer takes a roster's only seat that merely starts or ends with the id, so a server with `LJOS_SEAT=claude` no longer finished the claims of a `claude-reviewer` seat.
+- Prefix wakes now fire only for canonical run-seat slugs and skip the bare
+  prefix key itself.
+  Webhook envelopes quote the `read` helper safely and include `via` when a
+  prefix matched.
+  Wake output now names the launcher seat and the matched prefix, and
+  `wake --clear` explains when a seat is covered only by a prefix.
+- Prompt recall no longer injects `note` memories as facts: hook recall and
+  issue recall injected into prompts now leave notes out.
+  `ljos recall` still lists notes, but labels them as unverified agent notes
+  and includes provenance tags where known.
+  The MCP refusal for non-person `remember`/`prefer` text is now neutral and
+  no longer tells the model to resave that text through `ljos_note`.
+- Prompt recall now recognizes a refused note that was downgraded to another kind by the note provenance it still carries, so the downgrade can no longer smuggle it back into prompt facts.
+- Publishing a deed bag keeps the directory fd from the open of `.ljos/deeds`
+  and stages, swaps, and publishes with mkdirat, openat, and renameat on that
+  fd, then fsyncs the directory. A symlink swapped in for `.ljos` or
+  `.ljos/deeds` after the check is not where the bag is written. Atom logs
+  are classified and written the same way, and the atoms merge driver writes
+  through that fd.
+- Reading a state log under `$XDG_STATE_HOME/ljos` still followed a symlink the writer refuses, so a link swapped in for a log file, or for the `ljos` directory, handed back whatever it pointed at. Every read now goes through the same directory-descriptor open the writer uses, and a symlinked log or directory is refused rather than read through. A `$HOME` or XDG base you made a symlink yourself is still followed.
+- Reading a state log while a hook appended to it could catch a row cut in the middle of a character, and the doctor then reported no bypass at all, `ljos jev` an empty judge log, and `ljos accept` no proposals. A line an older ljos tore also hid every memory verdict after it. The readers of `bypass.jsonl`, `jev-log.jsonl`, `memory-reviews.jsonl`, `proposals.jsonl` and `note-queue.jsonl` now leave a last line without a newline for the next read and skip a line that does not parse.
+- Rebinding a sitting onto another issue moves the commit baseline to the current HEAD, so commits already made for the previous issue are not cited on the new one.
+- Removing an extra scope retires atoms previously imported from it, and export deletes this machine's stale `<host>+<scope>` logs.
+  Readers no longer keep `sync:<host>+<old>` atoms after the scope is gone from the tracker.
+- Retirement state for a synced host is stored per tracker, not only per scope name and host.
+  Two tracker checkouts that share a scope name no longer retire each other's atoms.
+- Rewriting the note queue used a `tmp + rename` through the path, which followed a symlink and left the file mode 0644, and the queue lock was created the same way. Both now go through the `ljos` directory's descriptor: the lock file is created mode 0600 without following a link, and a drain writes a fresh temp created `O_EXCL` mode 0600, fsyncs it, renames it over the queue from the directory, and fsyncs the directory. A queue file swapped for a symlink is refused.
+- Runner hook relay faults now fail closed. If the inner `ljos hook` cannot
+  start, times out, is signaled, or exits non-zero without a decision, the
+  relay returns a deny in each runner's native deny contract instead of
+  allowing the command.
+
+  The relay also treats an inner-hook "guard is unhealthy" note as a guard
+  fault and denies with a reason that names the fault and points to
+  `ljos doctor`.
+- Running a hooked `ljos vote` line a second time, as a shell loop or a pasted line does, is now refused as already cast.
+  The call the hook saw stays behind as taken for its ten minutes, so the second run binds the session the first run bound, instead of casting again as the seat or as the parent session.
+- Scope names must be non-empty and use only `[a-z0-9-]`.
+  A slash or a plus in a name is refused at load, because both are special in the atoms log path.
+- Seat and slot signature checks now compare signer keys and pinned keys by canonical key fingerprint, so uppercase and lowercase hex encodings of the same key are treated as the same key.
+- Sending the note queue rewrote it with only the rows that parse, so a line cut short and a last line without its newline were deleted. Those bytes now move, unchanged, to a dated `note-queue.jsonl.<date>.damaged` file beside the queue before the rewrite, `ljos note` and `ljos finish` name that file, and a queue holding nothing readable is emptied into it.
+- Session-end extraction now keeps each sentence from an assistant reply as an unverified agent note rather than a lesson, so the agent's own prose no longer becomes a fact the hook shows on later prompts.
+- Sitting and finish under `LJOS_TRACKER_GIT=commit` no longer reach the network for the pack log.
+  Sitting used to fetch every tracker remote and then read and post the pack, and a pack that did not answer in time printed `3: timed out reading response`.
+  Finish still commits the sealed log when it changes, and it says the log was not pushed, including when the log was unchanged and a tracker commit was waiting to be sent.
+  `ljos sync` run by hand still pulls and pushes.
+- Starting work on the issue a sitting already holds keeps whether that ticket was named or filed, and only a rebind to a different issue resets those flags.
+- Sync and guard-shim tests that spawn git now hold the shared test environment lock, so parallel lib tests no longer race on PATH or other process-global environment values.
+- Sync import no longer reads a tracker log whose file name does not give a host name and a scope name.
+  A removed scope's log was read by any suffix, so `peer+...jsonl.age` named scope `..` and its taken list was written outside the tracker's own state directory; such a log is now skipped with a line naming the part that was refused.
+- Sync import now treats the same words on two tickets as two memories, as the pack does.
+  A peer's atom on another ticket was skipped as already held, and the copy of the ticket the peer dropped was never retired, because import and adopt keyed what they held and what they had taken by text alone.
+  The taken list now records text and issue; a list written before this change is read once through the copies this machine holds, so nothing is posted again and what the peer dropped is still retired.
+- Taking over a placeholder issue keeps the sitting's failures, asks, title and landed commits instead of clearing that row.
+- The Codex MCP entry `ljos onboard` writes now forwards `CODEX_SESSION_ID` and `CODEX_THREAD_ID` beside `XDG_RUNTIME_DIR`, so the server sees the session the prompt hook binds the kept prompt to. A Codex entry written before is brought up to date on the next `ljos onboard`; variables it already forwards are kept.
+- The MCP server answers `tools/list` when the home directory is empty and no tracker or seat is set.
+  Each listed schema is a JSON Schema object, with the draft identifier and schemars-only formats left off, so a strict client can load the list.
+  A tool call with no seat still returns that error.
+- The MCP server now counts the session a call's `_meta` names, as Codex sends it under `x-runner-turn-metadata`, among the runner's sessions when it checks the bind beside the kept prompt. A Codex MCP server, whose environment named no session, refused the person's real words. With no runner above the server, nothing counts, as before.
+- The MCP tool `ljos_guard_check` now accepts an optional `cwd` argument and
+  judges commands in that directory, instead of always using the server process
+  start directory.
+- The `- Voted by SEAT` logbook line ljos adds before a tracker commit is now written under the issue file's vissue lock and through a temporary file and a rename.
+  Rewritten in place, it could drop a ballot another seat wrote at the same moment, and a parallel seat's `git add` failed with `confused by unstable object source data`.
+- The atoms merge driver reads this host's fresh log, and writes git's
+  merge result, without following a symlink. A tracker that committed
+  this host's log as a link to a file outside it had that file copied into
+  the merge result and pushed. Resolving a rebase writes the log the same
+  way, and the conflict-marker check reads `.ljos` files without following
+  a link.
+- The cloud finish test read `accession=` from whatever `deedar` was on PATH.
+  A released deedar prints `id=` and no such line, so the test panicked on a machine that had the release installed.
+  The test now builds the deedar commit named in `.github/deedar-pin`, the same one CI installs.
+- The cloud seat guard allows a ref write only when the destination is
+  develop or a branch named in that seat's ljos.toml. A force, a delete, a
+  tag, and any destination the line does not show are refused.
+- The cloud seat guard no longer refuses a push whose destination an earlier assignment already names, `cd "$(git rev-parse --show-toplevel)"` (or the backtick form) before pushing `HEAD`, or `git push --tags` when no local tag is under `cursor/`. A destination the shell has not expanded is still refused, and the refusal names that whole destination. `git push --follow-tags` from a `cursor/` checkout is still refused, because that push sends the branch.
+- The cloud seat guard now refuses `gh pr ready`, `gh pr reopen`, a gh alias `gh alias list` expands into one of those or into `gh pr create` or `gh pr merge`, and `gh api` calls that create, reopen, ready or merge a pull request. That is a write to a `.../pulls` or `.../pulls/N/merge` path, or a GraphQL mutation named `createPullRequest`, `reopenPullRequest`, `markPullRequestReadyForReview`, `mergePullRequest` or `enablePullRequestAutoMerge`. A GET of a pull request, a GraphQL query, an issue write, and `gh pr comment` stay allowed. A GraphQL body that is not on the line and cannot be read is refused, because it may be one of those mutations.
+- The cloud seat guard that `ljos cloud up` installs now reads each `git push` and `gh` command's arguments instead of matching the command text. It refuses a push that names a `cursor/*` destination (`+cursor/x`, `refs/tags/cursor/x`, `HEAD:cursor/x`), a bare push or `HEAD` from a `cursor/` checkout, `--all`, `--branches` or `--mirror` when a local `cursor/` branch would be pushed, and `--tags` or `--mirror` when a local `cursor/` tag would be pushed. It also refuses `gh pr create`, `gh pr new` and `gh pr merge` with `-R` or `--repo` before the verb. Pushing a `cursor/` branch onto another branch, a remote URL or option value that contains `cursor/`, and gh comment text that mentions `pr merge` are no longer refused.
+- The cloud-finish import test and CI build the same deedar commit, the one named in `.github/deedar-pin`.
+  The test was still pinned to an older commit than the branch CI clones, so the import check failed.
+- The cloud-up test clears an ambient GitHub Actions run id, so the seat suffix is the cursor agent id it sets.
+- The destination allowlist now runs in the pre-push hook `ljos cloud up`
+  installs. Git runs that hook for every push, including one a script,
+  make, or another program starts, and passes the remote URL after
+  insteadOf. The shell guard refuses the switches and the writes that
+  would skip the hook, and `ljos doctor` reports a hook that is missing
+  or was replaced.
+- The docs workflows grant pages write and the identity token on the jobs that publish, and the checkout does not keep credentials.
+- The first import of a log that git already stored with a header left no local note that the host writes headers, and it left a pinned pre-header blob in place. History is how a fresh clone knows. The note is still the file this checkout writes when it opens a headed log.
+- The first sync import after taken lists moved under each tracker now still retires what a peer dropped.
+  A tracker with no taken list of its own reads the one every checkout shared by scope name and host, instead of starting from nothing.
+- The git shim treats a force push as the hook does. A `--force-with-lease` push onto a branch other than `main`, `master`, `develop` or a protected branch runs. A bare push reads the current branch with `git rev-parse --abbrev-ref HEAD` and the upstream from `branch.<name>.merge`. Any other force push stops with a message that it is the person's to approve, in place of the refusal that told the agent to give up.
+- The guard and `ljos rules` take a rule's person basis as the person's only from a pack that asks for the seat's token. From any other listener every rule's reason is labelled an unverified agent note, as preferences already were.
+- The guard check test keeps the guard on, so a parallel test's temporary home cannot allow a refused commit.
+- The guard labels the reason of a rule the pack does not record as the person's, an agent rule or one with no basis, as an unverified agent note. Before, a hook denial or ask stated any stored rule's reason as though the person had written it.
+- The guard no longer switches itself off in a temporary working directory, so `cd /tmp && rm -rf ~/proj` is judged. Only `LJOS_OFF` or a `HOME` that is a temporary directory switches it off, in the hook and in the rm, git and find shims alike, and `LJOS_GUARD=on` keeps it on under a temporary `HOME`. The session start line says `command guard off` with the reason, as `ljos doctor` does.
+- The hook now hands `ljos-policyd` the shell line itself, as `bash -c
+  LINE`, so it reads the line with its own shell lexer. It used to get the
+  line split on spaces, so `(cd project; make clean-all)`, `cd project &&
+  echo $(make clean-all)`, `cd project;make clean-all` and a `cd` on one
+  line and `make clean-all` on the next were judged where the line
+  started instead of in `project`.
+- The hook now sends the full shell line to `ljos-policyd` from one resolved
+  start directory, instead of tracking `cd` and `pushd` segments itself. A
+  `cwd` with a leading `~` now expands against HOME, and an unresolved start
+  directory is refused (`cwd-unresolved`) instead of falling back to the
+  process directory.
+- The hook now takes any string argument of a file tool that resolves into the runtime ljos directory as the tool's target, whatever its key (`target`, `destination`, `filePath`, `path` beside `text`, a path inside a list of changes) and however deep, including arguments Cursor passes as a JSON string. The seat guard refuses such a call for every tool that does not only read; `Read`, `read_text_file`, `search_files` and the like still reach the directory.
+- The hook sends each full shell line to `ljos-policyd` from the payload start
+  directory, and `ljos-policyd` decides where commands on that line run.
+- The hook starts `ljos-policyd` in the directory each checked command argv runs
+  in: the payload cwd plus any workdir override, and for chained pipelines after
+  `cd` or `pushd`, the entered directory for later segments.
+  When that directory is missing or not a directory, `ljos-policyd` stays in the
+  hook process directory.
+- The hooks, `ljos recall` and a persona brief no longer lose an old
+  memory at the pack's cut. The pack returned its first twenty, or
+  twelve for a failed command, by a score that decays with age, so a
+  pack with enough fresh lookalikes never sent the old lesson that
+  answers. They now ask the pack to choose by relevance alone. A pack
+  too old to do that, or whose relevance cut comes back full, is
+  joined by the stored memories that best match, aliases included, so
+  a relevant old memory always has a way in.
+- The kept prompt is the person's only when it is a whole entry the person typed in the runner's record of the latest turn, with spacing and Cursor's `<user_query>` wrapper set aside. Before, any span of that entry agreed, so a tool call could cut the kept prompt down to the one clause it wanted and still pass the record check.
+- The latest-prompt file is now a guarded path, and a prompt counts only when the hook's bind matches its bytes and mtime. A shell write to that file is denied, and a file written beside the hook does not make a sentence the person's words.
+- The mail checks and reader now fail closed. A draft must be one
+  text/plain UTF-8 part in 7bit or 8bit with no encoded words, tags or
+  entities. The approval hash is the message bytes `sendmail -i -t` is
+  given, and export refuses Bcc, an invalid Date or Message-ID, a
+  mismatched reachbook-hash and any draft the checks refuse. `[mail]`
+  is read only from the user's own config files, needs `deny_file`
+  with `identity` and an explicit `notmuch_config`. notmuch runs have a
+  deadline, attachment hashing a cap, and show leaves out spam, refuses
+  symlinked or out-of-root message files, flags hidden HTML and
+  withholds what it cannot follow. Any cloud marker refuses the tools.
+- The message for a skipped guard bypass row echoed the whole command onto hook stderr, which several runners show as the deny reason, so a secret or an injected newline in the command leaked there. The message now names only the log and the error.
+- The no-runner onboard test now simulates missing tools with an injected command lookup instead of mutating process PATH, so parallel lib tests cannot hide git from sync tests.
+- The npm push check no longer depends on one machine's node path. A CI
+  job has no npm, so the test uses the installed npm when there is one
+  and otherwise a script that runs the package.json recipe.
+- The pack will not raise `source.basis` on an update, so an old preference cannot be stamped `person` in place. A person-side run closes that atom and writes a new one born with basis `person`. The closed atom keeps the basis it had. The cutoff notes the write before the close, and the next run finishes it. A runner still does neither.
+- The persona brief keeps its heading saying the tracker recall may carry unverified logbook notes above the fenced tracker text.
+- The pre-push hook exited successfully when LJOS_HOOK_KEY was set,
+  before it read the allowlist. That variable was only there so a test
+  could call the URL normaliser, and it shipped in the installed hook.
+  The normaliser test builds its own script from the functions above
+  the gate. The installed hook has no off switch.
+- The pre-push hook took its allowlist from HOME or
+  XDG_CONFIG_HOME, and it ran readlink and tr from PATH. A push
+  could point those at another allowlist, or at programs that
+  hid the real path, and the hook then allowed the push.
+
+  The hook now resolves the allowlist from its own path, takes
+  the tilde root from the passwd entry, and calls those programs
+  by absolute path with PATH fixed to /usr/bin:/bin.
+- The prompt `ljos panel ISSUE --cloud` writes no longer says the ballot counts only under its slot; it says the slot line is recorded for the launcher to sign.
+  `ljos panel --cloud` refuses `--designers`, which it used to take and ignore.
+  `ljos panel --cloud` refuses two personas whose names make the same seat, naming both, before it writes any file.
+- The prompt `ljos panel ISSUE --cloud` writes tells the seat to load `~/.config/ljos/env` and cast its ballot `--as "$LJOS_SEAT"`, so the seat `cloud up` wrote signs it and the launcher's slot names it. It used to say to cast `--as` the persona and that the seat signed that ballot; the persona's own key signed it, and the push gate left it out before reading any slot.
+- The prompt and failure hooks no longer lose an old memory before
+  they test it. The pack cuts its list by a score that decays with
+  age, and the hooks read only its first ten, in that order. They now
+  ask for a wider list, and what passes is read by how well it
+  matches, with the pack's score only breaking a tie.
+- The prompt hook drops the kept prompt on every prompt before it keeps the new one, so a prompt it skips, such as a pasted block, or does not take as the person's no longer leaves the previous turn's words in place for up to an hour to be quoted as the person's.
+- The prompt hook hands over the memory that covers the prompt, not the
+  freshest of the ones that share a word with it. Every memory that
+  named the prompt's subject scored the same, so on a pack with no
+  encoder one rare word and then the age-decayed fused score picked
+  among them: "the registry rejected my token" got three fresh
+  lookalikes and never the January lesson on the expired CI secret.
+  The match is now graded by how much of the prompt a memory covers,
+  and when the cross-encoder ran, its order stands. Age only breaks an
+  exact tie.
+- The prompt hook no longer drops the lesson that covers the prompt
+  because one of the pack's ballots left it out. Where many lessons tie
+  on the words the pack scores, which of them a ballot keeps at its cut
+  is arbitrary, so the January lesson on the expired CI secret came
+  back on one ballot of two behind fresh lookalikes, and the prompt got
+  three of those instead. A memory still has to name the prompt's
+  subject and match it at least 0.6 as well as the best one, so a line
+  that shares one rare word with the prompt stays out.
+- The prompt hook now records every id the runner's payload names its conversation by (`conversation_id`, `session_id`, `sessionId`, `thread_id`) in the bind beside the kept prompt, and the check accepts the bind when any of them is a session the runner gave the checking process. Under Cursor, whose payload carries a `session_id` beside the `conversation_id` its shell is stamped with as `CURSOR_CONVERSATION_ID`, the person's real words were refused. Cursor's hook session is now its `conversation_id`.
+- The push allowlist keyed a repository by dropping everything before
+  the first `@`. A path that contained `@` then matched the seat, and
+  the push was allowed. The key now keeps that path: userinfo is only
+  the last `@` in the part before the first slash.
+- The push gate now decides a cite on the ballots `ljos consensus` counts.
+  A second ballot from the same session no longer lets the cite stand when
+  consensus would refuse it.
+- The push gate now reads `LJOS_CITE`: a push that carries a cite which
+  does not stand is denied, with the reason the cite check gives. Before,
+  nothing on the push path called the cite check, so a cited push ran
+  whatever the issue's ballots said, and the claims that the push gate
+  counts the same ballots as `ljos consensus` described no check.
+- The push gate reads the tracker's seat pins strictly.
+  A second line for a seat in `.ljos-seat-keys` no longer re-pins it to the
+  new key; the gate refuses the pin file and names the seat.
+- The push gate refuses a pin file that no longer holds a pin the tracker
+  committed. Changing a seat's key in place no longer re-pins it, and
+  removing a seat's pin no longer drops its ballot from the count.
+- The ready line of `ljos doctor` names only the parts whose rows are `ok`: memory, tracker, command guard. Before, it said `memory, tracker and command guard work` while the optional tracker row failed, as it does when `vissue identity` exits 1 outside a tracker. The short doctor, and a sitting's short report, now print that tracker row under the line, with its fix. Other optional rows that are off, such as the encoder, stay behind `ljos doctor --all`.
+- The record tally and seat pins keep a run's and a judge's id whole, as `record-v1.md` says. `judge-gpt-oss-120b` and `judge-gpt-oss-20b`, `run-pr-1234` and `run-pr-5678`, or `judge-grok-4` and `grok-4` are no longer one seat, and a seat row such as `inky` no longer holds `run-inky` or `judge-inky`.
+- The relay no longer denies a tool call because its answer contains
+  the unhealthy-guard sentence. That match missed the sentence once a
+  push warning or a preference was joined to it. A real fault is
+  already a deny from the check. An allow that carries the sentence
+  stays that allow.
+- The runner relay now treats Windsurf, Factory, Qwen and Crush as
+  exit-code gates: a deny exits 2 and writes the reason to stderr, so
+  their command guards block refused commands reliably.
+- The same sentence noted on another ticket is stored as its own memory, and `ljos note` prints that memory's id.
+  A pack that answers with the memory already held for a different ticket is given the note again under this ticket's set, which keeps the two apart.
+  `ljos recall` on each ticket finds the note that was written on it.
+- The seat guard no longer refuses a command for naming `latest-prompt` or `latest-prompt.bind` by itself unless the command writes the files it is given: a redirection, `mv`, `rm`, `ln`, `cp`, `install`, `rsync`, `tee`, `dd`, `touch`, `sed -i`, an editor, a shell or interpreter running a script, or a `find` that deletes or runs a command. `git grep latest-prompt`, `git log -S latest-prompt`, `echo latest-prompt`, `find . -name latest-prompt`, `test -f latest-prompt` and `cargo test latest-prompt` are allowed. A path that resolves into the runtime ljos directory is still refused to any command but a reader.
+- The seat guard now also denies a tool call that renames, removes or links the runtime ljos directory, writes `latest-prompt` or its bind by a relative name or a glob, or writes one through an MCP file tool that names its target `path`.
+- The seat guard now denies a tool call that assigns or exports a runner session variable (`LJOS_HARNESS_SESSION`, `CURSOR_*SESSION*`, or any `*_SESSION_ID`, `*_THREAD_ID` or `*_CONVERSATION_ID`) before it runs `ljos` or `ljos-mcp`, as a prefix, through `env`, `export` or `declare`, on an earlier line or inside `sh -c`.
+- The seat guard now judges a write to the kept prompt by the path a word resolves to, not by how it is spelled. Variables with defaults, `$UID` and `~` are expanded, `.`, `..` and repeated slashes are taken out, a relative word is read from the directory the line has `cd`'d to, and the symlinks of the part that exists are followed, before the word is compared with the runtime ljos directory. A glob that could match the directory or a file in it counts, and so does moving, removing or linking a directory above it.
+- The seat guard now refuses `ljos prefer`, `ljos remember` and `ljos accept` run through `ssh`, including `ssh localhost`. ljos started that way is not under the runner, so it took the words as the person's and skipped the check against the latest prompt; `ssh localhost ljos prefer --user --promote` could promote a lesson the person never said.
+- The seat guard now treats interpreter code as a write to the kept prompt when the code names it. Inline programs given to `python -c`, `perl -e`, `node -e`, `ruby -e` or `awk`, and scripts fed on standard input or by heredoc to an interpreter, a shell, `git apply` or `patch`, are refused when they mention the runtime ljos directory, its environment spelling, or the files kept there.
+- The seat guard refused writes to Claude, Codex and agy's hook
+  files, and let an agent rewrite Cursor's and the relay runners'.
+  Those files are the seat's law too. A guarded agent cannot
+  overwrite them. Reading one still runs.
+- The session a kept prompt's bind must name now comes from the process the runner started, read from that process's environment on Linux and macOS, and no longer from the asking `ljos`'s own. `LJOS_HARNESS_SESSION=forged ljos prefer --user ...` no longer picks the session of a forged bind, and with no runner above the process nothing counts as the person's words.
+- The session an MCP call's `_meta` names no longer counts as the runner's when ljos checks whose prompt the kept one is. Only the environment the runner gave the process above, or the very runner process that spawned the prompt hook, which the bind beside the kept prompt now records, says a prompt is this conversation's. A `_meta` session only narrows the check: one that differs from the runner's, or from the bind's when the runner gave none, is refused for the verbs that store the person's words. A Codex MCP server, whose environment names no session, still takes the person's real words, because Codex itself spawned both the hook and the server.
+- The stale-memory test reads recall counts from its own state directory, so a parallel test's recall of the same atom cannot hide a never-recalled row.
+- The state logs refused a symlink only at the file itself, so a symlink put in place of the `ljos` directory under `$XDG_STATE_HOME`, `$XDG_DATA_HOME` or the runtime directory took every row somewhere else. That directory is now opened without following a link and the log is opened from it. A `$HOME` or XDG base you made a symlink yourself is still followed.
+- The user-rule preface no longer states a rule promoted from a lesson the pack stored as agent-derived; a promote records the lesson's stored origin so a seat whose pack does not hold the lesson decides the same way.
+- Tracker recall, the brief and the timeline fence tracker text with a nonce that is fresh on each call, and quote every line inside it. A logbook note that writes the closer, or a rule after it, now stays inside the fence.
+- Tracker writes (`note`, `claim`, `sitting`, `finish`, `release`, `complete`, `file`, `options`, `deed --add/--remove`, and the matching MCP tools) refuse a seat nobody named, as ballots already did: a seat taken only from the program above the shell, or from the login user under a runner, is refused with a line naming `LJOS_SEAT` and the seats file. When `seats.toml` lists seats, a write from a seat it does not list is refused; with no seats file, writes go on as before. `ljos doctor` gains a `seat source` row that warns, without failing, when the seat is derived.
+- User-rule sync refuses a symlinked `.ljos/user-rules` in the tracker or
+  `sync/user-rules` in the state directory. Rules are no longer merged
+  from, or sealed into, the directory a link points at.
+- Wake writes now preserve an existing `wake.toml` mode on atomic rewrites and
+  create new `wake.toml` files as mode 0600, so wake key variable names stay
+  private by default.
+- When VISSUE_ROOT is not a git checkout, seat signature refusals now include a one-time note that pre-signing ballots cannot be dated and are therefore reported as unsigned.
+- When an agy hook payload omits top-level `cwd`, the guard now reads
+  `toolCall.args.Cwd` before falling back to `workspacePaths`, so checks run in
+  the tool call directory that agy reported.
+- When nothing but the seat names a ballot's session, `ljos vote` says the session is unverified and that every run of that seat is one session.
+  The tally marks those ballots unverified.
+- Windows curl also loads `.curlrc` or `_curlrc` from `USERPROFILE`,
+  `APPDATA`, and `USERPROFILE\Application Data`, and the guard did
+  not read those files. They are judged now in curl's order, the
+  Windows variables wherever they are set.
+- With the pack down, the push cite line `ljos consensus` and the MCP
+  consensus tool print now says the roster is not readable and that the
+  cite does not stand, the same answer the push gate gives. Before, they
+  read the roster as empty and counted every persona ballot as a seat's.
+  A seat whose pack is off on purpose (`PACKSET_URL=off`) has an empty
+  roster at the push gate too, as it already had in `ljos consensus`.
+- `cloud up` now retires env-owned wakes before writing the cloud age identity,
+  so a bad `LJOS_CLOUD_AGE_SECRET` cannot leave a stale wake URL that still
+  sees a rotated wake bearer key.
+- `cloud up` now retires stale env-owned wakes when the matching
+  `LJOS_WAKE_<SEAT>_URL` variable is gone, collides with another variable,
+  or names a refused URL.
+  Wake writes now refuse to overwrite a malformed `wake.toml`, so a parse
+  error aborts the write and leaves the file untouched.
+  Wake webhook posts now refuse redirects, and wake file updates now use an
+  exclusive lock plus temp-file-and-rename writes to prevent torn reads and
+  lost concurrent updates.
+  Entries without `source` remain treated as hand-set wake entries. This is
+  intentional for entries written by the unreleased 2a30af8 behavior.
+- `curl -G` turned every body into a read, so `-G -T` and `-G -F`
+  still uploaded and passed. A curlrc or wgetrc could set the
+  method, and writing those files was allowed. `wget -e
+  method=DELETE` was a read.
+
+  An upload stays a write beside `-G`. A client config is a write
+  when the command carries a token, because the file can hide
+  the method. Writing the config file is refused.
+- `curl -LO`, `-fsSLO`, `-JLO`, `-C - -O`, `-i`, and `-4` were
+  refused, and so were `--write-out`, `--retry-all-errors`,
+  `gh run download`, `gh label list`, `gh cache list`, and a
+  GraphQL query. Those are reads this seat runs.
+
+  A short or long flag that only names a read stays allowed. A
+  GraphQL operation is a read when it is not a mutation.
+- `curl -X PUT https://ghcr.io/...` was allowed. The host check
+  only named github.com, and ghcr.io accepts the same token.
+
+  ghcr.io, githubusercontent.com, and pkg.github.com are GitHub
+  hosts. A write to one of them is refused like a write to
+  api.github.com.
+- `gh api` treated `-fbase=main`, `-Ftitle=@file`, and `-if title=x`
+  as flags it did not know. No field was recorded, so the call
+  looked like a GET and a merge, a ref create, or a mutation
+  passed.
+
+  A short flag with its value attached is the same field as
+  `-f base=main`. Any field is a write unless the method is GET
+  or HEAD, or the call is a GraphQL query.
+- `git replace` and a grafts file rewrite commit parents without making
+  the checkout shallow or dropping an object. Pin order followed that
+  rewritten parent list, so a pin removed before slots could still
+  stand. History reads that decide pin order ignore replace refs and
+  grafts. A checkout that has `refs/replace` or a grafts file is refused,
+  and the refusal names which one.
+- `git send-pack` does not run the pre-push hook, and the shell
+  guard only checked its ref names. `develop` on another
+  repository was allowed, and the push landed there.
+
+  A send-pack written on the line is checked against the
+  repository allowlist. A name git cannot resolve is refused.
+  An ordinary `git push` is still left to the hook.
+- `install.sh` puts its bin directory on PATH for the shells opened after it. When that directory is not on PATH, it adds `export PATH="$HOME/.local/bin:$PATH"` to `~/.profile` and `~/.bashrc`, and to `~/.zshrc` when there is one, under a marker comment that keeps a later install from adding it again. `--no-modify-path` leaves those files alone. Before, it printed a note and wrote nothing, so the next command after the install did not find `ljos`.
+- `ljos claim` commits and pushes the issue the way a note does, so the claim reaches the other hosts before the next note.
+  A `STARTED` claim stays taken when this machine's hold for that issue names a program that is still running, and goes back to `TODO` once that program is gone and the lease has passed.
+  The hold names the nearest program above the command, so a short-lived runner is not kept alive by the daemon above it.
+- `ljos cloud up` inserts the PATH export before Ubuntu's multi-line `case $-` guard in `~/.bashrc`, so a non-interactive shell that sources that file still finds `ljos-mcp`.
+- `ljos cloud up` inserts the PATH export before an interactive guard written as `if [ -z "$PS1" ]; then`, `return` and `fi` on separate lines.
+  A non-interactive shell that sources `~/.bashrc` used to return before the export and not find `ljos-mcp`.
+- `ljos cloud up` no longer changes a scope cloud identity reached
+  through a parent symlink. The mode and the bytes stay where they are.
+- `ljos cloud up` no longer treats a directory named `packset-embed` as an installed encoder.
+  The install check requires a regular file with the executable bit.
+- `ljos cloud up` now creates the temp file for `~/.config/ljos/cloud.age` new, with mode 0600 and without following a link, and refuses a symlink at `cloud.age`, so a file or link planted beside it never receives the identity.
+  `ljos sync` tries the `cloud.age` identity only on files sealed to scope `cloud`, so a VM never opens another scope's memory with it.
+- `ljos cloud up` now writes a machine-local cloud guard rule file that denies `git push` to `cursor/*` refs and blocks `gh pr create` and `gh pr merge`; `ljos doctor` reports whether that guard file is present.
+- `ljos cloud up` puts `LJOS_BIN_DIR` first on PATH. A stale `ljos-mcp` earlier on PATH used to stay the one a bare command ran, while cloud up reported the new install. The MCP config names the absolute path of this install when that earlier copy would have won.
+- `ljos cloud up` recorded whichever repository it was run in.
+  A second run from another clone rewrote the allowlist, and a
+  push of develop then landed there. Doctor still reported ok.
+
+  The first repository stays recorded. A later `cloud up` leaves
+  it in place, and the shell guard refuses `--repoint`.
+- `ljos cloud up` replaced an existing `core.hooksPath`. The
+  identity hook booked there stopped running, and the guard then
+  refused putting it back. The same rule refused a local
+  hooksPath on a throwaway repository, so the bookkeeping fixture
+  could not run.
+
+  When a hooks directory is already booked, `cloud up` chains a
+  pre-push that runs the previous hook and then the seat hook.
+  The booked path stays. A throwaway repository can still set
+  its own.
+- `ljos cloud up` tags this machine's memory and lessons `scope:cloud`.
+  They are sealed into the cloud log, and a box machine's unscoped memory stays on the primary scope.
+  `cloud up` does not set `default_scope`.
+- `ljos cloud up` writes the absolute `ljos-mcp` path unless PATH already runs this install when it starts.
+  It used to write the bare name whenever the install directory was missing from PATH, or listed with a trailing slash or through a symlink, so a client that did not read the edited profile ran a stale copy or none.
+- `ljos doctor` counted a `note-queue.jsonl.*.damaged` name in the state dir by looking through it when it was a symlink, so a link to a file outside the state dir showed as bytes a send had set aside. A damaged name that is a link, dangling or not, is now left out of the note queue row without following it or opening its target.
+- `ljos doctor` leaves `$HOME` and `~/` as written in an OpenCode command. OpenCode expands `{env:HOME}` only, so a `$HOME/...` path that will not run was reported ready, and a working `{env:HOME}/...` path was reported missing.
+- `ljos doctor` listed the note queue's damaged files by path, so a state dir swapped for a symlink could show files from outside it; the listing now goes through the state dir descriptor and a linked dir lists nothing. Emptying a note queue that is a dangling symlink is now refused instead of reported as done. A tracker deepen whose fetch failed, or whose shallow or missing-object state git could not report, no longer counts as complete history, and a failed fetch is tried again on the next check.
+- `ljos doctor` names `ljos sync --adopt-legacy HOST` once for each host
+  whose log still has no scope header. A develop reader already refused
+  those logs; the row is how a seat sees the command, and the seat still
+  counts as up.
+- `ljos doctor` now gives a concrete repair command for an unresponsive
+  `ljos-policyd` in the `policy` row, not only for a missing binary.
+
+  The policy health check still fails both cases, and tests now cover
+  missing and unresponsive binaries with the expected fix guidance.
+- `ljos doctor` opened each log through the import path, which records that a host writes headers, and it still named a scope that had been removed. Looking is not recording, and a scope that is no longer configured is left out.
+- `ljos doctor` passed over a note-queue row cut short but ended with a newline, so a queue holding only such a row read "empty" and one holding a note besides read as whole. Such a row now makes the note queue a `no` row that says how many rows are not a note and that `ljos finish` or the next session start moves them to a dated `.damaged` file. The guard bypass row says "the log is damaged" beside the rows it could not read.
+- `ljos doctor` printed `ljos sync --adopt-legacy HOST` for every headerless file, including a name with a shell metacharacter and a host `-h`, which clap reads as help. The hint now uses the same name, duplicate, and scope checks as import, and the host is bound with `--adopt-legacy=HOST`.
+- `ljos doctor` printed a damaged guard bypass log as an `ok` row, so the short doctor left it out. A bypass log with an unfinished last row that has sat, a row that cannot be read, or a fifo, socket, directory or symlink in its place is now a `warn` row the short doctor shows. The exit stays 0: the guard still judges every command.
+- `ljos doctor` read the whole guard bypass log and note queue into memory whatever their size, so a runaway or swapped-in file held it for as long as the read took. Doctor now reads at most 32 MiB of either, and a log past that is a damaged row that gives its size and says it was not read.
+- `ljos doctor` reads `env.PATH` from the ljos server's own table. `NODE_PATH`, `LD_LIBRARY_PATH`, and another server's `PATH` no longer fail a working config. JSON `env.PATH` expands `${env:PATH}` and `$PATH`.
+- `ljos doctor` reads an MCP entry's `env.PATH` with the client's own syntax: `${env:PATH}` for Cursor, `${PATH}` for Claude Code, and `${PATH}` or `${env:PATH}` in a hermes YAML entry.
+  It used to take `$PATH` as expanded in Cursor's file, where Cursor passes it as text, and to miss `${PATH}` in Claude Code's and hermes' files.
+- `ljos doctor` reads home variables in `~/.cursor/mcp.json` as Cursor does (`${env:HOME}`, `${userHome}`) and in `~/.claude.json` as Claude Code does (`${HOME}`, `${HOME:-default}`).
+  It used to call `$HOME` or `~/` in either file ready, though neither client expands them.
+- `ljos doctor` said "ljos is ready" and exited 0 over a damaged note queue, and over a damaged guard bypass log. A damaged note queue now fails doctor: the summary says "ljos is not ready: the note queue is damaged" and the exit is 1. A damaged bypass log keeps its `warn` and exit 0, and the summary says "ljos runs, but the guard bypass log is damaged". An empty or missing log of either is whole.
+- `ljos doctor` says `ljos cloud up` on a cloud VM, a codespace, or CI, and `ljos onboard` in a desktop Cursor terminal. `CURSOR_AGENT=1` alone is that terminal. CI is the documented value: `GITHUB_ACTIONS=true`, `GITLAB_CI=true`, `CI=true`, `BUILDKITE=true`, `TF_BUILD=True`, `CIRCLECI=true`, or a set `JENKINS_URL`. `false` does not count. A CI job still does not download `packset-embed`.
+- `ljos doctor` sent the note queue before it reported on it, and a send rewrites the queue with only the rows that parse, so a last row still missing its newline, one touched a moment before or dated ahead of the clock, was deleted. The send also waited on the queue lock with no end, so a lock another process held hung doctor. Doctor, and the MCP doctor tool, now only read and count the queue; the next note or finish that reaches the pack, or a session start, sends it.
+- `ljos doctor` tells a desktop Cursor install to run `ljos onboard --harness cursor`. It says `ljos cloud up` only on a cloud VM, a codespace, or CI.
+- `ljos doctor` took a state log whose last row lacks its newline for one still being written whenever the file was dated ahead of the clock, so a touched or clock-skewed log never showed as damaged. A last row dated more than 5 seconds ahead of the clock is now damaged at once, and the row says it is dated ahead of the clock.
+- `ljos doctor` tries the note-queue lock once instead of waiting on it, and when another process holds it the note queue row is a `warn` that says the queue is busy and names the lock, so a stuck holder shows in the short doctor rather than hanging it.
+- `ljos doctor` used to wait forever on a habitat that never
+  exited, and a policyd whose `version` answered while `check`
+  hung looked healthy. A capture now stops at three minutes. The
+  policy row runs `check` as well, and a hang there is unresponsive.
+
+  A `POLICYD_BIN` that names a missing file says so, instead of
+  suggesting a cargo install. `LJOS_GUARD_FAIL_OPEN=1` is its own
+  row, and an allow it chooses is written to the bypass log.
+- `ljos doctor` warns about a stale runner env ljos wrote and does not fail the command for it.
+  `ljos doctor --fix` refreshes that file.
+- `ljos doctor` warns when an MCP config names an absolute `ljos-mcp` that exists but is not this install.
+  A stale copy left in another directory used to pass as ready, though it was the binary the client started.
+- `ljos hook` and `prefer --user` count a runner as installed only below a real install root: `~/.local/bin`, `~/.cargo/bin` or `~/.npm-global` of the passwd home rather than `$HOME`, a system `bin`, npm's global `node_modules`, an app directory of the runner's name under `~/.local/share` or `/usr/share`, or a `/nix/store` entry.
+  The path is compared after every link resolves, so a copy in `/tmp/.local/bin`, a project's `node_modules/.bin`, a `.local` a tool call made elsewhere, a link from `~/.local/bin` into `/tmp`, or a file another user could rewrite is not the runner.
+- `ljos hook` and `prefer --user` trust a group-writable runner file only when the person's primary group bears their name and holds no one else, count a `/nix/store` entry only when Nix alone can change it, judge the directory each install root sits in, and read every directory down to the file through descriptors that do not follow a link, so the file judged is the one the process runs.
+- `ljos hook` keeps a prompt as the person's only when the parent is an installed runner, older than the tool call the guard recorded, or that same runner. A copy named like a runner, and one started after the tool call in its cgroup or session, keeps nothing after `setsid`, `env -i`, `nohup`, a double fork or a reparent. `prefer --user` under that copy keeps nothing either. An unreadable session, cgroup or record keeps nothing.
+- `ljos hook` keeps a prompt as the person's, and grants, saves or corrects from it, only when the runner itself spawned the hook: its parent must be Claude Code, Codex, Cursor or another runner as read from the file the kernel runs it from, with nothing between them but the `sh -c` that runs the configured hook command, and that runner must not run inside another runner's tool call. Otherwise the hook says why on stderr and keeps nothing. The seat guard now refuses a tool call that runs `ljos hook`, directly, through the plugin launcher or over ssh, since it writes the person's words.
+- `ljos hook` now denies a shell command whose directory does not resolve
+  as `cwd-unresolved`: a workdir or session `cwd` that is missing, a
+  symlink loop, or a directory it cannot enter. It used to judge the
+  command in the session directory, or its own, where the command does
+  not run, and allow what it would allow there. `LJOS_GUARD_FAIL_OPEN=1`
+  keeps that fallback, and a prompt is never denied for its directory.
+  `ljos_guard_check` now refuses a `cwd` it cannot enter too.
+- `ljos inbox --sync COMMIT` checks the commit against the fetched remote refs, so a commit made on this machine and never pushed is named as not on the remote and is not fast-forwarded to.
+  It fetches again until the remote has the commit, for up to 30 seconds (`LJOS_INBOX_SYNC_WAIT`), so a push that lands just after the wake is still read.
+- `ljos inbox` exits non-zero when a writer that reports no version refuses kind `message`, and the error names packset 0.13.0.
+  An empty message is a tool dump on every packset and is refused before the kind, so that probe could not tell a pack that keeps mail from one that does not, and the inbox printed nothing unread.
+  The probe is a message with a level the pack does not keep, so a refusal of the kind is an error and a refusal of the level means the pack keeps mail, and neither answer is stored.
+  The reference and the howto describe the receipt `ljos hook --prompt` writes: at most eight messages, interrupts first, with the rest left unread, text lines `read`, `by`, `at` and `msg`, printed to the sender once.
+  A shell writes that receipt before the hook exits. Cursor writes it when the note is delivered, on `postToolUse` or on `Stop` when the turn ran no tool.
+- `ljos island` against a running pack labels an agent's claims by their stored origin again; the island row carries no origin of its own, and it had been read as the person's.
+- `ljos memories review --edit` and `--merge` are refused under a runner.
+  The replacement keeps the origin and the basis the memory already had, so a user-declared preference with no basis is not stamped `person` by the edit.
+  An edit of a memory that already carries a basis keeps that basis.
+- `ljos onboard --harness goose` rewrites only the `ljos:` extension's own `cmd`.
+  A sibling extension listed after an `ljos:` entry with no `cmd` used to have its `ljos-mcp` path replaced, because the YAML entry was read as the next 24 lines.
+- `ljos onboard --harness hermes` rewrites only the `ljos` command. A sibling server such as `ljos-dev` on the line above the marker keeps its own command.
+- `ljos onboard --harness json` says on stderr why the command is an absolute path. Stdout stays the JSON entry alone, so it still parses. A PATH that does not resolve `ljos-mcp` used to print the path with no reason.
+- `ljos onboard --harness opencode` writes the server at `mcp.servers.ljos` with `codemode` false, so opencode lists `ljos_ljos_recall` and `ljos_ljos_note` on the native tool list. With Code Mode left on, those names were missing and note and recall failed on every model.
+- `ljos onboard` replaces a bare `ljos-mcp` that PATH resolves to another binary, or to nothing, with this install's path.
+  `ljos doctor` used to warn about it and advise onboard, which left the config alone, so doctor warned again.
+- `ljos onboard` replaces an absolute `ljos-mcp` in a harness config that exists but is another binary, the same way it replaces one that is missing.
+  A stale copy in another directory used to be kept, and the config was left byte for byte as it was.
+- `ljos panel --cloud` refuses two personas that boot as one seat, not only two whose names slug alike: `inky` and `inky-n9o`, `inky` and `inky@n9o`, and `ljos-bot` and `ljosbot` each name one seat, with no run id or with a short one that strips back off. `eessi` and `eessi-bot` stay two seats.
+- `ljos prefer --review` prints the date, the seat and the source of each held preference or lesson, so one written a minute ago is not mistaken for an old one.
+  The date is the pack's server time, or `source.at` when that is all the writer stored, and the seat falls back to the harness and then to a `seat:` entity.
+  `ljos doctor` still exits 0 while those items are waiting.
+- `ljos prefer --user --promote` under a runner, and MCP `ljos_prefer` with `user` and `promote`, now refuse a lesson whose text is not in the person's latest prompt, the same check `prefer --user` makes of the words.
+- `ljos prefer --user` under a runner, and MCP `ljos_prefer` with `user` set, now refuse text that is not in the person's latest prompt. A user rule reaches every prompt and every seat, so a planted sentence is not stored.
+- `ljos prefer` under a runner now stores only words from the person's latest prompt as theirs. Any other sentence is agent-derived, so a planted preference is not user-declared.
+- `ljos prefer`, `ljos remember` and the lesson `ljos finish` keeps are the person's only when the person is at the terminal, by the same check `ljos rule` now makes. From a pipe, or below a parent named like a session, a preference is stored `agent-derived` and a remember is an unreviewed note.
+- `ljos recall` lists what bears on an issue, not only what is newest.
+  Past twenty of an issue's own memories it kept the newest, and of
+  the related search it kept the first five the pack ranked, by a
+  score that decays with age. It now asks for four times as many
+  related hits and keeps the ones that best match the issue's id and
+  title, with recency only breaking a tie. The count of what it left
+  out now says "more" rather than "older".
+- `ljos record check` again holds a voter id pin row to its seat. Beside `inky <key1>`, a row such as `mallory/inky <key9>` no longer lets a second key vote as seat `inky`; rows that pin one seat must pin one key, however they are spelled.
+- `ljos record check` and ballot signature checks now refuse small-order ed25519 keys, which used to verify any message.
+  An entry signed with the identity point as its key no longer passes, whatever its stance.
+- `ljos record check` and entry signing now refuse voter ids whose part after `/`
+  is not already that seat's slug, so `alpha/Seat-a` cannot be counted beside
+  `alpha/seat-a` under one pinned key.
+- `ljos record check` now accepts only exact lowercase ballot stances:
+  `accept`, `reject`, or `withdrawn`. Variant spellings with spaces, Unicode
+  invisibles, or capitals are refused.
+- `ljos record check` now applies seat pins by key fingerprint, so hex-case
+  differences and small-order-part variants of the same key are treated as
+  the same signer.
+  An explicit voter-id pin row now takes precedence over a conflicting seat
+  row, while seat rows still reject a second key on that seat.
+  Seat rows now cover run/judge aliases of a seat (`run-inky`,
+  `judge-inky`) and keep true run/model forms on their own rows.
+
+  Tally is now per question and key-based: one signing key is one voter on
+  that question. A seat that appears under a second key on the same
+  question keeps the first key's ballot and refuses the later key on that
+  seat. Same-hour ambiguity drops only that voter's ballots on that
+  question, so unrelated questions and voters still count.
+  `replaces` now follows the effective voter identity (signing key), not
+  the raw voter-id string.
+- `ljos record check` now counts each signing key once per question, whatever voter ids it signs under.
+  The latest hour still wins, and two unreplaced ballots under one key in one hour are an error.
+  Keys that differ only in hex case or in a small-order part count as one key, since one secret signs under all of them.
+  A voter id now has one written form: the identity is its slug, and the seat drops a holder `@TAG` or an old pid suffix and maps an old seat name, so `alpha/inky-39u` is `alpha/inky` and `alpha/ljos-bot` is `alpha/ljosbot`.
+  A run and a judge keep their ids whole.
+  Signing and checking refuse any other spelling and name the form to sign under; a stored entry in another spelling has to be signed again.
+  Bare pin rows such as `inky@39u`, `inky-n9o`, `ljos-bot` and `judge:model-1.5` now hold record voters of the seat they read as.
+- `ljos record check` now cross-checks `<identity>/<seat>` voters against any
+  existing `<seat> <key>` tracker pin, so record entries cannot diverge from
+  the seat key already pinned by `ljos vote`.
+- `ljos record check` now fails closed on the tracker pin file: unreadable pin
+  files and duplicate voter rows are hard errors, and pin mismatches report
+  whether the source was the pin file path or first-seen pins in that check.
+- `ljos record check` now fails when the tracker pin file is a symlink to a missing path, instead of reading it as no pin file and falling back to first-seen pins.
+- `ljos record check` now folds a voter's seat with the seat slug before the tracker seat pin lookup.
+  `alpha/Seat-a`, `alpha/SEAT-A`, `alpha/seat_a` and `alpha/seat.a` are all held to the `seat-a` pin, so a second key can no longer vote beside it under another spelling.
+- `ljos record check` now holds a `run-*` voter suffix to the tracker pin file row of that name, when there is one, instead of skipping the seat cross-check for every run.
+- `ljos record check` now refuses a pin file that pins one seat to two keys under two of its names, such as `inky` and `inky@39u`.
+  The tally now counts a seat once on a question whatever identities and keys it signs under, as it already counted a key once whatever voter ids it signs under, so `alpha/inky` and `beta/inky` are one vote.
+  A last part of digits alone is no longer read as an old conversation tag: `alpha/gpt-5` signs as itself and stays apart from `alpha/gpt`, and the tracker keeps a holder such as `ridley-ci-a-555001` whole.
+  A pid tag with a letter, as in `inky-39u` or `inky-n9o`, still folds to its seat.
+- `ljos record check` now refuses a tracker pin file row whose voter is not spelled the way the check looks it up, instead of silently skipping that pin.
+  A BOM or zero-width space before `seat-a`, a non-slug seat such as `Seat-a` or `seat_a`, and a malformed `<identity>/<seat>` row all fail the check.
+- `ljos record check` now rejects duplicate JSON keys at any depth, including
+  duplicate ballot `stance` fields and duplicate keys under `signature`.
+- `ljos record check` now rejects extra keys under `signature`, including nested
+  objects that used to be ignored during schema parsing.
+- `ljos record check` now requires `replaces` to point to an existing ballot
+  from the same voter on the same question instead of silently crossing voters,
+  crossing questions, or naming missing targets.
+- `ljos record check` now requires the hex suffix of a question id to be lowercase.
+  `correct-3f9a1c2e` and `correct-3F9A1C2E` used to tally as two questions, so one voter could cast two counted ballots on one question.
+- `ljos record check` reads legacy unsigned ballots by commit order, as the
+  push gate does: a ballot counts as legacy when its issue held it in the
+  commit that brought the tracker's first pin. It read the committer date
+  of the ballot's commit before, which any tracker writer sets.
+- `ljos record check` refuses plain-layer `host`, `session` and `agent` fields, and rejects unsigned extra fields in signed entries.
+  Timestamps must be UTC hours written `YYYY-MM-DDTHH:00:00Z`.
+  A ballot another entry replaces does not count, and two unreplaced ballots from one voter in one hour are an error.
+  Every voter id is pinned to one key, including a question's opener and a seat; a run is `<identity>/run-<id>`.
+- `ljos record sign_entry` now refuses signer seats that are not the entry's
+  named voter or question opener, so test fixtures and generated entries stay
+  bound to the identity they claim.
+- `ljos release` of an issue the claim graph no longer holds, because a lease reclaim freed it or `ljos complete` ended it, now puts the tracker heading back to the state it had before the claim instead of failing with `release: status ready` and leaving it STARTED.
+  A heading another name holds is left alone, and the release still fails when the tracker has nothing of this holder's to hand back.
+- `ljos remember` under a runner now stores the agent's own words as an unreviewed note. The prompt does not treat that note as a fact. Words from the person's latest prompt stay a standing lesson. Briefs no longer tell the agent to store its own lesson with `ljos remember --as ROLE`.
+- `ljos rule --user` and MCP `ljos_rule` with `user` true record who stands behind the rule, as a seat rule does, and `ljos prefer --user` records it too. Only a user rule with basis `person`, or one promoted from a lesson the pack holds as the person's, is stated in the prompt as the person's standing rule; any other, including a row written before rows carried a basis, is left out of the prompt and listed as unverified by `ljos rules`.
+- `ljos rule` at a terminal names the verdict and the pattern, and a failed habitat command says `failed (exit N)` with the program named once.
+  With no coding agent found, `ljos onboard` and `install.sh` still make the tracker, the deed store and the memory writer, the installer's force-push line runs from the home directory, and the README says so.
+- `ljos rule`, `ljos prefer --deny`/`--ask` and MCP `ljos_rule` now stamp the rule with who stands behind its reason. A rule an agent wrote from a file, a tool's output or a web page is stored `agent-derived` with basis `agent`; before, it went to the pack with no origin and no basis, and the pack filed it as `user-declared`. The person's rule at a terminal, or in their latest prompt, is stored as theirs.
+- `ljos rule`, `ljos prefer --deny`/`--ask`, the command rules `ljos prefer` writes, and `ljos prefer --review --keep` treat a writer as the person only on positive evidence: stdin is the process's controlling pseudo-terminal, the process above its session holds that terminal, and the whole chain to pid 1 has no runner and no reparented process. Before, any process not found under a runner was the person, so a tool call that named its parent `systemd`, `sshd` or `init`, left the runner by a double fork, or read from a pipe stored its rule with basis `person`.
+- `ljos rules` no longer lists a rule promoted from a lesson as a user rule when the pack does not confirm that lesson as the person's.
+  Such a row is listed apart, as `unverified`, with the reason: no hash kept, the pack does not hold the lesson or holds it as an agent's, the record is another one, or the read failed.
+- `ljos search`, `ljos island`, the timeline and a sitting's copies of them, and MCP `ljos_search` and `ljos_island` now name each claim by who stands behind it, as recall does, so an agent's note or preference reads as unverified there too; a lesson the pack stored as the person's no longer reads as agent-derived. MCP hit rows gain a `label` field.
+- `ljos send` and `ljos reply` in push mode push the sealed log from the detached wake before the wake fires, so a seat on another machine does not read an empty inbox.
+  The send does not wait on the push.
+  A push that fails is a line in the wake log, and the wake still runs.
+- `ljos slot` refuses a seat that already ends with the run id, such as `ridley-review-RUN` for run `RUN`, because `ridley-review` on that run boots as the same seat and the slot could not say which one it vouches for.
+- `ljos slot` takes `--key`, the run's public seat key that `ljos cloud up`
+  now prints on the `seat key:` line, and signs it into the slot. A run's
+  ballot counts only when the tracker pins that key for the run's seat, so
+  a writer that pins the seat first under its own key no longer votes as
+  the run. A slot written before this names no key and no longer counts.
+- `ljos sync --adopt HOST` now adopts each of HOST's logs that this machine
+  can open, instead of aborting on the first unopened scope log. The command
+  reports skipped scopes and keeps unopened logs in place while still adopting
+  and retiring data from openable scopes.
+- `ljos sync --adopt HOST` on a machine whose host name is not already a log file name, such as one with a space, now commits this machine's updated log with the deletion of the gone host's log.
+  The export wrote `bad host.jsonl.age` while the adopt commit staged `bad-host.jsonl.age`, so peers retired the gone host's copies and never received the adopted atoms.
+  The host name is now folded once, and export, adopt and every log path use that name; a log left under the raw name is not imported back as another machine's.
+- `ljos sync --adopt-legacy` pinned, and import offered it for, a headerless log that replaced a host's headed one when the clone held only part of that log's history.
+  A shallow clone cut by depth or by date, a graft, a replace ref, or a partial clone missing objects could hide the commit with the headed log.
+  Where history may be short, import says why and offers no command, `--adopt-legacy` pins nothing, and an earlier pin is not read; `git fetch --unshallow` deepens a shallow clone, and nothing here does it on its own.
+  `ljos doctor` names that reason for the host in place of the command.
+  A headed log that only one side of a merge carried, as when a peer merged it away with `-s ours`, now counts too; the walk had followed only the side the merge kept.
+- `ljos sync --adopt` folds every configured scope of a gone host into this machine's logs.
+  A cloud log is no longer left behind when the primary log is adopted.
+- `ljos sync --adopt` refuses a scope log that is not a regular file.
+  A symlink, hard link, or fifo checked in as a gone host's log is left
+  in place, so a link to a machine-key file is not decrypted and resealed
+  to the cloud recipients. Ciphertext is passed to age on stdin.
+- `ljos sync --adopt` reports a scope log it cannot decrypt and keeps
+  that file, and still adopts the host's other scope logs.
+- `ljos sync --adopt` says "would adopt" on a dry run, and names only
+  scopes that posted atoms. A scope with nothing to post is left out.
+- `ljos sync` fails when a log this machine's key is listed for will not decrypt. That used to be skipped as "not sealed to this machine", and a pack that is off hid the failure. A log sealed to someone else is still skipped.
+- `ljos sync` keeps the record of what it took from each host under the
+  state directory's `sync/` without following a symlinked `sync`,
+  `sync/<tracker>` or `sync/<scope>` directory. A linked one is named and
+  the import stops.
+- `ljos sync` leaves a log with no scope header unread whichever key opens
+  it, the cloud identity included. Such a log names no host, so a peer
+  could commit one ciphertext under every host's name, or put a host's
+  headed log back to the headerless blob it replaced and retire what the
+  headed log had added.
+- `ljos sync` reads a log only under the name export writes for its host
+  and scope. `HOST+PRIMARY.jsonl.age` read as the same log as
+  `HOST.jsonl.age`, so an older copy committed under that name retired the
+  host's current atoms and shrank what this machine had taken from it.
+- `ljos sync` refuses a tracker whose `.ljos` or `.ljos/atoms` is a
+  symlink. The scope file, the atoms logs and this host's export are read
+  and written under directory fds opened with `O_NOFOLLOW` from the
+  tracker root, so a linked directory cannot bring a local log sealed to
+  this machine into the import or take this host's log out of the tracker.
+- `ljos sync` runs `age` and `rage` with `LC_ALL=C`. A French rage miss (`Aucune clef correspondante`) is the same not-for-this-host result as the English text, so import continues with the remaining hosts.
+- `ljos sync` seals a header naming the writing host and scope into every
+  atoms log, and import and `--adopt` refuse a log whose header names
+  another host or scope than its file name. A log sealed only to this
+  machine and committed as a cloud log is no longer resealed to the cloud
+  recipients. A log written before the header opens only with the cloud
+  identity for scope cloud; any other is named and left unread until its
+  host exports again.
+- `ljos vote` now refuses a second ballot on an issue from a shell that already cast on it as another session, so setting `LJOS_SESSION_ID`, `CURSOR_AGENT_ID`, `CLOUD_AGENT_ID` or `CURSOR_CONVERSATION_ID` to a new value between casts no longer makes a second voice.
+  A cast records its calling shell, and the harness whose hook saw its line, by pid and start time in the runtime directory; a harness may still cast once per subagent of one root session, and only another root session from it is refused.
+- `ljos_guard_check` now asks `ljos-policyd` what the hook asks it: the
+  line as `bash -c LINE`, each program a heredoc feeds (`python3 - <<'PY'`)
+  and each download pair. It sent only the words of the line, so it
+  allowed a `python3 -` heredoc that runs `os.system('rm -rf /')`, and
+  `(cd project; make clean-all)`, both of which the hook refuses.
+- `ljos_start` after a Write keeps the issue the Write hook claimed instead of closing it and filing another.
+  A runner starts each hook through `sh -c`, and the hook recorded that shell, which exits with it, as the runner that owns the sitting.
+  The MCP server's next call then finished the sitting as orphaned, so the start found nothing held and claimed a new issue.
+  On the willma-20261021g seat replay this happened on all four harnesses: a Write claimed work-X under `free-claude@mf`, and `ljos_start` closed it and claimed work-Y under `free-claude`.
+  A sitting is now owned by the first process above the hook that is not a shell or a wrapper.
+- `mail_wake_push` no longer needs Linux user namespaces. The test harness
+  sets `LJOS_TEST_HOSTNAME` for each simulated machine and runs `ljos`
+  directly, so CI runners that block unprivileged user namespaces still
+  exercise push-before-wake behavior end to end.
+- `mcp_forward` retries a spawn that fails with "Text file busy" for about a second, and the tests close and fsync a script before they run it.
+- `prepare_tracker` now ignores exported `GIT_DIR` and `GIT_WORK_TREE` when it prepares another path, so it initializes and configures that tracker without rewriting an unrelated dotfiles repository.
+- `same_holder` now refuses malformed holder names that end in `@`.
+  This keeps `seat` and `seat@` from matching as one holder.
+- `server.json` carries the crate version, and CI refuses a copy whose version is not the one in `Cargo.toml`.
+- cloud guard now evaluates `git send-pack` bulk flags (`--all`,
+  `--mirror`, `--tags`) against local refs so hidden `cursor/*` branch or
+  tag updates are refused the same way as guarded `git push` bulk forms.
+- cloud guard now inspects `gh api` git-ref writes (REST and GraphQL) and
+  refuses cursor ref creation, ref deletion, and force updates, including
+  payloads read from `--input` and `@query` files.
+- cloud guard now parses `!` git aliases through nested shell command
+  expansion so aliases that hide `git push` under `sh -c` cannot bypass the
+  `cursor/*` push refusal.
+- gh, curl, wget, and httpie are now an allowlist when they talk to
+  GitHub. A resolved GET or HEAD passes. Any other method, a body, or a
+  flag whose meaning is not on the command is refused. ljos itself only
+  reads. A program that calls the API on its own is outside this filter.
+- ljos asks the pack to rank by relevance only when the pack says it
+  can. It reads `search.ranks` in the pack's status, once a process,
+  and sends `rank=relevance` to a writer that lists it. A writer that
+  does not, or does not answer, is searched as before, and ljos adds
+  the stored memories that best match itself.
+- ljos recall, the MCP recall tool, the sitting and the persona brief now fence the tracker's issue text and logbook notes as unverified tracker text instead of pasting them unmarked.
+- omp blocks a command when `ljos hook` writes a deny and exits non-zero.
+  It reads the hook's JSON on any exit, and exit 2 without JSON is a deny
+  with stderr as its reason. Before, omp dropped the deny a failed gate
+  writes and ran the command. On Codex, which shows no prompt, a force
+  push no longer says the agent asks first; it says the push needs the
+  person's approval.
+
+  The README lists the runners whose hook blocks a denied command apart
+  from the ones it serves over MCP, and names hermes and Amazon Q with
+  the MCP ones, since onboard writes no hook for either. The integration
+  page says a failed Claude Code or Cursor gate blocks the call and that
+  Codex turns an ask into a deny. It says which guard faults
+  `ljos hook --runner` denies, with `GUARD_TIMEOUT` as the 5 second limit
+  `LJOS_GUARD_TIMEOUT` overrides, that an `ljos-policyd` that is not
+  installed is not one of them, and that Claude Code, Codex and Cursor
+  still let a command run after a guard fault, with a note.
+- opencode-style workdirs now resolve lexically, so `lnk/..` stays at the
+  parent path instead of being canonicalized through the symlink target first.
+  The resolver also expands a leading `~` in workdir overrides.
+
+### Documentation
+
+- A prompt cost of $0.00004 is the arithmetic of about 900 input tokens at $0.042 per million, with output free.
+- Codex integration docs now state that `shell_command` payloads carry only
+  the command and session `cwd`; there is no `workdir` override field.
+- Documented that Codex `shell_command` hook payloads carry the command and the
+  session `cwd`, but no `workdir` override field.
+- Record schema docs now spell out that first-seen voter pins are scoped to one
+  `record check` run unless pins are ingested durably, and clarify how unsigned
+  payload canonicalisation is enforced.
+- Remember and prefer now say that any other text is refused, so those
+  descriptions are shorter. The measured core set is 8,062 o200k_base
+  tokens and all fifty tools are 16,658.
+- The README and `docs/cloud-vm.md` say that `ljos cloud up` and `install.sh --cloud` arrive in the next release, which the install line and the job step fetch; the latest release has neither. Until then both work from a checkout of `develop`, where `sh scripts/install.sh --cloud` builds that tree's `ljos`.
+- The README counts twenty-one core MCP tools at 8,062 o200k_base tokens and all fifty at 16,658.
+  CI checks that count against a fresh `tools/list`.
+- The README's cost of the default MCP tool set is the measured count: 7,702 tokens for the twenty core tools against 16,298 for all forty-nine (o200k_base, `initialize` instructions plus the compact `tools/list` result). It said about 8,200 and 17,800.
+- The README's five-minute paste runs `export PATH="$HOME/.local/bin:$PATH"` after the install, so the `ljos` lines after it find the program in the same shell. It says the installer adds that line to the shell profiles from the next release on, and that `--no-modify-path` leaves them alone.
+- The README, the docs and `ljos onboard` tell Codex users to trust each ljos hook in `/hooks` before the guard runs, and again after an upgrade. `ljos doctor` reports an untrusted hook. Until then only the rm, git and find shims guard Codex's commands.
+- The `sit` playbook no longer says lessons are `ljos remember`. It says that under a runner `ljos remember` is an unreviewed note that the person reviews.
+- The cloud VM doc no longer says `cloud up` builds `packset-embed` from source off a cloud VM.
+  Off a cloud VM the command downloads no encoder. `sh scripts/install.sh --cloud` sets `WITH_EMBED=0`.
+- The cloud VM docs no longer say `ljos consensus` counts a run's ballot only under its slot. The push gate, and the push cite line `ljos consensus` prints, count a ballot the run casts as its own seat when its slot verifies; a ballot cast `--as` a persona is left out before any slot is read, and the settle reads no slot.
+- The cloud guard docs now say which check sees which write. The shell
+  guard filters the command as written. The pre-push hook is the git
+  backstop. A program that calls the GitHub API with the token needs a
+  server-side ruleset.
+- The cloud guard docs now say which pushes this machine does not
+  see. A script, make, python, or dulwich is not on the command
+  line the shell guard reads. `--no-verify` inside a script skips
+  the pre-push hook. `git send-pack` does not run that hook. A
+  server-side ruleset is what stops those.
+- The explanation now says plainly what the kept prompt does not stop: a process of the same user that runs outside the seat guard, not as a tool call, can still forge the person's words. A person basis is strong only against writes made through tool calls the guard sees.
+- The explanation now says who keeps the person's prompt (only a hook the runner spawned), what each runner's own record of the turn is and whether it is required, that an MCP `_meta` session only narrows the check, and what remains: code of the same user that forges the runner's transcript as well as the kept prompt and its bind, or runs outside the guard. It is a check on tool calls, not a sandbox.
+- The explanation of the person's words now says what the prompt check and the seat guard hold to: a whole clause with its negations, a session read from the runner above and never from the asking process, paths however spelled, interpreter code, every file tool argument, and ljos through ssh. The residual stays: a process of the same user outside the guard can still write the kept prompt and its bind.
+- The explanation page links the committed correlation-history and forgetting runs beside the 6.4 point gap and the 0.947 retrieval figure.
+- The getting-started search sample is the two lines release ljos printed for `ljos search "which fusion"` after that remember and prefer.
+- The habit sample uses source `example-0001` and is marked as an example, so it is not a real job id.
+- The howto force-push sample is the ask the hook prints, with rule `git-force-push`.
+  The doctor sample is the ljos row taken from ljos 0.32.1.
+  `ljos protocol` lists the sitting sections in the order `ljos sitting` prints them, reclaim before claim.
+- The install paragraph names packset, deedar and consensus as the repositories that gain a build attestation on their next release, which the installer counts as not published until then.
+- The integration docs now describe a guard fault as a deny: a policyd
+  that is installed but hangs, crashes, or prints no verdict, and a
+  relay that cannot read its input. A missing `ljos-policyd` still
+  allows, with a note, unless `POLICYD_REQUIRED=1`.
+
+  The same docs now document `LJOS_GUARD_FAIL_OPEN=1` as the temporary
+  escape hatch that restores the previous allow-with-note behavior for
+  a fault.
+- The ljos_note tool text and the session-end extractor's documentation now say that a note is stored as an agent note in memory, read by its stored origin, and that its logbook line is fenced as unverified tracker text.
+- The note tool now says recall labels an unverified agent note, so its
+  description is longer. The measured core set is 8,062 o200k_base tokens
+  and all fifty tools are 16,658.
+- The protocol and the ljos skill say how a voter changes its ballot: withdraw it with `ljos vote ISSUE --withdraw --as NAME`, then cast again.
+- The protocol and the ljos skill say the tracker commit lock is `.ljos-commit.lock` at the top of the worktree, not a file in the git directory, and that a stale `index.lock` is named with the `rm` that clears it.
+- The protocol and the skill say `ljos doctor` names the adopt command
+  once per host only when history is complete.
+  Otherwise it names the host and why no command is offered.
+- The protocol describes extra scopes under `[scopes]`, and `cloud up` documents `LJOS_WRITE_SCOPE=cloud`.
+  A primary scope named `cloud` is refused, and `default_scope` cannot name an extra scope.
+- The protocol now states what ballot binding defends against: an honest but careless agent voicing a panel from one session, not a process running as the same user that rewrites the tracker, the seat keys or the runtime directory.
+  It names what is still not caught, and no longer says a ballot carries a nonce of the process: the second field is `-`, or `seat` when only the seat named the session.
+- The protocol text names the same `ljos doctor` line as the skill a harness
+  loads, so a headerless log's `ljos sync --adopt-legacy HOST` command is in
+  both.
+- The protocol, the remember skill and the panelist now tell an agent to keep its own lesson with `ljos note`. `ljos remember --as` is no longer how that lesson is stored.
+- The record check and holder docs now say what the code does: `check_entries` lists the errors it raises and no longer calls a same-hour pair an error, the tally rule says a seat is the part of the voter id after `/` whatever the identity, and `holder_parts` names the numbers, runs, judges and subagents it keeps whole.
+- The record schema docs now say what `ljos record check` enforces: duplicate-key rejection, exact stances, the `replaces` rule, strict signatures, the seat cross-check by seat slug, and the pin file rules.
+  The first-seen pin sentence now says it applies only when neither the voter id nor its seat has a pin file row.
+  The docs also state that the check reads one directory and cannot tell a withdrawal file was deleted, so a deleted withdrawal revives the earlier ballot.
+- The reference says a lesson written again after an amend or a rebase closes the one that named the replaced commit.
+- The reference says which commits `Stop` and `SessionEnd` cite when the git hooks are not installed.
+- The seat protocol now names the writes that are refused: a runner with no prompt hook, `LJOS_CAPTURE=off`, a paraphrase, and a prompt older than an hour. The four-word match is unchanged, and the docs say so.
+- The skill and the howto say that each reviewer casts its own ballot from its own run, with ljos installed by `ljos cloud up` and the tracker synced through the shared tracker repository.
+  They also say that persona and Jev ballots are advisory, and that the push gate counts seat ballots from another seat.
+- The skill and the howto say that each reviewer votes from its own subagent or run, and that a subagent's ballot binds the parent session plus the subagent, `SESSION:AGENT`, from Claude Code's `agent_id` or the Codex thread, while an opencode subagent is a session of its own.
+- The skill, the sitting's `== panel` step and the howto say that each persona brief goes to its own subagent or run, which casts `ljos vote --as NAME` itself, and that the seat does not cast `--as` for its personas.
+- `CONTRIBUTING.md` now names `ljos-policyd` among the programs the workspace tests need on `PATH`, built from its `develop` branch with phronesis `v0.2.5` linked, as CI builds it.
+- `CONTRIBUTING.md` now names the programs the workspace tests need on `PATH`: `age`, the `packset` CLI and `packsetd` from packset `develop`, and `deedar` at the pinned commit.
+- `docs/design/mail.md` describes the opt-in mail tools, the `mailgate` user that alone can send, and the send gate: the approval file, the ballot, the refuse-only checks and the owner's yes.
+- `ljos onboard --example` says the MCP command is `ljos-mcp` when that name on PATH is this install, and the absolute path otherwise. The example used to say an absolute path would be the machine that wrote the file.
+- `record-v1.md` now says, under "What the check cannot see", that a ballot is not bound to a tracker and that a new identity signed with a newly minted key is a new voter, so only the pin file limits how many voters one party can cast.
+
+### Miscellaneous
+
+- A `crates/ljos-cli/vissue.toml` left by a test run is no longer in the source tree.
+- A cast refused because the session already voted opens with `already cast a ballot on ISSUE (SESSION)` whether or not it names the same voter, so a reader or script matching that refusal still finds it.
+- A cloud finish with a signing key is checked against the pinned deedar.
+  `check` and `import` accept the bag when finish leaves the export link sidecars untouched.
+- A dated search lists the pack before it queries, so the one-shot test counts that listing and then the search that carries the date and the rerank.
+- A dotfiles checkout test passes `GIT_DIR` and `GIT_WORK_TREE` only to the git commands it starts.
+  Other tests in the same process no longer inherit that checkout.
+- A test casts eight persona votes and four notes at once into one git tracker checkout, through vissue-core, and checks every write is committed, the tally counts each ballot, and no `index.lock` is left.
+- A test now holds that a run's ballot under its slot is left out while
+  the run's pin is only in the working tree, and counts once the pin is
+  committed.
+- A test now holds that on a tracker that is not a git repository a run's
+  ballot counts under a slot from a seat on the standing list, when the
+  run is pinned to the key its slot names.
+- CI checks only the commits a push or a pull request adds, and
+  rejects one whose author or committer is not Rohit Goswami
+  <rgoswami@ieee.org>, or whose message has a Co-authored-by or
+  Signed-off-by trailer or a generated line.
+  `scripts/identity-gate.sh` runs the same check on a local range.
+- Push-gate path tests now force `LJOS_GUARD=on` so they still exercise lease-push parsing under a temporary test `HOME`, and the MCP guard-check test comment now matches the tool's allow-versus-error behavior.
+- Restored the three-argument `tcb_answer` API as a wrapper around the cwd-aware
+  entry point (`tcb_answer_in`), so existing callers keep compiling while the
+  hooked path still passes an explicit directory.
+- The `ljos cloud up` test for Ubuntu's `case $-` interactive guard carries that `.bashrc` itself instead of reading the host's `/etc/skel/.bashrc`, so it runs the same on every distribution.
+- The bookkeep config test and the guard shim test no longer treat a
+  temporary directory that lives under the login home as that home's
+  own config or as a permanent seat.
+- The cloud guard's toml header parse takes a missing bracket as an
+  early return, which is what Rust 1.97 clippy accepts, and a header
+  it could read still parses as before.
+- The cloud-finish import test and CI build the deedar commit named in `.github/deedar-pin`.
+- The deedar refusal test now isolates PATH edits under the shared test
+  environment lock and reuses the existing environment restore helper.
+- The guard and booking tests put their seat homes outside the temp roots wherever the checkout sits, so the suite passes from a checkout under `/tmp`.
+- The guard shim test that checks a deny is refused now pins `LJOS_GUARD=on` and clears `LJOS_OFF`, so it passes when the suite runs with a temporary `HOME` or `LJOS_OFF` set.
+- The held-checkout sync test passes `cargo clippy -D warnings` on Rust 1.97, which rejects a cloned path made into a one-element slice.
+- The isolated test config directory is removed when the test process exits, and the connected-seat test runs in a temporary home with `LJOS_GUARD=on` in place of a directory in the build tree.
+- The job-folder test no longer exports `GIT_DIR` for the whole process.
+  The origin lookup still receives that directory on its git command and drops it, so `-C` stays on the checkout.
+- The mail wake harness probed a free port and then let packsetd bind
+  it. Another test could take that port in between, so reply talked to
+  a daemon that had already exited.
+- The origin-refusal writer test checks the atom posts in order, so a search from a parallel test landing on the same mock server first does not hide the retry that drops `origin`.
+- The panel test now casts a ballot from a seat off the standing list with
+  no slot, and checks that the push cite leaves it out by name while the
+  listed seats still decide.
+- The pin-ignore test names its decoy `GIT_DIR` on the git command and then drops it.
+  Other tests in the same process no longer inherit that directory.
+- The pinned deedar helper builds once per process into a directory named by the sha in `.github/deedar-pin`, and leaves an existing tree in place so two finish-bag tests cannot wipe each other's build.
+- The preference migration test's pack now asks for this seat's token. A listener that answers without one does not list a migrated preference as the person's.
+- The search label test now writes a rule from a pipe and one from the person's terminal and pins the exact label of each, so it fails on a writer that leaves a rule without a basis. The fixture-only test it replaces passed before the writer was fixed.
+- The second-issue lesson check again requires a rewrite under that issue's own title.
+- The shared-override record test signs both runs while it holds the environment lock, hides `GITHUB_RUN_ID` for that span, and restores the previous values when the guard drops. Record tests also clear a leaked `CURSOR_AGENT_ID`.
+- The test suites no longer inherit the agent runner that launched `cargo test`. The shared test environment lock and the user rule harness clear `CURSOR_*`, `CLAUDE*`, `CODEX_*` and the other runner and session variables, so the suites pass with or without them.
+- The test that two runs sharing an override seat key sign with different keys now passes on GitHub Actions, where the run id used to name both runs.
+- The tracker row test gives a fresh unpushed commit ten minutes before calling it stuck.
+  A parallel git suite can spend longer than five seconds inside that check.
+- The two cloud finish bag tests build the pinned deedar one at a time, so neither clears the cache the other is building in on a fresh checkout.
+- The upgrade test installs the published v0.32.1 binaries and stores a preference through each old path, then checks that a prompt hook and a terminal prefer still show and a prefer run under a runner stays unverified until a terminal keeps it.
+- The write-side tests run their ljos and ljos-mcp processes in the seat's temporary home, and the tracker file a run left in the crate is gone.
+- Two seats on packsetd exchange mail in the test suite: group add, send, inbox, read, reply, interrupt, and the receipt `ljos hook --prompt` writes for a shell and for Cursor.
+- ljos builds on packset-client and packset-core 0.16.0, and `ljos doctor` marks an `ljos-policyd` older than 0.5.0 `no`.
+  The release workflow builds `packset-embed` 0.16.0 and the bookworm archive installs packset 0.16.0.
+  The README and the tutorial name the same floor.
+
+
 ## 0.32.1 (2026-10-20)
 
 ### Fixes

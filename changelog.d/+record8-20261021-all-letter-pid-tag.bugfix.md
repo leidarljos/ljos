@@ -1,1 +1,0 @@
-A hook holder whose old pid tag is all letters, such as `free-agy-aak` or `free-opencode-nrv`, again counts as its seat in the checkout's bookkeeping, unless the whole name is a seat the tracker knows (`eessi-bot` stays apart from `eessi`). A tag of digits alone still never folds.
