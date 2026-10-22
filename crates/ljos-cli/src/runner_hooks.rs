@@ -590,8 +590,7 @@ fn fault_output(event: &str, what: &str) -> String {
         })
         .to_string();
     }
-    let reason =
-        format!("the ljos guard failed while checking this command ({what}); run `ljos doctor`");
+    let reason = crate::guard_fault_reason(what);
     json!({
         "hookSpecificOutput": {
             "hookEventName": if event.is_empty() { "PreToolUse" } else { event },

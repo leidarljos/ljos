@@ -27398,6 +27398,19 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
                     answered = true;
                     continue;
                 }
+                // A faulted guard still lets the repair through: `ljos
+                // doctor` and `ljos onboard`, and nothing else on the line.
+                // A real deny is not a fault and still stands.
+                if code == "guard-fault" && repair_line(line) {
+                    let why = token
+                        .split_once(':')
+                        .map(|(_, detail)| detail.trim())
+                        .filter(|detail| !detail.is_empty())
+                        .unwrap_or("did not start");
+                    set_guard_note(unhealthy_note(why));
+                    answered = true;
+                    continue;
+                }
                 return Some(Rule {
                     pattern: if ask {
                         code.to_string()
@@ -27422,6 +27435,52 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         verdict: "deny".into(),
         reason: policyd_required_reason(),
     })
+}
+
+/// A line whose every pipeline is `ljos doctor` or `ljos onboard`,
+/// arguments included. `ljos doctor && rm -rf` is not one: the other
+/// command would run while the guard cannot judge it. A pipe is another
+/// command too, and `pipelines` keeps it inside the segment.
+fn repair_line(line: &str) -> bool {
+    let mut saw = false;
+    for part in nested_lines(line, 0) {
+        for seg in pipelines(&part) {
+            let seg = seg.trim();
+            if seg.is_empty() {
+                continue;
+            }
+            saw = true;
+            let words = shell_words(seg);
+            let (at, _) = prefix_end(&words);
+            let words = &words[at..];
+            let Some(first) = words.first() else {
+                return false;
+            };
+            if words.iter().any(|w| w == "|") {
+                return false;
+            }
+            if base_name(first) != "ljos" {
+                return false;
+            }
+            match words.get(1).map(String::as_str) {
+                Some("doctor" | "onboard") => {}
+                _ => return false,
+            }
+        }
+    }
+    saw
+}
+
+/// What a faulted guard tells the agent. The repair is the person's:
+/// they run `ljos doctor` in their own terminal. `LJOS_GUARD_FAIL_OPEN=1`
+/// is the switch that allows other lines until then.
+#[must_use]
+pub fn guard_fault_reason(why: &str) -> String {
+    format!(
+        "the ljos guard failed ({why}); ask the person to run `ljos doctor` in their own \
+         terminal. LJOS_GUARD_FAIL_OPEN=1 allows other lines until the guard is repaired, and \
+         `ljos doctor` or `ljos onboard` still runs."
+    )
 }
 
 /// What a person reads when `POLICYD_REQUIRED` is set and no policyd
@@ -27824,6 +27883,7 @@ pub fn policyd_reason(token: &str) -> String {
             "this runs git on another machine, so the gate cannot read the tip, the identity, or \
              CI. Run the git command in the local checkout"
         }
+        "guard-fault" => return guard_fault_reason(detail),
         _ => return token.to_string(),
     };
     if detail.is_empty() {
@@ -41822,7 +41882,17 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let _ = take_guard_note();
         let rule = tcb_verdict("echo hi").expect("a crashed policyd denies the line");
         assert_eq!(rule.verdict, "deny");
-        assert!(rule.reason.contains("guard-fault"), "{}", rule.reason);
+        assert!(
+            rule.reason
+                .contains("ask the person to run `ljos doctor` in their own terminal"),
+            "{}",
+            rule.reason
+        );
+        assert!(
+            rule.reason.contains("LJOS_GUARD_FAIL_OPEN=1"),
+            "{}",
+            rule.reason
+        );
         assert!(take_guard_note().is_none());
         let direct = [
             ("claude", HookShape::Asks),
@@ -41839,7 +41909,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             };
             let out = hook_output_ruled(&call, "", Some(&rule));
             assert!(answer_denies(&out), "{name}: {out}");
-            assert!(out.contains("guard-fault"), "{name}: {out}");
+            assert!(out.contains("LJOS_GUARD_FAIL_OPEN=1"), "{name}: {out}");
             if shape.is_cursor() {
                 let v: Value = serde_json::from_str(out.trim()).unwrap();
                 assert_eq!(v["permission"], "deny", "{name}: {out}");
@@ -41847,14 +41917,14 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                     v["user_message"]
                         .as_str()
                         .unwrap_or("")
-                        .contains("guard-fault"),
+                        .contains("LJOS_GUARD_FAIL_OPEN=1"),
                     "{name}: {out}"
                 );
                 assert!(
                     v["agent_message"]
                         .as_str()
                         .unwrap_or("")
-                        .contains("guard-fault"),
+                        .contains("LJOS_GUARD_FAIL_OPEN=1"),
                     "{name}: {out}"
                 );
             }
@@ -41883,7 +41953,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 _ => false,
             };
             assert!(denied, "{runner}: code {code} {body}");
-            assert!(body.contains("guard-fault"), "{runner}: {body}");
+            assert!(body.contains("LJOS_GUARD_FAIL_OPEN=1"), "{runner}: {body}");
         }
 
         let _open = HoldEnv::set(&[("LJOS_GUARD_FAIL_OPEN", "1")]);
@@ -42172,7 +42242,17 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let _ = take_guard_note();
         let rule = tcb_verdict("git status").expect("a crashed policyd denies");
         assert_eq!(rule.verdict, "deny");
-        assert!(rule.reason.contains("guard-fault"), "{}", rule.reason);
+        assert!(
+            rule.reason
+                .contains("ask the person to run `ljos doctor` in their own terminal"),
+            "{}",
+            rule.reason
+        );
+        assert!(
+            rule.reason.contains("LJOS_GUARD_FAIL_OPEN=1"),
+            "{}",
+            rule.reason
+        );
         assert!(take_guard_note().is_none());
         let kept = tcb_verdict("rm -rf /home/u/proj").expect("still denied");
         assert_eq!(kept.verdict, "deny");
@@ -42212,6 +42292,65 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(rule.reason.contains("POLICYD_REQUIRED"), "{}", rule.reason);
         assert!(rule.reason.contains("cargo install"), "{}", rule.reason);
         assert!(take_guard_note().is_none());
+    }
+
+    /// A faulted guard still runs `ljos doctor` and `ljos onboard`, so the
+    /// seat can be repaired. Another command on the same line stays denied.
+    #[test]
+    fn a_faulted_guard_lets_doctor_and_onboard_through() {
+        let _g = env_guard();
+        let home = SeatDir::new("repair-guard");
+        let bin = fake_policyd(home.path(), "policyd", "echo oops; exit 1");
+        let _env = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", home.path().join("data").to_str().unwrap()),
+            ("POLICYD_BIN", bin.to_str().unwrap()),
+            ("PACKSET_URL", "off"),
+            ("LJOS_OFF", "0"),
+            ("LJOS_GUARD", "on"),
+        ]);
+        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
+        for line in [
+            "ljos doctor",
+            "ljos doctor --fix",
+            "ljos onboard",
+            "ljos onboard --example",
+        ] {
+            let _ = take_guard_note();
+            assert!(tcb_verdict(line).is_none(), "{line} should run");
+            let note = take_guard_note().expect(line);
+            assert!(note.contains("unhealthy"), "{line}: {note}");
+        }
+        for line in [
+            "ljos doctor && echo hi",
+            "ljos doctor | cat",
+            "echo hi && ljos doctor",
+        ] {
+            let mixed = tcb_verdict(line).expect("another command stays denied");
+            assert_eq!(mixed.verdict, "deny", "{line}");
+            assert!(
+                mixed
+                    .reason
+                    .contains("ask the person to run `ljos doctor` in their own terminal"),
+                "{line}: {}",
+                mixed.reason
+            );
+            assert!(
+                mixed.reason.contains("LJOS_GUARD_FAIL_OPEN=1"),
+                "{line}: {}",
+                mixed.reason
+            );
+        }
+        let wiped = tcb_verdict("ljos doctor && rm -rf /home/u/proj").expect("still denied");
+        assert_eq!(wiped.verdict, "deny");
+        assert_eq!(wiped.pattern, "rm-rf-outside-tmp");
+        let other = tcb_verdict("echo hi").expect("a plain line is still denied");
+        assert_eq!(other.verdict, "deny");
+        assert!(
+            other.reason.contains("run `ljos doctor`"),
+            "{}",
+            other.reason
+        );
     }
 
     /// `ljos-policyd` prints `deny\tphronesis` when a decision has no reason
