@@ -934,21 +934,23 @@ fn launch_check(file: &McpFile, launch: &LaunchSpec) -> LaunchCheck {
             chosen.display()
         ));
     }
-    if !pathy {
-        let own = crate::server_path().ok();
-        if let Some(own) = own {
-            let name = Path::new(&command).file_name().and_then(|n| n.to_str());
-            if name == Some(crate::MCP_SERVER_COMMAND) && !same_binary(&chosen, &own) {
-                return LaunchCheck::Warn(format!(
-                    "{} resolves to {}, not {}",
-                    launch.command,
-                    chosen.display(),
-                    own.display()
-                ));
+    let name = Path::new(&command).file_name().and_then(|n| n.to_str());
+    if name == Some(crate::MCP_SERVER_COMMAND) {
+        if let Ok(own) = crate::server_path() {
+            if !same_binary(&chosen, &own) {
+                return LaunchCheck::Warn(if pathy {
+                    format!("{} is not this install's {}", launch.command, own.display())
+                } else {
+                    format!(
+                        "{} resolves to {}, not {}",
+                        launch.command,
+                        chosen.display(),
+                        own.display()
+                    )
+                });
             }
         }
     }
-    let name = Path::new(&command).file_name().and_then(|n| n.to_str());
     if name == Some("ljos-plugin") {
         if let Some(bin) = launch.args.first() {
             if !bin.contains('/')
