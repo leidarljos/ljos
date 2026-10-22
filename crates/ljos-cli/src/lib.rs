@@ -119,6 +119,9 @@ pub struct Harness {
     /// A JSON config file the runner reads its MCP servers from, for a
     /// runner an appended snippet cannot serve.
     pub config_json: Option<String>,
+    /// That file on macOS, for a runner that keeps it somewhere else there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_json_macos: Option<String>,
     /// Where in that file the entry goes, as a JSON pointer (`/mcp/ljos`).
     pub json_pointer: Option<String>,
     /// The entry to set there, as JSON text; `{server}` and `{name}` are
@@ -213,6 +216,22 @@ pub struct Harness {
     /// as `<name>.env`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_file: Option<String>,
+}
+
+impl Harness {
+    /// The JSON config this runner reads on `os`, a
+    /// [`std::env::consts::OS`] name.
+    fn config_json_on(&self, os: &str) -> Option<&str> {
+        match (os, &self.config_json_macos) {
+            ("macos", Some(path)) => Some(path),
+            _ => self.config_json.as_deref(),
+        }
+    }
+
+    /// The JSON config this runner reads on this machine.
+    pub(crate) fn json_config(&self) -> Option<&str> {
+        self.config_json_on(std::env::consts::OS)
+    }
 }
 
 fn is_false(value: &bool) -> bool {
@@ -863,6 +882,7 @@ skills = "~/.config/Code/User/skills"
 [[harness]]
 name = "claude-desktop"
 config_json = "~/.config/Claude/claude_desktop_config.json"
+config_json_macos = "~/Library/Application Support/Claude/claude_desktop_config.json"
 json_pointer = "/mcpServers/ljos"
 json_entry = '{"command": "{server}", "args": []}'
 skills = "~/.config/Claude/skills"
@@ -3499,7 +3519,7 @@ fn is_registered(h: &Harness, server: &Path) -> Option<bool> {
     if let (Some(config), Some(marker)) = (&h.config, &h.marker) {
         return Some(std::fs::read_to_string(expand(config)).is_ok_and(|t| t.contains(marker)));
     }
-    if let (Some(config), Some(pointer)) = (&h.config_json, &h.json_pointer) {
+    if let (Some(config), Some(pointer)) = (h.json_config(), &h.json_pointer) {
         return Some(
             std::fs::read_to_string(expand(config))
                 .ok()
@@ -3807,7 +3827,7 @@ fn heal_registered(
     dry: bool,
 ) -> Result<Option<String>> {
     let mut notes = Vec::new();
-    if let Some(config) = &h.config_json {
+    if let Some(config) = h.json_config() {
         if let Some(note) = heal_json_command(
             &expand(config),
             h.json_pointer.as_deref().unwrap_or(""),
@@ -3915,8 +3935,8 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
                 },
             }
         }
-        Some(false) if h.config_json.is_some() => {
-            let config = expand(h.config_json.as_deref().unwrap_or_default());
+        Some(false) if h.json_config().is_some() => {
+            let config = expand(h.json_config().unwrap_or_default());
             let pointer = h.json_pointer.clone().unwrap_or_default();
             let entry_text = h
                 .json_entry
@@ -4116,11 +4136,16 @@ pub fn detect_runners(
             .find(|(name, _)| *name == h.name)
             .map_or(&[][..], |(_, cmds)| *cmds);
         let by_command = on_path(&h.name) || extra.iter().any(|c| on_path(c));
-        let by_dir = [&h.config, &h.config_json, &h.hooks, &h.hooks_named]
-            .into_iter()
-            .flatten()
-            .filter_map(|p| under_home(p))
-            .any(|p| p.parent().is_some_and(Path::is_dir));
+        let by_dir = [
+            h.config.as_deref(),
+            h.json_config(),
+            h.hooks.as_deref(),
+            h.hooks_named.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(under_home)
+        .any(|p| p.parent().is_some_and(Path::is_dir));
         if by_command || by_dir {
             found.push(h.name.clone());
         }
@@ -36924,6 +36949,26 @@ mod tests {
         assert!(!step.ok, "an unknown template writes nothing: {step:?}");
     }
 
+    /// Claude Desktop keeps its config under ~/Library/Application Support
+    /// on macOS and under ~/.config on Linux. A runner with one place
+    /// keeps it on both.
+    #[test]
+    fn claude_desktop_config_is_where_the_os_keeps_it() {
+        let all: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).expect("parses");
+        let find = |name: &str| all.harness.iter().find(|h| h.name == name).expect(name);
+        let desktop = find("claude-desktop");
+        assert_eq!(
+            desktop.config_json_on("macos"),
+            Some("~/Library/Application Support/Claude/claude_desktop_config.json")
+        );
+        assert_eq!(
+            desktop.config_json_on("linux"),
+            Some("~/.config/Claude/claude_desktop_config.json")
+        );
+        let cursor = find("cursor");
+        assert_eq!(cursor.config_json_on("macos"), Some("~/.cursor/mcp.json"));
+    }
+
     /// The example file parses, and onboarding a config-file runner from it
     /// appends the entry once and writes the skill once; a dry run writes
     /// nothing; an unnamed runner is refused with the names the file holds.
@@ -39568,6 +39613,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             marker: None,
             snippet: None,
             config_json: Some(config.display().to_string()),
+            config_json_macos: None,
             json_pointer: Some("/mcp/ljos".into()),
             json_entry: None,
             skills: None,

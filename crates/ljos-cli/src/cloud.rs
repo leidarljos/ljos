@@ -572,7 +572,7 @@ fn mcp_files() -> Vec<McpFile> {
             "cursor" => Expand::Cursor,
             _ => Expand::Shell,
         };
-        if let (Some(config), Some(pointer)) = (&harness.config_json, &harness.json_pointer) {
+        if let (Some(config), Some(pointer)) = (harness.json_config(), &harness.json_pointer) {
             if !pointer.is_empty() {
                 push(
                     crate::expand(config),
