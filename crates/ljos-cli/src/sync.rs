@@ -1642,7 +1642,7 @@ fn import_jobs(root: &Path, scope: &Scope, me: &str) -> Result<(Vec<ImportJob>, 
                 scope_name: log.scope_name,
                 plain,
             }),
-            Opened::Refused(line) => out.push_str(&line),
+            Opened::Refused(line) | Opened::Hidden { line, .. } => out.push_str(&line),
             Opened::Miss => {
                 // The log's own recipients. A cloud log lists different
                 // keys than the primary, and a miss is an error only
@@ -2192,6 +2192,9 @@ enum Opened {
     Miss,
     /// It opened and is not that host's log of that scope. The line says so.
     Refused(String),
+    /// It opened with no header, and history here may hide a headed log
+    /// of that host's. The line says so, and `why` is what doctor repeats.
+    Hidden { line: String, why: String },
 }
 
 /// Open `bytes`, found at `label` as `host`'s log of `scope_name`, and hold
@@ -2241,17 +2244,33 @@ fn open_log_inner(
     if legacy_pinned(root, scope_name, host, bytes)? {
         return Ok(Opened::Atoms(plain));
     }
-    let hint = if was_headed(root, scope_name, host)? {
-        format!("{host} has written headed logs, so none without one is read again")
-    } else {
-        format!(
-            "`{}` reads this blob if it is {host}'s",
-            adopt_legacy_command(host)
-        )
+    let (hint, hidden) = match was_headed(root, scope_name, host)? {
+        Headed::Yes => (
+            format!("{host} has written headed logs, so none without one is read again"),
+            None,
+        ),
+        Headed::No => (
+            format!(
+                "`{}` reads this blob if it is {host}'s",
+                adopt_legacy_command(host)
+            ),
+            None,
+        ),
+        Headed::Hidden(why) => (
+            format!(
+                "{}, and no adopt command is offered",
+                hidden_headed(host, &why)
+            ),
+            Some(why),
+        ),
     };
-    Ok(Opened::Refused(format!(
+    let line = format!(
         "sync: {label} has no scope header, so nothing binds it to {host}'s {scope_name} log; it was left unread ({hint})\n"
-    )))
+    );
+    Ok(match hidden {
+        Some(why) => Opened::Hidden { line, why },
+        None => Opened::Refused(line),
+    })
 }
 
 /// Where this tracker's state notes `host`'s logs of `scope_name`: `.taken`,
@@ -2260,17 +2279,33 @@ fn host_state_rel(root: &Path, scope_name: &str, host: &str, ext: &str) -> Strin
     format!("{}/{scope_name}/{host}.{ext}", tracker_state_rel(root))
 }
 
+/// Whether `host` has written a headed log of a scope, as this checkout
+/// can tell.
+enum Headed {
+    Yes,
+    No,
+    /// This checkout may not hold the commit that would say. The text is
+    /// why.
+    Hidden(String),
+}
+
 /// Whether a log of `host`'s in `scope_name` has opened here with its header,
 /// or any committed blob of that log carried one. Kept apart from `.taken`,
 /// which adopt removes. The local mark is per checkout. A fresh clone does
 /// not have it, and would otherwise adopt a headerless file that replaced
 /// a host who had already committed a headed log.
-fn was_headed(root: &Path, scope_name: &str, host: &str) -> Result<bool> {
+fn was_headed(root: &Path, scope_name: &str, host: &str) -> Result<Headed> {
     let rel = host_state_rel(root, scope_name, host, "headed");
     if read_beneath(&state_base(), &rel)?.is_some() {
-        return Ok(true);
+        return Ok(Headed::Yes);
     }
-    headed_in_history(root, scope_name, host)
+    Ok(headed_in_history(root, scope_name, host))
+}
+
+/// What a headerless log of `host`'s is told when `why` says history here
+/// is short.
+fn hidden_headed(host: &str, why: &str) -> String {
+    format!("{why}, so a headed log of {host}'s may be hidden")
 }
 
 /// Whether git history of this host's log holds a blob that opens with a
@@ -2283,43 +2318,73 @@ fn was_headed(root: &Path, scope_name: &str, host: &str) -> Result<bool> {
 /// be the one that was committed. Choosing between them with
 /// [`scope_of_repo`] refuses a primary scope named `cloud`, and adopt
 /// opens every log through this check, so that refusal kept the log.
-fn headed_in_history(root: &Path, scope_name: &str, host: &str) -> Result<bool> {
+///
+/// No headed blob is `No` only when this checkout holds the whole
+/// history. A shallow cut, a graft, a replace ref or a missing object can
+/// hide the commit that had one.
+fn headed_in_history(root: &Path, scope_name: &str, host: &str) -> Headed {
     let identities = identities_for_open(scope_name);
     if identities.is_empty() {
-        return Ok(false);
+        return Headed::No;
     }
+    let mut hidden = None;
     for rel in [
         format!(".ljos/atoms/{host}.jsonl.age"),
         format!(".ljos/atoms/{host}+{scope_name}.jsonl.age"),
     ] {
-        if history_of_log_is_headed(root, &rel, &identities, host, scope_name) {
-            return Ok(true);
+        match history_of_log_is_headed(root, &rel, &identities, host, scope_name) {
+            Ok(true) => return Headed::Yes,
+            Ok(false) => {}
+            Err(why) => hidden = hidden.or(Some(why)),
         }
     }
-    Ok(false)
+    match hidden.or_else(|| history_gap(root)) {
+        Some(why) => Headed::Hidden(why),
+        None => Headed::No,
+    }
 }
 
 /// Whether any committed blob of `rel` opens with a header naming `host`
-/// and `scope_name`. Git and decrypt failures are skipped.
+/// and `scope_name`. A blob that does not decrypt is skipped. Err is why
+/// the walk may have missed one: git could not list or read the history,
+/// or an object of it is not here, as in a partial clone. Missing objects
+/// are listed, not fetched. Every parent of a merge is walked: by default
+/// a path walk follows only the parent whose blob the merge kept.
 fn history_of_log_is_headed(
     root: &Path,
     rel: &str,
     identities: &[PathBuf],
     host: &str,
     scope_name: &str,
-) -> bool {
-    let out = match git(root, &["rev-list", "HEAD", "--", rel]) {
+) -> Result<bool, String> {
+    let unread = || format!("git could not read the history of {rel}");
+    let args = [
+        "rev-list",
+        "--full-history",
+        "--objects",
+        "--missing=print",
+        "HEAD",
+        "--",
+        rel,
+    ];
+    let out = match git(root, &args) {
         Ok(out) if out.status.success() => out,
-        _ => return false,
+        _ => return Err(unread()),
     };
-    for commit in String::from_utf8_lossy(&out.stdout).lines() {
-        if commit.is_empty() {
+    let listed = String::from_utf8_lossy(&out.stdout);
+    if listed.lines().any(|line| line.starts_with('?')) {
+        return Err(format!("this clone lacks objects in the history of {rel}"));
+    }
+    for line in listed.lines() {
+        let Some((oid, path)) = line.split_once(' ') else {
+            continue;
+        };
+        if path != rel {
             continue;
         }
-        let spec = format!("{commit}:{rel}");
-        let blob = match git(root, &["cat-file", "blob", &spec]) {
+        let blob = match git(root, &["cat-file", "blob", oid]) {
             Ok(blob) if blob.status.success() => blob.stdout,
-            _ => continue,
+            _ => return Err(unread()),
         };
         let plain = match open_sealed_bytes(&blob, identities) {
             Ok(Some(plain)) => plain,
@@ -2327,11 +2392,40 @@ fn history_of_log_is_headed(
         };
         if let Some((named_host, named_scope, _)) = split_header(&plain) {
             if named_host == host && named_scope == scope_name {
-                return true;
+                return Ok(true);
             }
         }
     }
-    false
+    Ok(false)
+}
+
+/// Why this checkout's history may lack commits that were made, or None
+/// when it holds them all. A shallow clone stops at its cut, and grafts
+/// and replace refs show other parents than were committed. Nothing here
+/// fetches or deepens the clone.
+fn history_gap(root: &Path) -> Option<String> {
+    let said = |args: &[&str]| {
+        git(root, args)
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    match said(&["rev-parse", "--is-shallow-repository"]).as_deref() {
+        Some("false") => {}
+        Some("true") => return Some("this clone is shallow until `git fetch --unshallow`".into()),
+        _ => return Some("git could not say whether this clone is shallow".into()),
+    }
+    match said(&["rev-parse", "--git-path", "info/grafts"]) {
+        Some(grafts) if !root.join(&grafts).exists() => {}
+        Some(_) => return Some("this clone has grafts".into()),
+        None => return Some("git could not name this clone's graft file".into()),
+    }
+    let base = std::env::var("GIT_REPLACE_REF_BASE").unwrap_or_else(|_| "refs/replace/".into());
+    match said(&["for-each-ref", "--count=1", "--format=%(refname)", &base]).as_deref() {
+        Some("") => None,
+        Some(_) => Some("this clone has replace refs".into()),
+        None => Some("git could not list this clone's replace refs".into()),
+    }
 }
 
 /// Note that `host` writes headed logs of `scope_name`, and drop any
@@ -2358,9 +2452,10 @@ fn blob_digest(bytes: &[u8]) -> String {
 }
 
 /// Whether `bytes` is a pre-header blob this reader pinned for `host`'s
-/// `scope_name` log, and `host` has not written a headed one since.
+/// `scope_name` log, and `host` has not written a headed one since. A pin
+/// is not read where history may hide that headed log.
 fn legacy_pinned(root: &Path, scope_name: &str, host: &str, bytes: &[u8]) -> Result<bool> {
-    if was_headed(root, scope_name, host)? {
+    if !matches!(was_headed(root, scope_name, host)?, Headed::No) {
         return Ok(false);
     }
     let rel = host_state_rel(root, scope_name, host, "legacy");
@@ -2832,7 +2927,7 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
             Ok(Opened::Atoms(plain)) => {
                 opened.push((log, plain));
             }
-            Ok(Opened::Refused(line)) => out.push_str(&line),
+            Ok(Opened::Refused(line) | Opened::Hidden { line, .. }) => out.push_str(&line),
             Ok(Opened::Miss) => {
                 skipped_scopes.push(log.scope_name.clone());
                 out.push_str(&format!(
@@ -3477,17 +3572,30 @@ fn adopt_legacy_command(host: &str) -> String {
     format!("ljos sync --adopt-legacy={host}")
 }
 
+/// What doctor names for the logs in one tracker that opened with no
+/// scope header and were left unread.
+#[derive(Default)]
+struct LegacyHints {
+    /// The exact [`adopt_legacy_command`] import prints, once per host.
+    commands: Vec<String>,
+    /// For each host whose headed log history here may hide, why no
+    /// command is offered.
+    hidden: Vec<String>,
+}
+
 /// Commands that pin each host whose log in `root` opened with no scope
 /// header, and which this machine has not pinned and has not seen a headed
 /// log from. Each command is the exact [`adopt_legacy_command`] import
 /// prints. A bad name, a duplicate, and a removed scope are left out, the
-/// same way import refuses to read them.
-pub(crate) fn legacy_adopt_commands(root: &Path) -> Result<Vec<String>> {
+/// same way import refuses to read them. A host whose headed log history
+/// here may hide gets the reason instead.
+fn legacy_hints(root: &Path) -> Result<LegacyHints> {
     let Some(scope) = scope_of_repo(root)? else {
-        return Ok(Vec::new());
+        return Ok(LegacyHints::default());
     };
     let logs = listed_logs(root, &scope, &host())?.logs;
     let mut hosts = BTreeSet::new();
+    let mut hidden = BTreeSet::new();
     for log in logs {
         if !log.configured {
             continue;
@@ -3495,38 +3603,46 @@ pub(crate) fn legacy_adopt_commands(root: &Path) -> Result<Vec<String>> {
         let Some(bytes) = read_beneath(root, &log.rel)? else {
             continue;
         };
-        let Ok(Opened::Refused(line)) =
-            open_log_inner(root, &bytes, &log.host, &log.scope_name, &log.rel, false)
-        else {
-            continue;
-        };
-        let cmd = adopt_legacy_command(&log.host);
-        if line.contains(&cmd) {
-            hosts.insert(cmd);
+        match open_log_inner(root, &bytes, &log.host, &log.scope_name, &log.rel, false) {
+            Ok(Opened::Refused(line)) => {
+                let cmd = adopt_legacy_command(&log.host);
+                if line.contains(&cmd) {
+                    hosts.insert(cmd);
+                }
+            }
+            Ok(Opened::Hidden { why, .. }) => {
+                hidden.insert(format!(
+                    "{}'s {} log has no scope header, and {}",
+                    log.host,
+                    log.scope_name,
+                    hidden_headed(&log.host, &why)
+                ));
+            }
+            _ => {}
         }
     }
-    Ok(hosts.into_iter().collect())
+    Ok(LegacyHints {
+        commands: hosts.into_iter().collect(),
+        hidden: hidden.into_iter().collect(),
+    })
 }
 
-/// What `ljos doctor` says when a tracker still holds headerless logs.
-/// None when every opened log has its header, or none opened.
+/// What `ljos doctor` says when a tracker still holds headerless logs:
+/// the command for each host, or why none is offered. None when every
+/// opened log has its header, or none opened.
 pub(crate) fn legacy_doctor_state() -> Option<String> {
     let roots = sync_roots().ok()?;
-    let mut cmds = BTreeSet::new();
+    let mut said = BTreeSet::new();
     for root in roots {
-        if let Ok(found) = legacy_adopt_commands(&root) {
-            cmds.extend(found);
+        if let Ok(found) = legacy_hints(&root) {
+            said.extend(found.commands.iter().map(|cmd| format!("`{cmd}`")));
+            said.extend(found.hidden);
         }
     }
-    if cmds.is_empty() {
+    if said.is_empty() {
         None
     } else {
-        Some(
-            cmds.into_iter()
-                .map(|cmd| format!("`{cmd}`"))
-                .collect::<Vec<_>>()
-                .join("; "),
-        )
+        Some(said.into_iter().collect::<Vec<_>>().join("; "))
     }
 }
 
@@ -3540,6 +3656,7 @@ pub(crate) fn legacy_doctor_state() -> Option<String> {
 /// blob under this one, is still refused. Once a log of `target`'s opens
 /// with its header, the pin is dropped and no blob without one is read
 /// again. Nothing in the tracker can make the pin; only this command can.
+/// A clone whose history may hide a headed log of `target`'s pins nothing.
 ///
 /// # Errors
 ///
@@ -3585,11 +3702,21 @@ fn adopt_legacy_in_repo(root: &Path, scope: &Scope, host: &str) -> Result<String
             out.push_str(&said("has its header; import reads it as it is"));
             continue;
         }
-        if was_headed(root, &log.scope_name, host)? {
-            out.push_str(&said(
-                "has no header, and one of theirs had it here, so it stays unread",
-            ));
-            continue;
+        match was_headed(root, &log.scope_name, host)? {
+            Headed::Yes => {
+                out.push_str(&said(
+                    "has no header, and one of theirs had it here, so it stays unread",
+                ));
+                continue;
+            }
+            Headed::Hidden(why) => {
+                out.push_str(&said(&format!(
+                    "has no header, and {}; nothing was pinned",
+                    hidden_headed(host, &why)
+                )));
+                continue;
+            }
+            Headed::No => {}
         }
         let rel = host_state_rel(root, &log.scope_name, host, "legacy");
         let digest = blob_digest(&bytes);
@@ -9104,7 +9231,7 @@ mod tests {
         );
         assert!(said.contains("`ljos sync --adopt-legacy=bob`"), "{said}");
         assert_eq!(
-            legacy_adopt_commands(&fix.root).unwrap(),
+            legacy_hints(&fix.root).unwrap().commands,
             vec![
                 "ljos sync --adopt-legacy=alice".to_string(),
                 "ljos sync --adopt-legacy=bob".to_string(),
@@ -9167,7 +9294,7 @@ mod tests {
         assert!(!said.contains("--adopt-legacy "), "{said}");
         assert!(!said.contains("--adopt-legacy=x"), "{said}");
         assert!(!said.contains("--adopt-legacy=mallory"), "{said}");
-        let cmds = legacy_adopt_commands(&fix.root).unwrap();
+        let cmds = legacy_hints(&fix.root).unwrap().commands;
         assert_eq!(
             cmds,
             vec![
@@ -9317,7 +9444,7 @@ mod tests {
         assert!(said.contains("`ljos sync --adopt-legacy=erin`"), "{said}");
         assert!(said.contains("`ljos sync --adopt-legacy=frank`"), "{said}");
         assert_eq!(
-            legacy_adopt_commands(&fix.root).unwrap(),
+            legacy_hints(&fix.root).unwrap().commands,
             vec![
                 "ljos sync --adopt-legacy=erin".to_string(),
                 "ljos sync --adopt-legacy=frank".to_string(),
@@ -9332,7 +9459,7 @@ mod tests {
         );
         assert!(!pinned.contains("grokbot"), "{pinned}");
         assert_eq!(
-            legacy_adopt_commands(&fix.root).unwrap(),
+            legacy_hints(&fix.root).unwrap().commands,
             vec!["ljos sync --adopt-legacy=frank".to_string()],
             "{pinned}"
         );
@@ -9412,7 +9539,7 @@ mod tests {
                 root.display()
             );
             assert!(
-                legacy_adopt_commands(root).unwrap().is_empty(),
+                legacy_hints(root).unwrap().commands.is_empty(),
                 "{}: {said}",
                 root.display()
             );
@@ -9424,6 +9551,142 @@ mod tests {
             );
         }
         assert_eq!(fix.held(), vec!["Alice wrote this."]);
+    }
+
+    /// A clone that holds only part of a host's history cannot say the
+    /// host never wrote a headed log. A shallow cut by depth or by date, a
+    /// replace ref and a graft each hid the headed commit, and adoption of
+    /// the headerless blob that replaced it was offered and pinned. Doctor
+    /// names why instead, and leaves the clone as shallow as it was. A full
+    /// clone sees that commit, and so does the shallow one once deepened.
+    #[test]
+    fn a_clone_missing_history_neither_offers_nor_pins_adopt_legacy() {
+        let dir = tempfile::tempdir().unwrap();
+        let fix = Shared::new(dir.path());
+        let cloud = [fix.cloud.as_str()];
+        let headed = fix.sealed(
+            Some(("alice", CLOUD_SCOPE)),
+            &lesson_line("Alice wrote this.", "cloud"),
+            &cloud,
+        );
+        std::fs::write(fix.peer.join(".ljos/atoms/alice+cloud.jsonl.age"), &headed).unwrap();
+        git_ok(&fix.peer, &["add", "-A", ".ljos/atoms"]);
+        let dated = Command::new("git")
+            .arg("-C")
+            .arg(&fix.peer)
+            .args(["commit", "-q", "-m", "alice's headed log"])
+            .env("GIT_COMMITTER_DATE", "2001-01-01T00:00:00Z")
+            .status()
+            .unwrap();
+        assert!(dated.success());
+        let forged = fix.sealed(None, &lesson_line("Forged as Alice.", "cloud"), &cloud);
+        fix.push(&[("alice+cloud.jsonl.age", &forged)]);
+        let origin = format!("file://{}", fix.dir.join("origin.git").display());
+        let clone = |name: &str, how: &[&str]| {
+            let to = fix.dir.join(name);
+            let mut args = vec!["clone", "-q"];
+            args.extend_from_slice(how);
+            args.extend([origin.as_str(), to.to_str().unwrap()]);
+            git_ok(&fix.dir, &args);
+            to
+        };
+        let full = clone("full", &[]);
+        let shallow = clone("shallow", &["--depth", "1"]);
+        let since = clone("since", &["--shallow-since", "2010-01-01"]);
+        let replaced = clone("replaced", &[]);
+        git_ok(&replaced, &["replace", "--graft", "HEAD"]);
+        let grafted = clone("grafted", &[]);
+        let head = Command::new("git")
+            .arg("-C")
+            .arg(&grafted)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        std::fs::write(grafted.join(".git/info/grafts"), &head.stdout).unwrap();
+
+        let hints = legacy_hints(&full).unwrap();
+        assert!(hints.commands.is_empty() && hints.hidden.is_empty());
+        let again = adopt_legacy_in_repo(&full, &fix.scope(), "alice").unwrap();
+        assert!(again.contains("stays unread"), "{again}");
+        let cut = "this clone is shallow until `git fetch --unshallow`";
+        for (root, why) in [
+            (&shallow, cut),
+            (&since, cut),
+            (&replaced, "this clone has replace refs"),
+            (&grafted, "this clone has grafts"),
+        ] {
+            let hints = legacy_hints(root).unwrap();
+            assert!(hints.commands.is_empty(), "{}", root.display());
+            assert_eq!(
+                hints.hidden,
+                vec![format!(
+                    "alice's cloud log has no scope header, and {why}, so a headed log of alice's may be hidden"
+                )]
+            );
+            let said = import(root, &fix.scope()).unwrap();
+            assert!(!said.contains("adopt-legacy"), "{}: {said}", root.display());
+            assert!(said.contains("may be hidden"), "{}: {said}", root.display());
+            let again = adopt_legacy_in_repo(root, &fix.scope(), "alice").unwrap();
+            assert!(
+                again.contains("nothing was pinned"),
+                "{}: {again}",
+                root.display()
+            );
+            let said = import(root, &fix.scope()).unwrap();
+            assert!(!said.contains("alice: "), "{}: {said}", root.display());
+        }
+        let said = import(&shallow, &fix.scope()).unwrap();
+        assert!(said.contains("`git fetch --unshallow`"), "{said}");
+        let still = Command::new("git")
+            .arg("-C")
+            .arg(&shallow)
+            .args(["rev-parse", "--is-shallow-repository"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&still.stdout).trim(), "true");
+        git_ok(&shallow, &["fetch", "-q", "--unshallow"]);
+        let said = import(&shallow, &fix.scope()).unwrap();
+        assert!(said.contains("none without one is read again"), "{said}");
+        assert!(fix.held().is_empty(), "{said}");
+    }
+
+    /// A peer branched before alice's headed log, committed a headerless
+    /// blob under her name, merged main with `-s ours` and pushed the merge
+    /// as a fast-forward. The path walk followed only the parent the merge
+    /// matched, so even a full clone missed the headed commit and offered
+    /// to adopt the forged blob.
+    #[test]
+    fn a_headed_log_behind_an_ours_merge_still_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let fix = Shared::new(dir.path());
+        let cloud = [fix.cloud.as_str()];
+        let forged = fix.sealed(None, &lesson_line("Forged as Alice.", "cloud"), &cloud);
+        git_ok(&fix.peer, &["checkout", "-q", "-b", "forged"]);
+        std::fs::write(fix.peer.join(".ljos/atoms/alice+cloud.jsonl.age"), &forged).unwrap();
+        git_ok(&fix.peer, &["add", "-A", ".ljos/atoms"]);
+        git_ok(&fix.peer, &["commit", "-q", "-m", "forged"]);
+        git_ok(&fix.peer, &["checkout", "-q", "main"]);
+        std::fs::create_dir_all(fix.peer.join(".ljos/atoms")).unwrap();
+        let headed = fix.sealed(
+            Some(("alice", CLOUD_SCOPE)),
+            &lesson_line("Alice wrote this.", "cloud"),
+            &cloud,
+        );
+        fix.push(&[("alice+cloud.jsonl.age", &headed)]);
+        git_ok(&fix.peer, &["checkout", "-q", "forged"]);
+        git_ok(
+            &fix.peer,
+            &["merge", "-q", "-s", "ours", "main", "-m", "ours"],
+        );
+        git_ok(&fix.peer, &["push", "-q", "origin", "forged:main"]);
+        fix.pull();
+        let hints = legacy_hints(&fix.root).unwrap();
+        assert!(hints.commands.is_empty(), "{:?}", hints.commands);
+        let said = import(&fix.root, &fix.scope()).unwrap();
+        assert!(said.contains("none without one is read again"), "{said}");
+        let again = adopt_legacy_in_repo(&fix.root, &fix.scope(), "alice").unwrap();
+        assert!(again.contains("stays unread"), "{again}");
+        assert!(fix.held().is_empty(), "{said}");
     }
 
     /// Doctor reads logs to name an adopt command. That read used to record
@@ -9468,7 +9731,7 @@ mod tests {
             out
         };
         let before = files();
-        let cmds = legacy_adopt_commands(&fix.root).unwrap();
+        let cmds = legacy_hints(&fix.root).unwrap().commands;
         assert_eq!(files(), before, "doctor wrote state: {cmds:?}");
         assert!(
             cmds.is_empty(),
