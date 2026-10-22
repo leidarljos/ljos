@@ -11211,7 +11211,8 @@ impl SeatSignatures {
 /// under a slot this issue already held when its pin was introduced
 /// ([`slot::problems`]) is left out and named, and the rest still decide.
 /// `Ok` when every other seat ballot is signed under its pinned key or is
-/// legacy unsigned (committed to the tracker before signing began), or
+/// legacy unsigned (in its issue's entry before the tracker's first pin,
+/// by commit order: [`ballot_sig::recorded_before_signing`]), or
 /// when `LJOS_UNSIGNED_BALLOTS=allow`.
 ///
 /// # Errors
@@ -11232,9 +11233,8 @@ pub fn check_seat_signatures(
         return Ok(SeatSignatures::default());
     }
     let v = issue_record(issue).map_err(|e| format!("{issue}: not readable: {e:#}"))?;
-    let legacy = |voter: &str, choice: &str| {
-        ballot_sig::recorded_at(issue, voter, choice).is_some_and(|t| t < ballot_sig::SIGNING_SINCE)
-    };
+    let legacy =
+        |voter: &str, choice: &str| ballot_sig::recorded_before_signing(issue, voter, choice);
     let notes = ballot_sig::notes_of(&v);
     let (pins, _) = ballot_sig::pins_for_check().map_err(|e| {
         format!("{issue}: the seat pins are not one key per seat, so it decides nothing for a push: {e:#}")

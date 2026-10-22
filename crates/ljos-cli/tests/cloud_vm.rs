@@ -3803,6 +3803,36 @@ fn commit_dated(repo: &Path, paths: &[&str], message: &str, unix: &str) {
     );
 }
 
+/// An unsigned ballot is legacy by commit order: one already on its issue
+/// when the first pin was committed counts whatever its dates say, and
+/// one committed after does not, however far back its dates are set.
+#[test]
+fn a_legacy_ballot_is_decided_by_commit_order_not_by_date() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_origin, repo) = slot_world(root.path(), &["probe-old", "probe-new"]);
+    let layout = vissue_core::Layout::resolve(None, None).unwrap();
+    let issues = ["Software/probe/issues.org"];
+    vissue_core::ops::vote_with(&layout, "probe-old", Some("ship"), "eessi", None, None).unwrap();
+    commit_dated(&repo, &issues, "vote before signing", "1792800000");
+    pin_standing(&repo, "inky");
+    vissue_core::ops::vote_with(&layout, "probe-new", Some("hold"), "inky", None, None).unwrap();
+    commit_dated(&repo, &issues, "vote after signing", "1700000000");
+
+    let personas = std::collections::BTreeSet::new();
+    let old = [serde_json::json!({"agent": "eessi", "choice": "ship"})];
+    assert_eq!(
+        ljos_cli::check_seat_signatures("probe-old", &old, &personas),
+        Ok(ljos_cli::SeatSignatures {
+            legacy: vec!["eessi".to_string()],
+            left_out: Vec::new(),
+        })
+    );
+    let new = [serde_json::json!({"agent": "inky", "choice": "hold"})];
+    let err = ljos_cli::check_seat_signatures("probe-new", &new, &personas).unwrap_err();
+    assert!(err.contains("inky's ballot is unsigned"), "{err}");
+}
+
 /// The same slot line, committed earlier on another issue, does not make
 /// this issue's pin look later than the slot. The oldest author time of
 /// the line is before the pin; the gate still refuses.
