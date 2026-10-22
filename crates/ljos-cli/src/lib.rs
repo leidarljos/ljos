@@ -21164,16 +21164,61 @@ pub(crate) const ROW_LOCK_WAIT: std::time::Duration = std::time::Duration::from_
 /// tried for [`ROW_LOCK_WAIT`] and then given up with `WouldBlock`. A
 /// writer holds it for one `write(2)`; a lock held longer than that is
 /// not one of ours, and the row is skipped rather than the command.
+///
+/// The directory `path` sits in is one ljos made, such as
+/// `$XDG_STATE_HOME/ljos`, and a symlink there is refused as well: it
+/// is opened first and the file is opened from that descriptor, so the
+/// link cannot be swapped in between. What lies above it, `$HOME` or
+/// an XDG base the person pointed elsewhere, is followed as set.
 pub(crate) fn append_locked_row(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    use std::os::unix::io::AsRawFd;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "row path has no directory",
+        ));
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    let dir = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(dir)
+    {
+        Ok(dir) => dir,
+        // Linux answers ENOTDIR, not ELOOP, when O_DIRECTORY meets a link.
+        Err(err) if matches!(err.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} is a symlink or not a directory", dir.display()),
+            ));
+        }
+        Err(err) => return Err(err),
+    };
+    let name = std::ffi::CString::new(name.as_bytes())
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+    // SAFETY: dir is an open directory descriptor and name is a
+    // NUL-terminated string with no interior NUL. openat returns a new
+    // descriptor or -1.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600 as libc::c_uint,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: fd was just opened above and nothing else owns it.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
     file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     let deadline = std::time::Instant::now() + ROW_LOCK_WAIT;
     loop {
@@ -39455,6 +39500,38 @@ mod tests {
             state.starts_with("2 commands ran past the guard"),
             "{state}"
         );
+    }
+
+    /// The `ljos` directory is ljos's own, so a symlink put there is not
+    /// written through. An XDG base the person made a symlink still is.
+    #[test]
+    fn a_symlinked_ljos_dir_is_refused_and_a_linked_base_is_not() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let rule = Rule {
+            pattern: "ask pack: cloud".into(),
+            verdict: "ask".into(),
+            reason: "infra-destroy: this tears down infrastructure".into(),
+        };
+        let data = dir.path().join("data");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, data.join("ljos")).unwrap();
+        {
+            let _env = HoldEnv::set(&[("XDG_DATA_HOME", data.to_str().unwrap())]);
+            log_bypass("switch", "LJOS_ASK_PACK=off", "terraform destroy", &rule);
+        }
+        assert!(!elsewhere.join("bypass.jsonl").exists());
+
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let linked = dir.path().join("linked");
+        std::os::unix::fs::symlink(&real, &linked).unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", linked.to_str().unwrap())]);
+        log_bypass("switch", "LJOS_ASK_PACK=off", "terraform destroy", &rule);
+        let text = std::fs::read_to_string(real.join("ljos/bypass.jsonl")).unwrap();
+        assert_eq!(text.lines().count(), 1, "{text}");
     }
 
     /// The fail-open path writes its row before the command runs. A lock
