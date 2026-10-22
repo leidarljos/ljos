@@ -3179,7 +3179,52 @@ pub fn write_seat(verb: &str) -> Result<Seat> {
             seats_file().display()
         );
     }
+    registered_seat(&who.seat)?;
     Ok(who)
+}
+
+/// Refuse a tracker write from a seat the seats file does not list. A
+/// file that lists no seat, or is missing as on a fresh single-user
+/// install, refuses nothing.
+///
+/// # Errors
+///
+/// The seats file lists seats and `seat` is not one of them, or the file
+/// cannot be read as TOML.
+pub fn registered_seat(seat: &str) -> Result<()> {
+    let path = seats_file();
+    let Some(listed) = listed_seats(&path)? else {
+        return Ok(());
+    };
+    let slug = canonical_seat_name(seat);
+    if listed.contains(&slug) {
+        return Ok(());
+    }
+    bail!(
+        "no seat named {slug} in {}, which lists {}. \
+         Set LJOS_SEAT to a seat it lists, or add yours to it; nothing was written",
+        path.display(),
+        listed.into_iter().collect::<Vec<_>>().join(", ")
+    )
+}
+
+/// The seat names `path` maps conversations to, slugged. `None` when the
+/// file is missing or names no seat.
+fn listed_seats(path: &Path) -> Result<Option<std::collections::BTreeSet<String>>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => bail!("cannot read the seats file {}: {e}", path.display()),
+    };
+    let table: toml::Table = toml::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("the seats file {} is not TOML: {e}", path.display()))?;
+    let listed: std::collections::BTreeSet<String> = table
+        .values()
+        .filter_map(toml::Value::as_str)
+        .map(canonical_seat_name)
+        .filter(|slug| !slug.is_empty())
+        .collect();
+    Ok((!listed.is_empty()).then_some(listed))
 }
 
 /// Append one line, `ts seat verb what`, to the state dir's recall.log, so
