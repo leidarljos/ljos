@@ -2184,20 +2184,99 @@ fn doctor_leaves_dollar_home_literal_for_opencode() {
         "{tilde}"
     );
     fs::remove_file(home.join(".config/opencode/opencode.json")).unwrap();
-    fs::create_dir_all(home.join(".cursor")).unwrap();
+    let config = root.path().join("mcp.json");
     fs::write(
-        home.join(".cursor/mcp.json"),
+        &config,
         serde_json::json!({
             "mcpServers": { "ljos": { "command": "$HOME/.local/bin/ljos-mcp" } }
         })
         .to_string(),
     )
     .unwrap();
+    std::env::set_var("LJOS_MCP_CONFIG", &config);
     assert!(
         ljos_cli::cloud::missing_mcp_line().is_none(),
         "a shell harness still expands $HOME: {:?}",
         ljos_cli::cloud::missing_mcp_line()
     );
+}
+
+/// Write `command` as the ljos entry of the JSON file at `path`, check it
+/// with doctor, and return the missing line.
+fn doctor_on_command(path: &Path, command: &str) -> Option<String> {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let doc = serde_json::json!({ "mcpServers": { "ljos": { "command": command } } });
+    fs::write(path, doc.to_string()).unwrap();
+    ljos_cli::cloud::missing_mcp_line()
+}
+
+/// Cursor substitutes `${env:NAME}` and `${userHome}` and nothing else
+/// (https://cursor.com/docs/context/mcp, "Config interpolation").
+#[test]
+fn doctor_expands_home_in_cursor_mcp_json_the_way_cursor_does() {
+    let _g = Guard::new();
+    clear_agent_ids();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    fs::create_dir_all(home.join(".local/bin")).unwrap();
+    executable(&home.join(".local/bin/ljos-mcp"), "#!/bin/sh\nexit 0\n");
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::remove_var("LJOS_MCP_CONFIG");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    let config = home.join(".cursor/mcp.json");
+    for ready in ["${env:HOME}", "${userHome}"] {
+        let command = format!("{ready}/.local/bin/ljos-mcp");
+        let line = doctor_on_command(&config, &command);
+        assert!(line.is_none(), "Cursor expands {command}: {line:?}");
+    }
+    for literal in ["$HOME", "${HOME}", "~"] {
+        let command = format!("{literal}/.local/bin/ljos-mcp");
+        let line = doctor_on_command(&config, &command).unwrap_or_default();
+        assert!(
+            line.contains(&format!("{command} does not exist")),
+            "Cursor leaves {command} as text: {line}"
+        );
+    }
+}
+
+/// Claude Code substitutes `${VAR}` and `${VAR:-default}` in the entries
+/// `claude mcp add` stores in ~/.claude.json, and keeps an unset `${VAR}`
+/// as written (https://docs.claude.com/en/docs/claude-code/mcp).
+#[test]
+fn doctor_expands_home_in_claude_json_the_way_claude_code_does() {
+    let _g = Guard::new();
+    clear_agent_ids();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    fs::create_dir_all(home.join(".local/bin")).unwrap();
+    executable(&home.join(".local/bin/ljos-mcp"), "#!/bin/sh\nexit 0\n");
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::remove_var("LJOS_MCP_CONFIG");
+    std::env::remove_var("LJOS_TEST_NO_SUCH_HOME");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    let config = home.join(".claude.json");
+    let fallback = format!("${{LJOS_TEST_NO_SUCH_HOME:-{}}}", home.display());
+    for ready in ["${HOME}", fallback.as_str()] {
+        let command = format!("{ready}/.local/bin/ljos-mcp");
+        let line = doctor_on_command(&config, &command);
+        assert!(line.is_none(), "Claude Code expands {command}: {line:?}");
+    }
+    for literal in [
+        "$HOME",
+        "~",
+        "${env:HOME}",
+        "${userHome}",
+        "${LJOS_TEST_NO_SUCH_HOME}",
+    ] {
+        let command = format!("{literal}/.local/bin/ljos-mcp");
+        let line = doctor_on_command(&config, &command).unwrap_or_default();
+        assert!(
+            line.contains(&format!("{command} does not exist")),
+            "Claude Code leaves {command} as text: {line}"
+        );
+    }
 }
 
 #[test]
