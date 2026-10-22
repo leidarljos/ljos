@@ -3386,6 +3386,7 @@ pub fn write_assignee(
     if same_holder(&assignee, &checked.holder) || slug == canonical_seat_name(&checked.seat) {
         return Ok(assignee);
     }
+    claim_holder(&assignee).map_err(|e| anyhow::anyhow!("{verb}: {e}"))?;
     if !delegates {
         bail!(
             "{verb}: {assignee} is not this seat, {}; a write is recorded as the seat that makes it. \

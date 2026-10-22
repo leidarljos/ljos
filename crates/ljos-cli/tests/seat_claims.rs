@@ -85,7 +85,7 @@ fn a_raw_or_legacy_name_does_not_hold_the_claim() {
     clear_log();
 
     let out = ljos(
-        "saddle",
+        "disk-saver",
         &["claim", "proj-disk", "--assignee", "disk-saver-t4t"],
     );
     let calls = read_log();
@@ -103,7 +103,7 @@ fn a_raw_or_legacy_name_does_not_hold_the_claim() {
     assert!(calls.contains(&format!("--assignee {actor}")), "{calls}");
     clear_log();
 
-    let out = ljos("saddle", &["claim", "proj-bot", "--assignee", "ljos-bot"]);
+    let out = ljos("ljosbot", &["claim", "proj-bot", "--assignee", "ljos-bot"]);
     let calls = read_log();
     assert!(
         out.status.success(),
