@@ -82,6 +82,138 @@ pub fn ancestors() -> Vec<Proc> {
     above(std::process::id())
 }
 
+/// `pid`'s parent and its own name.
+#[cfg(not(target_os = "macos"))]
+fn parent_and_name(pid: u32) -> Option<(u32, String)> {
+    stat(pid).map(|s| (s.ppid, s.comm))
+}
+
+#[cfg(target_os = "macos")]
+fn parent_and_name(pid: u32) -> Option<(u32, String)> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    // SAFETY: the buffer is a zeroed proc_bsdinfo of the size passed.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            libc::c_int::try_from(pid).ok()?,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            std::ptr::addr_of_mut!(info).cast(),
+            size,
+        )
+    };
+    if n != size {
+        return None;
+    }
+    let comm: Vec<u8> = info
+        .pbi_comm
+        .iter()
+        .take_while(|c| **c != 0)
+        .map(|c| c.to_ne_bytes()[0])
+        .collect();
+    Some((info.pbi_ppid, String::from_utf8_lossy(&comm).into_owned()))
+}
+
+fn split_environ(raw: &[u8]) -> Vec<(String, String)> {
+    raw.split(|b| *b == 0)
+        .filter_map(|kv| {
+            let kv = String::from_utf8_lossy(kv);
+            let (k, v) = kv.split_once('=')?;
+            Some((k.to_string(), v.to_string()))
+        })
+        .collect()
+}
+
+/// The environment `pid` was started with. A program it runs can set its
+/// own variables, but cannot change what its parent was started with.
+#[cfg(not(target_os = "macos"))]
+#[must_use]
+pub fn environ(pid: u32) -> Option<Vec<(String, String)>> {
+    std::fs::read(format!("/proc/{pid}/environ"))
+        .ok()
+        .map(|raw| split_environ(&raw))
+}
+
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn environ(pid: u32) -> Option<Vec<(String, String)>> {
+    let mut mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROCARGS2,
+        libc::c_int::try_from(pid).ok()?,
+    ];
+    let mut size: libc::size_t = 0;
+    // SAFETY: a null buffer asks sysctl for the size alone.
+    let asked = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if asked != 0 || size < 4 {
+        return None;
+    }
+    let mut buf = vec![0u8; size];
+    // SAFETY: buf holds the size sysctl reported.
+    let read = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if read != 0 {
+        return None;
+    }
+    buf.truncate(size);
+    // argc, the executable path and its padding, argc words, then the
+    // environment up to an empty string.
+    let argc = usize::try_from(i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?)).ok()?;
+    let mut words = buf[4..]
+        .split(|b| *b == 0)
+        .skip(1)
+        .skip_while(|w| w.is_empty());
+    for _ in 0..argc {
+        words.next()?;
+    }
+    let env: Vec<u8> = words
+        .take_while(|w| !w.is_empty())
+        .flat_map(|w| w.iter().copied().chain([0]))
+        .collect();
+    Some(split_environ(&env))
+}
+
+/// The process the nearest runner on this process's chain started: the
+/// shell it opened for a tool call, or this process when the runner ran
+/// it directly. `None` when the chain reaches the person's session or the
+/// top without a runner.
+#[must_use]
+pub fn started_by_runner() -> Option<u32> {
+    let mut child = std::process::id();
+    for _ in 0..DEPTH {
+        let (ppid, _) = parent_and_name(child)?;
+        if ppid == 0 {
+            return None;
+        }
+        let (_, comm) = parent_and_name(ppid)?;
+        if crate::is_harness_process(ppid, &comm) {
+            return Some(child);
+        }
+        if crate::is_session(&comm) || ppid == 1 {
+            return None;
+        }
+        child = ppid;
+    }
+    None
+}
+
 /// Whether `p` still runs: the same pid with the same start, and not a
 /// zombie waiting to be reaped.
 #[must_use]
@@ -242,6 +374,33 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(!alive(&p));
+    }
+
+    #[test]
+    fn a_child_is_read_with_the_environment_it_was_started_with() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .env("LJOS_PROC_TREE_PROBE", "started-with")
+            .spawn()
+            .unwrap();
+        // Until the child has exec'd, its environment is the fork's.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let env = loop {
+            let env = environ(child.id()).unwrap_or_default();
+            if env.iter().any(|(k, _)| k == "LJOS_PROC_TREE_PROBE")
+                || std::time::Instant::now() > deadline
+            {
+                break env;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "LJOS_PROC_TREE_PROBE" && v == "started-with"),
+            "{env:?}"
+        );
     }
 
     #[test]
