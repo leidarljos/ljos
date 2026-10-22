@@ -149,8 +149,10 @@ pub fn up(force: bool) -> Result<String> {
         }
     });
     lines.push(ensure_cloud_guard_rules()?);
-    lines.push(ensure_cloud_age()?);
+    // Retire env-owned wakes before any later step can fail, so a removed
+    // `LJOS_WAKE_<SEAT>_URL` cannot leave a stale URL that still sees a new key.
     lines.extend(ensure_wakes()?);
+    lines.push(ensure_cloud_age()?);
     let reaped = reap_gone_owners(crate::lease_secs());
     if !reaped.trim().is_empty() {
         lines.push(reaped.trim_end().to_string());
