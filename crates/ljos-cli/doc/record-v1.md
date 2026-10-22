@@ -10,8 +10,33 @@ Every entry is one JSON file.
 - `opened_at` and `cast_at` are UTC hours written
   `YYYY-MM-DDTHH:00:00Z`. Offsets, subseconds and other separators are
   refused, so one hour has one spelling and one ballot id.
-- voter ids are `<identity>/<seat-or-run>`.
-- the part after `/` must already be its seat slug (`alpha/seat-a`, not `alpha/Seat-a`).
+- voter ids are `<identity>/<seat-or-run>`, each written one way (see
+  [Voter ids](#voter-ids)): `alpha/seat-a`, not `Alpha/seat-a` or
+  `alpha/Seat-a`.
+
+## Voter ids
+
+A voter id is `<identity>/<seat-or-run>`, spelled with ASCII letters,
+digits, `-`, `_` and `.`. It has one written form:
+
+- the identity is its slug: lower case, with each run of other
+  characters one `-` and none at either end. `alpha`, not `Alpha`,
+  `alpha.` or `alpha_`.
+- the part after `/` is the seat it sits as, read the way the tracker
+  reads a holder: its slug, less an old conversation tag (a last part of
+  one to six lower-case letters and digits with a digit, as in
+  `inky-39u` or `inky-n9o`), with an old seat name mapped to the new one
+  (`ljos-bot` is `ljosbot`). `alpha/inky`, not `alpha/Inky` or
+  `alpha/inky-39u`.
+- a run is `run-<id>` and a judge `judge-<model>`. Both are slugs and
+  keep their ids whole, so `judge-model-1-5` keeps its version.
+- `run/<id>` has no identity and is refused; a run is
+  `<identity>/run-<id>`.
+
+Signing and `ljos record check` refuse every other spelling and name the
+form to use: `alpha/inky-39u` must be written `alpha/inky`. The signature
+covers the voter, so a stored entry in another spelling has to be signed
+again under that form.
 
 ## Question entry
 
@@ -101,7 +126,9 @@ any message.
 A voter signs with its own key file,
 `$XDG_DATA_HOME/ljos/seats/<name>/ballot.key`. `<name>` keeps ASCII
 letters, digits, `-` and `.` and writes any other byte, and a leading
-`.`, as `%HH`, so `a/b_c` and `a_b/c` never share a key.
+`.`, as `%HH`, so `a/b_c` and `a_b/c` never share a key. A voter id
+in its one written form is lower case, so two never share a file on a
+case-insensitive volume either.
 
 ## What `ljos record check` enforces
 
@@ -118,19 +145,20 @@ The tracker pin file is `.ljos-seat-keys` at `$VISSUE_ROOT`, one
   read, including a symlink to a missing file, fails the check.
 - two rows for one voter fail the check
 - a row's voter is read as written and nothing is stripped. It must be
-  printable ASCII, a row with `/` must be a voter id, and a bare row
-  spelled only with voter-id characters must already be a seat slug
-  (`seat-a`, not `Seat-a` or `seat_a`). A BOM or zero-width space before
-  a voter fails the check instead of leaving that pin unread. Rows for
-  tracker voters no voter id can spell, such as `judge:<model>`, are
-  left alone.
+  printable ASCII, a row with `/` must be a voter id in its one written
+  form, and a bare row spelled only with voter-id characters must
+  already be a seat slug (`seat-a`, not `Seat-a` or `seat_a`). A BOM or
+  zero-width space before a voter fails the check instead of leaving
+  that pin unread.
 - every voter id is pinned to one key, including a question's `opened_by`
-- a run is `<identity>/run-<id>`; `run/<id>` has no identity and is refused
 - a pin file row for the voter id wins
-- seat cross-check: the part after `/` is folded to its seat slug, so
-  `Seat-a`, `SEAT-A`, `seat_a` and `seat.a` are all `seat-a`. When the pin
-  file has a row for that slug, the entry's key must be that row's key.
-  A `run-*` part is checked the same way when it has a row.
+- seat cross-check: a voter id with any other spelling of its seat is
+  refused before this check (see [Voter ids](#voter-ids)), so the part
+  after `/` is looked up as written. Each bare row pins the seat it
+  reads as under the same rules: `inky`, `inky@39u` and `inky-n9o` all
+  pin `inky`, `ljos-bot` pins `ljosbot`, `judge:model-1.5` pins
+  `judge-model-1-5` and `run-101` pins `run-101`. When rows pin the
+  voter's seat, the entry's key must be one of those rows' keys.
 - with no pin file row for the voter id and none for its seat, the first
   key seen in this check is the pin for this check only
 - ingesting pins durably is what makes that pin persist across checks
@@ -138,22 +166,26 @@ The tracker pin file is `.ljos-seat-keys` at `$VISSUE_ROOT`, one
 
 ## Tally rule
 
-Tally is pure over ballot entries:
+Tally is pure over signed ballot entries and counts signing keys, not
+voter ids: a key is one vote on a question whatever voter ids it signs
+under. Two keys are one key when they differ only in the case of a hex
+digit or in a small-order part, since one secret signs under eight
+public keys that differ only there.
 
 - `replaces` must name the id of a ballot in the same check, from the
   same voter, on the same question. A missing target, or another voter's
   or another question's ballot, fails the check.
 - a ballot named by another entry's `replaces` never counts
-- of the rest, the latest `cast_at` per `(question, voter)` counts
+- of the rest, the latest `cast_at` per `(question, key)` counts
 - a latest stance of `withdrawn` contributes no vote
-- two unreplaced ballots from one voter on one question in the same
-  hour are an error. `cast_at` does not break that tie, and neither
-  does file order
+- two unreplaced ballots under one key on one question in the same
+  hour are an error, whichever voter ids they name. `cast_at` does not
+  break that tie, and neither does file order
 
 ## What the check cannot see
 
 The check reads one directory as it is now and keeps nothing from earlier
 runs. It cannot tell that a file was deleted. A deleted withdrawal revives
 the earlier ballot: with the withdrawal file gone, the ballot it replaced
-is again the voter's latest and counts. Keep the record under version
+is again the latest under its key and counts. Keep the record under version
 control and review deletions there.
