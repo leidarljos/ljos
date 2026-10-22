@@ -169,21 +169,25 @@ The tracker pin file is `.ljos-seat-keys` at `$VISSUE_ROOT`, one
 
 ## Tally rule
 
-Tally is pure over signed ballot entries and counts signing keys, not
-voter ids: a key is one vote on a question whatever voter ids it signs
-under. Two keys are one key when they differ only in the case of a hex
-digit or in a small-order part, since one secret signs under eight
-public keys that differ only there.
+Tally is pure over signed ballot entries and counts voters, not voter
+ids. Ballots that share a seat or a signing key are one voter, and so
+are ballots joined through a chain of those: a seat is one vote on a
+question whatever identities and keys it signs under, and a key is one
+vote whatever voter ids it signs under. The seat is the part of the
+voter id after `/`, so `alpha/inky` and `beta/inky` are one voter. Two
+keys are one key when they differ only in the case of a hex digit or in
+a small-order part, since one secret signs under eight public keys that
+differ only there.
 
 - `replaces` must name the id of a ballot in the same check, from the
   same voter, on the same question. A missing target, or another voter's
   or another question's ballot, fails the check.
 - a ballot named by another entry's `replaces` never counts
-- of the rest, the latest `cast_at` per `(question, key)` counts
+- of the rest, the latest `cast_at` per `(question, voter)` counts
 - a latest stance of `withdrawn` contributes no vote
-- two unreplaced ballots under one key on one question in the same
-  hour are an error, whichever voter ids they name. `cast_at` does not
-  break that tie, and neither does file order
+- two unreplaced ballots from one voter on one question in the same
+  hour are an error, whichever voter ids and keys they name. `cast_at`
+  does not break that tie, and neither does file order
 
 ## What the check cannot see
 
