@@ -13927,7 +13927,7 @@ A sitting on one issue. Name this recipe at open (`ljos sitting ISSUE --playbook
 
 1. Open with `ljos sitting ISSUE --playbook sit`. Read doctor, cards, due, island, blockers, this recipe, recall, timeline, reclaim, claim.
 2. Grade due claims (`ljos graded ID`).
-3. Do the work on this claim only. Artefacts are deeds, then `ljos deed ISSUE --add ACCESSION`. Lessons are `ljos remember` in two sentences.
+3. Do the work on this claim only. Artefacts are deeds, then `ljos deed ISSUE --add ACCESSION`. Under a runner `ljos remember` is an unreviewed note that the person reviews; keep it to two sentences.
 4. One playbook step is the whole sitting. A subagent takes this recipe and this issue; it does not resume a later phase.
 5. Close with `ljos finish ISSUE --lesson \"...\"`. Completing the node does not close the ticket. `ljos finish ISSUE --close` does, when the work is accepted.
 ";
