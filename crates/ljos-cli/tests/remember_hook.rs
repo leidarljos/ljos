@@ -56,6 +56,9 @@ impl Home {
     }
 
     fn env(&self, cmd: &mut Command, home: &Path) {
+        // The pack asks for its token. A preference is this seat's only
+        // when a read without the token is refused; the daemon and the
+        // client share the token file under this home.
         cmd.env_clear()
             .current_dir(home)
             .env("HOME", home)
@@ -68,7 +71,6 @@ impl Home {
             .env("XDG_CACHE_HOME", home.join(".cache"))
             .env("XDG_RUNTIME_DIR", home.join("run"))
             .env("PACKSET_PORT", self.port.to_string())
-            .env("PACKSET_AUTH", "off")
             .env("LJOS_TRACKER_GIT", "off");
     }
 }
@@ -184,8 +186,8 @@ fn prompt_through(home: &Home, hook: &str, session: &str, prompt: &str) -> Strin
     // Claude Code runs the command in `sh -c`; the hook keeps the prompt
     // only when that runner, a program the kernel runs from a file named
     // `claude`, opened the shell.
-    let runner = home.dir.path().join(".local/bin/claude");
-    std::fs::create_dir_all(runner.parent().unwrap()).unwrap();
+    let installed = runner::install_dir();
+    let runner = installed.path().join("claude");
     runner::runner_at(&runner);
     let mut cmd = Command::new(&runner);
     cmd.args(["-c", "\"$@\"; exit $?", "claude", "/bin/sh", "-c", hook]);
