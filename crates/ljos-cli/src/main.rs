@@ -224,10 +224,14 @@ enum CloudCmd {
 
 #[derive(Subcommand)]
 enum RecordCmd {
-    /// Validate a directory of schema-v1 record entries.
+    /// Validate a directory of schema-v1 record entries, or with `--tracker` every ballot on a tracker.
     Check {
         /// Directory containing question and ballot JSON entries.
-        dir: PathBuf,
+        #[arg(required_unless_present = "tracker", conflicts_with = "tracker")]
+        dir: Option<PathBuf>,
+        /// Verify the signature on every ballot under this tracker root, reading only. Exits 1 when one does not stand.
+        #[arg(long, value_name = "ROOT")]
+        tracker: Option<PathBuf>,
     },
 }
 
@@ -1043,7 +1047,7 @@ enum Cmd {
         /// Print every row, the ones that answer included.
         #[arg(long, visible_alias = "verbose")]
         all: bool,
-        /// Refresh runner skills and runner env files this ljos wrote. A skill edited by hand, and an env file ljos did not write, are left in place.
+        /// Refresh runner skills and runner env files this ljos wrote, and replace a stale cloud guard rule file. A skill edited by hand, an env file ljos did not write, and a cloud guard file that is missing or not a known older version are left in place.
         #[arg(long)]
         fix: bool,
     },
@@ -1304,13 +1308,15 @@ fn run_command() -> Result<()> {
     }
     let cmd = Cli::parse().cmd;
     // The first run of a new version refreshes skills and runner env
-    // files ljos wrote. Doctor stays read-only unless `--fix` is set.
+    // files ljos wrote. Doctor stays read-only unless `--fix` is set, and
+    // a record check, which CI runs, always stays read-only.
     match &cmd {
         Cmd::Doctor { fix: true, .. } => {
             ljos_cli::runner_skills::refresh_for_fix();
             ljos_cli::runner_env::refresh_for_fix();
+            ljos_cli::cloud::replace_stale_guard();
         }
-        Cmd::Doctor { .. } => {}
+        Cmd::Doctor { .. } | Cmd::Record { .. } => {}
         _ => {
             ljos_cli::runner_skills::refresh_on_new_version();
             ljos_cli::runner_env::refresh_on_new_version();
@@ -1618,7 +1624,18 @@ fn run_command() -> Result<()> {
             }
         }
         Cmd::Record { cmd } => match cmd {
-            RecordCmd::Check { dir } => {
+            RecordCmd::Check {
+                tracker: Some(root),
+                ..
+            } => {
+                let report = ljos_cli::record::check_tracker(&root)?;
+                print!("{}", ljos_cli::record::format_tracker_report(&report));
+                if !report.bad.is_empty() {
+                    std::process::exit(1);
+                }
+            }
+            RecordCmd::Check { dir, tracker: None } => {
+                let dir = dir.context("record check: name a directory, or --tracker ROOT")?;
                 let report = ljos_cli::record::check_dir(&dir)?;
                 print!("{}", ljos_cli::record::format_check_report(&report));
             }

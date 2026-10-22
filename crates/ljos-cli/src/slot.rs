@@ -235,10 +235,10 @@ pub fn sign(
 /// # Errors
 ///
 /// No seat names the launcher, the launcher has no pinned key or holds
-/// another one, the run's seat is the launcher or is already pinned,
-/// `run_key` is not a public key, or the tracker did not take the note. A
-/// launcher that is not a standing seat is refused too: no slot it signs
-/// would count.
+/// another one, `seat` already ends with the run id, the run's seat is
+/// the launcher or is already pinned, `run_key` is not a public key, or
+/// the tracker did not take the note. A launcher that is not a standing
+/// seat is refused too: no slot it signs would count.
 pub fn write(issue: &str, seat: &str, model: &str, run: &str, run_key: &str) -> Result<String> {
     let launcher = ballot_sig::own_voter()
         .context("slot: no seat to sign as; set LJOS_SEAT to the launching seat")?;
@@ -250,7 +250,7 @@ pub fn write(issue: &str, seat: &str, model: &str, run: &str, run_key: &str) -> 
     if public.is_none() {
         bail!("slot: --key {run_key} is not a public seat key; pass the hex `ljos cloud up` printed on the run");
     }
-    let seat = crate::cloud::run_seat(seat, run);
+    let seat = crate::cloud::run_seat(seat, run)?;
     if seat == launcher {
         bail!("slot: {seat} is the launching seat, and a seat does not slot itself");
     }
