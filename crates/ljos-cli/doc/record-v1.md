@@ -153,39 +153,58 @@ The tracker pin file is `.ljos-seat-keys` at `$VISSUE_ROOT`, one
   zero-width space before a voter fails the check instead of leaving
   that pin unread.
 - every voter id is pinned to one key, including a question's `opened_by`
-- a pin file row for the voter id wins over a seat row
+- a pin file row for a voter id also pins the seat after its `/`:
+  beside `inky <key1>`, a row `mallory/inky <key9>` fails the check
+  rather than letting a second key vote as `inky`
 - seat cross-check: a voter id with any other spelling of its seat is
   refused before this check (see [Voter ids](#voter-ids)), so the part
-  after `/` is looked up as written. Each bare row pins the seat it
-  reads as under the same rules: `inky`, `inky@39u`, `inky-10`,
-  `run-inky` and `judge-inky` all pin `inky`; `ljos-bot` pins
-  `ljosbot`; `judge:model-1.5` pins `judge-model-1-5`; and `run-101`
-  pins `run-101`. Rows that pin one seat must pin one key, up to hex
-  case and a small-order part: `inky <key1>` beside `inky@39u <key2>`
-  fails the check, since one seat would vote under two keys. When rows
-  pin the voter's seat, the entry must be signed under that key.
+  after `/` is looked up as written. A voter id row pins the seat after
+  its `/`, and each bare row pins the seat it reads as under the same
+  rules: `inky` and `inky@39u` both pin `inky`, while `inky-10` pins
+  `inky-10`; `ljos-bot` pins `ljosbot`; `judge:model-1.5` pins
+  `judge-model-1-5`; and `run-101` pins `run-101`. A run or a judge
+  keeps its id whole, so `run-inky` and `judge-inky` pin themselves, not
+  `inky`. Rows that pin one seat must pin one key, whatever their
+  spelling, up to hex case and a small-order part: `inky <key1>` beside
+  `inky@39u <key2>` or `alpha/inky <key2>` fails the check, since one
+  seat would vote under two keys. When rows pin the voter's seat, the
+  entry must be signed under that key.
 - with no pin file row for the voter id and none for its seat, the first
   key seen in this check is the pin for this check only
 - ingesting pins durably is what makes that pin persist across checks
 - a later entry from the same voter under another key is rejected
+- a seat, the part of the voter id after `/`, holds one key across the
+  check whatever identity signs for it: `alpha/inky` under one key and
+  `beta/inky` under another fail the check whichever file comes first.
+  Pin the seat, or sign under one key
 
 ## Tally rule
 
 Tally is pure over signed ballot entries and counts per question. A
 voter is a signing key fingerprint: two key strings are one voter when
-they differ only in hex case or in a small-order part.
+they differ only in hex case or in a small-order part. A seat is the
+part of the voter id after `/`, and the identity part is ignored:
+`alpha/inky` and `beta/inky` are one seat.
 
+- files that hold one ballot (one ballot id) under one voter are one
+  ballot, whatever the hex case of their key and signature: a replayed
+  copy neither counts twice nor makes the voter ambiguous
 - `replaces` must name the id of a ballot in the same check, from the
   same voter (key fingerprint), on the same question. A missing target,
   or another voter's or another question's ballot, fails the check.
 - a ballot named by another entry's `replaces` never counts
-- with one seat under two keys on one question, the first key seen for
-  that seat keeps counting and the later key for that seat is refused
+- a seat under two keys on one question counts under neither key
+  there, whatever order the ballots come in. `ljos record check` fails
+  on it (see [Key pinning](#key-pinning)), so file order never picks
+  which key holds the seat
 - of what remains, the latest `cast_at` per `(question, voter)` counts
 - a latest stance of `withdrawn` contributes no vote
-- two unreplaced ballots from one voter on one question in the same
-  hour are ambiguous and are dropped on that question only. `cast_at`
-  does not break that tie, and neither does file order
+- two unreplaced ballots from one voter on one question in that
+  voter's latest hour are ambiguous and are dropped on that question
+  only. `cast_at` does not break that tie, and neither does file
+  order. A tie in an earlier hour is superseded by the later ballot
+  like any older ballot: accept and reject at 10:00 and accept at
+  12:00 count one accept
 
 ## What the check cannot see
 
@@ -194,3 +213,14 @@ runs. It cannot tell that a file was deleted. A deleted withdrawal revives
 the earlier ballot: with the withdrawal file gone, the ballot it replaced
 is again the latest under its key and counts. Keep the record under version
 control and review deletions there.
+
+A ballot is not bound to a tracker. Nothing in the entry names the
+tracker, repository or pin file it was cast for, so a signed ballot
+copied into another record verifies there too, and is held only to the
+pins of the check that reads it.
+
+The check cannot tell people apart, only keys. A voter is a key and a
+seat is held to one key, but a new identity and seat signed with a new
+key is a new voter: anyone who can mint keys can cast as many voters as
+they mint seats. Only the pin file limits that, by naming the seats and
+keys that may vote; seats it does not name take the first key seen.

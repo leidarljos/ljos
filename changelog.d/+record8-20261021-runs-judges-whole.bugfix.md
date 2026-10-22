@@ -1,0 +1,1 @@
+The record tally and seat pins keep a run's and a judge's id whole, as `record-v1.md` says. `judge-gpt-oss-120b` and `judge-gpt-oss-20b`, `run-pr-1234` and `run-pr-5678`, or `judge-grok-4` and `grok-4` are no longer one seat, and a seat row such as `inky` no longer holds `run-inky` or `judge-inky`.

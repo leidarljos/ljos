@@ -3198,16 +3198,21 @@ pub fn same_holder(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
-    let (seat_a, tag_a) = holder_parts(a);
-    let (seat_b, tag_b) = holder_parts(b);
-    let invalid = |raw: &str, tag: &Option<String>| raw.contains('@') && tag.is_none();
-    if invalid(a, &tag_a) || invalid(b, &tag_b) {
+    let (Some((seat_a, tag_a)), Some((seat_b, tag_b))) = (holder_seat(a), holder_seat(b)) else {
         return false;
-    }
-    let seat_a = seat_slug(&seat_a);
-    let seat_b = seat_slug(&seat_b);
+    };
     // Two tags of one seat are two conversations, not one holder.
     seat_a == seat_b && (tag_a.is_none() || tag_b.is_none())
+}
+
+/// [`holder_parts`] of a well-formed holder. `None` for a name with no
+/// seat before `@` or nothing after it, which no conversation writes.
+/// The seat is compared as parsed, not slugged: `ljosbot-` and `@abc`
+/// would slug to `ljosbot` and `runner`.
+fn holder_seat(holder: &str) -> Option<(String, Option<String>)> {
+    let (seat, tag) = holder_parts(holder);
+    let dangling = holder.contains('@') && tag.is_none();
+    (!seat.is_empty() && !dangling).then_some((seat, tag))
 }
 
 /// Whether `held`, the name a tracker row is claimed under, belongs to
@@ -3215,21 +3220,33 @@ pub fn same_holder(a: &str, b: &str) -> bool {
 /// apart; this does not. The bookkeeping that asks already looks only at
 /// one checkout, where a git hook (`SEAT@TAG`, or `SEAT-TAG` from ljos
 /// 0.31 and earlier) and the MCP server (the bare seat, or its own tag)
-/// are one conversation booking under two names. A `SEAT-TAG` whose seat
-/// part is this seat counts when the tag is one to six lowercase letters
-/// and digits, a pid in base 36 (`free-claude-8h`, `free-opencode-1v8am`),
-/// and the whole name is not itself a seat in `known`, so `eessi-bot`
-/// stays apart from `eessi`.
+/// are one conversation booking under two names. Past what
+/// [`holder_parts`] folds, a `SEAT-TAG` whose seat part is this seat
+/// counts when the tag is a pid in base 36 that may be all letters
+/// (`free-agy-aak`, `free-opencode-nrv`) and the whole name is not itself
+/// a seat in `known`, so `eessi-bot` stays apart from `eessi`. A tag of
+/// digits alone is a number and never folds, and a run, judge or
+/// subagent keeps its id whole.
 #[must_use]
 pub fn same_seat(held: &str, holder: &str, known: &std::collections::BTreeSet<String>) -> bool {
-    let _ = known;
     let (held, holder) = (held.trim(), holder.trim());
     if held.is_empty() || holder.is_empty() {
         return false;
     }
-    let (seat_a, _) = holder_parts(held);
-    let (seat_b, _) = holder_parts(holder);
-    seat_slug(&seat_a) == seat_slug(&seat_b)
+    let (Some((seat_a, _)), Some((seat_b, _))) = (holder_seat(held), holder_seat(holder)) else {
+        return false;
+    };
+    if seat_a == seat_b {
+        return true;
+    }
+    let suffixed = |name: &str, seat: &str| {
+        !known.contains(name)
+            && name
+                .strip_prefix(seat)
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|tag| pid_shaped(seat, tag))
+    };
+    suffixed(&seat_a, &seat_b) || suffixed(&seat_b, &seat_a)
 }
 
 /// [`same_seat`] against the seats this tracker lists.
@@ -3247,8 +3264,12 @@ const LEGACY_SEATS: &[(&str, &str)] = &[("ljos-bot", "ljosbot")];
 /// a pid in base 36 (`inky-n9o`, `disk-saver-t4t`, `free-claude-8h`,
 /// `free-opencode-1vmow`); a last part of one to six lowercase letters and
 /// digits with at least one of each is read as that tag, so `eessi-bot`
-/// and `disk-saver` stay whole seats, and so does a version or a run
-/// number such as `gpt-5` or `ridley-ci-a-555001`. The same suffix on the
+/// and `disk-saver` stay whole seats, and so does a version or a number
+/// such as `gpt-5`, `node-01` or `ridley-ci-a-555001`. A run, a judge
+/// and a subagent (`run-pr-1234`, `judge-gpt-oss-120b`,
+/// `sand-subagent-0e61`) keep every part. An all-letter tag cannot be
+/// told from a seat's own last part here; [`same_seat`] settles it
+/// against the seats a tracker knows. The same suffix on the
 /// seat side of `SEAT@TAG` (`inky-n9o@deadbeef`) is that tag too. An old
 /// tag comes back as `None`: the server that wrote it is gone and no
 /// conversation holds under it again, so the seat is its holder now and
@@ -3267,7 +3288,10 @@ pub fn holder_parts(holder: &str) -> (String, Option<String>) {
     (seat, tag)
 }
 
-fn legacy_tag(head: &str, tag: &str) -> bool {
+/// Whether `tag` after `head` has the shape of a pid in base 36: one to
+/// six lower-case letters and digits with at least one letter. A run,
+/// judge or subagent name keeps every part.
+fn pid_shaped(head: &str, tag: &str) -> bool {
     if head.starts_with("run-")
         || head == "run"
         || head.starts_with("judge-")
@@ -3276,20 +3300,17 @@ fn legacy_tag(head: &str, tag: &str) -> bool {
     {
         return false;
     }
-    if !(1..=6).contains(&tag.len())
-        || !tag
+    (1..=6).contains(&tag.len())
+        && tag
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-        || !tag.bytes().any(|b| b.is_ascii_digit())
-    {
-        return false;
-    }
-    // Old pid tags can be all digits (`inky-10`), but keep one-digit model
-    // suffixes (`gpt-5`) and long build numbers (`ridley-ci-a-555001`) whole.
-    if tag.bytes().all(|b| b.is_ascii_digit()) && (tag.len() == 1 || tag.len() > 5) {
-        return false;
-    }
-    true
+        && tag.bytes().any(|b| b.is_ascii_lowercase())
+}
+
+/// An old pid tag [`holder_parts`] drops whatever seats exist: a
+/// [`pid_shaped`] tag with a digit, so `eessi-bot` keeps its last part.
+fn legacy_tag(head: &str, tag: &str) -> bool {
+    pid_shaped(head, tag) && tag.bytes().any(|b| b.is_ascii_digit())
 }
 
 /// Drop a pid-shaped suffix (`n9o`, `1vmow`) from a seat. A name that has
@@ -28854,14 +28875,22 @@ pub(crate) fn stored_by(atom: &Value) -> StoredBy {
     }
 }
 
-/// [`stored_by`] for each atom id this process read. A
-/// [`packset_client::Hit`] has no origin field, so the readers that parse
-/// the pack's answer record it here by id.
-fn stored_origins() -> &'static std::sync::Mutex<std::collections::BTreeMap<String, StoredBy>> {
-    static SEEN: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::BTreeMap<String, StoredBy>>,
-    > = std::sync::OnceLock::new();
+/// [`stored_by`] for each atom id this process read, or `None` for an id
+/// the pack last answered it does not hold. A [`packset_client::Hit`] has
+/// no origin field, so the readers that parse the pack's answer record it
+/// here by id.
+type Origins = std::collections::BTreeMap<String, Option<StoredBy>>;
+
+fn stored_origins() -> &'static std::sync::Mutex<Origins> {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<Origins>> = std::sync::OnceLock::new();
     SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+}
+
+fn record_origin(id: &str, by: Option<StoredBy>) {
+    stored_origins()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(id.to_string(), by);
 }
 
 /// Record the stored origin of `atom`, an atom or a search hit, by its id.
@@ -28871,28 +28900,19 @@ pub(crate) fn keep_origin(atom: &Value) {
         return;
     }
     if let Some(id) = atom.get("id").and_then(Value::as_str) {
-        stored_origins()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id.to_string(), stored_by(atom));
+        record_origin(id, Some(stored_by(atom)));
     }
 }
 
-/// Record the stored origin of each hit no reader recorded yet, from the
-/// pack's listing. A hit the listing does not hold stays unknown.
+/// Record the stored origin of each hit from the pack's listing, read
+/// fresh: the pack can change a held atom's origin in place, and a
+/// long-lived process must not name a hit by the origin it read before.
+/// A hit the listing does not hold keeps what was recorded.
 fn keep_origins_of(client: &PacksetClient, hits: &[Hit]) {
-    let missing = {
-        let known = stored_origins()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        hits.iter()
-            .filter_map(|h| h.id.as_deref())
-            .any(|id| !known.contains_key(id))
-    };
-    if !missing {
+    if hits.iter().all(|h| h.id.is_none()) {
         return;
     }
-    if let Ok(atoms) = atoms_lean_shared(client, &client.workspace()) {
+    if let Ok(atoms) = atoms_lean(client, &client.workspace()) {
         atoms.iter().for_each(keep_origin);
     }
 }
@@ -28912,6 +28932,12 @@ fn hit_stored_by(h: &Hit) -> StoredBy {
 }
 
 fn recorded_origin(id: &str) -> Option<StoredBy> {
+    recorded(id).flatten()
+}
+
+/// The pack's last answer for `id` in this process: `Some(None)` when it
+/// answered it does not hold the atom, `None` when it was never asked.
+fn recorded(id: &str) -> Option<Option<StoredBy>> {
     stored_origins()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -28930,42 +28956,33 @@ pub(crate) enum Stored {
     Unreachable,
 }
 
-/// How long a listing answers for atoms it did not hold before the pack
-/// is listed again: a long-lived reader sees atoms written since.
-const LISTING_FRESH: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// [`person_stored`] for atom `id` in this seat's pack. When no reader has
-/// recorded it, the pack is listed inside a short bound. Only a listing
-/// the pack answered is remembered, per pack and workspace, so a pack
-/// that was down is asked again on the next read.
+/// [`person_stored`] for atom `id` in this seat's pack, asked of the pack
+/// inside a short bound on every read. A long-lived process (the MCP
+/// server, a hook daemon) outlives a forget or a retraction, so what it
+/// recorded earlier never answers ahead of the pack. Only when the pack
+/// does not answer does the last answer recorded here stand, a held
+/// origin or the pack's not holding it. A failure is never recorded, so
+/// a pack that was down is asked again on the next read.
 pub(crate) fn stored_origin_of(id: &str) -> Stored {
-    static LISTED: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::BTreeMap<String, std::time::Instant>>,
-    > = std::sync::OnceLock::new();
-    if let Some(known) = recorded_origin(id) {
-        return Stored::Origin(known);
+    let asked = with_pack_timeout(400, || {
+        pack().map(|client| client.get_atom(&client.workspace(), id))
+    });
+    match asked {
+        Ok(Ok(atom)) => {
+            let by = stored_by(&atom);
+            record_origin(id, Some(by));
+            Stored::Origin(by)
+        }
+        Ok(Err(packset_client::Error::Bad(_))) => {
+            record_origin(id, None);
+            Stored::Absent
+        }
+        _ => match recorded(id) {
+            Some(Some(by)) => Stored::Origin(by),
+            Some(None) => Stored::Absent,
+            None => Stored::Unreachable,
+        },
     }
-    let Ok(client) = pack() else {
-        return Stored::Unreachable;
-    };
-    let key = format!("{}|{}", client.base(), client.workspace());
-    let listed = LISTED.get_or_init(Default::default);
-    let fresh = listed
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&key)
-        .is_some_and(|at| at.elapsed() < LISTING_FRESH);
-    if !fresh {
-        let Ok(atoms) = session_atoms(400) else {
-            return Stored::Unreachable;
-        };
-        atoms.iter().for_each(keep_origin);
-        listed
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(key, std::time::Instant::now());
-    }
-    recorded_origin(id).map_or(Stored::Absent, Stored::Origin)
 }
 
 /// Whether a recalled hit is an unverified working note. Any claim the
@@ -37099,7 +37116,13 @@ mod tests {
         let _url = PackUrl::set(&url);
         let found = packset_search_as_of("tag the release", 3, Some("2026-01-01"), true).unwrap();
         assert_eq!(found[0].id.as_deref(), Some("other"));
-        let lines = seen.lock().unwrap().clone();
+        let lines: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.contains("/v1/search"))
+            .cloned()
+            .collect();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("rerank=1"), "{lines:?}");
         assert!(lines[0].contains("as_of="), "{lines:?}");
@@ -38154,7 +38177,7 @@ mod tests {
             holder_parts("ridley-ci-a-555001"),
             ("ridley-ci-a-555001".to_string(), None)
         );
-        assert_eq!(holder_parts("inky-10"), ("inky".to_string(), None));
+        assert_eq!(holder_parts("inky-10"), ("inky-10".to_string(), None));
         assert_eq!(
             holder_parts("sand-subagent-0e61"),
             ("sand-subagent-0e61".to_string(), None)
@@ -38176,6 +38199,75 @@ mod tests {
             holder_parts("saddle-review"),
             ("saddle-review".to_string(), None)
         );
+    }
+
+    #[test]
+    fn a_last_part_of_digits_alone_stays_in_the_seat() {
+        let known = std::collections::BTreeSet::new();
+        for (a, b) in [
+            ("node-01", "node-02"),
+            ("qwen-72", "qwen"),
+            ("inky-10", "inky"),
+            ("run-12", "run-34"),
+        ] {
+            assert!(!same_holder(a, b), "a digit suffix folded: {a} {b}");
+            assert!(!same_seat(a, b, &known), "a digit suffix folded: {a} {b}");
+        }
+        for name in ["node-01", "qwen-72", "inky-10", "inky-12345"] {
+            assert_eq!(
+                holder_parts(name),
+                (name.to_string(), None),
+                "a digit suffix folded: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dangling_separator_is_not_the_seat() {
+        let known = std::collections::BTreeSet::new();
+        for (a, b) in [
+            ("ljosbot@", "ljosbot"),
+            ("ljosbot-", "ljosbot"),
+            ("ljosbot.", "ljosbot"),
+            ("@abc", "runner"),
+            ("-", "runner"),
+        ] {
+            for (x, y) in [(a, b), (b, a)] {
+                assert!(!same_holder(x, y), "a dangling separator matched: {x} {y}");
+                assert!(
+                    !same_seat(x, y, &known),
+                    "a dangling separator matched: {x} {y}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_all_letter_pid_tag_folds_to_a_known_seat() {
+        let known: std::collections::BTreeSet<String> = ["free-agy", "eessi", "eessi-bot"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        for (held, holder) in [
+            ("free-agy-aak", "free-agy@q4s23e2cxd"),
+            ("free-opencode-nrv", "free-opencode"),
+            ("free-opencode", "free-opencode-nrv"),
+        ] {
+            assert!(
+                same_seat(held, holder, &known),
+                "an all-letter pid tag did not fold: {held} {holder}"
+            );
+        }
+        for (held, holder) in [
+            ("eessi-bot", "eessi"),
+            ("qwen-72", "qwen"),
+            ("node-01", "node"),
+            ("judge-qwen-ab", "judge-qwen"),
+            ("run-pr-abc", "run-pr"),
+            ("free-claude-sandbox", "free-claude"),
+        ] {
+            assert!(!same_seat(held, holder, &known), "{held} {holder}");
+        }
     }
 
     #[test]
@@ -38211,9 +38303,9 @@ mod tests {
                 .collect();
         assert!(same_seat("free-claude-8h", "free-claude", &known));
         assert!(same_seat("free-claude", "free-claude-8h", &known));
-        assert!(!same_seat("free-agy-aak", "free-agy@q4s23e2cxd", &known));
+        assert!(same_seat("free-agy-aak", "free-agy@q4s23e2cxd", &known));
         assert!(same_seat("free-opencode@abc", "free-opencode@xyz", &known));
-        assert!(!same_seat("free-opencode-nrv", "free-opencode", &known));
+        assert!(same_seat("free-opencode-nrv", "free-opencode", &known));
         assert!(!same_seat("eessi-bot", "eessi", &known));
         assert!(!same_seat("free-claude-8h", "free-codex", &known));
         assert!(same_seat("free-opencode-1v8am", "free-opencode", &known));
@@ -48936,15 +49028,15 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
         let (url, _) = serve_http(move |req| {
             let first = req.lines().next().unwrap_or("");
-            if first.contains("/v1/atoms") {
-                let atoms = serde_json::json!({"atoms": [{
+            if first.contains(&format!("/v1/atoms/{id}")) {
+                let atom = serde_json::json!({
                     "id": id, "kind": "lesson", "text": "Keep the form short.",
                     "workspace": "seat", "origin": "user-declared",
                     "source": {"basis": "person"},
-                }]});
-                return (200, atoms.to_string());
+                });
+                return (200, atom.to_string());
             }
-            (200, r#"{"atoms":[]}"#.into())
+            (404, r#"{"error":"no atom"}"#.into())
         });
         let _pack = HoldEnv::set(&[("PACKSET_URL", &url), ("PACKSET_WORKSPACE", "seat")]);
         assert_eq!(stored_origin_of(id), Stored::Origin(StoredBy::Person));
