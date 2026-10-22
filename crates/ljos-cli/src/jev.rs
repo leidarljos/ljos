@@ -1694,7 +1694,11 @@ fn log(entry: &Value) {
         return;
     };
     line.push('\n');
-    let _ = crate::append_locked_row(&dir.join("jev-log.jsonl"), line.as_bytes());
+    let _ = crate::append_locked_row(
+        &dir.join("jev-log.jsonl"),
+        line.as_bytes(),
+        crate::Durability::BestEffort,
+    );
 }
 
 /// Add a call's cost to this month's running total in the state directory,

@@ -145,7 +145,7 @@ pub fn push_in(dir: &Path, note: Queued) -> Result<bool> {
     let path = queue_file(dir);
     let mut line = serde_json::to_string(&note)?;
     line.push('\n');
-    crate::append_locked_row(&path, line.as_bytes())
+    crate::append_locked_row(&path, line.as_bytes(), crate::Durability::Durable)
         .with_context(|| format!("append {}", path.display()))?;
     Ok(true)
 }
