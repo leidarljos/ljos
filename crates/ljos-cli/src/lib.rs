@@ -8312,10 +8312,12 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             // fused score. Reordering cannot change which of the twenty
             // pass. When none does, no memory can reach the prompt, and
             // the second stage, a few hundred milliseconds a prompt, is not
-            // run.
+            // run. The count of the pack's ballots that named a hit is not
+            // read: where many lessons tie on the words the pack scores,
+            // which of them a ballot keeps at its cut is arbitrary. The
+            // subject test and the lexical floor are the second scorer.
             let could = |h: &Hit| {
                 !UNREVIEWED_KINDS.contains(&h.kind.as_str())
-                    && agreed(h)
                     && names_the_subject(&h.text, cue)
                     && shown_on_prompt(h)
                     && h.id.as_ref().is_none_or(|id| !seen.contains(id))
@@ -37503,6 +37505,81 @@ mod tests {
             );
             assert_eq!(note.contains("host13"), !shows_full, "{stage}: {note}");
         }
+    }
+
+    /// The relevance cut kept the old lesson on one ballot of two: where
+    /// lessons tie on every word the pack scores, which of them a ballot
+    /// keeps at its cut is arbitrary. It names the prompt's subject and
+    /// covers the most of it, so the prompt gets it. A line that shares
+    /// one rare word with a longer prompt does not name its subject, and
+    /// one ballot does not let it in.
+    #[test]
+    fn a_lesson_one_ballot_kept_still_reaches_the_prompt() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let hit = |id: &str, text: &str, ballots: u32| {
+            serde_json::json!({
+                "id": id, "text": text, "score": 1.0, "kind": "lesson",
+                "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"],
+                "ballots": ballots, "of": 2
+            })
+        };
+        let mut hits: Vec<Value> = ["Figma", "Grafana", "Sentry"]
+            .iter()
+            .map(|who| {
+                hit(
+                    who,
+                    &format!("Operator {who} recorded that the registry rejected the token"),
+                    2,
+                )
+            })
+            .collect();
+        hits.push(hit(
+            "old",
+            "With pnpm the registry rejected the token because the CI secret expired",
+            1,
+        ));
+        hits.push(hit("case", "Name pytest fixtures by their case", 2));
+        hits.push(hit(
+            "kebab",
+            "kebab kebab kebab: the kebab stand shuts at nine",
+            1,
+        ));
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/status") {
+                let status = serde_json::json!({"search": {"ranks": ["fused", "relevance"]}});
+                return (200, status.to_string());
+            }
+            if first.contains("/v1/search") {
+                let body = serde_json::json!({"hits": hits, "rank": "relevance"});
+                return (200, body.to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let prompt = |session: &str, cue: &str| HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: cue.into(),
+            session: Some(session.into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(
+            &prompt("one-ballot", "npm: the registry rejected my token"),
+            5,
+        );
+        assert!(note.contains("CI secret expired"), "{note}");
+        let (note, _) = hook_note(
+            &prompt("rare-word", "kebab case for the pytest fixtures"),
+            5,
+        );
+        assert!(note.contains("Name pytest fixtures"), "{note}");
+        assert!(!note.contains("kebab stand"), "{note}");
     }
 
     /// The prompt hook hands over a paraphrase the encoder ranked first
