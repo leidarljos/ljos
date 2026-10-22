@@ -494,6 +494,22 @@ fn preferences_from_v0_32_1_follow_the_writer_that_stored_them() {
         }),
     );
     let start = succeeded(&start, "session start");
+    // The hook's cap could stop a raise half way, so the upgrade waits for
+    // the next run outside a hook.
+    let prefs = start.split("Preferences here:").nth(1).unwrap_or("");
+    assert!(!prefs.contains("release notes"), "{start}");
+    assert!(basis(by_text(&atoms(&daemon.url), "release notes")).is_none());
+    succeeded(&seat.output(new, &["prefer", "--review"]), "first review");
+
+    let start = seat.hook(
+        new,
+        json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "after-review",
+            "source": "startup",
+        }),
+    );
+    let start = succeeded(&start, "session start after review");
     let on = start.find("ljos is on").expect(&start);
     let awaits = start.find("older preference awaits review").expect(&start);
     assert!(!start[on..awaits].contains('\n'), "{start}");
