@@ -42768,6 +42768,39 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
     }
 
+    /// Code handed to an interpreter writes wherever it likes, so code that
+    /// names the runtime directory, its variable or a kept file is a write,
+    /// and so is a here-document or a pipe fed to one or to a patch tool.
+    #[test]
+    fn interpreter_code_that_names_the_kept_prompt_is_denied() {
+        let _g = env_guard();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
+        for line in [
+            r#"python3 -c "open('/run/user/1000/ljos/latest-prompt','w').write('x')""#,
+            r#"python3 -c 'import os; open(os.environ["XDG_RUNTIME_DIR"]+"/ljos/p","w")'"#,
+            r#"perl -e 'open F, ">", "$ENV{XDG_RUNTIME_DIR}/ljos/latest-prompt.bind"'"#,
+            r#"node -e "require('fs').writeFileSync(process.env.XDG_RUNTIME_DIR+'/ljos/x','')""#,
+            r#"ruby -e 'File.write(ENV["XDG_RUNTIME_DIR"] + "/ljos/latest-prompt", "x")'"#,
+            r#"awk 'BEGIN { print "x" > "/run/user/1000/ljos/latest-prompt" }'"#,
+            "python3 - <<'EOF'\nimport os\nos.rename('/tmp/p', '/run/user/1000/ljos/latest-prompt')\nEOF",
+            "git apply <<'EOF'\n--- /dev/null\n+++ b/run/user/1000/ljos/latest-prompt\n@@ -0,0 +1 @@\n+x\nEOF",
+            "patch -p0 <<'EOF'\n--- a\n+++ /run/user/1000/ljos/latest-prompt.bind\nEOF",
+            r#"printf 'import os\nos.remove("/run/user/1000/ljos/latest-prompt")' | python3"#,
+        ] {
+            assert!(seat_guard(line).is_some(), "allowed: {line}");
+        }
+        for line in [
+            "python3 -c 'print(1)'",
+            "node -e 'console.log(process.version)'",
+            "awk '{print $1}' notes.txt",
+            "git apply fix.patch",
+            "perl -ne 'print if /x/' notes.txt",
+            "printf 'print(1)' | python3",
+        ] {
+            assert!(seat_guard(line).is_none(), "refused: {line}");
+        }
+    }
+
     /// A tool call that names a runner session for the ljos it runs is
     /// choosing the session the person's words are checked against.
     #[test]
