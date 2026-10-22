@@ -39,11 +39,18 @@ const CLOUD_GUARD_RULES_FILE: &str = "cloud-guard-rules.json";
 /// The rule that refuses a push updating a `cursor/*` ref, read from the
 /// push's argv by [`crate::cloud_guard::cursor_push`].
 const CURSOR_PUSH: &str = "cloud-cursor-push";
-/// The rule that refuses `gh pr create` and its alias `gh pr new`, read
-/// from gh's argv by [`crate::cloud_guard::gh_pr`].
+/// The rule that refuses opening, readying or reopening a pull request,
+/// read from gh's argv by [`crate::cloud_guard::gh_acts`].
 const GH_PR_CREATE: &str = "cloud-gh-pr-create";
-/// The rule that refuses `gh pr merge`, read the same way.
+/// The rule that refuses merging a pull request, read the same way.
 const GH_PR_MERGE: &str = "cloud-gh-pr-merge";
+/// The push pattern an older `ljos cloud up` wrote, before the rule had a name.
+const LEGACY_CURSOR_PUSH: &str =
+    "re:git push(?:\\s+\\S+)*\\s(?:\\S*:)?(?:refs/heads/)?cursor/\\S+(?:\\s|$)";
+/// The pull-request patterns from that file, and from the file that named
+/// only the push rule. A glob, so they miss flags and match comment text.
+const LEGACY_GH_PR_CREATE: &str = "gh* pr create*";
+const LEGACY_GH_PR_MERGE: &str = "gh* pr merge*";
 /// The release workflow's encoder archives, the runtime before the binary
 /// that links it. Each unpacks into the prefix above the binary directory.
 const ENCODER_ARCHIVES: &[&str] = &["onnxruntime", "packset-embed"];
@@ -251,6 +258,8 @@ pub fn mcp_row() -> crate::Habitat {
 }
 
 /// What `ljos doctor` says about the cloud guard refusals cloud seats need.
+/// The current patterns are `ok` whatever their reason text says. A known
+/// older file is stale. Anything else that is present differs.
 #[must_use]
 pub fn guard_row() -> crate::Habitat {
     let Some(path) = cloud_guard_rules_path() else {
@@ -260,9 +269,8 @@ pub fn guard_row() -> crate::Habitat {
             ok: false,
         };
     };
-    let wanted = cloud_guard_rules();
     let have = crate::kept_rules(&path);
-    if have == wanted {
+    if current_rules(&have) {
         return crate::Habitat {
             name: "cloud guard",
             state: format!(
@@ -277,6 +285,8 @@ pub fn guard_row() -> crate::Habitat {
             "missing in {}; run `ljos cloud up` to install the cloud seat refusals",
             path.display()
         )
+    } else if covers_seat(&have) {
+        format!("{} is stale; ljos doctor --fix", path.display())
     } else {
         format!(
             "{} differs from the cloud seat refusals; run `ljos cloud up`",
@@ -288,6 +298,13 @@ pub fn guard_row() -> crate::Habitat {
         state,
         ok: false,
     }
+}
+
+/// Whether a cloud-guard doctor row should print `warn`. A missing file
+/// stays `info`.
+#[must_use]
+pub(crate) fn guard_row_is_warning(state: &str) -> bool {
+    state.contains("is stale;") || state.contains("differs from the cloud seat refusals")
 }
 
 /// Whether a `cloud age` row is the unset case: no secret was named and
@@ -343,17 +360,19 @@ pub fn missing_mcp_line() -> Option<String> {
 }
 
 /// The cloud-up refusal `line` meets when it runs in `cwd`. A rule this
-/// ljos names is read from the command's argv; any other rule in the file
-/// is matched as a seat rule.
+/// ljos names, and the pattern an older ljos wrote for the same refusal,
+/// is read from the command's argv. Any other rule in the file is matched
+/// as a seat rule.
 #[must_use]
 pub(crate) fn guard_line(line: &str, cwd: Option<&Path>) -> Option<crate::Rule> {
     let path = cloud_guard_rules_path()?;
+    let gh = crate::cloud_guard::gh_acts(line, cwd);
     let denies = crate::kept_rules(&path)
         .into_iter()
         .filter(|rule| rule.verdict == "deny");
     for rule in denies {
-        match rule.pattern.as_str() {
-            CURSOR_PUSH => {
+        match seat_part(&rule.pattern) {
+            Some(SeatPart::Push) => {
                 if let Some(why) = crate::cloud_guard::cursor_push(line, cwd) {
                     return Some(crate::Rule {
                         reason: format!("{} ({why})", rule.reason),
@@ -361,17 +380,10 @@ pub(crate) fn guard_line(line: &str, cwd: Option<&Path>) -> Option<crate::Rule> 
                     });
                 }
             }
-            GH_PR_CREATE | GH_PR_MERGE => {
-                let verbs: &[&str] = if rule.pattern == GH_PR_CREATE {
-                    &["create", "new"]
-                } else {
-                    &["merge"]
-                };
-                if crate::cloud_guard::gh_pr(line, verbs) {
-                    return Some(rule);
-                }
-            }
-            _ => {
+            Some(SeatPart::Open) if gh.open => return Some(rule),
+            Some(SeatPart::Merge) if gh.merge => return Some(rule),
+            Some(SeatPart::Open | SeatPart::Merge) => {}
+            None => {
                 if let Some(hit) = crate::verdict_for(std::slice::from_ref(&rule), line) {
                     return Some(hit.clone());
                 }
@@ -1830,12 +1842,96 @@ fn ensure_profile(home: &Path, bin_dir: &Path) -> Result<String> {
     Ok(notes.join("; "))
 }
 
-/// Whether this machine is a cloud seat: `ljos cloud up` wrote the guard
-/// file, and the file still holds the refusals that command writes. A box
-/// that never ran it has no such file, so finish exports no deeds.
+/// Whether this machine is a cloud seat. The guard file holds the refusals
+/// `ljos cloud up` writes now, or the patterns an older ljos wrote for the
+/// same three refusals. Reason text and order do not matter. A box that
+/// never ran it has no such file, so finish exports no deeds.
 #[must_use]
-pub(crate) fn cloud_seat() -> bool {
-    cloud_guard_rules_path().is_some_and(|path| crate::kept_rules(&path) == cloud_guard_rules())
+pub fn cloud_seat() -> bool {
+    cloud_guard_rules_path().is_some_and(|path| covers_seat(&crate::kept_rules(&path)))
+}
+
+/// Replace a cloud guard file from an older ljos with the rules this ljos
+/// writes. A missing file stays missing. A file that is not one of those
+/// versions stays as it was written; `ljos cloud up` is what replaces that.
+pub fn replace_stale_guard() {
+    let Some(path) = cloud_guard_rules_path() else {
+        return;
+    };
+    if !path.is_file() {
+        return;
+    }
+    let have = crate::kept_rules(&path);
+    if !covers_seat(&have) || current_rules(&have) {
+        return;
+    }
+    crate::keep_rules(&path, &cloud_guard_rules());
+}
+
+/// One of the three refusals a cloud seat file has to carry.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SeatPart {
+    Push,
+    Open,
+    Merge,
+}
+
+/// The refusal `pattern` is, current or from an older rule file.
+fn seat_part(pattern: &str) -> Option<SeatPart> {
+    match pattern {
+        CURSOR_PUSH | LEGACY_CURSOR_PUSH => Some(SeatPart::Push),
+        GH_PR_CREATE | LEGACY_GH_PR_CREATE => Some(SeatPart::Open),
+        GH_PR_MERGE | LEGACY_GH_PR_MERGE => Some(SeatPart::Merge),
+        _ => None,
+    }
+}
+
+/// Every rule is a deny of a known cloud-seat pattern, and the push, open
+/// and merge refusals are all present.
+fn covers_seat(rules: &[crate::Rule]) -> bool {
+    if rules.is_empty() {
+        return false;
+    }
+    let mut push = false;
+    let mut open = false;
+    let mut merge = false;
+    for rule in rules {
+        if rule.verdict != "deny" {
+            return false;
+        }
+        match seat_part(&rule.pattern) {
+            Some(SeatPart::Push) => push = true,
+            Some(SeatPart::Open) => open = true,
+            Some(SeatPart::Merge) => merge = true,
+            None => return false,
+        }
+    }
+    push && open && merge
+}
+
+/// The three patterns this ljos writes, each once, verdict deny. The
+/// reasons and the order are ignored.
+fn current_rules(rules: &[crate::Rule]) -> bool {
+    if rules.len() != 3 {
+        return false;
+    }
+    let mut seen = [false; 3];
+    for rule in rules {
+        if rule.verdict != "deny" {
+            return false;
+        }
+        let index = match rule.pattern.as_str() {
+            CURSOR_PUSH => 0,
+            GH_PR_CREATE => 1,
+            GH_PR_MERGE => 2,
+            _ => return false,
+        };
+        if seen[index] {
+            return false;
+        }
+        seen[index] = true;
+    }
+    seen == [true, true, true]
 }
 
 pub(crate) fn ensure_cloud_guard_rules() -> Result<String> {
