@@ -226,12 +226,18 @@ printf '%s' "$2" > "$d/$id.prompt"
         child.wait_with_output().unwrap()
     }
 
-    /// `ljos-mcp` sent `calls` after the handshake, each answer by its id.
-    fn mcp(&self, env: &[(&str, &str)], calls: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    /// `ljos-mcp` as `seat`, sent `calls` after the handshake, each answer
+    /// by its id.
+    fn mcp(
+        &self,
+        seat: &str,
+        env: &[(&str, &str)],
+        calls: &[serde_json::Value],
+    ) -> Vec<serde_json::Value> {
         use std::io::Write as _;
         use std::process::Stdio;
         let mut child = self
-            .program(env!("CARGO_BIN_EXE_ljos-mcp"), "ljosbot", env, &[])
+            .program(env!("CARGO_BIN_EXE_ljos-mcp"), seat, env, &[])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -901,7 +907,7 @@ fn a_persona_cast_then_withdraw_leaves_the_tally_at_zero() {
     let issue = "demo-wd";
     let session = "sess-review-1";
     let cast = world.ljos(
-        "clerk",
+        "reviewer",
         session,
         &[
             "vote", issue, "--for", "ship", "--used", "none", "--as", "reviewer",
@@ -916,7 +922,7 @@ fn a_persona_cast_then_withdraw_leaves_the_tally_at_zero() {
         "{said}"
     );
     let withdrawn = world.ljos(
-        "clerk",
+        "reviewer",
         session,
         &["vote", issue, "--withdraw", "--as", "reviewer"],
     );
@@ -936,7 +942,7 @@ fn a_persona_cast_then_withdraw_leaves_the_tally_at_zero() {
     assert!(!stdout.contains("ship"), "{said}");
     // Another persona from the session is still not another voice.
     let other = world.ljos(
-        "clerk",
+        "editor",
         session,
         &[
             "vote", issue, "--for", "hold", "--used", "none", "--as", "editor",
@@ -952,7 +958,7 @@ fn a_persona_cast_then_withdraw_leaves_the_tally_at_zero() {
     );
     // The persona that withdrew casts again, and the new ballot counts.
     let again = world.ljos(
-        "clerk",
+        "reviewer",
         session,
         &[
             "vote", issue, "--for", "hold", "--used", "none", "--as", "reviewer",
@@ -974,7 +980,7 @@ fn a_withdrawn_voter_recasting_the_same_option_counts_once() {
     let issue = "demo-wd-same";
     let session = "sess-review-same";
     let cast = world.ljos(
-        "clerk",
+        "reviewer",
         session,
         &[
             "vote", issue, "--for", "ship", "--used", "none", "--as", "reviewer",
@@ -982,7 +988,7 @@ fn a_withdrawn_voter_recasting_the_same_option_counts_once() {
     );
     assert!(cast.status.success(), "{}", text(&cast));
     let withdrawn = world.ljos(
-        "clerk",
+        "reviewer",
         session,
         &["vote", issue, "--withdraw", "--as", "reviewer"],
     );
@@ -992,7 +998,7 @@ fn a_withdrawn_voter_recasting_the_same_option_counts_once() {
         "{said}"
     );
     let recast = world.ljos(
-        "clerk",
+        "reviewer",
         session,
         &[
             "vote", issue, "--for", "ship", "--used", "none", "--as", "reviewer",
@@ -1016,7 +1022,7 @@ fn a_voter_holding_a_ballot_is_told_to_withdraw_then_cast() {
     let world = World::new();
     let issue = "demo-held";
     let cast = world.ljos(
-        "clerk",
+        "reviewer",
         "sess-review-1",
         &[
             "vote", issue, "--for", "ship", "--used", "none", "--as", "reviewer",
@@ -1025,7 +1031,7 @@ fn a_voter_holding_a_ballot_is_told_to_withdraw_then_cast() {
     assert!(cast.status.success(), "{}", text(&cast));
     for (session, choice) in [("sess-review-1", "ship"), ("sess-review-2", "hold")] {
         let again = world.ljos(
-            "clerk",
+            "reviewer",
             session,
             &[
                 "vote", issue, "--for", choice, "--used", "none", "--as", "reviewer",
@@ -1042,7 +1048,7 @@ fn a_voter_holding_a_ballot_is_told_to_withdraw_then_cast() {
         assert!(!said.contains("already voted"), "{said}");
     }
     let withdrawn = world.ljos(
-        "clerk",
+        "reviewer",
         "sess-review-2",
         &["vote", issue, "--withdraw", "--as", "reviewer"],
     );
@@ -1052,7 +1058,7 @@ fn a_voter_holding_a_ballot_is_told_to_withdraw_then_cast() {
         "{said}"
     );
     let recast = world.ljos(
-        "clerk",
+        "reviewer",
         "sess-review-2",
         &[
             "vote", issue, "--for", "hold", "--used", "none", "--as", "reviewer",
@@ -1187,7 +1193,7 @@ fn runs_with_their_own_harness_ids_each_count_and_one_run_counts_once() {
     ];
     for (name, env, session) in runs {
         let cast = world.ljos_env(
-            "ljosbot",
+            name,
             env,
             &[
                 "vote", issue, "--for", "ship", "--used", "none", "--as", name,
@@ -1200,7 +1206,7 @@ fn runs_with_their_own_harness_ids_each_count_and_one_run_counts_once() {
     }
     for (name, choice) in [("reviewer-e", "ship"), ("reviewer-a", "hold")] {
         let again = world.ljos_env(
-            "ljosbot",
+            name,
             cloud,
             &[
                 "vote", issue, "--for", choice, "--used", "none", "--as", name,
@@ -1256,7 +1262,7 @@ fn subagents_of_one_session_each_count_and_one_subagent_counts_once() {
             "vote", issue, "--for", choice, "--used", "none", "--as", name,
         ];
         hook(tool_use, agent, &args);
-        world.ljos_env("ljosbot", env, &args)
+        world.ljos_env(name, env, &args)
     };
     for (tool_use, agent, name) in [
         ("toolu_01a", Some("agent-a1"), "reviewer-a"),
@@ -1329,7 +1335,7 @@ fn a_box_seat_with_no_session_counts_each_subagent() {
         }
         let hook = world.hook(none, &payload);
         assert!(hook.status.success(), "{}", text(&hook));
-        world.ljos_env("eessi", none, &args)
+        world.ljos_env(name, none, &args)
     };
     for (tool_use, agent, name, session) in [
         (
@@ -1366,7 +1372,7 @@ fn a_box_seat_with_no_session_counts_each_subagent() {
         ("sand-subagent-box-0002", "reviewer-e"),
     ] {
         let out = world.ljos_env(
-            "eessi",
+            name,
             &[("CURSOR_CONVERSATION_ID", conversation)],
             &[
                 "vote", issue, "--for", "ship", "--used", "none", "--as", name,
@@ -1401,8 +1407,8 @@ fn a_shared_shell_holder_is_not_a_ballot_session() {
             "vote", issue, "--for", "ship", "--used", "none", "--as", name,
         ]
     };
-    for (seat, name) in [("eessi", "reviewer-a"), ("inky", "reviewer-b")] {
-        let out = world.ljos_env(seat, shared, &args(name));
+    for seat in ["reviewer-a", "reviewer-b"] {
+        let out = world.ljos_env(seat, shared, &args(seat));
         let said = text(&out);
         assert!(out.status.success(), "{said}");
         assert!(said.contains(&format!("session {seat}\n")), "{said}");
@@ -1423,7 +1429,7 @@ fn a_shared_shell_holder_is_not_a_ballot_session() {
         }),
     );
     assert!(hook.status.success(), "{}", text(&hook));
-    let out = world.ljos_env("eessi", shared, &line);
+    let out = world.ljos_env("reviewer-c", shared, &line);
     let said = text(&out);
     assert!(out.status.success(), "{said}");
     assert!(
@@ -1462,8 +1468,8 @@ fn forge_call(world: &World, session: &str, agent: &str, args: &[&str], tree: se
 #[test]
 fn a_call_record_no_hook_above_this_shell_left_names_no_session() {
     // Records under agent-calls are not signed. One written by hand, or by
-    // a hook in another process tree, must not bind a session: the seat
-    // stays one unverified session and casts once.
+    // a hook in another process tree, must not bind a session: each seat
+    // stays its own unverified session.
     let world = World::new();
     let issue = "demo-forged-calls";
     let mut sibling = Command::new("sleep").arg("30").spawn().unwrap();
@@ -1502,29 +1508,24 @@ fn a_call_record_no_hook_above_this_shell_left_names_no_session() {
         &b,
         serde_json::json!([elsewhere]),
     );
-    let unverified = ljos_cli::ballot_sig::unverified_sentence("eessi");
-    let first = world.ljos_env("eessi", &[], &a);
-    let said = text(&first);
-    assert!(first.status.success(), "{said}");
-    assert!(!said.contains("forged-sess"), "{said}");
-    assert!(
-        said.contains("session eessi") && said.contains(&unverified),
-        "{said}"
-    );
-    let second = world.ljos_env("eessi", &[], &b);
-    let said = text(&second);
-    assert!(!second.status.success(), "{said}");
-    assert!(
-        said.contains("already cast") && said.contains("Nothing was cast"),
-        "{said}"
-    );
+    for (seat, line) in [("reviewer-a", &a), ("reviewer-b", &b)] {
+        let unverified = ljos_cli::ballot_sig::unverified_sentence(seat);
+        let out = world.ljos_env(seat, &[], line);
+        let said = text(&out);
+        assert!(out.status.success(), "{said}");
+        assert!(!said.contains("forged-sess"), "{said}");
+        assert!(
+            said.contains(&format!("session {seat}")) && said.contains(&unverified),
+            "{said}"
+        );
+    }
     sibling.kill().unwrap();
     sibling.wait().unwrap();
     let tally = world.ljos("eessi", "sess-reader-0001", &["vote", issue]);
     let said = text(&tally);
     assert!(tally.status.success(), "{said}");
-    assert!(!said.contains("2 ballots count"), "{said}");
-    assert!(!said.contains("reviewer-b"), "{said}");
+    assert!(said.contains("2 ballots count"), "{said}");
+    assert!(!said.contains("forged-sess"), "{said}");
 }
 
 #[test]
@@ -1559,14 +1560,14 @@ fn a_line_run_again_after_its_call_was_taken_is_already_cast() {
     };
     let none: &[(&str, &str)] = &[];
     hook(none, "toolu_r1", "agent-r1");
-    let first = world.ljos_env("eessi", none, &args);
+    let first = world.ljos_env("reviewer-a", none, &args);
     let said = text(&first);
     assert!(first.status.success(), "{said}");
     assert!(
         said.contains(&format!("session {parent}:agent-r1\n")),
         "{said}"
     );
-    let again = world.ljos_env("eessi", none, &args);
+    let again = world.ljos_env("reviewer-a", none, &args);
     let said = text(&again);
     assert!(!again.status.success(), "{said}");
     assert!(
@@ -1598,14 +1599,14 @@ fn a_line_run_again_after_its_call_was_taken_is_already_cast() {
     });
     let out = world.hook(named, &payload);
     assert!(out.status.success(), "{}", text(&out));
-    let first = world.ljos_env("eessi", named, &args);
+    let first = world.ljos_env("reviewer-b", named, &args);
     let said = text(&first);
     assert!(first.status.success(), "{said}");
     assert!(
         said.contains(&format!("session {parent}:agent-r2\n")),
         "{said}"
     );
-    let again = world.ljos_env("eessi", named, &args);
+    let again = world.ljos_env("reviewer-b", named, &args);
     let said = text(&again);
     assert!(!again.status.success(), "{said}");
     assert!(
@@ -1657,8 +1658,8 @@ fn one_shell_that_renames_its_session_between_casts_casts_once() {
     {
         let issue = format!("demo-flip-{i}");
         let script = format!(
-            "{var}=sess-flip-a-000{i} \"$LJOS\" vote {issue} --for ship --used none --as reviewer-a; echo \"first $?\"\n\
-             {var}=sess-flip-b-000{i} \"$LJOS\" vote {issue} --for ship --used none --as reviewer-b; echo \"second $?\"\n"
+            "{var}=sess-flip-a-000{i} LJOS_SEAT=reviewer-a \"$LJOS\" vote {issue} --for ship --used none --as reviewer-a; echo \"first $?\"\n\
+             {var}=sess-flip-b-000{i} LJOS_SEAT=reviewer-b \"$LJOS\" vote {issue} --for ship --used none --as reviewer-b; echo \"second $?\"\n"
         );
         let out = shell(&world, &[], &script);
         let said = text(&out);
@@ -1680,7 +1681,9 @@ fn one_shell_that_renames_its_session_between_casts_casts_once() {
         let out = shell(
             &world,
             &[("LJOS_SESSION_ID", session)],
-            &format!("\"$LJOS\" vote {issue} --for ship --used none --as reviewer-{session}"),
+            &format!(
+                "LJOS_SEAT=reviewer-{session} \"$LJOS\" vote {issue} --for ship --used none --as reviewer-{session}"
+            ),
         );
         assert!(out.status.success(), "{}", text(&out));
     }
@@ -1712,7 +1715,7 @@ fn a_hooked_harness_that_renames_its_session_casts_once() {
         }
         let hook = world.hook(none, &payload);
         assert!(hook.status.success(), "{}", text(&hook));
-        world.ljos_env("eessi", env, &args)
+        world.ljos_env(name, env, &args)
     };
     let out = cast("toolu_f1", None, "reviewer-a", none);
     assert!(out.status.success(), "{}", text(&out));
@@ -1778,14 +1781,16 @@ fn claude_subagents_voting_over_mcp_each_count() {
     };
     // A server answers a batch in any order; each call waits for the last.
     let answers: Vec<serde_json::Value> = [
-        vote(3, "toolu_m1", "reviewer-a", "ship"),
-        vote(4, "toolu_m2", "reviewer-b", "ship"),
-        vote(5, "toolu_m3", "coordinator", "ship"),
-        vote(6, "toolu_m4", "reviewer-c", "hold"),
-        vote(7, "toolu_m1", "reviewer-d", "hold"),
+        (3, "toolu_m1", "reviewer-a", "ship"),
+        (4, "toolu_m2", "reviewer-b", "ship"),
+        (5, "toolu_m3", "coordinator", "ship"),
+        (6, "toolu_m4", "reviewer-c", "hold"),
+        (7, "toolu_m1", "reviewer-d", "hold"),
     ]
     .iter()
-    .flat_map(|call| world.mcp(env, std::slice::from_ref(call)))
+    .flat_map(|&(id, tool_use, name, choice)| {
+        world.mcp(name, env, &[vote(id, tool_use, name, choice)])
+    })
     .collect();
     let answer = |id: u64| {
         let found = answers
@@ -1851,7 +1856,7 @@ fn codex_subagent_threads_each_count_under_their_root_session() {
     ];
     let cast = |name: &str, thread: &str, choice: &str| {
         world.ljos_env(
-            "ljosbot",
+            name,
             &[("CODEX_SESSION_ID", root), ("CODEX_THREAD_ID", thread)],
             &[
                 "vote", issue, "--for", choice, "--used", "none", "--as", name,

@@ -901,6 +901,10 @@ else:
     std::fs::write(state.join("hide-notes"), "1").unwrap();
     let path = format!("{}:/usr/bin:/bin", bin.display());
     let vote = |args: &[&str]| {
+        let seat = args
+            .iter()
+            .position(|a| *a == "--as")
+            .map_or("sess-1", |i| args[i + 1]);
         let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
             .env_clear()
@@ -913,8 +917,9 @@ else:
             .env("VISSUE_ROOT", &root)
             .env("VISSUE_STATE", &state)
             .env("VISSUE_NO_ROUTE", "1")
-            .env("VISSUE_AGENT", "sess-1")
-            .env("LJOS_SEAT", "sess-1")
+            .env("VISSUE_AGENT", seat)
+            .env("LJOS_SEAT", seat)
+            .env("SEAT_SESSION_ID", "sess-holder-0001")
             .env("LJOS_TRACKER_GIT", "off")
             .env("PACKSET_URL", "off")
             .output()
