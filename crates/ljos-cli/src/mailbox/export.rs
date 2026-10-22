@@ -3,7 +3,7 @@
 //! ```text
 //! ljos-outbox v1
 //! draft <outbox draft id>
-//! reachbook-hash <the outbox's message hash>
+//! reachbook-hash <the outbox's sha256 of the message, hex>
 //! expires <RFC 3339, at most 24 h out>
 //! nonce <16 random bytes, hex>
 //!
@@ -32,6 +32,7 @@ pub const MAX_LIFETIME: Duration = Duration::hours(24);
 /// What the outbox holds for one draft.
 pub struct Draft<'a> {
     pub id: &'a str,
+    /// The outbox's sha256 of `message`, lowercase hex. It must match.
     pub reachbook_hash: &'a str,
     /// The message in its canonical form, `Message-ID` and `Date` set.
     pub message: &'a [u8],
@@ -84,6 +85,10 @@ pub fn export(draft: &Draft<'_>, expires: DateTime<Utc>, now: DateTime<Utc>) -> 
     if fields.iter().any(|(n, _)| n == "bcc" || n == "resent-bcc") {
         bail!("export: sendmail -t strips Bcc, so the sent bytes would not be H; use To or Cc");
     }
+    let hash = hex::encode(Sha256::digest(draft.message));
+    if draft.reachbook_hash != hash {
+        bail!("export: reachbook-hash is not the sha256 of the message, so the outbox holds other bytes");
+    }
     let mut seed = [0u8; 16];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut seed))
@@ -97,7 +102,6 @@ pub fn export(draft: &Draft<'_>, expires: DateTime<Utc>, now: DateTime<Utc>) -> 
     )
     .into_bytes();
     file.extend_from_slice(draft.message);
-    let hash = hex::encode(Sha256::digest(draft.message));
     Ok(Approval {
         file,
         hash,

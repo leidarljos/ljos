@@ -18,10 +18,14 @@ fn now() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 10, 22, 12, 0, 0).unwrap()
 }
 
+fn sha(message: &str) -> &'static str {
+    Box::leak(hex::encode(Sha256::digest(message.as_bytes())).into_boxed_str())
+}
+
 fn draft(message: &str) -> Draft<'_> {
     Draft {
         id: "draft-7",
-        reachbook_hash: "ab12cd34",
+        reachbook_hash: sha(message),
         message: message.as_bytes(),
     }
 }
@@ -38,7 +42,7 @@ fn the_file_is_the_statement_block_then_the_exact_bytes() {
         [
             "ljos-outbox v1",
             "draft draft-7",
-            "reachbook-hash ab12cd34",
+            &format!("reachbook-hash {}", sha(MESSAGE)),
             "expires 2026-10-22T14:00:00Z",
         ]
     );
@@ -187,4 +191,21 @@ fn a_bcc_header_is_refused_because_sendmail_t_strips_it() {
         let err = export(&draft(&message), later, now()).unwrap_err();
         assert!(err.to_string().contains("Bcc"), "{bcc}: {err}");
     }
+}
+
+#[test]
+fn reachbook_hash_must_be_the_sha256_of_the_message() {
+    let later = now() + Duration::hours(1);
+    let other = MESSAGE.replace("noon", "one");
+    let upper = sha(MESSAGE).to_ascii_uppercase();
+    for hash in [sha(&other), &upper, "ab12cd34"] {
+        let bad = Draft {
+            reachbook_hash: hash,
+            ..draft(MESSAGE)
+        };
+        let err = export(&bad, later, now()).unwrap_err();
+        assert!(err.to_string().contains("reachbook-hash"), "{hash}: {err}");
+    }
+    let got = export(&draft(MESSAGE), later, now()).unwrap();
+    assert_eq!(got.hash, sha(MESSAGE));
 }
