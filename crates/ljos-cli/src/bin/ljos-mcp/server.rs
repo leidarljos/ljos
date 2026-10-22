@@ -1425,6 +1425,10 @@ impl LjosServer {
                 }
                 ljos_cli::user_rules::promote_lesson(&id, &why, &mention, &reply)
             } else {
+                // A user rule reaches every prompt and every seat. The tool
+                // description refuses anything that is not the person's words,
+                // including when this server has no runner session variable.
+                ljos_cli::refuse_unless_person_words("prefer", &args.text).map_err(refused)?;
                 ljos_cli::user_rules::write_preference(&args.text, &why, &mention, &reply)
             };
             return rule
