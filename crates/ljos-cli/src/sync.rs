@@ -184,18 +184,24 @@ pub(crate) fn age_identity(text: &str) -> bool {
     found
 }
 
-/// Identity files that may open a sealed log.
+/// The scope [`cloud_identity_path`] reads.
+const CLOUD_SCOPE: &str = "cloud";
+
+/// Identity files that may open a sealed file of scope `scope_name`.
 ///
 /// The machine key when it is an age identity, then the scope `cloud`
-/// identity when `cloud up` wrote one. A machine key that is not an
+/// identity when `cloud up` wrote one and `scope_name` is `cloud`.
+/// Memory leaves the box only as scope `cloud`, so the cloud identity
+/// is never tried on another scope's log. A machine key that is not an
 /// identity is still passed when it is the only file, so `age` reports
 /// the broken key. A cloud file that is not an identity is left out, so
 /// it cannot make `age` refuse the machine key.
-fn identities_for_open() -> Vec<PathBuf> {
+fn identities_for_open(scope_name: &str) -> Vec<PathBuf> {
     let own = identity_path();
     let own_ok = read_identity(&own).is_some_and(|text| age_identity(&text));
     let cloud = cloud_identity_path();
-    let cloud_ok = read_identity(&cloud).is_some_and(|text| age_identity(&text));
+    let cloud_ok =
+        scope_name == CLOUD_SCOPE && read_identity(&cloud).is_some_and(|text| age_identity(&text));
     let mut ids = Vec::new();
     // A valid machine key is used. A broken one is passed only when the
     // cloud identity cannot stand in, so age still reports that key.
@@ -739,8 +745,11 @@ fn sender_entity_for_scope(host: &str, scope: &Scope, scope_name: &str) -> Strin
 /// The pack not answering, or a log this machine should open failing to.
 pub fn import(root: &Path, scope: &Scope) -> Result<String> {
     let me = host();
-    let identities = identities_for_open();
-    if identities.is_empty() {
+    if scope
+        .all_scopes()
+        .iter()
+        .all(|named| identities_for_open(named.name).is_empty())
+    {
         return Ok("sync: no age identity on this machine; `ljos sync --key` makes one\n".into());
     }
     let dir = log_dir(root);
@@ -762,7 +771,7 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
         if host.is_empty() || host == me {
             continue;
         }
-        let Some(plain) = open_identities(&path, &identities)? else {
+        let Some(plain) = open_identities(&path, &identities_for_open(&scope_name))? else {
             out.push_str(&format!(
                 "sync: {host}'s {} log is not sealed to this machine\n",
                 scope_name
@@ -842,7 +851,7 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, push: bool) -> Result<S
     if gone == me {
         bail!("sync: {gone} is this machine; pass a gone host");
     }
-    let identities = identities_for_open();
+    let identities = identities_for_open(&scope.name);
     if identities.is_empty() {
         return Ok("sync: no age identity on this machine; `ljos sync --key` makes one\n".into());
     }
@@ -1699,8 +1708,10 @@ fn plain_rules_rel(name: &str) -> String {
 }
 
 /// Rows of every sealed user-rule file this machine can open, and how many
-/// it could not: sealed to other machines, or `age` missing.
-fn sealed_rows(root: &Path) -> (Vec<crate::user_rules::UserRule>, usize) {
+/// it could not: sealed to other machines, or `age` missing. The files are
+/// sealed to the tracker's primary scope, `scope_name`, which is empty
+/// when the tracker names none.
+fn sealed_rows(root: &Path, scope_name: &str) -> (Vec<crate::user_rules::UserRule>, usize) {
     let dir = root.join(".ljos").join("user-rules");
     let Ok(read) = std::fs::read_dir(&dir) else {
         return (Vec::new(), 0);
@@ -1711,7 +1722,7 @@ fn sealed_rows(root: &Path) -> (Vec<crate::user_rules::UserRule>, usize) {
         .filter(|path| path.to_string_lossy().ends_with(".json.age"))
         .collect();
     paths.sort();
-    let identities = identities_for_open();
+    let identities = identities_for_open(scope_name);
     let mut rows = Vec::new();
     let mut closed = 0;
     for path in paths {
@@ -1828,8 +1839,9 @@ pub fn exchange_user_rules(
     }
     let mode = tracker_git(asked);
     let scope = scope_of_repo(root)?;
+    let sealed_to = scope.as_ref().map(|s| s.name.clone()).unwrap_or_default();
     let Some(scope) = scope.filter(|_| mode != TrackerGit::Off) else {
-        let (mut rows, _) = sealed_rows(root);
+        let (mut rows, _) = sealed_rows(root, &sealed_to);
         rows.extend(repo_rows(root));
         let merged = merge_into_local(rows)?;
         if !asked {
@@ -1850,7 +1862,7 @@ pub fn exchange_user_rules(
     if remote {
         integrate_remote(root, deadline)?;
     }
-    let (mut rows, closed) = sealed_rows(root);
+    let (mut rows, closed) = sealed_rows(root, &scope.name);
     rows.extend(repo_rows(root));
     let merged = merge_into_local(rows)?;
     let mut out = String::new();
@@ -2596,7 +2608,7 @@ mod tests {
         let sealed = dir.path().join("cloud.jsonl.age");
         seal("{\"text\":\"from cloud\"}\n", &[public], &sealed).unwrap();
         assert_eq!(
-            open_identities(&sealed, &identities_for_open())
+            open_identities(&sealed, &identities_for_open(CLOUD_SCOPE))
                 .unwrap()
                 .as_deref(),
             Some("{\"text\":\"from cloud\"}\n")
@@ -2620,7 +2632,7 @@ mod tests {
         let closed = dir.path().join("closed.jsonl.age");
         seal("nope\n", &[other_public], &closed).unwrap();
         assert_eq!(
-            open_identities(&closed, &identities_for_open()).unwrap(),
+            open_identities(&closed, &identities_for_open(CLOUD_SCOPE)).unwrap(),
             None
         );
 
@@ -2632,7 +2644,7 @@ mod tests {
             .unwrap();
         assert!(made.status.success());
         assert_eq!(
-            open_identities(&sealed, &identities_for_open())
+            open_identities(&sealed, &identities_for_open(CLOUD_SCOPE))
                 .unwrap()
                 .as_deref(),
             Some("{\"text\":\"from cloud\"}\n"),
@@ -2654,6 +2666,131 @@ mod tests {
             .unwrap();
         assert!(made.status.success(), "age-keygen must be installed");
         std::fs::write(cloud_identity_path(), "not a key\n").unwrap();
-        assert_eq!(identities_for_open(), vec![own]);
+        assert_eq!(identities_for_open(CLOUD_SCOPE), vec![own]);
+    }
+
+    /// A pack that keeps what is posted to it and lists it back.
+    fn serve_pack(posted: std::sync::Arc<std::sync::Mutex<Vec<Value>>>) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                while let Ok(n) = stream.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&buf[..at]).to_ascii_lowercase();
+                    let need: usize = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|n| n.trim().parse().ok())
+                        .unwrap_or(0);
+                    if buf.len() >= at + 4 + need {
+                        break;
+                    }
+                }
+                let req = String::from_utf8_lossy(&buf).into_owned();
+                let line = req.lines().next().unwrap_or("");
+                let body = req.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+                let answer = if line.starts_with("GET /v1/atoms") {
+                    serde_json::json!({ "atoms": posted.lock().unwrap().clone() }).to_string()
+                } else if line.starts_with("POST /v1/atoms ") {
+                    let mut atom: Value = serde_json::from_str(body).unwrap_or_default();
+                    let mut held = posted.lock().unwrap();
+                    atom["id"] = Value::String(format!("posted-{}", held.len()));
+                    held.push(atom.clone());
+                    atom.to_string()
+                } else {
+                    "{}".into()
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+                    answer.len()
+                );
+            }
+        });
+        url
+    }
+
+    /// Point this process at `dir` as a VM that holds `cloud.age` and no
+    /// machine key. Returns the cloud identity's public key.
+    fn vm_with_only_the_cloud_identity(dir: &Path) -> String {
+        std::env::set_var("HOME", dir.join("home"));
+        std::env::set_var("XDG_CONFIG_HOME", dir.join("config"));
+        std::env::set_var("XDG_STATE_HOME", dir.join("state"));
+        std::env::set_var("PACKSET_TIMEOUT_MS", "5000");
+        let cloud = cloud_identity_path();
+        std::fs::create_dir_all(cloud.parent().unwrap()).unwrap();
+        let made = Command::new("age-keygen")
+            .arg("-o")
+            .arg(&cloud)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "age-keygen must be installed");
+        let public = Command::new("age-keygen")
+            .arg("-y")
+            .arg(&cloud)
+            .output()
+            .unwrap();
+        assert!(public.status.success());
+        assert!(!identity_path().exists());
+        String::from_utf8_lossy(&public.stdout).trim().to_string()
+    }
+
+    fn posted_texts(posted: &std::sync::Mutex<Vec<Value>>) -> Vec<String> {
+        posted
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a["text"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// Memory leaves the box only as scope cloud. A box scope's log is not
+    /// tried with the cloud identity, even one the cloud key could open.
+    #[test]
+    fn a_box_scope_log_is_never_opened_with_the_cloud_identity() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let public = vm_with_only_the_cloud_identity(dir.path());
+        assert!(identities_for_open("grokbot").is_empty());
+        assert_eq!(
+            identities_for_open(CLOUD_SCOPE),
+            vec![cloud_identity_path()]
+        );
+        let root = dir.path().join("tracker");
+        let atoms = log_dir(&root);
+        std::fs::create_dir_all(&atoms).unwrap();
+        let scope: Scope = toml::from_str(&format!(
+            "name = \"grokbot\"\nrecipients = [\"{public}\"]\n[scopes]\ncloud = [\"{public}\"]\n"
+        ))
+        .unwrap();
+        let to_cloud = std::slice::from_ref(&public);
+        let box_log = format!("{}\n", atom("a", "box only", &["scope:grokbot"]));
+        seal(&box_log, to_cloud, &atoms.join("gonehost.jsonl.age")).unwrap();
+        let cloud_log = format!("{}\n", atom("b", "cloud only", &["scope:cloud"]));
+        seal(
+            &cloud_log,
+            to_cloud,
+            &atoms.join("gonehost+cloud.jsonl.age"),
+        )
+        .unwrap();
+        let posted = std::sync::Arc::default();
+        std::env::set_var("PACKSET_URL", serve_pack(std::sync::Arc::clone(&posted)));
+        let said = import(&root, &scope).unwrap();
+        assert!(
+            said.contains("gonehost's grokbot log is not sealed to this machine"),
+            "{said}"
+        );
+        assert!(said.contains("gonehost: 1 cloud atoms taken"), "{said}");
+        assert_eq!(posted_texts(&posted), vec!["cloud only"]);
     }
 }
