@@ -193,11 +193,16 @@ fn seam(store: &Path, bag: &Path, rows: &[Row]) -> Result<()> {
 }
 
 /// Product bytes live at `<deed>/bytes/<hex>`. The importer hashes the file
-/// and requires the name to be that digest.
+/// and requires the name to be that digest. `is_file` follows a symlink, so
+/// the kind comes from `symlink_metadata` and a link is refused.
 fn copy_payload(store: &Path, hex: &str, folder: &Path) -> Result<()> {
     let src = store.join("bytes").join(hex);
-    if !src.is_file() {
-        bail!("file bytes sha256:{hex} are not in the store");
+    match file_kind(&src)? {
+        Kind::File => {}
+        Kind::Symlink => bail!("file bytes sha256:{hex} are a symlink"),
+        Kind::Missing | Kind::Other => {
+            bail!("file bytes sha256:{hex} are not in the store");
+        }
     }
     let dir = folder.join("bytes");
     std::fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
@@ -215,8 +220,10 @@ fn write_link(
     digests: &mut HashMap<String, String>,
 ) -> Result<()> {
     let src = store.join("deeds").join(format!("{id}.{name}"));
-    if !src.is_file() {
-        return Ok(());
+    match file_kind(&src)? {
+        Kind::Missing | Kind::Other => return Ok(()),
+        Kind::Symlink => bail!("{id}.{name} is a symlink"),
+        Kind::File => {}
     }
     let raw = std::fs::read_to_string(&src).with_context(|| format!("reading {id}.{name}"))?;
     let linked = raw.trim();
@@ -296,6 +303,30 @@ fn is_sha256_hex(hex: &str) -> bool {
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+enum Kind {
+    Missing,
+    Symlink,
+    Other,
+    File,
+}
+
+fn file_kind(path: &Path) -> Result<Kind> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            let kind = meta.file_type();
+            if kind.is_symlink() {
+                Ok(Kind::Symlink)
+            } else if kind.is_file() {
+                Ok(Kind::File)
+            } else {
+                Ok(Kind::Other)
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Kind::Missing),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
 fn store_dir() -> Result<PathBuf> {
     let raw = std::env::var("DEEDAR_URL").unwrap_or_default();
     let raw = raw.trim();
@@ -367,10 +398,15 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
         let dest = to.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            bail!("{} is a symlink", entry.path().display());
+        } else if kind.is_dir() {
             copy_tree(&entry.path(), &dest)?;
-        } else {
+        } else if kind.is_file() {
             std::fs::copy(entry.path(), &dest)?;
+        } else {
+            bail!("{} is not a regular file", entry.path().display());
         }
     }
     Ok(())
