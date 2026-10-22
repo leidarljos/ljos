@@ -46806,7 +46806,11 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     /// Build deedar at the deedimport2 tip and import a bag `on_finish`
-    /// wrote. A missing binary is a failure. The test does not skip.
+    /// wrote. The export is then reduced to what deedar on main leaves:
+    /// one-line link files, no `sources`, no `bytes/`. Finish has to put
+    /// the digest form back, including a tab-separated `sources` line for
+    /// a carried deed made from one this bag does not carry. A missing
+    /// binary is a failure. The test does not skip.
     #[test]
     fn a_cloud_finish_bag_imports_with_deedar() {
         let bin_dir = deedimport_deedar();
@@ -46826,8 +46830,12 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
         let v1 = dir.path().join("v1.txt");
         let v2 = dir.path().join("v2.txt");
+        let base_file = dir.path().join("base.txt");
+        let made_file = dir.path().join("made.txt");
         std::fs::write(&v1, b"version one\n").unwrap();
         std::fs::write(&v2, b"version two\n").unwrap();
+        std::fs::write(&base_file, b"carried from this\n").unwrap();
+        std::fs::write(&made_file, b"made from the other\n").unwrap();
         let store_url = format!("file://{}", store.display());
         unsafe { std::env::remove_var("ISSUE_ROOT") };
         let _env = HoldEnv::set(&[
@@ -46883,12 +46891,44 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         ]);
         let id2 = accession_of(&made);
         let sha2 = digest_of(&made);
+        let made = deedar(&[
+            "create",
+            "file",
+            "--path",
+            base_file.to_str().unwrap(),
+            "--agent",
+            "otherseat",
+            "--name",
+            "note-base",
+        ]);
+        let base_id = accession_of(&made);
+        let made = deedar(&[
+            "create",
+            "file",
+            "--path",
+            made_file.to_str().unwrap(),
+            "--agent",
+            "cloudseat",
+            "--name",
+            "note-made",
+            "--input",
+            &base_id,
+        ]);
+        let made_id = accession_of(&made);
+        let made_sha = digest_of(&made);
+        let proved = deedar(&["log", "prove", &base_id]);
+        let base_digest = proved
+            .lines()
+            .find_map(|line| line.strip_prefix("digest="))
+            .map(str::trim)
+            .unwrap_or_else(|| panic!("no digest in {proved}"))
+            .to_string();
         std::fs::write(
             project.join("issues.org"),
             format!(
                 "#+TITLE: probe issues\n#+VISSUE: 1\n#+TODO: TODO STARTED | DONE\n\
                  * STARTED [#B] Cloud finish\n:PROPERTIES:\n:ID:         probe-imp1\n\
-                 :DEEDS:      {id1} {id2}\n:END:\n"
+                 :DEEDS:      {id1} {id2} {made_id}\n:END:\n"
             ),
         )
         .unwrap();
@@ -46903,21 +46943,69 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "git init\n{}",
             String::from_utf8_lossy(&git.stderr)
         );
+        let recv = dir.path().join("recv");
+        let recv_url = format!("file://{}", recv.display());
+        let side = dir.path().join("base-bag");
+        let exported = std::process::Command::new("deedar")
+            .args(["export", "--into", side.to_str().unwrap(), &base_id])
+            .output()
+            .unwrap_or_else(|e| panic!("deedar export: {e}"));
+        assert!(
+            exported.status.success(),
+            "deedar export\n{}{}",
+            String::from_utf8_lossy(&exported.stderr),
+            String::from_utf8_lossy(&exported.stdout)
+        );
+        let imported_base = std::process::Command::new("deedar")
+            .args(["import", "--allow-unsigned-head", side.to_str().unwrap()])
+            .env("DEEDAR_URL", &recv_url)
+            .env("DEEDAR_HOST_SIGNING_KEY", "off")
+            .output()
+            .unwrap_or_else(|e| panic!("deedar import base: {e}"));
+        assert!(
+            imported_base.status.success(),
+            "deedar import base\n{}{}",
+            String::from_utf8_lossy(&imported_base.stderr),
+            String::from_utf8_lossy(&imported_base.stdout)
+        );
         assert!(!cloud::cloud_seat(), "a box has no cloud guard file");
         let (box_said, box_paths) = deedbag::on_finish("probe-imp1");
         assert!(box_said.is_empty(), "{box_said}");
         assert!(box_paths.is_empty());
         assert!(!root.join(".ljos").join("deeds").exists());
         cloud::ensure_cloud_guard_rules().unwrap_or_else(|e| panic!("cloud guard: {e:#}"));
+        // deedar on main writes the store's one-line link and no sources
+        // or bytes/. This stands in for that export so finish has to
+        // write the digest form itself.
+        let wrap_dir = dir.path().join("wrap");
+        std::fs::create_dir_all(&wrap_dir).unwrap();
+        let real = bin_dir.join("deedar");
+        let script = format!(
+            "#!/bin/sh\nset -eu\nreal='{real}'\nif [ \"$1\" = export ]; then\n  \"$real\" \"$@\"\n  into=\n  prev=\n  for arg in \"$@\"; do\n    if [ \"$prev\" = --into ]; then into=$arg; fi\n    prev=$arg\n  done\n  [ -n \"$into\" ]\n  for d in \"$into\"/*; do\n    [ -d \"$d\" ] || continue\n    if [ -f \"$d/supersedes\" ]; then\n      id=$(head -n 1 \"$d/supersedes\")\n      printf '%s\\n' \"$id\" > \"$d/supersedes\"\n    fi\n    if [ -f \"$d/successor\" ]; then\n      id=$(head -n 1 \"$d/successor\")\n      printf '%s\\n' \"$id\" > \"$d/successor\"\n    fi\n    rm -f \"$d/sources\"\n    rm -rf \"$d/bytes\"\n  done\n  exit 0\nfi\nexec \"$real\" \"$@\"\n",
+            real = real.display()
+        );
+        let wrap = wrap_dir.join("deedar");
+        std::fs::write(&wrap, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&wrap, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _wrap_path = super::prepend_path(&wrap_dir);
         let (said, paths) = deedbag::on_finish("probe-imp1");
+        drop(_wrap_path);
         assert!(
             said.contains(
-                "deeds: exported 2 deeds cited by cloudseat into .ljos/deeds/cloudseat\n"
+                "deeds: exported 3 deeds cited by cloudseat into .ljos/deeds/cloudseat\n"
             ),
             "{said}"
         );
         assert_eq!(paths, vec![".ljos/deeds/cloudseat".to_string()]);
         let bag = root.join(".ljos").join("deeds").join("cloudseat");
+        assert!(
+            !bag.join(&base_id).exists(),
+            "an uncarried source was exported"
+        );
         assert_eq!(
             std::fs::read(bag.join(&id1).join("bytes").join(&sha1)).unwrap(),
             b"version one\n".to_vec()
@@ -46932,8 +47020,14 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(digest.starts_with("sha256:"), "{link}");
         assert_eq!(digest.len(), "sha256:".len() + 64, "{link}");
         assert!(lines.next().is_none(), "{link}");
-        let recv = dir.path().join("recv");
-        let recv_url = format!("file://{}", recv.display());
+        assert_eq!(
+            std::fs::read_to_string(bag.join(&made_id).join("sources")).unwrap(),
+            format!("{base_id}\t{base_digest}\n")
+        );
+        assert_eq!(
+            std::fs::read(bag.join(&made_id).join("bytes").join(&made_sha)).unwrap(),
+            b"made from the other\n".to_vec()
+        );
         let imported = std::process::Command::new("deedar")
             .args(["import", "--allow-unsigned-head", bag.to_str().unwrap()])
             .env("DEEDAR_URL", &recv_url)
@@ -46947,7 +47041,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             String::from_utf8_lossy(&imported.stdout)
         );
         let report = String::from_utf8_lossy(&imported.stdout);
-        assert!(report.contains("imported 2 deeds"), "{report}");
+        assert!(report.contains("imported 3 deeds"), "{report}");
         assert_eq!(
             std::fs::read(recv.join("bytes").join(&sha1)).unwrap(),
             b"version one\n".to_vec()
@@ -46955,6 +47049,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(
             std::fs::read(recv.join("bytes").join(&sha2)).unwrap(),
             b"version two\n".to_vec()
+        );
+        assert_eq!(
+            std::fs::read(recv.join("bytes").join(&made_sha)).unwrap(),
+            b"made from the other\n".to_vec()
         );
         let current = std::process::Command::new("deedar")
             .args(["current", &id1])
