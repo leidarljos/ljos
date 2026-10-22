@@ -923,29 +923,56 @@ fn walk_kept(owners: &[Owner], at: usize, in_store: bool, person: &Person) -> bo
 #[must_use]
 pub fn exe_runner(pid: u32) -> Option<&'static str> {
     use std::os::unix::fs::MetadataExt as _;
-    let home = own_home();
-    let person = Person::new(&SystemAccounts);
     let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
     let running = std::fs::metadata(format!("/proc/{pid}/exe"))
         .ok()
         .map(|meta| (meta.dev(), meta.ino()));
-    let store = Path::new(NIX_STORE);
-    if let Some(r) = runner_of_file(&exe, home.as_deref(), store, &person, running) {
+    let script = || {
+        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let script = cmdline
+            .split(|b| *b == 0)
+            .skip(1)
+            .map(String::from_utf8_lossy)
+            .find(|a| !a.is_empty() && !a.starts_with('-'))?;
+        let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
+        Some(cwd.join(script.as_ref()))
+    };
+    let home = own_home();
+    let person = Person::new(&SystemAccounts);
+    runner_from(
+        &exe,
+        running,
+        script,
+        home.as_deref(),
+        Path::new(NIX_STORE),
+        &person,
+    )
+}
+
+/// [`exe_runner`] for a process run from `exe`, whose (device, inode)
+/// the kernel reports as `running`, and that names `script` as the
+/// script a runtime there runs. `None` when `running` could not be
+/// read, since the path alone may name another file than the one the
+/// process runs.
+#[cfg(target_os = "linux")]
+fn runner_from(
+    exe: &Path,
+    running: Option<(u64, u64)>,
+    script: impl FnOnce() -> Option<PathBuf>,
+    home: Option<&Path>,
+    store: &Path,
+    person: &Person,
+) -> Option<&'static str> {
+    let running = running?;
+    if let Some(r) = runner_of_file(exe, home, store, person, Some(running)) {
         return Some(r);
     }
     let base = exe.file_name()?.to_str()?;
     if !RUNTIMES.iter().any(|r| base.starts_with(r)) {
         return None;
     }
-    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-    let script = cmdline
-        .split(|b| *b == 0)
-        .skip(1)
-        .map(String::from_utf8_lossy)
-        .find(|a| !a.is_empty() && !a.starts_with('-'))?;
-    let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
-    let script = std::fs::canonicalize(cwd.join(script.as_ref())).ok()?;
-    runner_of_file(&script, home.as_deref(), store, &person, None)
+    let script = std::fs::canonicalize(script()?).ok()?;
+    runner_of_file(&script, home, store, person, None)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1611,6 +1638,31 @@ mod tests {
         std::fs::rename(&other, &versions).unwrap();
         assert_eq!(runner(running), None);
         assert_eq!(runner(None), Some("claude"));
+    }
+
+    /// A process is its runner only through the (device, inode) the
+    /// kernel reports for its executable. When that cannot be read, the
+    /// path the link names is not trusted in its place.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_executable_that_cannot_be_read_is_no_runner() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let base = tempfile::Builder::new()
+            .prefix(".ljos-exe-")
+            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .unwrap();
+        let home = base.path().join("u");
+        let bin = home.join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let claude = bin.join("claude");
+        std::fs::write(&claude, "").unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let meta = std::fs::metadata(&claude).unwrap();
+        let person = Person::new(&SystemAccounts);
+        let store = PathBuf::from(NIX_STORE);
+        let runner = |running| runner_from(&claude, running, || None, Some(&home), &store, &person);
+        assert_eq!(runner(Some((meta.dev(), meta.ino()))), Some("claude"));
+        assert_eq!(runner(None), None);
     }
 
     /// A Nix store entry is a runner only while Nix alone keeps it. A
