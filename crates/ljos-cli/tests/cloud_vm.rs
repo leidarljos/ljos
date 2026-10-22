@@ -1804,6 +1804,15 @@ fn cloud_up_writes_the_scope_cloud_identity_from_a_named_secret() {
     fs::write(&outside, b"keep\n").unwrap();
     std::os::unix::fs::symlink(&outside, &path).unwrap();
     std::env::set_var("LJOS_CLOUD_AGE_KEY", &identity);
+    let linked = ljos_cli::cloud::up(false).unwrap_err().to_string();
+    assert!(linked.contains("is a symlink"), "{linked}");
+    assert!(!linked.contains(&secret_line), "{linked}");
+    assert_eq!(fs::read(&outside).unwrap(), b"keep\n");
+    assert!(fs::symlink_metadata(&path)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    fs::remove_file(&path).unwrap();
     let wrote = ljos_cli::cloud::up(false).unwrap();
     assert!(wrote.contains("wrote"), "{wrote}");
     assert!(wrote.contains("0600"), "{wrote}");
