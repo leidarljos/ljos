@@ -49621,7 +49621,20 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         let dir = tempfile::tempdir().unwrap();
         let argv = vec!["git".to_string(), "status".to_string()];
-        let quick = std::time::Duration::from_millis(200);
+        // A fixed 200 ms is shorter than a slow CI spawn, so an allow
+        // was read as a timeout. The budget is the measured spawn, and
+        // at least two seconds; the hang still sleeps longer than that.
+        let spawned = std::time::Instant::now();
+        let _ = tcb_answer_in(
+            &fake_policyd(dir.path(), "baseline", "echo allow"),
+            &argv,
+            std::time::Duration::from_secs(2),
+            None,
+        );
+        let quick = spawned
+            .elapsed()
+            .saturating_mul(8)
+            .max(std::time::Duration::from_secs(2));
         let answer = |name: &str, body: &str| {
             tcb_answer_in(&fake_policyd(dir.path(), name, body), &argv, quick, None)
         };
