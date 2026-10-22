@@ -187,12 +187,10 @@ pub fn record(id: &str, verdict: &str, into: Option<&str>) -> Result<Review> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
+    let mut line = serde_json::to_string(&r)?;
+    line.push('\n');
+    crate::append_locked_row(&path, line.as_bytes())
         .with_context(|| format!("memories: cannot write {}", path.display()))?;
-    writeln!(f, "{}", serde_json::to_string(&r)?)?;
     Ok(r)
 }
 
@@ -1212,6 +1210,46 @@ mod tests {
             "{got}"
         );
         assert!(got.starts_with("from now on use [redacted]"));
+    }
+
+    /// A verdict is one JSON line. Two reviews landing together used to
+    /// split that line across write calls, so a later read dropped it.
+    #[test]
+    fn concurrent_review_rows_each_parse() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_STATE_HOME", dir.path());
+        const THREADS: usize = 32;
+        const EACH: usize = 4;
+        let mut handles = Vec::with_capacity(THREADS);
+        for thread in 0..THREADS {
+            handles.push(std::thread::spawn(move || {
+                for n in 0..EACH {
+                    record(&format!("id-{thread}-{n}"), "keep", None).unwrap();
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("review writer");
+        }
+        let path = reviews_path();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rows: Vec<Review> = text
+            .lines()
+            .map(|line| {
+                serde_json::from_str(line).unwrap_or_else(|err| {
+                    panic!("review row does not parse ({err}): {line}");
+                })
+            })
+            .collect();
+        assert_eq!(rows.len(), THREADS * EACH, "{text}");
+        let mode = std::fs::symlink_metadata(&path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "review log mode {mode:o}");
     }
 
     #[test]

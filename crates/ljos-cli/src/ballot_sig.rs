@@ -2,11 +2,11 @@
 //! ed25519 key, made on its first vote at
 //! `$XDG_DATA_HOME/ljos/seats/SEAT/ballot.key` (or `LJOS_SEAT_KEY`), so
 //! seats sharing one HOME still sign apart. The signature rides on the
-//! issue as a `ballot-sig:` note. A ballot the tracker committed before
-//! signing began ([`SIGNING_SINCE`]) is legacy unsigned and still counts. The tracker
-//! pins each seat's public key the first time it signs (`.ljos-seat-keys`
-//! at the tracker root, committed), so a later ballot under that name signed
-//! by another key is a mismatch. The push gate counts a seat ballot only
+//! issue as a `ballot-sig:` note. A ballot the tracker held before its
+//! first pin, by commit order ([`recorded_before_signing`]), is legacy
+//! unsigned and still counts. The tracker pins each seat's public key the
+//! first time it signs (`.ljos-seat-keys` at the tracker root, committed),
+//! so a later ballot under that name signed by another key is a mismatch. The push gate counts a seat ballot only
 //! when its latest signature covers exactly that voter, issue and choice
 //! under the pinned key.
 //!
@@ -288,11 +288,6 @@ pub(crate) fn key_from_file(path: &std::path::Path) -> Result<SigningKey> {
     Ok(SigningKey::from_bytes(&seed))
 }
 
-/// The commit time of the signing change: a ballot the tracker recorded
-/// before it is legacy unsigned and still counts; one after needs a
-/// signature.
-pub const SIGNING_SINCE: i64 = 1_791_984_778;
-
 /// Where `seat`'s ballot key lives: `LJOS_SEAT_KEY` when that path is this
 /// seat's own key and not the machine key, else
 /// `$XDG_DATA_HOME/ljos/seats/SEAT/ballot.key` (`~/.local/share` when unset).
@@ -449,100 +444,56 @@ pub fn load_or_create(path: &std::path::Path) -> Result<SigningKey> {
     key_from_file(path)
 }
 
-/// When the tracker recorded `voter`'s ballot for `choice` on `issue`: the
-/// newest commit that added or removed its `] VOTER: CHOICE` line in the
-/// file holding the issue. `None` when the tracker is not a git repository
-/// or the ballot is not committed yet.
+/// Whether `voter`'s ballot for `choice` on `issue` was recorded before
+/// signing began in this tracker, by commit order: its `] VOTER: CHOICE`
+/// line is in that issue's own entry in every parent of each commit that
+/// brought the pin file into a tree none of its parents held it in. No
+/// git date is read. `false` on a tracker that is not a git repository or
+/// has no pin committed; `LJOS_UNSIGNED_BALLOTS=allow` is for a tracker
+/// that never signed.
 #[must_use]
-pub fn recorded_at(issue: &str, voter: &str, choice: &str) -> Option<i64> {
-    recorded_at_in(&env_root()?, issue, voter, choice)
+pub fn recorded_before_signing(issue: &str, voter: &str, choice: &str) -> bool {
+    env_root().is_some_and(|root| recorded_before_signing_in(&root, issue, voter, choice))
 }
 
-/// [`recorded_at`] in the tracker at `root`.
+/// [`recorded_before_signing`] in the tracker at `root`.
 #[must_use]
-pub fn recorded_at_in(root: &Path, issue: &str, voter: &str, choice: &str) -> Option<i64> {
-    let pattern = format!(":ID:[[:space:]]+{issue}[[:space:]]*$");
-    let files = git_in(root, &["grep", "-l", "-E", &pattern])?;
-    let needle = format!("] {}: {}", voter.trim(), choice.trim());
-    for file in files.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let file_path = root.join(file);
-        let Ok(text) = std::fs::read_to_string(&file_path) else {
-            continue;
-        };
-        let Some((start, end)) = issue_range(&text, issue) else {
-            continue;
-        };
-        let Some(line) = ballot_line_in(&text, start, end, &needle) else {
-            continue;
-        };
-        if let Some(epoch) = line_epoch(root, file, line) {
-            return Some(epoch);
-        }
-    }
-    None
-}
-
-fn line_epoch(root: &Path, file: &str, line: usize) -> Option<i64> {
-    let line = line.to_string();
-    let range = format!("{line},{line}");
-    git_in(
+pub fn recorded_before_signing_in(root: &Path, issue: &str, voter: &str, choice: &str) -> bool {
+    let log = git_in(
         root,
-        &["blame", "--porcelain", "-L", &range, "--", file.trim()],
-    )?
-    .lines()
-    .find_map(|row| {
-        row.trim_start()
-            .strip_prefix("committer-time ")?
-            .parse()
-            .ok()
-    })
+        &[
+            "--no-pager",
+            "log",
+            "--full-history",
+            "-m",
+            "--diff-filter=A",
+            "--format=%H %P",
+            "--",
+            PIN_FILE,
+        ],
+    )
+    .unwrap_or_default();
+    let held = |commit: &str| crate::slot::file_at_in(root, commit, PIN_FILE).is_some();
+    let starts: Vec<Vec<&str>> = log
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let commit = parts.next()?;
+            let parents: Vec<&str> = parts.collect();
+            (held(commit) && !parents.iter().any(|p| held(p))).then_some(parents)
+        })
+        .collect();
+    let needle = format!("] {}: {}", voter.trim(), choice.trim());
+    !starts.is_empty()
+        && starts.iter().all(|parents| {
+            !parents.is_empty()
+                && parents
+                    .iter()
+                    .all(|p| crate::slot::note_on_issue_at_in(root, p, issue, &needle))
+        })
 }
 
-fn ballot_line_in(text: &str, start: usize, end: usize, needle: &str) -> Option<usize> {
-    text.lines().enumerate().find_map(|(idx, line)| {
-        let line_no = idx + 1;
-        (start <= line_no && line_no <= end && line.contains(needle)).then_some(line_no)
-    })
-}
-
-fn issue_range(text: &str, issue: &str) -> Option<(usize, usize)> {
-    let mut start = None;
-    let mut matched = false;
-    let mut in_entry = false;
-    let mut line_no = 0usize;
-    for line in text.lines() {
-        line_no += 1;
-        if is_heading(line) {
-            if matched {
-                return Some((start?, line_no.saturating_sub(1)));
-            }
-            start = Some(line_no);
-            matched = false;
-            in_entry = true;
-        }
-        if in_entry && id_line(line, issue) {
-            matched = true;
-        }
-    }
-    matched.then_some((start?, line_no))
-}
-
-fn is_heading(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    let Some(rest) = trimmed.strip_prefix('*') else {
-        return false;
-    };
-    rest.is_empty() || rest.starts_with(['*', ' ', '\t'])
-}
-
-fn id_line(line: &str, issue: &str) -> bool {
-    let Some(rest) = line.trim().strip_prefix(":ID:") else {
-        return false;
-    };
-    rest.trim() == issue
-}
-
-fn env_root() -> Option<PathBuf> {
+pub(crate) fn env_root() -> Option<PathBuf> {
     std::env::var_os("VISSUE_ROOT")
         .filter(|r| !r.is_empty())
         .map(PathBuf::from)
@@ -571,7 +522,7 @@ pub fn tracker_is_git_checkout() -> Option<bool> {
     Some(String::from_utf8_lossy(&out.stdout).trim() == "true")
 }
 
-fn git_in(root: &Path, args: &[&str]) -> Option<String> {
+pub(crate) fn git_in(root: &Path, args: &[&str]) -> Option<String> {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(root)
@@ -1470,39 +1421,6 @@ mod tests {
         );
     }
 
-    fn read_epoch(dir: &Path, rev: &str) -> i64 {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(["show", "-s", "--format=%ct", rev])
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "git show failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
-    }
-
-    fn with_issue_root<R>(root: &Path, f: impl FnOnce() -> R) -> R {
-        crate::with_env_mutation(|| {
-            let was = std::env::var_os("VISSUE_ROOT");
-            std::env::set_var("VISSUE_ROOT", root);
-            struct Reset(Option<std::ffi::OsString>);
-            impl Drop for Reset {
-                fn drop(&mut self) {
-                    match &self.0 {
-                        Some(v) => std::env::set_var("VISSUE_ROOT", v),
-                        None => std::env::remove_var("VISSUE_ROOT"),
-                    }
-                }
-            }
-            let _reset = Reset(was);
-            f()
-        })
-    }
-
     #[test]
     fn a_signed_pinned_ballot_counts_and_every_forgery_does_not() {
         let alice = key(1);
@@ -1696,15 +1614,9 @@ mod tests {
     }
 
     #[test]
-    fn recorded_at_dates_the_ballot_line_on_its_own_issue() {
+    fn a_legacy_ballot_is_read_on_its_own_issue() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("issues.org");
-        let stamp = |s: &str| {
-            [
-                ("GIT_AUTHOR_DATE", s.to_string()),
-                ("GIT_COMMITTER_DATE", s.to_string()),
-            ]
-        };
         git(dir.path(), &["init"], &[]);
         git(dir.path(), &["config", "user.name", "Rohit Goswami"], &[]);
         git(
@@ -1717,21 +1629,31 @@ mod tests {
             "* TODO [#C] old\n:PROPERTIES:\n:ID:         probe-old\n:END:\n- [X] elder: rail\n",
         )
         .unwrap();
-        let old = stamp("2026-10-01T00:00:00Z");
-        git(dir.path(), &["add", "issues.org"], &old);
-        git(dir.path(), &["commit", "-m", "old ballot"], &old);
+        git(dir.path(), &["add", "issues.org"], &[]);
+        git(dir.path(), &["commit", "-m", "old ballot"], &[]);
+        std::fs::write(dir.path().join(PIN_FILE), "inky 00\n").unwrap();
+        git(dir.path(), &["add", PIN_FILE], &[]);
+        git(dir.path(), &["commit", "-m", "first pin"], &[]);
         std::fs::write(
             &file,
             "* TODO [#C] old\n:PROPERTIES:\n:ID:         probe-old\n:END:\n- [X] elder: rail\n\
              * TODO [#C] new\n:PROPERTIES:\n:ID:         probe-new\n:END:\n- [X] elder: rail\n",
         )
         .unwrap();
-        let new = stamp("2026-10-20T00:00:00Z");
-        git(dir.path(), &["add", "issues.org"], &new);
-        git(dir.path(), &["commit", "-m", "new ballot"], &new);
-        let old_epoch = read_epoch(dir.path(), "HEAD~1");
-        let got = with_issue_root(dir.path(), || recorded_at("probe-old", "elder", "rail"));
-        assert_eq!(got, Some(old_epoch));
+        git(dir.path(), &["add", "issues.org"], &[]);
+        git(dir.path(), &["commit", "-m", "new ballot"], &[]);
+        assert!(recorded_before_signing_in(
+            dir.path(),
+            "probe-old",
+            "elder",
+            "rail"
+        ));
+        assert!(!recorded_before_signing_in(
+            dir.path(),
+            "probe-new",
+            "elder",
+            "rail"
+        ));
     }
 
     #[test]
