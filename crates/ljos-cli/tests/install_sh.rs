@@ -413,3 +413,46 @@ fn install_with_no_coding_tool_leaves_a_seat_a_sitting_opens_on() {
     assert!(org.contains(":CLAIMED_BY: demo"), "{org}");
     assert!(logged.contains("claimdag claim "), "{logged}");
 }
+
+/// `cp` onto a binary that is executing fails with "Text file busy".
+/// The installer copies to a new name and renames, so the running process
+/// keeps the old inode and the path runs the new program.
+#[cfg(target_os = "linux")]
+#[test]
+fn install_replaces_a_binary_that_is_running() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let progs = dir.path().join("progs");
+    let next = dir.path().join("next");
+    std::fs::create_dir_all(&progs).unwrap();
+    std::fs::create_dir_all(&next).unwrap();
+    for name in PROGRAMS {
+        for (src, dest) in [("/bin/sleep", &progs), ("/bin/true", &next)] {
+            let path = dest.join(name);
+            std::fs::copy(src, &path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let home = dir.path().join("home");
+    install(&home, &progs, "/usr/bin:/bin", &[]);
+    let bin = home.join(".local/bin/ljos");
+    let mut child = Command::new(&bin).arg("30").spawn().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the stand-in exited before the replace"
+    );
+    let said = install(&home, &next, "/usr/bin:/bin", &[]);
+    assert!(!said.to_lowercase().contains("text file busy"), "{said}");
+    assert_eq!(
+        std::fs::read(&bin).unwrap(),
+        std::fs::read("/bin/true").unwrap()
+    );
+    assert!(Command::new(&bin).status().unwrap().success());
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "replacing the binary killed the process that was running it"
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+}

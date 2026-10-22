@@ -178,6 +178,23 @@ claimdag claimdag-cli v claimdag
 ljos-policyd ljos-policyd v ljos-policyd
 consensus ljos-consensus v ljos-consensus"
 
+# Replace DEST with SRC. Writing a binary that is executing fails with
+# "Text file busy"; a copy to a new name in the same directory, then a
+# rename, leaves the running process on the old inode.
+place_bin() {
+  src=$1 dest=$2
+  tmp=$(mktemp "$dest.XXXXXX") || die "could not stage $dest"
+  if ! cp "$src" "$tmp"; then
+    rm -f "$tmp"
+    die "could not copy $src to $dest"
+  fi
+  chmod 755 "$tmp" || { rm -f "$tmp"; die "could not mark $dest executable"; }
+  if ! mv -f "$tmp" "$dest"; then
+    rm -f "$tmp"
+    die "could not install $dest"
+  fi
+}
+
 source_build() {
   crate=$1 ver=$2
   command -v cargo >/dev/null 2>&1 ||
@@ -189,7 +206,10 @@ source_build() {
     say "  building $crate from source (no release build for $TARGET)"
     cargo install --locked --quiet --root "$TMP/cargo" "$crate" >&2
   fi
-  cp "$TMP"/cargo/bin/* "$BIN_DIR"/
+  for bin in "$TMP"/cargo/bin/*; do
+    [ -f "$bin" ] || continue
+    place_bin "$bin" "$BIN_DIR/$(basename "$bin")"
+  done
 }
 
 # What can check a build attestation here. gh gained `attestation` in
@@ -317,7 +337,7 @@ install_one() {
         continue
       fi
       [ -x "$FROM_DIR/$p" ] || die "$FROM_DIR/$p is missing"
-      cp "$FROM_DIR/$p" "$BIN_DIR/$p"
+      place_bin "$FROM_DIR/$p" "$BIN_DIR/$p"
     done
     printf '%s\n' "$repo" >> "$TMP/copied"
     return
@@ -361,8 +381,7 @@ install_one() {
       continue
     fi
     [ -n "$found" ] || die "$asset holds no $p"
-    cp "$found" "$BIN_DIR/$p"
-    chmod 755 "$BIN_DIR/$p"
+    place_bin "$found" "$BIN_DIR/$p"
   done
   label=$repo
   case $crate in *-mcp) label=$crate ;; esac
