@@ -273,7 +273,9 @@ struct WalkIn {
 }
 
 fn judge(line: &str, cwd: Option<&Path>) -> Verdict {
-    judge_depth(line, cwd, &WalkIn::default())
+    crate::cloud_hook::with_line_configs(named_http_configs(line, cwd), || {
+        judge_depth(line, cwd, &WalkIn::default())
+    })
 }
 
 fn judge_depth(line: &str, cwd: Option<&Path>, incoming: &WalkIn) -> Verdict {
@@ -518,8 +520,16 @@ fn protected_path_write(cmd: Option<&str>, words: &[String], cwd: Option<&Path>)
     if command_is_pure_read(cmd, words) || (cmd == "git" && git_invocation_is_read(words)) {
         return None;
     }
+    // A config curl or wget is told to load is read, not written.
+    let reads: Vec<usize> = http_config_args(words)
+        .into_iter()
+        .map(|(_, at)| at)
+        .collect();
     let hit = words
         .iter()
+        .enumerate()
+        .filter(|(at, _)| !reads.contains(at))
+        .map(|(_, word)| word)
         .find(|word| crate::cloud_hook::word_hits_protected(word, cwd))?;
     Some(disarm_why(&format!(
         "`{cmd}` writes {hit}, which can replace the pre-push hook or the config that names it"
@@ -4030,7 +4040,7 @@ fn curl_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) ->
     }
     for arg in curl_argv(words) {
         match arg {
-            CurlArg::Opt(hit, value) => {
+            CurlArg::Opt(hit, value, _) => {
                 opaque |=
                     apply_curl_opt(hit, value.as_deref(), cwd, &mut tune, &mut seen).is_some();
             }
@@ -4051,7 +4061,8 @@ fn curl_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) ->
 
 /// One option or URL of a curl command line.
 enum CurlArg {
-    Opt(CurlHit, Option<String>),
+    /// The option, its value, and the index of the word that holds it.
+    Opt(CurlHit, Option<String>, usize),
     /// An option the table does not name. Curl refuses an unknown short.
     Unknown {
         short: bool,
@@ -4065,6 +4076,7 @@ fn curl_argv(words: &[String]) -> Vec<CurlArg> {
     let mut i = 1usize;
     while i < words.len() {
         let word = words[i].as_str();
+        let here = i;
         i += 1;
         if word == "--" {
             out.extend(words[i..].iter().cloned().map(CurlArg::Url));
@@ -4079,6 +4091,7 @@ fn curl_argv(words: &[String]) -> Vec<CurlArg> {
                 out.push(CurlArg::Unknown { short: false });
                 continue;
             };
+            let split = hit.kind.takes_value() && attached.is_none();
             let value = if !hit.kind.takes_value() {
                 None
             } else if let Some(value) = attached {
@@ -4087,7 +4100,7 @@ fn curl_argv(words: &[String]) -> Vec<CurlArg> {
                 i += 1;
                 words.get(i - 1).cloned()
             };
-            out.push(CurlArg::Opt(hit, value));
+            out.push(CurlArg::Opt(hit, value, if split { i - 1 } else { here }));
             continue;
         }
         let Some(cluster) = word.strip_prefix('-').filter(|rest| !rest.is_empty()) else {
@@ -4100,18 +4113,60 @@ fn curl_argv(words: &[String]) -> Vec<CurlArg> {
                 break;
             };
             if !hit.kind.takes_value() {
-                out.push(CurlArg::Opt(hit, None));
+                out.push(CurlArg::Opt(hit, None, here));
                 continue;
             }
             let rest = &cluster[at + c.len_utf8()..];
-            let value = if rest.is_empty() {
+            let (value, held) = if rest.is_empty() {
                 i += 1;
-                words.get(i - 1).cloned()
+                (words.get(i - 1).cloned(), i - 1)
             } else {
-                Some(rest.to_string())
+                (Some(rest.to_string()), here)
             };
-            out.push(CurlArg::Opt(hit, value));
+            out.push(CurlArg::Opt(hit, value, held));
             break;
+        }
+    }
+    out
+}
+
+/// The config files a curl or wget command names, each with the index
+/// of the word that holds it.
+fn http_config_args(words: &[String]) -> Vec<(String, usize)> {
+    let cmd = words
+        .first()
+        .map(|word| word.rsplit('/').next().unwrap_or(word));
+    let named: Vec<(String, usize)> = match cmd {
+        Some("curl") => curl_argv(words)
+            .into_iter()
+            .filter_map(|arg| match arg {
+                CurlArg::Opt(hit, Some(value), at) if hit.long == "config" => Some((value, at)),
+                _ => None,
+            })
+            .collect(),
+        Some("wget") => wget_args(words)
+            .into_iter()
+            .filter(|(name, _, _)| *name == "config")
+            .map(|(_, value, at)| (value, at))
+            .collect(),
+        _ => Vec::new(),
+    };
+    named
+        .into_iter()
+        .filter(|(value, _)| !value.is_empty() && value != "-")
+        .collect()
+}
+
+/// Config files a curl or wget on `line` names. The guard reads one
+/// before the client does, so a write to it on the same line is refused.
+fn named_http_configs(line: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for l in crate::nested_lines(line, 0) {
+        for seg in crate::raw_segments(&l) {
+            let words = argv(&seg);
+            for (value, _) in http_config_args(&words) {
+                out.push(resolve_cfg(&value, cwd));
+            }
         }
     }
     out
@@ -4585,7 +4640,7 @@ fn wget_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) ->
     // the system wgetrc and the user file apply, and either can set
     // the method. The command line is read after an opaque file too.
     let opaque = wget_files(words, env, cwd, &mut tune).is_some();
-    for (name, value) in wget_args(words) {
+    for (name, value, _) in wget_args(words) {
         match name {
             "method" => tune.method = Some(value.to_ascii_uppercase()),
             "execute" => note_wget_exec(&value, &mut tune),
@@ -4640,11 +4695,12 @@ fn wget_long_name(word: &str) -> Option<&'static str> {
 
 /// The options in `words` the guard reads, by long name, each with its
 /// value, split or attached, in a short cluster or abbreviated.
-fn wget_args(words: &[String]) -> Vec<(&'static str, String)> {
+fn wget_args(words: &[String]) -> Vec<(&'static str, String, usize)> {
     let mut out = Vec::new();
     let mut i = 1usize;
     while i < words.len() {
         let word = words[i].as_str();
+        let here = i;
         i += 1;
         if word == "--" {
             break;
@@ -4657,15 +4713,15 @@ fn wget_args(words: &[String]) -> Vec<(&'static str, String)> {
             let Some(name) = wget_long_name(&name.to_ascii_lowercase()) else {
                 continue;
             };
-            let value = match attached {
-                _ if name == "no-config" => String::new(),
-                Some(value) => value.to_string(),
+            let (value, held) = match attached {
+                _ if name == "no-config" => (String::new(), here),
+                Some(value) => (value.to_string(), here),
                 None => {
                     i += 1;
-                    words.get(i - 1).cloned().unwrap_or_default()
+                    (words.get(i - 1).cloned().unwrap_or_default(), i - 1)
                 }
             };
-            out.push((name, value));
+            out.push((name, value, held));
             continue;
         }
         let Some(cluster) = word.strip_prefix('-').filter(|rest| !rest.is_empty()) else {
@@ -4677,14 +4733,14 @@ fn wget_args(words: &[String]) -> Vec<(&'static str, String)> {
                 continue;
             }
             let rest = &cluster[at + c.len_utf8()..];
-            let value = if rest.is_empty() {
+            let (value, held) = if rest.is_empty() {
                 i += 1;
-                words.get(i - 1).cloned().unwrap_or_default()
+                (words.get(i - 1).cloned().unwrap_or_default(), i - 1)
             } else {
-                rest.to_string()
+                (rest.to_string(), here)
             };
             if let Some((long, _)) = read {
-                out.push((long, value));
+                out.push((long, value, held));
             }
             break;
         }
@@ -4702,7 +4758,7 @@ enum WgetFiles {
 /// does when it scans the command before reading a file.
 fn wget_files_plan(words: &[String]) -> WgetFiles {
     let mut named = Vec::new();
-    for (name, value) in wget_args(words) {
+    for (name, value, _) in wget_args(words) {
         match name {
             "no-config" if named.is_empty() => return WgetFiles::Off,
             "config" => named.push(PathBuf::from(value)),
