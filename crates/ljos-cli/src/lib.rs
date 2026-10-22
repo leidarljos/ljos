@@ -46496,8 +46496,11 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// commit carries a bag `deedar check` accepts.
     #[test]
     fn a_box_finish_writes_no_bag_and_a_cloud_finish_writes_one() {
-        which::which("deedar").unwrap_or_else(|_| panic!("deedar is not on PATH"));
+        // After the env lock. A parallel test replaces PATH while it holds
+        // the lock, and a lookup before it sees that PATH and reports
+        // deedar missing.
         let _g = env_guard();
+        which::which("deedar").unwrap_or_else(|_| panic!("deedar is not on PATH"));
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("tracker");
         let project = root.join("Software/probe");
