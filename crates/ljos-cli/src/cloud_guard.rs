@@ -3743,8 +3743,13 @@ fn strip_host_port(hostport: &str) -> &str {
 fn is_github_host(host: &str) -> bool {
     host == "github.com"
         || host == "github.ghe.com"
+        || host == "ghcr.io"
+        || host == "githubusercontent.com"
         || host.ends_with(".github.com")
         || host.ends_with(".github.ghe.com")
+        || host.ends_with(".ghcr.io")
+        || host.ends_with(".githubusercontent.com")
+        || host.ends_with(".pkg.github.com")
 }
 
 fn http_ref_write(words: &[String]) -> Option<String> {

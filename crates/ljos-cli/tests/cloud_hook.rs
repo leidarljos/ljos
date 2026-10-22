@@ -659,6 +659,7 @@ fn github_clients_allow_only_a_resolved_get() {
         "curl --proto-default https -X DELETE api.github.com/repos/acme/widgets/git/refs/heads/main",
         "http DELETE api.github.com/repos/acme/widgets/git/refs/heads/main \"Authorization:token $GH_TOKEN\"",
         "curl -X POST --data-binary @pack https://x:$GH_TOKEN@github.com/acme/widgets.git/git-receive-pack",
+        "curl -X PUT https://ghcr.io/v2/acme/widgets/manifests/latest",
     ] {
         let hit = refused(line, here);
         assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {}", hit.reason);
