@@ -10,7 +10,7 @@
 
 use std::io::Read;
 use std::os::unix::process::CommandExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -252,8 +252,10 @@ impl Reader {
         }
         raw.retain(|msg| !tags(msg).iter().any(|t| EXCLUDED.contains(&t.as_str())));
         let truncated = cut || raw.len() > MESSAGES_MAX;
+        let root = self.mail_root()?;
         let mut messages = Vec::new();
         for msg in raw.into_iter().take(MESSAGES_MAX) {
+            confined(&root, msg)?;
             messages.push(self.message(msg)?);
         }
         Ok(Show {
@@ -262,6 +264,33 @@ impl Reader {
             messages,
             truncated,
         })
+    }
+
+    /// The mail root notmuch reads, resolved: `database.mail_root`, or
+    /// `database.path` when notmuch has no such key.
+    fn mail_root(&self) -> Result<PathBuf> {
+        let said = match self.config_get("database.mail_root") {
+            Ok(root) if !root.is_empty() => root,
+            _ => self.config_get("database.path")?,
+        };
+        let root = PathBuf::from(said);
+        if !root.is_absolute() {
+            bail!("mail: the notmuch mail root is not an absolute path");
+        }
+        root.canonicalize()
+            .context("mail: the notmuch mail root cannot be resolved")
+    }
+
+    fn config_get(&self, key: &str) -> Result<String> {
+        let said = self.run(&["config", "get", key], |stdout| {
+            let mut out = Vec::new();
+            stdout.take(4097).read_to_end(&mut out)?;
+            if out.len() > 4096 {
+                bail!("mail: notmuch said more than 4096 bytes for {key}");
+            }
+            Ok((String::from_utf8(out)?, true))
+        })?;
+        Ok(said.trim_end_matches('\n').to_string())
     }
 
     fn message(&self, msg: &Value) -> Result<Message> {
@@ -491,6 +520,35 @@ fn kill_group(child: &Mutex<Child>) {
         }
         let _ = child.kill();
     }
+}
+
+/// Every file notmuch has for `msg` is a regular file, not a symlink,
+/// whose real path is under `root`. The error names no path.
+fn confined(root: &Path, msg: &Value) -> Result<()> {
+    let files: Vec<&str> = match &msg["filename"] {
+        Value::String(one) => vec![one.as_str()],
+        Value::Array(many) => many.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+    if files.is_empty() {
+        bail!("mail: notmuch named no file for a message");
+    }
+    for file in files {
+        let path = Path::new(file);
+        let meta = path
+            .symlink_metadata()
+            .context("mail: a message file cannot be read")?;
+        if meta.file_type().is_symlink() {
+            bail!("mail: a message file is a symlink, so the thread is not shown");
+        }
+        let real = path
+            .canonicalize()
+            .context("mail: a message file cannot be resolved")?;
+        if !real.starts_with(root) || !meta.is_file() {
+            bail!("mail: a message file is outside the mail root, so the thread is not shown");
+        }
+    }
+    Ok(())
 }
 
 /// Messages of one thread in thread order. A node is `[message, replies]`.
