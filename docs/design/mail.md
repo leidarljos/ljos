@@ -80,10 +80,14 @@ precondition, not an option.
 
 ## The send gate
 
-1. A seat drafts. The outbox renders the exact RFC 5322 bytes at queue
-   time, with `Message-ID` and `Date` set, so the send path adds nothing.
+1. A seat drafts. The outbox renders the message at queue time, with
+   `Message-ID` and `Date` set, in one canonical form: RFC 5322 header
+   fields and body with LF line endings, no carriage return anywhere.
+   mailgate writes exactly those bytes to `sendmail -i -t`, and the MTA
+   turns each LF into CRLF on the wire. `-i` keeps a line holding only
+   `.` as text, and `-t` takes the recipients from `To` and `Cc`.
 2. Export. The approval file is plain text: a statement block, a blank
-   line, then the exact message bytes.
+   line, then the message bytes.
 
    ```
    ljos-outbox v1
@@ -92,10 +96,14 @@ precondition, not an option.
    expires <RFC 3339, at most 24 h out>
    nonce <16 random bytes, hex>
 
-   <exact RFC 5322 bytes to send>
+   <the message, LF line endings>
    ```
 
-   `H` is the sha256 of the whole file. The exporter refuses control
+   `H` is the sha256 of the message bytes after the statement block,
+   which are exactly the bytes mailgate writes to `sendmail` stdin.
+   mailgate hashes the bytes it is about to write and refuses on a
+   mismatch with `H`. The expiry and nonce are not in `H`; mailgate
+   checks them and spends the nonce. The exporter refuses control
    characters other than tab and newline, and the bidirectional overrides,
    anywhere in the message, so a terminal cannot hide text from the
    person reading it.
@@ -110,8 +118,9 @@ precondition, not an option.
    reference.
 6. mailgate checks the caller, that the card reference is unused, the
    expiry and the nonce, re-verifies the ballot, runs the policy and
-   content checks with its own copy of the deny file, and pipes the
-   message to the send wrapper exactly once. The nonce is spent whether
+   content checks with its own copy of the deny file, re-hashes the
+   message bytes against `H`, and writes them to `sendmail -i -t`
+   exactly once. The nonce is spent whether
    the send succeeds or fails, so a retry needs a new tap.
 
 The checks only ever refuse. Passing them grants nothing.

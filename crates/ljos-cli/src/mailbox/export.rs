@@ -7,10 +7,15 @@
 //! expires <RFC 3339, at most 24 h out>
 //! nonce <16 random bytes, hex>
 //!
-//! <exact RFC 5322 bytes to send>
+//! <the message, LF line endings>
 //! ```
 //!
-//! `H = sha256(file)` is what the ballot and the owner approve. The person
+//! The message is stored in one canonical form: LF line endings, written
+//! as is to `sendmail -i -t`, with the MTA turning LF into CRLF. `H` is
+//! sha256 of exactly those bytes, so mailgate can hash what it is about
+//! to write and refuse on a mismatch. `H` is what the ballot and the
+//! owner approve; the expiry and nonce are checked and spent by mailgate
+//! on their own. The person
 //! approving reads this file in a terminal or a chat card, so any byte
 //! that could hide or reorder text there is refused, not escaped: what
 //! they read must be exactly what is sent.
@@ -28,7 +33,7 @@ pub const MAX_LIFETIME: Duration = Duration::hours(24);
 pub struct Draft<'a> {
     pub id: &'a str,
     pub reachbook_hash: &'a str,
-    /// The exact RFC 5322 bytes, `Message-ID` and `Date` already set.
+    /// The message in its canonical form, `Message-ID` and `Date` set.
     pub message: &'a [u8],
 }
 
@@ -36,7 +41,7 @@ pub struct Draft<'a> {
 #[derive(Debug, Clone)]
 pub struct Approval {
     pub file: Vec<u8>,
-    /// `H`, sha256 of `file`, hex.
+    /// `H`: sha256 of the message bytes, the ones `sendmail` is given, hex.
     pub hash: String,
     pub nonce: String,
     pub expires: DateTime<Utc>,
@@ -80,7 +85,7 @@ pub fn export(draft: &Draft<'_>, expires: DateTime<Utc>, now: DateTime<Utc>) -> 
     )
     .into_bytes();
     file.extend_from_slice(draft.message);
-    let hash = hex::encode(Sha256::digest(&file));
+    let hash = hex::encode(Sha256::digest(draft.message));
     Ok(Approval {
         file,
         hash,

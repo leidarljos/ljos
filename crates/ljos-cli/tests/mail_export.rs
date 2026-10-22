@@ -1,5 +1,5 @@
 //! A draft exported as an approval file: a statement block, a blank
-//! line, the exact message bytes, and `H = sha256(file)`.
+//! line, the exact message bytes, and `H` = sha256 of those bytes.
 
 use chrono::{Duration, TimeZone as _, Utc};
 use ljos_cli::mailbox::export::{export, Draft};
@@ -50,12 +50,27 @@ fn the_file_is_the_statement_block_then_the_exact_bytes() {
     assert_eq!(nonce, got.nonce);
     assert_eq!(lines.len(), 5);
     assert_eq!(message, MESSAGE);
-    assert_eq!(got.hash, hex::encode(Sha256::digest(&got.file)));
+    assert_eq!(got.hash, hex::encode(Sha256::digest(MESSAGE.as_bytes())));
     assert_eq!(got.expires, expires);
 
     let again = export(&draft(MESSAGE), expires, now()).unwrap();
     assert_ne!(again.nonce, got.nonce);
-    assert_ne!(again.hash, got.hash);
+    assert_eq!(again.hash, got.hash, "H is the message, not the nonce");
+}
+
+#[test]
+fn the_hash_covers_the_bytes_sendmail_is_given_including_a_lone_dot() {
+    let dotted = MESSAGE.replace("See you at noon.\n", "See you at noon.\n.\nStill here.\n");
+    let got = export(&draft(&dotted), now() + Duration::hours(1), now()).unwrap();
+    assert!(got.file.ends_with(dotted.as_bytes()));
+    assert_eq!(got.hash, hex::encode(Sha256::digest(dotted.as_bytes())));
+}
+
+#[test]
+fn crlf_is_refused_because_the_stored_form_is_lf() {
+    let crlf = MESSAGE.replace('\n', "\r\n");
+    let err = export(&draft(&crlf), now() + Duration::hours(1), now()).unwrap_err();
+    assert!(err.to_string().contains("U+000D"), "{err}");
 }
 
 #[test]
