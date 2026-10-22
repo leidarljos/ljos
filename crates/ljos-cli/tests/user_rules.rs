@@ -7,6 +7,9 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+#[path = "common/terminal.rs"]
+mod terminal;
+
 fn read_http(stream: &mut impl Read) -> String {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 1024];
@@ -106,7 +109,22 @@ impl Home {
     }
 
     fn ljos(&self) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+        self.program(env!("CARGO_BIN_EXE_ljos"))
+    }
+
+    /// `ljos ARGS` typed at a terminal of the person's own.
+    fn typed(&self, args: &[&str]) -> Command {
+        let mut cmd = self.program(terminal::PYTHON);
+        cmd.args(terminal::shape(
+            "terminal",
+            env!("CARGO_BIN_EXE_ljos"),
+            args,
+        ));
+        cmd
+    }
+
+    fn program(&self, program: &str) -> Command {
+        let mut cmd = Command::new(program);
         cmd.env("HOME", self.root.path())
             .env("XDG_CONFIG_HOME", self.root.path().join(".config"))
             .env("XDG_DATA_HOME", self.root.path().join(".local/share"))
@@ -144,8 +162,7 @@ fn output_text(out: &std::process::Output) -> String {
 fn prefer_user_is_read_by_a_second_seat_and_promote_copies_a_fixture_lesson() {
     let home = Home::new();
     let wrote = home
-        .ljos()
-        .args([
+        .typed(&[
             "prefer",
             "--user",
             "--why",
