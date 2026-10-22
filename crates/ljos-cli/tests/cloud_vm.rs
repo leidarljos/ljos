@@ -550,6 +550,36 @@ fn a_failed_first_encoder_install_leaves_no_runtime() {
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
+fn an_encoder_directory_is_not_already_installed() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, rel) = encoder_machine(root.path());
+    let bin_dir = home.join(".local/bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        fs::copy(rel.join(name), bin_dir.join(name)).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(bin_dir.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let encoder = bin_dir.join("packset-embed");
+    fs::create_dir(&encoder).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&encoder, fs::Permissions::from_mode(0o755)).unwrap();
+    let soname = home.join(".local/lib/onnxruntime/libonnxruntime.so.1");
+    fs::create_dir_all(soname.parent().unwrap()).unwrap();
+    fs::write(&soname, b"planted").unwrap();
+    let name = "packset-embed-x86_64-unknown-linux-gnu.tar.gz";
+    let forged = format!("{}  {name}\n", "ab".repeat(32));
+    fs::write(rel.join(format!("{name}.sha256")), forged).unwrap();
+    let err = ljos_cli::cloud::up(false).unwrap_err().to_string();
+    assert!(err.contains("checksum mismatch"), "{err}");
+    assert!(err.contains("nothing was installed"), "{err}");
+    assert_eq!(fs::read(&soname).unwrap(), b"planted", "{err}");
+    assert!(encoder.is_dir(), "the directory was replaced: {err}");
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
 fn a_ci_job_downloads_no_encoder() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
