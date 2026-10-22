@@ -14231,7 +14231,19 @@ fn note_queue_row() -> Habitat {
         ok: false,
         state,
     };
-    let bytes = match doctor_state_log("note queue", &queue) {
+    // One descriptor for the state dir serves the queue read and the
+    // damaged-file listing, so both see the same directory.
+    let opened = match open_state_dir(&queue) {
+        Ok(opened) => Some(opened),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return damaged(doctor_state_read("note queue", &queue, Err(err)).unwrap_err()),
+    };
+    let read = opened
+        .as_ref()
+        .map_or(Ok((Vec::new(), None)), |(fd, name)| {
+            read_state_file_dated_at(fd, name, &queue, DOCTOR_READ_LIMIT)
+        });
+    let bytes = match doctor_state_read("note queue", &queue, read) {
         Ok(bytes) => bytes,
         Err(state) => return damaged(state),
     };
@@ -14243,7 +14255,9 @@ fn note_queue_row() -> Habitat {
             queue.display()
         ));
     }
-    let set_aside = note_queue::set_aside_in(&dir);
+    let set_aside = opened
+        .map(|(fd, _)| note_queue::set_aside_at(&fd, &dir))
+        .unwrap_or_default();
     let state = if let Some(lock) = note_queue::busy_in(&dir) {
         format!(
             "{QUEUE_BUSY}another process holds {}, so a note may be landing or leaving; {waiting} note(s) wait. Run `ljos doctor` again once it lets go",
@@ -22510,7 +22524,7 @@ impl From<StateRefusal> for std::io::Error {
 /// person pointed elsewhere, is followed as set. Every state-log read,
 /// write and rewrite goes through here, so the reader refuses the same
 /// links the writer does.
-fn open_state_dir(path: &Path) -> std::io::Result<(std::fs::File, std::ffi::CString)> {
+pub(crate) fn open_state_dir(path: &Path) -> std::io::Result<(std::fs::File, std::ffi::CString)> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::OpenOptionsExt;
     let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
@@ -22550,7 +22564,7 @@ fn open_state_dir(path: &Path) -> std::io::Result<(std::fs::File, std::ffi::CStr
 /// `O_NONBLOCK` is cleared once that check passes, so a later read of a
 /// real log waits for its bytes. A symlink fails the open (`ELOOP`) and is
 /// reported as one.
-fn open_regular_at(
+pub(crate) fn open_regular_at(
     dir: &std::fs::File,
     name: &std::ffi::CStr,
     path: &Path,
@@ -22627,9 +22641,20 @@ fn read_state_file_dated(
     path: &Path,
     limit: u64,
 ) -> std::io::Result<(Vec<u8>, Option<std::time::SystemTime>)> {
-    use std::io::Read;
     let (dir, name) = open_state_dir(path)?;
-    let mut file = match open_regular_at(&dir, &name, path, libc::O_RDONLY, 0) {
+    read_state_file_dated_at(&dir, &name, path, limit)
+}
+
+/// [`read_state_file_dated`] for `name` in the state dir already open as
+/// `dir`.
+fn read_state_file_dated_at(
+    dir: &std::fs::File,
+    name: &std::ffi::CStr,
+    path: &Path,
+    limit: u64,
+) -> std::io::Result<(Vec<u8>, Option<std::time::SystemTime>)> {
+    use std::io::Read;
+    let mut file = match open_regular_at(dir, name, path, libc::O_RDONLY, 0) {
         Ok(file) => file,
         Err(err) if err.raw_os_error() == Some(libc::ENOENT) => return Ok((Vec::new(), None)),
         Err(err) => return Err(err),
@@ -23016,9 +23041,18 @@ const DOCTOR_READ_LIMIT: u64 = 32 << 20;
 /// ahead of the clock than the grace is no live write either, since the
 /// kernel dates a write by the clock: it is a touch or a clock set back.
 fn doctor_state_log(what: &str, path: &Path) -> std::result::Result<Vec<u8>, String> {
+    doctor_state_read(what, path, read_state_file_dated(path, DOCTOR_READ_LIMIT))
+}
+
+/// [`doctor_state_log`]'s answer for a read of the log at `path`.
+fn doctor_state_read(
+    what: &str,
+    path: &Path,
+    read: std::io::Result<(Vec<u8>, Option<std::time::SystemTime>)>,
+) -> std::result::Result<Vec<u8>, String> {
     let damaged =
         |why: &dyn std::fmt::Display| format!("the {what} at {} is damaged: {why}", path.display());
-    let (bytes, modified) = match read_state_file_dated(path, DOCTOR_READ_LIMIT) {
+    let (bytes, modified) = match read {
         Ok(read) => read,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => return Err(damaged(&err)),

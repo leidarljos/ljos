@@ -583,7 +583,7 @@ fn is_dir(mode: libc::mode_t) -> bool {
     (mode & libc::S_IFMT) == libc::S_IFDIR
 }
 
-fn stat_at(dir: &std::fs::File, name: &std::ffi::CStr) -> Result<Option<libc::stat>> {
+pub(crate) fn stat_at(dir: &std::fs::File, name: &std::ffi::CStr) -> Result<Option<libc::stat>> {
     use std::os::fd::AsRawFd;
     // SAFETY: dir is an open directory fd and name is NUL-terminated. stat
     // is zeroed and only read when fstatat fills it.
@@ -673,7 +673,7 @@ fn clear_entry(dir: &std::fs::File, name: &std::ffi::CStr) -> Result<()> {
     Ok(())
 }
 
-fn list_names(dir: &std::fs::File) -> Result<Vec<std::ffi::CString>> {
+pub(crate) fn list_names(dir: &std::fs::File) -> Result<Vec<std::ffi::CString>> {
     use std::os::fd::AsRawFd;
     // SAFETY: dup makes an fd fdopendir can take. dir stays open.
     let fd = unsafe { libc::dup(dir.as_raw_fd()) };
