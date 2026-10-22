@@ -3352,6 +3352,68 @@ pub fn adopt(target: &str, force: bool, dry_run: bool) -> Result<String> {
     Ok(out)
 }
 
+/// Commands that pin each host whose log in `root` opened with no scope
+/// header, and which this machine has not pinned and has not seen a headed
+/// log from. Each command is the exact `ljos sync --adopt-legacy HOST`
+/// import prints.
+pub(crate) fn legacy_adopt_commands(root: &Path) -> Result<Vec<String>> {
+    let Some(scope) = scope_of_repo(root)? else {
+        return Ok(Vec::new());
+    };
+    let me = host();
+    let mut hosts = BTreeSet::new();
+    for name in list_beneath(root, ".ljos/atoms")? {
+        if !name.ends_with(".jsonl.age") {
+            continue;
+        }
+        let path = log_dir(root).join(&name);
+        let Some((host, scope_name)) = host_scope_from_log_path(&path, &scope) else {
+            continue;
+        };
+        if host.is_empty() || machine_name(&host) == me {
+            continue;
+        }
+        let rel = format!(".ljos/atoms/{name}");
+        let [canonical, _] = host_log_rels_for_scope(&host, &scope.name, &scope_name);
+        if canonical != rel {
+            continue;
+        }
+        let Some(bytes) = read_beneath(root, &rel)? else {
+            continue;
+        };
+        let Ok(Opened::Refused(line)) = open_log(root, &bytes, &host, &scope_name, &rel) else {
+            continue;
+        };
+        let cmd = format!("ljos sync --adopt-legacy {host}");
+        if line.contains(&cmd) {
+            hosts.insert(cmd);
+        }
+    }
+    Ok(hosts.into_iter().collect())
+}
+
+/// What `ljos doctor` says when a tracker still holds headerless logs.
+/// None when every opened log has its header, or none opened.
+pub(crate) fn legacy_doctor_state() -> Option<String> {
+    let roots = sync_roots().ok()?;
+    let mut cmds = BTreeSet::new();
+    for root in roots {
+        if let Ok(found) = legacy_adopt_commands(&root) {
+            cmds.extend(found);
+        }
+    }
+    if cmds.is_empty() {
+        None
+    } else {
+        Some(
+            cmds.into_iter()
+                .map(|cmd| format!("`{cmd}`"))
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    }
+}
+
 /// Read `target`'s logs from before the scope header as `target`'s, in
 /// each configured tracker repository.
 ///
@@ -8814,8 +8876,18 @@ mod tests {
             said.contains("alice+cloud.jsonl.age has no scope header"),
             "{said}"
         );
+        assert!(said.contains("`ljos sync --adopt-legacy alice`"), "{said}");
         assert!(
             said.contains("bob+cloud.jsonl.age has no scope header"),
+            "{said}"
+        );
+        assert!(said.contains("`ljos sync --adopt-legacy bob`"), "{said}");
+        assert_eq!(
+            legacy_adopt_commands(&fix.root).unwrap(),
+            vec![
+                "ljos sync --adopt-legacy alice".to_string(),
+                "ljos sync --adopt-legacy bob".to_string(),
+            ],
             "{said}"
         );
 
@@ -8965,7 +9037,16 @@ mod tests {
         ]);
         let said = fix.import();
         assert!(fix.held().is_empty(), "{said}");
-        assert!(said.contains("--adopt-legacy erin"), "{said}");
+        assert!(said.contains("`ljos sync --adopt-legacy erin`"), "{said}");
+        assert!(said.contains("`ljos sync --adopt-legacy frank`"), "{said}");
+        assert_eq!(
+            legacy_adopt_commands(&fix.root).unwrap(),
+            vec![
+                "ljos sync --adopt-legacy erin".to_string(),
+                "ljos sync --adopt-legacy frank".to_string(),
+            ],
+            "{said}"
+        );
 
         let pinned = adopt_legacy_in_repo(&fix.root, &fix.scope(), "erin").unwrap();
         assert!(
@@ -8973,6 +9054,11 @@ mod tests {
             "{pinned}"
         );
         assert!(!pinned.contains("grokbot"), "{pinned}");
+        assert_eq!(
+            legacy_adopt_commands(&fix.root).unwrap(),
+            vec!["ljos sync --adopt-legacy frank".to_string()],
+            "{pinned}"
+        );
         let said = fix.import();
         assert_eq!(fix.held(), vec!["Erin's old note."], "{said}");
         assert!(said.contains("erin: 1 cloud atoms taken"), "{said}");
