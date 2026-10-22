@@ -536,6 +536,16 @@ fn scope_is_configured(scope: &Scope, name: &str) -> bool {
 
 /// Seal `plain` to the recipients into `out`.
 fn seal(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
+    let sealed = seal_bytes(plain, recipients)?;
+    let tmp = out.with_extension("age.tmp");
+    std::fs::write(&tmp, sealed)?;
+    std::fs::rename(&tmp, out)?;
+    Ok(())
+}
+
+/// `plain` sealed to the recipients. age writes to a pipe, so the caller
+/// decides where the ciphertext lands.
+fn seal_bytes(plain: &str, recipients: &[String]) -> Result<Vec<u8>> {
     if recipients.is_empty() {
         bail!("sync: the scope names no recipients; add this machine's `ljos sync --key` to .ljos/sync.toml");
     }
@@ -543,34 +553,37 @@ fn seal(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
     for r in recipients {
         cmd.arg("-r").arg(r);
     }
-    let tmp = out.with_extension("age.tmp");
     let mut child = cmd
-        .arg("-o")
-        .arg(&tmp)
         .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .context("age not on PATH; install age")?;
-    use std::io::Write;
-    child
-        .stdin
-        .take()
-        .context("age: no stdin")?
-        .write_all(plain.as_bytes())?;
+    let mut stdin = child.stdin.take().context("age: no stdin")?;
+    let plain = plain.as_bytes().to_vec();
+    // age writes while it reads; a log past the pipe buffer would block
+    // both sides if stdin were written before stdout is drained.
+    let writer = std::thread::spawn(move || {
+        use std::io::Write;
+        stdin.write_all(&plain)
+    });
     let done = child.wait_with_output()?;
+    let wrote = writer
+        .join()
+        .map_err(|_| anyhow::anyhow!("age: stdin writer"))?;
     if !done.status.success() {
-        let _ = std::fs::remove_file(&tmp);
         bail!("age: {}", String::from_utf8_lossy(&done.stderr).trim());
     }
-    std::fs::rename(&tmp, out)?;
-    Ok(())
+    wrote?;
+    Ok(done.stdout)
 }
 
 /// The directory `rel` below `root`, opened one component at a time with
 /// `O_NOFOLLOW`. A tracker can commit `.ljos` or `.ljos/atoms` as a
 /// symlink to a local directory, and reading through it imports logs
-/// that never were in the tracker. None when one is missing.
-fn open_dir_beneath(root: &Path, rel: &str) -> Result<Option<std::fs::File>> {
+/// that never were in the tracker. `create` makes a missing component.
+/// None when one is missing.
+fn open_dir_beneath(root: &Path, rel: &str, create: bool) -> Result<Option<std::fs::File>> {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::fs::OpenOptionsExt;
     let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
@@ -588,7 +601,19 @@ fn open_dir_beneath(root: &Path, rel: &str) -> Result<Option<std::fs::File>> {
         walked.push(name);
         let cname = c_name(name)?;
         // SAFETY: dir is an open directory fd and cname is NUL-terminated.
-        let fd = unsafe { libc::openat(dir.as_raw_fd(), cname.as_ptr(), flags) };
+        let open =
+            |dir: &std::fs::File| unsafe { libc::openat(dir.as_raw_fd(), cname.as_ptr(), flags) };
+        let mut fd = open(&dir);
+        if fd < 0 && create && last_errno() == Some(libc::ENOENT) {
+            // SAFETY: as above; mkdirat makes one directory entry.
+            if unsafe { libc::mkdirat(dir.as_raw_fd(), cname.as_ptr(), 0o777) } < 0
+                && last_errno() != Some(libc::EEXIST)
+            {
+                return Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("sync: {}", walked.display()));
+            }
+            fd = open(&dir);
+        }
         if fd < 0 {
             let err = std::io::Error::last_os_error();
             return match err.raw_os_error() {
@@ -601,6 +626,10 @@ fn open_dir_beneath(root: &Path, rel: &str) -> Result<Option<std::fs::File>> {
         dir = unsafe { std::fs::File::from_raw_fd(fd) };
     }
     Ok(Some(dir))
+}
+
+fn last_errno() -> Option<i32> {
+    std::io::Error::last_os_error().raw_os_error()
 }
 
 fn c_name(name: &str) -> Result<std::ffi::CString> {
@@ -634,7 +663,7 @@ fn read_beneath(root: &Path, rel: &str) -> Result<Option<Vec<u8>>> {
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::fs::MetadataExt;
     let (parent, name) = split_rel(rel);
-    let Some(dir) = open_dir_beneath(root, parent)? else {
+    let Some(dir) = open_dir_beneath(root, parent, false)? else {
         return Ok(None);
     };
     let cname = c_name(name)?;
@@ -664,11 +693,60 @@ fn read_beneath(root: &Path, rel: &str) -> Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
+/// Replace `rel` below `root` with `bytes`, making missing directories,
+/// with no symlink at any component.
+fn write_beneath(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let (parent, name) = split_rel(rel);
+    let dir = open_dir_beneath(root, parent, true)?
+        .with_context(|| format!("sync: {} was not made", root.join(parent).display()))?;
+    let cname = c_name(name)?;
+    let ctmp = c_name(&format!(".{name}.tmp-{}", std::process::id()))?;
+    // SAFETY: dir is an open directory fd; both names are NUL-terminated.
+    unsafe { libc::unlinkat(dir.as_raw_fd(), ctmp.as_ptr(), 0) };
+    // SAFETY: as above. O_EXCL with O_NOFOLLOW makes a new file or fails.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            ctmp.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o666,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("sync: {}", root.join(rel).display()));
+    }
+    // SAFETY: fd is new, owned here, and opened with O_CLOEXEC.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let written = file.write_all(bytes);
+    drop(file);
+    // SAFETY: as above. renameat replaces the entry and follows no link.
+    let renamed = written.is_ok()
+        && unsafe {
+            libc::renameat(
+                dir.as_raw_fd(),
+                ctmp.as_ptr(),
+                dir.as_raw_fd(),
+                cname.as_ptr(),
+            )
+        } == 0;
+    if !renamed {
+        let err = std::io::Error::last_os_error();
+        // SAFETY: as above.
+        unsafe { libc::unlinkat(dir.as_raw_fd(), ctmp.as_ptr(), 0) };
+        written?;
+        return Err(err).with_context(|| format!("sync: {}", root.join(rel).display()));
+    }
+    Ok(())
+}
+
 /// Names in the directory `rel` below `root`, with no symlink at any
 /// component. Empty when it is missing.
 fn list_beneath(root: &Path, rel: &str) -> Result<Vec<String>> {
     use std::os::fd::IntoRawFd;
-    let Some(dir) = open_dir_beneath(root, rel)? else {
+    let Some(dir) = open_dir_beneath(root, rel, false)? else {
         return Ok(Vec::new());
     };
     let fd = dir.into_raw_fd();
@@ -699,6 +777,24 @@ fn list_beneath(root: &Path, rel: &str) -> Result<Vec<String>> {
     unsafe { libc::closedir(stream) };
     names.sort();
     Ok(names)
+}
+
+/// Remove the file `rel` below `root`, with no symlink at any directory.
+fn remove_beneath(root: &Path, rel: &str) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    let (parent, name) = split_rel(rel);
+    let Some(dir) = open_dir_beneath(root, parent, false)? else {
+        return Ok(());
+    };
+    let cname = c_name(name)?;
+    // SAFETY: dir is an open directory fd and cname is NUL-terminated.
+    if unsafe { libc::unlinkat(dir.as_raw_fd(), cname.as_ptr(), 0) } < 0
+        && last_errno() != Some(libc::ENOENT)
+    {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("sync: {}", root.join(rel).display()));
+    }
+    Ok(())
 }
 
 /// The public key written above an age identity (`# public key: age1...`).
@@ -922,16 +1018,13 @@ fn export_named_scope(
     let body = log_lines(atoms, scope_name, default, explicit_only);
     let count = body.lines().count();
     let plain = log_header(&host, scope_name) + &body;
-    std::fs::create_dir_all(log_dir(root))?;
     let [log_rel, digest_rel] = host_log_rels_for_scope(&host, primary_scope, scope_name);
-    let log = root.join(&log_rel);
-    let stamp = root.join(&digest_rel);
     let digest = format!(
         "{} {}\n",
         crate::work_id(&plain),
         crate::work_id(&recipients.join(","))
     );
-    if std::fs::read_to_string(&stamp).is_ok_and(|d| d == digest) {
+    if read_beneath(root, &digest_rel)?.is_some_and(|d| d == digest.as_bytes()) {
         return Ok(format!(
             "sync: {count} {} atoms unchanged since the last export\n",
             scope_name
@@ -940,13 +1033,13 @@ fn export_named_scope(
     if !age_on_path() {
         return Ok(age_missing_line());
     }
-    if let Err(err) = seal(&plain, recipients, &log) {
-        if age_missing(&err) {
-            return Ok(age_missing_line());
-        }
-        return Err(err);
-    }
-    std::fs::write(&stamp, digest)?;
+    let sealed = match seal_bytes(&plain, recipients) {
+        Ok(sealed) => sealed,
+        Err(err) if age_missing(&err) => return Ok(age_missing_line()),
+        Err(err) => return Err(err),
+    };
+    write_beneath(root, &log_rel, &sealed)?;
+    write_beneath(root, &digest_rel, digest.as_bytes())?;
     Ok(format!(
         "sync: exported {count} {} atoms to {log_rel}, sealed to {} recipient{}\n",
         scope_name,
@@ -1292,10 +1385,7 @@ fn extra_scope_of_host_file(name: &str, host: &str) -> Option<String> {
 
 fn drop_stale_scope_files(root: &Path, scope: &Scope) {
     for rel in stale_scope_rels(root, scope) {
-        let path = root.join(rel);
-        if path.is_file() {
-            let _ = std::fs::remove_file(path);
-        }
+        let _ = remove_beneath(root, &rel);
     }
 }
 
@@ -1823,7 +1913,7 @@ fn tracked_modes_are_regular(root: &Path, rel: &str) -> bool {
 }
 
 fn gone_log_state(root: &Path, rel: &str) -> GoneLog {
-    if open_dir_beneath(root, split_rel(rel).0).is_err() {
+    if open_dir_beneath(root, split_rel(rel).0, false).is_err() {
         return GoneLog::Refused;
     }
     let kind = worktree_kind(&root.join(rel));
