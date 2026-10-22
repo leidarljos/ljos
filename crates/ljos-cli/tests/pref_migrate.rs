@@ -985,3 +985,74 @@ fn a_kept_preference_keeps_its_clock() {
         "{quiet}"
     );
 }
+
+/// Another live record making the same claim would answer the successor
+/// once the original is closed, and would be taken for the person's copy.
+/// The raise is refused and written on the cutoff, and the original stays
+/// live.
+#[test]
+fn a_raise_another_record_would_answer_closes_nothing() {
+    let daemon = Daemon::start();
+    let seat = Seat::on(daemon.url.clone(), daemon.token.clone());
+    let typed = post_atom(
+        &daemon.url,
+        &daemon.token,
+        json!({
+            "schema": "inside.atom/v1",
+            "workspace": "seat",
+            "kind": "preference",
+            "level": "explicit",
+            "origin": "user-declared",
+            "text": TERMINAL,
+            "entities": ["seat:person", "horizon:standing"],
+            "source": {"harness": "person", "seat": "person", "session": "person", "via": "ljos"},
+        }),
+    );
+    let other = post_atom(
+        &daemon.url,
+        &daemon.token,
+        json!({
+            "schema": "inside.atom/v1",
+            "workspace": "seat",
+            "kind": "preference",
+            "level": "derived",
+            "origin": "agent-derived",
+            "text": "Keep the release notes somewhere.",
+            "entities": ["seat:claude"],
+            "source": {"via": "ljos", "basis": "agent"},
+        }),
+    );
+    ureq::post(&format!("{}/v1/atoms/update", daemon.url))
+        .set("Authorization", &format!("Bearer {}", daemon.token))
+        .send_json(json!({"workspace": "seat", "id": other["id"], "fields": {"text": TERMINAL}}))
+        .expect("POST /v1/atoms/update");
+
+    succeeded(
+        &seat.output(env!("CARGO_BIN_EXE_ljos"), &["prefer", "--review"]),
+        "review",
+    );
+    let after = atoms(&daemon.url, &daemon.token);
+    let original = after
+        .iter()
+        .find(|a| a["id"] == typed["id"])
+        .unwrap_or_else(|| panic!("the original was closed: {after:?}"));
+    assert!(basis(original).is_none(), "{original}");
+    let kept = after
+        .iter()
+        .find(|a| a["id"] == other["id"])
+        .unwrap_or_else(|| panic!("the other record is gone: {after:?}"));
+    assert_eq!(basis(kept), Some("agent"), "{kept}");
+    let cutoff = cutoffs(&after);
+    assert_eq!(cutoff.len(), 1, "{after:?}");
+    let refused = cutoff[0]["source"]["refused"].as_array().cloned();
+    assert!(
+        refused.unwrap_or_default().contains(&typed["id"]),
+        "{}",
+        cutoff[0]
+    );
+    assert!(
+        cutoff[0]["source"].get("pending").is_none(),
+        "{}",
+        cutoff[0]
+    );
+}
