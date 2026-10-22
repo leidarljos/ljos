@@ -182,7 +182,9 @@ The tracker pin file is `.ljos-seat-keys` at `$VISSUE_ROOT`, one
 
 Tally is pure over signed ballot entries and counts per question. A
 voter is a signing key fingerprint: two key strings are one voter when
-they differ only in hex case or in a small-order part.
+they differ only in hex case or in a small-order part. A seat is the
+part of the voter id after `/`, and the identity part is ignored:
+`alpha/inky` and `beta/inky` are one seat.
 
 - files that hold one ballot (one ballot id) under one voter are one
   ballot, whatever the hex case of their key and signature: a replayed
