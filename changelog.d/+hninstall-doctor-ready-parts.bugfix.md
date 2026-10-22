@@ -1,0 +1,1 @@
+The ready line of `ljos doctor` names only the parts whose rows are `ok`: memory, tracker, command guard. Before, it said `memory, tracker and command guard work` while the optional tracker row failed, as it does when `vissue identity` exits 1 outside a tracker. The short doctor, and a sitting's short report, now print each optional row that is off under that line, with its fix.
