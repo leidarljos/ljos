@@ -356,6 +356,8 @@ With no remote it only lists.
 A decision panel runs at most `LJOS_PANEL_CONCURRENCY` members at once, and
 the next starts as one exits. Unset, that is the machine's parallelism clamped
 to 4. `LJOS_MAX_PARALLEL` is the same knob. `0` starts every member.
+Each member sits as its persona: `LJOS_SEAT` and `VISSUE_AGENT` are the
+persona's name, not the opener's seat.
 
 ## Commands
 

@@ -9890,9 +9890,9 @@ pub fn panel_concurrency() -> usize {
 /// Start each member once fewer than `at_once` are running. The opener counts
 /// its own children rather than leaving the count to a shell: under dash,
 /// `jobs` inside a command substitution lists none.
-fn start_members(members: &[(PathBuf, Vec<String>)], at_once: usize) -> Result<()> {
+fn start_members(members: &[(String, PathBuf, Vec<String>)], at_once: usize) -> Result<()> {
     let mut running: Vec<std::process::Child> = Vec::new();
-    for (log, argv) in members {
+    for (persona, log, argv) in members {
         loop {
             running.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
             if running.len() < at_once.max(1) {
@@ -9900,7 +9900,7 @@ fn start_members(members: &[(PathBuf, Vec<String>)], at_once: usize) -> Result<(
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        running.push(spawn_member(argv, log)?);
+        running.push(spawn_member(persona, argv, log)?);
     }
     Ok(())
 }
@@ -9929,7 +9929,7 @@ pub fn open_decision_panel(prompt: &str, cwd: Option<&str>, log: &Path) -> Resul
     let briefs = runtime_dir().join(format!("panel-{issue}"));
     let wrote = panel(&issue, &briefs)?;
     append_log(log, &wrote);
-    let mut members: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    let mut members: Vec<(String, PathBuf, Vec<String>)> = Vec::new();
     for path in std::fs::read_dir(&briefs)
         .with_context(|| format!("read {}", briefs.display()))?
         .flatten()
@@ -9949,7 +9949,7 @@ pub fn open_decision_panel(prompt: &str, cwd: Option<&str>, log: &Path) -> Resul
         std::fs::write(&task_file, task)?;
         let argv = panel_member_argv(&task_file, cwd, &persona);
         let member_log = briefs.join(format!("{persona}.log"));
-        members.push((member_log, argv));
+        members.push((persona, member_log, argv));
     }
     let n = members.len();
     let at_once = match panel_concurrency() {
@@ -10035,10 +10035,12 @@ fn file_yes_no(parent: Option<&str>, prompt: &str) -> Result<String> {
     Ok(id)
 }
 
-/// One member, in a session of its own where `setsid` is on `PATH`.
+/// One member, seated as its persona, in a session of its own where
+/// `setsid` is on `PATH`. The opener's seat is not inherited: a member's
+/// ballot is its own seat's.
 /// `setsid` forks only when it starts as a process group leader, which a
 /// spawned child is not, so the handle returned is the member's own.
-fn spawn_member(argv: &[String], log: &Path) -> Result<std::process::Child> {
+fn spawn_member(persona: &str, argv: &[String], log: &Path) -> Result<std::process::Child> {
     if argv.is_empty() {
         bail!("panel member has no argv");
     }
@@ -10057,6 +10059,8 @@ fn spawn_member(argv: &[String], log: &Path) -> Result<std::process::Child> {
         c
     };
     cmd.env("LJOS_PANEL_CHILD", "1")
+        .env("LJOS_SEAT", persona)
+        .env("VISSUE_AGENT", persona)
         .stdin(std::process::Stdio::null())
         .stdout(file)
         .stderr(err)
@@ -56066,13 +56070,14 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     fn a_panel_runs_no_more_members_at_once_than_its_bound() {
         let dir = tempfile::tempdir().unwrap();
         let ledger = dir.path().join("ledger");
-        let members: Vec<(PathBuf, Vec<String>)> = (0..5)
+        let members: Vec<(String, PathBuf, Vec<String>)> = (0..5)
             .map(|n| {
                 let run = format!(
                     "echo + >> '{0}'; sleep 0.3; echo - >> '{0}'",
                     ledger.display()
                 );
                 (
+                    format!("m{n}"),
                     dir.path().join(format!("m{n}.log")),
                     vec!["sh".into(), "-c".into(), run],
                 )
@@ -56097,6 +56102,27 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             })
             .max();
         assert_eq!(peak, Some(2), "{seen}");
+    }
+
+    #[test]
+    fn a_decision_panel_member_sits_as_its_persona() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("seat");
+        let run = format!(
+            "printf '%s %s' \"$LJOS_SEAT\" \"$VISSUE_AGENT\" > '{}.tmp' && mv '{0}.tmp' '{0}'",
+            out.display()
+        );
+        let members = vec![(
+            "skeptic".to_string(),
+            dir.path().join("skeptic.log"),
+            vec!["sh".into(), "-c".into(), run],
+        )];
+        start_members(&members, 1).unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !out.exists() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "skeptic skeptic");
     }
 
     #[test]
