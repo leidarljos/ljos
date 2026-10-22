@@ -347,10 +347,11 @@ pub struct TrackerReport {
 /// signature check ([`crate::ballot_sig::seat_check`]): the newest
 /// `ballot-sig:` note of its voter names its choice, verifies, and is
 /// under the key `.ljos-seat-keys` pins for that voter and for no other
-/// voter, so one key does not count as several voters. A persona's or a
-/// judge's ballot is held to it too, since every cast signs. An unsigned
-/// ballot the tracker committed before signing began is legacy, as at the
-/// push gate. Only files are read, and git for the commit dates.
+/// seat or voter on the issue, so one key does not count as several
+/// voters. A persona's or a judge's ballot is held to it too, since every
+/// cast signs. An unsigned ballot the tracker committed before signing
+/// began is legacy, as at the push gate. Only files are read, and git for
+/// the commit dates.
 ///
 /// # Errors
 ///
@@ -397,6 +398,7 @@ pub fn check_tracker(root: &Path) -> Result<TrackerReport> {
                 crate::ballot_sig::recorded_at_in(root, issue, voter, choice)
                     .is_some_and(|t| t < crate::ballot_sig::SIGNING_SINCE)
             };
+            let cast: Vec<&str> = ballots.iter().map(|b| b.agent.as_str()).collect();
             for ballot in &ballots {
                 report.ballots += 1;
                 let seat = [(ballot.agent.as_str(), ballot.choice.as_str())];
@@ -409,7 +411,7 @@ pub fn check_tracker(root: &Path) -> Result<TrackerReport> {
                 let reason = problems
                     .into_iter()
                     .next()
-                    .or_else(|| shared_key(&ballot.agent, &pins));
+                    .or_else(|| shared_key(&ballot.agent, &pins, &cast));
                 let Some(reason) = reason else {
                     continue;
                 };
@@ -427,13 +429,20 @@ pub fn check_tracker(root: &Path) -> Result<TrackerReport> {
     Ok(report)
 }
 
-/// The other voters `pins` holds `voter`'s key for, as a reason. Hex in
-/// another case is the same key.
-fn shared_key(voter: &str, pins: &BTreeMap<String, String>) -> Option<String> {
-    let key = pins.get(voter)?;
+/// The other voters `pins` holds `voter`'s key for, as a reason. Keys are
+/// told apart by [`crate::ballot_sig::key_fingerprint`]. Two rows that
+/// [`voter_seat`] folds to one seat, such as `inky` and `inky@39u`, may
+/// share a key, unless both are among `cast`, the voters on this issue.
+fn shared_key(voter: &str, pins: &BTreeMap<String, String>, cast: &[&str]) -> Option<String> {
+    let key = crate::ballot_sig::key_fingerprint(pins.get(voter)?);
+    let seat = voter_seat(voter);
     let others: Vec<&str> = pins
         .iter()
-        .filter(|(other, k)| other.as_str() != voter && k.eq_ignore_ascii_case(key))
+        .filter(|(other, k)| {
+            other.as_str() != voter
+                && (voter_seat(other) != seat || cast.contains(&other.as_str()))
+                && crate::ballot_sig::key_fingerprint(k) == key
+        })
         .map(|(other, _)| other.as_str())
         .collect();
     (!others.is_empty()).then(|| {

@@ -260,6 +260,52 @@ fn one_key_pinned_for_two_voters_stands_for_neither() {
     let (ok, said) = tracker.check();
     assert!(!ok, "{said}");
     assert!(said.contains(&shared("twin-a", "twin-b")), "{said}");
+
+    // One secret signs under its key with a small-order part added.
+    let tracker = Tracker::new(&[ISSUE]);
+    tracker.cast(ISSUE, "twin-a", "bus", &key(8));
+    let mut order_two = [0xff; 32];
+    order_two[0] = 0xec;
+    order_two[31] = 0x7f;
+    let order_two = ed25519_dalek::VerifyingKey::from_bytes(&order_two).unwrap();
+    let twin = (key(8).verifying_key().to_edwards() + order_two.to_edwards()).compress();
+    let pins = format!("twin-a {hex}\ntwin-b {}\n", hex::encode(twin.to_bytes()));
+    std::fs::write(tracker.root.join(ballot_sig::PIN_FILE), pins).unwrap();
+    tracker.commit(None);
+    let (ok, said) = tracker.check();
+    assert!(!ok, "{said}");
+    assert!(said.contains(&shared("twin-a", "twin-b")), "{said}");
+}
+
+#[test]
+fn one_seat_pinned_under_two_names_shares_its_key_but_not_an_issue() {
+    let tracker = Tracker::new(&[ISSUE, "probe-r002"]);
+    tracker.cast(ISSUE, "inky", "rail", &key(1));
+    tracker.cast("probe-r002", "inky@39u", "bus", &key(1));
+    tracker.pin(&[("inky", &key(1)), ("inky@39u", &key(1))]);
+    tracker.commit(None);
+    let (ok, said) = tracker.check();
+    assert!(ok, "{said}");
+    assert!(
+        said.contains("record check: 2 ballots on 2 issues stand"),
+        "{said}"
+    );
+
+    tracker.cast(ISSUE, "inky@39u", "bus", &key(1));
+    tracker.commit(None);
+    let (ok, said) = tracker.check();
+    assert!(!ok, "{said}");
+    for (voter, other) in [("inky", "inky@39u"), ("inky@39u", "inky")] {
+        let want = format!(
+            "{BOARD}:{}: {ISSUE}: {voter}'s key is also pinned for {other}, so one key counts as several voters\n",
+            tracker.line_of(voter)
+        );
+        assert!(said.contains(&want), "want {want}{said}");
+    }
+    assert!(
+        said.contains("record check: 2 of 3 ballots on 2 issues do not stand"),
+        "{said}"
+    );
 }
 
 #[test]
