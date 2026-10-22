@@ -840,6 +840,7 @@ pub fn send(args: &Send<'_>) -> Result<String> {
 
 /// Start the wake of each recipient that set one, and say which. The
 /// message is already written, so a wake that fails changes nothing here.
+/// In push mode the detached wake pushes the sealed log before it fires.
 fn wake_after(m: &Outgoing) -> String {
     let events: Vec<super::wake::Event> =
         m.to.iter()
@@ -849,6 +850,8 @@ fn wake_after(m: &Outgoing) -> String {
                 msg: m.id.clone(),
                 issue: m.issue.clone(),
                 interrupt: m.interrupt,
+                // The detached wake discovers the log commit after it pushes.
+                commit: None,
             })
             .collect();
     let woken = super::wake::spawn(&events);
@@ -864,14 +867,51 @@ fn wake_after(m: &Outgoing) -> String {
 ///
 /// Listing does not write a receipt. `ljos hook --prompt` does, for each
 /// message it shows. A pack that does not answer, or that refuses mail, is
-/// an error. `ljos_inbox` calls this.
+/// an error. `ljos_inbox` calls this. This does not fetch the tracker;
+/// [`inbox_sync`] does.
 pub fn inbox(all: bool) -> Result<String> {
+    inbox_sync(all, None)
+}
+
+/// [`inbox`], after fetching the tracker when `until` is set.
+///
+/// `None` lists the pack as it stands. `Some("")` fetches the remote head,
+/// or the commit in `LJOS_WAKE_COMMIT` when that is set. `Some(commit)`
+/// fetches until that commit is present, or the remote head when it is
+/// not. A checkout with no remote is listed as it is. Fetch notes go to
+/// stderr. The returned text is the inbox.
+///
+/// # Errors
+///
+/// The named commit is not hex, a scope file does not parse, the import
+/// fails, or the pack does not answer. A fetch that fails still lists.
+pub fn inbox_sync(all: bool, until: Option<&str>) -> Result<String> {
+    if let Some(until) = until {
+        let named = commit_named(until);
+        let note = super::sync::fetch_for_inbox(named.as_deref())?;
+        if !note.trim().is_empty() {
+            eprint!("{note}");
+        }
+    }
     let atoms = load("inbox")?;
     let seat = super::seat_name();
     let seen = receipt_seen();
     let (text, keys) = render_inbox(&atoms, &seat, all, &seen);
     remember_receipts(&keys);
     Ok(text)
+}
+
+/// The commit `--sync` asked for. An empty flag means `LJOS_WAKE_COMMIT`
+/// when that is set, and otherwise the remote head.
+fn commit_named(until: &str) -> Option<String> {
+    let named = until.trim();
+    if !named.is_empty() {
+        return Some(named.to_string());
+    }
+    std::env::var("LJOS_WAKE_COMMIT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn already_read(atoms: &[Value], msg: &str, seat: &str) -> bool {
