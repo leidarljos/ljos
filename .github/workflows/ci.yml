@@ -179,6 +179,20 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+  # release.yml already builds on macos-latest. This job runs the
+  # parent-death and launcher tests there, which is the kqueue path.
+  # Those tests use a fake pack and do not need packsetd.
+  mcp-lifetime-macos:
+    name: mcp lifetime on macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: 1.97.1
+      - name: MCP lifetime
+        run: cargo test -p ljos --test mcp_lifetime
+
   deny:
     name: cargo deny check
     runs-on: ubuntu-latest

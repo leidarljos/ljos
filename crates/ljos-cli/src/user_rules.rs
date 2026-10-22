@@ -157,6 +157,7 @@ pub(crate) fn render_rules(rules: &[UserRule]) -> Result<String> {
 }
 
 fn store(rules: &[UserRule]) -> Result<()> {
+    let _durable = crate::bookkeep::durable_write();
     let path = rules_path().context("user rules: no home and no XDG_CONFIG_HOME")?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)

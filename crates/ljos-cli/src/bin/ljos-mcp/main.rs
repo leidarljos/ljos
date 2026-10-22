@@ -28,7 +28,14 @@ fn main() -> anyhow::Result<()> {
     let ended = runtime.block_on(serve());
     // Stdin is read on a blocking thread. After the parent dies with stdin
     // still open that read never returns, and a plain drop would wait on it.
-    runtime.shutdown_timeout(std::time::Duration::from_secs(2));
+    // A write still inside its own file or pack call is not that read: the
+    // cap then has to outlast the call, or the process exit cuts the write.
+    let cap = if ljos_cli::bookkeep::durable_pending() {
+        lifetime::settle_window()
+    } else {
+        std::time::Duration::from_secs(2)
+    };
+    runtime.shutdown_timeout(cap);
     ended
 }
 

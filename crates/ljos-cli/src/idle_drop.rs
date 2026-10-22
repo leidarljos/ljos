@@ -10,6 +10,7 @@ use std::path::Path;
 use std::time::Duration;
 
 const DEFAULT: Duration = Duration::from_secs(120);
+const ORPHAN_DEFAULT: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// How long the server sits without a call before it gives memory back.
 /// `LJOS_MCP_IDLE_DROP`, else `[mcp] idle_drop` in the `ljos.toml`
@@ -62,6 +63,58 @@ fn parse(raw: &str) -> Option<Duration> {
         Ok(found) if found.is_zero() => None,
         Ok(found) => Some(found),
         Err(_) => Some(DEFAULT),
+    }
+}
+
+/// How long an `ljos-mcp` with no client request may live when no editor
+/// or agent is still above it. `LJOS_MCP_ORPHAN_IDLE`, else `[mcp]
+/// orphan_idle` in the `ljos.toml` layers, else six hours. A bare number
+/// is seconds. `0` and `off` leave the server until the client or stdin
+/// ends it.
+#[must_use]
+pub fn orphan_after() -> Option<Duration> {
+    if let Ok(raw) = std::env::var("LJOS_MCP_ORPHAN_IDLE") {
+        if !raw.trim().is_empty() {
+            return parse_orphan(&raw);
+        }
+    }
+    let mut window = Some(ORPHAN_DEFAULT);
+    for path in crate::converge::config_paths(None) {
+        if let Some(set) = configured_orphan(&path) {
+            window = set;
+        }
+    }
+    window
+}
+
+fn configured_orphan(path: &Path) -> Option<Option<Duration>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value = toml::from_str::<toml::Value>(&text).ok()?;
+    match value.get("mcp")?.get("orphan_idle")? {
+        toml::Value::Integer(secs) => Some(u64::try_from(*secs).ok().and_then(window)),
+        toml::Value::String(raw) => Some(parse_orphan(raw)),
+        toml::Value::Boolean(false) => Some(None),
+        _ => None,
+    }
+}
+
+/// `raw` as a quiet window. A bare number is seconds, unlike
+/// [`crate::reap::parse_idle`], which reads a bare number as minutes.
+fn parse_orphan(raw: &str) -> Option<Duration> {
+    let raw = raw.trim();
+    if matches!(
+        raw.to_ascii_lowercase().as_str(),
+        "0" | "off" | "false" | "no" | "never"
+    ) {
+        return None;
+    }
+    if let Ok(secs) = raw.parse::<u64>() {
+        return window(secs);
+    }
+    match crate::reap::parse_idle(raw) {
+        Ok(found) if found.is_zero() => None,
+        Ok(found) => Some(found),
+        Err(_) => Some(ORPHAN_DEFAULT),
     }
 }
 
@@ -130,6 +183,30 @@ mod tests {
         assert_eq!(parse("0"), None);
         assert_eq!(parse("off"), None);
         assert_eq!(parse("soon"), Some(DEFAULT));
+    }
+
+    #[test]
+    fn orphan_idle_is_seconds_and_off_leaves_the_server() {
+        assert_eq!(parse_orphan("30"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_orphan("5m"), Some(Duration::from_secs(300)));
+        assert_eq!(parse_orphan("0"), None);
+        assert_eq!(parse_orphan("off"), None);
+        assert_eq!(parse_orphan("soon"), Some(ORPHAN_DEFAULT));
+    }
+
+    #[test]
+    fn ljos_toml_sets_orphan_idle_under_mcp() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("ljos.toml");
+        std::fs::write(&file, "[mcp]\norphan_idle = 30\n").unwrap();
+        assert_eq!(
+            configured_orphan(&file),
+            Some(Some(Duration::from_secs(30)))
+        );
+        std::fs::write(&file, "[mcp]\norphan_idle = \"off\"\n").unwrap();
+        assert_eq!(configured_orphan(&file), Some(None));
+        std::fs::write(&file, "[mcp]\nidle_drop = 30\n").unwrap();
+        assert_eq!(configured_orphan(&file), None);
     }
 
     #[test]
