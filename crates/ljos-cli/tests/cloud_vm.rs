@@ -1853,9 +1853,9 @@ fn a_signed_handover_is_not_signed_again_by_the_machine_key() {
     assert_eq!(fs::read(&host).unwrap(), vec![8u8; 32]);
 }
 
-/// Pin `seat`'s key in a commit dated long before slots began, as the
-/// seats a tracker held before then were pinned, and push it.
-fn pin_standing(repo: &Path, seat: &str) -> String {
+/// Pin `seat` at author time `unix` and push it. The date is what a tracker
+/// writer can set; the standing list does not read it.
+fn pin_at(repo: &Path, seat: &str, unix: &str) -> String {
     let path = ljos_cli::cloud::prepare_seat_key(seat).unwrap();
     let key = ljos_cli::ballot_sig::load_or_create(&path).unwrap();
     let (public, _) = ljos_cli::ballot_sig::signed_hex(&key, b"pin");
@@ -1868,8 +1868,8 @@ fn pin_standing(repo: &Path, seat: &str) -> String {
         .arg("-C")
         .arg(repo)
         .args(["commit", "-q", "-m", &format!("pin {seat}")])
-        .env("GIT_AUTHOR_DATE", "@1700000000 +0000")
-        .env("GIT_COMMITTER_DATE", "@1700000000 +0000")
+        .env("GIT_AUTHOR_DATE", format!("@{unix} +0000"))
+        .env("GIT_COMMITTER_DATE", format!("@{unix} +0000"))
         .output()
         .unwrap();
     assert!(out.status.success(), "{out:?}");
@@ -1877,8 +1877,16 @@ fn pin_standing(repo: &Path, seat: &str) -> String {
     public
 }
 
-/// A box clone whose seat `ljosbot` is pinned from before slots began,
-/// over an origin holding `issues` on one board.
+/// Pin a standing seat with an author date after slots began, and push it.
+/// The list makes the seat standing. The date would refuse it if the gate
+/// still trusted git time.
+fn pin_standing(repo: &Path, seat: &str) -> String {
+    pin_at(repo, seat, "1792700000")
+}
+
+/// A box clone whose seat `ljosbot` is on the standing list, over an
+/// origin holding `issues` on one board. The pin's author date is after
+/// slots began.
 fn slot_world(root: &Path, issues: &[&str]) -> (PathBuf, PathBuf) {
     isolate_git(root);
     clear_agent_ids();
@@ -1993,28 +2001,72 @@ fn a_run_ballot_counts_for_a_push_under_its_slot_and_not_without_one() {
     let bare = ljos_cli::check_seat_signatures("probe-bare", &rows, &personas).unwrap_err();
     assert!(
         bare.contains(&format!(
-            "{seat} was first pinned after slots began, and no slot on probe-bare names it"
+            "{seat} is not a standing seat, and no slot on probe-bare names it"
         )),
         "{bare}"
     );
+}
 
-    std::env::set_var("LJOS_SEAT", "inky");
-    std::env::set_var("VISSUE_AGENT", "inky");
-    let key = ljos_cli::cloud::prepare_seat_key("inky").unwrap();
-    let key = ljos_cli::ballot_sig::load_or_create(&key).unwrap();
-    let (public, _) = ljos_cli::ballot_sig::signed_hex(&key, b"pin");
-    let pins = box_repo.join(".ljos-seat-keys");
-    let text = fs::read_to_string(&pins).unwrap() + &format!("inky {public}\n");
-    fs::write(&pins, text).unwrap();
-    git(
-        &box_repo,
-        &["commit", "-q", "-m", "pin inky", ".ljos-seat-keys"],
+/// A pin whose author date is before slots began does not make a seat
+/// standing, and a standing seat still launches when its pin is dated after.
+#[test]
+fn a_backdated_pin_does_not_make_a_standing_seat() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_origin, repo) = slot_world(root.path(), &["probe-bare"]);
+    let public = pin_at(&repo, "mallory", "1700000000");
+    let needle = format!("-Smallory {public}");
+    let when = git(
+        &repo,
+        &[
+            "log",
+            "-1",
+            "--format=%at",
+            &needle,
+            "--",
+            ".ljos-seat-keys",
+        ],
     );
+    let when: i64 = when.trim().parse().unwrap();
+    assert!(
+        when < ljos_cli::slot::SLOTS_SINCE,
+        "the forged author time {when} is not before slots"
+    );
+
+    std::env::set_var("LJOS_SEAT", "mallory");
+    std::env::set_var("VISSUE_AGENT", "mallory");
     let err = ljos_cli::slot::write("probe-bare", "ridley-review", "grok-4", "feedface0002abcd")
         .unwrap_err()
         .to_string();
+    assert!(err.contains("mallory is not a standing seat"), "{err}");
+
+    let layout = vissue_core::Layout::resolve(None, None).unwrap();
+    vissue_core::ops::vote_with(
+        &layout,
+        "probe-bare",
+        Some("ship"),
+        "mallory",
+        Some("none"),
+        None,
+    )
+    .unwrap();
+    let signed = ljos_cli::ballot_sig::sign_own_ballot("probe-bare").unwrap();
+    assert!(signed.contains("ballot signed"), "{signed}");
+    let rows = [serde_json::json!({"agent": "mallory", "choice": "ship"})];
+    let bare =
+        ljos_cli::check_seat_signatures("probe-bare", &rows, &std::collections::BTreeSet::new())
+            .unwrap_err();
     assert!(
-        err.contains("inky was first pinned after slots began"),
-        "{err}"
+        bare.contains("mallory is not a standing seat, and no slot on probe-bare names it"),
+        "{bare}"
+    );
+
+    pin_at(&repo, "inky", "1792700000");
+    std::env::set_var("LJOS_SEAT", "inky");
+    std::env::set_var("VISSUE_AGENT", "inky");
+    let said = ljos_cli::slot::write("probe-bare", "ridley-review", "grok-4", "feedface0002abcd");
+    assert!(
+        said.is_ok(),
+        "a standing seat dated after slots was refused: {said:?}"
     );
 }

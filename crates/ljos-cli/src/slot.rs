@@ -4,11 +4,11 @@
 //! The run mints its own key on its machine, so the slot names the seat
 //! before any key is pinned for it.
 //!
-//! A pin alone is what any tracker writer can make, so a seat the tracker
-//! first pinned after slots began ([`SLOTS_SINCE`]) counts toward a push
-//! cite only under a slot on that issue ([`problems`]). The seats pinned
-//! before then stand as they were. A tracker that is not a git repository
-//! cannot say when a pin was made, and every seat on it stands.
+//! A pin alone is what any tracker writer can make, and the author date on
+//! that commit is whatever the writer sets. The seats that stood when
+//! slots began are a list in this binary ([`standing`]). Any other seat
+//! counts toward a push cite only under a slot on that issue
+//! ([`problems`]), on a git tracker and on any other.
 
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::SigningKey;
@@ -19,10 +19,25 @@ use crate::ballot_sig;
 /// The note prefix a slot rides under.
 pub const SLOT_NOTE: &str = "slot: ";
 
-/// The commit time of the slot change. A seat whose pin the tracker first
-/// committed before it stands; one pinned since is a run seat and needs
-/// a slot.
+/// When the standing list was frozen: the slot change, 2026-10-21T23:48:25Z.
+/// The list is the policy. This instant is not compared with a git time.
 pub const SLOTS_SINCE: i64 = 1_792_626_505;
+
+/// Seats that stood at [`SLOTS_SINCE`]. One name per line. A `#` line is a
+/// comment.
+const STANDING_SEATS: &str = include_str!("standing_seats.txt");
+
+/// Whether `seat` stood when slots began. A standing seat needs no slot
+/// and may sign one. Any other seat is a run seat.
+#[must_use]
+pub fn standing(seat: &str) -> bool {
+    let seat = seat.trim();
+    !seat.is_empty()
+        && STANDING_SEATS.lines().any(|line| {
+            let line = line.trim();
+            !line.is_empty() && !line.starts_with('#') && line == seat
+        })
+}
 
 /// A slot note's fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,8 +117,8 @@ pub fn sign(
 ///
 /// No seat names the launcher, the launcher has no pinned key or holds
 /// another one, the run's seat is the launcher or is already pinned, or
-/// the tracker did not take the note. A launcher first pinned after slots
-/// began is refused too: no slot it signs would count.
+/// the tracker did not take the note. A launcher that is not a standing
+/// seat is refused too: no slot it signs would count.
 pub fn write(issue: &str, seat: &str, model: &str, run: &str) -> Result<String> {
     let launcher = ballot_sig::own_voter()
         .context("slot: no seat to sign as; set LJOS_SEAT to the launching seat")?;
@@ -133,9 +148,9 @@ pub fn write(issue: &str, seat: &str, model: &str, run: &str) -> Result<String> 
             &mine[..12]
         );
     }
-    if pinned_at(&launcher, pinned).is_some_and(|t| t >= SLOTS_SINCE) {
+    if !standing(&launcher) {
         bail!(
-            "slot: {launcher} was first pinned after slots began, so no slot it signs counts; a seat pinned before then launches"
+            "slot: {launcher} is not a standing seat, so no slot it signs counts; a standing seat launches"
         );
     }
     let note = sign(&key, issue, &seat, model, run, &launcher);
@@ -150,13 +165,13 @@ pub fn write(issue: &str, seat: &str, model: &str, run: &str) -> Result<String> 
     ))
 }
 
-/// Why the run seats among `seats` do not count on `issue`. A seat first
-/// pinned before [`SLOTS_SINCE`] needs no slot. A later one needs a slot
-/// in `notes` that names it and verifies, signed under the pin of another
-/// seat pinned before then, and recorded no later than its own pin, so
-/// the key the slot vouches for is one the run minted after it. With
-/// `pinned_at` the first commit of a seat's pin and `noted_at` that of a
-/// note, `None` from `pinned_at` is a tracker that cannot say.
+/// Why the run seats among `seats` do not count on `issue`. A seat on the
+/// standing list needs no slot. Any other needs a slot in `notes` that
+/// names it and verifies, signed under the pin of a standing seat, and
+/// recorded no later than its own pin, so the key the slot vouches for is
+/// one the run minted after it. `pinned_at` is the first commit of a
+/// seat's pin and `noted_at` that of a note. A missing time skips only
+/// that order check: the seat still needs the slot.
 #[must_use]
 pub fn problems(
     issue: &str,
@@ -166,12 +181,13 @@ pub fn problems(
     pinned_at: &dyn Fn(&str, &str) -> Option<i64>,
     noted_at: &dyn Fn(&str) -> Option<i64>,
 ) -> Vec<String> {
-    let since = |seat: &str| pins.get(seat).and_then(|key| pinned_at(seat, key));
+    let pinned_time = |seat: &str| pins.get(seat).and_then(|key| pinned_at(seat, key));
     let mut out = Vec::new();
     for (voter, _) in seats {
-        let Some(pinned) = since(voter).filter(|t| *t >= SLOTS_SINCE) else {
+        if standing(voter) {
             continue;
-        };
+        }
+        let pinned = pinned_time(voter);
         let mut why = None;
         let mut counted = false;
         for (note, slot) in notes.iter().filter_map(|n| Some((n, parse(n)?))) {
@@ -187,10 +203,10 @@ pub fn problems(
                 Some(key) if *key != slot.key => Some(format!(
                     "{voter}'s slot is signed by a key other than {launcher}'s pinned one"
                 )),
-                Some(_) if since(launcher).is_some_and(|t| t >= SLOTS_SINCE) => Some(format!(
-                    "{voter}'s slot is from {launcher}, itself first pinned after slots began"
+                Some(_) if !standing(launcher) => Some(format!(
+                    "{voter}'s slot is from {launcher}, which is not a standing seat"
                 )),
-                Some(_) if noted_at(note).is_some_and(|t| t > pinned) => {
+                Some(_) if pinned.is_some_and(|p| noted_at(note).is_some_and(|t| t > p)) => {
                     Some(format!("{voter}'s key was pinned before its slot"))
                 }
                 Some(_) => None,
@@ -207,9 +223,7 @@ pub fn problems(
         }
         if !counted {
             out.push(why.unwrap_or_else(|| {
-                format!(
-                    "{voter} was first pinned after slots began, and no slot on {issue} names it"
-                )
+                format!("{voter} is not a standing seat, and no slot on {issue} names it")
             }));
         }
     }
@@ -293,9 +307,9 @@ mod tests {
         hex::encode(k.verifying_key().to_bytes())
     }
 
-    /// `ljosbot` and `inky` pinned before slots began, `mallory` and the
-    /// run seat after; the run's pin lands at `AFTER + 10`, and every
-    /// note at `AFTER` unless `late` names it.
+    /// `ljosbot` and `inky` are standing seats. `mallory` and the run seat
+    /// are not. The run's pin lands at `AFTER + 10`, and every note at
+    /// `AFTER` unless `late` names it.
     fn check(notes: &[String], late: Option<&str>) -> Vec<String> {
         let pins: BTreeMap<String, String> = [
             ("ljosbot", public(&key(1))),
@@ -335,7 +349,7 @@ mod tests {
         let none = check(&[], None);
         assert_eq!(
             none,
-            vec!["review-r1 was first pinned after slots began, and no slot on d-1 names it"]
+            vec!["review-r1 is not a standing seat, and no slot on d-1 names it"]
         );
         let other = sign(&key(1), "d-1", "review-r2", "grok", "r2", "ljosbot");
         assert_eq!(check(&[other], None), none);
@@ -353,9 +367,9 @@ mod tests {
         let forged = sign(&key(3), "d-1", "review-r1", "grok", "r1", "ljosbot");
         assert!(refused(forged, false).contains("other than ljosbot's pinned one"));
         let minted = sign(&key(3), "d-1", "review-r1", "grok", "r1", "mallory");
-        assert!(refused(minted, false).contains("itself first pinned after slots began"));
+        assert!(refused(minted, false).contains("not a standing seat"));
         let own = sign(&key(4), "d-1", "review-r1", "grok", "r1", "review-r1");
-        assert!(refused(own, false).contains("itself first pinned after slots began"));
+        assert!(refused(own, false).contains("not a standing seat"));
         let stranger = sign(&key(5), "d-1", "review-r1", "grok", "r1", "nobody");
         assert!(refused(stranger, false).contains("no pinned key"));
         let late = sign(&key(1), "d-1", "review-r1", "grok", "r1", "ljosbot");
@@ -370,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tracker_that_cannot_order_pins_needs_no_slot() {
+    fn a_seat_off_the_list_needs_a_slot_when_the_tracker_has_no_clock() {
         let pins: BTreeMap<String, String> = [("review-r1".to_string(), public(&key(4)))].into();
         let p = problems(
             "d-1",
@@ -380,7 +394,20 @@ mod tests {
             &|_, _| None,
             &|_| None,
         );
-        assert!(p.is_empty(), "{p:?}");
+        assert_eq!(
+            p,
+            vec!["review-r1 is not a standing seat, and no slot on d-1 names it"]
+        );
+    }
+
+    #[test]
+    fn the_standing_list_names_those_seats_and_skips_comments() {
+        assert!(standing("ljosbot"));
+        assert!(standing("inky"));
+        assert!(standing("disk-saver"));
+        assert!(!standing("mallory"));
+        assert!(!standing("# Seats that stood"));
+        assert!(!standing(""));
     }
 
     #[test]
