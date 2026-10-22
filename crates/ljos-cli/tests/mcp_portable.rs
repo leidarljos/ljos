@@ -345,6 +345,44 @@ fn onboard_writes_an_absolute_command_when_path_points_to_another_install() {
     );
 }
 
+/// Doctor warns when a bare `ljos-mcp` resolves to a stale copy earlier on
+/// PATH and says to run onboard. Onboard has to change the command, or
+/// the next doctor warns again.
+#[test]
+fn onboard_replaces_a_bare_command_that_runs_another_binary() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join(".cargo/bin");
+    install_pair(&bin);
+    let stale = root.path().join("stale/bin");
+    stub(&stale.join("ljos-mcp"));
+    let config = home.join(".codex/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let bare = "[mcp_servers.ljos]\ncommand = \"ljos-mcp\"\nargs = []\n";
+    fs::write(&config, bare).unwrap();
+    let path = format!("{}:{}:/usr/bin:/bin", stale.display(), bin.display());
+    let out = onboard_with_path(
+        &bin.join("ljos"),
+        &home,
+        &path,
+        &["onboard", "--harness", "codex"],
+    );
+    assert!(out.status.success(), "{}", said(&out));
+    let text = fs::read_to_string(&config).unwrap();
+    assert_eq!(
+        toml_command(&text),
+        bin.join("ljos-mcp").display().to_string(),
+        "{text}\n{}",
+        said(&out)
+    );
+
+    fs::write(&config, bare).unwrap();
+    let out = onboard(&bin.join("ljos"), &home, &["onboard", "--harness", "codex"]);
+    assert!(out.status.success(), "{}", said(&out));
+    let text = fs::read_to_string(&config).unwrap();
+    assert_eq!(toml_command(&text), "ljos-mcp", "{text}");
+}
+
 #[test]
 fn onboard_rewrites_only_the_ljos_entry_in_toml() {
     let root = tempfile::tempdir().unwrap();
