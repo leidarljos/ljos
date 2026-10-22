@@ -845,15 +845,29 @@ fn runner_at(
     let (runner, root) = runner_below(file, &roots, &store)?;
     let owners = pinned_walk(file, expect)?;
     let at = root.components().count().checked_sub(1)?;
-    if root.parent() == Some(store.as_path())
-        && !store_keeps(*owners.get(at.checked_sub(1)?)?, owners[at], person)
-    {
-        return None;
-    }
-    owners[at..]
-        .iter()
-        .all(|dir| person_keeps(*dir, person))
-        .then_some(runner)
+    let in_store = root.parent() == Some(store.as_path());
+    walk_kept(&owners, at, in_store, person).then_some(runner)
+}
+
+/// Whether the owners [`pinned_walk`] read leave a file to the person,
+/// its install root being at `at`. The directory holding the root, the
+/// root, and all below it are kept by the person ([`person_keeps`]),
+/// since whoever may write the root's directory may rename the root.
+/// For an entry of a Nix store, the store and the entry are as Nix keeps
+/// them ([`store_keeps`]) instead.
+fn walk_kept(owners: &[Owner], at: usize, in_store: bool, person: &Person) -> bool {
+    let (Some(&above), Some(&root)) = (
+        at.checked_sub(1).and_then(|above| owners.get(above)),
+        owners.get(at),
+    ) else {
+        return false;
+    };
+    let top = if in_store {
+        store_keeps(above, root, person)
+    } else {
+        person_keeps(above, person)
+    };
+    top && owners[at..].iter().all(|dir| person_keeps(*dir, person))
 }
 
 /// The runner `pid` is, from the file the kernel runs it from, never
@@ -1447,6 +1461,73 @@ mod tests {
             runner_of_file(&grok, Some(&home), &store, &person, None),
             None
         );
+    }
+
+    /// Whoever may write the directory an install root sits in may swap
+    /// the root, so that directory is judged as the root is: each root
+    /// under the person's home is refused once its own directory is
+    /// writable by anyone or by a group the person shares.
+    #[test]
+    fn a_root_in_a_directory_others_may_write_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let base = tempfile::Builder::new()
+            .prefix(".ljos-above-")
+            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .unwrap();
+        let home = base.path().join("u");
+        let store = PathBuf::from(NIX_STORE);
+        let person = Person::new(&SystemAccounts);
+        let staff = FakeAccounts {
+            user: Some("u"),
+            group: "staff",
+            members: &["u", "v"],
+            primary: vec![person.uid],
+        };
+        let sharing = Person::new(&staff);
+        let mut files: Vec<PathBuf> = vec![
+            home.join(".local/bin/claude"),
+            home.join(".cargo/bin/codex"),
+            home.join(".npm-global/lib/node_modules/@anthropic-ai/claude-code/cli.js"),
+        ];
+        files.extend(
+            HOOK_RUNNERS
+                .iter()
+                .map(|(name, _)| home.join(".local/share").join(name).join(name)),
+        );
+        for file in &files {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "").unwrap();
+        }
+        let set = |dir: &Path, mode| {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        for root in install_roots(Some(&home))
+            .iter()
+            .filter(|r| r.starts_with(&home))
+        {
+            let file = files.iter().find(|f| f.starts_with(root)).unwrap();
+            let above = root.parent().unwrap();
+            let runner = |who| runner_of_file(file, Some(&home), &store, who, None);
+            assert!(runner(&person).is_some(), "{}", root.display());
+            set(above, 0o757);
+            assert_eq!(runner(&person), None, "{}", root.display());
+            set(above, 0o775);
+            assert_eq!(runner(&sharing), None, "{}", root.display());
+            set(above, 0o755);
+        }
+
+        let uid = person.uid;
+        let owner = |uid, mode| Owner {
+            uid,
+            gid: person.gid,
+            mode,
+        };
+        let walk = |above| [owner(0, 0o755), above, owner(uid, 0o755), owner(uid, 0o755)];
+        assert!(walk_kept(&walk(owner(uid, 0o755)), 2, false, &person));
+        assert!(walk_kept(&walk(owner(0, 0o755)), 2, false, &person));
+        assert!(!walk_kept(&walk(owner(uid + 1, 0o755)), 2, false, &person));
+        assert!(!walk_kept(&walk(owner(uid, 0o757)), 2, false, &person));
+        assert!(!walk_kept(&walk(owner(uid, 0o775)), 2, false, &sharing));
     }
 
     /// The file judged is the one opened. A directory swapped after the
