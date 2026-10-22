@@ -28830,24 +28830,61 @@ pub(crate) enum Stored {
 /// How long a read waits for the pack to answer for one atom id.
 const ATOM_NOW_MS: u64 = 400;
 
-/// Atom `id` as this seat's pack answers for it now, asked inside
+/// Atom `id` as this seat's pack answers for it now, both requests inside
 /// [`ATOM_NOW_MS`]: `Ok(Some(record))` when it holds it live, `Ok(None)`
 /// when it answered that it does not, and `Err` saying why when there is
 /// no answer to stand on.
+///
+/// Only a listener that asks for this seat's token answers. The read goes
+/// only with the token, which [`packset_client::authorize`] keeps from a
+/// port another user holds, and only after the same read without it was
+/// refused with 401. A stand-in that answers anyone, or a packsetd run
+/// with `PACKSET_AUTH=off`, confirms nothing. A process of this same user
+/// can read the token file and answer as packsetd would; no client check
+/// tells it apart, and only a pack that signs its answers or runs as its
+/// own user would.
 pub(crate) fn atom_now(id: &str) -> std::result::Result<Option<Value>, String> {
-    let asked = with_pack_timeout(ATOM_NOW_MS, || {
-        pack().map(|client| client.get_atom(&client.workspace(), id))
-    });
-    match asked {
-        Ok(Ok(atom)) if atom.get("id").and_then(Value::as_str) != Some(id) => {
-            Err(format!("the pack answered for {id} with another atom"))
+    let client = pack().map_err(|err| format!("no pack to ask for {id}: {err:#}"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ATOM_NOW_MS);
+    let left = || {
+        deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .max(std::time::Duration::from_millis(1))
+    };
+    let mut url = url::Url::parse(client.base())
+        .map_err(|err| format!("the pack URL {} is not a URL: {err}", client.base()))?;
+    url.path_segments_mut()
+        .map_err(|()| format!("the pack URL {} has no path", client.base()))?
+        .pop_if_empty()
+        .extend(["v1", "atoms", id]);
+    url.query_pairs_mut()
+        .append_pair("workspace", &client.workspace());
+    match ureq::get(url.as_str()).timeout(left()).call() {
+        Err(ureq::Error::Status(401, _)) => {}
+        _ => {
+            return Err(format!(
+                "the listener at {} answers for {id} without this seat's token",
+                client.base()
+            ));
         }
-        Ok(Ok(atom)) if atom.get("tombstone") == Some(&Value::Bool(true)) => Ok(None),
-        Ok(Ok(atom)) => Ok(Some(atom)),
-        Ok(Err(packset_client::Error::Bad(_))) => Ok(None),
-        Ok(Err(err)) => Err(format!("the pack did not answer for {id}: {err}")),
-        Err(err) => Err(format!("no pack to ask for {id}: {err:#}")),
     }
+    let asked = packset_client::authorize(ureq::get(url.as_str())).timeout(left());
+    if asked.header("Authorization").is_none() {
+        return Err(format!(
+            "no token for {id}: this seat has none, or another user holds the pack's port"
+        ));
+    }
+    let atom: Value = match asked.call() {
+        Ok(answer) => answer
+            .into_json()
+            .map_err(|err| format!("the pack's answer for {id} is not JSON: {err}"))?,
+        Err(ureq::Error::Status(404, _)) => return Ok(None),
+        Err(err) => return Err(format!("the pack did not answer for {id}: {err}")),
+    };
+    if atom.get("id").and_then(Value::as_str) != Some(id) {
+        return Err(format!("the pack answered for {id} with another atom"));
+    }
+    Ok((atom.get("tombstone") != Some(&Value::Bool(true))).then_some(atom))
 }
 
 /// [`stored_by`] for atom `id` in this seat's pack, from the by-id read
@@ -48725,8 +48762,30 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             let _pack = HoldEnv::set(&[("PACKSET_URL", &dead), ("PACKSET_WORKSPACE", "seat")]);
             assert_eq!(stored_origin_of(id), Stored::Unverified);
         }
-        let (url, _) = serve_http(move |req| {
+        let (url, _) = serve_lesson_pack(id, true);
+        let _pack = HoldEnv::set(&[
+            ("PACKSET_URL", &url),
+            ("PACKSET_WORKSPACE", "seat"),
+            ("PACKSET_TOKEN", LESSON_PACK_TOKEN),
+        ]);
+        assert_eq!(stored_origin_of(id), Stored::Origin(StoredBy::Person));
+        assert_eq!(
+            stored_origin_of("5707ed0000000000000000000000d0e6"),
+            Stored::Absent
+        );
+    }
+
+    const LESSON_PACK_TOKEN: &str = "lesson-pack-token";
+
+    /// A pack holding the person's lesson `id`. One that `asks` refuses a
+    /// request without [`LESSON_PACK_TOKEN`] with 401, as packsetd does;
+    /// one that does not answers anyone.
+    fn serve_lesson_pack(id: &'static str, asks: bool) -> (String, Arc<Mutex<Vec<String>>>) {
+        serve_http(move |req| {
             let first = req.lines().next().unwrap_or("");
+            if asks && !req.contains(&format!("Bearer {LESSON_PACK_TOKEN}")) {
+                return (401, r#"{"error":"token"}"#.into());
+            }
             if first.contains(&format!("/v1/atoms/{id}")) {
                 let atom = serde_json::json!({
                     "id": id, "kind": "lesson", "text": "Keep the form short.",
@@ -48736,12 +48795,48 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 return (200, atom.to_string());
             }
             (404, r#"{"error":"no atom"}"#.into())
-        });
-        let _pack = HoldEnv::set(&[("PACKSET_URL", &url), ("PACKSET_WORKSPACE", "seat")]);
-        assert_eq!(stored_origin_of(id), Stored::Origin(StoredBy::Person));
-        assert_eq!(
-            stored_origin_of("5707ed0000000000000000000000d0e6"),
-            Stored::Absent
+        })
+    }
+
+    /// A by-id read stands only on a pack that asks for this seat's token
+    /// and gets it: a listener that answers without it, or a seat with no
+    /// token to show, confirms nothing.
+    #[test]
+    fn only_a_pack_that_asks_for_the_token_answers_for_an_atom() {
+        let _g = env_guard();
+        let id = "5707ed0000000000000000000000d0e7";
+        let token = tempfile::tempdir().unwrap();
+        let missing = token.path().join("token");
+        let (asks, seen) = serve_lesson_pack(id, true);
+        let (open, _) = serve_lesson_pack(id, false);
+        let read = |url: &str, token: Option<&str>| {
+            // SAFETY: under the lock every environment-reading test takes,
+            // which puts the environment back when it drops.
+            unsafe {
+                std::env::set_var("PACKSET_URL", url);
+                std::env::set_var("PACKSET_WORKSPACE", "seat");
+                std::env::set_var("PACKSET_TOKEN_FILE", &missing);
+                match token {
+                    Some(token) => std::env::set_var("PACKSET_TOKEN", token),
+                    None => std::env::remove_var("PACKSET_TOKEN"),
+                }
+            }
+            atom_now(id)
+        };
+        assert!(read(&asks, Some(LESSON_PACK_TOKEN)).is_ok_and(|a| a.is_some()));
+        let open_read = read(&open, Some(LESSON_PACK_TOKEN)).unwrap_err();
+        assert!(
+            open_read.contains("without this seat's token"),
+            "{open_read}"
+        );
+        let bare = read(&asks, None).unwrap_err();
+        assert!(bare.contains("no token"), "{bare}");
+        let wrong = read(&asks, Some("another-token")).unwrap_err();
+        assert!(wrong.contains("did not answer"), "{wrong}");
+        assert!(
+            seen.lock().unwrap().iter().all(|line| line.contains(id)),
+            "{:?}",
+            seen.lock().unwrap()
         );
     }
 
@@ -50508,6 +50603,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 let status = match code {
                     200 => "200 OK",
                     400 => "400 Bad Request",
+                    401 => "401 Unauthorized",
                     403 => "403 Forbidden",
                     404 => "404 Not Found",
                     _ => "500 Internal Server Error",

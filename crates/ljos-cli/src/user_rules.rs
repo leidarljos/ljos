@@ -1455,21 +1455,26 @@ mod tests {
         assert!(!raw.contains("\"origin\""), "{raw}");
     }
 
-    /// packsetd from PATH on a free port with its home under `home`; CI
-    /// builds it from packset develop.
+    /// packsetd from PATH on a free port with its home under `home`, asking
+    /// for the token this process then shows it; CI builds it from packset
+    /// develop.
     fn packsetd(home: &std::path::Path) -> (std::process::Child, String) {
         use std::io::{Read, Write};
+        const TOKEN: &str = "7a6b5c4d3e2f10017a6b5c4d3e2f10017a6b5c4d3e2f10017a6b5c4d3e2f1001";
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
             .port();
         let dir = home.join("pack");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("token"), format!("{TOKEN}\n")).unwrap();
+        unsafe { std::env::set_var("PACKSET_TOKEN", TOKEN) };
         let mut child = std::process::Command::new("packsetd")
             .args(["--port", &port.to_string()])
             .arg("--home")
             .arg(&dir)
-            .env("PACKSET_AUTH", "off")
+            .env_remove("PACKSET_AUTH")
             .env("PACKSET_HOME", &dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
