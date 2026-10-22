@@ -96,6 +96,8 @@ pushes this machine's. `commit` skips that pull and that push.
 Each log's first line, inside the seal, names its host and scope;
 a log naming another host or scope is left unread, and so is a log
 from before that line, whichever key opens it.
+A log is read only under the name export writes, `HOST.jsonl.age`
+for the primary scope and `HOST+SCOPE.jsonl.age` for an extra one.
 A symlink at `.ljos`, `.ljos/atoms`, `.ljos/user-rules` or the state
 directory's `sync/` is refused.
 `ljos sync --key` prints this machine's public key
