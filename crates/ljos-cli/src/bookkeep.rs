@@ -526,7 +526,11 @@ fn claimed_recall(issue: &str, cached: &str) -> String {
     if super::pack().is_err() {
         return cached.to_string();
     }
-    format!("{}{}", recall_line(issue), super::recall_memories(issue))
+    format!(
+        "{}{}",
+        recall_line(issue),
+        super::recall_memories_for_prompt(issue)
+    )
 }
 
 /// Whether this MCP tool writes a habitat, so the server joins the held issue first.
@@ -1039,7 +1043,7 @@ pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result
     let recall = format!(
         "{}{}",
         recall_line(&issue_id),
-        super::recall_memories(&issue_id)
+        super::recall_memories_for_prompt(&issue_id)
     );
     let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
     let path = book_path(&sitting_key());
@@ -1438,7 +1442,11 @@ fn start_on_held(place: &str, task: &str, cwd: &str) -> Option<String> {
             Err(e) => log_line(&format!("start: note on {issue}: {e}")),
         }
     }
-    let recall = format!("{}{}", recall_line(&issue), super::recall_memories(&issue));
+    let recall = format!(
+        "{}{}",
+        recall_line(&issue),
+        super::recall_memories_for_prompt(&issue)
+    );
     Some(format!("claimed {issue}\n{recall}"))
 }
 
@@ -1472,7 +1480,11 @@ fn start_on_recorded_hold(place: &str, task: &str, cwd: &str) -> Option<String> 
     store_book(&own, &book);
     drop(_held);
     log_line(&format!("start: kept {issue}, already held in {place}"));
-    let recall = format!("{}{}", recall_line(&issue), super::recall_memories(&issue));
+    let recall = format!(
+        "{}{}",
+        recall_line(&issue),
+        super::recall_memories_for_prompt(&issue)
+    );
     Some(format!("claimed {issue}\n{recall}"))
 }
 
