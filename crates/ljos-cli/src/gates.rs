@@ -54,6 +54,57 @@ pub fn command_gate(line: &str, cwd: Option<&Path>) -> Option<super::Rule> {
     enforce(line, base, 0).err()
 }
 
+/// One git call a shell line runs, its aliases expanded: the checkout it
+/// runs in, the subcommand, its arguments, and each `-c KEY=VALUE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitCall {
+    pub cwd: PathBuf,
+    pub sub: String,
+    pub args: Vec<String>,
+    pub config: Vec<(String, String)>,
+}
+
+/// Every git call `line` runs from `cwd`, the process directory when
+/// absent. `cd DIR`, `git -C DIR`, `sh -c`, `$(...)` and a `!` alias's
+/// shell are followed the way [`command_gate`] follows them.
+///
+/// # Errors
+///
+/// The aliases nest too deep to read, so what the line runs is not known.
+pub fn git_calls(line: &str, cwd: Option<&Path>) -> Result<Vec<GitCall>, String> {
+    let mut out = Vec::new();
+    if !line.to_ascii_lowercase().contains("git") {
+        return Ok(out);
+    }
+    let found = std::env::current_dir().ok();
+    let base = cwd.or(found.as_deref()).unwrap_or_else(|| Path::new("."));
+    let mut queue = invocations(line, base, 0);
+    let mut i = 0;
+    while i < queue.len() {
+        let inv = queue[i].clone();
+        i += 1;
+        if inv.depth > 3 {
+            return Err("its git aliases nest too deep to read".into());
+        }
+        let Some(git) = git_of(&inv) else {
+            continue;
+        };
+        match git.shell {
+            Some(shell) => {
+                let extras = invocations(&shell, &git.cwd, inv.depth.saturating_add(1));
+                queue.splice(i..i, extras);
+            }
+            None => out.push(GitCall {
+                cwd: git.cwd,
+                sub: git.sub,
+                args: git.args,
+                config: git.config,
+            }),
+        }
+    }
+    Ok(out)
+}
+
 /// The static guard (seat, user rules, these gates, a dangerous push) and
 /// then the pack's rules, the same composition the hook uses. `None` lets
 /// the line run. A plain push runs. When the checkout sets `test` and the
@@ -2501,6 +2552,38 @@ mod tests {
 
     fn tip(dir: &Path) -> String {
         head_sha(dir).unwrap()
+    }
+
+    #[test]
+    fn git_calls_follow_dirs_shells_and_aliases() {
+        let dir = repo();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        git(root, &["config", "alias.ci", "commit -q"]);
+        git(
+            root,
+            &["config", "alias.ship", "!git add . && git push origin HEAD"],
+        );
+        let calls = git_calls(
+            "cd sub && git -C .. ci -m x; sh -c 'git ship'; echo $(git cherry-pick abc)",
+            Some(root),
+        )
+        .unwrap();
+        let subs: Vec<&str> = calls.iter().map(|c| c.sub.as_str()).collect();
+        assert_eq!(subs, ["commit", "add", "push", "cherry-pick"], "{calls:?}");
+        assert_eq!(calls[0].args, ["-q", "-m", "x"]);
+        assert_eq!(calls[0].cwd, root.join("sub").join(".."));
+        assert_eq!(calls[2].args, ["origin", "HEAD"]);
+        assert!(git_calls("ls -la", Some(root)).unwrap().is_empty());
+
+        for (name, next) in [("a", "b"), ("b", "c"), ("c", "d"), ("d", "e")] {
+            git(
+                root,
+                &["config", &format!("alias.{name}"), &format!("!git {next}")],
+            );
+        }
+        let deep = git_calls("git a", Some(root)).unwrap_err();
+        assert!(deep.contains("too deep"), "{deep}");
     }
 
     struct GhHold {
