@@ -1,1 +1,0 @@
-`ljos_cli::mailbox::export` writes a draft as an `ljos-outbox v1` approval file (draft id, outbox hash, an expiry at most 24 h out, a random nonce, then the exact message bytes) and returns its sha256. It refuses control characters other than tab and newline, and the bidirectional overrides, anywhere in the message, and a message without its own `Message-ID` and `Date`.

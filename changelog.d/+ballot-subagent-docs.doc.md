@@ -1,1 +1,0 @@
-The skill and the howto say that each reviewer votes from its own subagent or run, and that a subagent's ballot binds the parent session plus the subagent, `SESSION:AGENT`, from Claude Code's `agent_id` or the Codex thread, while an opencode subagent is a session of its own.
