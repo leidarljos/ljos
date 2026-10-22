@@ -940,6 +940,7 @@ fn adopt_plan(plain: &str, scope: &str, own: &BTreeSet<String>) -> AdoptPlan {
             entities.push(Value::String(scope_tag.clone()));
             map.insert("entities".into(), Value::Array(entities));
         }
+        crate::strip_person_basis(&mut atom);
         plan.post.push(atom);
     }
     plan
@@ -995,6 +996,7 @@ fn incoming_with_sender(
             );
             map.remove("id");
         }
+        crate::strip_person_basis(&mut atom);
         post.push(atom);
     }
     let retired = before.difference(&now).cloned().collect();
@@ -1405,6 +1407,7 @@ fn post_incoming(
         if let Some(map) = atom.as_object_mut() {
             map.insert("workspace".into(), Value::String(workspace.to_string()));
         }
+        crate::strip_person_basis(&mut atom);
         match crate::admit::post_kept(client, &atom) {
             Ok(_) => kept += 1,
             Err(_) => refused += 1,
