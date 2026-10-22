@@ -367,7 +367,7 @@ impl Reader {
         if id.is_empty() || id.chars().any(char::is_control) {
             bail!("mail: a message id notmuch gave cannot be quoted");
         }
-        let query = format!("id:\"{}\"", id.replace('"', "\"\""));
+        let query = id_term(id);
         let part_arg = format!("--part={part}");
         self.run(
             &["show", "--format=raw", &part_arg, "--", &query],
@@ -511,6 +511,21 @@ fn walk<'a>(nodes: &'a Value, depth: usize, out: &mut Vec<&'a Value>) -> bool {
     cut
 }
 
+/// `id:` and the id as notmuch's own `make_boolean_term` writes it: bare
+/// unless it is empty or has a space, a control byte, `(`, `)`, `"` or a
+/// non-ASCII byte, and otherwise in double quotes with each `"` doubled.
+fn id_term(id: &str) -> String {
+    let quote = id.is_empty()
+        || id
+            .bytes()
+            .any(|b| b <= b' ' || b == b'(' || b == b')' || b == b'"' || b > 127);
+    if quote {
+        format!("id:\"{}\"", id.replace('"', "\"\""))
+    } else {
+        format!("id:{id}")
+    }
+}
+
 fn thread_id(id: &str) -> Result<String> {
     if id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
         Ok(id.to_ascii_lowercase())
@@ -568,6 +583,21 @@ pub(crate) fn hiding(c: char) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn ids_are_quoted_the_way_notmuch_quotes_them() {
+        assert_eq!(id_term("a.b@example.test"), "id:a.b@example.test");
+        assert_eq!(
+            id_term("\"q\"@example.test"),
+            "id:\"\"\"q\"\"@example.test\""
+        );
+        assert_eq!(id_term("a(b)@example.test"), "id:\"a(b)@example.test\"");
+        assert_eq!(
+            id_term("caf\u{e9}@example.test"),
+            "id:\"caf\u{e9}@example.test\""
+        );
+        assert_eq!(id_term(""), "id:\"\"");
+    }
 
     #[test]
     fn walk_stops_at_the_thread_depth_cap() {

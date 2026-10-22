@@ -251,3 +251,20 @@ fn show_leaves_out_spam_and_deleted_messages_in_the_thread() {
         assert!(!json.contains("password"), "{tag}: {json}");
     }
 }
+
+#[test]
+fn an_attachment_of_a_message_whose_id_has_quotes_is_hashed() {
+    let mailbox = maildir::mailbox();
+    let thread = mailbox
+        .notmuch(&["search", "--output=threads", "--", "subject:quoted"])
+        .trim()
+        .trim_start_matches("thread:")
+        .to_string();
+    let shown = reader(&mailbox).show(&thread).unwrap();
+    let receipt = &shown.messages[0].attachments[0];
+    assert!(receipt.name.contains("receipt.txt"), "{receipt:?}");
+    assert_eq!(
+        receipt.sha256,
+        Some(hex::encode(Sha256::digest(b"Receipt 9")))
+    );
+}
