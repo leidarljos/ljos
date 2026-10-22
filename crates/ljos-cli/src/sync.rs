@@ -8569,6 +8569,38 @@ mod tests {
         assert!(said.contains("left unread"), "{said}");
     }
 
+    /// `dave.jsonl.age` and `dave+grokbot.jsonl.age` both read as dave's
+    /// grokbot log. An older blob of the first, committed under the second
+    /// name, retired what the current log holds and shrank the taken set.
+    #[test]
+    fn a_primary_log_under_its_plus_alias_retires_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let fix = Shared::new(dir.path());
+        let first = lesson_line("Dave pins the toolchain.", "grokbot");
+        let second = lesson_line("Runners need four gigabytes of swap.", "grokbot");
+        let dave = Some(("dave", "grokbot"));
+        let old = fix.sealed(dave, &first, &[fix.machine.as_str()]);
+        fix.push(&[("dave.jsonl.age", &old)]);
+        fix.import();
+        let new = fix.sealed(dave, &format!("{first}{second}"), &[fix.machine.as_str()]);
+        fix.push(&[("dave.jsonl.age", &new)]);
+        fix.import();
+        let both = vec![
+            "Dave pins the toolchain.".to_string(),
+            "Runners need four gigabytes of swap.".to_string(),
+        ];
+        assert_eq!(fix.held(), both);
+        fix.push(&[("dave+grokbot.jsonl.age", &old)]);
+        let said = fix.import();
+        assert_eq!(fix.held(), both, "{said}");
+        assert!(
+            said.contains("dave+grokbot.jsonl.age is not a log name"),
+            "{said}"
+        );
+        let taken = std::fs::read_to_string(taken_path(&fix.root, "grokbot", "dave")).unwrap();
+        assert_eq!(taken.lines().count(), 3, "{taken}");
+    }
+
     /// Headed logs still import through a symlinked `$HOME`, a checkout
     /// reached through a symlinked parent, and a git worktree.
     #[test]
