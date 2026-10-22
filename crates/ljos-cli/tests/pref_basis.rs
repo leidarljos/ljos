@@ -5,6 +5,7 @@
 //! `source.basis` from none to `person`; one from before takes it. The
 //! upgrade stores a copy as the person's and retires the original on
 //! either, so the text a rule cites and a lesson's hash read the same.
+//! A refusal is said once and kept, so later runs do not retry it.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -17,6 +18,7 @@ use serde_json::{json, Value};
 
 const PREFERENCE: &str = "Keep the release notes in one file.";
 const LESSON: &str = "The release notes live beside the changelog.";
+const DUMP: &str = "Paste the ```stdout``` of the release build into the notes.";
 
 struct Daemon {
     child: std::process::Child,
@@ -270,4 +272,51 @@ fn an_older_preference_is_raised_by_a_person_copy() {
         ids
     };
     assert_eq!(ids(&after), ids(&again), "a second run stamped again");
+}
+
+/// A record the pack will not take back is left as it was, said once on
+/// stderr and written down, and the next run does not send it again. The
+/// other older preference is still raised.
+#[test]
+fn a_refused_raise_is_said_once_and_not_retried() {
+    let daemon = Daemon::start();
+    let seat = Seat::on(&daemon);
+    let dumped = daemon.legacy("preference", "Paste the build output into the notes.");
+    daemon.post(
+        "/v1/atoms/update",
+        &json!({"workspace": "seat", "id": dumped["id"], "fields": {"text": DUMP}}),
+    );
+    daemon.legacy("preference", PREFERENCE);
+
+    let first = reviewed(&seat);
+    let err = String::from_utf8_lossy(&first.stderr);
+    assert_eq!(err.matches("will not try again").count(), 1, "{err}");
+    let id = dumped["id"].as_str().unwrap();
+    assert!(err.contains(id), "{err}");
+    assert!(err.contains("tool dump"), "{err}");
+    assert!(
+        !err.contains("```stdout```"),
+        "the refusal names the text: {err}"
+    );
+
+    let after = daemon.atoms();
+    let left = live_with(&after, DUMP);
+    assert_eq!(left.len(), 1, "{after:?}");
+    assert_eq!(left[0]["id"], dumped["id"], "{after:?}");
+    assert_eq!(basis(left[0]), None, "{}", left[0]);
+    let raised = live_with(&after, PREFERENCE);
+    assert_eq!(raised.len(), 1, "{after:?}");
+    assert_eq!(basis(raised[0]), Some("person"), "{}", raised[0]);
+
+    let marks = seat.markers();
+    assert_eq!(marks.len(), 1, "{marks:?}");
+    let written = std::fs::read_to_string(&marks[0]).unwrap();
+    assert!(written.starts_with("refused\n"), "{written}");
+    assert!(written.contains(id), "{written}");
+
+    let second = reviewed(&seat);
+    let err = String::from_utf8_lossy(&second.stderr);
+    assert!(!err.contains("will not try again"), "{err}");
+    assert_eq!(daemon.atoms(), after, "a second run sent the raise again");
+    assert_eq!(std::fs::read_to_string(&marks[0]).unwrap(), written);
 }

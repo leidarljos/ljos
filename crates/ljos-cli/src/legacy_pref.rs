@@ -126,7 +126,9 @@ pub(crate) fn review_sentence(n: usize) -> String {
 /// Stamp basis `person` on every legacy atom the old person-path writers
 /// marked. Recorded per pack, so a later run does nothing. The pack is
 /// the one this process is configured for; nothing is fetched elsewhere.
-/// A pack that does not answer is left for the next run.
+/// A pack that does not answer is left for the next run. One the pack
+/// refuses is written on the record and said once, by the run that wrote
+/// it, and is not sent again.
 pub fn migrate_once() {
     // A bounded pack read already holds the environment lock, then
     // searches, and the search calls this. The marker path takes that
@@ -138,8 +140,28 @@ pub fn migrate_once() {
         if recorded() {
             return;
         }
-        if stamp_marked().is_ok() {
-            let _ = record();
+        match stamp_marked() {
+            Ok(refused) if refused.is_empty() => {
+                let _ = record("once\n");
+            }
+            Ok(refused) => {
+                let list = refused.join("\n");
+                if record(&format!("refused\n{list}\n")).unwrap_or(false) {
+                    let path = marker_path().map(|p| p.display().to_string());
+                    eprintln!(
+                        "ljos: the pack refused {} older {} as the person's, and the \
+                         upgrade will not try again; remove {} to retry:\n{list}",
+                        refused.len(),
+                        if refused.len() == 1 {
+                            "preference"
+                        } else {
+                            "preferences"
+                        },
+                        path.unwrap_or_default(),
+                    );
+                }
+            }
+            Err(_) => {}
         }
     });
 }
@@ -295,18 +317,24 @@ fn live() -> Result<Vec<Value>> {
     atoms_lean(&client, &client.workspace()).context("prefer: GET /v1/atoms failed")
 }
 
-fn stamp_marked() -> Result<usize> {
+/// Raise every promoted atom. One the pack refuses does not stop the
+/// rest; each comes back as `id: why`.
+fn stamp_marked() -> Result<Vec<String>> {
     let client = pack()?;
     let atoms = atoms_lean(&client, &client.workspace())?;
-    let mut n = 0;
+    let mut refused = Vec::new();
     for atom in &atoms {
         if legacy(atom) != Some(Legacy::Promote) {
             continue;
         }
-        stamp_basis(&client, atom)?;
-        n += 1;
+        if let Err(e) = stamp_basis(&client, atom) {
+            if e.downcast_ref::<Refused>().is_none() {
+                return Err(e);
+            }
+            refused.push(format!("{}: {e:#}", id_of(atom).unwrap_or("?")));
+        }
     }
-    Ok(n)
+    Ok(refused)
 }
 
 /// Store `atom` again as the person's and retire the original. Returns
@@ -370,11 +398,28 @@ fn post(client: &packset_client::PacksetClient, path: &str, body: &Value) -> Res
                 .ok()
                 .and_then(|v| v.get("error")?.as_str().map(str::to_string))
                 .unwrap_or(text);
-            bail!("POST {path} failed: {code}: {}", why.trim());
+            let why = format!("POST {path} failed: {code}: {}", why.trim());
+            if (400..500).contains(&code) && !matches!(code, 401 | 408 | 429) {
+                return Err(Refused(why).into());
+            }
+            bail!(why);
         }
         Err(e) => bail!("POST {path} failed: {e}"),
     }
 }
+
+/// A 4xx the pack will answer again for the same body. Auth, a timeout
+/// and a rate limit are not one: the next run may get through.
+#[derive(Debug)]
+struct Refused(String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
 
 fn gate() -> &'static Mutex<()> {
     static GATE: Mutex<()> = Mutex::new(());
@@ -399,9 +444,11 @@ fn recorded() -> bool {
     marker_path().is_some_and(|p| p.is_file())
 }
 
-fn record() -> Result<()> {
+/// Write `body` as this pack's record. `Ok(false)` when another run wrote
+/// it first, or there is no pack to name it after.
+fn record(body: &str) -> Result<bool> {
     let Some(path) = marker_path() else {
-        return Ok(());
+        return Ok(false);
     };
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -415,9 +462,10 @@ fn record() -> Result<()> {
         .open(&path)
     {
         Ok(mut f) => f
-            .write_all(b"once\n")
+            .write_all(body.as_bytes())
+            .map(|()| true)
             .context("recording the preference migration"),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
         Err(e) => Err(e).context("recording the preference migration"),
     }
 }
