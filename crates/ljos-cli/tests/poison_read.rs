@@ -71,10 +71,12 @@ fn serve(atoms: Vec<serde_json::Value>) -> String {
                 let island: Vec<serde_json::Value> = atoms
                     .iter()
                     .map(|a| {
-                        let mut row = a.clone();
-                        row["activation"] = serde_json::json!(1.0);
-                        row["seed"] = serde_json::json!(true);
-                        row
+                        // packsetd's island row is id, kind, text and ts:
+                        // no origin, no source, no entities.
+                        serde_json::json!({
+                            "id": a["id"], "kind": a["kind"], "text": a["text"],
+                            "ts": a["ts"], "activation": 1.0, "seed": true,
+                        })
                     })
                     .collect();
                 serde_json::json!({"island": island, "fired": 0})

@@ -27759,6 +27759,10 @@ fn stored_origins() -> &'static std::sync::Mutex<std::collections::BTreeMap<Stri
 
 /// Record the stored origin of `atom`, an atom or a search hit, by its id.
 pub(crate) fn keep_origin(atom: &Value) {
+    // An island row drops the origin, which says nothing of the stored one.
+    if atom.get("origin").is_none() && atom.get("activation").is_some() {
+        return;
+    }
     if let Some(id) = atom.get("id").and_then(Value::as_str) {
         stored_origins()
             .lock()
@@ -27953,6 +27957,9 @@ pub fn kind_label(h: &Hit) -> String {
 /// [`kind_label`] for an atom the pack returned whole, as the island does.
 #[must_use]
 pub fn atom_label(atom: &Value) -> String {
+    if let Some(id) = atom.get("id").and_then(Value::as_str) {
+        stored_origin_of(id);
+    }
     atom_as_hit(atom).map_or_else(|| "claim".to_string(), |h| kind_label(&h))
 }
 
@@ -41733,11 +41740,11 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "{printed}"
         );
         assert!(
-            printed.contains("1.000\tseed\ta\ttoday\t[lesson] one\n"),
+            printed.contains("1.000\tseed\ta\ttoday\t[lesson, agent-derived] one\n"),
             "{printed}"
         );
         assert!(
-            printed.contains("0.250\t    \tb\t\t[lesson] two\n"),
+            printed.contains("0.250\t    \tb\t\t[lesson, agent-derived] two\n"),
             "{printed}"
         );
         assert!(format_island(&serde_json::json!({})).is_empty());
