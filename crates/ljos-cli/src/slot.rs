@@ -125,10 +125,26 @@ pub struct Slot {
     pub sig: String,
 }
 
-/// The bytes a slot signature covers. The issue is in them, so a slot
-/// copied to another issue does not verify there.
+/// This tracker as a slot names it: its root commits, sorted and joined
+/// with `,`. `-` on a tracker that is not a git repository.
+#[must_use]
+pub fn tracker_id() -> String {
+    let roots = ballot_sig::tracker_git(&["rev-list", "--max-parents=0", "HEAD"]);
+    let mut roots: Vec<&str> = roots.as_deref().unwrap_or("").split_whitespace().collect();
+    roots.sort_unstable();
+    if roots.is_empty() {
+        "-".into()
+    } else {
+        roots.join(",")
+    }
+}
+
+/// The bytes a slot signature covers. The tracker and the issue are in
+/// them, so a slot copied to another issue, or to the same issue id on
+/// another tracker, does not verify there.
 #[must_use]
 pub fn message(
+    tracker: &str,
     issue: &str,
     seat: &str,
     model: &str,
@@ -137,7 +153,8 @@ pub fn message(
     launcher: &str,
 ) -> Vec<u8> {
     format!(
-        "ljos-slot/v2\n{}\n{}\n{}\n{}\n{}\n{}\n",
+        "ljos-slot/v3\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+        tracker.trim(),
         issue.trim(),
         seat.trim(),
         model.trim(),
@@ -168,13 +185,15 @@ pub fn parse(note: &str) -> Option<Slot> {
     })
 }
 
-/// Whether `slot` is a valid signature by its key over this issue's slot.
+/// Whether `slot` is a valid signature by its key over this issue's slot
+/// on `tracker` ([`tracker_id`]).
 #[must_use]
-pub fn verifies(issue: &str, slot: &Slot) -> bool {
+pub fn verifies(tracker: &str, issue: &str, slot: &Slot) -> bool {
     ballot_sig::signature_ok(
         &slot.key,
         &slot.sig,
         &message(
+            tracker,
             issue,
             &slot.seat,
             &slot.model,
@@ -185,10 +204,13 @@ pub fn verifies(issue: &str, slot: &Slot) -> bool {
     )
 }
 
-/// The note for a slot signed by `key`. Each field is one token.
+/// The note for a slot on `tracker` ([`tracker_id`]) signed by `key`.
+/// Each field is one token.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn sign(
     key: &SigningKey,
+    tracker: &str,
     issue: &str,
     seat: &str,
     model: &str,
@@ -200,7 +222,7 @@ pub fn sign(
         [seat, model, run, run_key, launcher].map(ballot_sig::field);
     let (public, sig) = ballot_sig::signed_hex(
         key,
-        &message(issue, &seat, &model, &run, &run_key, &launcher),
+        &message(tracker, issue, &seat, &model, &run, &run_key, &launcher),
     );
     format!("{SLOT_NOTE}{seat} model={model} run={run} key={run_key} {launcher} {public} {sig}")
 }
@@ -259,7 +281,16 @@ pub fn write(issue: &str, seat: &str, model: &str, run: &str, run_key: &str) -> 
             "slot: {launcher} is not a standing seat, so no slot it signs counts; a standing seat launches"
         );
     }
-    let note = sign(&key, issue, &seat, model, run, &run_key, &launcher);
+    let note = sign(
+        &key,
+        &tracker_id(),
+        issue,
+        &seat,
+        model,
+        run,
+        &run_key,
+        &launcher,
+    );
     if ballot_sig::write_sig_note(issue, &note).is_err() {
         crate::run_captured("vissue", &["note", issue, &note])?;
     }
@@ -279,8 +310,10 @@ pub fn write(issue: &str, seat: &str, model: &str, run: &str, run_key: &str) -> 
 /// `before_pin(note, voter)` is whether `note` was already in this
 /// issue's own entry when `voter`'s pin was introduced. `false` refuses
 /// the slot: the key it vouches for is not one the run minted after it.
+/// A slot verifies only on `tracker` ([`tracker_id`]).
 #[must_use]
 pub fn problems(
+    tracker: &str,
     issue: &str,
     seats: &[(&str, &str)],
     notes: &[String],
@@ -301,7 +334,9 @@ pub fn problems(
             }
             let launcher = &slot.launcher;
             let refused = match pins.get(launcher) {
-                _ if !verifies(issue, &slot) => Some(format!("{voter}'s slot does not verify")),
+                _ if !verifies(tracker, issue, &slot) => {
+                    Some(format!("{voter}'s slot does not verify"))
+                }
                 None => Some(format!(
                     "{voter}'s slot is from {launcher}, which has no pinned key on this tracker"
                 )),
@@ -531,6 +566,7 @@ mod tests {
     fn a_slot_parses_whole_and_verifies_on_its_issue_only() {
         let note = sign(
             &key(1),
+            "t-1",
             "d-1",
             "review-cafebabe0001abcd",
             "grok 4",
@@ -544,24 +580,31 @@ mod tests {
         assert_eq!(slot.run, "bc-cafebabe0001abcd");
         assert_eq!(slot.run_key, public(&key(4)));
         assert_eq!(slot.launcher, "ljosbot");
-        assert!(verifies("d-1", &slot));
+        assert!(verifies("t-1", "d-1", &slot));
         assert!(
-            !verifies("d-2", &slot),
+            !verifies("t-1", "d-2", &slot),
             "a slot lifted to another issue verified"
+        );
+        assert!(
+            !verifies("t-2", "d-1", &slot),
+            "a slot lifted to another tracker verified"
         );
         let mut moved = slot.clone();
         moved.model = "opus".into();
-        assert!(!verifies("d-1", &moved), "a rewritten model still verified");
+        assert!(
+            !verifies("t-1", "d-1", &moved),
+            "a rewritten model still verified"
+        );
         let mut rekeyed = slot.clone();
         rekeyed.run_key = public(&key(3));
         assert!(
-            !verifies("d-1", &rekeyed),
+            !verifies("t-1", "d-1", &rekeyed),
             "a rewritten run key still verified"
         );
         let mut renamed = slot;
         renamed.seat = "review-other".into();
         assert!(
-            !verifies("d-1", &renamed),
+            !verifies("t-1", "d-1", &renamed),
             "a rewritten seat still verified"
         );
     }
@@ -570,11 +613,12 @@ mod tests {
         hex::encode(k.verifying_key().to_bytes())
     }
 
-    /// A slot for `seat` on `issue` naming the run key [`check`] pins for
-    /// `review-r1`, signed by `key(k)` as `launcher`.
+    /// A slot for `seat` on `issue` of tracker `t-1` naming the run key
+    /// [`check`] pins for `review-r1`, signed by `key(k)` as `launcher`.
     fn slotted(k: u8, issue: &str, seat: &str, launcher: &str) -> String {
         sign(
             &key(k),
+            "t-1",
             issue,
             seat,
             "grok",
@@ -599,6 +643,7 @@ mod tests {
         .collect();
         let before_pin = |note: &str, _voter: &str| late != Some(note);
         problems(
+            "t-1",
             "d-1",
             &[("inky", "ship"), ("review-r1", "ship")],
             notes,
@@ -640,6 +685,7 @@ mod tests {
         assert!(refused(stranger, false).contains("no pinned key"));
         let rekeyed = sign(
             &key(1),
+            "t-1",
             "d-1",
             "review-r1",
             "grok",
@@ -663,6 +709,7 @@ mod tests {
     fn a_seat_off_the_list_needs_a_slot_when_the_tracker_has_no_clock() {
         let pins: BTreeMap<String, String> = [("review-r1".to_string(), public(&key(4)))].into();
         let p = problems(
+            "t-1",
             "d-1",
             &[("review-r1", "ship")],
             &[],

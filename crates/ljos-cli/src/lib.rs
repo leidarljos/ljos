@@ -11259,6 +11259,7 @@ pub fn check_seat_signatures(
             .filter_map(|n| ballot_sig::parse_note(n))
             .any(|n| n.voter == voter)
     };
+    let tracker = slot::tracker_id();
     let mut left_out = Vec::new();
     let mut kept = Vec::new();
     for (voter, choice) in seats {
@@ -11267,6 +11268,7 @@ pub fn check_seat_signatures(
             None
         } else {
             slot::problems(
+                &tracker,
                 issue,
                 &[(voter, choice)],
                 &notes,
