@@ -549,6 +549,25 @@ fn a_failed_first_encoder_install_leaves_no_runtime() {
 }
 
 #[test]
+fn the_cloud_vm_doc_matches_the_encoder_install() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let docs = fs::read_to_string(root.join("docs/cloud-vm.md")).unwrap();
+    assert!(
+        !docs.contains("is built from source"),
+        "docs still say an off-cloud cloud up builds packset-embed"
+    );
+    assert!(
+        docs.contains("WITH_EMBED=0"),
+        "docs omit that install.sh --cloud sets WITH_EMBED=0"
+    );
+    let src = fs::read_to_string(root.join("crates/ljos-cli/src/cloud.rs")).unwrap();
+    assert!(
+        !src.contains("from source"),
+        "cloud.rs still says the encoder is built from source"
+    );
+}
+
+#[test]
 fn a_release_build_does_not_reuse_another_onnx_runtime() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/release.yml");
     let yml = fs::read_to_string(&path).unwrap();
