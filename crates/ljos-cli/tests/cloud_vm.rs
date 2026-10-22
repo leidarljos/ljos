@@ -4509,6 +4509,60 @@ fn an_uncommitted_run_pin_does_not_count_under_its_slot() {
     );
 }
 
+/// A run's pin introduced twice, once under its slot and once on a branch
+/// whose issue had no slot, then merged, was pinned before its slot: one
+/// introduction under the slot is not enough.
+#[test]
+fn a_run_pin_merged_from_a_branch_without_its_slot_does_not_count() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_origin, repo) = slot_world(root.path(), &["probe-m"]);
+    pin_standing(&repo, "ljosbot");
+    let main = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let main = main.trim();
+    git(&repo, &["branch", "side"]);
+    slot_run("probe-m", "ridley-review", "cafebabe0001abcd").unwrap();
+    let pushed = ljos_cli::persist_tracker("probe-m", "slotted");
+    assert!(pushed.contains("pushed"), "{pushed}");
+    std::env::set_var("XDG_DATA_HOME", root.path().join("vm-data"));
+    let run = ljos_cli::cloud::run_seat("ridley-review", "cafebabe0001abcd").unwrap();
+    cast(&run, "probe-m", "ship");
+
+    git(&repo, &["checkout", "-q", "side"]);
+    let pins = repo.join(".ljos-seat-keys");
+    let mut text = fs::read_to_string(&pins).unwrap();
+    text.push_str(&format!(
+        "{run} {}\n",
+        run_key("ridley-review", "cafebabe0001abcd")
+    ));
+    fs::write(&pins, text).unwrap();
+    git(
+        &repo,
+        &["commit", "-q", "-am", "pin the run without its slot"],
+    );
+    git(&repo, &["checkout", "-q", main]);
+    git(
+        &repo,
+        &["merge", "-q", "--no-ff", "-m", "merge side", "side"],
+    );
+    git(&repo, &["push", "-q", "origin", "HEAD"]);
+
+    std::env::set_var("LJOS_SEAT", "ljosbot");
+    std::env::set_var("VISSUE_AGENT", "ljosbot");
+    let rows = [serde_json::json!({"agent": run, "choice": "ship"})];
+    let left =
+        ljos_cli::check_seat_signatures("probe-m", &rows, &std::collections::BTreeSet::new())
+            .unwrap()
+            .left_out;
+    assert_eq!(
+        left,
+        vec![(
+            run.clone(),
+            format!("{run}'s key was pinned before its slot")
+        )]
+    );
+}
+
 /// A writer that answers `GET /v1/atoms` with an empty roster.
 fn serve_empty_pack() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
