@@ -1,0 +1,1 @@
+`ljos record check` again holds a voter id pin row to its seat. Beside `inky <key1>`, a row such as `mallory/inky <key9>` no longer lets a second key vote as seat `inky`; rows that pin one seat must pin one key, however they are spelled.
