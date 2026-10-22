@@ -5,7 +5,9 @@
 //! ends the input the same way. A shell or a launcher that only started
 //! the server is not the client: the nearest ancestor that is not one of
 //! those is, recorded by pid and start time so a reused pid is not taken
-//! for it.
+//! for it. Stdin EOF is observed by the reader, not by polling the fd
+//! from here: tokio takes the bytes on its own thread, and a hangup seen
+//! on the bare fd can arrive before those bytes have been parsed.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -258,26 +260,6 @@ fn still_there(_watched: &Watched) -> bool {
     true
 }
 
-/// Stdin has hung up and nothing is left to read. Pending bytes are the
-/// reader's: a hangup with `POLLIN` still has a request in the pipe.
-fn stdin_finished() -> bool {
-    let mut fd = libc::pollfd {
-        fd: libc::STDIN_FILENO,
-        events: libc::POLLIN | libc::POLLHUP,
-        revents: 0,
-    };
-    // SAFETY: fd points at one pollfd owned by this frame; the timeout is 0.
-    let n = unsafe { libc::poll(&mut fd, 1, 0) };
-    if n <= 0 {
-        return false;
-    }
-    let rev = fd.revents;
-    if rev & libc::POLLIN != 0 {
-        return false;
-    }
-    rev & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
-}
-
 /// Report one failed `PR_SET_PDEATHSIG`. Later failures stay quiet.
 fn note_prctl(rc: i32) {
     if rc == 0 || PRCTL_LOGGED.swap(true, Ordering::Relaxed) {
@@ -438,21 +420,23 @@ fn watch(client: Option<Watched>, orphan: Option<Duration>) {
     let mut held = false;
     loop {
         let gone = client.as_ref().is_some_and(|c| !still_there(c));
-        if gone || stdin_finished() || orphaned(orphan, &mut looked, &mut held) || tick(&queue) {
+        if gone || orphaned(orphan, &mut looked, &mut held) || tick(&queue) {
             close();
             return;
         }
     }
 }
 
-/// End the input when the client exits or stdin hangs up.
+/// End the input when the client exits.
 ///
 /// The client is the nearest ancestor that is not a shell or a wrapper
 /// (`sh`, `npx`, `uvx`, `sudo -n`, and the rest of that list). Its pid
 /// and start time are taken once, here. On Linux the parent-death signal
 /// is armed as a hint and its failure is logged once; the decision is the
 /// recorded ancestor, because a launcher can outlive the client. On macOS
-/// the same ancestor is watched with `kqueue` `NOTE_EXIT`.
+/// the same ancestor is watched with `kqueue` `NOTE_EXIT`. Stdin EOF is
+/// the reader's zero-length read, so a request already in the pipe is
+/// parsed before the input ends.
 pub fn watch_parent() {
     #[cfg(target_os = "linux")]
     arm_pdeathsig();
