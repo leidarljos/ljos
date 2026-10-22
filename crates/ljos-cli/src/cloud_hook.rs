@@ -647,10 +647,28 @@ fn canonical_hook_path(our_dir: &Path) -> PathBuf {
     fs::canonicalize(&path).unwrap_or(path)
 }
 
+thread_local! {
+    /// Config files a curl or wget on the line being judged names.
+    static LINE_CONFIGS: std::cell::RefCell<Vec<PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Judge a line with the config files it names protected, so a write on
+/// the same line cannot change one between the guard's read and the
+/// client's.
+pub(crate) fn with_line_configs<T>(named: Vec<PathBuf>, judge: impl FnOnce() -> T) -> T {
+    let before = LINE_CONFIGS.with(|cell| cell.replace(named));
+    let out = judge();
+    LINE_CONFIGS.with(|cell| cell.replace(before));
+    out
+}
+
 /// The hook directory, the hook file, the allowlist, and the gitconfig
 /// files that can name `core.hooksPath`. A write to one of these disarms
 /// the hook. The recorded seat's `.git/config` is included. Any other
 /// `.git/config` or `.gitconfig` is matched by name in `names_protected`.
+/// The curl and wget configs are included too, with any a curl or wget on
+/// the line names: a write to one changes a file the guard already read.
 pub(crate) fn protected_write_targets() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(dir) = hooks_dir() {
@@ -689,12 +707,15 @@ pub(crate) fn protected_write_targets() -> Vec<PathBuf> {
             out.push(path.join(".curlrc"));
         }
     }
-    if let Some(path) = std::env::var_os("WGETRC") {
-        let path = PathBuf::from(path);
-        if !path.as_os_str().is_empty() {
-            out.push(path);
+    for key in ["WGETRC", "SYSTEM_WGETRC"] {
+        if let Some(path) = std::env::var_os(key) {
+            let path = PathBuf::from(path);
+            if !path.as_os_str().is_empty() {
+                out.push(path);
+            }
         }
     }
+    LINE_CONFIGS.with(|named| out.extend(named.borrow().iter().cloned()));
     if let Some(seat) = recorded_seat() {
         out.push(seat.join(".git/config"));
     }
