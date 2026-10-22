@@ -5865,7 +5865,12 @@ pub fn hook_directory(input: &str) -> Result<PathBuf> {
         .filter(|v| !v.is_null())
         .or_else(|| value.get("toolInput"));
     let override_dir = args
-        .and_then(|v| v.get("workdir").or_else(|| v.get("cwd")))
+        .and_then(|v| {
+            v.get("workdir")
+                .or_else(|| v.get("cwd"))
+                .or_else(|| v.get("dir_path"))
+                .or_else(|| v.get("directory"))
+        })
         .filter(|v| !v.is_null());
     let directory = match override_dir {
         Some(v) => base.join(v.as_str().context("invalid tool working directory")?),
@@ -46061,7 +46066,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let child = root.path().join("checkout");
         std::fs::create_dir(&child).unwrap();
         for tool in ["tool_input", "toolInput"] {
-            for field in ["workdir", "cwd"] {
+            for field in ["workdir", "cwd", "dir_path", "directory"] {
                 for directory in [child.to_str().unwrap(), "checkout"] {
                     let input = serde_json::json!({"cwd":root.path(), tool:{field:directory}});
                     assert_eq!(hook_directory(&input.to_string()).unwrap(), child);
