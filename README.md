@@ -380,7 +380,7 @@ ljos panel vissue-xxxx --jev                   # with Jev on: cast when every se
 ljos learn vissue-xxxx --outcome ship
 ljos due
 ljos hud                                       # execs sibling ljos-hud (overlay; P pops out)
-ljos habit mab-cr-all 0.579 --unit acc --every 7d --source 11793   # a reading; the one before closes and is kept as what it was
+ljos habit mab-cr-all 0.579 --unit acc --every 7d --source example-0001   # an example reading; the one before closes and is kept as what it was
 ljos habit                                     # every habit as it stands, the change since the last reading, when the next is due
 ljos graded <atom-id> [--lapsed]
 ljos handover --out bag --project x --issue vissue-xxxx

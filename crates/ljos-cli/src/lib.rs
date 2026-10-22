@@ -31427,18 +31427,18 @@ mod tests {
         assert_eq!(trim_num(0.5790), "0.579");
         assert_eq!(trim_num(12.0), "12");
         assert_eq!(
-            habit_text("mab cr all", 0.579, "acc", "job 11793"),
-            "habit mab cr all stands at 0.579 acc (job 11793)."
+            habit_text("mab cr all", 0.579, "acc", "example-0001"),
+            "habit mab cr all stands at 0.579 acc (example-0001)."
         );
         let first = serde_json::json!({
             "id": "a1", "kind": "habit", "ts": "2026-09-12T10:00:00.000Z",
             "due_at": "2026-09-19T10:00:00.000Z",
-            "habit": {"name": "mab cr all", "value": 0.535, "unit": "acc", "source": "11750", "every_s": 604800}
+            "habit": {"name": "mab cr all", "value": 0.535, "unit": "acc", "source": "example-0000", "every_s": 604800}
         });
         let second = serde_json::json!({
             "id": "a2", "kind": "habit", "ts": "2026-09-19T10:00:00.000Z",
             "due_at": "2026-09-26T10:00:00.000Z",
-            "habit": {"name": "mab cr all", "value": 0.579, "unit": "acc", "source": "11793", "every_s": 604800,
+            "habit": {"name": "mab cr all", "value": 0.579, "unit": "acc", "source": "example-0001", "every_s": 604800,
                        "was": 0.535, "was_ts": "2026-09-12T10:00:00.000Z"}
         });
         let other = serde_json::json!({
@@ -31451,7 +31451,7 @@ mod tests {
         assert_eq!(rows[0].was, Some(0.535));
         let now = "2026-09-20T09:00:00.000Z";
         let line = format_readings(&rows, now);
-        assert!(line.starts_with("mab cr all\t0.579 acc\t+0.044 since 0.535 (8 days ago)\tyesterday\tnext reading in 6 days\t11793\n"), "{line}");
+        assert!(line.starts_with("mab cr all\t0.579 acc\t+0.044 since 0.535 (8 days ago)\tyesterday\tnext reading in 6 days\texample-0001\n"), "{line}");
         let late = readings_of(&[first]);
         assert!(format_readings(&late, now).contains("next reading late (yesterday)"));
         assert_eq!(format_change(&late[0], now), "first reading");

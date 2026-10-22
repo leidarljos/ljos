@@ -690,17 +690,18 @@ Keep a number
 =============
 
 A number the seat measures again and again, a benchmark score, a hook
-latency, a count of open tickets, is a habit. A reading is one verb:
+latency, a count of open tickets, is a habit. A reading is one verb.
+The one below is an example:
 
 .. code:: console
 
-   $ ljos habit mab-cr-all 0.535 --unit acc --every 7d --source 11750
-   7b1c... habit   due 2026-09-26T10:00:00.000Z    habit mab-cr-all stands at 0.535 acc (11750).
-   $ ljos habit mab-cr-all 0.579 --unit acc --every 7d --source 11793
-   9e0a... habit   due 2026-10-03T09:12:41.000Z    habit mab-cr-all stands at 0.579 acc (11793).
+   $ ljos habit mab-cr-all 0.535 --unit acc --every 7d --source example-0000
+   7b1c... habit   due 2026-09-26T10:00:00.000Z    habit mab-cr-all stands at 0.535 acc (example-0000).
+   $ ljos habit mab-cr-all 0.579 --unit acc --every 7d --source example-0001
+   9e0a... habit   due 2026-10-03T09:12:41.000Z    habit mab-cr-all stands at 0.579 acc (example-0001).
    was 0.535 acc (8 days ago), now closed
    $ ljos habit
-   mab-cr-all  0.579 acc   +0.044 since 0.535 (8 days ago) today   next reading in 7 days  11793
+   mab-cr-all  0.579 acc   +0.044 since 0.535 (8 days ago) today   next reading in 7 days  example-0001
 
 The second reading supersedes the first, so the pack keeps one live value
 a habit and ``ljos search mab-cr-all --as-of 2026-09-15`` still answers
