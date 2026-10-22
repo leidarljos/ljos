@@ -7,3 +7,16 @@
 pub mod config;
 pub mod html;
 pub mod notmuch;
+
+use anyhow::{bail, Context as _, Result};
+
+/// A reader over the mailbox the `[mail]` table names. A cloud seat is
+/// refused: it has no mailbox, and the owner's mail stays on the machine
+/// that holds it.
+pub fn open() -> Result<notmuch::Reader> {
+    if crate::cloud::cloud_seat() {
+        bail!("mail: a cloud seat has no mailbox; mail is read only on the machine that holds it");
+    }
+    let config = config::load()?.context("mail: no [mail] table in ljos config")?;
+    notmuch::Reader::new(&config)
+}
