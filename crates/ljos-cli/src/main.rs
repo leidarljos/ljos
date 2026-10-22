@@ -300,6 +300,13 @@ enum Cmd {
         /// Pull and push user rules through the tracker repository. Pass `--user`.
         #[arg(long)]
         sync: bool,
+        /// List preferences stored before a basis was kept. With `--keep`,
+        /// keep one of them as the person's, from a terminal with no runner.
+        #[arg(long)]
+        review: bool,
+        /// Keep this older preference as the person's. Pass with `--review`.
+        #[arg(long, value_name = "ID", requires = "review")]
+        keep: Option<String>,
     },
     /// Review the memories agents wrote on their own: list, keep, edit, merge, drop, prune, or browse them in a terminal viewer.
     Memories {
@@ -1417,7 +1424,36 @@ fn run_command() -> Result<()> {
             deny_reply_name,
             forget,
             sync,
+            review,
+            keep,
         } => {
+            if review {
+                if user
+                    || sync
+                    || promote.is_some()
+                    || forget.is_some()
+                    || why.is_some()
+                    || !text.is_empty()
+                    || !deny.is_empty()
+                    || !ask.is_empty()
+                    || as_persona.is_some()
+                    || !deny_mention.is_empty()
+                    || !deny_name.is_empty()
+                    || !deny_reply_to.is_empty()
+                    || !deny_reply_name.is_empty()
+                {
+                    bail!(
+                        "prefer: --review lists older preferences and takes none of the other flags"
+                    );
+                }
+                if let Some(id) = keep {
+                    print!("{}", ljos_cli::legacy_pref::keep(&id)?);
+                } else {
+                    print!("{}", ljos_cli::legacy_pref::list()?);
+                }
+                return Ok(());
+            }
+            ljos_cli::legacy_pref::migrate_once();
             if user {
                 if sync {
                     if !text.is_empty()
