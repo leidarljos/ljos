@@ -119,7 +119,8 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
     .to_string();
     // The runner spawns the prompt hook and starts the server, and the
     // prompt's session is the one that runner gave it.
-    let runner = home.path().join("claude");
+    let runner = home.path().join(".local/bin/claude");
+    std::fs::create_dir_all(runner.parent().unwrap()).unwrap();
     runner::runner_at(&runner);
     let mut noted = Command::new(&runner)
         .args([
