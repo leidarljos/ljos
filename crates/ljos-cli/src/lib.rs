@@ -27326,7 +27326,8 @@ pub fn policyd_bin() -> Option<std::path::PathBuf> {
 /// `ljos-policyd` on that whole line, and the first deny stands. A heredoc
 /// body is data the shell feeds a command, and it is not sent as argv.
 /// With the TCB required and absent, the line is refused. A policyd that
-/// times out or crashes does not refuse a line the fast check allowed.
+/// is present but times out, crashes, or prints no verdict refuses the
+/// line, unless `LJOS_GUARD_FAIL_OPEN` is set.
 #[must_use]
 pub fn tcb_verdict(line: &str) -> Option<Rule> {
     tcb_verdict_in(line, None)
@@ -27492,6 +27493,10 @@ pub fn take_guard_note() -> Option<String> {
 
 fn guard_note_of(text: &str) -> Option<String> {
     let rest = text.trim().strip_prefix("allow\t")?;
+    // `fail-open` marks an allow `LJOS_GUARD_FAIL_OPEN` chose. The person
+    // reads the sentence after it; the marker stays on the raw line so a
+    // later log can tell this allow from an unready token.
+    let rest = rest.strip_prefix("fail-open\t").unwrap_or(rest);
     rest.contains("unhealthy").then(|| rest.to_string())
 }
 
@@ -27507,7 +27512,8 @@ pub fn unhealthy_note(why: &str) -> String {
 
 /// A force push, a seat deny rule, an `rm -rf` outside a temp directory,
 /// or a commit, push, or merge the gates refuse, judged in this process.
-/// `None` means the slow check may run: a timeout there allows the line.
+/// `None` means the slow check may run. A timeout there denies the line
+/// unless `LJOS_GUARD_FAIL_OPEN` is set.
 /// A temp home is not a seat unless `LJOS_GUARD=on`, and this returns
 /// `None` there too. A temp working directory is still judged.
 ///
@@ -27814,9 +27820,10 @@ pub fn policyd_reason(token: &str) -> String {
 
 /// One line from `ljos-policyd check -- argv`. None only when there is no
 /// binary to ask: absence is not a deny unless `POLICYD_REQUIRED` says so.
-/// A binary that fails to start, crashes, hangs past [`guard_timeout`], or
-/// prints something that is not a verdict allows the line and says the
-/// guard is unhealthy. A line [`static_guard`] already judged does not
+/// A binary that is there but fails to start, crashes, hangs past
+/// [`guard_timeout`], or prints something that is not a verdict denies the
+/// line. `LJOS_GUARD_FAIL_OPEN=1` allows that fault and says the guard is
+/// unhealthy. A line [`static_guard`] already judged does not
 /// wait for that binary. The binary keeps this process's directory;
 /// [`tcb_verdict_in`] starts it in the hook's directory instead.
 pub fn tcb_check(argv: &[String]) -> Option<String> {
@@ -27850,7 +27857,19 @@ pub fn tcb_answer_in(
     cwd: Option<&Path>,
 ) -> String {
     use std::io::Read as _;
+    // A missing file is not a fault. CI and a fresh install have no
+    // policyd, and locking those out is a later, explicit switch
+    // (`POLICYD_REQUIRED`). A file that is there and still fails is a
+    // fault: Claude Code, Codex and Cursor call this path directly, and
+    // an allow there used to let the tool run with no note on Cursor.
     let unhealthy = |why: &str| format!("allow\t{}", unhealthy_note(why));
+    let faulted = |why: &str| {
+        if guard_fail_open() {
+            format!("allow\tfail-open\t{}", unhealthy_note(why))
+        } else {
+            format!("deny\tguard-fault: {why}")
+        }
+    };
     let run_dir = match cwd {
         Some(_) => match guard_start_directory(cwd) {
             Ok(dir) => Some(dir),
@@ -27858,6 +27877,9 @@ pub fn tcb_answer_in(
         },
         None => None,
     };
+    if !bin.is_file() {
+        return unhealthy("did not start");
+    }
     // A binary just written, by an install or a test, can be busy for a
     // moment: another thread's fork still holds the write descriptor until
     // its exec, and the kernel answers ETXTBSY. That is not a guard that
@@ -27878,7 +27900,7 @@ pub fn tcb_answer_in(
         cmd.spawn()
     };
     let Ok(mut child) = spawn_while_busy(spawn) else {
-        return unhealthy("did not start");
+        return faulted("did not start");
     };
     let start = std::time::Instant::now();
     let status = loop {
@@ -27890,7 +27912,7 @@ pub fn tcb_answer_in(
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return unhealthy("did not answer in time");
+                return faulted("did not answer in time");
             }
         }
     };
@@ -27909,7 +27931,7 @@ pub fn tcb_answer_in(
             None => text,
         },
         ("allow", true) => text,
-        _ => unhealthy("gave no verdict"),
+        _ => faulted("gave no verdict"),
     }
 }
 
@@ -41643,8 +41665,17 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
     }
 
+    /// A policyd that hangs, crashes, or prints garbage used to allow the
+    /// tool call. Claude Code, Codex and Cursor call `ljos hook` directly,
+    /// so that allow reached the runner, and Cursor's was a bare allow
+    /// with no note. The fault is a deny in every runner's contract.
+    /// `LJOS_GUARD_FAIL_OPEN=1` restores the allow with a note. A missing
+    /// binary, and a deny that is only the seat not being ready, still
+    /// allow. A `cwd` that does not resolve stays `cwd-unresolved`.
     #[test]
-    fn a_tcb_that_crashes_or_times_out_allows_the_line() {
+    fn a_tcb_that_crashes_or_times_out_denies_on_every_runner() {
+        let _g = env_guard();
+        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         let dir = tempfile::tempdir().unwrap();
         let argv = vec!["git".to_string(), "status".to_string()];
         let quick = std::time::Duration::from_millis(200);
@@ -41658,12 +41689,16 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         );
         let empty = answer("empty-reason", "printf 'deny\\tphronesis\\n'; exit 2");
         assert!(
-            empty.starts_with("allow\t") && empty.contains("unhealthy"),
+            empty.starts_with("allow\t")
+                && empty.contains("unhealthy")
+                && !empty.contains("fail-open"),
             "{empty}"
         );
         let unbound = answer("bind-failed", "printf 'deny\\tbind-failed\\n'; exit 2");
         assert!(
-            unbound.starts_with("allow\t") && unbound.contains("unhealthy"),
+            unbound.starts_with("allow\t")
+                && unbound.contains("unhealthy")
+                && !unbound.contains("fail-open"),
             "{unbound}"
         );
         assert_eq!(
@@ -41677,24 +41712,20 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ),
             "deny\tphronesis: seat could not open"
         );
-        for (name, body) in [
-            ("crashes", "kill -SEGV $$"),
-            ("fails", "echo oops; exit 1"),
-            ("garbage", "echo ok"),
-            ("silent", "exit 0"),
-            ("allows-then-fails", "echo allow; exit 3"),
-            ("hangs", "sleep 30"),
+        for (name, body, why) in [
+            ("crashes", "kill -SEGV $$", "gave no verdict"),
+            ("fails", "echo oops; exit 1", "gave no verdict"),
+            ("garbage", "echo ok", "gave no verdict"),
+            ("silent", "exit 0", "gave no verdict"),
+            ("allows-then-fails", "echo allow; exit 3", "gave no verdict"),
+            ("hangs", "sleep 30", "did not answer in time"),
         ] {
             let said = answer(name, body);
-            assert!(
-                said.starts_with("allow\t") && said.contains("unhealthy"),
-                "{name}: {said}"
-            );
-            assert!(!said.contains("refused unchecked"), "{name}: {said}");
+            assert_eq!(said, format!("deny\tguard-fault: {why}"), "{name}: {said}");
         }
         let gone = tcb_answer_in(&dir.path().join("missing"), &argv, quick, None);
         assert!(
-            gone.starts_with("allow\t") && gone.contains("did not start"),
+            gone.starts_with("allow\t") && gone.contains("did not start") && !gone.contains("deny"),
             "{gone}"
         );
         let home = dir.path().join("home");
@@ -41731,6 +41762,103 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             unresolved.starts_with("deny\tcwd-unresolved:"),
             "{unresolved}"
         );
+        drop(_home);
+
+        let seat = SeatDir::new("fault-deny");
+        let _seat = HoldEnv::set(&[
+            ("HOME", seat.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", seat.path().join("data").to_str().unwrap()),
+            ("LJOS_OFF", "0"),
+            ("LJOS_GUARD", "on"),
+            ("PACKSET_URL", "off"),
+            (
+                "POLICYD_BIN",
+                fake_policyd(seat.path(), "hook-fault", "echo oops; exit 1")
+                    .to_str()
+                    .unwrap(),
+            ),
+        ]);
+        let _ = take_guard_note();
+        let rule = tcb_verdict("echo hi").expect("a crashed policyd denies the line");
+        assert_eq!(rule.verdict, "deny");
+        assert!(rule.reason.contains("guard-fault"), "{}", rule.reason);
+        assert!(take_guard_note().is_none());
+        let direct = [
+            ("claude", HookShape::Asks),
+            ("codex", HookShape::DenyOnly),
+            ("cursor", HookShape::Cursor),
+            ("cursor-shell", HookShape::CursorShell),
+        ];
+        for (name, shape) in direct {
+            let call = HookCall {
+                event: "PreToolUse".into(),
+                cue: "echo hi".into(),
+                session: None,
+                shape,
+            };
+            let out = hook_output_ruled(&call, "", Some(&rule));
+            assert!(answer_denies(&out), "{name}: {out}");
+            assert!(out.contains("guard-fault"), "{name}: {out}");
+            if shape.is_cursor() {
+                let v: Value = serde_json::from_str(out.trim()).unwrap();
+                assert_eq!(v["permission"], "deny", "{name}: {out}");
+                assert!(
+                    v["user_message"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("guard-fault"),
+                    "{name}: {out}"
+                );
+                assert!(
+                    v["agent_message"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("guard-fault"),
+                    "{name}: {out}"
+                );
+            }
+        }
+        let inner = hook_output_ruled(
+            &HookCall {
+                event: "PreToolUse".into(),
+                cue: "echo hi".into(),
+                session: None,
+                shape: HookShape::CamelCase,
+            },
+            "",
+            Some(&rule),
+        );
+        for runner in runner_hooks::RUNNERS {
+            let (stdout, stderr, code) = runner_hooks::answer(runner, "PreToolUse", &inner);
+            let body = format!("{stdout}{stderr}");
+            let denied = match *runner {
+                "copilot" | "auggie" => {
+                    code == 0 && stdout.contains(r#""permissionDecision":"deny""#)
+                }
+                "gemini" => code == 0 && stdout.contains(r#""decision":"deny""#),
+                "cline" => code == 0 && stdout.contains(r#""cancel":true"#),
+                "windsurf" | "factory" | "kiro" | "qwen" | "crush" | "goose" | "amp"
+                | "openhands" => code == 2,
+                _ => false,
+            };
+            assert!(denied, "{runner}: code {code} {body}");
+            assert!(body.contains("guard-fault"), "{runner}: {body}");
+        }
+
+        let _open = HoldEnv::set(&[("LJOS_GUARD_FAIL_OPEN", "1")]);
+        let opened = answer("fails-open", "echo oops; exit 1");
+        assert!(
+            opened.starts_with("allow\tfail-open\t") && opened.contains("unhealthy"),
+            "{opened}"
+        );
+        let _ = take_guard_note();
+        assert!(
+            tcb_verdict("echo hi").is_none(),
+            "fail-open allows the line"
+        );
+        let note = take_guard_note().expect("the allow keeps its note");
+        assert!(note.contains("unhealthy"), "{note}");
+        assert!(!note.starts_with("fail-open"), "{note}");
     }
 
     #[test]
@@ -41987,7 +42115,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     #[test]
-    fn a_plain_command_is_allowed_when_the_guard_is_unhealthy() {
+    fn a_plain_command_is_denied_when_the_guard_is_unhealthy() {
         let _g = env_guard();
         let home = SeatDir::new("unhealthy-guard");
         let bin = fake_policyd(home.path(), "policyd", "echo oops; exit 1");
@@ -41997,15 +42125,17 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ("POLICYD_BIN", bin.to_str().unwrap()),
             ("PACKSET_WORKSPACE", "unhealthy-guard"),
             ("LJOS_OFF", "0"),
+            ("LJOS_GUARD", "on"),
         ]);
+        unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         let _ = take_guard_note();
-        assert!(tcb_verdict("git status").is_none());
-        let note = take_guard_note().expect("the unhealthy note");
-        assert!(note.contains("unhealthy"), "{note}");
-        assert!(!note.contains("refused unchecked"), "{note}");
-        let rule = tcb_verdict("rm -rf /home/u/proj").expect("still denied");
+        let rule = tcb_verdict("git status").expect("a crashed policyd denies");
         assert_eq!(rule.verdict, "deny");
-        assert_eq!(rule.pattern, "rm-rf-outside-tmp");
+        assert!(rule.reason.contains("guard-fault"), "{}", rule.reason);
+        assert!(take_guard_note().is_none());
+        let kept = tcb_verdict("rm -rf /home/u/proj").expect("still denied");
+        assert_eq!(kept.verdict, "deny");
+        assert_eq!(kept.pattern, "rm-rf-outside-tmp");
         assert!(take_guard_note().is_none());
     }
 
