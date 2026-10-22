@@ -1,0 +1,1 @@
+`ljos doctor` printed `ljos sync --adopt-legacy HOST` for every headerless file, including a name with a shell metacharacter and a host `-h`, which clap reads as help. The hint now uses the same name, duplicate, and scope checks as import, and the host is bound with `--adopt-legacy=HOST`.
