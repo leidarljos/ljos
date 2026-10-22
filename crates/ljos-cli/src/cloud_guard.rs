@@ -44,7 +44,7 @@ const ALLOW_RULE: &str =
 /// Branches this seat may update: `develop`, plus each branch named in the
 /// seat's `ljos.toml` under `[cloud] branches`. `Err` when that file is
 /// present and cannot be read, so a ref write fails closed.
-fn seat_allowlist() -> Result<HashSet<String>, String> {
+pub(crate) fn seat_allowlist() -> Result<HashSet<String>, String> {
     let mut allow = HashSet::new();
     allow.insert("develop".to_string());
     let Some(path) = seat_branch_file() else {
@@ -298,6 +298,15 @@ fn judge_depth(line: &str, cwd: Option<&Path>, incoming: &WalkIn) -> Verdict {
     for l in crate::nested_lines(line, 0) {
         let mut names: Vec<(String, String)> = Vec::new();
         for seg in crate::raw_segments(&l) {
+            // An assignment on its own is not a git command, and it is
+            // skipped below, but `export GIT_CONFIG_KEY_0=core.hooksPath`
+            // still disarms the hook for every later push.
+            if let Some(why) = hook_disarm(&seg, here.as_deref()) {
+                verdict.saw_ref = true;
+                if verdict.push.is_none() {
+                    verdict.push = Some(why);
+                }
+            }
             if crate::assignment_segment(&seg) {
                 bound_names(&mut names, &seg);
                 continue;
@@ -411,8 +420,12 @@ fn judge_depth(line: &str, cwd: Option<&Path>, incoming: &WalkIn) -> Verdict {
                     }
                 }
                 "curl" | "wget" | "http" | "https" => {
-                    if let Some(why) = http_ref_write(&words, &run.env, &names) {
+                    // A GET the walk resolved is a read, so a script that
+                    // only does that is not failed closed for naming curl.
+                    if http_targets_github(&words) {
                         verdict.saw_ref = true;
+                    }
+                    if let Some(why) = http_ref_write(&words) {
                         if verdict.push.is_none() {
                             verdict.push = Some(why);
                         }
@@ -423,6 +436,343 @@ fn judge_depth(line: &str, cwd: Option<&Path>, incoming: &WalkIn) -> Verdict {
         }
     }
     verdict
+}
+
+/// Why `seg` disarms the pre-push hook, or `None` when it does not.
+///
+/// The hook is the destination check. `--no-verify`, a `core.hooksPath`
+/// override, and a write to the hook file or the gitconfig that names it
+/// would let the next push skip that check. `GIT_CONFIG_COUNT` is not one
+/// of these: a push refspec in that env is judged as a destination.
+fn hook_disarm(seg: &str, cwd: Option<&Path>) -> Option<String> {
+    let words = crate::shell_words(seg);
+    if words.is_empty() {
+        return None;
+    }
+    if let Some(why) = redirect_disarm(&words, cwd) {
+        return Some(why);
+    }
+    let (at, _) = crate::prefix_end(&words);
+    let cmd = words
+        .get(at)
+        .map(|word| word.rsplit('/').next().unwrap_or(word));
+    if let Some(why) = file_tool_disarm(cmd, &words[at..], cwd) {
+        return Some(why);
+    }
+    let shell_wide = cmd == Some("export") || at == words.len();
+    let git = cmd == Some("git");
+    // A prefix assignment applies to this command. `export`, and a segment
+    // that is only assignments, applies to every later command.
+    if shell_wide || git {
+        if let Some(why) = config_env_disarm(&words[..at]) {
+            return Some(why);
+        }
+    }
+    if cmd == Some("export") {
+        if let Some(why) = config_env_disarm(&words[at + 1..]) {
+            return Some(why);
+        }
+    }
+    if git {
+        return git_hook_disarm(&words[at..]);
+    }
+    None
+}
+
+fn disarm_why(what: &str) -> String {
+    format!("{what}; {ALLOW_RULE}")
+}
+
+fn redirect_disarm(words: &[String], cwd: Option<&Path>) -> Option<String> {
+    for (i, word) in words.iter().enumerate() {
+        if word != ">" {
+            continue;
+        }
+        let Some(target) = words.get(i + 1) else {
+            continue;
+        };
+        if crate::cloud_hook::names_protected(target, cwd) {
+            return Some(disarm_why(&format!(
+                "a redirect writes {target}, which can replace the pre-push hook or the config that names it"
+            )));
+        }
+    }
+    None
+}
+
+fn file_tool_disarm(cmd: Option<&str>, words: &[String], cwd: Option<&Path>) -> Option<String> {
+    let cmd = cmd?;
+    let each = matches!(cmd, "rm" | "unlink" | "truncate" | "chmod" | "tee");
+    let dest = matches!(cmd, "mv" | "cp" | "install" | "ln");
+    if !each && !dest {
+        return None;
+    }
+    let mut positionals: Vec<String> = Vec::new();
+    let mut i = 1;
+    while i < words.len() {
+        let word = words[i].as_str();
+        if word == "--" {
+            positionals.extend(words[i + 1..].iter().cloned());
+            break;
+        }
+        if matches!(word, "-t" | "--target-directory" | "--target") {
+            if let Some(dir) = words.get(i + 1) {
+                if crate::cloud_hook::names_protected(dir, cwd) {
+                    return Some(disarm_why(&format!(
+                        "`{cmd}` writes {dir}, which can replace the pre-push hook or the config that names it"
+                    )));
+                }
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(dir) = word
+            .strip_prefix("--target-directory=")
+            .or_else(|| word.strip_prefix("--target="))
+        {
+            if crate::cloud_hook::names_protected(dir, cwd) {
+                return Some(disarm_why(&format!(
+                    "`{cmd}` writes {dir}, which can replace the pre-push hook or the config that names it"
+                )));
+            }
+            i += 1;
+            continue;
+        }
+        if valued_file_flag(cmd, word) {
+            i += 2;
+            continue;
+        }
+        if word.starts_with('-') && word.len() > 1 {
+            i += 1;
+            continue;
+        }
+        positionals.push(word.to_string());
+        i += 1;
+    }
+    let hit = if dest {
+        positionals.last().cloned()
+    } else {
+        positionals
+            .iter()
+            .find(|path| crate::cloud_hook::names_protected(path, cwd))
+            .cloned()
+    };
+    let hit = hit.filter(|path| crate::cloud_hook::names_protected(path, cwd))?;
+    Some(disarm_why(&format!(
+        "`{cmd}` writes {hit}, which can replace the pre-push hook or the config that names it"
+    )))
+}
+
+fn valued_file_flag(cmd: &str, word: &str) -> bool {
+    match cmd {
+        "install" => matches!(
+            word,
+            "-m" | "-o"
+                | "-g"
+                | "-S"
+                | "--mode"
+                | "--owner"
+                | "--group"
+                | "--suffix"
+                | "--strip-program"
+                | "--compare"
+        ),
+        "chmod" => matches!(word, "--reference"),
+        "cp" | "mv" | "ln" => matches!(
+            word,
+            "--suffix" | "-S" | "--backup" | "--context" | "--no-target-directory"
+        ),
+        "truncate" => matches!(word, "-s" | "--size" | "-r" | "--reference"),
+        "tee" => false,
+        _ => false,
+    }
+}
+
+/// `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` replace the file that names
+/// the hook. `GIT_CONFIG_KEY_*` and `GIT_CONFIG_PARAMETERS` can set
+/// `core.hooksPath` without a `-c`. The ambient values are not read: a
+/// test isolates git by pointing those variables at an empty file.
+fn config_env_disarm(words: &[String]) -> Option<String> {
+    for word in words {
+        let Some((key, value)) = word.split_once('=') else {
+            continue;
+        };
+        if !assign_key(key) {
+            continue;
+        }
+        if key == "GIT_CONFIG_GLOBAL" || key == "GIT_CONFIG_SYSTEM" {
+            return Some(disarm_why(&format!(
+                "`{key}` replaces the config that names the pre-push hook"
+            )));
+        }
+        if key.starts_with("GIT_CONFIG_KEY_") && value.eq_ignore_ascii_case("core.hooksPath") {
+            return Some(disarm_why(
+                "`GIT_CONFIG_KEY_*` sets core.hooksPath and skips the pre-push hook",
+            ));
+        }
+        if key == "GIT_CONFIG_PARAMETERS" && value.to_ascii_lowercase().contains("core.hookspath") {
+            return Some(disarm_why(
+                "`GIT_CONFIG_PARAMETERS` sets core.hooksPath and skips the pre-push hook",
+            ));
+        }
+    }
+    None
+}
+
+fn git_hook_disarm(words: &[String]) -> Option<String> {
+    // `--no-verify` is a push option, so it follows the subcommand.
+    // `-c core.hooksPath` is refused wherever it sits on the git command.
+    if let Some(why) = git_hook_switches(words) {
+        return Some(why);
+    }
+    let mut i = 1;
+    while i < words.len() {
+        let word = words[i].as_str();
+        if word == "--no-verify" || word.starts_with("--no-verify=") {
+            return Some(disarm_why("`git --no-verify` skips the pre-push hook"));
+        }
+        if word == "-c" || word == "--config-env" {
+            let value = words.get(i + 1).map(String::as_str).unwrap_or("");
+            if hooks_path_setting(value) {
+                return Some(disarm_why(
+                    "`git -c` names core.hooksPath and skips the pre-push hook",
+                ));
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(value) = word.strip_prefix("--config-env=") {
+            if hooks_path_setting(value) {
+                return Some(disarm_why(
+                    "`git -c` names core.hooksPath and skips the pre-push hook",
+                ));
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(value) = word.strip_prefix("-c") {
+            if !value.is_empty() && !word.starts_with("--") && hooks_path_setting(value) {
+                return Some(disarm_why(
+                    "`git -c` names core.hooksPath and skips the pre-push hook",
+                ));
+            }
+        }
+        if GIT_VALUED.contains(&word) {
+            i += 2;
+            continue;
+        }
+        if word.starts_with('-') && word.len() > 1 {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    if words.get(i).map(String::as_str) == Some("config") {
+        return git_config_hooks_disarm(&words[i + 1..]);
+    }
+    None
+}
+
+fn git_hook_switches(words: &[String]) -> Option<String> {
+    let mut i = 1;
+    while i < words.len() {
+        let word = words[i].as_str();
+        if word == "--no-verify" || word.starts_with("--no-verify=") {
+            return Some(disarm_why("`git --no-verify` skips the pre-push hook"));
+        }
+        if word == "-c" || word == "--config-env" {
+            let value = words.get(i + 1).map(String::as_str).unwrap_or("");
+            if hooks_path_setting(value) {
+                return Some(disarm_why(
+                    "`git -c` names core.hooksPath and skips the pre-push hook",
+                ));
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(value) = word.strip_prefix("--config-env=") {
+            if hooks_path_setting(value) {
+                return Some(disarm_why(
+                    "`git -c` names core.hooksPath and skips the pre-push hook",
+                ));
+            }
+        }
+        if let Some(value) = word.strip_prefix("-c") {
+            if !value.is_empty() && !word.starts_with("--") && hooks_path_setting(value) {
+                return Some(disarm_why(
+                    "`git -c` names core.hooksPath and skips the pre-push hook",
+                ));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn hooks_path_setting(value: &str) -> bool {
+    let key = value.split_once('=').map(|(key, _)| key).unwrap_or(value);
+    key.eq_ignore_ascii_case("core.hooksPath")
+}
+
+fn git_config_hooks_disarm(args: &[String]) -> Option<String> {
+    let mut i = 0;
+    let mut read = false;
+    let mut write = false;
+    let mut positional: Vec<&str> = Vec::new();
+    while i < args.len() {
+        let word = args[i].as_str();
+        if matches!(
+            word,
+            "--get"
+                | "--get-all"
+                | "--get-regexp"
+                | "--get-urlmatch"
+                | "--list"
+                | "-l"
+                | "--show-origin"
+                | "--show-scope"
+                | "--get-color"
+                | "--get-colorbool"
+        ) {
+            read = true;
+            i += 1;
+            continue;
+        }
+        if matches!(word, "--unset" | "--unset-all" | "--replace-all" | "--add") {
+            write = true;
+            i += 1;
+            continue;
+        }
+        if matches!(
+            word,
+            "--file" | "-f" | "--blob" | "--default" | "--comment" | "--type" | "--name" | "--id"
+        ) {
+            i += 2;
+            continue;
+        }
+        if word.starts_with('-') && word.len() > 1 {
+            i += 1;
+            continue;
+        }
+        positional.push(word);
+        i += 1;
+    }
+    let key = positional.first().copied().unwrap_or("");
+    let key = key.split_once('=').map(|(key, _)| key).unwrap_or(key);
+    if !key.eq_ignore_ascii_case("core.hooksPath") {
+        return None;
+    }
+    let sets =
+        write || positional.len() >= 2 || positional.first().is_some_and(|w| w.contains('='));
+    if read && !sets {
+        return None;
+    }
+    if !sets {
+        return None;
+    }
+    Some(disarm_why(
+        "`git config` writes core.hooksPath and skips the pre-push hook",
+    ))
 }
 
 fn walk_child(
@@ -492,13 +842,18 @@ fn gh_command(
         ));
     }
     match noun {
-        "pr" => Verdict {
-            acts: pr_verb(gh_word(&mut rest)),
-            ..Verdict::default()
-        },
-        "api" => gh_api(rest, cwd),
+        "help" | "completion" | "status" | "search" | "browse" | "alias" | "config" => {
+            Verdict::default()
+        }
+        "auth" => gh_read_verb(noun, gh_word(&mut rest), &["status", "token"]),
+        "pr" => gh_pr(rest),
+        "issue" => gh_read_verb(noun, gh_word(&mut rest), &["view", "list", "status"]),
+        "repo" => gh_read_verb(noun, gh_word(&mut rest), &["view", "list", "clone"]),
         "release" => gh_release(rest),
-        "repo" => gh_repo_sync(rest),
+        "run" => gh_read_verb(noun, gh_word(&mut rest), &["view", "list", "watch"]),
+        "workflow" => gh_read_verb(noun, gh_word(&mut rest), &["view", "list"]),
+        "gist" => gh_read_verb(noun, gh_word(&mut rest), &["view", "list"]),
+        "api" => gh_api(rest, cwd),
         other => {
             let exp = incoming
                 .gh_aliases
@@ -513,12 +868,64 @@ fn gh_command(
                         "a gh alias set on this line could not be read; {ALLOW_RULE}"
                     ));
                 }
-                return Verdict::default();
+                return gh_write(other, "");
             };
             let extra: Vec<&str> = rest.collect();
             expand_alias(&exp, &extra, env, cwd, incoming)
         }
     }
+}
+
+/// GitHub writes this program runs. There are none. The reads it does run
+/// are `gh api user`, `repos/{owner}/{repo}`, that repo's collaborators,
+/// and its releases, each a GET.
+const GH_WRITES_LJOS_NEEDS: &[&str] = &[];
+
+fn ljos_needs_write(noun: &str, verb: &str) -> bool {
+    GH_WRITES_LJOS_NEEDS
+        .iter()
+        .any(|need| *need == noun || *need == verb)
+}
+
+fn gh_write(noun: &str, verb: &str) -> Verdict {
+    if ljos_needs_write(noun, verb) {
+        return Verdict::default();
+    }
+    let what = if verb.is_empty() {
+        format!("`gh {noun}`")
+    } else {
+        format!("`gh {noun} {verb}`")
+    };
+    Verdict::closed(format!(
+        "{what} is not a GitHub read this seat runs; {ALLOW_RULE}"
+    ))
+}
+
+/// `verb` is allowed when it is absent or one of `reads`. Anything else
+/// is a write. Opening and merging a pull request are not reads, and they
+/// are not this function's: [`gh_pr`] names those two on their own rules.
+fn gh_read_verb(noun: &str, verb: Option<&str>, reads: &[&str]) -> Verdict {
+    match verb {
+        Some(verb) if reads.contains(&verb) => Verdict::default(),
+        None => Verdict::default(),
+        Some(verb) => gh_write(noun, verb),
+    }
+}
+
+fn gh_pr<'a>(mut words: impl Iterator<Item = &'a str>) -> Verdict {
+    let verb = gh_word(&mut words);
+    let acts = pr_verb(verb);
+    if acts.any() {
+        return Verdict {
+            acts,
+            ..Verdict::default()
+        };
+    }
+    gh_read_verb(
+        "pr",
+        verb,
+        &["view", "list", "status", "checks", "diff", "checkout"],
+    )
 }
 
 fn pr_verb(verb: Option<&str>) -> GhActs {
@@ -645,58 +1052,7 @@ fn gh_release<'a>(mut words: impl Iterator<Item = &'a str>) -> Verdict {
     if verb == Some("create") {
         return Verdict::closed(format!("`gh release create` writes a tag; {ALLOW_RULE}"));
     }
-    Verdict::default()
-}
-
-fn gh_repo_sync<'a>(mut words: impl Iterator<Item = &'a str>) -> Verdict {
-    let verb = gh_word(&mut words);
-    if verb != Some("sync") {
-        return Verdict::default();
-    }
-    let mut branch: Option<String> = None;
-    let mut force = false;
-    let rest: Vec<&str> = words.collect();
-    let mut i = 0;
-    while i < rest.len() {
-        let word = rest[i];
-        if word == "-b" || word == "--branch" {
-            branch = rest.get(i + 1).map(|value| (*value).to_string());
-            i += 2;
-            continue;
-        }
-        if let Some(value) = word.strip_prefix("--branch=") {
-            branch = Some(value.to_string());
-            i += 1;
-            continue;
-        }
-        if word == "--force" {
-            force = true;
-        }
-        i += 1;
-    }
-    if force {
-        return Verdict::closed(format!(
-            "`gh repo sync --force` rewrites a ref; {ALLOW_RULE}"
-        ));
-    }
-    let Some(branch) = branch else {
-        return Verdict::closed(format!(
-            "`gh repo sync` does not name the branch it updates; {ALLOW_RULE}"
-        ));
-    };
-    if unreadable_token(&branch) {
-        return Verdict::closed(format!(
-            "`gh repo sync` names `{branch}`, which is only known once the shell expands it; {ALLOW_RULE}"
-        ));
-    }
-    match branch_permitted(&branch) {
-        Err(why) => Verdict::closed(why),
-        Ok(false) => Verdict::closed(format!("`gh repo sync` updates {branch}; {ALLOW_RULE}")),
-        Ok(true) => Verdict {
-            saw_ref: true,
-            ..Verdict::default()
-        },
-    }
+    gh_read_verb("release", verb, &["view", "list", "download"])
 }
 
 /// `NAME=value` words in front of `gh`, so `gh alias list` sees the config
@@ -812,36 +1168,53 @@ fn gh_api<'a>(words: impl Iterator<Item = &'a str>, cwd: Option<&Path>) -> Verdi
         call.input.as_deref(),
         cwd,
     );
-    let why = classify_api_cursor_ref(
+    // Open and merge keep their own rules. A push reason here would hide
+    // them, because the push rule is the one read first.
+    if acts.any() {
+        return Verdict {
+            acts,
+            saw_ref: true,
+            ..Verdict::default()
+        };
+    }
+    if api_is_safe_read(&call) {
+        return Verdict::default();
+    }
+    if let Some(why) = classify_api_cursor_ref(
         &call.endpoint,
         call.method.as_deref(),
         &call.fields,
         call.input.as_deref(),
         cwd,
         call.opaque,
-    );
-    let has_body = !call.fields.is_empty() || call.input.is_some() || call.opaque;
-    let saw_ref =
-        why.is_some() || endpoint_writes_ref(&call.endpoint, call.method.as_deref(), has_body);
-    Verdict {
-        push: why,
-        acts,
-        saw_ref,
+    ) {
+        return Verdict {
+            push: Some(why),
+            saw_ref: true,
+            ..Verdict::default()
+        };
     }
+    Verdict::closed(format!(
+        "`gh api` is not a GET or HEAD with no request body; {ALLOW_RULE}"
+    ))
 }
 
-fn endpoint_writes_ref(endpoint: &str, method: Option<&str>, has_body: bool) -> bool {
-    if !api_writes(method, has_body) {
+/// A resolved GET or HEAD. No method and no field is gh's GET. An explicit
+/// GET may carry `-f` query fields. `--input` and a field read from a file
+/// are not resolved.
+fn api_is_safe_read(call: &ApiCall) -> bool {
+    if call.opaque || call.input.is_some() {
         return false;
     }
-    let path = api_path(endpoint);
-    if graphql_path(&path) || git_refs_tail(&path).is_some() {
-        return true;
+    match call.method.as_deref() {
+        Some(method)
+            if method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD") =>
+        {
+            true
+        }
+        Some(_) => false,
+        None => call.fields.is_empty(),
     }
-    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
-    parts
-        .iter()
-        .any(|part| matches!(*part, "releases" | "merges" | "contents" | "branches"))
 }
 
 fn parse_api_call<'a>(words: impl Iterator<Item = &'a str>, cwd: Option<&Path>) -> Option<ApiCall> {
@@ -2847,175 +3220,372 @@ fn script_mentions_ref_write(text: &str) -> bool {
             && lower.contains("github.com"))
 }
 
-fn http_ref_write(
-    words: &[String],
-    env: &[(String, String)],
-    names: &[(String, String)],
-) -> Option<String> {
-    let cmd = words.first()?.rsplit('/').next()?;
-    if !matches!(cmd, "curl" | "wget" | "http" | "https") {
-        return None;
-    }
-    let joined = words.join(" ");
-    let aimed = joined.contains("api.github.com")
-        || joined.contains("github.com")
-        || joined.contains("github.ghe.com");
-    let url_hidden = words.iter().any(|word| {
-        (word.starts_with("http://") || word.starts_with("https://") || word.contains("github"))
-            && unreadable_token(word)
-    }) || words
-        .iter()
-        .any(|word| unreadable_token(word) && word.contains("://"));
-    let auth = http_has_auth(words, env, names);
-    if !(aimed || auth && url_hidden) {
-        return None;
-    }
-    if !auth {
-        return None;
-    }
-    if http_is_get(cmd, words) {
-        return None;
-    }
-    Some(format!(
-        "an HTTP client can write refs on GitHub and the destination is not limited to this seat; {ALLOW_RULE}"
-    ))
-}
-
-fn http_has_auth(words: &[String], env: &[(String, String)], names: &[(String, String)]) -> bool {
-    let joined = words.join(" ");
-    if joined.to_ascii_lowercase().contains("authorization") {
-        return true;
-    }
-    const TOKENS: &[&str] = &[
-        "GH_TOKEN",
-        "GITHUB_TOKEN",
-        "GH_ENTERPRISE_TOKEN",
-        "GITHUB_PAT",
-    ];
-    let mentions = |text: &str| {
-        TOKENS
-            .iter()
-            .any(|name| text.contains(&format!("${name}")) || text.contains(&format!("${{{name}")))
-    };
-    if mentions(&joined) {
-        return true;
-    }
-    env.iter()
-        .chain(names.iter())
-        .any(|(key, value)| TOKENS.contains(&key.as_str()) && !value.is_empty())
-}
-
-fn http_is_get(cmd: &str, words: &[String]) -> bool {
-    match cmd {
-        "curl" => curl_is_get(words),
-        "wget" => wget_is_get(words),
-        "http" | "https" => httpie_is_get(words),
-        _ => false,
-    }
-}
-
-fn curl_is_get(words: &[String]) -> bool {
-    let mut method: Option<String> = None;
-    let mut body = false;
-    let mut forced_get = false;
-    let mut i = 1usize;
-    while i < words.len() {
-        let word = words[i].as_str();
-        if word == "-X" || word == "--request" {
-            method = words.get(i + 1).map(|value| value.to_ascii_uppercase());
-            i += 2;
-            continue;
-        }
-        if let Some(value) = word.strip_prefix("--request=") {
-            method = Some(value.to_ascii_uppercase());
-            i += 1;
-            continue;
-        }
-        if let Some(value) = word.strip_prefix("-X") {
-            if !value.is_empty() && !word.starts_with("--") {
-                method = Some(value.to_ascii_uppercase());
-                i += 1;
-                continue;
-            }
-        }
-        if matches!(
-            word,
-            "-d" | "--data"
-                | "--data-raw"
-                | "--data-binary"
-                | "--data-urlencode"
-                | "--json"
-                | "-T"
-                | "--upload-file"
-                | "-F"
-                | "--form"
-        ) || word.starts_with("--data=")
-            || word.starts_with("--data-raw=")
-            || word.starts_with("--json=")
-            || word.starts_with("--upload-file=")
-        {
-            body = true;
-            if !word.contains('=') && !word.starts_with("--json") {
-                i += 2;
-                continue;
-            }
-        }
-        if word == "-G" || word == "--get" || word == "-I" || word == "--head" {
-            forced_get = true;
-        }
-        i += 1;
-    }
-    if forced_get && method.is_none() {
-        return true;
-    }
-    match method.as_deref() {
-        Some("GET" | "HEAD") => !body || forced_get,
-        Some(_) => false,
-        None => !body,
-    }
-}
-
-fn wget_is_get(words: &[String]) -> bool {
-    for word in words.iter().skip(1) {
-        let lower = word.to_ascii_lowercase();
-        if lower.starts_with("--post-")
-            || lower.starts_with("--body-")
-            || lower.starts_with("--method=post")
-            || lower.starts_with("--method=put")
-            || lower.starts_with("--method=patch")
-            || lower.starts_with("--method=delete")
-        {
-            return false;
-        }
-    }
-    true
-}
-
-fn httpie_is_get(words: &[String]) -> bool {
-    let mut saw_method = false;
-    let mut body = false;
+fn http_targets_github(words: &[String]) -> bool {
+    let mut github = false;
+    let mut other = false;
+    let mut hidden = false;
     for word in words.iter().skip(1) {
         if word.starts_with('-') {
             continue;
         }
+        if let Some(host) = literal_http_host(word) {
+            if is_github_host(&host) {
+                github = true;
+            } else {
+                other = true;
+            }
+            continue;
+        }
+        // `$URL` and `https://$HOST/...` do not name a host. A header that
+        // happens to hold a token has a colon or a space and is not a URL.
+        if unreadable_token(word) && (word.contains("://") || !word.contains([' ', ':', '='])) {
+            hidden = true;
+        }
+    }
+    if github {
+        return true;
+    }
+    // A visible host that is not GitHub stays out of this allowlist, even
+    // when the path or a header still has a substitution.
+    if other {
+        return false;
+    }
+    hidden
+}
+
+fn literal_http_host(word: &str) -> Option<String> {
+    let rest = word
+        .strip_prefix("https://")
+        .or_else(|| word.strip_prefix("http://"))?;
+    let host = rest.split(['/', '?', ':']).next().unwrap_or("");
+    if host.is_empty() || unreadable_token(host) {
+        return None;
+    }
+    Some(host.to_ascii_lowercase())
+}
+
+fn is_github_host(host: &str) -> bool {
+    host == "github.com"
+        || host == "github.ghe.com"
+        || host.ends_with(".github.com")
+        || host.ends_with(".github.ghe.com")
+}
+
+fn http_ref_write(words: &[String]) -> Option<String> {
+    let cmd = words.first()?.rsplit('/').next()?;
+    if !matches!(cmd, "curl" | "wget" | "http" | "https") {
+        return None;
+    }
+    // A host that is not GitHub is left alone, including a clustered
+    // DELETE. Cargo and npm talk to those hosts.
+    if !http_targets_github(words) {
+        return None;
+    }
+    match http_shape(cmd, words) {
+        HttpShape::Get => None,
+        HttpShape::Write | HttpShape::Opaque => Some(format!(
+            "an HTTP client can write refs on GitHub and the destination is not limited to this seat; {ALLOW_RULE}"
+        )),
+    }
+}
+
+enum HttpShape {
+    Get,
+    Write,
+    Opaque,
+}
+
+fn http_shape(cmd: &str, words: &[String]) -> HttpShape {
+    match cmd {
+        "curl" => curl_shape(words),
+        "wget" => wget_shape(words),
+        "http" | "https" => httpie_shape(words),
+        _ => HttpShape::Opaque,
+    }
+}
+
+/// Boolean curl shorts. `G` is `--get` and `I` is `--head`. `n` is
+/// `--netrc` and is not in this set.
+const CURL_BOOL: &str = "sSfkLvgGI";
+/// Curl shorts that take a value. `K` is a config file.
+const CURL_VALUE: &str = "XdHuKoTFAbcemwExUrPQDyYztC";
+
+fn curl_shape(words: &[String]) -> HttpShape {
+    let mut method: Option<String> = None;
+    let mut body = false;
+    let mut query = false;
+    let mut i = 1usize;
+    while i < words.len() {
+        let word = words[i].as_str();
+        if word == "--" {
+            break;
+        }
+        if word.starts_with("--") {
+            match curl_long(words, &mut i, &mut method, &mut body, &mut query) {
+                Some(shape) => return shape,
+                None => continue,
+            }
+        }
+        if let Some(cluster) = word.strip_prefix('-') {
+            if cluster.is_empty() {
+                i += 1;
+                continue;
+            }
+            if let Some(shape) =
+                curl_cluster(cluster, words, &mut i, &mut method, &mut body, &mut query)
+            {
+                return shape;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    finish_http(method.as_deref(), body, query)
+}
+
+fn finish_http(method: Option<&str>, body: bool, query: bool) -> HttpShape {
+    match method {
+        Some("GET" | "HEAD") if !body || query => HttpShape::Get,
+        Some("GET" | "HEAD") => HttpShape::Write,
+        Some(_) => HttpShape::Write,
+        None if body && !query => HttpShape::Write,
+        None => HttpShape::Get,
+    }
+}
+
+fn curl_long(
+    words: &[String],
+    i: &mut usize,
+    method: &mut Option<String>,
+    body: &mut bool,
+    query: &mut bool,
+) -> Option<HttpShape> {
+    let word = words[*i].as_str();
+    let (name, attached) = word.split_once('=').unwrap_or((word, ""));
+    let lower = name.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "--netrc" | "--netrc-optional" | "--netrc-file" | "--config"
+    ) {
+        return Some(HttpShape::Opaque);
+    }
+    if matches!(
+        lower.as_str(),
+        "--data"
+            | "--data-ascii"
+            | "--data-binary"
+            | "--data-raw"
+            | "--data-urlencode"
+            | "--json"
+            | "--upload-file"
+            | "--form"
+    ) {
+        let value = flag_value(words, i, attached);
+        return if value.starts_with('@') {
+            Some(HttpShape::Opaque)
+        } else {
+            *body = true;
+            None
+        };
+    }
+    if lower == "--request" {
+        let value = flag_value(words, i, attached);
+        *method = Some(value.to_ascii_uppercase());
+        return None;
+    }
+    if lower == "--head" {
+        *method = Some("HEAD".to_string());
+        *i += 1;
+        return None;
+    }
+    if lower == "--get" {
+        *query = true;
+        *i += 1;
+        return None;
+    }
+    if matches!(
+        lower.as_str(),
+        "--header" | "--oauth2-bearer" | "--user" | "--url"
+    ) {
+        let value = flag_value(words, i, attached);
+        return if lower == "--header" && value.starts_with('@') {
+            Some(HttpShape::Opaque)
+        } else {
+            None
+        };
+    }
+    if matches!(
+        lower.as_str(),
+        "--silent"
+            | "--show-error"
+            | "--fail"
+            | "--fail-with-body"
+            | "--insecure"
+            | "--location"
+            | "--location-trusted"
+            | "--verbose"
+            | "--globoff"
+            | "--compressed"
+            | "--progress-bar"
+            | "--remote-name"
+            | "--http1.1"
+            | "--http2"
+            | "--path-as-is"
+            | "--no-progress-meter"
+            | "--create-dirs"
+            | "--ipv4"
+            | "--ipv6"
+    ) {
+        *i += 1;
+        return None;
+    }
+    if matches!(
+        lower.as_str(),
+        "--output"
+            | "--retry"
+            | "--retry-delay"
+            | "--retry-max-time"
+            | "--connect-timeout"
+            | "--max-time"
+            | "--max-redirs"
+            | "--user-agent"
+            | "--referer"
+            | "--cookie"
+            | "--cookie-jar"
+            | "--proxy"
+            | "--proxy-user"
+            | "--cacert"
+            | "--capath"
+            | "--cert"
+            | "--key"
+            | "--speed-limit"
+            | "--speed-time"
+            | "--limit-rate"
+            | "--output-dir"
+    ) {
+        let _value = flag_value(words, i, attached);
+        return None;
+    }
+    Some(HttpShape::Opaque)
+}
+
+fn flag_value(words: &[String], i: &mut usize, attached: &str) -> String {
+    if !attached.is_empty() {
+        *i += 1;
+        return attached.to_string();
+    }
+    *i += 1;
+    let value = words.get(*i).cloned().unwrap_or_default();
+    *i += 1;
+    value
+}
+
+fn curl_cluster(
+    cluster: &str,
+    words: &[String],
+    i: &mut usize,
+    method: &mut Option<String>,
+    body: &mut bool,
+    query: &mut bool,
+) -> Option<HttpShape> {
+    let chars: Vec<char> = cluster.chars().collect();
+    let mut k = 0;
+    while k < chars.len() {
+        let c = chars[k];
+        if CURL_BOOL.contains(c) {
+            if c == 'G' {
+                *query = true;
+            }
+            if c == 'I' {
+                *method = Some("HEAD".to_string());
+            }
+            k += 1;
+            continue;
+        }
+        if c == 'n' || !CURL_VALUE.contains(c) {
+            return Some(HttpShape::Opaque);
+        }
+        let attached: String = chars[k + 1..].iter().collect();
+        let value = if attached.is_empty() {
+            *i += 1;
+            let value = words.get(*i).cloned().unwrap_or_default();
+            *i += 1;
+            value
+        } else {
+            *i += 1;
+            attached
+        };
+        return match c {
+            'K' => Some(HttpShape::Opaque),
+            'X' => {
+                *method = Some(value.to_ascii_uppercase());
+                None
+            }
+            'd' | 'T' | 'F' => {
+                if value.starts_with('@') {
+                    Some(HttpShape::Opaque)
+                } else {
+                    *body = true;
+                    None
+                }
+            }
+            'H' if value.starts_with('@') => Some(HttpShape::Opaque),
+            _ => None,
+        };
+    }
+    *i += 1;
+    None
+}
+
+fn wget_shape(words: &[String]) -> HttpShape {
+    let mut method: Option<String> = None;
+    let mut body = false;
+    let mut i = 1usize;
+    while i < words.len() {
+        let lower = words[i].to_ascii_lowercase();
+        if lower == "--method" {
+            method = words.get(i + 1).map(|value| value.to_ascii_uppercase());
+            i += 2;
+            continue;
+        }
+        if let Some(value) = lower.strip_prefix("--method=") {
+            method = Some(value.to_ascii_uppercase());
+            i += 1;
+            continue;
+        }
+        if lower.starts_with("--post-") || lower.starts_with("--body-") {
+            body = true;
+        }
+        i += 1;
+    }
+    finish_http(method.as_deref(), body, false)
+}
+
+fn httpie_shape(words: &[String]) -> HttpShape {
+    let mut method: Option<String> = None;
+    let mut saw_method = false;
+    let mut body = false;
+    for word in words.iter().skip(1) {
+        if word.starts_with('@') {
+            return HttpShape::Opaque;
+        }
+        if word.starts_with('-') {
+            continue;
+        }
+        let upper = word.to_ascii_uppercase();
         if !saw_method
             && matches!(
-                word.to_ascii_uppercase().as_str(),
+                upper.as_str(),
                 "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS"
             )
         {
             saw_method = true;
-            if !matches!(
-                word.to_ascii_uppercase().as_str(),
-                "GET" | "HEAD" | "OPTIONS"
-            ) {
-                return false;
-            }
+            method = Some(upper);
             continue;
         }
         if word.contains('=') && !word.starts_with("http") {
             body = true;
         }
     }
-    !body
+    finish_http(method.as_deref(), body, false)
 }

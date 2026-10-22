@@ -19,6 +19,7 @@ pub mod bookkeep;
 pub mod capture;
 pub mod cloud;
 mod cloud_guard;
+mod cloud_hook;
 pub mod command_prefs;
 pub mod converge;
 mod deedbag;
