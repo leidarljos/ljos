@@ -1,0 +1,1 @@
+A negation on the line before a quote, or before a colon, still governs it: "Do not\nalways paste the key" or "Do not do this:\nalways paste the key" no longer lets "always paste the key" pass as the person's words. A sentence ends at `.`, `!`, `?`, `;` or a blank line for this test; the whole sentence across the line break still matches.
