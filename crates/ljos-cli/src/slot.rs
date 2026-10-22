@@ -1230,7 +1230,6 @@ mod tests {
     fn a_failed_deepen_is_tried_again() {
         let _lock = crate::test_env_lock();
         let root = tempfile::tempdir().unwrap();
-        quiet_git_config(root.path());
         let origin = root.path().join("origin");
         pinned_before_slots(&origin);
         let shallow = shallow_of(root.path(), &origin);
