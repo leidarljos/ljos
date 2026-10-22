@@ -540,15 +540,11 @@ fn resolve_attributes(dir: &Path) -> Result<(), String> {
 }
 
 fn resolve_atoms(dir: &Path, file: &str) -> Result<(), String> {
-    let path = dir.join(file);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    reexport_local(dir, &path, file)?;
-    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let bytes = reexport_local(dir, file)?;
     if bytes.windows(7).any(|w| w == b"<<<<<<<") {
         return Err(format!("{file} still has conflict markers"));
     }
+    crate::sync::write_beneath(dir, file, &bytes).map_err(|e| format!("atoms merge: {e}"))?;
     mark_resolved(dir, file)
 }
 
@@ -733,8 +729,18 @@ pub(crate) fn prepare_tracker(root: &Path, init: bool, commit: bool) -> Result<(
 /// git's `ljos-atoms` merge driver. `current` is `%A` and `rel` is `%P`.
 /// The file becomes a fresh export of this machine's atoms.
 pub(crate) fn merge_atoms_driver(current: &Path, rel: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     let root = work_tree_of(current).or_else(|_| work_tree_cwd())?;
-    reexport_local(&root, current, rel.trim())
+    let bytes = reexport_local(&root, rel.trim())?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(current)
+        .map_err(|e| format!("atoms merge: {}: {e}", current.display()))?;
+    file.write_all(&bytes).map_err(|e| e.to_string())
 }
 
 /// One org file, after a union. Two headings that share a `:ID:` become
@@ -1009,10 +1015,12 @@ fn toplevel(start: &Path) -> Result<PathBuf, String> {
     Ok(PathBuf::from(path))
 }
 
-/// Replace `dest` with a fresh export of this machine's log. Another
-/// machine's file is left alone: re-exporting it would publish our atoms
-/// under their name. No scope returns before the pack is asked.
-fn reexport_local(root: &Path, dest: &Path, rel: &str) -> Result<(), String> {
+/// A fresh export of this machine's log at `rel`. Another machine's file
+/// is refused: re-exporting it would publish our atoms under their name.
+/// No scope returns before the pack is asked. An unchanged export writes
+/// nothing, so the file is read with no symlink at any component: the
+/// tracker can hold a link there to a file outside it.
+fn reexport_local(root: &Path, rel: &str) -> Result<Vec<u8>, String> {
     if !is_this_host_atoms(rel) {
         return Err(format!(
             "atoms merge: {rel} belongs to another machine; this driver re-exports only {}",
@@ -1033,12 +1041,10 @@ fn reexport_local(root: &Path, dest: &Path, rel: &str) -> Result<(), String> {
     crate::sync::export_named(root, &scope, &scope_name, &atoms).map_err(|e| e.to_string())?;
     let name =
         atoms_file_name(rel).ok_or_else(|| format!("atoms merge: {rel} has no file name"))?;
-    let fresh = root.join(".ljos").join("atoms").join(name);
-    let bytes = std::fs::read(&fresh).map_err(|e| format!("atoms merge: {e}"))?;
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(dest, bytes).map_err(|e| e.to_string())
+    let fresh = format!(".ljos/atoms/{name}");
+    crate::sync::read_beneath(root, &fresh)
+        .map_err(|e| format!("atoms merge: {e}"))?
+        .ok_or_else(|| format!("atoms merge: {fresh} was not written"))
 }
 
 fn atoms_file_name(rel: &str) -> Option<&str> {
@@ -1159,10 +1165,17 @@ fn refuse_markers(dir: &Path) -> Result<(), String> {
     let mut files = tracked(dir, "*.org");
     files.extend(tracked(dir, ".ljos/atoms"));
     for file in files {
-        let bytes = match std::fs::read(dir.join(&file)) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e.to_string()),
+        let read = if file.starts_with(".ljos/") {
+            crate::sync::read_beneath(dir, &file).map_err(|e| e.to_string())
+        } else {
+            match std::fs::read(dir.join(&file)) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e.to_string()),
+            }
+        };
+        let Some(bytes) = read? else {
+            continue;
         };
         if bytes.windows(7).any(|window| window == b"<<<<<<<") {
             return Err(format!("{file} still has conflict markers"));
