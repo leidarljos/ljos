@@ -191,7 +191,7 @@ pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
     for voter in pins.keys() {
         validate_pin_voter(voter).with_context(|| format!("pin source: {pin_source}"))?;
     }
-    let seat_pins = seat_pins(&pins);
+    let seat_pins = seat_pins(&pins).with_context(|| format!("pin source: {pin_source}"))?;
     for entry in entries {
         verify_entry(entry)?;
         match &entry.entry {
@@ -238,26 +238,38 @@ fn validate_pin_voter(voter: &str) -> Result<()> {
     Ok(())
 }
 
-/// Bare pin rows by the seat each folds to, as row to key. A seat the
-/// tracker pinned under two names, such as `inky` and `inky@39u`, holds
-/// both keys.
-fn seat_pins(pins: &BTreeMap<String, String>) -> BTreeMap<String, BTreeMap<String, String>> {
+/// Bare pin rows by the seat each folds to, as row to key. A seat holds
+/// one key: rows such as `inky` and `inky@39u` that fold to one seat
+/// must pin the same key, or that seat would vote once under each.
+fn seat_pins(
+    pins: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, BTreeMap<String, String>>> {
     let mut seats: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for (row, key) in pins {
         if row.contains('/') {
             continue;
         }
-        if let Some(seat) = voter_seat(row) {
-            seats
-                .entry(seat)
-                .or_default()
-                .insert(row.clone(), key.clone());
+        let Some(seat) = voter_seat(row) else {
+            continue;
+        };
+        let rows = seats.entry(seat.clone()).or_default();
+        let fingerprint = crate::ballot_sig::key_fingerprint(key);
+        if let Some((other, pinned)) = rows
+            .iter()
+            .find(|(_, pinned)| crate::ballot_sig::key_fingerprint(pinned) != fingerprint)
+        {
+            bail!(
+                "seat {seat} is pinned to two keys, {}… ({other}) and {}… ({row}); a seat holds one key",
+                &pinned[..12.min(pinned.len())],
+                &key[..12.min(key.len())]
+            );
         }
+        rows.insert(row.clone(), key.clone());
     }
-    seats
+    Ok(seats)
 }
 
-/// Hold `voter` to its seat's pinned keys. The voter id is already
+/// Hold `voter` to its seat's pinned key. The voter id is already
 /// canonical, so the part after `/` is the seat as [`seat_pins`] keys it.
 fn observe_seat_pin(
     seat_pins: &BTreeMap<String, BTreeMap<String, String>>,
@@ -2026,24 +2038,28 @@ mod tests {
     }
 
     #[test]
-    fn a_seat_pinned_under_two_names_takes_either_key() {
+    fn a_seat_pinned_to_two_keys_under_two_names_is_refused() {
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
             // SAFETY: this test holds the process environment lock.
             unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
         });
+        let pin_path = root.path().join(crate::ballot_sig::PIN_FILE);
         let at = "2026-10-21T10:00:00Z";
         let bare = sign_as(ballot_entry("alpha/inky", "accept", at), 1);
         let tagged = sign_as(ballot_entry("beta/inky", "accept", at), 2);
-        let rows = format!(
-            "inky {}\ninky@39u {}\n",
-            bare.signature.key, tagged.signature.key
-        );
-        std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), rows).expect("pin");
-        check_entries(&[bare, tagged]).expect("each key the seat was pinned under");
-        let third = sign_as(ballot_entry("gamma/inky", "accept", at), 3);
-        let err = check_entries(std::slice::from_ref(&third)).expect_err("an unpinned key");
+        let (key1, key2) = (&bare.signature.key, &tagged.signature.key);
+        std::fs::write(&pin_path, format!("inky {key1}\ninky@39u {key2}\n")).expect("pin");
+        let entries = [bare.clone(), tagged.clone()];
+        let Err(err) = check_entries(&entries) else {
+            panic!("one seat voted under two keys: {:?}", tally(&entries));
+        };
+        let text = err_chain(&err);
+        assert!(text.contains("seat inky is pinned to two keys"), "{text}");
+        std::fs::write(&pin_path, format!("inky {key1}\ninky@39u {key1}\n")).expect("pin");
+        check_entries(std::slice::from_ref(&bare)).expect("one key under both names");
+        let err = check_entries(std::slice::from_ref(&tagged)).expect_err("an unpinned key");
         let text = err_chain(&err);
         assert!(
             text.contains("(inky)") && text.contains("(inky@39u)"),
