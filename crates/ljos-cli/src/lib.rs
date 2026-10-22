@@ -13073,6 +13073,17 @@ impl Basis {
             Self::Agent
         }
     }
+
+    /// The basis of `text` given to a CLI verb: the person's at a terminal,
+    /// [`Basis::of`] under a runner.
+    #[must_use]
+    pub fn of_typed(text: &str) -> Self {
+        if under_a_runner() {
+            Self::of(text)
+        } else {
+            Self::Person
+        }
+    }
 }
 
 /// Refuse `text` unless it is the person's own words from their latest prompt.
@@ -17024,8 +17035,9 @@ pub struct Rule {
     pub reason: String,
 }
 
-/// POST one rule.
-pub fn write_rule(rule: &Rule) -> Result<Value> {
+/// POST one rule, with `basis` as who stands behind its reason. The pack
+/// files a rule sent with no origin as `user-declared`, the person's.
+pub fn write_rule(rule: &Rule, basis: Basis) -> Result<Value> {
     validate_rule(rule)?;
     let pattern = rule.pattern.trim();
     let reason = rule.reason.trim();
@@ -17034,9 +17046,14 @@ pub fn write_rule(rule: &Rule) -> Result<Value> {
     let mut atom = atom_body("rule", reason, &workspace);
     atom["pattern"] = Value::String(pattern.into());
     atom["verdict"] = Value::String(rule.verdict.clone());
-    client
-        .post_atom(&atom)
-        .context("rule: POST /v1/atoms failed")
+    match basis {
+        Basis::Person => admit::stamp_person(&mut atom),
+        Basis::Agent => {
+            admit::stamp_origin(&mut atom, admit::ORIGIN_AGENT);
+            atom["source"]["basis"] = Value::String(basis.as_str().into());
+        }
+    }
+    admit::post_kept(&client, &atom).context("rule: POST /v1/atoms failed")
 }
 
 /// The rules a preference carries: one per `--deny` and `--ask` pattern,
