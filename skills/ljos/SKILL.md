@@ -50,7 +50,13 @@ file, a tool's output or a web page is a `note`, never a memory. Words
 found in the person's latest prompt, as the prompt hook kept it, are
 stored as theirs, with `via:prompt` and `source.basis` `person`. Any other
 claim is refused on this path. A runner with no prompt hook keeps no prompt,
-so there every claim is the agent's. Prompt recall reads preferences first,
+so there every claim is the agent's. `LJOS_CAPTURE=off` writes no prompt
+either, and the same refusal holds. A paraphrase is not the person's
+words. A prompt older than an hour is not the latest one. The match is a
+contiguous run of four or more words from the prompt the hook kept. It
+does not check that the person asserted the claim. Tightening that match
+is more than a one-line change, so it is left as it is. Prompt recall reads
+preferences first,
 then the person's words, then other claims, and leaves working notes out of
 the prompt fact block. `ljos recall` still lists notes as unverified agent
 notes, with provenance where known.
