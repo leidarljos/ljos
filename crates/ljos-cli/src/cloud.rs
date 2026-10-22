@@ -1417,18 +1417,15 @@ fn ensure_wakes() -> Result<Vec<String>> {
             ));
             continue;
         }
-        let hand_set = existing
-            .get(&seat)
-            .is_some_and(|wake| wake.source.as_deref() != Some(crate::wake::ENV_SOURCE));
-        if hand_set {
+        let key_env = format!("LJOS_WAKE_{}_KEY", one.mid);
+        let wrote = crate::wake::set_env_webhook(&seat, &one.url, &key_env)?;
+        if !wrote {
             lines.push(format!(
                 "wake {seat}: left the wake cloud up did not write; {} did not replace it",
                 one.name
             ));
             continue;
         }
-        let key_env = format!("LJOS_WAKE_{}_KEY", one.mid);
-        crate::wake::set_env_webhook(&seat, &one.url, &key_env)?;
         let unset = if nonempty_var(&key_env).is_some() {
             ""
         } else {
