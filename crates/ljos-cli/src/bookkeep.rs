@@ -2882,7 +2882,12 @@ fn book_named_in(book: &mut Book, key: &str, repo: &str, head: &str, issue: &str
             }
         }
         None if placeholder.is_some() => {
-            clear_issue_fields_if_issue_changes(row, issue);
+            // The cancelled ticket was a placeholder for this sitting.
+            // Failures, asks, the title and commits a sweep already found
+            // stay. Only the lesson was about that ticket.
+            row.lesson = false;
+            row.lesson_id = None;
+            row.lesson_title = None;
             row.issue = Some(issue.to_string());
             row.named = true;
             row.filed = false;
@@ -9614,6 +9619,73 @@ print(f"id={ident}")
             std::fs::read_to_string(crate::runtime_dir().join("book.log")).unwrap_or_default();
         assert!(log.contains(&format!("claim: cancelled {auto}")), "{log}");
         assert_eq!(creates(&tracker), 2, "the commit filed no third issue");
+    }
+
+    /// Taking over a placeholder keeps the sitting's notes. The commit
+    /// names the real ticket; it does not wipe failures, asks, the title
+    /// or commits the sweep already found.
+    #[test]
+    fn a_named_commit_keeps_the_placeholder_sittings_notes() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let named = file_by_hand("Add slugify function and tests");
+        let session = "harness-named-keeps-notes";
+        let (raw, call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Edit", "tool_input": {"file_path": "slug.py"}}),
+        );
+        let _ = observe(&raw, &call);
+        let auto = hook_row(session, &repo)
+            .issue
+            .expect("the edit filed a claim");
+        let path = book_path(session);
+        let mut book = load_book(&path);
+        let key = book
+            .repos
+            .iter()
+            .find(|(_, row)| row.issue.as_deref() == Some(auto.as_str()))
+            .map(|(key, _)| key.clone())
+            .expect("placeholder row");
+        let landed = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        let landed_at = head_sha(&key).expect("head");
+        {
+            let row = book.repos.get_mut(&key).expect("row");
+            row.failures = vec!["cargo test exited 101".into()];
+            row.asks = vec!["guard asked about the test".into()];
+            row.title = Some("slugify the names".into());
+            row.landed = vec![landed.clone()];
+            row.landed_head = Some(landed_at);
+        }
+        store_book(&path, &book);
+        let message = format!("{named}: add kebab_case");
+        let sha = land_commit(&repo, "slug.py", &message);
+        let (raw, call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {"command": format!("git commit -m \"{message}\"")},
+                "tool_response": {"exit_code": 0}
+            }),
+        );
+        let _ = observe(&raw, &call);
+        let row = hook_row(session, &repo);
+        assert_eq!(row.issue.as_deref(), Some(named.as_str()));
+        assert!(row.deeds.contains(&sha), "{:?}", row.deeds);
+        assert_eq!(
+            row.failures,
+            vec!["cargo test exited 101".to_string()],
+            "placeholder takeover dropped the failure notes: {:?}",
+            row.failures
+        );
+        assert_eq!(row.asks, vec!["guard asked about the test".to_string()]);
+        assert_eq!(row.title.as_deref(), Some("slugify the names"));
+        assert_eq!(row.landed, vec![landed]);
     }
 
     /// A placeholder that already has a deed is real work: the named
