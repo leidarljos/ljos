@@ -91,8 +91,9 @@ precondition, not an option.
    (`<left@right>`, dot-atom text or a `[...]` literal), since an MTA
    would add or replace them. It refuses `Bcc` and `Resent-Bcc`, which
    `-t` strips, so the sent bytes would no longer be the hashed ones.
-2. Export. The approval file is plain text: a statement block, a blank
-   line, then the message bytes.
+2. Export. The exporter runs the content checks below first and writes
+   no file for a draft they refuse. The approval file is plain text: a
+   statement block, a blank line, then the message bytes.
 
    ```
    ljos-outbox v1
@@ -117,7 +118,7 @@ precondition, not an option.
 3. Consensus. The draft's send issue carries the option `send H`. It
    passes with ballots from at least two seats of at least two model
    families, each verified against the seat keys the tracker pins.
-4. Policy and content checks pass, in ljos at draft time and again in
+4. Policy and content checks pass, in ljos at export and again in
    mailgate.
 5. The owner's yes. The designated mail seat (`mailseat` here) shows the
    whole approval file and `H` on an in-chat approval card, and the owner
