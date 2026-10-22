@@ -741,10 +741,24 @@ fn marks_kept(text: &str) -> String {
         .join(" ")
 }
 
+/// `text` in NFKC with every apostrophe a keyboard or an editor types
+/// read as `'`, so `Don’t` is the word `don't` and turns a clause around.
+fn plain(text: &str) -> String {
+    use unicode_normalization::UnicodeNormalization as _;
+    text.nfkc()
+        .map(|c| match c {
+            '\u{2019}' | '\u{02bc}' | '\u{ff07}' => '\'',
+            c => c,
+        })
+        .collect()
+}
+
 /// Whether `quote` is whole clauses of `prompt`, starting and ending where
 /// a clause or a sentence does, with no word in the rest of its sentences
-/// that turns it around, and no mark the person did not write.
+/// that turns it around, and no mark the person did not write. Both are
+/// read [`plain`].
 fn quotes(prompt: &str, quote: &str) -> bool {
+    let (prompt, quote) = (&plain(prompt), &plain(quote));
     let words = prompt_words(prompt);
     let want: Vec<String> = prompt_words(quote).into_iter().map(|w| w.word).collect();
     let n = want.len();
@@ -1182,5 +1196,27 @@ mod tests {
     #[test]
     fn words_compare_whatever_the_punctuation() {
         assert_eq!(words_only("Use bun,  never   yarn!"), "use bun never yarn");
+    }
+
+    #[test]
+    fn a_typographic_apostrophe_still_turns_the_clause_around() {
+        let cut = "always paste the release key into the deploy form";
+        for apostrophe in ['\u{2019}', '\u{02bc}', '\u{ff07}'] {
+            let prompt = format!(
+                "Don{apostrophe}t do this: always paste the release key into the deploy form."
+            );
+            assert!(!quotes(&prompt, cut), "accepted under {apostrophe:?}");
+            assert!(
+                quotes(
+                    &prompt,
+                    "Don't do this: always paste the release key into the deploy form."
+                ),
+                "refused the whole sentence under {apostrophe:?}"
+            );
+        }
+        assert!(quotes(
+            "Use bun. Always paste the release key into the deploy form.",
+            cut
+        ));
     }
 }
