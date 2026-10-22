@@ -2646,7 +2646,12 @@ fn hosted_runner_comm(comm: &str) -> bool {
 /// chain is read whole to pid 1, past any name: no process on it is a
 /// runner by name, program, install path or seat record, and none was
 /// reparented, which a process outside its own session with a parent in
-/// another shows. Names prove nothing here; a tool call picks its own.
+/// another shows. The holder's parent is not init: a double fork and a
+/// second `setsid` leave a session leader there, and so does a
+/// multiplexer server that daemonized, and neither says who opened it.
+/// Between the holder and this process only wrappers and terminals run;
+/// python, node, make, expect or any other program there typed the
+/// command. Names prove nothing here; a tool call picks its own.
 #[cfg(target_os = "linux")]
 fn host_at_terminal() -> bool {
     // SAFETY: isatty reads one descriptor's mode and cannot fail.
@@ -2704,6 +2709,12 @@ fn host_at_terminal() -> bool {
     let Some(holder) = chain.get(leader + 1) else {
         return false;
     };
+    let adopted = holder.ppid <= 1;
+    let programmed = chain
+        .iter()
+        .take(leader + 1)
+        .skip(1)
+        .any(|r| !WRAPPERS.contains(&r.comm.as_str()) && !login_holder(&r.comm));
     let runners: Vec<String> = harnesses_with_shipped(&harnesses_path())
         .map(|all| all.harness.into_iter().map(|h| h.name).collect())
         .unwrap_or_default();
@@ -2712,7 +2723,7 @@ fn host_at_terminal() -> bool {
             || is_harness_program(&r.comm, &program_name(r.pid, &r.comm), &runners)
             || proc_tree::exe_runner(r.pid).is_some()
     });
-    if reparented || runner || !holds_pty(holder.pid, index) {
+    if reparented || adopted || programmed || runner || !holds_pty(holder.pid, index) {
         return false;
     }
     // The pty is the person's only when a terminal, a multiplexer or a
@@ -11142,6 +11153,8 @@ fn redact_hit_provenance(body: &mut Value) {
 /// is asked again as an older writer. Any other 4xx, a 401, a 429 or a
 /// 400 about something else, refuses nothing: that search has no hits
 /// of the writer's, and the stored atoms that best match answer alone.
+/// A 401 or 403 is said, at most once a minute, and `ljos doctor`
+/// reports it without failing a seat whose search answers.
 /// An older writer is not asked, and cuts its
 /// fused list, which decays with age, so rank 21 of a pack full of fresh
 /// lookalikes never arrives: the stored atoms that best match the cue
@@ -11155,10 +11168,13 @@ fn redact_hit_provenance(body: &mut Value) {
 /// as the atom. A body that does not parse, a NaN from a writer that is
 /// not packset, is an error, so a pool the hook already holds stands.
 ///
-/// The token rides only when the proof on this connection held. Another
-/// listener is still read, without the token, and origin and basis are
-/// removed, so a lesson can be shown as an agent's and nothing is the
-/// person's.
+/// The token rides only when the proof on this connection held. A
+/// listener that is not proven is still read, without the token, and
+/// origin and basis are removed, so a lesson can be shown as an agent's
+/// and nothing is the person's. A seat with no token, a token file that
+/// cannot be read, or a port another user holds, is not that listener:
+/// the search is the stored atoms alone, and the miss is said. Taking
+/// the listener's answer then would let it choose the recall.
 fn search_relevant(
     client: &PacksetClient,
     cue: &str,
@@ -11166,7 +11182,13 @@ fn search_relevant(
     rerank: bool,
     timeout: std::time::Duration,
 ) -> Result<(Value, usize)> {
-    let ranked = ranks_by_relevance(client, timeout, true);
+    if seat_has_no_token(client) {
+        say_search_miss();
+        return Ok(stored_only(client, cue, limit));
+    }
+    // A listener that already failed the proof is read bare. Asking for
+    // the token's cache would miss, re-read status, and wipe a refusal.
+    let ranked = ranks_by_relevance(client, timeout, search_asks_with_token(client));
     // The writer's answer, or the status and body of a 4xx it gave.
     // The token rides only when this connection's proof held.
     let ask = |rank: bool| -> Result<(pack_link::Answer, bool)> {
@@ -11202,9 +11224,18 @@ fn search_relevant(
     };
     let mut fetched = ask(ranked)?;
     if ranked && fetched.0.status == 400 && names_the_rank(&fetched.0.body) {
-        refuses_relevance(client);
+        // Clear the mode this answer was read in. A bare read is not the
+        // authenticated one, so a refusal there leaves the other cache.
+        refuses_relevance(client, fetched.1);
         fetched = ask(false)?;
     }
+    if fetched.1 && matches!(fetched.0.status, 401 | 403) {
+        // A 401 or 403 on the token fails this search closed, as a 429
+        // does, and does not refuse the rank. It is also an auth fault,
+        // so it is said. A bare read is not that fault.
+        warn_search_refused(client.base(), fetched.0.status);
+    }
+    note_search_trust(client, fetched.1);
     let open = !fetched.1;
     let mut body: Value = if (200..300).contains(&fetched.0.status) {
         serde_json::from_str(&fetched.0.body)
@@ -11244,13 +11275,206 @@ fn search_relevant(
     Ok((body, chosen))
 }
 
+/// The stored atoms that best match `cue`, and none the writer chose.
+/// Used when the listener asked for a token and this seat cannot show one.
+fn stored_only(client: &PacksetClient, cue: &str, limit: u32) -> (Value, usize) {
+    let mut body = serde_json::json!({ "hits": [] });
+    let extra = relevant_atoms(client, cue, limit as usize);
+    if let Some(hits) = body["hits"].as_array_mut() {
+        hits.extend(extra);
+    }
+    (body, 0)
+}
+
+/// The last missing-token line [`say_search_miss`] printed. Stderr is
+/// given the same line.
+static SEARCH_MISS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// How often a hook says that search answered 401 or 403. A hook is a
+/// new process each prompt, so the stamp is a file.
+const SEARCH_AUTH_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Lines [`warn_search_refused`] has printed, with the writer they name.
+static SEARCH_AUTH_SAID: std::sync::Mutex<Vec<(String, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// The line stderr gets when search answered `code`.
+fn search_auth_warning(code: u16) -> String {
+    format!(
+        "ljos: the writer answered {code} on /v1/search, so recall is using stored memories. Run `ljos doctor`."
+    )
+}
+
+/// Where the last refusal of `base` is stamped, so the next prompt inside
+/// [`SEARCH_AUTH_EVERY`] stays quiet.
+fn search_auth_path(base: &str) -> std::path::PathBuf {
+    let name: String = base
+        .trim_end_matches('/')
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    runtime_dir().join(format!("search-auth-{name}"))
+}
+
+fn parse_search_auth(text: &str) -> Option<(u16, std::time::SystemTime)> {
+    let mut parts = text.split_whitespace();
+    let code = parts.next()?.parse().ok()?;
+    let secs = parts.next()?.parse().ok()?;
+    Some((
+        code,
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs),
+    ))
+}
+
+/// Whether `code` from `base` should be said now. A fresh stamp of the
+/// same code inside [`SEARCH_AUTH_EVERY`] is not said again.
+fn mark_search_auth(base: &str, code: u16) -> bool {
+    let path = search_auth_path(base);
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Some((was, at)) = parse_search_auth(&text) {
+            if was == code {
+                if let Ok(age) = std::time::SystemTime::now().duration_since(at) {
+                    if age < SEARCH_AUTH_EVERY {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let _ = std::fs::write(&path, format!("{code} {stamp}\n"));
+    true
+}
+
+/// Say that search answered 401 or 403, at most once a minute per writer.
+/// The search has already failed closed; this is how the person hears it.
+fn warn_search_refused(base: &str, code: u16) {
+    if !matches!(code, 401 | 403) {
+        return;
+    }
+    let base = base.trim_end_matches('/').to_string();
+    if !mark_search_auth(&base, code) {
+        return;
+    }
+    let line = search_auth_warning(code);
+    SEARCH_AUTH_SAID
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((base, line.clone()));
+    eprintln!("{line}");
+}
+
+/// What doctor reports when an authenticated search is still refused.
+/// `None` when search answers, the listener is not proven, or this seat
+/// has no token: a working seat gains no row, and a missing token is the
+/// pack token row. The read is [`PacksetClient::roundtrip`], so the token
+/// stays off until the proof on that connection holds.
+fn search_auth_habitat(client: &PacksetClient) -> Option<Habitat> {
+    if seat_has_no_token(client) {
+        return None;
+    }
+    let timeout = std::time::Duration::from_secs(2).min(pack_timeout());
+    let workspace = client.workspace();
+    let answer = client
+        .roundtrip(
+            "GET",
+            "/v1/search",
+            &[
+                ("workspace", workspace.as_str()),
+                ("q", "ljos"),
+                ("limit", "1"),
+            ],
+            None,
+            true,
+            timeout,
+        )
+        .ok()?;
+    if !answer.trusted {
+        return None;
+    }
+    if !matches!(answer.status, 401 | 403) {
+        return None;
+    }
+    let code = answer.status;
+    Some(Habitat {
+        name: "search",
+        state: format!(
+            "the writer answered {code} on /v1/search; recall is using stored memories until that read is accepted"
+        ),
+        ok: false,
+    })
+}
+
+/// This seat cannot put its token on a request: there is none, the token
+/// file cannot be read, or another user holds the pack's port. That is
+/// not an open listener. An open listener has a token and fails the proof.
+fn seat_has_no_token(client: &PacksetClient) -> bool {
+    if packset_client::token().is_none() {
+        return true;
+    }
+    packset_client::authorize(ureq::get(client.base()))
+        .header("Authorization")
+        .is_none()
+}
+
+/// Writers whose last search did not carry the token. The next search
+/// asks the bare rank cache, so a refusal there is not read again as the
+/// authenticated mode.
+static SEARCH_OPEN: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+fn search_trust_key(client: &PacksetClient) -> String {
+    format!(
+        "{}\n{}",
+        client.base().trim_end_matches('/'),
+        client.workspace()
+    )
+}
+
+fn search_asks_with_token(client: &PacksetClient) -> bool {
+    !SEARCH_OPEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&search_trust_key(client))
+}
+
+fn note_search_trust(client: &PacksetClient, trusted: bool) {
+    let mut open = SEARCH_OPEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let key = search_trust_key(client);
+    if trusted {
+        open.remove(&key);
+    } else {
+        open.insert(key);
+    }
+}
+
+/// Say that this seat cannot show a token. That used to be read as an
+/// open listener, and the recall then followed whatever it answered.
+fn say_search_miss() {
+    let line = "ljos: no token the search: this seat has none, the token file cannot be read, or another user holds the pack's port";
+    *SEARCH_MISS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(line.to_string());
+    eprintln!("{line}");
+}
+
 /// Whether the writer at `client` takes `rank=relevance` in this
 /// workspace: its `/v1/status` lists it under `search.ranks`, and no
 /// search here was refused it since. An older writer omits `search`, and
 /// one that does not answer is taken as older. Its crate version did not
 /// move with the rank, so it is not read. Asked once per writer and
-/// workspace each [`RANKS_FOR`]. `with_token` is false for a listener
-/// that did not ask, so the token is not handed to it.
+/// workspace and auth mode each [`RANKS_FOR`]. `with_token` is false for
+/// a listener that did not ask, so the token is not handed to it. An
+/// unauthenticated read is not reused for an authenticated one: the two
+/// listeners are not the same seat.
 fn ranks_by_relevance(
     client: &PacksetClient,
     timeout: std::time::Duration,
@@ -11261,12 +11485,12 @@ fn ranks_by_relevance(
     let mut known = RANKS_KNOWN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    known.retain(|(.., at, _)| at.elapsed() < RANKS_FOR);
-    if let Some((.., ranks)) = known
+    known.retain(|row| row.at.elapsed() < RANKS_FOR);
+    if let Some(row) = known
         .iter()
-        .find(|(b, w, ..)| *b == base && *w == workspace)
+        .find(|row| row.base == base && row.workspace == workspace && row.with_token == with_token)
     {
-        return *ranks;
+        return row.ranks;
     }
     let Ok(answer) = client.roundtrip("GET", "/v1/status", &[], None, with_token, timeout) else {
         return false;
@@ -11281,7 +11505,24 @@ fn ranks_by_relevance(
         .pointer("/search/ranks")
         .and_then(Value::as_array)
         .is_some_and(|r| r.iter().any(|v| v.as_str() == Some("relevance")));
-    known.push((base, workspace, std::time::Instant::now(), ranks));
+    // The mode is whether the token was on the answer, not whether the
+    // caller asked. A proof that fails reads bare and must not fill the
+    // authenticated cache.
+    let carried = answer.trusted;
+    if let Some(row) = known
+        .iter()
+        .find(|row| row.base == base && row.workspace == workspace && row.with_token == carried)
+    {
+        // A fresh refusal stands. This read does not wipe it.
+        return row.ranks;
+    }
+    known.push(RankSeen {
+        base,
+        workspace,
+        with_token: carried,
+        at: std::time::Instant::now(),
+        ranks,
+    });
     ranks
 }
 
@@ -11290,33 +11531,88 @@ fn ranks_by_relevance(
 /// writer that lists the rank is asked for it.
 const RANKS_FOR: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// The writer and workspace [`ranks_by_relevance`] asked about, when it
-/// read the status, and whether that workspace is asked for the rank.
-type RanksKnown = Vec<(String, String, std::time::Instant, bool)>;
-static RANKS_KNOWN: std::sync::Mutex<RanksKnown> = std::sync::Mutex::new(Vec::new());
+/// One answer [`ranks_by_relevance`] is still willing to reuse: the
+/// writer, the workspace, whether the read carried the token, when it
+/// was read, and whether that mode is asked for the rank.
+struct RankSeen {
+    base: String,
+    workspace: String,
+    with_token: bool,
+    at: std::time::Instant,
+    ranks: bool,
+}
+
+static RANKS_KNOWN: std::sync::Mutex<Vec<RankSeen>> = std::sync::Mutex::new(Vec::new());
 
 /// Whether a 400's body names the `rank` parameter, as packset's `rank
-/// must be fused or relevance` does. `rerank` is another parameter and
-/// another word.
+/// must be fused or relevance` does, or carries a JSON field of that
+/// name. A sentence that merely uses the word does not: `rerank` is
+/// another parameter, and "the lesson rank is stale" is not a refusal
+/// of this one.
 fn names_the_rank(body: &str) -> bool {
-    body.split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|w| w.eq_ignore_ascii_case("rank"))
+    match serde_json::from_str::<Value>(body) {
+        Ok(value) => value_names_the_rank(&value),
+        Err(_) => text_names_the_rank(body),
+    }
+}
+
+fn value_names_the_rank(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .any(|(key, child)| key.eq_ignore_ascii_case("rank") || value_names_the_rank(child)),
+        Value::Array(items) => items.iter().any(value_names_the_rank),
+        Value::String(text) => text_names_the_rank(text),
+        _ => false,
+    }
+}
+
+/// The parameter's name, not the word in a sentence. Packset puts it
+/// first (`rank must be fused or relevance`) or after `unknown`. A JSON
+/// string that is only `rank` is the name too.
+fn text_names_the_rank(text: &str) -> bool {
+    let words: Vec<&str> = text
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    if words
+        .first()
+        .is_some_and(|word| word.eq_ignore_ascii_case("rank"))
+    {
+        return true;
+    }
+    words.windows(2).any(|pair| {
+        pair[1].eq_ignore_ascii_case("rank")
+            && matches!(
+                pair[0].to_ascii_lowercase().as_str(),
+                "unknown"
+                    | "invalid"
+                    | "bad"
+                    | "unsupported"
+                    | "unexpected"
+                    | "unrecognized"
+                    | "parameter"
+                    | "param"
+            )
+    })
 }
 
 /// The writer at `client` answered a ranked search 400 naming `rank`
-/// though its status lists it: this workspace is asked as an older writer
-/// until [`ranks_by_relevance`] reads the status again.
-fn refuses_relevance(client: &PacksetClient) {
+/// though its status lists it: this workspace, in the auth mode
+/// `with_token` that was asked, is asked as an older writer until
+/// [`ranks_by_relevance`] reads the status again. The other mode keeps
+/// the answer it cached.
+fn refuses_relevance(client: &PacksetClient, with_token: bool) {
     let base = client.base().trim_end_matches('/');
     let workspace = client.workspace();
     let mut known = RANKS_KNOWN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((.., ranks)) = known
+    if let Some(row) = known
         .iter_mut()
-        .find(|(b, w, ..)| b == base && *w == workspace)
+        .find(|row| row.base == base && row.workspace == workspace && row.with_token == with_token)
     {
-        *ranks = false;
+        row.ranks = false;
     }
 }
 
@@ -18301,8 +18597,8 @@ pub fn preferences_line(enforced: usize, could: usize, total: usize) -> String {
 }
 
 fn preferences_row() -> Habitat {
-    // The doctor is a person-side run, so it records the cutoff. Under a
-    // runner the call does nothing and the count below still stands.
+    // The doctor records the cutoff only with the person at a terminal of
+    // their own. Without them the call does nothing and the row reports.
     legacy_pref::migrate_once();
     let listed = pack().and_then(|client| {
         atoms_lean(&client, &client.workspace()).context("preferences: GET /v1/atoms failed")
@@ -21011,6 +21307,47 @@ fn writes_persons_words(line: &str) -> Option<&'static str> {
         })
 }
 
+/// Whether keys typed into a pane spell the person's consent: an
+/// approval, or `ljos prefer` or `ljos remember`, which store words as
+/// the person's at their terminal. Quotes, a path, a `Space` key and one
+/// key per word are read through.
+fn types_consent(keys: &str) -> bool {
+    let spelled: String = keys
+        .split_whitespace()
+        .filter(|w| !w.eq_ignore_ascii_case("space"))
+        .flat_map(str::chars)
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    ["approve", "ljosprefer", "ljosremember"]
+        .iter()
+        .any(|word| spelled.contains(word))
+}
+
+/// Whether `wezterm cli send-text` in `words` names its text. Without it
+/// wezterm types what it reads from stdin.
+fn sends_text_argument(words: &[String]) -> bool {
+    let Some(at) = words.iter().position(|w| w == "send-text") else {
+        return false;
+    };
+    let mut rest = words[at + 1..].iter();
+    while let Some(w) = rest.next() {
+        let operator = w.trim_start_matches(|c: char| c.is_ascii_digit());
+        if operator.starts_with(['<', '>']) {
+            if operator.trim_matches(['<', '>', '&']).is_empty() {
+                rest.next();
+            }
+        } else if w == "--pane-id" {
+            rest.next();
+        } else if w == "--" {
+            return rest.next().is_some();
+        } else if !w.starts_with('-') {
+            return true;
+        }
+    }
+    false
+}
+
 /// The seat's own guard, before any rule: a shell command that writes one
 /// of [`SEAT_PATHS`] (anything but a reader, or a redirect into it), or a
 /// file tool aimed at one, is refused. A path is a word of its own: a
@@ -21127,7 +21464,8 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         // Consent given in the chat is what the person submits; keys an
         // agent types into a pane would forge it. Each multiplexer below
         // writes into another pane's input with these verbs; xdotool,
-        // wtype and ydotool type into whatever window has focus.
+        // wtype and ydotool type into whatever window has focus, and
+        // ttyecho and writevt into a terminal's input queue.
         let has = |verbs: &[&str]| words.iter().any(|w| verbs.contains(&w.as_str()));
         let input_flag = words
             .iter()
@@ -21138,7 +21476,7 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
             "zellij" => has(&["write-chars", "write"]),
             "wezterm" | "kitty" | "kitten" => has(&["send-text"]),
             "screen" => has(&["stuff"]),
-            "xdotool" | "wtype" | "ydotool" => true,
+            "xdotool" | "wtype" | "ydotool" | "ttyecho" | "writevt" => true,
             _ => false,
         };
         // Some verbs type what another command produced: herdr's terminal
@@ -21152,24 +21490,34 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
             _ => false,
         };
         // A paste writes a buffer into a pane. The buffer can hold an
-        // approval that this segment does not spell.
+        // approval that this segment does not spell. So does a typer fed
+        // from stdin or a file, and a program that pushes bytes into a
+        // terminal with TIOCSTI spells them however it likes.
         let pastes = match first {
             "tmux" => has(&["paste-buffer", "pasteb", "load-buffer", "loadb"]),
             "screen" => has(&["paste"]),
+            "xdotool" | "ydotool" => words.iter().any(|w| w.starts_with("--file")),
+            "wtype" => has(&["-"]),
+            "kitty" | "kitten" => words
+                .iter()
+                .any(|w| w == "--stdin" || w.starts_with("--from-file")),
+            "wezterm" => has(&["send-text"]) && !sends_text_argument(&words),
             _ => false,
         };
+        let code = words.join(" ").to_ascii_lowercase();
+        let pushes = !READERS.contains(&first)
+            && code.contains("ioctl")
+            && (code.contains("tiocsti") || code.contains("0x5412"));
         if pastes
-            || (types_keys
-                && words
-                    .iter()
-                    .any(|w| w.to_ascii_lowercase().contains("approve")))
-            || (streams_keys && line.to_ascii_lowercase().contains("approve"))
+            || pushes
+            || (types_keys && types_consent(&words[1..].join(" ")))
+            || (streams_keys && types_consent(line))
         {
             return Some(Rule {
                 pattern: "seat-guard".into(),
                 verdict: "deny".into(),
-                reason: "Typing an approval into a pane would forge the person's consent. Ask the \
-                         person to approve in the chat themselves."
+                reason: "Typing an approval, `ljos prefer` or `ljos remember` into a pane would \
+                         forge the person's consent. Ask the person to run it themselves."
                     .into(),
             });
         }
@@ -23957,6 +24305,16 @@ pub fn doctor_seat() -> Vec<Habitat> {
             refused,
         ));
     }
+    // A search that keeps answering 401 or 403 is using stored memories
+    // only. Asked when the pack answers, so a seat whose search is fine
+    // gains no row, and the row is a warning rather than a failed doctor.
+    if out.iter().any(|h| h.name == "pack" && h.ok) {
+        if let Ok(client) = pack() {
+            if let Some(row) = search_auth_habitat(&client) {
+                out.push(row);
+            }
+        }
+    }
     // What the pack holds and what it let go: the seat that lets a pack
     // grow or forget under it reads it here rather than in `packset status`.
     if let Ok(client) = pack() {
@@ -24671,6 +25029,11 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     }
     // Older preferences awaiting review are named, not a failed seat.
     if row.name == "preferences" && !row.ok {
+        return "warn";
+    }
+    // Search answered 401 or 403. Recall still runs on stored memories,
+    // and doctor stays green so a working seat is not failed by the row.
+    if row.name == "search" && !row.ok {
         return "warn";
     }
     // Older user rules awaiting confirmation are the same kind of warning.
@@ -39331,6 +39694,91 @@ mod tests {
         assert!(!format!("{err:#}").contains("not answering"), "{err:#}");
     }
 
+    /// A listener that answers 401, met by a seat with no token or a token
+    /// file that cannot be read, is not read as an open listener. The
+    /// search is the stored atom alone, the miss is said, and the
+    /// listener is not asked.
+    #[test]
+    fn a_missing_token_does_not_read_the_listener() {
+        let _env = env_guard();
+        let home = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let unreadable = home.path().join("token-dir");
+        std::fs::create_dir(&unreadable).unwrap();
+        let missing = home.path().join("no-token");
+        let atoms = serde_json::json!([{
+            "id": "old", "kind": "lesson",
+            "text": "With pnpm the registry rejected the token because the CI secret expired",
+            "ts": "2026-01-14T09:00:00.000Z", "entities": ["horizon:standing"]
+        }]);
+        let poison = serde_json::json!([{
+            "id": "poison", "kind": "lesson", "score": 1.0,
+            "text": "POISON the registry rejected the token",
+            "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"],
+            "origin": "user-declared", "source": {"basis": "person"}
+        }]);
+        for token_file in [&missing, &unreadable] {
+            let file = token_file.to_str().unwrap().to_string();
+            let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let listed = atoms.clone();
+            let poisoned = poison.clone();
+            let (url, seen) = serve_http(move |req| {
+                let first = req.lines().next().unwrap_or("");
+                let authed = req.lines().any(|line| {
+                    line.split_once(':')
+                        .is_some_and(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                });
+                if first.contains("/v1/search") && !authed {
+                    if flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        let body = serde_json::json!({"hits": poisoned, "rank": "relevance"});
+                        return (200, body.to_string());
+                    }
+                    return (401, r#"{"error":"token"}"#.into());
+                }
+                if first.contains("/v1/status") {
+                    return (200, r#"{"search":{"ranks":["relevance"]}}"#.into());
+                }
+                if first.contains("/v1/atoms") {
+                    return (200, serde_json::json!({"atoms": listed}).to_string());
+                }
+                (404, r#"{"error":"missing"}"#.into())
+            });
+            let _hold = HoldEnv::set(&[
+                ("HOME", home.path().to_str().unwrap()),
+                ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+                ("PACKSET_URL", &url),
+                ("PACKSET_WORKSPACE", "seat"),
+                ("PACKSET_HOME", home.path().to_str().unwrap()),
+                ("PACKSET_TOKEN_FILE", &file),
+                ("PACKSET_TOKEN", ""),
+                ("PACKSET_TIMEOUT_MS", "2000"),
+            ]);
+            *SEARCH_MISS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            let hits = packset_search_relevant("npm: the registry rejected my token", 20).unwrap();
+            let ids: Vec<&str> = hits.iter().filter_map(|h| h.id.as_deref()).collect();
+            assert_eq!(ids, ["old"], "{token_file:?} {hits:?}");
+            assert!(
+                hits.iter().all(|h| !h.text.contains("POISON")),
+                "{token_file:?} {hits:?}"
+            );
+            let searches = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.contains("/v1/search"))
+                .count();
+            assert_eq!(searches, 0, "{token_file:?} {:?}", seen.lock().unwrap());
+            let said = SEARCH_MISS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+                .unwrap_or_default();
+            assert!(said.contains("no token"), "{token_file:?} {said}");
+        }
+    }
+
     /// Only a 400 whose body names `rank` refuses the rank. A 429, a 401
     /// or a 400 about `rerank` fails that search closed, with the stored
     /// atoms alone and no fused retry, and the next search asks for the
@@ -39395,6 +39843,52 @@ mod tests {
         assert_eq!(ranked(), 4, "{:?}", seen.lock().unwrap());
     }
 
+    /// A 400 names `rank` when the body has that field or names the
+    /// parameter, as packset does. A sentence that only uses the word
+    /// does not refuse the rank, so the next search still asks for it.
+    #[test]
+    fn prose_that_mentions_rank_does_not_refuse_it() {
+        assert!(names_the_rank(
+            r#"{"error":"rank must be fused or relevance"}"#
+        ));
+        assert!(names_the_rank(r#"{"error":"unknown rank"}"#));
+        assert!(names_the_rank(r#"{"error":"nope","rank":true}"#));
+        assert!(names_the_rank(r#"{"param":"rank"}"#));
+        assert!(names_the_rank("rank must be fused or relevance"));
+        assert!(!names_the_rank(r#"{"error":"the lesson rank is stale"}"#));
+        assert!(!names_the_rank(r#"{"error":"cannot rank these hits"}"#));
+        assert!(!names_the_rank(r#"{"error":"rerank must be on or off"}"#));
+
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap())]);
+        let (url, seen) = serve_http(|req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/status") {
+                return (200, r#"{"search":{"ranks":["fused","relevance"]}}"#.into());
+            }
+            if first.contains("/v1/search") && first.contains("rank=") {
+                return (400, r#"{"error":"the lesson rank is stale"}"#.into());
+            }
+            if first.contains("/v1/search") {
+                return (200, r#"{"hits":[]}"#.into());
+            }
+            (200, r#"{"atoms":[]}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let ranked = || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.contains("rank=relevance"))
+                .count()
+        };
+        let search = || packset_search_relevant("the registry rejected my token", 20).unwrap();
+        search();
+        search();
+        assert_eq!(ranked(), 2, "{:?}", seen.lock().unwrap());
+    }
+
     /// A refused rank holds for the workspace whose search was refused,
     /// and only until the writer's status is read again: another
     /// workspace on that writer is asked for it, and so is the refused
@@ -39434,9 +39928,12 @@ mod tests {
         assert_eq!(ranked("refused"), 1, "{:?}", seen.lock().unwrap());
         search("other");
         assert_eq!(ranked("other"), 1, "{:?}", seen.lock().unwrap());
-        for (base, workspace, at, _) in RANKS_KNOWN.lock().unwrap().iter_mut() {
-            if base == url.trim_end_matches('/') && workspace == "refused" {
-                *at = at.checked_sub(RANKS_FOR).expect("up longer than RANKS_FOR");
+        for row in RANKS_KNOWN.lock().unwrap().iter_mut() {
+            if row.base == url.trim_end_matches('/') && row.workspace == "refused" {
+                row.at = row
+                    .at
+                    .checked_sub(RANKS_FOR)
+                    .expect("up longer than RANKS_FOR");
             }
         }
         search("refused");
@@ -39444,6 +39941,243 @@ mod tests {
         let seen = seen.lock().unwrap();
         let reads = seen.iter().filter(|r| r.contains("/v1/status")).count();
         assert_eq!(reads, 3, "{seen:?}");
+    }
+
+    /// An unauthenticated status is not reused for an authenticated read,
+    /// and a refusal clears only the auth mode that was refused.
+    #[test]
+    fn the_rank_cache_is_kept_per_auth_mode() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("PACKSET_TOKEN", "rank-cache-token"),
+            ("PACKSET_WORKSPACE", "seat"),
+        ]);
+        let (url, seen) = serve_http(|req| {
+            let first = req.lines().next().unwrap_or("");
+            let authed = req.lines().any(|line| {
+                line.split_once(':').is_some_and(|(name, value)| {
+                    name.eq_ignore_ascii_case("authorization")
+                        && value.trim() == "Bearer rank-cache-token"
+                })
+            });
+            // The authenticated read is the one whose proof held. A 404
+            // here would be read bare and would fill the other cache.
+            let proof = first.split_whitespace().nth(1).is_some_and(|path| {
+                path.split(['/', '?'])
+                    .nth(3)
+                    .is_some_and(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+            });
+            if proof {
+                return if authed {
+                    (404, r#"{"error":"no atom"}"#.into())
+                } else {
+                    (401, r#"{"error":"token"}"#.into())
+                };
+            }
+            if !first.contains("/v1/status") {
+                return (404, r#"{"error":"missing"}"#.into());
+            }
+            if authed {
+                return (200, r#"{"search":{"ranks":["relevance"]}}"#.into());
+            }
+            (200, r#"{"search":{"ranks":["fused"]}}"#.into())
+        });
+        let client = PacksetClient::new(&url).with_workspace("seat");
+        let timeout = std::time::Duration::from_secs(2);
+        let status_reads = || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.contains("/v1/status"))
+                .count()
+        };
+        assert!(!ranks_by_relevance(&client, timeout, false));
+        assert!(ranks_by_relevance(&client, timeout, true));
+        assert_eq!(status_reads(), 2, "{:?}", seen.lock().unwrap());
+        assert!(!ranks_by_relevance(&client, timeout, false));
+        assert!(ranks_by_relevance(&client, timeout, true));
+        assert_eq!(status_reads(), 2, "{:?}", seen.lock().unwrap());
+
+        let (same, _) = serve_http(|req| {
+            let first = req.lines().next().unwrap_or("");
+            let authed = req.lines().any(|line| {
+                line.split_once(':').is_some_and(|(name, value)| {
+                    name.eq_ignore_ascii_case("authorization")
+                        && value.trim() == "Bearer rank-cache-token"
+                })
+            });
+            let proof = first.split_whitespace().nth(1).is_some_and(|path| {
+                path.split(['/', '?'])
+                    .nth(3)
+                    .is_some_and(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+            });
+            if proof {
+                return if authed {
+                    (404, r#"{"error":"no atom"}"#.into())
+                } else {
+                    (401, r#"{"error":"token"}"#.into())
+                };
+            }
+            if first.contains("/v1/status") {
+                return (200, r#"{"search":{"ranks":["relevance"]}}"#.into());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let both = PacksetClient::new(&same).with_workspace("seat");
+        assert!(ranks_by_relevance(&both, timeout, false));
+        assert!(ranks_by_relevance(&both, timeout, true));
+        refuses_relevance(&both, true);
+        assert!(ranks_by_relevance(&both, timeout, false));
+        assert!(!ranks_by_relevance(&both, timeout, true));
+    }
+
+    /// A 401 or 403 on search fails closed and is said once a minute.
+    /// Doctor reports it as a warning. A search that answers adds no row,
+    /// so a working seat is not failed.
+    #[test]
+    fn a_refused_search_is_said_once_a_minute_and_doctor_warns() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("PACKSET_TOKEN", "search-auth-token"),
+            ("PACKSET_WORKSPACE", "seat"),
+            ("PACKSET_TIMEOUT_MS", "2000"),
+        ]);
+        let atoms = serde_json::json!([{
+            "id": "old", "kind": "lesson",
+            "text": "With pnpm the registry rejected the token because the CI secret expired",
+            "ts": "2026-01-14T09:00:00.000Z", "entities": ["horizon:standing"]
+        }]);
+        let serve = |code: u16| {
+            let listed = atoms.clone();
+            serve_http(move |req| {
+                let first = req.lines().next().unwrap_or("");
+                let authed = req.lines().any(|line| {
+                    line.split_once(':').is_some_and(|(name, value)| {
+                        name.eq_ignore_ascii_case("authorization")
+                            && value.trim() == "Bearer search-auth-token"
+                    })
+                });
+                // The proof asks for an atom id no pack holds: 401 with no
+                // token and with a bogus one, and not 401 with this seat's.
+                let proof = first.split_whitespace().nth(1).is_some_and(|path| {
+                    path.split(['/', '?']).nth(3).is_some_and(|id| {
+                        id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
+                    })
+                });
+                if proof {
+                    return if authed {
+                        (404, r#"{"error":"no atom"}"#.into())
+                    } else {
+                        (401, r#"{"error":"token"}"#.into())
+                    };
+                }
+                if first.contains("/v1/search") && !authed {
+                    return (401, r#"{"error":"token"}"#.into());
+                }
+                if first.contains("/v1/search") {
+                    return (code, format!(r#"{{"error":"{code}"}}"#));
+                }
+                if first.contains("/v1/atoms") && authed {
+                    return (200, serde_json::json!({"atoms": listed}).to_string());
+                }
+                if first.contains("/v1/status") {
+                    return (200, r#"{"search":{"ranks":["fused"]}}"#.into());
+                }
+                (404, r#"{"error":"missing"}"#.into())
+            })
+        };
+        let said = |base: &str| -> Vec<String> {
+            let base = base.trim_end_matches('/').to_string();
+            SEARCH_AUTH_SAID
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(writer, _)| writer == &base)
+                .map(|(_, line)| line.clone())
+                .collect()
+        };
+        let (url, _) = serve(401);
+        let _url = HoldEnv::set(&[("PACKSET_URL", &url)]);
+        let search = || packset_search_relevant("npm: the registry rejected my token", 20).unwrap();
+        let hits = search();
+        let ids: Vec<&str> = hits.iter().filter_map(|h| h.id.as_deref()).collect();
+        assert_eq!(ids, ["old"], "{hits:?}");
+        let lines = said(&url);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("401"), "{lines:?}");
+        assert!(lines[0].contains("ljos doctor"), "{lines:?}");
+        let _ = search();
+        assert_eq!(said(&url).len(), 1, "{:?}", said(&url));
+        std::fs::write(search_auth_path(&url), "401 1\n").unwrap();
+        let _ = search();
+        let lines = said(&url);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        let client = PacksetClient::new(&url).with_workspace("seat");
+        let row = search_auth_habitat(&client).expect("doctor reports the refusal");
+        assert!(!row.ok);
+        assert!(row.state.contains("401"), "{}", row.state);
+        assert_eq!(doctor_word(&row), "warn");
+        assert!(failing(std::slice::from_ref(&row)).is_empty());
+        assert!(healthy(std::slice::from_ref(&row)));
+
+        let (forbidden, _) = serve(403);
+        let _forbidden = HoldEnv::set(&[("PACKSET_URL", &forbidden)]);
+        let _ = search();
+        let lines = said(&forbidden);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("403") && line.contains("ljos doctor")),
+            "{lines:?}"
+        );
+        let client = PacksetClient::new(&forbidden).with_workspace("seat");
+        let row = search_auth_habitat(&client).expect("403");
+        assert!(row.state.contains("403"), "{}", row.state);
+        assert_eq!(doctor_word(&row), "warn");
+        assert!(healthy(std::slice::from_ref(&row)));
+
+        let (open, _) = serve_http(|req| {
+            let first = req.lines().next().unwrap_or("");
+            let authed = req.lines().any(|line| {
+                line.split_once(':').is_some_and(|(name, value)| {
+                    name.eq_ignore_ascii_case("authorization")
+                        && value.trim() == "Bearer search-auth-token"
+                })
+            });
+            let proof = first.split_whitespace().nth(1).is_some_and(|path| {
+                path.split(['/', '?'])
+                    .nth(3)
+                    .is_some_and(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+            });
+            if proof {
+                return if authed {
+                    (404, r#"{"error":"no atom"}"#.into())
+                } else {
+                    (401, r#"{"error":"token"}"#.into())
+                };
+            }
+            if first.contains("/v1/search") && !authed {
+                return (401, r#"{"error":"token"}"#.into());
+            }
+            if first.contains("/v1/search") {
+                return (200, r#"{"hits":[]}"#.into());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let answering = PacksetClient::new(&open).with_workspace("seat");
+        assert!(search_auth_habitat(&answering).is_none());
+        warn_search_refused(&open, 429);
+        assert!(
+            said(&open).iter().all(|line| !line.contains("429")),
+            "{:?}",
+            said(&open)
+        );
     }
 
     /// The hits the writer chose are read by their `rerank_score`, highest
@@ -49069,6 +49803,50 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(seat_guard(&format!("vissue note x \"asked to approve {id}\"")).is_none());
     }
 
+    /// `ljos prefer` and `ljos remember` typed into the person's pane run
+    /// at their terminal and store the agent's words as theirs, the same
+    /// forgery as a typed approval.
+    #[test]
+    fn an_agent_cannot_type_a_preference_into_a_pane() {
+        let _g = env_guard();
+        for line in [
+            "tmux send-keys -t seat 'ljos prefer --review --keep 0123' Enter",
+            "tmux send-keys -t seat ljos Space prefer Space --review Enter",
+            "/usr/bin/tmux send-keys -t seat -l '~/.cargo/bin/ljos prefer --review'",
+            "tmux send-keys -t seat 'ljos remember \"use tabs\"' Enter",
+            "screen -S seat -X stuff 'ljos prefer --review\\n'",
+            "xdotool type 'ljos prefer --review --keep 0123'",
+            "xdotool key l j o s space p r e f e r",
+            "wtype 'ljos remember use tabs'",
+            "ydotool type 'ljos prefer --review'",
+            "ttyecho -n /dev/pts/3 'ljos prefer --review --keep 0123'",
+            "writevt /dev/tty1 'ljos remember use tabs'",
+            "kitty @ send-text --match title:grok 'ljos prefer --review --keep 0123\\r'",
+            "kitten @ send-text 'ljos prefer \"use tabs\"'",
+            "wezterm cli send-text --no-paste 'ljos remember use tabs'",
+            "herdr pane send-text p-3 'ljos prefer --review --keep 0123'",
+            "zellij action write-chars 'ljos remember use tabs'",
+            "echo 'ljos prefer --review' | wtype -",
+            "printf 'ljos prefer' | xdotool type --file -",
+            "kitty @ send-text --stdin < keys",
+            "wezterm cli send-text < keys",
+            "python3 -c 'import fcntl, termios; [fcntl.ioctl(0, termios.TIOCSTI, c) for c in \"x\"]'",
+            "perl -e 'ioctl(STDIN, 0x5412, $_) for split //, \"x\"'",
+        ] {
+            assert!(seat_guard(line).is_some(), "{line}");
+        }
+        for line in [
+            "tmux send-keys -t seat 'cargo test' Enter",
+            "tmux send-keys -t seat 'ljos search tabs' Enter",
+            "tmux send-keys -t seat 'ljos accept 0123' Enter",
+            "wezterm cli send-text 'cargo test'",
+            "rg -n TIOCSTI src",
+            "git grep TIOCSTI",
+        ] {
+            assert!(seat_guard(line).is_none(), "{line}");
+        }
+    }
+
     #[test]
     fn the_tcb_sees_a_pipeline_whole_and_a_quote_as_one_word() {
         let piped: Vec<Vec<String>> =
@@ -52717,15 +53495,29 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let captured = Arc::new(Mutex::new(String::new()));
         let slot = captured.clone();
         std::thread::spawn(move || {
-            if let Ok((mut s, _)) = listener.accept() {
-                *slot.lock().unwrap() = read_http(&mut s);
+            // A seat token proves on this socket before the POST, and each
+            // proof is its own connection. The POST is the request the
+            // caller reads. A writer with no token has only that POST.
+            for _ in 0..6 {
+                let Ok((mut s, _)) = listener.accept() else {
+                    break;
+                };
+                let req = read_http(&mut s);
+                let post = req.starts_with("POST ") || req.contains("\nPOST ");
+                if post {
+                    *slot.lock().unwrap() = req;
+                }
                 let body =
                     r#"{"id":"atom-1","kind":"lesson","text":"the default fuse is CombMNZ"}"#;
+                let status = if post { "200 OK" } else { "401 Unauthorized" };
                 let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 let _ = s.write_all(resp.as_bytes());
+                if post {
+                    break;
+                }
             }
         });
         (format!("http://{addr}"), captured)
