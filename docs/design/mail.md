@@ -9,6 +9,12 @@ owner's own yes. Everything specific to one machine (addresses, hosts,
 password entries, wrapper paths, the deny file and route rules) lives in
 config, never in this repository.
 
+What ljos implements today is the reader (Config and Reading below), the
+content checks, and the exporter that writes an approval file. mailgate,
+its socket, the outbox, the ballot on `send H`, the approval card and
+the audit receipt are not in ljos yet. Where this document describes
+them, it states what they must do, not code that exists.
+
 ## Config
 
 The `[mail]` table is optional. Without it the mail tools refuse and
@@ -62,8 +68,8 @@ here.
   thread tagged `spam` or `deleted` are left out. The thread is refused
   when a message file notmuch names is a symlink or resolves outside
   notmuch's mail root (`database.mail_root`, else `database.path`).
-  Text parts are
-  wrapped as untrusted. HTML is reduced to the text a mail client would
+  Text parts are wrapped as untrusted. HTML is reduced to the text a mail
+  client would
   show. Text the reducer can tell is concealed is dropped: the `hidden`
   attribute, or a style that sets `display:none`, `visibility:hidden`,
   `opacity` near 0, a zero `font-size`, a zero width or height, a
@@ -75,16 +81,16 @@ here.
   `@media`, a concealing rule on an element or other selector, a color
   in one rule equal to a background in another, or a linked
   stylesheet), the part's text is replaced by a note that it was
-  withheld. Links are shown as text with their target, never followed. Attachments are listed by name,
-  type, size and sha256, with no content and no path. Hashing reads at
-  most 64 MiB of one attachment; past that notmuch is stopped, `sha256`
-  is null and `size` is a lower bound.
+  withheld. Links are shown as text with their target, never followed.
+  Attachments are listed by name, type, size and sha256, with no content
+  and no path. Hashing reads at most 64 MiB of one attachment; past that
+  notmuch is stopped, `sha256` is null and `size` is a lower bound.
 
 A message whose MIME parts nest more than 16 deep is refused, and replies
 nested more than 64 deep in one thread are left out with `truncated`
-set. Every notmuch run has a 30 s deadline. At the deadline notmuch and its
-process group are killed and the tool refuses, so a hung database or a
-slow part cannot stall the MCP server.
+set. Every notmuch run has a 30 s deadline. At the deadline notmuch and
+its process group are killed and the tool refuses, so a hung database or
+a slow part cannot stall the MCP server.
 
 Untrusted text sits between a start and an end marker that carry a fresh
 random nonce, so a message cannot close its own wrapping. Mail text is
@@ -144,10 +150,9 @@ precondition, not an option.
    mismatch with `H`. The expiry and nonce are not in `H`; mailgate
    checks them and spends the nonce. `reachbook-hash` must equal `H`,
    so the outbox and the file name the same bytes; any other value is
-   refused. The exporter refuses control
-   characters other than tab and newline, and the bidirectional overrides,
-   anywhere in the message, so a terminal cannot hide text from the
-   person reading it.
+   refused. The exporter refuses control characters other than tab and
+   newline, and the bidirectional overrides, anywhere in the message, so
+   a terminal cannot hide text from the person reading it.
 3. Consensus. The draft's send issue carries the option `send H`. It
    passes with ballots from at least two seats of at least two model
    families, each verified against the seat keys the tracker pins.
@@ -161,8 +166,8 @@ precondition, not an option.
    expiry and the nonce, re-verifies the ballot, runs the policy and
    content checks with its own copy of the deny file, re-hashes the
    message bytes against `H`, and writes them to `sendmail -i -t`
-   exactly once. The nonce is spent whether
-   the send succeeds or fails, so a retry needs a new tap.
+   exactly once. The nonce is spent whether the send succeeds or fails,
+   so a retry needs a new tap.
 
 The checks only ever refuse. Passing them grants nothing.
 
