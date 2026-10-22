@@ -52,15 +52,22 @@ jobs:
           command -v packsetd
       # deedar on main writes no bytes/ and no sources sidecar, so a
       # carried deed made from one this bag does not carry cannot be
-      # imported. deedimport2-20261021 writes both. Pin this build there
-      # until main carries that export.
-      - name: Build deedar from deedimport2-20261021
+      # imported. .github/deedar-pin names the commit that writes both.
+      # The import test reads that same file.
+      - name: Build deedar at the pinned commit
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch deedimport2-20261021 https://github.com/leidarljos/deedar.git "${{ runner.temp }}/deedar"
-          cargo build --locked --manifest-path "${{ runner.temp }}/deedar/Cargo.toml" -p deedar-cli --bin deedar
+          sha=$(tr -d '[:space:]' < .github/deedar-pin)
+          printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'
+          dir="${{ runner.temp }}/deedar"
+          git init -q "$dir"
+          git -C "$dir" remote add origin https://github.com/leidarljos/deedar.git
+          git -C "$dir" fetch --depth 1 origin "$sha"
+          git -C "$dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$dir" rev-parse HEAD)" = "$sha"
+          cargo build --locked --manifest-path "$dir/Cargo.toml" -p deedar-cli --bin deedar
           mkdir -p "${{ runner.temp }}/bin"
-          install -m 0755 "${{ runner.temp }}/deedar/target/debug/deedar" "${{ runner.temp }}/bin/deedar"
+          install -m 0755 "$dir/target/debug/deedar" "${{ runner.temp }}/bin/deedar"
           echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
           export PATH="${{ runner.temp }}/bin:${PATH}"
           command -v deedar
