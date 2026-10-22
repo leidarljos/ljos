@@ -21132,6 +21132,10 @@ pub fn bypass_log_path() -> Option<PathBuf> {
     Some(data_base()?.join("ljos").join("bypass.jsonl"))
 }
 
+/// How long [`append_locked_row`] tries for the lock before it skips
+/// the row.
+pub(crate) const ROW_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Append `bytes` as one row. The caller includes the trailing newline.
 ///
 /// `writeln!` of a JSON value issues a `write(2)` per token, and those
@@ -21140,6 +21144,11 @@ pub fn bypass_log_path() -> Option<PathBuf> {
 /// created mode 0600, and a symlink is not followed: the row would
 /// otherwise land in whatever the link names. A row that cannot be
 /// written is the caller's to skip.
+///
+/// Hooks call this on the path of the person's command, so the lock is
+/// tried for [`ROW_LOCK_WAIT`] and then given up with `WouldBlock`. A
+/// writer holds it for one `write(2)`; a lock held longer than that is
+/// not one of ours, and the row is skipped rather than the command.
 pub(crate) fn append_locked_row(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -21151,11 +21160,27 @@ pub(crate) fn append_locked_row(path: &Path, bytes: &[u8]) -> std::io::Result<()
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
     file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    // SAFETY: this descriptor stays open until the matching unlock. The
-    // lock is advisory, so the row is written on this same descriptor
-    // while it is held, or not at all.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(std::io::Error::last_os_error());
+    let deadline = std::time::Instant::now() + ROW_LOCK_WAIT;
+    loop {
+        // SAFETY: this descriptor stays open until the matching unlock.
+        // The lock is advisory, so the row is written on this same
+        // descriptor while it is held, or not at all.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            break;
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EWOULDBLOCK | libc::EINTR) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            Some(libc::EWOULDBLOCK) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    format!("still locked after {}ms", ROW_LOCK_WAIT.as_millis()),
+                ));
+            }
+            _ => return Err(err),
+        }
     }
     let wrote = file.write_all(bytes);
     // SAFETY: the same descriptor, still open. Close would drop the lock
@@ -21188,7 +21213,12 @@ pub fn log_bypass(kind: &str, how: &str, command: &str, rule: &Rule) {
     };
     line.push('\n');
     let _ = path.parent().map(std::fs::create_dir_all);
-    let _ = append_locked_row(&path, line.as_bytes());
+    if let Err(err) = append_locked_row(&path, line.as_bytes()) {
+        eprintln!(
+            "ljos: the bypass row for `{command}` was not written to {}: {err}",
+            path.display()
+        );
+    }
 }
 
 /// The doctor's line on the bypass log: how many commands ran past the
@@ -39388,6 +39418,42 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    /// The fail-open path writes its row before the command runs. A lock
+    /// on the log that is never let go skips the row; it does not hold
+    /// the command.
+    #[test]
+    fn a_held_bypass_lock_skips_the_row_and_returns() {
+        use std::os::unix::io::AsRawFd;
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", dir.path().to_str().unwrap())]);
+        let path = bypass_log_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        // SAFETY: `held` is open for the rest of the test.
+        assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
+        let (done, wait) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rule = Rule {
+                pattern: "ljos-policyd".into(),
+                verdict: "deny".into(),
+                reason: "guard-fault".into(),
+            };
+            log_bypass("switch", "LJOS_GUARD_FAIL_OPEN=1", "rm -rf build", &rule);
+            let _ = done.send(());
+        });
+        assert!(
+            wait.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
+            "log_bypass waited on a held lock"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        drop(held);
     }
 
     /// `hook-trace.jsonl` is the same append as the bypass log: one JSON

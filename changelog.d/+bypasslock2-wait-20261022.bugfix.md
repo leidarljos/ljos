@@ -1,0 +1,1 @@
+A lock held on `bypass.jsonl` or another ljos state log used to stall the hook that wanted to append to it, and with it the command the guard had already let through. The lock is now tried for 50ms; past that the row is skipped, and a skipped bypass row is reported on stderr.
