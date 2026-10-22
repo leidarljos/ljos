@@ -6590,6 +6590,47 @@ mod tests {
         assert_eq!(std::fs::read(&cloud).unwrap(), b"not-age\n");
     }
 
+    /// A dry run says "would adopt", and a scope that posts nothing is not
+    /// named as adopted. An empty cloud log opens and still has no atoms.
+    #[test]
+    fn adopt_summary_names_only_scopes_that_post() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let (root, scope) = two_scope_logs(dir.path());
+        let public = identity_recipient(&identity_path()).unwrap();
+        seal(
+            "\n",
+            std::slice::from_ref(&public),
+            &root.join(".ljos/atoms/gone+cloud.jsonl.age"),
+        )
+        .unwrap();
+        commit_dated(
+            &root,
+            &[".ljos/atoms/gone+cloud.jsonl.age"],
+            "empty cloud",
+            Some(OLD_COMMIT),
+        );
+        let (url, _store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+
+        let dry = adopt_in_repo(&root, &scope, "gone", opts(false, true)).unwrap();
+        let dry_summary = dry
+            .lines()
+            .find(|line| line.contains("scopes "))
+            .unwrap_or("");
+        assert_eq!(dry_summary, "sync: gone: would adopt scopes box", "{dry}");
+        assert!(!dry.contains("adopted scopes"), "{dry}");
+
+        let said = adopt_in_repo(&root, &scope, "gone", opts(false, false)).unwrap();
+        let summary = said
+            .lines()
+            .find(|line| line.contains("scopes "))
+            .unwrap_or("");
+        assert_eq!(summary, "sync: gone: adopted scopes box", "{said}");
+        assert!(said.contains("0 cloud atoms adopted"), "{said}");
+        assert!(!said.contains("would adopt scopes"), "{said}");
+    }
+
     #[test]
     fn a_young_extra_scope_blocks_the_adopt() {
         let dir = tempfile::tempdir().unwrap();
