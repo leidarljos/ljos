@@ -425,7 +425,7 @@ fn judge_depth(line: &str, cwd: Option<&Path>, incoming: &WalkIn) -> Verdict {
                     if http_targets_github(&words) {
                         verdict.saw_ref = true;
                     }
-                    if let Some(why) = http_ref_write(&words) {
+                    if let Some(why) = http_ref_write(&words, &run.env) {
                         if verdict.push.is_none() {
                             verdict.push = Some(why);
                         }
@@ -3752,7 +3752,7 @@ fn is_github_host(host: &str) -> bool {
         || host.ends_with(".pkg.github.com")
 }
 
-fn http_ref_write(words: &[String]) -> Option<String> {
+fn http_ref_write(words: &[String], env: &[(String, String)]) -> Option<String> {
     let cmd = words.first()?.rsplit('/').next()?;
     if !matches!(cmd, "curl" | "wget" | "http" | "https") {
         return None;
@@ -3762,7 +3762,7 @@ fn http_ref_write(words: &[String]) -> Option<String> {
     if !http_targets_github(words) {
         return None;
     }
-    match http_shape(cmd, words) {
+    match http_shape(cmd, words, env) {
         HttpShape::Get => None,
         HttpShape::Write | HttpShape::Opaque => Some(format!(
             "an HTTP client can write refs on GitHub and the destination is not limited to this seat; {ALLOW_RULE}"
@@ -3776,10 +3776,10 @@ enum HttpShape {
     Opaque,
 }
 
-fn http_shape(cmd: &str, words: &[String]) -> HttpShape {
+fn http_shape(cmd: &str, words: &[String], env: &[(String, String)]) -> HttpShape {
     match cmd {
-        "curl" => curl_shape(words),
-        "wget" => wget_shape(words),
+        "curl" => curl_shape(words, env),
+        "wget" => wget_shape(words, env),
         "http" | "https" => httpie_shape(words),
         _ => HttpShape::Opaque,
     }
@@ -3791,9 +3791,13 @@ const CURL_BOOL: &str = "sSfkLvgGIOJi4";
 /// Curl shorts that take a value. `K` is a config file.
 const CURL_VALUE: &str = "XdHuKoTFAbcemwExUrPQDyYztC";
 
-fn curl_shape(words: &[String]) -> HttpShape {
+fn curl_shape(words: &[String], env: &[(String, String)]) -> HttpShape {
+    if !curl_disabled(words) && carries_token(words, env) && curl_config_applies(words, env) {
+        return HttpShape::Opaque;
+    }
     let mut method: Option<String> = None;
     let mut body = false;
+    let mut upload = false;
     let mut query = false;
     let mut i = 1usize;
     while i < words.len() {
@@ -3802,7 +3806,14 @@ fn curl_shape(words: &[String]) -> HttpShape {
             break;
         }
         if word.starts_with("--") {
-            match curl_long(words, &mut i, &mut method, &mut body, &mut query) {
+            match curl_long(
+                words,
+                &mut i,
+                &mut method,
+                &mut body,
+                &mut upload,
+                &mut query,
+            ) {
                 Some(shape) => return shape,
                 None => continue,
             }
@@ -3812,19 +3823,29 @@ fn curl_shape(words: &[String]) -> HttpShape {
                 i += 1;
                 continue;
             }
-            if let Some(shape) =
-                curl_cluster(cluster, words, &mut i, &mut method, &mut body, &mut query)
-            {
+            if let Some(shape) = curl_cluster(
+                cluster,
+                words,
+                &mut i,
+                &mut method,
+                &mut body,
+                &mut upload,
+                &mut query,
+            ) {
                 return shape;
             }
             continue;
         }
         i += 1;
     }
-    finish_http(method.as_deref(), body, query)
+    finish_http(method.as_deref(), body, query, upload)
 }
 
-fn finish_http(method: Option<&str>, body: bool, query: bool) -> HttpShape {
+fn finish_http(method: Option<&str>, body: bool, query: bool, upload: bool) -> HttpShape {
+    // `-G` moves `-d` into the query string. An upload (`-T`, `-F`) stays a body.
+    if upload {
+        return HttpShape::Write;
+    }
     match method {
         Some("GET" | "HEAD") if !body || query => HttpShape::Get,
         Some("GET" | "HEAD") => HttpShape::Write,
@@ -3834,11 +3855,101 @@ fn finish_http(method: Option<&str>, body: bool, query: bool) -> HttpShape {
     }
 }
 
+fn curl_disabled(words: &[String]) -> bool {
+    words.iter().any(|word| word == "-q" || word == "--disable")
+}
+
+fn carries_token(words: &[String], env: &[(String, String)]) -> bool {
+    words.iter().any(|word| token_mark(word)) || env_has_token(env)
+}
+
+fn token_mark(word: &str) -> bool {
+    let lower = word.to_ascii_lowercase();
+    lower.contains("$gh_token")
+        || lower.contains("${gh_token}")
+        || lower.contains("$github_token")
+        || lower.contains("${github_token}")
+        || lower.contains("$github_pat")
+        || lower.contains("${github_pat}")
+        || lower.contains("authorization")
+        || lower.contains("bearer")
+        || lower.contains("x-access-token")
+        || (word.contains("://") && word.contains('@'))
+        || word == "-u"
+        || word == "--user"
+        || word == "--oauth2-bearer"
+        || word == "--netrc"
+        || word == "--netrc-optional"
+        || word == "--netrc-file"
+        || word == "-n"
+}
+
+fn env_has_token(env: &[(String, String)]) -> bool {
+    for key in ["GH_TOKEN", "GITHUB_TOKEN", "GITHUB_PAT"] {
+        if let Some((_, value)) = env.iter().rev().find(|(name, _)| name == key) {
+            if !value.is_empty() {
+                return true;
+            }
+            continue;
+        }
+        if std::env::var(key)
+            .ok()
+            .is_some_and(|value| !value.is_empty())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn prefixed_or_process(env: &[(String, String)], key: &str) -> Option<String> {
+    if let Some((_, value)) = env.iter().rev().find(|(name, _)| name == key) {
+        return Some(value.clone());
+    }
+    std::env::var(key).ok()
+}
+
+fn curl_config_applies(words: &[String], env: &[(String, String)]) -> bool {
+    if curl_disabled(words) {
+        return false;
+    }
+    if prefixed_or_process(env, "CURL_HOME").is_some_and(|value| !value.is_empty()) {
+        return true;
+    }
+    if let Ok(home) = crate::home() {
+        if home.join(".curlrc").is_file() {
+            return true;
+        }
+    }
+    if let Some(xdg) = prefixed_or_process(env, "XDG_CONFIG_HOME") {
+        if !xdg.is_empty() && Path::new(&xdg).join("curlrc").is_file() {
+            return true;
+        }
+    }
+    false
+}
+
+fn wget_config_applies(words: &[String], env: &[(String, String)]) -> bool {
+    if words
+        .iter()
+        .any(|word| word == "--config" || word.starts_with("--config="))
+    {
+        return true;
+    }
+    if prefixed_or_process(env, "WGETRC").is_some_and(|value| !value.is_empty()) {
+        return true;
+    }
+    crate::home()
+        .map(|home| home.join(".wgetrc").is_file())
+        .unwrap_or(false)
+}
+
 fn curl_long(
     words: &[String],
     i: &mut usize,
     method: &mut Option<String>,
     body: &mut bool,
+    upload: &mut bool,
     query: &mut bool,
 ) -> Option<HttpShape> {
     let word = words[*i].as_str();
@@ -3860,10 +3971,15 @@ fn curl_long(
             | "--json"
             | "--upload-file"
             | "--form"
+            | "--form-string"
     ) {
         let value = flag_value(words, i, attached);
+        let uploading = matches!(lower.as_str(), "--upload-file" | "--form" | "--form-string");
         return if value.starts_with('@') {
             Some(HttpShape::Opaque)
+        } else if uploading {
+            *upload = true;
+            None
         } else {
             *body = true;
             None
@@ -3973,6 +4089,7 @@ fn curl_cluster(
     i: &mut usize,
     method: &mut Option<String>,
     body: &mut bool,
+    upload: &mut bool,
     query: &mut bool,
 ) -> Option<HttpShape> {
     let chars: Vec<char> = cluster.chars().collect();
@@ -4011,8 +4128,11 @@ fn curl_cluster(
             'd' | 'T' | 'F' => {
                 if value.starts_with('@') {
                     Some(HttpShape::Opaque)
-                } else {
+                } else if c == 'd' {
                     *body = true;
+                    None
+                } else {
+                    *upload = true;
                     None
                 }
             }
@@ -4024,7 +4144,10 @@ fn curl_cluster(
     None
 }
 
-fn wget_shape(words: &[String]) -> HttpShape {
+fn wget_shape(words: &[String], env: &[(String, String)]) -> HttpShape {
+    if carries_token(words, env) && wget_config_applies(words, env) {
+        return HttpShape::Opaque;
+    }
     let mut method: Option<String> = None;
     let mut body = false;
     let mut i = 1usize;
@@ -4040,12 +4163,42 @@ fn wget_shape(words: &[String]) -> HttpShape {
             i += 1;
             continue;
         }
+        if lower == "-e" || lower == "--execute" {
+            if let Some(value) = words.get(i + 1) {
+                note_wget_exec(value, &mut method, &mut body);
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(value) = lower.strip_prefix("--execute=") {
+            note_wget_exec(value, &mut method, &mut body);
+            i += 1;
+            continue;
+        }
+        if let Some(value) = lower.strip_prefix("-e") {
+            if !value.is_empty() && !lower.starts_with("--") {
+                note_wget_exec(value, &mut method, &mut body);
+                i += 1;
+                continue;
+            }
+        }
         if lower.starts_with("--post-") || lower.starts_with("--body-") {
             body = true;
         }
         i += 1;
     }
-    finish_http(method.as_deref(), body, false)
+    finish_http(method.as_deref(), body, false, false)
+}
+
+fn note_wget_exec(value: &str, method: &mut Option<String>, body: &mut bool) {
+    let lower = value.to_ascii_lowercase();
+    let (key, val) = lower.split_once('=').unwrap_or((lower.as_str(), ""));
+    let key = key.trim();
+    match key {
+        "method" => *method = Some(val.trim().to_ascii_uppercase()),
+        "body_data" | "body_file" | "post_data" | "post_file" | "header" => *body = true,
+        _ => {}
+    }
 }
 
 fn httpie_shape(words: &[String]) -> HttpShape {
@@ -4074,5 +4227,5 @@ fn httpie_shape(words: &[String]) -> HttpShape {
             body = true;
         }
     }
-    finish_http(method.as_deref(), body, false)
+    finish_http(method.as_deref(), body, false, false)
 }
