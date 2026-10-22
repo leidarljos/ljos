@@ -1,2 +1,6 @@
-MCP `remember` and `prefer` now refuse text that is not in the person's latest prompt and tell the agent to use `ljos_note` for its own findings.
-The MCP tool descriptions now match that behavior, so non-person claims are no longer described as memory writes.
+Prompt and session-start recall now exclude unverified working notes even when
+those notes were downgraded to another kind but still carry note provenance
+tags.
+`ljos recall` now shows facts first and groups working notes under
+`unverified logbook notes`, and session-end extraction writes unverified notes
+instead of lessons.

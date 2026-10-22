@@ -214,7 +214,7 @@ pub fn at_session_end(input: &str, session: Option<&str>) -> usize {
         if let Some(s) = session {
             tags.push(format!("session:{s}"));
         }
-        match crate::packset_write_agent_tagged("Remember", &f, &tags) {
+        match crate::packset_write_agent_note_tagged(&f, &tags) {
             Ok(_) => {
                 written += 1;
                 keys.push(normal(&f));

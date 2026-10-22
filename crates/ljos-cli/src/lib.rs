@@ -7367,7 +7367,7 @@ fn recall_rank(hit: &Hit) -> u8 {
         0
     } else if said_by_person(hit) {
         1
-    } else if hit.kind == packset_core::record::NOTE_KIND {
+    } else if unverified_note_hit(hit) {
         3
     } else {
         2
@@ -7402,7 +7402,7 @@ where
 /// rehearsal promotes it. Notes are excluded from prompt injection: they
 /// are unverified working notes, not facts.
 fn shown_on_prompt(hit: &Hit) -> bool {
-    if hit.kind == packset_core::record::NOTE_KIND {
+    if unverified_note_hit(hit) {
         return false;
     }
     is_refresher(hit) || hit.entities.iter().any(|e| e == "horizon:transient")
@@ -12825,6 +12825,34 @@ pub fn packset_write_agent_tagged(label: &str, text: &str, tags: &[String]) -> R
     store_agent_atom(&client, atom, &prefix)
 }
 
+/// Write an unverified note from agent output with explicit provenance tags.
+///
+/// # Errors
+///
+/// As [`packset_write_agent`].
+pub fn packset_write_agent_note_tagged(text: &str, tags: &[String]) -> Result<Value> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        bail!("Remember: empty text is not a claim");
+    }
+    let prefix = "Remember: POST /v1/atoms failed".to_string();
+    let client = pack()?;
+    let workspace = client.workspace();
+    let mut atom = atom_body(packset_core::record::NOTE_KIND, trimmed, &workspace);
+    stamp_horizon(
+        &mut atom,
+        packset_core::record::NOTE_KIND,
+        trimmed,
+        Some(true),
+    );
+    atom["source"]["basis"] = Value::String("agent".into());
+    let mut all = tags.to_vec();
+    all.push(format!("{NOTE_BASIS_ENTITY}agent"));
+    all.push(format!("{NOTE_SOURCE_ENTITY}session-end-extract"));
+    add_entities(&mut atom, all);
+    store_agent_atom(&client, atom, &prefix)
+}
+
 /// The issue this memory belongs to. The pack reads `issue` as identity:
 /// two records that read alike stay both live when their issues differ,
 /// and a later record on the same issue still replaces the earlier one.
@@ -14980,7 +15008,7 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
             continue;
         };
         for h in hits.into_iter().take(5) {
-            if UNREVIEWED_KINDS.contains(&h.kind.as_str()) {
+            if UNREVIEWED_KINDS.contains(&h.kind.as_str()) || unverified_note_hit(&h) {
                 continue;
             }
             if let Some(id) = &h.id {
@@ -14999,7 +15027,7 @@ pub fn brief(name: &str, issue: &str) -> Result<String> {
             out.push('\n');
         }
     }
-    out.push_str("\nThe work:\n");
+    out.push_str("\nThe work (tracker recall may include unverified logbook notes):\n");
     out.push_str(&run_captured("vissue", &["recall", issue])?.stdout);
     out.push_str(&format!(
         "\nWalk the island as yourself before the ballot: `ljos island` on the work with `--as {name}`. \
@@ -24290,7 +24318,7 @@ pub fn recall_memories(issue: &str) -> String {
 
 /// [`recall_memories`] for prompt injection: note memories are left out so
 /// a working note cannot come back as a fact on the next prompt.
-fn recall_memories_for_prompt(issue: &str) -> String {
+pub(crate) fn recall_memories_for_prompt(issue: &str) -> String {
     recall_memories_with(issue, false)
 }
 
@@ -24382,38 +24410,81 @@ fn tagged_with_issue(atoms: &[Value], issue: &str) -> Vec<Hit> {
 /// are neither listed already nor unreviewed.
 fn recall_lines(own: &[Hit], related: Vec<Hit>, now: &str, include_notes: bool) -> String {
     let key = |h: &Hit| h.id.clone().unwrap_or_else(|| h.text.clone());
-    let own: Vec<&Hit> = own
+    let mut own_facts = Vec::new();
+    let mut own_notes = Vec::new();
+    for h in own {
+        if unverified_note_hit(h) {
+            if include_notes {
+                own_notes.push(h);
+            }
+        } else {
+            own_facts.push(h);
+        }
+    }
+    let mut seen: std::collections::BTreeSet<String> = own_facts
         .iter()
-        .filter(|h| include_notes || h.kind != packset_core::record::NOTE_KIND)
+        .chain(own_notes.iter())
+        .map(|h| key(h))
         .collect();
-    let mut seen: std::collections::BTreeSet<String> = own.iter().map(|h| key(h)).collect();
     let related: Vec<Hit> = related
         .into_iter()
         .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
-        .filter(|h| include_notes || h.kind != packset_core::record::NOTE_KIND)
+        .filter(|h| include_notes || !unverified_note_hit(h))
         .filter(|h| seen.insert(key(h)))
         .take(RELATED_MEMORY_CAP)
         .collect();
-    if own.is_empty() && related.is_empty() {
+    let mut related_facts = Vec::new();
+    let mut related_notes = Vec::new();
+    for h in related {
+        if unverified_note_hit(&h) {
+            related_notes.push(h);
+        } else {
+            related_facts.push(h);
+        }
+    }
+    if own_facts.is_empty()
+        && own_notes.is_empty()
+        && related_facts.is_empty()
+        && related_notes.is_empty()
+    {
         return String::new();
     }
     let mut out = String::from("\nMemory\n");
-    for h in own.iter().take(ISSUE_MEMORY_CAP) {
+    for h in own_facts.iter().take(ISSUE_MEMORY_CAP) {
         out.push_str("  ");
         out.push_str(&hit_line(h, now));
         out.push('\n');
     }
-    if own.len() > ISSUE_MEMORY_CAP {
+    if own_facts.len() > ISSUE_MEMORY_CAP {
         out.push_str(&format!(
             "  ({} older memories on this issue left out)\n",
-            own.len() - ISSUE_MEMORY_CAP
+            own_facts.len() - ISSUE_MEMORY_CAP
         ));
     }
-    if !related.is_empty() {
-        if !own.is_empty() {
+    if !related_facts.is_empty() {
+        if !own_facts.is_empty() {
             out.push_str("  related:\n");
         }
-        for h in &related {
+        for h in &related_facts {
+            out.push_str("  ");
+            out.push_str(&hit_line(h, now));
+            out.push('\n');
+        }
+    }
+    if include_notes && (!own_notes.is_empty() || !related_notes.is_empty()) {
+        out.push_str("  unverified logbook notes:\n");
+        for h in own_notes.iter().take(ISSUE_MEMORY_CAP) {
+            out.push_str("  ");
+            out.push_str(&hit_line(h, now));
+            out.push('\n');
+        }
+        if own_notes.len() > ISSUE_MEMORY_CAP {
+            out.push_str(&format!(
+                "  ({} older logbook notes on this issue left out)\n",
+                own_notes.len() - ISSUE_MEMORY_CAP
+            ));
+        }
+        for h in &related_notes {
             out.push_str("  ");
             out.push_str(&hit_line(h, now));
             out.push('\n');
@@ -27011,16 +27082,25 @@ fn note_kind_label(h: &Hit) -> String {
     format!("unverified agent note ({})", bits.join(", "))
 }
 
+fn unverified_note_hit(h: &Hit) -> bool {
+    h.kind == packset_core::record::NOTE_KIND
+        || h.entities
+            .iter()
+            .any(|e| e.starts_with(NOTE_BASIS_ENTITY) || e.starts_with(NOTE_SOURCE_ENTITY))
+}
+
 /// The kind a recalled line names. A note is marked unverified with its
 /// provenance, and a claim in the person's words says so.
 fn kind_label(h: &Hit) -> String {
     let kind = match h.kind.as_str() {
         "" => "claim",
-        packset_core::record::NOTE_KIND => return note_kind_label(h),
+        _ if unverified_note_hit(h) => return note_kind_label(h),
         other => other,
     };
     if said_by_person(h) {
         format!("{kind}, the person's words")
+    } else if kind == "lesson" {
+        "lesson, agent-derived".to_string()
     } else {
         kind.to_string()
     }
@@ -30210,24 +30290,31 @@ mod tests {
         ];
         let text = super::recall_lines(&own, related, "2026-10-18T12:00:00.000Z", true);
         assert!(
-            text.starts_with(
-                "\nMemory\n  - [unverified agent note (origin agent-derived), today] note 21\n"
-            ),
+            text.starts_with("\nMemory\n  - [lesson, agent-derived, today] tagged lesson\n"),
             "{text}"
         );
         assert!(text.contains("note 02"), "{text}");
         assert!(!text.contains("note 01"), "{text}");
         assert!(
-            text.contains("(3 older memories on this issue left out)"),
+            text.contains("older logbook notes on this issue left out"),
             "{text}"
         );
         assert_eq!(text.matches("note 21").count(), 1, "{text}");
+        assert!(text.contains("unverified logbook notes"), "{text}");
         assert!(
-            text.ends_with("  related:\n  - [lesson] a related lesson\n"),
+            text.contains("  related:\n  - [lesson, agent-derived] a related lesson\n"),
             "{text}"
         );
         let prompt = super::recall_lines(&own, vec![hit("own21", "note", "note 21")], "now", false);
-        assert_eq!(prompt, "\nMemory\n  - [lesson] tagged lesson\n");
+        assert_eq!(
+            prompt,
+            "\nMemory\n  - [lesson, agent-derived] tagged lesson\n"
+        );
+        let tagged_summary = hit("summary-note", "summary", "note disguised");
+        let mut tagged_summary = tagged_summary;
+        tagged_summary.entities = vec![format!("{}ljos-note", super::NOTE_SOURCE_ENTITY)];
+        let prompt = super::recall_lines(&[], vec![tagged_summary], "now", false);
+        assert_eq!(prompt, "");
         assert_eq!(super::recall_lines(&[], Vec::new(), "now", true), "");
         let alone = super::recall_lines(
             &[],
@@ -30235,7 +30322,10 @@ mod tests {
             "now",
             true,
         );
-        assert_eq!(alone, "\nMemory\n  - [lesson] a related lesson\n");
+        assert_eq!(
+            alone,
+            "\nMemory\n  - [lesson, agent-derived] a related lesson\n"
+        );
     }
 
     /// A prompt naming an issue is handed the issue's recall.
@@ -44999,7 +45089,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         );
         assert_eq!(
             hit_line(&rows[4], "2026-10-02T00:00:00.000Z"),
-            "- [lesson, today] agent-old"
+            "- [lesson, agent-derived, today] agent-old"
         );
     }
 
