@@ -1533,10 +1533,11 @@ fn run_command() -> Result<()> {
             } else {
                 Vec::new()
             };
+            let basis = ljos_cli::Basis::of_typed(&text);
             let body = ljos_cli::packset_prefer(&text, as_persona.as_deref())?;
             println!("{}", write_ack(&body));
             for rule in &rules {
-                println!("{}", write_ack(&write_rule(rule)?));
+                println!("{}", write_ack(&write_rule(rule, basis)?));
             }
             if !proposed.is_empty() && ljos_cli::under_a_runner() {
                 for rule in &proposed {
@@ -1549,7 +1550,7 @@ fn run_command() -> Result<()> {
                 }
             } else {
                 for rule in &proposed {
-                    let written = write_rule(rule)?;
+                    let written = write_rule(rule, basis)?;
                     let id = written
                         .get("id")
                         .and_then(serde_json::Value::as_str)
@@ -2384,11 +2385,15 @@ fn run_command() -> Result<()> {
                     println!("{}", ljos_cli::user_rules::ack(&rule));
                 }
             } else {
-                let body = write_rule(&Rule {
-                    pattern,
-                    verdict,
-                    reason: why,
-                })?;
+                let basis = ljos_cli::Basis::of_typed(&why);
+                let body = write_rule(
+                    &Rule {
+                        pattern,
+                        verdict,
+                        reason: why,
+                    },
+                    basis,
+                )?;
                 println!(
                     "{}",
                     if json {
