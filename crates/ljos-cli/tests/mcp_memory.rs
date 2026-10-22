@@ -135,7 +135,17 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
         "prompt hook failed: {}",
         String::from_utf8_lossy(&noted.stderr)
     );
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
+    // The runner starts the server, and the prompt's session is the one
+    // that runner gave it.
+    let runner = home.path().join("claude");
+    std::os::unix::fs::symlink("/bin/sh", &runner).unwrap();
+    let mut child = Command::new(&runner)
+        .args([
+            "-c",
+            "\"$@\"; exit $?",
+            "claude",
+            env!("CARGO_BIN_EXE_ljos-mcp"),
+        ])
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))
         .env("XDG_STATE_HOME", &state)

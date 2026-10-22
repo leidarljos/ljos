@@ -1,0 +1,1 @@
+The session a kept prompt's bind must name now comes from the process the runner started, read from that process's environment on Linux and macOS, and no longer from the asking `ljos`'s own. `LJOS_HARNESS_SESSION=forged ljos prefer --user ...` no longer picks the session of a forged bind, and with no runner above the process nothing counts as the person's words.
