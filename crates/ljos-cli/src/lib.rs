@@ -22339,20 +22339,28 @@ fn bypass_skip_note(path: &Path, err: &std::io::Error) -> String {
 }
 
 /// The doctor's line on the bypass log: how many commands ran past the
-/// guard, and the last one. Passing over the guard is allowed, so the row
-/// stays green; it is there to be read.
+/// guard, and the last one. Passing over the guard is allowed, so a whole
+/// log is green; it is there to be read. A damaged one is not `ok`, and
+/// [`doctor_word`] makes it a `warn`: the guard still judges every
+/// command, and what is hurt is the record of those that ran past it.
 fn bypass_row() -> Habitat {
-    let state = match bypass_log_path() {
-        None => "no command has run past the guard".to_string(),
+    let (state, ok) = match bypass_log_path() {
+        None => ("no command has run past the guard".to_string(), true),
         Some(path) => match doctor_state_log("guard bypass log", &path) {
-            Ok(bytes) => bypass_summary(&bytes, &path.display().to_string()),
-            Err(state) => state,
+            Ok(bytes) => {
+                let (_, dropped): (Vec<Value>, usize) = complete_rows_counted(&bytes);
+                (
+                    bypass_summary(&bytes, &path.display().to_string()),
+                    dropped == 0,
+                )
+            }
+            Err(state) => (state, false),
         },
     };
     Habitat {
         name: "guard bypass",
         state,
-        ok: true,
+        ok,
     }
 }
 
@@ -23404,9 +23412,9 @@ fn optional_bin(name: &str) -> bool {
 
 /// `ok` when the row answers, `warn` when the policy row names an
 /// `ljos-policyd` without phronesis, a runner skill or runner env ljos
-/// wrote is stale or edited by hand, the note queue is busy, or the cloud
-/// guard file is a known older version or differs from the seat
-/// refusals, `info` when the row
+/// wrote is stale or edited by hand, the note queue is busy, the guard
+/// bypass log is damaged, or the cloud guard file is a known older
+/// version or differs from the seat refusals, `info` when the row
 /// is optional and absent, `no` when a required row failed. A stale skill,
 /// env or cloud guard file ljos wrote is a warning `ljos doctor --fix`
 /// rewrites, not a failure. A cloud guard file that differs is a warning
@@ -23432,6 +23440,9 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
         return "warn";
     }
     if row.ok && row.name == "note queue" && row.state.starts_with(QUEUE_BUSY) {
+        return "warn";
+    }
+    if row.name == "guard bypass" && !row.ok {
         return "warn";
     }
     if row.ok && row.name == "policy" && row.state.ends_with(POLICY_TABLE_ONLY) {
@@ -42481,9 +42492,13 @@ mod tests {
                     "{kind} {name}: {}",
                     habitat.state
                 );
-                if std::ptr::eq(log, &queue) {
-                    assert!(!habitat.ok, "{kind}: {}", habitat.state);
-                }
+                assert!(!habitat.ok, "{kind} {name}: {}", habitat.state);
+                let word = if std::ptr::eq(log, &queue) {
+                    "no"
+                } else {
+                    "warn"
+                };
+                assert_eq!(doctor_word(&habitat), word, "{kind} {name}");
                 let _ = std::fs::remove_file(log);
                 let _ = std::fs::remove_dir(log);
             }
@@ -42491,6 +42506,7 @@ mod tests {
 
         let missing = bounded("missing bypass", bypass_row);
         assert_eq!(missing.state, "no command has run past the guard");
+        assert!(missing.ok);
     }
 
     fn bounded<T: Send + 'static>(what: &str, body: impl FnOnce() -> T + Send + 'static) -> T {

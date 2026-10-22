@@ -152,7 +152,8 @@ const QUEUE_ROW: &[u8] =
 /// A fifo or a symlink at either log is left as doctor found it: the
 /// fifo stays a fifo, the link and the file it names keep their bytes,
 /// nothing lands beside them, and doctor returns and names the log
-/// damaged.
+/// damaged in a row the short doctor shows: `warn` for the bypass log,
+/// `no` for the note queue.
 #[test]
 fn doctor_leaves_a_fifo_or_a_symlink_at_either_log_as_it_found_it() {
     for kind in ["fifo", "symlink"] {
@@ -172,13 +173,39 @@ fn doctor_leaves_a_fifo_or_a_symlink_at_either_log_as_it_found_it() {
             }
             let before = home.tree();
             let (_, out) = home
-                .doctor(&["--all"])
+                .doctor(&[])
                 .unwrap_or_else(|| panic!("doctor hung on a {kind} at the {name}"));
             assert_eq!(home.tree(), before, "{kind} at the {name}:\n{out}");
+            let word = if name == "guard bypass" { "warn" } else { "no" };
             let line = row(&out, name).unwrap_or_else(|| panic!("no {name} row:\n{out}"));
-            assert!(line.contains("damaged"), "{kind}: {line}");
+            assert!(
+                line.starts_with(word) && line.contains("damaged"),
+                "{kind}: {line}"
+            );
         }
     }
+}
+
+/// The review's bypass log: a row, then one torn off two hours ago.
+/// Doctor warns about it in the short output and leaves it alone.
+#[test]
+fn doctor_warns_about_an_aged_torn_bypass_log() {
+    let home = Home::new();
+    let mut torn = BYPASS_ROW.to_vec();
+    torn.extend_from_slice(br#"{"kind":"switch","command":"torn"#);
+    std::fs::write(home.bypass(), &torn).expect("bypass log");
+    set_mtime(
+        &home.bypass(),
+        SystemTime::now() - Duration::from_secs(2 * 3600),
+    );
+    let before = home.tree();
+    let (_, out) = home.doctor(&[]).expect("doctor hung");
+    assert_eq!(home.tree(), before, "{out}");
+    let line = row(&out, "guard bypass").unwrap_or_else(|| panic!("no bypass row:\n{out}"));
+    assert!(
+        line.starts_with("warn\tguard bypass\t") && line.contains("an unfinished last row"),
+        "{line}"
+    );
 }
 
 /// A note, then a whole note still missing its newline: 151 bytes.
