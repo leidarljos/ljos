@@ -1042,6 +1042,28 @@ mod tests {
             ("/tmp/.local/bin/claude", None),
             ("/tmp/project/node_modules/.bin/claude", None),
             ("/home/u/../other/.local/bin/claude", None),
+            ("/home/uu/.local/bin/claude", None),
+            ("/home/other/.local/bin/claude", None),
+            ("/home/u/.local/binx/claude", None),
+            ("/home/u/.local/bin/../../plant/claude", None),
+            ("/home/u/.local/share/plant/claude", None),
+            ("/home/u/.local/share/claude-plant/claude", None),
+            ("/home/u/src/app/node_modules/.bin/claude", None),
+            ("/usr/binx/claude", None),
+            ("/usr/share/plant/claude", None),
+            ("/usr/lib/node_modules/../../../tmp/claude", None),
+            ("/opt/plant/claude", None),
+            ("/var/tmp/.local/bin/claude", None),
+            ("/dev/shm/node_modules/.bin/claude", None),
+            ("/nix/store/claude/bin/claude", None),
+            (
+                "/nix/store/0c9yapqd0b8y4mj5xj7mrpmhy3l5ykh8/bin/claude",
+                None,
+            ),
+            (
+                "/nix/store/0c9yapqd0b8y4mj5xj7mrpmhy3l5ykhe-claude-code-2.0.1/bin/claude",
+                None,
+            ),
         ] {
             let got = runner_below(Path::new(path), &roots).map(|(runner, _)| runner);
             assert_eq!(got, want, "{path}");
@@ -1050,8 +1072,9 @@ mod tests {
 
     /// A runner is read where the kernel resolves it. A link from the
     /// person's own `~/.local/bin` into `/tmp`, a path that climbs out of
-    /// that home into another, and a file anyone may rewrite are not
-    /// installed copies; the same file kept by the person is.
+    /// that home into another, and a file anyone may rewrite or reach
+    /// through a directory anyone may write are not installed copies; the
+    /// same file kept by the person is.
     #[test]
     fn an_install_root_holds_only_what_resolves_inside_it() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1081,6 +1104,12 @@ mod tests {
 
         std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o757)).unwrap();
         assert_eq!(runner_of_file(&claude, Some(&home)), None);
+
+        let open = bin.join("open");
+        let grok = program(&open, "grok");
+        assert_eq!(runner_of_file(&grok, Some(&home)), Some("grok"));
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(runner_of_file(&grok, Some(&home)), None);
     }
 
     /// A process younger than a recorded tool call, in that call's cgroup
