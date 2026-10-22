@@ -165,13 +165,19 @@ fn config_dir() -> PathBuf {
         .join("ljos")
 }
 
-fn state_dir() -> PathBuf {
+/// This machine's ljos state. Paths below it are walked with
+/// [`open_dir_beneath`]; the directory itself may be a symlink.
+fn state_base() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
         .unwrap_or_else(|| PathBuf::from(".local/state"))
         .join("ljos")
-        .join("sync")
+}
+
+#[cfg(test)]
+fn state_dir() -> PathBuf {
+    state_base().join("sync")
 }
 
 /// This machine's age identity, made on first use.
@@ -299,8 +305,9 @@ pub fn public_key() -> Result<String> {
 /// A `.ljos/sync.toml` that is present and does not parse.
 pub fn scope_of_repo(root: &Path) -> Result<Option<Scope>> {
     let path = root.join(".ljos").join("sync.toml");
-    match std::fs::read_to_string(&path) {
-        Ok(text) => {
+    match read_beneath(root, ".ljos/sync.toml")? {
+        Some(bytes) => {
+            let text = String::from_utf8(bytes).with_context(|| path.display().to_string())?;
             let scope: Scope = toml::from_str(&text).with_context(|| path.display().to_string())?;
             check_scope_name(&path, &scope.name)?;
             if scope.name == CLOUD_SCOPE {
@@ -321,8 +328,7 @@ pub fn scope_of_repo(root: &Path) -> Result<Option<Scope>> {
             }
             Ok(Some(scope))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| path.display().to_string()),
+        None => Ok(None),
     }
 }
 
@@ -461,6 +467,29 @@ fn log_lines(atoms: &[Value], scope: &str, default: &str, explicit_only: bool) -
     mine.iter().map(|a| format!("{a}\n")).collect()
 }
 
+/// The key of the first line export seals into every log. The line names
+/// the writing host and the log's scope, inside the ciphertext, so a log
+/// copied under another host's or scope's file name says so when opened.
+/// It has no `text`, so a reader that predates it skips it as an atom.
+const LOG_HEADER: &str = "ljos_log";
+
+fn log_header(host: &str, scope_name: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({ LOG_HEADER: 1, "host": host, "scope": scope_name })
+    )
+}
+
+/// The host and scope a log's header names, and the atoms after it. None
+/// for a log written before the header.
+fn split_header(plain: &str) -> Option<(String, String, &str)> {
+    let (first, body) = plain.split_once('\n').unwrap_or((plain, ""));
+    let header: Value = serde_json::from_str(first).ok()?;
+    header.get(LOG_HEADER)?;
+    let field = |key: &str| header.get(key).and_then(Value::as_str).map(str::to_string);
+    Some((field("host")?, field("scope")?, body))
+}
+
 fn belongs_to_scope(atom: &Value, scope: &str, default: &str, explicit_only: bool) -> bool {
     if !is_own(atom) {
         return false;
@@ -512,7 +541,18 @@ fn scope_is_configured(scope: &Scope, name: &str) -> bool {
 }
 
 /// Seal `plain` to the recipients into `out`.
+#[cfg(test)]
 fn seal(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
+    let sealed = seal_bytes(plain, recipients)?;
+    let tmp = out.with_extension("age.tmp");
+    std::fs::write(&tmp, sealed)?;
+    std::fs::rename(&tmp, out)?;
+    Ok(())
+}
+
+/// `plain` sealed to the recipients. age writes to a pipe, so the caller
+/// decides where the ciphertext lands.
+fn seal_bytes(plain: &str, recipients: &[String]) -> Result<Vec<u8>> {
     if recipients.is_empty() {
         bail!("sync: the scope names no recipients; add this machine's `ljos sync --key` to .ljos/sync.toml");
     }
@@ -520,26 +560,248 @@ fn seal(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
     for r in recipients {
         cmd.arg("-r").arg(r);
     }
-    let tmp = out.with_extension("age.tmp");
     let mut child = cmd
-        .arg("-o")
-        .arg(&tmp)
         .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .context("age not on PATH; install age")?;
-    use std::io::Write;
-    child
-        .stdin
-        .take()
-        .context("age: no stdin")?
-        .write_all(plain.as_bytes())?;
+    let mut stdin = child.stdin.take().context("age: no stdin")?;
+    let plain = plain.as_bytes().to_vec();
+    // age writes while it reads; a log past the pipe buffer would block
+    // both sides if stdin were written before stdout is drained.
+    let writer = std::thread::spawn(move || {
+        use std::io::Write;
+        stdin.write_all(&plain)
+    });
     let done = child.wait_with_output()?;
+    let wrote = writer
+        .join()
+        .map_err(|_| anyhow::anyhow!("age: stdin writer"))?;
     if !done.status.success() {
-        let _ = std::fs::remove_file(&tmp);
         bail!("age: {}", String::from_utf8_lossy(&done.stderr).trim());
     }
-    std::fs::rename(&tmp, out)?;
+    wrote?;
+    Ok(done.stdout)
+}
+
+/// The directory `rel` below `root`, opened one component at a time with
+/// `O_NOFOLLOW`. A tracker can commit `.ljos` or `.ljos/atoms` as a
+/// symlink to a local directory, and reading through it imports logs
+/// that never were in the tracker. `create` makes a missing component.
+/// None when one is missing.
+fn open_dir_beneath(root: &Path, rel: &str, create: bool) -> Result<Option<std::fs::File>> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::OpenOptionsExt;
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let mut dir = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(root)
+    {
+        Ok(dir) => dir,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("sync: {}", root.display())),
+    };
+    let mut walked = root.to_path_buf();
+    for name in rel.split('/').filter(|name| !name.is_empty()) {
+        walked.push(name);
+        let cname = c_name(name)?;
+        // SAFETY: dir is an open directory fd and cname is NUL-terminated.
+        let open =
+            |dir: &std::fs::File| unsafe { libc::openat(dir.as_raw_fd(), cname.as_ptr(), flags) };
+        let mut fd = open(&dir);
+        if fd < 0 && create && last_errno() == Some(libc::ENOENT) {
+            // SAFETY: as above; mkdirat makes one directory entry.
+            if unsafe { libc::mkdirat(dir.as_raw_fd(), cname.as_ptr(), 0o777) } < 0
+                && last_errno() != Some(libc::EEXIST)
+            {
+                return Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("sync: {}", walked.display()));
+            }
+            fd = open(&dir);
+        }
+        if fd < 0 {
+            let err = std::io::Error::last_os_error();
+            return match err.raw_os_error() {
+                Some(libc::ENOENT) => Ok(None),
+                Some(libc::ELOOP | libc::ENOTDIR) => Err(not_a_dir(&walked)),
+                _ => Err(err).with_context(|| format!("sync: {}", walked.display())),
+            };
+        }
+        // SAFETY: fd is new, owned here, and opened with O_CLOEXEC.
+        dir = unsafe { std::fs::File::from_raw_fd(fd) };
+    }
+    Ok(Some(dir))
+}
+
+fn last_errno() -> Option<i32> {
+    std::io::Error::last_os_error().raw_os_error()
+}
+
+fn c_name(name: &str) -> Result<std::ffi::CString> {
+    if name == "." || name == ".." {
+        bail!("sync: `{name}` is not a path component");
+    }
+    std::ffi::CString::new(name).map_err(|_| anyhow::anyhow!("sync: NUL in `{name}`"))
+}
+
+fn not_a_dir(path: &Path) -> anyhow::Error {
+    let linked = std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink());
+    let what = if linked {
+        "is a symlink"
+    } else {
+        "is not a directory"
+    };
+    anyhow::anyhow!(
+        "sync: {} {what}; nothing is read or written through it",
+        path.display()
+    )
+}
+
+fn split_rel(rel: &str) -> (&str, &str) {
+    rel.rsplit_once('/').unwrap_or(("", rel))
+}
+
+/// The bytes of the regular file `rel` below `root`, with no symlink at
+/// any component. None when it is missing.
+fn read_beneath(root: &Path, rel: &str) -> Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::MetadataExt;
+    let (parent, name) = split_rel(rel);
+    let Some(dir) = open_dir_beneath(root, parent, false)? else {
+        return Ok(None);
+    };
+    let cname = c_name(name)?;
+    // SAFETY: dir is an open directory fd and cname is NUL-terminated.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            cname.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
+    };
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        return match err.raw_os_error() {
+            Some(libc::ENOENT) => Ok(None),
+            _ => bail!("sync: {} is not a regular file", root.join(rel).display()),
+        };
+    }
+    // SAFETY: fd is new, owned here, and opened with O_CLOEXEC.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() || meta.nlink() != 1 {
+        bail!("sync: {} is not a regular file", root.join(rel).display());
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
+}
+
+/// Replace `rel` below `root` with `bytes`, making missing directories,
+/// with no symlink at any component.
+fn write_beneath(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let (parent, name) = split_rel(rel);
+    std::fs::create_dir_all(root).with_context(|| format!("sync: {}", root.display()))?;
+    let dir = open_dir_beneath(root, parent, true)?
+        .with_context(|| format!("sync: {} was not made", root.join(parent).display()))?;
+    let cname = c_name(name)?;
+    let ctmp = c_name(&format!(".{name}.tmp-{}", std::process::id()))?;
+    // SAFETY: dir is an open directory fd; both names are NUL-terminated.
+    unsafe { libc::unlinkat(dir.as_raw_fd(), ctmp.as_ptr(), 0) };
+    // SAFETY: as above. O_EXCL with O_NOFOLLOW makes a new file or fails.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            ctmp.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o666,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("sync: {}", root.join(rel).display()));
+    }
+    // SAFETY: fd is new, owned here, and opened with O_CLOEXEC.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let written = file.write_all(bytes);
+    drop(file);
+    // SAFETY: as above. renameat replaces the entry and follows no link.
+    let renamed = written.is_ok()
+        && unsafe {
+            libc::renameat(
+                dir.as_raw_fd(),
+                ctmp.as_ptr(),
+                dir.as_raw_fd(),
+                cname.as_ptr(),
+            )
+        } == 0;
+    if !renamed {
+        let err = std::io::Error::last_os_error();
+        // SAFETY: as above.
+        unsafe { libc::unlinkat(dir.as_raw_fd(), ctmp.as_ptr(), 0) };
+        written?;
+        return Err(err).with_context(|| format!("sync: {}", root.join(rel).display()));
+    }
+    Ok(())
+}
+
+/// Names in the directory `rel` below `root`, with no symlink at any
+/// component. Empty when it is missing.
+fn list_beneath(root: &Path, rel: &str) -> Result<Vec<String>> {
+    use std::os::fd::IntoRawFd;
+    let Some(dir) = open_dir_beneath(root, rel, false)? else {
+        return Ok(Vec::new());
+    };
+    let fd = dir.into_raw_fd();
+    // SAFETY: fd is an open directory fd owned here; fdopendir takes it.
+    let stream = unsafe { libc::fdopendir(fd) };
+    if stream.is_null() {
+        let err = std::io::Error::last_os_error();
+        // SAFETY: fdopendir failed, so fd is still ours to close.
+        unsafe { libc::close(fd) };
+        return Err(err).with_context(|| format!("sync: {}", root.join(rel).display()));
+    }
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: stream is open; readdir returns null at the end.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        // SAFETY: d_name is NUL-terminated inside the entry readdir returned.
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if let Ok(name) = name.to_str() {
+            if name != "." && name != ".." {
+                names.push(name.to_string());
+            }
+        }
+    }
+    // SAFETY: stream is open and closed once; this closes fd too.
+    unsafe { libc::closedir(stream) };
+    names.sort();
+    Ok(names)
+}
+
+/// Remove the file `rel` below `root`, with no symlink at any directory.
+fn remove_beneath(root: &Path, rel: &str) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    let (parent, name) = split_rel(rel);
+    let Some(dir) = open_dir_beneath(root, parent, false)? else {
+        return Ok(());
+    };
+    let cname = c_name(name)?;
+    // SAFETY: dir is an open directory fd and cname is NUL-terminated.
+    if unsafe { libc::unlinkat(dir.as_raw_fd(), cname.as_ptr(), 0) } < 0
+        && last_errno() != Some(libc::ENOENT)
+    {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("sync: {}", root.join(rel).display()));
+    }
     Ok(())
 }
 
@@ -607,6 +869,7 @@ fn open(path: &Path, identity: &Path) -> Result<Option<String>> {
 /// of them is a recipient. `age` and `rage` run with `LC_ALL`, `LANG`,
 /// `LANGUAGE`, and `LC_MESSAGES` set to C, so a French miss stays a miss
 /// instead of aborting the rest of the import.
+#[cfg(test)]
 fn open_identities(path: &Path, identities: &[PathBuf]) -> Result<Option<String>> {
     if identities.is_empty() {
         return Ok(None);
@@ -761,18 +1024,16 @@ fn export_named_scope(
 ) -> Result<String> {
     let host = host();
     let explicit_only = scope_name != primary_scope;
-    let plain = log_lines(atoms, scope_name, default, explicit_only);
-    let count = plain.lines().count();
-    std::fs::create_dir_all(log_dir(root))?;
+    let body = log_lines(atoms, scope_name, default, explicit_only);
+    let count = body.lines().count();
+    let plain = log_header(&host, scope_name) + &body;
     let [log_rel, digest_rel] = host_log_rels_for_scope(&host, primary_scope, scope_name);
-    let log = root.join(&log_rel);
-    let stamp = root.join(&digest_rel);
     let digest = format!(
         "{} {}\n",
         crate::work_id(&plain),
         crate::work_id(&recipients.join(","))
     );
-    if std::fs::read_to_string(&stamp).is_ok_and(|d| d == digest) {
+    if read_beneath(root, &digest_rel)?.is_some_and(|d| d == digest.as_bytes()) {
         return Ok(format!(
             "sync: {count} {} atoms unchanged since the last export\n",
             scope_name
@@ -781,13 +1042,13 @@ fn export_named_scope(
     if !age_on_path() {
         return Ok(age_missing_line());
     }
-    if let Err(err) = seal(&plain, recipients, &log) {
-        if age_missing(&err) {
-            return Ok(age_missing_line());
-        }
-        return Err(err);
-    }
-    std::fs::write(&stamp, digest)?;
+    let sealed = match seal_bytes(&plain, recipients) {
+        Ok(sealed) => sealed,
+        Err(err) if age_missing(&err) => return Ok(age_missing_line()),
+        Err(err) => return Err(err),
+    };
+    write_beneath(root, &log_rel, &sealed)?;
+    write_beneath(root, &digest_rel, digest.as_bytes())?;
     Ok(format!(
         "sync: exported {count} {} atoms to {log_rel}, sealed to {} recipient{}\n",
         scope_name,
@@ -1006,17 +1267,28 @@ fn incoming_with_sender(
     Incoming { post, retired }
 }
 
+fn tracker_state_rel(root: &Path) -> String {
+    format!("sync/{}", crate::work_id(&root.display().to_string()))
+}
+
+fn taken_rel(root: &Path, scope: &str, host: &str) -> String {
+    format!("{}/{scope}/{host}.taken", tracker_state_rel(root))
+}
+
+#[cfg(test)]
 fn taken_path(root: &Path, scope: &str, host: &str) -> PathBuf {
-    state_dir()
-        .join(crate::work_id(&root.display().to_string()))
-        .join(scope)
-        .join(format!("{host}.taken"))
+    state_base().join(taken_rel(root, scope, host))
 }
 
 /// Where `.taken` was before its path named the tracker. Every checkout
 /// of the scope shared this one file.
+fn shared_taken_rel(scope: &str, host: &str) -> String {
+    format!("sync/{scope}/{host}.taken")
+}
+
+#[cfg(test)]
 fn shared_taken_path(scope: &str, host: &str) -> PathBuf {
-    state_dir().join(scope).join(format!("{host}.taken"))
+    state_base().join(shared_taken_rel(scope, host))
 }
 
 /// First line of a `.taken` file that lists [`memory_key`]s. A file
@@ -1029,25 +1301,29 @@ const TAKEN_KEYS: &str = "# text and issue";
 /// A file of texts is read through the atoms this pack holds from
 /// `sender`: each text stands for every copy of it, so the first import
 /// after the change still retires what the host dropped and posts
-/// nothing again.
+/// nothing again. A symlinked directory on the way is an error.
 fn read_taken(
     root: &Path,
     scope: &str,
     host: &str,
     atoms: &[Value],
     sender: &str,
-) -> BTreeSet<String> {
-    let Ok(text) = std::fs::read_to_string(taken_path(root, scope, host))
-        .or_else(|_| std::fs::read_to_string(shared_taken_path(scope, host)))
-    else {
-        return BTreeSet::new();
+) -> Result<BTreeSet<String>> {
+    let base = state_base();
+    let bytes = match read_beneath(&base, &taken_rel(root, scope, host))? {
+        Some(bytes) => bytes,
+        None => match read_beneath(&base, &shared_taken_rel(scope, host))? {
+            Some(bytes) => bytes,
+            None => return Ok(BTreeSet::new()),
+        },
     };
+    let text = String::from_utf8_lossy(&bytes);
     let mut lines = text.lines();
     if lines.next() == Some(TAKEN_KEYS) {
-        return lines.map(str::to_string).collect();
+        return Ok(lines.map(str::to_string).collect());
     }
     let texts: BTreeSet<&str> = text.lines().collect();
-    atoms
+    Ok(atoms
         .iter()
         .filter(|atom| has_entity(atom, sender))
         .filter(|atom| {
@@ -1056,22 +1332,20 @@ fn read_taken(
                 .is_some_and(|text| texts.contains(crate::work_id(text).as_str()))
         })
         .filter_map(memory_key)
-        .collect()
+        .collect())
 }
 
 /// Write this tracker's `.taken`. Its first one replaces the shared file
 /// [`read_taken`] fell back to. That file goes only after this one is
 /// written, so a failed write leaves it for the next import to read.
 fn write_taken(root: &Path, scope: &str, host: &str, plain: &str) -> Result<()> {
-    let path = taken_path(root, scope, host);
-    let first = !path.exists();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
+    let base = state_base();
+    let rel = taken_rel(root, scope, host);
+    let first = read_beneath(&base, &rel)?.is_none();
     let keys: String = log_keys(plain).into_iter().map(|key| key + "\n").collect();
-    std::fs::write(&path, format!("{TAKEN_KEYS}\n{keys}"))?;
+    write_beneath(&base, &rel, format!("{TAKEN_KEYS}\n{keys}").as_bytes())?;
     if first {
-        let _ = std::fs::remove_file(shared_taken_path(scope, host));
+        let _ = remove_beneath(&base, &shared_taken_rel(scope, host));
     }
     Ok(())
 }
@@ -1106,12 +1380,8 @@ fn stale_scope_rels(root: &Path, scope: &Scope) -> Vec<String> {
             rels.push(format!(".ljos/atoms/{name}"));
         }
     };
-    if let Ok(entries) = std::fs::read_dir(log_dir(root)) {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                push(name);
-            }
-        }
+    for name in list_beneath(root, ".ljos/atoms").unwrap_or_default() {
+        push(&name);
     }
     if let Ok(out) = git(root, &["ls-files", "--", ".ljos/atoms"]) {
         if out.status.success() {
@@ -1137,29 +1407,16 @@ fn extra_scope_of_host_file(name: &str, host: &str) -> Option<String> {
 
 fn drop_stale_scope_files(root: &Path, scope: &Scope) {
     for rel in stale_scope_rels(root, scope) {
-        let path = root.join(rel);
-        if path.is_file() {
-            let _ = std::fs::remove_file(path);
-        }
+        let _ = remove_beneath(root, &rel);
     }
 }
 
-fn remembered_hosts(root: &Path) -> Vec<(String, String)> {
-    let dir = state_dir().join(crate::work_id(&root.display().to_string()));
-    let Ok(scopes) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
+fn remembered_hosts(root: &Path) -> Result<Vec<(String, String)>> {
+    let base = state_base();
+    let tracker = tracker_state_rel(root);
     let mut out = Vec::new();
-    for scope_ent in scopes.flatten() {
-        if !scope_ent.path().is_dir() {
-            continue;
-        }
-        let scope_name = scope_ent.file_name().to_string_lossy().into_owned();
-        let Ok(hosts) = std::fs::read_dir(scope_ent.path()) else {
-            continue;
-        };
-        for host_ent in hosts.flatten() {
-            let fname = host_ent.file_name().to_string_lossy().into_owned();
+    for scope_name in list_beneath(&base, &tracker)? {
+        for fname in list_beneath(&base, &format!("{tracker}/{scope_name}"))? {
             if let Some(host) = fname.strip_suffix(".taken") {
                 if !host.is_empty() {
                     out.push((scope_name.clone(), host.to_string()));
@@ -1167,7 +1424,7 @@ fn remembered_hosts(root: &Path) -> Vec<(String, String)> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Import every other machine's log of the repository's scope into this
@@ -1219,18 +1476,18 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
                 let incoming = incoming_with_sender(
                     &job.plain,
                     &sender,
-                    &read_taken(root, &job.scope_name, &job.host, &atoms, &sender),
+                    &read_taken(root, &job.scope_name, &job.host, &atoms, &sender)?,
                     &held,
                 );
-                ImportPlan {
+                Ok(ImportPlan {
                     host: job.host,
                     scope_name: job.scope_name,
                     plain: job.plain,
                     sender,
                     incoming,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<_>>()?;
         let retired: Vec<usize> = plans
             .iter()
             .map(|plan| forget_retired(&atoms, &plan.sender, &plan.incoming.retired))
@@ -1254,11 +1511,10 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
 }
 
 fn any_log_file(root: &Path) -> bool {
-    std::fs::read_dir(log_dir(root))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .any(|entry| entry.path().to_string_lossy().ends_with(".jsonl.age"))
+    list_beneath(root, ".ljos/atoms")
+        .unwrap_or_default()
+        .iter()
+        .any(|name| name.ends_with(".jsonl.age"))
 }
 
 struct ImportJob {
@@ -1275,11 +1531,11 @@ fn import_jobs(root: &Path, scope: &Scope, me: &str) -> Result<(Vec<ImportJob>, 
     // its first miss. A log sealed to one of them that still does not open
     // is an error, and it is raised before the pack is asked.
     let mut mine: BTreeMap<PathBuf, String> = BTreeMap::new();
-    if let Ok(entries) = std::fs::read_dir(log_dir(root)) {
-        let mut paths: Vec<PathBuf> = entries
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.to_string_lossy().ends_with(".jsonl.age"))
+    {
+        let mut paths: Vec<PathBuf> = list_beneath(root, ".ljos/atoms")?
+            .into_iter()
+            .filter(|name| name.ends_with(".jsonl.age"))
+            .map(|name| log_dir(root).join(name))
             .collect();
         // `+` sorts before `.`, so `<host>+cloud` would be read before
         // `<host>`. The primary log comes first; retirement of every log
@@ -1309,13 +1565,19 @@ fn import_jobs(root: &Path, scope: &Scope, me: &str) -> Result<(Vec<ImportJob>, 
                 continue;
             }
             let identities = identities_for_open(&scope_name);
-            match open_identities(&path, &identities)? {
-                Some(plain) => jobs.push(ImportJob {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            let rel = format!(".ljos/atoms/{name}");
+            let Some(bytes) = read_beneath(root, &rel)? else {
+                continue;
+            };
+            match open_log(&bytes, &host, &scope_name, &rel)? {
+                Opened::Atoms(plain) => jobs.push(ImportJob {
                     host,
                     scope_name,
                     plain,
                 }),
-                None => {
+                Opened::Refused(line) => out.push_str(&line),
+                Opened::Miss => {
                     // The log's own recipients. A cloud log lists different
                     // keys than the primary, and a miss is an error only
                     // when one of those keys is an identity this log was
@@ -1347,7 +1609,7 @@ fn import_jobs(root: &Path, scope: &Scope, me: &str) -> Result<(Vec<ImportJob>, 
             }
         }
     }
-    for (scope_name, host) in remembered_hosts(root) {
+    for (scope_name, host) in remembered_hosts(root)? {
         if host == me || scope_is_configured(scope, &scope_name) {
             continue;
         }
@@ -1663,6 +1925,9 @@ fn tracked_modes_are_regular(root: &Path, rel: &str) -> bool {
 }
 
 fn gone_log_state(root: &Path, rel: &str) -> GoneLog {
+    if open_dir_beneath(root, split_rel(rel).0, false).is_err() {
+        return GoneLog::Refused;
+    }
     let kind = worktree_kind(&root.join(rel));
     if matches!(kind, WorktreeKind::Unsafe) || !tracked_modes_are_regular(root, rel) {
         return GoneLog::Refused;
@@ -1789,25 +2054,47 @@ fn open_sealed_bytes(bytes: &[u8], identities: &[PathBuf]) -> Result<Option<Stri
     age_opened(&out, "sealed log")
 }
 
-/// Read a regular file without following a symlink at the last component.
-fn read_regular_nofollow(path: &Path) -> Result<Vec<u8>> {
-    use std::io::Read;
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .with_context(|| format!("sync: {}", path.display()))?;
-    let meta = file.metadata()?;
-    if !meta.file_type().is_file() || meta.nlink() != 1 {
-        bail!("sync: {} is not a regular file", path.display());
-    }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    Ok(bytes)
+/// What opening one host's log of one scope gave.
+enum Opened {
+    /// The atoms, after a header that names that host and scope.
+    Atoms(String),
+    /// No identity on this machine is a recipient.
+    Miss,
+    /// It opened and is not that host's log of that scope. The line says so.
+    Refused(String),
 }
 
-fn sealed_plain(root: &Path, rel: &str, identities: &[PathBuf]) -> Result<Option<String>> {
+/// Open `bytes`, found at `label` as `host`'s log of `scope_name`, and hold
+/// it to that name. A peer can commit any ciphertext it holds under any
+/// file name, and a log sealed only to this machine, read as scope cloud,
+/// would be resealed to the cloud recipients. A header naming another host
+/// or scope is refused. A log with no header predates it and is read only
+/// through a key that is not this machine's, the cloud identity for scope
+/// cloud, which no narrower scope is sealed to.
+fn open_log(bytes: &[u8], host: &str, scope_name: &str, label: &str) -> Result<Opened> {
+    let identities = identities_for_open(scope_name);
+    let Some(plain) = open_sealed_bytes(bytes, &identities)? else {
+        return Ok(Opened::Miss);
+    };
+    if let Some((named_host, named_scope, body)) = split_header(&plain) {
+        if named_host == host && named_scope == scope_name {
+            return Ok(Opened::Atoms(body.to_string()));
+        }
+        return Ok(Opened::Refused(format!(
+            "sync: {label} holds {named_host}'s {named_scope} log, not {host}'s {scope_name} log; it was left unread\n"
+        )));
+    }
+    let own = identity_path();
+    let shared: Vec<PathBuf> = identities.into_iter().filter(|id| *id != own).collect();
+    if let Some(plain) = open_sealed_bytes(bytes, &shared)? {
+        return Ok(Opened::Atoms(plain));
+    }
+    Ok(Opened::Refused(format!(
+        "sync: {label} has no scope header and opens only with this machine's key; it was left unread\n"
+    )))
+}
+
+fn sealed_bytes(root: &Path, rel: &str) -> Result<Option<Vec<u8>>> {
     if !tracked_modes_are_regular(root, rel) {
         bail!("sync: {rel} is not a regular file; the log was kept");
     }
@@ -1816,18 +2103,11 @@ fn sealed_plain(root: &Path, rel: &str, identities: &[PathBuf]) -> Result<Option
         WorktreeKind::Unsafe => {
             bail!("sync: {rel} is not a regular file; the log was kept");
         }
-        WorktreeKind::Regular => {
-            let bytes = read_regular_nofollow(&path)?;
-            open_sealed_bytes(&bytes, identities)
-        }
-        WorktreeKind::Missing => {
-            if in_head(root, rel) {
-                let bytes = head_blob(root, rel)?;
-                open_sealed_bytes(&bytes, identities)
-            } else {
-                Ok(None)
-            }
-        }
+        WorktreeKind::Regular => read_beneath(root, rel)?
+            .map(Some)
+            .with_context(|| format!("sync: {rel} went missing; the log was kept")),
+        WorktreeKind::Missing if in_head(root, rel) => head_blob(root, rel).map(Some),
+        WorktreeKind::Missing => Ok(None),
     }
 }
 
@@ -1906,7 +2186,7 @@ fn adopt_pack(
     // Import's retirement, run before the log is dropped. It is by
     // memory, so a ticket the gone host dropped is retired even while the
     // same words remain on another ticket.
-    let taken = read_taken(root, scope_name, gone, &before, sender);
+    let taken = read_taken(root, scope_name, gone, &before, sender)?;
     let dropped = retired_keys(plain, &taken);
     let (retired, retire_failed) = forget_tagged(&before, sender, |atom| {
         in_adopted_scope(atom, scope_name)
@@ -1959,7 +2239,7 @@ fn dry_adopt_line(
     let atoms = crate::atoms_lean(&client, &client.workspace())?;
     let own = own_memory_keys(&atoms, scope_name);
     let plan = adopt_plan(plain, scope_name, &own);
-    let taken = read_taken(root, scope_name, gone, &atoms, sender);
+    let taken = read_taken(root, scope_name, gone, &atoms, sender)?;
     let retired = retired_keys(plain, &taken);
     let posts = plan.post.len();
     Ok((
@@ -2184,7 +2464,7 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
         match gone_log_state(root, &log.age) {
             GoneLog::Absent => {
                 if age_stem(&log.age).is_some_and(|stem| adopted.contains(stem)) {
-                    let _ = std::fs::remove_file(taken_path(root, &log.scope_name, &gone));
+                    let _ = remove_beneath(&state_base(), &taken_rel(root, &log.scope_name, &gone));
                 }
             }
             GoneLog::Untracked => bail!(
@@ -2258,12 +2538,16 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
     let mut opened = Vec::with_capacity(present.len());
     let mut skipped_scopes = Vec::new();
     for log in &present {
-        let identities = identities_for_open(&log.scope_name);
-        match sealed_plain(root, &log.age, &identities) {
-            Ok(Some(plain)) => {
+        let result = sealed_bytes(root, &log.age).and_then(|bytes| match bytes {
+            Some(bytes) => open_log(&bytes, &gone, &log.scope_name, &log.age),
+            None => Ok(Opened::Miss),
+        });
+        match result {
+            Ok(Opened::Atoms(plain)) => {
                 opened.push((log, plain));
             }
-            Ok(None) => {
+            Ok(Opened::Refused(line)) => out.push_str(&line),
+            Ok(Opened::Miss) => {
                 skipped_scopes.push(log.scope_name.clone());
                 out.push_str(&format!(
                     "sync: {gone}'s {} log is not sealed to this machine\n",
@@ -2395,7 +2679,7 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
     if report.landed {
         for (log, _) in &opened {
             if !in_head(root, &log.age) {
-                let _ = std::fs::remove_file(taken_path(root, &log.scope_name, &gone));
+                let _ = remove_beneath(&state_base(), &taken_rel(root, &log.scope_name, &gone));
             }
         }
     }
@@ -3100,27 +3384,20 @@ fn looks_like_git(root: &Path) -> bool {
     git.is_dir() || git.is_file()
 }
 
-fn repo_rows(root: &Path) -> Vec<crate::user_rules::UserRule> {
-    let dir = root.join(".ljos").join("user-rules");
-    let Ok(read) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut paths: Vec<PathBuf> = read
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .collect();
-    paths.sort();
+fn repo_rows(root: &Path) -> Result<Vec<crate::user_rules::UserRule>> {
     let mut rows = Vec::new();
-    for path in paths {
-        let Ok(text) = std::fs::read_to_string(&path) else {
+    for name in list_beneath(root, ".ljos/user-rules")? {
+        if !name.ends_with(".json") {
+            continue;
+        }
+        let Ok(Some(bytes)) = read_beneath(root, &format!(".ljos/user-rules/{name}")) else {
             continue;
         };
-        if let Ok(parsed) = crate::user_rules::parse_rules(&text) {
+        if let Ok(parsed) = crate::user_rules::parse_rules(&String::from_utf8_lossy(&bytes)) {
             rows.extend(parsed);
         }
     }
-    rows
+    Ok(rows)
 }
 
 /// How long a git past its budget has to clean up after SIGTERM.
@@ -3341,32 +3618,26 @@ fn plain_rules_rel(name: &str) -> String {
 /// it could not: sealed to other machines, or `age` missing. The files are
 /// sealed to the tracker's primary scope, `scope_name`, which is empty
 /// when the tracker names none.
-fn sealed_rows(root: &Path, scope_name: &str) -> (Vec<crate::user_rules::UserRule>, usize) {
-    let dir = root.join(".ljos").join("user-rules");
-    let Ok(read) = std::fs::read_dir(&dir) else {
-        return (Vec::new(), 0);
-    };
-    let mut paths: Vec<PathBuf> = read
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| path.to_string_lossy().ends_with(".json.age"))
-        .collect();
-    paths.sort();
+fn sealed_rows(root: &Path, scope_name: &str) -> Result<(Vec<crate::user_rules::UserRule>, usize)> {
     let identities = identities_for_open(scope_name);
     let mut rows = Vec::new();
     let mut closed = 0;
-    for path in paths {
-        let opened = if identities.is_empty() {
-            None
-        } else {
-            open_identities(&path, &identities).ok().flatten()
+    for name in list_beneath(root, ".ljos/user-rules")? {
+        if !name.ends_with(".json.age") {
+            continue;
+        }
+        let opened = match read_beneath(root, &format!(".ljos/user-rules/{name}")) {
+            Ok(Some(bytes)) if !identities.is_empty() => {
+                open_sealed_bytes(&bytes, &identities).ok().flatten()
+            }
+            _ => None,
         };
         match opened.and_then(|text| crate::user_rules::parse_rules(&text).ok()) {
             Some(parsed) => rows.extend(parsed),
             None => closed += 1,
         }
     }
-    (rows, closed)
+    Ok((rows, closed))
 }
 
 /// Merge `rows` into the local file and return the merged rows. Nothing
@@ -3389,11 +3660,11 @@ fn merge_into_local(
 /// unchanged set of rules is not sealed and committed again. It stays on
 /// this machine: a digest of the rules in the tracker would say something
 /// about them.
-fn rules_stamp_path(root: &Path, name: &str) -> PathBuf {
-    state_dir()
-        .join("user-rules")
-        .join(crate::work_id(&root.display().to_string()))
-        .join(format!("{name}.digest"))
+fn rules_stamp_rel(root: &Path, name: &str) -> String {
+    format!(
+        "sync/user-rules/{}/{name}.digest",
+        crate::work_id(&root.display().to_string())
+    )
 }
 
 /// What sealing this host's rules did.
@@ -3405,32 +3676,29 @@ enum Sealed {
 }
 
 fn seal_rules(root: &Path, scope: &Scope, rendered: &str, name: &str) -> Result<Sealed> {
-    let out = root.join(sealed_rules_rel(name));
-    let stamp = rules_stamp_path(root, name);
+    let out = sealed_rules_rel(name);
+    let base = state_base();
+    let stamp = rules_stamp_rel(root, name);
     let digest = format!(
         "{} {}\n",
         crate::work_id(rendered),
         crate::work_id(&scope.recipients.join(","))
     );
-    if out.is_file() && std::fs::read_to_string(&stamp).is_ok_and(|have| have == digest) {
+    if read_beneath(root, &out)?.is_some()
+        && read_beneath(&base, &stamp)?.is_some_and(|have| have == digest.as_bytes())
+    {
         return Ok(Sealed::Unchanged);
     }
     if !age_on_path() {
         return Ok(Sealed::AgeMissing);
     }
-    if let Some(parent) = out.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if let Err(err) = seal(rendered, &scope.recipients, &out) {
-        if age_missing(&err) {
-            return Ok(Sealed::AgeMissing);
-        }
-        return Err(err);
-    }
-    if let Some(parent) = stamp.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&stamp, digest)?;
+    let sealed = match seal_bytes(rendered, &scope.recipients) {
+        Ok(sealed) => sealed,
+        Err(err) if age_missing(&err) => return Ok(Sealed::AgeMissing),
+        Err(err) => return Err(err),
+    };
+    write_beneath(root, &out, &sealed)?;
+    write_beneath(&base, &stamp, digest.as_bytes())?;
     Ok(Sealed::Wrote)
 }
 
@@ -3471,8 +3739,8 @@ pub fn exchange_user_rules(
     let scope = scope_of_repo(root)?;
     let sealed_to = scope.as_ref().map(|s| s.name.clone()).unwrap_or_default();
     let Some(scope) = scope.filter(|_| mode != TrackerGit::Off) else {
-        let (mut rows, _) = sealed_rows(root, &sealed_to);
-        rows.extend(repo_rows(root));
+        let (mut rows, _) = sealed_rows(root, &sealed_to)?;
+        rows.extend(repo_rows(root)?);
         let merged = merge_into_local(rows)?;
         if !asked {
             return Ok(String::new());
@@ -3492,8 +3760,8 @@ pub fn exchange_user_rules(
     if remote {
         integrate_remote(root, deadline)?;
     }
-    let (mut rows, closed) = sealed_rows(root, &scope.name);
-    rows.extend(repo_rows(root));
+    let (mut rows, closed) = sealed_rows(root, &scope.name)?;
+    rows.extend(repo_rows(root)?);
     let merged = merge_into_local(rows)?;
     let mut out = String::new();
     if remote {
@@ -3506,7 +3774,7 @@ pub fn exchange_user_rules(
         ));
     }
     let live = merged.iter().filter(|rule| !rule.deleted).count();
-    if merged.is_empty() && !root.join(plain_rules_rel(&machine_name(host))).exists() {
+    if merged.is_empty() && read_beneath(root, &plain_rules_rel(&machine_name(host)))?.is_none() {
         out.push_str("sync: user rules: 0 on this machine\n");
         return Ok(out);
     }
@@ -3526,9 +3794,7 @@ pub fn exchange_user_rules(
     }
     let mut rels = vec![sealed_rules_rel(&name)];
     let plain = plain_rules_rel(&name);
-    if root.join(&plain).exists() {
-        std::fs::remove_file(root.join(&plain))?;
-    }
+    remove_beneath(root, &plain)?;
     if tracked(root, &plain) {
         rels.push(plain);
     }
@@ -3679,7 +3945,7 @@ mod tests {
         let fake_age = dir.join("age");
         std::fs::write(
             &fake_age,
-            "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -o) out=\"$2\"; shift 2 ;;\n    -r) shift 2 ;;\n    *) shift ;;\n  esac\ndone\ncat > \"$out\"\n",
+            "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -o) out=\"$2\"; shift 2 ;;\n    -r) shift 2 ;;\n    *) shift ;;\n  esac\ndone\nif [ -n \"$out\" ]; then cat > \"$out\"; else cat; fi\n",
         )
         .unwrap();
         std::fs::set_permissions(&fake_age, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -4231,7 +4497,7 @@ mod tests {
         let fake_age = dir.path().join("age");
         std::fs::write(
             &fake_age,
-            "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -o) out=\"$2\"; shift 2 ;;\n    -r) shift 2 ;;\n    *) shift ;;\n  esac\ndone\ncat > \"$out\"\n",
+            "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -o) out=\"$2\"; shift 2 ;;\n    -r) shift 2 ;;\n    *) shift ;;\n  esac\ndone\nif [ -n \"$out\" ]; then cat > \"$out\"; else cat; fi\n",
         )
         .unwrap();
         std::fs::set_permissions(&fake_age, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -5764,7 +6030,7 @@ mod tests {
             atom("a", "from the primary log", &["scope:grokbot"])
         );
         seal(
-            &box_plain,
+            &framed("gonehost", "grokbot", &box_plain),
             std::slice::from_ref(&box_public),
             &atoms.join("gonehost.jsonl.age"),
         )
@@ -5822,6 +6088,296 @@ mod tests {
         let tracked = git(&["ls-files", ".ljos/atoms"]);
         assert!(!tracked.contains("gonehost.jsonl.age"), "{tracked}");
         assert!(tracked.contains("gonehost+cloud.jsonl.age"), "{tracked}");
+    }
+
+    /// `body` as `host` seals its log of `scope_name`: the header first.
+    fn framed(host: &str, scope_name: &str, body: &str) -> String {
+        format!(
+            "{}\n{body}",
+            serde_json::json!({ "ljos_log": 1, "host": host, "scope": scope_name })
+        )
+    }
+
+    struct Laundered {
+        _env: crate::EnvLock,
+        root: PathBuf,
+        scope: Scope,
+        posted: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+    }
+
+    /// A box that holds its machine key and the cloud identity. A peer has
+    /// committed, as `gonehost+cloud.jsonl.age`, a log sealed only to the
+    /// machine key: this host's own grokbot log, or one with no header.
+    fn laundered(dir: &Path, legacy: bool) -> Laundered {
+        let env = begin(dir);
+        let machine = make_key();
+        let cloud_public = age_keygen(&cloud_identity_path());
+        let root = tracker(dir);
+        std::fs::write(
+            root.join(".ljos/sync.toml"),
+            format!(
+                "name = \"grokbot\"\nrecipients = [\"{machine}\"]\n[scopes]\ncloud = [\"{cloud_public}\"]\n"
+            ),
+        )
+        .unwrap();
+        let body = format!("{}\n", atom("a", "machine-only secret", &[]));
+        let plain = if legacy {
+            body
+        } else {
+            framed(&host(), "grokbot", &body)
+        };
+        let rel = ".ljos/atoms/gonehost+cloud.jsonl.age";
+        seal(&plain, std::slice::from_ref(&machine), &root.join(rel)).unwrap();
+        commit_dated(
+            &root,
+            &[".ljos/sync.toml", rel],
+            "peer log",
+            Some(OLD_COMMIT),
+        );
+        let scope = scope_of_repo(&root).unwrap().unwrap();
+        let posted = std::sync::Arc::default();
+        point_pack(&serve_pack(std::sync::Arc::clone(&posted)));
+        Laundered {
+            _env: env,
+            root,
+            scope,
+            posted,
+        }
+    }
+
+    #[test]
+    fn a_machine_only_log_named_as_scope_cloud_is_not_adopted() {
+        for legacy in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let fix = laundered(dir.path(), legacy);
+            let said = adopt_in_repo(&fix.root, &fix.scope, "gonehost", opts(true, false)).unwrap();
+            assert!(said.contains("left unread"), "legacy {legacy}: {said}");
+            assert!(
+                posted_texts(&fix.posted).is_empty(),
+                "legacy {legacy}: {said}"
+            );
+            let mine = fix
+                .root
+                .join(format!(".ljos/atoms/{}+cloud.jsonl.age", host()));
+            assert!(
+                !mine.exists(),
+                "legacy {legacy}: resealed to the cloud recipients: {said}"
+            );
+            assert!(in_head(&fix.root, ".ljos/atoms/gonehost+cloud.jsonl.age"));
+        }
+    }
+
+    #[test]
+    fn a_machine_only_log_named_as_scope_cloud_is_not_imported() {
+        for legacy in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let fix = laundered(dir.path(), legacy);
+            let said = import(&fix.root, &fix.scope).unwrap();
+            assert!(said.contains("left unread"), "legacy {legacy}: {said}");
+            assert!(
+                posted_texts(&fix.posted).is_empty(),
+                "legacy {legacy}: {said}"
+            );
+        }
+    }
+
+    /// A box with no cloud identity whose machine key is a cloud recipient
+    /// reads a peer's cloud log that names itself.
+    #[test]
+    fn a_cloud_log_with_its_header_opens_with_the_machine_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let machine = make_key();
+        let root = tracker(dir.path());
+        let scope: Scope = toml::from_str(&format!(
+            "name = \"grokbot\"\nrecipients = [\"{machine}\"]\n[scopes]\ncloud = [\"{machine}\"]\n"
+        ))
+        .unwrap();
+        let body = format!("{}\n", atom("a", "cloud words", &["scope:cloud"]));
+        seal(
+            &framed("gonehost", CLOUD_SCOPE, &body),
+            std::slice::from_ref(&machine),
+            &root.join(".ljos/atoms/gonehost+cloud.jsonl.age"),
+        )
+        .unwrap();
+        let posted = std::sync::Arc::default();
+        point_pack(&serve_pack(std::sync::Arc::clone(&posted)));
+        let said = import(&root, &scope).unwrap();
+        assert!(said.contains("gonehost: 1 cloud atoms taken"), "{said}");
+        assert_eq!(posted_texts(&posted), vec!["cloud words"]);
+    }
+
+    /// A cloud log written before the header, sealed to the cloud
+    /// recipient, still opens with the cloud identity beside a machine key.
+    #[test]
+    fn a_legacy_cloud_log_opens_with_the_cloud_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let machine = make_key();
+        let cloud_public = age_keygen(&cloud_identity_path());
+        let root = tracker(dir.path());
+        let scope: Scope = toml::from_str(&format!(
+            "name = \"grokbot\"\nrecipients = [\"{machine}\"]\n[scopes]\ncloud = [\"{cloud_public}\"]\n"
+        ))
+        .unwrap();
+        let body = format!("{}\n", atom("a", "old cloud words", &["scope:cloud"]));
+        seal(
+            &body,
+            std::slice::from_ref(&cloud_public),
+            &root.join(".ljos/atoms/gonehost+cloud.jsonl.age"),
+        )
+        .unwrap();
+        let posted = std::sync::Arc::default();
+        point_pack(&serve_pack(std::sync::Arc::clone(&posted)));
+        let said = import(&root, &scope).unwrap();
+        assert!(said.contains("gonehost: 1 cloud atoms taken"), "{said}");
+        assert_eq!(posted_texts(&posted), vec!["old cloud words"]);
+    }
+
+    /// A tracker whose `.ljos` or `.ljos/atoms` is a symlink to a local
+    /// directory holding a log sealed to this machine. Import would take
+    /// it as the tracker's, and export would write this host's log there.
+    #[test]
+    fn a_symlinked_tracker_directory_is_not_read_or_written() {
+        for linked in [".ljos", ".ljos/atoms"] {
+            let dir = tempfile::tempdir().unwrap();
+            let _env = begin(dir.path());
+            let machine = make_key();
+            let root = tracker(dir.path());
+            std::fs::remove_dir_all(root.join(".ljos")).unwrap();
+            std::fs::create_dir_all(root.join(".ljos")).unwrap();
+            let outside = dir.path().join("outside");
+            let atoms = if linked == ".ljos" {
+                outside.join("atoms")
+            } else {
+                outside.clone()
+            };
+            std::fs::create_dir_all(&atoms).unwrap();
+            let scope = scope_of(&machine);
+            let toml = format!("name = \"notes\"\nrecipients = [\"{machine}\"]\n");
+            std::fs::write(atoms.parent().unwrap().join("sync.toml"), &toml).unwrap();
+            let body = format!("{}\n", atom("a", "from outside", &[]));
+            seal(
+                &framed("peer", "cloud", &body),
+                std::slice::from_ref(&machine),
+                &atoms.join("peer.jsonl.age"),
+            )
+            .unwrap();
+            if linked == ".ljos" {
+                std::fs::remove_dir(root.join(".ljos")).unwrap();
+            }
+            std::os::unix::fs::symlink(&outside, root.join(linked)).unwrap();
+            let posted = std::sync::Arc::default();
+            point_pack(&serve_pack(std::sync::Arc::clone(&posted)));
+
+            if linked == ".ljos" {
+                let err = scope_of_repo(&root).unwrap_err();
+                assert!(err.to_string().contains("symlink"), "{linked}: {err}");
+            }
+            let err = import(&root, &scope).unwrap_err();
+            assert!(err.to_string().contains("symlink"), "{linked}: {err}");
+            assert!(posted_texts(&posted).is_empty(), "{linked}");
+            let before = std::fs::read_dir(&atoms).unwrap().count();
+            let err = export(&root, &scope, &[atom("b", "mine", &[])]).unwrap_err();
+            assert!(err.to_string().contains("symlink"), "{linked}: {err}");
+            assert_eq!(
+                std::fs::read_dir(&atoms).unwrap().count(),
+                before,
+                "{linked}: export wrote through the symlink"
+            );
+        }
+    }
+
+    /// The `.taken` files live under `sync/<tracker>/<scope>`, and once
+    /// under `sync/<scope>`. A symlink at any of those is not followed to
+    /// read what was taken or to write it.
+    #[test]
+    fn a_symlinked_state_directory_is_not_read_or_written() {
+        for linked in ["sync", "sync/{id}", "sync/{id}/cloud", "sync/cloud"] {
+            let dir = tempfile::tempdir().unwrap();
+            let _env = begin(dir.path());
+            let (root, scope) = peer_log(dir.path(), &[same_words("proj-a")]);
+            let rel = linked.replace("{id}", &crate::work_id(&root.display().to_string()));
+            let outside = dir.path().join("outside");
+            std::fs::create_dir_all(&outside).unwrap();
+            let link = state_dir().parent().unwrap().join(&rel);
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            let (url, _store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+            point_pack(&url);
+            let err = import(&root, &scope).unwrap_err();
+            assert!(err.to_string().contains("symlink"), "{linked}: {err}");
+            assert_eq!(
+                std::fs::read_dir(&outside).unwrap().count(),
+                0,
+                "{linked}: written through the symlink"
+            );
+        }
+    }
+
+    /// User rules are read from `.ljos/user-rules` and sealed back there,
+    /// with a digest under the state directory's `sync/user-rules`. A
+    /// symlink at either directory, or at `.ljos`, is not followed.
+    #[test]
+    fn symlinked_user_rule_directories_are_not_read_or_written() {
+        let rules = |id: &str, text: &str| {
+            serde_json::json!({ "rules": [{
+                "id": id, "text": text, "author": "seat", "reason": "test",
+                "written_at": "2026-01-01T00:00:00Z"
+            }] })
+            .to_string()
+        };
+        for linked in [".ljos", ".ljos/user-rules", "sync/user-rules"] {
+            let dir = tempfile::tempdir().unwrap();
+            let _env = begin(dir.path());
+            std::env::remove_var("LJOS_TRACKER_GIT");
+            let machine = make_key();
+            let root = tracker(dir.path());
+            let local = dir.path().join("config/ljos/user-rules.json");
+            std::fs::write(&local, rules("local", "stays here")).unwrap();
+            let toml = format!("name = \"notes\"\nrecipients = [\"{machine}\"]\n");
+            let outside = dir.path().join("outside");
+            let watched = match linked {
+                ".ljos" => {
+                    std::fs::create_dir_all(outside.join("user-rules")).unwrap();
+                    std::fs::write(outside.join("sync.toml"), &toml).unwrap();
+                    std::fs::remove_dir_all(root.join(".ljos")).unwrap();
+                    std::os::unix::fs::symlink(&outside, root.join(".ljos")).unwrap();
+                    outside.join("user-rules")
+                }
+                ".ljos/user-rules" => {
+                    std::fs::create_dir_all(&outside).unwrap();
+                    std::fs::write(root.join(".ljos/sync.toml"), &toml).unwrap();
+                    std::os::unix::fs::symlink(&outside, root.join(linked)).unwrap();
+                    outside.clone()
+                }
+                _ => {
+                    std::fs::create_dir_all(&outside).unwrap();
+                    std::fs::write(root.join(".ljos/sync.toml"), &toml).unwrap();
+                    let link = state_dir().parent().unwrap().join(linked);
+                    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+                    std::os::unix::fs::symlink(&outside, &link).unwrap();
+                    outside.clone()
+                }
+            };
+            std::fs::write(watched.join("peer.json"), rules("peer", "from outside")).unwrap();
+            let before = std::fs::read_dir(&watched).unwrap().count();
+            let err = exchange_user_rules(
+                &root,
+                "probe-host",
+                std::time::Duration::from_secs(8),
+                false,
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("symlink"), "{linked}: {err:#}");
+            assert_eq!(
+                std::fs::read_dir(&watched).unwrap().count(),
+                before,
+                "{linked}: written through the symlink"
+            );
+            let kept = std::fs::read_to_string(&local).unwrap();
+            assert!(!kept.contains("from outside"), "{linked}: {kept}");
+        }
     }
 
     const OLD_COMMIT: &str = "100000000 +0000";
@@ -5937,7 +6493,7 @@ mod tests {
         .unwrap();
         let age = ".ljos/atoms/gone.jsonl.age";
         seal(
-            &cloud_plain(),
+            &framed("gone", "cloud", &cloud_plain()),
             std::slice::from_ref(&public),
             &root.join(age),
         )
@@ -6074,7 +6630,11 @@ mod tests {
         assert!(!private_log.contains("ljos-b"), "{private_log}");
         let mine = log_dir(&fix.root).join(format!("{}.jsonl.age", host()));
         let opened = open(&mine, &identity_path()).unwrap().unwrap();
-        assert_eq!(opened.lines().count(), 3, "{opened}");
+        let atoms = opened
+            .lines()
+            .filter(|line| line.contains("\"text\""))
+            .count();
+        assert_eq!(atoms, 3, "{opened}");
         assert!(opened.contains("scope:cloud"), "{opened}");
         assert!(!opened.contains("sync:"), "{opened}");
         assert!(!in_head(&fix.root, ".ljos/atoms/gone.jsonl.age"));
@@ -6115,7 +6675,11 @@ mod tests {
         let opened = open_sealed_bytes(&sealed, &[identity_path()])
             .unwrap()
             .unwrap();
-        assert_eq!(opened.lines().count(), 3, "{opened}");
+        let atoms = opened
+            .lines()
+            .filter(|line| line.contains("\"text\""))
+            .count();
+        assert_eq!(atoms, 3, "{opened}");
         let raw = log_dir(&fix.root).join("bad host.jsonl.age");
         assert!(!raw.exists());
         assert_eq!(require_host_name(&host()).unwrap(), host());
@@ -6333,7 +6897,11 @@ mod tests {
         let public = make_key();
         let root = tracker(dir.path());
         let rel = ".ljos/atoms/gone.jsonl.age";
-        let plain = "{\"text\":\"back\",\"kind\":\"lesson\",\"entities\":[]}\n";
+        let plain = &framed(
+            "gone",
+            "cloud",
+            "{\"text\":\"back\",\"kind\":\"lesson\",\"entities\":[]}\n",
+        );
         seal(plain, std::slice::from_ref(&public), &root.join(rel)).unwrap();
         commit_dated(&root, &[rel], "log", None);
         let out = git(&root, &["rm", "-q", "--", rel]).unwrap();
@@ -6392,7 +6960,8 @@ mod tests {
         assert_ne!(host(), "peer", "the log's host would be this machine");
         let public = make_key();
         let root = tracker(dir);
-        let plain: String = rows.iter().map(|row| format!("{row}\n")).collect();
+        let body: String = rows.iter().map(|row| format!("{row}\n")).collect();
+        let plain = framed("peer", "cloud", &body);
         let rel = ".ljos/atoms/peer.jsonl.age";
         seal(&plain, std::slice::from_ref(&public), &root.join(rel)).unwrap();
         commit_dated(&root, &[rel], "log", None);
@@ -6516,7 +7085,7 @@ mod tests {
         std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
         std::fs::rename(&own, &shared).unwrap();
         let log = root.join(".ljos/atoms/peer.jsonl.age");
-        seal("", &scope.recipients, &log).unwrap();
+        seal(&framed("peer", "cloud", ""), &scope.recipients, &log).unwrap();
         let said = import(&root, &scope).unwrap();
         assert!(
             said.contains("sync: peer: 0 cloud atoms taken, 0 refused, 1 retired\n"),
@@ -6616,13 +7185,21 @@ mod tests {
         )
         .unwrap();
         seal(
-            "{\"text\":\"box-live\",\"kind\":\"lesson\",\"entities\":[\"scope:box\"]}\n",
+            &framed(
+                "gone",
+                "box",
+                "{\"text\":\"box-live\",\"kind\":\"lesson\",\"entities\":[\"scope:box\"]}\n",
+            ),
             std::slice::from_ref(&public),
             &root.join(".ljos/atoms/gone.jsonl.age"),
         )
         .unwrap();
         seal(
-            "{\"text\":\"cloud-live\",\"kind\":\"lesson\",\"entities\":[\"scope:cloud\"]}\n",
+            &framed(
+                "gone",
+                "cloud",
+                "{\"text\":\"cloud-live\",\"kind\":\"lesson\",\"entities\":[\"scope:cloud\"]}\n",
+            ),
             std::slice::from_ref(&public),
             &root.join(".ljos/atoms/gone+cloud.jsonl.age"),
         )
@@ -6789,7 +7366,7 @@ mod tests {
         let (root, scope) = two_scope_logs(dir.path());
         let public = identity_recipient(&identity_path()).unwrap();
         seal(
-            "\n",
+            &framed("gone", "cloud", "\n"),
             std::slice::from_ref(&public),
             &root.join(".ljos/atoms/gone+cloud.jsonl.age"),
         )
@@ -6834,7 +7411,11 @@ mod tests {
         assert!(public.status.success());
         let public = String::from_utf8_lossy(&public.stdout).trim().to_string();
         seal(
-            "{\"text\":\"cloud-live\",\"kind\":\"lesson\",\"entities\":[\"scope:cloud\",\"seat:again\"]}\n",
+            &framed(
+                "gone",
+                "cloud",
+                "{\"text\":\"cloud-live\",\"kind\":\"lesson\",\"entities\":[\"scope:cloud\",\"seat:again\"]}\n",
+            ),
             std::slice::from_ref(&public),
             &root.join(".ljos/atoms/gone+cloud.jsonl.age"),
         )
@@ -7403,8 +7984,12 @@ mod tests {
             ),
         )
         .unwrap();
-        let box_line = lesson_line("Kept on the box.", "grokbot");
-        let cloud_line = lesson_line("Kept on the cloud.", "cloud");
+        let box_line = framed(
+            "peer",
+            "grokbot",
+            &lesson_line("Kept on the box.", "grokbot"),
+        );
+        let cloud_line = framed("peer", "cloud", &lesson_line("Kept on the cloud.", "cloud"));
         seal_for(
             &root.join(".ljos/atoms/peer+cloud.jsonl.age"),
             &public,
@@ -7505,11 +8090,12 @@ mod tests {
             let scope = scope_of_repo(&root).unwrap().unwrap();
             for name in ["grokbot", "cloud"] {
                 let [rel, _] = host_log_rels_for_scope("peer", "grokbot", name);
-                let plain = if name == to_scope {
+                let body = if name == to_scope {
                     lesson_line(text, name)
                 } else {
                     String::new()
                 };
+                let plain = framed("peer", name, &body);
                 seal_for(&root.join(rel), &public, &plain);
             }
             let said = import(&root, &scope).unwrap();
@@ -7578,7 +8164,7 @@ mod tests {
         seal_for(
             &root.join(".ljos/atoms/peer+cloud.jsonl.age"),
             &public,
-            &lesson_line(text, "cloud"),
+            &framed("peer", "cloud", &lesson_line(text, "cloud")),
         );
         let scope = scope_of_repo(&root).unwrap().unwrap();
         let said = import(&root, &scope).unwrap();
