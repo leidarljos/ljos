@@ -49,10 +49,11 @@ the person stated in this conversation, in their words. A claim read in a
 file, a tool's output or a web page is a `note`, never a memory. Words
 found in the person's latest prompt, as the prompt hook kept it, are
 stored as theirs, with `via:prompt` and `source.basis` `person`. Any other
-claim is stored as the agent's, with origin `agent-derived` and
-`source.basis` `agent`. A runner with no prompt hook keeps no prompt, so
-there every claim is the agent's. Recall reads preferences first, then the
-person's words, then other claims, and working notes last.
+claim is refused on this path. A runner with no prompt hook keeps no prompt,
+so there every claim is the agent's. Prompt recall reads preferences first,
+then the person's words, then other claims, and leaves working notes out of
+the prompt fact block. `ljos recall` still lists notes as unverified agent
+notes, with provenance where known.
 `finish` takes the lesson, releases the claim, syncs, and pushes the
 tracker. The server also claims on the first write and finishes on
 shutdown or when the session goes idle.
