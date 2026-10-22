@@ -158,7 +158,7 @@ pub fn reviews_path() -> PathBuf {
 /// The latest verdict per id.
 #[must_use]
 pub fn reviews() -> BTreeMap<String, Review> {
-    let bytes = std::fs::read(reviews_path()).unwrap_or_default();
+    let bytes = crate::read_state_file(&reviews_path()).unwrap_or_default();
     crate::complete_rows::<Review>(&bytes)
         .into_iter()
         .map(|r| (r.id.clone(), r))
@@ -184,7 +184,7 @@ pub fn record(id: &str, verdict: &str, into: Option<&str>) -> Result<Review> {
     }
     let mut line = serde_json::to_string(&r)?;
     line.push('\n');
-    crate::append_locked_row(&path, line.as_bytes())
+    crate::append_locked_row(&path, line.as_bytes(), crate::Durability::Durable)
         .with_context(|| format!("memories: cannot write {}", path.display()))?;
     Ok(r)
 }
@@ -328,8 +328,11 @@ pub fn keep(id: &str, all: &[Memory]) -> Result<String> {
 /// An id that names no memory, or the pack refusing.
 pub fn drop_memory(id: &str, all: &[Memory]) -> Result<String> {
     let m = find(id, all)?;
-    crate::packset_forget(&m.id, None)?;
+    // The verdict is the durable record of the drop. Write it first: if the
+    // pack then does not answer, the claim is still live and marked dropped,
+    // not tombstoned with no verdict to show for it.
     record(&m.id, "drop", None)?;
+    crate::packset_forget(&m.id, None)?;
     Ok(format!("dropped {}\n", m.short_id()))
 }
 
@@ -362,10 +365,13 @@ fn replace(olds: &[&Memory], text: &str, verdict: &str) -> Result<String> {
     };
     let new_id = s(&posted["id"]);
     for m in olds {
+        // Record the verdict before retiring the old claim, so a pack that
+        // stops answering mid-replace leaves the old one live and marked,
+        // not forgotten with no verdict naming what replaced it.
+        record(&m.id, verdict, Some(&new_id))?;
         if m.id != new_id {
             crate::packset_forget(&m.id, None)?;
         }
-        record(&m.id, verdict, Some(&new_id))?;
     }
     if !new_id.is_empty() {
         record(&new_id, "keep", None)?;
@@ -1265,6 +1271,54 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600, "review log mode {mode:o}");
+    }
+
+    /// A verdict is durable: a second process holding the lock longer than
+    /// the best-effort skip does not make the write drop the verdict; it
+    /// waits the lock out and records it.
+    #[test]
+    fn a_durable_verdict_waits_for_a_held_lock() {
+        use std::os::unix::io::AsRawFd;
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_STATE_HOME", dir.path());
+        let path = reviews_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        // SAFETY: `held` is open until the releaser drops it below.
+        assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            // SAFETY: `held` is still open on this thread.
+            unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_UN) };
+            drop(held);
+        });
+        record("a1aaaaaaaaaaaaaa", "keep", None).unwrap();
+        releaser.join().unwrap();
+        assert_eq!(reviews()["a1aaaaaaaaaaaaaa"].verdict, "keep");
+    }
+
+    /// A drop records the verdict before it asks the pack to tombstone the
+    /// claim. With the pack off the forget fails, and the drop verdict is
+    /// still on disk, not lost with the failed pack change.
+    #[test]
+    fn a_drop_records_the_verdict_before_the_pack_change() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_STATE_HOME", dir.path());
+        let old = std::env::var_os("PACKSET_URL");
+        std::env::set_var("PACKSET_URL", "off");
+        let all = sample();
+        assert!(drop_memory("a1", &all).is_err());
+        assert_eq!(reviews()["a1aaaaaaaaaaaaaa"].verdict, "drop");
+        match old {
+            Some(v) => std::env::set_var("PACKSET_URL", v),
+            None => std::env::remove_var("PACKSET_URL"),
+        }
     }
 
     #[test]
