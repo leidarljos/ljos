@@ -30962,7 +30962,10 @@ mod tests {
 
         let id = |r: &str| format!("vissue 0.16.2\nprotocol: 1\nroot={r}\nprefix=Software\n");
         let root_s = root.display().to_string();
-        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "5");
+        // The age is read after `git log` returns. A full suite keeps git
+        // busy long enough that a five-second wait already calls this
+        // commit stuck.
+        std::env::set_var("LJOS_TRACKER_PUSH_WAIT", "60");
         std::env::set_var("XDG_RUNTIME_DIR", dir.path());
 
         let (state, ok) = super::tracker_state(&id(&root_s), "VISSUE_ROOT=x");
