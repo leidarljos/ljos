@@ -21719,8 +21719,8 @@ fn plain_part(name: &str) -> &str {
 }
 
 /// The short doctor: the summary line, then only the rows that need
-/// action (`no` and `warn`) and the optional rows that are off, each with
-/// the fix its state names.
+/// action (`no` and `warn`) and an optional row of a part the line leaves
+/// out, each with the fix its state names.
 #[must_use]
 pub fn format_doctor_short(rows: &[Habitat]) -> String {
     let needs: Vec<Habitat> = rows
@@ -21732,10 +21732,13 @@ pub fn format_doctor_short(rows: &[Habitat]) -> String {
 }
 
 /// Whether the short doctor prints a row, from its word and name. An
-/// optional row that is off leaves its part out of the ready line, and
-/// this row says why.
+/// optional row of a [`READY_PARTS`] part that is off leaves the part out
+/// of the ready line, and the row says why. The other optional rows, such
+/// as a cloud guard on a machine that never ran `cloud up`, stay behind
+/// `ljos doctor --all`.
 fn shown_short(word: &str, name: &str) -> bool {
-    matches!(word, "no" | "warn") || (word == "info" && OPTIONAL_ROWS.contains(&name))
+    matches!(word, "no" | "warn")
+        || (word == "info" && READY_PARTS.iter().any(|(_, rows)| rows.contains(&name)))
 }
 
 /// One section of a sitting's report, cut for [`compact_sitting`].
@@ -38452,14 +38455,14 @@ mod tests {
             habitat_row("pack", "answers", true),
             habitat_row("tracker", "answers", true),
             habitat_row("policy", "ljos-policyd 0.4.6 (phronesis)", true),
-            habitat_row("ljos-hud", "not on PATH", false),
+            habitat_row("host key", "none yet", false),
         ];
         let short = format_doctor_short(&rows);
         assert_eq!(
             short,
             "ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.\n"
         );
-        assert!(format_doctor(&rows).contains("info\tljos-hud\t"));
+        assert!(format_doctor(&rows).contains("host key"));
     }
 
     #[test]
@@ -38474,14 +38477,13 @@ mod tests {
             tracker.clone(),
             habitat_row("policy", "ljos-policyd 0.4.6 (phronesis)", true),
             habitat_row("host key", "none yet", false),
-            habitat_row("ljos-hud", "not on PATH", false),
+            habitat_row("cloud guard", "missing; run `ljos cloud up`", false),
         ];
         assert!(healthy(&rows));
         assert_eq!(
             format_doctor_short(&rows),
             "ljos is ready: memory and command guard work. Optional extras: `ljos doctor --all`.\n\
-             info\ttracker\t`vissue identity` exited 1: not inside a tracker\n\
-             info\thost key\tnone yet\n"
+             info\ttracker\t`vissue identity` exited 1: not inside a tracker\n"
         );
         rows.push(habitat_row("guard", "off: LJOS_OFF is set", false));
         let short = format_doctor_short(&rows);
@@ -38526,17 +38528,18 @@ mod tests {
         ];
         let short = format_doctor_short(&rows);
         let lines: Vec<&str> = short.lines().collect();
-        // The encoder is optional, so a missing one is an info row under
-        // the line, not a reason the seat is not ready. The short doctor
-        // still names the pack, with its fix.
+        // The encoder is optional, so a missing one is an info row, not a
+        // reason the seat is not ready. The short doctor still names the
+        // pack, with its fix.
         assert_eq!(
             lines[0],
             "ljos is not ready: memory does not answer. Optional extras: `ljos doctor --all`."
         );
-        assert_eq!(lines.len(), 3, "{short}");
+        assert_eq!(lines.len(), 2, "{short}");
         assert!(lines[1].starts_with("no\tpack\tno pack: run packset ensure"));
-        assert!(lines[2].starts_with("info\tencoder\tnot installed"));
         assert!(!short.contains("tracker"), "{short}");
+        assert!(!short.contains("encoder"), "{short}");
+        assert!(format_doctor(&rows).contains("info\tencoder\t"));
     }
 
     #[test]
@@ -38556,7 +38559,6 @@ mod tests {
         assert_eq!(
             short,
             "ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.\n\
-info\thost key\tnone yet\n\
 encoder down: the pack ranks by words alone\n\
 2 due; the soonest: abc\n\
 claimed Software-x for ljos-bot@ux-fix\n\
