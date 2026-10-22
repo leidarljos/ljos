@@ -345,16 +345,32 @@ or a =/nix/store= entry. Root or the person owns the file, every
 directory from the root down to it, and the directory the root sits
 in, and no one else can write them but the person's primary group,
 and that only when the group bears the person's name and holds no one
-else. A store entry counts only when Nix alone keeps it: a root-owned
+else. That is read from =/etc/group= and =/etc/passwd= themselves, and
+only when =nsswitch.conf= sends both to those files alone; a second
+group line with the same gid, a source such as =systemd=, =sss= or
+=ldap=, or a line that cannot be read means the group is shared. A store entry counts only when Nix alone keeps it: a root-owned
 store the person cannot write, sticky if its group may, holding a
 root-owned entry, or on a single-user install a store the person owns
-and no one else may write. Each directory is opened beneath the one
+and no one else may write. The home roots and a single-user store are
+trusted because the person owns them, and that is the limit of this
+check: a tool call runs with the person's uid and can write them too,
+so it can replace an installed runner there. The check keeps out other
+users and copies placed anywhere else, not the person's own account.
+Each directory is opened beneath the one
 before without following a link, and the file opened must be the one
 the process runs, so a directory swapped after the path was resolved
-is not walked through. A copy whose name is the runner,
+is not walked through. A runtime named exactly =node=, =nodejs=,
+=bun= or =deno= stands for the script its arguments name only when the
+runtime is itself such an installed file, kept the same way and the
+file the process runs; the script is then judged as a runner file is.
+A copy whose name is the runner,
 in =/tmp=, =/var/tmp=, =/dev/shm=, a project tree or a =.local= of its
 own making, or reached through a link that leaves its root, is not
-that program. Nothing sits between the hook and the runner but the
+that program. All of this is Linux only, since it reads
+=/proc/<pid>/exe= and walks with =O_PATH= descriptors: on macOS and
+any other system no process is an installed runner, whatever root it
+runs from, so =ljos hook= keeps no prompt as the person's and
+=prefer --user= refuses. Nothing sits between the hook and the runner but the
 =sh -c= that runs the configured hook command, and the runner must not
 itself run inside a tool call.
 The guard's =PreToolUse= records the tool call: the session id, the

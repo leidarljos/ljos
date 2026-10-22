@@ -1,0 +1,1 @@
+`ljos hook` and `prefer --user` read the person's primary group from `/etc/group` itself, and only when `nsswitch.conf` sends group to that file alone; a second line with the same gid, another source, or a line that cannot be read means the group is not the person's alone.
