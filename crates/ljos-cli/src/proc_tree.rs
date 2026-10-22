@@ -350,35 +350,88 @@ const HOOK_RUNNERS: &[(&str, &str)] = &[
 /// above them.
 const RUNTIMES: &[&str] = &["node", "nodejs", "bun", "deno"];
 
-/// The runner a program file is, read up its path past versions, places
-/// and entry scripts: `~/.local/share/claude/versions/2.1.3` is Claude
-/// Code, and so is `@anthropic-ai/claude-code/cli.js`. A bundled runtime
-/// (`cursor-agent/versions/V/node`) is the runner it ships in.
+/// The stem of a path component, so `cli.js` is the entry `cli`.
+fn component_stem(component: &str) -> &str {
+    component
+        .strip_suffix(".js")
+        .or_else(|| component.strip_suffix(".mjs"))
+        .or_else(|| component.strip_suffix(".cjs"))
+        .unwrap_or(component)
+}
+
+/// A path component that names where a runner is packed, not the runner.
+fn layout_component(component: &str) -> bool {
+    let name = component_stem(component);
+    crate::version_like(name)
+        || crate::PLACES.contains(&name)
+        || crate::ENTRY_STEMS.contains(&name)
+        || RUNTIMES.contains(&name)
+        || matches!(name, "vendor" | "share")
+        || name.starts_with('@')
+        || name.contains("unknown-linux")
+        || matches!(name, "x86_64" | "aarch64" | "arm64")
+        || name.starts_with("armv")
+}
+
+/// The runner a component names, after an architecture suffix is dropped.
+fn hook_name(component: &str) -> Option<&'static str> {
+    let name = component_stem(component);
+    let name = name.split_once("-x86_64").map_or(name, |(head, _)| head);
+    let name = name.split_once("-aarch64").map_or(name, |(head, _)| head);
+    HOOK_RUNNERS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, runner)| *runner)
+}
+
+/// Whether `parts` sits where a runner is installed: a user install
+/// (`.local`, `.cargo`), an npm tree, or a system root (`/usr`, `/opt`,
+/// `/bin`).
+fn under_install_root(parts: &[&str]) -> bool {
+    parts
+        .iter()
+        .any(|part| matches!(*part, ".local" | ".cargo" | "node_modules"))
+        || matches!(parts.first(), Some(&"usr" | &"opt" | &"bin"))
+}
+
+/// Whether `parts[index]` is an installed runner: the path is under a
+/// user install or a system root. A `bin` directory beside `.local`,
+/// `.cargo`, `/usr` or `/bin`, and an app directory of the runner's name
+/// (`/usr/share/cursor/cursor`), are that shape. A `bin` under a home
+/// directory of the person's own making is not.
+fn name_installed(parts: &[&str]) -> bool {
+    under_install_root(parts)
+}
+
+/// The runner a program file is, when the file is an installed copy.
+/// `~/.local/share/claude/versions/2.1.3` is Claude Code, and so is
+/// `@anthropic-ai/claude-code/cli.js`. A bundled runtime
+/// (`cursor-agent/versions/V/node`) is the runner it ships in. A copy
+/// whose name is the runner, sat in `/tmp` or a home directory, is not:
+/// the name alone is what a tool call can choose. A path the kernel
+/// marks ` (deleted)` is not the file that was installed.
 fn runner_of_file(path: &std::path::Path) -> Option<&'static str> {
-    let mut parts: Vec<String> = path
+    let raw = path.to_str()?;
+    if raw.contains(" (deleted)") {
+        return None;
+    }
+    let parts: Vec<&str> = path
         .components()
-        .filter_map(|c| c.as_os_str().to_str().map(str::to_string))
+        .filter_map(|component| match component {
+            std::path::Component::Normal(text) => text.to_str(),
+            _ => None,
+        })
         .collect();
-    while let Some(last) = parts.pop() {
-        let last = last.trim_end_matches(" (deleted)");
-        let name = last
-            .strip_suffix(".js")
-            .or_else(|| last.strip_suffix(".mjs"))
-            .or_else(|| last.strip_suffix(".cjs"))
-            .unwrap_or(last);
-        if crate::version_like(name)
-            || crate::PLACES.contains(&name)
-            || crate::ENTRY_STEMS.contains(&name)
-            || RUNTIMES.contains(&name)
-        {
+    let mut index = parts.len();
+    while index > 0 {
+        index -= 1;
+        if layout_component(parts[index]) {
             continue;
         }
-        let name = name.split_once("-x86_64").map_or(name, |(n, _)| n);
-        let name = name.split_once("-aarch64").map_or(name, |(n, _)| n);
-        return HOOK_RUNNERS
-            .iter()
-            .find(|(n, _)| *n == name)
-            .map(|(_, r)| *r);
+        let runner = hook_name(parts[index])?;
+        if name_installed(&parts) {
+            return Some(runner);
+        }
     }
     None
 }
@@ -503,13 +556,286 @@ fn tool_call_stamp(env: &[(String, String)]) -> Option<&str> {
         .map(|(k, _)| k.as_str())
 }
 
+/// One tool call the guard's `PreToolUse` saw: the session and cgroup it
+/// could not shed, the start time of that hook (a later process is part
+/// of the call), and the runner that spawned the hook.
+struct ToolMark {
+    sid: u32,
+    at: u64,
+    runner_pid: u32,
+    runner_start: u64,
+    shell_pid: u32,
+    shell_start: u64,
+    cgroup: String,
+}
+
+/// The session and cgroup of this process. A child inherits both until
+/// it calls `setsid` or migrates cgroup.
+struct Here {
+    sid: u32,
+    cgroup: String,
+}
+
+fn marks_path() -> std::path::PathBuf {
+    crate::runtime_dir().join("tool-calls")
+}
+
+fn broken_path() -> std::path::PathBuf {
+    crate::runtime_dir().join("tool-calls.broken")
+}
+
+/// The calling process's session id.
+fn current_sid() -> Result<u32, String> {
+    // SAFETY: getsid(0) reads the calling process's session id and writes
+    // nothing the caller owns.
+    let sid = unsafe { libc::getsid(0) };
+    if sid < 0 {
+        return Err(
+            "the session id cannot be read, so a tool call cannot be told from the runner".into(),
+        );
+    }
+    u32::try_from(sid).map_err(|_| "the session id does not fit".into())
+}
+
+fn here_evidence() -> Result<Here, String> {
+    let sid = current_sid()?;
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup").map_err(|_| {
+        "the cgroup cannot be read, so a tool call cannot be told from the runner".to_string()
+    })?;
+    if cgroup.is_empty() {
+        return Err("the cgroup is empty, so a tool call cannot be told from the runner".into());
+    }
+    Ok(Here { sid, cgroup })
+}
+
+fn self_start() -> Result<u64, String> {
+    stat(std::process::id())
+        .map(|row| row.start)
+        .ok_or_else(|| "this process's start time cannot be read".into())
+}
+
+/// Remember that a tool-call record could not be written. A later read
+/// then fails closed: a missing record means no tool call, and a failed
+/// write must not look like that.
+/// A tool call may have happened and its evidence could not be taken.
+/// Later reads fail closed instead of looking like a quiet runtime.
+pub fn seal_unreadable_tool_call() {
+    mark_broken();
+}
+
+fn mark_broken() {
+    let dir = crate::runtime_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let _ = options.open(broken_path());
+}
+
+fn tool_marks() -> Result<Vec<ToolMark>, String> {
+    if broken_path().exists() {
+        return Err(
+            "a tool-call record could not be written, so nothing is kept as the person's".into(),
+        );
+    }
+    let text = match std::fs::read_to_string(marks_path()) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => {
+            return Err(
+                "the tool-call record cannot be read, so nothing is kept as the person's".into(),
+            );
+        }
+    };
+    let mut marks = Vec::new();
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() != 8 || fields[0] != "1" {
+            return Err(
+                "the tool-call record is corrupt, so nothing is kept as the person's".into(),
+            );
+        }
+        let number = |index: usize, label: &str| -> Result<u64, String> {
+            fields[index].parse().map_err(|_| {
+                format!(
+                    "the tool-call record has a bad {label}, so nothing is kept as the person's"
+                )
+            })
+        };
+        let cgroup = hex::decode(fields[7])
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .ok_or("the tool-call record has a bad cgroup, so nothing is kept as the person's")?;
+        let narrow = |value: u64, label: &str| -> Result<u32, String> {
+            u32::try_from(value).map_err(|_| {
+                format!(
+                    "the tool-call record has a bad {label}, so nothing is kept as the person's"
+                )
+            })
+        };
+        marks.push(ToolMark {
+            sid: narrow(number(1, "session")?, "session")?,
+            at: number(2, "start")?,
+            runner_pid: narrow(number(3, "runner")?, "runner")?,
+            runner_start: number(4, "runner start")?,
+            shell_pid: narrow(number(5, "shell")?, "shell")?,
+            shell_start: number(6, "shell start")?,
+            cgroup,
+        });
+    }
+    Ok(marks)
+}
+
+/// Record the tool call whose guard hook this is. The runner is `runner`,
+/// the process that spawned the hook. The hook's own start time is the
+/// watermark: a process started later, in this session or cgroup, is the
+/// tool call even after it detaches.
+///
+/// # Errors
+///
+/// The session, cgroup or start time cannot be read, or the record cannot
+/// be written. A failed write leaves a sentinel so later reads fail closed.
+pub fn note_tool_call(runner: &Proc) -> Result<(), String> {
+    // A tool call whose session, cgroup or start time cannot be read must
+    // not look like a runtime that has seen no tool call.
+    let here = match here_evidence() {
+        Ok(here) => here,
+        Err(why) => {
+            mark_broken();
+            return Err(why);
+        }
+    };
+    let at = match self_start() {
+        Ok(at) => at,
+        Err(why) => {
+            mark_broken();
+            return Err(why);
+        }
+    };
+    let dir = crate::runtime_dir();
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    if builder.create(&dir).is_err() {
+        mark_broken();
+        return Err("the tool-call record directory cannot be created".into());
+    }
+    // sid, watermark, runner pid and start, tool shell pid and start
+    // (unset when the shell does not exist yet), cgroup text as hex.
+    // One line stays under PIPE_BUF so the append is one write.
+    let line = format!(
+        "1\t{}\t{at}\t{}\t{}\t0\t0\t{}\n",
+        here.sid,
+        runner.pid,
+        runner.start,
+        hex::encode(here.cgroup.as_bytes())
+    );
+    if line.len() > 4096 {
+        mark_broken();
+        return Err("the tool-call record does not fit one write".into());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let opened = options.open(marks_path());
+    let mut file = match opened {
+        Ok(file) => file,
+        Err(_) => {
+            mark_broken();
+            return Err("the tool-call record cannot be written".into());
+        }
+    };
+    use std::io::Write as _;
+    if file.write_all(line.as_bytes()).is_err() {
+        mark_broken();
+        return Err("the tool-call record cannot be written".into());
+    }
+    Ok(())
+}
+
+/// Whether `runner` is the runner a person started, rather than a process
+/// a recorded tool call still owns. The same runner process that recorded
+/// a mark is that opener. Any other process that shares the mark's cgroup
+/// or session and is not older than the mark is the tool call. No marks
+/// means the person has not made a tool call in this runtime yet.
+fn confirm_runner(runner: &Proc) -> Result<(), String> {
+    let here = here_evidence()?;
+    let marks = tool_marks()?;
+    let chain = ancestors();
+    for mark in &marks {
+        if mark.runner_pid == runner.pid && mark.runner_start == runner.start {
+            continue;
+        }
+        if mark.shell_pid > 0
+            && chain
+                .iter()
+                .any(|proc| proc.pid == mark.shell_pid && proc.start == mark.shell_start)
+        {
+            return Err(format!(
+                "{} (pid {}) descends from a recorded tool call",
+                runner.comm, runner.pid
+            ));
+        }
+        let same_place = mark.sid == here.sid || mark.cgroup == here.cgroup;
+        if same_place && runner.start >= mark.at {
+            return Err(format!(
+                "{} (pid {}) shares a recorded tool call's cgroup or session and is not older than that tool call",
+                runner.comm, runner.pid
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The installed runner above this process, checked against the tool-call
+/// record ([`confirm_runner`]). Shells and wrappers are stepped over. The
+/// first other program that is not an installed runner ends the walk, so
+/// a copy named like a runner cannot hide behind a real one further up.
+///
+/// # Errors
+///
+/// No installed runner is above this process, or the one that is still
+/// belongs to a recorded tool call.
+pub fn placed_runner() -> Result<(), String> {
+    for proc in ancestors() {
+        if is_shell(&proc) || is_wrapper(&proc) {
+            continue;
+        }
+        if ends_the_walk(&proc) {
+            break;
+        }
+        if exe_runner(proc.pid).is_some() {
+            return confirm_runner(&proc);
+        }
+        return Err(format!(
+            "{} (pid {}) is not an installed runner, so this is not the person's runner",
+            proc.comm, proc.pid
+        ));
+    }
+    Err("no installed runner is above this process, so this is not the person's runner".into())
+}
+
 /// The runner that spawned this `ljos hook` itself, or why none did: the
-/// parent must be a runner's own program ([`exe_runner`]), with no shell
-/// or interpreter between them but the `sh -c` the runner runs its hook
-/// command in ([`hook_shell`]), and that runner must not run inside a
-/// tool call, which a runner above it or a tool call's variables in the
-/// environment it was started with would show. Only such a hook's prompt
-/// is the person's.
+/// parent must be an installed runner ([`exe_runner`]), with no shell or
+/// interpreter between them but the `sh -c` the runner runs its hook
+/// command in ([`hook_shell`]). That runner must not run inside a tool
+/// call, which a runner above it, a tool call's variables in the
+/// environment it was started with, or the guard's tool-call record
+/// ([`confirm_runner`]) would show. Only such a hook's prompt is the
+/// person's. An environment that cannot be read hides the stamp, so it
+/// is refused.
 ///
 /// # Errors
 ///
@@ -527,7 +853,12 @@ pub fn hook_runner() -> Result<(Proc, &'static str), String> {
             parent.comm, parent.pid
         ));
     };
-    let env = environ(parent.pid).unwrap_or_default();
+    let env = environ(parent.pid).ok_or_else(|| {
+        format!(
+            "the environment {} (pid {}) was started with cannot be read, so a tool call's stamp would be hidden",
+            parent.comm, parent.pid
+        )
+    })?;
     if let Some(key) = tool_call_stamp(&env) {
         return Err(format!(
             "{runner} (pid {}) was started with {key} set, inside another runner's tool call",
@@ -546,6 +877,7 @@ pub fn hook_runner() -> Result<(Proc, &'static str), String> {
             parent.pid, p.pid
         ));
     }
+    confirm_runner(parent)?;
     Ok((parent.clone(), runner))
 }
 
@@ -572,14 +904,57 @@ mod tests {
                 Some("cursor-agent"),
             ),
             ("/usr/share/cursor/cursor", Some("cursor")),
+            ("/usr/local/bin/codex", Some("codex")),
+            ("/usr/bin/claude", Some("claude")),
+            ("/bin/grok", Some("grok")),
+            ("/home/u/.cargo/bin/codex", Some("codex")),
             ("/usr/bin/node", None),
             ("/usr/bin/bash", None),
             ("/usr/bin/python3", None),
             ("/usr/bin/ssh", None),
             ("/home/u/.cargo/bin/ljos", None),
+            ("/tmp/claude", None),
+            ("/tmp/claude/versions/2.1.3", None),
+            ("/home/u/runners/claude", None),
+            ("/home/u/plant/grok", None),
+            ("/home/u/plant/bin/claude", None),
+            ("/home/u/.local/bin/claude (deleted)", None),
         ] {
             assert_eq!(runner_of_file(Path::new(path)), want, "{path}");
         }
+    }
+
+    /// A process younger than a recorded tool call, in that call's cgroup
+    /// or session, is still the tool call. The runner that recorded the
+    /// mark is not. A missing record is not a tool call; a corrupt one
+    /// refuses everything.
+    #[test]
+    fn a_young_runner_in_a_recorded_tool_call_is_refused() {
+        let _guard = crate::test_env_lock();
+        let opener = Proc {
+            pid: 1,
+            start: 1,
+            comm: "claude".into(),
+        };
+        let young = Proc {
+            pid: 999_999,
+            start: u64::MAX,
+            comm: "claude".into(),
+        };
+        let old = Proc {
+            pid: 42,
+            start: 0,
+            comm: "claude".into(),
+        };
+        assert!(confirm_runner(&young).is_ok(), "no record yet");
+        note_tool_call(&opener).unwrap();
+        let why = confirm_runner(&young).unwrap_err();
+        assert!(why.contains("tool call"), "{why}");
+        assert!(confirm_runner(&opener).is_ok(), "the opener recorded it");
+        assert!(confirm_runner(&old).is_ok(), "older than the record");
+        std::fs::write(marks_path(), "nope\n").unwrap();
+        let why = confirm_runner(&old).unwrap_err();
+        assert!(why.contains("corrupt"), "{why}");
     }
 
     #[test]

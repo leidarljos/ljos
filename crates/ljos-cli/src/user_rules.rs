@@ -353,8 +353,13 @@ pub fn write_preference(
     deny_reply_to: &People,
 ) -> Result<UserRule> {
     // A person typing the command is the words. Under a runner the words
-    // have to be in the prompt the hook kept, the same check MCP makes.
+    // have to be in the prompt the hook kept, the same check MCP makes,
+    // and the process has to sit under the runner the person started, not
+    // a copy a tool call detached.
     if super::under_a_runner() {
+        if let Err(why) = super::proc_tree::placed_runner() {
+            bail!("prefer: {why}; only the person's own words can be stored here");
+        }
         super::refuse_unless_person_words("prefer", text)?;
     }
     let mut rule = fresh(text, reason, None)?;
@@ -490,6 +495,11 @@ pub fn promote_lesson(
         .find(|atom| atom.get("id").and_then(Value::as_str) == Some(id))
         .with_context(|| format!("prefer: no atom {id} in this seat's pack"))?;
     if person_words || super::under_a_runner() {
+        if super::under_a_runner() {
+            if let Err(why) = super::proc_tree::placed_runner() {
+                bail!("prefer: {why}; only the person's own words can be stored here");
+            }
+        }
         let text = atom.get("text").and_then(Value::as_str).unwrap_or("");
         super::refuse_unless_person_words("prefer", text)?;
     }
