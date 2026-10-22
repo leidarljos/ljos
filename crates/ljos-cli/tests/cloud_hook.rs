@@ -1093,6 +1093,62 @@ fn a_wget_config_that_moves_the_target_may_be_github() {
     );
 }
 
+/// A curlrc line the guard cannot read, a `variable` or `expand-`
+/// option, or a config it cannot open may add a URL, so the host on the
+/// command line is not the whole target.
+#[test]
+fn a_curl_config_that_hides_the_target_may_be_github() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let line = "curl -s https://example.com/x";
+
+    fs::write(home.join(".curlrc"), "request = POST\nsilent\n").unwrap();
+    allowed(line, here);
+    for hidden in [
+        "url = \"https://example.com/\" \\\nhttps://api.github.com/user",
+        "url = \"https://api.git\\\nhub.com/user\"",
+        "variable = %HOST\nexpand-url = \"https://{{HOST}}/user\"",
+        "--variable HOST@/tmp/host",
+        "url = \"https://{{HOST}}/user\"",
+        "proxy = https://api.github.com/",
+        "resolve = example.com:443:140.82.112.6",
+    ] {
+        fs::write(home.join(".curlrc"), format!("request = POST\n{hidden}\n")).unwrap();
+        let hit = cloud_refusal(line, here);
+        assert!(
+            hit.is_some_and(|hit| hit.pattern == "cloud-cursor-push"),
+            "`{hidden}` in ~/.curlrc was allowed"
+        );
+    }
+    fs::remove_file(home.join(".curlrc")).unwrap();
+
+    let inner = root.path().join("inner.cfg");
+    let outer = root.path().join("outer.cfg");
+    fs::write(&inner, "url = https://api.github.com/user\n").unwrap();
+    fs::write(&outer, format!("config = \"{}\"\n", inner.display())).unwrap();
+    refused(
+        &format!("curl -X POST -K {} https://example.com/x", outer.display()),
+        here,
+    );
+    allowed("curl -X POST https://example.com/x", here);
+    refused("curl -X POST -K - https://example.com/x", here);
+    refused(
+        &format!(
+            "curl -X POST --config {} https://example.com/x",
+            root.path().join("missing.cfg").display()
+        ),
+        here,
+    );
+    refused(
+        "curl --variable HOST=api.github.com --expand-url \"https://{{HOST}}/user\" -X POST",
+        here,
+    );
+}
+
 /// Only a missing default config is no config. A directory, a fifo, or a
 /// symlink there could not be read, so the request is judged a write. A
 /// fifo must not hold the guard waiting for a writer.
