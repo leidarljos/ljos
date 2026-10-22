@@ -84,6 +84,12 @@ pub fn up(force: bool) -> Result<String> {
         ("LJOS_SEAT", seat.clone()),
         ("VISSUE_AGENT", seat.clone()),
         ("LJOS_SEAT_KEY", key.display().to_string()),
+        // Tag this VM's memory and lessons scope:cloud. Not default_scope:
+        // an unscoped box atom must not follow a default into the cloud log.
+        (
+            crate::sync::WRITE_SCOPE_KEY,
+            crate::sync::CLOUD_SCOPE.to_string(),
+        ),
     ];
     if std::env::var("DEEDAR_HOST_SIGNING_KEY").ok().as_deref() != Some("off") {
         pairs.push(("DEEDAR_HOST_SIGNING_KEY", key.display().to_string()));
