@@ -1869,6 +1869,31 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "were merged into one voter")]
+    fn runs_and_judges_keep_their_ids_whole() {
+        let _home = test_home();
+        for (one, two) in [
+            ("alpha/judge-gpt-oss-120b", "beta/judge-gpt-oss-20b"),
+            ("alpha/judge-llama-3-70b", "beta/judge-llama-3-8b"),
+            ("alpha/judge-qwen", "beta/judge-qwen-72"),
+            ("alpha/run-pr-1234", "beta/run-pr-5678"),
+            ("alpha/judge-grok-4", "beta/grok-4"),
+        ] {
+            let entries = [
+                sign_as(ballot_entry(one, "accept", "2026-10-21T10:00:00Z"), 1),
+                sign_as(ballot_entry(two, "accept", "2026-10-21T11:00:00Z"), 2),
+            ];
+            check_entries(&entries).unwrap_or_else(|err| panic!("{one} {two}: {err:#}"));
+            let read = tally(&entries).expect("tally");
+            assert_eq!(
+                counted(&read, "accept"),
+                Some(2),
+                "{one} and {two} were merged into one voter"
+            );
+        }
+    }
+
+    #[test]
     fn one_key_under_two_voters_in_one_hour_is_flagged() {
         let _home = test_home();
         let at = "2026-10-21T10:00:00Z";
