@@ -3974,6 +3974,12 @@ fn curl_long(
         let value = flag_value(words, i, attached);
         return curl_named_file(&value, cwd, tune, seen);
     }
+    // curl 8.3 expands `{{name}}` in an `--expand-` option from a
+    // `--variable`, which can read a file or the environment.
+    if lower == "--variable" || lower.starts_with("--expand-") {
+        tune.github = true;
+        return Some(HttpShape::Opaque);
+    }
     if matches!(
         lower.as_str(),
         "--data"
@@ -4165,44 +4171,87 @@ fn curl_named_file(
     tune: &mut Tune,
     seen: &mut HashSet<PathBuf>,
 ) -> Option<HttpShape> {
+    // A named config can add any URL, so one that cannot be read leaves
+    // the target unknown even beside a host that is not GitHub.
     if value.is_empty() || value == "-" {
         tune.unreadable = true;
+        tune.github = true;
         return Some(HttpShape::Opaque);
     }
-    read_curl_file(&resolve_cfg(value, cwd), cwd, tune, seen, true)
+    let shape = read_curl_file(&resolve_cfg(value, cwd), cwd, tune, seen, true);
+    if tune.unreadable {
+        tune.github = true;
+    }
+    shape
 }
 
 /// Default curlrc search. `CURL_HOME` replaces the others: a missing file
 /// there is opaque, because the variable says a config applies and it
-/// could not be read. Otherwise the first of the XDG file and `~/.curlrc`
-/// that exists is the one curl would load.
+/// could not be read. Otherwise the first file that exists, in curl's
+/// order, is the one curl would load: the XDG file, then `HOME`, then the
+/// Windows `USERPROFILE`, `APPDATA`, and `USERPROFILE\Application Data`.
+/// Windows curl also takes `_curlrc` after `.curlrc` in each. The Windows
+/// variables are read wherever they are set, so a seat that sets one is
+/// judged as Windows curl would be.
 fn curl_default_files(
     env: &[(String, String)],
     cwd: Option<&Path>,
     tune: &mut Tune,
     seen: &mut HashSet<PathBuf>,
 ) -> Option<HttpShape> {
-    if let Some(dir) = prefixed_or_process(env, "CURL_HOME") {
-        if !dir.is_empty() {
-            let path = PathBuf::from(dir).join(".curlrc");
-            return read_curl_file(&path, cwd, tune, seen, true);
-        }
+    let dir_of = |key: &str| {
+        prefixed_or_process(env, key)
+            .filter(|dir| !dir.is_empty())
+            .map(PathBuf::from)
+    };
+    if let Some(dir) = dir_of("CURL_HOME") {
+        let found = first_curl_file(&curl_rc_names(&dir, cfg!(windows)), cwd, tune, seen);
+        return found.unwrap_or_else(|| {
+            tune.unreadable = true;
+            Some(HttpShape::Opaque)
+        });
     }
-    if let Some(xdg) = prefixed_or_process(env, "XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            let path = PathBuf::from(xdg).join("curlrc");
-            if let Some(shape) = read_curl_file(&path, cwd, tune, seen, false) {
-                return Some(shape);
-            }
-            if tune.unreadable || seen.iter().any(|have| have == &cfg_key(&path)) {
-                return None;
-            }
-        }
+    let mut paths = Vec::new();
+    if let Some(xdg) = dir_of("XDG_CONFIG_HOME") {
+        paths.push(xdg.join("curlrc"));
     }
-    if let Some(home) = prefixed_or_process(env, "HOME") {
-        if !home.is_empty() {
-            let path = PathBuf::from(home).join(".curlrc");
-            return read_curl_file(&path, cwd, tune, seen, false);
+    if let Some(home) = dir_of("HOME") {
+        paths.extend(curl_rc_names(&home, cfg!(windows)));
+    }
+    if let Some(profile) = dir_of("USERPROFILE") {
+        paths.extend(curl_rc_names(&profile, true));
+    }
+    if let Some(appdata) = dir_of("APPDATA") {
+        paths.extend(curl_rc_names(&appdata, true));
+    }
+    if let Some(profile) = dir_of("USERPROFILE") {
+        paths.extend(curl_rc_names(&profile.join("Application Data"), true));
+    }
+    first_curl_file(&paths, cwd, tune, seen).flatten()
+}
+
+fn curl_rc_names(dir: &Path, windows: bool) -> Vec<PathBuf> {
+    let mut names = vec![dir.join(".curlrc")];
+    if windows {
+        names.push(dir.join("_curlrc"));
+    }
+    names
+}
+
+/// The judgement of the first of `paths` that exists, or None when none
+/// does.
+fn first_curl_file(
+    paths: &[PathBuf],
+    cwd: Option<&Path>,
+    tune: &mut Tune,
+    seen: &mut HashSet<PathBuf>,
+) -> Option<Option<HttpShape>> {
+    for path in paths {
+        if let Some(shape) = read_curl_file(path, cwd, tune, seen, false) {
+            return Some(Some(shape));
+        }
+        if tune.unreadable || seen.contains(&cfg_key(path)) {
+            return Some(None);
         }
     }
     None
@@ -4248,7 +4297,10 @@ fn apply_curl_text(
     for line in text.lines() {
         match curl_cfg_line(line) {
             CfgLine::Blank => {}
-            CfgLine::Bad => opaque = true,
+            CfgLine::Bad => {
+                opaque = true;
+                tune.github = true;
+            }
             CfgLine::Item { name, value } => {
                 if apply_curl_opt(&name, value.as_deref(), cwd, tune, seen).is_some() {
                     opaque = true;
@@ -4435,7 +4487,7 @@ fn apply_curl_opt(
             let value = value.unwrap_or("");
             curl_named_file(value, cwd, tune, seen)
         }
-        "url" => {
+        "url" | "proxy" | "x" => {
             if let Some(value) = value {
                 note_cfg_url(value, tune);
             }
@@ -4444,7 +4496,12 @@ fn apply_curl_opt(
         "netrc" | "netrc-optional" | "netrc-file" | "n" => Some(HttpShape::Opaque),
         _ if short && curl_short_benign(name) => None,
         _ if !short && curl_long_benign(name) => None,
-        _ => Some(HttpShape::Opaque),
+        // An option this seat does not know, `variable`, an `expand-`
+        // option, or a line spilled from the one before may name the target.
+        _ => {
+            tune.github = true;
+            Some(HttpShape::Opaque)
+        }
     }
 }
 
@@ -4540,7 +4597,7 @@ fn curl_long_benign(name: &str) -> bool {
 }
 
 fn note_cfg_url(value: &str, tune: &mut Tune) {
-    if value.contains('$') || value.contains('`') {
+    if value.contains('$') || value.contains('`') || value.contains("{{") {
         tune.github = true;
         return;
     }
@@ -4575,16 +4632,28 @@ fn cfg_key(path: &Path) -> PathBuf {
     out
 }
 
+/// Only a missing path is no config. Anything else at that path that is
+/// not a regular file is opaque: a directory, a fifo, a device, or a
+/// symlink. `O_NONBLOCK` keeps a fifo from waiting for a writer, and
+/// `fstat` judges what was opened, not what the path named a moment ago.
 fn open_cfg(path: &Path) -> Result<Option<String>, ()> {
-    match std::fs::metadata(path) {
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(()),
-        Ok(meta) if !meta.is_file() => Ok(None),
-        Ok(_) => match std::fs::read_to_string(path) {
-            Ok(text) => Ok(Some(text)),
-            Err(_) => Err(()),
-        },
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    if !file.metadata().is_ok_and(|meta| meta.is_file()) {
+        return Err(());
     }
+    let mut text = String::new();
+    file.read_to_string(&mut text).map_err(|_| ())?;
+    Ok(Some(text))
 }
 
 fn wget_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) -> (HttpShape, bool) {
@@ -4613,19 +4682,19 @@ fn wget_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) ->
         }
         if lower == "-e" || lower == "--execute" {
             if let Some(value) = words.get(i + 1) {
-                note_wget_exec(value, &mut method, &mut body);
+                note_wget_exec(value, &mut method, &mut body, &mut tune.github);
             }
             i += 2;
             continue;
         }
         if let Some(value) = lower.strip_prefix("--execute=") {
-            note_wget_exec(value, &mut method, &mut body);
+            note_wget_exec(value, &mut method, &mut body, &mut tune.github);
             i += 1;
             continue;
         }
         if let Some(value) = lower.strip_prefix("-e") {
             if !value.is_empty() && !lower.starts_with("--") {
-                note_wget_exec(value, &mut method, &mut body);
+                note_wget_exec(value, &mut method, &mut body, &mut tune.github);
                 i += 1;
                 continue;
             }
@@ -4752,6 +4821,9 @@ fn apply_wget_text(text: &str, tune: &mut Tune) -> Option<HttpShape> {
             CfgLine::Bad => opaque = true,
             CfgLine::Item { name, value } => {
                 let key = name.replace(['_', '-'], "");
+                if wget_key_moves_target(&key, value.as_deref().unwrap_or("")) {
+                    tune.github = true;
+                }
                 match key.as_str() {
                     "method" => {
                         tune.method = Some(value.unwrap_or_default().trim().to_ascii_uppercase());
@@ -4768,10 +4840,27 @@ fn apply_wget_text(text: &str, tune: &mut Tune) -> Option<HttpShape> {
     opaque.then_some(HttpShape::Opaque)
 }
 
-fn note_wget_exec(value: &str, method: &mut Option<String>, body: &mut bool) {
+/// A wgetrc command that can supply or change where the request goes. The
+/// target is then not the one on the command line, so it may be GitHub.
+fn wget_key_moves_target(key: &str, value: &str) -> bool {
+    match key {
+        "input" | "inputmetalink" | "base" | "httpproxy" | "httpsproxy" | "ftpproxy"
+        | "useproxy" => true,
+        "header" => value
+            .trim_start()
+            .get(..5)
+            .is_some_and(|name| name.eq_ignore_ascii_case("host:")),
+        _ => false,
+    }
+}
+
+fn note_wget_exec(value: &str, method: &mut Option<String>, body: &mut bool, github: &mut bool) {
     let lower = value.to_ascii_lowercase();
     let (key, val) = lower.split_once('=').unwrap_or((lower.as_str(), ""));
     let key = key.trim();
+    if wget_key_moves_target(&key.replace(['_', '-'], ""), val) {
+        *github = true;
+    }
     match key {
         "method" => *method = Some(val.trim().to_ascii_uppercase()),
         "body_data" | "body_file" | "post_data" | "post_file" | "header" => *body = true,
