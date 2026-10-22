@@ -1358,9 +1358,59 @@ pub fn unsigned_allowed() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::process::Command;
 
     fn key(b: u8) -> SigningKey {
         SigningKey::from_bytes(&[b; 32])
+    }
+
+    fn git(dir: &Path, args: &[&str], env: &[(&str, String)]) {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(dir).args(args);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn read_epoch(dir: &Path, rev: &str) -> i64 {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["show", "-s", "--format=%ct", rev])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git show failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+    }
+
+    fn with_issue_root<R>(root: &Path, f: impl FnOnce() -> R) -> R {
+        crate::with_env_mutation(|| {
+            let was = std::env::var_os("VISSUE_ROOT");
+            std::env::set_var("VISSUE_ROOT", root);
+            struct Reset(Option<std::ffi::OsString>);
+            impl Drop for Reset {
+                fn drop(&mut self) {
+                    match &self.0 {
+                        Some(v) => std::env::set_var("VISSUE_ROOT", v),
+                        None => std::env::remove_var("VISSUE_ROOT"),
+                    }
+                }
+            }
+            let _reset = Reset(was);
+            f()
+        })
     }
 
     #[test]
@@ -1553,6 +1603,45 @@ mod tests {
         )]
         .into();
         assert!(seat_problems("d-1", &[("alice", "ship")], &[note], &pins).is_empty());
+    }
+
+    #[test]
+    fn recorded_at_dates_the_ballot_line_on_its_own_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("issues.org");
+        let stamp = |s: &str| {
+            [
+                ("GIT_AUTHOR_DATE", s.to_string()),
+                ("GIT_COMMITTER_DATE", s.to_string()),
+            ]
+        };
+        git(dir.path(), &["init"], &[]);
+        git(dir.path(), &["config", "user.name", "Rohit Goswami"], &[]);
+        git(
+            dir.path(),
+            &["config", "user.email", "rgoswami@ieee.org"],
+            &[],
+        );
+        std::fs::write(
+            &file,
+            "* TODO [#C] old\n:PROPERTIES:\n:ID:         probe-old\n:END:\n- [X] elder: rail\n",
+        )
+        .unwrap();
+        let old = stamp("2026-10-01T00:00:00Z");
+        git(dir.path(), &["add", "issues.org"], &old);
+        git(dir.path(), &["commit", "-m", "old ballot"], &old);
+        std::fs::write(
+            &file,
+            "* TODO [#C] old\n:PROPERTIES:\n:ID:         probe-old\n:END:\n- [X] elder: rail\n\
+             * TODO [#C] new\n:PROPERTIES:\n:ID:         probe-new\n:END:\n- [X] elder: rail\n",
+        )
+        .unwrap();
+        let new = stamp("2026-10-20T00:00:00Z");
+        git(dir.path(), &["add", "issues.org"], &new);
+        git(dir.path(), &["commit", "-m", "new ballot"], &new);
+        let old_epoch = read_epoch(dir.path(), "HEAD~1");
+        let got = with_issue_root(dir.path(), || recorded_at("probe-old", "elder", "rail"));
+        assert_eq!(got, Some(old_epoch));
     }
 
     /// One server answers a parent and its subagents: each call is the
