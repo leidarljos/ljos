@@ -748,3 +748,20 @@ fn a_brief_does_not_offer_remember_around_the_refusal() {
         );
     });
 }
+
+/// The sit playbook must not sell a runner's `ljos remember` as a lesson
+/// that stands: under a runner it is an unreviewed note the person reviews.
+#[test]
+fn the_sit_playbook_calls_a_runner_remember_an_unreviewed_note() {
+    let sit = ljos_cli::shipped_playbooks()
+        .into_iter()
+        .find(|p| p.name == "sit")
+        .expect("the sit playbook ships");
+    assert!(
+        !sit.body.contains("Lessons are `ljos remember`"),
+        "{}",
+        sit.body
+    );
+    assert!(sit.body.contains("unreviewed note"), "{}", sit.body);
+    assert!(sit.body.contains("the person reviews"), "{}", sit.body);
+}
