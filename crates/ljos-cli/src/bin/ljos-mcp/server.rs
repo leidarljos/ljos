@@ -279,6 +279,7 @@ const TRACKER_WRITES: &[&str] = &[
     "ljos_options",
     "ljos_deed",
     "ljos_playbook",
+    "ljos_predict",
 ];
 
 fn writes_tracker(name: &str, args: Option<&serde_json::Map<String, serde_json::Value>>) -> bool {
@@ -286,6 +287,13 @@ fn writes_tracker(name: &str, args: Option<&serde_json::Map<String, serde_json::
         return args
             .and_then(|a| a.get("add"))
             .is_some_and(|add| !add.is_null());
+    }
+    if name == "ljos_vote" {
+        let set = |key| {
+            args.and_then(|a| a.get(key))
+                .is_some_and(|v| !v.is_null() && *v != serde_json::Value::Bool(false))
+        };
+        return set("choice") || set("jev") || set("withdraw");
     }
     TRACKER_WRITES.contains(&name)
 }

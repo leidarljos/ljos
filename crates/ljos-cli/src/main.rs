@@ -3592,6 +3592,14 @@ fn tracker_write(cmd: &Cmd) -> Option<&'static str> {
         } if !no_file || deadline.is_some() => "consensus",
         Cmd::Playbook { .. } => "playbook",
         Cmd::Reap { apply: true, .. } => "reap",
+        Cmd::Vote {
+            choice,
+            jev,
+            withdraw,
+            ..
+        } if choice.is_some() || *jev || *withdraw => "vote",
+        Cmd::Predict { .. } => "predict",
+        Cmd::Slot { .. } => "slot",
         _ => return None,
     })
 }

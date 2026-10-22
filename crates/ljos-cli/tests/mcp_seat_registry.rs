@@ -83,6 +83,31 @@ fn a_seats_file_keeps_unlisted_seats_off_the_tracker() {
         serde_json::json!({"seat": "stranger", "issue": "proj-aaaa", "name": "sit"}),
     );
     assert!(bound.contains("no seat named stranger in"), "{bound}");
+    for (tool, args) in [
+        (
+            "ljos_vote",
+            serde_json::json!({"seat": "stranger", "issue": "proj-aaaa", "choice": "accept", "used": "none"}),
+        ),
+        (
+            "ljos_vote",
+            serde_json::json!({"seat": "stranger", "issue": "proj-aaaa", "withdraw": true}),
+        ),
+        (
+            "ljos_predict",
+            serde_json::json!({"seat": "stranger", "issue": "proj-aaaa", "expect": "accept"}),
+        ),
+    ] {
+        let said = call(tool, args);
+        assert!(said.contains("no seat named stranger in"), "{tool}: {said}");
+    }
+    let tally = call(
+        "ljos_vote",
+        serde_json::json!({"seat": "stranger", "issue": "proj-aaaa"}),
+    );
+    assert!(
+        !tally.contains("no seat named"),
+        "a tally is a read: {tally}"
+    );
 
     let listed = note("saddle");
     assert!(!listed.contains("no seat named"), "{listed}");
