@@ -3941,6 +3941,9 @@ fn git_remote_from_command(repo: &str) -> Option<String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    // A test may have named a decoy on this command. Drop it with the
+    // variables a hook would have exported, so `-C` is the checkout.
+    crate::apply_git_command_env(&mut cmd);
     for key in [
         "GIT_DIR",
         "GIT_WORK_TREE",
@@ -6386,13 +6389,16 @@ mod tests {
                 "https://github.com/acme/widget.git",
             ],
         );
-        set_var("GIT_DIR", decoy.join(".git").to_str().unwrap());
-        assert_eq!(
-            project_for_at(included.to_str().unwrap(), None, None),
-            "ljos",
-            "GIT_DIR named the decoy"
-        );
-        unsafe { std::env::remove_var("GIT_DIR") };
+        let before_dir = std::env::var_os("GIT_DIR");
+        {
+            let _decoy = crate::GitCommandEnv::set([("GIT_DIR", decoy.join(".git").as_os_str())]);
+            assert_eq!(
+                project_for_at(included.to_str().unwrap(), None, None),
+                "ljos",
+                "GIT_DIR named the decoy"
+            );
+        }
+        assert_eq!(std::env::var_os("GIT_DIR"), before_dir);
         let rewritten = root.join("bench-w18b-tfn7");
         std::fs::create_dir_all(&rewritten).unwrap();
         git(&rewritten, &["init", "-q", "-b", "main"]);
