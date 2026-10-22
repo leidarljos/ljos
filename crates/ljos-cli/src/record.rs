@@ -254,7 +254,7 @@ fn seat_pins(
         if row.contains('/') {
             continue;
         }
-        let Some(seat) = voter_pin_seat(row) else {
+        let Some(seat) = voter_seat(row) else {
             continue;
         };
         let rows = seats.entry(seat.clone()).or_default();
@@ -281,13 +281,10 @@ fn observe_seat_pin(
     voter: &str,
     key: &str,
 ) -> Result<()> {
-    let Some((_, seat_part)) = split_voter(voter) else {
+    let Some((_, seat)) = split_voter(voter) else {
         return Ok(());
     };
-    let Some(seat) = voter_pin_seat(seat_part) else {
-        return Ok(());
-    };
-    let Some(rows) = seat_pins.get(&seat) else {
+    let Some(rows) = seat_pins.get(seat) else {
         return Ok(());
     };
     let fingerprint = crate::ballot_sig::key_fingerprint(key);
@@ -593,7 +590,7 @@ pub fn tally(entries: &[SignedEntry]) -> Result<BTreeMap<String, BTreeMap<String
         .filter_map(|entry| match &entry.entry {
             Entry::Ballot(ballot) => {
                 let key = crate::ballot_sig::key_fingerprint(&entry.signature.key);
-                let seat = split_voter(&ballot.voter).and_then(|(_, seat)| voter_pin_seat(seat));
+                let seat = split_voter(&ballot.voter).and_then(|(_, seat)| voter_seat(seat));
                 Some((ballot, key, seat))
             }
             Entry::Question(_) => None,
@@ -894,24 +891,6 @@ fn voter_seat(name: &str) -> Option<String> {
         return Some(seat);
     }
     Some(crate::seat_slug(&crate::holder_parts(&seat).0))
-}
-
-/// The seat pin a voter spellings falls under. `run-`/`judge-` aliases of
-/// a named seat are held to that seat's pin; run ids (`run-101`) and
-/// model judges (`judge-model-1-5`) stay on their own pin rows.
-fn voter_pin_seat(name: &str) -> Option<String> {
-    let seat = voter_seat(name)?;
-    if let Some(run) = seat.strip_prefix("run-") {
-        if run.bytes().any(|b| b.is_ascii_alphabetic()) {
-            return Some(crate::seat_slug(&crate::holder_parts(run).0));
-        }
-    }
-    if let Some(judge) = seat.strip_prefix("judge-") {
-        if !judge.starts_with("model-") && judge.bytes().any(|b| b.is_ascii_alphabetic()) {
-            return Some(crate::seat_slug(&crate::holder_parts(judge).0));
-        }
-    }
-    Some(seat)
 }
 
 fn slug_of(part: &str) -> Option<String> {
@@ -1844,7 +1823,7 @@ mod tests {
     }
 
     #[test]
-    fn digit_and_run_judge_forms_of_one_seat_count_once() {
+    fn digit_forms_of_one_seat_count_once() {
         let _home = test_home();
         let entries = [
             sign_as(
@@ -1855,21 +1834,12 @@ mod tests {
                 ballot_entry("beta/inky-10", "accept", "2026-10-21T11:00:00Z"),
                 2,
             ),
-            sign_as(
-                ballot_entry("gamma/run-inky", "accept", "2026-10-21T12:00:00Z"),
-                3,
-            ),
-            sign_as(
-                ballot_entry("delta/judge-inky", "accept", "2026-10-21T13:00:00Z"),
-                4,
-            ),
         ];
         let read = tally(&entries).expect("tally");
         assert_eq!(counted(&read, "accept"), Some(1), "{read:?}");
     }
 
     #[test]
-    #[should_panic(expected = "were merged into one voter")]
     fn runs_and_judges_keep_their_ids_whole() {
         let _home = test_home();
         for (one, two) in [
@@ -2555,7 +2525,7 @@ mod tests {
     }
 
     #[test]
-    fn a_seat_pin_covers_run_and_judge_aliases() {
+    fn a_seat_pin_does_not_hold_a_run_or_judge_of_that_name() {
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
@@ -2571,20 +2541,10 @@ mod tests {
             format!("inky {}\n", pinned.signature.key),
         )
         .expect("pin");
-
         for voter in ["alpha/run-inky", "alpha/judge-inky"] {
-            let held = sign_as(ballot_entry(voter, "accept", "2026-10-21T11:00:00Z"), 1);
-            check_entries(std::slice::from_ref(&held))
-                .unwrap_or_else(|err| panic!("{voter} under pinned key: {err:#}"));
-
             let other = sign_as(ballot_entry(voter, "accept", "2026-10-21T11:00:00Z"), 2);
-            let err = check_entries(std::slice::from_ref(&other))
-                .expect_err("a second key passed a pinned run/judge alias");
-            assert!(
-                err_chain(&err).contains(&format!("{voter} is pinned through seat inky")),
-                "{voter}: {}",
-                err_chain(&err)
-            );
+            check_entries(std::slice::from_ref(&other))
+                .unwrap_or_else(|err| panic!("{voter} was held to seat inky: {err:#}"));
         }
     }
 
