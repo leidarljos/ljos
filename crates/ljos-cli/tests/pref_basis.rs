@@ -307,6 +307,33 @@ fn an_older_preference_is_raised_by_a_person_copy() {
     assert_eq!(ids(&after), ids(&again), "a second run stamped again");
 }
 
+/// A hook is stopped at its cap, which can fall between the copy and the
+/// retirement, so a run inside one leaves the upgrade to the next run.
+#[test]
+fn a_hook_leaves_the_upgrade_alone() {
+    let daemon = Daemon::start();
+    let seat = Seat::on(&daemon);
+    let preference = daemon.legacy("preference", PREFERENCE);
+    let before = daemon.atoms();
+
+    let out = seat
+        .command(env!("CARGO_BIN_EXE_ljos"))
+        .args(["prefer", "--review"])
+        .env("LJOS_IN_HOOK", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text_of(&out));
+    assert_eq!(daemon.atoms(), before, "a hook raised it");
+    assert!(seat.markers().is_empty(), "{:?}", seat.markers());
+
+    reviewed(&seat);
+    let after = daemon.atoms();
+    let live = live_with(&after, PREFERENCE);
+    assert_eq!(live.len(), 1, "{after:?}");
+    assert_ne!(live[0]["id"], preference["id"], "{after:?}");
+    assert_eq!(basis(live[0]), Some("person"), "{}", live[0]);
+}
+
 /// A record the pack will not take back is left as it was, said once on
 /// stderr and written down, and the next run does not send it again. The
 /// other older preference is still raised.
