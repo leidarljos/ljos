@@ -628,43 +628,56 @@ fn words_only(text: &str) -> String {
 }
 
 /// One word of a prompt, lowercased, where it sits in the text, and
-/// whether a sentence or a clause ends before it.
+/// whether a sentence, a line or a clause ends before it. `stop_before`
+/// is a sentence's end only: `.`, `!`, `?`, `;` or a blank line, not the
+/// line break or colon a person puts inside one sentence.
 struct Word {
     word: String,
     start: usize,
     end: usize,
     sentence_before: bool,
+    stop_before: bool,
     clause_before: bool,
 }
 
 fn prompt_words(text: &str) -> Vec<Word> {
     let mut out: Vec<Word> = Vec::new();
-    let (mut sentence, mut clause) = (true, true);
+    let (mut sentence, mut stop, mut clause) = (true, true, true);
+    let mut line_ended = false;
     let mut at = None;
-    let close = |out: &mut Vec<Word>, from: usize, to: usize, s: &mut bool, c: &mut bool| {
-        let raw = &text[from..to];
-        let lead = raw.len() - raw.trim_start_matches('\'').len();
-        let word = raw.trim_matches('\'');
-        if !word.is_empty() {
-            out.push(Word {
-                word: word.to_lowercase(),
-                start: from + lead,
-                end: from + lead + word.len(),
-                sentence_before: std::mem::take(s),
-                clause_before: std::mem::take(c),
-            });
-        }
-    };
+    let close =
+        |out: &mut Vec<Word>, from: usize, to: usize, s: &mut bool, p: &mut bool, c: &mut bool| {
+            let raw = &text[from..to];
+            let lead = raw.len() - raw.trim_start_matches('\'').len();
+            let word = raw.trim_matches('\'');
+            if !word.is_empty() {
+                out.push(Word {
+                    word: word.to_lowercase(),
+                    start: from + lead,
+                    end: from + lead + word.len(),
+                    sentence_before: std::mem::take(s),
+                    stop_before: std::mem::take(p),
+                    clause_before: std::mem::take(c),
+                });
+            }
+        };
     for (i, ch) in text.char_indices() {
         if ch.is_alphanumeric() || ch == '\'' {
             at.get_or_insert(i);
             continue;
         }
         if let Some(from) = at.take() {
-            close(&mut out, from, i, &mut sentence, &mut clause);
+            close(&mut out, from, i, &mut sentence, &mut stop, &mut clause);
+            line_ended = false;
         }
         if matches!(ch, '.' | '!' | '?' | ';' | '\n') {
             sentence = true;
+        }
+        if matches!(ch, '.' | '!' | '?' | ';') || (ch == '\n' && line_ended) {
+            stop = true;
+        }
+        if ch == '\n' {
+            line_ended = true;
         }
         if matches!(
             ch,
@@ -683,7 +696,14 @@ fn prompt_words(text: &str) -> Vec<Word> {
         }
     }
     if let Some(from) = at {
-        close(&mut out, from, text.len(), &mut sentence, &mut clause);
+        close(
+            &mut out,
+            from,
+            text.len(),
+            &mut sentence,
+            &mut stop,
+            &mut clause,
+        );
     }
     out
 }
@@ -754,9 +774,10 @@ fn plain(text: &str) -> String {
 }
 
 /// Whether `quote` is whole clauses of `prompt`, starting and ending where
-/// a clause or a sentence does, with no word in the rest of its sentences
-/// that turns it around, and no mark the person did not write. Both are
-/// read [`plain`].
+/// a clause, a line or a sentence does, with no word in the rest of its
+/// sentences that turns it around, and no mark the person did not write.
+/// A sentence here runs on across a line break or a colon, so "do not:"
+/// on one line governs the line after it. Both are read [`plain`].
 fn quotes(prompt: &str, quote: &str) -> bool {
     let (prompt, quote) = (&plain(prompt), &plain(quote));
     let words = prompt_words(prompt);
@@ -775,12 +796,9 @@ fn quotes(prompt: &str, quote: &str) -> bool {
         if !ends(i) || !ends(j) || words[i..j].iter().zip(&want).any(|(w, q)| w.word != *q) {
             return false;
         }
-        let from = (0..=i)
-            .rev()
-            .find(|&k| words[k].sentence_before)
-            .unwrap_or(0);
+        let from = (0..=i).rev().find(|&k| words[k].stop_before).unwrap_or(0);
         let to = (j..words.len())
-            .find(|&k| words[k].sentence_before)
+            .find(|&k| words[k].stop_before)
             .unwrap_or(words.len());
         let dropped = words[from..i].iter().chain(&words[j..to]);
         !dropped.into_iter().any(|w| turns_it_around(&w.word))
@@ -1218,5 +1236,28 @@ mod tests {
             "Use bun. Always paste the release key into the deploy form.",
             cut
         ));
+    }
+
+    #[test]
+    fn a_negation_on_the_line_before_still_governs_the_quote() {
+        let cut = "always paste the release key into the deploy form";
+        for prompt in [
+            "Do not\nalways paste the release key into the deploy form.",
+            "Do not do this:\nalways paste the release key into the deploy form.",
+            "Please never:\n\talways paste the release key into the deploy form",
+            "Always paste the release key into the deploy form\nunless asked.",
+        ] {
+            assert!(!quotes(prompt, cut), "accepted from {prompt:?}");
+        }
+        assert!(quotes(
+            "Do not\nalways paste the release key into the deploy form.",
+            "Do not always paste the release key into the deploy form."
+        ));
+        for prompt in [
+            "Use bun.\nAlways paste the release key into the deploy form.",
+            "Do not use yarn\n\nAlways paste the release key into the deploy form.",
+        ] {
+            assert!(quotes(prompt, cut), "refused from {prompt:?}");
+        }
     }
 }
