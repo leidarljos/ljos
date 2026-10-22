@@ -1423,7 +1423,9 @@ impl LjosServer {
                         "prefer: pass the lesson id or the words, not both"
                     )));
                 }
-                ljos_cli::user_rules::promote_lesson(&id, &why, &mention, &reply)
+                // The same refusal as the words below: a promoted lesson
+                // reaches every prompt and every seat just as they do.
+                ljos_cli::user_rules::promote_lesson(&id, &why, &mention, &reply, true)
             } else {
                 // A user rule reaches every prompt and every seat. The tool
                 // description refuses anything that is not the person's words,
