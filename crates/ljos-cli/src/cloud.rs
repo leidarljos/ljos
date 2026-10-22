@@ -2062,7 +2062,8 @@ enum Install {
 
 fn install_identity(path: &Path, text: &str) -> Result<Install> {
     // Follow a symlink and the identity would be written into the target,
-    // or the target's mode would change. Replace the link instead.
+    // or the target's mode would change. A link is left to write_private,
+    // which refuses it.
     let regular = fs::symlink_metadata(path)
         .ok()
         .is_some_and(|meta| meta.file_type().is_file());
@@ -2091,32 +2092,40 @@ fn set_mode_0600(path: &Path) -> Result<()> {
         .with_context(|| format!("mode 0600 {}", path.display()))
 }
 
-/// Write `text` to `path` as mode 0600. A symlink at `path` is replaced,
-/// so the identity is not stored through a link to another file.
+/// Write `text` to `path` as mode 0600. A symlink at `path` is refused, so
+/// the identity is not stored through a link to another file. The temp
+/// file beside it is made new, mode 0600 from the start, and is not a
+/// link: a file or link already at that name is refused, not written
+/// through, so no other user can read the identity even for a moment.
 fn write_private(path: &Path, text: &str) -> Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    }
+    if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        bail!(
+            "cloud up: {} is a symlink, so the scope cloud identity was not written; remove it and run `ljos cloud up` again",
+            path.display()
+        );
     }
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("cloud.age");
     let tmp = path.with_file_name(format!(".{name}.tmp-{}", std::process::id()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&tmp)
+        .with_context(|| format!("create {}", tmp.display()))?;
     let write = (|| -> Result<()> {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)
-            .with_context(|| format!("write {}", tmp.display()))?;
+        // The umask may clear bits of the mode asked for at creation.
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
-        drop(file);
-        set_mode_0600(&tmp)?;
         fs::rename(&tmp, path).with_context(|| format!("install {}", path.display()))?;
-        set_mode_0600(path)?;
         Ok(())
     })();
     if write.is_err() {
@@ -2745,5 +2754,56 @@ mod archive_member_tests {
         let err = refuse_unsafe_archive(&archive).unwrap_err().to_string();
         assert!(err.contains("symlink"), "{err}");
         assert!(err.contains("nothing was installed"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    const SECRET: &str = "AGE-SECRET-KEY-1PLANTED\n";
+
+    fn temp_of(path: &Path) -> PathBuf {
+        path.with_file_name(format!(".cloud.age.tmp-{}", std::process::id()))
+    }
+
+    #[test]
+    fn a_link_planted_at_the_temp_name_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cloud.age");
+        let outside = dir.path().join("outside");
+        fs::write(&outside, "keep\n").unwrap();
+        let tmp = temp_of(&path);
+        std::os::unix::fs::symlink(&outside, &tmp).unwrap();
+        assert!(write_private(&path, SECRET).is_err());
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "keep\n");
+        assert!(fs::symlink_metadata(&tmp).unwrap().file_type().is_symlink());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_readable_file_planted_at_the_temp_name_never_holds_the_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cloud.age");
+        let tmp = temp_of(&path);
+        fs::write(&tmp, "planted\n").unwrap();
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(write_private(&path, SECRET).is_err());
+        assert_eq!(fs::read_to_string(&tmp).unwrap(), "planted\n");
+        assert_eq!(
+            fs::metadata(&tmp).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert!(!path.exists());
+
+        fs::remove_file(&tmp).unwrap();
+        write_private(&path, SECRET).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), SECRET);
+        assert_eq!(
+            fs::symlink_metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!tmp.exists());
     }
 }
