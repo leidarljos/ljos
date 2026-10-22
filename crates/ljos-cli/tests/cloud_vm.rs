@@ -4466,6 +4466,49 @@ fn a_slot_line_replayed_from_another_issue_does_not_backdate_it() {
     );
 }
 
+/// A run's pin that is only in the working tree has no commit to read its
+/// slot at, so the ballot is left out until the pin is committed.
+#[test]
+fn an_uncommitted_run_pin_does_not_count_under_its_slot() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_origin, repo) = slot_world(root.path(), &["probe-u"]);
+    pin_standing(&repo, "ljosbot");
+    slot_run("probe-u", "ridley-review", "cafebabe0001abcd").unwrap();
+    let pushed = ljos_cli::persist_tracker("probe-u", "slotted");
+    assert!(pushed.contains("pushed"), "{pushed}");
+    std::env::set_var("XDG_DATA_HOME", root.path().join("vm-data"));
+    let run = ljos_cli::cloud::run_seat("ridley-review", "cafebabe0001abcd").unwrap();
+    std::env::set_var("LJOS_SEAT", &run);
+    std::env::set_var("VISSUE_AGENT", &run);
+    let layout = vissue_core::Layout::resolve(None, None).unwrap();
+    vissue_core::ops::vote_with(&layout, "probe-u", Some("ship"), &run, Some("none"), None)
+        .unwrap();
+    let signed = ljos_cli::ballot_sig::sign_own_ballot("probe-u").unwrap();
+    assert!(signed.contains("ballot signed"), "{signed}");
+
+    std::env::set_var("LJOS_SEAT", "ljosbot");
+    std::env::set_var("VISSUE_AGENT", "ljosbot");
+    let rows = [serde_json::json!({"agent": run, "choice": "ship"})];
+    let personas = std::collections::BTreeSet::new();
+    let left = ljos_cli::check_seat_signatures("probe-u", &rows, &personas)
+        .unwrap()
+        .left_out;
+    assert_eq!(
+        left,
+        vec![(
+            run.clone(),
+            format!("{run}'s key was pinned before its slot")
+        )]
+    );
+    let pushed = ljos_cli::persist_tracker("probe-u", "voted");
+    assert!(pushed.contains("pushed"), "{pushed}");
+    assert_eq!(
+        ljos_cli::check_seat_signatures("probe-u", &rows, &personas),
+        Ok(ljos_cli::SeatSignatures::default())
+    );
+}
+
 /// A writer that answers `GET /v1/atoms` with an empty roster.
 fn serve_empty_pack() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
