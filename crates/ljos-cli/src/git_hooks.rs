@@ -1096,6 +1096,12 @@ pub(crate) fn hook_child_env(cmd: &mut Command) {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn with_hook_children_for_test<T>(run: impl FnOnce() -> T) -> T {
+    let _guard = HookChildren::enter();
+    run()
+}
+
 fn git_command(args: &[&str], git_env: &[(&str, &str)]) -> Command {
     let mut cmd = Command::new("git");
     cmd.args(args);

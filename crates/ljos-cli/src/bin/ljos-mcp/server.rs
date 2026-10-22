@@ -3746,6 +3746,10 @@ mod tests {
         let _guard = CALL_QUEUE_TEST
             .lock()
             .unwrap_or_else(|err| err.into_inner());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let _env_lock = rt.block_on(ENV_TEST_LOCK.lock());
         let _reset = ConnectedReset;
         reset_connected_client();
         let dir = tempfile::tempdir().unwrap();
@@ -3994,8 +3998,8 @@ mod tests {
 
     /// One queue for the process, so these tests take turns.
     static CALL_QUEUE_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    /// Process environment is global; async tests that rewrite PATH take turns.
-    static PATH_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    /// Process environment is global; tests that edit it must take one lock.
+    static ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// The runtime can poll the later task first. The recall is already in
     /// the queue behind the note, so it waits even though it asks first.
@@ -4333,7 +4337,7 @@ mod tests {
     /// depends on whatever else is on PATH.
     #[tokio::test]
     async fn a_refusal_is_an_error() {
-        let _env_lock = PATH_TEST_LOCK.lock().await;
+        let _env_lock = ENV_TEST_LOCK.lock().await;
         let _saved = RestoreEnv::new(&["PATH"]);
         let cards = tempfile::tempdir().unwrap();
         let server = LjosServer::at(cards.path().to_path_buf());
@@ -4395,6 +4399,7 @@ mod tests {
     /// error, the same way every other refusal is.
     #[tokio::test]
     async fn guard_check_allows_an_ordinary_command_and_refuses_a_bad_commit() {
+        let _env_lock = ENV_TEST_LOCK.lock().await;
         // A parallel test points HOME at a temporary directory, which
         // suspends the guard. This check is about the command, so keep it on.
         let _saved = RestoreEnv::new(&["LJOS_GUARD", "LJOS_OFF"]);

@@ -25527,15 +25527,14 @@ pub const TRACKER_LOCK: &str = ".ljos-commit.lock";
 /// and the next seat would lock a new file beside it. `None` outside a git
 /// checkout.
 fn tracker_lock_path(dir: &Path) -> Option<PathBuf> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
         .arg(dir)
         .args(["rev-parse", "--show-toplevel", "--git-common-dir"])
         .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
+        .stderr(std::process::Stdio::null());
+    git_hooks::hook_child_env(&mut cmd);
+    let out = cmd.output().ok().filter(|o| o.status.success())?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut lines = text.lines().map(str::trim);
     let top = PathBuf::from(lines.next().filter(|l| !l.is_empty())?);
@@ -25941,15 +25940,14 @@ const ORPHAN_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 /// git process working in the checkout. A git killed outright leaves one,
 /// and every later commit fails on it until a person removes it.
 pub fn orphaned_index_lock(dir: &Path) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
         .arg(dir)
         .args(["rev-parse", "--absolute-git-dir", "--show-toplevel"])
         .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
+        .stderr(std::process::Stdio::null());
+    git_hooks::hook_child_env(&mut cmd);
+    let out = cmd.output().ok().filter(|o| o.status.success())?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut lines = text.lines().map(str::trim);
     let lock = Path::new(lines.next()?).join("index.lock");
@@ -30018,12 +30016,26 @@ mod tests {
         let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("qemu");
+        let origin = dir.path().join("origin.git");
         let arm = repo.join("target/arm");
         std::fs::create_dir_all(&arm).unwrap();
         let run = |args: &[&str]| {
             let out = std::process::Command::new("git")
                 .arg("-C")
                 .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let run_root = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
                 .args(args)
                 .output()
                 .unwrap();
@@ -30041,6 +30053,16 @@ mod tests {
         run(&["add", "target/arm/kconfig"]);
         run(&["commit", "-q", "-m", "seed"]);
         run(&["checkout", "-q", "-b", "feature/arm"]);
+        run_root(&[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            origin.to_str().unwrap(),
+        ]);
+        run(&["remote", "add", "origin", origin.to_str().unwrap()]);
+        run(&["push", "-q", "-u", "origin", "feature/arm"]);
         std::fs::write(arm.join("kconfig"), "CONFIG_ARM=y\nCONFIG_NEON=y\n").unwrap();
 
         let lock_path = super::tracker_lock_path(&arm).expect("the checkout is still discovered");
@@ -30054,13 +30076,8 @@ mod tests {
 
         let cwd = arm.display().to_string();
         assert!(
-            gate_push(
-                None,
-                "git push --force-with-lease origin feature/arm",
-                Some(&cwd)
-            )
-            .is_none(),
-            "a lease push onto a feature branch in target/arm is ordinary"
+            gate_push(None, "git push --force-with-lease", Some(&cwd)).is_none(),
+            "a bare lease push follows the feature upstream in target/arm"
         );
     }
 
@@ -30071,6 +30088,7 @@ mod tests {
         let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let bare = dir.path().join("dotfiles.git");
+        let origin = dir.path().join("origin.git");
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
         let init = std::process::Command::new("git")
@@ -30102,6 +30120,18 @@ mod tests {
         git(&["add", ".vimrc"]);
         git(&["commit", "-q", "-m", "seed"]);
         git(&["checkout", "-q", "-b", "feature/dots"]);
+        let origin_init = std::process::Command::new("git")
+            .args(["init", "-q", "--bare", "-b", "main"])
+            .arg(&origin)
+            .output()
+            .unwrap();
+        assert!(
+            origin_init.status.success(),
+            "origin init: {}",
+            String::from_utf8_lossy(&origin_init.stderr)
+        );
+        git(&["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(&["push", "-q", "-u", "origin", "feature/dots"]);
         std::fs::write(home.join(".vimrc"), "set number\nset list\n").unwrap();
 
         std::env::set_var("GIT_DIR", &bare);
@@ -30116,13 +30146,42 @@ mod tests {
         );
         let cwd = home.display().to_string();
         assert!(
-            gate_push(
-                None,
-                "git push --force-with-lease origin feature/dots",
-                Some(&cwd)
-            )
-            .is_none(),
-            "a feature lease push stays ordinary with GIT_DIR/GIT_WORK_TREE"
+            gate_push(None, "git push --force-with-lease", Some(&cwd)).is_none(),
+            "a bare lease push stays ordinary with GIT_DIR/GIT_WORK_TREE"
+        );
+        std::env::remove_var("GIT_DIR");
+        std::env::remove_var("GIT_WORK_TREE");
+    }
+
+    /// In hook-child mode, lock-path discovery must ignore the hook's
+    /// exported git directory and stay on the checkout passed to `-C`.
+    #[test]
+    fn hook_children_ignore_exported_git_dir_for_lock_paths() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        let decoy = dir.path().join("decoy");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&decoy).unwrap();
+        seeded_tracker(&real);
+        seeded_tracker(&decoy);
+        let lock = real.join(".git/index.lock");
+        let file = std::fs::File::create(&lock).unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120))
+            .unwrap();
+        drop(file);
+        std::env::set_var("GIT_DIR", decoy.join(".git"));
+        std::env::set_var("GIT_WORK_TREE", &decoy);
+        let tracker = crate::git_hooks::with_hook_children_for_test(|| {
+            super::tracker_lock_path(&real).expect("checkout lock path")
+        });
+        assert_eq!(tracker, real.join(TRACKER_LOCK));
+        let orphan = crate::git_hooks::with_hook_children_for_test(|| {
+            super::orphaned_index_lock(&real).expect("orphaned lock")
+        });
+        assert!(
+            orphan.contains(&lock.display().to_string()),
+            "wrong lock path under hook child env: {orphan}"
         );
         std::env::remove_var("GIT_DIR");
         std::env::remove_var("GIT_WORK_TREE");
