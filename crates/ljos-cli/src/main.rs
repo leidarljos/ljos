@@ -237,7 +237,9 @@ enum RecordCmd {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Remember one lesson. Typed by the person it takes effect at once. From an agent runner it is written at once as agent-derived, with its provenance; `ljos memories review` prunes it later.
+    /// Remember one lesson. Typed by the person it takes effect at once.
+    /// Under a runner, words from the person's latest prompt are theirs.
+    /// Any other text is an unreviewed note, which the prompt does not treat as a fact.
     Remember {
         text: Vec<String>,
         /// Remember as this persona: the lesson comes back to it first in its next brief.
@@ -1352,14 +1354,17 @@ fn run_command() -> Result<()> {
             }
             ljos_cli::set_validity(valid_from.as_deref(), valid_to.as_deref())?;
             let text = join(&text);
-            // Under a runner the lesson is the agent's, unless it is the
-            // person's words from their latest prompt: then it stands.
-            let agents =
-                ljos_cli::under_a_runner() && !ljos_cli::capture::said_in_latest_prompt(&text);
-            let horizon = ljos_cli::remember_horizon(transient, standing, agents);
-            let body = if agents {
-                ljos_cli::packset_write_agent("Remember", &text, as_persona.as_deref(), horizon)?
+            // Under a runner the agent's own words are an unreviewed note.
+            // Words from the person's latest prompt are theirs and stand.
+            // The seat guard lets remember through, so this is the check.
+            let under = ljos_cli::under_a_runner();
+            let body = if under && !ljos_cli::capture::said_in_latest_prompt(&text) {
+                ljos_cli::packset_write_remember_note(&text, as_persona.as_deref())?
+            } else if under {
+                let horizon = transient.then_some(true);
+                ljos_cli::packset_write_mcp("Remember", &text, as_persona.as_deref(), horizon)?
             } else {
+                let horizon = ljos_cli::remember_horizon(transient, standing, false);
                 packset_write_as("Remember", &text, as_persona.as_deref(), horizon)?
             };
             println!("{}", write_ack(&body));
