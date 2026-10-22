@@ -13,6 +13,7 @@ At release time `towncrier build --version X.Y.Z` collects the fragments into `C
 
 `cargo test --locked --workspace` runs the real programs ljos drives, so put them on `PATH` first, as the `cargo test` job in `.github/workflows/ci.yml` does:
 `age` and `age-keygen` from your package manager, `packset` and `packsetd` built from the `develop` branch of [packset](https://github.com/leidarljos/packset) with `cargo build -p packset --bin packset --bin packsetd`, and `deedar` built from the [deedar](https://github.com/leidarljos/deedar) commit named in `.github/deedar-pin`.
+The guard tests ask `ljos-policyd` how a shell line reads, so build it as well, from the `develop` branch of [ljos-policyd](https://github.com/leidarljos/ljos-policyd) with `PHRONESIS_DIR` set to an install of [phronesis](https://github.com/leidarljos/phronesis) `v0.2.5`, as CI does.
 A test that finds one missing panics with its name; that run does not count.
 Run the suite from a shell with no `LJOS_OFF` set and outside an agent runner.
 
