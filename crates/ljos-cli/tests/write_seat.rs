@@ -98,6 +98,21 @@ const WRITES: &[&[&str]] = &[
     &["consensus", "proj-aaaa"],
     &["playbook", "proj-aaaa", "sit"],
     &["reap", "--idle", "6h", "--apply"],
+    &["vote", "proj-aaaa", "--for", "accept", "--used", "none"],
+    &["vote", "proj-aaaa", "--withdraw"],
+    &["vote", "proj-aaaa", "--as", "skeptic", "--jev"],
+    &["predict", "proj-aaaa", "--expect", "accept"],
+    &[
+        "slot",
+        "proj-aaaa",
+        "runner",
+        "--model",
+        "m",
+        "--run",
+        "r1",
+        "--key",
+        "00",
+    ],
 ];
 
 #[test]
@@ -300,4 +315,28 @@ fn a_playbook_binding_records_the_seat_the_seats_file_maps() {
         .find(|l| l.starts_with("vissue note proj-aaaa playbook: sit"))
         .unwrap_or_else(|| panic!("no binding: {calls}"));
     assert!(note.ends_with("VISSUE_AGENT=saddle"), "{note}");
+}
+
+#[test]
+fn a_slot_is_signed_only_by_a_listed_seat() {
+    let b = Bench::new();
+    b.seats("seats = [\"saddle\"]\n");
+    let out = b.ljos_env(
+        &[("LJOS_SEAT", "saddle"), ("VISSUE_AGENT", "stranger")],
+        &[
+            "slot",
+            "proj-aaaa",
+            "runner",
+            "--model",
+            "m",
+            "--run",
+            "r1",
+            "--key",
+            "00",
+        ],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(err.contains("slot: no seat named stranger"), "{err}");
+    assert_eq!(b.calls(), "", "nothing reached the tracker");
 }
