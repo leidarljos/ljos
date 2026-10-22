@@ -436,12 +436,16 @@ struct McpFile {
 /// How a harness turns a command string into a path.
 ///
 /// Codex stores `$HOME` as text. OpenCode substitutes `{env:VAR}` only.
-/// A shell client expands `$HOME`, `${HOME}`, `${env:HOME}`, `${userHome}`
-/// and a leading `~/`.
+/// Cursor substitutes `${env:VAR}` and `${userHome}`. Claude Code
+/// substitutes `${VAR}` and `${VAR:-default}` and keeps an unset `${VAR}`
+/// as written. Any other client is read as a shell: `$HOME`, `${HOME}`,
+/// `${env:HOME}`, `${userHome}` and a leading `~/`.
 #[derive(Clone, Copy)]
 enum HomeExpand {
     Literal,
     Opencode,
+    Cursor,
+    Claude,
     Shell,
 }
 
@@ -553,14 +557,14 @@ fn mcp_files() -> Vec<McpFile> {
             McpProbe::Json("/mcpServers/ljos".into()),
             true,
             cursor_mcp_advice(),
-            HomeExpand::Shell,
+            HomeExpand::Cursor,
         );
         push(
             home.join(".claude.json"),
             McpProbe::Json("/mcpServers/ljos".into()),
             false,
             "ljos onboard --harness claude".into(),
-            HomeExpand::Shell,
+            HomeExpand::Claude,
         );
     }
     for harness in harness_shapes() {
@@ -568,6 +572,7 @@ fn mcp_files() -> Vec<McpFile> {
         let home = match harness.name.as_str() {
             "codex" => HomeExpand::Literal,
             "opencode" | "opencode-v2" => HomeExpand::Opencode,
+            "cursor" => HomeExpand::Cursor,
             _ => HomeExpand::Shell,
         };
         if let (Some(config), Some(pointer)) = (&harness.config_json, &harness.json_pointer) {
@@ -858,8 +863,65 @@ fn expand_launch(command: &str, home: HomeExpand) -> String {
     match home {
         HomeExpand::Literal => command.to_string(),
         HomeExpand::Opencode => expand_opencode_home(command),
+        HomeExpand::Cursor => expand_cursor(command),
+        HomeExpand::Claude => expand_claude(command),
         HomeExpand::Shell => expand_shell_home(command),
     }
+}
+
+/// Cursor's `${env:NAME}` and `${userHome}`. `$HOME`, `${HOME}` and `~/`
+/// stay text.
+fn expand_cursor(text: &str) -> String {
+    expand_braced(text, |inner| match inner {
+        "userHome" => crate::home().ok().map(|h| h.display().to_string()),
+        _ => std::env::var(inner.strip_prefix("env:")?).ok(),
+    })
+}
+
+/// Claude Code's `${VAR}` and `${VAR:-default}`. An unset `${VAR}` with no
+/// default stays as written, as do `$HOME`, `~/` and Cursor's forms.
+fn expand_claude(text: &str) -> String {
+    expand_braced(text, |inner| {
+        let (name, default) = match inner.split_once(":-") {
+            Some((name, default)) => (name, Some(default)),
+            None => (inner, None),
+        };
+        if !is_env_name(name) {
+            return None;
+        }
+        std::env::var(name)
+            .ok()
+            .or_else(|| default.map(str::to_string))
+    })
+}
+
+fn is_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Each `${...}` in `text` replaced by what `resolve` gives for its inside,
+/// or kept as written when it gives nothing.
+fn expand_braced(text: &str, resolve: impl Fn(&str) -> Option<String>) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("${") {
+        let inner = &rest[at + 2..];
+        let Some(len) = inner.find('}') else {
+            break;
+        };
+        out.push_str(&rest[..at]);
+        match resolve(&inner[..len]) {
+            Some(value) => out.push_str(&value),
+            None => out.push_str(&rest[at..at + len + 3]),
+        }
+        rest = &inner[len + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// OpenCode substitutes `{env:HOME}` only. `$HOME`, `${HOME}`, `~/` and
