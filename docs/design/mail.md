@@ -22,9 +22,14 @@ nothing else changes. It names the From a draft may carry, the deny list
 and the mailbox, so only the user may set it: it is read from the user's
 own `~/.config/ljos/ljos.toml` and then `~/.config/ljos/mail.toml`
 (under `XDG_CONFIG_HOME` when that is set), the second overriding the
-keys it sets. Each must be owned by the user running ljos and not be
-group or world writable. Any other layer of ljos config (`./ljos.toml`,
-`./vissue.toml`, `VISSUE_CONFIG`, `LJOS_CONFIG` and
+keys it sets. Each is opened `O_NOFOLLOW`, so a symlink is refused, and
+the open file must be a regular file owned by the user running ljos or
+root and not group or world writable. Every directory above it, with
+symlinks resolved, must be owned by that user or root and not be group
+or world writable unless it is sticky like `/tmp`. `deny_file` and
+`notmuch_config` pass the same check each time they are read, and
+notmuch is given the resolved path. Any other layer of ljos config
+(`./ljos.toml`, `./vissue.toml`, `VISSUE_CONFIG`, `LJOS_CONFIG` and
 `~/.config/vissue/config.toml`) that carries a `[mail]` table, even an
 empty one, is an error, so a seat that can write its working directory
 cannot swap the identity or the deny list. A file that cannot be read
