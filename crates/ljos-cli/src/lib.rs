@@ -10213,7 +10213,7 @@ fn file_correction(call: &HookCall, key: &str) {
         stamp_horizon(&mut atom, "preference", &text, Some(false));
         // The words are the person's. The hook files them; it does not store
         // them. Accept is what writes the preference.
-        admit::stamp_origin(&mut atom, admit::ORIGIN_USER);
+        admit::stamp_person(&mut atom);
         if let Some(map) = atom.as_object_mut() {
             map.insert("hook".into(), Value::Bool(true));
         }
@@ -12499,7 +12499,7 @@ fn post_claim_horizon(
     let kind = atom_kind(label)?;
     let mut atom = atom_body(kind, trimmed, workspace);
     stamp_horizon(&mut atom, kind, trimmed, transient);
-    admit::stamp_origin(&mut atom, admit::ORIGIN_USER);
+    admit::stamp_person(&mut atom);
     let posted = with_writer(|| {
         admit::post_kept(client, &atom)
             .map_err(|e| with_post_failure(&format!("{label}: POST /v1/atoms failed"), e))
@@ -12511,9 +12511,9 @@ fn post_claim_horizon(
 /// Write a claim an agent made, at once. No person approves it first: it
 /// carries origin `agent-derived` and its provenance in `source`, and
 /// `ljos memories review` keeps, edits, merges or drops it afterwards.
-/// The pack still refuses a secret, the size cap and a third sentence.
-/// A sentence over 29 words, a grade over 14 or too many adverbs is stored
-/// as written, with the pack's warning, the same way `prefer` stores it.
+/// The pack still refuses a secret, the size cap and a third sentence, and
+/// holds an agent's claim to its word limit, grade and adverb ratio: a
+/// sentence it would keep from the person with a warning is refused here.
 ///
 /// # Errors
 ///
@@ -13480,9 +13480,9 @@ pub fn packset_write(label: &str, text: &str) -> Result<Value> {
 /// Stored as an unreviewed note: kind `note`, origin `agent-derived`,
 /// no horizon tag and no [`SAID_ENTITY`], so the prompt does not treat it
 /// as a fact. A pack that does not know kind `note` takes the same text as
-/// a `summary`, still agent-derived and untagged. Posted with the origin
-/// set, not through the agent writer that relabels soft prose as the
-/// person's.
+/// a `summary`, still agent-derived and untagged. Posted as a note, not
+/// through the agent writer, which files a lesson the pack holds to the
+/// atom prose gate.
 ///
 /// # Errors
 ///
@@ -13617,7 +13617,7 @@ pub fn packset_write_as(
     let mut atom = atom_body(kind, trimmed, &workspace);
     add_entities(&mut atom, [persona_entity(name)]);
     stamp_horizon(&mut atom, kind, trimmed, transient);
-    admit::stamp_origin(&mut atom, admit::ORIGIN_USER);
+    admit::stamp_person(&mut atom);
     // Its own tree: the persona's conclusions replace and duplicate among
     // themselves, not against the seat's or another persona's.
     atom["set"] = Value::String(persona_set(name));
@@ -26713,7 +26713,7 @@ fn finish_lesson(issue: &str, text: &str) -> String {
         if persons {
             // Typed by the person in a terminal of their own: no
             // runner above it, so it needs no second review.
-            admit::stamp_origin(&mut atom, admit::ORIGIN_USER);
+            admit::stamp_person(&mut atom);
             let posted = with_writer(|| {
                 admit::post_kept(&client, &atom).map_err(|e| with_post_failure(prefix, e))
             })?;
@@ -28215,11 +28215,12 @@ fn hit_line(h: &Hit, now: &str) -> String {
 }
 
 /// Whether the pack's stored record says the person stands behind `atom`,
-/// an atom or a search hit: `origin` `user-declared` and no `source.basis`
-/// of `agent`. A missing origin reads as `user-declared`, as the pack reads
-/// it. An agent basis outweighs the origin, because the agent writer files
-/// soft prose as `user-declared`. Kind and entities are the writer's and
-/// are not read.
+/// an atom or a search hit: `origin` `user-declared` and `source.basis`
+/// `person`, which only a person-path writer stamps. A missing origin
+/// reads as `user-declared`, as the pack reads it, and still needs the
+/// basis: a direct post, a pack default or a record written before the
+/// basis is not the person's. Kind and entities are the writer's and are
+/// not read.
 #[must_use]
 pub fn person_stored(atom: &Value) -> bool {
     let origin = atom
@@ -28228,7 +28229,7 @@ pub fn person_stored(atom: &Value) -> bool {
         .filter(|o| !o.is_empty())
         .unwrap_or(admit::ORIGIN_USER);
     origin == admit::ORIGIN_USER
-        && atom.pointer("/source/basis").and_then(Value::as_str) != Some(Basis::Agent.as_str())
+        && atom.pointer("/source/basis").and_then(Value::as_str) == Some(Basis::Person.as_str())
 }
 
 /// [`person_stored`] for each atom id this process read. A
@@ -32392,7 +32393,9 @@ mod tests {
             "the prompt tag alone made a claim the person's words"
         );
         person.id = Some("label-person".into());
-        super::keep_origin(&serde_json::json!({"id": "label-person", "origin": "user-declared"}));
+        super::keep_origin(&serde_json::json!({
+            "id": "label-person", "origin": "user-declared", "source": {"basis": "person"}
+        }));
         assert_eq!(super::kind_label(&person), "lesson, the person's words");
     }
 
@@ -35879,7 +35882,9 @@ mod tests {
 
     fn signal_hit(kind: &str, text: &str, score: f64, ballots: u32) -> Hit {
         let id = format!("id-{}", text.len());
-        keep_origin(&serde_json::json!({"id": id, "origin": admit::ORIGIN_USER}));
+        keep_origin(&serde_json::json!({
+            "id": id, "origin": admit::ORIGIN_USER, "source": {"basis": "person"}
+        }));
         Hit {
             id: Some(id),
             text: text.into(),
@@ -36340,6 +36345,7 @@ mod tests {
             serde_json::json!({
                 "id": id, "text": text, "score": score, "kind": kind,
                 "ts": "2026-10-11T15:00:00.000Z", "entities": ["horizon:standing"],
+                "source": {"basis": "person"},
                 "ballots": 1, "of": 3, "dense_rank": rank, "cosine": cos
             })
         };
@@ -36702,6 +36708,7 @@ mod tests {
                         "kind": "preference",
                         "text": memory,
                         "entities": ["horizon:standing"],
+                        "source": {"basis": "person"},
                         "ts": "2020-01-01T00:00:00Z"
                     }]})
                     .to_string(),
@@ -36717,6 +36724,7 @@ mod tests {
                         "kind": "preference",
                         "ts": "2020-01-01T00:00:00.000Z",
                         "entities": ["horizon:standing"],
+                        "source": {"basis": "person"},
                         "ballots": 2,
                         "of": 3,
                         "dense_rank": 1,
@@ -37106,7 +37114,7 @@ mod tests {
             "a claim with no stored origin read as a fact"
         );
         bare.id = Some("bare-claim".into());
-        keep_origin(&serde_json::json!({"id": "bare-claim"}));
+        keep_origin(&serde_json::json!({"id": "bare-claim", "source": {"basis": "person"}}));
         assert_eq!(hit_line(&bare, "2026-09-12T00:00:00.000Z"), "- [claim] x");
     }
 
@@ -47579,7 +47587,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     fn a_session_start_says_ljos_is_on_in_one_line() {
         let now = "2026-10-11T12:00:00Z";
         let atoms = vec![
-            serde_json::json!({"kind":"preference","text":"Plain words in denials.","due_at":"2026-10-01T00:00:00Z"}),
+            serde_json::json!({"kind":"preference","text":"Plain words in denials.","due_at":"2026-10-01T00:00:00Z","source":{"basis":"person"}}),
             serde_json::json!({"kind":"lesson","text":"BM25+ beat BM25.","due_at":"2027-01-01T00:00:00Z"}),
         ];
         let line = session_start_line_from(Some(&atoms), now, true);
@@ -48261,7 +48269,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                         }
                         (
                             "200 OK",
-                            r#"{"hits":[{"id":"p1","text":"Tag a release with git push origin TAG; --follow-tags leaves v-tags behind.","score":2.0,"kind":"preference","ts":"2026-10-10T18:00:00.000Z","entities":[],"ballots":3,"of":3}]}"#.to_string(),
+                            r#"{"hits":[{"id":"p1","text":"Tag a release with git push origin TAG; --follow-tags leaves v-tags behind.","score":2.0,"kind":"preference","ts":"2026-10-10T18:00:00.000Z","entities":[],"source":{"basis":"person"},"ballots":3,"of":3}]}"#.to_string(),
                         )
                     } else {
                         ("404 Not Found", r#"{"error":"not here"}"#.to_string())
@@ -48431,6 +48439,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                         serde_json::json!({
                             "id": a["id"], "text": a["text"], "score": 2.0, "kind": a["kind"],
                             "ts": "2026-10-11T15:00:00.000Z", "entities": a["entities"],
+                            "origin": a["origin"], "source": a["source"],
                             "ballots": 3, "of": 3
                         })
                     })
@@ -48645,7 +48654,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             } else {
                 admit::ORIGIN_AGENT
             };
-            keep_origin(&serde_json::json!({"id": id, "origin": origin}));
+            keep_origin(&serde_json::json!({
+                "id": id, "origin": origin, "source": {"basis": if origin == admit::ORIGIN_USER { "person" } else { "agent" }}
+            }));
             Hit {
                 id: Some(id.into()),
                 text: id.into(),
@@ -48975,21 +48986,20 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     /// Length and grade are stored as written, with the pack's warning, for
-    /// remember and for prefer. A third sentence is still more than one atom.
+    /// the person's prefer. The agent writer files the same text as the
+    /// agent's, and the pack refuses it rather than keep it as the
+    /// person's. A third sentence is still more than one atom.
     #[test]
-    fn a_long_remember_is_stored_with_the_same_warning_as_prefer() {
+    fn a_long_agent_claim_is_refused_and_the_persons_kept_with_a_warning() {
         let _g = env_guard();
         let (url, stored) = serve_validating();
         let _url = PackUrl::set(&url);
         let grade = "The payments service retries webhooks three times with exponential backoff starting at two seconds.";
         let words = format!("{}end.", "word ".repeat(29));
         for text in [grade, words.as_str()] {
-            let remembered = packset_write_agent("Remember", text, None, Some(false))
-                .unwrap_or_else(|why| panic!("remember refused {text:?}: {why:#}"));
-            assert_eq!(remembered["text"], text);
-            let warning = remembered["prose"]["warning"].as_str().unwrap_or("");
-            assert!(!warning.is_empty(), "{remembered}");
-            assert!(prose_warning_line(&remembered).is_some(), "{warning}");
+            let refused = packset_write_agent("Remember", text, None, Some(false))
+                .expect_err("the agent's soft prose was kept");
+            assert!(format!("{refused:#}").contains("400"), "{refused:#}");
             let preferred = packset_write_as("Prefer", text, None, Some(false))
                 .unwrap_or_else(|why| panic!("prefer refused {text:?}: {why:#}"));
             assert_eq!(preferred["text"], text);

@@ -115,6 +115,14 @@ pub fn stamp_origin(atom: &mut Value, origin: &str) {
     }
 }
 
+/// Mark `atom` as the person's: origin `user-declared` and `source.basis`
+/// `person`. Only a person-path writer calls this; the readers take the
+/// basis, not the origin alone, as the person standing behind a claim.
+pub fn stamp_person(atom: &mut Value) {
+    stamp_origin(atom, ORIGIN_USER);
+    atom["source"]["basis"] = Value::String(crate::Basis::Person.as_str().into());
+}
+
 fn strip_origin(atom: &mut Value) {
     if let Some(map) = atom.as_object_mut() {
         map.remove("origin");
@@ -258,15 +266,14 @@ fn post_direct(client: &PacksetClient, atom: &Value) -> Result<Option<String>> {
 /// were live answers `held as proposal ID`; that proposal is accepted on
 /// the spot, so the memory is live there too. Nothing waits for a person.
 /// A lesson past the two-sentence cap or the character cap is posted as the
-/// shorter copies [`crate::pack_copy::pack_copies`] cuts. A lesson that
-/// fails only the word limit, the grade or the adverb ratio is posted
-/// whole, as `prefer` stores it, and the pack keeps the text with a
-/// warning. A preference is posted as written.
+/// shorter copies [`crate::pack_copy::pack_copies`] cuts. A preference is
+/// posted as written.
 ///
 /// # Errors
 ///
 /// An empty text, or the pack refusing the claim for a reason other than
-/// holding it (a secret, the size cap, a third sentence).
+/// holding it (a secret, the size cap, a third sentence, or the word
+/// limit, grade or adverb ratio the pack holds an agent's claim to).
 pub fn write_agent(client: &PacksetClient, atom: Value) -> Result<Value> {
     let text = atom["text"].as_str().unwrap_or("").trim().to_string();
     if text.is_empty() {
@@ -309,30 +316,19 @@ fn past_hard_cap(text: &str) -> bool {
         || text.chars().count() > packset_core::record::TEXT_SOFT_CAP
 }
 
-/// A prose refusal other than the sentence cap. The sentence error is
-/// reported first, so a third sentence is not stored as a warning.
-fn prose_is_soft(text: &str) -> bool {
-    match packset_core::prose_refuse(text, packset_core::ProseRole::Atom) {
-        Ok(_) => false,
-        Err(why) => !why.to_string().contains("sentences; one claim is at most"),
-    }
-}
-
 /// One agent atom, with no further split.
+///
+/// Always origin `agent-derived` and `source.basis` `agent`, whatever the
+/// prose. The pack keeps a person's long or hard sentence with a warning
+/// and refuses an agent's; filing the agent's as the person's to get it
+/// kept would hand it to every reader as the person's words.
 pub(crate) fn write_agent_one(client: &PacksetClient, mut atom: Value) -> Result<Value> {
     let text = atom["text"].as_str().unwrap_or("").trim();
     if text.is_empty() {
         bail!("remember: empty text is not a claim");
     }
-    // The pack refuses an agent-derived atom for length, grade and adverbs,
-    // and keeps a person's atom with a warning. A lesson that fails only
-    // those checks is stored the way `prefer` stores it.
-    let origin = if prose_is_soft(text) {
-        ORIGIN_USER
-    } else {
-        ORIGIN_AGENT
-    };
-    stamp_origin(&mut atom, origin);
+    stamp_origin(&mut atom, ORIGIN_AGENT);
+    atom["source"]["basis"] = Value::String(crate::Basis::Agent.as_str().into());
     match post_kept(client, &atom) {
         Ok(posted) => Ok(posted),
         Err(e) => {

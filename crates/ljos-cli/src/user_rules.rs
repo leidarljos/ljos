@@ -1384,7 +1384,14 @@ mod tests {
     #[test]
     fn a_promoted_agent_lesson_stays_out_of_the_preface() {
         let (_lock, _dir) = isolated();
-        let lesson = |id: &str, text: &str, origin: &str| serde_json::json!({"id": id, "kind": "lesson", "text": text, "origin": origin});
+        let lesson = |id: &str, text: &str, origin: &str| {
+            let basis = if origin == "user-declared" {
+                "person"
+            } else {
+                "agent"
+            };
+            serde_json::json!({"id": id, "kind": "lesson", "text": text, "origin": origin, "source": {"basis": basis}})
+        };
         let planted = promote_atom(
             &lesson(
                 "lesson-planted-ur",
