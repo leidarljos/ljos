@@ -8356,4 +8356,266 @@ mod tests {
             );
         });
     }
+
+    fn git_ok(cwd: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} in {}: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A tracker shared through a bare origin. `peer` is another machine's
+    /// clone: it commits whatever bytes it holds under whatever name and
+    /// pushes. `root` is this host's clone. This host holds its machine key
+    /// and the cloud identity, and imports into a real pack.
+    struct Shared {
+        _daemon: PackDaemon,
+        _env: crate::EnvLock,
+        dir: PathBuf,
+        root: PathBuf,
+        peer: PathBuf,
+        machine: String,
+        cloud: String,
+    }
+
+    impl Shared {
+        fn new(dir: &Path) -> Self {
+            let env = crate::test_env_lock();
+            for name in ["alice", "bob", "carol", "dave"] {
+                assert_ne!(host(), name, "this machine would skip {name}'s logs");
+            }
+            let home = dir.join("home");
+            std::fs::create_dir_all(home.join(".config/ljos")).unwrap();
+            let pack_home = dir.join("pack");
+            let (port, daemon) = spawn_pack(&pack_home);
+            // SAFETY: this test holds the process env lock.
+            unsafe {
+                std::env::set_var("HOME", &home);
+                std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+                std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+                std::env::set_var("PACKSET_URL", format!("http://127.0.0.1:{port}"));
+                std::env::set_var("PACKSET_AUTH", "off");
+                std::env::set_var("PACKSET_HOME", &pack_home);
+                std::env::set_var("PACKSET_WORKSPACE", "shared");
+                std::env::remove_var(WRITE_SCOPE_KEY);
+            }
+            let machine = age_keygen(&identity_path());
+            let cloud = age_keygen(&cloud_identity_path());
+            let origin = dir.join("origin.git");
+            let peer = dir.join("peer");
+            let root = dir.join("reader");
+            let origin_arg = origin.to_str().unwrap();
+            git_ok(dir, &["init", "-q", "--bare", "-b", "main", origin_arg]);
+            let clone = |to: &Path| {
+                git_ok(dir, &["clone", "-q", origin_arg, to.to_str().unwrap()]);
+                for (key, value) in [
+                    ("user.email", "seat@example.invalid"),
+                    ("user.name", "seat"),
+                    ("core.hooksPath", "/dev/null"),
+                    ("commit.gpgsign", "false"),
+                ] {
+                    git_ok(to, &["config", key, value]);
+                }
+            };
+            clone(&peer);
+            std::fs::create_dir_all(peer.join(".ljos/atoms")).unwrap();
+            std::fs::write(
+                peer.join(".ljos/sync.toml"),
+                format!(
+                    "name = \"grokbot\"\nrecipients = [\"{machine}\"]\n[scopes]\ncloud = [\"{cloud}\"]\n"
+                ),
+            )
+            .unwrap();
+            git_ok(&peer, &["add", ".ljos/sync.toml"]);
+            git_ok(&peer, &["commit", "-q", "-m", "scope"]);
+            git_ok(&peer, &["push", "-q", "-u", "origin", "HEAD"]);
+            clone(&root);
+            Shared {
+                _daemon: daemon,
+                _env: env,
+                dir: dir.to_path_buf(),
+                root,
+                peer,
+                machine,
+                cloud,
+            }
+        }
+
+        fn scope(&self) -> Scope {
+            scope_of_repo(&self.root).unwrap().unwrap()
+        }
+
+        /// `body` sealed to `recipients`, after the header `host` and
+        /// `scope_name` name when `header` is set.
+        fn sealed(&self, header: Option<(&str, &str)>, body: &str, recipients: &[&str]) -> Vec<u8> {
+            let plain = match header {
+                Some((host, scope_name)) => framed(host, scope_name, body),
+                None => body.to_string(),
+            };
+            let recipients: Vec<String> = recipients.iter().map(|r| (*r).to_string()).collect();
+            seal_bytes(&plain, &recipients).unwrap()
+        }
+
+        /// Commit `files` under `.ljos/atoms` in the peer's clone and push.
+        fn push(&self, files: &[(&str, &[u8])]) {
+            for (name, bytes) in files {
+                std::fs::write(self.peer.join(".ljos/atoms").join(name), bytes).unwrap();
+            }
+            git_ok(&self.peer, &["add", "-A", ".ljos/atoms"]);
+            git_ok(&self.peer, &["commit", "-q", "-m", "peer logs"]);
+            git_ok(&self.peer, &["push", "-q"]);
+        }
+
+        /// Bring this host's clone level with the origin.
+        fn pull(&self) {
+            git_ok(&self.root, &["fetch", "-q", "origin"]);
+            git_ok(&self.root, &["merge", "-q", "--ff-only", "origin/main"]);
+        }
+
+        fn import(&self) -> String {
+            self.pull();
+            import(&self.root, &self.scope()).unwrap()
+        }
+
+        /// Every text the pack holds, sorted.
+        fn held(&self) -> Vec<String> {
+            let client = crate::pack().unwrap();
+            let mut texts: Vec<String> = crate::atoms_lean(&client, &client.workspace())
+                .unwrap()
+                .iter()
+                .filter_map(|atom| atom["text"].as_str().map(str::to_string))
+                .collect();
+            texts.sort();
+            texts
+        }
+    }
+
+    /// A log with no header names nobody. Sealed to the machine and cloud
+    /// keys, it was taken under whatever host its file name gave, and a
+    /// copy under a second name was taken again. A headed copy under
+    /// another host's name is refused, and the host it names keeps it.
+    #[test]
+    fn a_headerless_cloud_log_is_not_taken_under_any_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let fix = Shared::new(dir.path());
+        let both = [fix.machine.as_str(), fix.cloud.as_str()];
+        let bare = fix.sealed(None, &lesson_line("No one wrote this.", "cloud"), &both);
+        fix.push(&[
+            ("alice+cloud.jsonl.age", &bare),
+            ("bob+cloud.jsonl.age", &bare),
+        ]);
+        let said = fix.import();
+        assert!(fix.held().is_empty(), "{said}");
+        assert!(
+            said.contains("alice+cloud.jsonl.age has no scope header"),
+            "{said}"
+        );
+        assert!(
+            said.contains("bob+cloud.jsonl.age has no scope header"),
+            "{said}"
+        );
+
+        let headed = fix.sealed(
+            Some(("alice", CLOUD_SCOPE)),
+            &lesson_line("Alice wrote this.", "cloud"),
+            &both,
+        );
+        fix.push(&[
+            ("alice+cloud.jsonl.age", &headed),
+            ("bob+cloud.jsonl.age", &headed),
+        ]);
+        let said = fix.import();
+        assert_eq!(fix.held(), vec!["Alice wrote this."], "{said}");
+        assert!(said.contains("alice: 1 cloud atoms taken"), "{said}");
+        assert!(
+            said.contains("bob+cloud.jsonl.age holds alice's cloud log"),
+            "{said}"
+        );
+        assert!(!said.contains("bob: "), "{said}");
+    }
+
+    /// A headed log put back to its earlier headerless blob opened through
+    /// the cloud identity, and retired what the headed log had added.
+    #[test]
+    fn a_headed_log_put_back_to_its_headerless_blob_retires_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let fix = Shared::new(dir.path());
+        let first = lesson_line("The deploy key rotates on Mondays.", "cloud");
+        let second = lesson_line("Build caches live under the shared volume.", "cloud");
+        let old = fix.sealed(None, &first, &[fix.cloud.as_str()]);
+        fix.push(&[("carol+cloud.jsonl.age", &old)]);
+        fix.import();
+        let new = fix.sealed(
+            Some(("carol", CLOUD_SCOPE)),
+            &format!("{first}{second}"),
+            &[fix.cloud.as_str()],
+        );
+        fix.push(&[("carol+cloud.jsonl.age", &new)]);
+        let said = fix.import();
+        let both = vec![
+            "Build caches live under the shared volume.".to_string(),
+            "The deploy key rotates on Mondays.".to_string(),
+        ];
+        assert_eq!(fix.held(), both, "{said}");
+        fix.push(&[("carol+cloud.jsonl.age", &old)]);
+        let said = fix.import();
+        assert_eq!(fix.held(), both, "{said}");
+        assert!(said.contains("left unread"), "{said}");
+    }
+
+    /// Headed logs still import through a symlinked `$HOME`, a checkout
+    /// reached through a symlinked parent, and a git worktree.
+    #[test]
+    fn honest_logs_import_through_linked_homes_parents_and_worktrees() {
+        let dir = tempfile::tempdir().unwrap();
+        let fix = Shared::new(dir.path());
+        let primary = fix.sealed(
+            Some(("alice", "grokbot")),
+            &lesson_line("Alice's box note.", "grokbot"),
+            &[fix.machine.as_str()],
+        );
+        let cloud = fix.sealed(
+            Some(("alice", CLOUD_SCOPE)),
+            &lesson_line("Alice's cloud note.", "cloud"),
+            &[fix.cloud.as_str()],
+        );
+        fix.push(&[
+            ("alice.jsonl.age", &primary),
+            ("alice+cloud.jsonl.age", &cloud),
+        ]);
+        fix.pull();
+        let scope = fix.scope();
+        let worktree = fix.dir.join("worktree");
+        git_ok(
+            &fix.root,
+            &["worktree", "add", "-q", worktree.to_str().unwrap(), "HEAD"],
+        );
+        let parent = fix.dir.join("parent-link");
+        std::os::unix::fs::symlink(&fix.dir, &parent).unwrap();
+        let home = fix.dir.join("home-link");
+        std::os::unix::fs::symlink(fix.dir.join("home"), &home).unwrap();
+        // SAFETY: the fixture holds the process env lock.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::remove_var("XDG_CONFIG_HOME");
+            std::env::remove_var("XDG_STATE_HOME");
+        }
+        for root in [fix.root.clone(), parent.join("reader"), worktree] {
+            let said = import(&root, &scope).unwrap();
+            for line in ["alice: ", "grokbot atoms taken", "cloud atoms taken"] {
+                assert!(said.contains(line), "{}: {said}", root.display());
+            }
+            assert!(!said.contains("unread"), "{}: {said}", root.display());
+        }
+        assert_eq!(fix.held(), vec!["Alice's box note.", "Alice's cloud note."]);
+    }
 }
