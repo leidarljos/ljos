@@ -299,7 +299,9 @@ fn judge_depth(line: &str, cwd: Option<&Path>, incoming: &WalkIn) -> Verdict {
     let mut verdict = Verdict::default();
     for l in crate::nested_lines(line, 0) {
         let mut names: Vec<(String, String)> = Vec::new();
+        let piped = piped_segments(&l);
         for seg in crate::raw_segments(&l) {
+            let fed = piped.iter().any(|p| p == seg.trim()) || stdin_redirected(&seg);
             // An assignment on its own is not a git command, and it is
             // skipped below, but `export GIT_CONFIG_KEY_0=core.hooksPath`
             // still disarms the hook for every later push.
@@ -430,7 +432,7 @@ fn judge_depth(line: &str, cwd: Option<&Path>, incoming: &WalkIn) -> Verdict {
                     // An `export` or assignment earlier on the line reaches
                     // the client too; a prefix on this command wins.
                     let env: Vec<_> = names.iter().chain(&run.env).cloned().collect();
-                    if let Some(why) = http_ref_write(&words, &env, here.as_deref()) {
+                    if let Some(why) = http_ref_write(&words, &env, here.as_deref(), fed) {
                         if verdict.push.is_none() {
                             verdict.push = Some(why);
                         }
@@ -560,6 +562,7 @@ fn command_is_pure_read(cmd: &str, words: &[String]) -> bool {
             | "printf"
             | "true"
             | "false"
+            | "export"
     ) {
         return true;
     }
@@ -3699,6 +3702,10 @@ fn http_targets_github(words: &[String]) -> bool {
         None
     };
     let httpie = cmd == "http" || cmd == "https";
+    // HTTPie's `--proxy`, `--follow`, sessions, and config file are not
+    // read, so loopback may still lead to GitHub there.
+    let peer =
+        |host: &str| is_github_host(host) || address_host(host) || (httpie && loopback_host(host));
     let mut github = false;
     let mut other = false;
     let mut hidden = false;
@@ -3707,7 +3714,7 @@ fn http_targets_github(words: &[String]) -> bool {
             continue;
         }
         if let Some(host) = literal_http_host(word) {
-            if is_github_host(&host) || address_host(&host) {
+            if peer(&host) {
                 github = true;
             } else {
                 other = true;
@@ -3716,7 +3723,7 @@ fn http_targets_github(words: &[String]) -> bool {
         }
         if httpie || proto.is_some() {
             if let Some(host) = schemeless_host(word) {
-                if is_github_host(&host) || address_host(&host) {
+                if peer(&host) {
                     github = true;
                 } else {
                     other = true;
@@ -3775,11 +3782,11 @@ fn host_in_url(word: &str) -> Option<String> {
         return None;
     }
     let rest = &word[idx + 3..];
-    let auth = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let auth = percent_decoded(rest.split(['/', '?', '#']).next().unwrap_or(""));
     if auth.is_empty() {
         return None;
     }
-    let hostport = auth.rsplit_once('@').map(|(_, host)| host).unwrap_or(auth);
+    let hostport = auth.rsplit_once('@').map(|(_, host)| host).unwrap_or(&auth);
     if hostport.is_empty() || unreadable_token(hostport) {
         return None;
     }
@@ -3788,6 +3795,34 @@ fn host_in_url(word: &str) -> Option<String> {
         return None;
     }
     Some(host.to_ascii_lowercase())
+}
+
+/// Curl and wget percent-decode the authority before they connect, so
+/// `api%2egithub%2ecom` is `api.github.com`. Decoding until nothing
+/// changes reads a twice-encoded host too, and the userinfo and port are
+/// split after it, so an encoded `@` or `:` splits as well.
+fn percent_decoded(text: &str) -> String {
+    let hex = |b: Option<&u8>| b.and_then(|b| char::from(*b).to_digit(16));
+    let mut bytes = text.as_bytes().to_vec();
+    loop {
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' {
+                if let (Some(hi), Some(lo)) = (hex(bytes.get(i + 1)), hex(bytes.get(i + 2))) {
+                    out.push((hi * 16 + lo) as u8);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        if out.len() == bytes.len() {
+            return String::from_utf8_lossy(&out).into_owned();
+        }
+        bytes = out;
+    }
 }
 
 fn strip_host_port(hostport: &str) -> &str {
@@ -3816,8 +3851,13 @@ fn is_github_host(host: &str) -> bool {
 
 /// An IP address in a form curl and wget take: dotted, one number, hex
 /// parts, or IPv6. A DNS name does not end in a number, so a peer named
-/// this way may be GitHub behind a `Host:` header.
+/// this way may be GitHub behind a `Host:` header. Loopback is this
+/// machine; a proxy, a `Host:` header, or a route option that could send
+/// it on is judged without regard to the host.
 fn address_host(host: &str) -> bool {
+    if loopback_host(host) {
+        return false;
+    }
     if host.contains(':') {
         return true;
     }
@@ -3828,16 +3868,49 @@ fn address_host(host: &str) -> bool {
     !last.is_empty() && (hex || last.chars().all(|c| c.is_ascii_digit()))
 }
 
+/// `::1`, or an IPv4 address in 127.0.0.0/8 in the inet_aton forms curl
+/// and wget take: one to four parts, each decimal, octal, or hex, the last
+/// filling the bits the others leave, as in `127.1` or `0x7f000001`.
+fn loopback_host(host: &str) -> bool {
+    if host.contains(':') {
+        return host
+            .parse::<std::net::Ipv6Addr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    }
+    let Some(parts) = host.split('.').map(inet_part).collect::<Option<Vec<u64>>>() else {
+        return false;
+    };
+    let Some((last, head)) = parts.split_last().filter(|_| parts.len() <= 4) else {
+        return false;
+    };
+    let top = head.first().copied().unwrap_or(last >> 24);
+    head.iter().all(|part| *part <= 255) && *last >> (32 - 8 * head.len()) == 0 && top == 127
+}
+
+fn inet_part(part: &str) -> Option<u64> {
+    let (digits, radix) = match part.strip_prefix("0x") {
+        Some(hex) => (hex, 16),
+        None if part.len() > 1 && part.starts_with('0') => (&part[1..], 8),
+        None => (part, 10),
+    };
+    if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+        return None;
+    }
+    u64::from_str_radix(digits, radix).ok()
+}
+
+/// `fed` is a stdin the line pipes or redirects into the client.
 fn http_ref_write(
     words: &[String],
     env: &[(String, String)],
     cwd: Option<&Path>,
+    fed: bool,
 ) -> Option<String> {
     let cmd = words.first()?.rsplit('/').next()?;
     if !matches!(cmd, "curl" | "wget" | "http" | "https") {
         return None;
     }
-    let (shape, config_github) = http_shape(cmd, words, env, cwd);
+    let (shape, config_github) = http_shape(cmd, words, env, cwd, fed);
     let config_github = config_github || proxy_env(env);
     // A host that is not GitHub is left alone, including a clustered
     // DELETE. Cargo and npm talk to those hosts. A config file can name
@@ -3880,13 +3953,34 @@ fn http_shape(
     words: &[String],
     env: &[(String, String)],
     cwd: Option<&Path>,
+    fed: bool,
 ) -> (HttpShape, bool) {
     match cmd {
         "curl" => curl_shape(words, env, cwd),
         "wget" => wget_shape(words, env, cwd),
-        "http" | "https" => (httpie_shape(words), false),
+        "http" | "https" => (httpie_shape(words, fed), false),
         _ => (HttpShape::Opaque, false),
     }
+}
+
+/// The segments of `line` that read a pipe, trimmed: each stage of a
+/// pipeline after the first. Another segment with the same text counts
+/// as piped too, which only refuses.
+fn piped_segments(line: &str) -> Vec<String> {
+    crate::pipelines(line)
+        .iter()
+        .flat_map(|pipe| crate::raw_segments(pipe).into_iter().skip(1))
+        .map(|seg| seg.trim().to_string())
+        .collect()
+}
+
+/// A `<` redirect, here-document, or here-string gives the command a
+/// stdin that is not a terminal.
+fn stdin_redirected(seg: &str) -> bool {
+    crate::shell_words(seg).iter().any(|word| {
+        word.trim_start_matches(|c: char| c.is_ascii_digit())
+            .starts_with('<')
+    })
 }
 
 /// How curl reads an option, on the command line and in a curlrc alike.
@@ -4157,8 +4251,10 @@ fn http_config_args(words: &[String]) -> Vec<(String, usize)> {
         .collect()
 }
 
-/// Config files a curl or wget on `line` names. The guard reads one
-/// before the client does, so a write to it on the same line is refused.
+/// Config files a curl or wget on `line` names, and each `WGETRC` or
+/// `SYSTEM_WGETRC` the line sets, as a prefix, an `env` or `export`
+/// argument, or a bare assignment. The guard reads one before the client
+/// does, so a write to it on the same line is refused.
 fn named_http_configs(line: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for l in crate::nested_lines(line, 0) {
@@ -4166,6 +4262,13 @@ fn named_http_configs(line: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
             let words = argv(&seg);
             for (value, _) in http_config_args(&words) {
                 out.push(resolve_cfg(&value, cwd));
+            }
+            for word in crate::shell_words(&seg) {
+                if let Some(("WGETRC" | "SYSTEM_WGETRC", value)) = assignment(&word) {
+                    if !value.is_empty() {
+                        out.push(resolve_cfg(value, cwd));
+                    }
+                }
             }
         }
     }
@@ -4227,14 +4330,14 @@ fn curl_named_file(
     read_curl_file(&resolve_cfg(value, cwd), cwd, tune, seen, true)
 }
 
-/// Default curlrc search. `CURL_HOME` replaces the others: a missing file
-/// there is opaque, because the variable says a config applies and it
-/// could not be read. Otherwise the first file that exists, in curl's
-/// order, is the one curl would load: the XDG file, then `HOME`, then the
-/// Windows `USERPROFILE`, `APPDATA`, and `USERPROFILE\Application Data`.
-/// Windows curl also takes `_curlrc` after `.curlrc` in each. The Windows
-/// variables are read wherever they are set, so a seat that sets one is
-/// judged as Windows curl would be.
+/// Default curlrc search, in curl 8's order. The first file that exists
+/// is the one curl loads: `$CURL_HOME/.curlrc`, `$XDG_CONFIG_HOME/.curlrc`,
+/// `$HOME/.curlrc`, then, only while `XDG_CONFIG_HOME` is unset,
+/// `$CURL_HOME/.config/curlrc` and `$HOME/.config/curlrc`, and last
+/// `.curlrc` in the passwd home. An empty variable is unset. Windows curl
+/// also tries `_curlrc` and `USERPROFILE` and `APPDATA` after `HOME`; curl
+/// on Linux reads neither, so a file there must not stand in for the one
+/// it does read.
 fn curl_default_files(
     env: &[(String, String)],
     cwd: Option<&Path>,
@@ -4246,28 +4349,30 @@ fn curl_default_files(
             .filter(|dir| !dir.is_empty())
             .map(PathBuf::from)
     };
-    if let Some(dir) = dir_of("CURL_HOME") {
-        let found = first_curl_file(&curl_rc_names(&dir, cfg!(windows)), cwd, tune, seen);
-        return found.unwrap_or_else(|| {
-            tune.unreadable = true;
-            Some(HttpShape::Opaque)
-        });
-    }
+    let windows = cfg!(windows);
+    let (curl_home, xdg, home) = (
+        dir_of("CURL_HOME"),
+        dir_of("XDG_CONFIG_HOME"),
+        dir_of("HOME"),
+    );
     let mut paths = Vec::new();
-    if let Some(xdg) = dir_of("XDG_CONFIG_HOME") {
-        paths.push(xdg.join("curlrc"));
+    for dir in [&curl_home, &xdg, &home].into_iter().flatten() {
+        paths.extend(curl_rc_names(dir, windows));
     }
-    if let Some(home) = dir_of("HOME") {
-        paths.extend(curl_rc_names(&home, cfg!(windows)));
+    if windows {
+        let profile = dir_of("USERPROFILE");
+        let legacy = profile.as_ref().map(|dir| dir.join("Application Data"));
+        for dir in [profile, dir_of("APPDATA"), legacy].iter().flatten() {
+            paths.extend(curl_rc_names(dir, true));
+        }
     }
-    if let Some(profile) = dir_of("USERPROFILE") {
-        paths.extend(curl_rc_names(&profile, true));
+    if xdg.is_none() {
+        for dir in [&curl_home, &home].into_iter().flatten() {
+            paths.push(dir.join(".config/curlrc"));
+        }
     }
-    if let Some(appdata) = dir_of("APPDATA") {
-        paths.extend(curl_rc_names(&appdata, true));
-    }
-    if let Some(profile) = dir_of("USERPROFILE") {
-        paths.extend(curl_rc_names(&profile.join("Application Data"), true));
+    if let Some(own) = crate::proc_tree::own_home() {
+        paths.push(own.join(".curlrc"));
     }
     first_curl_file(&paths, cwd, tune, seen).flatten()
 }
@@ -4558,7 +4663,8 @@ fn header_sets_host(value: &str) -> bool {
 /// Whether a URL curl requests may reach GitHub: its host is GitHub, an
 /// address, or a name the shell has not expanded yet. Curl takes a word
 /// without a scheme as a URL. Unless `-g` is given, curl expands `{a,b}`
-/// and `[1-3]` into several URLs, so `git{hub,lab}.com` is two hosts.
+/// and `[1-3]` into several URLs, so `git{hub,lab}.com` is two hosts. A
+/// `[` that opens an IPv6 address is not a glob, as curl reads it.
 fn curl_url_github(url: &str, globoff: bool) -> bool {
     let url = url
         .trim()
@@ -4568,10 +4674,22 @@ fn curl_url_github(url: &str, globoff: bool) -> bool {
     if unreadable_token(auth) || auth.contains("{{") {
         return true;
     }
-    if !globoff && auth.contains(['{', '}', '[', ']']) {
+    let globbed = match auth
+        .split_once('[')
+        .map(|(head, tail)| (head, tail.split_once(']')))
+    {
+        Some((head, Some((ip, tail)))) if ip.parse::<std::net::Ipv6Addr>().is_ok() => {
+            format!("{head}{tail}")
+        }
+        _ => auth.to_string(),
+    };
+    if !globoff && globbed.contains(['{', '}', '[', ']']) {
         return true;
     }
-    let hostport = auth.rsplit_once('@').map_or(auth, |(_, host)| host);
+    let auth = percent_decoded(auth);
+    let hostport = auth
+        .rsplit_once('@')
+        .map_or(auth.as_str(), |(_, host)| host);
     let host = strip_host_port(hostport)
         .trim_end_matches('.')
         .to_ascii_lowercase();
@@ -4791,7 +4909,7 @@ fn wget_files(
             opaque.then_some(HttpShape::Opaque)
         }
         WgetFiles::Defaults => {
-            if let Some(shape) = wget_system(env, tune) {
+            if let Some(shape) = wget_system(env, cwd, tune) {
                 return Some(shape);
             }
             wget_user(env, cwd, tune)
@@ -4799,10 +4917,12 @@ fn wget_files(
     }
 }
 
-fn wget_system(env: &[(String, String)], tune: &mut Tune) -> Option<HttpShape> {
+/// Wget reads `SYSTEM_WGETRC` when that file exists and `/etc/wgetrc`
+/// when it does not. A relative path is the command's, as for `WGETRC`.
+fn wget_system(env: &[(String, String)], cwd: Option<&Path>, tune: &mut Tune) -> Option<HttpShape> {
     if let Some(path) = prefixed_or_process(env, "SYSTEM_WGETRC") {
         if !path.is_empty() {
-            let path = PathBuf::from(path);
+            let path = resolve_cfg(&path, cwd);
             match open_cfg(&path) {
                 Ok(None) => {}
                 Err(()) => {
@@ -4883,17 +5003,19 @@ fn wget_key_moves_target(key: &str, value: &str) -> bool {
     }
 }
 
+/// Wget reads a `-e` command as a wgetrc line: the name in any case, with
+/// every `-` and `_` dropped, so `-e post-data=x` is a POST.
 fn note_wget_exec(value: &str, tune: &mut Tune) {
     let lower = value.to_ascii_lowercase();
     let (key, val) = lower.split_once('=').unwrap_or((lower.as_str(), ""));
-    let key = key.trim();
-    if wget_key_moves_target(&key.replace(['_', '-'], ""), val) {
+    let key = key.trim().replace(['_', '-'], "");
+    if wget_key_moves_target(&key, val) {
         tune.github = true;
     }
-    match key {
+    match key.as_str() {
         "method" => tune.method = Some(val.trim().to_ascii_uppercase()),
-        "body_data" | "body_file" | "post_data" | "post_file" | "header" => tune.body = true,
-        "max_redirect" | "maxredirect" | "max-redirect" => tune.no_follow = zero(val),
+        "bodydata" | "bodyfile" | "postdata" | "postfile" | "header" => tune.body = true,
+        "maxredirect" => tune.no_follow = zero(val),
         _ => {}
     }
 }
@@ -4902,15 +5024,55 @@ fn zero(value: &str) -> bool {
     value.trim().parse::<u64>().is_ok_and(|n| n == 0)
 }
 
-fn httpie_shape(words: &[String]) -> HttpShape {
+/// HTTPie's long options that take the next word when no `=` joins it.
+const HTTPIE_LONG_VALUES: &str = "auth auth-type boundary cert cert-key cert-key-pass ciphers \
+    default-scheme format-options history-print max-headers max-redirects output pretty print \
+    proxy response-charset response-mime session session-read-only ssl style timeout verify";
+
+/// HTTPie sends POST when no method is given and there is a body: a data
+/// item, `--raw`, or a stdin that is not a terminal. `fed` is a pipe or a
+/// redirect on the line; `-I` or `--ignore-stdin` leaves it unread.
+/// HTTPie takes a unique prefix of a long option and a cluster of short
+/// flags. An abbreviated option that takes a value is not skipped, so its
+/// value is read as the URL and the URL as an item, which only refuses.
+fn httpie_shape(words: &[String], fed: bool) -> HttpShape {
     let mut method: Option<String> = None;
     let mut saw_method = false;
     let mut body = false;
-    for word in words.iter().skip(1) {
+    let mut stdin = fed;
+    let mut url = false;
+    let mut rest = words.iter().skip(1);
+    while let Some(word) = rest.next() {
         if word.starts_with('@') {
             return HttpShape::Opaque;
         }
-        if word.starts_with('-') {
+        if let Some(long) = word.strip_prefix("--") {
+            let (name, joined) = long
+                .split_once('=')
+                .map_or((long, false), |(n, _)| (n, true));
+            let raw = name.len() >= 2 && "raw".starts_with(name);
+            body |= raw;
+            if name.len() >= 8 && "ignore-stdin".starts_with(name) {
+                stdin = false;
+            }
+            if !joined && (raw || HTTPIE_LONG_VALUES.split_whitespace().any(|v| v == name)) {
+                rest.next();
+            }
+            continue;
+        }
+        if let Some(flags) = word.strip_prefix('-') {
+            for (at, flag) in flags.char_indices() {
+                if "AaoPps".contains(flag) {
+                    if at + 1 == flags.len() {
+                        rest.next();
+                    }
+                    break;
+                }
+                if !"FISbcdfhjmqvx".contains(flag) {
+                    break;
+                }
+                stdin &= flag != 'I';
+            }
             continue;
         }
         let upper = word.to_ascii_uppercase();
@@ -4924,9 +5086,32 @@ fn httpie_shape(words: &[String]) -> HttpShape {
             method = Some(upper);
             continue;
         }
-        if word.contains('=') && !word.starts_with("http") {
+        if !std::mem::replace(&mut url, true) {
+            continue;
+        }
+        if httpie_data_item(word) {
             body = true;
         }
     }
-    finish_http(method.as_deref(), body, false, false)
+    finish_http(method.as_deref(), body || stdin, false, false)
+}
+
+/// An HTTPie request item that is a body: the first separator is `=`,
+/// `:=`, `=@`, `:=@`, or a form file's `@`. `==` is a query and `:` a
+/// header, so a URL is not one. A backslash makes the next character
+/// plain.
+fn httpie_data_item(item: &str) -> bool {
+    let mut chars = item.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            ':' => return chars.peek() == Some(&'='),
+            '=' => return chars.peek() != Some(&'='),
+            '@' => return true,
+            _ => {}
+        }
+    }
+    false
 }
