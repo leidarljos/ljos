@@ -13658,7 +13658,7 @@ pub(crate) fn queue_memory(
 }
 
 /// Queue the memory copy of a note the pack did not take, for the next
-/// note, finish, doctor or session start to send. `false` when it was
+/// note, finish or session start to send. `false` when it was
 /// already queued, or when the pack would refuse the text.
 ///
 /// # Errors
@@ -13674,7 +13674,9 @@ pub fn queue_note(issue: &str, text: &str) -> Result<bool> {
 
 /// Send the memories queued while the pack was off or not answering. A
 /// copy the pack would refuse is dropped. A pack that still cannot be
-/// reached leaves the fitted copies queued.
+/// reached leaves the fitted copies queued. Queue bytes that are not a
+/// memory move to a dated `.damaged` file beside the queue, and the
+/// drain names it.
 ///
 /// # Errors
 ///
@@ -13701,19 +13703,15 @@ fn fit_queued(notes: Vec<note_queue::Queued>) -> Vec<note_queue::Queued> {
 }
 
 fn flush_note_queue_in(dir: &Path) -> Result<note_queue::Drained> {
-    let pending = note_queue::pending_in(dir);
-    if pending.is_empty() {
-        return Ok(note_queue::Drained::default());
-    }
-    let fitted = fit_queued(pending.clone());
-    if fitted != pending {
-        note_queue::replace_in(dir, fitted)?;
-    }
+    let set_aside = note_queue::tidy_in(dir, fit_queued)?;
     if note_queue::pending_in(dir).is_empty() {
-        return Ok(note_queue::Drained::default());
+        return Ok(note_queue::Drained {
+            set_aside: set_aside.into_iter().collect(),
+            ..Default::default()
+        });
     }
     let client = pack();
-    note_queue::drain_in(dir, |note| {
+    let mut done = note_queue::drain_in(dir, |note| {
         let client = match &client {
             Ok(client) => client.clone().with_workspace(note.workspace.clone()),
             Err(e) => return note_queue::Sent::Wait(format!("{e:#}")),
@@ -13739,7 +13737,9 @@ fn flush_note_queue_in(dir: &Path) -> Result<note_queue::Drained> {
             Err(e) if note_can_wait(&e) => note_queue::Sent::Wait(format!("{e:#}")),
             Err(e) => note_queue::Sent::Refused(format!("{e:#}")),
         }
-    })
+    })?;
+    done.set_aside.splice(0..0, set_aside);
+    Ok(done)
 }
 
 fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Result<Value> {
@@ -13754,31 +13754,70 @@ fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Resu
     with_writer(|| admit::write_agent_one(client, atom.clone()))
 }
 
-/// The doctor row for the note queue. It sends what waits first, so a
-/// doctor run after the pack comes back empties the queue.
+/// How the note queue row opens while another process holds the queue
+/// lock. The row is `warn`: a lock held for good stops every send too.
+const QUEUE_BUSY: &str = "busy: ";
+
+/// How the note queue row opens while a damaged file a send left beside
+/// the queue is there. The row is `warn` until the person reads and
+/// deletes it: a send that ran from a hook said so to nobody.
+const QUEUE_SET_ASIDE: &str = "set aside: ";
+
+/// The doctor row for the note queue: how many memory copies wait for the
+/// pack. It only reads the queue, without its lock: sending would rewrite
+/// the queue, and wait on a lock another ljos may hold. The next note or
+/// finish that reaches the pack, or a session start, sends them. A lock
+/// another process holds is tried once, not waited on, and the row says
+/// the queue is busy. A whole line that is not a note is damage, as a
+/// torn last row is: a send moves it out of the queue, and the row names
+/// the file it went to.
 fn note_queue_row() -> Habitat {
-    let queue = note_queue::state_dir().join("note-queue.jsonl");
-    if let Err(state) = doctor_state_log("note queue", &queue) {
-        return Habitat {
-            name: "note queue",
-            ok: false,
-            state,
-        };
+    let dir = note_queue::state_dir();
+    let queue = dir.join("note-queue.jsonl");
+    let damaged = |state| Habitat {
+        name: "note queue",
+        ok: false,
+        state,
+    };
+    let bytes = match doctor_state_log("note queue", &queue) {
+        Ok(bytes) => bytes,
+        Err(state) => return damaged(state),
+    };
+    let (notes, unread): (Vec<note_queue::Queued>, usize) = complete_rows_counted(&bytes);
+    let waiting = notes.len();
+    if unread > 0 {
+        return damaged(format!(
+            "the note queue at {} is damaged: {unread} row(s) are not a note; {waiting} note(s) wait. `ljos finish` or the next session start moves those rows to a dated `.damaged` file beside it",
+            queue.display()
+        ));
     }
-    let (ok, state) = match flush_note_queue() {
-        Ok(done) if done == note_queue::Drained::default() => (true, "empty".to_string()),
-        Ok(done) => (
-            done.left == 0,
-            note_queue::drained_lines(&done)
-                .trim_end()
-                .replace('\n', "; "),
-        ),
-        Err(e) => (false, format!("could not read or rewrite the queue: {e:#}")),
+    let set_aside = note_queue::set_aside_in(&dir);
+    let state = if let Some(lock) = note_queue::busy_in(&dir) {
+        format!(
+            "{QUEUE_BUSY}another process holds {}, so a note may be landing or leaving; {waiting} note(s) wait. Run `ljos doctor` again once it lets go",
+            lock.display()
+        )
+    } else if !set_aside.is_empty() {
+        let bytes: u64 = set_aside.iter().map(|(_, len)| len).sum();
+        let files: Vec<String> = set_aside
+            .iter()
+            .map(|(path, _)| path.display().to_string())
+            .collect();
+        format!(
+            "{QUEUE_SET_ASIDE}a send moved {bytes} byte(s) of the queue that are not a note to {}; they were not sent. Read them for a note worth keeping, then delete the file. {waiting} note(s) wait",
+            files.join(", ")
+        )
+    } else if waiting == 0 {
+        "empty".to_string()
+    } else {
+        format!(
+            "{waiting} note(s) wait for the pack; the next `ljos note` or `ljos finish` that reaches it, or a session start, sends them"
+        )
     };
     Habitat {
         name: "note queue",
         state,
-        ok,
+        ok: true,
     }
 }
 
@@ -22105,13 +22144,18 @@ fn clear_nonblock(fd: std::os::unix::io::RawFd) -> std::io::Result<()> {
 /// `O_NONBLOCK` would wait, and reading a device such as `/dev/zero`
 /// would not end.
 pub(crate) fn read_state_file(path: &Path) -> std::io::Result<Vec<u8>> {
-    read_state_file_dated(path).map(|(bytes, _)| bytes)
+    read_state_file_dated(path, u64::MAX).map(|(bytes, _)| bytes)
 }
 
 /// [`read_state_file`] with the log's mtime, taken from the same
 /// descriptor once the read is done, so a row appended during the read
-/// leaves the time no older than its bytes. A missing log has none.
-fn read_state_file_dated(path: &Path) -> std::io::Result<(Vec<u8>, Option<std::time::SystemTime>)> {
+/// leaves the time no older than its bytes. A missing log has none. A
+/// log longer than `limit` bytes is an error of kind `FileTooLarge`, and
+/// no more than one byte past `limit` is read to find that out.
+fn read_state_file_dated(
+    path: &Path,
+    limit: u64,
+) -> std::io::Result<(Vec<u8>, Option<std::time::SystemTime>)> {
     use std::io::Read;
     let (dir, name) = open_state_dir(path)?;
     let mut file = match open_regular_at(&dir, &name, path, libc::O_RDONLY, 0) {
@@ -22119,10 +22163,25 @@ fn read_state_file_dated(path: &Path) -> std::io::Result<(Vec<u8>, Option<std::t
         Err(err) if err.raw_os_error() == Some(libc::ENOENT) => return Ok((Vec::new(), None)),
         Err(err) => return Err(err),
     };
+    let too_large = |size: u64| {
+        std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            format!("it is {size} bytes, past the {limit}-byte limit, so it was not read"),
+        )
+    };
+    let size = file.metadata()?.len();
+    if size > limit {
+        return Err(too_large(size));
+    }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    let modified = file.metadata()?.modified().ok();
-    Ok((bytes, modified))
+    file.by_ref()
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    let meta = file.metadata()?;
+    if bytes.len() as u64 > limit {
+        return Err(too_large(meta.len()));
+    }
+    Ok((bytes, meta.modified().ok()))
 }
 
 /// Replace `path` with `bytes` through the directory ljos made, refusing a
@@ -22197,6 +22256,14 @@ pub(crate) fn rewrite_state_file(path: &Path, bytes: &[u8]) -> std::io::Result<(
         unsafe { libc::unlinkat(dir.as_raw_fd(), tmp.as_ptr(), 0) };
         return Err(err);
     }
+    dir.sync_all()
+}
+
+/// Put a state file [`append_locked_row`] wrote, and its directory entry,
+/// on disk, opening it the way every state-log open does.
+pub(crate) fn sync_state_file(path: &Path) -> std::io::Result<()> {
+    let (dir, name) = open_state_dir(path)?;
+    open_regular_at(&dir, &name, path, libc::O_RDONLY, 0)?.sync_all()?;
     dir.sync_all()
 }
 
@@ -22411,21 +22478,49 @@ fn bypass_skip_note(path: &Path, err: &std::io::Error) -> String {
 }
 
 /// The doctor's line on the bypass log: how many commands ran past the
-/// guard, and the last one. Passing over the guard is allowed, so the row
-/// stays green; it is there to be read.
+/// guard, and the last one. Passing over the guard is allowed, so a whole
+/// log is green; it is there to be read. A damaged one is not `ok`, and
+/// [`doctor_word`] makes it a `warn`: the guard still judges every
+/// command, and what is hurt is the record of those that ran past it.
 fn bypass_row() -> Habitat {
-    let state = match bypass_log_path() {
-        None => "no command has run past the guard".to_string(),
+    let (state, ok) = match bypass_log_path() {
+        None => ("no command has run past the guard".to_string(), true),
         Some(path) => match doctor_state_log("guard bypass log", &path) {
-            Ok(bytes) => bypass_summary(&bytes, &path.display().to_string()),
-            Err(state) => state,
+            Ok(bytes) => {
+                let (_, dropped): (Vec<Value>, usize) = complete_rows_counted(&bytes);
+                (
+                    bypass_summary(&bytes, &path.display().to_string()),
+                    dropped == 0,
+                )
+            }
+            Err(state) => (state, false),
         },
     };
     Habitat {
         name: "guard bypass",
         state,
-        ok: true,
+        ok,
     }
+}
+
+/// The doctor rows that read a state log ljos keeps, with the log as the
+/// summary line names it. Each row is `ok` unless its log is damaged, and
+/// a damaged log keeps the summary from calling ljos ready. A damaged
+/// guard bypass log is a `warn` that leaves the exit at 0 (see
+/// [`bypass_row`]). A damaged note queue is `no` and fails doctor: its
+/// rows are memory copies the pack has not taken, and a queue that cannot
+/// be read or added to loses them. An empty or missing log is whole.
+const STATE_LOG_ROWS: &[(&str, &str)] = &[
+    ("guard bypass", "the guard bypass log"),
+    ("note queue", "the note queue"),
+];
+
+/// How the summary line names the log a [`STATE_LOG_ROWS`] row reads.
+fn state_log_named(row: &str) -> Option<&'static str> {
+    STATE_LOG_ROWS
+        .iter()
+        .find(|(name, _)| *name == row)
+        .map(|(_, log)| *log)
 }
 
 /// How long a state log's last row may sit without its newline before
@@ -22433,32 +22528,41 @@ fn bypass_row() -> Habitat {
 /// `write_all` under the lock, so a live append ends well inside this.
 const UNFINISHED_ROW_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The longest state log the doctor reads. A row is a few hundred bytes,
+/// so this is over a hundred thousand rows. A log past it is a runaway
+/// writer or a file put in its place, and reading all of it would hold
+/// doctor and its memory for as long as the file goes on.
+const DOCTOR_READ_LIMIT: u64 = 32 << 20;
+
 /// A state log's bytes for a doctor row, or the row's text when the log
 /// is damaged. A missing log is empty. Any other refusal from
 /// [`read_state_file`], a symlink, a fifo, a socket, a directory or a log
 /// ljos may not read, is damaged, since calling it empty would hide the
-/// swap. So is a last row without its newline that has not been written
+/// swap. So is a log past [`DOCTOR_READ_LIMIT`], left unread, and a last
+/// row without its newline that has not been written
 /// to for [`UNFINISHED_ROW_GRACE`]: [`complete_rows`] leaves it for a
-/// live writer to finish, and nobody is finishing it.
+/// live writer to finish, and nobody is finishing it. An mtime further
+/// ahead of the clock than the grace is no live write either, since the
+/// kernel dates a write by the clock: it is a touch or a clock set back.
 fn doctor_state_log(what: &str, path: &Path) -> std::result::Result<Vec<u8>, String> {
     let damaged =
         |why: &dyn std::fmt::Display| format!("the {what} at {} is damaged: {why}", path.display());
-    let (bytes, modified) = match read_state_file_dated(path) {
+    let (bytes, modified) = match read_state_file_dated(path, DOCTOR_READ_LIMIT) {
         Ok(read) => read,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => return Err(damaged(&err)),
     };
     let unfinished = bytes.last().is_some_and(|&b| b != b'\n');
-    let idle = modified
-        .and_then(|at| at.elapsed().ok())
-        .is_some_and(|age| age >= UNFINISHED_ROW_GRACE);
-    if unfinished && idle {
-        return Err(damaged(&format_args!(
-            "an unfinished last row, unchanged for over {}s",
-            UNFINISHED_ROW_GRACE.as_secs()
-        )));
+    let grace = UNFINISHED_ROW_GRACE.as_secs();
+    match modified.map(|at| at.elapsed()) {
+        Some(Ok(age)) if unfinished && age >= UNFINISHED_ROW_GRACE => Err(damaged(&format_args!(
+            "an unfinished last row, unchanged for over {grace}s"
+        ))),
+        Some(Err(ahead)) if unfinished && ahead.duration() >= UNFINISHED_ROW_GRACE => Err(damaged(
+            &format_args!("an unfinished last row, dated over {grace}s ahead of the clock"),
+        )),
+        _ => Ok(bytes),
     }
-    Ok(bytes)
 }
 
 /// [`bypass_row`]'s text from the log's rows.
@@ -22476,7 +22580,7 @@ pub fn bypass_summary(bytes: &[u8], path: &str) -> String {
     };
     let damaged = if dropped > 0 {
         format!(
-            "; {dropped} row{} could not be read",
+            "; the log is damaged: {dropped} row{} could not be read",
             if dropped == 1 { "" } else { "s" }
         )
     } else {
@@ -23401,7 +23505,8 @@ pub fn pack_token_row(
     }
 }
 
-/// The required rows that do not answer, by name.
+/// The required rows that do not answer, and a damaged note queue (see
+/// [`STATE_LOG_ROWS`]), by name.
 #[must_use]
 pub fn failing(rows: &[Habitat]) -> Vec<&str> {
     rows.iter()
@@ -23411,7 +23516,8 @@ pub fn failing(rows: &[Habitat]) -> Vec<&str> {
                     || h.name == "pack"
                     || h.name == "pack token"
                     || h.name == "mcp"
-                    || h.name == "cloud age")
+                    || h.name == "cloud age"
+                    || h.name == "note queue")
         })
         .map(|h| h.name)
         .collect()
@@ -23476,8 +23582,10 @@ fn optional_bin(name: &str) -> bool {
 
 /// `ok` when the row answers, `warn` when the policy row names an
 /// `ljos-policyd` without phronesis, a runner skill or runner env ljos
-/// wrote is stale or edited by hand, or the cloud guard file is a known
-/// older version or differs from the seat refusals, `info` when the row
+/// wrote is stale or edited by hand, the note queue is busy or has bytes
+/// set aside beside it, the guard bypass log is damaged, or the cloud
+/// guard file is a known older
+/// version or differs from the seat refusals, `info` when the row
 /// is optional and absent, `no` when a required row failed. A stale skill,
 /// env or cloud guard file ljos wrote is a warning `ljos doctor --fix`
 /// rewrites, not a failure. A cloud guard file that differs is a warning
@@ -23500,6 +23608,15 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
         return "warn";
     }
     if row.ok && row.name == "mcp" && row.state.starts_with("warning:") {
+        return "warn";
+    }
+    if row.ok
+        && row.name == "note queue"
+        && (row.state.starts_with(QUEUE_BUSY) || row.state.starts_with(QUEUE_SET_ASIDE))
+    {
+        return "warn";
+    }
+    if row.name == "guard bypass" && !row.ok {
         return "warn";
     }
     if row.ok && row.name == "policy" && row.state.ends_with(POLICY_TABLE_ONLY) {
@@ -23550,14 +23667,19 @@ pub fn format_doctor(rows: &[Habitat]) -> String {
 }
 
 /// The line `ljos doctor` opens with: whether the seat is ready, which
-/// parts work or which required parts do not answer, and how many
-/// optional parts are off.
+/// parts work or which required parts do not answer, which state logs are
+/// damaged, and how many optional parts are off.
 #[must_use]
 pub fn doctor_summary(rows: &[Habitat]) -> String {
     let down = failing(rows);
+    let damaged: Vec<&str> = rows
+        .iter()
+        .filter(|h| !h.ok)
+        .filter_map(|h| state_log_named(h.name))
+        .collect();
     let off = rows.iter().filter(|h| doctor_word(h) == "info").count();
     let words: Vec<(&str, &str)> = rows.iter().map(|h| (doctor_word(h), h.name)).collect();
-    summary_line(&down, &working_parts(&words), off)
+    summary_line(&down, &damaged, &working_parts(&words), off)
 }
 
 /// The parts a ready line can name, each with the rows that answer for
@@ -23590,20 +23712,37 @@ fn and_list(names: &[&str]) -> String {
     }
 }
 
-fn summary_line(down: &[&str], working: &[&str], off: usize) -> String {
-    let mut line = if down.is_empty() {
+/// `down` are failing rows by name; `damaged` are the state logs, as
+/// [`STATE_LOG_ROWS`] names them, whose rows are not `ok`. A failing row
+/// whose log is in `damaged` is said once, as damaged. A damaged log
+/// whose row does not fail still keeps the line from saying ready.
+fn summary_line(down: &[&str], damaged: &[&str], working: &[&str], off: usize) -> String {
+    let silent: Vec<&str> = down
+        .iter()
+        .copied()
+        .filter(|name| state_log_named(name).is_none_or(|log| !damaged.contains(&log)))
+        .map(plain_part)
+        .collect();
+    let mut why = Vec::new();
+    if !silent.is_empty() {
+        let verb = if silent.len() == 1 { "does" } else { "do" };
+        why.push(format!("{} {verb} not answer", and_list(&silent)));
+    }
+    if !damaged.is_empty() {
+        let verb = if damaged.len() == 1 { "is" } else { "are" };
+        why.push(format!("{} {verb} damaged", and_list(damaged)));
+    }
+    let why = why.join(", and ");
+    let mut line = if why.is_empty() {
         match working {
             [] => "ljos is ready.".to_string(),
             [one] => format!("ljos is ready: {one} works."),
             parts => format!("ljos is ready: {} work.", and_list(parts)),
         }
+    } else if down.is_empty() {
+        format!("ljos runs, but {why}.")
     } else {
-        let names: Vec<&str> = down.iter().copied().map(plain_part).collect();
-        format!(
-            "ljos is not ready: {} {} not answer.",
-            and_list(&names),
-            if down.len() == 1 { "does" } else { "do" }
-        )
+        format!("ljos is not ready: {why}.")
     };
     if off > 0 {
         line.push_str(" Optional extras: `ljos doctor --all`.\n");
@@ -23680,7 +23819,7 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                     _ => {}
                 }
             }
-            out.push_str(&summary_line(&down, &working_parts(&words), off));
+            out.push_str(&summary_line(&down, &[], &working_parts(&words), off));
             out.push_str(&act);
         }
         "island" => {
@@ -27730,6 +27869,24 @@ impl CommitLock {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    /// Whether another process holds the private lock at `path` now. It
+    /// does not wait and does not create the file: a missing lock is not
+    /// held, and one that cannot be opened is no lock to
+    /// [`Self::acquire_private`] either.
+    pub(crate) fn is_held_private(path: &std::path::Path) -> bool {
+        use std::os::unix::io::AsRawFd;
+        let Ok((dir, name)) = open_state_dir(path) else {
+            return false;
+        };
+        let Ok(file) = open_regular_at(&dir, &name, path, libc::O_RDONLY, 0) else {
+            return false;
+        };
+        // SAFETY: flock on a descriptor this function owns. A shared lock
+        // taken here goes when `file` closes, at the end of this call.
+        let taken = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0;
+        !taken && std::io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK)
     }
 }
 
@@ -42701,6 +42858,22 @@ mod tests {
         );
     }
 
+    /// A log up to the limit is read whole; one byte past it is refused
+    /// with its size, and the plain read has no limit.
+    #[test]
+    fn a_state_log_past_the_limit_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("ljos/bypass.jsonl");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, b"0123456789").unwrap();
+        let (bytes, _) = read_state_file_dated(&log, 10).unwrap();
+        assert_eq!(bytes, b"0123456789");
+        let err = read_state_file_dated(&log, 9).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::FileTooLarge);
+        assert!(err.to_string().contains("10 bytes"), "{err}");
+        assert_eq!(read_state_file(&log).unwrap(), b"0123456789");
+    }
+
     /// A row torn in the middle of the log, bytes that are not UTF-8 among
     /// them, is one the doctor reports as unreadable, not one it passes
     /// over to call the log healthy and empty.
@@ -42717,7 +42890,7 @@ mod tests {
         let said = bypass_summary(&mixed, "LOG");
         assert!(
             said.starts_with("1 command ran past the guard")
-                && said.contains("1 row could not be read"),
+                && said.contains("damaged: 1 row could not be read"),
             "{said}"
         );
     }
@@ -42740,28 +42913,45 @@ mod tests {
             r#"{"issue":"ljos-abc","text":"kept","workspace":"w","at":1792573200}"#,
             "\n",
         );
-        let cases: [(&str, &[u8], bool, bool); 6] = [
-            ("stale unfinished", &torn, true, true),
-            ("fresh unfinished", &torn, false, false),
-            ("healthy", row, true, false),
-            ("empty", b"", true, false),
-            ("v0.32.1", v0_32_1.as_bytes(), true, false),
-            ("missing", b"", true, false),
+        let year = 365 * 24 * 3600;
+        let cases: [(&str, &[u8], i64, Option<&str>); 9] = [
+            (
+                "stale unfinished",
+                &torn,
+                -60,
+                Some("unchanged for over 5s"),
+            ),
+            ("fresh unfinished", &torn, 0, None),
+            (
+                "unfinished, a year ahead",
+                &torn,
+                year,
+                Some("ahead of the clock"),
+            ),
+            ("unfinished, a second ahead", &torn, 1, None),
+            ("healthy", row, -60, None),
+            ("healthy, a year ahead", row, year, None),
+            ("empty", b"", -60, None),
+            ("v0.32.1", v0_32_1.as_bytes(), -60, None),
+            ("missing", b"", 0, None),
         ];
-        for (case, bytes, stale, damaged) in cases {
+        for (case, bytes, shift, damaged) in cases {
             let _ = std::fs::remove_file(&log);
             if case != "missing" {
                 std::fs::write(&log, bytes).unwrap();
-                if stale {
-                    age_by(&log, std::time::Duration::from_secs(60));
-                }
+                let by = std::time::Duration::from_secs(shift.unsigned_abs());
+                let now = std::time::SystemTime::now();
+                let at = if shift < 0 { now - by } else { now + by };
+                let file = std::fs::File::options().write(true).open(&log).unwrap();
+                file.set_modified(at).unwrap();
             }
             let said = doctor_state_log("guard bypass log", &log);
-            if damaged {
+            if let Some(why) = damaged {
                 let said = said.expect_err(case);
                 assert!(
                     said.contains(&log.display().to_string())
-                        && said.contains("an unfinished last row"),
+                        && said.contains("an unfinished last row")
+                        && said.contains(why),
                     "{case}: {said}"
                 );
             } else {
@@ -43057,9 +43247,13 @@ mod tests {
                     "{kind} {name}: {}",
                     habitat.state
                 );
-                if std::ptr::eq(log, &queue) {
-                    assert!(!habitat.ok, "{kind}: {}", habitat.state);
-                }
+                assert!(!habitat.ok, "{kind} {name}: {}", habitat.state);
+                let word = if std::ptr::eq(log, &queue) {
+                    "no"
+                } else {
+                    "warn"
+                };
+                assert_eq!(doctor_word(&habitat), word, "{kind} {name}");
                 let _ = std::fs::remove_file(log);
                 let _ = std::fs::remove_dir(log);
             }
@@ -43067,6 +43261,131 @@ mod tests {
 
         let missing = bounded("missing bypass", bypass_row);
         assert_eq!(missing.state, "no command has run past the guard");
+        assert!(missing.ok);
+    }
+
+    /// A damaged state log is a row the short doctor shows, and the
+    /// summary does not call ljos ready. A damaged bypass log warns and
+    /// passes; a damaged note queue fails. An empty or a missing log is
+    /// neither, so a seat that never bypassed or queued stays ready.
+    #[test]
+    fn a_damaged_state_log_keeps_doctor_from_saying_ready() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let state = dir.path().join("state");
+        let home = dir.path().join("home");
+        for path in [&data.join("ljos"), &state.join("ljos"), &home] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let _env = HoldEnv::set(&[
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_DATA_HOME", data.to_str().unwrap()),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+        ]);
+        let bypass = bypass_log_path().unwrap();
+        let queue = note_queue::state_dir().join("note-queue.jsonl");
+        let torn_bypass: &[u8] = b"{\"kind\":\"switch\",\"command\":\"to";
+        let torn_queue: &[u8] = b"{\"issue\":\"ljos-abc\",\"te";
+        let cases = [
+            ("missing", "missing", "ljos is ready."),
+            ("empty", "empty", "ljos is ready."),
+            (
+                "torn",
+                "missing",
+                "ljos runs, but the guard bypass log is damaged.",
+            ),
+            (
+                "missing",
+                "torn",
+                "ljos is not ready: the note queue is damaged.",
+            ),
+            (
+                "torn",
+                "torn",
+                "ljos is not ready: the guard bypass log and the note queue are damaged.",
+            ),
+        ];
+        for (bypass_is, queue_is, summary) in cases {
+            let mut shown = Vec::new();
+            if bypass_is == "torn" {
+                shown.push("warn\tguard bypass\t");
+            }
+            if queue_is == "torn" {
+                shown.push("no\tnote queue\t");
+            }
+            for (log, is, torn) in [
+                (&bypass, bypass_is, torn_bypass),
+                (&queue, queue_is, torn_queue),
+            ] {
+                let _ = std::fs::remove_file(log);
+                if is != "missing" {
+                    std::fs::write(log, if is == "torn" { torn } else { b"" }).unwrap();
+                    age_by(log, std::time::Duration::from_secs(60));
+                }
+            }
+            let rows = vec![
+                bounded("doctor bypass", bypass_row),
+                bounded("doctor note queue", note_queue_row),
+            ];
+            let short = format_doctor_short(&rows);
+            assert!(short.starts_with(summary), "{short}");
+            for line in &shown {
+                assert!(
+                    short.lines().any(|l| l.starts_with(line)),
+                    "{line}: {short}"
+                );
+            }
+            assert_eq!(short.lines().count(), 1 + shown.len(), "{short}");
+            let fails = if queue_is == "torn" {
+                vec!["note queue"]
+            } else {
+                vec![]
+            };
+            assert_eq!(failing(&rows), fails);
+        }
+        let line = summary_line(&["note queue"], &[], &[], 0);
+        assert!(line.starts_with("ljos is not ready: note queue does not answer."));
+    }
+
+    /// A row that is not a note fails the queue row until a send moves it
+    /// aside. The row then warns and names the file, so a send from a hook,
+    /// whose report nobody reads, still gets said; once the person deletes
+    /// the file the row is plain again.
+    #[test]
+    fn the_queue_row_names_what_a_send_set_aside() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[
+            ("XDG_STATE_HOME", dir.path().to_str().unwrap()),
+            ("PACKSET_URL", "off"),
+        ]);
+        let queue_dir = note_queue::state_dir();
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let old = r#"{"issue":"ljos-old","text":"kept","workspace":"w","at":1,"kind":"note"}"#;
+        let cut = "{\"issue\":\"ljos-new\",\"te\n";
+        std::fs::write(queue_dir.join("note-queue.jsonl"), format!("{old}\n{cut}")).unwrap();
+        assert_eq!(doctor_word(&bounded("damaged", note_queue_row)), "no");
+
+        let done = flush_note_queue().unwrap();
+        let [aside] = done.set_aside.as_slice() else {
+            panic!("{done:?}");
+        };
+        let row = bounded("set aside", note_queue_row);
+        assert!(row.ok, "{}", row.state);
+        assert_eq!(doctor_word(&row), "warn", "{}", row.state);
+        assert!(
+            row.state.starts_with(QUEUE_SET_ASIDE)
+                && row.state.contains(&aside.path.display().to_string())
+                && row.state.contains(&format!("{} byte(s)", cut.len())),
+            "{}",
+            row.state
+        );
+
+        std::fs::remove_file(&aside.path).unwrap();
+        let row = bounded("cleared", note_queue_row);
+        assert_eq!(doctor_word(&row), "ok", "{}", row.state);
+        assert!(row.state.starts_with("1 note(s) wait"), "{}", row.state);
     }
 
     fn bounded<T: Send + 'static>(what: &str, body: impl FnOnce() -> T + Send + 'static) -> T {
@@ -44354,6 +44673,29 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(crate::note_queue::pending_in(&dir).len(), 1);
     }
 
+    /// A flush with the pack off loses no byte of the queue: the note
+    /// that parses stays queued, and the last one, missing its newline,
+    /// is in the damaged file beside the queue.
+    #[test]
+    fn a_flush_keeps_every_byte_of_the_queue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = r#"{"issue":"ljos-old","text":"kept","workspace":"w","at":1,"kind":"note"}"#;
+        let new =
+            r#"{"issue":"ljos-new","text":"just written","workspace":"w","at":2,"kind":"note"}"#;
+        let queue = tmp.path().join("note-queue.jsonl");
+        std::fs::write(&queue, format!("{old}\n{new}")).unwrap();
+        let _env = crate::test_env_lock();
+        // SAFETY: test_env_lock holds the environment and restores it.
+        unsafe { std::env::set_var("PACKSET_URL", "off") };
+        let done = super::flush_note_queue_in(tmp.path()).unwrap();
+        assert_eq!(done.left, 1, "{done:?}");
+        assert_eq!(std::fs::read_to_string(&queue).unwrap(), format!("{old}\n"));
+        let [aside] = done.set_aside.as_slice() else {
+            panic!("{done:?}");
+        };
+        assert_eq!(std::fs::read_to_string(&aside.path).unwrap(), new);
+    }
+
     /// A lesson queued while the pack is down still names the atom it closes.
     #[test]
     fn a_queued_lesson_keeps_the_atom_it_supersedes() {
@@ -44761,14 +45103,16 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             assert!(line.chars().count() <= 100, "{line}");
         }
         let all: &[&str] = &["memory", "tracker", "command guard"];
-        let cases: [(&[&str], usize); 4] = [
-            (&[], 0),
-            (&[], 6),
-            (&["pack"], 6),
-            (&["pack", "ljos-policyd"], 1),
+        let cases: [(&[&str], &[&str], usize); 6] = [
+            (&[], &[], 0),
+            (&[], &[], 6),
+            (&["pack"], &[], 6),
+            (&["pack", "ljos-policyd"], &[], 1),
+            (&[], &["the guard bypass log"], 6),
+            (&["note queue"], &["the note queue"], 6),
         ];
-        for (down, off) in cases {
-            let line = summary_line(down, all, off);
+        for (down, damaged, off) in cases {
+            let line = summary_line(down, damaged, all, off);
             assert!(line.trim_end().chars().count() <= 100, "{line}");
             assert!(!line.contains("pack"), "{line}");
         }

@@ -1,0 +1,1 @@
+`ljos doctor` printed a damaged guard bypass log as an `ok` row, so the short doctor left it out. A bypass log with an unfinished last row that has sat, a row that cannot be read, or a fifo, socket, directory or symlink in its place is now a `warn` row the short doctor shows. The exit stays 0: the guard still judges every command.
