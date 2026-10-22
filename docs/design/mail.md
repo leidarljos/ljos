@@ -57,9 +57,18 @@ stays on the machine that holds it.
   is left out unless the query names that tag.
 - `ljos_mail_show {thread}` takes a 16-digit thread id. Text parts are
   wrapped as untrusted. HTML is reduced to the text a mail client would
-  show: `display:none`, `visibility:hidden` and the `hidden` attribute drop
-  their text, and the message is flagged when they did. Links are shown as
-  text with their target, never followed. Attachments are listed by name,
+  show. Text the reducer can tell is concealed is dropped: the `hidden`
+  attribute, or a style that sets `display:none`, `visibility:hidden`,
+  `opacity` near 0, a zero `font-size`, a zero width or height, a
+  transparent color or one equal to the background, a negative offset or
+  indent, `clip`, `clip-path` or `mso-hide:all`, inline or through a
+  class or id rule in a `<style>` block. Any `<style>` block or
+  concealment sets `hidden_content: true` on the message. When a
+  stylesheet does what the reducer cannot follow (an `@` rule such as
+  `@media`, a concealing rule on an element or other selector, a color
+  in one rule equal to a background in another, or a linked
+  stylesheet), the part's text is replaced by a note that it was
+  withheld. Links are shown as text with their target, never followed. Attachments are listed by name,
   type, size and sha256, with no content and no path. Hashing reads at
   most 64 MiB of one attachment; past that notmuch is stopped, `sha256`
   is null and `size` is a lower bound.

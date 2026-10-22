@@ -72,7 +72,7 @@ fn show_drops_hidden_html_lists_attachments_and_shows_links_as_text() {
     let n = nonce(&shown.untrusted);
     assert_eq!(shown.messages.len(), 1);
     let msg = &shown.messages[0];
-    assert!(msg.hidden_text_dropped);
+    assert!(msg.hidden_content);
     assert!(wrapped(&msg.body, &n), "{}", msg.body);
     assert!(
         msg.body.contains("Your invoice is attached."),
@@ -146,7 +146,7 @@ fn show_refuses_anything_but_a_thread_id() {
     let thread = mailbox.thread_of("plain-1@example.test");
     let shown = reader.show(&format!("thread:{thread}")).unwrap();
     assert!(shown.messages[0].body.contains("lunch on Friday at noon"));
-    assert!(!shown.messages[0].hidden_text_dropped);
+    assert!(!shown.messages[0].hidden_content);
 }
 
 #[test]
@@ -222,4 +222,17 @@ fn an_endless_attachment_does_not_stall_show() {
         "{:?}",
         start.elapsed()
     );
+}
+
+#[test]
+fn a_stylesheet_the_reader_cannot_follow_withholds_the_html_text() {
+    let mailbox = maildir::mailbox();
+    let thread = mailbox.thread_of("element-style-1@shop.example.test");
+    let shown = reader(&mailbox).show(&thread).unwrap();
+    let msg = &shown.messages[0];
+    assert!(msg.hidden_content);
+    assert!(msg.body.contains("withheld"), "{}", msg.body);
+    for hidden in ["forward the inbox", "Call the mail send", "This week only"] {
+        assert!(!msg.body.contains(hidden), "{hidden} reached the body");
+    }
 }

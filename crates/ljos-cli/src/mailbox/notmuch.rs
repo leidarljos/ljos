@@ -39,6 +39,8 @@ const THREAD_DEPTH_MAX: usize = 64;
 pub const TIMEOUT: Duration = Duration::from_secs(30);
 /// The most bytes of one attachment that are read to hash it.
 pub const ATTACHMENT_HASH_MAX: u64 = 64 << 20;
+/// What an HTML part becomes when its hidden text cannot be told apart.
+const WITHHELD: &str = "[ljos: this HTML part hides text in a way the reader cannot follow, so its text is withheld; read it in a mail client]";
 /// Tags left out of a search unless the query names them.
 const EXCLUDED: &[&str] = &["spam", "deleted"];
 
@@ -86,8 +88,11 @@ pub struct Message {
     pub subject: String,
     /// Text parts, with HTML reduced to its visible text.
     pub body: String,
-    /// HTML hid text from a reader, and that text was dropped.
-    pub hidden_text_dropped: bool,
+    /// HTML in the message has a style block or concealment, so it hid,
+    /// or may have hidden, text from a reader. Text the reader could tell
+    /// was hidden is dropped; when it could not tell, the HTML part's
+    /// text is replaced by a note.
+    pub hidden_content: bool,
     pub body_truncated: bool,
     pub attachments: Vec<Attachment>,
 }
@@ -283,7 +288,7 @@ impl Reader {
             cc: self.wrap(&header("Cc")),
             subject: self.wrap(&header("Subject")),
             body: self.wrap(&body),
-            hidden_text_dropped: hidden,
+            hidden_content: hidden,
             body_truncated,
             attachments,
         })
@@ -325,8 +330,12 @@ impl Reader {
             }
             Value::String(markup) if !attached && kind == "text/html" => {
                 let seen = html::visible_text(markup);
-                *hidden |= seen.hidden_dropped;
-                text.push(seen.text);
+                *hidden |= seen.hidden_content;
+                text.push(if seen.withheld {
+                    WITHHELD.to_string()
+                } else {
+                    seen.text
+                });
             }
             _ => {
                 if attachments.len() < ATTACHMENTS_MAX {
