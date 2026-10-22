@@ -220,11 +220,14 @@ fn long_lived(hab: &Habitat, name: &str, body: &str, payload: &str) -> Child {
 /// script; `$DONE` holds its exit status once the shell has exited.
 const HOOK_IN_A_SHELL: &str = r#"/bin/sh -c '"$0" hook < "$1"; exit $?' "$LJOS_BIN" "$PAYLOAD""#;
 
-/// Wait for the hook a [`long_lived`] process ran to exit.
+/// Wait for the hook a [`long_lived`] process ran to exit. The shell
+/// creates `$DONE` before it writes the status, so an empty file is a
+/// hook not yet done.
 fn hook_done(hab: &Habitat) {
     let done = hab.home.with_file_name("procs").join("done");
     for _ in 0..600 {
-        if let Ok(status) = std::fs::read_to_string(&done) {
+        let status = std::fs::read_to_string(&done).unwrap_or_default();
+        if !status.trim().is_empty() {
             assert_eq!(status.trim(), "0", "ljos hook failed");
             return;
         }
