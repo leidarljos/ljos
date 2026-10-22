@@ -6330,6 +6330,71 @@ mod tests {
         }
     }
 
+    /// User rules are read from `.ljos/user-rules` and sealed back there,
+    /// with a digest under the state directory's `sync/user-rules`. A
+    /// symlink at either directory, or at `.ljos`, is not followed.
+    #[test]
+    fn symlinked_user_rule_directories_are_not_read_or_written() {
+        let rules = |id: &str, text: &str| {
+            serde_json::json!({ "rules": [{
+                "id": id, "text": text, "author": "seat", "reason": "test",
+                "written_at": "2026-01-01T00:00:00Z"
+            }] })
+            .to_string()
+        };
+        for linked in [".ljos", ".ljos/user-rules", "sync/user-rules"] {
+            let dir = tempfile::tempdir().unwrap();
+            let _env = begin(dir.path());
+            std::env::remove_var("LJOS_TRACKER_GIT");
+            let machine = make_key();
+            let root = tracker(dir.path());
+            let local = dir.path().join("config/ljos/user-rules.json");
+            std::fs::write(&local, rules("local", "stays here")).unwrap();
+            let toml = format!("name = \"notes\"\nrecipients = [\"{machine}\"]\n");
+            let outside = dir.path().join("outside");
+            let watched = match linked {
+                ".ljos" => {
+                    std::fs::create_dir_all(outside.join("user-rules")).unwrap();
+                    std::fs::write(outside.join("sync.toml"), &toml).unwrap();
+                    std::fs::remove_dir_all(root.join(".ljos")).unwrap();
+                    std::os::unix::fs::symlink(&outside, root.join(".ljos")).unwrap();
+                    outside.join("user-rules")
+                }
+                ".ljos/user-rules" => {
+                    std::fs::create_dir_all(&outside).unwrap();
+                    std::fs::write(root.join(".ljos/sync.toml"), &toml).unwrap();
+                    std::os::unix::fs::symlink(&outside, root.join(linked)).unwrap();
+                    outside.clone()
+                }
+                _ => {
+                    std::fs::create_dir_all(&outside).unwrap();
+                    std::fs::write(root.join(".ljos/sync.toml"), &toml).unwrap();
+                    let link = state_dir().parent().unwrap().join(linked);
+                    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+                    std::os::unix::fs::symlink(&outside, &link).unwrap();
+                    outside.clone()
+                }
+            };
+            std::fs::write(watched.join("peer.json"), rules("peer", "from outside")).unwrap();
+            let before = std::fs::read_dir(&watched).unwrap().count();
+            let err = exchange_user_rules(
+                &root,
+                "probe-host",
+                std::time::Duration::from_secs(8),
+                false,
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("symlink"), "{linked}: {err:#}");
+            assert_eq!(
+                std::fs::read_dir(&watched).unwrap().count(),
+                before,
+                "{linked}: written through the symlink"
+            );
+            let kept = std::fs::read_to_string(&local).unwrap();
+            assert!(!kept.contains("from outside"), "{linked}: {kept}");
+        }
+    }
+
     const OLD_COMMIT: &str = "100000000 +0000";
 
     fn begin(dir: &Path) -> crate::EnvLock {
