@@ -1229,6 +1229,143 @@ pub fn sync_repo_in_passing(pull_import: bool, export_log: bool) -> Result<Strin
     sync_repos(pull_import, export_log, false)
 }
 
+/// Export this machine's sealed log and push it.
+///
+/// A wake in push mode does this before it fires. The letter is already
+/// written, and the send has already returned: a refusal is for the wake
+/// log, not an error the send should grow. A tracker with no scope has
+/// nothing to push, and that is not a refusal.
+///
+/// # Errors
+///
+/// The pack did not answer, age refused to seal, or the commit or the
+/// push was refused. The message is the line the wake log stores.
+pub(crate) fn push_sealed_log() -> Result<()> {
+    let said = sync_repo_in_passing(false, true)?;
+    if let Some(why) = said.lines().map(str::trim).find(|line| {
+        line.contains("push refused")
+            || line.contains("commit refused")
+            || line.contains("no remote is configured")
+    }) {
+        bail!("{why}");
+    }
+    Ok(())
+}
+
+/// The commit at `HEAD` whose tree holds this machine's sealed log.
+///
+/// A wake in push mode reads this after the push and puts it on the
+/// envelope. A refused push still leaves the commit here, and the next
+/// push sends it. `None` when no tracker checkout holds the log.
+pub(crate) fn log_commit() -> Option<String> {
+    let spec = format!("HEAD:.ljos/atoms/{}.jsonl.age", host());
+    for root in &configured_roots() {
+        let Some(out) = git(root, &["rev-parse", "HEAD"]).ok() else {
+            continue;
+        };
+        if !out.status.success() {
+            continue;
+        }
+        let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if sha.is_empty() {
+            continue;
+        }
+        if git(root, &["cat-file", "-e", &spec]).is_ok_and(|o| o.status.success()) {
+            return Some(sha);
+        }
+    }
+    None
+}
+
+/// Tracker checkouts this machine shares. Named repos, or the tracker
+/// root when none are named. A missing tracker is no checkouts.
+fn configured_roots() -> Vec<PathBuf> {
+    let listed = local().repos;
+    if listed.is_empty() {
+        tracker_root().ok().into_iter().collect()
+    } else {
+        listed.iter().map(|r| expand(r)).collect()
+    }
+}
+
+fn has_remote(root: &Path) -> bool {
+    git(root, &["remote"])
+        .ok()
+        .filter(|out| out.status.success())
+        .is_some_and(|out| !String::from_utf8_lossy(&out.stdout).trim().is_empty())
+}
+
+fn hex_commit(commit: &str) -> bool {
+    (7..=64).contains(&commit.len()) && commit.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn is_ancestor(root: &Path, commit: &str) -> bool {
+    git(root, &["merge-base", "--is-ancestor", commit, "HEAD"]).is_ok_and(|o| o.status.success())
+}
+
+/// Bring `commit` into `HEAD` when a fetched tip already has it.
+///
+/// A commit the remote does not have is named, and the caller still
+/// imports the remote head. A fetch that already failed is not named
+/// twice.
+fn note_commit(root: &Path, commit: &str, fetched: bool) -> String {
+    let spec = format!("{commit}^{{commit}}");
+    let present = git(root, &["cat-file", "-e", &spec]).is_ok_and(|o| o.status.success());
+    if !present {
+        return if fetched {
+            format!("sync: {commit} is not on the remote; imported the remote head\n")
+        } else {
+            String::new()
+        };
+    }
+    if is_ancestor(root, commit) {
+        return String::new();
+    }
+    let _held = crate::tracker_commit_lock(root);
+    let forwarded =
+        git(root, &["merge", "-q", "--ff-only", commit]).is_ok_and(|o| o.status.success());
+    if forwarded && is_ancestor(root, commit) {
+        return String::new();
+    }
+    format!("sync: {commit} is not in this checkout; imported the remote head\n")
+}
+
+/// Fetch the tracker and import its sealed logs for `ljos inbox --sync`.
+///
+/// `commit` asks that this checkout contain that commit. Absent, or empty,
+/// the remote head is enough. A commit the remote does not have imports
+/// the remote head and says so. A checkout with no remote is left alone,
+/// and that is not an error. The returned lines are notes for stderr.
+///
+/// # Errors
+///
+/// `commit` is not 7 to 64 hex digits, a scope file does not parse, or
+/// the import fails. A fetch that fails is a note, not an error.
+pub(crate) fn fetch_for_inbox(commit: Option<&str>) -> Result<String> {
+    let commit = commit.map(str::trim).filter(|name| !name.is_empty());
+    if let Some(commit) = commit {
+        if !hex_commit(commit) {
+            bail!("sync: {commit} is not a commit");
+        }
+    }
+    let mut out = String::new();
+    for root in configured_roots() {
+        if !has_remote(&root) {
+            continue;
+        }
+        let fetched = catch_up(&root);
+        let fetched_ok = !fetched.contains("fetch failed");
+        out.push_str(&fetched);
+        if let Some(commit) = commit {
+            out.push_str(&note_commit(&root, commit, fetched_ok));
+        }
+        if let Some(scope) = scope_of_repo(&root)? {
+            out.push_str(&import(&root, &scope)?);
+        }
+    }
+    Ok(out)
+}
+
 fn sync_roots() -> Result<Vec<PathBuf>> {
     let listed = local().repos;
     Ok(if listed.is_empty() {
@@ -2557,6 +2694,12 @@ mod tests {
             "personal"
         );
         assert_eq!(atom_scope(&atom("a", "t", &["seat:x"]), "surf"), "surf");
+    }
+
+    #[test]
+    fn inbox_sync_refuses_a_name_that_is_not_a_commit() {
+        let err = fetch_for_inbox(Some("nope")).unwrap_err();
+        assert_eq!(err.to_string(), "sync: nope is not a commit");
     }
 
     #[test]
