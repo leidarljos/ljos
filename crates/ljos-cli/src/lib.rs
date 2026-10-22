@@ -13663,13 +13663,19 @@ fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Resu
 /// lock. The row is `warn`: a lock held for good stops every send too.
 const QUEUE_BUSY: &str = "busy: ";
 
+/// How the note queue row opens while a damaged file a send left beside
+/// the queue is there. The row is `warn` until the person reads and
+/// deletes it: a send that ran from a hook said so to nobody.
+const QUEUE_SET_ASIDE: &str = "set aside: ";
+
 /// The doctor row for the note queue: how many memory copies wait for the
 /// pack. It only reads the queue, without its lock: sending would rewrite
 /// the queue, and wait on a lock another ljos may hold. The next note or
 /// finish that reaches the pack, or a session start, sends them. A lock
 /// another process holds is tried once, not waited on, and the row says
 /// the queue is busy. A whole line that is not a note is damage, as a
-/// torn last row is: a send moves it out of the queue.
+/// torn last row is: a send moves it out of the queue, and the row names
+/// the file it went to.
 fn note_queue_row() -> Habitat {
     let dir = note_queue::state_dir();
     let queue = dir.join("note-queue.jsonl");
@@ -13690,10 +13696,21 @@ fn note_queue_row() -> Habitat {
             queue.display()
         ));
     }
+    let set_aside = note_queue::set_aside_in(&dir);
     let state = if let Some(lock) = note_queue::busy_in(&dir) {
         format!(
             "{QUEUE_BUSY}another process holds {}, so a note may be landing or leaving; {waiting} note(s) wait. Run `ljos doctor` again once it lets go",
             lock.display()
+        )
+    } else if !set_aside.is_empty() {
+        let bytes: u64 = set_aside.iter().map(|(_, len)| len).sum();
+        let files: Vec<String> = set_aside
+            .iter()
+            .map(|(path, _)| path.display().to_string())
+            .collect();
+        format!(
+            "{QUEUE_SET_ASIDE}a send moved {bytes} byte(s) of the queue that are not a note to {}; they were not sent. Read them for a note worth keeping, then delete the file. {waiting} note(s) wait",
+            files.join(", ")
         )
     } else if waiting == 0 {
         "empty".to_string()
@@ -23470,8 +23487,9 @@ fn optional_bin(name: &str) -> bool {
 
 /// `ok` when the row answers, `warn` when the policy row names an
 /// `ljos-policyd` without phronesis, a runner skill or runner env ljos
-/// wrote is stale or edited by hand, the note queue is busy, the guard
-/// bypass log is damaged, or the cloud guard file is a known older
+/// wrote is stale or edited by hand, the note queue is busy or has bytes
+/// set aside beside it, the guard bypass log is damaged, or the cloud
+/// guard file is a known older
 /// version or differs from the seat refusals, `info` when the row
 /// is optional and absent, `no` when a required row failed. A stale skill,
 /// env or cloud guard file ljos wrote is a warning `ljos doctor --fix`
@@ -23497,7 +23515,10 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     if row.ok && row.name == "mcp" && row.state.starts_with("warning:") {
         return "warn";
     }
-    if row.ok && row.name == "note queue" && row.state.starts_with(QUEUE_BUSY) {
+    if row.ok
+        && row.name == "note queue"
+        && (row.state.starts_with(QUEUE_BUSY) || row.state.starts_with(QUEUE_SET_ASIDE))
+    {
         return "warn";
     }
     if row.name == "guard bypass" && !row.ok {
@@ -42704,6 +42725,46 @@ mod tests {
         }
         let line = summary_line(&["note queue"], &[], &[], 0);
         assert!(line.starts_with("ljos is not ready: note queue does not answer."));
+    }
+
+    /// A row that is not a note fails the queue row until a send moves it
+    /// aside. The row then warns and names the file, so a send from a hook,
+    /// whose report nobody reads, still gets said; once the person deletes
+    /// the file the row is plain again.
+    #[test]
+    fn the_queue_row_names_what_a_send_set_aside() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[
+            ("XDG_STATE_HOME", dir.path().to_str().unwrap()),
+            ("PACKSET_URL", "off"),
+        ]);
+        let queue_dir = note_queue::state_dir();
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let old = r#"{"issue":"ljos-old","text":"kept","workspace":"w","at":1,"kind":"note"}"#;
+        let cut = "{\"issue\":\"ljos-new\",\"te\n";
+        std::fs::write(queue_dir.join("note-queue.jsonl"), format!("{old}\n{cut}")).unwrap();
+        assert_eq!(doctor_word(&bounded("damaged", note_queue_row)), "no");
+
+        let done = flush_note_queue().unwrap();
+        let [aside] = done.set_aside.as_slice() else {
+            panic!("{done:?}");
+        };
+        let row = bounded("set aside", note_queue_row);
+        assert!(row.ok, "{}", row.state);
+        assert_eq!(doctor_word(&row), "warn", "{}", row.state);
+        assert!(
+            row.state.starts_with(QUEUE_SET_ASIDE)
+                && row.state.contains(&aside.path.display().to_string())
+                && row.state.contains(&format!("{} byte(s)", cut.len())),
+            "{}",
+            row.state
+        );
+
+        std::fs::remove_file(&aside.path).unwrap();
+        let row = bounded("cleared", note_queue_row);
+        assert_eq!(doctor_word(&row), "ok", "{}", row.state);
+        assert!(row.state.starts_with("1 note(s) wait"), "{}", row.state);
     }
 
     fn bounded<T: Send + 'static>(what: &str, body: impl FnOnce() -> T + Send + 'static) -> T {
