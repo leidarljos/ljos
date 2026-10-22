@@ -29358,10 +29358,64 @@ fn stored_origins() -> &'static std::sync::Mutex<Origins> {
 }
 
 fn record_origin(id: &str, by: Option<StoredBy>) {
+    forget_body(id);
     stored_origins()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(id.to_string(), by);
+}
+
+fn forget_body(id: &str) {
+    stored_bodies()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(id);
+}
+
+/// The kind and text of the record each origin was read from, by id. A
+/// search hit, an island row or an activate row can carry a person's id
+/// on other words; a hit takes its id's origin only with that record's
+/// own kind and text.
+fn stored_bodies() -> &'static std::sync::Mutex<std::collections::BTreeMap<String, (String, String)>>
+{
+    static BODIES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<String, (String, String)>>,
+    > = std::sync::OnceLock::new();
+    BODIES.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+}
+
+/// Record `atom`'s origin, and its kind and text, by its id.
+fn record_held(id: &str, atom: &Value) {
+    record_origin(id, Some(stored_by(atom)));
+    let field = |name: &str| atom[name].as_str().unwrap_or("").trim().to_string();
+    stored_bodies()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(id.to_string(), (field("kind"), field("text")));
+}
+
+/// Whether `h` carries the kind and text of the record its id's origin
+/// was read from. A hit no record was kept for does not.
+fn same_record(h: &Hit) -> bool {
+    let Some(id) = h.id.as_deref() else {
+        return false;
+    };
+    stored_bodies()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(id)
+        .is_some_and(|(kind, text)| kind == h.kind.trim() && text == h.text.trim())
+}
+
+/// Whether `h` names a record this process read under its id with
+/// another kind or text.
+fn substituted(h: &Hit) -> bool {
+    h.id.as_deref().is_some_and(|id| {
+        stored_bodies()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(id)
+    }) && !same_record(h)
 }
 
 /// Record each listing atom's origin when the listener asks for the
@@ -29393,7 +29447,7 @@ pub(crate) fn keep_origin(atom: &Value) {
         return;
     }
     if let Some(id) = atom.get("id").and_then(Value::as_str) {
-        record_origin(id, Some(stored_by(atom)));
+        record_held(id, atom);
     }
 }
 
@@ -29415,10 +29469,13 @@ fn keep_origins_of<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'
         Ok(atoms) => {
             atoms.iter().for_each(keep_origin);
             for id in ids {
-                let held = atoms
+                match atoms
                     .iter()
-                    .find(|a| a.get("id").and_then(Value::as_str) == Some(id));
-                record_origin(id, held.map(stored_by));
+                    .find(|a| a.get("id").and_then(Value::as_str) == Some(id))
+                {
+                    Some(held) => record_held(id, held),
+                    None => record_origin(id, None),
+                }
             }
         }
         Err(_) => ids.into_iter().for_each(unrecord_person),
@@ -29443,10 +29500,11 @@ fn person_origin(h: &Hit) -> bool {
 }
 
 /// [`StoredBy`] of `h` as a reader recorded it; [`StoredBy::Agent`] when
-/// none did.
+/// none did, or when `h` does not carry that record's kind and text.
 fn hit_stored_by(h: &Hit) -> StoredBy {
     h.id.as_deref()
         .and_then(recorded_origin)
+        .filter(|_| same_record(h))
         .unwrap_or(StoredBy::Agent)
 }
 
@@ -29455,9 +29513,10 @@ fn recorded_origin(id: &str) -> Option<StoredBy> {
 }
 
 /// Clear the person recorded for `id`, so a read that did not stand
-/// leaves the claim no one's. Any other record stays: it already says
-/// less than the person.
+/// leaves the claim no one's. Any other origin stays: it already says
+/// less than the person. The kind and text read for `id` go either way.
 fn unrecord_person(id: &str) {
+    forget_body(id);
     let mut seen = stored_origins()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -29666,9 +29725,8 @@ pub(crate) fn atom_now(id: &str) -> std::result::Result<Option<Value>, String> {
 pub(crate) fn stored_origin_of(id: &str) -> Stored {
     match atom_now(id) {
         Ok(Some(atom)) => {
-            let by = stored_by(&atom);
-            record_origin(id, Some(by));
-            Stored::Origin(by)
+            record_held(id, &atom);
+            Stored::Origin(stored_by(&atom))
         }
         Ok(None) => {
             record_origin(id, None);
@@ -29690,7 +29748,9 @@ pub(crate) fn stored_origin_of(id: &str) -> Stored {
 /// a zero-width character does not slip past.
 fn unverified_note_hit(h: &Hit) -> bool {
     let kind = tag_skeleton(&h.kind);
-    kind == packset_core::record::NOTE_KIND || (kind != "lesson" && !person_origin(h))
+    kind == packset_core::record::NOTE_KIND
+        || substituted(h)
+        || (kind != "lesson" && !person_origin(h))
 }
 
 /// `tag` as a reader compares it: NFKC, with format, zero-width and space
@@ -29791,9 +29851,14 @@ fn unverified_label(h: &Hit, kind: &str) -> String {
 /// stored origin, a lesson in the person's words says so, and a lesson the
 /// pack did not store as the person's names its origin, so a standing
 /// lesson an agent or a peer wrote never reads like one the person stated.
-/// `ljos search`, the island, the timeline and MCP name it the same.
+/// A hit whose kind or text is not that of the record its id was read
+/// from is an unverified note. `ljos search`, the island, the timeline
+/// and MCP name it the same.
 #[must_use]
 pub fn kind_label(h: &Hit) -> String {
+    if substituted(h) {
+        return unverified_label(h, "note");
+    }
     if agent_preference(h) {
         return unverified_label(h, "preference");
     }
@@ -33895,7 +33960,8 @@ mod tests {
         );
         person.id = Some("label-person".into());
         super::keep_origin(&serde_json::json!({
-            "id": "label-person", "origin": "user-declared", "source": {"basis": "person"}
+            "id": "label-person", "kind": "lesson", "text": "t",
+            "origin": "user-declared", "source": {"basis": "person"}
         }));
         assert_eq!(super::kind_label(&person), "lesson, the person's words");
     }
@@ -37403,7 +37469,8 @@ mod tests {
     fn signal_hit(kind: &str, text: &str, score: f64, ballots: u32) -> Hit {
         let id = format!("id-{}", text.len());
         keep_origin(&serde_json::json!({
-            "id": id, "origin": admit::ORIGIN_USER, "source": {"basis": "person"}
+            "id": id, "kind": kind, "text": text,
+            "origin": admit::ORIGIN_USER, "source": {"basis": "person"}
         }));
         Hit {
             id: Some(id),
@@ -39236,14 +39303,16 @@ mod tests {
             "a claim with no stored origin read as a fact"
         );
         bare.id = Some("bare-claim".into());
-        keep_origin(&serde_json::json!({"id": "bare-claim", "source": {"basis": "person"}}));
+        keep_origin(
+            &serde_json::json!({"id": "bare-claim", "text": "x", "source": {"basis": "person"}}),
+        );
         assert_eq!(
             hit_line(&bare, "2026-09-12T00:00:00.000Z"),
             "- [unverified agent note (origin agent-derived)] x",
             "a person basis with no origin read as the person's"
         );
         keep_origin(&serde_json::json!({
-            "id": "bare-claim", "origin": "user-declared", "source": {"basis": "person"},
+            "id": "bare-claim", "text": "x", "origin": "user-declared", "source": {"basis": "person"},
         }));
         assert_eq!(hit_line(&bare, "2026-09-12T00:00:00.000Z"), "- [claim] x");
     }
@@ -51899,7 +51968,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 admit::ORIGIN_AGENT
             };
             keep_origin(&serde_json::json!({
-                "id": id, "origin": origin, "source": {"basis": if origin == admit::ORIGIN_USER { "person" } else { "agent" }}
+                "id": id, "kind": kind, "text": id, "origin": origin,
+                "source": {"basis": if origin == admit::ORIGIN_USER { "person" } else { "agent" }}
             }));
             Hit {
                 id: Some(id.into()),
