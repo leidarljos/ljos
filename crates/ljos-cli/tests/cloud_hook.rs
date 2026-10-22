@@ -671,3 +671,25 @@ fn github_clients_allow_only_a_resolved_get() {
         allowed(line, here);
     }
 }
+
+#[test]
+fn the_hook_off_switch_does_not_let_a_push_land() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    let (origin, repo) = bare_repo(root.path(), "seat");
+    let (other_origin, _other) = bare_repo(root.path(), "other");
+    std::env::set_current_dir(&repo).unwrap();
+    ljos_cli::cloud::up(false).unwrap();
+    std::env::set_current_dir(root.path()).unwrap();
+    ljos_cli::cloud::write_push_allowlist(&[origin.to_str().unwrap()], &[], &["develop"]).unwrap();
+    git(
+        &repo,
+        &["remote", "add", "other", other_origin.to_str().unwrap()],
+    );
+    sh_ok(&repo, "LJOS_HOOK_KEY=1 git push -q -u origin develop");
+    assert!(has_ref(&origin, "refs/heads/develop"));
+    push_fails(&repo, "LJOS_HOOK_KEY=1 git push -q other develop");
+    assert!(!has_ref(&other_origin, "refs/heads/develop"));
+}
