@@ -2281,6 +2281,20 @@ fn cgroup_text_names_runner(text: &str, runners: &[String]) -> bool {
     })
 }
 
+/// Whether `text` is a transient scope, the cgroup `systemd-run --scope`
+/// and a D-Bus `StartTransientUnit` of mode scope leave behind. The unit
+/// is named `run-*.scope`. A login is `session-*.scope` and is not this.
+fn cgroup_text_is_transient(text: &str) -> bool {
+    text.lines().any(|line| {
+        let path = line.rsplit_once(':').map_or(line, |(_, path)| path);
+        path.split('/').any(|segment| {
+            segment
+                .strip_suffix(".scope")
+                .is_some_and(|name| name.starts_with("run-") && name.len() > "run-".len())
+        })
+    })
+}
+
 /// The chain up to the session is only shells and wrappers, or it is
 /// empty because the session (or init) is the parent. `setsid -f`, a
 /// double fork, `script` and a detached tmux all leave this shape: the
@@ -2347,20 +2361,44 @@ fn responsible_comm() -> Option<String> {
         .map(str::to_string)
 }
 
+/// A runner in the process tree, or a scope that still names one when the
+/// chain above is only shells and wrappers. On Linux the scope is the
+/// cgroup, including a transient `run-*.scope` from `systemd-run` or a
+/// D-Bus scope. On macOS it is the responsible process. A cleared
+/// environment does not leave either.
+fn runner_scope_or_tree() -> bool {
+    let runners = runner_names();
+    if own_ancestry().iter().any(|(pid, comm)| {
+        seat_record_path(*pid).exists() || runners.iter().any(|name| name == comm)
+    }) {
+        return true;
+    }
+    wrappers_only() && (scope_names_runner(&runners) || transient_scope())
+}
+
+/// Linux: this process sits in a transient `run-*.scope`.
+#[cfg(target_os = "linux")]
+fn transient_scope() -> bool {
+    let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+    cgroup_text_is_transient(&text)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn transient_scope() -> bool {
+    false
+}
+
 /// Whether this process runs under an agent runner.
 ///
 /// Any one of these is enough. The environment carries a runner's
 /// conversation. A process above this one is a runner, one whose server
 /// left a seat record or one [`runner_names`] lists. Or the chain above
 /// is only shells and wrappers, which is what `setsid`, a double fork,
-/// `script` and a detached tmux leave, and the scope still names a
-/// runner: the cgroup on Linux, the responsible process on macOS.
-///
-/// The same user can still step out of that scope. On Linux that is a
-/// new cgroup (`systemd-run --user --scope`, or a cgroup the runner's
-/// parent allows). On macOS it is handing the process to launchd. A
-/// cleared environment does not do it. Consent is the person's, so the
-/// verbs that grant it refuse here.
+/// `script`, a detached tmux and `systemd-run --user --scope` leave, and
+/// the scope still names a runner or is a transient scope: the cgroup on
+/// Linux, the responsible process on macOS. A cleared environment does
+/// not leave that scope. Consent is the person's, so the verbs that
+/// grant it refuse here.
 #[must_use]
 pub fn under_a_runner() -> bool {
     if std::env::vars().any(|(k, v)| runner_session_var(&k, &v))
@@ -2368,13 +2406,7 @@ pub fn under_a_runner() -> bool {
     {
         return true;
     }
-    let runners = runner_names();
-    if own_ancestry().iter().any(|(pid, comm)| {
-        seat_record_path(*pid).exists() || runners.iter().any(|name| name == comm)
-    }) {
-        return true;
-    }
-    wrappers_only() && scope_names_runner(&runners)
+    runner_scope_or_tree()
 }
 
 /// Variables a runner, or the hook it spawned, leaves on what it starts.
@@ -2386,16 +2418,23 @@ const RUNNER_MARKS: &[&str] = &[
     "GEMINI_CLI",
 ];
 
-/// Whether the person is at this process, on positive evidence: no
-/// runner's variable in the environment, and [`person_at_terminal`].
-/// Not being [`under_a_runner`] proves nothing, since a tool call can
-/// name its parent `systemd` or leave the runner by a double fork. Every
-/// basis of person a CLI verb decides asks this; anything less is the
-/// agent's.
+/// A runner's variable, or one [`RUNNER_MARKS`] names.
+fn runner_mark_set() -> bool {
+    std::env::vars().any(|(k, v)| runner_session_var(&k, &v) || RUNNER_MARKS.contains(&k.as_str()))
+}
+
+/// Whether the person is at this process, on positive evidence.
+///
+/// [`person_at_terminal`] must hold, and [`under_a_runner`] must not. The
+/// runner check reads the cgroup on Linux and the responsible process on
+/// macOS, so a detached runner, `systemd-run --user --scope` and a D-Bus
+/// scope are not the person even when they cleared the environment and
+/// opened a terminal. A runner's variable ([`runner_mark_set`]) hides the
+/// person on its own. Every basis of person a CLI verb decides asks this;
+/// anything less is the agent's.
 #[must_use]
 pub fn person_present() -> bool {
-    !std::env::vars().any(|(k, v)| runner_session_var(&k, &v) || RUNNER_MARKS.contains(&k.as_str()))
-        && person_at_terminal()
+    person_at_terminal() && !runner_mark_set() && !under_a_runner()
 }
 
 /// One `/proc/PID/stat` row, the fields [`person_at_terminal`] reads.
@@ -47019,6 +47058,17 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(!super::cgroup_text_names_runner(
             "0::/user.slice/user-1000.slice/tmux.service\n",
             &runners
+        ));
+        // systemd-run and a D-Bus transient scope are `run-*.scope`. A login
+        // session is not, and neither is a scope that does not use that name.
+        let transient = "0::/user.slice/user-1000.slice/app.slice/run-u1000-4242.scope\n";
+        assert!(super::cgroup_text_is_transient(transient));
+        assert!(!super::cgroup_text_names_runner(transient, &runners));
+        assert!(!super::cgroup_text_is_transient(
+            "0::/user.slice/user-1000.slice/session-3.scope\n"
+        ));
+        assert!(!super::cgroup_text_is_transient(
+            "0::/system.slice/pod/cursor-agent/workload\n"
         ));
     }
 
