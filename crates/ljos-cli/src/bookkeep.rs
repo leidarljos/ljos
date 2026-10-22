@@ -104,6 +104,12 @@ struct Book {
     /// exits 124 before Stop) still closes.
     #[serde(default)]
     owner_pid: u32,
+    /// When `owner_pid` started, in clock ticks after boot, so a pid the
+    /// kernel has since handed to another process counts as gone. Zero is
+    /// a book written before this was kept, or a system with no `/proc`:
+    /// the pid alone is checked then.
+    #[serde(default)]
+    owner_start: u64,
     /// `cwd` as the hook named it, to the repository key. The warm path is
     /// a lookup, not another `git rev-parse`.
     #[serde(default)]
@@ -333,7 +339,11 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
     let hint = (!repo_hint.is_empty()).then_some(repo_hint.as_str());
     close_idle_sittings(unix_secs(), Some(session.as_str()), hint);
     let mut book = load_book(&path);
-    book.owner_pid = next_owner_pid(&call.event, book.owner_pid, hook_owner());
+    (book.owner_pid, book.owner_start) = next_owner(
+        &call.event,
+        (book.owner_pid, book.owner_start),
+        hook_owner(),
+    );
     let mut prompt_set = false;
     if call.event == "UserPromptSubmit" {
         let prompt = collapse(&call.cue);
@@ -2240,26 +2250,48 @@ fn repoint_row(
 
 /// A short-lived hook must not replace the runner that owns the sitting.
 /// Session start and a new prompt are that runner. A pid of zero has never
-/// been set, so the first call of any kind may set it.
-fn next_owner_pid(event: &str, current: u32, incoming: u32) -> u32 {
-    if current == 0 || matches!(event, "SessionStart" | "UserPromptSubmit") {
+/// been set, so the first call of any kind may set it. Each owner is a pid
+/// and its start time.
+fn next_owner(event: &str, current: (u32, u64), incoming: (u32, u64)) -> (u32, u64) {
+    if current.0 == 0 || matches!(event, "SessionStart" | "UserPromptSubmit") {
         incoming
     } else {
         current
     }
 }
 
-/// The runner that spawned this hook. When it is gone, the next session
-/// finishes the claims this book still has open. A runner starts the hook
-/// command through `sh -c` or a wrapper that exits with the hook, so the
-/// parent alone is gone by the next call.
-fn hook_owner() -> u32 {
+/// The runner that spawned this hook, as its pid and start time. When it
+/// is gone, the next session finishes the claims this book still has
+/// open. A runner starts the hook command through `sh -c` or a wrapper
+/// that exits with the hook, so the parent alone is gone by the next
+/// call. A terminal, a multiplexer or init outlives every sitting under
+/// it and never owns one: when one of those ran the hook itself, the hook
+/// is the owner, and its sitting is orphaned once it exits. With no
+/// `/proc` (macOS) the walk is empty and the parent is the owner.
+fn hook_owner() -> (u32, u64) {
     let chain = super::proc_tree::ancestors();
-    if let Some(runner) = super::proc_tree::runner(&chain) {
-        return runner.pid;
+    if chain.is_empty() {
+        // SAFETY: getppid only reads the parent pid.
+        return (unsafe { libc::getppid() as u32 }, 0);
     }
-    // SAFETY: getppid only reads the parent pid.
-    unsafe { libc::getppid() as u32 }
+    super::proc_tree::runner(&chain)
+        .cloned()
+        .or_else(|| super::proc_tree::of(std::process::id()))
+        .map_or((std::process::id(), 0), |owner| (owner.pid, owner.start))
+}
+
+/// Whether the runner that owns `book` still runs: the same pid with the
+/// same start time, and not a zombie. A book with no start time checks
+/// the pid alone.
+fn owner_alive(book: &Book) -> bool {
+    if book.owner_start == 0 {
+        return super::pid_alive(book.owner_pid);
+    }
+    super::proc_tree::alive(&super::proc_tree::Proc {
+        pid: book.owner_pid,
+        start: book.owner_start,
+        comm: String::new(),
+    })
 }
 /// How long the sweeps over past sittings may take in one hook call. They
 /// walk every book the seat has kept, and the landed check runs git once per
@@ -2292,7 +2324,7 @@ fn reap_stale_locked(current: Option<&str>, now: u64, deadline: Option<std::time
         if !open {
             continue;
         }
-        let dead = book.owner_pid != 0 && !super::pid_alive(book.owner_pid);
+        let dead = book.owner_pid != 0 && !owner_alive(&book);
         if dead {
             finish_open(&mut book);
             store_book(&path, &book);
@@ -5533,12 +5565,25 @@ mod tests {
 
     #[test]
     fn owner_pid_stays_put_on_a_tool_hook() {
-        assert_eq!(next_owner_pid("SessionStart", 0, 10), 10);
-        assert_eq!(next_owner_pid("UserPromptSubmit", 10, 42), 42);
-        assert_eq!(next_owner_pid("PostToolUse", 10, 99), 10);
-        assert_eq!(next_owner_pid("PreToolUse", 10, 99), 10);
-        assert_eq!(next_owner_pid("Stop", 10, 99), 10);
-        assert_eq!(next_owner_pid("PostToolUse", 0, 99), 99);
+        assert_eq!(next_owner("SessionStart", (0, 0), (10, 1)), (10, 1));
+        assert_eq!(next_owner("UserPromptSubmit", (10, 1), (42, 2)), (42, 2));
+        assert_eq!(next_owner("PostToolUse", (10, 1), (99, 3)), (10, 1));
+        assert_eq!(next_owner("PreToolUse", (10, 1), (99, 3)), (10, 1));
+        assert_eq!(next_owner("Stop", (10, 1), (99, 3)), (10, 1));
+        assert_eq!(next_owner("PostToolUse", (0, 0), (99, 3)), (99, 3));
+    }
+
+    #[test]
+    fn an_owner_pid_that_started_again_is_gone() {
+        let me = crate::proc_tree::of(std::process::id()).unwrap();
+        let owned = |pid, start| Book {
+            owner_pid: pid,
+            owner_start: start,
+            ..Book::default()
+        };
+        assert!(owner_alive(&owned(me.pid, me.start)));
+        assert!(!owner_alive(&owned(me.pid, me.start + 1)), "a reused pid");
+        assert!(owner_alive(&owned(me.pid, 0)), "a book with no start");
     }
 
     #[test]
@@ -9121,7 +9166,14 @@ print(f"id={ident}")
             .collect()
     }
 
+    /// Make `pid` the runner that owns `session`'s book, under the start
+    /// time it runs with now. A pid that is gone has none.
     fn set_owner(dir: &Path, session: &str, pid: u32) {
+        let start = crate::proc_tree::of(pid).map_or(0, |p| p.start);
+        set_owner_at(dir, session, pid, start);
+    }
+
+    fn set_owner_at(dir: &Path, session: &str, pid: u32, start: u64) {
         let path = dir.join(format!(
             "run/ljos/book-{}.json",
             crate::session_tag(session)
@@ -9129,6 +9181,7 @@ print(f"id={ident}")
         let mut book: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         book["owner_pid"] = serde_json::json!(pid);
+        book["owner_start"] = serde_json::json!(start);
         std::fs::write(&path, serde_json::to_string(&book).unwrap()).unwrap();
     }
 
@@ -10118,7 +10171,7 @@ print(f"id={ident}")
     /// ljos-tha1: a timeout kills the runner and leaves the parent alive, so
     /// the next prompt never comes. A later MCP call finishes a dead owner
     /// at once, finishes a live owner whose row is old, and leaves a fresh
-    /// live claim.
+    /// live claim. An owner pid another process now runs under is dead.
     #[test]
     fn a_timed_out_claim_is_reaped_without_another_prompt() {
         let _g = lock();
@@ -10151,14 +10204,19 @@ print(f"id={ident}")
         prompt_and_edit(&repo, "tha1-dead", "Add a readme line");
         prompt_and_edit(&repo, "tha1-old", "Add a readme line");
         prompt_and_edit(&repo, "tha1-live", "Add a readme line");
+        prompt_and_edit(&repo, "tha1-reused", "Add a readme line");
         let dead_issue = hook_row("tha1-dead", &repo).issue.unwrap();
         let old_issue = hook_row("tha1-old", &repo).issue.unwrap();
         let live_issue = hook_row("tha1-live", &repo).issue.unwrap();
+        let reused_issue = hook_row("tha1-reused", &repo).issue.unwrap();
+        let me = crate::proc_tree::of(std::process::id()).unwrap();
         set_owner(dir.path(), "tha1-dead", dead_pid());
-        set_owner(dir.path(), "tha1-live", std::process::id());
+        set_owner(dir.path(), "tha1-live", me.pid);
+        set_owner_at(dir.path(), "tha1-reused", me.pid, me.start + 1);
         let path = book_path("tha1-old");
         let mut book = load_book(&path);
-        book.owner_pid = std::process::id();
+        book.owner_pid = me.pid;
+        book.owner_start = me.start;
         book.last_unix = 1;
         for row in book.repos.values_mut() {
             row.last_unix = 1;
@@ -10179,12 +10237,16 @@ print(f"id={ident}")
         assert!(!live.finished);
         assert_eq!(live.issue.as_deref(), Some(live_issue.as_str()));
         assert_eq!(issue_state(&tracker, &live_issue), "STARTED");
+        let reused = load_book(&book_path("tha1-reused"));
+        let reused_row = reused.repos.values().next().expect("the reused row stays");
+        assert!(reused_row.finished, "a reused owner pid was taken as live");
+        assert_eq!(issue_state(&tracker, &reused_issue), "DONE");
         assert_eq!(
             git_log(&tracker).matches("finished").count(),
-            2,
+            3,
             "{}",
             git_log(&tracker)
         );
-        assert_eq!(creates(&tracker), 3);
+        assert_eq!(creates(&tracker), 4);
     }
 }
