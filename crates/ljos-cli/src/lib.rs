@@ -43405,6 +43405,46 @@ mod tests {
         assert!(row.state.starts_with("1 note(s) wait"), "{}", row.state);
     }
 
+    /// A damaged name that links out of the state dir, here to a FIFO
+    /// that would block an open, or to nothing, is not a file a send set
+    /// aside. The row neither follows nor opens it, waits on nothing, and
+    /// leaves the state dir as it found it.
+    #[test]
+    fn the_queue_row_does_not_follow_a_linked_damaged_name() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[
+            ("XDG_STATE_HOME", dir.path().to_str().unwrap()),
+            ("PACKSET_URL", "off"),
+        ]);
+        let queue_dir = note_queue::state_dir();
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let fifo = outside.path().join("fifo");
+        mkfifo(&fifo);
+        std::os::unix::fs::symlink(&fifo, queue_dir.join("note-queue.jsonl.2026-01-01.damaged"))
+            .unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("gone"),
+            queue_dir.join("note-queue.jsonl.2026-01-02.damaged"),
+        )
+        .unwrap();
+        let listing = |dir: &std::path::Path| {
+            let mut names: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        let before = listing(&queue_dir);
+        let row = bounded("linked damaged", note_queue_row);
+        assert_eq!(doctor_word(&row), "ok", "{}", row.state);
+        assert_eq!(row.state, "empty");
+        assert_eq!(listing(&queue_dir), before);
+        assert_eq!(listing(outside.path()), ["fifo"]);
+    }
+
     fn bounded<T: Send + 'static>(what: &str, body: impl FnOnce() -> T + Send + 'static) -> T {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
