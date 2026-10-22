@@ -186,13 +186,8 @@ fn append(rec: &Record) -> Result<()> {
     }
     let mut line = serde_json::to_string(rec)?;
     line.push('\n');
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    file.write_all(line.as_bytes())?;
-    Ok(())
+    crate::append_locked_row(&path, line.as_bytes())
+        .with_context(|| format!("admit: cannot write {}", path.display()))
 }
 
 fn proposal_is_local(base: &str) -> bool {
@@ -652,5 +647,75 @@ pub fn accept(id: &str) -> Result<String> {
             append(&rec)?;
             Ok(accepted_line(&rec.id, &rec.kind, &posted))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn record(id: String) -> Record {
+        Record {
+            id,
+            status: "proposed".into(),
+            remote: false,
+            remote_id: None,
+            text: "use uv for python envs".into(),
+            kind: "lesson".into(),
+            origin: ORIGIN_AGENT.into(),
+            atom: serde_json::json!({"text": "use uv for python envs"}),
+        }
+    }
+
+    /// A held proposal carries the whole atom, so its row is private and
+    /// written whole, like the other state logs.
+    #[test]
+    fn concurrent_proposal_rows_each_parse_and_stay_private() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("XDG_STATE_HOME", dir.path()) };
+        const THREADS: usize = 16;
+        const EACH: usize = 8;
+        let handles: Vec<_> = (0..THREADS)
+            .map(|thread| {
+                std::thread::spawn(move || {
+                    for n in 0..EACH {
+                        append(&record(format!("{thread}-{n}"))).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("proposal writer");
+        }
+        let path = proposals_path();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for line in text.lines() {
+            serde_json::from_str::<Record>(line)
+                .unwrap_or_else(|err| panic!("proposal row does not parse ({err}): {line}"));
+        }
+        assert_eq!(read_latest().len(), THREADS * EACH, "{text}");
+        let mode = std::fs::symlink_metadata(&path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "proposals mode {mode:o}");
+    }
+
+    /// A proposals file swapped for a symlink is not written through.
+    #[test]
+    fn a_symlinked_proposals_file_is_refused() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("XDG_STATE_HOME", dir.path()) };
+        let path = proposals_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::write(&outside, "kept\n").unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        assert!(append(&record("a".into())).is_err());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "kept\n");
     }
 }
