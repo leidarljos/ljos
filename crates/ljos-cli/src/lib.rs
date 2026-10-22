@@ -4305,13 +4305,21 @@ pub fn detect_runners(
 ///
 /// The home directory is unknown.
 pub fn onboard_detected(dry: bool, skills: Option<&Path>) -> Result<Vec<Step>> {
+    onboard_detected_with_lookup(dry, skills, &on_path)
+}
+
+fn onboard_detected_with_lookup(
+    dry: bool,
+    skills: Option<&Path>,
+    on_path_lookup: &dyn Fn(&str) -> bool,
+) -> Result<Vec<Step>> {
     let file = harnesses_path();
     let shipped: Harnesses = toml::from_str(HARNESSES_EXAMPLE).unwrap_or_default();
     let mut shapes = harnesses_with_shipped(&file)
         .map(|h| h.harness)
         .unwrap_or_default();
     shapes.extend(shipped.harness);
-    let found = detect_runners(&shapes, &home()?, &|c| on_path(c));
+    let found = detect_runners(&shapes, &home()?, on_path_lookup);
     if found.is_empty() {
         // The tracker, the deed store and the writer are the seat, not a
         // runner. A machine with no coding tool still gets them, or the
@@ -13409,6 +13417,16 @@ fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Resu
 /// The doctor row for the note queue. It sends what waits first, so a
 /// doctor run after the pack comes back empties the queue.
 fn note_queue_row() -> Habitat {
+    let queue = note_queue::state_dir().join("note-queue.jsonl");
+    if let Err(err) = read_state_file(&queue) {
+        if err.to_string().contains("not a regular file") {
+            return Habitat {
+                name: "note queue",
+                ok: false,
+                state: format!("the note queue at {} is damaged: {err}", queue.display()),
+            };
+        }
+    }
     let (ok, state) = match flush_note_queue() {
         Ok(done) if done == note_queue::Drained::default() => (true, "empty".to_string()),
         Ok(done) => (
@@ -21570,15 +21588,18 @@ pub fn bypass_log_path() -> Option<PathBuf> {
     Some(data_base()?.join("ljos").join("bypass.jsonl"))
 }
 
-/// Open the directory `path` sits in with `O_DIRECTORY | O_NOFOLLOW`, and
-/// return it with the file name to use from that descriptor.
+/// Open the directory `path` sits in with `O_DIRECTORY | O_NOFOLLOW |
+/// O_NONBLOCK`, and return it with the file name to use from that
+/// descriptor.
 ///
 /// The directory is one ljos made, such as `$XDG_STATE_HOME/ljos`, so a
 /// symlink swapped in for it is refused: the file is then opened from this
-/// descriptor, and the link cannot be slipped in between. What lies above
-/// it, `$HOME` or an XDG base the person pointed elsewhere, is followed as
-/// set. Every state-log read, write and rewrite goes through here, so the
-/// reader refuses the same links the writer does.
+/// descriptor, and the link cannot be slipped in between. `O_NONBLOCK`
+/// makes a fifo swapped in for that directory return at once instead of
+/// waiting for a writer. What lies above it, `$HOME` or an XDG base the
+/// person pointed elsewhere, is followed as set. Every state-log read,
+/// write and rewrite goes through here, so the reader refuses the same
+/// links the writer does.
 fn open_state_dir(path: &Path) -> std::io::Result<(std::fs::File, std::ffi::CString)> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::OpenOptionsExt;
@@ -21595,7 +21616,7 @@ fn open_state_dir(path: &Path) -> std::io::Result<(std::fs::File, std::ffi::CStr
     };
     let dir = match std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(dir)
     {
         Ok(dir) => dir,
@@ -21613,35 +21634,97 @@ fn open_state_dir(path: &Path) -> std::io::Result<(std::fs::File, std::ffi::CStr
     Ok((dir, name))
 }
 
+/// Open `name` in `dir` and require a regular file.
+///
+/// `flags` is combined with `O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC`. A fifo
+/// opened without `O_NONBLOCK` waits forever for the other end, which is
+/// how a log swapped for a fifo hung `ljos doctor`. `fstat` then refuses
+/// anything that is not a regular file: a fifo, a device, or a directory.
+/// `O_NONBLOCK` is cleared once that check passes, so a later read of a
+/// real log waits for its bytes. A symlink fails the open (`ELOOP`) and is
+/// reported as one.
+fn open_regular_at(
+    dir: &std::fs::File,
+    name: &std::ffi::CStr,
+    path: &Path,
+    flags: libc::c_int,
+    mode: libc::c_uint,
+) -> std::io::Result<std::fs::File> {
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    let flags = flags | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: `dir` is an open directory descriptor and `name` has no
+    // interior NUL. `mode` matters only with `O_CREAT`. openat returns a
+    // new descriptor or -1.
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags, mode) };
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ELOOP) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} is a symlink", path.display()),
+            ));
+        }
+        // A directory opened for write fails here, before fstat. It is not
+        // a regular file either, and the open itself did not wait.
+        if err.raw_os_error() == Some(libc::EISDIR) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} is not a regular file", path.display()),
+            ));
+        }
+        return Err(err);
+    }
+    // SAFETY: `fd` was just opened above and nothing else owns it.
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    // SAFETY: fstat on an open descriptor fills `st`.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(file.as_raw_fd(), &mut st) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if (st.st_mode & libc::S_IFMT) != libc::S_IFREG {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    clear_nonblock(file.as_raw_fd())?;
+    Ok(file)
+}
+
+/// Drop `O_NONBLOCK` on `fd`. The open used it so a fifo could not hang;
+/// a regular file is read and written without it.
+fn clear_nonblock(fd: std::os::unix::io::RawFd) -> std::io::Result<()> {
+    // SAFETY: `fd` is open. F_GETFL returns the status flags or -1.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: F_SETFL replaces the status flags. Access-mode bits in the
+    // value are ignored, so clearing O_NONBLOCK leaves the open mode alone.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Read a state log written by [`append_locked_row`] without its lock,
 /// refusing a symlink at the file or at the directory ljos made.
 ///
 /// A missing file is an empty log. A symlink in ljos's own directory, at
 /// the file or the directory, is an error rather than the bytes it points
 /// at: the write side refuses the same links, so the read side does not
-/// hand back whatever a swap put there.
+/// hand back whatever a swap put there. A fifo, a device node or a
+/// directory in place of the log is an error too: opening one without
+/// `O_NONBLOCK` would wait, and reading a device such as `/dev/zero`
+/// would not end.
 pub(crate) fn read_state_file(path: &Path) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
-    use std::os::unix::io::{AsRawFd, FromRawFd};
     let (dir, name) = open_state_dir(path)?;
-    // SAFETY: `dir` is an open directory descriptor and `name` has no
-    // interior NUL. openat returns a new descriptor or -1.
-    let fd = unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
+    let mut file = match open_regular_at(&dir, &name, path, libc::O_RDONLY, 0) {
+        Ok(file) => file,
+        Err(err) if err.raw_os_error() == Some(libc::ENOENT) => return Ok(Vec::new()),
+        Err(err) => return Err(err),
     };
-    if fd < 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::ENOENT) {
-            return Ok(Vec::new());
-        }
-        return Err(err);
-    }
-    // SAFETY: `fd` was just opened above and nothing else owns it.
-    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
     Ok(bytes)
@@ -21658,26 +21741,15 @@ pub(crate) fn read_state_file(path: &Path) -> std::io::Result<Vec<u8>> {
 pub(crate) fn rewrite_state_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::io::{AsRawFd, FromRawFd};
+    use std::os::unix::io::AsRawFd;
     let (dir, name) = open_state_dir(path)?;
-    // A rename over the target would drop a symlink safely, but a state
-    // file ljos made is never one, so its presence there is tampering.
-    // SAFETY: `dir` is an open directory descriptor and `name` has no
-    // interior NUL; `stat` is filled by the call.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    let seen = unsafe {
-        libc::fstatat(
-            dir.as_raw_fd(),
-            name.as_ptr(),
-            &mut st,
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    if seen == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFLNK {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("{} is a symlink", path.display()),
-        ));
+    // A rename over the target would replace a fifo or a symlink, and a
+    // state file ljos made is never either, so its presence there is
+    // tampering. Opening it O_NONBLOCK refuses it before the rename.
+    match open_regular_at(&dir, &name, path, libc::O_RDONLY, 0) {
+        Ok(_) => {}
+        Err(err) if err.raw_os_error() == Some(libc::ENOENT) => {}
+        Err(err) => return Err(err),
     }
     let mut tmp_bytes = path
         .file_name()
@@ -21686,30 +21758,27 @@ pub(crate) fn rewrite_state_file(path: &Path, bytes: &[u8]) -> std::io::Result<(
     tmp_bytes.extend_from_slice(format!(".{}.tmp", std::process::id()).as_bytes());
     let tmp = std::ffi::CString::new(tmp_bytes)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
-    // SAFETY: `dir` is an open directory descriptor; `tmp` has no interior
-    // NUL. A leftover temp from a crashed write is removed and the create
-    // is tried once more. openat returns a new descriptor or -1.
-    let fd = unsafe {
-        let open = || {
-            libc::openat(
-                dir.as_raw_fd(),
-                tmp.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o600 as libc::c_uint,
-            )
-        };
-        let mut fd = open();
-        if fd < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EEXIST) {
-            libc::unlinkat(dir.as_raw_fd(), tmp.as_ptr(), 0);
-            fd = open();
-        }
-        fd
+    // A leftover temp from a crashed write is removed and the create is
+    // tried once more. The temp is a new regular file; the same open
+    // still checks that and clears O_NONBLOCK before the write.
+    let open_temp = || {
+        open_regular_at(
+            &dir,
+            &tmp,
+            path,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+            0o600,
+        )
     };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: `fd` was just opened above and nothing else owns it.
-    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mut file = match open_temp() {
+        Ok(file) => file,
+        Err(err) if err.raw_os_error() == Some(libc::EEXIST) => {
+            // SAFETY: `dir` and `tmp` are still valid.
+            unsafe { libc::unlinkat(dir.as_raw_fd(), tmp.as_ptr(), 0) };
+            open_temp()?
+        }
+        Err(err) => return Err(err),
+    };
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
     if let Err(err) = written {
         // SAFETY: `dir` and `tmp` are still valid; a failed write leaves no
@@ -21832,26 +21901,19 @@ pub(crate) fn append_locked_row(
 ) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
-    use std::os::unix::io::{AsRawFd, FromRawFd};
+    use std::os::unix::io::AsRawFd;
     let (dir, name) = open_state_dir(path)?;
     // O_RDWR, not O_WRONLY: the torn-tail check pread(2)s the last byte, and
-    // a write-only descriptor answers that with EBADF.
-    // SAFETY: dir is an open directory descriptor and name is a
-    // NUL-terminated string with no interior NUL. openat returns a new
-    // descriptor or -1.
-    let fd = unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDWR | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o600 as libc::c_uint,
-        )
-    };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: fd was just opened above and nothing else owns it.
-    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    // a write-only descriptor answers that with EBADF. O_RDWR also opens a
+    // fifo without waiting for a reader, so the regular-file check can
+    // refuse it instead of blocking.
+    let mut file = open_regular_at(
+        &dir,
+        &name,
+        path,
+        libc::O_RDWR | libc::O_APPEND | libc::O_CREAT,
+        0o600,
+    )?;
     file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     let wait = durability.lock_wait();
     let deadline = std::time::Instant::now() + wait;
@@ -21957,9 +22019,18 @@ fn bypass_skip_note(path: &Path, err: &std::io::Error) -> String {
 /// guard, and the last one. Passing over the guard is allowed, so the row
 /// stays green; it is there to be read.
 fn bypass_row() -> Habitat {
-    let state = match bypass_log_path().and_then(|p| read_state_file(&p).ok().map(|t| (p, t))) {
+    let state = match bypass_log_path() {
         None => "no command has run past the guard".to_string(),
-        Some((path, bytes)) => bypass_summary(&bytes, &path.display().to_string()),
+        Some(path) => match read_state_file(&path) {
+            Ok(bytes) => bypass_summary(&bytes, &path.display().to_string()),
+            // A fifo, device or directory is not a log. Saying the guard
+            // was never passed would hide the swap; the row names it damaged.
+            Err(err) if err.to_string().contains("not a regular file") => format!(
+                "the guard bypass log at {} is damaged: {err}",
+                path.display()
+            ),
+            Err(_) => "no command has run past the guard".to_string(),
+        },
     };
     Habitat {
         name: "guard bypass",
@@ -31749,6 +31820,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_guard_shim_refuses_a_deny_and_runs_the_rest() {
+        let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let guard = dir.path().join("guard-bin");
         let fake = dir.path().join("fake");
@@ -41191,6 +41263,160 @@ mod tests {
         assert!(read_state_file(&bypass_log_path().unwrap()).is_err());
     }
 
+    /// A fifo, a directory, or a device node in place of a state log is
+    /// damaged, and the open returns. A regression that waits on the fifo
+    /// fails this test instead of hanging it.
+    #[test]
+    fn a_non_regular_state_log_is_damaged_not_a_hang() {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let state = dir.path().join("state");
+        let home = dir.path().join("home");
+        for path in [&data, &state, &home] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let bypass_dir = data.join("ljos");
+        std::fs::create_dir_all(&bypass_dir).unwrap();
+        let queue_dir = state.join("ljos");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+
+        let mut kinds = vec!["fifo".to_string(), "directory".to_string()];
+        let probe = dir.path().join("node");
+        if mknod_char(&probe) {
+            std::fs::remove_file(&probe).unwrap();
+            kinds.push("device".to_string());
+        }
+        for kind in &kinds {
+            let log = bypass_dir.join("bypass.jsonl");
+            plant_irregular(&log, kind);
+            refuse_state_log(&log);
+            let _ = std::fs::remove_file(&log);
+            let _ = std::fs::remove_dir(&log);
+
+            let queue = queue_dir.join("note-queue.jsonl");
+            plant_irregular(&queue, kind);
+            refuse_state_log(&queue);
+            let _ = std::fs::remove_file(&queue);
+            let _ = std::fs::remove_dir(&queue);
+        }
+
+        let zero = std::path::PathBuf::from("/dev/zero");
+        if zero
+            .symlink_metadata()
+            .is_ok_and(|meta| meta.file_type().is_char_device())
+        {
+            let before = zero.symlink_metadata().unwrap();
+            refuse_state_log(&zero);
+            let after = zero.symlink_metadata().unwrap();
+            assert!(after.file_type().is_char_device());
+            assert_eq!(before.mode() & 0o777, after.mode() & 0o777);
+        }
+
+        let log = bypass_dir.join("bypass.jsonl");
+        mkfifo(&log);
+        let queue = queue_dir.join("note-queue.jsonl");
+        mkfifo(&queue);
+        let _env = HoldEnv::set(&[
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_DATA_HOME", data.to_str().unwrap()),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+        ]);
+        let bypass = bounded("doctor bypass", bypass_row);
+        assert!(bypass.state.contains("damaged"), "bypass: {}", bypass.state);
+        assert!(
+            bypass.state.contains("not a regular file"),
+            "bypass: {}",
+            bypass.state
+        );
+        let notes = bounded("doctor note queue", note_queue_row);
+        assert!(
+            notes.state.contains("damaged"),
+            "note queue: {}",
+            notes.state
+        );
+        assert!(
+            notes.state.contains("not a regular file"),
+            "note queue: {}",
+            notes.state
+        );
+        assert!(!notes.ok, "{}", notes.state);
+    }
+
+    fn bounded<T: Send + 'static>(what: &str, body: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(body());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap_or_else(|_| panic!("{what} hung"))
+    }
+
+    fn refuse_state_log(path: &std::path::Path) {
+        let path = path.to_path_buf();
+        let read = bounded("read", {
+            let path = path.clone();
+            move || read_state_file(&path)
+        });
+        let err = read.expect_err("read");
+        assert!(
+            err.to_string().contains("not a regular file"),
+            "read {}: {err}",
+            path.display()
+        );
+        let rewrite = bounded("rewrite", {
+            let path = path.clone();
+            move || rewrite_state_file(&path, b"{}\n")
+        });
+        let err = rewrite.expect_err("rewrite");
+        assert!(
+            err.to_string().contains("not a regular file"),
+            "rewrite {}: {err}",
+            path.display()
+        );
+        let append = bounded("append", {
+            let path = path.clone();
+            move || append_locked_row(&path, b"{}\n", Durability::BestEffort)
+        });
+        let err = append.expect_err("append");
+        assert!(
+            err.to_string().contains("not a regular file"),
+            "append {}: {err}",
+            path.display()
+        );
+    }
+
+    fn plant_irregular(path: &std::path::Path, kind: &str) {
+        match kind {
+            "fifo" => mkfifo(path),
+            "directory" => std::fs::create_dir(path).unwrap(),
+            "device" => assert!(mknod_char(path), "mknod"),
+            _ => panic!("unknown {kind}"),
+        }
+    }
+
+    fn mkfifo(path: &std::path::Path) {
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: mkfifo takes a NUL-terminated path that lives until it
+        // returns, and a mode.
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(rc, 0, "mkfifo: {}", std::io::Error::last_os_error());
+    }
+
+    /// `true` when this machine lets the test make a character device.
+    fn mknod_char(path: &std::path::Path) -> bool {
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: mknod takes a NUL-terminated path that lives until it
+        // returns. Major 1 minor 3 is the null device; a kernel that
+        // refuses the node returns -1 and the caller skips the case.
+        let rc =
+            unsafe { libc::mknod(c_path.as_ptr(), libc::S_IFCHR | 0o600, libc::makedev(1, 3)) };
+        rc == 0
+    }
+
     /// The fail-open path writes its row before the command runs. A lock
     /// on the log that is never let go skips the row; it does not hold
     /// the command.
@@ -42054,10 +42280,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     fn a_seat_with_no_runner_still_gets_its_tracker() {
         let _g = env_guard();
         let _seat = HermeticSeat::new();
-        let empty = tempfile::tempdir().unwrap();
-        // SAFETY: env_guard restores PATH with the rest of the environment.
-        unsafe { std::env::set_var("PATH", empty.path()) };
-        let steps = super::onboard_detected(true, None).expect("dry onboard");
+        let steps =
+            super::onboard_detected_with_lookup(true, None, &|_| false).expect("dry onboard");
         let whats: Vec<&str> = steps.iter().map(|s| s.what.as_str()).collect();
         assert!(
             steps[0].detail.contains("found no coding tool"),
@@ -51893,12 +52117,20 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// the machine `ljos cloud up` marked, exports the deeds that seat
     /// cited, with the file bytes and the supersedes link, and the finish
     /// commit carries a bag `deedar check` accepts.
+    ///
+    /// The deedar this reads is the commit in `.github/deedar-pin`, built
+    /// here. A released deedar prints `id=` and no `accession=` line, and
+    /// it writes no `bytes/` sidecar. CI puts the pin on `PATH`; a cloud
+    /// image often has the release, and the test then panics with no
+    /// accession.
     #[test]
     fn a_box_finish_writes_no_bag_and_a_cloud_finish_writes_one() {
+        let bin_dir = deedimport_deedar();
         // After the env lock. A parallel test replaces PATH while it holds
         // the lock, and a lookup before it sees that PATH and reports
         // deedar missing.
         let _g = env_guard();
+        let _path = super::prepend_path(&bin_dir);
         which::which("deedar").unwrap_or_else(|_| panic!("deedar is not on PATH"));
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("tracker");
