@@ -288,6 +288,8 @@ fn short_cluster_takes_value(word: &str) -> bool {
 fn under_cursor(name: &str) -> bool {
     name.strip_prefix("refs/heads/")
         .or_else(|| name.strip_prefix("refs/tags/"))
+        .or_else(|| name.strip_prefix("heads/"))
+        .or_else(|| name.strip_prefix("tags/"))
         .unwrap_or(name)
         .starts_with(CURSOR)
 }
