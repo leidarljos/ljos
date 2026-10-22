@@ -36,8 +36,10 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -105,9 +107,13 @@ pub fn load() -> BTreeMap<String, Wake> {
         .unwrap_or_default()
 }
 
+#[cfg(test)]
 fn load_for_write() -> Result<BTreeMap<String, Wake>> {
-    let wake_path = path();
-    let text = match std::fs::read_to_string(&wake_path) {
+    load_path_for_write(&path())
+}
+
+fn load_path_for_write(wake_path: &Path) -> Result<BTreeMap<String, Wake>> {
+    let text = match std::fs::read_to_string(wake_path) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
         Err(err) => {
@@ -117,17 +123,92 @@ fn load_for_write() -> Result<BTreeMap<String, Wake>> {
     toml::from_str(&text).with_context(|| format!("wake: parse {}", wake_path.display()))
 }
 
-fn save(table: &BTreeMap<String, Wake>) -> Result<()> {
-    let path = path();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let text = format!(
+fn render(table: &BTreeMap<String, Wake>) -> Result<String> {
+    Ok(format!(
         "# Wakes `ljos send` starts when mail reaches a seat. A name ending in -\n\
          # matches every longer seat that starts with it. `ljos wake --help` sets them.\n{}",
         toml::to_string(table)?
-    );
-    std::fs::write(&path, text).with_context(|| format!("wake: {}", path.display()))
+    ))
+}
+
+fn lock_path(wake_path: &Path) -> PathBuf {
+    let mut name = wake_path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_else(|| "wake.toml".into());
+    name.push(".lock");
+    wake_path.with_file_name(name)
+}
+
+#[cfg(unix)]
+fn lock_exclusive(file: &std::fs::File) -> std::io::Result<()> {
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn lock_exclusive(_file: &std::fs::File) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn save_atomic(wake_path: &Path, table: &BTreeMap<String, Wake>) -> Result<()> {
+    let text = render(table)?;
+    let dir = wake_path
+        .parent()
+        .context("wake: no directory for wake.toml")?;
+    std::fs::create_dir_all(dir)?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut tmp_name = wake_path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_else(|| "wake.toml".into());
+    tmp_name.push(format!(".tmp-{}-{stamp}", std::process::id()));
+    let tmp = dir.join(tmp_name);
+    {
+        let mut out = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp)
+            .with_context(|| format!("wake: {}", tmp.display()))?;
+        out.write_all(text.as_bytes())
+            .with_context(|| format!("wake: {}", tmp.display()))?;
+        out.sync_all()
+            .with_context(|| format!("wake: {}", tmp.display()))?;
+    }
+    if let Err(err) = std::fs::rename(&tmp, wake_path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err).with_context(|| format!("wake: {}", wake_path.display()));
+    }
+    Ok(())
+}
+
+fn edit_table<T>(edit: impl FnOnce(&mut BTreeMap<String, Wake>) -> Result<(T, bool)>) -> Result<T> {
+    let wake_path = path();
+    if let Some(dir) = wake_path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let lock_file_path = lock_path(&wake_path);
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_file_path)
+        .with_context(|| format!("wake: {}", lock_file_path.display()))?;
+    lock_exclusive(&lock).with_context(|| format!("wake: lock {}", lock_file_path.display()))?;
+    let mut table = load_path_for_write(&wake_path)?;
+    let (out, changed) = edit(&mut table)?;
+    if changed {
+        save_atomic(&wake_path, &table)?;
+    }
+    Ok(out)
 }
 
 /// The guard's verdict on a wake command: the seat's own guard, the
@@ -192,16 +273,18 @@ pub fn set_command(seat: &str, command: &str, timeout: Option<u64>) -> Result<St
     if let Some(rule) = judge(command) {
         bail!("wake: {}", refusal(command, &rule));
     }
-    let mut table = load_for_write()?;
-    table.insert(
-        seat.to_string(),
-        Wake {
-            command: Some(command.to_string()),
-            timeout,
-            ..Wake::default()
-        },
-    );
-    save(&table)?;
+    let next = Wake {
+        command: Some(command.to_string()),
+        timeout,
+        ..Wake::default()
+    };
+    edit_table(|table| {
+        let changed = table.get(seat) != Some(&next);
+        if changed {
+            table.insert(seat.to_string(), next.clone());
+        }
+        Ok(((), changed))
+    })?;
     Ok(format!("wake {seat}: runs `{command}` {}\n", reaches(seat)))
 }
 
@@ -219,17 +302,19 @@ pub fn set_webhook(
 ) -> Result<String> {
     let url = url.trim();
     check_webhook(url)?;
-    let mut table = load_for_write()?;
-    table.insert(
-        seat.to_string(),
-        Wake {
-            webhook: Some(url.to_string()),
-            key_file: key_file.map(str::to_string),
-            key_env: key_env.map(str::to_string),
-            ..Wake::default()
-        },
-    );
-    save(&table)?;
+    let next = Wake {
+        webhook: Some(url.to_string()),
+        key_file: key_file.map(str::to_string),
+        key_env: key_env.map(str::to_string),
+        ..Wake::default()
+    };
+    edit_table(|table| {
+        let changed = table.get(seat) != Some(&next);
+        if changed {
+            table.insert(seat.to_string(), next.clone());
+        }
+        Ok(((), changed))
+    })?;
     Ok(format!("wake {seat}: posts to {url} {}\n", reaches(seat)))
 }
 
@@ -242,37 +327,43 @@ pub fn set_webhook(
 ///
 /// The URL is not https, and not http on localhost or a loopback
 /// address, or `wake.toml` cannot be written.
-pub(crate) fn set_env_webhook(seat: &str, url: &str, key_env: &str) -> Result<()> {
+pub(crate) fn set_env_webhook(seat: &str, url: &str, key_env: &str) -> Result<bool> {
     let url = url.trim();
     check_webhook(url)?;
-    let mut table = load_for_write()?;
-    table.insert(
-        seat.to_string(),
-        Wake {
-            webhook: Some(url.to_string()),
-            key_env: Some(key_env.to_string()),
-            source: Some(ENV_SOURCE.to_string()),
-            ..Wake::default()
-        },
-    );
-    save(&table)?;
-    Ok(())
+    let next = Wake {
+        webhook: Some(url.to_string()),
+        key_env: Some(key_env.to_string()),
+        source: Some(ENV_SOURCE.to_string()),
+        ..Wake::default()
+    };
+    edit_table(|table| {
+        let hand_set = table
+            .get(seat)
+            .is_some_and(|wake| wake.source.as_deref() != Some(ENV_SOURCE));
+        if hand_set {
+            return Ok((false, false));
+        }
+        let changed = table.get(seat) != Some(&next);
+        if changed {
+            table.insert(seat.to_string(), next.clone());
+        }
+        Ok((true, changed))
+    })
 }
 
 /// Remove one env-owned wake entry.
 ///
 /// Returns whether an env-owned entry was present and removed.
 pub(crate) fn clear_env_webhook(seat: &str) -> Result<bool> {
-    let mut table = load_for_write()?;
-    let remove = table
-        .get(seat)
-        .is_some_and(|wake| wake.source.as_deref() == Some(ENV_SOURCE));
-    if !remove {
-        return Ok(false);
-    }
-    table.remove(seat);
-    save(&table)?;
-    Ok(true)
+    edit_table(|table| {
+        let remove = table
+            .get(seat)
+            .is_some_and(|wake| wake.source.as_deref() == Some(ENV_SOURCE));
+        if remove {
+            table.remove(seat);
+        }
+        Ok((remove, remove))
+    })
 }
 
 /// Remove a seat's wake.
@@ -281,19 +372,20 @@ pub(crate) fn clear_env_webhook(seat: &str) -> Result<bool> {
 ///
 /// `wake.toml` cannot be written.
 pub fn clear(seat: &str) -> Result<String> {
-    let mut table = load_for_write()?;
-    if table.remove(seat).is_none() {
-        if let Some((key, _)) = resolve(&table, seat) {
-            if key != seat {
-                return Ok(format!(
-                    "wake {seat}: none set; matches {key}. clear {key} to remove it\n"
-                ));
+    edit_table(|table| {
+        if table.remove(seat).is_none() {
+            if let Some((key, _)) = resolve(table, seat) {
+                if key != seat {
+                    return Ok((
+                        format!("wake {seat}: none set; matches {key}. clear {key} to remove it\n"),
+                        false,
+                    ));
+                }
             }
+            return Ok((format!("wake {seat}: none set\n"), false));
         }
-        return Ok(format!("wake {seat}: none set\n"));
-    }
-    save(&table)?;
-    Ok(format!("wake {seat}: removed\n"))
+        Ok((format!("wake {seat}: removed\n"), true))
+    })
 }
 
 /// What a seat's wake is, in one line. A seat with no entry of its own
@@ -932,6 +1024,63 @@ mod tests {
         assert!(
             target_rx.recv_timeout(Duration::from_millis(700)).is_err(),
             "redirect target was called"
+        );
+    }
+
+    #[test]
+    fn concurrent_writers_and_reader_keep_every_entry() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let (_lock, _dir) = isolated();
+        set_command("seed", "true", None).expect("seed");
+        let left_payload = "a".repeat(40_000);
+        let right_payload = "b".repeat(40_000);
+
+        let done = Arc::new(AtomicBool::new(false));
+        let parse_errors = Arc::new(AtomicUsize::new(0));
+        let done_reader = Arc::clone(&done);
+        let parse_reader = Arc::clone(&parse_errors);
+        let reader = std::thread::spawn(move || {
+            while !done_reader.load(Ordering::Relaxed) {
+                if let Ok(text) = std::fs::read_to_string(path()) {
+                    if !text.is_empty() && toml::from_str::<BTreeMap<String, Wake>>(&text).is_err()
+                    {
+                        parse_reader.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                std::hint::spin_loop();
+            }
+        });
+
+        for round in 0..40 {
+            let gate = Arc::new(Barrier::new(2));
+            let left_gate = Arc::clone(&gate);
+            let right_gate = Arc::clone(&gate);
+            let left_cmd = format!("{left_payload}{round}");
+            let right_cmd = format!("{right_payload}{round}");
+            let left = std::thread::spawn(move || {
+                left_gate.wait();
+                set_command("alpha", &left_cmd, None).expect("left write");
+            });
+            let right = std::thread::spawn(move || {
+                right_gate.wait();
+                set_command("beta", &right_cmd, None).expect("right write");
+            });
+            left.join().expect("left join");
+            right.join().expect("right join");
+            let table = load_for_write().expect("table parse");
+            assert!(
+                table.contains_key("alpha") && table.contains_key("beta"),
+                "lost wake entry on round {round}: {table:?}"
+            );
+        }
+        done.store(true, Ordering::Relaxed);
+        reader.join().expect("reader join");
+        assert_eq!(
+            parse_errors.load(Ordering::Relaxed),
+            0,
+            "reader saw torn writes"
         );
     }
 
