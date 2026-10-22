@@ -6,6 +6,7 @@
 //! upgrade stores a copy as the person's and retires the original on
 //! either, so the text a rule cites and a lesson's hash read the same.
 //! A refusal is said once and kept, so later runs do not retry it.
+//! `ljos prefer --review --keep` raises a held-back one the same way.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -141,9 +142,42 @@ impl Seat {
     }
 
     fn ljos(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_ljos"))
+        self.command(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
-            .current_dir(self.home.path())
+            .output()
+            .unwrap()
+    }
+
+    /// `ljos prefer --review --keep id` typed at a terminal: stdin is a
+    /// pty and no runner is an ancestor.
+    fn keep(&self, id: &str) -> Output {
+        const SCRIPT: &str = r#"
+import os, pty, sys
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv(sys.argv[1], [sys.argv[1], "prefer", "--review", "--keep", sys.argv[2]])
+chunks = []
+while True:
+    try:
+        data = os.read(fd, 4096)
+    except OSError:
+        break
+    if not data:
+        break
+    chunks.append(data)
+_, status = os.waitpid(pid, 0)
+sys.stdout.buffer.write(b"".join(chunks))
+raise SystemExit(os.waitstatus_to_exitcode(status))
+"#;
+        self.command("python3")
+            .args(["-c", SCRIPT, env!("CARGO_BIN_EXE_ljos"), id])
+            .output()
+            .unwrap()
+    }
+
+    fn command(&self, program: &str) -> Command {
+        let mut cmd = Command::new(program);
+        cmd.current_dir(self.home.path())
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", self.home.path())
@@ -155,9 +189,8 @@ impl Seat {
             .env("PACKSET_WORKSPACE", "seat")
             .env("PACKSET_TIMEOUT_MS", "5000")
             .env("LJOS_USER_RULES_SYNC", "off")
-            .stdin(Stdio::null())
-            .output()
-            .unwrap()
+            .stdin(Stdio::null());
+        cmd
     }
 
     fn markers(&self) -> Vec<PathBuf> {
@@ -319,4 +352,66 @@ fn a_refused_raise_is_said_once_and_not_retried() {
     assert!(!err.contains("will not try again"), "{err}");
     assert_eq!(daemon.atoms(), after, "a second run sent the raise again");
     assert_eq!(std::fs::read_to_string(&marks[0]).unwrap(), written);
+}
+
+/// A preference a runner stored waits for review. Kept at a terminal, it
+/// is stored as the person's copy with the same words and clock, the
+/// original is retired, and nothing waits any more.
+#[test]
+fn a_kept_preference_is_raised_by_a_person_copy() {
+    let daemon = Daemon::start();
+    let seat = Seat::on(&daemon);
+    let held = daemon.post(
+        "/v1/atoms",
+        &json!({
+            "schema": "inside.atom/v1",
+            "workspace": "seat",
+            "kind": "preference",
+            "level": "explicit",
+            "origin": "user-declared",
+            "text": PREFERENCE,
+            "entities": ["seat:claude", "horizon:standing"],
+            "source": {
+                "harness": "claude",
+                "seat": "claude",
+                "session": "claude@4f1c",
+                "host": "box",
+                "via": "ljos",
+            },
+        }),
+    );
+    let id = held["id"].as_str().unwrap();
+    let listed = reviewed(&seat);
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains(id),
+        "{}",
+        text_of(&listed)
+    );
+
+    let kept = seat.keep(id);
+    assert!(kept.status.success(), "{}", text_of(&kept));
+
+    let after = daemon.atoms();
+    let live = live_with(&after, PREFERENCE);
+    assert_eq!(live.len(), 1, "{after:?}");
+    let new = live[0];
+    let new_id = new["id"].as_str().unwrap();
+    assert_ne!(new_id, id, "{new}");
+    let said = String::from_utf8_lossy(&kept.stdout);
+    assert!(
+        said.contains(&format!(
+            "kept {id} as the person's preference, now {new_id}"
+        )),
+        "{said}"
+    );
+    assert_eq!(basis(new), Some("person"), "{new}");
+    assert_eq!(new["origin"], "user-declared", "{new}");
+    for key in ["kind", "level", "entities", "ts", "valid_from"] {
+        assert_eq!(new[key], held[key], "{key}: {new}");
+    }
+    assert_eq!(without_basis(new), held["source"], "{new}");
+
+    let review = reviewed(&seat);
+    let said = String::from_utf8_lossy(&review.stdout);
+    assert!(said.contains("no older preferences await review"), "{said}");
 }
