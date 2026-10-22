@@ -84,7 +84,7 @@ same everywhere and the envelope differs:
 | Antigravity (=agy=) | hooks plus skill | hook deny blocks | =ljos approve=, =ljos_request_approval=, or reply =approve ID= | pipeline stages arrive separated by a =\|= word so a download and the shell it feeds are judged together |
 | opencode | =assets/opencode/ljos.ts= | hook deny blocks | runner prompt or =ljos approve= | same contract, TypeScript hook |
 | omp | =assets/omp/ljos.ts= | hook deny blocks | runner prompt or =ljos approve= | same contract, TypeScript hook |
-| hermes | MCP server list plus hooks | hook deny blocks | =ljos approve= | nothing leaves the machine unless a remote judge is turned on |
+| hermes | MCP server list plus skill | advisory: onboard registers no hook | none: no hook | nothing leaves the machine unless a remote judge is turned on |
 | Cursor | prompt note on the first tool result; skill; =~/.cursor/agents= | =beforeShellExecution= and =preToolUse=, fail closed | Cursor's permission prompt on a shell command | the IDE and the =agent= CLI share =~/.cursor/mcp.json= and =~/.cursor/hooks.json= |
 | GitHub Copilot CLI | skill; no prompt note, since Copilot drops a command hook's prompt output | =PreToolUse= in =~/.copilot/hooks/ljos.json=, =permissionDecision= | Copilot's permission prompt | the same file in a repository's =.github/hooks= reaches Copilot's cloud agent |
 | Gemini CLI | =BeforeAgent= =additionalContext= | =BeforeTool= on =run_shell_command=, =decision: deny= | none: an ask is a deny that says so | hooks and MCP server share =~/.gemini/settings.json=; timeouts there are milliseconds |
