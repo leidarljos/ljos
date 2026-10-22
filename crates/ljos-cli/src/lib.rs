@@ -11422,12 +11422,18 @@ pub fn check_seat_signatures(
     let can_date_legacy = tracker_is_git == Some(true);
     let v = issue_record(issue).map_err(|e| format!("{issue}: not readable: {e:#}"))?;
     let legacy = |voter: &str, choice: &str| {
-        can_date_legacy && ballot_sig::recorded_before_signing(issue, voter, choice)
+        can_date_legacy
+            && ballot_sig::recorded_before_signing(issue, voter, choice).unwrap_or(false)
     };
     let notes = ballot_sig::notes_of(&v);
     let (pins, _) = ballot_sig::pins_for_check().map_err(|e| {
         format!("{issue}: the seat pins are not one key per seat, so it decides nothing for a push: {e:#}")
     })?;
+    if can_date_legacy {
+        if let Some(root) = ballot_sig::env_root() {
+            slot::require_tracker_history(&root)?;
+        }
+    }
     let dropped = slot::dropped_pins(&pins);
     if !dropped.is_empty() {
         return Err(format!(
@@ -11435,12 +11441,19 @@ pub fn check_seat_signatures(
             dropped.join(", ")
         ));
     }
-    let starts = slot::starts();
-    let stands =
-        |seat: &str| slot::stands(seat, pins.get(seat).map(String::as_str), starts.as_deref());
-    let before_pin = |note: &str, voter: &str| {
-        pins.get(voter)
-            .is_some_and(|key| slot::recorded_before_pin(issue, note, voter, key).unwrap_or(true))
+    let starts = slot::starts()?;
+    let stands = |seat: &str| {
+        slot::stands(seat, pins.get(seat).map(String::as_str), starts.as_deref()).unwrap_or(false)
+    };
+    let before_pin = |note: &str, voter: &str| match pins.get(voter) {
+        Some(key) => match slot::recorded_before_pin(issue, note, voter, key) {
+            Ok(Some(before)) => before,
+            // Not a git checkout: there is no commit order to refuse on.
+            Ok(None) => true,
+            // Incomplete history must not count the slot.
+            Err(_) => false,
+        },
+        None => false,
     };
     let signed = |voter: &str| {
         notes
@@ -18973,22 +18986,20 @@ fn cite_ballots(
     Ok((ballots, cite_roster(cite)?))
 }
 
-/// The persona names a push cite leaves out: the pack's roster. A seat
-/// whose pack is off on purpose (`PACKSET_URL=off`) has no personas.
+/// The persona names a push cite leaves out: the pack's roster. An empty
+/// roster is an answer from the pack. `PACKSET_URL=off` is not an answer.
 ///
 /// # Errors
 ///
-/// The pack is on and its roster does not answer: a persona's ballot
-/// cannot be told from a seat's, so no cite stands until it does.
+/// The roster cannot be read, including when the pack is off. A persona's
+/// ballot cannot be told from a seat's, so no cite stands until the pack
+/// answers.
 pub fn cite_roster(cite: &str) -> std::result::Result<std::collections::BTreeSet<String>, String> {
     match personas_from_pack() {
         Ok(personas) => Ok(personas
             .into_iter()
             .map(|p| p.name.trim().to_string())
             .collect()),
-        Err(_) if std::env::var("PACKSET_URL").is_ok_and(|url| url == "off") => {
-            Ok(std::collections::BTreeSet::new())
-        }
         Err(e) => Err(format!(
             "{cite}: the roster is not readable, so persona ballots cannot be left out: {e:#}"
         )),
