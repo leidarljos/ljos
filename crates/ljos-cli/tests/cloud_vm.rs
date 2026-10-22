@@ -1229,6 +1229,67 @@ key_env = \"SADDLE_HAND_KEY\"
 }
 
 #[test]
+fn cloud_up_retires_env_wakes_even_when_cloud_age_fails() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let config = home.join(".config");
+    let rel = root.path().join("rel");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(config.join("ljos")).unwrap();
+    for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
+    }
+    fs::write(
+        rel.join("SHA256SUMS"),
+        sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
+    )
+    .unwrap();
+    let wakes = config.join("ljos/wake.toml");
+    fs::write(
+        &wakes,
+        "\
+[inky]
+webhook = \"https://old.example/inky\"
+key_env = \"LJOS_WAKE_INKY_KEY\"
+source = \"env\"
+
+[saddle]
+command = \"true\"
+",
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", &config);
+    std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::remove_var("LJOS_BIN_DIR");
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    clear_agent_ids();
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("LJOS_WAKE_") {
+            std::env::remove_var(&key);
+        }
+    }
+    std::env::set_var("LJOS_WAKE_INKY_KEY", "rotated-key");
+    std::env::set_var("LJOS_CLOUD_AGE_SECRET", "LJOS_FAKE_AGE_KEY");
+    std::env::set_var("LJOS_FAKE_AGE_KEY", "definitely-not-an-age-identity");
+
+    let err = ljos_cli::cloud::up(false).expect_err("bad cloud age must abort cloud up");
+    let said = format!("{err:#}");
+    assert!(said.contains("not an age identity"), "{said}");
+    let table = ljos_cli::wake::load();
+    assert!(!table.contains_key("inky"), "{table:?}");
+    assert_eq!(table["saddle"].command.as_deref(), Some("true"));
+    let text = fs::read_to_string(&wakes).unwrap();
+    assert!(!text.contains("old.example/inky"), "{text}");
+}
+
+#[test]
 fn cloud_up_refuses_to_overwrite_a_broken_wake_toml() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
@@ -1743,6 +1804,15 @@ fn cloud_up_writes_the_scope_cloud_identity_from_a_named_secret() {
     fs::write(&outside, b"keep\n").unwrap();
     std::os::unix::fs::symlink(&outside, &path).unwrap();
     std::env::set_var("LJOS_CLOUD_AGE_KEY", &identity);
+    let linked = ljos_cli::cloud::up(false).unwrap_err().to_string();
+    assert!(linked.contains("is a symlink"), "{linked}");
+    assert!(!linked.contains(&secret_line), "{linked}");
+    assert_eq!(fs::read(&outside).unwrap(), b"keep\n");
+    assert!(fs::symlink_metadata(&path)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    fs::remove_file(&path).unwrap();
     let wrote = ljos_cli::cloud::up(false).unwrap();
     assert!(wrote.contains("wrote"), "{wrote}");
     assert!(wrote.contains("0600"), "{wrote}");

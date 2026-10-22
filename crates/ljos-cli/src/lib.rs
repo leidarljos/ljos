@@ -20491,6 +20491,7 @@ fn panes_row() -> Habitat {
 /// alone refuses less than the table with phronesis after it.
 const POLICY_TABLE_ONLY: &str =
     "phronesis is not linked; install an ljos-policyd release built with it";
+const POLICYD_INSTALL_FIX: &str = "`cargo install --locked ljos-policyd`";
 
 /// The oldest `ljos-policyd` this ljos runs with. A Rust older than the
 /// workspace's `rust-version` can leave an older one installed: `cargo
@@ -20623,15 +20624,21 @@ pub fn bypass_summary(text: &str, path: &str) -> String {
 fn policy_row() -> Habitat {
     let state = match policyd_bin() {
         None if policyd_required() => {
-            Err("ljos-policyd is not installed and POLICYD_REQUIRED=1: every shell command is refused; `cargo install --locked ljos-policyd`".to_string())
+            Err(format!(
+                "ljos-policyd is not installed and POLICYD_REQUIRED=1: every shell command is refused; {POLICYD_INSTALL_FIX}"
+            ))
         }
         None => Err(
-            "ljos-policyd is not installed: shell commands are judged only by seat rules; `cargo install --locked ljos-policyd`"
-                .to_string(),
+            format!(
+                "ljos-policyd is not installed: shell commands are judged only by seat rules; {POLICYD_INSTALL_FIX}"
+            ),
         ),
         Some(bin) => match run_captured(&bin.display().to_string(), &["version"]) {
             Ok(said) => policy_state(said.stdout.trim(), &bin.display().to_string()),
-            Err(e) => Err(format!("{} does not answer `version`: {e:#}", bin.display())),
+            Err(e) => Err(format!(
+                "{} does not answer `version`: {e:#}; reinstall with {POLICYD_INSTALL_FIX}",
+                bin.display()
+            )),
         },
     };
     Habitat {
@@ -27174,11 +27181,20 @@ pub fn command_refused(text: &str) -> bool {
 }
 
 /// Operator switch: missing TCB is a deny. Unset, absence stays open.
-pub fn policyd_required() -> bool {
+fn env_switch(name: &str) -> bool {
     matches!(
-        std::env::var("POLICYD_REQUIRED").as_deref(),
+        std::env::var(name).as_deref(),
         Ok("1") | Ok("true") | Ok("TRUE")
     )
+}
+
+pub fn policyd_required() -> bool {
+    env_switch("POLICYD_REQUIRED")
+}
+
+/// Operator switch: guard faults allow with a note. Unset, they deny.
+pub fn guard_fail_open() -> bool {
+    env_switch("LJOS_GUARD_FAIL_OPEN")
 }
 
 /// `POLICYD_BIN`, else `ljos-policyd` on PATH.
@@ -31881,6 +31897,35 @@ mod tests {
     }
 
     #[test]
+    fn doctor_policy_row_fails_missing_or_unresponsive_policyd_with_fix() {
+        let _g = env_guard();
+        let _missing = HoldEnv::set(&[("PATH", "/nonexistent"), ("POLICYD_BIN", "")]);
+        let missing = policy_row();
+        assert!(!missing.ok);
+        assert!(missing.state.contains("not installed"), "{}", missing.state);
+        assert!(
+            missing.state.contains(POLICYD_INSTALL_FIX),
+            "{}",
+            missing.state
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let dead = dir.path().join("ljos-policyd-missing");
+        let _down = HoldEnv::set(&[("POLICYD_BIN", dead.to_str().unwrap())]);
+        let unresponsive = policy_row();
+        assert!(!unresponsive.ok);
+        assert!(
+            unresponsive.state.contains("does not answer `version`"),
+            "{}",
+            unresponsive.state
+        );
+        assert!(
+            unresponsive.state.contains(POLICYD_INSTALL_FIX),
+            "{}",
+            unresponsive.state
+        );
+    }
+
+    #[test]
     fn doctor_lists_ljos_hud_but_does_not_require_it() {
         assert!(SEAT_BINS
             .iter()
@@ -32118,18 +32163,18 @@ mod tests {
         assert_eq!(trim_num(0.5790), "0.579");
         assert_eq!(trim_num(12.0), "12");
         assert_eq!(
-            habit_text("mab cr all", 0.579, "acc", "job 11793"),
-            "habit mab cr all stands at 0.579 acc (job 11793)."
+            habit_text("mab cr all", 0.579, "acc", "example-0001"),
+            "habit mab cr all stands at 0.579 acc (example-0001)."
         );
         let first = serde_json::json!({
             "id": "a1", "kind": "habit", "ts": "2026-09-12T10:00:00.000Z",
             "due_at": "2026-09-19T10:00:00.000Z",
-            "habit": {"name": "mab cr all", "value": 0.535, "unit": "acc", "source": "11750", "every_s": 604800}
+            "habit": {"name": "mab cr all", "value": 0.535, "unit": "acc", "source": "example-0000", "every_s": 604800}
         });
         let second = serde_json::json!({
             "id": "a2", "kind": "habit", "ts": "2026-09-19T10:00:00.000Z",
             "due_at": "2026-09-26T10:00:00.000Z",
-            "habit": {"name": "mab cr all", "value": 0.579, "unit": "acc", "source": "11793", "every_s": 604800,
+            "habit": {"name": "mab cr all", "value": 0.579, "unit": "acc", "source": "example-0001", "every_s": 604800,
                        "was": 0.535, "was_ts": "2026-09-12T10:00:00.000Z"}
         });
         let other = serde_json::json!({
@@ -32142,7 +32187,7 @@ mod tests {
         assert_eq!(rows[0].was, Some(0.535));
         let now = "2026-09-20T09:00:00.000Z";
         let line = format_readings(&rows, now);
-        assert!(line.starts_with("mab cr all\t0.579 acc\t+0.044 since 0.535 (8 days ago)\tyesterday\tnext reading in 6 days\t11793\n"), "{line}");
+        assert!(line.starts_with("mab cr all\t0.579 acc\t+0.044 since 0.535 (8 days ago)\tyesterday\tnext reading in 6 days\texample-0001\n"), "{line}");
         let late = readings_of(&[first]);
         assert!(format_readings(&late, now).contains("next reading late (yesterday)"));
         assert_eq!(format_change(&late[0], now), "first reading");
@@ -34207,6 +34252,22 @@ mod tests {
         match before {
             Some(v) => std::env::set_var("POLICYD_REQUIRED", v),
             None => std::env::remove_var("POLICYD_REQUIRED"),
+        }
+    }
+
+    #[test]
+    fn guard_fail_open_is_the_operator_switch() {
+        let _g = env_guard();
+        let before = std::env::var_os("LJOS_GUARD_FAIL_OPEN");
+        std::env::remove_var("LJOS_GUARD_FAIL_OPEN");
+        assert!(!guard_fail_open());
+        std::env::set_var("LJOS_GUARD_FAIL_OPEN", "1");
+        assert!(guard_fail_open());
+        std::env::set_var("LJOS_GUARD_FAIL_OPEN", "0");
+        assert!(!guard_fail_open());
+        match before {
+            Some(v) => std::env::set_var("LJOS_GUARD_FAIL_OPEN", v),
+            None => std::env::remove_var("LJOS_GUARD_FAIL_OPEN"),
         }
     }
 
@@ -47543,7 +47604,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// `bytes/` and digest sidecars. The binary is installed on PATH the
     /// way CI installs deedar. A failed build fails the test.
     fn deedimport_deedar() -> std::path::PathBuf {
-        const SHA: &str = "89e2574f6432bfc0451315f552f048eec747f59a";
+        const SHA: &str = "0cf75a3f647968ffce5eb466c22b0d3320837032";
         let cache = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/deedimport2-deedar");
         let bin_dir = cache.join("bin");
