@@ -54,6 +54,7 @@ schemars.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+ed25519-dalek = { version = "2", features = ["hazmat"] }
 tempfile = "3"
 vissue-core.workspace = true
 # Not used by the binary. ureq 2 reaches webpki-roots 1 through the 0.26
