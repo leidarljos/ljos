@@ -8,10 +8,12 @@
 //! A refusal is said once and kept, so later runs do not retry it.
 //! `ljos prefer --review --keep` raises a held-back one the same way.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -134,10 +136,14 @@ struct Seat {
 
 impl Seat {
     fn on(daemon: &Daemon) -> Self {
+        Self::at(&daemon.url)
+    }
+
+    fn at(url: &str) -> Self {
         Self {
             home: tempfile::tempdir().unwrap(),
             run: tempfile::tempdir().unwrap(),
-            url: daemon.url.clone(),
+            url: url.to_string(),
         }
     }
 
@@ -199,6 +205,73 @@ raise SystemExit(os.waitstatus_to_exitcode(status))
             .map(|entries| entries.flatten().map(|e| e.path()).collect())
             .unwrap_or_default()
     }
+}
+
+/// A pack in front of `daemon` that drops the first atom post after a
+/// delete while `armed` holds, as a run cut off between the retirement
+/// and the copy would. Every other request is passed through.
+fn cut_after_delete(daemon: &Daemon, armed: Arc<AtomicBool>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let upstream = daemon.url.clone();
+    thread::spawn(move || {
+        let mut deleted = false;
+        for mut stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let mut words = line.split_whitespace();
+            let (method, path) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
+            let mut length = 0;
+            loop {
+                let mut header = String::new();
+                reader.read_line(&mut header).unwrap();
+                if header.trim().is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = header.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            if method == "POST" && path == "/v1/atoms/delete" {
+                deleted = true;
+            } else if method == "POST"
+                && path == "/v1/atoms"
+                && std::mem::take(&mut deleted)
+                && armed.swap(false, Ordering::SeqCst)
+            {
+                let _ = stream.write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+                continue;
+            }
+            let request = ureq::request(method, &format!("{upstream}{path}"));
+            let answer = if body.is_empty() {
+                request.call()
+            } else {
+                request
+                    .set("Content-Type", "application/json")
+                    .send_bytes(&body)
+            };
+            let (code, text) = match answer {
+                Ok(resp) => (resp.status(), resp.into_string().unwrap_or_default()),
+                Err(ureq::Error::Status(code, resp)) => {
+                    (code, resp.into_string().unwrap_or_default())
+                }
+                Err(_) => (502, String::new()),
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                text.len()
+            );
+        }
+    });
+    url
 }
 
 fn text_of(out: &Output) -> String {
@@ -331,6 +404,70 @@ fn a_hook_leaves_the_upgrade_alone() {
     let live = live_with(&after, PREFERENCE);
     assert_eq!(live.len(), 1, "{after:?}");
     assert_ne!(live[0]["id"], preference["id"], "{after:?}");
+    assert_eq!(basis(live[0]), Some("person"), "{}", live[0]);
+}
+
+/// A run cut off after the original is retired and before its copy is
+/// stored writes no marker, and the next run stores the copy from what it
+/// wrote down. A kept preference cut off the same way is finished by
+/// keeping it again.
+#[test]
+fn a_raise_cut_off_after_the_retirement_is_finished_later() {
+    let daemon = Daemon::start();
+    let armed = Arc::new(AtomicBool::new(true));
+    let seat = Seat::at(&cut_after_delete(&daemon, Arc::clone(&armed)));
+    let preference = daemon.legacy("preference", PREFERENCE);
+    let held = daemon.post(
+        "/v1/atoms",
+        &json!({
+            "schema": "inside.atom/v1",
+            "workspace": "seat",
+            "kind": "preference",
+            "level": "explicit",
+            "origin": "user-declared",
+            "text": LESSON,
+            "entities": ["seat:claude", "horizon:standing"],
+            "source": {"harness": "claude", "seat": "claude", "session": "claude@4f1c", "via": "ljos"},
+        }),
+    );
+
+    let cut = seat.ljos(&["prefer", "--review"]);
+    let after = daemon.atoms();
+    assert!(
+        live_with(&after, PREFERENCE).is_empty(),
+        "{}",
+        text_of(&cut)
+    );
+    assert!(seat.markers().is_empty(), "{:?}", seat.markers());
+
+    reviewed(&seat);
+    let after = daemon.atoms();
+    let live = live_with(&after, PREFERENCE);
+    assert_eq!(live.len(), 1, "{after:?}");
+    assert_ne!(live[0]["id"], preference["id"], "{after:?}");
+    assert_eq!(basis(live[0]), Some("person"), "{}", live[0]);
+    for key in ["kind", "entities", "ts", "valid_from"] {
+        assert_eq!(live[0][key], preference[key], "{key}: {}", live[0]);
+    }
+    let marks = seat.markers();
+    assert_eq!(marks.len(), 1, "{marks:?}");
+    assert_eq!(std::fs::read_to_string(&marks[0]).unwrap(), "once\n");
+
+    let id = held["id"].as_str().unwrap();
+    armed.store(true, Ordering::SeqCst);
+    let cut = seat.keep(id);
+    assert!(!cut.status.success(), "{}", text_of(&cut));
+    assert!(
+        live_with(&daemon.atoms(), LESSON).is_empty(),
+        "{}",
+        text_of(&cut)
+    );
+    let kept = seat.keep(id);
+    assert!(kept.status.success(), "{}", text_of(&kept));
+    let after = daemon.atoms();
+    let live = live_with(&after, LESSON);
+    assert_eq!(live.len(), 1, "{after:?}");
+    assert_ne!(live[0]["id"], held["id"], "{after:?}");
     assert_eq!(basis(live[0]), Some("person"), "{}", live[0]);
 }
 

@@ -42,7 +42,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
 use crate::admit::ORIGIN_USER;
@@ -145,7 +145,7 @@ pub fn migrate_once() {
         if recorded() {
             return;
         }
-        match stamp_marked() {
+        match finish_retired().and_then(|()| stamp_marked()) {
             Ok(refused) if refused.is_empty() => {
                 let _ = record("once\n");
             }
@@ -217,10 +217,20 @@ pub fn keep(id: &str) -> Result<String> {
     migrate_once();
     let atoms = live()?;
     let rows = awaiting(&atoms);
-    let ids: Vec<String> = rows.iter().map(|(id, _)| id.clone()).collect();
+    let journaled = retired_unstored(Legacy::Hold);
+    let ids: Vec<String> = rows
+        .iter()
+        .map(|(id, _)| id.clone())
+        .chain(
+            journaled
+                .iter()
+                .filter_map(|a| id_of(a).map(str::to_string)),
+        )
+        .collect();
     let id = crate::resolve_short_id("prefer", id.trim(), &ids)?;
     let Some(atom) = atoms
         .iter()
+        .chain(&journaled)
         .find(|a| a.get("id").and_then(Value::as_str) == Some(id.as_str()))
     else {
         bail!("prefer: {id} is not an older preference awaiting review");
@@ -231,8 +241,9 @@ pub fn keep(id: &str) -> Result<String> {
         bail!("prefer: {id} is not an older preference awaiting review");
     }
     let client = pack()?;
-    let stored =
-        stamp_basis(&client, atom).with_context(|| format!("prefer: could not keep {id}"))?;
+    let stored = finish(&client, atom).with_context(|| {
+        format!("prefer: could not keep {id}; run `ljos prefer --review --keep {id}` again")
+    })?;
     Ok(format!(
         "kept {id} as the person's preference, now {stored}\n"
     ))
@@ -345,40 +356,171 @@ fn stamp_marked() -> Result<Vec<String>> {
 /// Store `atom` again as the person's and retire the original. Returns
 /// the id the person's copy is stored under.
 ///
-/// The pack runs its checks on a post before it answers a live text with
-/// the record that already holds it, so the first post is the dry run: a
-/// refusal there leaves the original as it was.
+/// The copy goes in first under an id of its own, and the original is
+/// retired only once the copy reads back live. The pack runs its checks
+/// on a post before it answers a live text with the record that already
+/// holds it, so a refusal there leaves the original as it was. A pack
+/// that answers with the original cannot hold both; the original is then
+/// written down before it is retired, so a run stopped after the delete
+/// is finished by the next one.
 fn stamp_basis(client: &packset_client::PacksetClient, atom: &Value) -> Result<String> {
+    let id = id_of(atom).context("legacy preference has no id")?;
+    let copy = person_copy(client, atom)?;
+    let new_id = copy_id(id);
+    let held = post(client, "/v1/atoms", &copy)?;
+    if id_of(&held) == Some(new_id.as_str()) || fetch(client, &new_id)?.is_some() {
+        confirm(client, id, &new_id)?;
+        retire(client, id)?;
+        unjournal(id);
+        return Ok(new_id);
+    }
+    journal(atom)?;
+    retire(client, id)?;
+    store_copy(client, atom)
+}
+
+/// Store the copy of `atom`, whose original is already retired, and
+/// strike it from the journal once the copy reads back.
+fn store_copy(client: &packset_client::PacksetClient, atom: &Value) -> Result<String> {
+    let id = id_of(atom).context("legacy preference has no id")?;
+    let new_id = copy_id(id);
+    let unstored = |e: anyhow::Error| anyhow!("{id} was retired before its copy was stored: {e:#}");
+    if fetch(client, &new_id).map_err(unstored)?.is_none() {
+        post(client, "/v1/atoms", &person_copy(client, atom)?).map_err(unstored)?;
+    }
+    confirm(client, id, &new_id).map_err(unstored)?;
+    unjournal(id);
+    Ok(new_id)
+}
+
+/// Raise `atom`: from the live original when the pack still holds it,
+/// else from the journal's record of it.
+fn finish(client: &packset_client::PacksetClient, atom: &Value) -> Result<String> {
+    let id = id_of(atom).context("legacy preference has no id")?;
+    match fetch(client, id)? {
+        Some(live) if legacy(&live) == legacy(atom) => stamp_basis(client, &live),
+        Some(_) => {
+            unjournal(id);
+            bail!("{id} changed since its raise was written down")
+        }
+        None => store_copy(client, atom),
+    }
+}
+
+/// Finish every promoted raise a run stopped after the retirement.
+fn finish_retired() -> Result<()> {
+    let pending = retired_unstored(Legacy::Promote);
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let client = pack()?;
+    for atom in &pending {
+        finish(&client, atom)?;
+    }
+    Ok(())
+}
+
+fn person_copy(client: &packset_client::PacksetClient, atom: &Value) -> Result<Value> {
     let id = id_of(atom).context("legacy preference has no id")?;
     let mut copy = atom.clone();
     if let Some(map) = copy.as_object_mut() {
-        for key in ["id", "embedding", "links", "provenance_floor", "tombstone"] {
+        for key in ["embedding", "links", "provenance_floor", "tombstone"] {
             map.remove(key);
         }
         if !map.get("source").is_some_and(Value::is_object) {
             map.insert("source".into(), json!({}));
         }
+        map.insert("id".into(), json!(copy_id(id)));
         map.insert("workspace".into(), json!(client.workspace()));
     }
     crate::admit::stamp_person(&mut copy);
-    let held = post(client, "/v1/atoms", &copy)?;
+    Ok(copy)
+}
+
+/// The id the person's copy of `id` is stored under. Derived from the
+/// original, so a rerun posts the same id and finds the copy it stored.
+fn copy_id(id: &str) -> String {
+    crate::work_id(&format!("pref-basis copy\n{id}"))
+}
+
+/// The copy reads back live under its own id and as the person's.
+fn confirm(client: &packset_client::PacksetClient, id: &str, new_id: &str) -> Result<()> {
+    let Some(stored) = fetch(client, new_id)? else {
+        bail!("the pack does not hold the copy of {id} under {new_id}");
+    };
+    if !crate::person_stored(&stored) {
+        bail!("the pack holds {id}'s copy under a record that is not the person's");
+    }
+    Ok(())
+}
+
+fn retire(client: &packset_client::PacksetClient, id: &str) -> Result<()> {
     post(
         client,
         "/v1/atoms/delete",
         &json!({"workspace": client.workspace(), "id": id}),
-    )?;
-    let stored = if crate::person_stored(&held) && id_of(&held) != Some(id) {
-        held
-    } else {
-        post(client, "/v1/atoms", &copy)
-            .with_context(|| format!("{id} was retired before its copy was stored"))?
-    };
-    if !crate::person_stored(&stored) {
-        bail!("the pack holds {id}'s text under a record that is not the person's");
+    )
+    .map(drop)
+    // A copy may already be live, so a failed retirement is retried, not
+    // recorded as a refusal.
+    .map_err(|e| anyhow!("{e:#}"))
+}
+
+/// The live record `id` names, or none.
+fn fetch(client: &packset_client::PacksetClient, id: &str) -> Result<Option<Value>> {
+    let url = format!("{}/v1/atoms/{id}", client.base());
+    match packset_client::authorize(ureq::get(&url))
+        .query("workspace", &client.workspace())
+        .timeout(http_timeout())
+        .call()
+    {
+        Ok(resp) => resp
+            .into_json()
+            .map(Some)
+            .with_context(|| format!("GET /v1/atoms/{id}: the answer is not JSON")),
+        Err(ureq::Error::Status(404, _)) => Ok(None),
+        Err(e) => bail!("GET /v1/atoms/{id} failed: {e}"),
     }
-    id_of(&stored)
-        .map(str::to_string)
-        .with_context(|| format!("the pack stored the copy of {id} without an id"))
+}
+
+/// Where a raise writes the original down before retiring it, one file
+/// per id, until its copy reads back.
+fn journal_dir() -> Option<PathBuf> {
+    let client = pack().ok()?;
+    let name = crate::work_id(&format!("{}\n{}", client.base(), client.workspace()));
+    Some(state_dir().join("pref-basis-retired").join(name))
+}
+
+fn journal(atom: &Value) -> Result<()> {
+    let id = id_of(atom).context("legacy preference has no id")?;
+    let dir = journal_dir().context("no pack to write the raise down for")?;
+    std::fs::create_dir_all(&dir)?;
+    let body = serde_json::to_vec(atom)?;
+    let tmp = dir.join(format!(".{id}"));
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, dir.join(id)).context("writing the raise down")
+}
+
+fn unjournal(id: &str) {
+    if let Some(dir) = journal_dir() {
+        let _ = std::fs::remove_file(dir.join(id));
+    }
+}
+
+/// The originals a raise retired before their copy read back, of one
+/// kind of legacy. A file whose name is not its record's id is passed
+/// over.
+fn retired_unstored(want: Legacy) -> Vec<Value> {
+    let Some(entries) = journal_dir().and_then(|d| std::fs::read_dir(d).ok()) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let atom: Value = serde_json::from_slice(&std::fs::read(e.path()).ok()?).ok()?;
+            (id_of(&atom) == e.file_name().to_str() && legacy(&atom) == Some(want)).then_some(atom)
+        })
+        .collect()
 }
 
 fn id_of(atom: &Value) -> Option<&str> {
