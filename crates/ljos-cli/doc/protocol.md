@@ -606,8 +606,10 @@ conversations of one runner hold two tickets, and a second sitting does not
 release the first. `ljos seat` prints both names
 and where they came from. `LJOS_SEAT` names the seat; a `*_SESSION_ID` still
 names the holder. `VISSUE_AGENT` is
-the tracker's own name for the same thing; `--as` names a persona over
-both; a person at a terminal is their login user.
+the tracker's own name for the same thing; a person at a terminal is
+their login user. `--as` on a ballot or a withdrawal may name only this
+seat; another seat is refused, so a persona votes from a session seated
+as that persona.
 
 A tracker write needs a seat somebody named, as a ballot does: `note`,
 `claim`, `sitting`, `finish`, `release`, `complete`, `file`, `options`,

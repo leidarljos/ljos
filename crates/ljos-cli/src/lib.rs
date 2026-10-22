@@ -3635,6 +3635,27 @@ pub fn write_assignee(
     Ok(assignee)
 }
 
+/// The name a ballot or a withdrawal records: this process's seat, the one
+/// [`write_seat`] checked. `--as` (MCP `as`) may name that seat and no
+/// other; a persona votes from a session seated as that persona.
+///
+/// # Errors
+///
+/// `named` is another seat.
+pub fn ballot_voter(verb: &str, named: Option<&str>) -> Result<String> {
+    let seat = seat_name();
+    if let Some(name) = named.map(str::trim).filter(|n| !n.is_empty()) {
+        let slug = canonical_seat_name(name);
+        if slug != canonical_seat_name(&seat) {
+            bail!(
+                "{verb}: --as {name} is not this seat, {seat}; a ballot is recorded as the seat that casts it. \
+                 Drop --as, or cast it from a session seated as {name} (`export LJOS_SEAT={slug}`); nothing was written"
+            );
+        }
+    }
+    Ok(seat)
+}
+
 /// Refuse a tracker write from a seat the seats file does not list. A
 /// missing file, as on a fresh single-user install, refuses nothing; a
 /// file that is there and lists no seat refuses every write.

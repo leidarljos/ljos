@@ -240,6 +240,44 @@ fn a_conversation_the_seats_file_maps_votes_as_that_seat() {
 }
 
 #[test]
+fn a_ballot_or_a_withdrawal_as_another_seat_is_refused() {
+    let b = Bench::new();
+    b.seats("seats = [\"saddle\", \"inky\"]\n");
+    for args in [
+        &[
+            "vote",
+            "proj-aaaa",
+            "--for",
+            "accept",
+            "--used",
+            "none",
+            "--as",
+            "inky",
+        ][..],
+        &["vote", "proj-aaaa", "--withdraw", "--as", "inky"],
+    ] {
+        let out = b.ljos(Some("saddle"), args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{args:?} went through: {out:?}");
+        assert!(
+            err.contains("--as inky is not this seat, saddle"),
+            "{args:?}: {err}"
+        );
+    }
+    assert_eq!(b.calls(), "", "nothing reached the tracker");
+
+    b.ljos(
+        Some("saddle"),
+        &["vote", "proj-aaaa", "--withdraw", "--as", "saddle"],
+    );
+    let calls = b.calls();
+    assert!(
+        calls.contains("vissue vote proj-aaaa --withdraw VISSUE_AGENT=saddle"),
+        "{calls}"
+    );
+}
+
+#[test]
 fn an_assignee_that_is_another_seat_is_refused() {
     let b = Bench::new();
     for args in [

@@ -8,17 +8,16 @@ use ljos_cli::{
     forecasts_from_json, format_bump_rows, format_consolidation, format_doctor,
     format_doctor_short, format_findings, format_hits, format_hubs, format_island,
     format_playbooks, format_readings, format_remembered, format_seat_command, format_steps,
-    format_write_ack, graded, habit, habits, handover, healthy, hook_note, identity_or_seat,
-    island_entities, join, learn_anchors, learn_and_write, learn_reading, learn_shared, mark_seen,
-    now_utc, on_path, onboard_to, pack, packset_consolidate, packset_forget, packset_hubs,
-    packset_island_as, packset_search_as_of, packset_write_as, panel, panel_steps, parse_every,
-    personas_from_pack, playbooks_from_pack, policy_with_memory, post_hook_stdout, predictions_of,
-    prompt_hook_stdout, protocol_text, read_campaign, receive, release, remember_findings,
-    rows_about, run, run_as, run_captured, session_end, settle_discount, sitting_gated,
-    stop_hook_stdout, timeline, topic_words, tracker_show_json, trim_num, trust_from_pack,
-    uncite_deed, with_discount, withdraw_prediction, write_outcome, write_persona_as,
-    write_prediction, write_rule, write_trust, Persona, PersonaWrite, Reading, Rule, Trust,
-    HARNESSES_EXAMPLE, LEARN_BETA,
+    format_write_ack, graded, habit, habits, handover, healthy, hook_note, island_entities, join,
+    learn_anchors, learn_and_write, learn_reading, learn_shared, mark_seen, now_utc, on_path,
+    onboard_to, pack, packset_consolidate, packset_forget, packset_hubs, packset_island_as,
+    packset_search_as_of, packset_write_as, panel, panel_steps, parse_every, personas_from_pack,
+    playbooks_from_pack, policy_with_memory, post_hook_stdout, predictions_of, prompt_hook_stdout,
+    protocol_text, read_campaign, receive, release, remember_findings, rows_about, run, run_as,
+    run_captured, session_end, settle_discount, sitting_gated, stop_hook_stdout, timeline,
+    topic_words, tracker_show_json, trim_num, trust_from_pack, uncite_deed, with_discount,
+    withdraw_prediction, write_outcome, write_persona_as, write_prediction, write_rule,
+    write_trust, Persona, PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
 };
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -686,7 +685,9 @@ enum Cmd {
         /// popular reading has a forecast without a second verb.
         #[arg(long)]
         expect: Option<String>,
-        /// Cast as this persona instead of the seat's identity.
+        /// This seat's own name. A ballot or a withdrawal `--as` another
+        /// seat is refused: a persona votes from a session seated as it.
+        /// With `--jev`, the persona Jev answers for.
         #[arg(long = "as")]
         as_persona: Option<String>,
         /// Ask Jev for the persona's ballot (needs `--as`, not `--for`):
@@ -694,9 +695,9 @@ enum Cmd {
         /// a subagent when it is not.
         #[arg(long, requires = "as_persona", conflicts_with = "choice")]
         jev: bool,
-        /// Take back the ballot and its forecast, as the seat or `--as` a
-        /// persona: a ballot cast on the wrong issue or with no basis stops
-        /// counting, and the issue's logbook keeps what it was.
+        /// Take back this seat's ballot and its forecast: a ballot cast on
+        /// the wrong issue or with no basis stops counting, and the issue's
+        /// logbook keeps what it was.
         #[arg(long, conflicts_with_all = ["choice", "jev", "confidence", "used", "expect"])]
         withdraw: bool,
     },
@@ -2060,7 +2061,7 @@ fn run_command() -> Result<()> {
             withdraw,
         } => match choice {
             None if withdraw => {
-                let who = identity_or_seat(as_persona.as_deref()).unwrap_or_else(whoami_tracker);
+                let who = ljos_cli::ballot_voter("vote", as_persona.as_deref())?;
                 // A ballot already taken back still leaves its forecast to
                 // take back, so a second withdraw finishes the first.
                 match ljos_cli::run_captured_as(
@@ -2125,7 +2126,7 @@ fn run_command() -> Result<()> {
                 }
             }
             Some(c) => {
-                let who = identity_or_seat(as_persona.as_deref()).unwrap_or_else(whoami_tracker);
+                let who = ljos_cli::ballot_voter("vote", as_persona.as_deref())?;
                 let cast = ljos_cli::panel_gate::claim_session_ballot(&issue, &who)?;
                 let used = used.as_deref().unwrap_or("");
                 if used.is_empty() {
@@ -2146,7 +2147,7 @@ fn run_command() -> Result<()> {
                     args.push(format!("{p}"));
                 }
                 let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-                run_as("vissue", &refs, as_persona.as_deref())?;
+                run_as("vissue", &refs, Some(&who))?;
                 // Read the ballot back: only the tracker is proof it exists.
                 let rows: Vec<serde_json::Value> =
                     ljos_cli::run_captured("vissue", &["vote", &issue, "--json"])
@@ -2169,8 +2170,6 @@ fn run_command() -> Result<()> {
                     Err(e) => eprintln!("ljos vote: {e:#}"),
                 }
                 if let Some(expect) = expect.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
-                    let who =
-                        identity_or_seat(as_persona.as_deref()).unwrap_or_else(whoami_tracker);
                     write_prediction(&issue, &who, expect).with_context(|| {
                         format!("ballot cast; forecast for {who} was not recorded")
                     })?;

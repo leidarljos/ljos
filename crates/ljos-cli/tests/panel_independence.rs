@@ -1882,24 +1882,15 @@ fn codex_subagent_threads_each_count_under_their_root_session() {
 
 #[test]
 fn a_seat_no_harness_names_is_an_unverified_session() {
-    // Two reviewers recorded from one coordinator that no harness id and
-    // no run id names: the seat is the session, and every output says so.
+    // A coordinator that no harness id and no run id names: the seat is
+    // the session, every output says so, and it casts for no reviewer.
     let world = World::new();
     let issue = "demo-seat";
     let unverified = ljos_cli::ballot_sig::unverified_sentence("ljosbot");
     let first = world.ljos_env(
         "ljosbot",
         &[],
-        &[
-            "vote",
-            issue,
-            "--for",
-            "ship",
-            "--used",
-            "none",
-            "--as",
-            "reviewer-a",
-        ],
+        &["vote", issue, "--for", "ship", "--used", "none"],
     );
     let said = text(&first);
     assert!(first.status.success(), "{said}");
@@ -1924,9 +1915,8 @@ fn a_seat_no_harness_names_is_an_unverified_session() {
     let said = text(&second);
     assert!(!second.status.success(), "{said}");
     assert!(
-        said.contains("already cast")
-            && said.contains(&unverified)
-            && said.contains("Nothing was cast"),
+        said.contains("--as reviewer-b is not this seat, ljosbot")
+            && said.contains("nothing was written"),
         "{said}"
     );
     // A ballot that went around the cast gate, as `vissue vote` and a later
@@ -1962,7 +1952,7 @@ fn a_seat_no_harness_names_is_an_unverified_session() {
     let stdout = String::from_utf8_lossy(&tally.stdout);
     assert!(stdout.contains("1 ballot counts"), "{said}");
     assert!(
-        stdout.contains("reviewer-a  ship  (unverified session)"),
+        stdout.contains("ljosbot  ship  (unverified session)"),
         "{said}"
     );
     assert!(
