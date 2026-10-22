@@ -3323,6 +3323,14 @@ pub fn derived_seat(who: &Seat) -> Option<Derived> {
 /// The seat is the program above this shell, or the login user under a
 /// runner.
 pub fn write_seat(verb: &str) -> Result<Seat> {
+    if let (Some(seat), Some(holder)) = (hook_actor(), hook_holder()) {
+        registered_seat(&seat)?;
+        return Ok(Seat {
+            seat,
+            holder,
+            source: "the git hook".into(),
+        });
+    }
     let who = resolve_seat();
     if let Some(from) = derived_seat(&who) {
         bail!(
