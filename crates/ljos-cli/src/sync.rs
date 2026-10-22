@@ -2068,9 +2068,10 @@ enum Opened {
 /// it to that name. A peer can commit any ciphertext it holds under any
 /// file name, and a log sealed only to this machine, read as scope cloud,
 /// would be resealed to the cloud recipients. A header naming another host
-/// or scope is refused. A log with no header predates it and is read only
-/// through a key that is not this machine's, the cloud identity for scope
-/// cloud, which no narrower scope is sealed to.
+/// or scope is refused. A log with no header names nobody: one peer can
+/// commit it under every host's name, and an older blob can replace a
+/// host's headed log and retire what that log added. It is left unread,
+/// whichever key opens it.
 fn open_log(bytes: &[u8], host: &str, scope_name: &str, label: &str) -> Result<Opened> {
     let identities = identities_for_open(scope_name);
     let Some(plain) = open_sealed_bytes(bytes, &identities)? else {
@@ -2084,13 +2085,8 @@ fn open_log(bytes: &[u8], host: &str, scope_name: &str, label: &str) -> Result<O
             "sync: {label} holds {named_host}'s {named_scope} log, not {host}'s {scope_name} log; it was left unread\n"
         )));
     }
-    let own = identity_path();
-    let shared: Vec<PathBuf> = identities.into_iter().filter(|id| *id != own).collect();
-    if let Some(plain) = open_sealed_bytes(bytes, &shared)? {
-        return Ok(Opened::Atoms(plain));
-    }
     Ok(Opened::Refused(format!(
-        "sync: {label} has no scope header and opens only with this machine's key; it was left unread\n"
+        "sync: {label} has no scope header, so nothing binds it to {host}'s {scope_name} log; it was left unread\n"
     )))
 }
 
@@ -5816,7 +5812,7 @@ mod tests {
         seal(&box_log, to_cloud, &atoms.join("gonehost.jsonl.age")).unwrap();
         let cloud_log = format!("{}\n", atom("b", "cloud only", &["scope:cloud"]));
         seal(
-            &cloud_log,
+            &framed("gonehost", CLOUD_SCOPE, &cloud_log),
             to_cloud,
             &atoms.join("gonehost+cloud.jsonl.age"),
         )
@@ -5865,7 +5861,7 @@ mod tests {
         std::fs::write(atoms.join("gonehost.digest"), "digest\n").unwrap();
         let plain = format!("{}\n", atom("a", "from the gone host", &["scope:cloud"]));
         seal(
-            &plain,
+            &framed("gonehost", CLOUD_SCOPE, &plain),
             std::slice::from_ref(&public),
             &atoms.join("gonehost+cloud.jsonl.age"),
         )
@@ -6208,9 +6204,10 @@ mod tests {
     }
 
     /// A cloud log written before the header, sealed to the cloud
-    /// recipient, still opens with the cloud identity beside a machine key.
+    /// recipient, opens with the cloud identity and is still left unread:
+    /// nothing in it says which host wrote it.
     #[test]
-    fn a_legacy_cloud_log_opens_with_the_cloud_identity() {
+    fn a_legacy_cloud_log_is_left_unread() {
         let dir = tempfile::tempdir().unwrap();
         let _env = begin(dir.path());
         let machine = make_key();
@@ -6230,8 +6227,8 @@ mod tests {
         let posted = std::sync::Arc::default();
         point_pack(&serve_pack(std::sync::Arc::clone(&posted)));
         let said = import(&root, &scope).unwrap();
-        assert!(said.contains("gonehost: 1 cloud atoms taken"), "{said}");
-        assert_eq!(posted_texts(&posted), vec!["old cloud words"]);
+        assert!(said.contains("has no scope header"), "{said}");
+        assert!(posted_texts(&posted).is_empty(), "{said}");
     }
 
     /// A tracker whose `.ljos` or `.ljos/atoms` is a symlink to a local
@@ -8233,7 +8230,7 @@ mod tests {
         seal_for(
             &root.join(".ljos/atoms/peer+cloud.jsonl.age"),
             &cloud_public,
-            &lesson_line(cloud_text, "cloud"),
+            &framed("peer", CLOUD_SCOPE, &lesson_line(cloud_text, "cloud")),
         );
         let scope = scope_of_repo(&root).unwrap().unwrap();
         let said = import(&root, &scope).unwrap();

@@ -94,8 +94,8 @@ recipients and its own log, `<host>+<scope>.jsonl.age`
 the other machines' logs before the island is walked; finish writes and
 pushes this machine's. `commit` skips that pull and that push.
 Each log's first line, inside the seal, names its host and scope;
-a log naming another host or scope is left unread, and a log from
-before that line opens only with a key other than this machine's own.
+a log naming another host or scope is left unread, and so is a log
+from before that line, whichever key opens it.
 A symlink at `.ljos`, `.ljos/atoms`, `.ljos/user-rules` or the state
 directory's `sync/` is refused.
 `ljos sync --key` prints this machine's public key
