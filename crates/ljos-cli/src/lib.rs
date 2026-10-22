@@ -2290,6 +2290,14 @@ fn holds_pty(holder: u32, index: u32) -> bool {
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A unit test that stands in for the person at a terminal, which
+    /// `cargo test` never has. The binaries are built without it.
+    pub(crate) static PERSON_AT_TERMINAL: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 /// Whether the kernel says a person's terminal drives this process. Stdin
 /// is this process's controlling terminal, a pseudo-terminal, and its
 /// foreground group is ours. The session leader is this process or one
@@ -2301,6 +2309,10 @@ fn holds_pty(holder: u32, index: u32) -> bool {
 /// another shows. Names prove nothing here; a tool call picks its own.
 #[cfg(target_os = "linux")]
 fn person_at_terminal() -> bool {
+    #[cfg(test)]
+    if PERSON_AT_TERMINAL.with(std::cell::Cell::get) {
+        return true;
+    }
     // SAFETY: isatty reads one descriptor's mode and cannot fail.
     if unsafe { libc::isatty(0) } != 1 {
         return false;
@@ -54774,6 +54786,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             std::env::set_var("LJOS_HOLD", "rohit");
             std::env::set_var("LJOS_SEAT", "claude");
         }
+        PERSON_AT_TERMINAL.with(|p| p.set(true));
         user_rules::write_preference(
             "never post or reply to Alan (ocaisa)",
             "he asked not to be pinged",

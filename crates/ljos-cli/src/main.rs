@@ -2376,11 +2376,15 @@ fn run_command() -> Result<()> {
             user,
         } => {
             if user {
-                let rule = ljos_cli::user_rules::write_argv(&Rule {
-                    pattern,
-                    verdict,
-                    reason: why,
-                })?;
+                let basis = ljos_cli::Basis::of_typed(&why);
+                let rule = ljos_cli::user_rules::write_argv(
+                    &Rule {
+                        pattern,
+                        verdict,
+                        reason: why,
+                    },
+                    basis,
+                )?;
                 if json {
                     println!(
                         "{}",

@@ -403,6 +403,78 @@ fn a_person_can_write_a_user_rule_from_the_terminal() {
     );
 }
 
+/// The basis each user-rules row was written with, by its reason.
+fn user_rule_basis(seat: &Seat, reason: &str) -> serde_json::Value {
+    let rows: serde_json::Value = serde_json::from_str(&rules_text(seat)).unwrap();
+    rows["rules"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|r| r["reason"] == reason))
+        .map(|r| r["basis"].clone())
+        .unwrap_or_else(|| panic!("no user rule for {reason}: {rows}"))
+}
+
+/// What a session start says ahead of seat memory.
+fn session_start(seat: &Seat) -> String {
+    let payload = serde_json::json!({
+        "hook_event_name": "SessionStart",
+        "session_id": "start-1",
+        "source": "startup",
+    });
+    let out = fed(seat.command(&["hook"], false), &payload.to_string());
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// `ljos rule --user` from a pipe and MCP `ljos_rule` with `user` true are
+/// the agent's: the row says so, the preface leaves it out, and `ljos
+/// rules` lists it unverified. The person's at a terminal is stated.
+#[test]
+fn an_agent_user_rule_is_not_the_persons_standing_rule() {
+    let args = [
+        "rule",
+        "--user",
+        "*deploy-form*",
+        "--verdict",
+        "deny",
+        "--why",
+        PLANT,
+    ];
+    for via in ["pipe", "mcp", "terminal"] {
+        let seat = Seat::new();
+        match via {
+            "pipe" => {
+                let out = seat.command(&args, false).output().unwrap();
+                assert!(out.status.success(), "{}", text_of(&out));
+            }
+            "mcp" => {
+                let answer = mcp_call(
+                    &seat,
+                    "ljos_rule",
+                    serde_json::json!({"pattern": "*deploy-form*", "verdict": "deny",
+                        "why": PLANT, "user": true}),
+                );
+                assert!(answer["result"]["isError"] != true, "{answer}");
+            }
+            _ => {
+                let out = shaped(&seat, "terminal", &args);
+                assert!(out.status.success(), "{}", text_of(&out));
+            }
+        }
+        let person = via == "terminal";
+        let basis = if person { "person" } else { "agent" };
+        assert_eq!(user_rule_basis(&seat, PLANT), basis, "{via}");
+        let start = session_start(&seat);
+        assert_eq!(start.contains("release key"), person, "{via}: {start}");
+        let listed =
+            String::from_utf8_lossy(&seat.command(&["rules"], false).output().unwrap().stdout)
+                .into_owned();
+        let line = listed
+            .lines()
+            .find(|l| l.contains("release key"))
+            .unwrap_or_else(|| panic!("{via}: {listed}"));
+        assert_eq!(line.starts_with("unverified"), !person, "{via}: {listed}");
+    }
+}
+
 /// Under a runner, a user rule of the person's own words is kept.
 #[test]
 fn a_runner_user_rule_of_the_persons_words_is_kept() {

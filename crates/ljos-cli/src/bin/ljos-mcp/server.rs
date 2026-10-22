@@ -2342,12 +2342,12 @@ impl LjosServer {
             verdict: args.verdict,
             reason: args.why,
         };
+        let basis = ljos_cli::Basis::of(&rule.reason);
         if args.user {
-            return ljos_cli::user_rules::write_argv(&rule)
+            return ljos_cli::user_rules::write_argv(&rule, basis)
                 .map(|rule| object(ljos_cli::user_rules::to_value(&rule)))
                 .map_err(refused);
         }
-        let basis = ljos_cli::Basis::of(&rule.reason);
         write_rule(&rule, basis).map(object).map_err(refused)
     }
 
