@@ -12065,6 +12065,22 @@ pub fn packset_write_agent(
 /// hit, so recall can put the person's words ahead of an agent's.
 pub const SAID_ENTITY: &str = "via:prompt";
 
+/// Drop a claim that the words are the person's.
+///
+/// An import keeps kind and horizon. [`SAID_ENTITY`] and `source.basis`
+/// of `person` are that claim, and a peer must not supply them. Removing
+/// a basis that is already absent is a no-op, so a second pass is safe.
+pub(crate) fn strip_person_basis(atom: &mut Value) {
+    if let Some(entities) = atom.get_mut("entities").and_then(Value::as_array_mut) {
+        entities.retain(|entity| entity.as_str() != Some(SAID_ENTITY));
+    }
+    if atom.pointer("/source/basis").and_then(Value::as_str) == Some(Basis::Person.as_str()) {
+        if let Some(source) = atom.get_mut("source").and_then(Value::as_object_mut) {
+            source.remove("basis");
+        }
+    }
+}
+
 /// Who a claim written through MCP comes from, kept as `source.basis`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Basis {
@@ -22390,6 +22406,7 @@ pub fn receive(
                     Value::String(admit::ORIGIN_PEER.to_string()),
                 );
             }
+            strip_person_basis(&mut atom);
             match admit::post_kept(&client, &atom) {
                 Ok(_) => kept += 1,
                 Err(e) => refused.push(e.to_string()),
