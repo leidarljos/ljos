@@ -333,6 +333,210 @@ pub fn format_check_report(report: &CheckReport) -> String {
     )
 }
 
+/// A tracker ballot that does not stand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BadBallot {
+    /// The file that holds the ballot, under the tracker root.
+    pub file: PathBuf,
+    /// The ballot's line in that file, from 1.
+    pub line: usize,
+    pub issue: String,
+    pub reason: String,
+}
+
+/// Summary of `ljos record check --tracker`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrackerReport {
+    /// Issues that hold a ballot.
+    pub issues: usize,
+    pub ballots: usize,
+    /// `ISSUE VOTER` for each unsigned ballot committed before signing began.
+    pub legacy: Vec<String>,
+    pub bad: Vec<BadBallot>,
+}
+
+/// Hold every ballot on the tracker at `root` to the push gate's
+/// signature check ([`crate::ballot_sig::seat_check`]): the newest
+/// `ballot-sig:` note of its voter names its choice, verifies, and is
+/// under the key `.ljos-seat-keys` pins for that voter and for no other
+/// seat or voter on the issue, so one key does not count as several
+/// voters. A persona's or a judge's ballot is held to it too, since every
+/// cast signs. An unsigned ballot the tracker committed before signing
+/// began is legacy, as at the push gate. Only files are read, and git for
+/// the commit dates.
+///
+/// # Errors
+///
+/// The root holds no project, an issue file cannot be read or parsed, or
+/// the pin file is malformed.
+pub fn check_tracker(root: &Path) -> Result<TrackerReport> {
+    let layout = vissue_core::Layout::resolve(Some(root), None)?;
+    let projects = vissue_core::store::list_projects(&layout)?;
+    if projects.is_empty() {
+        bail!(
+            "record check: no issues.org under {}",
+            layout.projects_dir().display()
+        );
+    }
+    let (pins, _) = crate::ballot_sig::pins_for_check_in(root)?;
+    let mut report = TrackerReport::default();
+    let mut texts: BTreeMap<PathBuf, String> = BTreeMap::new();
+    for project in projects {
+        let board = layout.project_issues_path(&project);
+        let doc = vissue_core::IssueDoc::parse_file(&project, &board)?;
+        for heading in &doc.headings {
+            if !heading.extra_drawers.iter().any(|d| is_votes_drawer(d)) {
+                continue;
+            }
+            let issue = heading.id.as_str();
+            let ballots = vissue_core::ops::ballots(&layout, issue)?;
+            if ballots.is_empty() {
+                continue;
+            }
+            report.issues += 1;
+            let notes: Vec<String> = heading
+                .logbook
+                .iter()
+                .filter_map(|e| e.note.clone())
+                .collect();
+            let file = doc.heading_path(issue).to_path_buf();
+            if !texts.contains_key(&file) {
+                let text = std::fs::read_to_string(&file)
+                    .with_context(|| format!("record check: read {}", file.display()))?;
+                texts.insert(file.clone(), text);
+            }
+            let span = (file == board).then_some((heading.line_start, heading.line_end));
+            let legacy = |voter: &str, choice: &str| {
+                crate::ballot_sig::recorded_at_in(root, issue, voter, choice)
+                    .is_some_and(|t| t < crate::ballot_sig::SIGNING_SINCE)
+            };
+            let cast: Vec<&str> = ballots.iter().map(|b| b.agent.as_str()).collect();
+            for ballot in &ballots {
+                report.ballots += 1;
+                let seat = [(ballot.agent.as_str(), ballot.choice.as_str())];
+                let (problems, old) =
+                    crate::ballot_sig::seat_check(issue, &seat, &notes, &pins, &legacy);
+                if !old.is_empty() {
+                    report.legacy.push(format!("{issue} {}", ballot.agent));
+                    continue;
+                }
+                let reason = problems
+                    .into_iter()
+                    .next()
+                    .or_else(|| shared_key(&ballot.agent, &pins, &cast));
+                let Some(reason) = reason else {
+                    continue;
+                };
+                let line =
+                    ballot_line(&texts[&file], span, &ballot.agent).unwrap_or(heading.line_start);
+                report.bad.push(BadBallot {
+                    file: file.strip_prefix(root).unwrap_or(&file).to_path_buf(),
+                    line,
+                    issue: issue.to_string(),
+                    reason,
+                });
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// The other voters `pins` holds `voter`'s key for, as a reason. Keys are
+/// told apart by [`crate::ballot_sig::key_fingerprint`]. Two rows that
+/// [`voter_seat`] folds to one seat, such as `inky` and `inky@39u`, may
+/// share a key, unless both are among `cast`, the voters on this issue.
+fn shared_key(voter: &str, pins: &BTreeMap<String, String>, cast: &[&str]) -> Option<String> {
+    let key = crate::ballot_sig::key_fingerprint(pins.get(voter)?);
+    let seat = voter_seat(voter);
+    let others: Vec<&str> = pins
+        .iter()
+        .filter(|(other, k)| {
+            other.as_str() != voter
+                && (voter_seat(other) != seat || cast.contains(&other.as_str()))
+                && crate::ballot_sig::key_fingerprint(k) == key
+        })
+        .map(|(other, _)| other.as_str())
+        .collect();
+    (!others.is_empty()).then(|| {
+        format!(
+            "{voter}'s key is also pinned for {}, so one key counts as several voters",
+            others.join(", ")
+        )
+    })
+}
+
+fn is_votes_drawer(drawer: &str) -> bool {
+    drawer
+        .lines()
+        .next()
+        .is_some_and(|l| l.trim().eq_ignore_ascii_case(":VOTES:"))
+}
+
+/// The line of `voter`'s ballot in a `:VOTES:` drawer of `text`, within
+/// `span` when given. The last one, as a read keeps the last of two.
+fn ballot_line(text: &str, span: Option<(usize, usize)>, voter: &str) -> Option<usize> {
+    let (from, to) = span.unwrap_or((1, usize::MAX));
+    let mut inside = false;
+    let mut found = None;
+    for (at, line) in text.lines().enumerate() {
+        let at = at + 1;
+        if at < from || at > to {
+            continue;
+        }
+        let line = line.trim();
+        if line.eq_ignore_ascii_case(":VOTES:") {
+            inside = true;
+        } else if line.eq_ignore_ascii_case(":END:") {
+            inside = false;
+        } else if inside && ballot_voter(line) == Some(voter) {
+            found = Some(at);
+        }
+    }
+    found
+}
+
+/// The voter of a `[STAMP] VOTER: CHOICE` drawer line.
+fn ballot_voter(line: &str) -> Option<&str> {
+    let (_, rest) = line.strip_prefix('[')?.split_once("] ")?;
+    Some(rest.split_once(": ")?.0.trim())
+}
+
+/// Text form of a tracker check: one `FILE:LINE: ISSUE: REASON` line per
+/// ballot that does not stand, then the count.
+#[must_use]
+pub fn format_tracker_report(report: &TrackerReport) -> String {
+    let mut out = String::new();
+    for bad in &report.bad {
+        out.push_str(&format!(
+            "{}:{}: {}: {}\n",
+            bad.file.display(),
+            bad.line,
+            bad.issue,
+            bad.reason
+        ));
+    }
+    if report.bad.is_empty() {
+        out.push_str(&format!(
+            "record check: {} ballots on {} issues stand\n",
+            report.ballots, report.issues
+        ));
+    } else {
+        out.push_str(&format!(
+            "record check: {} of {} ballots on {} issues do not stand\n",
+            report.bad.len(),
+            report.ballots,
+            report.issues
+        ));
+    }
+    if !report.legacy.is_empty() {
+        out.push_str(&format!(
+            "legacy unsigned, committed before signing began: {}\n",
+            report.legacy.join(", ")
+        ));
+    }
+    out
+}
+
 /// Canonical JSON bytes: recursive key sort, no insignificant whitespace.
 ///
 /// # Errors

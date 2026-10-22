@@ -1,8 +1,9 @@
 //! What a cloud seat refuses once `ljos cloud up` installed its rules,
 //! read from the words each command runs rather than matched as text: a
-//! `git push` that updates a `cursor/*` branch or tag, and `gh pr create`
-//! or `gh pr merge`. The source side of a refspec, a remote URL, an
-//! option's value and the body of a comment are never what is refused.
+//! `git push` that updates a `cursor/*` branch or tag, and a `gh` command
+//! that opens, readies, reopens or merges a pull request. The source side
+//! of a refspec, a remote URL, an option's value and the body of a comment
+//! are never what is refused.
 
 use std::cell::OnceCell;
 use std::collections::HashSet;
@@ -39,54 +40,492 @@ const UNREAD: &str = "this push goes where the checkout says, and the checkout c
 /// Why a `git push` in `line` would update a `cursor/*` ref, or `None`
 /// when none would. `cwd` is where the line runs, the process directory
 /// when absent; a `cd DIR` before the push and `git -C DIR` move it.
+/// A `$NAME` bound by an earlier assignment on the same line is the
+/// destination the shell pushes, so that name is what is judged.
 pub(crate) fn cursor_push(line: &str, cwd: Option<&Path>) -> Option<String> {
     let mut here = cwd
         .map(Path::to_path_buf)
         .or_else(|| std::env::current_dir().ok());
     let mut line_aliases: Vec<(String, String)> = Vec::new();
-    for seg in crate::nested_lines(line, 0)
-        .iter()
-        .flat_map(|l| crate::raw_segments(l))
-    {
-        let words = argv(&seg);
-        let run = prefix_context(&seg, here.clone());
-        match words.first().map(String::as_str) {
-            Some("cd" | "pushd") => here = moved(here, &words[1..]),
-            Some("popd") => here = None,
-            Some("git") => {
-                if let Some(alias) = git_alias_write(&words[1..]) {
-                    line_aliases.push(alias);
-                }
-                if let Some(why) =
-                    git_push(&words[1..], run.dir, &line_aliases, &run.env, run.via_xargs)
-                        .and_then(|p| p.cursor_ref())
-                {
-                    return Some(why);
-                }
+    for l in crate::nested_lines(line, 0) {
+        let mut names: Vec<(String, String)> = Vec::new();
+        for seg in crate::raw_segments(&l) {
+            if crate::assignment_segment(&seg) {
+                bound_names(&mut names, &seg);
+                continue;
             }
-            _ => {}
+            let ifs = names
+                .iter()
+                .rev()
+                .find(|(k, _)| k == "IFS")
+                .map(|(_, v)| v.clone());
+            let expanded = crate::expand_names(&seg, &names, ifs.as_deref());
+            let seg = expanded.as_deref().unwrap_or(&seg);
+            let words = argv(seg);
+            let run = prefix_context(seg, here.clone());
+            match words.first().map(String::as_str) {
+                Some("cd" | "pushd") => here = moved(here, &words[1..]),
+                Some("popd") => here = None,
+                Some("git") => {
+                    if let Some(alias) = git_alias_write(&words[1..]) {
+                        line_aliases.push(alias);
+                    }
+                    if let Some(why) =
+                        git_push(&words[1..], run.dir, &line_aliases, &run.env, run.via_xargs)
+                            .and_then(|p| p.cursor_ref())
+                    {
+                        return Some(why);
+                    }
+                }
+                _ => {}
+            }
         }
     }
     None
 }
 
-/// Whether `line` runs `gh pr` with one of `verbs`. gh's flags before the
-/// noun and between the noun and the verb are skipped, `-R` and `--repo`
-/// with their value; the words after the verb are its arguments and are
-/// never read.
-pub(crate) fn gh_pr(line: &str, verbs: &[&str]) -> bool {
-    crate::nested_lines(line, 0)
-        .iter()
-        .flat_map(|l| crate::raw_segments(l))
-        .any(|seg| {
+/// Names a bare assignment binds, in order. A `NAME=value` prefix on the
+/// command itself is that command's environment, not a shell assignment,
+/// so it does not name a later `$NAME` on the same command.
+fn bound_names(names: &mut Vec<(String, String)>, seg: &str) {
+    let words = crate::shell_words(seg);
+    let bare = if words.first().is_some_and(|w| w == "export") {
+        &words[1..]
+    } else {
+        &words[..]
+    };
+    for w in bare {
+        if let Some((k, v)) = w.split_once('=') {
+            names.push((k.to_string(), v.to_string()));
+        }
+    }
+}
+
+/// Which pull-request actions `line` runs through `gh`. `open` is create,
+/// its alias `new`, ready, reopen, or an API call that does one of those.
+/// `merge` is `gh pr merge` or an API call that merges or turns auto-merge
+/// on. A comment, a list, or a GET is neither.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct GhActs {
+    pub open: bool,
+    pub merge: bool,
+}
+
+impl GhActs {
+    fn either(self, other: Self) -> Self {
+        Self {
+            open: self.open || other.open,
+            merge: self.merge || other.merge,
+        }
+    }
+
+    fn any(self) -> bool {
+        self.open || self.merge
+    }
+}
+
+/// The pull-request actions `line` runs. gh's flags before the noun and
+/// between `pr` and the verb are skipped, `-R` and `--repo` with their
+/// value. A name `gh alias list` expands is read as that expansion, so
+/// `gh pc` is whatever `pc` stands for. Words after a `pr` verb are its
+/// arguments and are never read.
+pub(crate) fn gh_acts(line: &str, cwd: Option<&Path>) -> GhActs {
+    if !line.contains("gh") {
+        return GhActs::default();
+    }
+    let mut here = cwd
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok());
+    let mut acts = GhActs::default();
+    for l in crate::nested_lines(line, 0) {
+        for seg in crate::raw_segments(&l) {
             let words = argv(&seg);
-            if words.first().map(String::as_str) != Some("gh") {
-                return false;
+            match words.first().map(String::as_str) {
+                Some("cd" | "pushd") => here = moved(here, &words[1..]),
+                Some("popd") => here = None,
+                Some("gh") => {
+                    acts = acts.either(gh_command(&words, &prefix_env(&seg), here.as_deref(), 0));
+                }
+                _ => {}
             }
-            let mut rest = words[1..].iter().map(String::as_str);
-            gh_word(&mut rest) == Some("pr")
-                && gh_word(&mut rest).is_some_and(|verb| verbs.contains(&verb))
-        })
+            if acts.open && acts.merge {
+                return acts;
+            }
+        }
+    }
+    acts
+}
+
+/// How many times an alias may expand into another alias before the line
+/// is refused. A real alias is one step. A loop would hide the verb.
+const ALIAS_DEPTH: usize = 8;
+
+fn gh_command(
+    words: &[String],
+    env: &[(String, String)],
+    cwd: Option<&Path>,
+    depth: usize,
+) -> GhActs {
+    if depth > ALIAS_DEPTH {
+        return GhActs {
+            open: true,
+            merge: true,
+        };
+    }
+    let mut rest = words.iter().map(String::as_str).skip(1);
+    let Some(noun) = gh_word(&mut rest) else {
+        return GhActs::default();
+    };
+    match noun {
+        "pr" => pr_verb(gh_word(&mut rest)),
+        "api" => gh_api(rest, cwd),
+        other => {
+            let Some(exp) = alias_expansion(env, other) else {
+                return GhActs::default();
+            };
+            let extra: Vec<&str> = rest.collect();
+            expand_alias(&exp, &extra, env, cwd, depth)
+        }
+    }
+}
+
+fn pr_verb(verb: Option<&str>) -> GhActs {
+    match verb {
+        Some("create" | "new" | "ready" | "reopen") => GhActs {
+            open: true,
+            merge: false,
+        },
+        Some("merge") => GhActs {
+            open: false,
+            merge: true,
+        },
+        _ => GhActs::default(),
+    }
+}
+
+fn expand_alias(
+    exp: &str,
+    extra: &[&str],
+    env: &[(String, String)],
+    cwd: Option<&Path>,
+    depth: usize,
+) -> GhActs {
+    // A shell alias is `!script`. gh appends the words typed after the
+    // alias, then the script runs. Anything that is not a gh pull request
+    // is left alone.
+    if let Some(script) = exp.strip_prefix('!') {
+        let mut line = script.trim().to_string();
+        if !extra.is_empty() {
+            line.push(' ');
+            line.push_str(&extra.join(" "));
+        }
+        return gh_script(&line, env, cwd, depth + 1);
+    }
+    let mut words = vec!["gh".to_string()];
+    words.extend(crate::shell_words(exp));
+    words.extend(extra.iter().map(|word| (*word).to_string()));
+    gh_command(&words, env, cwd, depth + 1)
+}
+
+fn gh_script(line: &str, env: &[(String, String)], cwd: Option<&Path>, depth: usize) -> GhActs {
+    let mut acts = GhActs::default();
+    for l in crate::nested_lines(line, 0) {
+        for seg in crate::raw_segments(&l) {
+            let words = argv(&seg);
+            if words.first().map(String::as_str) == Some("gh") {
+                acts = acts.either(gh_command(&words, env, cwd, depth));
+            }
+        }
+    }
+    acts
+}
+
+/// `NAME=value` words in front of `gh`, so `gh alias list` sees the config
+/// directory the command itself sets.
+fn prefix_env(segment: &str) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    for word in crate::shell_words(segment) {
+        if word == "gh" || word.rsplit('/').next() == Some("gh") {
+            break;
+        }
+        let Some((key, value)) = word.split_once('=') else {
+            continue;
+        };
+        if assign_key(key) && !value.contains('\0') {
+            env.push((key.to_string(), value.to_string()));
+        }
+    }
+    env
+}
+
+fn assign_key(key: &str) -> bool {
+    !key.is_empty()
+        && !key.starts_with(|c: char| c.is_ascii_digit())
+        && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The expansion `gh alias list` gives `name`, without the quotes gh puts
+/// around a shell alias. `None` when gh has no such alias or cannot be asked.
+fn alias_expansion(env: &[(String, String)], name: &str) -> Option<String> {
+    let mut cmd = Command::new("gh");
+    cmd.args(["alias", "list"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let Some((alias, exp)) = line.split_once(':') else {
+            continue;
+        };
+        if alias.trim() != name {
+            continue;
+        }
+        let exp = exp.trim();
+        let exp = exp
+            .strip_prefix('\'')
+            .and_then(|inner| inner.strip_suffix('\''))
+            .unwrap_or(exp);
+        return Some(exp.to_string());
+    }
+    None
+}
+
+/// gh api flags that take the next word. A flag not listed here is boolean,
+/// so its word is not the endpoint and not a body.
+const API_VALUED: &[&str] = &[
+    "-X",
+    "--method",
+    "-f",
+    "--raw-field",
+    "-F",
+    "--field",
+    "-H",
+    "--header",
+    "--hostname",
+    "--input",
+    "-q",
+    "--jq",
+    "-p",
+    "--preview",
+    "-t",
+    "--template",
+    "--cache",
+];
+
+const OPEN_MUTATIONS: &[&str] = &[
+    "createPullRequest",
+    "reopenPullRequest",
+    "markPullRequestReadyForReview",
+];
+
+const MERGE_MUTATIONS: &[&str] = &["mergePullRequest", "enablePullRequestAutoMerge"];
+
+fn gh_api<'a>(words: impl Iterator<Item = &'a str>, cwd: Option<&Path>) -> GhActs {
+    let mut method: Option<String> = None;
+    let mut endpoint: Option<String> = None;
+    let mut fields: Vec<(String, String)> = Vec::new();
+    let mut input: Option<String> = None;
+    let mut it = words;
+    while let Some(word) = it.next() {
+        if word == "--" {
+            if endpoint.is_none() {
+                endpoint = it.next().map(str::to_string);
+            }
+            continue;
+        }
+        if let Some(rest) = word.strip_prefix("--method=") {
+            method = Some(rest.to_string());
+            continue;
+        }
+        if let Some(rest) = word
+            .strip_prefix("--raw-field=")
+            .or_else(|| word.strip_prefix("--field="))
+        {
+            fields.push(field_pair(rest));
+            continue;
+        }
+        if let Some(rest) = word.strip_prefix("--input=") {
+            input = Some(rest.to_string());
+            continue;
+        }
+        if let Some(inline) = word.strip_prefix("-X") {
+            if !word.starts_with("--") && !inline.is_empty() {
+                method = Some(inline.to_string());
+                continue;
+            }
+        }
+        if API_VALUED.contains(&word) {
+            let Some(value) = it.next() else {
+                continue;
+            };
+            match word {
+                "-X" | "--method" => method = Some(value.to_string()),
+                "-f" | "--raw-field" | "-F" | "--field" => fields.push(field_pair(value)),
+                "--input" => input = Some(value.to_string()),
+                _ => {}
+            }
+            continue;
+        }
+        if word.starts_with('-') && word.len() > 1 {
+            continue;
+        }
+        if endpoint.is_none() {
+            endpoint = Some(word.to_string());
+        }
+    }
+    let Some(endpoint) = endpoint else {
+        return GhActs::default();
+    };
+    classify_api(&endpoint, method.as_deref(), &fields, input.as_deref(), cwd)
+}
+
+fn field_pair(raw: &str) -> (String, String) {
+    match raw.split_once('=') {
+        Some((key, value)) => (key.to_string(), value.to_string()),
+        None => (raw.to_string(), String::new()),
+    }
+}
+
+fn classify_api(
+    endpoint: &str,
+    method: Option<&str>,
+    fields: &[(String, String)],
+    input: Option<&str>,
+    cwd: Option<&Path>,
+) -> GhActs {
+    let path = api_path(endpoint);
+    if graphql_path(&path) {
+        return graphql_acts(fields, input, cwd);
+    }
+    if !api_writes(method, !fields.is_empty() || input.is_some()) {
+        return GhActs::default();
+    }
+    rest_acts(&path)
+}
+
+/// gh's default is GET, and POST when a field or a body was given. An
+/// explicit method wins, including GET with fields, which sends a query
+/// string rather than a pull-request write.
+fn api_writes(method: Option<&str>, has_body: bool) -> bool {
+    match method {
+        Some(method) => matches!(
+            method.to_ascii_uppercase().as_str(),
+            "POST" | "PUT" | "PATCH" | "DELETE"
+        ),
+        None => has_body,
+    }
+}
+
+fn api_path(endpoint: &str) -> String {
+    let endpoint = endpoint.split(['?', '#']).next().unwrap_or(endpoint);
+    let path = if let Some(rest) = endpoint
+        .strip_prefix("https://")
+        .or_else(|| endpoint.strip_prefix("http://"))
+    {
+        rest.split_once('/').map(|(_, path)| path).unwrap_or("")
+    } else {
+        endpoint
+    };
+    path.trim_matches('/').to_string()
+}
+
+fn graphql_path(path: &str) -> bool {
+    path == "graphql" || path.ends_with("/graphql")
+}
+
+fn rest_acts(path: &str) -> GhActs {
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    let n = parts.len();
+    if n >= 3 && parts[n - 1] == "merge" && parts[n - 3] == "pulls" {
+        return GhActs {
+            open: false,
+            merge: true,
+        };
+    }
+    if parts.last() == Some(&"pulls") {
+        return GhActs {
+            open: true,
+            merge: false,
+        };
+    }
+    GhActs::default()
+}
+
+fn graphql_acts(fields: &[(String, String)], input: Option<&str>, cwd: Option<&Path>) -> GhActs {
+    let mut texts = Vec::new();
+    let mut opaque = false;
+    for (key, value) in fields {
+        if key != "query" {
+            continue;
+        }
+        match value.strip_prefix('@') {
+            Some("-" | "") => opaque = true,
+            Some(path) => match read_query(cwd, path) {
+                Some(body) => texts.push(body),
+                None => opaque = true,
+            },
+            None => texts.push(value.clone()),
+        }
+    }
+    if let Some(path) = input {
+        if path == "-" {
+            opaque = true;
+        } else {
+            match read_query(cwd, path) {
+                Some(body) => texts.push(body),
+                None => opaque = true,
+            }
+        }
+    }
+    let mut acts = GhActs::default();
+    for text in &texts {
+        acts = acts.either(mutation_acts(text));
+    }
+    // The body is not on the line and could not be read. It may be any of
+    // the mutations below, so it is not treated as a query.
+    if opaque && !acts.any() {
+        acts.open = true;
+        acts.merge = true;
+    }
+    acts
+}
+
+fn read_query(cwd: Option<&Path>, path: &str) -> Option<String> {
+    if path.is_empty() || path.contains('\0') {
+        return None;
+    }
+    let path = Path::new(path);
+    let full = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        let base = cwd
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())?;
+        base.join(path)
+    };
+    std::fs::read_to_string(full).ok()
+}
+
+fn mutation_acts(text: &str) -> GhActs {
+    GhActs {
+        open: OPEN_MUTATIONS.iter().any(|name| has_ident(text, name)),
+        merge: MERGE_MUTATIONS.iter().any(|name| has_ident(text, name)),
+    }
+}
+
+fn has_ident(hay: &str, ident: &str) -> bool {
+    hay.match_indices(ident).any(|(at, _)| {
+        let before = hay[..at].chars().next_back();
+        let after = hay[at + ident.len()..].chars().next();
+        let ident_char = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        !before.is_some_and(ident_char) && !after.is_some_and(ident_char)
+    })
 }
 
 /// The next word of a gh command that is not a flag or a flag's value.
@@ -122,13 +561,17 @@ fn argv(segment: &str) -> Vec<String> {
 
 /// Where `cd ARGS` leaves the line, `None` when it cannot be told: `-`,
 /// a variable, or a directory that was already unknown.
+/// `cd "$(git rev-parse --show-toplevel)"` is this checkout's top.
 fn moved(here: Option<PathBuf>, args: &[String]) -> Option<PathBuf> {
     let home = || crate::home().ok();
     let Some(to) = args.iter().find(|a| !a.starts_with('-') || *a == "-") else {
         return home();
     };
-    if to == "-" || to.contains(['$', '`']) {
+    if to == "-" {
         return None;
+    }
+    if to.contains(['$', '`']) {
+        return toplevel_cd(here, to);
     }
     if to == "~" {
         return home();
@@ -140,6 +583,29 @@ fn moved(here: Option<PathBuf>, args: &[String]) -> Option<PathBuf> {
         return None;
     }
     Some(here?.join(to))
+}
+
+/// The checkout top `cd` named with `git rev-parse --show-toplevel`, or
+/// `None` for any other substitution. The command is run in `here`, so a
+/// subdirectory and the top resolve to the same repository.
+fn toplevel_cd(here: Option<PathBuf>, to: &str) -> Option<PathBuf> {
+    if to != "$(git rev-parse --show-toplevel)" && to != "`git rev-parse --show-toplevel`" {
+        return None;
+    }
+    let here = here?;
+    let out = Command::new("git")
+        .current_dir(here)
+        .args(["rev-parse", "--show-toplevel"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(out.stdout).ok()?;
+    let path = path.trim();
+    (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
 #[derive(Default)]
@@ -482,11 +948,16 @@ impl Push {
                 return Some(why);
             }
         }
-        let mirrors_or_all = self
+        // `--all`, `--branches` and `--mirror` already judged the local
+        // branches. `--tags` pushes tags and not the branch checked out.
+        // `--follow-tags` pushes that branch as well, so it is read below.
+        let covers_heads = self
             .bulk
             .iter()
             .any(|f| matches!(f.as_str(), "--all" | "--branches" | "--mirror"));
-        if self.words.len() <= 1 && !mirrors_or_all {
+        let follow_tags = self.bulk.iter().any(|f| f == "--follow-tags");
+        let tags_only = self.bulk.iter().any(|f| f == "--tags") && !covers_heads && !follow_tags;
+        if self.words.len() <= 1 && !covers_heads && !tags_only {
             return self.at.implicit(remote.map(String::as_str));
         }
         None
@@ -499,6 +970,39 @@ fn short_cluster_takes_value(word: &str) -> bool {
     word.strip_prefix('-').is_some_and(|flags| {
         flags.len() > 1 && flags.chars().all(|c| c.is_ascii_alphabetic()) && flags.ends_with('o')
     })
+}
+
+/// The last `:` that splits a refspec into `src:dst`. Colons inside
+/// `$(...)`, `${...}` and backticks stay inside that side, so
+/// `$(echo HEAD:cursor/x)` is one destination and not `cursor/x)`.
+fn refspec_sides(spec: &str) -> Option<(&str, &str)> {
+    let mut paren = 0i32;
+    let mut brace = 0i32;
+    let mut tick = false;
+    let mut colon = None;
+    let mut chars = spec.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '`' => tick = !tick,
+            '$' if !tick => match chars.peek().map(|(_, n)| *n) {
+                Some('(') => {
+                    paren += 1;
+                    chars.next();
+                }
+                Some('{') => {
+                    brace += 1;
+                    chars.next();
+                }
+                _ => {}
+            },
+            ')' if !tick && paren > 0 => paren -= 1,
+            '}' if !tick && brace > 0 => brace -= 1,
+            ':' if !tick && paren == 0 && brace == 0 => colon = Some(i),
+            _ => {}
+        }
+    }
+    let at = colon?;
+    Some((&spec[..at], &spec[at + 1..]))
 }
 
 fn prune_covers_heads(spec: &str) -> bool {
@@ -681,8 +1185,9 @@ impl Checkout {
             return self.local(&["refs/heads/"], "a matching push");
         }
         // A destination of `HEAD` is a branch named `HEAD` to git; only a
-        // bare `HEAD` or `@` pushes the branch checked out.
-        let (src, dst, bare) = match spec.rsplit_once(':') {
+        // bare `HEAD` or `@` pushes the branch checked out. A colon inside
+        // `$(...)`, `${...}` or backticks belongs to that substitution.
+        let (src, dst, bare) = match refspec_sides(spec) {
             Some((src, dst)) => (src, dst, false),
             None => (spec, spec, true),
         };
@@ -702,7 +1207,9 @@ impl Checkout {
                 Some(_) => None,
             };
         }
-        if spec.contains(['$', '`']) && dst.contains(['$', '`', '(', ')', '{', '}']) {
+        // An earlier assignment has already been substituted. What remains
+        // is a destination the shell has not expanded, named in full.
+        if dst.contains(['$', '`']) {
             return Some(format!(
                 "`{dst}` is only known once the shell expands it; push a named branch"
             ));
