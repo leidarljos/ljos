@@ -43596,13 +43596,13 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         std::fs::write(root.path().join("Makefile"), PLAIN_MAKEFILE).unwrap();
         std::fs::write(root.path().join("project/Makefile"), RISKY_MAKEFILE).unwrap();
         let home = SeatDir::new(name);
+        // ljos-policyd will not unpack its pack under a state path with
+        // `..` in it, and answers `pack-unavailable`, which is no verdict.
+        let state = std::fs::canonicalize(home.path()).unwrap().join("policyd");
         let env = HoldEnv::set(&[
             ("POLICYD_BIN", bin.to_str().unwrap()),
             ("HOME", home.path().to_str().unwrap()),
-            (
-                "PHRONESIS_STATE_DIR",
-                home.path().join("policyd").to_str().unwrap(),
-            ),
+            ("PHRONESIS_STATE_DIR", state.to_str().unwrap()),
             ("LJOS_GUARD", "on"),
             ("LJOS_OFF", "0"),
         ]);
