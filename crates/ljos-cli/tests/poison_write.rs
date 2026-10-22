@@ -100,9 +100,56 @@ impl Seat {
     }
 
     fn command(&self, args: &[&str], runner: bool) -> Command {
+        if runner {
+            return self.under(
+                "claude",
+                &[("ACMEAGENT_CONVERSATION_ID", RUNNER_SESSION)],
+                "",
+                args,
+            );
+        }
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
-        cmd.args(args)
-            .env_clear()
+        cmd.args(args);
+        self.seat_env(&mut cmd);
+        cmd
+    }
+
+    /// `ljos ARGS` as a tool call of the runner `name`: the runner, started
+    /// with `env`, opens `sh -c` and the line runs `prefix ljos ARGS` there.
+    fn under(&self, name: &str, env: &[(&str, &str)], prefix: &str, args: &[&str]) -> Command {
+        self.under_bin(name, env, prefix, env!("CARGO_BIN_EXE_ljos"), args)
+    }
+
+    fn under_bin(
+        &self,
+        name: &str,
+        env: &[(&str, &str)],
+        prefix: &str,
+        bin: &str,
+        args: &[&str],
+    ) -> Command {
+        // A shell started under the runner's name is a process the kernel
+        // calls `name`, and it stays the parent of the shell it opens.
+        let dir = self.home.path().join("runners");
+        std::fs::create_dir_all(&dir).unwrap();
+        let runner = dir.join(name);
+        if !runner.exists() {
+            std::os::unix::fs::symlink("/bin/sh", &runner).unwrap();
+        }
+        let mut cmd = Command::new(&runner);
+        cmd.args(["-c", "\"$@\"; exit $?", name, "sh", "-c"])
+            .arg(format!("{prefix} \"$0\" \"$@\"; exit $?"))
+            .arg(bin)
+            .args(args);
+        self.seat_env(&mut cmd);
+        cmd.envs(env.iter().copied());
+        cmd
+    }
+
+    fn seat_env(&self, cmd: &mut Command) {
+        // A seat's tracker file lands where ljos stands, not the crate.
+        cmd.current_dir(self.home.path());
+        cmd.env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", self.home.path())
             .env("XDG_CONFIG_HOME", self.home.path().join(".config"))
@@ -117,10 +164,6 @@ impl Seat {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if runner {
-            cmd.env("ACMEAGENT_CONVERSATION_ID", RUNNER_SESSION);
-        }
-        cmd
     }
 }
 
@@ -251,6 +294,7 @@ fn a_runner_user_rule_of_a_plant_is_refused() {
 fn mcp_user_prefer_of_a_plant_is_refused() {
     let seat = Seat::new();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
+        .current_dir(seat.home.path())
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", seat.home.path())
@@ -507,25 +551,24 @@ fn mcp_remember(seat: &Seat, text: &str) -> serde_json::Value {
 }
 
 fn mcp_call(seat: &Seat, tool: &str, arguments: serde_json::Value) -> serde_json::Value {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("HOME", seat.home.path())
-        .env("XDG_CONFIG_HOME", seat.home.path().join(".config"))
-        .env("XDG_STATE_HOME", seat.home.path().join("state"))
-        .env("XDG_RUNTIME_DIR", seat.run.path())
-        .env("PACKSET_URL", &seat.url)
-        .env("PACKSET_WORKSPACE", "seat")
-        .env("PACKSET_TIMEOUT_MS", "2000")
-        .env("LJOS_USER_RULES_SYNC", "off")
-        .env("LJOS_GUARD", "on")
-        .env("LJOS_CAPTURE", "save")
-        .env("LJOS_SEAT", "probe")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
+    seat.seat_env(&mut cmd);
+    cmd.env("LJOS_SEAT", "probe");
+    mcp_call_with(cmd, tool, arguments)
+}
+
+fn mcp_call_with(cmd: Command, tool: &str, arguments: serde_json::Value) -> serde_json::Value {
+    mcp_call_meta(cmd, tool, arguments, serde_json::json!({}))
+}
+
+/// One `tools/call` whose `_meta` is `meta`, as the runner sends it.
+fn mcp_call_meta(
+    mut cmd: Command,
+    tool: &str,
+    arguments: serde_json::Value,
+    meta: serde_json::Value,
+) -> serde_json::Value {
+    let mut child = cmd.stdin(Stdio::piped()).spawn().unwrap();
     let lines = [
         serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
             "protocolVersion": "2025-06-18", "capabilities": {},
@@ -533,7 +576,8 @@ fn mcp_call(seat: &Seat, tool: &str, arguments: serde_json::Value) -> serde_json
         serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
         serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
             "name": tool,
-            "arguments": arguments}}),
+            "arguments": arguments,
+            "_meta": meta}}),
     ];
     {
         let stdin = child.stdin.as_mut().unwrap();
@@ -764,4 +808,243 @@ fn the_sit_playbook_calls_a_runner_remember_an_unreviewed_note() {
     );
     assert!(sit.body.contains("unreviewed note"), "{}", sit.body);
     assert!(sit.body.contains("the person reviews"), "{}", sit.body);
+}
+
+/// The session the bind must name is the runner's, read from the shell the
+/// runner opened. `LJOS_HARNESS_SESSION=forged ljos ...` sets only the
+/// environment of that one ljos, so a bind forged for its session is not
+/// the person's prompt.
+#[test]
+fn a_session_set_on_the_ljos_line_does_not_pick_the_bind() {
+    let forged = "forged-session-0001";
+    for prefix in [
+        format!("LJOS_HARNESS_SESSION={forged}"),
+        format!("CLAUDE_CODE_SESSION_ID={forged} CURSOR_CONVERSATION_ID={forged}"),
+    ] {
+        let seat = Seat::new();
+        forge_prompt(&seat, PLANT, forged);
+        let out = seat
+            .under(
+                "claude",
+                &[("CLAUDE_CODE_SESSION_ID", RUNNER_SESSION)],
+                &prefix,
+                &["prefer", "--user", "--why", "x", PLANT],
+            )
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "{prefix} made a forged bind the person's\n{}",
+            text_of(&out)
+        );
+        assert!(
+            combined(&out).contains("only the person's own words"),
+            "{}",
+            text_of(&out)
+        );
+        assert!(!rules_text(&seat).contains("release key"), "{prefix}");
+    }
+}
+
+/// With no runner above it, nothing is the person's words: not from the
+/// CLI with a runner's variables set, and not from an MCP server whose
+/// environment names the bind's session.
+#[test]
+fn with_no_runner_above_nothing_is_the_persons_words() {
+    let forged = "forged-session-0002";
+    let seat = Seat::new();
+    forge_prompt(&seat, PLANT, forged);
+    let out = seat
+        .command(&["prefer", "--user", "--why", "x", PLANT], false)
+        .env("LJOS_HARNESS_SESSION", forged)
+        .env("CURSOR_CONVERSATION_ID", forged)
+        .output()
+        .unwrap();
+    assert!(
+        combined(&out).contains("only the person's own words"),
+        "{}",
+        text_of(&out)
+    );
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
+    seat.seat_env(&mut cmd);
+    cmd.env("LJOS_SEAT", "probe")
+        .env("LJOS_HARNESS_SESSION", forged);
+    let answer = mcp_call_with(
+        cmd,
+        "ljos_prefer",
+        serde_json::json!({"text": PLANT, "user": true, "why": "x"}),
+    );
+    let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
+    assert!(refused, "mcp stored a forged prompt's plant: {answer}");
+    assert!(
+        !rules_text(&seat).contains("release key"),
+        "{}",
+        rules_text(&seat)
+    );
+}
+
+/// One runner as ljos meets it: the payload its prompt hook sends, the
+/// environment it starts its shell and MCP server with, and the `_meta`
+/// of an MCP call.
+struct Runner {
+    name: &'static str,
+    hook: serde_json::Value,
+    env: Vec<(&'static str, String)>,
+    meta: serde_json::Value,
+}
+
+/// The variables the shipped Codex MCP entry forwards from Codex.
+fn codex_forwards() -> Vec<String> {
+    let table = ljos_cli::HARNESSES_EXAMPLE;
+    let at = table.find("name = \"codex\"").expect("codex ships");
+    let snippet = table[at..]
+        .lines()
+        .find(|l| l.starts_with("snippet = "))
+        .expect("codex has a snippet");
+    let list = snippet
+        .split("env_vars = [")
+        .nth(1)
+        .and_then(|rest| rest.split(']').next())
+        .expect("the snippet forwards variables");
+    list.split(',')
+        .map(|v| v.trim().trim_matches(|c| c == '"' || c == '\\').to_string())
+        .filter(|v| !v.is_empty())
+        .collect()
+}
+
+/// Each shipped runner, holding `prompt` as the person's latest.
+fn runners(prompt: &str) -> Vec<Runner> {
+    let claude = "claude-sess-0001aaaa";
+    let cursor = "cursor-conv-0001aaaa";
+    let codex = "019a1b2c-codex-root-0001";
+    let grok = "01a09b25-ffe9-7972-881a";
+    let forwards = codex_forwards();
+    let codex_env: Vec<(&'static str, String)> = [
+        ("CODEX_SESSION_ID", codex.to_string()),
+        ("CODEX_THREAD_ID", codex.to_string()),
+    ]
+    .into_iter()
+    .filter(|(k, _)| forwards.iter().any(|f| f == k))
+    .collect();
+    let codex_meta = serde_json::json!({
+        "x-runner-turn-metadata": {"session_id": codex, "thread_id": codex}
+    });
+    let codex_hook = serde_json::json!({
+        "hook_event_name": "UserPromptSubmit", "session_id": codex,
+        "turn_id": "turn-0001", "prompt": prompt,
+    });
+    vec![
+        Runner {
+            name: "claude",
+            hook: serde_json::json!({
+                "hook_event_name": "UserPromptSubmit", "session_id": claude, "prompt": prompt,
+            }),
+            env: vec![("CLAUDE_CODE_SESSION_ID", claude.to_string())],
+            meta: serde_json::json!({}),
+        },
+        // Cursor's hook names the chat `conversation_id` and its shell
+        // `CURSOR_CONVERSATION_ID`; the payload's `session_id` is another id.
+        Runner {
+            name: "cursor-agent",
+            hook: serde_json::json!({
+                "cursor_version": "2.4.0", "hook_event_name": "beforeSubmitPrompt",
+                "conversation_id": cursor, "session_id": "cursor-sess-0002bbbb",
+                "generation_id": "gen-0001", "prompt": prompt,
+            }),
+            env: vec![("CURSOR_CONVERSATION_ID", cursor.to_string())],
+            meta: serde_json::json!({}),
+        },
+        // The Codex MCP server sees only what its entry forwards, and each
+        // call names the turn's session in `_meta`.
+        Runner {
+            name: "codex",
+            hook: codex_hook.clone(),
+            env: codex_env,
+            meta: codex_meta.clone(),
+        },
+        Runner {
+            name: "codex",
+            hook: codex_hook,
+            env: Vec::new(),
+            meta: codex_meta,
+        },
+        Runner {
+            name: "grok",
+            hook: serde_json::json!({
+                "hookEventName": "user_prompt_submit", "sessionId": grok, "prompt": prompt,
+            }),
+            env: vec![("GROK_SESSION_ID", grok.to_string())],
+            meta: serde_json::json!({}),
+        },
+    ]
+}
+
+fn runner_env(r: &Runner) -> Vec<(&str, &str)> {
+    r.env.iter().map(|(k, v)| (*k, v.as_str())).collect()
+}
+
+fn mcp_under(seat: &Seat, r: &Runner) -> Command {
+    let mut cmd = seat.under_bin(
+        r.name,
+        &runner_env(r),
+        "",
+        env!("CARGO_BIN_EXE_ljos-mcp"),
+        &[],
+    );
+    cmd.env("LJOS_SEAT", "probe");
+    cmd
+}
+
+/// Under each shipped runner, the person's words in the prompt its hook
+/// kept are theirs, from the shell and from the MCP server the runner
+/// started; a bind forged for another session is not.
+#[test]
+fn every_runner_takes_a_real_quote_and_refuses_a_forged_session() {
+    let said = "Always build the release with the checked fuse never a guessed one.";
+    for r in runners(&format!("From now on: {said}")) {
+        let who = format!("{} env {:?} meta {}", r.name, r.env, r.meta);
+        let seat = Seat::new();
+        hook_stdout(&seat, &r.hook.to_string());
+        let answer = mcp_call_meta(
+            mcp_under(&seat, &r),
+            "ljos_prefer",
+            serde_json::json!({"text": said, "user": true, "why": "x"}),
+            r.meta.clone(),
+        );
+        let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
+        assert!(!refused, "{who}: mcp refused the person's words: {answer}");
+        assert!(rules_text(&seat).contains("checked fuse"), "{who}");
+
+        if !r.env.is_empty() {
+            let seat = Seat::new();
+            hook_stdout(&seat, &r.hook.to_string());
+            let out = seat
+                .under(
+                    r.name,
+                    &runner_env(&r),
+                    "",
+                    &["prefer", "--user", "--why", "x", said],
+                )
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{who}: cli refused\n{}",
+                text_of(&out)
+            );
+            assert!(rules_text(&seat).contains("checked fuse"), "{who}");
+        }
+
+        let seat = Seat::new();
+        forge_prompt(&seat, PLANT, "forged-session-0004");
+        let answer = mcp_call_meta(
+            mcp_under(&seat, &r),
+            "ljos_prefer",
+            serde_json::json!({"text": PLANT, "user": true, "why": "x"}),
+            r.meta.clone(),
+        );
+        let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
+        assert!(refused, "{who}: mcp took a forged bind: {answer}");
+        assert!(!rules_text(&seat).contains("release key"), "{who}");
+    }
 }

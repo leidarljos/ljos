@@ -2870,10 +2870,13 @@ fn run_command() -> Result<()> {
                     // repeat it and the correction hook does not file it
                     // again as a proposal.
                     let captured = if person {
-                        ljos_cli::capture::note_latest_prompt_for(
-                            &call.cue,
-                            call.session.as_deref(),
-                        );
+                        let mut sessions: Vec<String> = call.session.iter().cloned().collect();
+                        for s in ljos_cli::payload_sessions(&input) {
+                            if !sessions.contains(&s) {
+                                sessions.push(s);
+                            }
+                        }
+                        ljos_cli::capture::note_latest_prompt_as(&call.cue, &sessions);
                         ljos_cli::hook_timed("capture", || ljos_cli::capture::capture_stated(&call))
                     } else {
                         None
