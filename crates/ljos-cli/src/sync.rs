@@ -1020,7 +1020,7 @@ fn shared_taken_path(scope: &str, host: &str) -> PathBuf {
 const TAKEN_KEYS: &str = "# text and issue";
 
 /// The memories taken from `host` last time. A tracker with no file of
-/// its own reads the shared one, which is left for the other checkouts.
+/// its own reads the shared one, until [`write_taken`] replaces it.
 /// A file of texts is read through the atoms this pack holds from
 /// `sender`: each text stands for every copy of it, so the first import
 /// after the change still retires what the host dropped and posts
@@ -1054,13 +1054,20 @@ fn read_taken(
         .collect()
 }
 
+/// Write this tracker's `.taken`. Its first one replaces the shared file
+/// [`read_taken`] fell back to. That file goes only after this one is
+/// written, so a failed write leaves it for the next import to read.
 fn write_taken(root: &Path, scope: &str, host: &str, plain: &str) -> Result<()> {
     let path = taken_path(root, scope, host);
+    let first = !path.exists();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let keys: String = log_keys(plain).into_iter().map(|key| key + "\n").collect();
-    std::fs::write(path, format!("{TAKEN_KEYS}\n{keys}"))?;
+    std::fs::write(&path, format!("{TAKEN_KEYS}\n{keys}"))?;
+    if first {
+        let _ = std::fs::remove_file(shared_taken_path(scope, host));
+    }
     Ok(())
 }
 
@@ -6150,7 +6157,8 @@ mod tests {
     }
 
     /// Before its path named the tracker, one `.taken` per scope and host
-    /// was shared. A tracker with no file of its own reads that one.
+    /// was shared. A tracker with no file of its own reads that one, and
+    /// it goes once the tracker's own is written.
     #[test]
     fn an_import_reads_the_taken_file_trackers_shared() {
         import_over_texts(|_| shared_taken_path("cloud", "peer"));
@@ -6184,7 +6192,10 @@ mod tests {
         );
         assert!(has(&store, 201));
         assert!(!has(&store, 202));
-        assert!(old.exists(), "the old file was not left in place");
+        assert!(
+            !shared_taken_path("cloud", "peer").exists(),
+            "the shared file outlived the tracker's own"
+        );
         let taken = taken_path(&root, "cloud", "peer");
         let rewritten = std::fs::read_to_string(&taken).unwrap();
         assert!(
@@ -6198,6 +6209,67 @@ mod tests {
             "{again}"
         );
         assert!(has(&store, 201));
+    }
+
+    /// A tracker upgraded with its `.taken` at the shared path. The peer
+    /// drops the text; the import retires it and moves the file under the
+    /// tracker, and the next import does not read the shared path again.
+    #[test]
+    fn an_upgraded_tracker_retires_what_the_peer_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let row = serde_json::json!({
+            "text": "dropped", "kind": "lesson", "issue": "proj-a", "entities": []
+        });
+        let (root, scope) = peer_log(dir.path(), &[row]);
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        let said = import(&root, &scope).unwrap();
+        assert!(said.contains("sync: peer: 1 cloud atoms taken"), "{said}");
+        let own = taken_path(&root, "cloud", "peer");
+        let shared = shared_taken_path("cloud", "peer");
+        std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        std::fs::rename(&own, &shared).unwrap();
+        let log = root.join(".ljos/atoms/peer.jsonl.age");
+        seal("", &scope.recipients, &log).unwrap();
+        let said = import(&root, &scope).unwrap();
+        assert!(
+            said.contains("sync: peer: 0 cloud atoms taken, 0 refused, 1 retired\n"),
+            "{said}"
+        );
+        assert!(own.exists());
+        assert!(
+            !shared.exists(),
+            "the shared file was left to be read again"
+        );
+        let again = import(&root, &scope).unwrap();
+        assert!(
+            again.contains("sync: peer: 0 cloud atoms taken, 0 refused, 0 retired\n"),
+            "{again}"
+        );
+        let live = store.lock().unwrap().clone();
+        assert!(
+            !live.iter().any(|atom| atom["text"] == "dropped"),
+            "{live:?}"
+        );
+    }
+
+    /// The shared file goes only after the tracker's own is written.
+    #[test]
+    fn a_failed_taken_write_keeps_the_shared_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let (root, scope) = peer_log(dir.path(), &[same_words("proj-a")]);
+        let shared = shared_taken_path("cloud", "peer");
+        std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
+        std::fs::write(&shared, format!("{}\n", crate::work_id("same words"))).unwrap();
+        let blocked = taken_path(&root, "cloud", "peer");
+        std::fs::create_dir_all(blocked.parent().unwrap().parent().unwrap()).unwrap();
+        std::fs::write(blocked.parent().unwrap(), "").unwrap();
+        let (url, _store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        assert!(import(&root, &scope).is_err());
+        assert!(shared.exists(), "the shared file went before a write");
     }
 
     /// Primary `box` plus an extra `cloud` log. Both are adopted in one
