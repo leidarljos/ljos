@@ -309,6 +309,18 @@ fn setsid_prefer(seat: &Seat, text: &str) -> std::process::Output {
     detached(seat, "prefer", &format!("{bin} prefer '{text}'"))
 }
 
+/// `setsid -f` of `python3`, which then execs ljos. python is not a
+/// wrapper, so a check that reads the cgroup only for an all-wrapper
+/// chain never sees it. The environment is the seat's, with no runner
+/// variable.
+fn setsid_python_prefer(seat: &Seat, text: &str) -> std::process::Output {
+    let bin = ljos();
+    let body = format!(
+        "python3 -c 'import os, sys; os.execv(sys.argv[1], [sys.argv[1], \"prefer\", sys.argv[2]])' '{bin}' '{text}'"
+    );
+    detached(seat, "python", &body)
+}
+
 fn script_keep(seat: &Seat) -> std::process::Output {
     let log = seat.home.path().join("script.log");
     let bin = ljos();
@@ -470,30 +482,25 @@ fn detaching_does_not_make_this_process_the_person() {
         .unwrap();
     let direct_err = String::from_utf8_lossy(&direct.stderr);
     assert!(
-        direct_err.contains("needs a terminal"),
-        "a direct keep should miss the terminal, not the runner\n{}",
-        text_of(&direct)
-    );
-    assert!(
-        !direct_err.contains("a runner cannot keep"),
-        "the test process itself was taken for a runner\n{}",
+        direct_err.contains("a runner cannot keep"),
+        "the runner cgroup did not count without a detach\n{}",
         text_of(&direct)
     );
 
+    // python holds the pty. It is not a wrapper, and the cgroup still names
+    // the runner, so the typed command is the runner's.
     let shaped = terminal::shape(
         "terminal",
         ljos(),
         &["prefer", "Keep the release notes in one file."],
     );
     let typed = seat.command(terminal::PYTHON, &shaped).output().unwrap();
-    assert!(
-        typed.status.success(),
-        "terminal prefer\n{}",
-        text_of(&typed)
+    prefer_as_agent(
+        &seat,
+        &typed,
+        "release notes",
+        "terminal inside the runner cgroup",
     );
-    let stored = atoms(&seat.url);
-    let stored = by_text(&stored, "release notes");
-    assert_eq!(basis(stored), Some("person"), "{stored}");
 
     keep_refused(&setsid_keep(&seat), "setsid");
     keep_refused(&env_i_keep(&seat), "setsid env -i");
@@ -503,6 +510,12 @@ fn detaching_does_not_make_this_process_the_person() {
 
     let detached = setsid_prefer(&seat, "Name release branches after the month.");
     prefer_as_agent(&seat, &detached, "release branches", "setsid prefer");
+
+    // setsid -f python3: python is the parent, so the chain is not only
+    // wrappers, and the environment is the seat's clean one. The cgroup
+    // still has to count.
+    let via_python = setsid_python_prefer(&seat, "Write the notes before the tag.");
+    prefer_as_agent(&seat, &via_python, "before the tag", "setsid python3");
 
     let hook = forged_hook(&seat);
     assert!(hook.status.success(), "hook\n{}", text_of(&hook));
