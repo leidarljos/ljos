@@ -654,8 +654,8 @@ pub const HARNESSES_EXAMPLE: &str = r#"# ~/.config/ljos/harnesses.toml: runners 
 # Optional: `ljos onboard` alone prints the one entry any runner takes.
 # {server} is ljos-mcp when that name on PATH is this install, and the
 # absolute path when it is not. {name} is the runner's name. An absolute
-# path is kept while the file exists here, and rewritten when a synced
-# config names a missing file.
+# path is kept while it is this install, and rewritten when it names a
+# missing file or another binary.
 # Paths may start with ~. The seat names itself after the client that
 # connects; nothing is passed in env.
 
@@ -3590,24 +3590,26 @@ fn heal_detail(base: &str, healed: &Result<Option<String>>) -> String {
 }
 
 /// An absolute path whose file name is the MCP server. It may name another
-/// machine. A path that is a file here is this install and is left alone.
+/// machine, or a stale copy on this one.
 fn is_absolute_ljos_mcp(value: &str) -> bool {
     let path = Path::new(value);
     path.is_absolute() && path.file_name().and_then(|n| n.to_str()) == Some(MCP_SERVER_COMMAND)
 }
 
-fn needs_portable_rewrite(value: &str) -> bool {
-    is_absolute_ljos_mcp(value) && !Path::new(value).is_file()
+/// An absolute `ljos-mcp` that is missing here or is another binary than
+/// `server`. A path to this install, or a link to it, is left alone.
+fn needs_portable_rewrite(value: &str, server: &Path) -> bool {
+    is_absolute_ljos_mcp(value) && !same_binary(Path::new(value), server)
 }
 
-fn command_made_portable(command: &mut Value, replacement: &str) -> bool {
+fn command_made_portable(command: &mut Value, server: &Path, replacement: &str) -> bool {
     match command {
-        Value::String(text) if needs_portable_rewrite(text) => {
+        Value::String(text) if needs_portable_rewrite(text, server) => {
             *text = replacement.to_string();
             true
         }
         Value::Array(args) => match args.first_mut() {
-            Some(Value::String(text)) if needs_portable_rewrite(text) => {
+            Some(Value::String(text)) if needs_portable_rewrite(text, server) => {
                 *text = replacement.to_string();
                 true
             }
@@ -3618,12 +3620,12 @@ fn command_made_portable(command: &mut Value, replacement: &str) -> bool {
 }
 
 /// Rewrite an existing JSON entry whose command is an absolute `ljos-mcp`
-/// that is not a file here. The replacement is the bare name, or this
-/// install's path when the bare name would not run it. A path that exists
-/// is left alone.
+/// that would not start `server`. The replacement is the bare name, or
+/// this install's path when the bare name would not run it.
 fn heal_json_command(
     path: &Path,
     pointer: &str,
+    server: &Path,
     replacement: &str,
     dry: bool,
 ) -> Result<Option<String>> {
@@ -3641,7 +3643,7 @@ fn heal_json_command(
     let Some(command) = entry.get_mut("command") else {
         return Ok(None);
     };
-    if !command_made_portable(command, replacement) {
+    if !command_made_portable(command, server, replacement) {
         return Ok(None);
     }
     let note = format!("set the command in {} to {replacement}", path.display());
@@ -3720,7 +3722,12 @@ fn marker_section_end(text: &str, start: usize, marker: &str) -> usize {
     end
 }
 
-fn rewrite_marker_command(text: &str, marker: &str, replacement: &str) -> (String, bool) {
+fn rewrite_marker_command(
+    text: &str,
+    marker: &str,
+    server: &Path,
+    replacement: &str,
+) -> (String, bool) {
     let Some(found) = text.find(marker) else {
         return (text.to_string(), false);
     };
@@ -3740,7 +3747,7 @@ fn rewrite_marker_command(text: &str, marker: &str, replacement: &str) -> (Strin
             let value_start = at + value_start;
             let value_end = at + value_end;
             let value = &text[value_start..value_end];
-            if needs_portable_rewrite(value) {
+            if needs_portable_rewrite(value, server) {
                 let mut out = String::with_capacity(
                     text.len()
                         .saturating_sub(value.len())
@@ -3761,6 +3768,7 @@ fn rewrite_marker_command(text: &str, marker: &str, replacement: &str) -> (Strin
 fn heal_text_command(
     path: &Path,
     marker: &str,
+    server: &Path,
     replacement: &str,
     dry: bool,
 ) -> Result<Option<String>> {
@@ -3771,7 +3779,7 @@ fn heal_text_command(
         return Ok(None);
     }
     let text = std::fs::read_to_string(path).with_context(|| path.display().to_string())?;
-    let (rewritten, changed) = rewrite_marker_command(&text, marker, replacement);
+    let (rewritten, changed) = rewrite_marker_command(&text, marker, server, replacement);
     if !changed {
         return Ok(None);
     }
@@ -3785,12 +3793,18 @@ fn heal_text_command(
     )))
 }
 
-fn heal_registered(h: &Harness, replacement: &str, dry: bool) -> Result<Option<String>> {
+fn heal_registered(
+    h: &Harness,
+    server: &Path,
+    replacement: &str,
+    dry: bool,
+) -> Result<Option<String>> {
     let mut notes = Vec::new();
     if let Some(config) = &h.config_json {
         if let Some(note) = heal_json_command(
             &expand(config),
             h.json_pointer.as_deref().unwrap_or(""),
+            server,
             replacement,
             dry,
         )? {
@@ -3801,6 +3815,7 @@ fn heal_registered(h: &Harness, replacement: &str, dry: bool) -> Result<Option<S
         if let Some(note) = heal_text_command(
             &expand(config),
             h.marker.as_deref().unwrap_or(""),
+            server,
             replacement,
             dry,
         )? {
@@ -3814,6 +3829,7 @@ fn heal_registered(h: &Harness, replacement: &str, dry: bool) -> Result<Option<S
             if let Some(note) = heal_json_command(
                 &home.join(".claude.json"),
                 "/mcpServers/ljos",
+                server,
                 replacement,
                 dry,
             )? {
@@ -3836,7 +3852,7 @@ fn register_step(h: &Harness, server: &Path, dry: bool) -> Step {
     let plan = server_command_plan(server, "onboard");
     match is_registered(h, server) {
         Some(true) => {
-            let healed = heal_registered(h, &plan.command, dry);
+            let healed = heal_registered(h, server, &plan.command, dry);
             let config = expand(h.config.as_deref().unwrap_or_default());
             match bump_ljos_mcp_generation(&config, env!("CARGO_PKG_VERSION"), dry) {
                 Ok(Some(v)) => Step {

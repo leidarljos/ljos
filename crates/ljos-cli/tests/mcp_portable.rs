@@ -219,6 +219,29 @@ fn onboard_replaces_an_absolute_server_path() {
     assert!(!command.contains("/home/box"), "{command}");
 }
 
+/// A stale `ljos-mcp` left in another directory still exists, but it is
+/// not this install, so it is replaced like a missing one.
+#[test]
+fn onboard_replaces_an_absolute_server_path_from_another_install() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join(".local/bin");
+    install_pair(&bin);
+    let old = home.join("old/bin/ljos-mcp");
+    stub(&old);
+    fs::create_dir_all(home.join(".cursor")).unwrap();
+    let doc = serde_json::json!({ "mcpServers": { "ljos": { "command": old, "args": [] } } });
+    fs::write(home.join(".cursor/mcp.json"), doc.to_string()).unwrap();
+    let out = onboard(
+        &bin.join("ljos"),
+        &home,
+        &["onboard", "--harness", "cursor"],
+    );
+    assert!(out.status.success(), "{}", said(&out));
+    let (command, _) = json_command(&home.join(".cursor/mcp.json"));
+    assert_eq!(command, "ljos-mcp", "{}", said(&out));
+}
+
 #[test]
 fn onboard_keeps_an_absolute_server_path_that_exists_here() {
     let root = tempfile::tempdir().unwrap();
