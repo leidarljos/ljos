@@ -51628,12 +51628,20 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// the machine `ljos cloud up` marked, exports the deeds that seat
     /// cited, with the file bytes and the supersedes link, and the finish
     /// commit carries a bag `deedar check` accepts.
+    ///
+    /// The deedar this reads is the commit in `.github/deedar-pin`, built
+    /// here. A released deedar prints `id=` and no `accession=` line, and
+    /// it writes no `bytes/` sidecar. CI puts the pin on `PATH`; a cloud
+    /// image often has the release, and the test then panics with no
+    /// accession.
     #[test]
     fn a_box_finish_writes_no_bag_and_a_cloud_finish_writes_one() {
+        let bin_dir = deedimport_deedar();
         // After the env lock. A parallel test replaces PATH while it holds
         // the lock, and a lookup before it sees that PATH and reports
         // deedar missing.
         let _g = env_guard();
+        let _path = super::prepend_path(&bin_dir);
         which::which("deedar").unwrap_or_else(|_| panic!("deedar is not on PATH"));
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("tracker");
