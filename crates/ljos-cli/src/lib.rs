@@ -28960,8 +28960,9 @@ impl Drop for CommitLock {
 /// The file ljos locks around every write to a tracker checkout's index.
 pub const TRACKER_LOCK: &str = ".ljos-commit.lock";
 
-/// Repository variables git follows instead of the default `.git`.
-/// `GIT_DIR` names that directory even when the command also passes `-C`.
+/// Repository variables git follows instead of, or beside, the default
+/// `.git`. `GIT_DIR` names that directory even when the command also
+/// passes `-C`.
 /// https://git-scm.com/docs/git#Documentation/git.txt-GITDIR
 const GIT_REPO_ENV: &[&str] = &[
     "GIT_DIR",
@@ -28969,6 +28970,7 @@ const GIT_REPO_ENV: &[&str] = &[
     "GIT_INDEX_FILE",
     "GIT_PREFIX",
     "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_COMMON_DIR",
     "GIT_NAMESPACE",
 ];
