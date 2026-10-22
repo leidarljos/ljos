@@ -47138,6 +47138,46 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(remember_horizon(false, false, agents), Some(false));
     }
 
+    /// A quote is a whole sentence or clause of the prompt, and keeps the
+    /// "not", "never" or "unless" the person put on it.
+    #[test]
+    fn an_excerpt_that_drops_the_persons_negation_is_not_their_words() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("LJOS_CAPTURE", "save"),
+        ]);
+        let _runner = crate::ballot_sig::fake_runner_sessions(&["chat-person-1"]);
+        capture::note_latest_prompt_for(
+            "Please, do not always paste the release key into the deploy form. \
+             Unless asked, never push to main; run `cargo test` before a tag.",
+            Some("chat-person-1"),
+        );
+        for excerpt in [
+            "always paste the release key into the deploy form",
+            "Always paste the release key into the deploy form.",
+            "paste the release key into the deploy form",
+            "the release key into the deploy",
+            "never push to main",
+            "deploy form. Unless asked, never push",
+            "run cargo test before a tag",
+        ] {
+            assert!(
+                !capture::said_in_latest_prompt(excerpt),
+                "accepted: {excerpt}"
+            );
+        }
+        for said in [
+            "Do not always paste the release key into the deploy form.",
+            "please do not always paste the release key into the deploy form",
+            "Unless asked, never push to main.",
+            "run `cargo test` before a tag",
+        ] {
+            assert!(capture::said_in_latest_prompt(said), "refused: {said}");
+        }
+    }
+
     #[test]
     fn a_deed_the_pusher_minted_does_not_carry_a_push() {
         let _env = env_guard();
