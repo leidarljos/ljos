@@ -3974,6 +3974,12 @@ fn curl_long(
         let value = flag_value(words, i, attached);
         return curl_named_file(&value, cwd, tune, seen);
     }
+    // curl 8.3 expands `{{name}}` in an `--expand-` option from a
+    // `--variable`, which can read a file or the environment.
+    if lower == "--variable" || lower.starts_with("--expand-") {
+        tune.github = true;
+        return Some(HttpShape::Opaque);
+    }
     if matches!(
         lower.as_str(),
         "--data"
@@ -4165,11 +4171,18 @@ fn curl_named_file(
     tune: &mut Tune,
     seen: &mut HashSet<PathBuf>,
 ) -> Option<HttpShape> {
+    // A named config can add any URL, so one that cannot be read leaves
+    // the target unknown even beside a host that is not GitHub.
     if value.is_empty() || value == "-" {
         tune.unreadable = true;
+        tune.github = true;
         return Some(HttpShape::Opaque);
     }
-    read_curl_file(&resolve_cfg(value, cwd), cwd, tune, seen, true)
+    let shape = read_curl_file(&resolve_cfg(value, cwd), cwd, tune, seen, true);
+    if tune.unreadable {
+        tune.github = true;
+    }
+    shape
 }
 
 /// Default curlrc search. `CURL_HOME` replaces the others: a missing file
@@ -4248,7 +4261,10 @@ fn apply_curl_text(
     for line in text.lines() {
         match curl_cfg_line(line) {
             CfgLine::Blank => {}
-            CfgLine::Bad => opaque = true,
+            CfgLine::Bad => {
+                opaque = true;
+                tune.github = true;
+            }
             CfgLine::Item { name, value } => {
                 if apply_curl_opt(&name, value.as_deref(), cwd, tune, seen).is_some() {
                     opaque = true;
@@ -4435,7 +4451,7 @@ fn apply_curl_opt(
             let value = value.unwrap_or("");
             curl_named_file(value, cwd, tune, seen)
         }
-        "url" => {
+        "url" | "proxy" | "x" => {
             if let Some(value) = value {
                 note_cfg_url(value, tune);
             }
@@ -4444,7 +4460,12 @@ fn apply_curl_opt(
         "netrc" | "netrc-optional" | "netrc-file" | "n" => Some(HttpShape::Opaque),
         _ if short && curl_short_benign(name) => None,
         _ if !short && curl_long_benign(name) => None,
-        _ => Some(HttpShape::Opaque),
+        // An option this seat does not know, `variable`, an `expand-`
+        // option, or a line spilled from the one before may name the target.
+        _ => {
+            tune.github = true;
+            Some(HttpShape::Opaque)
+        }
     }
 }
 
@@ -4540,7 +4561,7 @@ fn curl_long_benign(name: &str) -> bool {
 }
 
 fn note_cfg_url(value: &str, tune: &mut Tune) {
-    if value.contains('$') || value.contains('`') {
+    if value.contains('$') || value.contains('`') || value.contains("{{") {
         tune.github = true;
         return;
     }
