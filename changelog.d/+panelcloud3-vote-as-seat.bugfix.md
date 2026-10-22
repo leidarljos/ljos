@@ -1,1 +1,0 @@
-The prompt `ljos panel ISSUE --cloud` writes tells the seat to load `~/.config/ljos/env` and cast its ballot `--as "$LJOS_SEAT"`, so the seat `cloud up` wrote signs it and the launcher's slot names it. It used to say to cast `--as` the persona and that the seat signed that ballot; the persona's own key signed it, and the push gate left it out before reading any slot.

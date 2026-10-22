@@ -1,1 +1,0 @@
-The ljos_note tool text and the session-end extractor's documentation now say that a note is stored as an agent note in memory, read by its stored origin, and that its logbook line is fenced as unverified tracker text.

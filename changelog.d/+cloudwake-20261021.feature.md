@@ -1,1 +1,0 @@
-`ljos cloud up` writes a webhook wake to `wake.toml` for each `LJOS_WAKE_<SEAT>_URL`, with `key_env = "LJOS_WAKE_<SEAT>_KEY"`, so a cloud VM wakes a box seat with its key passed by name and never written to disk.
