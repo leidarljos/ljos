@@ -165,13 +165,18 @@ fn config_dir() -> PathBuf {
         .join("ljos")
 }
 
-fn state_dir() -> PathBuf {
+/// This machine's ljos state. Paths below it are walked with
+/// [`open_dir_beneath`]; the directory itself may be a symlink.
+fn state_base() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
         .unwrap_or_else(|| PathBuf::from(".local/state"))
         .join("ljos")
-        .join("sync")
+}
+
+fn state_dir() -> PathBuf {
+    state_base().join("sync")
 }
 
 /// This machine's age identity, made on first use.
@@ -699,6 +704,7 @@ fn write_beneath(root: &Path, rel: &str, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     use std::os::fd::{AsRawFd, FromRawFd};
     let (parent, name) = split_rel(rel);
+    std::fs::create_dir_all(root).with_context(|| format!("sync: {}", root.display()))?;
     let dir = open_dir_beneath(root, parent, true)?
         .with_context(|| format!("sync: {} was not made", root.join(parent).display()))?;
     let cname = c_name(name)?;
@@ -1258,17 +1264,28 @@ fn incoming_with_sender(
     Incoming { post, retired }
 }
 
+fn tracker_state_rel(root: &Path) -> String {
+    format!("sync/{}", crate::work_id(&root.display().to_string()))
+}
+
+fn taken_rel(root: &Path, scope: &str, host: &str) -> String {
+    format!("{}/{scope}/{host}.taken", tracker_state_rel(root))
+}
+
+#[cfg(test)]
 fn taken_path(root: &Path, scope: &str, host: &str) -> PathBuf {
-    state_dir()
-        .join(crate::work_id(&root.display().to_string()))
-        .join(scope)
-        .join(format!("{host}.taken"))
+    state_base().join(taken_rel(root, scope, host))
 }
 
 /// Where `.taken` was before its path named the tracker. Every checkout
 /// of the scope shared this one file.
+fn shared_taken_rel(scope: &str, host: &str) -> String {
+    format!("sync/{scope}/{host}.taken")
+}
+
+#[cfg(test)]
 fn shared_taken_path(scope: &str, host: &str) -> PathBuf {
-    state_dir().join(scope).join(format!("{host}.taken"))
+    state_base().join(shared_taken_rel(scope, host))
 }
 
 /// First line of a `.taken` file that lists [`memory_key`]s. A file
@@ -1281,25 +1298,29 @@ const TAKEN_KEYS: &str = "# text and issue";
 /// A file of texts is read through the atoms this pack holds from
 /// `sender`: each text stands for every copy of it, so the first import
 /// after the change still retires what the host dropped and posts
-/// nothing again.
+/// nothing again. A symlinked directory on the way is an error.
 fn read_taken(
     root: &Path,
     scope: &str,
     host: &str,
     atoms: &[Value],
     sender: &str,
-) -> BTreeSet<String> {
-    let Ok(text) = std::fs::read_to_string(taken_path(root, scope, host))
-        .or_else(|_| std::fs::read_to_string(shared_taken_path(scope, host)))
-    else {
-        return BTreeSet::new();
+) -> Result<BTreeSet<String>> {
+    let base = state_base();
+    let bytes = match read_beneath(&base, &taken_rel(root, scope, host))? {
+        Some(bytes) => bytes,
+        None => match read_beneath(&base, &shared_taken_rel(scope, host))? {
+            Some(bytes) => bytes,
+            None => return Ok(BTreeSet::new()),
+        },
     };
+    let text = String::from_utf8_lossy(&bytes);
     let mut lines = text.lines();
     if lines.next() == Some(TAKEN_KEYS) {
-        return lines.map(str::to_string).collect();
+        return Ok(lines.map(str::to_string).collect());
     }
     let texts: BTreeSet<&str> = text.lines().collect();
-    atoms
+    Ok(atoms
         .iter()
         .filter(|atom| has_entity(atom, sender))
         .filter(|atom| {
@@ -1308,22 +1329,20 @@ fn read_taken(
                 .is_some_and(|text| texts.contains(crate::work_id(text).as_str()))
         })
         .filter_map(memory_key)
-        .collect()
+        .collect())
 }
 
 /// Write this tracker's `.taken`. Its first one replaces the shared file
 /// [`read_taken`] fell back to. That file goes only after this one is
 /// written, so a failed write leaves it for the next import to read.
 fn write_taken(root: &Path, scope: &str, host: &str, plain: &str) -> Result<()> {
-    let path = taken_path(root, scope, host);
-    let first = !path.exists();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
+    let base = state_base();
+    let rel = taken_rel(root, scope, host);
+    let first = read_beneath(&base, &rel)?.is_none();
     let keys: String = log_keys(plain).into_iter().map(|key| key + "\n").collect();
-    std::fs::write(&path, format!("{TAKEN_KEYS}\n{keys}"))?;
+    write_beneath(&base, &rel, format!("{TAKEN_KEYS}\n{keys}").as_bytes())?;
     if first {
-        let _ = std::fs::remove_file(shared_taken_path(scope, host));
+        let _ = remove_beneath(&base, &shared_taken_rel(scope, host));
     }
     Ok(())
 }
@@ -1389,22 +1408,12 @@ fn drop_stale_scope_files(root: &Path, scope: &Scope) {
     }
 }
 
-fn remembered_hosts(root: &Path) -> Vec<(String, String)> {
-    let dir = state_dir().join(crate::work_id(&root.display().to_string()));
-    let Ok(scopes) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
+fn remembered_hosts(root: &Path) -> Result<Vec<(String, String)>> {
+    let base = state_base();
+    let tracker = tracker_state_rel(root);
     let mut out = Vec::new();
-    for scope_ent in scopes.flatten() {
-        if !scope_ent.path().is_dir() {
-            continue;
-        }
-        let scope_name = scope_ent.file_name().to_string_lossy().into_owned();
-        let Ok(hosts) = std::fs::read_dir(scope_ent.path()) else {
-            continue;
-        };
-        for host_ent in hosts.flatten() {
-            let fname = host_ent.file_name().to_string_lossy().into_owned();
+    for scope_name in list_beneath(&base, &tracker)? {
+        for fname in list_beneath(&base, &format!("{tracker}/{scope_name}"))? {
             if let Some(host) = fname.strip_suffix(".taken") {
                 if !host.is_empty() {
                     out.push((scope_name.clone(), host.to_string()));
@@ -1412,7 +1421,7 @@ fn remembered_hosts(root: &Path) -> Vec<(String, String)> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Import every other machine's log of the repository's scope into this
@@ -1464,18 +1473,18 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
                 let incoming = incoming_with_sender(
                     &job.plain,
                     &sender,
-                    &read_taken(root, &job.scope_name, &job.host, &atoms, &sender),
+                    &read_taken(root, &job.scope_name, &job.host, &atoms, &sender)?,
                     &held,
                 );
-                ImportPlan {
+                Ok(ImportPlan {
                     host: job.host,
                     scope_name: job.scope_name,
                     plain: job.plain,
                     sender,
                     incoming,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<_>>()?;
         let retired: Vec<usize> = plans
             .iter()
             .map(|plan| forget_retired(&atoms, &plan.sender, &plan.incoming.retired))
@@ -1597,7 +1606,7 @@ fn import_jobs(root: &Path, scope: &Scope, me: &str) -> Result<(Vec<ImportJob>, 
             }
         }
     }
-    for (scope_name, host) in remembered_hosts(root) {
+    for (scope_name, host) in remembered_hosts(root)? {
         if host == me || scope_is_configured(scope, &scope_name) {
             continue;
         }
@@ -2174,7 +2183,7 @@ fn adopt_pack(
     // Import's retirement, run before the log is dropped. It is by
     // memory, so a ticket the gone host dropped is retired even while the
     // same words remain on another ticket.
-    let taken = read_taken(root, scope_name, gone, &before, sender);
+    let taken = read_taken(root, scope_name, gone, &before, sender)?;
     let dropped = retired_keys(plain, &taken);
     let (retired, retire_failed) = forget_tagged(&before, sender, |atom| {
         in_adopted_scope(atom, scope_name)
@@ -2227,7 +2236,7 @@ fn dry_adopt_line(
     let atoms = crate::atoms_lean(&client, &client.workspace())?;
     let own = own_memory_keys(&atoms, scope_name);
     let plan = adopt_plan(plain, scope_name, &own);
-    let taken = read_taken(root, scope_name, gone, &atoms, sender);
+    let taken = read_taken(root, scope_name, gone, &atoms, sender)?;
     let retired = retired_keys(plain, &taken);
     let posts = plan.post.len();
     Ok((
@@ -2452,7 +2461,7 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
         match gone_log_state(root, &log.age) {
             GoneLog::Absent => {
                 if age_stem(&log.age).is_some_and(|stem| adopted.contains(stem)) {
-                    let _ = std::fs::remove_file(taken_path(root, &log.scope_name, &gone));
+                    let _ = remove_beneath(&state_base(), &taken_rel(root, &log.scope_name, &gone));
                 }
             }
             GoneLog::Untracked => bail!(
@@ -2667,7 +2676,7 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
     if report.landed {
         for (log, _) in &opened {
             if !in_head(root, &log.age) {
-                let _ = std::fs::remove_file(taken_path(root, &log.scope_name, &gone));
+                let _ = remove_beneath(&state_base(), &taken_rel(root, &log.scope_name, &gone));
             }
         }
     }
