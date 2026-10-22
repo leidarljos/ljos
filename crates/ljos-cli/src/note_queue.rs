@@ -146,25 +146,36 @@ fn damaged_file(dir: &Path) -> PathBuf {
     ))
 }
 
-/// The damaged files a rewrite left in `dir`, with their sizes, oldest
-/// day first. Listed without following a link and without opening one;
-/// a link or anything else that is not a regular file is left out, since
-/// a send never writes through one.
+/// [`set_aside_at`] for `dir`, opened the way every state-log open is: a
+/// link in place of `dir` is refused and lists nothing.
 #[must_use]
 pub fn set_aside_in(dir: &Path) -> Vec<(PathBuf, u64)> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    match crate::open_state_dir(&queue_file(dir)) {
+        Ok((fd, _)) => set_aside_at(&fd, dir),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The damaged files a rewrite left in the state dir open as `fd`, named
+/// below `dir`, with their sizes, oldest day first. Each name is listed
+/// and stated through `fd`, without following a link and without opening
+/// one, so name and size come from the same directory; a link or
+/// anything else that is not a regular file is left out, since a send
+/// never writes through one.
+#[must_use]
+pub fn set_aside_at(fd: &std::fs::File, dir: &Path) -> Vec<(PathBuf, u64)> {
+    let Ok(names) = crate::deedbag::list_names(fd) else {
         return Vec::new();
     };
-    let mut found: Vec<(PathBuf, u64)> = entries
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let name = entry.file_name();
-            let name = name.to_str()?;
-            let dated = name.strip_prefix("note-queue.jsonl.")?;
-            dated.strip_suffix(".damaged")?;
-            let path = entry.path();
-            let meta = std::fs::symlink_metadata(&path).ok()?;
-            meta.is_file().then_some((path, meta.len()))
+    let mut found: Vec<(PathBuf, u64)> = names
+        .iter()
+        .filter_map(|name| {
+            let text = name.to_str().ok()?;
+            text.strip_prefix("note-queue.jsonl.")?
+                .strip_suffix(".damaged")?;
+            let st = crate::deedbag::stat_at(fd, name).ok()??;
+            let size = u64::try_from(st.st_size).ok()?;
+            ((st.st_mode & libc::S_IFMT) == libc::S_IFREG).then(|| (dir.join(text), size))
         })
         .collect();
     found.sort();
@@ -567,6 +578,19 @@ mod tests {
         assert_eq!(set_aside_in(&dir), [(real, 3)]);
         assert_eq!(std::fs::read(&outside).unwrap(), b"not ljos's own");
         assert!(!dir.join("gone").exists());
+    }
+
+    /// A state dir swapped for a link to a dir that holds a damaged file
+    /// lists nothing from that dir.
+    #[test]
+    fn a_linked_state_dir_lists_nothing_from_outside() {
+        let root = dir("linked-dir");
+        let outside = root.join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("note-queue.jsonl.2026-01-01.damaged"), b"x").unwrap();
+        let state = root.join("ljos");
+        std::os::unix::fs::symlink(&outside, &state).unwrap();
+        assert_eq!(set_aside_in(&state), []);
     }
 
     #[test]
