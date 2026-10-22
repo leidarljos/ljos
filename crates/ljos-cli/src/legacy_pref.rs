@@ -1519,7 +1519,13 @@ mod tests {
                 id
             };
             atom["id"] = json!(id);
-            atom["ts"] = json!("2026-10-21T00:00:00Z");
+            if atom
+                .get("ts")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+            {
+                atom["ts"] = json!("2026-10-21T00:00:00Z");
+            }
             pack.atoms.push(atom.clone());
             (200, atom.to_string())
         } else {
