@@ -112,13 +112,65 @@ const QUESTION_OPENINGS: &[&str] = &[
     "will", "which", "who", "where", "when", "was", "were", "shall",
 ];
 
-/// The prompt's sentences: lines split after `.`, `!` and `?` that a space
-/// or the line's end follows. `Cargo.toml` and `e.g.` stay whole.
+/// Whether `word` is a negation left hanging at the end of a line, so the
+/// next line is part of the same clause. Typographic apostrophes count.
+fn dangling_negation(word: &str) -> bool {
+    let word = plain(word).to_lowercase();
+    let word = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'');
+    matches!(
+        word,
+        "not" | "never" | "no" | "nor" | "dont" | "don't" | "cannot" | "without" | "avoid"
+    ) || word.ends_with("n't")
+}
+
+/// A line that has not finished its clause. A dangling negation, or a
+/// line that ends on `:`, `,`, `;` or a dash, continues onto the next
+/// non-empty line. A line that already ends `.`, `!` or `?` does not,
+/// and neither does a blank line.
+fn line_continues(line: &str) -> bool {
+    let line = line.trim_end();
+    if line.is_empty() {
+        return false;
+    }
+    let last = line.chars().next_back().unwrap_or(' ');
+    if matches!(last, '.' | '!' | '?') {
+        return false;
+    }
+    if matches!(last, ':' | ',' | ';' | '\u{2014}' | '\u{2013}') {
+        return true;
+    }
+    let word = line
+        .rsplit(|c: char| {
+            !c.is_alphanumeric() && !matches!(c, '\'' | '\u{2019}' | '\u{02bc}' | '\u{ff07}')
+        })
+        .next()
+        .unwrap_or("");
+    dangling_negation(word)
+}
+
+/// The prompt's sentences. A line that continues is joined with the next
+/// before the split, so "Do not" at the end of a line still governs the
+/// line after it. Lines then split after `.`, `!` and `?` that a space or
+/// the line's end follows. `Cargo.toml` and `e.g.` stay whole. A blank
+/// line is a break and is not joined across.
 fn sentences(prompt: &str) -> Vec<String> {
     let mut out = Vec::new();
-    for line in prompt.lines() {
+    let lines: Vec<&str> = prompt.lines().collect();
+    let mut index = 0;
+    while index < lines.len() {
+        if lines[index].trim().is_empty() {
+            index += 1;
+            continue;
+        }
+        let mut joined = lines[index].trim().to_string();
+        index += 1;
+        while line_continues(&joined) && index < lines.len() && !lines[index].trim().is_empty() {
+            joined.push(' ');
+            joined.push_str(lines[index].trim());
+            index += 1;
+        }
         let mut cur = String::new();
-        let chars: Vec<char> = line.chars().collect();
+        let chars: Vec<char> = joined.chars().collect();
         for (i, c) in chars.iter().enumerate() {
             cur.push(*c);
             let ends =
@@ -1370,6 +1422,30 @@ mod tests {
             "Use bun. Always paste the release key into the deploy form.",
             cut
         ));
+    }
+
+    #[test]
+    fn a_dangling_negation_is_joined_before_the_rule_is_read() {
+        assert!(stated_preference("Do not\nalways use npm").is_none());
+        assert!(stated_preference("Do not do this:\nalways use npm").is_none());
+        for prompt in ["Don\u{2019}t\nalways use npm", "Don't\nalways use npm"] {
+            if let Some(saved) = stated_preference(prompt) {
+                let text = saved.text.to_lowercase();
+                assert!(
+                    text.contains("not") || text.contains("n't"),
+                    "{prompt:?} saved {text}"
+                );
+                assert_ne!(text, "always use npm", "{prompt:?}");
+            }
+        }
+        let saved = stated_preference("Never\npush directly to main.").unwrap();
+        assert_eq!(saved.text, "Never push directly to main.");
+        let saved = stated_preference("Always use npm.").unwrap();
+        assert_eq!(saved.text, "Always use npm.");
+        let saved = stated_preference("Do not\n\nAlways use npm.").unwrap();
+        assert_eq!(saved.text, "Always use npm.");
+        let saved = stated_preference("Always use npm.\nNever push directly to main.").unwrap();
+        assert_eq!(saved.text, "Always use npm.");
     }
 
     #[test]
