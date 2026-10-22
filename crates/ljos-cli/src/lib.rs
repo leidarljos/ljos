@@ -29,6 +29,7 @@ pub mod mail;
 pub mod memories;
 pub mod note_queue;
 pub mod pack_copy;
+pub mod panel_cloud;
 pub mod panel_gate;
 pub mod persona_session;
 pub mod plugin;
@@ -15136,7 +15137,13 @@ fn tags_of(v: &Value) -> Vec<String> {
         .collect()
 }
 
-pub fn panel(issue: &str, out: &Path) -> Result<String> {
+/// The personas a panel seats, and how many the pack holds.
+///
+/// # Errors
+///
+/// No playbook is bound, the pack has no personas, or none of them speaks
+/// to `issue`.
+pub(crate) fn panel_roster(issue: &str) -> Result<(usize, Vec<Persona>)> {
     if bound_playbook(issue).is_none() {
         bail!(
             "panel: no playbook bound on {issue}; `ljos playbook {issue} NAME` or \
@@ -15159,11 +15166,16 @@ pub fn panel(issue: &str, out: &Path) -> Result<String> {
             words.join(", ")
         );
     }
+    Ok((all.len(), personas))
+}
+
+pub fn panel(issue: &str, out: &Path) -> Result<String> {
+    let (all, personas) = panel_roster(issue)?;
     std::fs::create_dir_all(out)?;
     let mut lines = vec![format!(
         "{} of {} personas speak to {issue}; briefs in {}; start one subagent per file, each ends with its ballot, then:",
         personas.len(),
-        all.len(),
+        all,
         out.display()
     )];
     for p in &personas {
@@ -44734,6 +44746,99 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             assert!(!text.contains("split-fence"), "{door}: {text}");
             assert!(!text.contains("Ledger intact"), "{door}: {text}");
         }
+    }
+
+    /// `ljos panel ISSUE --cloud` writes one prompt per seated persona.
+    /// The process seat and the tracker URL stay out of the file. The
+    /// brief's pack text stays out too.
+    #[test]
+    fn a_cloud_panel_writes_one_prompt_per_persona() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tracker");
+        let project = root.join("Software/probe");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("issues.org"),
+            "#+TITLE: probe issues\n#+VISSUE: 1\n#+TODO: TODO STARTED | DONE\n* TODO [#C] Logo legibility review\n:PROPERTIES:\n:ID:         probe-l0g0\n:END:\n",
+        )
+        .unwrap();
+        let fake = dir.path().join("vissue");
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let (url, _seen) = serve_http(|req| {
+            let line = req.lines().next().unwrap_or("");
+            if line.starts_with("GET /v1/atoms") && line.contains("kind=persona") {
+                (
+                    200,
+                    r#"{"atoms":[{"id":"atom-a","kind":"persona","name":"ada","anchor":0.5,"text":"LEGIBILITY-VIEW-TOKEN ada","entities":["logo"],"ts":"2026-10-11T10:00:00Z"},{"id":"atom-b","kind":"persona","name":"bea","anchor":0.4,"text":"LEGIBILITY-VIEW-TOKEN bea","entities":["logo"],"ts":"2026-10-11T10:00:00Z"}]}"#.into(),
+                )
+            } else if line.starts_with("GET /v1/atoms") {
+                (200, r#"{"atoms":[]}"#.into())
+            } else {
+                (200, "{}".into())
+            }
+        });
+        let runtime = dir.path().join("run");
+        std::fs::create_dir_all(&runtime).unwrap();
+        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        let _env = HoldEnv::set(&[
+            ("VISSUE_ROOT", root.to_str().unwrap()),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("LJOS_TRACKER_GIT", "off"),
+            (
+                "LJOS_TRACKER_REMOTE",
+                "https://tracker.example.invalid/secret-remote.git",
+            ),
+            ("XDG_RUNTIME_DIR", runtime.to_str().unwrap()),
+        ]);
+        let _url = PackUrl::set(&url);
+        let out = dir.path().join("panel");
+        let said = with_fake_on_path(dir.path(), || {
+            bind_playbook("probe-l0g0", "company-panel").unwrap();
+            super::panel_cloud::panel_cloud("probe-l0g0", &out).unwrap()
+        });
+        assert!(said.contains("2 of 2 personas"), "{said}");
+        assert!(said.contains("model grok"), "{said}");
+        assert!(said.contains("model opus"), "{said}");
+        assert!(said.contains("ljos consensus probe-l0g0"), "{said}");
+        let ada = std::fs::read_to_string(out.join("ada.md")).unwrap();
+        let bea = std::fs::read_to_string(out.join("bea.md")).unwrap();
+        for (name, text, model) in [("ada", &ada, "grok"), ("bea", &bea, "opus")] {
+            assert!(
+                text.contains(&format!("LJOS_SEAT={name}\n")),
+                "{name}: {text}"
+            );
+            assert!(
+                text.contains(&format!("VISSUE_AGENT={name}\n")),
+                "{name}: {text}"
+            );
+            assert!(text.contains("LJOS_TRACKER_GIT=push\n"), "{name}: {text}");
+            assert!(
+                text.contains(&format!("slot: {name} model={model}\n")),
+                "{name}: {text}"
+            );
+            assert!(text.contains("ref under cursor/"), "{name}: {text}");
+            assert!(text.contains("gh pr create"), "{name}: {text}");
+            assert!(text.contains("gh pr merge"), "{name}: {text}");
+            assert!(text.contains("force-push"), "{name}: {text}");
+            assert!(
+                text.contains(&format!("ljos brief {name} probe-l0g0")),
+                "{name}: {text}"
+            );
+            assert!(!text.contains("LEGIBILITY-VIEW-TOKEN"), "{name}: {text}");
+            assert!(!text.contains("secret-remote"), "{name}: {text}");
+            assert!(!text.contains("LJOS_SEAT=inky"), "{name}: {text}");
+        }
+        assert_ne!(
+            ada.lines().find(|line| line.starts_with("slot: ")),
+            bea.lines().find(|line| line.starts_with("slot: "))
+        );
+        let n = std::fs::read_dir(&out).unwrap().count();
+        assert_eq!(n, 2, "{said}");
     }
 
     /// The pack's address, its request lines and its posted atoms.
