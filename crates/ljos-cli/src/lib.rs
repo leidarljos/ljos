@@ -13084,12 +13084,17 @@ impl Basis {
 ///
 /// `text` is not in the person's latest prompt.
 pub fn refuse_unless_person_words(label: &str, text: &str) -> Result<()> {
-    if Basis::of(text) != Basis::Person {
+    if Basis::of(text) == Basis::Person {
+        return Ok(());
+    }
+    if capture::unverified_latest_prompt(text) {
         bail!(
-            "{label}: the text is not in the person's latest prompt; only the person's own words can be stored here"
+            "{label}: the runner's record of this prompt is unverified; only the person's own words can be stored here"
         );
     }
-    Ok(())
+    bail!(
+        "{label}: the text is not in the person's latest prompt; only the person's own words can be stored here"
+    );
 }
 
 /// The atom an MCP `ljos_remember` or `ljos_prefer` posts, with its basis.

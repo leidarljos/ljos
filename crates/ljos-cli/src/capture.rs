@@ -112,13 +112,65 @@ const QUESTION_OPENINGS: &[&str] = &[
     "will", "which", "who", "where", "when", "was", "were", "shall",
 ];
 
-/// The prompt's sentences: lines split after `.`, `!` and `?` that a space
-/// or the line's end follows. `Cargo.toml` and `e.g.` stay whole.
+/// Whether `word` is a negation left hanging at the end of a line, so the
+/// next line is part of the same clause. Typographic apostrophes count.
+fn dangling_negation(word: &str) -> bool {
+    let word = plain(word).to_lowercase();
+    let word = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'');
+    matches!(
+        word,
+        "not" | "never" | "no" | "nor" | "dont" | "don't" | "cannot" | "without" | "avoid"
+    ) || word.ends_with("n't")
+}
+
+/// A line that has not finished its clause. A dangling negation, or a
+/// line that ends on `:`, `,`, `;` or a dash, continues onto the next
+/// non-empty line. A line that already ends `.`, `!` or `?` does not,
+/// and neither does a blank line.
+fn line_continues(line: &str) -> bool {
+    let line = line.trim_end();
+    if line.is_empty() {
+        return false;
+    }
+    let last = line.chars().next_back().unwrap_or(' ');
+    if matches!(last, '.' | '!' | '?') {
+        return false;
+    }
+    if matches!(last, ':' | ',' | ';' | '\u{2014}' | '\u{2013}') {
+        return true;
+    }
+    let word = line
+        .rsplit(|c: char| {
+            !c.is_alphanumeric() && !matches!(c, '\'' | '\u{2019}' | '\u{02bc}' | '\u{ff07}')
+        })
+        .next()
+        .unwrap_or("");
+    dangling_negation(word)
+}
+
+/// The prompt's sentences. A line that continues is joined with the next
+/// before the split, so "Do not" at the end of a line still governs the
+/// line after it. Lines then split after `.`, `!` and `?` that a space or
+/// the line's end follows. `Cargo.toml` and `e.g.` stay whole. A blank
+/// line is a break and is not joined across.
 fn sentences(prompt: &str) -> Vec<String> {
     let mut out = Vec::new();
-    for line in prompt.lines() {
+    let lines: Vec<&str> = prompt.lines().collect();
+    let mut index = 0;
+    while index < lines.len() {
+        if lines[index].trim().is_empty() {
+            index += 1;
+            continue;
+        }
+        let mut joined = lines[index].trim().to_string();
+        index += 1;
+        while line_continues(&joined) && index < lines.len() && !lines[index].trim().is_empty() {
+            joined.push(' ');
+            joined.push_str(lines[index].trim());
+            index += 1;
+        }
         let mut cur = String::new();
-        let chars: Vec<char> = line.chars().collect();
+        let chars: Vec<char> = joined.chars().collect();
         for (i, c) in chars.iter().enumerate() {
             cur.push(*c);
             let ends =
@@ -441,21 +493,58 @@ fn changed_nanos(path: &std::path::Path) -> Option<u128> {
     Some(at(m.ctime(), m.ctime_nsec())?.max(at(m.mtime(), m.mtime_nsec())?))
 }
 
+/// What the runner's own record says about the kept prompt.
+enum RecordWord {
+    /// The record holds the prompt, or this runner is Claude Code or Codex
+    /// and has no directory to read (the old path). No runner above is this
+    /// too: an in-process check has nothing to disagree with.
+    Agrees,
+    /// Claude Code or Codex named a record that is missing or differs.
+    /// The refusal is the one a missing prompt already uses.
+    Disagrees,
+    /// Cursor has no readable transcript that holds the prompt, or Grok,
+    /// OpenCode, Gemini or Antigravity has no positive record. The prompt
+    /// is not the person's.
+    Unverified,
+}
+
+/// Runners that do not attribute a prompt unless a record of their own
+/// holds it. Claude Code and Codex keep the older rule: a missing record
+/// disagrees, and a stated choice in the hook is still saved.
+fn needs_positive_record(kind: &str) -> bool {
+    matches!(
+        kind,
+        "cursor" | "cursor-agent" | "grok" | "opencode" | "gemini" | "agy"
+    )
+}
+
 /// Whether `kept` agrees with the runner's own record of the person's
 /// turn, when the runner above keeps one ([`crate::turn_record`]). The
 /// record is the one the bind names, inside that runner's own directory,
 /// or for Cursor the transcript of a conversation the runner's
 /// environment names. Claude Code and Codex always name theirs, so a bind
-/// that names none, or names a file elsewhere, is refused under them.
-fn agrees_with_record(kept: &[u8], named: &str, runner_ids: &[String]) -> bool {
+/// that names none, or names a file elsewhere, disagrees under them.
+/// Cursor without a transcript that holds the prompt, and a runner that
+/// keeps no record, are [`RecordWord::Unverified`].
+fn agrees_with_record(kept: &[u8], named: &str, runner_ids: &[String]) -> RecordWord {
     use crate::turn_record;
     let Some((runner, kind)) = crate::proc_tree::runner_above() else {
-        return true;
+        return RecordWord::Agrees;
+    };
+    let positive = needs_positive_record(kind);
+    let word = |ok: bool| {
+        if positive {
+            RecordWord::Unverified
+        } else if ok {
+            RecordWord::Agrees
+        } else {
+            RecordWord::Disagrees
+        }
     };
     let env = crate::proc_tree::environ(runner.pid).unwrap_or_default();
     let roots = turn_record::roots(kind, &env);
     if roots.is_empty() {
-        return true;
+        return word(true);
     }
     let record = if named == "-" {
         roots
@@ -466,7 +555,7 @@ fn agrees_with_record(kept: &[u8], named: &str, runner_ids: &[String]) -> bool {
         turn_record::within(std::path::Path::new(named), &roots)
     };
     let Some(record) = record else {
-        return named == "-" && !turn_record::required(kind);
+        return word(named == "-" && !turn_record::required(kind));
     };
     // A turn's tool output can push the person's entry out of the tail.
     let Some(text) = crate::bookkeep::read_text_bounded(&record)
@@ -478,12 +567,16 @@ fn agrees_with_record(kept: &[u8], named: &str, runner_ids: &[String]) -> bool {
                 .flatten()
         })
     else {
-        return false;
+        return word(false);
     };
     if !turn_record::required(kind) && turn_record::latest_turn(&text).is_empty() {
-        return true;
+        return word(true);
     }
-    turn_record::agrees(&text, &String::from_utf8_lossy(kept))
+    if turn_record::agrees(&text, &String::from_utf8_lossy(kept)) {
+        RecordWord::Agrees
+    } else {
+        word(false)
+    }
 }
 
 fn latest_prompt_bind_path() -> std::path::PathBuf {
@@ -554,6 +647,16 @@ fn write_prompt_bind(
     f.write_all(body.as_bytes())
 }
 
+/// How the kept prompt stands against the bind and the runner's record.
+enum Kept {
+    /// The bind matches and the record agrees.
+    Yes,
+    /// The bind matches, and the record is [`RecordWord::Unverified`].
+    Unverified,
+    /// The bind does not match, or the record disagrees.
+    No,
+}
+
 /// Whether the prompt file still matches the bind the hook wrote, and the
 /// bind is this conversation's: it names a session from the environment
 /// of the runner above this process ([`crate::ballot_sig::runner_sessions`]),
@@ -565,17 +668,19 @@ fn write_prompt_bind(
 ///
 /// The prompt must also agree with the runner's own record of the turn
 /// ([`agrees_with_record`]), and neither file may have changed after the
-/// hook's time: a tool call that rewrites them leaves a later ctime.
-fn prompt_bind_matches(path: &std::path::Path) -> bool {
+/// hook's time: a tool call that rewrites them leaves a later ctime. A
+/// match whose record is unverified is [`Kept::Unverified`], not a miss:
+/// the words were kept, and they are still not the person's.
+fn kept_prompt(path: &std::path::Path) -> Kept {
     let Ok(bytes) = std::fs::read(path) else {
-        return false;
+        return Kept::No;
     };
     let Some(mtime) = mtime_nanos(path) else {
-        return false;
+        return Kept::No;
     };
     let bind_path = latest_prompt_bind_path();
     let Ok(bind) = std::fs::read_to_string(&bind_path) else {
-        return false;
+        return Kept::No;
     };
     let mut lines = bind.lines();
     let (Some("3"), Some(hash), Some(stored), Some(spawner), Some(at), Some(transcript)) = (
@@ -586,13 +691,13 @@ fn prompt_bind_matches(path: &std::path::Path) -> bool {
         lines.next().and_then(|t| t.parse::<u128>().ok()),
         lines.next(),
     ) else {
-        return false;
+        return Kept::No;
     };
     let late = |p: &std::path::Path| {
         changed_nanos(p).is_none_or(|c| c > at.saturating_add(BIND_WRITE_NANOS))
     };
     if late(path) || late(&bind_path) {
-        return false;
+        return Kept::No;
     }
     let bound: Vec<String> = lines
         .map(crate::ballot_sig::field)
@@ -604,17 +709,22 @@ fn prompt_bind_matches(path: &std::path::Path) -> bool {
             .iter()
             .any(|p| crate::proc_tree::token(p) == spawner);
     if !(above || bound.iter().any(|s| runner.contains(s))) {
-        return false;
+        return Kept::No;
     }
     if let Some(call) = crate::ballot_sig::call_session() {
         let within = if runner.is_empty() { &bound } else { &runner };
         if !within.contains(&call) {
-            return false;
+            return Kept::No;
         }
     }
-    hash == hex::encode(sha2::Sha256::digest(&bytes))
-        && stored == mtime.to_string()
-        && agrees_with_record(&bytes, transcript, &runner)
+    if hash != hex::encode(sha2::Sha256::digest(&bytes)) || stored != mtime.to_string() {
+        return Kept::No;
+    }
+    match agrees_with_record(&bytes, transcript, &runner) {
+        RecordWord::Agrees => Kept::Yes,
+        RecordWord::Unverified => Kept::Unverified,
+        RecordWord::Disagrees => Kept::No,
+    }
 }
 
 /// Lowercase words and nothing else, for comparing a sentence with a
@@ -806,16 +916,18 @@ fn quotes(prompt: &str, quote: &str) -> bool {
     })
 }
 
-/// Whether `text` is the person's words: whole clauses of the prompt they
-/// sent last ([`quotes`]), within [`LATEST_PROMPT_SECS`], and the file
-/// still matches the bind the hook wrote for this runner session. Four
-/// words or more, so "use bun" alone is not taken as a quote. A file
-/// written without that bind does not count.
-#[must_use]
-pub fn said_in_latest_prompt(text: &str) -> bool {
+/// How `text` stands in the latest prompt: the person's words, words the
+/// hook kept but whose runner has no record that holds them, or neither.
+enum Latest {
+    Said,
+    Unverified,
+    No,
+}
+
+fn latest_words(text: &str) -> Latest {
     let want = words_only(text);
     if want.split(' ').count() < 4 {
-        return false;
+        return Latest::No;
     }
     let path = latest_prompt_path();
     let fresh = std::fs::metadata(&path)
@@ -823,13 +935,45 @@ pub fn said_in_latest_prompt(text: &str) -> bool {
         .ok()
         .and_then(|t| t.elapsed().ok())
         .is_some_and(|age| age.as_secs() <= LATEST_PROMPT_SECS);
-    if !fresh || !prompt_bind_matches(&path) {
-        return false;
+    if !fresh {
+        return Latest::No;
+    }
+    let kept = kept_prompt(&path);
+    if matches!(kept, Kept::No) {
+        return Latest::No;
     }
     let Ok(prompt) = std::fs::read_to_string(&path) else {
-        return false;
+        return Latest::No;
     };
-    quotes(&prompt, text)
+    if !quotes(&prompt, text) {
+        return Latest::No;
+    }
+    match kept {
+        Kept::Yes => Latest::Said,
+        Kept::Unverified => Latest::Unverified,
+        Kept::No => Latest::No,
+    }
+}
+
+/// Whether `text` is the person's words: whole clauses of the prompt they
+/// sent last ([`quotes`]), within [`LATEST_PROMPT_SECS`], and the file
+/// still matches the bind the hook wrote for this runner session. Four
+/// words or more, so "use bun" alone is not taken as a quote. A file
+/// written without that bind does not count. A runner with no positive
+/// record of the prompt is not this: see [`unverified_latest_prompt`].
+#[must_use]
+pub fn said_in_latest_prompt(text: &str) -> bool {
+    matches!(latest_words(text), Latest::Said)
+}
+
+/// Whether `text` is in the prompt the hook kept, the bind matches, and
+/// the runner's record does not hold it. Cursor without a readable
+/// transcript, and Grok, OpenCode, Gemini and Antigravity, are this.
+/// Claude Code and Codex are not: a missing record there is a refusal
+/// without this word.
+#[must_use]
+pub fn unverified_latest_prompt(text: &str) -> bool {
+    matches!(latest_words(text), Latest::Unverified)
 }
 
 /// The session key that keeps one stated choice from being saved twice.
@@ -861,13 +1005,55 @@ fn save(stated: &Stated) -> Option<Value> {
     })
 }
 
+/// The transcript and sessions the hook's bind named, or none.
+fn bind_record_name() -> (String, Vec<String>) {
+    let Ok(bind) = std::fs::read_to_string(latest_prompt_bind_path()) else {
+        return ("-".to_string(), Vec::new());
+    };
+    let mut lines = bind.lines();
+    if lines.next() != Some("3") {
+        return ("-".to_string(), Vec::new());
+    }
+    let _hash = lines.next();
+    let _mtime = lines.next();
+    let _runner = lines.next();
+    let _at = lines.next();
+    let named = lines.next().filter(|s| !s.is_empty()).unwrap_or("-");
+    let sessions = lines
+        .map(crate::ballot_sig::field)
+        .filter(|s| s != "-")
+        .collect();
+    (named.to_string(), sessions)
+}
+
+/// Whether saving `prompt` as the person's would trust a runner that has
+/// no positive record of it. No runner above this process is not that:
+/// the in-process check has no runner record to require.
+fn capture_unverified(prompt: &str) -> bool {
+    if crate::proc_tree::runner_above().is_none() {
+        return false;
+    }
+    let (named, sessions) = bind_record_name();
+    matches!(
+        agrees_with_record(prompt.as_bytes(), &named, &sessions),
+        RecordWord::Unverified
+    )
+}
+
 /// On a prompt that states a standing choice, save it (or nudge, per
 /// [`capture_mode`]) and return the one line the note carries and the
 /// keys to mark seen when the note is delivered. The saved atom's id is
 /// marked seen at once, so the same prompt's note does not repeat it.
+/// A runner with no positive record of the prompt saves nothing.
 #[must_use]
 pub fn capture_stated(call: &HookCall) -> Option<(String, Vec<String>)> {
     if call.event != "UserPromptSubmit" {
+        return None;
+    }
+    // Cursor without a transcript, and a runner that keeps no record,
+    // does not save a stated choice as the person's. Claude Code and
+    // Codex still do: their missing record is not this.
+    if capture_unverified(&call.cue) {
         return None;
     }
     let mode = capture_mode();
@@ -1236,6 +1422,30 @@ mod tests {
             "Use bun. Always paste the release key into the deploy form.",
             cut
         ));
+    }
+
+    #[test]
+    fn a_dangling_negation_is_joined_before_the_rule_is_read() {
+        assert!(stated_preference("Do not\nalways use npm").is_none());
+        assert!(stated_preference("Do not do this:\nalways use npm").is_none());
+        for prompt in ["Don\u{2019}t\nalways use npm", "Don't\nalways use npm"] {
+            if let Some(saved) = stated_preference(prompt) {
+                let text = saved.text.to_lowercase();
+                assert!(
+                    text.contains("not") || text.contains("n't"),
+                    "{prompt:?} saved {text}"
+                );
+                assert_ne!(text, "always use npm", "{prompt:?}");
+            }
+        }
+        let saved = stated_preference("Never\npush directly to main.").unwrap();
+        assert_eq!(saved.text, "Never push directly to main.");
+        let saved = stated_preference("Always use npm.").unwrap();
+        assert_eq!(saved.text, "Always use npm.");
+        let saved = stated_preference("Do not\n\nAlways use npm.").unwrap();
+        assert_eq!(saved.text, "Always use npm.");
+        let saved = stated_preference("Always use npm.\nNever push directly to main.").unwrap();
+        assert_eq!(saved.text, "Always use npm.");
     }
 
     #[test]
