@@ -146,6 +146,76 @@ pub fn identity_path() -> PathBuf {
     config_dir().join("age.key")
 }
 
+/// The age identity for scope `cloud`, written by `ljos cloud up` from a
+/// named secret. It is not [`identity_path`]: that key is this machine's
+/// own. Scope `cloud` is sealed to one shared recipient, and the private
+/// key is not in the tracker, so a VM cannot read the scope without this
+/// file.
+#[must_use]
+pub fn cloud_identity_path() -> PathBuf {
+    config_dir().join("cloud.age")
+}
+
+/// Bech32 charset, upper case, as `age` writes an identity line.
+const AGE_BECH32: &[u8] = b"QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L";
+
+/// Whether `text` is an age identity file: comments, blank lines, and one
+/// or more `AGE-SECRET-KEY-1` lines. The payload length is the X25519
+/// identity `age` writes today.
+#[must_use]
+pub(crate) fn age_identity(text: &str) -> bool {
+    if text.len() > 8192 || text.contains('\0') {
+        return false;
+    }
+    let mut found = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("AGE-SECRET-KEY-1") else {
+            return false;
+        };
+        if !(58..=96).contains(&rest.len()) || !rest.bytes().all(|b| AGE_BECH32.contains(&b)) {
+            return false;
+        }
+        found = true;
+    }
+    found
+}
+
+/// Identity files that may open a sealed log.
+///
+/// The machine key when it is an age identity, then the scope `cloud`
+/// identity when `cloud up` wrote one. A machine key that is not an
+/// identity is still passed when it is the only file, so `age` reports
+/// the broken key. A cloud file that is not an identity is left out, so
+/// it cannot make `age` refuse the machine key.
+fn identities_for_open() -> Vec<PathBuf> {
+    let own = identity_path();
+    let own_ok = read_identity(&own).is_some_and(|text| age_identity(&text));
+    let cloud = cloud_identity_path();
+    let cloud_ok = read_identity(&cloud).is_some_and(|text| age_identity(&text));
+    let mut ids = Vec::new();
+    // A valid machine key is used. A broken one is passed only when the
+    // cloud identity cannot stand in, so age still reports that key.
+    if own_ok || (own.is_file() && !cloud_ok) {
+        ids.push(own);
+    }
+    if cloud_ok {
+        ids.push(cloud);
+    }
+    ids
+}
+
+fn read_identity(path: &Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > 8192 {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
 /// The public key of this machine's identity, making the identity first when
 /// there is none. This is what goes into a scope's `recipients`.
 ///
@@ -336,13 +406,25 @@ fn seal(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Open a sealed log with this machine's identity; none when this machine
-/// is not one of its recipients.
+/// Open a sealed log with one identity file. None when that identity is
+/// not a recipient.
+#[cfg(test)]
 fn open(path: &Path, identity: &Path) -> Result<Option<String>> {
-    let out = Command::new("age")
-        .arg("-d")
-        .arg("-i")
-        .arg(identity)
+    open_identities(path, &[identity.to_path_buf()])
+}
+
+/// Open a sealed log with every identity in `identities`. None when none
+/// of them is a recipient.
+fn open_identities(path: &Path, identities: &[PathBuf]) -> Result<Option<String>> {
+    if identities.is_empty() {
+        return Ok(None);
+    }
+    let mut cmd = Command::new("age");
+    cmd.arg("-d");
+    for identity in identities {
+        cmd.arg("-i").arg(identity);
+    }
+    let out = cmd
         .arg(path)
         .stdin(Stdio::null())
         .output()
@@ -657,8 +739,8 @@ fn sender_entity_for_scope(host: &str, scope: &Scope, scope_name: &str) -> Strin
 /// The pack not answering, or a log this machine should open failing to.
 pub fn import(root: &Path, scope: &Scope) -> Result<String> {
     let me = host();
-    let identity = identity_path();
-    if !identity.exists() {
+    let identities = identities_for_open();
+    if identities.is_empty() {
         return Ok("sync: no age identity on this machine; `ljos sync --key` makes one\n".into());
     }
     let dir = log_dir(root);
@@ -680,7 +762,7 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
         if host.is_empty() || host == me {
             continue;
         }
-        let Some(plain) = open(&path, &identity)? else {
+        let Some(plain) = open_identities(&path, &identities)? else {
             out.push_str(&format!(
                 "sync: {host}'s {} log is not sealed to this machine\n",
                 scope_name
@@ -760,8 +842,8 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, push: bool) -> Result<S
     if gone == me {
         bail!("sync: {gone} is this machine; pass a gone host");
     }
-    let identity = identity_path();
-    if !identity.exists() {
+    let identities = identities_for_open();
+    if identities.is_empty() {
         return Ok("sync: no age identity on this machine; `ljos sync --key` makes one\n".into());
     }
     let [gone_log, gone_digest] = host_log_rels(gone);
@@ -772,7 +854,7 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, push: bool) -> Result<S
             scope.name
         ));
     }
-    let Some(plain) = open(&log_path, &identity)? else {
+    let Some(plain) = open_identities(&log_path, &identities)? else {
         return Ok(format!(
             "sync: {gone}'s {} log is not sealed to this machine\n",
             scope.name
@@ -1618,7 +1700,7 @@ fn plain_rules_rel(name: &str) -> String {
 
 /// Rows of every sealed user-rule file this machine can open, and how many
 /// it could not: sealed to other machines, or `age` missing.
-fn sealed_rows(root: &Path, identity: &Path) -> (Vec<crate::user_rules::UserRule>, usize) {
+fn sealed_rows(root: &Path) -> (Vec<crate::user_rules::UserRule>, usize) {
     let dir = root.join(".ljos").join("user-rules");
     let Ok(read) = std::fs::read_dir(&dir) else {
         return (Vec::new(), 0);
@@ -1629,13 +1711,14 @@ fn sealed_rows(root: &Path, identity: &Path) -> (Vec<crate::user_rules::UserRule
         .filter(|path| path.to_string_lossy().ends_with(".json.age"))
         .collect();
     paths.sort();
+    let identities = identities_for_open();
     let mut rows = Vec::new();
     let mut closed = 0;
     for path in paths {
-        let opened = if identity.exists() {
-            open(&path, identity).ok().flatten()
-        } else {
+        let opened = if identities.is_empty() {
             None
+        } else {
+            open_identities(&path, &identities).ok().flatten()
         };
         match opened.and_then(|text| crate::user_rules::parse_rules(&text).ok()) {
             Some(parsed) => rows.extend(parsed),
@@ -1743,11 +1826,10 @@ pub fn exchange_user_rules(
     if !looks_like_git(root) {
         bail!("sync: user rules: {} is not a git checkout", root.display());
     }
-    let identity = identity_path();
     let mode = tracker_git(asked);
     let scope = scope_of_repo(root)?;
     let Some(scope) = scope.filter(|_| mode != TrackerGit::Off) else {
-        let (mut rows, _) = sealed_rows(root, &identity);
+        let (mut rows, _) = sealed_rows(root);
         rows.extend(repo_rows(root));
         let merged = merge_into_local(rows)?;
         if !asked {
@@ -1768,7 +1850,7 @@ pub fn exchange_user_rules(
     if remote {
         integrate_remote(root, deadline)?;
     }
-    let (mut rows, closed) = sealed_rows(root, &identity);
+    let (mut rows, closed) = sealed_rows(root);
     rows.extend(repo_rows(root));
     let merged = merge_into_local(rows)?;
     let mut out = String::new();
@@ -2463,5 +2545,115 @@ mod tests {
             "personal"
         );
         assert_eq!(atom_scope(&atom("a", "t", &["seat:x"]), "surf"), "surf");
+    }
+
+    #[test]
+    fn an_age_identity_file_is_one_secret_line() {
+        let line = format!("AGE-SECRET-KEY-1{}", "Q".repeat(58));
+        let file = format!("# created: 2021-01-02T15:30:45Z\n# public key: age1example\n{line}\n");
+        assert!(age_identity(&file));
+        assert!(!age_identity(
+            "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p\n"
+        ));
+        assert!(!age_identity(&line.to_lowercase()));
+        assert!(!age_identity("AGE-SECRET-KEY-1\n"));
+        assert!(!age_identity("# only a comment\n"));
+        assert!(!age_identity(&format!("{line}\nnot a key\n")));
+        assert!(!age_identity(&format!("{line}\0\n")));
+    }
+
+    #[test]
+    fn the_cloud_identity_opens_a_log_without_a_machine_key() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        std::env::set_var("HOME", dir.path().join("home"));
+        let cloud = cloud_identity_path();
+        assert!(
+            cloud.starts_with(dir.path()),
+            "cloud identity left the test directory: {}",
+            cloud.display()
+        );
+        std::fs::create_dir_all(cloud.parent().unwrap()).unwrap();
+        let made = Command::new("age-keygen")
+            .arg("-o")
+            .arg(&cloud)
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "age-keygen must be installed: {}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        let public = Command::new("age-keygen")
+            .arg("-y")
+            .arg(&cloud)
+            .output()
+            .unwrap();
+        assert!(public.status.success());
+        let public = String::from_utf8_lossy(&public.stdout).trim().to_string();
+        assert!(!identity_path().exists(), "the machine key was invented");
+        let sealed = dir.path().join("cloud.jsonl.age");
+        seal("{\"text\":\"from cloud\"}\n", &[public], &sealed).unwrap();
+        assert_eq!(
+            open_identities(&sealed, &identities_for_open())
+                .unwrap()
+                .as_deref(),
+            Some("{\"text\":\"from cloud\"}\n")
+        );
+
+        let other = dir.path().join("other.key");
+        let made = Command::new("age-keygen")
+            .arg("-o")
+            .arg(&other)
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        let other_public = Command::new("age-keygen")
+            .arg("-y")
+            .arg(&other)
+            .output()
+            .unwrap();
+        let other_public = String::from_utf8_lossy(&other_public.stdout)
+            .trim()
+            .to_string();
+        let closed = dir.path().join("closed.jsonl.age");
+        seal("nope\n", &[other_public], &closed).unwrap();
+        assert_eq!(
+            open_identities(&closed, &identities_for_open()).unwrap(),
+            None
+        );
+
+        let own = identity_path();
+        let made = Command::new("age-keygen")
+            .arg("-o")
+            .arg(&own)
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        assert_eq!(
+            open_identities(&sealed, &identities_for_open())
+                .unwrap()
+                .as_deref(),
+            Some("{\"text\":\"from cloud\"}\n"),
+            "the machine key must not hide the cloud identity"
+        );
+    }
+
+    #[test]
+    fn a_broken_cloud_file_is_not_passed_to_age() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        let own = identity_path();
+        std::fs::create_dir_all(own.parent().unwrap()).unwrap();
+        let made = Command::new("age-keygen")
+            .arg("-o")
+            .arg(&own)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "age-keygen must be installed");
+        std::fs::write(cloud_identity_path(), "not a key\n").unwrap();
+        assert_eq!(identities_for_open(), vec![own]);
     }
 }
