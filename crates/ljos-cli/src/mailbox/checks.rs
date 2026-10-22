@@ -4,9 +4,13 @@
 //! ballot, the policy check and the owner's yes. Every comparison runs on
 //! folded text (invisible format characters removed, NFKC, lower case), so
 //! a full-width letter or a zero-width space does not slip a term past.
-//! A draft the checks cannot read, such as a base64 body, is refused
-//! rather than skipped.
+//! The term, pair and attribution scans read the body twice, as written
+//! and as a client that sniffs HTML would show it, and refuse when
+//! either hits. A draft the checks cannot read, such as a base64 body,
+//! is refused rather than skipped, as is one the MTA could rewrite: a
+//! byte that is not ASCII or a line over 998 octets.
 
+use std::io::Read as _;
 use std::path::Path;
 
 use anyhow::{bail, Context as _, Result};
@@ -51,8 +55,12 @@ pub struct DenyList {
 }
 
 impl DenyList {
+    /// The deny file at `path`, opened by `config::open_owned`.
     pub fn read(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
+        let (mut file, _) = super::config::open_owned(path, "checks: deny_file")?
+            .with_context(|| format!("checks: the deny file {} does not exist", path.display()))?;
+        let mut text = String::new();
+        file.read_to_string(&mut text)
             .with_context(|| format!("checks: cannot read the deny file {}", path.display()))?;
         Self::parse(&text)
     }
@@ -164,37 +172,34 @@ fn check(message: &[u8], identity: &str, deny: &DenyList, attribution: &[String]
         }
     }
 
+    out.extend(sent_as_is(&message));
     out.extend(plain_text_only(&headers, body));
 
-    let text = fold(&format!(
-        "{}\n{body}",
-        headers
-            .iter()
-            .map(|(n, v)| format!("{n}: {v}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    ));
-    let identities = deny
-        .addresses
+    let head = headers
         .iter()
-        .chain(&deny.domains)
-        .chain(&deny.handles);
+        .map(|(n, v)| format!("{n}: {v}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let views = [body.to_string(), rendered(body)].map(|b| fold(&format!("{head}\n{b}")));
+    let carries = |t: &String| views.iter().any(|v| has_word(v, t));
     if deny
         .terms
         .iter()
-        .chain(identities)
-        .any(|t| has_word(&text, t))
+        .chain(&deny.addresses)
+        .chain(&deny.domains)
+        .chain(&deny.handles)
+        .any(carries)
     {
         out.push("checks: the draft carries a denied term".into());
     }
     if deny
         .pairs
         .iter()
-        .any(|(a, b)| has_word(&text, a) && has_word(&text, b))
+        .any(|(a, b)| views.iter().any(|v| has_word(v, a) && has_word(v, b)))
     {
         out.push("checks: the draft carries a denied pair".into());
     }
-    if let Some(hit) = attribution.iter().find(|p| has_word(&text, p)) {
+    if let Some(hit) = attribution.iter().find(|p| carries(p)) {
         out.push(format!("checks: the draft carries attribution ({hit})"));
     }
     for name in ["x-mailer", "user-agent"] {
@@ -210,10 +215,28 @@ fn check(message: &[u8], identity: &str, deny: &DenyList, attribution: &[String]
     out
 }
 
+/// The MTA delivers exactly the bytes `H` names only when every byte is
+/// ASCII and no line is over 998 octets. Postfix's `sendmail` splits a
+/// longer line and the SMTP client folds at 998, and an 8bit body is
+/// rewritten to quoted-printable for a next hop without `8BITMIME`.
+fn sent_as_is(message: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(n) = message.split('\n').position(|line| line.len() > 998) {
+        out.push(format!(
+            "checks: line {} is over 998 octets, so the MTA would break it",
+            n + 1
+        ));
+    }
+    if !message.is_ascii() {
+        out.push("checks: the draft is not ASCII, so an MTA may re-encode it; send 7bit".into());
+    }
+    out
+}
+
 /// What a recipient's client shows is what the checks scanned only for a
-/// single `text/plain; charset=utf-8` part in 7bit or 8bit. Anything
-/// else (multipart, HTML, base64, quoted-printable, encoded words,
-/// markup or entities a client might render) is refused.
+/// single `text/plain; charset=utf-8` part in 7bit. Anything
+/// else (multipart, HTML, base64, quoted-printable, encoded words, a
+/// closing tag, comment or declaration, or an entity) is refused.
 fn plain_text_only(headers: &[(String, String)], body: &str) -> Vec<String> {
     let mut out = Vec::new();
     let compact = |v: &str| -> String {
@@ -239,8 +262,11 @@ fn plain_text_only(headers: &[(String, String)], body: &str) -> Vec<String> {
         out.push("checks: the draft must be one text/plain; charset=utf-8 part".into());
     }
     let encodings = all("content-transfer-encoding");
-    if encodings.len() > 1 || encodings.iter().any(|e| e != "7bit" && e != "8bit") {
-        out.push("checks: encoded text cannot be scanned; send it as 7bit or 8bit UTF-8".into());
+    if encodings.len() > 1 || encodings.iter().any(|e| e != "7bit") {
+        out.push(
+            "checks: send 7bit; an encoded body cannot be scanned and an 8bit one may be re-encoded"
+                .into(),
+        );
     }
     if body.contains("=?") || headers.iter().any(|(_, v)| v.contains("=?")) {
         out.push("checks: encoded words cannot be scanned; send plain UTF-8".into());
@@ -251,14 +277,15 @@ fn plain_text_only(headers: &[(String, String)], body: &str) -> Vec<String> {
     out
 }
 
-/// A `<` that could open a tag, comment or declaration, or an `&` that
-/// starts a named or numeric entity.
+/// A `<` that opens a closing tag, comment or declaration, or an `&`
+/// that starts a named or numeric entity. An opening tag such as
+/// `<https://...>` is left to the scan of `rendered`.
 fn has_markup(body: &str) -> bool {
     let bytes = body.as_bytes();
     bytes.iter().enumerate().any(|(i, &b)| {
         let next = bytes.get(i + 1).copied().unwrap_or(0);
         match b {
-            b'<' => next.is_ascii_alphabetic() || matches!(next, b'/' | b'!' | b'?'),
+            b'<' => matches!(next, b'/' | b'!' | b'?'),
             b'&' => {
                 let name: Vec<u8> = bytes[i + 1..]
                     .iter()
@@ -270,6 +297,68 @@ fn has_markup(body: &str) -> bool {
             _ => false,
         }
     })
+}
+
+/// The body as a client that sniffs HTML would show it: every `<...>`
+/// removed, then numeric references, with or without their `;`, and
+/// `&amp`, `&lt`, `&gt`, `&quot`, `&apos` and `&nbsp` decoded.
+fn rendered(body: &str) -> String {
+    let mut text = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(lt) = rest.find('<') {
+        text.push_str(&rest[..lt]);
+        rest = &rest[lt..];
+        let Some(gt) = rest.find('>') else { break };
+        rest = &rest[gt + 1..];
+    }
+    text.push_str(rest);
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        rest = &rest[amp + 1..];
+        let (c, len) = reference(rest).unwrap_or(('&', 0));
+        out.push(c);
+        rest = &rest[len..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The character a reference after `&` stands for, and its length.
+fn reference(s: &str) -> Option<(char, usize)> {
+    const NAMES: &[(&str, char)] = &[
+        ("amp", '&'),
+        ("lt", '<'),
+        ("gt", '>'),
+        ("quot", '"'),
+        ("apos", '\''),
+        ("nbsp", '\u{a0}'),
+    ];
+    let semi = |s: &str| usize::from(s.starts_with(';'));
+    let Some(n) = s.strip_prefix('#') else {
+        let (name, c) = NAMES.iter().find(|(name, _)| {
+            s.get(..name.len())
+                .is_some_and(|p| p.eq_ignore_ascii_case(name))
+        })?;
+        return Some((*c, name.len() + semi(&s[name.len()..])));
+    };
+    let (digits, radix) = match n.strip_prefix(['x', 'X']) {
+        Some(hex) => (hex, 16),
+        None => (n, 10),
+    };
+    let run = digits
+        .find(|c: char| !c.is_digit(radix))
+        .unwrap_or(digits.len());
+    if run == 0 {
+        return None;
+    }
+    let c = u32::from_str_radix(&digits[..run], radix)
+        .ok()
+        .and_then(char::from_u32)
+        .filter(|&c| c != '\0')
+        .unwrap_or('\u{FFFD}');
+    Some((c, s.len() - digits.len() + run + semi(&digits[run..])))
 }
 
 /// Header fields unfolded as RFC 5322 says (a line break before
