@@ -3702,6 +3702,10 @@ fn http_targets_github(words: &[String]) -> bool {
         None
     };
     let httpie = cmd == "http" || cmd == "https";
+    // HTTPie's `--proxy`, `--follow`, sessions, and config file are not
+    // read, so loopback may still lead to GitHub there.
+    let peer =
+        |host: &str| is_github_host(host) || address_host(host) || (httpie && loopback_host(host));
     let mut github = false;
     let mut other = false;
     let mut hidden = false;
@@ -3710,7 +3714,7 @@ fn http_targets_github(words: &[String]) -> bool {
             continue;
         }
         if let Some(host) = literal_http_host(word) {
-            if is_github_host(&host) || address_host(&host) {
+            if peer(&host) {
                 github = true;
             } else {
                 other = true;
@@ -3719,7 +3723,7 @@ fn http_targets_github(words: &[String]) -> bool {
         }
         if httpie || proto.is_some() {
             if let Some(host) = schemeless_host(word) {
-                if is_github_host(&host) || address_host(&host) {
+                if peer(&host) {
                     github = true;
                 } else {
                     other = true;
@@ -3847,8 +3851,13 @@ fn is_github_host(host: &str) -> bool {
 
 /// An IP address in a form curl and wget take: dotted, one number, hex
 /// parts, or IPv6. A DNS name does not end in a number, so a peer named
-/// this way may be GitHub behind a `Host:` header.
+/// this way may be GitHub behind a `Host:` header. Loopback is this
+/// machine; a proxy, a `Host:` header, or a route option that could send
+/// it on is judged without regard to the host.
 fn address_host(host: &str) -> bool {
+    if loopback_host(host) {
+        return false;
+    }
     if host.contains(':') {
         return true;
     }
@@ -3857,6 +3866,37 @@ fn address_host(host: &str) -> bool {
         .strip_prefix("0x")
         .is_some_and(|digits| digits.chars().all(|c| c.is_ascii_hexdigit()));
     !last.is_empty() && (hex || last.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// `::1`, or an IPv4 address in 127.0.0.0/8 in the inet_aton forms curl
+/// and wget take: one to four parts, each decimal, octal, or hex, the last
+/// filling the bits the others leave, as in `127.1` or `0x7f000001`.
+fn loopback_host(host: &str) -> bool {
+    if host.contains(':') {
+        return host
+            .parse::<std::net::Ipv6Addr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    }
+    let Some(parts) = host.split('.').map(inet_part).collect::<Option<Vec<u64>>>() else {
+        return false;
+    };
+    let Some((last, head)) = parts.split_last().filter(|_| parts.len() <= 4) else {
+        return false;
+    };
+    let top = head.first().copied().unwrap_or(last >> 24);
+    head.iter().all(|part| *part <= 255) && *last >> (32 - 8 * head.len()) == 0 && top == 127
+}
+
+fn inet_part(part: &str) -> Option<u64> {
+    let (digits, radix) = match part.strip_prefix("0x") {
+        Some(hex) => (hex, 16),
+        None if part.len() > 1 && part.starts_with('0') => (&part[1..], 8),
+        None => (part, 10),
+    };
+    if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+        return None;
+    }
+    u64::from_str_radix(digits, radix).ok()
 }
 
 /// `fed` is a stdin the line pipes or redirects into the client.
@@ -4623,7 +4663,8 @@ fn header_sets_host(value: &str) -> bool {
 /// Whether a URL curl requests may reach GitHub: its host is GitHub, an
 /// address, or a name the shell has not expanded yet. Curl takes a word
 /// without a scheme as a URL. Unless `-g` is given, curl expands `{a,b}`
-/// and `[1-3]` into several URLs, so `git{hub,lab}.com` is two hosts.
+/// and `[1-3]` into several URLs, so `git{hub,lab}.com` is two hosts. A
+/// `[` that opens an IPv6 address is not a glob, as curl reads it.
 fn curl_url_github(url: &str, globoff: bool) -> bool {
     let url = url
         .trim()
@@ -4633,7 +4674,16 @@ fn curl_url_github(url: &str, globoff: bool) -> bool {
     if unreadable_token(auth) || auth.contains("{{") {
         return true;
     }
-    if !globoff && auth.contains(['{', '}', '[', ']']) {
+    let globbed = match auth
+        .split_once('[')
+        .map(|(head, tail)| (head, tail.split_once(']')))
+    {
+        Some((head, Some((ip, tail)))) if ip.parse::<std::net::Ipv6Addr>().is_ok() => {
+            format!("{head}{tail}")
+        }
+        _ => auth.to_string(),
+    };
+    if !globoff && globbed.contains(['{', '}', '[', ']']) {
         return true;
     }
     let auth = percent_decoded(auth);

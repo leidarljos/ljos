@@ -1741,6 +1741,66 @@ fn an_address_for_a_host_may_be_github() {
     allowed("curl -X POST http://localhost:8080/x", here);
 }
 
+/// Loopback is this machine, so a curl or wget write straight to it
+/// passes in every form the clients take. A proxy, a route option, a
+/// `Host:` header, or a redirect can still send it to GitHub, and wget
+/// follows one unless `--max-redirect=0`. HTTPie's routing is not read.
+#[test]
+fn a_loopback_address_is_this_machine() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let curl = "curl -X POST";
+    let wget = "wget --max-redirect=0 --method=POST";
+    for addr in [
+        "http://127.0.0.1:8761/x",
+        "'http://[::1]:8761/x'",
+        "http://127.1:8761/x",
+        "http://0x7f000001:8761/x",
+        "http://2130706433:8761/x",
+        "http://0177.0.0.1:8761/x",
+        "http://127.255.255.254/x",
+    ] {
+        allowed(&format!("{curl} {addr}"), here);
+        allowed(&format!("{wget} {addr}"), here);
+        allowed(&format!("curl -d x --url {addr}"), here);
+    }
+    allowed(
+        "wget --max-redirect=0 --method=POST http://localhost:8761/x",
+        here,
+    );
+
+    let addr = "http://127.0.0.1:8761/x";
+    for line in [
+        format!("curl -L -X POST {addr}"),
+        format!("{curl} -x http://relay.example:3128 {addr}"),
+        format!("{curl} --resolve example.com:80:127.0.0.1 {addr}"),
+        format!("{curl} --connect-to ::api.github.com:443 {addr}"),
+        format!("{curl} -H 'Host: api.github.com' {addr}"),
+        format!("http_proxy=http://relay.example:3128 {curl} {addr}"),
+        format!("wget --method=POST {addr}"),
+        "wget --method=POST http://localhost:8761/x".to_string(),
+        format!("{wget} --header='Host: api.github.com' {addr}"),
+        format!("http POST {addr}"),
+    ] {
+        refused(&line, here);
+    }
+    for other in [
+        "http://126.255.255.255/x",
+        "http://128.0.0.1/x",
+        "http://0127.0.0.1/x",
+        "http://4278190081/x",
+        "http://127.0.0.1.1/x",
+        "'http://[::2]/x'",
+        "'http://[::ffff:127.0.0.1]/x'",
+    ] {
+        refused(&format!("{curl} {other}"), here);
+    }
+}
+
 /// Curl and wget percent-decode the host before they connect, so an
 /// encoded GitHub name reaches GitHub, on the command line, after
 /// `--url`, and in a curlrc.
