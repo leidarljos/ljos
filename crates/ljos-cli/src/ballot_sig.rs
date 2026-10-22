@@ -1041,7 +1041,11 @@ fn signing_key(voter: &str) -> Result<(SigningKey, String)> {
         Some(p) if !pins().contains_key(voter.trim()) => pin_first(&p, voter.trim(), &mine)?,
         _ => pins(),
     };
-    if let Some(k) = pinned.get(voter.trim()).filter(|k| **k != mine) {
+    let mine_fp = key_fingerprint(&mine);
+    if let Some(k) = pinned
+        .get(voter.trim())
+        .filter(|k| key_fingerprint(k) != mine_fp)
+    {
         bail!(
             "seat {voter} is pinned to key {}…, and this key is {}…; the ballot is unsigned and no gate counts it",
             &k[..12.min(k.len())],
@@ -1395,7 +1399,7 @@ pub fn seat_check(
                 out.push(format!("{voter}'s signature does not verify"));
             }
             Some(n) => match pins.get(*voter) {
-                Some(k) if *k == n.key => {}
+                Some(k) if key_fingerprint(k) == key_fingerprint(&n.key) => {}
                 Some(_) => out.push(format!(
                     "{voter}'s ballot is signed by a key other than its pinned one"
                 )),
