@@ -1,5 +1,6 @@
 //! Identity, term and attribution checks only ever refuse.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use ljos_cli::mailbox::checks::refusals;
@@ -298,6 +299,27 @@ fn a_broken_setup_refuses_everything() {
     ] {
         let b = setup(bad);
         assert!(!refused(CLEAN, &b.config).is_empty(), "{bad:?}");
+    }
+}
+
+#[test]
+fn a_deny_file_others_could_change_refuses_everything() {
+    let s = setup(DENY);
+    let real = s.config.deny_file.clone().unwrap();
+    let dir = real.parent().unwrap();
+    let link = dir.join("linked.txt");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let shared = dir.join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::write(shared.join("deny.txt"), DENY).unwrap();
+    std::fs::set_permissions(&shared, PermissionsExt::from_mode(0o775)).unwrap();
+    for (path, why) in [(link, "symlink"), (shared.join("deny.txt"), "writable")] {
+        let config = MailConfig {
+            deny_file: Some(path),
+            ..s.config.clone()
+        };
+        let got = refused(CLEAN, &config);
+        assert!(got.iter().any(|r| r.contains(why)), "{why}: {got:?}");
     }
 }
 

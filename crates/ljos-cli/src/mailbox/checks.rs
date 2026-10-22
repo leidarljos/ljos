@@ -9,6 +9,7 @@
 //! either hits. A draft the checks cannot read, such as a base64 body,
 //! is refused rather than skipped.
 
+use std::io::Read as _;
 use std::path::Path;
 
 use anyhow::{bail, Context as _, Result};
@@ -53,8 +54,12 @@ pub struct DenyList {
 }
 
 impl DenyList {
+    /// The deny file at `path`, opened by `config::open_owned`.
     pub fn read(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
+        let (mut file, _) = super::config::open_owned(path, "checks: deny_file")?
+            .with_context(|| format!("checks: the deny file {} does not exist", path.display()))?;
+        let mut text = String::new();
+        file.read_to_string(&mut text)
             .with_context(|| format!("checks: cannot read the deny file {}", path.display()))?;
         Self::parse(&text)
     }

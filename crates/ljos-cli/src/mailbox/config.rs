@@ -3,14 +3,17 @@
 //! It names the identity drafts are sent as, the deny list, and the
 //! notmuch database, so only the user may set it. It is read from the
 //! user's own files, `ljos.toml` then `mail.toml` in the ljos config dir,
-//! each owned by the user and not group or world writable. Any other
+//! each opened by `open_owned`, as are `deny_file` and `notmuch_config`
+//! where they are read, so no other user can change them. Any other
 //! config layer (`./ljos.toml`, `./vissue.toml`, `VISSUE_CONFIG`,
 //! `LJOS_CONFIG`, the vissue config) that carries a `[mail]` table is an
 //! error, as is a layer that cannot be read or parsed: a seat that can
 //! write the working directory must not swap the identity or the deny
 //! list.
 
-use std::os::unix::fs::MetadataExt as _;
+use std::fs::File;
+use std::io::{ErrorKind, Read as _};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context as _, Result};
@@ -79,10 +82,12 @@ pub fn load_from(user: &[PathBuf], shared: &[PathBuf]) -> Result<Option<MailConf
     }
     let mut config: Option<MailConfig> = None;
     for path in user {
-        let Some(text) = read(path)? else {
+        let Some((mut file, _)) = open_owned(path, "mail config")? else {
             continue;
         };
-        owned_by_user(path)?;
+        let mut text = String::new();
+        file.read_to_string(&mut text)
+            .with_context(|| format!("mail config {}: cannot read", path.display()))?;
         let layer: Layer =
             toml::from_str(&text).with_context(|| format!("mail config {}", path.display()))?;
         let Some(table) = layer.mail else {
@@ -123,16 +128,69 @@ fn read(path: &Path) -> Result<Option<String>> {
     }
 }
 
-fn owned_by_user(path: &Path) -> Result<()> {
-    let meta = std::fs::metadata(path)
-        .with_context(|| format!("mail config {}: cannot stat", path.display()))?;
-    if meta.uid() != crate::euid() {
-        bail!("mail config {}: not owned by this user", path.display());
+/// `path` open for reading, and the path it was opened at, when no other
+/// user can change what it reads. Every directory above it, with
+/// symlinks resolved, must be owned by this user or root and not be
+/// group or world writable unless it is sticky like `/tmp`. The file is
+/// opened `O_NOFOLLOW`, and the descriptor must be a regular file owned
+/// by this user or root and not group or world writable. `None` when it
+/// does not exist. `what` names it in errors.
+pub(crate) fn open_owned(path: &Path, what: &str) -> Result<Option<(File, PathBuf)>> {
+    let Some(name) = path.file_name() else {
+        bail!("{what} {}: not a file path", path.display());
+    };
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+    let dir = match std::fs::canonicalize(parent.unwrap_or(Path::new("."))) {
+        Ok(dir) => dir,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("{what} {}", path.display())),
+    };
+    let at = dir.join(name);
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(&at)
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            bail!("{what} {}: is a symlink", path.display())
+        }
+        Err(e) => return Err(e).with_context(|| format!("{what} {}: cannot open", path.display())),
+    };
+    let trusted = |uid: u32| uid == crate::euid() || uid == 0;
+    for above in dir.ancestors() {
+        let meta = std::fs::symlink_metadata(above).with_context(|| {
+            format!("{what} {}: cannot stat {}", path.display(), above.display())
+        })?;
+        if !trusted(meta.uid()) {
+            bail!(
+                "{what} {}: {} is not owned by this user or root",
+                path.display(),
+                above.display()
+            );
+        }
+        if meta.mode() & 0o022 != 0 && meta.mode() & 0o1000 == 0 {
+            bail!(
+                "{what} {}: {} is group or world writable",
+                path.display(),
+                above.display()
+            );
+        }
+    }
+    let meta = file
+        .metadata()
+        .with_context(|| format!("{what} {}: cannot stat", path.display()))?;
+    if !meta.is_file() {
+        bail!("{what} {}: not a regular file", path.display());
+    }
+    if !trusted(meta.uid()) {
+        bail!("{what} {}: not owned by this user or root", path.display());
     }
     if meta.mode() & 0o022 != 0 {
-        bail!("mail config {}: group or world writable", path.display());
+        bail!("{what} {}: group or world writable", path.display());
     }
-    Ok(())
+    Ok(Some((file, at)))
 }
 
 fn check(table: &Table) -> Result<()> {

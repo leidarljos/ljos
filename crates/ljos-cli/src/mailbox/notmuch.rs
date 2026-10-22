@@ -421,7 +421,16 @@ impl Reader {
         .with_context(|| format!("mail: notmuch could not read part {part}"))
     }
 
-    fn command(&self, args: &[&str]) -> Command {
+    /// notmuch with `args`, once `config::open_owned` accepts the
+    /// notmuch config; it is passed as the path that check opened.
+    fn command(&self, args: &[&str]) -> Result<Command> {
+        let (_, config) = super::config::open_owned(&self.config, "mail: notmuch_config")?
+            .with_context(|| {
+                format!(
+                    "mail: notmuch_config {} does not exist",
+                    self.config.display()
+                )
+            })?;
         let mut cmd = Command::new(&self.bin);
         cmd.env_clear();
         for key in ["PATH", "HOME"] {
@@ -429,9 +438,9 @@ impl Reader {
                 cmd.env(key, value);
             }
         }
-        cmd.env("NOTMUCH_CONFIG", &self.config);
+        cmd.env("NOTMUCH_CONFIG", config);
         cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped());
-        cmd
+        Ok(cmd)
     }
 
     fn json(&self, args: &[&str]) -> Result<Value> {
@@ -455,7 +464,7 @@ impl Reader {
         read: impl FnOnce(&mut dyn Read) -> Result<(T, bool)>,
     ) -> Result<T> {
         let mut child = self
-            .command(args)
+            .command(args)?
             .stderr(Stdio::piped())
             .process_group(0)
             .spawn()
