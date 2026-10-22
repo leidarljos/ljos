@@ -57,8 +57,9 @@ pub(crate) fn cursor_push(line: &str, cwd: Option<&Path>) -> Option<String> {
                 if let Some(alias) = git_alias_write(&words[1..]) {
                     line_aliases.push(alias);
                 }
-                if let Some(why) = git_push(&words[1..], run.dir, &line_aliases, &run.env)
-                    .and_then(|p| p.cursor_ref())
+                if let Some(why) =
+                    git_push(&words[1..], run.dir, &line_aliases, &run.env, run.via_xargs)
+                        .and_then(|p| p.cursor_ref())
                 {
                     return Some(why);
                 }
@@ -145,6 +146,7 @@ fn moved(here: Option<PathBuf>, args: &[String]) -> Option<PathBuf> {
 struct PrefixContext {
     dir: Option<PathBuf>,
     env: Vec<(String, String)>,
+    via_xargs: bool,
 }
 
 fn assignment(word: &str) -> Option<(&str, &str)> {
@@ -167,6 +169,10 @@ fn prefix_context(segment: &str, here: Option<PathBuf>) -> PrefixContext {
             ctx.env.push((name.to_string(), value.to_string()));
             i += 1;
             continue;
+        }
+        if word == "xargs" {
+            ctx.via_xargs = true;
+            break;
         }
         if word != "env" {
             break;
@@ -214,6 +220,7 @@ fn git_push(
     dir: Option<PathBuf>,
     line_aliases: &[(String, String)],
     env: &[(String, String)],
+    via_xargs: bool,
 ) -> Option<Push> {
     let mut at = Checkout {
         dir,
@@ -251,10 +258,29 @@ fn git_push(
     let mut words: Vec<String> = vec![sub.clone()];
     words.extend(args[i + 1..].iter().cloned());
     words = at.expand_aliases(words, line_aliases);
-    if words.first().map(String::as_str) != Some("push") {
-        return None;
+    let sub = words.first().map(String::as_str)?;
+    if unresolved_subcommand(sub) {
+        return Some(Push::refuse(
+            at,
+            format!("`{sub}` is only known once the shell expands it; name the git subcommand"),
+        ));
     }
-    Some(Push::read(&words[1..], at))
+    match sub {
+        "push" => {
+            if via_xargs {
+                return Some(Push::refuse(
+                    at,
+                    "xargs fills git push arguments at run time; name each refspec directly"
+                        .to_string(),
+                ));
+            }
+            Some(Push::read(&words[1..], at))
+        }
+        "send-pack" => send_pack_cursor_ref(&words, &at).map(|why| Push::refuse(at, why)),
+        "subtree" => subtree_push_cursor_ref(&words, &at).map(|why| Push::refuse(at, why)),
+        "submodule" => submodule_foreach_cursor_ref(&words, &at).map(|why| Push::refuse(at, why)),
+        _ => None,
+    }
 }
 
 /// A `git config alias.NAME VALUE` assignment from one command line segment.
@@ -288,8 +314,71 @@ fn git_alias_write(args: &[String]) -> Option<(String, String)> {
     Some((name.to_string(), value))
 }
 
+fn unresolved_subcommand(sub: &str) -> bool {
+    sub.contains(['$', '`', '(', ')', '{', '}', '[', ']', '*', '?'])
+}
+
+fn send_pack_cursor_ref(words: &[String], at: &Checkout) -> Option<String> {
+    if words.first().map(String::as_str) != Some("send-pack") {
+        return None;
+    }
+    let remote = words.get(1).map(String::as_str);
+    words.iter().skip(2).find_map(|spec| at.spec(spec, remote))
+}
+
+fn subtree_push_cursor_ref(words: &[String], at: &Checkout) -> Option<String> {
+    if words.first().map(String::as_str) != Some("subtree")
+        || words.get(1).map(String::as_str) != Some("push")
+    {
+        return None;
+    }
+    let mut positional: Vec<&str> = Vec::new();
+    let mut i = 2;
+    while let Some(word) = words.get(i).map(String::as_str) {
+        if word == "--" {
+            positional.extend(words[i + 1..].iter().map(String::as_str));
+            break;
+        }
+        if matches!(word, "--prefix" | "-P") {
+            i += 2;
+            continue;
+        }
+        if word.starts_with("--prefix=") || (word.starts_with('-') && word.len() > 1) {
+            i += 1;
+            continue;
+        }
+        positional.push(word);
+        i += 1;
+    }
+    let remote = positional.first().copied()?;
+    let spec = positional.get(1).copied()?;
+    at.spec(spec, Some(remote))
+}
+
+fn submodule_foreach_cursor_ref(words: &[String], at: &Checkout) -> Option<String> {
+    if words.first().map(String::as_str) != Some("submodule")
+        || words.get(1).map(String::as_str) != Some("foreach")
+    {
+        return None;
+    }
+    let mut i = 2;
+    while words
+        .get(i)
+        .is_some_and(|word| word.starts_with('-') && word.len() > 1)
+    {
+        i += 1;
+    }
+    let script = words.get(i..)?.join(" ");
+    let why = cursor_push(&script, at.dir.as_deref())?;
+    Some(format!(
+        "`git submodule foreach` runs a command where {why}"
+    ))
+}
+
 /// A `git push` as its words give it.
 struct Push {
+    /// A refusal reason for non-`git push` forms that still write refs.
+    reason: Option<String>,
     at: Checkout,
     /// The words past the options: the remote, then the refspecs.
     words: Vec<String>,
@@ -306,6 +395,7 @@ struct Push {
 impl Push {
     fn read(args: &[String], at: Checkout) -> Self {
         let mut push = Push {
+            reason: None,
             at,
             words: Vec::new(),
             repo: None,
@@ -339,8 +429,22 @@ impl Push {
         push
     }
 
+    fn refuse(at: Checkout, reason: String) -> Self {
+        Self {
+            reason: Some(reason),
+            at,
+            words: Vec::new(),
+            repo: None,
+            bulk: Vec::new(),
+            prune: false,
+        }
+    }
+
     /// Why this push would update a `cursor/*` ref.
     fn cursor_ref(&self) -> Option<String> {
+        if let Some(reason) = &self.reason {
+            return Some(reason.clone());
+        }
         for flag in &self.bulk {
             let under: &[&str] = match flag.as_str() {
                 "--all" | "--branches" => &["refs/heads/"],

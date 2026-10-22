@@ -1670,6 +1670,29 @@ fn cloud_guard_refuses_prune_and_mirror_when_they_can_delete_heads() {
 }
 
 #[test]
+fn cloud_guard_refuses_shell_trick_push_forms() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-shell-tricks", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let repo = clone_of(root.path(), &origin, "probe-shell-tricks");
+
+    for line in [
+        "git \"$(echo push)\" origin HEAD:cursor/subcommand",
+        "git $'pu\\163h' origin HEAD:cursor/ansi-c",
+        "printf 'HEAD:cursor/xargs\\n' | xargs git push origin",
+        "git subtree push --prefix . origin cursor/subtree",
+        "git send-pack origin HEAD:refs/heads/cursor/send-pack",
+        "git submodule foreach 'git push origin HEAD:cursor/foreach'",
+    ] {
+        refused(line, &repo);
+    }
+}
+
+#[test]
 fn cloud_guard_reads_the_gh_pr_verb_and_never_its_arguments() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
