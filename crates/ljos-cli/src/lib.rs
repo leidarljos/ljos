@@ -13309,11 +13309,11 @@ fn post_queued_lesson(client: &PacksetClient, note: &note_queue::Queued) -> Resu
 fn note_queue_row() -> Habitat {
     let queue = note_queue::state_dir().join("note-queue.jsonl");
     if let Err(err) = read_state_file(&queue) {
-        if err.to_string().contains("not a regular file") {
+        if let Some(state) = state_log_damage("note queue", &queue, &err) {
             return Habitat {
                 name: "note queue",
                 ok: false,
-                state: format!("the note queue at {} is damaged: {err}", queue.display()),
+                state,
             };
         }
     }
@@ -21444,6 +21444,39 @@ pub fn bypass_log_path() -> Option<PathBuf> {
     Some(data_base()?.join("ljos").join("bypass.jsonl"))
 }
 
+/// What a state-log open refused at a path. It rides inside the
+/// `io::Error` the open returns, so a caller can tell a refusal from a
+/// missing log by type rather than by the message text.
+#[derive(Debug)]
+pub(crate) enum StateRefusal {
+    /// The log is a symlink.
+    Symlink(PathBuf),
+    /// The directory ljos made is a symlink or not a directory.
+    LinkedDir(PathBuf),
+    /// The log is a fifo, a socket, a device or a directory.
+    NotRegular(PathBuf),
+}
+
+impl std::fmt::Display for StateRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Symlink(path) => write!(f, "{} is a symlink", path.display()),
+            Self::LinkedDir(path) => {
+                write!(f, "{} is a symlink or not a directory", path.display())
+            }
+            Self::NotRegular(path) => write!(f, "{} is not a regular file", path.display()),
+        }
+    }
+}
+
+impl std::error::Error for StateRefusal {}
+
+impl From<StateRefusal> for std::io::Error {
+    fn from(refusal: StateRefusal) -> Self {
+        Self::new(std::io::ErrorKind::InvalidInput, refusal)
+    }
+}
+
 /// Open the directory `path` sits in with `O_DIRECTORY | O_NOFOLLOW |
 /// O_NONBLOCK`, and return it with the file name to use from that
 /// descriptor.
@@ -21478,10 +21511,7 @@ fn open_state_dir(path: &Path) -> std::io::Result<(std::fs::File, std::ffi::CStr
         Ok(dir) => dir,
         // Linux answers ENOTDIR, not ELOOP, when O_DIRECTORY meets a link.
         Err(err) if matches!(err.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("{} is a symlink or not a directory", dir.display()),
-            ));
+            return Err(StateRefusal::LinkedDir(dir.to_path_buf()).into());
         }
         Err(err) => return Err(err),
     };
@@ -21514,21 +21544,14 @@ fn open_regular_at(
     let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags, mode) };
     if fd < 0 {
         let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::ELOOP) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("{} is a symlink", path.display()),
-            ));
-        }
-        // A directory opened for write fails here, before fstat. It is not
-        // a regular file either, and the open itself did not wait.
-        if err.raw_os_error() == Some(libc::EISDIR) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("{} is not a regular file", path.display()),
-            ));
-        }
-        return Err(err);
+        // A directory opened for write is EISDIR before fstat, and a
+        // socket opened O_NONBLOCK is ENXIO. Neither is a regular file,
+        // and the open itself did not wait.
+        return Err(match err.raw_os_error() {
+            Some(libc::ELOOP) => StateRefusal::Symlink(path.to_path_buf()).into(),
+            Some(libc::EISDIR | libc::ENXIO) => StateRefusal::NotRegular(path.to_path_buf()).into(),
+            _ => err,
+        });
     }
     // SAFETY: `fd` was just opened above and nothing else owns it.
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
@@ -21538,10 +21561,7 @@ fn open_regular_at(
         return Err(std::io::Error::last_os_error());
     }
     if (st.st_mode & libc::S_IFMT) != libc::S_IFREG {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("{} is not a regular file", path.display()),
-        ));
+        return Err(StateRefusal::NotRegular(path.to_path_buf()).into());
     }
     clear_nonblock(file.as_raw_fd())?;
     Ok(file)
@@ -21879,13 +21899,8 @@ fn bypass_row() -> Habitat {
         None => "no command has run past the guard".to_string(),
         Some(path) => match read_state_file(&path) {
             Ok(bytes) => bypass_summary(&bytes, &path.display().to_string()),
-            // A fifo, device or directory is not a log. Saying the guard
-            // was never passed would hide the swap; the row names it damaged.
-            Err(err) if err.to_string().contains("not a regular file") => format!(
-                "the guard bypass log at {} is damaged: {err}",
-                path.display()
-            ),
-            Err(_) => "no command has run past the guard".to_string(),
+            Err(err) => state_log_damage("guard bypass log", &path, &err)
+                .unwrap_or_else(|| "no command has run past the guard".to_string()),
         },
     };
     Habitat {
@@ -21893,6 +21908,15 @@ fn bypass_row() -> Habitat {
         state,
         ok: true,
     }
+}
+
+/// A doctor row's text for a state log [`read_state_file`] could not
+/// read, or `None` when the log is simply not there. Only `NotFound` is
+/// an empty log: a symlink, a fifo, a socket, a directory or a log ljos
+/// may not read is damaged, since calling it empty would hide the swap.
+fn state_log_damage(what: &str, path: &Path, err: &std::io::Error) -> Option<String> {
+    (err.kind() != std::io::ErrorKind::NotFound)
+        .then(|| format!("the {what} at {} is damaged: {err}", path.display()))
 }
 
 /// [`bypass_row`]'s text from the log's rows.
@@ -32071,7 +32095,19 @@ mod tests {
             }
             cmd.output().unwrap()
         };
-        let home = dir.path().join("home");
+        // A home under /tmp, not under TMPDIR. The shim drops TMPDIR and
+        // still treats /tmp as temporary. A TMPDIR that lives under the
+        // login home would otherwise make this fixture look permanent.
+        let temp_root =
+            std::path::PathBuf::from(format!("/tmp/ljos-shim-home-{}", std::process::id()));
+        struct RmDir(std::path::PathBuf);
+        impl Drop for RmDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _rm = RmDir(temp_root.clone());
+        let home = temp_root.join("home");
         std::fs::create_dir_all(&home).unwrap();
         let sandbox = dir.path().join("sandbox");
         std::fs::create_dir_all(&sandbox).unwrap();
@@ -41422,7 +41458,7 @@ mod tests {
         {
             let _env = HoldEnv::set(&[("XDG_DATA_HOME", data.to_str().unwrap())]);
             assert!(read_state_file(&bypass_log_path().unwrap()).is_err());
-            assert_eq!(bypass_row().state, "no command has run past the guard");
+            assert!(bypass_row().state.contains("damaged"));
         }
 
         // A link at the directory ljos keeps its logs in.
@@ -41512,6 +41548,109 @@ mod tests {
             notes.state
         );
         assert!(!notes.ok, "{}", notes.state);
+    }
+
+    /// Every doctor row that reads a state log names any refusal damaged,
+    /// with the path: a socket, a symlink to a fifo or to a regular file,
+    /// a directory, and a log ljos may not read. Only a missing log is
+    /// empty. Each row runs under a timeout so a regression that waits
+    /// fails instead of hanging.
+    #[test]
+    fn doctor_names_every_refused_state_log_damaged() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let state = dir.path().join("state");
+        let home = dir.path().join("home");
+        let outside = dir.path().join("outside");
+        for path in [&data.join("ljos"), &state.join("ljos"), &home, &outside] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let _env = HoldEnv::set(&[
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_DATA_HOME", data.to_str().unwrap()),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+        ]);
+        let bypass = bypass_log_path().unwrap();
+        let queue = note_queue::state_dir().join("note-queue.jsonl");
+
+        let mut kinds = vec![
+            "socket",
+            "symlink-to-fifo",
+            "symlink-to-regular",
+            "directory",
+        ];
+        // SAFETY: geteuid has no arguments and only reads the process identity.
+        if unsafe { libc::geteuid() } != 0 {
+            kinds.push("permission-denied");
+        }
+        for kind in kinds {
+            for (log, row) in [
+                (&bypass, bypass_row as fn() -> Habitat),
+                (&queue, note_queue_row),
+            ] {
+                let name = log.file_name().unwrap().to_str().unwrap();
+                let target = outside.join(format!("{kind}-{name}"));
+                let _socket = match kind {
+                    "socket" => Some(std::os::unix::net::UnixListener::bind(log).unwrap()),
+                    "symlink-to-fifo" => {
+                        mkfifo(&target);
+                        std::os::unix::fs::symlink(&target, log).unwrap();
+                        None
+                    }
+                    "symlink-to-regular" => {
+                        std::fs::write(&target, b"{\"kind\":\"switch\",\"command\":\"forged\"}\n")
+                            .unwrap();
+                        std::os::unix::fs::symlink(&target, log).unwrap();
+                        None
+                    }
+                    "directory" => {
+                        std::fs::create_dir(log).unwrap();
+                        None
+                    }
+                    "permission-denied" => {
+                        std::fs::write(log, b"").unwrap();
+                        std::fs::set_permissions(log, std::fs::Permissions::from_mode(0o000))
+                            .unwrap();
+                        None
+                    }
+                    _ => unreachable!(),
+                };
+                let read = bounded("read", {
+                    let log = log.clone();
+                    move || read_state_file(&log)
+                });
+                let err = read.expect_err(kind);
+                if kind == "permission-denied" {
+                    assert_eq!(
+                        err.kind(),
+                        std::io::ErrorKind::PermissionDenied,
+                        "{kind}: {err}"
+                    );
+                } else {
+                    assert!(
+                        err.get_ref().is_some_and(|e| e.is::<StateRefusal>()),
+                        "{kind}: {err}"
+                    );
+                }
+                let habitat = bounded(kind, row);
+                assert!(
+                    habitat.state.contains("damaged")
+                        && habitat.state.contains(&log.display().to_string()),
+                    "{kind} {name}: {}",
+                    habitat.state
+                );
+                if std::ptr::eq(log, &queue) {
+                    assert!(!habitat.ok, "{kind}: {}", habitat.state);
+                }
+                let _ = std::fs::remove_file(log);
+                let _ = std::fs::remove_dir(log);
+            }
+        }
+
+        let missing = bounded("missing bypass", bypass_row);
+        assert_eq!(missing.state, "no command has run past the guard");
     }
 
     fn bounded<T: Send + 'static>(what: &str, body: impl FnOnce() -> T + Send + 'static) -> T {
