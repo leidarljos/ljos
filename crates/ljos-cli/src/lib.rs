@@ -20990,6 +20990,21 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
                         .into(),
                 });
             }
+            // Keeping an older preference raises it to the person's, the
+            // same consent by another verb.
+            if words.get(1).map(String::as_str) == Some("prefer")
+                && words
+                    .iter()
+                    .any(|w| w == "--keep" || w.starts_with("--keep="))
+            {
+                return Some(Rule {
+                    pattern: "seat-guard".into(),
+                    verdict: "deny".into(),
+                    reason: "`ljos prefer --review --keep` stores a preference as the person's, \
+                             and only the person runs it. Ask the person to keep it themselves."
+                        .into(),
+                });
+            }
             continue;
         }
         // Consent given in the chat is what the person submits; keys an
@@ -51429,10 +51444,14 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "setsid -f script -qc 'env -i ljos approve 0123' /dev/null",
             "(sh -c 'sleep 1; ~/.cargo/bin/ljos approve 0123' &)",
             "touch /run/user/1000/ljos/approvals/0123.json",
+            "ljos prefer --review --keep 0123",
+            "ljos prefer --review --keep=0123",
+            "setsid -f script -qc 'env -i ljos prefer --review --keep 0123' /dev/null",
         ] {
             assert!(seat_guard(line).is_some(), "{line}");
         }
         assert!(seat_guard("ljos seat").is_none());
+        assert!(seat_guard("ljos prefer --review").is_none());
         assert!(seat_guard("cat /run/user/1000/ljos/approvals/0123.json").is_none());
     }
 
