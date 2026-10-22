@@ -2419,6 +2419,36 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "voted under a pinned seat")]
+    fn a_voter_pin_row_cannot_give_a_seat_a_second_key() {
+        let _home = test_home();
+        let root = tempfile::tempdir().expect("root");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+        });
+        let at = "2026-10-21T10:00:00Z";
+        let owner = sign_as(ballot_entry("alpha/inky", "accept", at), 1);
+        let mallory = sign_as(ballot_entry("mallory/inky", "reject", at), 9);
+        let (k1, k9) = (&owner.signature.key, &mallory.signature.key);
+        let pin_path = root.path().join(crate::ballot_sig::PIN_FILE);
+        for rows in [
+            format!("inky {k1}\nmallory/inky {k9}\n"),
+            format!("alpha/inky {k1}\nmallory/inky {k9}\n"),
+        ] {
+            std::fs::write(&pin_path, &rows).expect("pin");
+            let Err(err) = check_entries(std::slice::from_ref(&mallory)) else {
+                panic!("a second key voted under a pinned seat: {rows}");
+            };
+            assert!(
+                err_chain(&err).contains("seat inky is pinned to two keys"),
+                "{}",
+                err_chain(&err)
+            );
+        }
+    }
+
+    #[test]
     fn a_seat_pin_accepts_same_key_in_capital_hex() {
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
