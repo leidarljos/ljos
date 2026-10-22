@@ -2081,6 +2081,9 @@ mod tests {
         std::fs::write(rules_path().unwrap(), render_rules(&[row]).unwrap()).unwrap();
         note_cutoff();
         assert!(preface().contains("not confirmed"), "{}", preface());
+        // A runner variable at a terminal is not a runner. This keep has
+        // no terminal, which is what a hook and a pipe have.
+        super::super::PERSON_AT_TERMINAL.with(|p| p.set(false));
         let saved = std::env::var_os("CLAUDECODE");
         unsafe { std::env::set_var("CLAUDECODE", "1") };
         let err = keep_held("ur-missing").unwrap_err().to_string();
