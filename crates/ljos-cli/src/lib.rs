@@ -34643,17 +34643,17 @@ mod tests {
     fn doctor_names_adopt_legacy_for_a_headerless_log() {
         let row = Habitat {
             name: "sync",
-            state: "`ljos sync --adopt-legacy alice`; `ljos sync --adopt-legacy bob`".into(),
+            state: "`ljos sync --adopt-legacy=alice`; `ljos sync --adopt-legacy=bob`".into(),
             ok: false,
         };
         assert_eq!(doctor_word(&row), "warn");
         assert!(healthy(std::slice::from_ref(&row)));
         let short = format_doctor_short(std::slice::from_ref(&row));
         assert!(
-            short.contains("`ljos sync --adopt-legacy alice`"),
+            short.contains("`ljos sync --adopt-legacy=alice`"),
             "{short}"
         );
-        assert!(short.contains("`ljos sync --adopt-legacy bob`"), "{short}");
+        assert!(short.contains("`ljos sync --adopt-legacy=bob`"), "{short}");
     }
 
     #[test]

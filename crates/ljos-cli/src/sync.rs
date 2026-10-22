@@ -1541,97 +1541,136 @@ struct ImportJob {
     plain: String,
 }
 
-fn import_jobs(root: &Path, scope: &Scope, me: &str) -> Result<(Vec<ImportJob>, String)> {
-    let mut jobs = Vec::new();
+struct ListedLog {
+    host: String,
+    scope_name: String,
+    rel: String,
+    /// False when the scope was removed. Import still retires it. The
+    /// adopt-legacy hint does not name it.
+    configured: bool,
+}
+
+struct ListedLogs {
+    logs: Vec<ListedLog>,
+    /// Refusals for a bad name or a file that is not the log export writes.
+    out: String,
+    /// Hosts and scopes already listed, so a removed scope remembered from
+    /// an older taken file is not retired twice.
+    seen: BTreeSet<(String, String)>,
+}
+
+/// Logs under `.ljos/atoms` for a host other than `me`, after the checks
+/// import and the adopt-legacy hint share. A host or scope that is not one
+/// safe path segment, a file that is not the name export writes, and a
+/// second file for a host and scope already listed are refusals in `out`.
+fn listed_logs(root: &Path, scope: &Scope, me: &str) -> Result<ListedLogs> {
+    let mut logs = Vec::new();
     let mut out = String::new();
     let mut seen = BTreeSet::new();
+    let mut paths: Vec<PathBuf> = list_beneath(root, ".ljos/atoms")?
+        .into_iter()
+        .filter(|name| name.ends_with(".jsonl.age"))
+        .map(|name| log_dir(root).join(name))
+        .collect();
+    // `+` sorts before `.`, so `<host>+cloud` would be read before
+    // `<host>`. The primary log comes first; retirement of every log
+    // still runs before any post, in `import`.
+    paths.sort_by_key(|path| import_log_rank(path));
+    for path in paths {
+        let Some((host, scope_name)) = host_scope_from_log_path(&path, scope) else {
+            continue;
+        };
+        if host.is_empty() || machine_name(&host) == me {
+            continue;
+        }
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let rel = format!(".ljos/atoms/{name}");
+        if let Some(why) = bad_log_name(&host, &scope_name) {
+            out.push_str(&format!("sync: {rel} was not read: {why}\n"));
+            continue;
+        }
+        // `host+<primary>` parses as the primary log. Two files for one
+        // sender would both retire against one taken set, so only the
+        // name export writes is read.
+        let [canonical, _] = host_log_rels_for_scope(&host, &scope.name, &scope_name);
+        if canonical != rel || !seen.insert((host.clone(), scope_name.clone())) {
+            out.push_str(&format!(
+                "sync: {rel} is not a log name; {host}'s {scope_name} log is {canonical}, and this one was left unread\n"
+            ));
+            continue;
+        }
+        let configured = scope_is_configured(scope, &scope_name);
+        logs.push(ListedLog {
+            host,
+            scope_name,
+            rel,
+            configured,
+        });
+    }
+    Ok(ListedLogs { logs, out, seen })
+}
+
+fn import_jobs(root: &Path, scope: &Scope, me: &str) -> Result<(Vec<ImportJob>, String)> {
+    let mut jobs = Vec::new();
     // The public key of each identity this machine opens with, computed on
     // its first miss. A log sealed to one of them that still does not open
     // is an error, and it is raised before the pack is asked.
     let mut mine: BTreeMap<PathBuf, String> = BTreeMap::new();
-    {
-        let mut paths: Vec<PathBuf> = list_beneath(root, ".ljos/atoms")?
-            .into_iter()
-            .filter(|name| name.ends_with(".jsonl.age"))
-            .map(|name| log_dir(root).join(name))
-            .collect();
-        // `+` sorts before `.`, so `<host>+cloud` would be read before
-        // `<host>`. The primary log comes first; retirement of every log
-        // still runs before any post, in `import`.
-        paths.sort_by_key(|path| import_log_rank(path));
-        for path in paths {
-            let Some((host, scope_name)) = host_scope_from_log_path(&path, scope) else {
-                continue;
-            };
-            if host.is_empty() || machine_name(&host) == me {
-                continue;
-            }
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            let rel = format!(".ljos/atoms/{name}");
-            if let Some(why) = bad_log_name(&host, &scope_name) {
-                out.push_str(&format!("sync: {rel} was not read: {why}\n"));
-                continue;
-            }
-            // `host+<primary>` parses as the primary log. Two files for one
-            // sender would both retire against one taken set, so only the
-            // name export writes is read.
-            let [canonical, _] = host_log_rels_for_scope(&host, &scope.name, &scope_name);
-            if canonical != rel || !seen.insert((host.clone(), scope_name.clone())) {
-                out.push_str(&format!(
-                    "sync: {rel} is not a log name; {host}'s {scope_name} log is {canonical}, and this one was left unread\n"
-                ));
-                continue;
-            }
-            if !scope_is_configured(scope, &scope_name) {
-                // The scope was removed or renamed. Do not read the log.
-                // Everything previously taken from it retires.
-                jobs.push(ImportJob {
-                    host,
-                    scope_name,
-                    plain: String::new(),
-                });
-                continue;
-            }
-            let identities = identities_for_open(&scope_name);
-            let Some(bytes) = read_beneath(root, &rel)? else {
-                continue;
-            };
-            match open_log(root, &bytes, &host, &scope_name, &rel)? {
-                Opened::Atoms(plain) => jobs.push(ImportJob {
-                    host,
-                    scope_name,
-                    plain,
-                }),
-                Opened::Refused(line) => out.push_str(&line),
-                Opened::Miss => {
-                    // The log's own recipients. A cloud log lists different
-                    // keys than the primary, and a miss is an error only
-                    // when one of those keys is an identity this log was
-                    // tried with.
-                    let recipients = scope.recipients_for(&scope_name).unwrap_or(&[]);
-                    let mut skip =
-                        format!("sync: {host}'s {scope_name} log is not sealed to this machine\n");
-                    for identity in &identities {
-                        let key = match mine.entry(identity.clone()) {
-                            std::collections::btree_map::Entry::Occupied(known) => {
-                                known.get().clone()
-                            }
-                            std::collections::btree_map::Entry::Vacant(slot) => {
-                                // A keygen miss is not a recipient we know.
-                                // Aborting here dropped every later host.
-                                match identity_recipient(identity) {
-                                    Ok(key) => {
-                                        slot.insert(key.clone());
-                                        key
-                                    }
-                                    Err(_) => continue,
+    let ListedLogs {
+        logs,
+        mut out,
+        mut seen,
+    } = listed_logs(root, scope, me)?;
+    for log in logs {
+        if !log.configured {
+            // The scope was removed or renamed. Do not read the log.
+            // Everything previously taken from it retires.
+            jobs.push(ImportJob {
+                host: log.host,
+                scope_name: log.scope_name,
+                plain: String::new(),
+            });
+            continue;
+        }
+        let identities = identities_for_open(&log.scope_name);
+        let Some(bytes) = read_beneath(root, &log.rel)? else {
+            continue;
+        };
+        match open_log(root, &bytes, &log.host, &log.scope_name, &log.rel)? {
+            Opened::Atoms(plain) => jobs.push(ImportJob {
+                host: log.host,
+                scope_name: log.scope_name,
+                plain,
+            }),
+            Opened::Refused(line) => out.push_str(&line),
+            Opened::Miss => {
+                // The log's own recipients. A cloud log lists different
+                // keys than the primary, and a miss is an error only
+                // when one of those keys is an identity this log was
+                // tried with.
+                let recipients = scope.recipients_for(&log.scope_name).unwrap_or(&[]);
+                let mut skip = format!(
+                    "sync: {}'s {} log is not sealed to this machine\n",
+                    log.host, log.scope_name
+                );
+                for identity in &identities {
+                    let key = match mine.entry(identity.clone()) {
+                        std::collections::btree_map::Entry::Occupied(known) => known.get().clone(),
+                        std::collections::btree_map::Entry::Vacant(slot) => {
+                            // A keygen miss is not a recipient we know.
+                            // Aborting here dropped every later host.
+                            match identity_recipient(identity) {
+                                Ok(key) => {
+                                    slot.insert(key.clone());
+                                    key
                                 }
+                                Err(_) => continue,
                             }
-                        };
-                        skip = miss_report(&host, &scope_name, &key, recipients)?;
-                    }
-                    out.push_str(&skip);
+                        }
+                    };
+                    skip = miss_report(&log.host, &log.scope_name, &key, recipients)?;
                 }
+                out.push_str(&skip);
             }
         }
     }
@@ -2190,7 +2229,10 @@ fn open_log(
     let hint = if was_headed(root, scope_name, host)? {
         format!("{host} has written headed logs, so none without one is read again")
     } else {
-        format!("`ljos sync --adopt-legacy {host}` reads this blob if it is {host}'s")
+        format!(
+            "`{}` reads this blob if it is {host}'s",
+            adopt_legacy_command(host)
+        )
     };
     Ok(Opened::Refused(format!(
         "sync: {label} has no scope header, so nothing binds it to {host}'s {scope_name} log; it was left unread ({hint})\n"
@@ -3344,39 +3386,37 @@ pub fn adopt(target: &str, force: bool, dry_run: bool) -> Result<String> {
     Ok(out)
 }
 
+/// The command import prints and doctor repeats. The host is bound with
+/// `=`, so a name that starts with `-` is a value. A separate argument
+/// `-h` is help.
+fn adopt_legacy_command(host: &str) -> String {
+    format!("ljos sync --adopt-legacy={host}")
+}
+
 /// Commands that pin each host whose log in `root` opened with no scope
 /// header, and which this machine has not pinned and has not seen a headed
-/// log from. Each command is the exact `ljos sync --adopt-legacy HOST`
-/// import prints.
+/// log from. Each command is the exact [`adopt_legacy_command`] import
+/// prints. A bad name, a duplicate, and a removed scope are left out, the
+/// same way import refuses to read them.
 pub(crate) fn legacy_adopt_commands(root: &Path) -> Result<Vec<String>> {
     let Some(scope) = scope_of_repo(root)? else {
         return Ok(Vec::new());
     };
-    let me = host();
+    let logs = listed_logs(root, &scope, &host())?.logs;
     let mut hosts = BTreeSet::new();
-    for name in list_beneath(root, ".ljos/atoms")? {
-        if !name.ends_with(".jsonl.age") {
+    for log in logs {
+        if !log.configured {
             continue;
         }
-        let path = log_dir(root).join(&name);
-        let Some((host, scope_name)) = host_scope_from_log_path(&path, &scope) else {
+        let Some(bytes) = read_beneath(root, &log.rel)? else {
             continue;
         };
-        if host.is_empty() || machine_name(&host) == me {
-            continue;
-        }
-        let rel = format!(".ljos/atoms/{name}");
-        let [canonical, _] = host_log_rels_for_scope(&host, &scope.name, &scope_name);
-        if canonical != rel {
-            continue;
-        }
-        let Some(bytes) = read_beneath(root, &rel)? else {
+        let Ok(Opened::Refused(line)) =
+            open_log(root, &bytes, &log.host, &log.scope_name, &log.rel)
+        else {
             continue;
         };
-        let Ok(Opened::Refused(line)) = open_log(root, &bytes, &host, &scope_name, &rel) else {
-            continue;
-        };
-        let cmd = format!("ljos sync --adopt-legacy {host}");
+        let cmd = adopt_legacy_command(&log.host);
         if line.contains(&cmd) {
             hosts.insert(cmd);
         }
@@ -8973,17 +9013,17 @@ mod tests {
             said.contains("alice+cloud.jsonl.age has no scope header"),
             "{said}"
         );
-        assert!(said.contains("`ljos sync --adopt-legacy alice`"), "{said}");
+        assert!(said.contains("`ljos sync --adopt-legacy=alice`"), "{said}");
         assert!(
             said.contains("bob+cloud.jsonl.age has no scope header"),
             "{said}"
         );
-        assert!(said.contains("`ljos sync --adopt-legacy bob`"), "{said}");
+        assert!(said.contains("`ljos sync --adopt-legacy=bob`"), "{said}");
         assert_eq!(
             legacy_adopt_commands(&fix.root).unwrap(),
             vec![
-                "ljos sync --adopt-legacy alice".to_string(),
-                "ljos sync --adopt-legacy bob".to_string(),
+                "ljos sync --adopt-legacy=alice".to_string(),
+                "ljos sync --adopt-legacy=bob".to_string(),
             ],
             "{said}"
         );
@@ -9005,6 +9045,62 @@ mod tests {
             "{said}"
         );
         assert!(!said.contains("bob: "), "{said}");
+    }
+
+    /// A file name is not a shell word. Doctor used to print
+    /// `ljos sync --adopt-legacy x;touch${IFS}PWNED` for a hostile name,
+    /// and a host `-h` was a separate argument clap reads as help. The
+    /// hint is `--adopt-legacy=HOST`, and a bad name, an alias, or a
+    /// removed scope is not a command.
+    #[test]
+    fn adopt_legacy_ignores_hostile_names_and_binds_the_host_with_equals() {
+        let dir = tempfile::tempdir().unwrap();
+        let fix = Shared::new(dir.path());
+        let cloud = [fix.cloud.as_str()];
+        let alice = fix.sealed(None, &lesson_line("Alice's old note.", "cloud"), &cloud);
+        let dash = fix.sealed(None, &lesson_line("Dash host.", "cloud"), &cloud);
+        fix.push(&[
+            ("alice+cloud.jsonl.age", &alice),
+            ("-h+cloud.jsonl.age", &dash),
+        ]);
+        fix.pull();
+        let atoms = fix.root.join(".ljos/atoms");
+        std::fs::write(atoms.join("alice+grokbot.jsonl.age"), &alice).unwrap();
+        std::fs::write(atoms.join("mallory+retired.jsonl.age"), &alice).unwrap();
+        for name in [
+            "x;touch${IFS}PWNED+cloud.jsonl.age",
+            "`touch pwned`+cloud.jsonl.age",
+            "bad host+cloud.jsonl.age",
+            "bad\nhost+cloud.jsonl.age",
+        ] {
+            std::fs::write(atoms.join(name), b"not a log").unwrap();
+        }
+        let said = import(&fix.root, &fix.scope()).unwrap();
+        assert!(said.contains("`ljos sync --adopt-legacy=alice`"), "{said}");
+        assert!(said.contains("`ljos sync --adopt-legacy=-h`"), "{said}");
+        assert!(said.contains("was not read"), "{said}");
+        assert!(said.contains("is not a log name"), "{said}");
+        assert!(!said.contains("--adopt-legacy "), "{said}");
+        assert!(!said.contains("--adopt-legacy=x"), "{said}");
+        assert!(!said.contains("--adopt-legacy=mallory"), "{said}");
+        let cmds = legacy_adopt_commands(&fix.root).unwrap();
+        assert_eq!(
+            cmds,
+            vec![
+                "ljos sync --adopt-legacy=-h".to_string(),
+                "ljos sync --adopt-legacy=alice".to_string(),
+            ],
+            "{said}"
+        );
+        let state = cmds
+            .iter()
+            .map(|cmd| format!("`{cmd}`"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        assert!(!state.contains('\n'), "{state:?}");
+        assert!(!state.contains("touch"), "{state}");
+        assert!(!state.contains("IFS"), "{state}");
+        assert!(!state.contains("mallory"), "{state}");
     }
 
     /// A headed log put back to its earlier headerless blob opened through
@@ -9134,13 +9230,13 @@ mod tests {
         ]);
         let said = fix.import();
         assert!(fix.held().is_empty(), "{said}");
-        assert!(said.contains("`ljos sync --adopt-legacy erin`"), "{said}");
-        assert!(said.contains("`ljos sync --adopt-legacy frank`"), "{said}");
+        assert!(said.contains("`ljos sync --adopt-legacy=erin`"), "{said}");
+        assert!(said.contains("`ljos sync --adopt-legacy=frank`"), "{said}");
         assert_eq!(
             legacy_adopt_commands(&fix.root).unwrap(),
             vec![
-                "ljos sync --adopt-legacy erin".to_string(),
-                "ljos sync --adopt-legacy frank".to_string(),
+                "ljos sync --adopt-legacy=erin".to_string(),
+                "ljos sync --adopt-legacy=frank".to_string(),
             ],
             "{said}"
         );
@@ -9153,7 +9249,7 @@ mod tests {
         assert!(!pinned.contains("grokbot"), "{pinned}");
         assert_eq!(
             legacy_adopt_commands(&fix.root).unwrap(),
-            vec!["ljos sync --adopt-legacy frank".to_string()],
+            vec!["ljos sync --adopt-legacy=frank".to_string()],
             "{pinned}"
         );
         let said = fix.import();
