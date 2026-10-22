@@ -7694,6 +7694,20 @@ fn lexical_scores(bodies: &[&str], cue: &str) -> Vec<(usize, f64)> {
     scored
 }
 
+/// Lexical match of each text against `cue`, in the same order. Zero when
+/// that text matches nothing. The pack's fused score adds recency on each
+/// ballot and then multiplies by retrievability, so this is the score that
+/// does not read the clock.
+fn lexical_match_scores(texts: &[&str], cue: &str) -> Vec<f64> {
+    let mut scores = vec![0.0; texts.len()];
+    for (index, score) in lexical_scores(texts, cue) {
+        if let Some(slot) = scores.get_mut(index) {
+            *slot = score;
+        }
+    }
+    scores
+}
+
 fn atom_as_hit(atom: &Value) -> Option<Hit> {
     let text = atom.get("text")?.as_str()?.trim().to_string();
     if text.is_empty() {
@@ -7877,10 +7891,11 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             let pool: Option<Vec<Hit>> = pool.map(|p| p.into_iter().map(|(h, _)| h).collect());
             // The local cross-encoder reranks.
             let rerank = hook_uses_rerank(false);
-            // The cross-encoder only reorders the fused top twenty, and every
-            // filter below but the score floor reads fields it leaves alone.
-            // Reordering cannot change which of the twenty pass those
-            // filters. When none does, no memory can reach the prompt, and
+            // The cross-encoder only reorders the fused top twenty. The
+            // filters below, other than the lexical floor, read fields it
+            // leaves alone, and the lexical floor reads the text, not the
+            // fused score. Reordering cannot change which of the twenty
+            // pass. When none does, no memory can reach the prompt, and
             // the second stage, a few hundred milliseconds a prompt, is not
             // run.
             if let Some(pool) = &pool {
@@ -7910,17 +7925,23 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
                 (Err(_), None) => return (nudge, pending),
             };
             hits = found;
-            let top = hits.iter().map(|h| h.score).fold(0.0_f64, f64::max);
-            if top <= 0.0 {
+            // Age is in the fused score twice, so the floor is the lexical
+            // match. The fused score still orders the rows below.
+            let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
+            let lexical = lexical_match_scores(&texts, cue);
+            let best_lexical = lexical.iter().copied().fold(0.0_f64, f64::max);
+            if best_lexical <= 0.0 {
                 return (nudge, pending);
             }
             hits.iter()
-                .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
-                .filter(|h| h.score >= top * HOOK_SCORE_FLOOR)
-                .filter(|h| agreed(h))
-                .filter(|h| names_the_subject(&h.text, cue))
-                .filter(|h| shown_on_prompt(h))
-                .filter(|h| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
+                .enumerate()
+                .filter(|(_, h)| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
+                .filter(|(i, _)| lexical[*i] >= best_lexical * HOOK_SCORE_FLOOR)
+                .filter(|(_, h)| agreed(h))
+                .filter(|(_, h)| names_the_subject(&h.text, cue))
+                .filter(|(_, h)| shown_on_prompt(h))
+                .filter(|(_, h)| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
+                .map(|(_, h)| h)
                 .collect()
         }
     };
@@ -35025,6 +35046,50 @@ mod tests {
             event: "UserPromptSubmit".into(),
             cue: "the API base URL is wrong after deploying".into(),
             session: Some("aged-one".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(&call, 5);
+        assert!(note.contains("VITE_API_URL"), "{note}");
+    }
+
+    /// A pack that sends no cosine still has to hand over a memory that
+    /// names the subject. Its fused score sits under 0.6 of a fresh hit
+    /// on age alone; the words it shares with the prompt do not.
+    #[test]
+    fn the_lexical_fallback_admits_an_old_memory_that_names_the_subject() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let hit = |id: &str, text: &str, score: f64, ts: &str| {
+            serde_json::json!({
+                "id": id, "text": text, "score": score, "kind": "lesson",
+                "ts": ts, "entities": ["horizon:standing"],
+                "ballots": 2, "of": 3
+            })
+        };
+        let url = serve_signal_pack(serde_json::json!([
+            hit(
+                "fresh",
+                "Restart the worker after every deploy so it reads the new config",
+                2.0,
+                "2026-10-20T09:00:00.000Z"
+            ),
+            hit(
+                "old",
+                "The frontend reads its API base URL from VITE_API_URL at build time, not at runtime",
+                0.8,
+                "2026-07-22T09:00:00.000Z"
+            ),
+        ]));
+        let _url = PackUrl::set(&url);
+        let call = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "the API base URL is wrong after deploying".into(),
+            session: Some("aged-lexical".into()),
             shape: HookShape::default(),
         };
         let (note, _) = hook_note(&call, 5);
