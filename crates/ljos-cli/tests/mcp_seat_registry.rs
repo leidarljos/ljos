@@ -3,11 +3,11 @@
 
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 
-#[test]
-fn a_seats_file_keeps_unlisted_seats_off_the_tracker() {
-    let root = tempfile::tempdir().unwrap();
-    let tracker = root.path().join("tracker");
+/// A server under `root` with a cleared environment, and a way to call it.
+fn server(root: &Path) -> impl Fn(&str, serde_json::Value) -> String {
+    let tracker = root.join("tracker");
     std::fs::create_dir(&tracker).unwrap();
     std::fs::write(
         tracker.join("vissue.toml"),
@@ -15,7 +15,7 @@ fn a_seats_file_keeps_unlisted_seats_off_the_tracker() {
     )
     .unwrap();
     let quote = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
-    let server = root.path().join("server");
+    let server = root.join("server");
     let mut server_file = std::fs::File::create(&server).unwrap();
     write!(
         server_file,
@@ -24,7 +24,7 @@ fn a_seats_file_keeps_unlisted_seats_off_the_tracker() {
          XDG_STATE_HOME={home}/state XDG_DATA_HOME={home}/data \
          VISSUE_ROOT={tracker} ISSUE_ROOT={tracker} VISSUE_NO_ROUTE=1 \
          LJOS_TRACKER_GIT=off PACKSET_URL=off LJOS_ASK_PACK=off LJOS_MCP_TOOLS=all {binary}\n",
-        home = quote(root.path().to_str().unwrap()),
+        home = quote(root.to_str().unwrap()),
         tracker = quote(tracker.to_str().unwrap()),
         binary = quote(env!("CARGO_BIN_EXE_ljos-mcp")),
     )
@@ -32,7 +32,7 @@ fn a_seats_file_keeps_unlisted_seats_off_the_tracker() {
     server_file.sync_all().unwrap();
     drop(server_file);
     std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let call = |name: &str, arguments: serde_json::Value| {
+    move |name: &str, arguments: serde_json::Value| {
         ljos_cli::mcp_forward(
             &server,
             "LJOS_MCP_FORWARDED",
@@ -44,7 +44,13 @@ fn a_seats_file_keeps_unlisted_seats_off_the_tracker() {
         )
         .unwrap()
         .to_string()
-    };
+    }
+}
+
+#[test]
+fn a_seats_file_keeps_unlisted_seats_off_the_tracker() {
+    let root = tempfile::tempdir().unwrap();
+    let call = server(root.path());
     let note = |seat: &str| {
         call(
             "ljos_note",
@@ -80,4 +86,30 @@ fn a_seats_file_keeps_unlisted_seats_off_the_tracker() {
         serde_json::json!({"seat": "stranger", "issue": "proj-aaaa"}),
     );
     assert!(!read.contains("no seat named"), "listing is a read: {read}");
+}
+
+#[test]
+fn a_listed_seat_cannot_write_as_another_assignee() {
+    let root = tempfile::tempdir().unwrap();
+    let call = server(root.path());
+    for (tool, args) in [
+        ("ljos_claim", serde_json::json!({"node": "proj-aaaa"})),
+        ("ljos_release", serde_json::json!({"node": "proj-aaaa"})),
+        ("ljos_complete", serde_json::json!({"node": "proj-aaaa"})),
+        ("ljos_sitting", serde_json::json!({"issue": "proj-aaaa"})),
+        (
+            "ljos_finish",
+            serde_json::json!({"issue": "proj-aaaa", "lesson": "x"}),
+        ),
+    ] {
+        let mut args = args;
+        args["seat"] = "saddle".into();
+        args["assignee"] = "stranger".into();
+        let said = call(tool, args);
+        assert!(said.contains("\"isError\":true"), "{tool}: {said}");
+        assert!(
+            said.contains("stranger is not this seat, saddle"),
+            "{tool}: {said}"
+        );
+    }
 }
