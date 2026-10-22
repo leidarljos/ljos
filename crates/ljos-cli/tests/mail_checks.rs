@@ -158,7 +158,9 @@ fn text_the_checks_cannot_read_is_refused() {
         cte("\n base64"),
         cte("\n\tQuoted-Printable"),
         cte(" binary"),
-        cte(" 7bit").replace("Subject:", "Content-Transfer-Encoding: 8bit\nSubject:"),
+        cte("\t8BIT"),
+        cte("\n 8bit"),
+        cte(" 7bit").replace("Subject:", "Content-Transfer-Encoding: 7bit\nSubject:"),
         word,
         body_word,
     ] {
@@ -168,10 +170,29 @@ fn text_the_checks_cannot_read_is_refused() {
             "{draft}: {got:?}"
         );
     }
-    for ok in [" 7bit", "\t8BIT", "\n 8bit"] {
+    for ok in [" 7bit", "\t7BIT", "\n 7bit"] {
         assert!(refused(&cte(ok), &s.config).is_empty(), "{ok:?}");
     }
     assert!(!refusals(b"From: owner@example.test\n\ncaf\xe9", &s.config).is_empty());
+}
+
+#[test]
+fn what_the_mta_would_rewrite_is_refused() {
+    let s = setup(DENY);
+    let body = |n: usize| CLEAN.replace("See you at noon about topic-a.", &"a".repeat(n));
+    assert_eq!(refused(&body(998), &s.config), Vec::<String>::new());
+    let subject = CLEAN.replace("Subject: Friday", &format!("Subject: {}", "b".repeat(990)));
+    for draft in [body(999), subject] {
+        let got = refused(&draft, &s.config);
+        assert!(got.iter().any(|r| r.contains("998 octets")), "{got:?}");
+    }
+    for draft in [
+        CLEAN.replace("noon", "midi, caf\u{e9}"),
+        CLEAN.replace("Friday", "Fr\u{e9}d\u{e9}ric"),
+    ] {
+        let got = refused(&draft, &s.config);
+        assert!(got.iter().any(|r| r.contains("not ASCII")), "{got:?}");
+    }
 }
 
 #[test]

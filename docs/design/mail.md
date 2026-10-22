@@ -198,9 +198,17 @@ The checks only ever refuse. Passing them grants nothing.
 - Header fields are unfolded first (a line break before a space or tab is
   removed), and every check reads the unfolded value. A header line that
   is neither a field nor a continuation is refused.
+- The draft is 7bit: every byte ASCII and no line over 998 octets.
+  Postfix's `sendmail` splits a longer line and the SMTP client folds at
+  998, and with the default `disable_mime_output_conversion = no` an
+  8bit body is rewritten to quoted-printable for a next hop without
+  `8BITMIME`, so either would deliver bytes other than the ones `H`
+  names. Encoding the draft ourselves would put bytes the owner cannot
+  read on the card, so non-ASCII text is refused instead; send it from
+  the mail client.
 - The draft is one part: exactly one `Content-Type: text/plain;
   charset=utf-8` with no other parameter, and `Content-Transfer-Encoding`
-  absent, `7bit` or `8bit`. Multipart, `text/html`, base64,
+  absent or `7bit`. Multipart, `text/html`, base64, `8bit`,
   quoted-printable and any other encoding are refused, as is `=?`
   (an encoded word) anywhere in the headers or body, and HTML in the
   body: a `<` before `/`, `!` or `?`, or an entity such as `&amp;` or

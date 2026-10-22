@@ -7,7 +7,8 @@
 //! The term, pair and attribution scans read the body twice, as written
 //! and as a client that sniffs HTML would show it, and refuse when
 //! either hits. A draft the checks cannot read, such as a base64 body,
-//! is refused rather than skipped.
+//! is refused rather than skipped, as is one the MTA could rewrite: a
+//! byte that is not ASCII or a line over 998 octets.
 
 use std::io::Read as _;
 use std::path::Path;
@@ -171,6 +172,7 @@ fn check(message: &[u8], identity: &str, deny: &DenyList, attribution: &[String]
         }
     }
 
+    out.extend(sent_as_is(&message));
     out.extend(plain_text_only(&headers, body));
 
     let head = headers
@@ -213,8 +215,26 @@ fn check(message: &[u8], identity: &str, deny: &DenyList, attribution: &[String]
     out
 }
 
+/// The MTA delivers exactly the bytes `H` names only when every byte is
+/// ASCII and no line is over 998 octets. Postfix's `sendmail` splits a
+/// longer line and the SMTP client folds at 998, and an 8bit body is
+/// rewritten to quoted-printable for a next hop without `8BITMIME`.
+fn sent_as_is(message: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(n) = message.split('\n').position(|line| line.len() > 998) {
+        out.push(format!(
+            "checks: line {} is over 998 octets, so the MTA would break it",
+            n + 1
+        ));
+    }
+    if !message.is_ascii() {
+        out.push("checks: the draft is not ASCII, so an MTA may re-encode it; send 7bit".into());
+    }
+    out
+}
+
 /// What a recipient's client shows is what the checks scanned only for a
-/// single `text/plain; charset=utf-8` part in 7bit or 8bit. Anything
+/// single `text/plain; charset=utf-8` part in 7bit. Anything
 /// else (multipart, HTML, base64, quoted-printable, encoded words, a
 /// closing tag, comment or declaration, or an entity) is refused.
 fn plain_text_only(headers: &[(String, String)], body: &str) -> Vec<String> {
@@ -242,8 +262,11 @@ fn plain_text_only(headers: &[(String, String)], body: &str) -> Vec<String> {
         out.push("checks: the draft must be one text/plain; charset=utf-8 part".into());
     }
     let encodings = all("content-transfer-encoding");
-    if encodings.len() > 1 || encodings.iter().any(|e| e != "7bit" && e != "8bit") {
-        out.push("checks: encoded text cannot be scanned; send it as 7bit or 8bit UTF-8".into());
+    if encodings.len() > 1 || encodings.iter().any(|e| e != "7bit") {
+        out.push(
+            "checks: send 7bit; an encoded body cannot be scanned and an 8bit one may be re-encoded"
+                .into(),
+        );
     }
     if body.contains("=?") || headers.iter().any(|(_, v)| v.contains("=?")) {
         out.push("checks: encoded words cannot be scanned; send plain UTF-8".into());
