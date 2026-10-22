@@ -3852,6 +3852,9 @@ mod tests {
     /// `+` is before `.`. Import has to read the primary log first.
     #[test]
     fn import_jobs_reads_the_primary_log_before_an_extra_scope() {
+        // Another test puts a fake `age` on PATH. Without the lock this
+        // test opens that script after its directory is gone.
+        let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let public = age_keygen(&dir.path().join("age.key"));
