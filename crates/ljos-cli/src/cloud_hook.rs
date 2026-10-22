@@ -35,7 +35,7 @@ pub(crate) fn hooks_dir() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("hooks"))
 }
 
-fn allow_path() -> Option<PathBuf> {
+pub(crate) fn allow_path() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join(ALLOW_NAME))
 }
 

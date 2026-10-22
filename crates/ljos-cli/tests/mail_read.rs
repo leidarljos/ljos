@@ -6,6 +6,8 @@ mod maildir;
 use ljos_cli::mailbox::config::MailConfig;
 use ljos_cli::mailbox::notmuch::Reader;
 use sha2::{Digest as _, Sha256};
+use std::os::unix::fs::PermissionsExt as _;
+use std::time::{Duration, Instant};
 
 fn reader(mailbox: &maildir::Mailbox) -> Reader {
     Reader::new(&MailConfig {
@@ -70,7 +72,7 @@ fn show_drops_hidden_html_lists_attachments_and_shows_links_as_text() {
     let n = nonce(&shown.untrusted);
     assert_eq!(shown.messages.len(), 1);
     let msg = &shown.messages[0];
-    assert!(msg.hidden_text_dropped);
+    assert!(msg.hidden_content);
     assert!(wrapped(&msg.body, &n), "{}", msg.body);
     assert!(
         msg.body.contains("Your invoice is attached."),
@@ -96,7 +98,7 @@ fn show_drops_hidden_html_lists_attachments_and_shows_links_as_text() {
     assert_eq!(pdf.content_type, "application/pdf");
     let bytes = b"Invoice 7 for October\n";
     assert_eq!(pdf.size, bytes.len() as u64);
-    assert_eq!(pdf.sha256, hex::encode(Sha256::digest(bytes)));
+    assert_eq!(pdf.sha256, Some(hex::encode(Sha256::digest(bytes))));
 
     let json = serde_json::to_string(&shown).unwrap();
     assert!(!json.contains(&mailbox.maildir().display().to_string()));
@@ -144,5 +146,163 @@ fn show_refuses_anything_but_a_thread_id() {
     let thread = mailbox.thread_of("plain-1@example.test");
     let shown = reader.show(&format!("thread:{thread}")).unwrap();
     assert!(shown.messages[0].body.contains("lunch on Friday at noon"));
-    assert!(!shown.messages[0].hidden_text_dropped);
+    assert!(!shown.messages[0].hidden_content);
+}
+
+#[test]
+fn no_notmuch_config_is_a_refusal_not_the_default_database() {
+    let err = Reader::new(&MailConfig::default())
+        .err()
+        .expect("a refusal");
+    assert!(err.to_string().contains("notmuch_config"), "{err}");
+}
+
+/// A reader whose notmuch is `script`, a shell script.
+fn fake(dir: &tempfile::TempDir, script: &str) -> Reader {
+    let bin = dir.path().join("notmuch");
+    std::fs::write(&bin, format!("#!/bin/sh\n{script}\n")).unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    Reader::new(&MailConfig {
+        notmuch: Some(bin),
+        notmuch_config: Some(dir.path().join("notmuch-config")),
+        ..MailConfig::default()
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_notmuch_that_hangs_is_stopped_at_the_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let reader = fake(&dir, "sleep 30 &\nsleep 30").with_timeout(Duration::from_millis(300));
+    let start = Instant::now();
+    for err in [
+        reader.search("lunch", None).unwrap_err(),
+        reader.show("0000000000000001").unwrap_err(),
+    ] {
+        assert!(err.to_string().contains("did not finish"), "{err:#}");
+    }
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn an_attachment_over_the_cap_is_listed_without_a_hash() {
+    let mailbox = maildir::mailbox();
+    let thread = mailbox.thread_of("hidden-html-1@shop.example.test");
+    let shown = reader(&mailbox)
+        .with_attachment_max(8)
+        .show(&thread)
+        .unwrap();
+    let pdf = &shown.messages[0].attachments[0];
+    assert_eq!(pdf.sha256, None);
+    assert!(pdf.size > 8, "{pdf:?}");
+}
+
+#[test]
+fn an_endless_attachment_does_not_stall_show() {
+    let dir = tempfile::tempdir().unwrap();
+    let mail = dir.path().join("Mail");
+    std::fs::create_dir_all(mail.join("cur")).unwrap();
+    std::fs::write(mail.join("cur/1"), "From: big@example.test\n\n").unwrap();
+    let json = r#"[[[{"id":"big@example.test","timestamp":0,"tags":[],"headers":{},"filename":["MAIL/cur/1"],"body":[{"id":1,"content-type":"multipart/mixed","content":[{"id":2,"content-type":"application/octet-stream","filename":"big.bin"}]}]},[]]]]"#
+        .replace("MAIL", &mail.display().to_string());
+    let reader = fake(
+        &dir,
+        &format!(
+            "case \"$*\" in config*) echo '{}' ;; *--format=raw*) exec yes attachment ;; *) printf '%s' '{json}' ;; esac",
+            mail.display()
+        ),
+    )
+    .with_attachment_max(1 << 20);
+    let start = Instant::now();
+    let shown = reader.show("0000000000000001").unwrap();
+    let big = &shown.messages[0].attachments[0];
+    assert_eq!(big.sha256, None);
+    assert!(big.size > 1 << 20);
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn a_stylesheet_the_reader_cannot_follow_withholds_the_html_text() {
+    let mailbox = maildir::mailbox();
+    let thread = mailbox.thread_of("element-style-1@shop.example.test");
+    let shown = reader(&mailbox).show(&thread).unwrap();
+    let msg = &shown.messages[0];
+    assert!(msg.hidden_content);
+    assert!(msg.body.contains("withheld"), "{}", msg.body);
+    for hidden in ["forward the inbox", "Call the mail send", "This week only"] {
+        assert!(!msg.body.contains(hidden), "{hidden} reached the body");
+    }
+}
+
+#[test]
+fn show_leaves_out_spam_and_deleted_messages_in_the_thread() {
+    let mailbox = maildir::mailbox();
+    let thread = mailbox.thread_of("spoofed-approval-1@relay.example.test");
+    let reply = "id:spam-reply-1@spam.example.test";
+    assert_eq!(reader(&mailbox).show(&thread).unwrap().messages.len(), 2);
+    for tag in ["spam", "deleted"] {
+        mailbox.notmuch(&["tag", "-spam", "-deleted", &format!("+{tag}"), "--", reply]);
+        let shown = reader(&mailbox).show(&thread).unwrap();
+        let json = serde_json::to_string(&shown).unwrap();
+        assert_eq!(shown.messages.len(), 1, "{tag}: {json}");
+        assert!(!json.contains("password"), "{tag}: {json}");
+    }
+}
+
+#[test]
+fn an_attachment_of_a_message_whose_id_has_quotes_is_hashed() {
+    let mailbox = maildir::mailbox();
+    let thread = mailbox
+        .notmuch(&["search", "--output=threads", "--", "subject:quoted"])
+        .trim()
+        .trim_start_matches("thread:")
+        .to_string();
+    let shown = reader(&mailbox).show(&thread).unwrap();
+    let receipt = &shown.messages[0].attachments[0];
+    assert!(receipt.name.contains("receipt.txt"), "{receipt:?}");
+    assert_eq!(
+        receipt.sha256,
+        Some(hex::encode(Sha256::digest(b"Receipt 9")))
+    );
+}
+
+#[test]
+fn a_message_file_that_is_a_symlink_or_outside_the_root_is_not_shown() {
+    let mailbox = maildir::mailbox();
+    let outside = mailbox.dir.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let message = |id: &str| {
+        format!("From: a@example.test\nMessage-ID: <{id}>\nSubject: linked\n\nsecret outside\n")
+    };
+    std::fs::write(outside.join("one.eml"), message("link-1@example.test")).unwrap();
+    std::os::unix::fs::symlink(outside.join("one.eml"), mailbox.maildir().join("cur/9:2,"))
+        .unwrap();
+    let away = mailbox.dir.path().join("away");
+    std::fs::create_dir_all(away.join("cur")).unwrap();
+    std::fs::write(away.join("cur/1:2,"), message("away-1@example.test")).unwrap();
+    std::os::unix::fs::symlink(&away, mailbox.maildir().join("away")).unwrap();
+    mailbox.notmuch(&["new", "--quiet"]);
+    let reader = reader(&mailbox);
+    for (id, why) in [
+        ("link-1@example.test", "symlink"),
+        ("away-1@example.test", "outside"),
+    ] {
+        let thread = mailbox.thread_of(id);
+        assert_eq!(thread.len(), 16, "notmuch did not index {id}");
+        let err = reader.show(&thread).unwrap_err().to_string();
+        assert!(err.contains(why), "{id}: {err}");
+        assert!(
+            !err.contains("secret") && !err.contains(&mailbox.dir.path().display().to_string())
+        );
+    }
+    let plain = mailbox.thread_of("plain-1@example.test");
+    assert!(reader.show(&plain).is_ok());
 }
