@@ -222,6 +222,31 @@ fn markup_in_the_body_is_refused_so_a_term_cannot_hide_in_it() {
 }
 
 #[test]
+fn a_bracketed_link_passes_and_a_term_joined_by_tags_or_references_does_not() {
+    let s = setup(DENY);
+    for body in [
+        "See <https://example.test/a> and <mailto:jo@example.test>.",
+        "Press <Enter> when 1 <2.",
+    ] {
+        let draft = CLEAN.replace("See you at noon about topic-a.", body);
+        assert_eq!(refused(&draft, &s.config), Vec::<String>::new(), "{body}");
+    }
+    for (body, kind) in [
+        ("Status of pro<span>ject-x.", "term"),
+        ("Status of pro<https://example.test/a>ject-x.", "term"),
+        ("Status of proj&#101ct-x.", "term"),
+        ("Status of pr&#X6Fject-x.", "term"),
+        ("Ask @blocked<i>handle.", "term"),
+        ("About topic-a and top<b>ic-b.", "pair"),
+        ("Gener<b>ated by a tool.", "attribution"),
+    ] {
+        let draft = CLEAN.replace("See you at noon about topic-a.", body);
+        let got = refused(&draft, &s.config);
+        assert!(got.iter().any(|r| r.contains(kind)), "{body}: {got:?}");
+    }
+}
+
+#[test]
 fn folded_headers_are_checked_unfolded() {
     let s = setup(DENY);
     let subject = CLEAN.replace("Subject: Friday", "Subject: Status of\n\tPROJECT-X");
