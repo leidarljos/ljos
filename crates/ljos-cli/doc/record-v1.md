@@ -157,8 +157,11 @@ The tracker pin file is `.ljos-seat-keys` at `$VISSUE_ROOT`, one
   after `/` is looked up as written. Each bare row pins the seat it
   reads as under the same rules: `inky`, `inky@39u` and `inky-n9o` all
   pin `inky`, `ljos-bot` pins `ljosbot`, `judge:model-1.5` pins
-  `judge-model-1-5` and `run-101` pins `run-101`. When rows pin the
-  voter's seat, the entry's key must be one of those rows' keys.
+  `judge-model-1-5` and `run-101` pins `run-101`. Rows that pin one seat
+  must pin one key, up to hex case and a small-order part: `inky <key1>`
+  beside `inky@39u <key2>` fails the check, since one seat would vote
+  under two keys. When rows pin the voter's seat, the entry must be
+  signed under that key.
 - with no pin file row for the voter id and none for its seat, the first
   key seen in this check is the pin for this check only
 - ingesting pins durably is what makes that pin persist across checks
