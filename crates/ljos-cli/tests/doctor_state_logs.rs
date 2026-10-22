@@ -281,6 +281,35 @@ fn doctor_names_a_cut_row_with_its_newline_damaged() {
     }
 }
 
+/// A log past the 32 MiB doctor reads, here a sparse file of zeros, is
+/// left unread and named damaged with its size, and stays as it was.
+#[test]
+fn doctor_does_not_read_a_log_past_its_limit() {
+    let limit = 32 << 20;
+    for name in ["guard bypass", "note queue"] {
+        let home = Home::new();
+        let log = if name == "guard bypass" {
+            home.bypass()
+        } else {
+            home.queue()
+        };
+        std::fs::File::create(&log)
+            .and_then(|file| file.set_len(limit + 1))
+            .expect("sparse log");
+        let before = home.tree();
+        let (_, out) = home.doctor(&[]).expect("doctor hung");
+        assert_eq!(home.tree(), before, "{name}");
+        let word = if name == "guard bypass" { "warn" } else { "no" };
+        let line = row(&out, name).unwrap_or_else(|| panic!("no {name} row:\n{out}"));
+        assert!(
+            line.starts_with(word)
+                && line.contains("damaged")
+                && line.contains(&format!("{} bytes", limit + 1)),
+            "{line}"
+        );
+    }
+}
+
 /// Another process holding the note-queue lock does not hold doctor: it
 /// tries the lock once, says the queue is busy in a row the short doctor
 /// shows, and says so no longer once the lock is let go. A queue dated a

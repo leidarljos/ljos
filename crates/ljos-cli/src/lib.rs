@@ -22032,13 +22032,18 @@ fn clear_nonblock(fd: std::os::unix::io::RawFd) -> std::io::Result<()> {
 /// `O_NONBLOCK` would wait, and reading a device such as `/dev/zero`
 /// would not end.
 pub(crate) fn read_state_file(path: &Path) -> std::io::Result<Vec<u8>> {
-    read_state_file_dated(path).map(|(bytes, _)| bytes)
+    read_state_file_dated(path, u64::MAX).map(|(bytes, _)| bytes)
 }
 
 /// [`read_state_file`] with the log's mtime, taken from the same
 /// descriptor once the read is done, so a row appended during the read
-/// leaves the time no older than its bytes. A missing log has none.
-fn read_state_file_dated(path: &Path) -> std::io::Result<(Vec<u8>, Option<std::time::SystemTime>)> {
+/// leaves the time no older than its bytes. A missing log has none. A
+/// log longer than `limit` bytes is an error of kind `FileTooLarge`, and
+/// no more than one byte past `limit` is read to find that out.
+fn read_state_file_dated(
+    path: &Path,
+    limit: u64,
+) -> std::io::Result<(Vec<u8>, Option<std::time::SystemTime>)> {
     use std::io::Read;
     let (dir, name) = open_state_dir(path)?;
     let mut file = match open_regular_at(&dir, &name, path, libc::O_RDONLY, 0) {
@@ -22046,10 +22051,25 @@ fn read_state_file_dated(path: &Path) -> std::io::Result<(Vec<u8>, Option<std::t
         Err(err) if err.raw_os_error() == Some(libc::ENOENT) => return Ok((Vec::new(), None)),
         Err(err) => return Err(err),
     };
+    let too_large = |size: u64| {
+        std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            format!("it is {size} bytes, past the {limit}-byte limit, so it was not read"),
+        )
+    };
+    let size = file.metadata()?.len();
+    if size > limit {
+        return Err(too_large(size));
+    }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    let modified = file.metadata()?.modified().ok();
-    Ok((bytes, modified))
+    file.by_ref()
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    let meta = file.metadata()?;
+    if bytes.len() as u64 > limit {
+        return Err(too_large(meta.len()));
+    }
+    Ok((bytes, meta.modified().ok()))
 }
 
 /// Replace `path` with `bytes` through the directory ljos made, refusing a
@@ -22396,11 +22416,18 @@ fn state_log_named(row: &str) -> Option<&'static str> {
 /// `write_all` under the lock, so a live append ends well inside this.
 const UNFINISHED_ROW_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The longest state log the doctor reads. A row is a few hundred bytes,
+/// so this is over a hundred thousand rows. A log past it is a runaway
+/// writer or a file put in its place, and reading all of it would hold
+/// doctor and its memory for as long as the file goes on.
+const DOCTOR_READ_LIMIT: u64 = 32 << 20;
+
 /// A state log's bytes for a doctor row, or the row's text when the log
 /// is damaged. A missing log is empty. Any other refusal from
 /// [`read_state_file`], a symlink, a fifo, a socket, a directory or a log
 /// ljos may not read, is damaged, since calling it empty would hide the
-/// swap. So is a last row without its newline that has not been written
+/// swap. So is a log past [`DOCTOR_READ_LIMIT`], left unread, and a last
+/// row without its newline that has not been written
 /// to for [`UNFINISHED_ROW_GRACE`]: [`complete_rows`] leaves it for a
 /// live writer to finish, and nobody is finishing it. An mtime further
 /// ahead of the clock than the grace is no live write either, since the
@@ -22408,7 +22435,7 @@ const UNFINISHED_ROW_GRACE: std::time::Duration = std::time::Duration::from_secs
 fn doctor_state_log(what: &str, path: &Path) -> std::result::Result<Vec<u8>, String> {
     let damaged =
         |why: &dyn std::fmt::Display| format!("the {what} at {} is damaged: {why}", path.display());
-    let (bytes, modified) = match read_state_file_dated(path) {
+    let (bytes, modified) = match read_state_file_dated(path, DOCTOR_READ_LIMIT) {
         Ok(read) => read,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => return Err(damaged(&err)),
@@ -42187,6 +42214,22 @@ mod tests {
             commands.contains(&"first") && commands.contains(&"second"),
             "{commands:?}"
         );
+    }
+
+    /// A log up to the limit is read whole; one byte past it is refused
+    /// with its size, and the plain read has no limit.
+    #[test]
+    fn a_state_log_past_the_limit_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("ljos/bypass.jsonl");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, b"0123456789").unwrap();
+        let (bytes, _) = read_state_file_dated(&log, 10).unwrap();
+        assert_eq!(bytes, b"0123456789");
+        let err = read_state_file_dated(&log, 9).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::FileTooLarge);
+        assert!(err.to_string().contains("10 bytes"), "{err}");
+        assert_eq!(read_state_file(&log).unwrap(), b"0123456789");
     }
 
     /// A row torn in the middle of the log, bytes that are not UTF-8 among
