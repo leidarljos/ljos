@@ -21647,12 +21647,35 @@ pub fn format_doctor(rows: &[Habitat]) -> String {
 }
 
 /// The line `ljos doctor` opens with: whether the seat is ready, which
-/// required parts do not answer, and how many optional parts are off.
+/// parts work or which required parts do not answer, and how many
+/// optional parts are off.
 #[must_use]
 pub fn doctor_summary(rows: &[Habitat]) -> String {
     let down = failing(rows);
     let off = rows.iter().filter(|h| doctor_word(h) == "info").count();
-    summary_line(&down, off)
+    let words: Vec<(&str, &str)> = rows.iter().map(|h| (doctor_word(h), h.name)).collect();
+    summary_line(&down, &working_parts(&words), off)
+}
+
+/// The parts a ready line can name, each with the rows that answer for
+/// it. A ready seat can still lack one: the tracker row is optional.
+const READY_PARTS: &[(&str, &[&str])] = &[
+    ("memory", &["pack"]),
+    ("tracker", &["tracker"]),
+    ("command guard", &["ljos-policyd", "policy", "guard"]),
+];
+
+/// The parts of [`READY_PARTS`] with a row in the doctor and every such
+/// row `ok`, from each row's word and name.
+fn working_parts(words: &[(&str, &str)]) -> Vec<&'static str> {
+    READY_PARTS
+        .iter()
+        .filter(|(_, names)| {
+            let mut mine = words.iter().filter(|(_, name)| names.contains(name));
+            mine.clone().next().is_some() && mine.all(|(word, _)| *word == "ok")
+        })
+        .map(|(part, _)| *part)
+        .collect()
 }
 
 /// `a`, `a and b`, `a, b and c`.
@@ -21664,9 +21687,13 @@ fn and_list(names: &[&str]) -> String {
     }
 }
 
-fn summary_line(down: &[&str], off: usize) -> String {
+fn summary_line(down: &[&str], working: &[&str], off: usize) -> String {
     let mut line = if down.is_empty() {
-        "ljos is ready: memory, tracker and command guard work.".to_string()
+        match working {
+            [] => "ljos is ready.".to_string(),
+            [one] => format!("ljos is ready: {one} works."),
+            parts => format!("ljos is ready: {} work.", and_list(parts)),
+        }
     } else {
         let names: Vec<&str> = down.iter().copied().map(plain_part).collect();
         format!(
@@ -21692,15 +21719,23 @@ fn plain_part(name: &str) -> &str {
 }
 
 /// The short doctor: the summary line, then only the rows that need
-/// action (`no` and `warn`), each with the fix its state names.
+/// action (`no` and `warn`) and the optional rows that are off, each with
+/// the fix its state names.
 #[must_use]
 pub fn format_doctor_short(rows: &[Habitat]) -> String {
     let needs: Vec<Habitat> = rows
         .iter()
-        .filter(|h| matches!(doctor_word(h), "no" | "warn"))
+        .filter(|h| shown_short(doctor_word(h), h.name))
         .cloned()
         .collect();
     format!("{}{}", doctor_summary(rows), format_doctor(&needs))
+}
+
+/// Whether the short doctor prints a row, from its word and name. An
+/// optional row that is off leaves its part out of the ready line, and
+/// this row says why.
+fn shown_short(word: &str, name: &str) -> bool {
+    matches!(word, "no" | "warn") || (word == "info" && OPTIONAL_ROWS.contains(&name))
 }
 
 /// One section of a sitting's report, cut for [`compact_sitting`].
@@ -21709,11 +21744,21 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
         "doctor" => {
             let mut down = Vec::new();
             let mut off = 0;
+            let mut words = Vec::new();
             let mut act = String::new();
             for l in lines {
                 let cols: Vec<&str> = l.splitn(3, '\t').collect();
+                if let [word, name, _] = cols.as_slice() {
+                    words.push((*word, *name));
+                }
                 match cols.as_slice() {
-                    ["info", _, _] => off += 1,
+                    ["info", name, _] => {
+                        off += 1;
+                        if shown_short("info", name) {
+                            act.push_str(l);
+                            act.push('\n');
+                        }
+                    }
                     ["ok", _, _] => {}
                     [word @ ("no" | "warn"), name, _] => {
                         if *word == "no" && (REQUIRED.contains(name) || *name == "pack") {
@@ -21729,7 +21774,7 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                     _ => {}
                 }
             }
-            out.push_str(&summary_line(&down, off));
+            out.push_str(&summary_line(&down, &working_parts(&words), off));
             out.push_str(&act);
         }
         "island" => {
@@ -38406,14 +38451,66 @@ mod tests {
         let rows = vec![
             habitat_row("pack", "answers", true),
             habitat_row("tracker", "answers", true),
-            habitat_row("host key", "none yet", false),
+            habitat_row("policy", "ljos-policyd 0.4.6 (phronesis)", true),
+            habitat_row("ljos-hud", "not on PATH", false),
         ];
         let short = format_doctor_short(&rows);
         assert_eq!(
             short,
             "ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.\n"
         );
-        assert!(format_doctor(&rows).contains("host key"));
+        assert!(format_doctor(&rows).contains("info\tljos-hud\t"));
+    }
+
+    #[test]
+    fn a_ready_line_names_only_the_parts_that_work() {
+        let tracker = habitat_row(
+            "tracker",
+            "`vissue identity` exited 1: not inside a tracker",
+            false,
+        );
+        let mut rows = vec![
+            habitat_row("pack", "answers", true),
+            tracker.clone(),
+            habitat_row("policy", "ljos-policyd 0.4.6 (phronesis)", true),
+            habitat_row("host key", "none yet", false),
+            habitat_row("ljos-hud", "not on PATH", false),
+        ];
+        assert!(healthy(&rows));
+        assert_eq!(
+            format_doctor_short(&rows),
+            "ljos is ready: memory and command guard work. Optional extras: `ljos doctor --all`.\n\
+             info\ttracker\t`vissue identity` exited 1: not inside a tracker\n\
+             info\thost key\tnone yet\n"
+        );
+        rows.push(habitat_row("guard", "off: LJOS_OFF is set", false));
+        let short = format_doctor_short(&rows);
+        assert!(
+            short.starts_with("ljos is ready: memory works. Optional extras"),
+            "{short}"
+        );
+        assert!(
+            short.contains("warn\tguard\toff: LJOS_OFF is set\n"),
+            "{short}"
+        );
+
+        // A sitting's report cuts its doctor section to the same line.
+        let full = format!(
+            "== doctor\n{}",
+            format_doctor(&[
+                habitat_row("ljos-policyd", "/bin/ljos-policyd  0.4.6", true),
+                habitat_row("pack", "answers", true),
+                tracker,
+            ])
+        );
+        let sat = compact_sitting(&full, "Software-x");
+        assert!(
+            sat.starts_with(
+                "ljos is ready: memory and command guard work. Optional extras: `ljos doctor --all`.\n\
+                 info\ttracker\t`vissue identity` exited 1: not inside a tracker\n"
+            ),
+            "{sat}"
+        );
     }
 
     #[test]
@@ -38429,23 +38526,22 @@ mod tests {
         ];
         let short = format_doctor_short(&rows);
         let lines: Vec<&str> = short.lines().collect();
-        // The encoder is optional, so a missing one is an info row, not a
-        // reason the seat is not ready. The short doctor still names the
-        // pack, with its fix.
+        // The encoder is optional, so a missing one is an info row under
+        // the line, not a reason the seat is not ready. The short doctor
+        // still names the pack, with its fix.
         assert_eq!(
             lines[0],
             "ljos is not ready: memory does not answer. Optional extras: `ljos doctor --all`."
         );
-        assert_eq!(lines.len(), 2, "{short}");
+        assert_eq!(lines.len(), 3, "{short}");
         assert!(lines[1].starts_with("no\tpack\tno pack: run packset ensure"));
+        assert!(lines[2].starts_with("info\tencoder\tnot installed"));
         assert!(!short.contains("tracker"), "{short}");
-        assert!(!short.contains("encoder"), "{short}");
-        assert!(format_doctor(&rows).contains("info\tencoder\t"));
     }
 
     #[test]
     fn a_compact_sitting_keeps_what_needs_action_and_the_memories() {
-        let full = "== doctor\nok\tpack\tanswers\ninfo\thost key\tnone yet\nencoder down: the pack ranks by words alone\n\
+        let full = "== doctor\nok\tljos-policyd\t/bin/ljos-policyd  0.4.6\nok\tpack\tanswers\ninfo\thost key\tnone yet\nok\ttracker\tvissue 0.21.0 root=/t prefix=Software\nencoder down: the pack ranks by words alone\n\
 == sync\nsync: this repository names no scope\n\
 == cards\n\
 == due\n2 due; the soonest: abc\n\
@@ -38460,6 +38556,7 @@ mod tests {
         assert_eq!(
             short,
             "ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.\n\
+info\thost key\tnone yet\n\
 encoder down: the pack ranks by words alone\n\
 2 due; the soonest: abc\n\
 claimed Software-x for ljos-bot@ux-fix\n\
@@ -39324,6 +39421,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         for line in [RECALL_HEADER, FAILURE_RECALL_HEADER] {
             assert!(line.chars().count() <= 100, "{line}");
         }
+        let all: &[&str] = &["memory", "tracker", "command guard"];
         let cases: [(&[&str], usize); 4] = [
             (&[], 0),
             (&[], 6),
@@ -39331,7 +39429,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             (&["pack", "ljos-policyd"], 1),
         ];
         for (down, off) in cases {
-            let line = summary_line(down, off);
+            let line = summary_line(down, all, off);
             assert!(line.trim_end().chars().count() <= 100, "{line}");
             assert!(!line.contains("pack"), "{line}");
         }
