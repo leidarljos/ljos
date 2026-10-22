@@ -260,7 +260,7 @@ impl Push {
                 }
                 _ => word.clone(),
             };
-            if let Some(why) = self.at.spec(&spec) {
+            if let Some(why) = self.at.spec(&spec, remote.map(String::as_str)) {
                 return Some(why);
             }
         }
@@ -407,7 +407,7 @@ impl Checkout {
     /// `+` off), the branch checked out for `HEAD`, or each local ref a
     /// wildcard maps there. A destination the shell still has to expand
     /// cannot be told, and is refused.
-    fn spec(&self, spec: &str) -> Option<String> {
+    fn spec(&self, spec: &str, remote: Option<&str>) -> Option<String> {
         let spec = spec.strip_prefix('+').unwrap_or(spec);
         if spec == ":" {
             return self.local(&["refs/heads/"], "a matching push");
@@ -444,6 +444,13 @@ impl Checkout {
                 })?;
                 under_cursor(&landed).then(|| format!("`{spec}` pushes {r} to {landed}"))
             });
+        }
+        if bare && !under_cursor(dst) {
+            if let Some(landed) = self.map_bare_destination(src, remote) {
+                if landed != dst && under_cursor(&landed) {
+                    return Some(format!("`{spec}` pushes {src} to {landed}"));
+                }
+            }
         }
         under_cursor(dst).then(|| format!("this push updates {dst}"))
     }
@@ -484,7 +491,7 @@ impl Checkout {
             .map(|(_, v)| v.as_str())
             .collect();
         if !pushes.is_empty() {
-            return pushes.iter().find_map(|spec| self.spec(spec));
+            return pushes.iter().find_map(|spec| self.spec(spec, Some(remote)));
         }
         match get("push.default").unwrap_or("simple") {
             "nothing" => None,
@@ -501,4 +508,52 @@ impl Checkout {
                 .map(|b| format!("this push updates {b}, the branch checked out")),
         }
     }
+
+    /// Where a bare source-only refspec lands once git applies remapping.
+    fn map_bare_destination(&self, src: &str, remote: Option<&str>) -> Option<String> {
+        let settings = self.settings()?;
+        let get = |key: &str| {
+            settings
+                .iter()
+                .rev()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        let branch = src.strip_prefix("refs/heads/").unwrap_or(src);
+        let remote = remote
+            .or_else(|| get(&format!("branch.{branch}.pushremote")))
+            .or_else(|| get("remote.pushdefault"))
+            .or_else(|| get(&format!("branch.{branch}.remote")))
+            .unwrap_or("origin");
+        let key = format!("remote.{remote}.push");
+        for push in settings.iter().filter(|(k, _)| *k == key) {
+            if let Some(dst) = map_push_spec(&push.1, src) {
+                return Some(dst);
+            }
+        }
+        match get("push.default").unwrap_or("simple") {
+            "upstream" | "tracking" => {
+                let branch_remote = get(&format!("branch.{branch}.remote"));
+                if branch_remote.is_none_or(|r| r == remote) {
+                    return get(&format!("branch.{branch}.merge")).map(str::to_string);
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+}
+
+/// Where `src` lands under one push refspec from `remote.<name>.push`.
+fn map_push_spec(spec: &str, src: &str) -> Option<String> {
+    let spec = spec.strip_prefix('+').unwrap_or(spec);
+    let (from, to) = spec.split_once(':')?;
+    let matched = land(from, to, src).or_else(|| {
+        (!src.starts_with("refs/")).then(|| land(from, to, &format!("refs/heads/{src}")))?
+    });
+    if matched.is_some() {
+        return matched;
+    }
+    let from = from.strip_prefix("refs/heads/").unwrap_or(from);
+    (from == src).then(|| to.to_string())
 }

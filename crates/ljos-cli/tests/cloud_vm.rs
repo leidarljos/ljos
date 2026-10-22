@@ -1569,6 +1569,46 @@ fn cloud_guard_denies_heads_and_tags_shortcuts_under_cursor() {
 }
 
 #[test]
+fn cloud_guard_reads_where_bare_refspecs_land() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-bare-map", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let repo = clone_of(root.path(), &origin, "probe-bare-map");
+
+    git(&repo, &["branch", "cursor/existing"]);
+    git(
+        &repo,
+        &["push", "-q", "origin", "cursor/existing:cursor/existing"],
+    );
+    git(&repo, &["checkout", "-q", "-b", "fix"]);
+    git(&repo, &["config", "push.default", "upstream"]);
+    git(
+        &repo,
+        &[
+            "branch",
+            "--set-upstream-to",
+            "origin/cursor/existing",
+            "fix",
+        ],
+    );
+    git(
+        &repo,
+        &[
+            "config",
+            "remote.origin.push",
+            "refs/heads/main:refs/heads/cursor/mapped",
+        ],
+    );
+
+    refused("git push origin fix", &repo);
+    refused("git push origin main", &repo);
+}
+
+#[test]
 fn cloud_guard_reads_the_gh_pr_verb_and_never_its_arguments() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
