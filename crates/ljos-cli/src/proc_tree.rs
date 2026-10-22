@@ -893,6 +893,30 @@ fn runner_at(
     kept_below(file, &root, &store, person, expect).then_some(runner)
 }
 
+/// Whether `path` is a runtime ([`RUNTIMES`]) by its exact name, and
+/// an installed copy kept as a runner file is ([`runner_of_file`]):
+/// below an install root, left to the person, and the file `expect`.
+#[cfg(target_os = "linux")]
+fn runtime_of_file(
+    path: &Path,
+    home: Option<&Path>,
+    store: &Path,
+    person: &Person,
+    expect: (u64, u64),
+) -> bool {
+    let Ok(file) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    let named = file
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|name| RUNTIMES.contains(&name));
+    let (roots, store) = resolved_roots(home, store);
+    named
+        && root_below(&file, &roots, &store)
+            .is_some_and(|root| kept_below(&file, &root, &store, person, expect))
+}
+
 /// The install roots for `home` ([`install_roots`]) and the Nix store
 /// `store`, resolved.
 fn resolved_roots(home: Option<&Path>, store: &Path) -> (Vec<PathBuf>, PathBuf) {
@@ -942,8 +966,11 @@ fn walk_kept(owners: &[Owner], at: usize, in_store: bool, person: &Person) -> bo
 }
 
 /// The runner `pid` is, from the file the kernel runs it from, never
-/// from the name it gives itself. A runtime such as `node` is the runner
-/// whose script it runs, that script's path resolved on disk.
+/// from the name it gives itself. An installed runtime such as `node`
+/// ([`runtime_of_file`]) is the runner whose script it runs, that
+/// script's path resolved on disk and judged as a runner file is. The
+/// script's path comes from the process's own arguments, so only a
+/// runtime the person installed is believed about it.
 #[cfg(target_os = "linux")]
 #[must_use]
 pub fn exe_runner(pid: u32) -> Option<&'static str> {
@@ -993,8 +1020,7 @@ fn runner_from(
     if let Some(r) = runner_of_file(exe, home, store, person, running) {
         return Some(r);
     }
-    let base = exe.file_name()?.to_str()?;
-    if !RUNTIMES.iter().any(|r| base.starts_with(r)) {
+    if !runtime_of_file(exe, home, store, person, running) {
         return None;
     }
     let script = std::fs::canonicalize(script()?).ok()?;
@@ -1695,6 +1721,67 @@ mod tests {
         let runner = |running| runner_from(&claude, running, || None, Some(&home), &store, &person);
         assert_eq!(runner(Some((meta.dev(), meta.ino()))), Some("claude"));
         assert_eq!(runner(None), None);
+    }
+
+    /// A runtime's script names the runner only when the runtime is an
+    /// installed copy of its exact name, kept as a runner file is and the
+    /// file the process runs. A `node` of a tool call's own making, or a
+    /// program whose name merely starts like one, may name any script.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_script_names_the_runner_only_for_an_installed_runtime() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let base = tempfile::Builder::new()
+            .prefix(".ljos-runtime-")
+            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .unwrap();
+        let home = base.path().join("u");
+        let away = tempfile::tempdir().unwrap();
+        let program = |dir: &Path, name: &str| {
+            std::fs::create_dir_all(dir).unwrap();
+            let path = dir.join(name);
+            std::fs::write(&path, "").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let id = |path: &Path| {
+            let meta = std::fs::metadata(path).unwrap();
+            (meta.dev(), meta.ino())
+        };
+        let cli = program(
+            &home.join(".npm-global/lib/node_modules/@anthropic-ai/claude-code"),
+            "cli.js",
+        );
+        let bin = home.join(".local/bin");
+        let node = program(&bin, "node");
+        let person = Person::new(&SystemAccounts);
+        let store = PathBuf::from(NIX_STORE);
+        let runner = |exe: &Path, running| {
+            runner_from(
+                exe,
+                Some(running),
+                || Some(cli.clone()),
+                Some(&home),
+                &store,
+                &person,
+            )
+        };
+        assert_eq!(runner(&node, id(&node)), Some("claude"));
+        assert_eq!(runner(&node, id(&cli)), None);
+        for planted in [
+            program(&bin, "node-v20"),
+            program(&bin, "nodejs_modules"),
+            program(away.path(), "node"),
+        ] {
+            assert_eq!(
+                runner(&planted, id(&planted)),
+                None,
+                "{}",
+                planted.display()
+            );
+        }
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o757)).unwrap();
+        assert_eq!(runner(&node, id(&node)), None);
     }
 
     /// A Nix store entry is a runner only while Nix alone keeps it. A
