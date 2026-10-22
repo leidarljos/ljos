@@ -5958,6 +5958,11 @@ pub fn hook_directory(input: &str) -> Result<PathBuf> {
     if !base.is_absolute() {
         bail!("hook working directory must be absolute");
     }
+    tool_directory_from(&value, &base)
+}
+
+/// [`hook_directory`] from the payload `value` and its absolute `base`.
+fn tool_directory_from(value: &Value, base: &Path) -> Result<PathBuf> {
     let base = std::fs::canonicalize(base).context("hook working directory is unavailable")?;
     if !base.is_dir() {
         bail!("hook working directory is not a directory");
@@ -5985,7 +5990,20 @@ pub fn hook_directory(input: &str) -> Result<PathBuf> {
     if !directory.is_dir() {
         bail!("tool working directory is not a directory");
     }
+    if !enterable(&directory) {
+        bail!("tool working directory cannot be entered");
+    }
     Ok(directory)
+}
+
+/// Whether this process may enter `dir`, as a command started there must.
+fn enterable(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    let Ok(path) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `path` is a NUL-terminated string that outlives the call.
+    unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 }
 }
 
 /// Resolve one tool workdir the way opencode does: lexical path resolution.
@@ -6030,14 +6048,31 @@ fn lexical_path(path: &Path) -> PathBuf {
 /// Directory a tool command is judged in.
 ///
 /// A relative workdir resolves against the session directory, as opencode's
-/// shell tool does with `path.resolve(directory, workdir)`. A directory that
-/// cannot be resolved is not a refusal: the session directory is used when
-/// it exists, and otherwise the process directory.
+/// shell tool does with `path.resolve(directory, workdir)`, and a relative
+/// session directory against the process directory.
+///
+/// # Errors
+///
+/// The directory does not resolve: it is missing, not a directory, a
+/// symlink loop, or one this process cannot enter. The command does not
+/// run in [`fallback_directory`], so it is not judged there.
+pub fn command_directory(input: &str) -> Result<PathBuf> {
+    let value = serde_json::from_str::<Value>(input).unwrap_or(Value::Null);
+    let here = || std::env::current_dir().context("hook working directory is unavailable");
+    let base = match session_path_raw(&value).map(Path::new) {
+        Some(path) if path.is_absolute() => path.to_path_buf(),
+        Some(path) => here()?.join(path),
+        None => here()?,
+    };
+    tool_directory_from(&value, &base)
+}
+
+/// Where a call whose [`command_directory`] does not resolve is read: the
+/// session directory when it exists, and otherwise the process directory.
+/// A prompt is read there, and so is a command with
+/// `LJOS_GUARD_FAIL_OPEN=1`.
 #[must_use]
-pub fn command_directory(input: &str) -> Option<PathBuf> {
-    if let Ok(dir) = hook_directory(input) {
-        return Some(dir);
-    }
+pub fn fallback_directory(input: &str) -> Option<PathBuf> {
     session_directory(input).or_else(|| std::env::current_dir().ok().filter(|path| path.is_dir()))
 }
 
@@ -11387,12 +11422,18 @@ pub fn check_seat_signatures(
     let can_date_legacy = tracker_is_git == Some(true);
     let v = issue_record(issue).map_err(|e| format!("{issue}: not readable: {e:#}"))?;
     let legacy = |voter: &str, choice: &str| {
-        can_date_legacy && ballot_sig::recorded_before_signing(issue, voter, choice)
+        can_date_legacy
+            && ballot_sig::recorded_before_signing(issue, voter, choice).unwrap_or(false)
     };
     let notes = ballot_sig::notes_of(&v);
     let (pins, _) = ballot_sig::pins_for_check().map_err(|e| {
         format!("{issue}: the seat pins are not one key per seat, so it decides nothing for a push: {e:#}")
     })?;
+    if can_date_legacy {
+        if let Some(root) = ballot_sig::env_root() {
+            slot::require_tracker_history(&root)?;
+        }
+    }
     let dropped = slot::dropped_pins(&pins);
     if !dropped.is_empty() {
         return Err(format!(
@@ -11400,12 +11441,19 @@ pub fn check_seat_signatures(
             dropped.join(", ")
         ));
     }
-    let starts = slot::starts();
-    let stands =
-        |seat: &str| slot::stands(seat, pins.get(seat).map(String::as_str), starts.as_deref());
-    let before_pin = |note: &str, voter: &str| {
-        pins.get(voter)
-            .is_some_and(|key| slot::recorded_before_pin(issue, note, voter, key).unwrap_or(true))
+    let starts = slot::starts()?;
+    let stands = |seat: &str| {
+        slot::stands(seat, pins.get(seat).map(String::as_str), starts.as_deref()).unwrap_or(false)
+    };
+    let before_pin = |note: &str, voter: &str| match pins.get(voter) {
+        Some(key) => match slot::recorded_before_pin(issue, note, voter, key) {
+            Ok(Some(before)) => before,
+            // Not a git checkout: there is no commit order to refuse on.
+            Ok(None) => true,
+            // Incomplete history must not count the slot.
+            Err(_) => false,
+        },
+        None => false,
     };
     let signed = |voter: &str| {
         notes
@@ -18938,22 +18986,20 @@ fn cite_ballots(
     Ok((ballots, cite_roster(cite)?))
 }
 
-/// The persona names a push cite leaves out: the pack's roster. A seat
-/// whose pack is off on purpose (`PACKSET_URL=off`) has no personas.
+/// The persona names a push cite leaves out: the pack's roster. An empty
+/// roster is an answer from the pack. `PACKSET_URL=off` is not an answer.
 ///
 /// # Errors
 ///
-/// The pack is on and its roster does not answer: a persona's ballot
-/// cannot be told from a seat's, so no cite stands until it does.
+/// The roster cannot be read, including when the pack is off. A persona's
+/// ballot cannot be told from a seat's, so no cite stands until the pack
+/// answers.
 pub fn cite_roster(cite: &str) -> std::result::Result<std::collections::BTreeSet<String>, String> {
     match personas_from_pack() {
         Ok(personas) => Ok(personas
             .into_iter()
             .map(|p| p.name.trim().to_string())
             .collect()),
-        Err(_) if std::env::var("PACKSET_URL").is_ok_and(|url| url == "off") => {
-            Ok(std::collections::BTreeSet::new())
-        }
         Err(e) => Err(format!(
             "{cite}: the roster is not readable, so persona ballots cannot be left out: {e:#}"
         )),
@@ -27808,6 +27854,16 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
 
 /// [`policy_with_memory`] for a command that runs in `cwd`.
 pub fn policy_with_memory_in(argv: &[String], cwd: Option<&Path>) -> Result<String> {
+    policy_reading_in(argv, cwd, || tcb_check_in(argv, cwd))
+}
+
+/// [`policy_with_memory_in`] with `tcb` for ljos-policyd's answer, so a
+/// shell line is asked about the way the hook asks.
+fn policy_reading_in(
+    argv: &[String],
+    cwd: Option<&Path>,
+    tcb: impl FnOnce() -> Option<String>,
+) -> Result<String> {
     let line = policy_line(argv)?;
     let call = HookCall {
         event: "argv".into(),
@@ -27860,7 +27916,7 @@ pub fn policy_with_memory_in(argv: &[String], cwd: Option<&Path>) -> Result<Stri
     let tcb = if judged || off {
         None
     } else {
-        match tcb_check_in(argv, cwd) {
+        match tcb() {
             // `git-force-push` asks, the same way the push gate does. The raw
             // `deny` line would read as a refusal beside that ask.
             Some(tcb) if policyd_token(&tcb) == "git-force-push" => None,
@@ -28001,6 +28057,9 @@ fn guard_start_directory(cwd: Option<&Path>) -> Result<PathBuf> {
     if !directory.is_dir() {
         bail!("guard cwd is not a directory: {}", directory.display());
     }
+    if !enterable(&directory) {
+        bail!("guard cwd cannot be entered: {}", directory.display());
+    }
     Ok(directory)
 }
 
@@ -28039,7 +28098,7 @@ pub fn guard_report_in(line: &str, cwd: Option<&Path>) -> Result<GuardReport> {
         bail!("guard: pass the command to check");
     }
     let warning = gates::take_push_warning();
-    let mut text = policy_with_memory_in(&argv, cwd)?;
+    let mut text = policy_reading_in(&argv, cwd, || tcb_line_in(line, cwd))?;
     let verdict = policy_verdict(&text);
     if verdict == "deny" {
         bail!("{text}");
@@ -28165,97 +28224,332 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if let Some(rule) = static_guard_in(line, cwd) {
         return Some(rule);
     }
-    let mut answered = false;
-    let mut opened = false;
-    // The whole shell line is judged as one call. The substitutions and
-    // scripts inside the line run too, so each of their pipelines is judged
-    // as well: `echo $(git push -f)` is a push.
-    // A here-document fed to `python3 -` or `node` is that program, sent
-    // as `python3 -c BODY`, so a shell call inside it is judged.
-    // A download and each later pipeline go once more as one call, so a
-    // file `curl -o i.sh URL` saves and `sh i.sh` then runs is judged as
-    // the pair it is.
-    let mut argvs = Vec::new();
-    let words = shell_words(line);
-    if !words.is_empty() {
-        argvs.push(words);
+    let Some(t) = tcb_line_in(line, cwd) else {
+        return policyd_required().then(|| Rule {
+            pattern: "ljos-policyd".into(),
+            verdict: "deny".into(),
+            reason: policyd_required_reason(),
+        });
+    };
+    if !t.starts_with("deny") {
+        // Only the fail-open marker is a fault the switch let through. An
+        // unready token is an allow with a note and is not a bypass.
+        if t.trim().starts_with("allow\tfail-open\t") {
+            log_bypass(
+                "switch",
+                "LJOS_GUARD_FAIL_OPEN=1",
+                line,
+                &Rule {
+                    pattern: "ljos-policyd".into(),
+                    verdict: "deny".into(),
+                    reason: "guard-fault".into(),
+                },
+            );
+        }
+        if let Some(note) = guard_note_of(&t) {
+            set_guard_note(note);
+        }
+        return None;
     }
+    let token = policyd_token(&t);
+    let token = if token.is_empty() { "tcb" } else { token };
+    // A force push asks, whether the table or the phronesis law
+    // (`git-force-push: ...`) refused it. The other checks still deny.
+    let code = token.split(':').next().unwrap_or(token).trim();
+    let ask = code == "git-force-push";
+    Some(Rule {
+        pattern: if ask {
+            code.to_string()
+        } else {
+            "ljos-policyd".into()
+        },
+        verdict: if ask { "ask" } else { "deny" }.into(),
+        reason: policyd_reason(token),
+    })
+}
+
+/// What ljos-policyd is asked about `line`: the line itself as `bash -c
+/// LINE`, so it reads the line with its own shell lexer, subshells,
+/// substitutions and separators with no space around them included,
+/// and with each backslash-newline already joined, see [`tcb_script`].
+/// A here-document fed to `python3 -` or `node` is that program, sent as
+/// `python3 -c BODY`, so a shell call inside it is judged. A download and
+/// each later pipeline go once more as one call, so a file `curl -o i.sh
+/// URL` saves and `sh i.sh` then runs is judged as the pair it is.
+fn tcb_argvs(line: &str) -> Vec<Vec<String>> {
+    let script = tcb_script(line);
+    let mut argvs = vec![vec!["bash".to_string(), "-c".to_string(), script.clone()]];
     argvs.extend(stdin_programs(line));
-    argvs.extend(fetch_pairs(line));
-    for argv in argvs {
-        if argv.is_empty() {
+    argvs.extend(fetch_pairs(&script));
+    argvs.retain(|argv| !argv.is_empty());
+    argvs
+}
+
+/// `line` as ljos-policyd is to read it. Each backslash-newline is
+/// dropped, as the shell drops them before it splits words, but not
+/// inside single quotes or `$'...'`, in a comment, or after an escaped
+/// backslash; ljos-policyd's lexer would read the newline as part of the
+/// next word. Each here-document's body, which it would read as commands,
+/// stands as [`heredoc_reading`] says.
+fn tcb_script(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    tcb_text(&chars, Some(heredocs_are_data(line)))
+}
+
+/// [`tcb_script`] over `chars`. `data` is whether a here-document body is
+/// data, and None inside a substitution, subshell or `${...}`, where
+/// `<<` opens no here-document this reads: `$((1<<2))` is a shift.
+fn tcb_text(chars: &[char], data: Option<bool>) -> String {
+    let mut out = String::with_capacity(chars.len());
+    let mut double = false;
+    // Each here-document waiting for its line to end: where `<<WORD` sits
+    // in `out`, the word, and whether it was quoted.
+    let mut pending: Vec<(std::ops::Range<usize>, String, bool)> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        // A substitution, subshell or `${...}`: its opener, then its inside.
+        let open = match (c, next) {
+            ('$', Some('(' | '{' | '[')) | ('<' | '>', Some('(')) if c == '$' || !double => 2,
+            ('`', _) => 1,
+            ('(', _) if !double && opens_subshell(chars, i) => 1,
+            _ => 0,
+        };
+        if open > 0 {
+            let end = if c == '$' {
+                construct_end(chars, i)
+            } else {
+                nested_end(chars, i)
+            };
+            // bash may read a waiting body from inside a construct that
+            // spans lines, so such a body is left where it stands.
+            if chars[i..end].contains(&'\n') {
+                pending.clear();
+            }
+            let inner = (i + open).min(end);
+            out.extend(&chars[i..inner]);
+            out.push_str(&tcb_text(&chars[inner..end], None));
+            i = end;
             continue;
         }
-        match tcb_check_in(&argv, cwd) {
-            Some(t) if t.starts_with("deny") => {
-                clear_guard_note();
-                let token = policyd_token(&t);
-                let token = if token.is_empty() { "tcb" } else { token };
-                // A force push asks, whether the table or the phronesis
-                // law (`git-force-push: ...`) refused it. The other checks
-                // still deny. A lease push the checkout clears runs:
-                // ljos-policyd cannot read where a bare one goes.
-                let code = token.split(':').next().unwrap_or(token).trim();
-                let ask = code == "git-force-push";
-                if ask && lease_cleared(&argv, cwd) {
-                    answered = true;
-                    continue;
-                }
-                // A faulted guard still lets the repair through: `ljos
-                // doctor` and `ljos onboard`, and nothing else on the line.
-                // A real deny is not a fault and still stands.
-                if code == "guard-fault" && repair_line(line) {
-                    let why = token
-                        .split_once(':')
-                        .map(|(_, detail)| detail.trim())
-                        .filter(|detail| !detail.is_empty())
-                        .unwrap_or("did not start");
-                    set_guard_note(unhealthy_note(why));
-                    answered = true;
-                    continue;
-                }
-                return Some(Rule {
-                    pattern: if ask {
-                        code.to_string()
-                    } else {
-                        "ljos-policyd".into()
-                    },
-                    verdict: if ask { "ask" } else { "deny" }.into(),
-                    reason: policyd_reason(token),
-                });
+        let end = match c {
+            '\\' if next == Some('\n') => {
+                i += 2;
+                continue;
             }
-            Some(t) => {
-                // Only the fail-open marker is a fault the switch let
-                // through. An unready token is an allow with a note and
-                // is not a bypass.
-                if t.trim().starts_with("allow\tfail-open\t") {
-                    opened = true;
+            '\\' => (i + 2).min(chars.len()),
+            '\'' if !double => chars[i + 1..]
+                .iter()
+                .position(|&q| q == '\'')
+                .map_or(chars.len(), |p| i + p + 2),
+            '$' if !double && next == Some('\'') => {
+                let mut j = i + 2;
+                while j < chars.len() && chars[j] != '\'' {
+                    j += if chars[j] == '\\' { 2 } else { 1 };
                 }
-                if let Some(note) = guard_note_of(&t) {
-                    set_guard_note(note);
-                }
-                answered = true;
+                (j + 1).min(chars.len())
             }
-            None => {}
+            '#' if !double
+                && out.chars().next_back().is_none_or(|p| {
+                    p.is_whitespace() || matches!(p, ';' | '&' | '|' | '(' | ')' | '<' | '>')
+                }) =>
+            {
+                chars[i..]
+                    .iter()
+                    .position(|&q| q == '\n')
+                    .map_or(chars.len(), |p| i + p)
+            }
+            '<' if data.is_some() && !double && next == Some('<') => {
+                if chars.get(i + 2) == Some(&'<') {
+                    i + 3
+                } else {
+                    let opener = chars[i + 2..]
+                        .iter()
+                        .find(|c| !matches!(c, '-' | ' ' | '\t'))
+                        .copied();
+                    match heredoc_word(chars, i + 2).filter(|(_, after, _)| {
+                        let closed = !matches!(opener, Some('\'' | '"'))
+                            || chars.get(after - 1).copied() == opener;
+                        closed
+                            && chars.get(*after).is_none_or(|c| {
+                                c.is_whitespace() || matches!(c, ';' | '&' | '|' | '<' | '>' | ')')
+                            })
+                    }) {
+                        Some((word, after, quoted)) => {
+                            let at = out.len();
+                            out.extend(&chars[i..after]);
+                            pending.push((at..out.len(), word, quoted));
+                            i = after;
+                            continue;
+                        }
+                        // A word this does not read, quoted in part or with
+                        // a space or a `$`, leaves its body as it stands.
+                        None => i + 2,
+                    }
+                }
+            }
+            '\n' if !double && !pending.is_empty() => {
+                out.push('\n');
+                let mut j = i + 1;
+                let mut read = Vec::new();
+                for (span, word, quoted) in std::mem::take(&mut pending) {
+                    let mut body = String::new();
+                    while j < chars.len() {
+                        let end = chars[j..]
+                            .iter()
+                            .position(|&q| q == '\n')
+                            .map_or(chars.len(), |p| j + p);
+                        let text: String = chars[j..end].iter().collect();
+                        j = (end + 1).min(chars.len());
+                        if text.trim() == word {
+                            break;
+                        }
+                        body.push_str(&text);
+                        body.push('\n');
+                    }
+                    read.push((span, heredoc_reading(&body, quoted, data == Some(true))));
+                }
+                for (span, text) in read.into_iter().rev() {
+                    out.replace_range(span, &text);
+                }
+                i = j;
+                continue;
+            }
+            _ => {
+                double ^= c == '"';
+                i + 1
+            }
+        };
+        out.extend(&chars[i..end]);
+        i = end;
+    }
+    out
+}
+
+/// Just past the construct that opens at `chars[i]`: the `}` that closes
+/// `${`, the `]` that closes `$[`, and otherwise [`nested_end`]. Quotes,
+/// escapes and substitutions inside count; an unclosed one runs to the
+/// end.
+fn construct_end(chars: &[char], i: usize) -> usize {
+    let (open, close) = match chars.get(i + 1) {
+        Some('{') => ('{', '}'),
+        Some('[') => ('[', ']'),
+        _ => return nested_end(chars, i),
+    };
+    let n = chars.len();
+    let mut depth = 0usize;
+    let mut j = i + 1;
+    while j < n {
+        match chars[j] {
+            '\\' => j += 2,
+            '\'' => j = (j + 1..n).find(|k| chars[*k] == '\'').map_or(n, |k| k + 1),
+            '"' => j = double_end(chars, j),
+            '`' => j = nested_end(chars, j),
+            '$' if chars.get(j + 1) == Some(&'(') => j = nested_end(chars, j),
+            c => {
+                depth = if c == open {
+                    depth + 1
+                } else if c == close {
+                    depth - 1
+                } else {
+                    depth
+                };
+                j += 1;
+                if depth == 0 {
+                    return j;
+                }
+            }
         }
     }
-    if opened {
-        log_bypass(
-            "switch",
-            "LJOS_GUARD_FAIL_OPEN=1",
-            line,
-            &Rule {
-                pattern: "ljos-policyd".into(),
-                verdict: "deny".into(),
-                reason: "guard-fault".into(),
-            },
-        );
-    }
-    (!answered && policyd_required()).then(|| Rule {
-        pattern: "ljos-policyd".into(),
-        verdict: "deny".into(),
-        reason: policyd_required_reason(),
+    n
+}
+
+/// Commands that take a here-document as data and run none of it.
+const HEREDOC_READERS: &[&str] = &[
+    "cat", "tee", "git", "gh", "glab", "echo", "printf", "cd", "mkdir", "true", "wc", "head",
+    "tail", "grep", "sort", "jq",
+];
+
+/// Whether every command `line` runs takes a here-document as data: one
+/// of [`HEREDOC_READERS`], or an interpreter whose program
+/// [`stdin_programs`] sends on its own. Any other command may run what a
+/// body holds, from its standard input, down a pipe, or from a file the
+/// line writes and then runs.
+fn heredocs_are_data(line: &str) -> bool {
+    raw_segments(line).iter().all(|s| {
+        let words = shell_words(s);
+        let (at, split) = prefix_end(&words);
+        let reads = words
+            .get(at)
+            .is_none_or(|w| HEREDOC_READERS.contains(&w.rsplit('/').next().unwrap_or(w.as_str())));
+        split.is_none() && reads || reads_program_on_stdin(s).is_some()
     })
+}
+
+/// What stands in place of a here-document whose body is `body`: the body
+/// as a script a subshell runs, unless the line's bodies are `data`; then
+/// the substitutions an unquoted body expands, each run so, or nothing.
+fn heredoc_reading(body: &str, quoted: bool, data: bool) -> String {
+    let run = |script: &str| {
+        format!(
+            " <(bash -c '{}')",
+            tcb_script(script).replace('\'', "'\\''")
+        )
+    };
+    if !data {
+        return run(body);
+    }
+    if quoted {
+        return String::new();
+    }
+    substitutions(body, true).iter().map(|s| run(s)).collect()
+}
+
+/// ljos-policyd's answer on `line` run from `cwd`, over each call of
+/// [`tcb_argvs`]: the first deny, or else an allow, the fail-open one or
+/// one with a note when any was. None when no ljos-policyd answered. A
+/// lease push the checkout clears is not a deny: ljos-policyd cannot read
+/// where a bare one goes. Nor is a faulted guard on a [`repair_line`],
+/// which is let through with the fault as its note.
+fn tcb_line_in(line: &str, cwd: Option<&Path>) -> Option<String> {
+    let weight = |t: &str| {
+        if t.trim().starts_with("allow\tfail-open\t") {
+            2
+        } else {
+            u8::from(guard_note_of(t).is_some())
+        }
+    };
+    let mut answer: Option<String> = None;
+    for (i, argv) in tcb_argvs(line).into_iter().enumerate() {
+        let Some(mut t) = tcb_check_in(&argv, cwd) else {
+            continue;
+        };
+        if t.starts_with("deny") {
+            let token = policyd_token(&t);
+            let code = token.split(':').next().unwrap_or(token).trim();
+            let words = if i == 0 { shell_words(&argv[2]) } else { argv };
+            if code == "git-force-push" && lease_cleared(&words, cwd) {
+                t = "allow".to_string();
+            } else if code == "guard-fault" && repair_line(line) {
+                // A faulted guard still lets the repair through: `ljos
+                // doctor` and `ljos onboard`, and nothing else on the line.
+                let why = token
+                    .split_once(':')
+                    .map(|(_, detail)| detail.trim())
+                    .filter(|detail| !detail.is_empty())
+                    .unwrap_or("did not start");
+                t = format!("allow\t{}", unhealthy_note(why));
+            } else {
+                clear_guard_note();
+                return Some(t);
+            }
+        }
+        if answer.as_deref().is_none_or(|a| weight(&t) > weight(a)) {
+            answer = Some(t);
+        }
+    }
+    answer
 }
 
 /// A line whose every pipeline is `ljos doctor` or `ljos onboard`,
@@ -43533,35 +43827,22 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(printed(None), process.display().to_string());
     }
 
+    /// A line whose `cd` the shell undoes, or runs where it leaves the line
+    /// alone, still runs `make clean-all` in `project`, and `lnk/..` is
+    /// `project` again, as a logical `cd` takes `..` off by name, though
+    /// `lnk` is a link to a directory whose parent is `elsewhere`.
     #[test]
     fn shell_lines_that_left_the_start_directory_are_still_denied() {
         let _g = env_guard();
-        let root = tempfile::tempdir().unwrap();
-        let danger = root.path().join("danger");
-        let safe = root.path().join("safe");
-        let elsewhere = root.path().join("elsewhere/leaf");
-        std::fs::create_dir_all(&danger).unwrap();
-        std::fs::create_dir_all(&safe).unwrap();
-        std::fs::create_dir_all(&elsewhere).unwrap();
-        std::os::unix::fs::symlink(&elsewhere, danger.join("lnk")).unwrap();
-        let bin = fake_policyd(
-            root.path(),
-            "ljos-policyd",
-            "case \"$*\" in\n\
-             *\"make clean-all\"*)\n\
-             if [ \"$(basename \"$(/bin/pwd -P)\")\" = \"danger\" ]; then\n\
-             printf 'deny\\tmake-clean-all\\n'\n\
-             exit 2\n\
-             fi\n\
-             ;;\n\
-             esac\n\
-             printf 'allow\\n'\n",
-        );
-        let _env = HoldEnv::set(&[
-            ("POLICYD_BIN", bin.to_str().unwrap()),
-            ("LJOS_GUARD", "on"),
-            ("LJOS_OFF", "0"),
-        ]);
+        let (root, _home, _env) = policyd_tree("policyd-left");
+        let project = root.path().join("project");
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir_all(project.join("safe")).unwrap();
+        std::fs::create_dir_all(elsewhere.join("leaf")).unwrap();
+        std::fs::write(project.join("safe/Makefile"), PLAIN_MAKEFILE).unwrap();
+        std::fs::write(elsewhere.join("Makefile"), PLAIN_MAKEFILE).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("leaf"), project.join("lnk")).unwrap();
+        let verdict = |line: &str| tcb_verdict_in(line, Some(&project));
         for line in [
             "cd safe | true && make clean-all",
             "cd safe & make clean-all",
@@ -43569,10 +43850,217 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "pushd safe && popd && make clean-all",
             "cd safe && cd - && make clean-all",
             "cd lnk/.. && make clean-all",
+            "cd lnk && cd .. && make clean-all",
         ] {
-            let rule = tcb_verdict_in(line, Some(&danger)).expect(line);
-            assert_eq!(rule.verdict, "deny", "{line}: {}", rule.reason);
-            assert_eq!(rule.pattern, "ljos-policyd", "{line}: {}", rule.reason);
+            let rule = verdict(line).unwrap_or_else(|| panic!("{line:?} was allowed"));
+            assert_eq!(rule.verdict, "deny", "{line:?}: {}", rule.reason);
+            assert_eq!(rule.pattern, "ljos-policyd", "{line:?}: {}", rule.reason);
+        }
+        for line in [
+            "cd safe && make clean-all",
+            "cd -P lnk/.. && make clean-all",
+        ] {
+            assert!(verdict(line).is_none(), "{line:?}: {:?}", verdict(line));
+        }
+    }
+
+    /// The `ljos-policyd` on PATH. CI builds it from develop, so a test
+    /// that asks it how a shell line reads fails, not skips, without one.
+    fn real_policyd() -> PathBuf {
+        which::which("ljos-policyd")
+            .expect("ljos-policyd is not on PATH; CI builds it from ljos-policyd develop")
+    }
+
+    const RISKY_MAKEFILE: &str = "test:\n\techo test\nclean-all:\n\trm -rf $(HOME)/.cache ~\n";
+    const PLAIN_MAKEFILE: &str = "test:\n\techo test\nclean-all:\n\techo clean\n";
+
+    /// A tree whose `project/Makefile` removes HOME on `make clean-all`,
+    /// below one whose `clean-all` only echoes, judged by the real
+    /// ljos-policyd from a seat HOME. Take [`env_guard`] first.
+    fn policyd_tree(name: &str) -> (tempfile::TempDir, SeatDir, HoldEnv) {
+        let bin = real_policyd();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("project")).unwrap();
+        std::fs::write(root.path().join("Makefile"), PLAIN_MAKEFILE).unwrap();
+        std::fs::write(root.path().join("project/Makefile"), RISKY_MAKEFILE).unwrap();
+        let home = SeatDir::new(name);
+        // ljos-policyd will not unpack its pack under a state path with
+        // `..` in it, and answers `pack-unavailable`, which is no verdict.
+        let state = std::fs::canonicalize(home.path()).unwrap().join("policyd");
+        let env = HoldEnv::set(&[
+            ("POLICYD_BIN", bin.to_str().unwrap()),
+            ("HOME", home.path().to_str().unwrap()),
+            ("PHRONESIS_STATE_DIR", state.to_str().unwrap()),
+            ("LJOS_GUARD", "on"),
+            ("LJOS_OFF", "0"),
+        ]);
+        (root, home, env)
+    }
+
+    /// A subshell, a substitution, a separator with no space around it,
+    /// or a newline still runs `make clean-all` in `project`.
+    #[test]
+    fn a_cd_the_shell_reads_is_where_policyd_judges_the_line() {
+        let _g = env_guard();
+        let (root, _home, _env) = policyd_tree("policyd-line");
+        let verdict = |line: &str| tcb_verdict_in(line, Some(root.path()));
+        for line in [
+            "(cd project; make clean-all)",
+            "cd project && (make clean-all)",
+            "cd project && echo $(make clean-all)",
+            "cd project && echo `make clean-all`",
+            "cd project;make clean-all",
+            "cd project&&make clean-all",
+            "cd project\nmake clean-all",
+        ] {
+            let rule = verdict(line).unwrap_or_else(|| panic!("{line:?} was allowed"));
+            assert_eq!(rule.verdict, "deny", "{line:?}: {}", rule.reason);
+            assert_eq!(rule.pattern, "ljos-policyd", "{line:?}: {}", rule.reason);
+        }
+        for line in [
+            "make clean-all",
+            "(cd project; make test)",
+            "cd project;make test",
+            "cd project\nmake test",
+        ] {
+            assert!(verdict(line).is_none(), "{line:?}: {:?}", verdict(line));
+        }
+    }
+
+    /// A `cd` through `$HOME`, `${HOME}`, `~`, `~login` or a `CDPATH`
+    /// entry still runs `make clean-all` where it lands.
+    #[test]
+    fn a_cd_through_home_or_cdpath_is_judged_where_it_lands() {
+        let _g = env_guard();
+        let (root, home, _env) = policyd_tree("policyd-home");
+        for (dir, makefile) in [
+            (home.path().join("proj"), RISKY_MAKEFILE),
+            (home.path().join("plain"), PLAIN_MAKEFILE),
+            (root.path().join("lib/proj"), RISKY_MAKEFILE),
+        ] {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("Makefile"), makefile).unwrap();
+        }
+        // SAFETY: getpwuid returns null or a record that stays valid until
+        // the next lookup, and both fields are copied out at once.
+        let (login, pw_home) = unsafe {
+            let pw = libc::getpwuid(libc::getuid());
+            assert!(!pw.is_null(), "no passwd entry for this user");
+            let field =
+                |p: *const libc::c_char| std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned();
+            (field((*pw).pw_name), PathBuf::from(field((*pw).pw_dir)))
+        };
+        let theirs = tempfile::Builder::new()
+            .prefix(".ljos-login-")
+            .tempdir_in(&pw_home)
+            .unwrap();
+        std::fs::create_dir_all(theirs.path().join("proj")).unwrap();
+        std::fs::write(theirs.path().join("proj/Makefile"), RISKY_MAKEFILE).unwrap();
+        let below = theirs.path().strip_prefix(&pw_home).unwrap().display();
+        let verdict = |line: &str| tcb_verdict_in(line, Some(root.path()));
+        for line in [
+            "cd $HOME/proj && make clean-all".to_string(),
+            "cd ${HOME}/proj && make clean-all".to_string(),
+            "cd ~/proj && make clean-all".to_string(),
+            format!("cd ~{login}/{below}/proj && make clean-all"),
+            "CDPATH=lib cd proj && make clean-all".to_string(),
+            "CDPATH=$HOME cd proj && make clean-all".to_string(),
+        ] {
+            let rule = verdict(&line).unwrap_or_else(|| panic!("{line:?} was allowed"));
+            assert_eq!(rule.verdict, "deny", "{line:?}: {}", rule.reason);
+            assert_eq!(rule.pattern, "ljos-policyd", "{line:?}: {}", rule.reason);
+        }
+        for line in ["cd ~/plain && make clean-all", "cd lib && make clean-all"] {
+            assert!(verdict(line).is_none(), "{line:?}: {:?}", verdict(line));
+        }
+    }
+
+    /// A backslash and the newline after it drop out of the line the TCB
+    /// reads, as the shell drops them, except inside single quotes or
+    /// `$'...'`, in a comment, or after an escaped backslash.
+    #[test]
+    fn a_backslash_newline_joins_the_line_policyd_reads() {
+        let script = |line: &str| tcb_argvs(line)[0][2].clone();
+        for (line, read) in [
+            (
+                "cd project && \\\nmake clean-all",
+                "cd project && make clean-all",
+            ),
+            ("ma\\\nke clean-all", "make clean-all"),
+            ("echo \"a\\\nb\"", "echo \"ab\""),
+            ("echo `echo x\\\ny`", "echo `echo xy`"),
+        ] {
+            assert_eq!(script(line), read, "{line:?}");
+        }
+        for line in [
+            "echo 'a\\\nb'",
+            "echo $'a\\\nb'",
+            "echo a\\\\\nmake clean-all",
+            "# note \\\nmake clean-all",
+        ] {
+            assert_eq!(script(line), line, "{line:?}");
+        }
+        let _g = env_guard();
+        let (root, _home, _env) = policyd_tree("policyd-continued");
+        let rule = tcb_verdict_in("cd project && \\\nmake clean-all", Some(root.path()))
+            .expect("a continued line was allowed");
+        assert_eq!(rule.verdict, "deny", "{}", rule.reason);
+    }
+
+    /// A here-document's body is data unless a shell on the line reads it
+    /// as its script, and only the substitutions of an unquoted one run.
+    /// `<<` in `${...}`, `$((...))`, `$[...]` or `<<<` opens none, so the
+    /// lines after it still run.
+    #[test]
+    fn a_heredoc_body_is_judged_only_where_a_shell_runs_it() {
+        let _g = env_guard();
+        let (root, _home, _env) = policyd_tree("policyd-heredoc");
+        let project = root.path().join("project");
+        let project = project.as_path();
+        for (line, at) in [
+            ("bash <<'EOF'\nmake clean-all\nEOF", project),
+            (
+                "cd project && bash <<'EOF'\nmake clean-all\nEOF",
+                root.path(),
+            ),
+            (
+                "bash <<'EOF'\ncd project && make clean-all\nEOF",
+                root.path(),
+            ),
+            (
+                "cat <<'EOF' | sh\ncd project\nmake clean-all\nEOF",
+                root.path(),
+            ),
+            (
+                "cat <<EOF\n$(cd project && make clean-all)\nEOF",
+                root.path(),
+            ),
+            (
+                "echo ${x:-<<EOF}\ncd project && make clean-all\nEOF",
+                root.path(),
+            ),
+            (
+                "echo $((1<<EOF))\ncd project && make clean-all\nEOF",
+                root.path(),
+            ),
+            (
+                "echo $[1<<EOF]\ncd project && make clean-all\nEOF",
+                root.path(),
+            ),
+            ("cat <<<EOF\ncd project && make clean-all\nEOF", root.path()),
+        ] {
+            let rule =
+                tcb_verdict_in(line, Some(at)).unwrap_or_else(|| panic!("{line:?} was allowed"));
+            assert_eq!(rule.verdict, "deny", "{line:?}: {}", rule.reason);
+        }
+        for line in [
+            "cat <<'EOF'\nsudo reboot\nEOF",
+            "cat <<'EOF' > notes.md\ncd project && make clean-all\nEOF",
+            "cat <<'EOF'\n$(sudo reboot)\nEOF",
+            "cat <<EOF\nrun $(echo make clean-all) in project\nEOF",
+        ] {
+            let rule = tcb_verdict_in(line, Some(root.path()));
+            assert!(rule.is_none(), "{line:?}: {rule:?}");
         }
     }
 
@@ -49281,7 +49769,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     /// A relative workdir resolves against the session directory. A missing
-    /// workdir is the session directory, so the command is still judged.
+    /// workdir does not resolve, and its fallback is the session directory.
     #[test]
     fn a_relative_workdir_resolves_against_the_session_directory() {
         let root = tempfile::tempdir().unwrap();
@@ -49299,8 +49787,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "cwd": root.path(),
             "tool_input": {"command": "git status", "workdir": "/path/to/git/repo"}
         });
+        assert!(command_directory(&missing.to_string()).is_err());
         assert_eq!(
-            command_directory(&missing.to_string()).unwrap(),
+            fallback_directory(&missing.to_string()).unwrap(),
             root.path().canonicalize().unwrap()
         );
     }
