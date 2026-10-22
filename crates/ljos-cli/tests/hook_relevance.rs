@@ -242,3 +242,19 @@ fn the_lesson_that_covers_the_prompt_beats_fresher_lookalikes() {
         "the hook left out the lesson that answers the prompt: {context}"
     );
 }
+
+/// A prompt that says `always` is not about every rule that says it.
+#[test]
+fn always_does_not_bring_in_a_rule_about_something_else() {
+    let seat = seat();
+    seat.lesson("Always squash commits before merging to main.", FRESH);
+    seat.lesson(
+        "Format the Rust code with cargo fmt, not rustfmt alone.",
+        FRESH,
+    );
+    let (context, _) = seat.prompt("always-1", "always run the formatter");
+    assert!(
+        !context.contains("squash commits"),
+        "a shared `always` brought in an unrelated rule: {context}"
+    );
+}
