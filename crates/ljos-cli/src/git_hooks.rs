@@ -741,6 +741,15 @@ fn book_commit(hook: &str) -> Result<()> {
         return Ok(());
     };
     let _actor = crate::HookActor::enter(&seat);
+    // Every path below writes the tracker: a repointed citation, a named
+    // issue, an open sitting, a new claim.
+    if let Err(e) = crate::write_seat("commit") {
+        println!(
+            "ljos: commit {} not booked: {e:#}",
+            &head[..head.len().min(12)]
+        );
+        return Ok(());
+    }
     let _children = HookChildren::enter();
     // An amend or a rebase lists old and new shas. Move the citation
     // before the "already booked" return: post-commit may have cited the

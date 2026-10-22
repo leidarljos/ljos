@@ -1749,11 +1749,7 @@ fn forget_retired(atoms: &[Value], sender: &str, gone: &[String]) -> usize {
     retired
 }
 
-fn post_incoming(
-    client: &packset_client::PacksetClient,
-    workspace: &str,
-    post: &[Value],
-) -> (usize, usize) {
+fn post_incoming(client: &crate::PacksetClient, workspace: &str, post: &[Value]) -> (usize, usize) {
     let (mut kept, mut refused) = (0usize, 0usize);
     for atom in post {
         let mut atom = atom.clone();

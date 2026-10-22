@@ -507,6 +507,7 @@ pub fn sign(
 pub fn write(issue: &str, seat: &str, model: &str, run: &str, run_key: &str) -> Result<String> {
     let launcher = ballot_sig::own_voter()
         .context("slot: no seat to sign as; set LJOS_SEAT to the launching seat")?;
+    crate::registered_seat(&launcher).map_err(|e| anyhow::anyhow!("slot: {e:#}"))?;
     let run_key = run_key.trim().to_ascii_lowercase();
     let public = hex::decode(&run_key)
         .ok()

@@ -360,6 +360,15 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
     if !BOOK_EVENTS.contains(&call.event.as_str()) {
         return String::new();
     }
+    // Every claim, note, deed and finish below is written as this seat.
+    let seat = match super::write_seat("hook") {
+        Ok(seat) => seat,
+        Err(e) => {
+            log_line(&format!("{}: nothing booked: {e:#}", call.event));
+            return String::new();
+        }
+    };
+    let _seated = super::Seated::enter(&seat);
     let session = session_key(call);
     let value: Value = serde_json::from_str(raw.trim()).unwrap_or(Value::Null);
     let _held = super::hook_timed("book_lock", || {
@@ -5479,6 +5488,7 @@ mod tests {
         unsafe {
             std::env::set_var("XDG_STATE_HOME", &state);
             std::env::set_var("LJOS_SESSION_ID", "jld5-second-issue");
+            std::env::remove_var("LJOS_SEAT");
         }
         let proj = tracker.join("Software/probe");
         std::fs::create_dir_all(&proj).unwrap();
@@ -6773,7 +6783,20 @@ print(f"id={ident}")
         (dir, tracker, repo)
     }
 
-    fn arm(dir: &Path, tracker: &Path) -> crate::PathGuard {
+    /// Name the seat the process tree gives in `LJOS_SEAT`, as a runner's
+    /// env file does, so a hook books under the name it always had. A seat
+    /// nobody named books nothing. The caller restores `LJOS_SEAT`.
+    fn name_the_derived_seat() {
+        // SAFETY: the caller holds test_env_lock.
+        unsafe {
+            std::env::remove_var("LJOS_SEAT");
+            std::env::set_var("LJOS_SEAT", crate::whoami().seat);
+        }
+    }
+
+    /// The habitat's binaries and environment, the seat named.
+    fn arm(dir: &Path, tracker: &Path) -> (crate::PathGuard, Restore) {
+        let seat = Restore::new(&["LJOS_SEAT"]);
         let bins = crate::prepend_path(&dir.join("bin"));
         unsafe {
             std::env::set_var("VISSUE_ROOT", tracker);
@@ -6786,8 +6809,9 @@ print(f"id={ident}")
             std::env::remove_var("ISSUE_ROOT");
             std::env::remove_var("LJOS_OFF");
             std::env::remove_var("LJOS_SESSION_ID");
+            name_the_derived_seat();
         }
-        bins
+        (bins, seat)
     }
 
     fn payload(event: &str, session: &str, cwd: &Path, extra: Value) -> (String, crate::HookCall) {
@@ -7202,11 +7226,13 @@ print(f"id={ident}")
             "PACKSET_URL",
             "LJOS_OFF",
             "LJOS_PROJECT",
+            "LJOS_SEAT",
         ]);
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-q"]);
+        name_the_derived_seat();
         // Hide vissue, which lives outside the coreutils directories.
         // cat and sh stay on PATH.
         let _bins = crate::set_path(crate::path_without(&["vissue"]));
@@ -7717,7 +7743,7 @@ print(f"id={ident}")
         let (dir, tracker, repo) = scratch();
         let _bins = arm(dir.path(), &tracker);
         unsafe {
-            std::env::remove_var("LJOS_SEAT");
+            name_the_derived_seat();
             std::env::remove_var("LJOS_HARNESS_SESSION");
         }
         let session = "book-none";
@@ -7880,7 +7906,7 @@ print(f"id={ident}")
         let (dir, tracker, repo) = scratch();
         let _bins = arm(dir.path(), &tracker);
         unsafe {
-            std::env::remove_var("LJOS_SEAT");
+            name_the_derived_seat();
             std::env::remove_var("LJOS_HARNESS_SESSION");
             std::env::set_var("LJOS_SESSION_ID", "mcp-start-held");
         }
@@ -7962,7 +7988,7 @@ print(f"id={ident}")
         let (dir, tracker, repo) = scratch();
         let _bins = arm(dir.path(), &tracker);
         unsafe {
-            std::env::remove_var("LJOS_SEAT");
+            name_the_derived_seat();
             std::env::remove_var("LJOS_HARNESS_SESSION");
             std::env::set_var("LJOS_SESSION_ID", "mcp-start-other");
         }
@@ -10129,7 +10155,7 @@ print(f"id={ident}")
         let (dir, tracker, repo) = scratch();
         let _bins = arm(dir.path(), &tracker);
         unsafe {
-            std::env::remove_var("LJOS_SEAT");
+            name_the_derived_seat();
             std::env::remove_var("LJOS_HARNESS_SESSION");
         }
         let session = "harness-edit-then-start";
@@ -10834,7 +10860,7 @@ print(f"id={ident}")
         let (dir, tracker, repo) = scratch();
         let _bins = arm(dir.path(), &tracker);
         unsafe {
-            std::env::remove_var("LJOS_SEAT");
+            name_the_derived_seat();
             std::env::remove_var("LJOS_HOLD");
             std::env::remove_var("LJOS_SESSION_ID");
             std::env::remove_var("LJOS_SITTING_IDLE");
