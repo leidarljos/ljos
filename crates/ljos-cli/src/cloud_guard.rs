@@ -1163,7 +1163,13 @@ fn gh_command(
         "issue" => gh_read_verb(noun, gh_word(&mut rest), &["view", "list", "status"]),
         "repo" => gh_read_verb(noun, gh_word(&mut rest), &["view", "list", "clone"]),
         "release" => gh_release(rest),
-        "run" => gh_read_verb(noun, gh_word(&mut rest), &["view", "list", "watch"]),
+        "run" => gh_read_verb(
+            noun,
+            gh_word(&mut rest),
+            &["view", "list", "watch", "download"],
+        ),
+        "label" => gh_read_verb(noun, gh_word(&mut rest), &["list"]),
+        "cache" => gh_read_verb(noun, gh_word(&mut rest), &["list"]),
         "workflow" => gh_read_verb(noun, gh_word(&mut rest), &["view", "list"]),
         "gist" => gh_read_verb(noun, gh_word(&mut rest), &["view", "list"]),
         "api" => gh_api(rest, cwd),
@@ -1490,7 +1496,7 @@ fn gh_api<'a>(words: impl Iterator<Item = &'a str>, cwd: Option<&Path>) -> Verdi
             ..Verdict::default()
         };
     }
-    if api_is_safe_read(&call) {
+    if api_is_safe_read(&call, cwd) {
         return Verdict::default();
     }
     if let Some(why) = classify_api_cursor_ref(
@@ -1513,11 +1519,14 @@ fn gh_api<'a>(words: impl Iterator<Item = &'a str>, cwd: Option<&Path>) -> Verdi
 }
 
 /// A resolved GET or HEAD. No method and no field is gh's GET. An explicit
-/// GET may carry `-f` query fields. `--input` and a field read from a file
-/// are not resolved.
-fn api_is_safe_read(call: &ApiCall) -> bool {
+/// GET may carry `-f` query fields. A GraphQL query is a read; a mutation
+/// is not. `--input` and a field read from a file are not resolved.
+fn api_is_safe_read(call: &ApiCall, cwd: Option<&Path>) -> bool {
     if call.opaque || call.input.is_some() {
         return false;
+    }
+    if graphql_path(&api_path(&call.endpoint)) {
+        return graphql_is_query(call, cwd);
     }
     match call.method.as_deref() {
         Some(method)
@@ -1528,6 +1537,22 @@ fn api_is_safe_read(call: &ApiCall) -> bool {
         Some(_) => false,
         None => call.fields.is_empty(),
     }
+}
+
+fn graphql_is_query(call: &ApiCall, cwd: Option<&Path>) -> bool {
+    if let Some(method) = call.method.as_deref() {
+        let upper = method.to_ascii_uppercase();
+        if upper != "GET" && upper != "HEAD" && upper != "POST" {
+            return false;
+        }
+    }
+    let (texts, opaque) = graphql_texts(&call.fields, call.input.as_deref(), cwd);
+    if opaque || texts.is_empty() {
+        return false;
+    }
+    texts
+        .iter()
+        .all(|text| !has_ident(&without_strings(text), "mutation"))
 }
 
 fn parse_api_call<'a>(words: impl Iterator<Item = &'a str>, cwd: Option<&Path>) -> Option<ApiCall> {
@@ -3619,7 +3644,7 @@ fn http_shape(cmd: &str, words: &[String]) -> HttpShape {
 
 /// Boolean curl shorts. `G` is `--get` and `I` is `--head`. `n` is
 /// `--netrc` and is not in this set.
-const CURL_BOOL: &str = "sSfkLvgGI";
+const CURL_BOOL: &str = "sSfkLvgGIOJi4";
 /// Curl shorts that take a value. `K` is a config file.
 const CURL_VALUE: &str = "XdHuKoTFAbcemwExUrPQDyYztC";
 
@@ -3748,6 +3773,8 @@ fn curl_long(
             | "--create-dirs"
             | "--ipv4"
             | "--ipv6"
+            | "--retry-all-errors"
+            | "--remote-header-name"
     ) {
         *i += 1;
         return None;
@@ -3775,11 +3802,15 @@ fn curl_long(
             | "--speed-time"
             | "--limit-rate"
             | "--output-dir"
+            | "--write-out"
     ) {
         let _value = flag_value(words, i, attached);
         return None;
     }
-    Some(HttpShape::Opaque)
+    // A long flag this seat has not named is still a read. A write flag
+    // is listed above.
+    *i += 1;
+    None
 }
 
 fn flag_value(words: &[String], i: &mut usize, attached: &str) -> String {
