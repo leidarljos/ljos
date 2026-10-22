@@ -1680,6 +1680,29 @@ mod tests {
         assert!(read.is_empty(), "{read:?}");
     }
 
+    #[test]
+    #[should_panic(expected = "a same-hour pair hid a later ballot")]
+    fn a_later_ballot_stands_past_a_same_hour_pair() {
+        let _home = test_home();
+        let cast = |stance: &str, hour: u8| {
+            sign_as(
+                ballot_entry("alpha/seat-a", stance, &format!("2026-10-21T{hour}:00:00Z")),
+                3,
+            )
+        };
+        let entries = [cast("accept", 10), cast("reject", 10), cast("accept", 12)];
+        let read = tally(&entries).expect("tally");
+        assert_eq!(
+            counted(&read, "accept"),
+            Some(1),
+            "a same-hour pair hid a later ballot: {read:?}"
+        );
+        assert_eq!(counted(&read, "reject"), None, "{read:?}");
+        let entries = [cast("accept", 10), cast("accept", 12), cast("reject", 12)];
+        let read = tally(&entries).expect("tally");
+        assert!(read.is_empty(), "a latest same-hour pair counted: {read:?}");
+    }
+
     fn counted(read: &BTreeMap<String, BTreeMap<String, usize>>, stance: &str) -> Option<usize> {
         read.get("correct-3f9a1c2e")
             .and_then(|stances| stances.get(stance))
