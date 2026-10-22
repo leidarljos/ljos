@@ -1,1 +1,0 @@
-The pinned deedar helper builds once per process into a directory named by the sha in `.github/deedar-pin`, and leaves an existing tree in place so two finish-bag tests cannot wipe each other's build.

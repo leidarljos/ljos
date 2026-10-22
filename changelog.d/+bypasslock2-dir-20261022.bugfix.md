@@ -1,1 +1,0 @@
-The state logs refused a symlink only at the file itself, so a symlink put in place of the `ljos` directory under `$XDG_STATE_HOME`, `$XDG_DATA_HOME` or the runtime directory took every row somewhere else. That directory is now opened without following a link and the log is opened from it. A `$HOME` or XDG base you made a symlink yourself is still followed.

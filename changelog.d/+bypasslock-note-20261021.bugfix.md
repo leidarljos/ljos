@@ -1,1 +1,0 @@
-A queued memory copy used to be appended with `writeln!`, which writes the JSON and the newline separately. Two copies landing together could share a line, so the next send dropped one. Each copy is now one locked write, and the file is mode 0600.

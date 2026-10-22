@@ -1,1 +1,0 @@
-The message for a skipped guard bypass row echoed the whole command onto hook stderr, which several runners show as the deny reason, so a secret or an injected newline in the command leaked there. The message now names only the log and the error.

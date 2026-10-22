@@ -1,1 +1,0 @@
-Concurrent judge answers used to split one `jev-log.jsonl` row across several writes, so a probability that should have been scored could no longer be read. Each answer is now one locked write, and the file is mode 0600.

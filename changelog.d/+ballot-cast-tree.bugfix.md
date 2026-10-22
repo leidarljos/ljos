@@ -1,2 +1,0 @@
-`ljos vote` now refuses a second ballot on an issue from a shell that already cast on it as another session, so setting `LJOS_SESSION_ID`, `CURSOR_AGENT_ID`, `CLOUD_AGENT_ID` or `CURSOR_CONVERSATION_ID` to a new value between casts no longer makes a second voice.
-A cast records its calling shell, and the harness whose hook saw its line, by pid and start time in the runtime directory; a harness may still cast once per subagent of one root session, and only another root session from it is refused.
