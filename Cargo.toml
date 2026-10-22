@@ -14,7 +14,7 @@ description = "Memory, a work tracker and a shell-command gate for coding agents
 [workspace.dependencies]
 rmcp = { version = "3.2", features = ["server", "transport-io", "transport-async-rw", "macros", "elicitation"] }
 schemars = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "signal", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "signal", "sync", "time"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 packset-client = "0.15.2"
