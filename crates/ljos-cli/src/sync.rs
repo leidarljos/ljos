@@ -16,6 +16,14 @@
 //! import took from a host are remembered, and a text that host no longer
 //! sends retires the local copy that came from it, never a claim this
 //! machine wrote itself.
+//!
+//! `--adopt HOST` posts that host's live atoms as this machine's own, with
+//! origin `peer` and each log's scope, then deletes every log of that host.
+//! The deletion is one commit, made only after every post and forget has
+//! landed. Its subject `chore(sync): adopt HOST SCOPE atoms` names the
+//! primary scope; a `host+scope` file in that commit is an extra scope.
+//! Another machine's import reads the subject and retires that host's
+//! copies in each scope whose log the commit removed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -685,41 +693,109 @@ pub struct Incoming {
     pub retired: Vec<String>,
 }
 
-/// What adopting one gone host's log asks of this pack: which texts are
+/// What adopting one gone host's log asks of this pack: which memories are
 /// still live there, and which atoms this host should post as its own.
 #[derive(Debug, Default, PartialEq)]
 struct AdoptPlan {
+    /// [`memory_key`] of every live atom in the log, including ones this
+    /// host already holds and so will not post again.
     live: BTreeSet<String>,
     post: Vec<Value>,
 }
 
-/// The atoms to adopt from one gone host log: one live text once, and never
-/// a text this host already holds as its own.
+/// The ticket an atom belongs to. The pack treats the same words on two
+/// tickets as two memories; the `issue` field is that identity, and an
+/// `issue:` entity is the same fact when the field was left off.
+fn atom_issue(atom: &Value) -> String {
+    atom.get("issue")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|issue| !issue.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            atom.get("entities")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .find_map(|tag| tag.strip_prefix("issue:"))
+                .map(str::trim)
+                .filter(|issue| !issue.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
+}
+
+/// One memory: the text and the ticket. Scope is not in the key. The
+/// caller passes only the keys of the scope being adopted, so a private
+/// copy of the same words does not swallow the cloud copy.
+fn memory_key(atom: &Value) -> Option<String> {
+    let text = atom
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(crate::work_id(&format!("{text}\n{}", atom_issue(atom))))
+}
+
+/// Keys this host holds as its own in `scope`. An import tagged `sync:` is
+/// not its own, and an atom of another scope is not this log's memory.
+fn own_memory_keys(atoms: &[Value], scope: &str) -> BTreeSet<String> {
+    let default = default_scope(scope);
+    atoms
+        .iter()
+        .filter(|atom| is_own(atom) && atom_scope(atom, &default) == scope)
+        .filter_map(memory_key)
+        .collect()
+}
+
+/// The atoms to adopt from one gone host log.
+///
+/// One memory once. A memory this host already holds in `scope` is not
+/// posted again. The repost is origin `peer`, whatever origin the sender
+/// wrote, and it carries `scope:<scope>` so it stays in this log rather
+/// than falling into the machine's default scope. Sender tags are dropped:
+/// the atom is this host's own after the post.
 #[must_use]
-fn adopt_plan(plain: &str, own: &BTreeSet<String>) -> AdoptPlan {
+fn adopt_plan(plain: &str, scope: &str, own: &BTreeSet<String>) -> AdoptPlan {
     let mut plan = AdoptPlan::default();
-    for line in plain.lines().filter(|l| !l.trim().is_empty()) {
+    let scope_tag = format!("scope:{scope}");
+    for line in plain.lines().filter(|line| !line.trim().is_empty()) {
         let Ok(mut atom) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        let text = atom["text"].as_str().unwrap_or("").to_string();
-        if text.is_empty() {
+        let Some(key) = memory_key(&atom) else {
             continue;
-        }
-        let id = crate::work_id(&text);
-        if !plan.live.insert(id.clone()) || own.contains(&id) {
+        };
+        if !plan.live.insert(key.clone()) || own.contains(&key) {
             continue;
         }
         if let Some(map) = atom.as_object_mut() {
             map.remove("id");
-            let entities: Vec<Value> = map
+            // The sender's level would keep a user-declared atom explicit.
+            // Origin `peer` is what the writer is asked to store; the level
+            // is the writer's, from that origin, not the one in the log.
+            map.remove("level");
+            map.insert(
+                "origin".into(),
+                Value::String(crate::admit::ORIGIN_PEER.to_string()),
+            );
+            let mut entities: Vec<Value> = map
                 .get("entities")
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter(|e| !e.as_str().is_some_and(|tag| tag.starts_with("sync:")))
+                .filter(|entity| {
+                    !entity
+                        .as_str()
+                        .is_some_and(|tag| tag.starts_with("sync:") || tag.starts_with("scope:"))
+                })
                 .cloned()
                 .collect();
+            entities.push(Value::String(scope_tag.clone()));
             map.insert("entities".into(), Value::Array(entities));
         }
         plan.post.push(atom);
@@ -829,28 +905,37 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
         return Ok("sync: no age identity on this machine; `ljos sync --key` makes one\n".into());
     }
     let dir = log_dir(root);
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Ok(format!("sync: no {} logs yet\n", scope.name));
-    };
-    let mut paths: Vec<PathBuf> = entries
+    // A missing directory is not a failure. The adopt commit removes the
+    // gone host's log, and an empty atoms directory is not in the tree, so
+    // the retirement below still has to run.
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.to_string_lossy().ends_with(".jsonl.age"))
         .collect();
     paths.sort();
+    // Retirement reads the adopt commits, not the directory. A missing
+    // atoms directory, or one that only holds this machine, still has to
+    // reach that step: the adopt commit is what removes the gone log.
+    let gone = adopted_hosts(root, &me);
+    if paths.is_empty() && gone.is_empty() {
+        return Ok(format!("sync: no {} logs yet\n", scope.name));
+    }
     // Open before the pack is asked. An owned miss has to surface even
     // when PACKSET_URL=off, which used to fail first and hide the log.
     let mut out = String::new();
     let mut opened: Vec<(String, String, String)> = Vec::new();
     let mut mine: Option<Vec<String>> = None;
-    for path in paths {
-        let Some((host, scope_name)) = host_scope_from_log_path(&path, scope) else {
+    for path in &paths {
+        let Some((host, scope_name)) = host_scope_from_log_path(path, scope) else {
             continue;
         };
         if host.is_empty() || host == me {
             continue;
         }
-        let Some(plain) = open_identities(&path, &identities)? else {
+        let Some(plain) = open_identities(path, &identities)? else {
             if mine.is_none() {
                 let mut keys = Vec::new();
                 for identity in &identities {
@@ -923,14 +1008,116 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
             scope_name
         ));
     }
+    out.push_str(&retire_adopted(scope, &gone, &client)?);
+    // A retirement that found nothing is not news. A tracker with no log
+    // files still says so, as it did before adopt commits were read.
+    if out.is_empty() && paths.is_empty() {
+        return Ok(format!("sync: no {} logs yet\n", scope.name));
+    }
     Ok(out)
 }
 
+/// Log stems whose newest deletion is an adopt commit, and whose file is
+/// not back in HEAD. A stem is `host` or `host+scope`. A re-added log is
+/// imported above; this set is what the other machines still hold as
+/// `sync:` copies after the file is gone.
+fn adopted_hosts(root: &Path, me: &str) -> BTreeSet<String> {
+    let mine = machine_name(me);
+    adopted_stems(root)
+        .into_iter()
+        .filter(|stem| log_stem_host(stem).is_some_and(|host| host != me && host != mine))
+        .filter(|stem| !in_head(root, &format!(".ljos/atoms/{stem}.jsonl.age")))
+        .collect()
+}
+
+/// Forget `sync:` copies for each log [`adopted_hosts`] named. A stem of
+/// `host` is the primary scope; `host+scope` is that extra scope and its
+/// sender is `sync:host+scope`. A forget that does not land is counted and
+/// tried again on the next import. It does not fail the import, and it
+/// does not skip the other logs. Quiet when there was nothing to forget.
+fn retire_adopted(
+    scope: &Scope,
+    hosts: &BTreeSet<String>,
+    client: &crate::PacksetClient,
+) -> Result<String> {
+    if hosts.is_empty() {
+        return Ok(String::new());
+    }
+    let atoms = crate::atoms_lean(client, &client.workspace())?;
+    let mut out = String::new();
+    for stem in hosts {
+        let Some(host) = log_stem_host(stem) else {
+            continue;
+        };
+        let scope_name = stem
+            .split_once('+')
+            .map(|(_, extra)| extra)
+            .unwrap_or(scope.name.as_str());
+        let sender = match stem.split_once('+') {
+            Some((_, extra)) => format!("sync:{host}+{extra}"),
+            None => sender_entity(host),
+        };
+        let (retired, failed) =
+            forget_tagged(&atoms, &sender, |atom| in_adopted_scope(atom, scope_name));
+        if retired == 0 && failed == 0 {
+            continue;
+        }
+        out.push_str(&format!(
+            "sync: {host}: adopted away, {retired} {scope_name} atoms retired, {failed} still held\n"
+        ));
+    }
+    Ok(out)
+}
+
+/// A host name that is safe as one path segment under `.ljos/atoms`.
+///
+/// [`machine_name`] folds `../x` into a different name. Adopting that
+/// folded name would open some other host's log, so a name that is not
+/// already a machine name is refused. The path is still built from
+/// [`machine_name`], so a caller that skips this check cannot leave the
+/// atoms directory.
+fn require_host_name(raw: &str) -> Result<String> {
+    let gone = raw.trim();
+    if gone.is_empty() {
+        bail!("sync: pass a host after --adopt");
+    }
+    if machine_name(gone) != gone {
+        bail!("sync: {gone} is not a host name");
+    }
+    Ok(gone.to_string())
+}
+
 fn host_log_rels(host: &str) -> [String; 2] {
+    let host = machine_name(host);
     [
         format!(".ljos/atoms/{host}.jsonl.age"),
         format!(".ljos/atoms/{host}.digest"),
     ]
+}
+
+struct HostLog {
+    scope_name: String,
+    age: String,
+    digest: String,
+}
+
+/// Every log this repository would hold for `host`: the primary file, then
+/// one `host+scope` file per extra scope. Absent files are not an error;
+/// the caller decides which of these are actually in the tree.
+fn logs_of_host(scope: &Scope, host: &str) -> Vec<HostLog> {
+    let host = machine_name(host);
+    scope
+        .all_scopes()
+        .into_iter()
+        .map(|named| {
+            let [age, digest] = host_log_rels_for_scope(&host, &scope.name, named.name);
+            HostLog {
+                scope_name: named.name.to_string(),
+                age,
+                digest,
+            }
+        })
+        .collect()
 }
 
 fn tracked_path(root: &Path, rel: &str) -> bool {
@@ -941,110 +1128,651 @@ fn stageable_path(root: &Path, rel: &str) -> bool {
     root.join(rel).exists() || tracked_path(root, rel)
 }
 
-fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, push: bool) -> Result<String> {
+/// A host whose log moved within this window may still be alive. Adopting
+/// it then leaves every text in both machines' logs.
+const ADOPT_QUIET: std::time::Duration = std::time::Duration::from_secs(14 * 24 * 60 * 60);
+
+/// What one `ljos sync --adopt` may do beyond posting.
+#[derive(Clone, Copy)]
+struct AdoptOpts {
+    push: bool,
+    /// Adopt even when the log was committed inside [`ADOPT_QUIET`].
+    force: bool,
+    /// Print the plan and do not post, forget, or commit.
+    dry_run: bool,
+}
+
+/// Where the gone host's log stands relative to HEAD.
+#[derive(Clone, Copy)]
+enum GoneLog {
+    /// Tracked, and the worktree matches HEAD.
+    Clean,
+    /// In HEAD, missing on disk: the deletion was started and not committed.
+    Resume,
+    /// Tracked, and the worktree differs. `git rm` would refuse.
+    Dirty,
+    /// On disk, not in HEAD. Deleting it would not be recoverable.
+    Untracked,
+    /// Neither in HEAD nor on disk.
+    Absent,
+}
+
+fn in_head(root: &Path, rel: &str) -> bool {
+    let spec = format!("HEAD:{rel}");
+    git(root, &["cat-file", "-e", &spec]).is_ok_and(|out| out.status.success())
+}
+
+fn gone_log_state(root: &Path, rel: &str) -> GoneLog {
+    let on_disk = root.join(rel).is_file();
+    let tracked = in_head(root, rel);
+    if tracked && !on_disk {
+        return GoneLog::Resume;
+    }
+    if on_disk && !tracked {
+        return GoneLog::Untracked;
+    }
+    if !tracked {
+        return GoneLog::Absent;
+    }
+    let clean =
+        git(root, &["diff", "--quiet", "HEAD", "--", rel]).is_ok_and(|out| out.status.success());
+    if clean {
+        GoneLog::Clean
+    } else {
+        GoneLog::Dirty
+    }
+}
+
+fn log_committed_at(root: &Path, rel: &str) -> Option<i64> {
+    let out = git(root, &["log", "-1", "--format=%ct", "--", rel]).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|age| i64::try_from(age.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+/// Whether `committed_at` is old enough to treat the host as gone.
+fn host_is_quiet(committed_at: i64, now: i64) -> bool {
+    let quiet = i64::try_from(ADOPT_QUIET.as_secs()).unwrap_or(i64::MAX);
+    now.saturating_sub(committed_at) >= quiet
+}
+
+fn age_phrase(committed_at: i64, now: i64) -> String {
+    let secs = now.saturating_sub(committed_at).max(0);
+    let days = secs / 86_400;
+    if days >= 1 {
+        format!("{days} days ago")
+    } else {
+        format!("{} hours ago", secs / 3600)
+    }
+}
+
+fn head_blob(root: &Path, rel: &str) -> Result<Vec<u8>> {
+    let spec = format!("HEAD:{rel}");
+    let out = git(root, &["cat-file", "blob", &spec])?;
+    if !out.status.success() {
+        bail!("sync: {rel} is not in this tracker");
+    }
+    Ok(out.stdout)
+}
+
+/// Decrypt `bytes` with `identities`. The bytes are a sealed log, which
+/// `age` reads from a path, so they go to a temporary file that is removed
+/// before this returns.
+/// A sealed blob `age` will only read from a path. Removed when dropped,
+/// including when decrypt fails.
+struct SealedTemp(PathBuf);
+
+impl Drop for SealedTemp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn open_sealed_bytes(bytes: &[u8], identities: &[PathBuf]) -> Result<Option<String>> {
+    static TEMPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = std::env::temp_dir().join(format!(
+        "ljos-adopt-{}-{}.age",
+        std::process::id(),
+        TEMPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::write(&tmp, bytes)?;
+    let _remove = SealedTemp(tmp.clone());
+    open_identities(&tmp, identities)
+}
+
+fn sealed_plain(root: &Path, rel: &str, identities: &[PathBuf]) -> Result<Option<String>> {
+    let bytes = if root.join(rel).is_file() {
+        std::fs::read(root.join(rel))?
+    } else if in_head(root, rel) {
+        head_blob(root, rel)?
+    } else {
+        return Ok(None);
+    };
+    open_sealed_bytes(&bytes, identities)
+}
+
+/// Texts in `before` (the ids [`read_taken`] stored) that `plain` no longer
+/// carries. The same difference import uses to retire a host's copies.
+fn retired_text_ids(plain: &str, before: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut now = BTreeSet::new();
+    for line in plain.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(atom) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(text) = atom["text"].as_str().filter(|text| !text.is_empty()) else {
+            continue;
+        };
+        now.insert(crate::work_id(text));
+    }
+    before.difference(&now).cloned().collect()
+}
+
+/// Forget atoms tagged `sender` for which `keep` is true. The count is
+/// how many the pack dropped, and how many it still holds. `sender` is
+/// `sync:<host>` for the primary log and `sync:<host>+<scope>` for an
+/// extra one; those are different copies.
+fn forget_tagged(atoms: &[Value], sender: &str, keep: impl Fn(&Value) -> bool) -> (usize, usize) {
+    let mut done = 0usize;
+    let mut failed = 0usize;
+    for atom in atoms {
+        let tagged = atom["entities"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|entity| entity.as_str() == Some(sender));
+        if !tagged || !keep(atom) {
+            continue;
+        }
+        let Some(id) = atom["id"].as_str().filter(|id| !id.is_empty()) else {
+            failed += 1;
+            continue;
+        };
+        if crate::packset_forget(id, None).is_ok() {
+            done += 1;
+        } else {
+            failed += 1;
+        }
+    }
+    (done, failed)
+}
+
+struct PackAdopt {
+    kept: usize,
+    refused: usize,
+    moved: usize,
+    retired: usize,
+    /// A post was not visible as this host's own atom afterwards, or a
+    /// forget did not land. The gone log has to stay.
+    failed: bool,
+}
+
+/// Post the plan, retire texts the gone host already dropped, and forget
+/// `sync:` copies only where a different own atom of that memory exists.
+/// An explicit `scope:` of another repository stays. Import does not add
+/// one, so a copy with no scope tag is this log's atom, not the default
+/// scope's.
+fn in_adopted_scope(atom: &Value, scope: &str) -> bool {
+    atom["entities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .find_map(|tag| tag.strip_prefix("scope:"))
+        .is_none_or(|name| name == scope)
+}
+
+fn adopt_pack(scope_name: &str, gone: &str, plain: &str, sender: &str) -> Result<PackAdopt> {
+    let client = crate::pack()?;
+    let workspace = client.workspace();
+    let before = crate::atoms_lean(&client, &workspace)?;
+    let own = own_memory_keys(&before, scope_name);
+    // Import's retirement, run before the log is dropped. It is by text,
+    // as `.taken` records texts: a ticket the gone host dropped while the
+    // same words remain on another ticket is still in the log, so it is
+    // not retired here.
+    let retired_ids = retired_text_ids(plain, &read_taken(scope_name, gone));
+    let (retired, retire_failed) = forget_tagged(&before, sender, |atom| {
+        in_adopted_scope(atom, scope_name)
+            && atom["text"]
+                .as_str()
+                .is_some_and(|text| retired_ids.contains(&crate::work_id(text)))
+    });
+    let plan = adopt_plan(plain, scope_name, &own);
+    for atom in &plan.post {
+        let mut posted = atom.clone();
+        if let Some(map) = posted.as_object_mut() {
+            map.insert("workspace".into(), Value::String(workspace.clone()));
+        }
+        let _ = crate::admit::post_kept(&client, &posted);
+    }
+    // The pack may answer the post with the `sync:` atom it already holds
+    // when the text matches. That Ok is not an adoption: forget only when
+    // a re-list shows a different own atom of the same memory.
+    let after = crate::atoms_lean(&client, &workspace)?;
+    let owned = own_memory_keys(&after, scope_name);
+    let mut kept = 0usize;
+    let mut refused = 0usize;
+    for atom in &plan.post {
+        if memory_key(atom).is_some_and(|key| owned.contains(&key)) {
+            kept += 1;
+        } else {
+            refused += 1;
+        }
+    }
+    let (moved, move_failed) = forget_tagged(&after, sender, |atom| {
+        in_adopted_scope(atom, scope_name)
+            && memory_key(atom).is_some_and(|key| plan.live.contains(&key) && owned.contains(&key))
+    });
+    Ok(PackAdopt {
+        kept,
+        refused,
+        moved,
+        retired,
+        failed: retire_failed > 0 || refused > 0 || move_failed > 0,
+    })
+}
+
+fn dry_adopt_line(scope_name: &str, gone: &str, plain: &str, rel: &str) -> Result<String> {
+    let client = crate::pack()?;
+    let atoms = crate::atoms_lean(&client, &client.workspace())?;
+    let own = own_memory_keys(&atoms, scope_name);
+    let plan = adopt_plan(plain, scope_name, &own);
+    let retired = retired_text_ids(plain, &read_taken(scope_name, gone));
+    Ok(format!(
+        "sync: {gone}: would adopt {} {scope_name} atoms, retire {}, and drop {rel}\n",
+        plan.post.len(),
+        retired.len()
+    ))
+}
+
+/// The subject import recognises as "this host was adopted". The host is
+/// the first word, so a name with a space cannot be one; [`machine_name`]
+/// does not produce one.
+fn adopt_commit_subject(subject: &str, host: &str) -> bool {
+    let Some(rest) = subject.trim().strip_prefix("chore(sync): adopt ") else {
+        return false;
+    };
+    let Some((named, tail)) = rest.split_once(' ') else {
+        return false;
+    };
+    named == host && tail.ends_with(" atoms")
+}
+
+/// The host a log stem names. `gone` is the primary file. `gone+cloud` is
+/// host `gone` and the extra scope `cloud`. A `+` with nothing on one side
+/// is not a file this crate writes.
+fn log_stem_host(stem: &str) -> Option<&str> {
+    match stem.split_once('+') {
+        Some((host, extra)) if !host.is_empty() && !extra.is_empty() => Some(host),
+        Some(_) => None,
+        None if stem.is_empty() => None,
+        None => Some(stem),
+    }
+}
+
+fn age_stem(rel: &str) -> Option<&str> {
+    rel.strip_prefix(".ljos/atoms/")?.strip_suffix(".jsonl.age")
+}
+
+/// Stems whose newest deletion under `.ljos/atoms` is an adopt commit.
+/// A stem is `host` or `host+scope`. `log` is `git log --diff-filter=D
+/// --pretty=format:%x1e%s --name-only`, newest first. A later deletion
+/// that is not an adopt wins. The subject names the host, not the whole
+/// stem, so one adopt commit covers the primary file and every extra
+/// scope file it deletes. The caller drops a stem whose file is back.
+fn hosts_removed_by_adopt(log: &str) -> BTreeSet<String> {
+    let mut seen = BTreeSet::new();
+    let mut adopted = BTreeSet::new();
+    let mut subject = String::new();
+    for line in log.lines() {
+        if let Some(rest) = line.strip_prefix('\u{1e}') {
+            subject = rest.to_string();
+            continue;
+        }
+        let Some(name) = line.strip_prefix(".ljos/atoms/") else {
+            continue;
+        };
+        let Some(stem) = name.strip_suffix(".jsonl.age") else {
+            continue;
+        };
+        let Some(host) = log_stem_host(stem) else {
+            continue;
+        };
+        if !seen.insert(stem.to_string()) {
+            continue;
+        }
+        if adopt_commit_subject(&subject, host) {
+            adopted.insert(stem.to_string());
+        }
+    }
+    adopted
+}
+
+fn adopted_stems(root: &Path) -> BTreeSet<String> {
+    let Ok(out) = git(
+        root,
+        &[
+            "log",
+            "--diff-filter=D",
+            "--pretty=format:%x1e%s",
+            "--name-only",
+            "--",
+            ".ljos/atoms",
+        ],
+    ) else {
+        return BTreeSet::new();
+    };
+    if !out.status.success() {
+        return BTreeSet::new();
+    }
+    hosts_removed_by_adopt(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn catch_up_failed(said: &str) -> bool {
+    said.contains("fetch failed") || said.contains("could not merge")
+}
+
+fn git_first_line(out: &std::process::Output) -> String {
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    text.lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("git failed")
+        .trim()
+        .to_string()
+}
+
+/// Remove a tracked path so the following commit records the deletion.
+///
+/// `git rm` refuses a dirty file, which is what keeps an uncommitted edit.
+/// It also drops the path from the index, and `commit --only` then cannot
+/// name it, so the HEAD entry is put back without restoring the worktree
+/// file. A crash after `git rm` leaves that staged deletion; reset still
+/// makes the path committable. The caller holds [`crate::tracker_commit_lock`].
+fn stage_deletion(root: &Path, rel: &str) -> Result<()> {
+    let dry = git(root, &["rm", "-n", "--ignore-unmatch", "--", rel])?;
+    if !dry.status.success() {
+        bail!(
+            "sync: {rel} was not removed ({}); the log was kept",
+            git_first_line(&dry)
+        );
+    }
+    let removed = git(root, &["rm", "--ignore-unmatch", "--", rel])?;
+    if !removed.status.success() {
+        bail!(
+            "sync: {rel} was not removed ({}); the log was kept",
+            git_first_line(&removed)
+        );
+    }
+    let reset = git(root, &["reset", "-q", "--", rel])?;
+    if !reset.status.success() {
+        bail!(
+            "sync: {rel} was not removed ({}); the log was kept",
+            git_first_line(&reset)
+        );
+    }
+    if root.join(rel).exists() {
+        bail!("sync: {rel} is still on disk; the log was kept");
+    }
+    Ok(())
+}
+
+struct CommitReport {
+    said: String,
+    /// `Made` or `AlreadyIn`: the paths are in HEAD. A refused commit is
+    /// not, and the taken file has to stay so the next run can finish.
+    landed: bool,
+}
+
+/// The words [`commit_files`] prints. The caller has dropped the tracker
+/// lock; a push takes it again inside `prepare_tracker`.
+fn report_commit(root: &Path, message: &str, push: bool, made: crate::PathCommit) -> CommitReport {
+    match made {
+        crate::PathCommit::Refused(why) => {
+            return CommitReport {
+                said: format!("sync: commit refused: {why}\n"),
+                landed: false,
+            };
+        }
+        crate::PathCommit::AlreadyIn => {
+            return CommitReport {
+                said: if push {
+                    push_pending(root)
+                } else {
+                    kept_local(root)
+                },
+                landed: true,
+            };
+        }
+        crate::PathCommit::Made => {}
+    }
+    if !push {
+        return CommitReport {
+            said: format!("sync: committed {message}; not pushed (LJOS_TRACKER_GIT=commit)\n"),
+            landed: true,
+        };
+    }
+    let remotes = git(root, &["remote"])
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if remotes.is_empty() {
+        return CommitReport {
+            said: format!(
+                "sync: committed {message}; no remote is configured, so nothing was pushed. \
+                 Set one with `git -C {} remote add origin URL` and `git push -u origin HEAD`.\n",
+                root.display()
+            ),
+            landed: true,
+        };
+    }
+    match crate::tracker_push::push_checkout(root) {
+        Ok(()) => CommitReport {
+            said: format!("sync: committed {message}; pushed\n"),
+            landed: true,
+        },
+        Err(e) => CommitReport {
+            said: format!("sync: committed {message}; push refused: {e}\n"),
+            landed: true,
+        },
+    }
+}
+
+fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Result<String> {
+    let gone = require_host_name(gone)?;
     let me = host();
     if gone == me {
         bail!("sync: {gone} is this machine; pass a gone host");
     }
-    let identities = identities_for_open();
-    if identities.is_empty() {
-        return Ok("sync: no age identity on this machine; `ljos sync --key` makes one\n".into());
+    // One host, every scope. A dirty or untracked file stops the whole
+    // adopt before the pack is asked, so a bad extra log cannot delete
+    // the primary one. An absent file is skipped; if every file is
+    // absent, the line is the same one a primary-only repository prints.
+    let adopted = adopted_stems(root);
+    let mut present = Vec::new();
+    for log in logs_of_host(scope, &gone) {
+        match gone_log_state(root, &log.age) {
+            GoneLog::Absent => {
+                if age_stem(&log.age).is_some_and(|stem| adopted.contains(stem)) {
+                    let _ = std::fs::remove_file(taken_path(&log.scope_name, &gone));
+                }
+            }
+            GoneLog::Untracked => bail!(
+                "sync: {gone}'s {} log is not committed; it was left in place",
+                log.scope_name
+            ),
+            GoneLog::Dirty => bail!(
+                "sync: {gone}'s {} log differs from the committed file; it was left in place",
+                log.scope_name
+            ),
+            GoneLog::Clean | GoneLog::Resume => {
+                if matches!(gone_log_state(root, &log.digest), GoneLog::Dirty) {
+                    bail!(
+                        "sync: {gone}'s {} digest differs from the committed file; the log was left in place",
+                        log.scope_name
+                    );
+                }
+                present.push(log);
+            }
+        }
     }
-    let [gone_log, gone_digest] = host_log_rels(gone);
-    let log_path = root.join(&gone_log);
-    if !log_path.is_file() {
+    if present.is_empty() {
         return Ok(format!(
             "sync: {gone} has no {} log in this tracker\n",
             scope.name
         ));
     }
-    let Some(plain) = open_identities(&log_path, &identities)? else {
-        return Ok(format!(
-            "sync: {gone}'s {} log is not sealed to this machine\n",
-            scope.name
-        ));
-    };
-    let client = crate::pack()?;
-    let workspace = client.workspace();
-    let before = crate::atoms_lean(&client, &workspace)?;
-    let own: BTreeSet<String> = before
-        .iter()
-        .filter(|a| is_own(a))
-        .filter_map(|a| a["text"].as_str().map(crate::work_id))
-        .collect();
-    let plan = adopt_plan(&plain, &own);
-    let mut adopted = BTreeSet::new();
-    let (mut kept, mut refused) = (0usize, 0usize);
-    for mut atom in plan.post {
-        let text = atom["text"].as_str().unwrap_or("");
-        let id = crate::work_id(text);
-        if let Some(map) = atom.as_object_mut() {
-            map.insert("workspace".into(), Value::String(workspace.clone()));
-        }
-        match crate::admit::post_kept(&client, &atom) {
-            Ok(_) => {
-                adopted.insert(id);
-                kept += 1;
+    // A resume already started the deletion, and refusing it would leave
+    // the worktree file gone and the commit unmade. Recipients are age
+    // keys, not host names, so a host still listed there cannot be told
+    // apart from one that left; the log's last commit is the signal. Any
+    // log that is still young, and not a resume, refuses the rest: adopting
+    // the quiet scope alone would leave the live one in place.
+    if !opts.force {
+        let now = unix_now();
+        for log in &present {
+            if matches!(gone_log_state(root, &log.age), GoneLog::Resume) {
+                continue;
             }
-            Err(_) => refused += 1,
+            match log_committed_at(root, &log.age) {
+                Some(at) if host_is_quiet(at, now) => {}
+                Some(at) => bail!(
+                    "sync: {gone}'s {} log was committed {}; pass --force to adopt a host that may still be alive",
+                    log.scope_name,
+                    age_phrase(at, now)
+                ),
+                None => bail!(
+                    "sync: {gone}'s {} log has no commit time; pass --force to adopt a host that may still be alive",
+                    log.scope_name
+                ),
+            }
         }
     }
-    let tag = sender_entity(gone);
-    let mut moved = 0usize;
-    for atom in before {
-        let Some(text) = atom["text"].as_str() else {
-            continue;
+    let identities = identities_for_open();
+    if identities.is_empty() {
+        return Ok("sync: no age identity on this machine; `ljos sync --key` makes one\n".into());
+    }
+    let mut plains = Vec::with_capacity(present.len());
+    for log in &present {
+        let Some(plain) = sealed_plain(root, &log.age, &identities)? else {
+            return Ok(format!(
+                "sync: {gone}'s {} log is not sealed to this machine\n",
+                log.scope_name
+            ));
         };
-        let from_gone = atom["entities"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|e| e.as_str() == Some(tag.as_str()));
-        if !from_gone {
-            continue;
+        plains.push(plain);
+    }
+    if opts.dry_run {
+        let mut out = String::new();
+        for (log, plain) in present.iter().zip(&plains) {
+            out.push_str(&dry_adopt_line(&log.scope_name, &gone, plain, &log.age)?);
         }
-        let text_id = crate::work_id(text);
-        if !plan.live.contains(&text_id) {
-            continue;
+        return Ok(out);
+    }
+    let mut rows = Vec::with_capacity(present.len());
+    let mut failed = false;
+    for (log, plain) in present.iter().zip(&plains) {
+        let sender = sender_entity_for_scope(&gone, scope, &log.scope_name);
+        let done = adopt_pack(&log.scope_name, &gone, plain, &sender)?;
+        failed |= done.failed;
+        rows.push(done);
+    }
+    let mut out = String::new();
+    for (log, done) in present.iter().zip(&rows) {
+        out.push_str(&format!(
+            "sync: {gone}: {} {} atoms adopted, {} refused, {} moved, {} retired",
+            done.kept, log.scope_name, done.refused, done.moved, done.retired
+        ));
+        // One scope failing keeps every file. Saying so on each line is
+        // what a single-scope failure already printed, and it stops a
+        // sibling scope from looking deleted.
+        if failed {
+            out.push_str("; the log was kept");
         }
-        if !(own.contains(&text_id) || adopted.contains(&text_id)) {
-            continue;
+        out.push('\n');
+    }
+    if failed {
+        return Ok(out);
+    }
+    let client = crate::pack()?;
+    let atoms = crate::atoms_lean(&client, &client.workspace())?;
+    let exported = if scope.scopes.is_empty() {
+        export(root, scope, &atoms)?
+    } else {
+        export_all(root, scope, &atoms)?
+    };
+    if exported.contains("age is not installed") {
+        bail!(
+            "{out}sync: age is not installed, so adoption cannot seal {me}'s log; install age and try again"
+        );
+    }
+    out.push_str(&exported);
+    let mut drop_rels = Vec::new();
+    for log in &present {
+        drop_rels.push(log.age.clone());
+        if matches!(
+            gone_log_state(root, &log.digest),
+            GoneLog::Clean | GoneLog::Resume
+        ) {
+            drop_rels.push(log.digest.clone());
         }
-        if let Some(id) = atom["id"].as_str() {
-            if crate::packset_forget(id, None).is_ok() {
-                moved += 1;
+    }
+    // One subject for every scope file. Import matches the host, the
+    // first word, and reads a `host+scope` path in this commit as that
+    // extra scope. The primary name is enough.
+    let message = format!("chore(sync): adopt {gone} {} atoms", scope.name);
+    let made = {
+        let held = crate::tracker_commit_lock(root);
+        for rel in &drop_rels {
+            if let Err(err) = stage_deletion(root, rel) {
+                drop(held);
+                bail!("{out}{err}");
+            }
+        }
+        let mut stage = drop_rels;
+        let mine: Vec<String> = if scope.scopes.is_empty() {
+            host_log_rels(&me).to_vec()
+        } else {
+            scope
+                .all_scopes()
+                .into_iter()
+                .flat_map(|named| host_log_rels_for_scope(&me, &scope.name, named.name))
+                .collect()
+        };
+        for rel in mine {
+            if stageable_path(root, &rel) {
+                stage.push(rel);
+            }
+        }
+        let refs: Vec<&str> = stage.iter().map(String::as_str).collect();
+        let made = crate::commit_paths(root, &refs, &message);
+        drop(held);
+        made
+    };
+    let report = report_commit(root, &message, opts.push, made);
+    if report.landed {
+        for log in &present {
+            if !in_head(root, &log.age) {
+                let _ = std::fs::remove_file(taken_path(&log.scope_name, &gone));
             }
         }
     }
-    let atoms = crate::atoms_lean(&client, &workspace)?;
-    let exported = export(root, scope, &atoms)?;
-    if exported.contains("age is not installed") {
-        bail!("sync: age is not installed, so adoption cannot seal {me}'s log; install age and try again");
+    out.push_str(&report.said);
+    if present.iter().any(|log| in_head(root, &log.age)) {
+        out.push_str("sync: the log was kept\n");
     }
-    let gone_paths = [gone_log.clone(), gone_digest.clone()];
-    let mut stage = Vec::new();
-    for rel in gone_paths {
-        if stageable_path(root, &rel) {
-            stage.push(rel.clone());
-        }
-        let path = root.join(rel);
-        if path.exists() {
-            std::fs::remove_file(path)?;
-        }
-    }
-    let _ = std::fs::remove_file(taken_path(&scope.name, gone));
-    for rel in host_log_rels(&me) {
-        if stageable_path(root, &rel) {
-            stage.push(rel);
-        }
-    }
-    let committed = commit_adopt(root, &scope.name, gone, &stage, push);
-    let mut out = format!(
-        "sync: {gone}: {kept} {} atoms adopted, {refused} refused, {moved} moved\n",
-        scope.name
-    );
-    out.push_str(&exported);
-    out.push_str(&committed);
     Ok(out)
 }
 
@@ -1128,51 +1856,13 @@ fn kept_local(root: &Path) -> String {
 
 fn commit_files(root: &Path, files: &[&str], message: &str, push: bool) -> String {
     let held = crate::tracker_commit_lock(root);
-    match crate::commit_paths(root, files, message) {
-        crate::PathCommit::Made => {}
-        crate::PathCommit::AlreadyIn => {
-            drop(held);
-            return if push {
-                push_pending(root)
-            } else {
-                kept_local(root)
-            };
-        }
-        crate::PathCommit::Refused(why) => return format!("sync: commit refused: {why}\n"),
-    }
+    let made = crate::commit_paths(root, files, message);
     drop(held);
-    if !push {
-        return format!("sync: committed {message}; not pushed (LJOS_TRACKER_GIT=commit)\n");
-    }
-    let remotes = git(root, &["remote"])
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
-    if remotes.is_empty() {
-        return format!(
-            "sync: committed {message}; no remote is configured, so nothing was pushed. \
-             Set one with `git -C {} remote add origin URL` and `git push -u origin HEAD`.\n",
-            root.display()
-        );
-    }
     // No upstream yet: push_checkout sets it with `-u origin <branch>`.
     // A sibling bot's push is rebased, and an org conflict keeps both
     // headings. Failure stays a failure; the line does not say the log was
     // pushed.
-    match crate::tracker_push::push_checkout(root) {
-        Ok(()) => format!("sync: committed {message}; pushed\n"),
-        Err(e) => format!("sync: committed {message}; push refused: {e}\n"),
-    }
-}
-
-fn commit_adopt(root: &Path, scope: &str, gone: &str, files: &[String], push: bool) -> String {
-    if files.is_empty() {
-        return String::new();
-    }
-    let refs: Vec<&str> = files.iter().map(String::as_str).collect();
-    let message = format!("chore(sync): adopt {gone} {scope} atoms");
-    commit_files(root, &refs, &message, push)
+    report_commit(root, message, push, made).said
 }
 
 /// Push commits this checkout has not sent. Atoms that did not change used
@@ -1470,18 +2160,21 @@ fn sync_roots() -> Result<Vec<PathBuf>> {
     })
 }
 
-/// Fold one gone host's atoms into this host's log and drop the gone host's
-/// log file from each configured tracker repository.
+/// Fold one gone host's atoms into this host's logs and drop that host's
+/// log files from each configured tracker repository.
+///
+/// `force` adopts a log committed within the last 14 days. `dry_run`
+/// prints the plan and writes nothing. A fetch or merge that did not
+/// bring a repository current adopts nothing in it: the remote log may
+/// be newer than the one that would be deleted.
 ///
 /// # Errors
 ///
 /// A missing host name, trying to adopt this machine's own host name, a
 /// scope file that does not parse, the pack not answering, or age refusing.
-pub fn adopt(target: &str) -> Result<String> {
-    let gone = target.trim();
-    if gone.is_empty() {
-        bail!("sync: pass a host after --adopt");
-    }
+/// A log that is too new, unless `force`. A tracker that is not current.
+pub fn adopt(target: &str, force: bool, dry_run: bool) -> Result<String> {
+    let gone = require_host_name(target)?;
     if gone == host() {
         bail!("sync: {gone} is this machine; pass a gone host");
     }
@@ -1497,8 +2190,24 @@ pub fn adopt(target: &str) -> Result<String> {
             ));
             continue;
         };
-        out.push_str(&catch_up(&root));
-        out.push_str(&adopt_in_repo(&root, &scope, gone, true)?);
+        let caught = catch_up(&root);
+        if catch_up_failed(&caught) {
+            bail!(
+                "sync: {gone} was not adopted from {}; the tracker is not current\n{caught}",
+                root.display()
+            );
+        }
+        out.push_str(&caught);
+        out.push_str(&adopt_in_repo(
+            &root,
+            &scope,
+            &gone,
+            AdoptOpts {
+                push: true,
+                force,
+                dry_run,
+            },
+        )?);
     }
     Ok(out)
 }
@@ -1865,6 +2574,7 @@ fn commit_host(
     host: &str,
     deadline: std::time::Instant,
 ) -> Result<bool> {
+    crate::refuse_ljos_checkout(root).map_err(|why| anyhow::anyhow!("sync: user rules: {why}"))?;
     let held = held_by(root, deadline)?;
     let paths: Vec<&str> = rels.iter().map(String::as_str).collect();
     let mut add = vec!["add", "-A", "--"];
@@ -2624,6 +3334,38 @@ mod tests {
     }
 
     #[test]
+    fn a_log_file_names_its_host_and_its_scope() {
+        let scope: Scope = toml::from_str(
+            "name = \"grokbot\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = [\"age1cloud\"]\n",
+        )
+        .unwrap();
+        let primary = PathBuf::from(".ljos/atoms/laptop.jsonl.age");
+        assert_eq!(
+            host_scope_from_log_path(&primary, &scope).unwrap(),
+            ("laptop".into(), "grokbot".into())
+        );
+        let extra = PathBuf::from(".ljos/atoms/laptop+cloud.jsonl.age");
+        assert_eq!(
+            host_scope_from_log_path(&extra, &scope).unwrap(),
+            ("laptop".into(), "cloud".into())
+        );
+        assert!(host_scope_from_log_path(
+            &PathBuf::from(".ljos/atoms/laptop+missing.jsonl.age"),
+            &scope
+        )
+        .is_none());
+        assert!(
+            host_scope_from_log_path(&PathBuf::from(".ljos/atoms/+cloud.jsonl.age"), &scope)
+                .is_none()
+        );
+        assert!(host_scope_from_log_path(
+            &PathBuf::from(".ljos/atoms/laptop+cloud.digest"),
+            &scope
+        )
+        .is_none());
+    }
+
+    #[test]
     fn a_grokbot_atom_never_lands_in_the_cloud_file() {
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
@@ -2715,34 +3457,495 @@ mod tests {
     }
 
     #[test]
-    fn an_adopt_plan_posts_each_live_text_once_without_sync_tags() {
+    fn an_adopt_plan_keeps_each_issue_in_the_logs_scope() {
         let plain = format!(
-            "{}\n{}\n{}\nnot-json\n",
-            atom("a", "fresh", &["seat:x", "sync:gone"]),
-            atom("b", "mine", &["scope:cloud"]),
-            atom("c", "fresh", &["sync:stale"])
+            "{}\n{}\n{}\n{}\nnot-json\n",
+            serde_json::json!({
+                "id": "a", "text": "fresh", "kind": "lesson",
+                "origin": "user-declared", "level": "explicit",
+                "entities": ["seat:x", "sync:gone"]
+            }),
+            serde_json::json!({
+                "id": "b", "text": "mine", "kind": "lesson",
+                "entities": ["scope:cloud"]
+            }),
+            serde_json::json!({
+                "id": "c", "text": "fresh", "kind": "lesson", "issue": "ljos-b",
+                "entities": ["sync:stale", "issue:ljos-b"]
+            }),
+            serde_json::json!({
+                "id": "d", "text": "fresh", "kind": "lesson",
+                "entities": ["sync:gone"]
+            })
         );
-        let own: BTreeSet<String> = [crate::work_id("mine")].into_iter().collect();
-        let plan = adopt_plan(&plain, &own);
-        let live: BTreeSet<String> = [crate::work_id("fresh"), crate::work_id("mine")]
-            .into_iter()
-            .collect();
-        assert_eq!(plan.live, live);
-        assert_eq!(plan.post.len(), 1);
-        assert_eq!(plan.post[0]["text"], "fresh");
-        assert!(plan.post[0].get("id").is_none());
-        assert!(plan.post[0]["entities"]
-            .as_array()
-            .unwrap()
+        let held = [
+            serde_json::json!({
+                "id": "o", "text": "mine", "kind": "lesson",
+                "entities": ["scope:cloud"]
+            }),
+            serde_json::json!({
+                "id": "p", "text": "fresh", "kind": "lesson",
+                "entities": ["scope:private"]
+            }),
+        ];
+        let own = own_memory_keys(&held, "cloud");
+        assert_eq!(own.len(), 1, "a private copy is not this scope's own");
+        let plan = adopt_plan(&plain, "cloud", &own);
+        assert_eq!(
+            plan.post.len(),
+            2,
+            "same words on two tickets are two posts"
+        );
+        assert!(plan.post.iter().all(|atom| atom["origin"] == "peer"));
+        assert!(plan.post.iter().all(|atom| atom.get("id").is_none()));
+        assert!(plan.post.iter().all(|atom| atom.get("level").is_none()));
+        let issues: BTreeSet<&str> = plan
+            .post
             .iter()
-            .all(|e| !e.as_str().is_some_and(|tag| tag.starts_with("sync:"))));
+            .map(|atom| atom["issue"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(issues, BTreeSet::from(["", "ljos-b"]));
+        for atom in &plan.post {
+            let tags: Vec<&str> = atom["entities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            assert!(tags.contains(&"scope:cloud"), "{tags:?}");
+            assert!(tags.iter().all(|tag| !tag.starts_with("sync:")), "{tags:?}");
+        }
+        assert!(plan.live.contains(&memory_key(&held[0]).unwrap()));
+    }
+
+    #[test]
+    fn a_host_name_cannot_leave_the_atoms_directory() {
+        let err = require_host_name("../x").unwrap_err().to_string();
+        assert!(err.contains("not a host name"), "{err}");
+        assert!(require_host_name("").is_err());
+        assert_eq!(require_host_name("gone-host").unwrap(), "gone-host");
+        let rels = host_log_rels("../x");
+        assert!(
+            rels.iter()
+                .all(|rel| rel.starts_with(".ljos/atoms/") && !rel.contains("..")),
+            "{rels:?}"
+        );
+    }
+
+    #[test]
+    fn an_untagged_sync_copy_belongs_to_the_log_being_adopted() {
+        let cloud = serde_json::json!({"text": "a", "entities": ["sync:gone", "scope:cloud"]});
+        let bare = serde_json::json!({"text": "a", "entities": ["sync:gone"]});
+        let private = serde_json::json!({"text": "a", "entities": ["sync:gone", "scope:private"]});
+        assert!(in_adopted_scope(&cloud, "cloud"));
+        assert!(in_adopted_scope(&bare, "cloud"));
+        assert!(!in_adopted_scope(&private, "cloud"));
+    }
+
+    #[test]
+    fn a_host_is_quiet_only_after_a_fortnight() {
+        let now = 1_700_000_000_i64;
+        let quiet = i64::try_from(ADOPT_QUIET.as_secs()).unwrap();
+        assert!(host_is_quiet(now - quiet, now));
+        assert!(!host_is_quiet(now - quiet + 1, now));
+        assert!(host_is_quiet(now - quiet - 86_400, now));
+        assert!(!host_is_quiet(now + 10, now));
+        assert_eq!(age_phrase(now - 3 * 86_400, now), "3 days ago");
+        assert_eq!(age_phrase(now - 90, now), "0 hours ago");
+        assert!(!catch_up_failed(""));
+        assert!(!catch_up_failed("sync: committed\n"));
+        assert!(catch_up_failed(
+            "sync: fetch failed; reading the logs as they are\n"
+        ));
+        assert!(catch_up_failed(
+            "sync: could not merge origin/main; `ljos doctor` names the split\n"
+        ));
+    }
+
+    #[test]
+    fn an_adopt_commit_is_the_newest_deletion_of_that_host() {
+        let log = "\
+\u{1e}chore(sync): adopt gone cloud atoms
+.ljos/atoms/gone.digest
+.ljos/atoms/gone.jsonl.age
+\u{1e}chore(sync): otherhost cloud atoms
+.ljos/atoms/stay.jsonl.age
+\u{1e}chore: drop back
+.ljos/atoms/back.jsonl.age
+\u{1e}chore(sync): adopt back cloud atoms
+.ljos/atoms/back.jsonl.age
+";
+        assert_eq!(
+            hosts_removed_by_adopt(log),
+            BTreeSet::from(["gone".to_string()])
+        );
+        assert!(adopt_commit_subject(
+            "chore(sync): adopt gone cloud atoms",
+            "gone"
+        ));
+        assert!(!adopt_commit_subject(
+            "chore(sync): adopt gone cloud atoms",
+            "other"
+        ));
+        assert!(!adopt_commit_subject(
+            "chore(sync): gone cloud atoms",
+            "gone"
+        ));
+        assert!(!adopt_commit_subject("chore(sync): adopt gone", "gone"));
+        let scoped = "\
+\u{1e}chore(sync): adopt gone box atoms
+.ljos/atoms/gone+cloud.jsonl.age
+.ljos/atoms/gone.jsonl.age
+\u{1e}chore: drop extra
+.ljos/atoms/stay+cloud.jsonl.age
+";
+        assert_eq!(
+            hosts_removed_by_adopt(scoped),
+            BTreeSet::from(["gone".to_string(), "gone+cloud".to_string()])
+        );
+        let replaced = "\
+\u{1e}chore: drop the extra by hand
+.ljos/atoms/gone+cloud.jsonl.age
+\u{1e}chore(sync): adopt gone box atoms
+.ljos/atoms/gone+cloud.jsonl.age
+.ljos/atoms/gone.jsonl.age
+";
+        assert_eq!(
+            hosts_removed_by_adopt(replaced),
+            BTreeSet::from(["gone".to_string()])
+        );
+    }
+
+    fn hold_env(dir: &Path) -> crate::EnvLock {
+        let lock = crate::test_env_lock();
+        std::env::set_var("XDG_CONFIG_HOME", dir.join("config"));
+        std::env::set_var("XDG_STATE_HOME", dir.join("state"));
+        std::fs::create_dir_all(dir.join("config/ljos")).unwrap();
+        std::fs::create_dir_all(dir.join("state")).unwrap();
+        lock
+    }
+
+    fn tracker(dir: &Path) -> PathBuf {
+        let root = dir.join("tracker");
+        std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
+        let run = |args: &[&str]| {
+            let out = git(&root, args).unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "seat@example.invalid"]);
+        run(&["config", "user.name", "seat"]);
+        run(&["config", "core.hooksPath", "/dev/null"]);
+        run(&["config", "commit.gpgsign", "false"]);
+        root
+    }
+
+    fn commit_rel(root: &Path, rel: &str, body: &str, message: &str) {
+        if let Some(parent) = root.join(rel).parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(root.join(rel), body).unwrap();
+        let out = git(root, &["add", "--", rel]).unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let out = git(root, &["commit", "-q", "-m", message, "--", rel]).unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn cloud() -> Scope {
+        Scope {
+            name: "cloud".into(),
+            recipients: vec!["age1test".into()],
+            projects: BTreeMap::new(),
+            scopes: BTreeMap::new(),
+        }
+    }
+
+    /// A log that is dirty, untracked, or still young is not deleted, and
+    /// the pack is not asked. Force does not override a dirty file.
+    #[test]
+    fn a_log_that_is_not_a_quiet_commit_stays_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = hold_env(dir.path());
+        let root = tracker(dir.path());
+        let rel = ".ljos/atoms/gone.jsonl.age";
+        let opts = AdoptOpts {
+            push: false,
+            force: true,
+            dry_run: true,
+        };
+        std::fs::write(root.join(rel), "not committed\n").unwrap();
+        let err = adopt_in_repo(&root, &cloud(), "gone", opts).unwrap_err();
+        assert!(err.to_string().contains("not committed"), "{err}");
+        assert!(root.join(rel).is_file(), "an untracked log was deleted");
+
+        commit_rel(&root, rel, "sealed\n", "log");
+        std::fs::write(root.join(rel), "dirty\n").unwrap();
+        let err = adopt_in_repo(&root, &cloud(), "gone", opts).unwrap_err();
+        assert!(err.to_string().contains("differs"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(root.join(rel)).unwrap(),
+            "dirty\n",
+            "a dirty log was deleted"
+        );
+        let held = crate::tracker_commit_lock(&root);
+        let removed = stage_deletion(&root, rel).unwrap_err();
+        drop(held);
+        assert!(removed.to_string().contains("was not removed"), "{removed}");
+        assert_eq!(std::fs::read_to_string(root.join(rel)).unwrap(), "dirty\n");
+
+        let out = git(&root, &["checkout", "-q", "--", rel]).unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let err = adopt_in_repo(
+            &root,
+            &cloud(),
+            "gone",
+            AdoptOpts {
+                push: false,
+                force: false,
+                dry_run: true,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--force"), "{err}");
+        assert_eq!(std::fs::read_to_string(root.join(rel)).unwrap(), "sealed\n");
+        let said = adopt_in_repo(&root, &cloud(), "gone", opts).unwrap();
+        assert!(said.contains("no age identity"), "{said}");
+        assert_eq!(std::fs::read_to_string(root.join(rel)).unwrap(), "sealed\n");
+        assert!(in_head(&root, rel));
+    }
+
+    /// The deletion is a commit of the named paths. A crash that left the
+    /// file missing, or a `git rm` that had not been committed, still
+    /// records it. `.taken` goes only once that commit is in HEAD, and
+    /// only when the newest deletion is an adopt.
+    #[test]
+    fn the_gone_log_is_committed_away_and_taken_waits_for_that() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = hold_env(dir.path());
+        let root = tracker(dir.path());
+        let age = ".ljos/atoms/gone.jsonl.age";
+        let digest = ".ljos/atoms/gone.digest";
+        commit_rel(&root, age, "sealed\n", "log");
+        commit_rel(&root, digest, "digest\n", "digest");
+        std::fs::write(root.join("other.txt"), "keep\n").unwrap();
+        let out = git(&root, &["add", "other.txt"]).unwrap();
+        assert!(out.status.success());
+        let out = git(&root, &["commit", "-q", "-m", "other"]).unwrap();
+        assert!(out.status.success());
+        std::fs::write(root.join("other.txt"), "staged\n").unwrap();
+        let out = git(&root, &["add", "other.txt"]).unwrap();
+        assert!(out.status.success());
+
+        std::fs::remove_file(root.join(age)).unwrap();
+        let held = crate::tracker_commit_lock(&root);
+        stage_deletion(&root, age).unwrap();
+        stage_deletion(&root, digest).unwrap();
+        let made =
+            crate::commit_paths(&root, &[age, digest], "chore(sync): adopt gone cloud atoms");
+        drop(held);
+        assert_eq!(made, crate::PathCommit::Made);
+        assert!(!in_head(&root, age));
+        assert!(!in_head(&root, digest));
+        assert!(!root.join(age).exists());
+        let status = git(&root, &["status", "--porcelain"]).unwrap();
+        let status = String::from_utf8_lossy(&status.stdout);
+        assert!(
+            status.contains("other.txt"),
+            "the unrelated stage was committed or lost: {status}"
+        );
+        assert!(!status.contains("gone"), "{status}");
+
+        let taken = taken_path("cloud", "gone");
+        std::fs::create_dir_all(taken.parent().unwrap()).unwrap();
+        std::fs::write(&taken, "abc\n").unwrap();
+        let said = adopt_in_repo(
+            &root,
+            &cloud(),
+            "gone",
+            AdoptOpts {
+                push: false,
+                force: true,
+                dry_run: false,
+            },
+        )
+        .unwrap();
+        assert!(said.contains("has no cloud log"), "{said}");
+        assert!(!taken.exists(), "an adopt deletion left .taken behind");
+
+        commit_rel(&root, ".ljos/atoms/otherhost.jsonl.age", "x\n", "log");
+        let other = root.join(".ljos/atoms/otherhost.jsonl.age");
+        let out = git(
+            &root,
+            &["rm", "-q", "--", ".ljos/atoms/otherhost.jsonl.age"],
+        )
+        .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let out = git(
+            &root,
+            &["commit", "-q", "-m", "chore(sync): otherhost cloud atoms"],
+        )
+        .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let kept = taken_path("cloud", "otherhost");
+        std::fs::write(&kept, "abc\n").unwrap();
+        let said = adopt_in_repo(
+            &root,
+            &cloud(),
+            "otherhost",
+            AdoptOpts {
+                push: false,
+                force: true,
+                dry_run: false,
+            },
+        )
+        .unwrap();
+        assert!(said.contains("has no cloud log"), "{said}");
+        assert!(kept.exists(), "a non-adopt deletion cleared .taken");
+        assert!(!other.exists());
+    }
+
+    #[test]
+    fn a_resume_without_an_identity_does_not_commit_the_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = hold_env(dir.path());
+        let root = tracker(dir.path());
+        let rel = ".ljos/atoms/gone.jsonl.age";
+        commit_rel(&root, rel, "sealed\n", "log");
+        let head = git(&root, &["rev-parse", "HEAD"]).unwrap();
+        std::fs::remove_file(root.join(rel)).unwrap();
+        let said = adopt_in_repo(
+            &root,
+            &cloud(),
+            "gone",
+            AdoptOpts {
+                push: false,
+                force: false,
+                dry_run: false,
+            },
+        )
+        .unwrap();
+        assert!(said.contains("no age identity"), "{said}");
+        assert!(in_head(&root, rel), "the resume committed the deletion");
+        assert!(!root.join(rel).exists());
+        let again = git(&root, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(head.stdout, again.stdout);
+    }
+
+    #[test]
+    fn a_failed_fetch_does_not_adopt() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = hold_env(dir.path());
+        let root = tracker(dir.path());
+        std::fs::write(
+            root.join(".ljos/sync.toml"),
+            "name = \"cloud\"\nrecipients = [\"age1test\"]\n",
+        )
+        .unwrap();
+        let rel = ".ljos/atoms/gone.jsonl.age";
+        commit_rel(&root, rel, "sealed\n", "log");
+        let out = git(
+            &root,
+            &["remote", "add", "origin", "/nonexistent/ljos-tracker.git"],
+        )
+        .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let listed = root.display().to_string();
+        std::fs::write(
+            dir.path().join("config/ljos/sync.toml"),
+            format!("repos = [\"{listed}\"]\n"),
+        )
+        .unwrap();
+        let err = adopt("gone", true, false).unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("not current"), "{err}");
+        assert!(err.contains("fetch failed"), "{err}");
+        assert_eq!(std::fs::read_to_string(root.join(rel)).unwrap(), "sealed\n");
+        assert!(in_head(&root, rel));
     }
 
     #[test]
     fn an_adopt_names_a_missing_scope() {
         let _g = crate::test_env_lock();
-        let said = adopt("otherhost").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tracker");
+        std::fs::create_dir_all(&root).unwrap();
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(config.join("ljos")).unwrap();
+        let listed = root.display().to_string();
+        assert!(
+            !listed.contains('"'),
+            "the temporary path is not a toml string"
+        );
+        std::fs::write(
+            config.join("ljos/sync.toml"),
+            format!("repos = [\"{listed}\"]\n"),
+        )
+        .unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &config);
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let head = git(&source, &["rev-parse", "HEAD"]).unwrap();
+        let said = adopt("otherhost", false, false).unwrap();
+        let again = git(&source, &["rev-parse", "HEAD"]).unwrap();
         assert!(said.contains("names no scope"), "{said}");
+        assert!(
+            !said.contains("ljos checkout"),
+            "adopt fell back to the source tree: {said}"
+        );
+        assert_eq!(
+            head.stdout, again.stdout,
+            "adopt committed the ljos checkout"
+        );
+        assert!(!source.join(".gitattributes").exists());
+    }
+
+    /// The suite's working directory is inside the ljos checkout. A tracker
+    /// root that falls back there must not commit, and must not write the
+    /// attributes file the stray commit `3df31c6` added.
+    #[test]
+    fn a_test_cannot_commit_the_ljos_checkout() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let head = git(&root, &["rev-parse", "HEAD"]).unwrap();
+        assert!(head.status.success());
+        let err = crate::tracker_push::prepare_tracker(&root, false, true).unwrap_err();
+        assert!(err.contains("ljos checkout"), "{err}");
+        assert!(
+            !root.join(".gitattributes").exists(),
+            "prepare_tracker wrote attributes into the crate"
+        );
+        match crate::commit_paths(&root, &["Cargo.toml"], "do not commit the checkout") {
+            crate::PathCommit::Refused(why) => assert!(why.contains("ljos checkout"), "{why}"),
+            other => panic!("commit was not refused: {other:?}"),
+        }
+        let again = git(&root, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(head.stdout, again.stdout);
     }
 
     #[test]
@@ -3136,5 +4339,720 @@ mod tests {
         assert!(made.status.success(), "age-keygen must be installed");
         std::fs::write(cloud_identity_path(), "not a key\n").unwrap();
         assert_eq!(identities_for_open(), vec![own]);
+    }
+
+    const OLD_COMMIT: &str = "100000000 +0000";
+
+    fn begin(dir: &Path) -> crate::EnvLock {
+        let lock = hold_env(dir);
+        std::env::set_var("HOME", dir);
+        lock
+    }
+
+    fn point_pack(url: &str) {
+        std::env::set_var("PACKSET_URL", url);
+        std::env::set_var("PACKSET_WORKSPACE", "seat");
+        std::env::set_var("PACKSET_TIMEOUT_MS", "5000");
+    }
+
+    fn make_key() -> String {
+        let path = identity_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let made = Command::new("age-keygen")
+            .arg("-o")
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "age-keygen: {}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        let public = Command::new("age-keygen")
+            .arg("-y")
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            public.status.success(),
+            "{}",
+            String::from_utf8_lossy(&public.stderr)
+        );
+        String::from_utf8_lossy(&public.stdout).trim().to_string()
+    }
+
+    fn commit_dated(root: &Path, rels: &[&str], message: &str, date: Option<&str>) {
+        let mut add = vec!["add", "--"];
+        add.extend_from_slice(rels);
+        let out = git(root, &add).unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
+            .arg(root)
+            .args(["commit", "-q", "-m", message, "--"])
+            .args(rels);
+        if let Some(date) = date {
+            cmd.env("GIT_AUTHOR_DATE", date);
+            cmd.env("GIT_COMMITTER_DATE", date);
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn scope_of(public: &str) -> Scope {
+        Scope {
+            name: "cloud".into(),
+            recipients: vec![public.to_string()],
+            projects: BTreeMap::new(),
+            scopes: BTreeMap::new(),
+        }
+    }
+
+    fn cloud_plain() -> String {
+        format!(
+            "{}\n{}\n{}\n",
+            serde_json::json!({
+                "text": "fresh", "kind": "lesson", "origin": "user-declared",
+                "level": "explicit", "entities": ["seat:x"]
+            }),
+            serde_json::json!({
+                "text": "fresh", "kind": "lesson", "issue": "ljos-b",
+                "entities": ["issue:ljos-b"]
+            }),
+            serde_json::json!({"text": "mine", "kind": "lesson", "entities": ["scope:cloud"]}),
+        )
+    }
+
+    struct Fixture {
+        root: PathBuf,
+        public: String,
+    }
+
+    /// A quiet cloud log sealed to this machine, and a taken file that
+    /// still names a text the log no longer carries.
+    fn fixture(dir: &Path, date: Option<&str>) -> Fixture {
+        assert_ne!(host(), "gone", "the fixture host would be this machine");
+        let public = make_key();
+        let root = tracker(dir);
+        std::fs::write(
+            root.join(".ljos/sync.toml"),
+            format!("name = \"cloud\"\nrecipients = [\"{public}\"]\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("config/ljos/sync.toml"),
+            "default_scope = \"private\"\n",
+        )
+        .unwrap();
+        let age = ".ljos/atoms/gone.jsonl.age";
+        seal(
+            &cloud_plain(),
+            std::slice::from_ref(&public),
+            &root.join(age),
+        )
+        .unwrap();
+        std::fs::write(root.join(".ljos/atoms/gone.digest"), "digest\n").unwrap();
+        commit_dated(
+            &root,
+            &[age, ".ljos/atoms/gone.digest", ".ljos/sync.toml"],
+            "log",
+            date,
+        );
+        let taken = taken_path("cloud", "gone");
+        std::fs::create_dir_all(taken.parent().unwrap()).unwrap();
+        std::fs::write(&taken, format!("{}\n", crate::work_id("old"))).unwrap();
+        Fixture { root, public }
+    }
+
+    fn hex_id(n: u64) -> String {
+        format!("{n:032x}")
+    }
+
+    fn seeded(n: u64, text: &str, issue: &str, tags: &[&str]) -> Value {
+        let mut atom = serde_json::json!({
+            "id": hex_id(n),
+            "text": text,
+            "kind": "lesson",
+            "entities": tags,
+        });
+        if !issue.is_empty() {
+            atom["issue"] = Value::String(issue.to_string());
+        }
+        atom
+    }
+
+    fn seed_cloud(store: &std::sync::Mutex<Vec<Value>>) {
+        *store.lock().unwrap() = vec![
+            seeded(101, "fresh", "", &["sync:gone", "scope:cloud"]),
+            seeded(
+                102,
+                "fresh",
+                "ljos-b",
+                &["sync:gone", "scope:cloud", "issue:ljos-b"],
+            ),
+            seeded(103, "mine", "", &["scope:cloud"]),
+            seeded(104, "fresh", "", &["scope:private"]),
+            seeded(105, "old", "", &["sync:gone"]),
+            seeded(106, "old", "", &["sync:gone", "scope:private"]),
+            seeded(107, "fresh", "", &["sync:gone", "scope:private"]),
+        ];
+    }
+
+    fn ids(store: &std::sync::Mutex<Vec<Value>>) -> BTreeSet<String> {
+        store
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|atom| atom["id"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    fn has(store: &std::sync::Mutex<Vec<Value>>, n: u64) -> bool {
+        ids(store).contains(&hex_id(n))
+    }
+
+    fn opts(force: bool, dry_run: bool) -> AdoptOpts {
+        AdoptOpts {
+            push: false,
+            force,
+            dry_run,
+        }
+    }
+
+    /// Both tickets are posted into the log's scope, the private copy does
+    /// not swallow them, and the log is deleted only after that is visible.
+    #[test]
+    fn an_adopt_posts_each_issue_then_drops_the_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let fix = fixture(dir.path(), Some(OLD_COMMIT));
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        seed_cloud(&store);
+        let said = adopt_in_repo(
+            &fix.root,
+            &scope_of(&fix.public),
+            "gone",
+            opts(false, false),
+        )
+        .unwrap();
+        assert!(
+            said.starts_with("sync: gone: 2 cloud atoms adopted, 0 refused, 2 moved, 1 retired\n"),
+            "{said}"
+        );
+        assert!(said.contains("not pushed"), "{said}");
+        assert!(!has(&store, 101), "the cloud sync copy was kept");
+        assert!(!has(&store, 102), "the other ticket's sync copy was kept");
+        assert!(!has(&store, 105), "a text the host dropped was kept");
+        assert!(has(&store, 103), "this machine's own atom was forgotten");
+        assert!(has(&store, 104), "the private copy was forgotten");
+        assert!(has(&store, 106), "another scope's sync copy was forgotten");
+        assert!(has(&store, 107), "another scope's live copy was forgotten");
+        let live = store.lock().unwrap().clone();
+        let posted: Vec<&Value> = live
+            .iter()
+            .filter(|atom| atom["origin"] == "peer")
+            .collect();
+        assert_eq!(posted.len(), 2, "{live:?}");
+        assert!(posted.iter().all(|atom| atom.get("level").is_none()));
+        assert!(posted.iter().all(|atom| {
+            let tags = atom["entities"].to_string();
+            tags.contains("scope:cloud") && !tags.contains("sync:")
+        }));
+        let cloud_log = log_plaintext(&live, "cloud", "private");
+        let rows: BTreeSet<(String, String)> = cloud_log
+            .lines()
+            .map(|line| {
+                let atom: Value = serde_json::from_str(line).unwrap();
+                (
+                    atom["text"].as_str().unwrap_or("").to_string(),
+                    atom["issue"].as_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            BTreeSet::from([
+                ("fresh".to_string(), String::new()),
+                ("fresh".to_string(), "ljos-b".to_string()),
+                ("mine".to_string(), String::new()),
+            ])
+        );
+        let private_log = log_plaintext(&live, "private", "private");
+        assert_eq!(private_log.lines().count(), 1, "{private_log}");
+        assert!(!private_log.contains("ljos-b"), "{private_log}");
+        let mine = log_dir(&fix.root).join(format!("{}.jsonl.age", host()));
+        let opened = open(&mine, &identity_path()).unwrap().unwrap();
+        assert_eq!(opened.lines().count(), 3, "{opened}");
+        assert!(opened.contains("scope:cloud"), "{opened}");
+        assert!(!opened.contains("sync:"), "{opened}");
+        assert!(!in_head(&fix.root, ".ljos/atoms/gone.jsonl.age"));
+        assert!(!in_head(&fix.root, ".ljos/atoms/gone.digest"));
+        assert!(!taken_path("cloud", "gone").exists());
+        let subject = git(&fix.root, &["log", "-1", "--format=%s"]).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&subject.stdout).trim(),
+            "chore(sync): adopt gone cloud atoms"
+        );
+    }
+
+    #[test]
+    fn a_refused_post_keeps_the_log_and_its_sync_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let fix = fixture(dir.path(), Some(OLD_COMMIT));
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::RefusePosts);
+        point_pack(&url);
+        seed_cloud(&store);
+        let before = std::fs::read(fix.root.join(".ljos/atoms/gone.jsonl.age")).unwrap();
+        let said = adopt_in_repo(
+            &fix.root,
+            &scope_of(&fix.public),
+            "gone",
+            opts(false, false),
+        )
+        .unwrap();
+        assert!(said.contains("2 refused"), "{said}");
+        assert!(said.contains("the log was kept"), "{said}");
+        assert_eq!(
+            std::fs::read(fix.root.join(".ljos/atoms/gone.jsonl.age")).unwrap(),
+            before
+        );
+        assert!(in_head(&fix.root, ".ljos/atoms/gone.jsonl.age"));
+        assert!(taken_path("cloud", "gone").exists());
+        assert!(has(&store, 101));
+        assert!(has(&store, 102));
+        assert!(!has(&store, 105), "the dropped text is still retired");
+        let subject = git(&fix.root, &["log", "-1", "--format=%s"]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&subject.stdout).trim(), "log");
+    }
+
+    #[test]
+    fn an_echoed_sync_atom_is_not_treated_as_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let fix = fixture(dir.path(), Some(OLD_COMMIT));
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::EchoText);
+        point_pack(&url);
+        seed_cloud(&store);
+        let said = adopt_in_repo(
+            &fix.root,
+            &scope_of(&fix.public),
+            "gone",
+            opts(false, false),
+        )
+        .unwrap();
+        assert!(said.contains("2 refused"), "{said}");
+        assert!(said.contains("the log was kept"), "{said}");
+        assert!(in_head(&fix.root, ".ljos/atoms/gone.jsonl.age"));
+        assert!(has(&store, 101));
+        assert!(has(&store, 102));
+        let live = store.lock().unwrap().clone();
+        assert!(live.iter().all(|atom| atom["origin"] != "peer"), "{live:?}");
+    }
+
+    #[test]
+    fn a_dry_run_prints_the_plan_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let fix = fixture(dir.path(), Some(OLD_COMMIT));
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        seed_cloud(&store);
+        let head = git(&fix.root, &["rev-parse", "HEAD"]).unwrap();
+        let said =
+            adopt_in_repo(&fix.root, &scope_of(&fix.public), "gone", opts(false, true)).unwrap();
+        assert!(
+            said.contains(
+                "would adopt 2 cloud atoms, retire 1, and drop .ljos/atoms/gone.jsonl.age"
+            ),
+            "{said}"
+        );
+        assert_eq!(ids(&store).len(), 7, "a dry run posted or forgot");
+        assert!(fix.root.join(".ljos/atoms/gone.jsonl.age").is_file());
+        assert!(taken_path("cloud", "gone").exists());
+        let again = git(&fix.root, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(head.stdout, again.stdout);
+    }
+
+    #[test]
+    fn a_young_log_needs_force_and_a_dry_run_still_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let fix = fixture(dir.path(), None);
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        seed_cloud(&store);
+        let err = adopt_in_repo(&fix.root, &scope_of(&fix.public), "gone", opts(false, true))
+            .unwrap_err();
+        assert!(err.to_string().contains("--force"), "{err}");
+        assert_eq!(ids(&store).len(), 7);
+        let head = git(&fix.root, &["rev-parse", "HEAD"]).unwrap();
+        let said =
+            adopt_in_repo(&fix.root, &scope_of(&fix.public), "gone", opts(true, true)).unwrap();
+        assert!(said.contains("would adopt 2"), "{said}");
+        assert_eq!(ids(&store).len(), 7);
+        assert!(fix.root.join(".ljos/atoms/gone.jsonl.age").is_file());
+        let again = git(&fix.root, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(head.stdout, again.stdout);
+    }
+
+    /// The worktree file is gone and the commit is not. Pack work runs
+    /// from the blob in HEAD, and a young log does not need `--force`
+    /// again: the deletion already started.
+    #[test]
+    fn a_missing_log_is_resumed_from_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let fix = fixture(dir.path(), None);
+        std::fs::remove_file(fix.root.join(".ljos/atoms/gone.jsonl.age")).unwrap();
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        seed_cloud(&store);
+        let said = adopt_in_repo(
+            &fix.root,
+            &scope_of(&fix.public),
+            "gone",
+            opts(false, false),
+        )
+        .unwrap();
+        assert!(
+            said.starts_with("sync: gone: 2 cloud atoms adopted, 0 refused, 2 moved, 1 retired\n"),
+            "{said}"
+        );
+        assert!(!in_head(&fix.root, ".ljos/atoms/gone.jsonl.age"));
+        assert!(!in_head(&fix.root, ".ljos/atoms/gone.digest"));
+        assert!(!taken_path("cloud", "gone").exists());
+        assert!(!has(&store, 101));
+        assert!(has(&store, 104));
+    }
+
+    fn adopt_deletion(root: &Path) {
+        let rel = ".ljos/atoms/gone.jsonl.age";
+        commit_rel(root, rel, "sealed\n", "log");
+        let out = git(root, &["rm", "-q", "--", rel]).unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let out = git(
+            root,
+            &["commit", "-q", "-m", "chore(sync): adopt gone cloud atoms"],
+        )
+        .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn an_import_retires_an_adopted_host_without_its_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let public = make_key();
+        let root = tracker(dir.path());
+        adopt_deletion(&root);
+        // The deletion is the only file under `.ljos`, so the directory may
+        // already be gone. Import has to retire without it.
+        if root.join(".ljos").exists() {
+            std::fs::remove_dir_all(root.join(".ljos")).unwrap();
+        }
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        *store.lock().unwrap() = vec![
+            seeded(101, "fresh", "", &["sync:gone", "scope:cloud"]),
+            seeded(105, "old", "", &["sync:gone"]),
+            seeded(106, "old", "", &["sync:gone", "scope:private"]),
+        ];
+        let said = import(&root, &scope_of(&public)).unwrap();
+        assert!(
+            said.contains("sync: gone: adopted away, 2 cloud atoms retired, 0 still held\n"),
+            "{said}"
+        );
+        assert!(!has(&store, 101));
+        assert!(!has(&store, 105));
+        assert!(has(&store, 106));
+
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::FailDeletes);
+        point_pack(&url);
+        *store.lock().unwrap() = vec![
+            seeded(101, "fresh", "", &["sync:gone", "scope:cloud"]),
+            seeded(105, "old", "", &["sync:gone"]),
+        ];
+        let said = import(&root, &scope_of(&public)).unwrap();
+        assert!(
+            said.contains("0 cloud atoms retired, 2 still held"),
+            "{said}"
+        );
+        assert!(has(&store, 101));
+        assert!(has(&store, 105));
+        let again = import(&root, &scope_of(&public)).unwrap();
+        assert!(again.contains("still held"), "{again}");
+        assert!(has(&store, 101));
+    }
+
+    #[test]
+    fn a_readded_log_is_imported_instead_of_retired() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let public = make_key();
+        let root = tracker(dir.path());
+        let rel = ".ljos/atoms/gone.jsonl.age";
+        let plain = "{\"text\":\"back\",\"kind\":\"lesson\",\"entities\":[]}\n";
+        seal(plain, std::slice::from_ref(&public), &root.join(rel)).unwrap();
+        commit_dated(&root, &[rel], "log", None);
+        let out = git(&root, &["rm", "-q", "--", rel]).unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let out = git(
+            &root,
+            &["commit", "-q", "-m", "chore(sync): adopt gone cloud atoms"],
+        )
+        .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
+        seal(plain, std::slice::from_ref(&public), &root.join(rel)).unwrap();
+        commit_dated(&root, &[rel], "bring the log back", None);
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        let said = import(&root, &scope_of(&public)).unwrap();
+        assert!(said.contains("1 cloud atoms taken"), "{said}");
+        assert!(!said.contains("adopted away"), "{said}");
+        let live = store.lock().unwrap().clone();
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert!(live[0]["entities"].to_string().contains("sync:gone"));
+    }
+
+    #[test]
+    fn an_import_with_nothing_to_retire_still_says_there_are_no_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let public = make_key();
+        let root = tracker(dir.path());
+        adopt_deletion(&root);
+        if root.join(".ljos").exists() {
+            std::fs::remove_dir_all(root.join(".ljos")).unwrap();
+        }
+        let (url, _store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        let said = import(&root, &scope_of(&public)).unwrap();
+        assert!(said.contains("no cloud logs yet"), "{said}");
+        assert!(!said.contains("adopted away"), "{said}");
+    }
+
+    /// Primary `box` plus an extra `cloud` log. Both are adopted in one
+    /// commit, each atom stays in its own scope, and a later import
+    /// retires `sync:gone` and `sync:gone+cloud` separately.
+    fn two_scope_logs(dir: &Path) -> (PathBuf, Scope) {
+        let public = make_key();
+        let root = tracker(dir);
+        let text = format!(
+            "name = \"box\"\nrecipients = [\"{public}\"]\n\n[scopes]\ncloud = [\"{public}\"]\n"
+        );
+        let scope: Scope = toml::from_str(&text).unwrap();
+        std::fs::write(root.join(".ljos/sync.toml"), &text).unwrap();
+        std::fs::write(
+            dir.join("config/ljos/sync.toml"),
+            "default_scope = \"private\"\n",
+        )
+        .unwrap();
+        seal(
+            "{\"text\":\"box-live\",\"kind\":\"lesson\",\"entities\":[\"scope:box\"]}\n",
+            std::slice::from_ref(&public),
+            &root.join(".ljos/atoms/gone.jsonl.age"),
+        )
+        .unwrap();
+        seal(
+            "{\"text\":\"cloud-live\",\"kind\":\"lesson\",\"entities\":[\"scope:cloud\"]}\n",
+            std::slice::from_ref(&public),
+            &root.join(".ljos/atoms/gone+cloud.jsonl.age"),
+        )
+        .unwrap();
+        std::fs::write(root.join(".ljos/atoms/gone.digest"), "d\n").unwrap();
+        std::fs::write(root.join(".ljos/atoms/gone+cloud.digest"), "d\n").unwrap();
+        commit_dated(
+            &root,
+            &[
+                ".ljos/sync.toml",
+                ".ljos/atoms/gone.jsonl.age",
+                ".ljos/atoms/gone.digest",
+                ".ljos/atoms/gone+cloud.jsonl.age",
+                ".ljos/atoms/gone+cloud.digest",
+            ],
+            "logs",
+            Some(OLD_COMMIT),
+        );
+        let taken = taken_path("cloud", "gone");
+        std::fs::create_dir_all(taken.parent().unwrap()).unwrap();
+        std::fs::write(&taken, format!("{}\n", crate::work_id("cloud-old"))).unwrap();
+        (root, scope)
+    }
+
+    #[test]
+    fn an_adopt_takes_every_scope_log_of_the_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let (root, scope) = two_scope_logs(dir.path());
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        *store.lock().unwrap() = vec![
+            seeded(201, "box-live", "", &["sync:gone", "scope:box"]),
+            seeded(202, "cloud-live", "", &["sync:gone+cloud", "scope:cloud"]),
+            seeded(203, "cloud-old", "", &["sync:gone+cloud"]),
+            seeded(204, "cloud-old", "", &["sync:gone+cloud", "scope:private"]),
+            seeded(205, "box-live", "", &["scope:private"]),
+        ];
+        let said = adopt_in_repo(&root, &scope, "gone", opts(false, false)).unwrap();
+        assert!(
+            said.starts_with(
+                "sync: gone: 1 box atoms adopted, 0 refused, 1 moved, 0 retired\n\
+                 sync: gone: 1 cloud atoms adopted, 0 refused, 1 moved, 1 retired\n"
+            ),
+            "{said}"
+        );
+        assert!(!has(&store, 201));
+        assert!(!has(&store, 202));
+        assert!(!has(&store, 203));
+        assert!(has(&store, 204), "another scope's copy was forgotten");
+        assert!(has(&store, 205), "a private copy was forgotten");
+        let live = store.lock().unwrap().clone();
+        let posted: Vec<&Value> = live
+            .iter()
+            .filter(|atom| atom["origin"] == "peer")
+            .collect();
+        assert_eq!(posted.len(), 2, "{live:?}");
+        assert!(posted.iter().all(|atom| {
+            let tags = atom["entities"].to_string();
+            !tags.contains("sync:")
+        }));
+        let box_log = log_plaintext(&live, "box", "private");
+        assert!(box_log.contains("box-live"), "{box_log}");
+        assert!(!box_log.contains("cloud-live"), "{box_log}");
+        let cloud_log = log_plaintext(&live, "cloud", "private");
+        assert!(cloud_log.contains("cloud-live"), "{cloud_log}");
+        assert!(!cloud_log.contains("box-live"), "{cloud_log}");
+        assert!(!in_head(&root, ".ljos/atoms/gone.jsonl.age"));
+        assert!(!in_head(&root, ".ljos/atoms/gone+cloud.jsonl.age"));
+        assert!(!in_head(&root, ".ljos/atoms/gone.digest"));
+        assert!(!in_head(&root, ".ljos/atoms/gone+cloud.digest"));
+        assert!(!taken_path("cloud", "gone").exists());
+        let subject = git(&root, &["log", "-1", "--format=%s"]).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&subject.stdout).trim(),
+            "chore(sync): adopt gone box atoms"
+        );
+        let names = git(
+            &root,
+            &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+        )
+        .unwrap();
+        let names = String::from_utf8_lossy(&names.stdout);
+        assert!(names.contains("gone.jsonl.age"), "{names}");
+        assert!(names.contains("gone+cloud.jsonl.age"), "{names}");
+
+        *store.lock().unwrap() = vec![
+            seeded(301, "box-live", "", &["sync:gone", "scope:box"]),
+            seeded(302, "cloud-live", "", &["sync:gone+cloud", "scope:cloud"]),
+            seeded(303, "cloud-live", "", &["sync:gone+cloud"]),
+            seeded(304, "cloud-live", "", &["sync:gone+cloud", "scope:private"]),
+        ];
+        let said = import(&root, &scope).unwrap();
+        assert!(
+            said.contains("sync: gone: adopted away, 1 box atoms retired, 0 still held\n"),
+            "{said}"
+        );
+        assert!(
+            said.contains("sync: gone: adopted away, 2 cloud atoms retired, 0 still held\n"),
+            "{said}"
+        );
+        assert!(!has(&store, 301));
+        assert!(!has(&store, 302));
+        assert!(!has(&store, 303));
+        assert!(has(&store, 304));
+    }
+
+    #[test]
+    fn a_refused_extra_scope_keeps_every_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let (root, scope) = two_scope_logs(dir.path());
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::RefusePosts);
+        point_pack(&url);
+        *store.lock().unwrap() = vec![
+            seeded(201, "box-live", "", &["sync:gone", "scope:box"]),
+            seeded(202, "cloud-live", "", &["sync:gone+cloud", "scope:cloud"]),
+        ];
+        let said = adopt_in_repo(&root, &scope, "gone", opts(false, false)).unwrap();
+        assert!(said.contains("0 box atoms adopted, 1 refused"), "{said}");
+        assert!(said.contains("0 cloud atoms adopted, 1 refused"), "{said}");
+        assert_eq!(said.matches("the log was kept").count(), 2, "{said}");
+        assert!(in_head(&root, ".ljos/atoms/gone.jsonl.age"));
+        assert!(in_head(&root, ".ljos/atoms/gone+cloud.jsonl.age"));
+        let live = store.lock().unwrap().clone();
+        assert!(live.iter().all(|atom| atom["origin"] != "peer"), "{live:?}");
+    }
+
+    #[test]
+    fn a_young_extra_scope_blocks_the_adopt() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let (root, scope) = two_scope_logs(dir.path());
+        let public = Command::new("age-keygen")
+            .arg("-y")
+            .arg(identity_path())
+            .output()
+            .unwrap();
+        assert!(public.status.success());
+        let public = String::from_utf8_lossy(&public.stdout).trim().to_string();
+        seal(
+            "{\"text\":\"cloud-live\",\"kind\":\"lesson\",\"entities\":[\"scope:cloud\",\"seat:again\"]}\n",
+            std::slice::from_ref(&public),
+            &root.join(".ljos/atoms/gone+cloud.jsonl.age"),
+        )
+        .unwrap();
+        std::fs::write(root.join(".ljos/atoms/gone+cloud.digest"), "newer\n").unwrap();
+        commit_dated(
+            &root,
+            &[
+                ".ljos/atoms/gone+cloud.jsonl.age",
+                ".ljos/atoms/gone+cloud.digest",
+            ],
+            "cloud again",
+            None,
+        );
+        let err = adopt_in_repo(&root, &scope, "gone", opts(false, true)).unwrap_err();
+        assert!(err.to_string().contains("cloud"), "{err}");
+        assert!(err.to_string().contains("--force"), "{err}");
+        assert!(root.join(".ljos/atoms/gone.jsonl.age").is_file());
+        assert!(root.join(".ljos/atoms/gone+cloud.jsonl.age").is_file());
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        let said = adopt_in_repo(&root, &scope, "gone", opts(true, true)).unwrap();
+        assert!(said.contains("drop .ljos/atoms/gone.jsonl.age"), "{said}");
+        assert!(
+            said.contains("drop .ljos/atoms/gone+cloud.jsonl.age"),
+            "{said}"
+        );
+        assert!(store.lock().unwrap().is_empty(), "a dry run posted");
+        assert!(in_head(&root, ".ljos/atoms/gone.jsonl.age"));
+        assert!(in_head(&root, ".ljos/atoms/gone+cloud.jsonl.age"));
     }
 }

@@ -163,6 +163,13 @@ the other machines' logs before the island is walked; finish writes and
 pushes this machine's. `commit` skips that pull and that push.
 `ljos sync --key` prints this machine's public key
 for a scope's recipients, and `ljos sync` runs the pull and the push by hand.
+`ljos sync --adopt HOST` reposts that host's live atoms as this
+machine's, origin `peer`, in each log's scope, and drops each of that
+host's logs once every post and forget has landed. A log committed
+within 14 days is refused unless `--force`, and `--dry-run` prints the
+plan and writes nothing. A fetch or merge that failed adopts nothing.
+Another machine retires that host's copies, including each extra
+scope's `sync:HOST+SCOPE` copies, when it imports the adopt commit.
 A repository with no `.ljos/sync.toml` is not synced, and the sitting and
 finish say nothing about it; only `ljos sync` names the missing file.
 The sitting and finish follow `LJOS_TRACKER_GIT`: `push` commits, rebases
