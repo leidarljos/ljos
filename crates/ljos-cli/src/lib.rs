@@ -25969,13 +25969,12 @@ fn commit_seat_pin(start: &Path, seat: &str) {
     if !root.join(name).is_file() {
         return;
     }
-    let ignored = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&root)
+    let mut ignored_cmd = git_at(&root);
+    ignored_cmd
         .args(["check-ignore", "-q", "--", name])
-        .stdin(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
+        .stdin(std::process::Stdio::null());
+    git_hooks::hook_child_env(&mut ignored_cmd);
+    let ignored = ignored_cmd.status().is_ok_and(|s| s.success());
     if ignored {
         return;
     }
@@ -30517,6 +30516,67 @@ mod tests {
         );
         std::env::remove_var("GIT_DIR");
         std::env::remove_var("GIT_WORK_TREE");
+    }
+
+    /// A hook-child tracker write must check pin ignores in that tracker,
+    /// not in an exported `GIT_DIR` from the parent hook process.
+    #[test]
+    fn hook_children_check_pin_ignores_in_the_tracker_checkout() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        let decoy = dir.path().join("decoy");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&decoy).unwrap();
+        let issues = seeded_tracker(&real);
+        seeded_tracker(&decoy);
+        std::fs::write(decoy.join(".gitignore"), format!("{}\n", ballot_sig::PIN_FILE)).unwrap();
+        let decoy_add = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&decoy)
+            .args(["add", ".gitignore"])
+            .status()
+            .unwrap();
+        assert!(decoy_add.success());
+        let decoy_commit = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&decoy)
+            .args(["commit", "-q", "-m", "ignore pin"])
+            .status()
+            .unwrap();
+        assert!(decoy_commit.success());
+
+        std::fs::write(
+            &issues,
+            "* STARTED [#C] Probe\n:PROPERTIES:\n:ID:         probe-a1b2\n:END:\n",
+        )
+        .unwrap();
+        std::fs::write(real.join(ballot_sig::PIN_FILE), "saddle deadbeef\n").unwrap();
+        std::env::set_var("LJOS_TRACKER_GIT", "commit");
+        std::env::set_var("LJOS_SEAT", "saddle");
+        std::env::set_var("GIT_DIR", decoy.join(".git"));
+        std::env::set_var("GIT_WORK_TREE", &decoy);
+        let said = crate::git_hooks::with_hook_children_for_test(|| {
+            persist_tracker_file(&issues, "probe-a1b2", "claimed")
+        });
+        assert!(said.contains("committed chore(issues): probe-a1b2 claimed by saddle"));
+        std::env::remove_var("GIT_DIR");
+        std::env::remove_var("GIT_WORK_TREE");
+        let log = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&real)
+            .args(["log", "-2", "--format=%s"])
+            .output()
+            .unwrap();
+        assert!(log.status.success(), "real log failed");
+        let subjects = String::from_utf8_lossy(&log.stdout);
+        assert!(
+            subjects.lines().any(|line| line == "chore(issues): pin saddle key"),
+            "pin commit missing under hook child env: {subjects}"
+        );
+        for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
+            std::env::remove_var(var);
+        }
     }
 
     /// Paths HEAD already holds, as another seat's commit leaves them, are
