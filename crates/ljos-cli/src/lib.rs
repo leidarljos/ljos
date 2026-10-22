@@ -47132,10 +47132,11 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "Redis for the tests listens on 6380"
         ));
         assert!(!capture::said_in_latest_prompt("local Redis"));
+        // Cut before ", not 6379", the clause leaves the person's "not" behind.
         let agents = !capture::said_in_latest_prompt(
             "the integration tests need a local Redis on port 6380",
         );
-        assert_eq!(remember_horizon(false, false, agents), Some(false));
+        assert_eq!(remember_horizon(false, false, agents), Some(true));
     }
 
     /// A quote is a whole sentence or clause of the prompt, and keeps the
