@@ -77,25 +77,31 @@ impl Seat {
     /// The context the prompt hook onboard wrote gives back, and how long
     /// the hook took.
     fn prompt(&self, session: &str, prompt: &str) -> (String, Duration) {
-        let payload = serde_json::json!({
-            "hook_event_name": "UserPromptSubmit",
-            "session_id": session,
-            "cwd": self.dir.path(),
-            "prompt": prompt,
-        })
-        .to_string();
+        self.fire(
+            "UserPromptSubmit",
+            serde_json::json!({ "session_id": session, "prompt": prompt }),
+        )
+    }
+
+    /// The context the hook onboard wrote gives back for `event` and
+    /// `payload`, and how long it took. One command serves every event.
+    fn fire(&self, event: &str, mut payload: Value) -> (String, Duration) {
+        payload["hook_event_name"] = event.into();
+        payload["cwd"] = self.dir.path().to_str().expect("utf-8").into();
+        let payload = payload.to_string();
+        let hook = &self.hook;
         let mut cmd = Command::new("/bin/sh");
-        cmd.args(["-c", &self.hook]);
+        cmd.args(["-c", hook]);
         self.env(&mut cmd);
         let started = Instant::now();
         let said = run(cmd, Some(&payload));
         let took = started.elapsed();
-        assert!(said.status.success(), "{}: {}", self.hook, text(&said));
+        assert!(said.status.success(), "{hook}: {}", text(&said));
         if said.stdout.iter().all(u8::is_ascii_whitespace) {
             return (String::new(), took);
         }
         let out: Value = serde_json::from_slice(&said.stdout)
-            .unwrap_or_else(|e| panic!("{e}: {} printed {}", self.hook, text(&said)));
+            .unwrap_or_else(|e| panic!("{e}: {hook} printed {}", text(&said)));
         let context = out["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .unwrap_or_default()
@@ -144,8 +150,8 @@ fn text(out: &Output) -> String {
     )
 }
 
-/// A fresh home with packsetd on a free port and the prompt hook `ljos
-/// onboard --harness claude` wrote.
+/// A fresh home with packsetd on a free port and the hooks `ljos onboard
+/// --harness claude` wrote.
 fn seat() -> Seat {
     let Some(packsetd) = on_path("packsetd") else {
         panic!("packsetd is not on PATH; CI builds it from packset develop");
@@ -256,5 +262,136 @@ fn always_does_not_bring_in_a_rule_about_something_else() {
     assert!(
         !context.contains("squash commits"),
         "a shared `always` brought in an unrelated rule: {context}"
+    );
+}
+
+/// Twenty-four fresh lessons that tie the old one on every word the pack
+/// scores. The old one says `pnpm`, which shares the alias groups of the
+/// failure's `npm` and is a word the pack does not score, so it covers
+/// more of the failure.
+fn lookalikes() -> Vec<String> {
+    const WHO: [&str; 24] = [
+        "Figma",
+        "Grafana",
+        "Sentry",
+        "Jira",
+        "Slack",
+        "Vercel",
+        "Netlify",
+        "Heroku",
+        "Stripe",
+        "Twilio",
+        "Okta",
+        "Auth0",
+        "Datadog",
+        "PagerDuty",
+        "Linear",
+        "Notion",
+        "Airtable",
+        "Zendesk",
+        "Mapbox",
+        "Algolia",
+        "Cloudflare",
+        "Fastly",
+        "Mailgun",
+        "Segment",
+    ];
+    const WHAT: [&str; 24] = [
+        "export",
+        "webhook",
+        "bot",
+        "preview",
+        "deploy",
+        "sandbox",
+        "staging",
+        "read-only",
+        "admin",
+        "upload",
+        "billing",
+        "search",
+        "metrics",
+        "alerting",
+        "sync",
+        "import",
+        "share",
+        "audit",
+        "tile",
+        "index",
+        "purge",
+        "edge",
+        "bounce",
+        "replay",
+    ];
+    const WHEN: [&str; 24] = [
+        "after the plan changed",
+        "once the seat was removed",
+        "when the org moved region",
+        "after a password reset",
+        "during the outage",
+        "on the second retry",
+        "after the workspace was renamed",
+        "when the scope was narrowed",
+        "after SSO was enforced",
+        "when the trial ended",
+        "after the key rotation",
+        "once two-factor was required",
+        "after the domain moved",
+        "when the quota ran out",
+        "after the app was reinstalled",
+        "when the project was archived",
+        "after an audit",
+        "once the IP list changed",
+        "after the plan downgrade",
+        "when the account was merged",
+        "after the cache was purged",
+        "when the zone was deleted",
+        "after the sender was blocked",
+        "when the source was paused",
+    ];
+    (0..24)
+        .map(|i| {
+            format!(
+                "{} registry rejected the {} token {}; ask its owner for a new one.",
+                WHO[i], WHAT[i], WHEN[i]
+            )
+        })
+        .collect()
+}
+
+/// The pack cuts its list by a fused score that decays with age, and
+/// with twenty-four fresh lookalikes the January lesson is past the
+/// failure note's twelve. A writer that ranks by relevance alone returns
+/// it; an older one is joined by the stored atoms that best match. Either
+/// way the failure note and the prompt hook hand it over.
+#[test]
+fn an_old_lesson_behind_a_full_fused_cut_still_arrives() {
+    let seat = seat();
+    seat.lesson(
+        "With pnpm the registry rejected the token because the CI secret expired; \
+         refresh it from 1Password.",
+        JANUARY,
+    );
+    for text in lookalikes() {
+        seat.lesson(&text, FRESH);
+    }
+    let (context, took) = seat.fire(
+        "PostToolUseFailure",
+        serde_json::json!({
+            "session_id": "pool-1",
+            "tool_name": "Bash",
+            "tool_input": {"command": "npm publish"},
+            "error": "E401: the registry rejected the token",
+        }),
+    );
+    eprintln!("failure hook took {took:?}");
+    assert!(
+        context.contains("CI secret expired"),
+        "the failure note never saw the old lesson: {context}"
+    );
+    let (context, took) = seat.prompt("pool-2", "npm: the registry rejected my token");
+    eprintln!("prompt hook took {took:?}");
+    assert!(
+        context.contains("CI secret expired"),
+        "the prompt hook never saw the old lesson: {context}"
     );
 }
