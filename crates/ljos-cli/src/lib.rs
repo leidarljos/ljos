@@ -43744,6 +43744,63 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(rule.verdict, "deny", "{}", rule.reason);
     }
 
+    /// A here-document's body is data unless a shell on the line reads it
+    /// as its script, and only the substitutions of an unquoted one run.
+    /// `<<` in `${...}`, `$((...))`, `$[...]` or `<<<` opens none, so the
+    /// lines after it still run.
+    #[test]
+    fn a_heredoc_body_is_judged_only_where_a_shell_runs_it() {
+        let _g = env_guard();
+        let (root, _home, _env) = policyd_tree("policyd-heredoc");
+        let project = root.path().join("project");
+        let project = project.as_path();
+        for (line, at) in [
+            ("bash <<'EOF'\nmake clean-all\nEOF", project),
+            (
+                "cd project && bash <<'EOF'\nmake clean-all\nEOF",
+                root.path(),
+            ),
+            (
+                "bash <<'EOF'\ncd project && make clean-all\nEOF",
+                root.path(),
+            ),
+            (
+                "cat <<'EOF' | sh\ncd project\nmake clean-all\nEOF",
+                root.path(),
+            ),
+            (
+                "cat <<EOF\n$(cd project && make clean-all)\nEOF",
+                root.path(),
+            ),
+            (
+                "echo ${x:-<<EOF}\ncd project && make clean-all\nEOF",
+                root.path(),
+            ),
+            (
+                "echo $((1<<EOF))\ncd project && make clean-all\nEOF",
+                root.path(),
+            ),
+            (
+                "echo $[1<<EOF]\ncd project && make clean-all\nEOF",
+                root.path(),
+            ),
+            ("cat <<<EOF\ncd project && make clean-all\nEOF", root.path()),
+        ] {
+            let rule =
+                tcb_verdict_in(line, Some(at)).unwrap_or_else(|| panic!("{line:?} was allowed"));
+            assert_eq!(rule.verdict, "deny", "{line:?}: {}", rule.reason);
+        }
+        for line in [
+            "cat <<'EOF'\nsudo reboot\nEOF",
+            "cat <<'EOF' > notes.md\ncd project && make clean-all\nEOF",
+            "cat <<'EOF'\n$(sudo reboot)\nEOF",
+            "cat <<EOF\nrun $(echo make clean-all) in project\nEOF",
+        ] {
+            let rule = tcb_verdict_in(line, Some(root.path()));
+            assert!(rule.is_none(), "{line:?}: {rule:?}");
+        }
+    }
+
     /// A policyd that hangs, crashes, or prints garbage used to allow the
     /// tool call. Claude Code, Codex and Cursor call `ljos hook` directly,
     /// so that allow reached the runner, and Cursor's was a bare allow
