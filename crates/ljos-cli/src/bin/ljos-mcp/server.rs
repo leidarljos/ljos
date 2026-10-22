@@ -4491,6 +4491,66 @@ mod tests {
         assert!(said.contains("cwd-deny"), "{said}");
     }
 
+    #[tokio::test]
+    async fn guard_check_expands_tilde_and_refuses_an_unresolved_cwd() {
+        let _env_lock = ENV_TEST_LOCK.lock().await;
+        let _saved = RestoreEnv::new(&["POLICYD_BIN", "LJOS_GUARD", "LJOS_OFF", "HOME"]);
+        let home = tempfile::tempdir().expect("tempdir");
+        let danger = home.path().join("proj/danger");
+        std::fs::create_dir_all(&danger).expect("danger dir");
+        let bin = home.path().join("ljos-policyd");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\n\
+             case \"$*\" in\n\
+             *\"make clean-all\"*)\n\
+             if [ \"$(basename \"$(/bin/pwd -P)\")\" = \"danger\" ]; then\n\
+             printf 'deny\\tmake-clean-all\\n'\n\
+             exit 2\n\
+             fi\n\
+             ;;\n\
+             esac\n\
+             printf 'allow\\n'\n",
+        )
+        .expect("policyd");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        unsafe {
+            std::env::set_var("POLICYD_BIN", &bin);
+            std::env::set_var("LJOS_GUARD", "on");
+            std::env::remove_var("LJOS_OFF");
+            std::env::set_var("HOME", home.path());
+        }
+        let server = LjosServer::at(std::env::temp_dir());
+        let denied = match server
+            .ljos_guard_check(Parameters(GuardArgs {
+                command: "make clean-all".into(),
+                cwd: Some("~/proj/danger".into()),
+            }))
+            .await
+        {
+            Err(err) => err,
+            Ok(out) => panic!("allowed {}: {}", out.0.verdict, out.0.text),
+        };
+        let said = format!("{denied:?}");
+        assert!(said.contains("make-clean-all"), "{said}");
+
+        let missing = match server
+            .ljos_guard_check(Parameters(GuardArgs {
+                command: "echo hi".into(),
+                cwd: Some("~/proj/missing".into()),
+            }))
+            .await
+        {
+            Err(err) => err,
+            Ok(out) => panic!("allowed {}: {}", out.0.verdict, out.0.text),
+        };
+        let miss = format!("{missing:?}");
+        assert!(miss.contains("guard cwd is unavailable"), "{miss}");
+    }
+
     /// The protocol is a resource every harness can read, and it names the
     /// tools in the order a sitting calls them.
     #[test]
