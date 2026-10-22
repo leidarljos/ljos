@@ -504,18 +504,186 @@ fn runner_below(path: &Path, roots: &[PathBuf]) -> Option<(&'static str, PathBuf
     Some((hook_name(name)?, root))
 }
 
-/// Whether root or this user owns `path`, and no one else can write it
-/// but this user's primary group, which on most systems is theirs alone.
-fn person_keeps(path: &Path) -> bool {
+/// A group as the group database lists it.
+struct GroupEntry {
+    name: std::ffi::OsString,
+    members: Vec<std::ffi::OsString>,
+}
+
+/// The account lookups [`group_is_private`] makes. `None` is a lookup
+/// that failed, which is never read as an empty answer.
+trait Accounts {
+    fn user_name(&self, uid: u32) -> Option<std::ffi::OsString>;
+    fn group(&self, gid: u32) -> Option<GroupEntry>;
+    /// The uid of every passwd entry whose primary group is `gid`.
+    fn primary_members(&self, gid: u32) -> Option<Vec<u32>>;
+}
+
+/// The passwd and group databases, through the C library.
+struct SystemAccounts;
+
+/// Runs a `get*_r` lookup with a buffer that grows while it is too small.
+fn with_buf<T>(mut lookup: impl FnMut(&mut [u8]) -> Result<Option<T>, i32>) -> Option<T> {
+    let mut buf = vec![0u8; 1024];
+    loop {
+        match lookup(&mut buf) {
+            Err(libc::ERANGE) if buf.len() < 1 << 20 => buf.resize(buf.len() * 2, 0),
+            Ok(found) => return found,
+            Err(_) => return None,
+        }
+    }
+}
+
+/// # Safety
+/// `ptr` is a NUL-terminated string.
+unsafe fn os_string(ptr: *const libc::c_char) -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStrExt as _;
+    // SAFETY: the caller's contract.
+    let bytes = unsafe { std::ffi::CStr::from_ptr(ptr) }.to_bytes();
+    std::ffi::OsStr::from_bytes(bytes).to_os_string()
+}
+
+impl Accounts for SystemAccounts {
+    fn user_name(&self, uid: u32) -> Option<std::ffi::OsString> {
+        with_buf(|buf| {
+            // SAFETY: passwd is plain data, so all zeroes is a valid value.
+            let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+            let mut found: *mut libc::passwd = std::ptr::null_mut();
+            // SAFETY: getpwuid_r writes at most buf.len() bytes into buf
+            // and points entry's fields into it.
+            let rc = unsafe {
+                libc::getpwuid_r(
+                    uid,
+                    &mut entry,
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                    &mut found,
+                )
+            };
+            if rc != 0 {
+                return Err(rc);
+            }
+            // SAFETY: a found entry's pw_name is a string inside buf.
+            Ok((!found.is_null() && !entry.pw_name.is_null())
+                .then(|| unsafe { os_string(entry.pw_name) }))
+        })
+    }
+
+    fn group(&self, gid: u32) -> Option<GroupEntry> {
+        with_buf(|buf| {
+            // SAFETY: group is plain data, so all zeroes is a valid value.
+            let mut entry: libc::group = unsafe { std::mem::zeroed() };
+            let mut found: *mut libc::group = std::ptr::null_mut();
+            // SAFETY: getgrgid_r writes at most buf.len() bytes into buf
+            // and points entry's fields into it.
+            let rc = unsafe {
+                libc::getgrgid_r(
+                    gid,
+                    &mut entry,
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                    &mut found,
+                )
+            };
+            if rc != 0 {
+                return Err(rc);
+            }
+            if found.is_null() || entry.gr_name.is_null() || entry.gr_mem.is_null() {
+                return Ok(None);
+            }
+            let mut members = Vec::new();
+            // SAFETY: gr_mem is a NULL-terminated array of strings in buf.
+            unsafe {
+                let mut at = entry.gr_mem;
+                while !(*at).is_null() {
+                    members.push(os_string(*at));
+                    at = at.add(1);
+                }
+            }
+            // SAFETY: gr_name is a string inside buf.
+            let name = unsafe { os_string(entry.gr_name) };
+            Ok(Some(GroupEntry { name, members }))
+        })
+    }
+
+    fn primary_members(&self, gid: u32) -> Option<Vec<u32>> {
+        static WALK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _walk = WALK.lock().ok()?;
+        let mut uids = Vec::new();
+        // SAFETY: the enumeration state is the C library's own, and WALK
+        // keeps this the only walk over it; each entry is read before
+        // the next call replaces it.
+        unsafe {
+            libc::setpwent();
+            loop {
+                let entry = libc::getpwent();
+                if entry.is_null() {
+                    break;
+                }
+                if (*entry).pw_gid == gid {
+                    uids.push((*entry).pw_uid);
+                }
+            }
+            libc::endpwent();
+        }
+        Some(uids)
+    }
+}
+
+/// Whether group `gid` holds no one but user `uid`: it bears the user's
+/// name, lists no other member, and is no other account's primary group.
+fn group_is_private(accounts: &dyn Accounts, uid: u32, gid: u32) -> bool {
+    let (Some(user), Some(group), Some(primary)) = (
+        accounts.user_name(uid),
+        accounts.group(gid),
+        accounts.primary_members(gid),
+    ) else {
+        return false;
+    };
+    group.name == user
+        && group.members.iter().all(|member| *member == user)
+        && primary.iter().all(|other| *other == uid)
+}
+
+/// Who [`person_keeps`] judges a file for: this process's user and
+/// primary group, and whether that group is the user's alone, asked
+/// only when a file is group-writable.
+struct Person<'a> {
+    uid: u32,
+    gid: u32,
+    accounts: &'a dyn Accounts,
+    private_group: std::cell::OnceCell<bool>,
+}
+
+impl<'a> Person<'a> {
+    fn new(accounts: &'a dyn Accounts) -> Self {
+        // SAFETY: getuid and getgid take no arguments and only read the
+        // process identity.
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        Person {
+            uid,
+            gid,
+            accounts,
+            private_group: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn private_group(&self) -> bool {
+        *self
+            .private_group
+            .get_or_init(|| group_is_private(self.accounts, self.uid, self.gid))
+    }
+}
+
+/// Whether root or `person` owns `path`, and no one else can write it
+/// but `person`'s primary group when that group is theirs alone.
+fn person_keeps(path: &Path, person: &Person) -> bool {
     use std::os::unix::fs::MetadataExt as _;
-    // SAFETY: getuid and getgid take no arguments and only read the
-    // process identity.
-    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     std::fs::metadata(path).is_ok_and(|meta| {
         let mode = meta.mode();
-        (meta.uid() == 0 || meta.uid() == uid)
+        (meta.uid() == 0 || meta.uid() == person.uid)
             && mode & 0o002 == 0
-            && (mode & 0o020 == 0 || meta.gid() == gid)
+            && (mode & 0o020 == 0 || (meta.gid() == person.gid && person.private_group()))
     })
 }
 
@@ -530,7 +698,7 @@ fn person_keeps(path: &Path) -> bool {
 /// of its own making, is not: the name alone is what a tool call can
 /// choose. Nor is a file that someone other than the person could have
 /// written, or swapped through a directory between it and its root.
-fn runner_of_file(path: &Path, home: Option<&Path>) -> Option<&'static str> {
+fn runner_of_file(path: &Path, home: Option<&Path>, person: &Person) -> Option<&'static str> {
     let file = std::fs::canonicalize(path).ok()?;
     if crate::bookkeep::path_is_temp(Some(&file)) {
         return None;
@@ -542,7 +710,7 @@ fn runner_of_file(path: &Path, home: Option<&Path>) -> Option<&'static str> {
     let (runner, root) = runner_below(&file, &roots)?;
     file.ancestors()
         .take_while(|dir| dir.starts_with(&root))
-        .all(person_keeps)
+        .all(|dir| person_keeps(dir, person))
         .then_some(runner)
 }
 
@@ -553,8 +721,9 @@ fn runner_of_file(path: &Path, home: Option<&Path>) -> Option<&'static str> {
 #[must_use]
 pub fn exe_runner(pid: u32) -> Option<&'static str> {
     let home = own_home();
+    let person = Person::new(&SystemAccounts);
     let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
-    if let Some(r) = runner_of_file(&exe, home.as_deref()) {
+    if let Some(r) = runner_of_file(&exe, home.as_deref(), &person) {
         return Some(r);
     }
     let base = exe.file_name()?.to_str()?;
@@ -569,7 +738,7 @@ pub fn exe_runner(pid: u32) -> Option<&'static str> {
         .find(|a| !a.is_empty() && !a.starts_with('-'))?;
     let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
     let script = std::fs::canonicalize(cwd.join(script.as_ref())).ok()?;
-    runner_of_file(&script, home.as_deref())
+    runner_of_file(&script, home.as_deref(), &person)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1083,6 +1252,7 @@ mod tests {
             .tempdir_in(own_home().expect("this user's passwd entry names a home"))
             .unwrap();
         let home = base.path().join("u");
+        let person = Person::new(&SystemAccounts);
         let program = |dir: &Path, name: &str| {
             std::fs::create_dir_all(dir).unwrap();
             let path = dir.join(name);
@@ -1092,24 +1262,112 @@ mod tests {
         };
         let bin = home.join(".local/bin");
         let claude = program(&bin, "claude");
-        assert_eq!(runner_of_file(&claude, Some(&home)), Some("claude"));
+        assert_eq!(
+            runner_of_file(&claude, Some(&home), &person),
+            Some("claude")
+        );
 
         let away = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(program(away.path(), "codex"), bin.join("codex")).unwrap();
-        assert_eq!(runner_of_file(&bin.join("codex"), Some(&home)), None);
+        assert_eq!(
+            runner_of_file(&bin.join("codex"), Some(&home), &person),
+            None
+        );
 
         program(&base.path().join("other/.local/bin"), "claude");
         let climbed = home.join("../other/.local/bin/claude");
-        assert_eq!(runner_of_file(&climbed, Some(&home)), None);
+        assert_eq!(runner_of_file(&climbed, Some(&home), &person), None);
 
         std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o757)).unwrap();
-        assert_eq!(runner_of_file(&claude, Some(&home)), None);
+        assert_eq!(runner_of_file(&claude, Some(&home), &person), None);
 
         let open = bin.join("open");
         let grok = program(&open, "grok");
-        assert_eq!(runner_of_file(&grok, Some(&home)), Some("grok"));
+        assert_eq!(runner_of_file(&grok, Some(&home), &person), Some("grok"));
         std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
-        assert_eq!(runner_of_file(&grok, Some(&home)), None);
+        assert_eq!(runner_of_file(&grok, Some(&home), &person), None);
+    }
+
+    /// One user `u`, the name and members of whatever group is asked
+    /// for, and the uids whose primary group it is.
+    struct FakeAccounts {
+        user: Option<&'static str>,
+        group: &'static str,
+        members: &'static [&'static str],
+        primary: Vec<u32>,
+    }
+
+    impl Accounts for FakeAccounts {
+        fn user_name(&self, _uid: u32) -> Option<std::ffi::OsString> {
+            self.user.map(Into::into)
+        }
+
+        fn group(&self, _gid: u32) -> Option<GroupEntry> {
+            Some(GroupEntry {
+                name: self.group.into(),
+                members: self.members.iter().map(Into::into).collect(),
+            })
+        }
+
+        fn primary_members(&self, _gid: u32) -> Option<Vec<u32>> {
+            Some(self.primary.clone())
+        }
+    }
+
+    /// A runner file the person's primary group may write is theirs only
+    /// when that group is: named for them, listing no one else, and no
+    /// other account's primary group. An account lookup that fails is
+    /// not such a group.
+    #[test]
+    fn a_group_write_counts_only_from_a_group_the_person_has_alone() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // SAFETY: getuid takes no arguments and only reads the process
+        // identity.
+        let uid = unsafe { libc::getuid() };
+        let alone = |members, primary| FakeAccounts {
+            user: Some("u"),
+            group: "u",
+            members,
+            primary,
+        };
+        let shared = [
+            FakeAccounts {
+                group: "staff",
+                ..alone(&[], vec![uid])
+            },
+            alone(&["u", "v"], vec![uid]),
+            alone(&["v"], vec![uid]),
+            alone(&[], vec![uid, uid + 1]),
+            FakeAccounts {
+                user: None,
+                ..alone(&[], vec![uid])
+            },
+        ];
+
+        let base = tempfile::Builder::new()
+            .prefix(".ljos-group-")
+            .tempdir_in(own_home().expect("this user's passwd entry names a home"))
+            .unwrap();
+        let home = base.path().join("u");
+        let bin = home.join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let claude = bin.join("claude");
+        std::fs::write(&claude, "").unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o775)).unwrap();
+
+        for accounts in [alone(&[], vec![uid]), alone(&["u"], vec![uid, uid])] {
+            assert!(group_is_private(&accounts, uid, 0));
+            let person = Person::new(&accounts);
+            assert_eq!(
+                runner_of_file(&claude, Some(&home), &person),
+                Some("claude")
+            );
+        }
+        for accounts in &shared {
+            assert!(!group_is_private(accounts, uid, 0));
+            let person = Person::new(accounts);
+            assert_eq!(runner_of_file(&claude, Some(&home), &person), None);
+        }
     }
 
     /// A process younger than a recorded tool call, in that call's cgroup
