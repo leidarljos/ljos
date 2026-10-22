@@ -986,6 +986,22 @@ enum Cmd {
         #[arg(long, value_name = "RFC3339", requires = "quorum")]
         deadline: Option<String>,
     },
+    /// Sign a launch slot on the issue a cloud run is launched for: the
+    /// run's seat, the model asked for and the run id, under this seat's
+    /// pinned key. Written before the run's first ballot.
+    Slot {
+        /// The issue the run is launched for.
+        issue: String,
+        /// The `LJOS_SEAT` the run boots with. The run id is appended the
+        /// way `ljos cloud up` appends it.
+        seat: String,
+        /// The model the run was launched on.
+        #[arg(long)]
+        model: String,
+        /// The run id, the run's `CURSOR_AGENT_ID` or `GITHUB_RUN_ID`.
+        #[arg(long)]
+        run: String,
+    },
     /// One trust row: FROM weighs TO at WEIGHT in (0, 1]. Written to the pack.
     Trust {
         from: String,
@@ -1284,6 +1300,7 @@ fn run_command() -> Result<()> {
             | Cmd::Sitting { .. }
             | Cmd::Claim { .. }
             | Cmd::Note { .. }
+            | Cmd::Slot { .. }
             | Cmd::Finish { .. }
             | Cmd::Release { .. }
             | Cmd::Complete { .. }
@@ -1754,6 +1771,15 @@ fn run_command() -> Result<()> {
                 Err(e) => eprintln!("ljos note: {e:#}"),
             }
             print!("{}", ljos_cli::persist_tracker(&issue, "noted"));
+        }
+        Cmd::Slot {
+            issue,
+            seat,
+            model,
+            run,
+        } => {
+            print!("{}", ljos_cli::slot::write(&issue, &seat, &model, &run)?);
+            print!("{}", ljos_cli::persist_tracker(&issue, "slotted"));
         }
         Cmd::Log { seat } => print!("{}", ljos_cli::tracker_log(Some(&seat))?),
         Cmd::Usage { since } => print!("{}", ljos_cli::tracker_usage(&since)?),
