@@ -50,6 +50,22 @@
 //! creation. A terminal-shaped atom without `updated`, or written after
 //! the bound with an old `ts`, is held for review instead of promoted.
 //!
+//! What stays trusted, and nothing else:
+//!
+//! * The record in `$XDG_STATE_HOME/ljos/pref-cutoff/`: receipt id, bound
+//!   and journal. Any process running as the person's user can write it,
+//!   as it can any of their files.
+//! * [`under_a_runner`] deciding that the run recording the cutoff is the
+//!   person's. A process it does not catch records the bound as theirs.
+//! * packset's `updated`. A record carried over from a packset before
+//!   d0d7663 got `updated` from its stored `ts`, which its post chose.
+//!   The bound is this machine's clock, so a pack on another clock moves
+//!   the window by the skew.
+//! * The marks on an atom the pack wrote before the bound. A post made
+//!   with the seat token before the person's first migration, in the
+//!   terminal shape under a word that names no runner, is promoted:
+//!   nothing in the pack tells it from the person's own `ljos prefer`.
+//!
 //! The writers at v0.32.1, and the same writers through d47b69bd, left
 //! these marks:
 //!
