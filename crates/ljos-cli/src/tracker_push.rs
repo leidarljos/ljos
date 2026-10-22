@@ -669,10 +669,8 @@ pub(crate) fn repo_root(start: &Path) -> PathBuf {
 
 fn git(dir: &Path, args: &[&str]) -> Output {
     use std::os::unix::process::ExitStatusExt;
-    let mut cmd = std::process::Command::new("git");
-    cmd.arg("-C")
-        .arg(dir)
-        .args(args)
+    let mut cmd = crate::git_at(dir);
+    cmd.args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
         .env("GIT_SEQUENCE_EDITOR", "true")
@@ -714,6 +712,9 @@ fn first_line(text: &str) -> String {
 /// `git init` failed, the attributes could not be written, or the
 /// attributes commit was refused.
 pub(crate) fn prepare_tracker(root: &Path, init: bool, commit: bool) -> Result<(), String> {
+    // Before any write. A test whose tracker root falls back to the crate
+    // directory used to commit `.gitattributes` into the ljos checkout.
+    crate::refuse_ljos_checkout(root)?;
     if !is_work_tree(root) {
         if !init {
             return Ok(());
@@ -1078,6 +1079,7 @@ fn scope_for_this_host_atoms(rel: &str, scope: &crate::sync::Scope) -> Option<St
 }
 
 fn merge_onto(dir: &Path, onto: &str) -> Result<(), String> {
+    crate::refuse_ljos_checkout(dir)?;
     let started = git(dir, &["merge", "-q", "--no-commit", "--no-edit", onto]);
     let stopped = merge_in_progress(dir) || has_unmerged(dir);
     if !started.status.success() && !stopped {
@@ -1110,6 +1112,7 @@ fn merge_onto(dir: &Path, onto: &str) -> Result<(), String> {
 }
 
 fn fold_orgs(dir: &Path) -> Result<(), String> {
+    crate::refuse_ljos_checkout(dir)?;
     let mut changed = Vec::new();
     for file in tracked(dir, "*.org") {
         let path = dir.join(&file);
@@ -1530,6 +1533,7 @@ body b
         let outer = dir.path().join("repo");
         let nested = outer.join("target/tracker-home");
         std::fs::create_dir_all(&outer).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
         let run_outer = |args: &[&str]| {
             let out = std::process::Command::new("git")
                 .arg("-C")
@@ -1605,6 +1609,82 @@ body b
         assert_eq!(
             after_driver, before_driver,
             "enclosing checkout gained a merge driver"
+        );
+    }
+
+    #[test]
+    fn prepare_tracker_does_not_retarget_to_exported_git_dir() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let bare = dir.path().join("dots.git");
+        let home = dir.path().join("home");
+        let tracker = dir.path().join("tracker");
+        std::fs::create_dir_all(&home).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q", "--bare"])
+            .arg(&bare)
+            .output()
+            .unwrap();
+        assert!(
+            init.status.success(),
+            "bare init: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+
+        let git_bare = |args: &[&str]| -> String {
+            let out = std::process::Command::new("git")
+                .arg("--git-dir")
+                .arg(&bare)
+                .args(args)
+                .output()
+                .unwrap();
+            if out.status.success() {
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            } else {
+                String::new()
+            }
+        };
+
+        let before_bare = git_bare(&["config", "--get", "core.bare"]);
+        let before_worktree = git_bare(&["config", "--get", "core.worktree"]);
+        let before_driver = git_bare(&["config", "--get", "merge.ljos-atoms.driver"]);
+        let old_git_dir = std::env::var_os("GIT_DIR");
+        let old_git_work_tree = std::env::var_os("GIT_WORK_TREE");
+        unsafe {
+            std::env::set_var("GIT_DIR", &bare);
+            std::env::set_var("GIT_WORK_TREE", &home);
+        }
+        prepare_tracker(&tracker, true, false).unwrap();
+        unsafe {
+            match old_git_dir {
+                Some(value) => std::env::set_var("GIT_DIR", value),
+                None => std::env::remove_var("GIT_DIR"),
+            }
+            match old_git_work_tree {
+                Some(value) => std::env::set_var("GIT_WORK_TREE", value),
+                None => std::env::remove_var("GIT_WORK_TREE"),
+            }
+        }
+
+        let top = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&tracker)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            .unwrap();
+        assert!(top.status.success(), "tracker rev-parse failed");
+        assert_eq!(
+            String::from_utf8_lossy(&top.stdout).trim(),
+            tracker.display().to_string()
+        );
+        assert_eq!(git_bare(&["config", "--get", "core.bare"]), before_bare);
+        assert_eq!(
+            git_bare(&["config", "--get", "core.worktree"]),
+            before_worktree
+        );
+        assert_eq!(
+            git_bare(&["config", "--get", "merge.ljos-atoms.driver"]),
+            before_driver
         );
     }
 
