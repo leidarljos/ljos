@@ -31,6 +31,11 @@ use serde_json::Value;
 /// finish lesson into the shared log.
 pub const CLOUD_SCOPE: &str = "cloud";
 
+/// Set by `ljos cloud up` in `~/.config/ljos/env`. Writers tag memory and
+/// lessons `scope:<value>` explicitly. This is not `default_scope`: an
+/// unscoped atom still stays on the primary scope.
+pub const WRITE_SCOPE_KEY: &str = "LJOS_WRITE_SCOPE";
+
 /// The scope a tracker repository shares: `.ljos/sync.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct Scope {
@@ -313,6 +318,40 @@ fn check_scope_name(path: &Path, name: &str) -> Result<()> {
         "{} names `{name}`, but a scope name is non-empty and only [a-z0-9-]",
         path.display()
     );
+}
+
+/// The scope this machine's memory and lessons are tagged with.
+///
+/// `cloud up` writes [`WRITE_SCOPE_KEY`] into the process and into
+/// `~/.config/ljos/env`. The value has to be a scope name. Unset, writers
+/// leave the atom unscoped and the repository's primary scope applies.
+#[must_use]
+pub fn machine_write_scope() -> Option<String> {
+    let raw = std::env::var(WRITE_SCOPE_KEY)
+        .ok()
+        .or_else(write_scope_from_env_file)?;
+    let name = raw.trim();
+    valid_scope_name(name).then(|| name.to_string())
+}
+
+fn write_scope_from_env_file() -> Option<String> {
+    let home = std::env::var_os("HOME")?;
+    let text = std::fs::read_to_string(PathBuf::from(home).join(".config/ljos/env")).ok()?;
+    text.lines().find_map(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let (key, value) = line.split_once('=')?;
+        (key.trim() == WRITE_SCOPE_KEY).then(|| value.trim().to_string())
+    })
+}
+
+/// Scope tag for a finish lesson. A VM tags `cloud` explicitly so the
+/// lesson does not follow the repository's primary scope into the box log.
+#[must_use]
+pub fn scope_for_lesson(repo_scope: Option<String>) -> Option<String> {
+    machine_write_scope().or(repo_scope)
 }
 
 /// The scope unscoped atoms take. An explicit `default_scope` may name the
@@ -2486,6 +2525,78 @@ mod tests {
         assert_eq!(scope.name, "grokbot");
         assert_eq!(scope.for_project("garden"), "grokbot");
         assert!(scope.scopes.contains_key(CLOUD_SCOPE));
+    }
+
+    #[test]
+    fn vm_memory_lands_in_the_cloud_log_and_box_memory_does_not() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join(".config/ljos")).unwrap();
+        // SAFETY: this test holds the process env lock.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+            std::env::set_var(WRITE_SCOPE_KEY, CLOUD_SCOPE);
+        }
+        assert_eq!(
+            scope_for_lesson(Some("grokbot".into())).as_deref(),
+            Some(CLOUD_SCOPE),
+            "a VM lesson must be tagged cloud, not the repository primary"
+        );
+        let vm_memory = crate::atom_body("lesson", "The VM kept a fact.", "seat");
+        let vm_rule = crate::atom_body("preference", "The VM prefers short logs.", "seat");
+        let vm_lesson = crate::atom_body("lesson", "The VM learned a lesson.", "seat");
+        for atom in [&vm_memory, &vm_rule, &vm_lesson] {
+            let tagged = atom["entities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tag| tag == "scope:cloud");
+            assert!(tagged, "vm write missed scope:cloud: {atom}");
+        }
+        // SAFETY: this test holds the process env lock.
+        unsafe { std::env::remove_var(WRITE_SCOPE_KEY) };
+        assert_eq!(
+            scope_for_lesson(Some("grokbot".into())).as_deref(),
+            Some("grokbot")
+        );
+        let box_memory = crate::atom_body("lesson", "The box kept a fact.", "seat");
+        assert!(
+            !box_memory["entities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tag| { tag.as_str().is_some_and(|text| text.starts_with("scope:")) }),
+            "box memory was scoped: {box_memory}"
+        );
+        std::fs::write(home.join(".config/ljos/env"), "LJOS_WRITE_SCOPE=cloud\n").unwrap();
+        assert_eq!(machine_write_scope().as_deref(), Some(CLOUD_SCOPE));
+
+        let scope: Scope = toml::from_str(
+            "name = \"grokbot\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = [\"age1cloud\"]\n",
+        )
+        .unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let said = with_fake_age(dir.path(), || {
+            export_all(&root, &scope, &[vm_memory, vm_rule, vm_lesson, box_memory])
+        })
+        .unwrap();
+        assert!(!said.contains("default_scope"), "{said}");
+        let host = host();
+        let [cloud_rel, _] = host_log_rels_for_scope(&host, "grokbot", "cloud");
+        let cloud = std::fs::read_to_string(root.join(cloud_rel)).unwrap();
+        assert!(cloud.contains("The VM kept a fact."), "{cloud}");
+        assert!(cloud.contains("The VM prefers short logs."), "{cloud}");
+        assert!(cloud.contains("The VM learned a lesson."), "{cloud}");
+        assert!(!cloud.contains("The box kept a fact."), "{cloud}");
+        let [primary_rel, _] = host_log_rels_for_scope(&host, "grokbot", "grokbot");
+        let primary = std::fs::read_to_string(root.join(primary_rel)).unwrap();
+        assert!(primary.contains("The box kept a fact."), "{primary}");
+        assert!(!primary.contains("The VM kept a fact."), "{primary}");
+        assert!(!primary.contains("The VM learned a lesson."), "{primary}");
+        assert!(!primary.contains("The VM prefers short logs."), "{primary}");
     }
 
     #[test]
