@@ -299,3 +299,46 @@ fn mcp_user_prefer_of_a_plant_is_refused() {
         rules_text(&seat)
     );
 }
+
+/// The person typing `ljos prefer --user` is the words. No prompt hook is required.
+#[test]
+fn a_person_can_write_a_user_rule_from_the_terminal() {
+    let seat = Seat::new();
+    let out = seat
+        .command(
+            ["prefer", "--user", "--why", "they asked", PLANT].as_slice(),
+            false,
+        )
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text_of(&out));
+    assert!(
+        rules_text(&seat).contains("release key"),
+        "{}",
+        rules_text(&seat)
+    );
+}
+
+/// Under a runner, a user rule of the person's own words is kept.
+#[test]
+fn a_runner_user_rule_of_the_persons_words_is_kept() {
+    let seat = Seat::new();
+    let said = "Always build the release with the checked fuse never a guessed one.";
+    note_prompt(&seat, &format!("please keep this rule: {said}"));
+    let out = seat
+        .command(
+            [
+                "prefer",
+                "--user",
+                "--why",
+                "they said so in the prompt",
+                said,
+            ]
+            .as_slice(),
+            true,
+        )
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text_of(&out));
+    assert!(rules_text(&seat).contains(said), "{}", rules_text(&seat));
+}

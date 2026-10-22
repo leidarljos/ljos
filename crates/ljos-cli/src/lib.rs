@@ -12099,6 +12099,23 @@ impl Basis {
     }
 }
 
+/// Refuse `text` unless it is the person's own words from their latest prompt.
+///
+/// User rules and the MCP prefer of them reach every prompt. A sentence the
+/// prompt hook did not keep is not those words.
+///
+/// # Errors
+///
+/// `text` is not in the person's latest prompt.
+pub fn refuse_unless_person_words(label: &str, text: &str) -> Result<()> {
+    if Basis::of(text) != Basis::Person {
+        bail!(
+            "{label}: the text is not in the person's latest prompt; only the person's own words can be stored here"
+        );
+    }
+    Ok(())
+}
+
 /// The atom an MCP `ljos_remember` or `ljos_prefer` posts, with its basis.
 /// The person's words carry origin `user-declared` and [`SAID_ENTITY`], and
 /// a lesson in them stands unless the caller said transient. An agent's
