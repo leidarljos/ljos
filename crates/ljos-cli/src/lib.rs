@@ -6745,8 +6745,9 @@ pub fn tool_error(input: &str) -> String {
 /// searched on the command and the error it gave, and a hit has to pass the
 /// prompt hook's tests. It must also share [`FAILURE_SHARED_WORDS`] content
 /// words with the command and the error, where a prompt needs one, since an
-/// error is long and noisy. The floor is the lexical match, not the fused
-/// score: the pack decays that score by age, and age only ranks. The pack's
+/// error is long and noisy. The floor is the lexical match of the hits that
+/// pass those tests, not the fused score: the pack decays that score by
+/// age, and age only ranks. The pack's
 /// order, which is that score, is kept. One handed over earlier in the
 /// session is left out. Calls that worked are not searched.
 #[must_use]
@@ -6764,21 +6765,23 @@ pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<
     };
     let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
     let lexical = lexical_match_scores(&texts, &cue);
-    let best_lexical = lexical.iter().copied().fold(0.0_f64, f64::max);
-    if best_lexical <= 0.0 {
-        return (String::new(), Vec::new());
-    }
     let seen = seen_ids(call.session.as_deref());
+    let eligible: Vec<bool> = hits
+        .iter()
+        .map(|h| {
+            !UNREVIEWED_KINDS.contains(&h.kind.as_str())
+                && agreed(h)
+                && shared_cue_words(&h.text, &cue) >= FAILURE_SHARED_WORDS
+                && shown_on_prompt(h)
+                && h.id.as_ref().is_none_or(|id| !seen.contains(id))
+        })
+        .collect();
+    let admitted = clears_lexical_floor(&lexical, &eligible);
     let rows: Vec<&Hit> = hits
         .iter()
-        .enumerate()
-        .filter(|(_, h)| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
-        .filter(|(i, _)| lexical[*i] >= best_lexical * HOOK_SCORE_FLOOR)
-        .filter(|(_, h)| agreed(h))
-        .filter(|(_, h)| shared_cue_words(&h.text, &cue) >= FAILURE_SHARED_WORDS)
-        .filter(|(_, h)| shown_on_prompt(h))
-        .filter(|(_, h)| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
-        .map(|(_, h)| h)
+        .zip(&admitted)
+        .filter(|(_, ok)| **ok)
+        .map(|(h, _)| h)
         .take(limit)
         .collect();
     if rows.is_empty() {
@@ -7714,18 +7717,43 @@ fn lexical_scores(bodies: &[&str], cue: &str) -> Vec<(usize, f64)> {
     scored
 }
 
-/// Lexical match of each text against `cue`, in the same order. Zero when
-/// that text matches nothing. The pack's fused score adds recency on each
-/// ballot and then multiplies by retrievability, so this is the score that
-/// does not read the clock.
+/// Lexical match of each text against `cue`, in the same order, on one
+/// scale from 0 to 1. A text that names the subject scores 1. Any other
+/// text scores its BM25 squashed under 1, so one rare word cannot outrank
+/// naming the subject. Zero when that text matches nothing. The pack's
+/// fused score adds recency on each ballot and then multiplies by
+/// retrievability, so this is the score that does not read the clock.
 fn lexical_match_scores(texts: &[&str], cue: &str) -> Vec<f64> {
-    let mut scores = vec![0.0; texts.len()];
-    for (index, score) in lexical_scores(texts, cue) {
-        if let Some(slot) = scores.get_mut(index) {
-            *slot = score;
-        }
-    }
-    scores
+    let docs: Vec<Vec<String>> = texts.iter().map(|text| match_tokens(text)).collect();
+    let df = document_frequency(&docs);
+    texts
+        .iter()
+        .enumerate()
+        .map(|(i, text)| {
+            if names_the_subject(text, cue) {
+                1.0
+            } else {
+                let bm25 = bm25_distinctive(&docs, &df, i, cue);
+                bm25 / (1.0 + bm25)
+            }
+        })
+        .collect()
+}
+
+/// Which hits clear [`HOOK_SCORE_FLOOR`] of the best lexical match among
+/// the `eligible` ones, those that pass every other test. A hit kept out
+/// by kind, agreement, horizon or the word test does not set the floor.
+fn clears_lexical_floor(lexical: &[f64], eligible: &[bool]) -> Vec<bool> {
+    let best = lexical
+        .iter()
+        .zip(eligible)
+        .filter(|(_, ok)| **ok)
+        .fold(0.0_f64, |best, (score, _)| best.max(*score));
+    lexical
+        .iter()
+        .zip(eligible)
+        .map(|(score, ok)| *ok && best > 0.0 && *score >= best * HOOK_SCORE_FLOOR)
+        .collect()
 }
 
 fn atom_as_hit(atom: &Value) -> Option<Hit> {
@@ -7852,7 +7880,11 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
         // it by age, and Jev's probability orders this path.
         let texts: Vec<&str> = candidates.iter().map(|h| h.text.as_str()).collect();
         let lexical = lexical_match_scores(&texts, cue);
-        let best_lexical = lexical.iter().copied().fold(0.0_f64, f64::max);
+        let best_lexical = candidates
+            .iter()
+            .enumerate()
+            .filter(|(i, h)| j.bears(*i) && agreed(h) && names_the_subject(&h.text, cue))
+            .fold(0.0_f64, |best, (i, _)| best.max(lexical[i]));
         candidates
             .iter()
             .enumerate()
@@ -7922,14 +7954,14 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             // pass. When none does, no memory can reach the prompt, and
             // the second stage, a few hundred milliseconds a prompt, is not
             // run.
+            let could = |h: &Hit| {
+                !UNREVIEWED_KINDS.contains(&h.kind.as_str())
+                    && agreed(h)
+                    && names_the_subject(&h.text, cue)
+                    && shown_on_prompt(h)
+                    && h.id.as_ref().is_none_or(|id| !seen.contains(id))
+            };
             if let Some(pool) = &pool {
-                let could = |h: &Hit| {
-                    !UNREVIEWED_KINDS.contains(&h.kind.as_str())
-                        && agreed(h)
-                        && names_the_subject(&h.text, cue)
-                        && shown_on_prompt(h)
-                        && h.id.as_ref().is_none_or(|id| !seen.contains(id))
-                };
                 if !pool.iter().any(could) {
                     return (nudge, pending);
                 }
@@ -7953,19 +7985,12 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
             // match. The fused score still orders the rows below.
             let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
             let lexical = lexical_match_scores(&texts, cue);
-            let best_lexical = lexical.iter().copied().fold(0.0_f64, f64::max);
-            if best_lexical <= 0.0 {
-                return (nudge, pending);
-            }
+            let eligible: Vec<bool> = hits.iter().map(could).collect();
+            let admitted = clears_lexical_floor(&lexical, &eligible);
             hits.iter()
-                .enumerate()
-                .filter(|(_, h)| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
-                .filter(|(i, _)| lexical[*i] >= best_lexical * HOOK_SCORE_FLOOR)
-                .filter(|(_, h)| agreed(h))
-                .filter(|(_, h)| names_the_subject(&h.text, cue))
-                .filter(|(_, h)| shown_on_prompt(h))
-                .filter(|(_, h)| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
-                .map(|(_, h)| h)
+                .zip(admitted)
+                .filter(|(_, ok)| *ok)
+                .map(|(h, _)| h)
                 .collect()
         }
     };
@@ -35229,6 +35254,51 @@ mod tests {
         assert!(note.contains("VITE_API_URL"), "{note}");
     }
 
+    /// A hit one scorer named carries a word no other hit has. Its BM25
+    /// is near 2, but it is kept out, so it must not lift the floor over
+    /// the memories that name the subject and do get in.
+    #[test]
+    fn a_rare_word_on_a_hit_kept_out_does_not_lift_the_lexical_floor() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let hit = |id: &str, text: &str, ballots: u32| {
+            serde_json::json!({
+                "id": id, "text": text, "score": 2.0, "kind": "lesson",
+                "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"],
+                "ballots": ballots, "of": 3
+            })
+        };
+        let mut hits = vec![hit(
+            "rare",
+            "Publishing on Fridays needs a second reviewer",
+            1,
+        )];
+        for i in 0..8 {
+            hits.push(hit(
+                &format!("subject{i}"),
+                &format!("The registry rejected the token on host {i}; mint a new one"),
+                2,
+            ));
+        }
+        hits.push(hit("other", "Pin the Postgres image by digest", 2));
+        let url = serve_signal_pack(Value::Array(hits));
+        let _url = PackUrl::set(&url);
+        let call = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "publishing failed, the registry rejected my token".into(),
+            session: Some("rare-lexical".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(&call, 5);
+        assert!(note.contains("The registry rejected the token"), "{note}");
+        assert!(!note.contains("Fridays"), "{note}");
+    }
+
     /// Jev says an old memory bears on the prompt and the memory names
     /// the subject. Its fused score sits under 0.6 of a fresh hit on
     /// age alone, and its cosine sits outside the dense band, so only
@@ -42872,6 +42942,48 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             3,
         );
         assert!(note.contains("VITE_API_URL"), "{note}");
+    }
+
+    /// "Clear the npm cache weekly" is the only hit that says `npm`, so
+    /// its BM25 is above 2. It shares no two words with the failure and
+    /// is kept out, and naming the subject is worth as much as a rare
+    /// word, so the eight lessons on the rejected token still get in.
+    #[test]
+    fn a_failed_tool_floor_is_set_by_the_hits_that_pass() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap())]);
+        let hit = |id: &str, text: &str, score: f64| {
+            serde_json::json!({
+                "id": id, "text": text, "score": score, "kind": "lesson",
+                "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"],
+                "ballots": 2, "of": 3
+            })
+        };
+        let mut hits = vec![hit("cache", "Clear the npm cache weekly", 3.0)];
+        for i in 0..8 {
+            hits.push(hit(
+                &format!("token{i}"),
+                &format!("The registry rejected the token on host {i}; rotate it there"),
+                2.0,
+            ));
+        }
+        hits.push(hit("other", "Pin the Postgres image by digest", 1.0));
+        let url = serve_signal_pack(Value::Array(hits));
+        let _url = PackUrl::set(&url);
+        let call = HookCall {
+            event: "PostToolUseFailure".into(),
+            cue: "npm test".into(),
+            session: Some("rare-fail".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = failure_note(&call, "failed: token rejected by the registry", 3);
+        assert_eq!(
+            note.matches("The registry rejected the token").count(),
+            3,
+            "{note}"
+        );
+        assert!(!note.contains("npm cache"), "{note}");
     }
 
     /// A compaction forgets which memories the conversation was handed, so
