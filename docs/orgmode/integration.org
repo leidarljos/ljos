@@ -85,7 +85,7 @@ same everywhere and the envelope differs:
 | opencode | =assets/opencode/ljos.ts= | hook deny blocks | runner prompt or =ljos approve= | same contract, TypeScript hook |
 | omp | =assets/omp/ljos.ts= | hook deny blocks | runner prompt or =ljos approve= | same contract, TypeScript hook |
 | hermes | MCP server list plus hooks | hook deny blocks | =ljos approve= | nothing leaves the machine unless a remote judge is turned on |
-| Cursor | prompt note on the first tool result; skill; =~/.cursor/agents= | =beforeShellExecution= and =preToolUse=, fail closed | Cursor's permission prompt on a shell command | the IDE and the =agent= CLI share =~/.cursor/mcp.json= and =~/.cursor/hooks.json= |
+| Cursor | prompt note on the first tool result; skill; =~/.cursor/agents= | =beforeShellExecution= and =preToolUse=; a missing policyd allows | Cursor's permission prompt on a shell command | the IDE and the =agent= CLI share =~/.cursor/mcp.json= and =~/.cursor/hooks.json= |
 | GitHub Copilot CLI | skill; no prompt note, since Copilot drops a command hook's prompt output | =PreToolUse= in =~/.copilot/hooks/ljos.json=, =permissionDecision= | Copilot's permission prompt | the same file in a repository's =.github/hooks= reaches Copilot's cloud agent |
 | Gemini CLI | =BeforeAgent= =additionalContext= | =BeforeTool= on =run_shell_command=, =decision: deny= | none: an ask is a deny that says so | hooks and MCP server share =~/.gemini/settings.json=; timeouts there are milliseconds |
 | Windsurf (Devin Desktop) | skill | =pre_run_command=, exit 2 with the reason on stderr | none | =~/.codeium/windsurf/hooks.json= |
@@ -112,10 +112,11 @@ The runners from Copilot down call =ljos hook --runner NAME=. That
 command reads the runner's payload as Claude Code's, runs the same hook,
 and writes the answer back in the runner's field names and exit code.
 The relay denies when the inner hook crashes, exits non-zero without
-an answer, reports an unhealthy guard, or runs past
-=LJOS_GUARD_TIMEOUT= (5 seconds by default). The reason names the
-failure and says to run =ljos doctor=. =LJOS_GUARD_FAIL_OPEN=1=
-restores the old allow-with-note behavior while the seat is repaired.
+an answer, or runs past =LJOS_GUARD_TIMEOUT= (5 seconds by default).
+The reason names the failure and says to run =ljos doctor=. A missing
+=ljos-policyd= is an allow with a note, not that deny.
+=LJOS_GUARD_FAIL_OPEN=1= restores the old allow-with-note behavior
+for a fault while the seat is repaired.
 
 ** When a hook fails
 
@@ -139,13 +140,15 @@ ahead unchecked.
 | Qwen Code | runs; only exit 2 blocks | not documented | not read; the exit code decides | [[https://qwenlm.github.io/qwen-code-docs/en/users/features/hooks/][hooks]] |
 | Crush | runs; only exit 2 blocks | runs | not read; the exit code decides | [[https://github.com/charmbracelet/crush/blob/main/docs/hooks/README.md][hooks]] |
 
-Three things on the seat's side close part of the gap. On the runners
-from Copilot down, =ljos hook --runner= fails closed on guard faults,
-including a missing or unresponsive =ljos-policyd= and a guard timeout
-past =LJOS_GUARD_TIMEOUT=. =LJOS_GUARD_FAIL_OPEN=1= restores the old
-allow-with-note behavior while that is repaired. =POLICYD_REQUIRED=1=
-still makes shell-line checks refuse when =ljos-policyd= is absent
-outside the relay. The hook files the seat writes give each runner a
+Three things on the seat's side close part of the gap. A guard fault
+denies the tool call: a =ljos-policyd= that is installed but hangs,
+crashes, or prints no verdict, a relay that cannot read its input, and
+a wait past =LJOS_GUARD_TIMEOUT=. A missing =ljos-policyd= still
+allows, with a note, so CI and a fresh install are not locked out.
+=POLICYD_REQUIRED=1= refuses the line when no binary answers, on the
+relay and on a direct hook. =LJOS_GUARD_FAIL_OPEN=1= restores the old
+allow-with-note behavior for a fault while that is repaired. The hook
+files the seat writes give each runner a
 timeout of 10 to 20 seconds; a check that takes longer meets the
 "times out" column. None of these helps when the =ljos= binary itself
 is gone: on Copilot and Kiro that blocks every shell command, and on
