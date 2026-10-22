@@ -509,7 +509,8 @@ struct GroupEntry {
 }
 
 /// The account lookups [`group_is_private`] makes. `None` is a lookup
-/// that failed, which is never read as an empty answer.
+/// that failed or that cannot be shown to be complete, which is never
+/// read as an empty answer.
 trait Accounts {
     fn user_name(&self, uid: u32) -> Option<std::ffi::OsString>;
     fn group(&self, gid: u32) -> Option<GroupEntry>;
@@ -517,7 +518,9 @@ trait Accounts {
     fn primary_members(&self, gid: u32) -> Option<Vec<u32>>;
 }
 
-/// The passwd and group databases, through the C library.
+/// The passwd and group databases: names through the C library, and
+/// the accounts in a group from `/etc/passwd` itself
+/// ([`primary_in_files`]), since enumerating NSS can stop short.
 struct SystemAccounts;
 
 /// Runs a `get*_r` lookup with a buffer that grows while it is too small.
@@ -605,27 +608,61 @@ impl Accounts for SystemAccounts {
     }
 
     fn primary_members(&self, gid: u32) -> Option<Vec<u32>> {
-        static WALK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _walk = WALK.lock().ok()?;
-        let mut uids = Vec::new();
-        // SAFETY: the enumeration state is the C library's own, and WALK
-        // keeps this the only walk over it; each entry is read before
-        // the next call replaces it.
-        unsafe {
-            libc::setpwent();
-            loop {
-                let entry = libc::getpwent();
-                if entry.is_null() {
-                    break;
-                }
-                if (*entry).pw_gid == gid {
-                    uids.push((*entry).pw_uid);
-                }
-            }
-            libc::endpwent();
-        }
-        Some(uids)
+        primary_in_files(Path::new(ETC), gid)
     }
+}
+
+/// Where the account files and `nsswitch.conf` are.
+const ETC: &str = "/etc";
+
+/// Whether `etc/nsswitch.conf` sends database `db` to `files` and
+/// nothing else, so the file under `etc` is all of it. A missing
+/// file, a missing or repeated line, or any other source, such as
+/// `systemd`, `sss`, `ldap` or `compat`, may add accounts that file
+/// does not list.
+fn files_only(etc: &Path, db: &str) -> bool {
+    let Ok(conf) = std::fs::read_to_string(etc.join("nsswitch.conf")) else {
+        return false;
+    };
+    let mut lines = conf
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or_default())
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(name, _)| name.trim() == db);
+    let (Some((_, sources)), None) = (lines.next(), lines.next()) else {
+        return false;
+    };
+    sources.split_whitespace().eq(["files"])
+}
+
+/// The uid of every line of `etc/passwd` whose primary group is `gid`,
+/// read only when passwd is that file alone ([`files_only`]). `None`
+/// when the file cannot be read whole: a line that is not seven fields
+/// with numeric ids, or a `+` or `-` line, which names accounts kept
+/// elsewhere.
+fn primary_in_files(etc: &Path, gid: u32) -> Option<Vec<u32>> {
+    if !files_only(etc, "passwd") {
+        return None;
+    }
+    let text = std::fs::read_to_string(etc.join("passwd")).ok()?;
+    let mut uids = Vec::new();
+    for line in text.lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with(['+', '-']) {
+            return None;
+        }
+        let fields: Vec<&str> = line.split(':').collect();
+        let [_, _, uid, primary, _, _, _] = fields[..] else {
+            return None;
+        };
+        let (uid, primary) = (uid.parse::<u32>().ok()?, primary.parse::<u32>().ok()?);
+        if primary == gid {
+            uids.push(uid);
+        }
+    }
+    Some(uids)
 }
 
 /// Whether group `gid` holds no one but user `uid`: it bears the user's
@@ -1481,7 +1518,7 @@ mod tests {
             user: Some("u"),
             group: "staff",
             members: &["u", "v"],
-            primary: vec![person.uid],
+            primary: Some(vec![person.uid]),
         };
         let sharing = Person::new(&staff);
         let mut files: Vec<PathBuf> = vec![
@@ -1653,7 +1690,7 @@ mod tests {
         user: Option<&'static str>,
         group: &'static str,
         members: &'static [&'static str],
-        primary: Vec<u32>,
+        primary: Option<Vec<u32>>,
     }
 
     impl Accounts for FakeAccounts {
@@ -1669,7 +1706,7 @@ mod tests {
         }
 
         fn primary_members(&self, _gid: u32) -> Option<Vec<u32>> {
-            Some(self.primary.clone())
+            self.primary.clone()
         }
     }
 
@@ -1687,7 +1724,7 @@ mod tests {
             user: Some("u"),
             group: "u",
             members,
-            primary,
+            primary: Some(primary),
         };
         let shared = [
             FakeAccounts {
@@ -1699,6 +1736,10 @@ mod tests {
             alone(&[], vec![uid, uid + 1]),
             FakeAccounts {
                 user: None,
+                ..alone(&[], vec![uid])
+            },
+            FakeAccounts {
+                primary: None,
                 ..alone(&[], vec![uid])
             },
         ];
@@ -1731,6 +1772,51 @@ mod tests {
                 None
             );
         }
+    }
+
+    /// The accounts in a group are read from `passwd` only when
+    /// `nsswitch.conf` names that file alone, and a file that cannot be
+    /// read whole lists no one rather than fewer.
+    #[test]
+    fn a_primary_group_is_listed_only_from_a_passwd_file_read_whole() {
+        let etc = tempfile::tempdir().unwrap();
+        let write = |name: &str, text: &str| std::fs::write(etc.path().join(name), text).unwrap();
+        let passwd = "root:x:0:0::/root:/bin/sh\nu:x:1000:1000::/home/u:/bin/sh\n";
+        write("passwd", passwd);
+        assert_eq!(primary_in_files(etc.path(), 1000), None, "no nsswitch.conf");
+        for conf in [
+            "passwd: files systemd\n",
+            "passwd: sss files\n",
+            "passwd: compat\n",
+            "passwd: files [NOTFOUND=return] ldap\n",
+            "passwd: files\npasswd: files ldap\n",
+            "group: files\n",
+        ] {
+            write("nsswitch.conf", conf);
+            assert_eq!(primary_in_files(etc.path(), 1000), None, "{conf}");
+        }
+        write(
+            "nsswitch.conf",
+            "# local\npasswd:   files # only\ngroup: files\n",
+        );
+        assert_eq!(primary_in_files(etc.path(), 1000), Some(vec![1000]));
+        assert_eq!(primary_in_files(etc.path(), 7), Some(vec![]));
+        for extra in [
+            "+@admins\n",
+            "-v\n",
+            "v:x:1001\n",
+            "v:x:one:1000::/home/v:/bin/sh\n",
+        ] {
+            write("passwd", &format!("{passwd}{extra}"));
+            assert_eq!(primary_in_files(etc.path(), 1000), None, "{extra}");
+        }
+        write(
+            "passwd",
+            &format!("{passwd}\n# kept\nv:x:1001:1000::/home/v:/bin/sh\n"),
+        );
+        assert_eq!(primary_in_files(etc.path(), 1000), Some(vec![1000, 1001]));
+        std::fs::remove_file(etc.path().join("passwd")).unwrap();
+        assert_eq!(primary_in_files(etc.path(), 1000), None);
     }
 
     /// A process younger than a recorded tool call, in that call's cgroup
