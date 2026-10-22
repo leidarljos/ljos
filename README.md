@@ -42,6 +42,7 @@ encoder build, the installer warns and goes on without it. `--with-embed` is
 still accepted and changes nothing. `ljos doctor` names any part that is missing.
 `--version 0.29.0` installs that ljos release instead of the latest, and `--pin packset=0.14.0` holds another repository at a version; a pinned version with no release for the platform builds that version's crate, never a newer one.
 The installer also checks each tarball's GitHub build attestation, with `gh` 2.49 or newer or with `cosign`, and sums up in one line; `--attest` stops the install when one is missing or does not verify.
+packset, deedar and consensus gain a build attestation on their next release; until that release the summary counts each of them as not published.
 `ljos-hud`, the desktop pane, is optional, and the doctor lists it as `info`.
 An `ljos-policyd` built without phronesis checks commands with its table alone, and the doctor marks its policy row `warn`.
 Building from source (`cargo install`, or binstall on a platform with no release tarball) needs Rust 1.89 or newer; `rustc --version` says which you have, and `rustup update stable` gets a current one.
@@ -333,8 +334,9 @@ a receipt for each message it shows. When the pack does not answer, it prints
 `ljos inbox`.
 In push mode the detached wake pushes the sealed log before it fires.
 The send does not wait, and a failed push is a line in the wake log.
-`ljos inbox --sync [COMMIT]` fetches until that commit is present, or the
-remote head when it is not, imports the sealed logs, and then lists.
+`ljos inbox --sync [COMMIT]` fetches until the remote has that commit, for
+up to 30 seconds (`LJOS_INBOX_SYNC_WAIT`), or else takes the remote head,
+imports the sealed logs, and then lists.
 With no remote it only lists.
 
 ## Decision panel concurrency
@@ -388,7 +390,7 @@ ljos panel vissue-xxxx --jev                   # with Jev on: cast when every se
 ljos learn vissue-xxxx --outcome ship
 ljos due
 ljos hud                                       # execs sibling ljos-hud (overlay; P pops out)
-ljos habit mab-cr-all 0.579 --unit acc --every 7d --source 11793   # a reading; the one before closes and is kept as what it was
+ljos habit mab-cr-all 0.579 --unit acc --every 7d --source example-0001   # an example reading; the one before closes and is kept as what it was
 ljos habit                                     # every habit as it stands, the change since the last reading, when the next is due
 ljos graded <atom-id> [--lapsed]
 ljos handover --out bag --project x --issue vissue-xxxx
@@ -417,13 +419,13 @@ ljos reply <id> "looking"                      # back to the sender, on the same
 ## MCP
 
 `ljos-mcp` serves the same verbs over stdio, and so does `ljos mcp`, which runs
-the `ljos-mcp` installed beside it. By default it lists twenty core tools,
+the `ljos-mcp` installed beside it. By default it lists twenty-one core tools,
 guard and memory first: `rule`, `request_approval`, `prefer`, `remember`,
-`search`, `start`, `guard_check`, `file`, `note`, `recall`, `sitting`,
+`search`, `start`, `guard_check`, `file`, `options`, `note`, `recall`, `sitting`,
 `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
 `doctor`, each with the prefix `ljos_`.
-Every listed tool costs its description and schema on every session: 7,702
-tokens for the core set against 16,298 for all forty-nine (o200k_base
+Every listed tool costs its description and schema on every session: 8,081
+tokens for the core set against 16,677 for all fifty (o200k_base
 count of `initialize` instructions and the `tools/list` result). `LJOS_MCP_TOOLS=all` in the server's environment lists every tool;
 `LJOS_MCP_TOOLS=core,island,due` adds named ones. A tool that fails answers
 with a result marked `isError` that carries the reason, so the model reads
@@ -482,7 +484,8 @@ The ballot gets recorded as `judge:<model>`, not as the persona.
 `ljos due --judge` names a claim the judges find still true; `ljos graded`
 marks it recalled. `ljos judge-score` reads the judge log against outcomes.
 The local answer stays as the fallback, and a machine without the file runs
-as before. A prompt costs about $0.00004, and `ljos doctor` prints the
+as before. A prompt costs about $0.00004, the arithmetic of about 900
+input tokens at $0.042 per million with output free, and `ljos doctor` prints the
 month's spend. A chat backend has to name `usd_per_mtok_in`. The section on
 judgment in the explanation says how Jev fits with what the seat already
 does; the how-to has the setup.
