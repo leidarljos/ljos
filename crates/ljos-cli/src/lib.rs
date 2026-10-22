@@ -10179,16 +10179,15 @@ pub const CURSOR_GATE_DEADLINE_MS: u64 = 8_000;
 
 /// The exit status of a gate the seat refused because the hook failed.
 /// Cursor, Claude Code and Codex each read exit 2 from a tool hook as a
-/// deny; any other failing status lets the call run on Cursor's CLI.
+/// deny. Cursor blocks any other failing status too, because onboard sets
+/// `failClosed` on its permission events.
 pub const GATE_REFUSED_EXIT: i32 = 2;
 
 /// A gate's refusal when the hook fails before it reaches a verdict: an
-/// error, a panic, or no verdict by the deadline. Cursor's IDE reads a
-/// permission hook that prints nothing as a deny when `failClosed` is set,
-/// and Cursor's CLI reads the same silence as an allow, so the seat says
-/// deny in the runner's own JSON and both refuse. `None` on an event that
-/// is not a gate: a prompt or a session event that fails lets the work go
-/// on.
+/// error, a panic, or no verdict by the deadline. The seat says deny in
+/// the runner's own JSON, with a reason, rather than leave the failure to
+/// the runner's own rules. `None` on an event that is not a gate: a prompt
+/// or a session event that fails lets the work go on.
 #[must_use]
 pub fn hook_failure_output(input: &str, event: Option<&str>, error: &str) -> Option<String> {
     let call = hook_call_as(input, event);
@@ -10246,10 +10245,10 @@ pub fn answer_gate(output: &str) {
 }
 
 /// Arm the refusals of a gate call: a panic in the hook writes the deny of
-/// [`hook_failure_output`] and exits 2 (a panic exits 101, which Cursor's
-/// CLI reads as an allow), and on Cursor, a hook with no answer by
-/// [`CURSOR_GATE_DEADLINE_MS`] does the same. A Cursor hook that times out
-/// is a deny in the IDE and an allow in the CLI, so the seat answers first.
+/// [`hook_failure_output`] and exits 2 (a panic exits 101, which only a
+/// runner told to fail closed blocks), and on Cursor, a hook with no
+/// answer by [`CURSOR_GATE_DEADLINE_MS`] does the same, so the refusal
+/// carries a reason before Cursor times the hook out.
 /// Nothing is armed for an event that is not a gate.
 pub fn arm_gate(input: &str, event: Option<&str>) {
     let call = hook_call_as(input, event);
