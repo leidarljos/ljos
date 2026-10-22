@@ -2096,10 +2096,17 @@ fn parent_and_comm(pid: u32) -> Option<(u32, String)> {
     Some((ppid, comm))
 }
 
-/// macOS has no procfs. `ps` prints the parent and the short command name.
+/// `ps` by absolute path. A `ps` earlier on `PATH` is a program the
+/// caller chose, and it must not be the one that names a parent.
+#[cfg(any(test, target_os = "macos"))]
+fn ps_bin() -> &'static str {
+    "/bin/ps"
+}
+
+/// macOS has no procfs. `/bin/ps` prints the parent and the short command name.
 #[cfg(target_os = "macos")]
 fn parent_and_comm(pid: u32) -> Option<(u32, String)> {
-    let out = std::process::Command::new("ps")
+    let out = std::process::Command::new(ps_bin())
         .args(["-o", "ppid=,comm=", "-p", &pid.to_string()])
         .output()
         .ok()?;
@@ -2251,16 +2258,21 @@ fn runner_names() -> Vec<String> {
 /// multiplexer or a terminal is not a runner, and a name shorter than
 /// four letters is too small a word to trust inside a path.
 fn scope_word_counts(name: &str) -> bool {
-    name.len() >= 4
-        && !WRAPPERS.contains(&name)
-        && !SESSION.iter().any(|prefix| name.starts_with(prefix))
-        && !TERMINALS.contains(&name)
+    let lower = name.to_ascii_lowercase();
+    lower.len() >= 4
+        && !WRAPPERS.iter().any(|w| w.eq_ignore_ascii_case(name))
+        && !SESSION
+            .iter()
+            .any(|prefix| lower.starts_with(&prefix.to_ascii_lowercase()))
+        && !TERMINALS.iter().any(|t| t.eq_ignore_ascii_case(name))
 }
 
 fn segment_names_runner(segment: &str, runners: &[String]) -> bool {
     segment
         .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|word| scope_word_counts(word) && runners.iter().any(|name| name == word))
+        .any(|word| {
+            scope_word_counts(word) && runners.iter().any(|name| name.eq_ignore_ascii_case(word))
+        })
 }
 
 /// Whether `text` is `/proc/self/cgroup` for a process still inside a
@@ -2320,14 +2332,30 @@ fn scope_names_runner(runners: &[String]) -> bool {
     }
 }
 
+/// What the responsible process says about a runner. No name is not
+/// "not a runner": a missing symbol or a pid of 1 has no other evidence,
+/// and that fails closed.
+#[cfg(any(test, target_os = "macos"))]
+fn responsible_names_runner(comm: Option<&str>, runners: &[String]) -> bool {
+    match comm {
+        Some(comm) => segment_names_runner(comm, runners),
+        None => true,
+    }
+}
+
+/// `launchctl submit` reparents onto launchd and drops the responsible
+/// process. With no controlling terminal that process is not the person.
+#[cfg(any(test, target_os = "macos"))]
+fn launchd_without_tty(parent: Option<&str>, tty: bool) -> bool {
+    !tty && parent.is_some_and(|name| name.eq_ignore_ascii_case("launchd"))
+}
+
 /// macOS: the process that owns this one after a detach. `launchctl
-/// submit` can hand it to launchd, and then the name is gone.
+/// submit` can hand it to launchd, and then the name is gone. No name
+/// counts as a runner.
 #[cfg(target_os = "macos")]
 fn scope_names_runner(runners: &[String]) -> bool {
-    let Some(comm) = responsible_comm() else {
-        return false;
-    };
-    segment_names_runner(&comm, runners)
+    responsible_names_runner(responsible_comm().as_deref(), runners)
 }
 
 #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
@@ -2349,7 +2377,7 @@ fn responsible_comm() -> Option<String> {
     if unsafe { ask(std::process::id() as i32, &mut pid) } != 0 || pid <= 1 {
         return None;
     }
-    let out = std::process::Command::new("ps")
+    let out = std::process::Command::new(ps_bin())
         .args(["-o", "comm=", "-p", &pid.to_string()])
         .output()
         .ok()?;
@@ -2376,7 +2404,8 @@ fn responsible_comm() -> Option<String> {
 fn runner_scope_or_tree() -> bool {
     let runners = runner_names();
     if own_ancestry().iter().any(|(pid, comm)| {
-        seat_record_path(*pid).exists() || runners.iter().any(|name| name == comm)
+        seat_record_path(*pid).exists()
+            || runners.iter().any(|name| name.eq_ignore_ascii_case(comm))
     }) {
         return true;
     }
@@ -2625,14 +2654,21 @@ fn host_at_terminal() -> bool {
 /// which is an answer, not a failed check.
 #[cfg(target_os = "macos")]
 fn host_at_terminal() -> bool {
-    match at_terminal_with_responsible(
-        controlling_tty(),
-        responsible_comm().as_deref(),
-        &runner_names(),
-    ) {
+    let tty = controlling_tty();
+    if launchd_without_tty(parent_name().as_deref(), tty) {
+        return false;
+    }
+    match at_terminal_with_responsible(tty, responsible_comm().as_deref(), &runner_names()) {
         Some(present) => present,
         None => false,
     }
+}
+
+/// The command name of this process's parent.
+#[cfg(target_os = "macos")]
+fn parent_name() -> Option<String> {
+    let (ppid, _) = parent_and_comm(std::process::id())?;
+    parent_and_comm(ppid).map(|(_, comm)| comm)
 }
 
 /// Stdin is this process's controlling terminal and its foreground group.
@@ -47478,6 +47514,11 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "0::/system.slice/pod/cursor-agent/workload\n",
             &runners
         ));
+        // The harness file says `cursor`. The cgroup may say `Cursor`.
+        assert!(super::cgroup_text_names_runner(
+            "0::/system.slice/pod/Cursor-agent/workload\n",
+            &runners
+        ));
         assert!(super::cgroup_text_names_runner(
             "0::/user.slice/user-1000.slice/app-claude-123.scope\n",
             &runners
@@ -47527,6 +47568,17 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             Some(false)
         );
         assert_eq!(
+            super::at_terminal_with_responsible(true, Some("Cursor"), &runners),
+            Some(false)
+        );
+        assert!(super::responsible_names_runner(None, &runners));
+        assert!(!super::responsible_names_runner(Some("Terminal"), &runners));
+        assert!(super::responsible_names_runner(Some("Cursor"), &runners));
+        assert!(super::launchd_without_tty(Some("launchd"), false));
+        assert!(super::launchd_without_tty(Some("Launchd"), false));
+        assert!(!super::launchd_without_tty(Some("launchd"), true));
+        assert!(!super::launchd_without_tty(Some("Terminal"), false));
+        assert_eq!(
             super::at_terminal_with_responsible(true, None, &runners),
             None
         );
@@ -47546,6 +47598,34 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(!super::host_lacks_person_check());
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         assert!(super::host_lacks_person_check());
+    }
+
+    /// A `ps` earlier on `PATH` must not be the program that names a parent.
+    #[test]
+    fn ps_is_not_taken_from_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("called");
+        let fake = dir.path().join("ps");
+        std::fs::write(&fake, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perm = std::fs::metadata(&fake).unwrap().permissions();
+            perm.set_mode(0o755);
+            std::fs::set_permissions(&fake, perm).unwrap();
+        }
+        assert_eq!(super::ps_bin(), "/bin/ps");
+        let out = std::process::Command::new(super::ps_bin())
+            .args(["-o", "comm=", "-p", &std::process::id().to_string()])
+            .env("PATH", dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!marker.exists(), "the ps on PATH ran instead of /bin/ps");
     }
 
     /// A runner variable in a real terminal, with no runner in the tree or
