@@ -24972,7 +24972,8 @@ pub fn is_decision(v: &Value) -> bool {
 }
 
 /// How many of an issue's own memories a recall lists, newest first,
-/// before it says how many older ones it left out.
+/// before it says how many it left out. Past the cap the ones kept are
+/// the most relevant to the issue, newest first among equals.
 pub const ISSUE_MEMORY_CAP: usize = 20;
 
 /// How many text-search hits a recall adds after the issue's own memories.
@@ -24983,7 +24984,8 @@ pub const RELATED_MEMORY_CAP: usize = 5;
 /// with the issue (`issue` on the atom, or an `issue:ID` entity), newest
 /// first, at most [`ISSUE_MEMORY_CAP`] with a count of the rest. Then up
 /// to [`RELATED_MEMORY_CAP`] hits from a search on the issue's id and
-/// title that are not already listed. Reviewed kinds only. Empty when the
+/// title that are not already listed, most relevant first, out of
+/// [`POOL_PER_SHOWN`] times as many. Reviewed kinds only. Empty when the
 /// pack holds nothing on it. A pack that does not answer is started, as
 /// the doctor starts it, and the line says so only when the start did not
 /// bring it up.
@@ -25021,15 +25023,24 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> String {
             cues.push(t);
         }
     }
+    let pool = u32::try_from(RELATED_MEMORY_CAP * POOL_PER_SHOWN).unwrap_or(u32::MAX);
     let mut related = Vec::new();
     for cue in &cues {
-        match ask(&|| packset_search(cue)) {
+        match ask(&|| packset_search_opts(cue, pool, false)) {
             Ok(hits) => related.extend(hits),
             Err(e) if own.is_empty() && related.is_empty() => return recall_down(&e),
             Err(_) => break,
         }
     }
-    recall_lines(&own, related, &now_utc(), include_notes)
+    recall_lines(&own, related, &cues.join(" "), &now_utc(), include_notes)
+}
+
+/// The `cap` of `rows` most relevant to `cue`, in the order they came.
+fn most_relevant<'a>(rows: &[&'a Hit], cue: &str, cap: usize) -> Vec<&'a Hit> {
+    let mut kept = relevance_order(rows, cue);
+    kept.truncate(cap);
+    kept.sort_unstable();
+    kept.into_iter().map(|i| rows[i]).collect()
 }
 
 /// The memories the pack holds on `issue`, newest first: every live atom
@@ -25083,7 +25094,13 @@ fn tagged_with_issue(atoms: &[Value], issue: &str) -> Vec<Hit> {
 
 /// The `Memory` block: the issue's own memories, then related hits that
 /// are neither listed already nor unreviewed.
-fn recall_lines(own: &[Hit], related: Vec<Hit>, now: &str, include_notes: bool) -> String {
+fn recall_lines(
+    own: &[Hit],
+    related: Vec<Hit>,
+    cue: &str,
+    now: &str,
+    include_notes: bool,
+) -> String {
     let key = |h: &Hit| h.id.clone().unwrap_or_else(|| h.text.clone());
     let (own_facts, own_notes): (Vec<&Hit>, Vec<&Hit>) = own
         .iter()
@@ -25091,13 +25108,14 @@ fn recall_lines(own: &[Hit], related: Vec<Hit>, now: &str, include_notes: bool) 
         .partition(|h| !unverified_note_hit(h));
     let mut seen: std::collections::BTreeSet<String> =
         own_facts.iter().chain(&own_notes).map(|h| key(h)).collect();
-    let related: Vec<Hit> = related
+    let mut related: Vec<Hit> = related
         .into_iter()
         .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
         .filter(|h| include_notes || !unverified_note_hit(h))
         .filter(|h| seen.insert(key(h)))
-        .take(RELATED_MEMORY_CAP)
         .collect();
+    sort_by_relevance(&mut related, cue);
+    related.truncate(RELATED_MEMORY_CAP);
     let (related_facts, related_notes): (Vec<&Hit>, Vec<&Hit>) =
         related.iter().partition(|h| !unverified_note_hit(h));
     if own_facts.is_empty()
@@ -25108,14 +25126,14 @@ fn recall_lines(own: &[Hit], related: Vec<Hit>, now: &str, include_notes: bool) 
         return String::new();
     }
     let mut out = String::from("\nMemory\n");
-    for h in own_facts.iter().take(ISSUE_MEMORY_CAP) {
+    for h in most_relevant(&own_facts, cue, ISSUE_MEMORY_CAP) {
         out.push_str("  ");
         out.push_str(&hit_line(h, now));
         out.push('\n');
     }
     if own_facts.len() > ISSUE_MEMORY_CAP {
         out.push_str(&format!(
-            "  ({} older memories on this issue left out)\n",
+            "  ({} more memories on this issue left out)\n",
             own_facts.len() - ISSUE_MEMORY_CAP
         ));
     }
@@ -25133,14 +25151,14 @@ fn recall_lines(own: &[Hit], related: Vec<Hit>, now: &str, include_notes: bool) 
     // own heading, so a note never reads as something the issue established.
     if !own_notes.is_empty() || !related_notes.is_empty() {
         out.push_str("  unverified logbook notes:\n");
-        for h in own_notes.iter().take(ISSUE_MEMORY_CAP) {
+        for h in most_relevant(&own_notes, cue, ISSUE_MEMORY_CAP) {
             out.push_str("  ");
             out.push_str(&hit_line(h, now));
             out.push('\n');
         }
         if own_notes.len() > ISSUE_MEMORY_CAP {
             out.push_str(&format!(
-                "  ({} older logbook notes on this issue left out)\n",
+                "  ({} more logbook notes on this issue left out)\n",
                 own_notes.len() - ISSUE_MEMORY_CAP
             ));
         }
@@ -31226,7 +31244,13 @@ mod tests {
             hit("own21", "note", "note 21"),
             hit("near", "lesson", "a related lesson"),
         ];
-        let text = super::recall_lines(&own, related, "2026-10-18T12:00:00.000Z", true);
+        let text = super::recall_lines(
+            &own,
+            related,
+            "probe-0lm4",
+            "2026-10-18T12:00:00.000Z",
+            true,
+        );
         // Facts lead; the working notes follow under their own heading.
         assert!(
             text.starts_with("\nMemory\n  - [lesson, agent-derived, today] tagged lesson\n"),
@@ -31244,25 +31268,118 @@ mod tests {
         assert!(text.contains("note 02"), "{text}");
         assert!(!text.contains("note 01"), "{text}");
         assert!(
-            text.contains("(2 older logbook notes on this issue left out)"),
+            text.contains("(2 more logbook notes on this issue left out)"),
             "{text}"
         );
         assert_eq!(text.matches("note 21").count(), 1, "{text}");
-        let prompt = super::recall_lines(&own, vec![hit("own21", "note", "note 21")], "now", false);
+        let prompt = super::recall_lines(
+            &own,
+            vec![hit("own21", "note", "note 21")],
+            "probe-0lm4",
+            "now",
+            false,
+        );
         assert_eq!(
             prompt,
             "\nMemory\n  - [lesson, agent-derived] tagged lesson\n"
         );
-        assert_eq!(super::recall_lines(&[], Vec::new(), "now", true), "");
+        assert_eq!(
+            super::recall_lines(&[], Vec::new(), "probe-0lm4", "now", true),
+            ""
+        );
         let alone = super::recall_lines(
             &[],
             vec![hit("near", "lesson", "a related lesson")],
+            "probe-0lm4",
             "now",
             true,
         );
         assert_eq!(
             alone,
             "\nMemory\n  - [lesson, agent-derived] a related lesson\n"
+        );
+    }
+
+    /// An issue's own memories past the cap and the related hits past
+    /// the first five were cut newest or freshest first, before anything
+    /// asked what bears on the issue. The two oldest memories on it and
+    /// a related one the pack ranks seventh are the ones that name its
+    /// subject, and they are what a recall lists.
+    #[test]
+    fn a_recall_keeps_what_bears_on_the_issue_past_the_newest() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("Software/sample");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("issues.org"),
+            "#+TITLE: sample issues\n#+VISSUE: 1\n#+CATEGORY: sample\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n* TODO [#B] Rotate the npm registry token\n:PROPERTIES:\n:ID:         sample-k2p2\n:CREATED:    [2026-09-20 Sat]\n:END:\n",
+        )
+        .unwrap();
+        let mut atoms: Vec<Value> = (0..20)
+            .map(|i| {
+                serde_json::json!({"id": format!("chat{i:02}"), "kind": "lesson",
+                    "text": format!("Standup {i:02} moved to the small room"),
+                    "ts": format!("2026-10-{:02}T09:00:00.000Z", i + 1),
+                    "entities": ["issue:sample-k2p2"]})
+            })
+            .collect();
+        for (i, text) in [
+            "The npm registry token is rotated from 1Password, not by hand",
+            "Rotate the registry token before the old one expires on the first",
+        ]
+        .iter()
+        .enumerate()
+        {
+            atoms.push(
+                serde_json::json!({"id": format!("token{i}"), "kind": "lesson",
+                "text": text, "ts": format!("2026-07-0{}T09:00:00.000Z", i + 1),
+                "entities": ["issue:sample-k2p2"]}),
+            );
+        }
+        let mut hits: Vec<Value> = (0..6)
+            .map(|i| {
+                serde_json::json!({"id": format!("sync{i}"), "kind": "lesson", "score": 2.0,
+                    "text": format!("Weekly sync {i} ran long"), "entities": []})
+            })
+            .collect();
+        hits.push(
+            serde_json::json!({"id": "publish", "kind": "lesson", "score": 0.5,
+            "text": "npm publish reads the registry token from the CI secret", "entities": []}),
+        );
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/atoms") {
+                return (200, serde_json::json!({ "atoms": atoms }).to_string());
+            }
+            if !first.contains("/v1/search") {
+                return (404, r#"{"error":"missing"}"#.into());
+            }
+            let limit = first
+                .split(['?', '&', ' '])
+                .find_map(|kv| kv.strip_prefix("limit="))
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(hits.len());
+            let kept: Vec<&Value> = hits.iter().take(limit).collect();
+            (200, serde_json::json!({ "hits": kept }).to_string())
+        });
+        let _url = PackUrl::set(&url);
+        let _bins = super::set_path(super::path_without(&["vissue"]));
+        let _roots = HoldEnv::set(&[
+            ("ISSUE_ROOT", dir.path().to_str().unwrap()),
+            ("VISSUE_ROOT", dir.path().to_str().unwrap()),
+            ("VISSUE_NO_ROUTE", "1"),
+        ]);
+        let text = recall_memories("sample-k2p2");
+        assert!(text.contains("rotated from 1Password"), "{text}");
+        assert!(text.contains("before the old one expires"), "{text}");
+        assert!(
+            text.contains("(2 more memories on this issue left out)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("reads the registry token from the CI"),
+            "{text}"
         );
     }
 
