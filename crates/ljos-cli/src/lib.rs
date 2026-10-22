@@ -27808,6 +27808,16 @@ pub fn policy_with_memory(argv: &[String]) -> Result<String> {
 
 /// [`policy_with_memory`] for a command that runs in `cwd`.
 pub fn policy_with_memory_in(argv: &[String], cwd: Option<&Path>) -> Result<String> {
+    policy_reading_in(argv, cwd, || tcb_check_in(argv, cwd))
+}
+
+/// [`policy_with_memory_in`] with `tcb` for ljos-policyd's answer, so a
+/// shell line is asked about the way the hook asks.
+fn policy_reading_in(
+    argv: &[String],
+    cwd: Option<&Path>,
+    tcb: impl FnOnce() -> Option<String>,
+) -> Result<String> {
     let line = policy_line(argv)?;
     let call = HookCall {
         event: "argv".into(),
@@ -27860,7 +27870,7 @@ pub fn policy_with_memory_in(argv: &[String], cwd: Option<&Path>) -> Result<Stri
     let tcb = if judged || off {
         None
     } else {
-        match tcb_check_in(argv, cwd) {
+        match tcb() {
             // `git-force-push` asks, the same way the push gate does. The raw
             // `deny` line would read as a refusal beside that ask.
             Some(tcb) if policyd_token(&tcb) == "git-force-push" => None,
@@ -28039,7 +28049,7 @@ pub fn guard_report_in(line: &str, cwd: Option<&Path>) -> Result<GuardReport> {
         bail!("guard: pass the command to check");
     }
     let warning = gates::take_push_warning();
-    let mut text = policy_with_memory_in(&argv, cwd)?;
+    let mut text = policy_reading_in(&argv, cwd, || tcb_line_in(line, cwd))?;
     let verdict = policy_verdict(&text);
     if verdict == "deny" {
         bail!("{text}");
