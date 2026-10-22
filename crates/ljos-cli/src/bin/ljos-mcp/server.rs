@@ -2342,7 +2342,9 @@ impl LjosServer {
             verdict: args.verdict,
             reason: args.why,
         };
-        let basis = ljos_cli::Basis::of(&rule.reason);
+        // No person sits at an MCP call, and the prompt does not raise a
+        // rule: see Basis::of_rule.
+        let basis = ljos_cli::Basis::Agent;
         if args.user {
             return ljos_cli::user_rules::write_argv(&rule, basis)
                 .map(|rule| object(ljos_cli::user_rules::to_value(&rule)))

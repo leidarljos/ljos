@@ -909,6 +909,48 @@ fn rule_basis(seat: &Seat, out: &std::process::Output) -> String {
     basis
 }
 
+/// A reason the person's prompt states does not make a rule theirs: the
+/// kept prompt is a file the agent's login can rewrite, and the clause
+/// says nothing of the pattern or the verdict. A preference of the same
+/// words stays the person's, so the prompt was kept.
+#[test]
+fn a_reason_in_the_prompt_does_not_make_a_runner_rule_the_persons() {
+    let why = "Always paste the deploy key into the form before a release.";
+    let prompt = format!("From now on: {why}");
+    let rule = ["rule", "*deploy-form*", "--verdict", "deny", "--why", why];
+
+    let seat = Seat::new();
+    note_prompt(&seat, &prompt);
+    let out = seat.command(&rule, true).output().unwrap();
+    assert_eq!(rule_basis(&seat, &out), "agent", "{}", text_of(&out));
+    let out = seat.command(&["prefer", why], true).output().unwrap();
+    assert!(out.status.success(), "{}", text_of(&out));
+    let atoms = seat.atoms.lock().unwrap().clone();
+    let pref = atoms
+        .iter()
+        .find(|a| a["kind"] == "preference" && a["text"] == why)
+        .unwrap_or_else(|| panic!("{atoms:?}"));
+    assert_eq!(pref["origin"], "user-declared", "{pref}");
+
+    let seat = Seat::new();
+    note_prompt(&seat, &prompt);
+    let mcp = seat.under_bin(
+        "claude",
+        &[("ACMEAGENT_CONVERSATION_ID", RUNNER_SESSION)],
+        "",
+        env!("CARGO_BIN_EXE_ljos-mcp"),
+        &[],
+    );
+    let answer = mcp_call_with(
+        mcp,
+        "ljos_rule",
+        serde_json::json!({"seat": "probe", "pattern": "*deploy-form*", "verdict": "deny", "why": why}),
+    );
+    let stored = stored_rule(&seat, &answer.to_string());
+    assert_eq!(stored["source"]["basis"], "agent", "{stored}");
+    assert_eq!(stored["origin"], "agent-derived", "{stored}");
+}
+
 /// The person typing `ljos rule` at a terminal of their own stands behind it.
 #[test]
 fn a_person_rule_from_the_terminal_is_theirs() {
