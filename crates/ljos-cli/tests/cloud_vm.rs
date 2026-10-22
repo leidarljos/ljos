@@ -829,6 +829,53 @@ key_env = \"SADDLE_HAND_KEY\"
 }
 
 #[test]
+fn cloud_up_refuses_to_overwrite_a_broken_wake_toml() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let config = home.join(".config");
+    let rel = root.path().join("rel");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(config.join("ljos")).unwrap();
+    for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
+    }
+    fs::write(
+        rel.join("SHA256SUMS"),
+        sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
+    )
+    .unwrap();
+    let wakes = config.join("ljos/wake.toml");
+    let broken = "[inky\nwebhook = \"https://old.example/hook\"\n";
+    fs::write(&wakes, broken).unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", &config);
+    std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::remove_var("LJOS_BIN_DIR");
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    clear_agent_ids();
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("LJOS_WAKE_") {
+            std::env::remove_var(&key);
+        }
+    }
+    std::env::set_var(
+        "LJOS_WAKE_INKY_URL",
+        "https://api2.cursor.sh/automations/webhook/inky",
+    );
+    let err = ljos_cli::cloud::up(false).expect_err("broken wake.toml must abort cloud up");
+    let said = format!("{err:#}");
+    assert!(said.contains("wake"), "{said}");
+    assert!(said.contains("parse"), "{said}");
+    assert_eq!(fs::read_to_string(&wakes).unwrap(), broken);
+}
+
+#[test]
 fn cloud_up_installs_cloud_guard_refusals_idempotently() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
