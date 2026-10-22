@@ -282,7 +282,19 @@ pub fn path_is_temp(path: Option<&Path>) -> bool {
     temp_roots().iter().any(|root| path.starts_with(root))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Temp roots that stand in for the machine's on one test thread, so a
+    /// judgment of the working tree reads the same from a checkout in `/tmp`.
+    pub(crate) static TEST_TEMP_ROOTS: std::cell::RefCell<Option<Vec<PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn temp_roots() -> Vec<PathBuf> {
+    #[cfg(test)]
+    if let Some(roots) = TEST_TEMP_ROOTS.with(|r| r.borrow().clone()) {
+        return roots;
+    }
     let mut roots = vec![
         std::env::temp_dir(),
         PathBuf::from("/tmp"),
@@ -5866,7 +5878,15 @@ mod tests {
         let home = Path::new("/home/someone");
         let got = super::super::resolve_config_base(None, Some(home)).expect("isolated base");
         assert_ne!(got, home.join(".config"));
-        assert!(!got.starts_with(home), "{got:?}");
+        // The isolated directory follows TMPDIR. A TMPDIR under a home
+        // still is not that home's config.
+        let tmp = std::env::temp_dir();
+        if got.starts_with(home) {
+            assert!(
+                got.starts_with(&tmp),
+                "{got:?} is under {home:?} and not the temp directory"
+            );
+        }
         let rules = super::super::user_rules::rules_path().expect("rules path");
         if std::env::var_os("XDG_CONFIG_HOME")
             .filter(|value| !value.is_empty())
@@ -5874,7 +5894,11 @@ mod tests {
         {
             let login = std::env::var_os("HOME").map(PathBuf::from);
             if let Some(login) = login {
-                assert!(!rules.starts_with(&login), "{rules:?} is the login config");
+                let login_rules = login.join(".config").join("ljos").join("user-rules.json");
+                assert_ne!(rules, login_rules, "{rules:?} is the login config");
+                if !rules.starts_with(&tmp) {
+                    assert!(!rules.starts_with(&login), "{rules:?} is the login config");
+                }
             }
         }
     }
