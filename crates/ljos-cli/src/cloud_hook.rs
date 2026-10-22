@@ -1,11 +1,16 @@
 //! The pre-push hook `ljos cloud up` installs.
 //!
-//! Git runs it for every push, however the push was started, and passes
-//! the remote URL after `insteadOf`. The allowlist is the repository and
-//! the branch. A branch name on its own is not enough: `develop` on
-//! another repository is refused, and so is a tag, a delete, or a push
-//! that is not a fast-forward. The tracker is the other repository this
-//! seat may update, on any branch, still without a force or a delete.
+//! Git runs it for every push that does not pass `--no-verify`, however
+//! that push was started, and passes the remote URL after `insteadOf`.
+//! The allowlist is the repository and the branch. A branch name on its
+//! own is not enough: `develop` on another repository is refused, and so
+//! is a tag, a delete, or a push that is not a fast-forward. The tracker
+//! is the other repository this seat may update, on any branch, still
+//! without a force or a delete.
+//!
+//! The hook reads the allowlist next to its own directory. The pusher's
+//! environment does not choose that path. `cloud up` records the seat
+//! repository once and leaves it there.
 
 use std::fs;
 use std::io::Write;
