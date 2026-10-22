@@ -296,6 +296,33 @@ fn text(out: &Output) -> String {
     )
 }
 
+/// A writer that answers `GET /v1/atoms` with an empty roster. An empty
+/// answer means these seats are not personas. `PACKSET_URL=off` is not
+/// that answer, and a push cite refuses it before anyone is counted.
+fn empty_pack() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = std::io::Read::read(&mut stream, &mut buf).unwrap_or(0);
+                if n == 0 || buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let body = r#"{"atoms":[]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = std::io::Write::write_all(&mut stream, resp.as_bytes());
+        }
+    });
+    format!("http://{addr}")
+}
+
 fn vote(world: &World, seat: &str, session: &str, issue: &str) {
     let out = world.ljos(
         seat,
@@ -499,10 +526,20 @@ fn n_distinct_sessions_settle() {
     // A cite stands for these seats because they are on the standing list.
     // A seat off that list needs a slot, which this panel does not write,
     // so carol's ballot is left out and named and the rest still decide.
+    // The pack answers with no personas. An off pack has not answered, and
+    // that refusal comes before any seat is counted.
     for seat in ["ljosbot", "inky", "disk-saver", "carol"] {
         vote(&world, seat, &format!("sess-{seat}-0001"), "demo-ind2");
     }
-    let out = world.ljos("ljosbot", "sess-ljosbot-0001", &["consensus", "demo-ind2"]);
+    let pack = empty_pack();
+    let out = world.ljos_env(
+        "ljosbot",
+        &[
+            ("SEAT_SESSION_ID", "sess-ljosbot-0001"),
+            ("PACKSET_URL", &pack),
+        ],
+        &["consensus", "demo-ind2"],
+    );
     let said = text(&out);
     assert!(out.status.success(), "{said}");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -597,7 +634,15 @@ fn a_design_that_saw_another_candidate_is_flagged_and_distinct_sessions_still_se
     for seat in ["ljosbot", "inky", "disk-saver"] {
         vote(&world, seat, &format!("sess-{seat}-0001"), "demo-blind");
     }
-    let out = world.ljos("ljosbot", "sess-ljosbot-0001", &["consensus", "demo-blind"]);
+    let pack = empty_pack();
+    let out = world.ljos_env(
+        "ljosbot",
+        &[
+            ("SEAT_SESSION_ID", "sess-ljosbot-0001"),
+            ("PACKSET_URL", &pack),
+        ],
+        &["consensus", "demo-blind"],
+    );
     let said = text(&out);
     assert!(out.status.success(), "{said}");
     let stdout = String::from_utf8_lossy(&out.stdout);
