@@ -3315,12 +3315,15 @@ pub fn derived_seat(who: &Seat) -> Option<Derived> {
 /// made under. Refused, as a ballot is, when nothing named the seat: a
 /// subagent shell wrote hundreds of notes as `exec-daemon` and `cursor`.
 ///
+/// The seat is [`resolve_seat`]'s, the one `ljos seat` prints, so a
+/// conversation id `seats.toml` maps writes as that seat.
+///
 /// # Errors
 ///
 /// The seat is the program above this shell, or the login user under a
 /// runner.
 pub fn write_seat(verb: &str) -> Result<Seat> {
-    let who = whoami();
+    let who = resolve_seat();
     if let Some(from) = derived_seat(&who) {
         bail!(
             "{verb}: no seat is named, so this write would be made as {}, {from}. \
@@ -3498,6 +3501,12 @@ pub fn seat_source_row(who: &Seat) -> Habitat {
             ok: true,
         },
     }
+}
+
+/// [`seat_source_row`] for the seat the `seat` row and [`write_seat`] name.
+#[must_use]
+pub fn doctor_seat_source() -> Habitat {
+    seat_source_row(&resolve_seat())
 }
 
 /// The doctor's `seat` row: who votes, who holds, and where the names came
@@ -23459,7 +23468,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
         state: format_seat_row(),
         ok: true,
     });
-    out.push(seat_source_row(&whoami()));
+    out.push(doctor_seat_source());
     out.push(cloud::mcp_row());
     out.push(cloud::guard_row());
     // Scope cloud is readable here when cloud up wrote its age identity.
@@ -50366,6 +50375,51 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_doctor_seat_source_row_names_the_seat_a_conversation_maps_to() {
+        let _env = env_guard();
+        let keys = [
+            "LJOS_SEAT",
+            "VISSUE_AGENT",
+            "LJOS_HOLD",
+            "LJOS_SEATS",
+            "CURSOR_CONVERSATION_ID",
+            "XDG_RUNTIME_DIR",
+        ];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        let dir = tempfile::tempdir().unwrap();
+        let seats = dir.path().join("seats.toml");
+        std::fs::write(
+            &seats,
+            "\"0b1c2d3e-0000-4000-8000-000000000000\" = \"saddle\"\n",
+        )
+        .unwrap();
+        unsafe {
+            for k in keys {
+                std::env::remove_var(k);
+            }
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+            std::env::set_var("LJOS_SEATS", &seats);
+            std::env::set_var(
+                "CURSOR_CONVERSATION_ID",
+                "0b1c2d3e-0000-4000-8000-000000000000",
+            );
+        }
+        let row = doctor_seat_source();
+        let seat = resolve_seat().seat;
+        unsafe {
+            for (k, v) in saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+        assert_eq!(seat, "saddle");
+        assert!(row.ok, "{}", row.state);
+        assert_eq!(row.state, "saddle named by seats.toml");
     }
 
     #[test]
