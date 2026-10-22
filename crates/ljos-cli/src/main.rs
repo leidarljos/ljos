@@ -3179,6 +3179,8 @@ fn run_command() -> Result<()> {
             // First what the push gate decides: seat ballots only.
             let (gate, gate_json) =
                 ljos_cli::push_cite_reading_on_roster(&id, &ballots, &ljos_cli::seat_name());
+            let (protected, protected_json) =
+                ljos_cli::protected_push_reading(&id, std::env::current_dir().ok().as_deref());
             // The named outcomes show which voters err together, and
             // those voters are discounted.
             let discount = settle_discount(&atoms).map(|(discount, line)| {
@@ -3215,6 +3217,7 @@ fn run_command() -> Result<()> {
                     said.push((ljos_cli::consensus_step_label(step), captured.stdout));
                 }
                 let mut doc = ljos_cli::consensus_document(&gate_json, &said);
+                doc["protected_push"] = protected_json;
                 if !dissent.is_empty() {
                     doc["dissent"] = serde_json::json!(dissent);
                 }
@@ -3222,6 +3225,7 @@ fn run_command() -> Result<()> {
                 return Ok(());
             }
             print!("{gate}");
+            print!("{protected}");
             for line in &dissent {
                 println!("dissent: {line}");
             }

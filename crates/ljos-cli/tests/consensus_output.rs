@@ -22,7 +22,7 @@ fn fakes(ballots: &str) -> (tempfile::TempDir, PathBuf) {
         dir.path(),
         "vissue",
         &format!(
-            "#!/bin/sh\ncase \"$1\" in\n  vote) echo '{ballots}' ;;\n  consensus) echo 'consensus: rrf 2 of 2, settled' ;;\n  *) exit 1 ;;\nesac\n"
+            "#!/bin/sh\ncase \"$1\" in\n  vote) echo '{ballots}' ;;\n  show) echo '{{\"id\":\"'\"$2\"'\"}}' ;;\n  consensus) echo 'consensus: rrf 2 of 2, settled' ;;\n  *) exit 1 ;;\nesac\n"
         ),
     );
     script(
@@ -49,6 +49,7 @@ fn consensus_on(dir: &Path, home: &Path, args: &[&str], pack: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_ljos"))
         .arg("consensus")
         .args(args)
+        .current_dir(dir)
         .env_clear()
         .env("PATH", path)
         .env("HOME", home)
@@ -127,6 +128,39 @@ fn json_is_one_document() {
     let doc = one_document(&compared.stdout);
     assert_eq!(doc["settle"]["winner"], "rrf", "{doc}");
     assert_eq!(doc["tracker"], "consensus: rrf 2 of 2, settled", "{doc}");
+}
+
+/// Beside the push cite, the reading says whether the issue clears a
+/// runner's push onto develop or main, under the quorum the person sets.
+#[test]
+fn the_reading_says_whether_a_protected_push_clears() {
+    let (dir, home) = fakes(r#"[{"agent":"alice","choice":"rrf"},{"agent":"bob","choice":"rrf"}]"#);
+    let pack = empty_pack();
+    let out = consensus_on(dir.path(), &home, &["proj-v0te", "--json"], &pack);
+    assert!(out.status.success(), "{out:?}");
+    let doc = one_document(&out.stdout);
+    let protected = &doc["protected_push"];
+    assert_eq!(protected["stands"], true, "{doc}");
+    assert_eq!(protected["quorum"], 2, "{doc}");
+    assert_eq!(
+        protected["branches"],
+        serde_json::json!(["develop", "main"]),
+        "{doc}"
+    );
+
+    let config = home.join(".config").join("ljos");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("ljos.toml"), "[gates]\nquorum = 3\n").unwrap();
+    let out = consensus_on(dir.path(), &home, &["proj-v0te"], &pack);
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains(
+            "protected push: proj-v0te does not clear a push onto `develop`, `main`: \
+             2 of the 3 seats a protected push needs voted on proj-v0te"
+        ),
+        "{text}"
+    );
 }
 
 #[test]

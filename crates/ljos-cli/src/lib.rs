@@ -32570,6 +32570,49 @@ pub fn push_cite_reading_on_roster(issue: &str, rows: &[Value], pusher: &str) ->
     }
 }
 
+/// Whether `issue` clears a runner's push onto a protected branch
+/// ([`protected_push_stands`]), under the quorum and branches
+/// [`gates::consensus_push`] reads from `cwd`: the line and the
+/// `protected_push` object `ljos consensus` prints. Neither changes how
+/// that command exits.
+#[must_use]
+pub fn protected_push_reading(issue: &str, cwd: Option<&std::path::Path>) -> (String, Value) {
+    let cfg = match gates::consensus_push(cwd) {
+        Ok(cfg) => cfg,
+        Err(why) => {
+            return (
+                format!("protected push: the settings do not read: {why}\n"),
+                serde_json::json!({"issue": issue, "stands": false, "refusal": why}),
+            )
+        }
+    };
+    let named = cfg
+        .branches
+        .iter()
+        .map(|b| format!("`{b}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut json = serde_json::json!({
+        "issue": issue, "quorum": cfg.quorum, "branches": cfg.branches,
+    });
+    let words = match protected_push_stands(issue, cfg.quorum) {
+        Ok(decided) => {
+            let words = format!("protected push: {issue} clears a push onto {named}: {decided}\n");
+            json["stands"] = true.into();
+            json["decided"] = decided.into();
+            words
+        }
+        Err(why) => {
+            let words =
+                format!("protected push: {issue} does not clear a push onto {named}: {why}\n");
+            json["stands"] = false.into();
+            json["refusal"] = why.into();
+            words
+        }
+    };
+    (words, json)
+}
+
 /// [`push_cite_reading`] with the signature check already made: a refusal
 /// there is the gate's answer.
 #[must_use]
