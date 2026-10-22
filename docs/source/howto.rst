@@ -1058,5 +1058,6 @@ seats pushing to two remotes each read only their own writes. A sitting's own tr
 every remote that carries the branch. A missing
 claim graph is reported and is not a failure: the first claim creates it.
 A damaged guard bypass log is a ``warn`` row and is not a failure: the guard still judges every command.
+A seat nobody named, taken from the program above the shell or from the login user under a runner, is a ``warn`` ``seat source`` row and is not a failure: reads work, and tracker writes are refused until ``LJOS_SEAT`` names the seat.
 A damaged note queue is a ``no`` row and fails: it holds memory copies the pack has not taken.
 An empty or missing log of either is whole.
