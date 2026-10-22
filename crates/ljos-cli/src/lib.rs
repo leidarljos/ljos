@@ -425,7 +425,7 @@ pub fn session_start_line_from(atoms: Option<&[Value]>, now: &str, guard: bool) 
     let prefs: Vec<String> = kept
         .iter()
         .filter(|a| a.get("kind").and_then(Value::as_str) == Some("preference"))
-        .filter(|a| person_stored(a))
+        .filter(|a| person_stored(a) && live_now(a, now))
         .filter_map(|a| a.get("text").and_then(Value::as_str))
         .map(|t| {
             let t = t.trim().trim_end_matches('.');
@@ -29384,14 +29384,27 @@ fn stored_bodies() -> &'static std::sync::Mutex<std::collections::BTreeMap<Strin
     BODIES.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
 }
 
-/// Record `atom`'s origin, and its kind and text, by its id.
+/// Record `atom`'s origin, and its kind and text, by its id. A tombstone,
+/// or a record whose `valid_to` has passed, is not held: packsetd lists
+/// one that is still due, and its by-id read answers 404.
 fn record_held(id: &str, atom: &Value) {
+    if !live_now(atom, &now_utc()) {
+        record_origin(id, None);
+        return;
+    }
     record_origin(id, Some(stored_by(atom)));
     let field = |name: &str| atom[name].as_str().unwrap_or("").trim().to_string();
     stored_bodies()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(id.to_string(), (field("kind"), field("text")));
+}
+
+/// Whether `atom` is live at `now`, as packsetd reads it: not a
+/// tombstone, and no `valid_to` at or before `now`.
+fn live_now(atom: &Value, now: &str) -> bool {
+    atom.as_object()
+        .is_some_and(|fields| packset_core::record::is_live(fields, now))
 }
 
 /// Whether `h` carries the kind and text of the record its id's origin
