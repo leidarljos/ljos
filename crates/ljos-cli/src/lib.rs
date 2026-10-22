@@ -43661,6 +43661,38 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
     }
 
+    /// A backslash and the newline after it drop out of the line the TCB
+    /// reads, as the shell drops them, except inside single quotes or
+    /// `$'...'`, in a comment, or after an escaped backslash.
+    #[test]
+    fn a_backslash_newline_joins_the_line_policyd_reads() {
+        let script = |line: &str| tcb_argvs(line)[0][2].clone();
+        for (line, read) in [
+            (
+                "cd project && \\\nmake clean-all",
+                "cd project && make clean-all",
+            ),
+            ("ma\\\nke clean-all", "make clean-all"),
+            ("echo \"a\\\nb\"", "echo \"ab\""),
+            ("echo `echo x\\\ny`", "echo `echo xy`"),
+        ] {
+            assert_eq!(script(line), read, "{line:?}");
+        }
+        for line in [
+            "echo 'a\\\nb'",
+            "echo $'a\\\nb'",
+            "echo a\\\\\nmake clean-all",
+            "# note \\\nmake clean-all",
+        ] {
+            assert_eq!(script(line), line, "{line:?}");
+        }
+        let _g = env_guard();
+        let (root, _home, _env) = policyd_tree("policyd-continued");
+        let rule = tcb_verdict_in("cd project && \\\nmake clean-all", Some(root.path()))
+            .expect("a continued line was allowed");
+        assert_eq!(rule.verdict, "deny", "{}", rule.reason);
+    }
+
     /// A policyd that hangs, crashes, or prints garbage used to allow the
     /// tool call. Claude Code, Codex and Cursor call `ljos hook` directly,
     /// so that allow reached the runner, and Cursor's was a bare allow
