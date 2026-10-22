@@ -18063,6 +18063,7 @@ fn git_out(dir: Option<&str>, args: &[&str]) -> Option<String> {
     if let Some(d) = dir {
         cmd.arg("-C").arg(d);
     }
+    apply_git_command_env(&mut cmd);
     let out = cmd
         .args(args)
         .stdin(std::process::Stdio::null())
@@ -25531,15 +25532,14 @@ pub const TRACKER_LOCK: &str = ".ljos-commit.lock";
 /// and the next seat would lock a new file beside it. `None` outside a git
 /// checkout.
 fn tracker_lock_path(dir: &Path) -> Option<PathBuf> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
         .arg(dir)
         .args(["rev-parse", "--show-toplevel", "--git-common-dir"])
         .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
+        .stderr(std::process::Stdio::null());
+    apply_git_command_env(&mut cmd);
+    let out = cmd.output().ok().filter(|o| o.status.success())?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut lines = text.lines().map(str::trim);
     let top = PathBuf::from(lines.next().filter(|l| !l.is_empty())?);
@@ -25889,6 +25889,7 @@ pub fn commit_paths(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
             .arg("--")
             .args(paths)
             .stdin(std::process::Stdio::null());
+        apply_git_command_env(&mut cmd);
         git_hooks::hook_child_env(&mut cmd);
         cmd.output()
     };
@@ -25945,15 +25946,14 @@ const ORPHAN_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 /// git process working in the checkout. A git killed outright leaves one,
 /// and every later commit fails on it until a person removes it.
 pub fn orphaned_index_lock(dir: &Path) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
         .arg(dir)
         .args(["rev-parse", "--absolute-git-dir", "--show-toplevel"])
         .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
+        .stderr(std::process::Stdio::null());
+    apply_git_command_env(&mut cmd);
+    let out = cmd.output().ok().filter(|o| o.status.success())?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut lines = text.lines().map(str::trim);
     let lock = Path::new(lines.next()?).join("index.lock");
@@ -29013,6 +29013,64 @@ impl Drop for EnvLock {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static GIT_COMMAND_ENV: std::cell::RefCell<Vec<(std::ffi::OsString, std::ffi::OsString)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Environment entries copied onto git commands this thread starts.
+///
+/// A checkout that exists only as `GIT_DIR` and `GIT_WORK_TREE` has to hand
+/// those to git. Putting them on the process would hand them to every other
+/// test thread as well, including one that spawns git and does not hold
+/// [`test_env_lock`]. Dropping the guard restores the previous list. The
+/// process environment is not changed.
+#[cfg(test)]
+#[must_use = "the git environment lasts until this guard drops"]
+pub(crate) struct GitCommandEnv {
+    previous: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+}
+
+#[cfg(test)]
+impl GitCommandEnv {
+    pub(crate) fn set<I, K, V>(pairs: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<std::ffi::OsString>,
+        V: Into<std::ffi::OsString>,
+    {
+        let next = pairs
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+        let previous =
+            GIT_COMMAND_ENV.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), next));
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for GitCommandEnv {
+    fn drop(&mut self) {
+        let previous = std::mem::take(&mut self.previous);
+        GIT_COMMAND_ENV.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+/// Copy a test's git environment onto `cmd`. Outside the test build this
+/// does nothing, and git keeps the process environment.
+pub(crate) fn apply_git_command_env(cmd: &mut std::process::Command) {
+    #[cfg(test)]
+    GIT_COMMAND_ENV.with(|slot| {
+        for (key, value) in slot.borrow().iter() {
+            cmd.env(key, value);
+        }
+    });
+    #[cfg(not(test))]
+    let _ = cmd;
+}
+
 /// The lock every test that changes the process environment takes.
 /// Bookkeeping tests live in another module and take the same one.
 #[cfg(test)]
@@ -30187,6 +30245,9 @@ mod tests {
 
     /// A bare `GIT_DIR` plus `GIT_WORK_TREE` checkout keeps its lock and push
     /// semantics. `git -C` in that worktree must still see the configured repo.
+    /// The variables ride on the git commands. The process environment is one
+    /// for every test thread, and a thread that does not hold it would
+    /// otherwise run git in this checkout.
     #[test]
     fn a_dotfiles_git_dir_checkout_keeps_locks_and_lease_pushes() {
         let _env = env_guard();
@@ -30225,8 +30286,12 @@ mod tests {
         git(&["checkout", "-q", "-b", "feature/dots"]);
         std::fs::write(home.join(".vimrc"), "set number\nset list\n").unwrap();
 
-        std::env::set_var("GIT_DIR", &bare);
-        std::env::set_var("GIT_WORK_TREE", &home);
+        let before_dir = std::env::var_os("GIT_DIR");
+        let before_tree = std::env::var_os("GIT_WORK_TREE");
+        let _checkout = super::GitCommandEnv::set([
+            ("GIT_DIR", bare.as_os_str()),
+            ("GIT_WORK_TREE", home.as_os_str()),
+        ]);
         let lock_path = super::tracker_lock_path(&home).expect("GIT_DIR checkout stays visible");
         assert_eq!(lock_path, home.join(TRACKER_LOCK));
         let held = tracker_commit_lock(&home);
@@ -30245,8 +30310,8 @@ mod tests {
             .is_none(),
             "a feature lease push stays ordinary with GIT_DIR/GIT_WORK_TREE"
         );
-        std::env::remove_var("GIT_DIR");
-        std::env::remove_var("GIT_WORK_TREE");
+        assert_eq!(std::env::var_os("GIT_DIR"), before_dir);
+        assert_eq!(std::env::var_os("GIT_WORK_TREE"), before_tree);
     }
 
     /// Paths HEAD already holds, as another seat's commit leaves them, are
