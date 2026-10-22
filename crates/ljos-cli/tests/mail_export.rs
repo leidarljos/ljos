@@ -211,14 +211,28 @@ fn date_and_message_id_must_be_valid_not_only_present() {
 #[test]
 fn a_bcc_header_is_refused_because_sendmail_t_strips_it() {
     let later = now() + Duration::hours(1);
-    for bcc in [
-        "Bcc: hidden@example.test\n",
-        "bcc:\n hidden@example.test\n",
-        "Resent-Bcc: x@example.test\n",
-    ] {
+    for bcc in ["Bcc: hidden@example.test\n", "bcc:\n hidden@example.test\n"] {
         let message = MESSAGE.replace("Subject:", &format!("{bcc}Subject:"));
         let err = export(&draft(&message), later, now()).unwrap_err();
         assert!(err.to_string().contains("Bcc"), "{bcc}: {err}");
+    }
+}
+
+#[test]
+fn every_resent_header_is_refused_because_sendmail_t_follows_it() {
+    let later = now() + Duration::hours(1);
+    for resent in [
+        "Resent-To: other@example.test\n",
+        "Resent-Cc: other@example.test\n",
+        "Resent-Bcc: x@example.test\n",
+        "RESENT-FROM: owner@example.test\n",
+        "Resent-Date: Thu, 22 Oct 2026 12:00:00 +0000\n",
+        "Resent-Message-ID: <r@example.test>\n",
+        "resent-sender:\n owner@example.test\n",
+    ] {
+        let message = MESSAGE.replace("Subject:", &format!("{resent}Subject:"));
+        let err = export(&draft(&message), later, now()).unwrap_err();
+        assert!(err.to_string().contains("Resent-"), "{resent}: {err}");
     }
 }
 

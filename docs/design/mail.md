@@ -147,8 +147,10 @@ precondition, not an option.
    exporter refuses a message without exactly one `Date` that parses as
    an RFC 5322 date-time and exactly one `Message-ID` in msg-id syntax
    (`<left@right>`, dot-atom text or a `[...]` literal), since an MTA
-   would add or replace them. It refuses `Bcc` and `Resent-Bcc`, which
-   `-t` strips, so the sent bytes would no longer be the hashed ones.
+   would add or replace them. It refuses `Bcc`, which `-t` strips, so
+   the sent bytes would no longer be the hashed ones, and every
+   `Resent-*` header: once one names a recipient, `-t` sends to the
+   `Resent-` recipients and ignores `To` and `Cc`.
 2. Export. The exporter runs the content checks below first and writes
    no file for a draft they refuse. The approval file is plain text: a
    statement block, a blank line, then the message bytes.

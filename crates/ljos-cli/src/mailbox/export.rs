@@ -92,8 +92,13 @@ pub fn export(
     if !is_msg_id(one("message-id")?) {
         bail!("export: Message-ID is not an RFC 5322 msg-id such as <id@example.test>");
     }
-    if fields.iter().any(|(n, _)| n == "bcc" || n == "resent-bcc") {
+    if fields.iter().any(|(n, _)| n == "bcc") {
         bail!("export: sendmail -t strips Bcc, so the sent bytes would not be H; use To or Cc");
+    }
+    if let Some((name, _)) = fields.iter().find(|(n, _)| n.starts_with("resent-")) {
+        bail!(
+            "export: {name} is refused: with a Resent- header sendmail -t sends to the Resent- recipients, not To and Cc"
+        );
     }
     let refused = super::checks::refusals(draft.message, config);
     if !refused.is_empty() {
