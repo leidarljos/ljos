@@ -634,6 +634,36 @@ fn a_slow_or_hung_lesson_read_does_not_state_the_rule() {
     }
 }
 
+/// A by-id answer for the person's lesson that carries no origin, a null
+/// one or an empty one does not state the rule promoted from it, whatever
+/// basis it sends: packsetd stores every record with an origin, so a body
+/// without one is not the person's record.
+#[test]
+fn a_lesson_read_without_an_origin_does_not_state_the_rule() {
+    const ID: &str = "lessonid0000000000000000000005";
+    let lesson = persons_lesson(ID, RELEASE_KEY);
+    for origin in [
+        None,
+        Some(serde_json::Value::Null),
+        Some(serde_json::json!("")),
+    ] {
+        let mut body = lesson.clone();
+        match &origin {
+            None => drop(body.as_object_mut().unwrap().remove("origin")),
+            Some(origin) => body["origin"] = origin.clone(),
+        }
+        let seat = Seat::on(serve_scripted(vec![], move |line| {
+            reads_atom(line, ID).then(|| Reply::now("200 OK", body.clone()))
+        }));
+        promoted_rule(&seat, &lesson);
+        let note = seat.prompt("tidy the changelog fragments");
+        assert!(
+            !states_rule(&note, RELEASE_KEY),
+            "a by-id body with origin {origin:?} stated the rule: {note}"
+        );
+    }
+}
+
 /// A `vissue` that answers every call with `body`, so a brief reads a
 /// tracker without one.
 fn stub_vissue(seat: &Seat, body: &str) {
