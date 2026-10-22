@@ -51,6 +51,8 @@ pub struct Memory {
     pub text: String,
     pub kind: String,
     pub origin: String,
+    /// `source.basis` as stored. Empty when the writer left none.
+    pub basis: String,
     pub seat: String,
     pub harness: String,
     pub session: String,
@@ -102,6 +104,7 @@ impl Memory {
             text: s(&atom["text"]),
             kind,
             origin,
+            basis: s(&src["basis"]),
             harness: Some(s(&src["harness"]))
                 .filter(|x| !x.is_empty())
                 .unwrap_or_else(|| seat.clone()),
@@ -338,6 +341,10 @@ pub fn drop_memory(id: &str, all: &[Memory]) -> Result<String> {
 
 /// Write `text` in place of `olds`, carrying the first one's provenance
 /// and naming what it replaced, then retire the old claims.
+///
+/// The new claim keeps the origin and the basis the memory already had.
+/// A missing basis is left missing: origin `user-declared` is not a
+/// person basis, and this does not stamp one.
 fn replace(olds: &[&Memory], text: &str, verdict: &str) -> Result<String> {
     let text = text.trim();
     if text.is_empty() {
@@ -360,7 +367,10 @@ fn replace(olds: &[&Memory], text: &str, verdict: &str) -> Result<String> {
     let posted = if first.is_agents() {
         crate::admit::write_agent(&client, atom)?
     } else {
-        crate::admit::stamp_person(&mut atom);
+        atom["origin"] = Value::String(first.origin.clone());
+        if !first.basis.is_empty() {
+            atom["source"]["basis"] = Value::String(first.basis.clone());
+        }
         crate::admit::post_kept(&client, &atom)?
     };
     let new_id = s(&posted["id"]);
@@ -388,10 +398,15 @@ fn replace(olds: &[&Memory], text: &str, verdict: &str) -> Result<String> {
 
 /// Rewrite one memory's text.
 ///
+/// A runner is refused. The replacement keeps the basis the memory
+/// already had.
+///
 /// # Errors
 ///
-/// An id that names no memory, an empty text, or the pack refusing.
+/// This process is under a runner, an id that names no memory, an empty
+/// text, or the pack refusing.
 pub fn edit(id: &str, text: &str, all: &[Memory]) -> Result<String> {
+    refuse_runner("edit")?;
     let m = find(id, all)?;
     replace(&[m], text, "edited")
 }
@@ -399,10 +414,15 @@ pub fn edit(id: &str, text: &str, all: &[Memory]) -> Result<String> {
 /// Merge memories into one. Without `text` the merged text is theirs,
 /// joined in the order given.
 ///
+/// A runner is refused. The replacement keeps the basis the first
+/// memory already had.
+///
 /// # Errors
 ///
-/// Fewer than two ids, an id that names no memory, or the pack refusing.
+/// This process is under a runner, fewer than two ids, an id that names
+/// no memory, or the pack refusing.
 pub fn merge(ids: &[String], text: Option<&str>, all: &[Memory]) -> Result<String> {
+    refuse_runner("merge")?;
     if ids.len() < 2 {
         bail!("memories: merge takes two ids or more");
     }
@@ -419,6 +439,16 @@ pub fn merge(ids: &[String], text: Option<&str>, all: &[Memory]) -> Result<Strin
         &joined
     };
     replace(&olds, text, "merged")
+}
+
+fn refuse_runner(verb: &str) -> Result<()> {
+    if crate::under_a_runner() {
+        bail!(
+            "memories: a runner cannot {verb} a memory. \
+             Run `ljos memories review` from a terminal of your own"
+        );
+    }
+    Ok(())
 }
 
 /// The memory as the review prints it: id, kind, text, then provenance.
@@ -1046,6 +1076,18 @@ mod tests {
         assert_eq!(m.at, "2026-10-12T10:00:00Z");
         assert_eq!(m.reason.as_deref(), Some("the user said so"));
         assert!(m.is_agents());
+        assert!(m.basis.is_empty());
+        let mut stamped = atom(
+            "a1aaaaaaaaaaaaaa",
+            "t",
+            "codex",
+            "2026-10-12T10:00:00Z",
+            "user-declared",
+        );
+        stamped["source"]["basis"] = json!("person");
+        let stamped = Memory::of(&stamped).unwrap();
+        assert_eq!(stamped.basis, "person");
+        assert!(!stamped.is_agents());
     }
 
     #[test]
