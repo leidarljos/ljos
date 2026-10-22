@@ -32065,7 +32065,19 @@ mod tests {
             }
             cmd.output().unwrap()
         };
-        let home = dir.path().join("home");
+        // A home under /tmp, not under TMPDIR. The shim drops TMPDIR and
+        // still treats /tmp as temporary. A TMPDIR that lives under the
+        // login home would otherwise make this fixture look permanent.
+        let temp_root =
+            std::path::PathBuf::from(format!("/tmp/ljos-shim-home-{}", std::process::id()));
+        struct RmDir(std::path::PathBuf);
+        impl Drop for RmDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _rm = RmDir(temp_root.clone());
+        let home = temp_root.join("home");
         std::fs::create_dir_all(&home).unwrap();
         let sandbox = dir.path().join("sandbox");
         std::fs::create_dir_all(&sandbox).unwrap();
