@@ -130,10 +130,11 @@ struct RepoBook {
     /// filed or one it adopted from a hold record, is that conversation's.
     #[serde(default)]
     started: bool,
-    /// A hook filed this row's issue for the sitting's first edit or
-    /// commit: no one asked for that ticket by name. A commit naming another
-    /// open issue before any deed lands here takes the row over, and this
-    /// issue is cancelled.
+    /// This sitting filed the issue: a hook on the first edit or commit, or
+    /// `ljos_start` with no ticket named. A commit naming another open issue
+    /// before any deed lands here takes the row over, and this issue is
+    /// cancelled. Starting again on the same issue leaves `filed` as it is.
+    /// A rebind sets it for the issue that start claims.
     #[serde(default)]
     filed: bool,
     /// Commit shas already cited. The id is `deed-file-commit-<sha>`, so a
@@ -172,7 +173,9 @@ struct RepoBook {
     #[serde(default)]
     recall: String,
     /// HEAD the first time this sitting saw the repository, before a commit
-    /// ran. A deed is cited only when HEAD has moved past it.
+    /// ran. A deed is cited only when HEAD has moved past it. A rebind to
+    /// another issue moves this to HEAD then, so the previous issue's
+    /// commits are not cited on the new one.
     #[serde(default)]
     start_sha: Option<String>,
     /// The prompt this sitting is working from. agy sends no title of its
@@ -187,6 +190,8 @@ struct RepoBook {
     /// The issue is one a commit named, not one this sitting filed. The
     /// sweep hands it back with a release instead of closing it: the
     /// commit cited work on someone's open ticket, it did not accept it.
+    /// Starting again on the same issue keeps `named`. Only a rebind to a
+    /// different issue clears it.
     #[serde(default)]
     named: bool,
     /// Other open issues this row's commits named while it held `issue`.
@@ -1047,14 +1052,25 @@ pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result
     }
     let row = book.repos.entry(place.clone()).or_default();
     row.last_unix = now;
+    let same_issue = row.issue.as_deref() == Some(issue_id.as_str());
+    let rebound = row.issue.is_some() && !same_issue;
     clear_issue_fields_if_issue_changes(row, &issue_id);
     row.issue = Some(issue_id.clone());
-    row.filed = filed_here;
-    row.named = false;
+    // A later start on the issue this row already holds does not change
+    // how the sitting got it. Only a rebind resets `named` and `filed`.
+    if !same_issue {
+        row.filed = filed_here;
+        row.named = false;
+    }
     row.finished = false;
     row.started = true;
     row.claim_failed = false;
     row.recall.clone_from(&recall);
+    if rebound {
+        // Commits already made belong to the issue this row just left.
+        // HEAD now is the baseline, so the next citation starts after them.
+        row.start_sha = head_sha(&place).ok();
+    }
     if !cwd.is_empty() {
         book.cwd_repo.insert(cwd, place);
     }
@@ -1788,6 +1804,7 @@ fn tracker_holder(issue: &str) -> Option<String> {
 /// row, which then holds `issue`.
 fn adopt_row(book: &mut Book, repo: &str, issue: &str, moved: RepoBook) {
     let row = book.repos.entry(repo.to_string()).or_default();
+    let rebound = row.issue.as_deref().is_some_and(|old| old != issue);
     clear_issue_fields_if_issue_changes(row, issue);
     row.issue = Some(issue.to_string());
     row.finished = false;
@@ -1797,7 +1814,9 @@ fn adopt_row(book: &mut Book, repo: &str, issue: &str, moved: RepoBook) {
     } else {
         moved.recall
     };
-    if moved.start_sha.is_some() {
+    if rebound {
+        row.start_sha = head_sha(repo).ok();
+    } else if moved.start_sha.is_some() {
         row.start_sha = moved.start_sha;
     }
     if row.title.is_none() {
@@ -2871,7 +2890,12 @@ fn book_named_in(book: &mut Book, key: &str, repo: &str, head: &str, issue: &str
             }
         }
         None if placeholder.is_some() => {
-            clear_issue_fields_if_issue_changes(row, issue);
+            // The cancelled ticket was a placeholder for this sitting.
+            // Failures, asks, the title and commits a sweep already found
+            // stay. Only the lesson was about that ticket.
+            row.lesson = false;
+            row.lesson_id = None;
+            row.lesson_title = None;
             row.issue = Some(issue.to_string());
             row.named = true;
             row.filed = false;
@@ -3356,7 +3380,9 @@ fn bind_prompt(book: &mut Book, repo: &str, now: u64) {
 
 /// A row that moves to another issue must drop issue-bound state from the
 /// prior issue. A rewrite must not carry old deeds, failures or lesson links
-/// onto the new ticket.
+/// onto the new ticket. The commit baseline goes with them. The caller
+/// plants HEAD at the rebind, so a later citation does not walk the
+/// previous issue's range.
 fn clear_issue_fields_if_issue_changes(row: &mut RepoBook, issue: &str) {
     if row.issue.as_deref() == Some(issue) {
         return;
@@ -3380,6 +3406,7 @@ fn clear_issue_fields_if_issue_changes(row: &mut RepoBook, issue: &str) {
     row.also.clear();
     row.elsewhere.clear();
     row.filed = false;
+    row.start_sha = None;
 }
 
 /// Copy `row.title` into `lesson_title` once, when a lesson already exists.
@@ -3914,6 +3941,9 @@ fn git_remote_from_command(repo: &str) -> Option<String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    // A test may have named a decoy on this command. Drop it with the
+    // variables a hook would have exported, so `-C` is the checkout.
+    crate::apply_git_command_env(&mut cmd);
     for key in [
         "GIT_DIR",
         "GIT_WORK_TREE",
@@ -5302,7 +5332,8 @@ mod tests {
     }
 
     /// A row that once held another issue does not carry that issue's lesson
-    /// title or superseded atom into the next issue's rewrite.
+    /// title or superseded atom into the next issue's rewrite. The rewrite
+    /// names the second issue's own title.
     #[test]
     fn a_second_issue_does_not_rewrite_with_the_first_issue_lesson() {
         let _g = lock();
@@ -5385,6 +5416,8 @@ mod tests {
         switched.prompt = "Now add a kebab-case helper".into();
         bind_prompt(&mut switched, &repo_s, unix_secs());
         let row = switched.repos.get_mut(&repo_s).expect("repo row");
+        row.title = Some("Now add a kebab-case helper".into());
+        row.deeds = vec![old.clone()];
         row.finished = true;
         row.lesson = true;
         store_book(&path, &switched);
@@ -5393,8 +5426,8 @@ mod tests {
         let queued =
             std::fs::read_to_string(state.join("ljos/note-queue.jsonl")).unwrap_or_default();
         assert!(
-            queued.trim().is_empty(),
-            "a rebind with no deeds should not rewrite any lesson\n{queued}"
+            queued.contains("kebab case helper"),
+            "the second issue title was lost\n{queued}"
         );
         assert!(
             !queued.contains("slugify"),
@@ -5404,6 +5437,288 @@ mod tests {
             !queued.contains("atom-a"),
             "the second issue rewrite superseded the first issue atom\n{queued}"
         );
+    }
+
+    /// A sitting that moves from one issue to another must not book the
+    /// first issue's commits on the second. The baseline stays at the old
+    /// HEAD otherwise, and the next citation walks that range again.
+    #[test]
+    fn a_rebind_does_not_cite_the_previous_issues_commits() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+            "LJOS_SEAT",
+            "LJOS_HARNESS_SESSION",
+        ]);
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let session = "zdnr4a-rebind";
+        unsafe {
+            std::env::set_var("LJOS_SESSION_ID", session);
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("LJOS_HARNESS_SESSION");
+        }
+        let proj = tracker.join("Software/probe");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("issues.org"),
+            "\
+* TODO [#C] First issue
+:PROPERTIES:
+:ID:         probe-00aa
+:END:
+* TODO [#C] Second issue
+:PROPERTIES:
+:ID:         probe-00ab
+:END:
+",
+        )
+        .unwrap();
+        let repo_s = git_toplevel(&repo).expect("toplevel");
+        let seed = head_sha(&repo_s).expect("seed");
+        let first = land_commit(&repo, "first.txt", "work for the first issue");
+        let now = unix_secs();
+        let mut book = Book {
+            last_unix: now,
+            ..Book::default()
+        };
+        book.repos.insert(
+            repo_s.clone(),
+            RepoBook {
+                issue: Some("probe-00aa".into()),
+                start_sha: Some(seed),
+                deeds: vec![first.clone()],
+                started: true,
+                last_unix: now,
+                ..RepoBook::default()
+            },
+        );
+        store_book(&book_path(session), &book);
+
+        let said = start_work(
+            Some("probe-00ab"),
+            Some(repo.to_str().unwrap()),
+            "Continue on the second issue",
+        )
+        .expect("rebind");
+        assert!(said.contains("probe-00ab"), "{said}");
+        assert!(
+            cite_into_open_sitting(&repo_s),
+            "the open sitting was not cited"
+        );
+        let row = load_book(&book_path(session))
+            .repos
+            .get(&repo_s)
+            .cloned()
+            .expect("row");
+        assert_eq!(row.issue.as_deref(), Some("probe-00ab"));
+        assert!(
+            !row.deeds.iter().any(|sha| sha == &first),
+            "rebind cited the previous issue's commit: {:?}",
+            row.deeds
+        );
+        let later = land_commit(&repo, "later.txt", "work on the second issue");
+        assert!(cite_into_open_sitting(&repo_s));
+        let row = load_book(&book_path(session))
+            .repos
+            .get(&repo_s)
+            .cloned()
+            .expect("row after later commit");
+        assert!(
+            row.deeds.iter().any(|sha| sha == &later),
+            "the commit after the rebind was not cited: {:?}",
+            row.deeds
+        );
+        assert!(
+            !row.deeds.iter().any(|sha| sha == &first),
+            "the later citation still carried the previous commit: {:?}",
+            row.deeds
+        );
+    }
+
+    /// Folding another issue into a row must not keep the baseline the
+    /// previous issue was citing from.
+    #[test]
+    fn adopt_row_rebind_does_not_cite_the_previous_issues_commits() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+            "LJOS_SEAT",
+        ]);
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let proj = tracker.join("Software/probe");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("issues.org"),
+            "\
+* TODO [#C] First issue
+:PROPERTIES:
+:ID:         probe-00aa
+:END:
+* TODO [#C] Second issue
+:PROPERTIES:
+:ID:         probe-00ab
+:END:
+",
+        )
+        .unwrap();
+        let repo_s = git_toplevel(&repo).expect("toplevel");
+        let seed = head_sha(&repo_s).expect("seed");
+        let first = land_commit(&repo, "first.txt", "work for the first issue");
+        let mut book = Book::default();
+        book.repos.insert(
+            repo_s.clone(),
+            RepoBook {
+                issue: Some("probe-00aa".into()),
+                start_sha: Some(seed.clone()),
+                deeds: vec![first.clone()],
+                ..RepoBook::default()
+            },
+        );
+        adopt_row(
+            &mut book,
+            &repo_s,
+            "probe-00ab",
+            RepoBook {
+                start_sha: Some(seed),
+                ..RepoBook::default()
+            },
+        );
+        cite_row(&mut book, &repo_s, &repo_s).expect("cite");
+        let row = book.repos.get(&repo_s).expect("row");
+        assert_eq!(row.issue.as_deref(), Some("probe-00ab"));
+        assert!(
+            !row.deeds.iter().any(|sha| sha == &first),
+            "adopt cited the previous issue's commit: {:?}",
+            row.deeds
+        );
+    }
+
+    /// Starting the issue a sitting already holds must not clear `named`
+    /// or `filed`. Finish then releases a named ticket instead of closing
+    /// it DONE. A real rebind still resets both flags.
+    #[test]
+    fn start_work_on_the_same_issue_keeps_named_and_filed() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+            "LJOS_SEAT",
+            "LJOS_HARNESS_SESSION",
+        ]);
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let session = "zdnr4a-same-issue";
+        unsafe {
+            std::env::set_var("LJOS_SESSION_ID", session);
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("LJOS_HARNESS_SESSION");
+        }
+        let proj = tracker.join("Software/probe");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("issues.org"),
+            "\
+* TODO [#C] Named ticket
+:PROPERTIES:
+:ID:         probe-00aa
+:END:
+* TODO [#C] Other ticket
+:PROPERTIES:
+:ID:         probe-00ab
+:END:
+",
+        )
+        .unwrap();
+        let repo_s = git_toplevel(&repo).expect("toplevel");
+        let mut book = Book::default();
+        book.repos.insert(
+            repo_s.clone(),
+            RepoBook {
+                issue: Some("probe-00aa".into()),
+                named: true,
+                filed: true,
+                started: true,
+                ..RepoBook::default()
+            },
+        );
+        store_book(&book_path(session), &book);
+        start_work(
+            Some("probe-00aa"),
+            Some(repo.to_str().unwrap()),
+            "Keep working on the named ticket",
+        )
+        .expect("start the same issue");
+        let row = load_book(&book_path(session))
+            .repos
+            .get(&repo_s)
+            .cloned()
+            .expect("row");
+        assert!(row.named, "same-issue start cleared named");
+        assert!(row.filed, "same-issue start cleared filed");
+        let mut book = load_book(&book_path(session));
+        finish_open(&mut book);
+        assert_ne!(
+            issue_state(&tracker, "probe-00aa"),
+            "DONE",
+            "a named ticket was closed instead of handed back"
+        );
+
+        let mut again = Book::default();
+        again.repos.insert(
+            repo_s.clone(),
+            RepoBook {
+                issue: Some("probe-00aa".into()),
+                named: true,
+                filed: true,
+                started: true,
+                ..RepoBook::default()
+            },
+        );
+        store_book(&book_path(session), &again);
+        start_work(
+            Some("probe-00ab"),
+            Some(repo.to_str().unwrap()),
+            "Move the sitting to the other ticket",
+        )
+        .expect("rebind");
+        let row = load_book(&book_path(session))
+            .repos
+            .get(&repo_s)
+            .cloned()
+            .expect("rebound row");
+        assert!(!row.named, "a rebind kept named");
+        assert!(!row.filed, "a rebind kept filed");
     }
 
     /// A fresh claim on a row that had no issue clears stale lesson linkage
@@ -6074,13 +6389,16 @@ mod tests {
                 "https://github.com/acme/widget.git",
             ],
         );
-        set_var("GIT_DIR", decoy.join(".git").to_str().unwrap());
-        assert_eq!(
-            project_for_at(included.to_str().unwrap(), None, None),
-            "ljos",
-            "GIT_DIR named the decoy"
-        );
-        unsafe { std::env::remove_var("GIT_DIR") };
+        let before_dir = std::env::var_os("GIT_DIR");
+        {
+            let _decoy = crate::GitCommandEnv::set([("GIT_DIR", decoy.join(".git").as_os_str())]);
+            assert_eq!(
+                project_for_at(included.to_str().unwrap(), None, None),
+                "ljos",
+                "GIT_DIR named the decoy"
+            );
+        }
+        assert_eq!(std::env::var_os("GIT_DIR"), before_dir);
         let rewritten = root.join("bench-w18b-tfn7");
         std::fs::create_dir_all(&rewritten).unwrap();
         git(&rewritten, &["init", "-q", "-b", "main"]);
@@ -9424,6 +9742,73 @@ print(f"id={ident}")
             std::fs::read_to_string(crate::runtime_dir().join("book.log")).unwrap_or_default();
         assert!(log.contains(&format!("claim: cancelled {auto}")), "{log}");
         assert_eq!(creates(&tracker), 2, "the commit filed no third issue");
+    }
+
+    /// Taking over a placeholder keeps the sitting's notes. The commit
+    /// names the real ticket; it does not wipe failures, asks, the title
+    /// or commits the sweep already found.
+    #[test]
+    fn a_named_commit_keeps_the_placeholder_sittings_notes() {
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let named = file_by_hand("Add slugify function and tests");
+        let session = "harness-named-keeps-notes";
+        let (raw, call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({"tool_name": "Edit", "tool_input": {"file_path": "slug.py"}}),
+        );
+        let _ = observe(&raw, &call);
+        let auto = hook_row(session, &repo)
+            .issue
+            .expect("the edit filed a claim");
+        let path = book_path(session);
+        let mut book = load_book(&path);
+        let key = book
+            .repos
+            .iter()
+            .find(|(_, row)| row.issue.as_deref() == Some(auto.as_str()))
+            .map(|(key, _)| key.clone())
+            .expect("placeholder row");
+        let landed = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        let landed_at = head_sha(&key).expect("head");
+        {
+            let row = book.repos.get_mut(&key).expect("row");
+            row.failures = vec!["cargo test exited 101".into()];
+            row.asks = vec!["guard asked about the test".into()];
+            row.title = Some("slugify the names".into());
+            row.landed = vec![landed.clone()];
+            row.landed_head = Some(landed_at);
+        }
+        store_book(&path, &book);
+        let message = format!("{named}: add kebab_case");
+        let sha = land_commit(&repo, "slug.py", &message);
+        let (raw, call) = payload(
+            "PostToolUse",
+            session,
+            &repo,
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {"command": format!("git commit -m \"{message}\"")},
+                "tool_response": {"exit_code": 0}
+            }),
+        );
+        let _ = observe(&raw, &call);
+        let row = hook_row(session, &repo);
+        assert_eq!(row.issue.as_deref(), Some(named.as_str()));
+        assert!(row.deeds.contains(&sha), "{:?}", row.deeds);
+        assert_eq!(
+            row.failures,
+            vec!["cargo test exited 101".to_string()],
+            "placeholder takeover dropped the failure notes: {:?}",
+            row.failures
+        );
+        assert_eq!(row.asks, vec!["guard asked about the test".to_string()]);
+        assert_eq!(row.title.as_deref(), Some("slugify the names"));
+        assert_eq!(row.landed, vec![landed]);
     }
 
     /// A placeholder that already has a deed is real work: the named

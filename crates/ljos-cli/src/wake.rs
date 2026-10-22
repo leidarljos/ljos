@@ -155,6 +155,17 @@ fn lock_exclusive(_file: &std::fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn wake_file_mode(wake_path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::symlink_metadata(wake_path)
+        .ok()
+        .filter(|meta| meta.file_type().is_file())
+        .map(|meta| meta.permissions().mode() & 0o777)
+        .unwrap_or(0o600)
+}
+
 fn save_atomic(wake_path: &Path, table: &BTreeMap<String, Wake>) -> Result<()> {
     let text = render(table)?;
     let dir = wake_path
@@ -171,16 +182,29 @@ fn save_atomic(wake_path: &Path, table: &BTreeMap<String, Wake>) -> Result<()> {
         .unwrap_or_else(|| "wake.toml".into());
     tmp_name.push(format!(".tmp-{}-{stamp}", std::process::id()));
     let tmp = dir.join(tmp_name);
+    #[cfg(unix)]
+    let mode = wake_file_mode(wake_path);
     {
-        let mut out = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut out = options
             .open(&tmp)
             .with_context(|| format!("wake: {}", tmp.display()))?;
         out.write_all(text.as_bytes())
             .with_context(|| format!("wake: {}", tmp.display()))?;
         out.sync_all()
             .with_context(|| format!("wake: {}", tmp.display()))?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
+            .with_context(|| format!("wake: mode {mode:04o} {}", tmp.display()))?;
     }
     if let Err(err) = std::fs::rename(&tmp, wake_path) {
         let _ = std::fs::remove_file(&tmp);
@@ -1120,6 +1144,36 @@ mod tests {
             "the refusal should say this is a parse error: {said}"
         );
         assert_eq!(std::fs::read_to_string(&wake_file).unwrap(), broken);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_atomic_keeps_existing_mode_and_creates_private_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_lock, _dir) = isolated();
+        let wake_file = path();
+        std::fs::create_dir_all(wake_file.parent().expect("wake dir")).expect("wake dir");
+        std::fs::write(&wake_file, "[seed]\ncommand = \"true\"\n").expect("seed wake");
+        std::fs::set_permissions(&wake_file, std::fs::Permissions::from_mode(0o600))
+            .expect("mode 0600 wake");
+
+        set_command("inky", "true", None).expect("rewrite wake");
+        let kept = std::fs::symlink_metadata(&wake_file)
+            .expect("wake metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(kept, 0o600, "rewriting wake.toml changed its mode");
+
+        std::fs::remove_file(&wake_file).expect("remove wake");
+        set_command("new", "true", None).expect("new wake");
+        let created = std::fs::symlink_metadata(&wake_file)
+            .expect("wake metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(created, 0o600, "new wake.toml should be private");
     }
 
     #[test]
