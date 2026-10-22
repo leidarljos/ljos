@@ -1064,8 +1064,10 @@ fn bins_ready(dir: &Path) -> bool {
 
 fn executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    fs::metadata(path)
-        .map(|m| m.permissions().mode() & 0o111 != 0)
+    // A directory is mode 0755, and `metadata` follows a symlink. Either
+    // would count as an installed encoder and skip the download.
+    fs::symlink_metadata(path)
+        .map(|meta| meta.file_type().is_file() && meta.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
 }
 
@@ -1167,7 +1169,7 @@ fn sha256_file(path: &Path) -> Result<String> {
 }
 
 /// `packset-embed` and the ONNX Runtime it links, from this version's
-/// release, on a cloud VM only. Elsewhere the encoder is built from source.
+/// release, on a cloud VM only. Elsewhere nothing is downloaded.
 /// A release without them leaves search lexical. Both sums are checked
 /// before either archive is unpacked.
 fn ensure_encoder(bin_dir: &Path, force: bool) -> Result<String> {
@@ -1233,6 +1235,13 @@ fn install_encoder(stage: &Path, target: &str, bin_dir: &Path, lib: &Path) -> Re
         }
         archives.push(file);
     }
+    // `tar -xzf` unpacks a symlink, and `is_file` follows it, so the
+    // install would put that link on PATH and chmod its target. Refuse
+    // those members, hard links, and paths that leave the tree, in both
+    // archives, before unpacking either.
+    for file in &archives {
+        refuse_unsafe_archive(file)?;
+    }
     let tree = stage.join("tree");
     fs::create_dir_all(&tree)?;
     for file in &archives {
@@ -1252,25 +1261,26 @@ fn install_encoder(stage: &Path, target: &str, bin_dir: &Path, lib: &Path) -> Re
             );
         }
     }
+    refuse_unsafe_tree(&tree)?;
     let new_lib = tree.join(ENCODER_LIB);
     let new_bin = tree.join("bin/packset-embed");
-    if !new_lib.join(ENCODER_SONAME).is_file() || !new_bin.is_file() {
+    if !regular_file(&new_lib.join(ENCODER_SONAME)) || !regular_file(&new_bin) {
         bail!("the encoder archives lack bin/packset-embed or {ENCODER_LIB}/{ENCODER_SONAME}; nothing was installed");
     }
-    // A running encoder keeps the files it opened; the new ones are renamed in.
-    let old = stage.join("old");
-    if lib.exists() {
-        fs::rename(lib, &old).with_context(|| format!("move {} aside", lib.display()))?;
-    }
-    if let Err(e) = fs::rename(&new_lib, lib) {
-        let _ = fs::rename(&old, lib);
-        return Err(e).with_context(|| format!("install {}", lib.display()));
-    }
+    // A running encoder keeps the inode it opened, so the new files are
+    // renamed in. chmod and the destination directory happen first: a
+    // failure after the runtime rename used to leave the new runtime and
+    // delete the old one with the stage. Both names move aside, then both
+    // new names move in, and either failure puts the previous pair back.
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&new_bin, fs::Permissions::from_mode(0o755))?;
-    fs::create_dir_all(bin_dir)?;
+    if let Err(err) = fs::set_permissions(&new_bin, fs::Permissions::from_mode(0o755)) {
+        bail!("encoder install failed ({err}); nothing was installed");
+    }
+    if let Err(err) = fs::create_dir_all(bin_dir) {
+        bail!("encoder install failed ({err}); nothing was installed");
+    }
     let bin = bin_dir.join("packset-embed");
-    fs::rename(&new_bin, &bin).with_context(|| format!("install {}", bin.display()))?;
+    swap_encoder(stage, &new_lib, &new_bin, lib, &bin)?;
     Ok(format!(
         "encoder: installed {} and ONNX Runtime in {} (checksums match)",
         bin.display(),
@@ -1278,8 +1288,73 @@ fn install_encoder(stage: &Path, target: &str, bin_dir: &Path, lib: &Path) -> Re
     ))
 }
 
-/// A cloud VM. A CI job is not one, and the box and a laptop build
-/// packset-embed from source.
+/// `symlink_metadata` sees a dangling symlink. `exists` follows links and
+/// would leave that name in the way of the rename.
+fn path_present(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => bail!("encoder install failed ({err}); nothing was installed"),
+    }
+}
+
+/// Stage both names, swap both, and roll both back. The stage directory is
+/// removed by the caller, so a backup that is still there at return is gone.
+fn swap_encoder(
+    stage: &Path,
+    new_lib: &Path,
+    new_bin: &Path,
+    lib: &Path,
+    bin: &Path,
+) -> Result<()> {
+    let backup_lib = stage.join("old-lib");
+    let backup_bin = stage.join("old-bin");
+    let had_lib = path_present(lib)?;
+    let had_bin = path_present(bin)?;
+    let mut bin_aside = false;
+
+    let fail = |bin_aside: bool, cause: &str| -> Result<()> {
+        let lib_err = had_lib
+            .then(|| fs::rename(&backup_lib, lib).err())
+            .flatten();
+        let bin_err = bin_aside
+            .then(|| fs::rename(&backup_bin, bin).err())
+            .flatten();
+        match lib_err.or(bin_err) {
+            None => bail!("encoder install failed ({cause}); nothing was installed"),
+            Some(err) => bail!(
+                "encoder install failed ({cause}); restoring the previous encoder also failed: {err}"
+            ),
+        }
+    };
+
+    if had_lib {
+        if let Err(err) = fs::rename(lib, &backup_lib) {
+            bail!("encoder install failed ({err}); nothing was installed");
+        }
+    }
+    if had_bin {
+        if let Err(err) = fs::rename(bin, &backup_bin) {
+            return fail(false, &err.to_string());
+        }
+        bin_aside = true;
+    }
+    if let Err(err) = fs::rename(new_lib, lib) {
+        return fail(bin_aside, &err.to_string());
+    }
+    if let Err(err) = fs::rename(new_bin, bin) {
+        // The new runtime is occupying the live name. Move it back into the
+        // stage, or delete it, so the previous runtime can return.
+        if fs::rename(lib, new_lib).is_err() {
+            let _ = fs::remove_dir_all(lib);
+        }
+        return fail(bin_aside, &err.to_string());
+    }
+    Ok(())
+}
+
+/// A cloud VM. A CI job is not one. Anywhere else the encoder is not
+/// installed.
 fn cloud_vm() -> bool {
     if github_actions() {
         return false;
@@ -2427,6 +2502,251 @@ fn hostname() -> String {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "vm".into())
+}
+
+#[derive(Debug)]
+struct ArchiveMember {
+    /// tar's verbose type character: `-` file, `d` directory, `l` symlink.
+    kind: u8,
+    name: Vec<u8>,
+}
+
+/// Members of one encoder archive. A listing tar will not parse is refused,
+/// so a hostile header cannot be unpacked on the strength of a later stat.
+fn refuse_unsafe_archive(file: &Path) -> Result<()> {
+    let out = Command::new("tar")
+        .args(["--full-time", "--quoting-style=shell-always", "-tvzf"])
+        .arg(file)
+        .stdin(std::process::Stdio::null())
+        .env("LC_ALL", "C")
+        .output()
+        .context("tar")?;
+    if !out.status.success() {
+        bail!(
+            "tar {}: {}; nothing was installed",
+            file.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let members = match parse_tar_listing(&out.stdout) {
+        Ok(members) => members,
+        Err(err) => bail!("tar {}: {err}; nothing was installed", file.display()),
+    };
+    for member in members {
+        let shown = String::from_utf8_lossy(&member.name);
+        if member.name.is_empty() || member.name.contains(&0) {
+            bail!(
+                "encoder archive {}: a member path is empty; nothing was installed",
+                file.display()
+            );
+        }
+        if !archive_member_path_ok(&member.name) {
+            bail!(
+                "encoder archive {}: member {shown} has an absolute path or '..'; nothing was installed",
+                file.display()
+            );
+        }
+        match member.kind {
+            b'-' | b'd' => {}
+            b'l' => bail!(
+                "encoder archive {}: member {shown} is a symlink; nothing was installed",
+                file.display()
+            ),
+            b'h' => bail!(
+                "encoder archive {}: member {shown} is a hard link; nothing was installed",
+                file.display()
+            ),
+            _ => bail!(
+                "encoder archive {}: member {shown} is not a regular file; nothing was installed",
+                file.display()
+            ),
+        }
+    }
+    Ok(())
+}
+
+fn archive_member_path_ok(name: &[u8]) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Component;
+    if name.is_empty() || name.contains(&0) || name[0] == b'/' {
+        return false;
+    }
+    let path = Path::new(std::ffi::OsStr::from_bytes(name));
+    if path.is_absolute() {
+        return false;
+    }
+    path.components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
+/// `tar -tv` with `--quoting-style=shell-always`. Names may contain
+/// newlines, so records are split on the shell quotes, not on lines.
+fn parse_tar_listing(bytes: &[u8]) -> Result<Vec<ArchiveMember>> {
+    let mut members = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\n' {
+            i += 1;
+            continue;
+        }
+        let kind = bytes[i];
+        let quote = bytes[i..]
+            .iter()
+            .position(|b| *b == b'\'')
+            .context("unquoted tar member")?;
+        let start = i + quote;
+        let (name, used) = parse_shell_single(&bytes[start..])?;
+        let mut j = start + used;
+        let rest = &bytes[j..];
+        if rest.starts_with(b" -> ") || rest.starts_with(b" link to ") {
+            let target = rest
+                .iter()
+                .position(|b| *b == b'\'')
+                .context("unquoted link target")?;
+            let (_, used_target) = parse_shell_single(&rest[target..])?;
+            j += target + used_target;
+        }
+        if j < bytes.len() && bytes[j] == b'\n' {
+            j += 1;
+        } else if j < bytes.len() {
+            bail!("tar member list has trailing bytes");
+        }
+        members.push(ArchiveMember { kind, name });
+        i = j;
+    }
+    Ok(members)
+}
+
+/// One shell-always single-quoted word. `'\''` is a literal quote.
+fn parse_shell_single(bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
+    if bytes.first() != Some(&b'\'') {
+        bail!("tar member is not shell-quoted");
+    }
+    let mut out = Vec::new();
+    let mut i = 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            i += 1;
+            if bytes.get(i) == Some(&b'\\') && bytes.get(i + 1) == Some(&b'\'') {
+                out.push(b'\'');
+                i += 2;
+                if bytes.get(i) != Some(&b'\'') {
+                    bail!("broken shell quote in tar member");
+                }
+                i += 1;
+                continue;
+            }
+            return Ok((out, i));
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    bail!("unterminated shell quote in tar member")
+}
+
+/// What the unpack left on disk. `symlink_metadata` does not follow a link,
+/// so a link tar created is still a link here.
+fn refuse_unsafe_tree(root: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for ent in fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))? {
+            let path = ent?.path();
+            let meta =
+                fs::symlink_metadata(&path).with_context(|| format!("stat {}", path.display()))?;
+            let rel = path.strip_prefix(root).unwrap_or(path.as_path());
+            let ft = meta.file_type();
+            if ft.is_symlink() {
+                bail!(
+                    "encoder archive member {} is a symlink; nothing was installed",
+                    rel.display()
+                );
+            }
+            if ft.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !ft.is_file() {
+                bail!(
+                    "encoder archive member {} is not a regular file; nothing was installed",
+                    rel.display()
+                );
+            }
+            if meta.nlink() != 1 {
+                bail!(
+                    "encoder archive member {} is a hard link; nothing was installed",
+                    rel.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn regular_file(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file())
+}
+
+#[cfg(all(test, unix))]
+mod archive_member_tests {
+    use super::{archive_member_path_ok, parse_tar_listing, refuse_unsafe_archive};
+
+    #[test]
+    fn shell_quotes_and_escaping_paths_parse() {
+        let mut raw = b"-rw-r--r-- 0/0 3 1970-01-01 00:00:00 'bin/odd '".to_vec();
+        raw.extend_from_slice(b"\\''name'\\''\nwith space'\n");
+        raw.extend_from_slice(
+            b"lrwxrwxrwx ubuntu/ubuntu 0 2026-10-22 01:11:10 'bin/packset-embed' -> '/etc/passwd'\n",
+        );
+        raw.extend_from_slice(
+            b"hrw-r--r-- ubuntu/ubuntu 0 2026-10-22 01:11:10 'bin/real' link to 'bin/packset-embed'\n",
+        );
+        raw.extend_from_slice(b"prw-r--r-- ubuntu/ubuntu 0 2026-10-22 01:11:10 'bin/fifo'\n");
+        raw.extend_from_slice(b"-rw-r--r-- 0/0 17 1970-01-01 00:00:00 '/bin/packset-embed'\n");
+        raw.extend_from_slice(b"-rw-r--r-- 0/0 7 1970-01-01 00:00:00 '../escaped'\n");
+        let members = parse_tar_listing(&raw).unwrap();
+        assert_eq!(members.len(), 6, "{members:?}");
+        assert_eq!(members[0].kind, b'-');
+        assert_eq!(members[0].name, b"bin/odd 'name'\nwith space");
+        assert_eq!(members[1].kind, b'l');
+        assert_eq!(members[2].kind, b'h');
+        assert_eq!(members[3].kind, b'p');
+        assert_eq!(members[4].name, b"/bin/packset-embed");
+        assert_eq!(members[5].name, b"../escaped");
+        assert!(archive_member_path_ok(&members[0].name));
+        assert!(!archive_member_path_ok(&members[4].name));
+        assert!(!archive_member_path_ok(&members[5].name));
+        assert!(!archive_member_path_ok(b"bin/../../escaped2"));
+        assert!(archive_member_path_ok(
+            b"lib/onnxruntime/libonnxruntime.so.1"
+        ));
+        assert!(archive_member_path_ok(b"lib/"));
+    }
+
+    #[test]
+    fn tar_listing_refuses_a_symlink_member() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("tree");
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", dir.join("bin/packset-embed")).unwrap();
+        let archive = root.path().join("bad.tar.gz");
+        let out = std::process::Command::new("tar")
+            .arg("-C")
+            .arg(&dir)
+            .arg("-czf")
+            .arg(&archive)
+            .arg("bin")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let err = refuse_unsafe_archive(&archive).unwrap_err().to_string();
+        assert!(err.contains("symlink"), "{err}");
+        assert!(err.contains("nothing was installed"), "{err}");
+    }
 }
 
 #[cfg(test)]
