@@ -47347,8 +47347,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(!tree.contains(id3.as_str()), "{tree}");
     }
 
-    /// Build deedar at the deedimport2 tip and import a bag `on_finish`
-    /// wrote. The export is then reduced to what deedar on main leaves:
+    /// Build the deedar commit in `.github/deedar-pin` and import a bag
+    /// `on_finish` wrote. The export is then reduced to what deedar on main leaves:
     /// one-line link files, no `sources`, no `bytes/`. Finish has to put
     /// the digest form back, including a tab-separated `sources` line for
     /// a carried deed made from one this bag does not carry. A missing
@@ -47612,17 +47612,18 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(tip.contains(&id2), "{tip}");
     }
 
-    /// deedar from deedimport2-20261021, at the commit whose import reads
-    /// `bytes/` and digest sidecars. The binary is installed on PATH the
-    /// way CI installs deedar. A failed build fails the test.
+    /// deedar at the commit in `.github/deedar-pin`, whose import reads
+    /// `bytes/` and digest sidecars. CI builds that same file. The binary
+    /// is installed on PATH the way CI installs deedar. A failed build
+    /// fails the test.
     fn deedimport_deedar() -> std::path::PathBuf {
-        const SHA: &str = "0cf75a3f647968ffce5eb466c22b0d3320837032";
+        let sha = deedar_pin();
         let cache = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/deedimport2-deedar");
         let bin_dir = cache.join("bin");
         let bin = bin_dir.join("deedar");
         let stamp = cache.join("sha");
-        if bin.is_file() && std::fs::read_to_string(&stamp).ok().as_deref() == Some(SHA) {
+        if bin.is_file() && std::fs::read_to_string(&stamp).ok().as_deref() == Some(sha.as_str()) {
             return bin_dir;
         }
         if cache.exists() {
@@ -47630,34 +47631,51 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 .unwrap_or_else(|e| panic!("clear {}: {e}", cache.display()));
         }
         let src = cache.join("src");
-        let cloned = std::process::Command::new("git")
-            .args([
-                "clone",
-                "--depth",
-                "1",
-                "--branch",
-                "deedimport2-20261021",
-                "https://github.com/leidarljos/deedar.git",
-            ])
-            .arg(&src)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .output()
-            .unwrap_or_else(|e| panic!("git clone deedar: {e}"));
-        assert!(
-            cloned.status.success(),
-            "git clone deedar\n{}{}",
-            String::from_utf8_lossy(&cloned.stderr),
-            String::from_utf8_lossy(&cloned.stdout)
-        );
-        let head = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&src)
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .unwrap_or_else(|e| panic!("git rev-parse: {e}"));
-        assert!(head.status.success(), "git rev-parse failed");
+        let src_arg = src.to_str().unwrap();
+        // GIT_DIR overrides -C. A parallel test exports it, and the pin
+        // checkout would then land in that repository.
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_OBJECT_DIRECTORY")
+                .env_remove("GIT_INDEX_FILE")
+                .env_remove("GIT_COMMON_DIR")
+                .env_remove("GIT_NAMESPACE")
+                .output()
+                .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+            assert!(
+                out.status.success(),
+                "git {args:?}\n{}{}",
+                String::from_utf8_lossy(&out.stderr),
+                String::from_utf8_lossy(&out.stdout)
+            );
+            out
+        };
+        git(&["init", "-q", src_arg]);
+        git(&[
+            "-C",
+            src_arg,
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/leidarljos/deedar.git",
+        ]);
+        git(&[
+            "-C",
+            src_arg,
+            "fetch",
+            "--depth",
+            "1",
+            "origin",
+            sha.as_str(),
+        ]);
+        git(&["-C", src_arg, "checkout", "--detach", "FETCH_HEAD"]);
+        let head = git(&["-C", src_arg, "rev-parse", "HEAD"]);
         let head = String::from_utf8_lossy(&head.stdout);
-        assert_eq!(head.trim(), SHA, "deedimport2-20261021 moved");
+        assert_eq!(head.trim(), sha.as_str(), "deedar pin checkout");
         let built = std::process::Command::new("cargo")
             .args(["build", "--locked", "--manifest-path"])
             .arg(src.join("Cargo.toml"))
@@ -47666,6 +47684,12 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             .args(["-p", "deedar-cli", "--bin", "deedar"])
             .env_remove("CARGO_TARGET_DIR")
             .env("GIT_TERMINAL_PROMPT", "0")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_NAMESPACE")
             .output()
             .unwrap_or_else(|e| panic!("cargo build deedar: {e}"));
         assert!(
@@ -47687,9 +47711,24 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        std::fs::write(&stamp, SHA).unwrap();
+        std::fs::write(&stamp, &sha).unwrap();
         assert!(bin.is_file(), "deedar is not on PATH");
         bin_dir
+    }
+
+    /// The one commit in `.github/deedar-pin`. CI reads the same file.
+    fn deedar_pin() -> String {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.github/deedar-pin");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let sha = text.trim();
+        assert!(
+            sha.len() == 40 && sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+            "{} is not one commit: {text:?}",
+            path.display()
+        );
+        sha.to_string()
     }
 
     fn accession_of(text: &str) -> String {
