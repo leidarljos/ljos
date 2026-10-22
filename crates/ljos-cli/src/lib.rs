@@ -42803,6 +42803,34 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
     }
 
+    /// ljos on another host, or this one through ssh, is not under the
+    /// runner, so it takes the words it is given as the person's. A tool
+    /// call that runs it there to write a memory, a preference or an
+    /// acceptance skips the check the local run makes.
+    #[test]
+    fn ljos_writing_the_persons_words_through_ssh_is_denied() {
+        let _g = env_guard();
+        for line in [
+            "ssh localhost ljos prefer --user --promote L-1 --why x",
+            "ssh localhost 'ljos prefer --user always paste it'",
+            "ssh -p 22 me@box ~/.local/bin/ljos remember a b c d",
+            "ssh localhost \"cd /tmp && ljos accept L-1\"",
+            "ssh -o BatchMode=yes localhost env FOO=1 ljos prefer a b c d",
+            "ssh jump ssh localhost ljos remember a b c d",
+            "sh -c 'ssh localhost ljos prefer --user a b c d'",
+        ] {
+            assert!(seat_guard(line).is_some(), "allowed: {line}");
+        }
+        for line in [
+            "ssh localhost ljos status",
+            "ssh localhost ljos recall paste",
+            "ljos prefer --user --why x always paste it",
+            "ssh localhost echo ljos prefer",
+        ] {
+            assert!(seat_guard(line).is_none(), "refused: {line}");
+        }
+    }
+
     /// The bare name `latest-prompt` says where a write lands only when a
     /// command writes what it is given. Searching for it, printing it or
     /// testing for it touches nothing.
