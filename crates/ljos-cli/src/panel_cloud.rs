@@ -47,8 +47,12 @@ comes from the launcher \
 as LJOS_TRACKER_REMOTE and is not written here. When that variable is set, \
 `cloud up` turns push mode on.
 
-Cast the ballot as {persona} (`ljos vote {issue} --for OPTION --as \
-{persona}`). The seat that signs it is the one `cloud up` wrote.
+Cast the ballot as the seat `cloud up` wrote, not as {persona}. Load \
+that seat with `set -a; . \"$HOME/.config/ljos/env\"; set +a`, then run \
+the brief's `ljos vote {issue}` line with `--as \"$LJOS_SEAT\"` in place \
+of `--as {persona}`. That seat's key signs the ballot, and it is the \
+seat the slot below names. A ballot cast `--as {persona}` is signed \
+with {persona}'s own key, and no slot names it.
 
 == slot
 slot: {seat} model={family}
@@ -173,9 +177,15 @@ mod tests {
         assert!(text.contains("recorded for the launcher to sign"), "{text}");
         assert!(!text.contains("counts only under"), "{text}");
         assert!(
-            text.contains("ljos vote probe-l0g0 --for OPTION --as Ada Rider"),
+            text.contains("set -a; . \"$HOME/.config/ljos/env\"; set +a"),
             "{text}"
         );
+        assert!(
+            text.contains("`ljos vote probe-l0g0` line with `--as \"$LJOS_SEAT\"`"),
+            "{text}"
+        );
+        assert!(!text.contains("--for OPTION --as Ada Rider"), "{text}");
+        assert!(!text.contains("The seat that signs it"), "{text}");
         assert!(text.contains("vissue vote probe-l0g0"), "{text}");
         assert!(text.contains("vissue show probe-l0g0"), "{text}");
         assert!(text.contains("ljos consensus probe-l0g0"), "{text}");
