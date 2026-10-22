@@ -3907,13 +3907,18 @@ const CURL_FLAG: &str = "\
     progress-bar/# remote-name/O remote-name-all remote-header-name/J http1.1 http2 \
     path-as-is no-progress-meter create-dirs ipv4/4 ipv6/6 retry-all-errors include/i \
     disable/q use-ascii/B list-only/l append/a help/h version/V manual/M \
-    junk-session-cookies/j proxytunnel/p";
+    junk-session-cookies/j proxytunnel/p tlsv1/1 tlsv1.0 tlsv1.1 tlsv1.2 tlsv1.3 http1.0/0 \
+    http2-prior-knowledge remote-time/R fail-early no-buffer/N buffer tcp-nodelay \
+    keepalive no-keepalive retry-connrefused parallel/Z styled-output basic digest ntlm \
+    negotiate anyauth post301 post302 post303 disallow-username-in-url crlf";
 const CURL_VALUE: &str = "\
     output/o retry retry-delay retry-max-time connect-timeout max-time/m max-redirs \
     user-agent/A referer/e cookie/b cookie-jar/c proxy-user/U cacert capath cert/E key \
     speed-limit/Y speed-time/y limit-rate output-dir write-out/w user/u oauth2-bearer \
     dump-header/D continue-at/C range/r time-cond/z telnet-option/t ftp-port/P quote/Q \
-    proto proto-redir proto-default";
+    proto proto-redir proto-default tls-max ciphers tls13-ciphers curves cert-type key-type \
+    pass pinnedpubkey crlfile max-filesize keepalive-time url-query etag-compare etag-save \
+    trace trace-ascii stderr noproxy";
 const CURL_ROUTE: &str = "\
     proxy/x preproxy proxy1.0 socks4 socks4a socks5 socks5-hostname resolve connect-to \
     doh-url dns-servers unix-socket abstract-unix-socket alt-svc";
