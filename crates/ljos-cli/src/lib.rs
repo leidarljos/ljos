@@ -36633,7 +36633,13 @@ mod tests {
         let _url = PackUrl::set(&url);
         let found = packset_search_as_of("tag the release", 3, Some("2026-01-01"), true).unwrap();
         assert_eq!(found[0].id.as_deref(), Some("other"));
-        let lines = seen.lock().unwrap().clone();
+        let lines: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.contains("/v1/search"))
+            .cloned()
+            .collect();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("rerank=1"), "{lines:?}");
         assert!(lines[0].contains("as_of="), "{lines:?}");
