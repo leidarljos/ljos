@@ -1321,18 +1321,30 @@ fn promote(seat: &Seat, id: &str) {
 
 /// POST `body` to `path` on `daemon` and return what it answers.
 fn post(daemon: &Daemon, path: &str, body: serde_json::Value) -> serde_json::Value {
-    ureq::post(&format!("{}{path}", daemon.url))
+    try_post(daemon, path, body).unwrap_or_else(|status| panic!("{path} refused with {status}"))
+}
+
+/// [`post`], or the status `daemon` refuses the write with.
+fn try_post(
+    daemon: &Daemon,
+    path: &str,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, u16> {
+    match ureq::post(&format!("{}{path}", daemon.url))
         .set("Authorization", &format!("Bearer {TOKEN}"))
         .send_json(body)
-        .unwrap()
-        .into_json()
-        .unwrap()
+    {
+        Ok(answer) => Ok(answer.into_json().unwrap()),
+        Err(ureq::Error::Status(status, _)) => Err(status),
+        Err(err) => panic!("{path}: {err}"),
+    }
 }
 
 /// The review's repro on packsetd: the person's lesson is retracted and
 /// its id posted again as the person's. The new record is another lesson,
 /// so the rule promoted from the first is not stated, whatever the new
-/// text, the old text again among them.
+/// text, the old text again among them. A packsetd that retires a
+/// tombstoned id refuses the post with 409, and the rule stays unstated.
 #[test]
 fn a_lesson_id_posted_again_is_another_lesson() {
     const ID: &str = "lessonid0000000000000000000001";
@@ -1349,16 +1361,27 @@ fn a_lesson_id_posted_again_is_another_lesson() {
     let quiet = "tidy the changelog fragments";
     assert!(states_rule(&seat.prompt_anew(quiet), RELEASE_KEY));
 
+    let mut live = true;
     for text in ["Unrelated note about the weather.", RELEASE_KEY] {
-        let gone = post(
-            &daemon,
-            "/v1/atoms/delete",
-            serde_json::json!({"workspace": "seat", "id": ID, "why": "deed-patch-not-a-real-deed"}),
-        );
-        assert_eq!(gone["tombstone"], true, "{gone}");
+        if live {
+            let gone = post(
+                &daemon,
+                "/v1/atoms/delete",
+                serde_json::json!({"workspace": "seat", "id": ID, "why": "deed-patch-not-a-real-deed"}),
+            );
+            assert_eq!(gone["tombstone"], true, "{gone}");
+        }
         assert!(!states_rule(&seat.prompt_anew(quiet), RELEASE_KEY));
-        let again = post(&daemon, "/v1/atoms", lesson(text));
-        assert_eq!(again["tombstone"], false, "{again}");
+        live = match try_post(&daemon, "/v1/atoms", lesson(text)) {
+            Ok(again) => {
+                assert_eq!(again["tombstone"], false, "{again}");
+                true
+            }
+            Err(status) => {
+                assert_eq!(status, 409, "the post of {text:?} again");
+                false
+            }
+        };
         let note = seat.prompt_anew(quiet);
         assert!(
             !states_rule(&note, RELEASE_KEY),
@@ -1371,6 +1394,8 @@ fn a_lesson_id_posted_again_is_another_lesson() {
 /// stores an agent's lesson as `user-declared` with the person basis the
 /// update sent. A rule promoted while the lesson was the agent's stays
 /// unstated: the pack's record is not the one the rule was promoted from.
+/// A packsetd that keeps a blank origin from laundering refuses the update
+/// with 400, and the rule stays unstated.
 #[test]
 fn a_lesson_laundered_to_the_person_is_not_their_rule() {
     const ID: &str = "lessonid0000000000000000000002";
@@ -1391,20 +1416,56 @@ fn a_lesson_laundered_to_the_person_is_not_their_rule() {
 
     for origin in [serde_json::Value::Null, serde_json::json!("")] {
         let update = |fields: serde_json::Value| {
-            post(
+            try_post(
                 &daemon,
                 "/v1/atoms/update",
                 serde_json::json!({"workspace": "seat", "id": ID, "fields": fields}),
             )
         };
-        update(serde_json::json!({"origin": "agent-derived", "source": {"basis": "agent"}}));
-        let laundered =
-            update(serde_json::json!({"origin": origin, "source": {"basis": "person"}}));
-        assert_eq!(laundered["origin"], "user-declared", "{laundered}");
+        update(serde_json::json!({"origin": "agent-derived", "source": {"basis": "agent"}}))
+            .unwrap();
+        match update(serde_json::json!({"origin": origin, "source": {"basis": "person"}})) {
+            Ok(laundered) => assert_eq!(laundered["origin"], "user-declared", "{laundered}"),
+            Err(status) => assert_eq!(status, 400, "the update to origin {origin}"),
+        }
         let note = seat.prompt_anew(quiet);
         assert!(
             !states_rule(&note, RELEASE_KEY),
             "origin {origin} laundered the agent's lesson into the person's rule: {note}"
+        );
+    }
+}
+
+/// The client half of both repros above, whatever packsetd accepts: a
+/// pack that answers the promoted lesson's id with another record, the
+/// same words posted again, other words, or the agent's lesson stored as
+/// the person's, states no rule.
+#[test]
+fn a_pack_that_answers_the_id_with_another_record_states_no_rule() {
+    const ID: &str = "lessonid0000000000000000000009";
+    let persons = persons_lesson(ID, RELEASE_KEY);
+    let mut again = persons.clone();
+    again["valid_from"] = serde_json::json!("2026-10-21T00:00:00.000Z");
+    let mut weather = again.clone();
+    weather["text"] = serde_json::json!("Unrelated note about the weather.");
+    let mut agents = atom(ID, "lesson", RELEASE_KEY, "agent-derived", &["seat:probe"]);
+    agents["source"]["basis"] = serde_json::json!("agent");
+    for (promoted, answered, stated) in [
+        (&persons, &persons, true),
+        (&persons, &again, false),
+        (&persons, &weather, false),
+        (&agents, &persons, false),
+    ] {
+        let body = answered.clone();
+        let seat = Seat::on(serve_scripted(vec![], move |req| {
+            (reads_atom(req, ID) && authorized(req)).then(|| Reply::now("200 OK", body.clone()))
+        }));
+        promoted_rule(&seat, promoted);
+        let note = seat.prompt("tidy the changelog fragments");
+        assert_eq!(
+            states_rule(&note, RELEASE_KEY),
+            stated,
+            "promoted from {promoted}, answered with {answered}: {note}"
         );
     }
 }
