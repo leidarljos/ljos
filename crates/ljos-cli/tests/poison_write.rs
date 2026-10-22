@@ -820,6 +820,51 @@ fn a_bash_write_to_the_latest_prompt_is_denied() {
     }
 }
 
+/// The guard states a rule's reason as the person's only when the pack
+/// says the person stands behind it. An agent rule, or one with no
+/// basis, has its reason labelled an unverified agent note.
+#[test]
+fn the_guard_labels_a_rule_not_the_persons_unverified() {
+    let seat = Seat::new();
+    let stored = [
+        ("agent", "agent-derived", Some("agent")),
+        ("bare", "user-declared", None),
+        ("person", "user-declared", Some("person")),
+    ];
+    for (name, origin, basis) in stored {
+        let mut atom = serde_json::json!({
+            "id": format!("{name:a>32}"),
+            "kind": "rule",
+            "pattern": format!("*deploy-{name}*"),
+            "verdict": "deny",
+            "text": PLANT,
+            "origin": origin,
+        });
+        if let Some(basis) = basis {
+            atom["source"] = serde_json::json!({"basis": basis});
+        }
+        seat.atoms.lock().unwrap().push(atom);
+    }
+    for (name, _, basis) in stored {
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "person-1",
+            "tool_name": "Bash",
+            "tool_input": {"command": format!("deploy-{name}")},
+        })
+        .to_string();
+        let stdout = hook_stdout(&seat, &payload);
+        let answer: serde_json::Value =
+            serde_json::from_str(stdout.trim()).unwrap_or(serde_json::Value::Null);
+        let reason = answer["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(reason.contains(PLANT), "{name}: {stdout}");
+        let labelled = reason.starts_with("unverified agent note: ");
+        assert_eq!(labelled, basis != Some("person"), "{name}: {reason}");
+    }
+}
+
 fn mcp_remember(seat: &Seat, text: &str) -> serde_json::Value {
     mcp_call(
         seat,

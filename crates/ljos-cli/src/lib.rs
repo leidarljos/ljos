@@ -17475,20 +17475,24 @@ pub fn format_rules(rules: &[Rule], json: bool) -> String {
         .collect()
 }
 
-/// The live rules in a set of atoms.
+/// The live rules in a set of atoms. A reason the pack does not say the
+/// person stands behind is labelled an unverified agent note, so no gate
+/// states it as the person's.
 pub fn rules_of(atoms: &[Value]) -> Vec<Rule> {
     atoms
         .iter()
         .filter(|a| a.get("kind").and_then(Value::as_str) == Some("rule"))
         .filter_map(|a| {
+            let text = a.get("text").and_then(Value::as_str).unwrap_or("");
+            let reason = if text.is_empty() || person_stored(a) {
+                text.to_string()
+            } else {
+                format!("unverified agent note: {text}")
+            };
             Some(Rule {
                 pattern: a.get("pattern")?.as_str()?.to_string(),
                 verdict: a.get("verdict")?.as_str()?.to_string(),
-                reason: a
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
+                reason,
             })
         })
         .collect()
