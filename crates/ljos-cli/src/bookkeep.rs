@@ -172,7 +172,9 @@ struct RepoBook {
     #[serde(default)]
     recall: String,
     /// HEAD the first time this sitting saw the repository, before a commit
-    /// ran. A deed is cited only when HEAD has moved past it.
+    /// ran. A deed is cited only when HEAD has moved past it. A rebind to
+    /// another issue moves this to HEAD then, so the previous issue's
+    /// commits are not cited on the new one.
     #[serde(default)]
     start_sha: Option<String>,
     /// The prompt this sitting is working from. agy sends no title of its
@@ -1047,6 +1049,7 @@ pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result
     }
     let row = book.repos.entry(place.clone()).or_default();
     row.last_unix = now;
+    let rebound = row.issue.as_deref().is_some_and(|old| old != issue_id);
     clear_issue_fields_if_issue_changes(row, &issue_id);
     row.issue = Some(issue_id.clone());
     row.filed = filed_here;
@@ -1055,6 +1058,11 @@ pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result
     row.started = true;
     row.claim_failed = false;
     row.recall.clone_from(&recall);
+    if rebound {
+        // Commits already made belong to the issue this row just left.
+        // HEAD now is the baseline, so the next citation starts after them.
+        row.start_sha = head_sha(&place).ok();
+    }
     if !cwd.is_empty() {
         book.cwd_repo.insert(cwd, place);
     }
@@ -1788,6 +1796,7 @@ fn tracker_holder(issue: &str) -> Option<String> {
 /// row, which then holds `issue`.
 fn adopt_row(book: &mut Book, repo: &str, issue: &str, moved: RepoBook) {
     let row = book.repos.entry(repo.to_string()).or_default();
+    let rebound = row.issue.as_deref().is_some_and(|old| old != issue);
     clear_issue_fields_if_issue_changes(row, issue);
     row.issue = Some(issue.to_string());
     row.finished = false;
@@ -1797,7 +1806,9 @@ fn adopt_row(book: &mut Book, repo: &str, issue: &str, moved: RepoBook) {
     } else {
         moved.recall
     };
-    if moved.start_sha.is_some() {
+    if rebound {
+        row.start_sha = head_sha(repo).ok();
+    } else if moved.start_sha.is_some() {
         row.start_sha = moved.start_sha;
     }
     if row.title.is_none() {
@@ -3356,7 +3367,9 @@ fn bind_prompt(book: &mut Book, repo: &str, now: u64) {
 
 /// A row that moves to another issue must drop issue-bound state from the
 /// prior issue. A rewrite must not carry old deeds, failures or lesson links
-/// onto the new ticket.
+/// onto the new ticket. The commit baseline goes with them. The caller
+/// plants HEAD at the rebind, so a later citation does not walk the
+/// previous issue's range.
 fn clear_issue_fields_if_issue_changes(row: &mut RepoBook, issue: &str) {
     if row.issue.as_deref() == Some(issue) {
         return;
@@ -3380,6 +3393,7 @@ fn clear_issue_fields_if_issue_changes(row: &mut RepoBook, issue: &str) {
     row.also.clear();
     row.elsewhere.clear();
     row.filed = false;
+    row.start_sha = None;
 }
 
 /// Copy `row.title` into `lesson_title` once, when a lesson already exists.
@@ -5403,6 +5417,182 @@ mod tests {
         assert!(
             !queued.contains("atom-a"),
             "the second issue rewrite superseded the first issue atom\n{queued}"
+        );
+    }
+
+    /// A sitting that moves from one issue to another must not book the
+    /// first issue's commits on the second. The baseline stays at the old
+    /// HEAD otherwise, and the next citation walks that range again.
+    #[test]
+    fn a_rebind_does_not_cite_the_previous_issues_commits() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+            "LJOS_SEAT",
+            "LJOS_HARNESS_SESSION",
+        ]);
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let session = "zdnr4a-rebind";
+        unsafe {
+            std::env::set_var("LJOS_SESSION_ID", session);
+            std::env::remove_var("LJOS_SEAT");
+            std::env::remove_var("LJOS_HARNESS_SESSION");
+        }
+        let proj = tracker.join("Software/probe");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("issues.org"),
+            "\
+* TODO [#C] First issue
+:PROPERTIES:
+:ID:         probe-00aa
+:END:
+* TODO [#C] Second issue
+:PROPERTIES:
+:ID:         probe-00ab
+:END:
+",
+        )
+        .unwrap();
+        let repo_s = git_toplevel(&repo).expect("toplevel");
+        let seed = head_sha(&repo_s).expect("seed");
+        let first = land_commit(&repo, "first.txt", "work for the first issue");
+        let now = unix_secs();
+        let mut book = Book {
+            last_unix: now,
+            ..Book::default()
+        };
+        book.repos.insert(
+            repo_s.clone(),
+            RepoBook {
+                issue: Some("probe-00aa".into()),
+                start_sha: Some(seed),
+                deeds: vec![first.clone()],
+                started: true,
+                last_unix: now,
+                ..RepoBook::default()
+            },
+        );
+        store_book(&book_path(session), &book);
+
+        let said = start_work(
+            Some("probe-00ab"),
+            Some(repo.to_str().unwrap()),
+            "Continue on the second issue",
+        )
+        .expect("rebind");
+        assert!(said.contains("probe-00ab"), "{said}");
+        assert!(
+            cite_into_open_sitting(&repo_s),
+            "the open sitting was not cited"
+        );
+        let row = load_book(&book_path(session))
+            .repos
+            .get(&repo_s)
+            .cloned()
+            .expect("row");
+        assert_eq!(row.issue.as_deref(), Some("probe-00ab"));
+        assert!(
+            !row.deeds.iter().any(|sha| sha == &first),
+            "rebind cited the previous issue's commit: {:?}",
+            row.deeds
+        );
+        let later = land_commit(&repo, "later.txt", "work on the second issue");
+        assert!(cite_into_open_sitting(&repo_s));
+        let row = load_book(&book_path(session))
+            .repos
+            .get(&repo_s)
+            .cloned()
+            .expect("row after later commit");
+        assert!(
+            row.deeds.iter().any(|sha| sha == &later),
+            "the commit after the rebind was not cited: {:?}",
+            row.deeds
+        );
+        assert!(
+            !row.deeds.iter().any(|sha| sha == &first),
+            "the later citation still carried the previous commit: {:?}",
+            row.deeds
+        );
+    }
+
+    /// Folding another issue into a row must not keep the baseline the
+    /// previous issue was citing from.
+    #[test]
+    fn adopt_row_rebind_does_not_cite_the_previous_issues_commits() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "XDG_RUNTIME_DIR",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "LJOS_OFF",
+            "LJOS_SESSION_ID",
+            "LJOS_SEAT",
+        ]);
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let proj = tracker.join("Software/probe");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("issues.org"),
+            "\
+* TODO [#C] First issue
+:PROPERTIES:
+:ID:         probe-00aa
+:END:
+* TODO [#C] Second issue
+:PROPERTIES:
+:ID:         probe-00ab
+:END:
+",
+        )
+        .unwrap();
+        let repo_s = git_toplevel(&repo).expect("toplevel");
+        let seed = head_sha(&repo_s).expect("seed");
+        let first = land_commit(&repo, "first.txt", "work for the first issue");
+        let mut book = Book::default();
+        book.repos.insert(
+            repo_s.clone(),
+            RepoBook {
+                issue: Some("probe-00aa".into()),
+                start_sha: Some(seed.clone()),
+                deeds: vec![first.clone()],
+                ..RepoBook::default()
+            },
+        );
+        adopt_row(
+            &mut book,
+            &repo_s,
+            "probe-00ab",
+            RepoBook {
+                start_sha: Some(seed),
+                ..RepoBook::default()
+            },
+        );
+        cite_row(&mut book, &repo_s, &repo_s).expect("cite");
+        let row = book.repos.get(&repo_s).expect("row");
+        assert_eq!(row.issue.as_deref(), Some("probe-00ab"));
+        assert!(
+            !row.deeds.iter().any(|sha| sha == &first),
+            "adopt cited the previous issue's commit: {:?}",
+            row.deeds
         );
     }
 
