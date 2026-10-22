@@ -113,17 +113,48 @@ fn unwrapped(entry: &str) -> &str {
         .map_or(entry, str::trim)
 }
 
+/// How much of a prompt the hook keeps on disk. The rest is not in the
+/// file; [`agrees_truncated`] uses a hash of the whole prompt instead.
+pub const KEPT_PROMPT_CHARS: usize = 8000;
+
 /// Whether `kept` is, whole, an entry the person typed in the latest turn
 /// of `transcript`, whatever the spacing and with Cursor's wrapper set
 /// aside. A kept prompt that is only a span of an entry is not that
 /// entry: a tool call could cut the prompt down to the clause it wants.
 #[must_use]
 pub fn agrees(transcript: &str, kept: &str) -> bool {
+    agrees_truncated(transcript, kept, "")
+}
+
+/// [`agrees`] for a prompt the hook stored shortened to
+/// [`KEPT_PROMPT_CHARS`]. `full_hash` is the sha256 of the folded whole
+/// prompt, as the bind records it. Empty means an older bind: agreement
+/// stays whole-entry, so a short prompt still matches and a truncated one
+/// does not. With a hash, the entry's folded text must hash to it and the
+/// folded prefix of [`KEPT_PROMPT_CHARS`] must be `kept`. A shorter clause
+/// does not, even when that clause is what the file now holds.
+#[must_use]
+pub fn agrees_truncated(transcript: &str, kept: &str, full_hash: &str) -> bool {
     let kept = folded(kept);
-    !kept.is_empty()
-        && latest_turn(transcript)
-            .iter()
-            .any(|t| unwrapped(&folded(t)) == kept)
+    if kept.is_empty() {
+        return false;
+    }
+    latest_turn(transcript).iter().any(|entry| {
+        if full_hash.is_empty() {
+            return unwrapped(&folded(entry)) == kept;
+        }
+        let bare = unwrapped(entry);
+        folded_hash(bare) == full_hash
+            && folded(&bare.chars().take(KEPT_PROMPT_CHARS).collect::<String>()) == kept
+    })
+}
+
+/// sha256 of [`folded`] `text`, hex. The hook hashes the prompt it was
+/// given; agreement hashes the transcript entry with the wrapper removed.
+#[must_use]
+pub fn folded_hash(text: &str) -> String {
+    use sha2::Digest as _;
+    hex::encode(sha2::Sha256::digest(folded(text).as_bytes()))
 }
 
 /// The directories the runner `kind` keeps its record under, read from
@@ -235,6 +266,49 @@ mod tests {
         assert!(!agrees(&cursor, "never yarn."));
         assert!(!agrees(&cursor, "Done."));
         assert!(!agrees("", "x"));
+    }
+
+    /// The hook keeps 8000 characters. The transcript still holds the
+    /// whole prompt. The hash of that whole prompt is what makes them
+    /// the same entry, and a short clause taken from it is not.
+    #[test]
+    fn a_long_prompt_agrees_by_the_full_hash() {
+        let prompt = format!(
+            "Keep the release notes in one file. {}",
+            "word ".repeat(4000)
+        );
+        assert!(prompt.chars().count() > KEPT_PROMPT_CHARS);
+        let kept: String = prompt.chars().take(KEPT_PROMPT_CHARS).collect();
+        let hash = folded_hash(&prompt);
+        let transcript = lines(&[serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": prompt.clone()}
+        })]);
+        assert!(
+            !agrees(&transcript, &kept),
+            "truncation must not pass whole-entry agreement"
+        );
+        assert!(agrees_truncated(&transcript, &kept, &hash));
+        assert!(!agrees_truncated(
+            &transcript,
+            "Keep the release notes in one file.",
+            &hash
+        ));
+        let clause = "Keep the release notes in one file.";
+        assert!(!agrees_truncated(&transcript, clause, &folded_hash(clause)));
+        let wrapped = lines(&[serde_json::json!({
+            "role": "user",
+            "message": {"content": [{"type": "text", "text": format!("<user_query>\n{prompt}\n</user_query>")}]}
+        })]);
+        assert!(agrees_truncated(&wrapped, &kept, &hash));
+        assert!(agrees_truncated(
+            &lines(&[serde_json::json!({
+                "type": "user",
+                "message": {"role": "user", "content": "Fix the parser test"}
+            })]),
+            "Fix the  parser\ntest",
+            &folded_hash("Fix the parser test")
+        ));
     }
 
     #[test]
