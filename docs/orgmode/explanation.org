@@ -345,7 +345,11 @@ file the process runs; the script is then judged as a runner file is.
 A copy whose name is the runner,
 in =/tmp=, =/var/tmp=, =/dev/shm=, a project tree or a =.local= of its
 own making, or reached through a link that leaves its root, is not
-that program. Nothing sits between the hook and the runner but the
+that program. All of this is Linux only, since it reads
+=/proc/<pid>/exe= and walks with =O_PATH= descriptors: on macOS and
+any other system no process is an installed runner, whatever root it
+runs from, so =ljos hook= keeps no prompt as the person's and
+=prefer --user= refuses. Nothing sits between the hook and the runner but the
 =sh -c= that runs the configured hook command, and the runner must not
 itself run inside a tool call.
 The guard's =PreToolUse= records the tool call: the session id, the
