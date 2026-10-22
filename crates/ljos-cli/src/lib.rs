@@ -29656,23 +29656,78 @@ pub(crate) use tests::{serve_sync_pack, SyncPack};
 
 #[cfg(test)]
 mod tests {
+    /// Install `text` at `path` and return only after no write descriptor
+    /// remains on that inode.
+    ///
+    /// `std::fs::write` opens the file in this process. A sibling test's
+    /// fork inherits that descriptor until the child execs, and the kernel
+    /// answers ETXTBSY. The bytes are written by a short-lived process to
+    /// a temporary name, synced, and renamed into place only after that
+    /// process has exited, so this process never holds the write side.
+    fn publish_exe(path: &std::path::Path, text: &str) {
+        let dir = path.parent().unwrap();
+        let file_name = path.file_name().unwrap();
+        let n = {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        };
+        let tmp = dir.join(format!(
+            ".{}.{}.{}",
+            file_name.to_string_lossy(),
+            std::process::id(),
+            n
+        ));
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("/bin/cat > \"$1\" && /bin/chmod 755 \"$1\"")
+            .arg("publish-exe")
+            .arg(&tmp)
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write;
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(text.as_bytes())
+                .unwrap();
+        }
+        drop(child.stdin.take());
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "publish {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        {
+            let file = std::fs::File::open(&tmp).unwrap();
+            file.sync_all().unwrap();
+        }
+        std::fs::rename(&tmp, path).unwrap();
+        if let Ok(dir_file) = std::fs::File::open(dir) {
+            let _ = dir_file.sync_all();
+        }
+    }
+
     /// A guard shim refuses what ljos-policyd denies, with the rule and a
     /// way forward, and runs the real command for everything else.
     #[cfg(unix)]
     #[test]
     fn a_guard_shim_refuses_a_deny_and_runs_the_rest() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let guard = dir.path().join("guard-bin");
         let fake = dir.path().join("fake");
         std::fs::create_dir_all(&guard).unwrap();
         std::fs::create_dir_all(&fake).unwrap();
-        let exe = |p: &std::path::Path, text: &str| {
-            std::fs::write(p, text).unwrap();
-            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        };
-        exe(&guard.join("rm"), super::GUARD_SHIM);
-        exe(
+        publish_exe(&guard.join("rm"), super::GUARD_SHIM);
+        publish_exe(
             &fake.join("ljos-policyd"),
             "#!/bin/sh\ncase \"$*\" in *-rf*) printf 'deny\\trm-rf-outside-tmp\\n'; exit 2;; *slug*) printf 'deny\\tphronesis\\n'; exit 2;; *mixed*) printf 'deny\\tPhronesis\\n'; exit 2;; *bound*) printf 'deny\\tbind-failed\\n'; exit 2;; *spaced*) printf 'deny\\t  Bind-Failed  \\n'; exit 2;; *packed*) printf 'deny\\tpack-unavailable\\n'; exit 2;; *folded*) printf 'deny\\t  PACK-UNAVAILABLE  \\n'; exit 2;; *blew*) printf 'deny\\tpack-unavailable: janet failed to load\\n'; exit 2;; *ruled*) printf 'deny\\tphronesis: keep-the-tree\\n'; exit 2;; *outside*) printf 'deny\\tpath-outside-workspace: /etc/passwd\\n'; exit 2;; *secret*) printf 'deny\\tsecret material in argv denied by the pack\\n'; exit 2;; esac\necho allow\n",
         );
@@ -29834,20 +29889,16 @@ mod tests {
         let fake = dir.path().join("fake");
         std::fs::create_dir_all(&guard).unwrap();
         std::fs::create_dir_all(&fake).unwrap();
-        let exe = |p: &std::path::Path, text: &str| {
-            std::fs::write(p, text).unwrap();
-            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        };
-        exe(&guard.join("git"), super::GUARD_SHIM);
+        publish_exe(&guard.join("git"), super::GUARD_SHIM);
         let marker = dir.path().join("asked");
-        exe(
+        publish_exe(
             &fake.join("ljos-policyd"),
             &format!(
                 "#!/bin/sh\ntouch '{}'\nprintf 'deny\\tgit-branch-delete\\n'\nexit 2\n",
                 marker.display()
             ),
         );
-        exe(&fake.join("git"), "#!/bin/sh\necho ran\n");
+        publish_exe(&fake.join("git"), "#!/bin/sh\necho ran\n");
         let run = |home: &std::path::Path, env: &[(&str, &str)], cwd: &std::path::Path| {
             let _ = std::fs::remove_file(&marker);
             let mut cmd = std::process::Command::new("git");
@@ -29913,7 +29964,7 @@ mod tests {
         assert!(marker.exists());
         let err = String::from_utf8_lossy(&denied.stderr);
         assert!(err.contains("denied"), "{err}");
-        exe(&guard.join("rm"), super::GUARD_SHIM);
+        publish_exe(&guard.join("rm"), super::GUARD_SHIM);
         let _ = std::fs::remove_file(&marker);
         let removed = std::process::Command::new(guard.join("rm"))
             .args(["-rf", "/home/ubuntu/proj"])
@@ -29943,7 +29994,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_guard_shim_lets_a_feature_lease_push_run_and_asks_about_main() {
-        use std::os::unix::fs::PermissionsExt;
         // The shim inherits this process. Another test's GIT_DIR would
         // make rev-parse leave the fixture, and a protected branch would
         // be pushed instead of asked about.
@@ -29958,32 +30008,37 @@ mod tests {
         for d in [&guard, &fake, &home, &repo] {
             std::fs::create_dir_all(d).unwrap();
         }
-        let exe = |p: &std::path::Path, text: &str| {
-            std::fs::write(p, text).unwrap();
-            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        };
-        exe(&guard.join("git"), super::GUARD_SHIM);
-        exe(
+        publish_exe(&guard.join("git"), super::GUARD_SHIM);
+        publish_exe(
             &fake.join("ljos-policyd"),
             "#!/bin/sh\ncase \"$*\" in\n*push*--force*) printf 'deny\\tgit-force-push\\n'; exit 2;;\n*) printf 'allow\\n';;\nesac\n",
         );
         let real_git = which::which("git").expect("git on PATH");
-        // A parallel test may set GIT_DIR on this process. These git
-        // commands have to see this checkout, not that one.
-        let scrub = |cmd: &mut std::process::Command| {
-            cmd.env_remove("GIT_DIR");
-            cmd.env_remove("GIT_WORK_TREE");
-        };
-        let plain = |args: &[&str]| {
-            let mut cmd = std::process::Command::new(&real_git);
-            cmd.arg("-C")
-                .arg(&repo)
-                .args(args)
+        // Dropping GIT_DIR and GIT_WORK_TREE is not enough. Git also
+        // follows GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_COMMON_DIR,
+        // GIT_NAMESPACE and the config-count variables, and a global
+        // hooks path exits 1. A parallel test that exports any of those
+        // makes rev-parse leave this fixture, so a protected branch is
+        // pushed and git exits 1 instead of the guard's 126. Start from
+        // an empty environment and name only this fixture.
+        let gitconfig = root.path().join("gitconfig");
+        std::fs::write(&gitconfig, "[core]\n\thooksPath = /dev/null\n").unwrap();
+        let real_path = format!("{}:/usr/bin:/bin", real_git.parent().unwrap().display());
+        let seal = |cmd: &mut std::process::Command| {
+            cmd.env_clear()
+                .env("HOME", &home)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", &gitconfig)
                 .env("GIT_AUTHOR_NAME", "Rohit Goswami")
                 .env("GIT_AUTHOR_EMAIL", "rgoswami@ieee.org")
                 .env("GIT_COMMITTER_NAME", "Rohit Goswami")
                 .env("GIT_COMMITTER_EMAIL", "rgoswami@ieee.org");
-            scrub(&mut cmd);
+        };
+        let plain = |args: &[&str]| {
+            let mut cmd = std::process::Command::new(&real_git);
+            cmd.arg("-C").arg(&repo).args(args);
+            seal(&mut cmd);
+            cmd.env("PATH", &real_path);
             let out = cmd.output().unwrap();
             assert!(
                 out.status.success(),
@@ -29995,23 +30050,12 @@ mod tests {
         plain(&["config", "commit.gpgsign", "false"]);
         plain(&["commit", "-q", "--allow-empty", "-m", "seed"]);
         plain(&["checkout", "-q", "-b", "feature"]);
+        let shim_path = format!("{}:{}:{real_path}", guard.display(), fake.display());
         let shim = |args: &[&str]| {
             let mut cmd = std::process::Command::new(guard.join("git"));
-            cmd.args(args)
-                .current_dir(&repo)
-                .env("HOME", &home)
-                .env(
-                    "PATH",
-                    format!(
-                        "{}:{}:{}",
-                        guard.display(),
-                        fake.display(),
-                        real_git.parent().unwrap().display()
-                    ),
-                )
-                .env_remove("LJOS_OFF")
-                .env("LJOS_GUARD", "on");
-            scrub(&mut cmd);
+            cmd.args(args).current_dir(&repo);
+            seal(&mut cmd);
+            cmd.env("PATH", &shim_path).env("LJOS_GUARD", "on");
             cmd.output().unwrap()
         };
         // There is no remote, so git itself fails once the shim lets the
@@ -38309,13 +38353,10 @@ mod tests {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("deedar");
-        std::fs::write(
+        publish_exe(
             &bin,
             "#!/bin/sh\ncase \"$2\" in\nknown) exit 0;;\n*) echo \"no such deed $2\" >&2; exit 1;;\nesac\n",
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let path = std::env::var("PATH").unwrap_or_default();
         let _env = HoldEnv::set(&[("PATH", &format!("{}:{}", dir.path().display(), path))]);
         let err = super::require_deed("deed-missing").unwrap_err().to_string();
@@ -38354,13 +38395,10 @@ mod tests {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("deedar");
-        std::fs::write(
+        publish_exe(
             &bin,
             "#!/bin/sh\ncase \"$2\" in\nsha256:*) echo 'id=deed-file-survey kind=file name=survey'; echo 'accession=deed-file-survey';;\ndeed-file-survey) echo 'id=deed-file-survey kind=file';;\n*) echo \"invalid deed id: $2\" >&2; exit 1;;\nesac\n",
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let path = std::env::var("PATH").unwrap_or_default();
         let _env = HoldEnv::set(&[("PATH", &format!("{}:{}", dir.path().display(), path))]);
         let digest = format!("file=sha256:{}", "cd".repeat(32));
