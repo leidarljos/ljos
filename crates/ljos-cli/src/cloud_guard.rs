@@ -4625,19 +4625,19 @@ fn wget_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) ->
         }
         if lower == "-e" || lower == "--execute" {
             if let Some(value) = words.get(i + 1) {
-                note_wget_exec(value, &mut method, &mut body);
+                note_wget_exec(value, &mut method, &mut body, &mut tune.github);
             }
             i += 2;
             continue;
         }
         if let Some(value) = lower.strip_prefix("--execute=") {
-            note_wget_exec(value, &mut method, &mut body);
+            note_wget_exec(value, &mut method, &mut body, &mut tune.github);
             i += 1;
             continue;
         }
         if let Some(value) = lower.strip_prefix("-e") {
             if !value.is_empty() && !lower.starts_with("--") {
-                note_wget_exec(value, &mut method, &mut body);
+                note_wget_exec(value, &mut method, &mut body, &mut tune.github);
                 i += 1;
                 continue;
             }
@@ -4764,6 +4764,9 @@ fn apply_wget_text(text: &str, tune: &mut Tune) -> Option<HttpShape> {
             CfgLine::Bad => opaque = true,
             CfgLine::Item { name, value } => {
                 let key = name.replace(['_', '-'], "");
+                if wget_key_moves_target(&key, value.as_deref().unwrap_or("")) {
+                    tune.github = true;
+                }
                 match key.as_str() {
                     "method" => {
                         tune.method = Some(value.unwrap_or_default().trim().to_ascii_uppercase());
@@ -4780,10 +4783,27 @@ fn apply_wget_text(text: &str, tune: &mut Tune) -> Option<HttpShape> {
     opaque.then_some(HttpShape::Opaque)
 }
 
-fn note_wget_exec(value: &str, method: &mut Option<String>, body: &mut bool) {
+/// A wgetrc command that can supply or change where the request goes. The
+/// target is then not the one on the command line, so it may be GitHub.
+fn wget_key_moves_target(key: &str, value: &str) -> bool {
+    match key {
+        "input" | "inputmetalink" | "base" | "httpproxy" | "httpsproxy" | "ftpproxy"
+        | "useproxy" => true,
+        "header" => value
+            .trim_start()
+            .get(..5)
+            .is_some_and(|name| name.eq_ignore_ascii_case("host:")),
+        _ => false,
+    }
+}
+
+fn note_wget_exec(value: &str, method: &mut Option<String>, body: &mut bool, github: &mut bool) {
     let lower = value.to_ascii_lowercase();
     let (key, val) = lower.split_once('=').unwrap_or((lower.as_str(), ""));
     let key = key.trim();
+    if wget_key_moves_target(&key.replace(['_', '-'], ""), val) {
+        *github = true;
+    }
     match key {
         "method" => *method = Some(val.trim().to_ascii_uppercase()),
         "body_data" | "body_file" | "post_data" | "post_file" | "header" => *body = true,

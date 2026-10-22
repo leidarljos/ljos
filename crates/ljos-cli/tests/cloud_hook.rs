@@ -1041,6 +1041,58 @@ fn a_wget_config_is_a_write_without_a_token_on_the_command() {
     );
 }
 
+/// A wgetrc line or `-e` command that supplies or changes the target
+/// (an input file, a base, a proxy, a Host header) means the URL on the
+/// command line is not where the request goes, so it may be GitHub.
+#[test]
+fn a_wget_config_that_moves_the_target_may_be_github() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let line = "wget -q https://example.com/x";
+
+    fs::write(home.join(".wgetrc"), "method = POST\n").unwrap();
+    allowed(line, here);
+    for moved in [
+        "input = /tmp/urls",
+        "input_metalink = /tmp/urls.meta4",
+        "base = https://api.github.com/",
+        "https_proxy = https://api.github.com/",
+        "http-proxy = api.github.com:443",
+        "ftp_proxy = api.github.com",
+        "use_proxy = on",
+        "header = Host: api.github.com",
+        "header = host:api.github.com",
+    ] {
+        fs::write(home.join(".wgetrc"), format!("method = POST\n{moved}\n")).unwrap();
+        let hit = cloud_refusal(line, here);
+        assert!(
+            hit.is_some_and(|hit| hit.pattern == "cloud-cursor-push"),
+            "`{moved}` in ~/.wgetrc was allowed"
+        );
+    }
+    fs::write(home.join(".wgetrc"), "method = POST\nheader = X-Host: a\n").unwrap();
+    allowed(line, here);
+    fs::remove_file(home.join(".wgetrc")).unwrap();
+
+    allowed("wget --method=DELETE https://example.com/x", here);
+    refused(
+        "wget -e https_proxy=https://api.github.com/ --method=DELETE https://example.com/x",
+        here,
+    );
+    refused(
+        "wget --execute=input=/tmp/urls --method=DELETE https://example.com/x",
+        here,
+    );
+    refused(
+        "wget -ebase=https://api.github.com/ --method=DELETE https://example.com/x",
+        here,
+    );
+}
+
 /// Only a missing default config is no config. A directory, a fifo, or a
 /// symlink there could not be read, so the request is judged a write. A
 /// fifo must not hold the guard waiting for a writer.
