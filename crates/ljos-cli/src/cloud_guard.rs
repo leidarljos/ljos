@@ -3997,6 +3997,8 @@ struct Tune {
     unreadable: bool,
     /// URLs curl will request, from the command line and its configs.
     urls: Vec<String>,
+    /// `-g`: curl takes `{}[]` in a URL literally.
+    globoff: bool,
 }
 
 fn curl_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) -> (HttpShape, bool) {
@@ -4072,7 +4074,12 @@ fn curl_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) ->
 }
 
 fn curl_config_github(words: &[String], tune: &Tune) -> bool {
-    if tune.github || tune.urls.iter().any(|url| curl_url_github(url)) {
+    if tune.github
+        || tune
+            .urls
+            .iter()
+            .any(|url| curl_url_github(url, tune.globoff))
+    {
         return true;
     }
     // The file was not readable, so the host it would request is unknown
@@ -4415,6 +4422,7 @@ fn apply_curl_opt(
         "request" => tune.method = Some(value.to_ascii_uppercase()),
         "head" => tune.method = Some("HEAD".to_string()),
         "get" => tune.query = true,
+        "globoff" => tune.globoff = true,
         "data" | "data-ascii" | "data-binary" | "data-raw" | "data-urlencode" | "json"
         | "upload-file" | "form" | "form-string" | "header"
             if value.starts_with('@') =>
@@ -4449,14 +4457,18 @@ fn header_sets_host(value: &str) -> bool {
 
 /// Whether a URL curl requests may reach GitHub: its host is GitHub, an
 /// address, or a name the shell has not expanded yet. Curl takes a word
-/// without a scheme as a URL.
-fn curl_url_github(url: &str) -> bool {
+/// without a scheme as a URL. Unless `-g` is given, curl expands `{a,b}`
+/// and `[1-3]` into several URLs, so `git{hub,lab}.com` is two hosts.
+fn curl_url_github(url: &str, globoff: bool) -> bool {
     let url = url
         .trim()
         .trim_matches(|c| c == '"' || c == '\'' || c == '<' || c == '>');
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     let auth = rest.split(['/', '?', '#']).next().unwrap_or("");
     if unreadable_token(auth) || auth.contains("{{") {
+        return true;
+    }
+    if !globoff && auth.contains(['{', '}', '[', ']']) {
         return true;
     }
     let hostport = auth.rsplit_once('@').map_or(auth, |(_, host)| host);

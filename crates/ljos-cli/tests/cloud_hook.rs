@@ -1207,6 +1207,45 @@ fn a_curl_command_line_that_moves_the_target_may_be_github() {
     fs::remove_file(home.join(".curlrc")).unwrap();
 }
 
+/// Curl expands `{a,b}` and `[1-3]` in a URL into several URLs unless
+/// `-g` is given, so a host with those may be GitHub.
+#[test]
+fn a_curl_glob_in_the_host_may_be_github() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    for url in [
+        "https://git{hub,xxx}.com/",
+        "https://api.git{hub}.com/user",
+        "https://github.co[l-m]/",
+        "git{hub,xxx}.com/",
+    ] {
+        refused(&format!("curl -X POST '{url}'"), here);
+        refused(&format!("curl -X POST --url '{url}'"), here);
+        allowed(&format!("curl -s '{url}'"), here);
+    }
+    allowed("curl -X POST 'https://example.com/{a,b}'", here);
+    allowed("curl -g -X POST 'https://git{hub,xxx}.com/'", here);
+    allowed("curl -X POST --globoff 'https://git{hub,xxx}.com/'", here);
+
+    fs::write(
+        home.join(".curlrc"),
+        "request = POST\nurl = \"https://git{hub,xxx}.com/\"\n",
+    )
+    .unwrap();
+    refused("curl -s https://example.com/x", here);
+    fs::write(
+        home.join(".curlrc"),
+        "request = POST\ngloboff\nurl = \"https://git{hub,xxx}.com/\"\n",
+    )
+    .unwrap();
+    allowed("curl -s https://example.com/x", here);
+    fs::remove_file(home.join(".curlrc")).unwrap();
+}
+
 /// An address names a peer, not a host. GitHub answers there for the
 /// name in a `Host:` header or the TLS name, so the request may be
 /// GitHub's.
