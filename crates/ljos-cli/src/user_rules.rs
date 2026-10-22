@@ -746,11 +746,29 @@ fn fired(rule: &UserRule) -> Rule {
     } else {
         format!("{text} ({why})")
     };
-    Rule {
-        pattern: format!("user-rule:{}", rule.id),
-        verdict: "deny".into(),
-        reason,
+    reported(
+        rule,
+        Rule {
+            pattern: format!("user-rule:{}", rule.id),
+            verdict: "deny".into(),
+            reason,
+        },
+    )
+}
+
+/// `law`, fired by `rule`, as a guard reports it. A promoted rule the pack
+/// does not confirm still fires, with a reason that says it is unverified
+/// rather than the person's: a deny or an ask only takes a command away,
+/// so honouring an unconfirmed one never widens what the agent may run,
+/// while dropping it would let a slow, down or forged pack lift a deny.
+fn reported(rule: &UserRule, mut law: Rule) -> Rule {
+    if let Some(why) = unconfirmed(rule) {
+        law.reason = format!(
+            "unverified, not confirmed as the person's rule ({why}): {}",
+            law.reason
+        );
     }
+    law
 }
 
 /// Whether `rule` is an outbound-post denial, the only verdict
@@ -774,14 +792,22 @@ pub fn guard_line(line: &str) -> Option<Rule> {
     if rules.is_empty() || line.trim().is_empty() {
         return None;
     }
-    let argv: Vec<Rule> = rules.iter().filter_map(as_argv).collect();
+    let (rows, argv): (Vec<&UserRule>, Vec<Rule>) = rules
+        .iter()
+        .filter_map(|rule| Some((rule, as_argv(rule)?)))
+        .unzip();
+    // The rule verdict_for gives a line nested too deep is no row.
+    let report = |law: &Rule| match argv.iter().position(|row| std::ptr::eq(row, law)) {
+        Some(at) => reported(rows[at], law.clone()),
+        None => law.clone(),
+    };
     if let Some(hit) = super::verdict_for(&argv, line).filter(|rule| rule.verdict == "deny") {
-        return Some(hit.clone());
+        return Some(report(hit));
     }
     if let Some(hit) = outbound(line, &rules) {
         return Some(hit);
     }
-    super::verdict_for(&argv, line).cloned()
+    super::verdict_for(&argv, line).map(report)
 }
 
 /// The user-rule verdict for a hook payload that names a tool, if the tool
@@ -1773,6 +1799,48 @@ mod tests {
         assert_eq!(denied.verdict, "deny");
         assert_eq!(denied.pattern, "gh pr comment*");
         assert!(super::super::static_guard("gh issue list").is_none());
+    }
+
+    /// With no pack to confirm its lesson, a promoted rule still denies on
+    /// its pattern, on a mention and on an MCP post, and each reason says
+    /// it is unverified. A rule written as words keeps its own reason.
+    #[test]
+    fn an_unconfirmed_promoted_rule_still_denies_as_unverified() {
+        let (_lock, _dir) = isolated();
+        let lesson = serde_json::json!({
+            "id": "lesson-status", "kind": "lesson", "text": "Leave git status alone.",
+            "origin": "user-declared", "source": {"basis": "person"},
+        });
+        let mention = People {
+            handles: vec!["ocaisa".into()],
+            names: vec![],
+        };
+        promote_atom(&lesson, "fixture", &mention, &People::default()).unwrap();
+        let mut rows = read_all().unwrap();
+        rows[0].pattern = Some("git status*".into());
+        rows[0].verdict = Some("deny".into());
+        std::fs::write(rules_path().unwrap(), render_rules(&rows).unwrap()).unwrap();
+        let mcp = r#"{"tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"please ask @ocaisa"}}"#;
+        for denied in [
+            super::super::static_guard("git status").expect("pattern"),
+            super::super::static_guard("gh pr comment 12 --body 'please ask @ocaisa'")
+                .expect("mention"),
+            guard_payload(mcp).expect("mcp"),
+        ] {
+            assert_eq!(denied.verdict, "deny", "{denied:?}");
+            assert!(
+                denied.reason.starts_with("unverified") && denied.reason.contains("lesson-status"),
+                "an unconfirmed rule's denial read as the person's: {denied:?}"
+            );
+        }
+        write_argv(&Rule {
+            pattern: "git log*".into(),
+            verdict: "deny".into(),
+            reason: "leave the log alone".into(),
+        })
+        .unwrap();
+        let denied = super::super::static_guard("git log").unwrap();
+        assert_eq!(denied.reason, "leave the log alone");
     }
 
     fn git_ok(dir: &std::path::Path, args: &[&str]) {

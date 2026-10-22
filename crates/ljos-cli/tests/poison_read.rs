@@ -315,9 +315,15 @@ impl Seat {
 
     /// What the hook prints for `payload`.
     fn hook(&self, payload: serde_json::Value) -> String {
+        self.hook_with(payload, &[])
+    }
+
+    /// [`Seat::hook`] with `env` set on the hook as well.
+    fn hook_with(&self, payload: serde_json::Value, env: &[(&str, &str)]) -> String {
         let payload = payload.to_string();
         let mut child = self
             .command(env!("CARGO_BIN_EXE_ljos"), &["hook"])
+            .envs(env.iter().copied())
             .spawn()
             .unwrap();
         child
@@ -760,6 +766,53 @@ fn ljos_rules_lists_an_unconfirmed_promoted_rule_as_unverified() {
         line.starts_with("unverified\t") && line.contains("did not answer"),
         "a rule with the pack down was not listed as unverified: {line}"
     );
+}
+
+/// The review's repro for the guards: a promoted rule with the deny
+/// pattern `git status*` denies `git status` in the PreToolUse hook
+/// whether or not the pack confirms its lesson, as a deny only takes a
+/// command away. Once a by-id read answers 404 the reason says the rule
+/// is unverified rather than reading as the person's.
+#[test]
+fn an_unconfirmed_promoted_deny_still_denies_as_unverified() {
+    const ID: &str = "lessonid0000000000000000000008";
+    let lesson = persons_lesson(ID, RELEASE_KEY);
+    for held in [true, false] {
+        let seat = Seat::new(if held { vec![lesson.clone()] } else { vec![] });
+        promoted_rule(&seat, &lesson);
+        let path = seat.home.path().join(".config/ljos/user-rules.json");
+        let mut rules: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        rules["rules"][0]["pattern"] = serde_json::json!("git status*");
+        rules["rules"][0]["verdict"] = serde_json::json!("deny");
+        std::fs::write(&path, rules.to_string()).unwrap();
+        let out = seat.hook_with(
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "guard-1",
+                "tool_name": "Bash",
+                "tool_input": {"command": "git status"},
+                "cwd": seat.home.path(),
+            }),
+            &[("LJOS_GUARD", "on")],
+        );
+        let said = out
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .next_back()
+            .unwrap_or_else(|| panic!("no hook answer: {out}"));
+        let decision = &said["hookSpecificOutput"];
+        assert_eq!(decision["permissionDecision"], "deny", "{out}");
+        let reason = decision["permissionDecisionReason"].as_str().unwrap_or("");
+        if held {
+            assert_eq!(reason, "fixture (ljos rule `git status*`)", "{out}");
+        } else {
+            assert!(
+                reason.starts_with("unverified") && reason.contains(ID),
+                "an unconfirmed rule's deny read as the person's: {out}"
+            );
+        }
+    }
 }
 
 /// A `vissue` that answers every call with `body`, so a brief reads a
