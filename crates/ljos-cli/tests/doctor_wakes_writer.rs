@@ -4,14 +4,16 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "common/seat_root.rs"]
+mod seat_root;
+
 /// A seat home outside the temp roots. A temp HOME is a sandbox and the
 /// daemon stays out of those, so this proof cannot live in one.
 struct SeatHome(PathBuf);
 
 impl SeatHome {
     fn new(name: &str) -> Self {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../target")
+        let dir = seat_root::seat_root(ljos_cli::bookkeep::path_is_temp)
             .join(format!("ljos-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("seat home");
