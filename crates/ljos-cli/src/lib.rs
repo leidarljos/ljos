@@ -7669,7 +7669,8 @@ fn with_issue_recall(call: &HookCall, text: String) -> String {
 /// for a long prompt (`kebab` in a task that also says `test` and
 /// `pytest`). The subject test still admits a short cue or two shared
 /// words, including a match that lives only in the atom's `source`.
-/// Empty when none of them bear on the prompt.
+/// Both are read on [`lexical_match_scores`], the hooks' scale, so the
+/// floor below is theirs. Empty when none of them bear on the prompt.
 fn lexical_recall(call: &HookCall, cue: &str, limit: usize) -> Option<(String, Vec<String>)> {
     let atoms = session_atoms(1_500).ok()?;
     let seen = seen_ids(call.session.as_deref());
@@ -7791,21 +7792,14 @@ fn bm25_distinctive(
     score
 }
 
-/// Rank of each body against `cue`, highest first. A shared abbreviation
+/// Rank of each body against `cue` on [`lexical_match_scores`], highest
+/// first, without the bodies that match nothing. A shared abbreviation
 /// counts as naming the subject.
 fn lexical_scores(bodies: &[&str], cue: &str) -> Vec<(usize, f64)> {
-    let docs: Vec<Vec<String>> = bodies.iter().map(|body| match_tokens(body)).collect();
-    let df = document_frequency(&docs);
-    let mut scored: Vec<(usize, f64)> = bodies
-        .iter()
+    let mut scored: Vec<(usize, f64)> = lexical_match_scores(bodies, cue)
+        .into_iter()
         .enumerate()
-        .filter_map(|(i, body)| {
-            let mut score = bm25_distinctive(&docs, &df, i, cue);
-            if names_the_subject(body, cue) {
-                score = score.max(1.0);
-            }
-            (score > 0.0).then_some((i, score))
-        })
+        .filter(|(_, score)| *score > 0.0)
         .collect();
     scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     scored
@@ -35859,6 +35853,25 @@ mod tests {
     /// `conflict of interest` and `COI` name one another. The phrase's
     /// other words are common in the pack, so without the abbreviation the
     /// claim shares nothing with the query and is not ranked.
+    /// A cold prompt reads the stored atoms on the scale the hooks use, so
+    /// a rare word repeated in an atom that does not name the subject
+    /// stays under one that names most of the prompt.
+    #[test]
+    fn a_cold_recall_ranks_by_the_graded_match_not_raw_bm25() {
+        let cue = "kebab case for the pytest fixtures";
+        let named = "Name pytest fixtures by their case";
+        let rare = "kebab kebab kebab";
+        let mut docs = vec![named, rare];
+        docs.extend(["Every pytest fixture keeps its case in this repo"; 6]);
+        assert!(names_the_subject(named, cue) && !names_the_subject(rare, cue));
+        let order: Vec<usize> = lexical_scores(&docs, cue)
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect();
+        let at = |i: usize| order.iter().position(|&x| x == i);
+        assert!(at(0) < at(1), "{order:?}");
+    }
+
     #[test]
     fn a_phrase_ranks_its_abbreviation_and_the_abbreviation_ranks_the_phrase() {
         let cue = "JOSS conflict of interest rule";
