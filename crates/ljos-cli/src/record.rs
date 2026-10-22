@@ -460,9 +460,9 @@ fn is_votes_drawer(drawer: &str) -> bool {
         .is_some_and(|l| l.trim().eq_ignore_ascii_case(":VOTES:"))
 }
 
-/// The line of `agent`'s ballot in a `:VOTES:` drawer of `text`, within
+/// The line of `voter`'s ballot in a `:VOTES:` drawer of `text`, within
 /// `span` when given. The last one, as a read keeps the last of two.
-fn ballot_line(text: &str, span: Option<(usize, usize)>, agent: &str) -> Option<usize> {
+fn ballot_line(text: &str, span: Option<(usize, usize)>, voter: &str) -> Option<usize> {
     let (from, to) = span.unwrap_or((1, usize::MAX));
     let mut inside = false;
     let mut found = None;
@@ -476,15 +476,15 @@ fn ballot_line(text: &str, span: Option<(usize, usize)>, agent: &str) -> Option<
             inside = true;
         } else if line.eq_ignore_ascii_case(":END:") {
             inside = false;
-        } else if inside && ballot_agent(line) == Some(agent) {
+        } else if inside && ballot_voter(line) == Some(voter) {
             found = Some(at);
         }
     }
     found
 }
 
-/// The agent of a `[STAMP] AGENT: CHOICE` drawer line.
-fn ballot_agent(line: &str) -> Option<&str> {
+/// The voter of a `[STAMP] VOTER: CHOICE` drawer line.
+fn ballot_voter(line: &str) -> Option<&str> {
     let (_, rest) = line.strip_prefix('[')?.split_once("] ")?;
     Some(rest.split_once(": ")?.0.trim())
 }
