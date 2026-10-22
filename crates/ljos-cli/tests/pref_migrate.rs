@@ -133,6 +133,16 @@ impl Seat {
             .unwrap()
     }
 
+    /// `ljos doctor` exits 0 only when the required binaries answer. The
+    /// other commands in this test keep the stripped PATH.
+    fn doctor(&self, bin: &str) -> Output {
+        stage_doctor_bins(self.home.path());
+        self.command(bin, &["doctor"])
+            .env("PATH", doctor_path(self.home.path()))
+            .output()
+            .unwrap()
+    }
+
     fn hook(&self, bin: &str, payload: Value) -> Output {
         let mut child = self.command(bin, &["hook"]).spawn().unwrap();
         child
@@ -176,6 +186,40 @@ impl Seat {
             .find(|v| v["id"] == 2)
             .unwrap_or_else(|| panic!("no tool answer\n{}", text_of(&out)))
     }
+}
+
+/// Symlink this build's `ljos` and `ljos-mcp`, stub the two tools this
+/// seat does not ship, and keep the parent's PATH so packset, packsetd,
+/// deedar and ljos-policyd stay the ones already installed.
+fn stage_doctor_bins(home: &Path) {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let mode = std::fs::Permissions::from_mode(0o755);
+    let vissue = bin.join("vissue");
+    std::fs::write(
+        &vissue,
+        "#!/bin/sh\nif [ \"$1\" = vote ]; then echo '--used --confidence'; else echo 'vissue 0.21.0'; fi\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&vissue, mode.clone()).unwrap();
+    let claimdag = bin.join("claimdag");
+    std::fs::write(&claimdag, "#!/bin/sh\necho 'claimdag 0.8.0'\n").unwrap();
+    std::fs::set_permissions(&claimdag, mode).unwrap();
+    for (name, src) in [
+        ("ljos", env!("CARGO_BIN_EXE_ljos")),
+        ("ljos-mcp", env!("CARGO_BIN_EXE_ljos-mcp")),
+    ] {
+        let dest = bin.join(name);
+        if !dest.exists() {
+            symlink(src, dest).unwrap();
+        }
+    }
+}
+
+fn doctor_path(home: &Path) -> String {
+    let parent = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
+    format!("{}:{parent}", home.join("bin").display())
 }
 
 fn text_of(out: &Output) -> String {
@@ -603,6 +647,20 @@ fn preferences_from_v0_32_1_follow_the_writer_that_stored_them() {
         .to_string();
     assert!(review.contains(&held_id), "{review}");
     assert!(review.contains(&hook_id), "{review}");
+    let held_atom = by_text(&migrated, "release key");
+    let when = &held_atom["ts"].as_str().unwrap_or("")[..10];
+    let seat_word = held_atom["source"]["seat"].as_str().unwrap_or("");
+    let line = review
+        .lines()
+        .find(|l| l.contains("release key"))
+        .unwrap_or("");
+    assert!(line.contains(when), "{line}");
+    assert!(line.contains(seat_word), "{line}");
+    assert!(line.contains("ljos/"), "{line}");
+    assert!(
+        line.contains(held_atom["source"]["session"].as_str().unwrap_or("missing")),
+        "{line}"
+    );
 
     let start = seat.hook(
         new,
@@ -628,7 +686,12 @@ fn preferences_from_v0_32_1_follow_the_writer_that_stored_them() {
     assert!(!prefs.contains("beside the tag"), "{start}");
     assert_eq!(cutoffs(&atoms(&daemon.url)).len(), 1);
 
-    let doctor = seat.output(new, &["doctor"]);
+    let doctor = seat.doctor(new);
+    assert!(
+        doctor.status.success(),
+        "held preferences must not fail the doctor\n{}",
+        text_of(&doctor)
+    );
     let doctor_out = String::from_utf8_lossy(&doctor.stdout);
     assert!(
         doctor_out.contains("2 older preferences await review"),
