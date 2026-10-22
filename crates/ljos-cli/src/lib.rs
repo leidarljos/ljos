@@ -5853,9 +5853,7 @@ fn cursor_hook_step(file: &Path, claude_settings: &Path, dry: bool) -> Step {
 /// Relative overrides are resolved against the hook's directory.
 pub fn hook_directory(input: &str) -> Result<PathBuf> {
     let value = serde_json::from_str::<Value>(input).unwrap_or(Value::Null);
-    let base = value["cwd"]
-        .as_str()
-        .or_else(|| value["workspacePaths"][0].as_str())
+    let base = session_path_raw(&value)
         .map(PathBuf::from)
         .map(Ok)
         .unwrap_or_else(std::env::current_dir)?;
@@ -5900,9 +5898,7 @@ pub fn command_directory(input: &str) -> Option<PathBuf> {
 /// session directory when the hook was started there.
 fn session_directory(input: &str) -> Option<PathBuf> {
     let value = serde_json::from_str::<Value>(input).ok()?;
-    let raw = value["cwd"]
-        .as_str()
-        .or_else(|| value["workspacePaths"][0].as_str())?;
+    let raw = session_path_raw(&value)?;
     let path = Path::new(raw);
     let joined = if path.is_absolute() {
         path.to_path_buf()
@@ -5912,6 +5908,14 @@ fn session_directory(input: &str) -> Option<PathBuf> {
     std::fs::canonicalize(joined)
         .ok()
         .filter(|path| path.is_dir())
+}
+
+/// The payload directory, with agy's tool-call cwd before workspace paths.
+fn session_path_raw(value: &Value) -> Option<&str> {
+    value["cwd"]
+        .as_str()
+        .or_else(|| value["toolCall"]["args"]["Cwd"].as_str())
+        .or_else(|| value["workspacePaths"][0].as_str())
 }
 
 /// What the runner's hook hands the seat: the event, and the text worth
@@ -46082,6 +46086,23 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             .to_string()
         )
         .is_err());
+    }
+
+    #[test]
+    fn agy_tool_call_cwd_precedes_workspace_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let agy = root.path().join("agy");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&agy).unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        let input = serde_json::json!({
+            "workspacePaths":[workspace],
+            "toolCall":{"args":{"Cwd":agy}},
+        });
+        assert_eq!(
+            hook_directory(&input.to_string()).unwrap(),
+            agy.canonicalize().unwrap()
+        );
     }
 
     /// A relative workdir resolves against the session directory. A missing
