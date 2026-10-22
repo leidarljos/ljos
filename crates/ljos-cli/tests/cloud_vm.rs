@@ -462,6 +462,92 @@ fn a_hostile_encoder_archive_installs_nothing() {
     }
 }
 
+/// Replace one release archive and rewrite its `.sha256`.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn replace_archive(rel: &Path, base: &str, top: &str, files: &[(&str, &[u8])]) {
+    let work = rel.join(format!("rebuild-{base}"));
+    let _ = fs::remove_dir_all(&work);
+    for (rel_path, bytes) in files {
+        let path = work.join(rel_path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
+    }
+    let archive = format!("{base}-x86_64-unknown-linux-gnu.tar.gz");
+    repack(rel, &archive, &work, top, None);
+}
+
+/// `0o555` lets the owner chmod the directory back and blocks a rename into it.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn lock_bin_dir(home: &Path) -> PathBuf {
+    let bin_dir = home.join(".local/bin");
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&bin_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    bin_dir
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn unlock_bin_dir(bin_dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(bin_dir, fs::Permissions::from_mode(0o755));
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn a_failed_encoder_swap_keeps_the_previous_pair() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, rel) = encoder_machine(root.path());
+    let said = ljos_cli::cloud::up(false).unwrap();
+    assert!(said.contains("encoder: installed"), "{said}");
+    let bin = home.join(".local/bin/packset-embed");
+    let soname = home.join(".local/lib/onnxruntime/libonnxruntime.so.1");
+    let old_bin = fs::read(&bin).unwrap();
+    assert_eq!(fs::read(&soname).unwrap(), b"runtime");
+    replace_archive(
+        &rel,
+        "onnxruntime",
+        "lib",
+        &[("lib/onnxruntime/libonnxruntime.so.1", b"runtime-new")],
+    );
+    replace_archive(
+        &rel,
+        "packset-embed",
+        "bin",
+        &[("bin/packset-embed", b"#!/bin/sh\nexit 7\n")],
+    );
+    let bin_dir = lock_bin_dir(&home);
+    let err = ljos_cli::cloud::up(true).unwrap_err().to_string();
+    unlock_bin_dir(&bin_dir);
+    assert_eq!(fs::read(&soname).unwrap(), b"runtime", "{err}");
+    assert_eq!(fs::read(&bin).unwrap(), old_bin, "{err}");
+    assert!(err.contains("nothing was installed"), "{err}");
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn a_failed_first_encoder_install_leaves_no_runtime() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, rel) = encoder_machine(root.path());
+    let bin_dir = home.join(".local/bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        fs::copy(rel.join(name), bin_dir.join(name)).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(bin_dir.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    lock_bin_dir(&home);
+    let err = ljos_cli::cloud::up(false).unwrap_err().to_string();
+    unlock_bin_dir(&bin_dir);
+    assert!(
+        !home.join(".local/lib/onnxruntime").exists(),
+        "a failed first install left the runtime: {err}"
+    );
+    assert!(!bin_dir.join("packset-embed").exists(), "{err}");
+    assert!(bin_dir.join("ljos").is_file());
+    assert!(err.contains("nothing was installed"), "{err}");
+}
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn a_ci_job_downloads_no_encoder() {
