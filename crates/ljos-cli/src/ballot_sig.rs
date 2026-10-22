@@ -517,7 +517,7 @@ pub(crate) fn env_root() -> Option<PathBuf> {
 }
 
 /// What `git ARGS` prints in the tracker at `VISSUE_ROOT`, trimmed, when
-/// it succeeds.
+/// it succeeds. Replacements and grafts are off ([`git_history`]).
 pub(crate) fn tracker_git(args: &[&str]) -> Option<String> {
     git_in(&env_root()?, args)
 }
@@ -539,13 +539,24 @@ pub fn tracker_is_git_checkout() -> Option<bool> {
     Some(String::from_utf8_lossy(&out.stdout).trim() == "true")
 }
 
-pub(crate) fn git_in(root: &Path, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new("git")
+/// `git` in `root` with replacements and grafts off. Pin order is the
+/// parents stored in the commits. A `refs/replace` ref or `info/grafts`
+/// rewrites those parents, so a read of tracker history must not follow
+/// either.
+pub(crate) fn git_history(root: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("--no-replace-objects")
         .arg("-C")
         .arg(root)
-        .args(args)
-        .output()
-        .ok()?;
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_GRAFT_FILE", "/dev/null");
+    cmd
+}
+
+/// What `git ARGS` prints in `root`, trimmed, when it succeeds.
+/// Replacements and grafts are off ([`git_history`]).
+pub(crate) fn git_in(root: &Path, args: &[&str]) -> Option<String> {
+    let out = git_history(root).args(args).output().ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())

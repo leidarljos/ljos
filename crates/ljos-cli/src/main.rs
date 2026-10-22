@@ -1948,7 +1948,9 @@ fn run_command() -> Result<()> {
         }
         Cmd::Recall { issue } => {
             ljos_cli::log_recall("recall", &issue);
-            run("vissue", &["recall", &issue])?;
+            let said = ljos_cli::tracker_recall(&issue)?;
+            eprint!("{}", said.stderr);
+            print!("{}", said.stdout);
             print!("{}", ljos_cli::recall_memories(&issue));
         }
         Cmd::Reap { idle, apply } => {
