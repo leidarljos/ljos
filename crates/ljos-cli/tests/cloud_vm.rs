@@ -548,6 +548,33 @@ fn a_failed_first_encoder_install_leaves_no_runtime() {
     assert!(err.contains("nothing was installed"), "{err}");
 }
 
+#[test]
+fn a_release_build_does_not_reuse_another_onnx_runtime() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/release.yml");
+    let yml = fs::read_to_string(&path).unwrap();
+    assert!(
+        yml.contains("github.ref_type != 'tag'"),
+        "a tag run restores the ONNX Runtime cache"
+    );
+    assert!(
+        yml.contains("github.event_name != 'workflow_dispatch'"),
+        "a dispatched release restores the ONNX Runtime cache"
+    );
+    assert!(
+        yml.contains("github.ref_type == 'tag'"),
+        "a tag run can skip the source build"
+    );
+    assert!(
+        yml.lines()
+            .any(|line| line.contains("sha256sum") && line.contains("libonnxruntime")),
+        "the release sums omit the built library"
+    );
+    assert!(
+        yml.contains("cp -L"),
+        "the runtime archive still packs soname symlinks"
+    );
+}
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn an_encoder_directory_is_not_already_installed() {
