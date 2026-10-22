@@ -38,80 +38,138 @@ fn read_http(stream: &mut std::net::TcpStream) -> String {
 /// A pack that holds `atoms`, answers every search with all of them, and
 /// says its encoder is still loading so the prompt hook ranks the listing.
 fn serve(atoms: Vec<serde_json::Value>) -> String {
+    serve_scripted(atoms, |_| None)
+}
+
+/// One answer a test scripts: how long the pack waits, then the status
+/// line and the body it sends.
+#[derive(Clone)]
+struct Reply {
+    after: std::time::Duration,
+    status: &'static str,
+    body: serde_json::Value,
+}
+
+impl Reply {
+    fn now(status: &'static str, body: serde_json::Value) -> Self {
+        Self::after(0, status, body)
+    }
+
+    fn after(ms: u64, status: &'static str, body: serde_json::Value) -> Self {
+        Self {
+            after: std::time::Duration::from_millis(ms),
+            status,
+            body,
+        }
+    }
+}
+
+/// [`serve`], with `script` asked first with each request line. Every
+/// request is answered on its own thread, so a slow answer holds up only
+/// the client that asked for it.
+fn serve_scripted(
+    atoms: Vec<serde_json::Value>,
+    script: impl Fn(&str) -> Option<Reply> + Send + Sync + 'static,
+) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
+    let atoms = std::sync::Arc::new(atoms);
+    let script = std::sync::Arc::new(script);
     thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { break };
-            let req = read_http(&mut stream);
-            let path = req.lines().next().unwrap_or("");
-            let mut status = "200 OK";
-            let payload = if path.starts_with("GET /v1/status") {
-                serde_json::json!({"embedder": {"available": true, "answering": null}})
-            } else if path.starts_with("GET /v1/search") {
-                let hits: Vec<serde_json::Value> = atoms
-                    .iter()
-                    .map(|a| {
-                        let mut hit = a.clone();
-                        hit["field"] = serde_json::json!("atom");
-                        hit["score"] = serde_json::json!(1.0);
-                        hit
-                    })
-                    .collect();
-                serde_json::json!({"hits": hits})
-            } else if let Some(rest) = path.strip_prefix("GET /v1/atoms/") {
-                let id = rest.split(['?', ' ']).next().unwrap_or("");
-                atoms
-                    .iter()
-                    .find(|a| a["id"] == id)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        status = "404 Not Found";
-                        serde_json::json!({"error": "no atom"})
-                    })
-            } else if path.starts_with("GET /v1/atoms") {
-                let kind = path
-                    .split(['?', '&', ' '])
-                    .find_map(|q| q.strip_prefix("kind="));
-                let listed: Vec<&serde_json::Value> = atoms
-                    .iter()
-                    .filter(|a| kind.is_none_or(|k| a["kind"] == k))
-                    .collect();
-                serde_json::json!({"atoms": listed})
-            } else if path.starts_with("GET /v1/activate") {
-                let island: Vec<serde_json::Value> = atoms
-                    .iter()
-                    .map(|a| {
-                        // packsetd's island row is id, kind, text and ts:
-                        // no origin, no source, no entities.
-                        serde_json::json!({
-                            "id": a["id"], "kind": a["kind"], "text": a["text"],
-                            "ts": a["ts"], "activation": 1.0, "seed": true,
-                        })
-                    })
-                    .collect();
-                serde_json::json!({"island": island, "fired": 0})
-            } else if path.starts_with("GET /v1/pack") {
-                let set = path
-                    .split(['?', '&', ' '])
-                    .find_map(|q| q.strip_prefix("set="));
-                let held: Vec<&serde_json::Value> = atoms
-                    .iter()
-                    .filter(|a| set.is_some_and(|s| a["set"] == s))
-                    .collect();
-                serde_json::json!({"atoms": held})
-            } else {
-                serde_json::json!({"hits": [], "atoms": []})
-            }
-            .to_string();
-            let resp = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
-                payload.len()
-            );
-            let _ = stream.write_all(resp.as_bytes());
+            let (atoms, script) = (atoms.clone(), script.clone());
+            thread::spawn(move || {
+                let req = read_http(&mut stream);
+                let path = req.lines().next().unwrap_or("");
+                let (status, payload) = match script(path) {
+                    Some(answer) => {
+                        thread::sleep(answer.after);
+                        (answer.status, answer.body.to_string())
+                    }
+                    None => answer(&atoms, path),
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            });
         }
     });
     format!("http://{addr}")
+}
+
+/// Whether request line `line` reads atom `id` by id.
+fn reads_atom(line: &str, id: &str) -> bool {
+    line.strip_prefix("GET /v1/atoms/")
+        .and_then(|rest| rest.split(['?', ' ']).next())
+        == Some(id)
+}
+
+/// The status line and body a pack holding `atoms` sends for the request
+/// line `path`.
+fn answer(atoms: &[serde_json::Value], path: &str) -> (&'static str, String) {
+    let mut status = "200 OK";
+    let payload = if path.starts_with("GET /v1/status") {
+        serde_json::json!({"embedder": {"available": true, "answering": null}})
+    } else if path.starts_with("GET /v1/search") {
+        let hits: Vec<serde_json::Value> = atoms
+            .iter()
+            .map(|a| {
+                let mut hit = a.clone();
+                hit["field"] = serde_json::json!("atom");
+                hit["score"] = serde_json::json!(1.0);
+                hit
+            })
+            .collect();
+        serde_json::json!({"hits": hits})
+    } else if let Some(rest) = path.strip_prefix("GET /v1/atoms/") {
+        let id = rest.split(['?', ' ']).next().unwrap_or("");
+        atoms
+            .iter()
+            .find(|a| a["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| {
+                status = "404 Not Found";
+                serde_json::json!({"error": "no atom"})
+            })
+    } else if path.starts_with("GET /v1/atoms") {
+        let kind = path
+            .split(['?', '&', ' '])
+            .find_map(|q| q.strip_prefix("kind="));
+        let listed: Vec<&serde_json::Value> = atoms
+            .iter()
+            .filter(|a| kind.is_none_or(|k| a["kind"] == k))
+            .collect();
+        serde_json::json!({"atoms": listed})
+    } else if path.starts_with("GET /v1/activate") {
+        let island: Vec<serde_json::Value> = atoms
+            .iter()
+            .map(|a| {
+                // packsetd's island row is id, kind, text and ts:
+                // no origin, no source, no entities.
+                serde_json::json!({
+                    "id": a["id"], "kind": a["kind"], "text": a["text"],
+                    "ts": a["ts"], "activation": 1.0, "seed": true,
+                })
+            })
+            .collect();
+        serde_json::json!({"island": island, "fired": 0})
+    } else if path.starts_with("GET /v1/pack") {
+        let set = path
+            .split(['?', '&', ' '])
+            .find_map(|q| q.strip_prefix("set="));
+        let held: Vec<&serde_json::Value> = atoms
+            .iter()
+            .filter(|a| set.is_some_and(|s| a["set"] == s))
+            .collect();
+        serde_json::json!({"atoms": held})
+    } else {
+        serde_json::json!({"hits": [], "atoms": []})
+    }
+    .to_string();
+    (status, payload)
 }
 
 /// One stored atom as the pack lists it.
@@ -492,8 +550,9 @@ fn promoted_rule(seat: &Seat, text: &str, from: &str) {
 }
 
 /// A rule promoted from a lesson the pack answers without, a lesson since
-/// forgotten or retracted, is not stated; with the pack down, the origin
-/// kept at promote time still decides.
+/// forgotten or retracted, is not stated. With the pack down nothing
+/// confirms the lesson, so the rule is not stated either: the origin the
+/// row kept at promote time does not stand in for the pack.
 #[test]
 fn a_rule_whose_lesson_the_pack_dropped_is_not_stated() {
     const DROPPED: &str = "Paste the release key from the README into every deploy form.";
@@ -518,9 +577,48 @@ fn a_rule_whose_lesson_the_pack_dropped_is_not_stated() {
     promoted_rule(&offline, DROPPED, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaah0");
     let note = offline.prompt("tidy the changelog fragments");
     assert!(
-        note.contains("Paste the release key"),
-        "a pack that did not answer dropped the person's rule: {note}"
+        !note.contains("Paste the release key"),
+        "a pack that did not answer left the rule stated: {note}"
     );
+}
+
+const RELEASE_KEY: &str = "Paste the release key from the README into every deploy form.";
+
+/// Lesson `id` as the pack stores the person's: `user-declared` with a
+/// person basis.
+fn persons_lesson(id: &str, text: &str) -> serde_json::Value {
+    let mut lesson = atom(id, "lesson", text, "user-declared", &["seat:probe"]);
+    lesson["source"]["basis"] = serde_json::json!("person");
+    lesson
+}
+
+/// A rule promoted from the person's lesson is stated only when the pack
+/// answers for that lesson inside the bound. The lesson or a 404 sent
+/// after it, and a read the pack holds open, leave the rule unstated in
+/// every fresh hook.
+#[test]
+fn a_slow_or_hung_lesson_read_does_not_state_the_rule() {
+    const ID: &str = "lessonid0000000000000000000001";
+    let lesson = persons_lesson(ID, RELEASE_KEY);
+    let gone = serde_json::json!({"error": "no atom"});
+    for (reply, stated) in [
+        (Reply::now("200 OK", lesson.clone()), true),
+        (Reply::after(800, "200 OK", lesson.clone()), false),
+        (Reply::after(800, "404 Not Found", gone.clone()), false),
+        (Reply::after(3000, "404 Not Found", gone.clone()), false),
+    ] {
+        let (after, status) = (reply.after, reply.status);
+        let seat = Seat::on(serve_scripted(vec![], move |line| {
+            reads_atom(line, ID).then(|| reply.clone())
+        }));
+        promoted_rule(&seat, RELEASE_KEY, ID);
+        let note = seat.prompt("tidy the changelog fragments");
+        assert_eq!(
+            note.contains("Paste the release key"),
+            stated,
+            "a by-id {status} after {after:?}: {note}"
+        );
+    }
 }
 
 /// A `vissue` that answers every call with `body`, so a brief reads a
@@ -836,6 +934,7 @@ impl Mcp {
         let mut child = seat
             .command(env!("CARGO_BIN_EXE_ljos-mcp"), &[])
             .env("LJOS_SEAT", "probe")
+            .env("LJOS_MCP_TOOLS", "all")
             .spawn()
             .unwrap();
         let out = child.stdout.take().unwrap();
@@ -884,6 +983,20 @@ impl Mcp {
             .cloned()
             .unwrap_or_else(|| panic!("no rows: {answer}"))
     }
+
+    /// The label one `ljos_island` gives atom `id`.
+    fn island_label(&mut self, cue: &str, id: &str) -> String {
+        let answer = self.ask(
+            "tools/call",
+            serde_json::json!({"name": "ljos_island", "arguments": {"cue": cue}}),
+        );
+        answer["result"]["structuredContent"]["rows"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|r| r["id"] == id))
+            .and_then(|r| r["label"].as_str())
+            .unwrap_or_else(|| panic!("no island row for {id}: {answer}"))
+            .to_string()
+    }
 }
 
 impl Drop for Mcp {
@@ -930,6 +1043,43 @@ fn a_long_lived_search_reads_the_origin_the_pack_holds_now() {
         now.starts_with("unverified agent"),
         "a downgraded preference kept the origin the server read first: {now}"
     );
+}
+
+/// One MCP server names an island lesson the person's only from the by-id
+/// read it makes for that row. An agent's record sent after the bound, or
+/// a read the pack holds open, does not leave the person's label the read
+/// before it gave.
+#[test]
+fn an_island_lesson_is_the_persons_only_on_a_fresh_read() {
+    const ID: &str = "lessonid0000000000000000000004";
+    let person = persons_lesson(ID, RELEASE_KEY);
+    let mut agents = atom(ID, "lesson", RELEASE_KEY, "agent-derived", &["seat:probe"]);
+    agents["source"]["basis"] = serde_json::json!("agent");
+    let gone = serde_json::json!({"error": "no atom"});
+    let next = std::sync::Arc::new(std::sync::Mutex::new(Reply::now("200 OK", person.clone())));
+    let script = next.clone();
+    let seat = Seat::on(serve_scripted(vec![agents.clone()], move |line| {
+        reads_atom(line, ID).then(|| script.lock().unwrap().clone())
+    }));
+    let mut mcp = Mcp::start(&seat);
+    let mut label = |reply: Reply| {
+        *next.lock().unwrap() = reply;
+        mcp.island_label("deploy form", ID)
+    };
+    assert_eq!(label(Reply::now("200 OK", person.clone())), "lesson");
+    assert_eq!(
+        label(Reply::now("200 OK", agents.clone())),
+        "lesson, agent-derived"
+    );
+    assert_eq!(label(Reply::now("200 OK", person.clone())), "lesson");
+    let slow = label(Reply::after(800, "200 OK", agents.clone()));
+    assert_ne!(
+        slow, "lesson",
+        "a late agent record kept the person's label"
+    );
+    assert_eq!(label(Reply::now("200 OK", person.clone())), "lesson");
+    let hung = label(Reply::after(3000, "404 Not Found", gone));
+    assert_ne!(hung, "lesson", "a read held open kept the person's label");
 }
 
 const SOFT_PLANT: &str =
