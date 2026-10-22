@@ -28355,20 +28355,53 @@ fn recorded_origin(id: &str) -> Option<bool> {
         .copied()
 }
 
+/// What this seat's pack holds for one atom id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stored {
+    /// The pack holds it; [`person_stored`] of its record.
+    Origin(bool),
+    /// The pack answered and does not hold it.
+    Absent,
+    /// The pack did not answer.
+    Unreachable,
+}
+
+/// How long a listing answers for atoms it did not hold before the pack
+/// is listed again: a long-lived reader sees atoms written since.
+const LISTING_FRESH: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// [`person_stored`] for atom `id` in this seat's pack. When no reader has
-/// recorded it, the pack is listed once a process, inside a short bound.
-/// `None` when the pack does not answer or does not hold the atom.
-pub(crate) fn stored_origin_of(id: &str) -> Option<bool> {
+/// recorded it, the pack is listed inside a short bound. Only a listing
+/// the pack answered is remembered, per pack and workspace, so a pack
+/// that was down is asked again on the next read.
+pub(crate) fn stored_origin_of(id: &str) -> Stored {
+    static LISTED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<String, std::time::Instant>>,
+    > = std::sync::OnceLock::new();
     if let Some(known) = recorded_origin(id) {
-        return Some(known);
+        return Stored::Origin(known);
     }
-    static LISTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    LISTED.get_or_init(|| {
-        if let Ok(atoms) = session_atoms(400) {
-            atoms.iter().for_each(keep_origin);
-        }
-    });
-    recorded_origin(id)
+    let Ok(client) = pack() else {
+        return Stored::Unreachable;
+    };
+    let key = format!("{}|{}", client.base(), client.workspace());
+    let listed = LISTED.get_or_init(Default::default);
+    let fresh = listed
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
+        .is_some_and(|at| at.elapsed() < LISTING_FRESH);
+    if !fresh {
+        let Ok(atoms) = session_atoms(400) else {
+            return Stored::Unreachable;
+        };
+        atoms.iter().for_each(keep_origin);
+        listed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, std::time::Instant::now());
+    }
+    recorded_origin(id).map_or(Stored::Absent, Stored::Origin)
 }
 
 /// Whether a recalled hit is an unverified working note. Any claim the
@@ -47526,6 +47559,37 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
     /// A logbook note that names the recall closer and states a rule
     /// reaches the timeline inside a fence whose nonce it cannot know.
+    #[test]
+    fn a_pack_that_was_down_is_asked_again_for_a_stored_origin() {
+        let _g = env_guard();
+        let id = "5707ed0000000000000000000000d0e5";
+        let down = TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead = format!("http://{}", down.local_addr().unwrap());
+        drop(down);
+        {
+            let _pack = HoldEnv::set(&[("PACKSET_URL", &dead), ("PACKSET_WORKSPACE", "seat")]);
+            assert_eq!(stored_origin_of(id), Stored::Unreachable);
+        }
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/atoms") {
+                let atoms = serde_json::json!({"atoms": [{
+                    "id": id, "kind": "lesson", "text": "Keep the form short.",
+                    "workspace": "seat", "origin": "user-declared",
+                    "source": {"basis": "person"},
+                }]});
+                return (200, atoms.to_string());
+            }
+            (200, r#"{"atoms":[]}"#.into())
+        });
+        let _pack = HoldEnv::set(&[("PACKSET_URL", &url), ("PACKSET_WORKSPACE", "seat")]);
+        assert_eq!(stored_origin_of(id), Stored::Origin(true));
+        assert_eq!(
+            stored_origin_of("5707ed0000000000000000000000d0e6"),
+            Stored::Absent
+        );
+    }
+
     #[test]
     fn the_timeline_fences_a_tracker_note() {
         let _g = env_guard();

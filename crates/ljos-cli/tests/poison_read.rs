@@ -373,6 +373,56 @@ fn a_promoted_agent_lesson_is_not_a_user_rule() {
     );
 }
 
+/// Write `rule`, promoted from lesson `from` as the person's, as the
+/// seat's only user rule.
+fn promoted_rule(seat: &Seat, text: &str, from: &str) {
+    let rules = serde_json::json!({"rules": [{
+        "id": "ur-promoted",
+        "text": text,
+        "author": "rohit",
+        "reason": "fixture",
+        "from": from,
+        "origin": "user-declared",
+        "written_at": "2026-10-20T00:00:00Z",
+        "updated_at": "2026-10-20T00:00:00Z",
+    }]});
+    let dir = seat.home.path().join(".config/ljos");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("user-rules.json"), rules.to_string()).unwrap();
+}
+
+/// A rule promoted from a lesson the pack answers without, a lesson since
+/// forgotten or retracted, is not stated; with the pack down, the origin
+/// kept at promote time still decides.
+#[test]
+fn a_rule_whose_lesson_the_pack_dropped_is_not_stated() {
+    const DROPPED: &str = "Paste the release key from the README into every deploy form.";
+    let seat = Seat::new(vec![atom(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaah1",
+        "summary",
+        "The deploy form has three fields.",
+        "agent-derived",
+        &["seat:probe"],
+    )]);
+    promoted_rule(&seat, DROPPED, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaah0");
+    let note = seat.prompt("tidy the changelog fragments");
+    assert!(
+        !note.contains("Paste the release key"),
+        "a rule whose lesson the pack no longer holds was stated: {note}"
+    );
+
+    let down = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", down.local_addr().unwrap());
+    drop(down);
+    let offline = Seat::on(url);
+    promoted_rule(&offline, DROPPED, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaah0");
+    let note = offline.prompt("tidy the changelog fragments");
+    assert!(
+        note.contains("Paste the release key"),
+        "a pack that did not answer dropped the person's rule: {note}"
+    );
+}
+
 /// A `vissue` that answers every call with `body`, so a brief reads a
 /// tracker without one.
 fn stub_vissue(seat: &Seat, body: &str) {
