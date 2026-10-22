@@ -1,0 +1,1 @@
+The upgrade test installs the published v0.32.1 binaries and stores a preference through each old path, then checks that a prompt hook and a terminal prefer still show and a prefer run under a runner stays unverified until a terminal keeps it.

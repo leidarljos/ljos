@@ -1,0 +1,1 @@
+The record check and holder docs now say what the code does: `check_entries` lists the errors it raises and no longer calls a same-hour pair an error, the tally rule says a seat is the part of the voter id after `/` whatever the identity, and `holder_parts` names the numbers, runs, judges and subagents it keeps whole.

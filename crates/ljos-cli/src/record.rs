@@ -172,51 +172,53 @@ pub fn verify_entry(entry: &SignedEntry) -> Result<()> {
 
 /// Run schema + signature checks over many entries, including voter-key pinning.
 ///
-/// Every voter id is pinned, including a question's `opened_by` and a
-/// seat. The tracker pin file wins when it already names that voter;
-/// otherwise the first key seen in this check is the pin. A later entry
-/// under another key is a mismatch. A run id is `<identity>/run-<id>`.
+/// Every voter id is pinned, including a question's `opened_by`, and so
+/// is the seat after its `/`. A pin file row for the voter id or its seat
+/// is the pin; otherwise the first key seen in this check is. A later
+/// entry under another key is a mismatch, and so is a seat seen under two
+/// keys, whichever comes first. A run id is `<identity>/run-<id>`. Two
+/// ballots of one voter in one hour are not an error here: the tally
+/// drops that voter on that question.
 ///
 /// # Errors
 ///
 /// Any entry fails validation or signature verification, a pin file voter
-/// is not spelled the way the check looks it up, voter-key pinning detects
-/// a mismatch, or two unreplaced ballots under one key share an hour.
+/// is not spelled the way the check looks it up, the pin file pins one
+/// seat to two keys, an entry's voter or seat is pinned to another key,
+/// or a `replaces` names no ballot of the same voter and question.
 pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
     let mut report = CheckReport {
         entries: entries.len(),
         ..CheckReport::default()
     };
     let (mut pins, pin_source) = crate::ballot_sig::pins_for_check()?;
-    let pinned_voters: BTreeSet<String> = pins.keys().cloned().collect();
     for voter in pins.keys() {
         validate_pin_voter(voter).with_context(|| format!("pin source: {pin_source}"))?;
     }
     let seat_pins = seat_pins(&pins).with_context(|| format!("pin source: {pin_source}"))?;
+    let mut seat_keys = BTreeMap::new();
     for entry in entries {
         verify_entry(entry)?;
         match &entry.entry {
             Entry::Question(question) => {
                 report.questions += 1;
-                if !pinned_voters.contains(&question.opened_by) {
-                    observe_seat_pin(&seat_pins, &question.opened_by, &entry.signature.key)
-                        .with_context(|| format!("pin source: {pin_source}"))?;
-                }
+                observe_seat_pin(&seat_pins, &question.opened_by, &entry.signature.key)
+                    .with_context(|| format!("pin source: {pin_source}"))?;
                 crate::ballot_sig::observe_pin(
                     &mut pins,
                     &question.opened_by,
                     &entry.signature.key,
                 )
                 .with_context(|| format!("pin source: {pin_source}"))?;
+                observe_seat_key(&mut seat_keys, &question.opened_by, &entry.signature.key)?;
             }
             Entry::Ballot(ballot) => {
                 report.ballots += 1;
-                if !pinned_voters.contains(&ballot.voter) {
-                    observe_seat_pin(&seat_pins, &ballot.voter, &entry.signature.key)
-                        .with_context(|| format!("pin source: {pin_source}"))?;
-                }
+                observe_seat_pin(&seat_pins, &ballot.voter, &entry.signature.key)
+                    .with_context(|| format!("pin source: {pin_source}"))?;
                 crate::ballot_sig::observe_pin(&mut pins, &ballot.voter, &entry.signature.key)
                     .with_context(|| format!("pin source: {pin_source}"))?;
+                observe_seat_key(&mut seat_keys, &ballot.voter, &entry.signature.key)?;
             }
         }
     }
@@ -243,18 +245,17 @@ fn validate_pin_voter(voter: &str) -> Result<()> {
     Ok(())
 }
 
-/// Bare pin rows by the seat each folds to, as row to key. A seat holds
-/// one key: rows such as `inky` and `inky@39u` that fold to one seat
+/// Pin rows by the seat each pins, as row to key. A bare row pins the
+/// seat it folds to and a voter id row the seat after its `/`. A seat
+/// holds one key: rows such as `inky`, `inky@39u` and `mallory/inky`
 /// must pin the same key, or that seat would vote once under each.
 fn seat_pins(
     pins: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, BTreeMap<String, String>>> {
     let mut seats: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for (row, key) in pins {
-        if row.contains('/') {
-            continue;
-        }
-        let Some(seat) = voter_pin_seat(row) else {
+        let seat_part = split_voter(row).map_or(row.as_str(), |(_, seat)| seat);
+        let Some(seat) = voter_seat(seat_part) else {
             continue;
         };
         let rows = seats.entry(seat.clone()).or_default();
@@ -281,13 +282,10 @@ fn observe_seat_pin(
     voter: &str,
     key: &str,
 ) -> Result<()> {
-    let Some((_, seat_part)) = split_voter(voter) else {
+    let Some((_, seat)) = split_voter(voter) else {
         return Ok(());
     };
-    let Some(seat) = voter_pin_seat(seat_part) else {
-        return Ok(());
-    };
-    let Some(rows) = seat_pins.get(&seat) else {
+    let Some(rows) = seat_pins.get(seat) else {
         return Ok(());
     };
     let fingerprint = crate::ballot_sig::key_fingerprint(key);
@@ -305,6 +303,32 @@ fn observe_seat_pin(
         "{voter} is pinned through seat {seat} to key {}, got {}…",
         pinned.join(" or "),
         &key[..12.min(key.len())]
+    );
+}
+
+/// Hold the seat `voter` sits as to one key across the check. A seat
+/// seen under two keys fails whichever file comes first, and the error
+/// names the keys in one order, so file order cannot pick the seat's key.
+fn observe_seat_key(seats: &mut BTreeMap<String, String>, voter: &str, key: &str) -> Result<()> {
+    let Some((_, seat)) = split_voter(voter) else {
+        return Ok(());
+    };
+    let fingerprint = crate::ballot_sig::key_fingerprint(key);
+    let held = seats
+        .entry(seat.to_string())
+        .or_insert_with(|| fingerprint.clone());
+    if *held == fingerprint {
+        return Ok(());
+    }
+    let (one, two) = if *held < fingerprint {
+        (held.as_str(), fingerprint.as_str())
+    } else {
+        (fingerprint.as_str(), held.as_str())
+    };
+    bail!(
+        "seat {seat} signs under two keys, {}… and {}…; a seat holds one key, so pin it or sign under one",
+        &one[..12.min(one.len())],
+        &two[..12.min(two.len())]
     );
 }
 
@@ -578,29 +602,36 @@ pub fn ballot_id(ballot: &BallotEntry) -> Result<String> {
 
 /// Latest unreplaced ballot per voter and question.
 ///
-/// Voters are counted per question, by signing key fingerprint. A ballot
-/// named by another entry's `replaces` never counts. Of what remains, the
+/// Voters are counted per question, by signing key fingerprint. Copies
+/// of one ballot under one key count as that ballot once. A ballot named
+/// by another entry's `replaces` never counts. Of what remains, the
 /// latest `cast_at` per key wins, and a latest `withdrawn` contributes no
-/// vote. When one seat appears under a second key on the same question,
-/// only the first key's ballot keeps counting. An ambiguous voter (two
-/// unreplaced ballots in one hour) is dropped on that question only.
+/// vote. A seat that appears under two keys on one question counts under
+/// neither there, whatever order the ballots come in. Two unreplaced ballots in
+/// a voter's latest hour are ambiguous and that voter is dropped on that
+/// question only; a tie in an earlier hour is superseded like any older
+/// ballot.
 ///
 /// # Errors
 ///
 /// A `replaces` names no ballot, or one from another voter or question, or
 /// a `cast_at` is not an hour timestamp.
 pub fn tally(entries: &[SignedEntry]) -> Result<BTreeMap<String, BTreeMap<String, usize>>> {
-    let ballots: Vec<(&BallotEntry, String, Option<String>)> = entries
-        .iter()
-        .filter_map(|entry| match &entry.entry {
-            Entry::Ballot(ballot) => {
-                let key = crate::ballot_sig::key_fingerprint(&entry.signature.key);
-                let seat = split_voter(&ballot.voter).and_then(|(_, seat)| voter_pin_seat(seat));
-                Some((ballot, key, seat))
-            }
-            Entry::Question(_) => None,
-        })
-        .collect();
+    let mut copies = BTreeSet::new();
+    let mut ballots: Vec<(&BallotEntry, String, Option<String>)> = Vec::new();
+    for entry in entries {
+        let Entry::Ballot(ballot) = &entry.entry else {
+            continue;
+        };
+        let key = crate::ballot_sig::key_fingerprint(&entry.signature.key);
+        // A second file with one ballot under one key is a copy, whatever
+        // the hex case of its key and signature, not a second ballot.
+        if !copies.insert((ballot_id(ballot)?, key.clone())) {
+            continue;
+        }
+        let seat = split_voter(&ballot.voter).and_then(|(_, seat)| voter_seat(seat));
+        ballots.push((ballot, key, seat));
+    }
     let by_id: BTreeMap<&str, usize> = ballots
         .iter()
         .enumerate()
@@ -653,24 +684,22 @@ pub fn tally(entries: &[SignedEntry]) -> Result<BTreeMap<String, BTreeMap<String
     }
     let mut counts: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
     for (question, group) in grouped {
-        let mut seat_keys: BTreeMap<String, String> = BTreeMap::new();
-        let mut refused = BTreeSet::new();
+        let mut seat_keys: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
         for (at, _) in &group {
-            let Some(seat) = ballots[*at].2.as_deref() else {
-                continue;
-            };
-            let key = ballots[*at].1.as_str();
-            if let Some(held) = seat_keys.get(seat) {
-                if held != key {
-                    refused.insert(*at);
-                }
-            } else {
-                seat_keys.insert(seat.to_string(), key.to_string());
+            if let Some(seat) = ballots[*at].2.as_deref() {
+                seat_keys
+                    .entry(seat)
+                    .or_default()
+                    .insert(ballots[*at].1.as_str());
             }
         }
         let mut by_key: BTreeMap<String, Vec<(i64, usize)>> = BTreeMap::new();
         for (at, stamp) in group {
-            if refused.contains(&at) {
+            let shared = ballots[at]
+                .2
+                .as_deref()
+                .is_some_and(|seat| seat_keys[seat].len() > 1);
+            if shared {
                 continue;
             }
             by_key
@@ -679,18 +708,11 @@ pub fn tally(entries: &[SignedEntry]) -> Result<BTreeMap<String, BTreeMap<String
                 .push((stamp, at));
         }
         for (_, votes) in by_key {
-            let mut seen = BTreeSet::new();
-            let mut ambiguous = false;
-            for (stamp, _) in &votes {
-                if !seen.insert(*stamp) {
-                    ambiguous = true;
-                    break;
-                }
-            }
-            if ambiguous {
+            let Some(latest) = votes.iter().map(|(stamp, _)| *stamp).max() else {
                 continue;
-            }
-            let Some((_, at)) = votes.iter().max_by_key(|(stamp, _)| *stamp) else {
+            };
+            let mut current = votes.iter().filter(|(stamp, _)| *stamp == latest);
+            let (Some((_, at)), None) = (current.next(), current.next()) else {
                 continue;
             };
             let ballot = ballots[*at].0;
@@ -896,24 +918,6 @@ fn voter_seat(name: &str) -> Option<String> {
         return Some(seat);
     }
     Some(crate::seat_slug(&crate::holder_parts(&seat).0))
-}
-
-/// The seat pin a voter spellings falls under. `run-`/`judge-` aliases of
-/// a named seat are held to that seat's pin; run ids (`run-101`) and
-/// model judges (`judge-model-1-5`) stay on their own pin rows.
-fn voter_pin_seat(name: &str) -> Option<String> {
-    let seat = voter_seat(name)?;
-    if let Some(run) = seat.strip_prefix("run-") {
-        if run.bytes().any(|b| b.is_ascii_alphabetic()) {
-            return Some(crate::seat_slug(&crate::holder_parts(run).0));
-        }
-    }
-    if let Some(judge) = seat.strip_prefix("judge-") {
-        if !judge.starts_with("model-") && judge.bytes().any(|b| b.is_ascii_alphabetic()) {
-            return Some(crate::seat_slug(&crate::holder_parts(judge).0));
-        }
-    }
-    Some(seat)
 }
 
 fn slug_of(part: &str) -> Option<String> {
@@ -1181,9 +1185,6 @@ mod tests {
                 std::env::remove_var("LJOS_SEAT");
                 std::env::remove_var("VISSUE_AGENT");
                 std::env::remove_var("VISSUE_ROOT");
-                // A parallel record test used to leave this set. The
-                // fallback override key is named by the run, so a leaked
-                // id collapses two seats onto one file.
                 std::env::remove_var("CURSOR_AGENT_ID");
             }
         });
@@ -1350,54 +1351,23 @@ mod tests {
     }
 
     #[test]
-    fn a_shared_override_key_splits_by_run_session() {
+    fn an_explicit_seat_key_is_used_as_given() {
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
-        let shared = root.path().join("shared.key");
-        // Signing reads the run id. GitHub Actions exports GITHUB_RUN_ID,
-        // and that names the fallback key ahead of CURSOR_AGENT_ID, so
-        // both runs hash one key. Releasing the mutation lock between
-        // the set and the sign lets another test do the same, and leaves
-        // agent-run-2222 set for whoever runs next.
-        let (first, second) = crate::with_env_mutation(|| {
-            let _restore = RestoreEnv::capture(&[
-                "LJOS_SEAT_KEY",
-                "LJOS_SEAT",
-                "VISSUE_AGENT",
-                "CURSOR_AGENT_ID",
-                "GITHUB_ACTIONS",
-                "GITHUB_RUN_ID",
-                "CLOUD_AGENT_ID",
-            ]);
+        let given = root.path().join("seat.key");
+        let path = crate::with_env_mutation(|| {
+            let _restore = RestoreEnv::capture(&["LJOS_SEAT_KEY", "CURSOR_AGENT_ID"]);
             // SAFETY: this test holds the process environment lock.
             unsafe {
-                std::env::set_var("LJOS_SEAT_KEY", &shared);
-                std::env::remove_var("LJOS_SEAT");
-                std::env::remove_var("VISSUE_AGENT");
-                // On GitHub Actions the run id names the run before the
-                // agent id does, and both signings would share it.
-                std::env::remove_var("GITHUB_ACTIONS");
-                std::env::remove_var("GITHUB_RUN_ID");
-                std::env::remove_var("CLOUD_AGENT_ID");
+                std::env::set_var("LJOS_SEAT_KEY", &given);
                 std::env::set_var("CURSOR_AGENT_ID", "agent-run-1111");
             }
-            let first = sign_entry(
-                ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
-                "alpha/seat-a",
-            )
-            .expect("run 1");
-            // SAFETY: this test holds the process environment lock.
-            unsafe { std::env::set_var("CURSOR_AGENT_ID", "agent-run-2222") };
-            let second = sign_entry(
-                ballot_entry("beta/seat-b", "accept", "2026-10-21T11:00:00Z"),
-                "beta/seat-b",
-            )
-            .expect("run 2");
-            (first, second)
+            crate::ballot_sig::seat_key_path("alpha/seat-a")
         });
-        assert_ne!(
-            first.signature.key, second.signature.key,
-            "two runs shared one fallback override key"
+        assert_eq!(
+            path.as_deref(),
+            Some(given.as_path()),
+            "LJOS_SEAT_KEY was not used as given"
         );
     }
 
@@ -1432,7 +1402,6 @@ mod tests {
             ("alpha/run-101.", "alpha/run-101"),
             ("alpha/run--101", "alpha/run-101"),
             ("alpha/Inky", "alpha/inky"),
-            ("alpha/inky-10", "alpha/inky"),
             ("alpha/inky-39u", "alpha/inky"),
             ("alpha/inky-n9o", "alpha/inky"),
             ("alpha/disk-saver-t4t", "alpha/disk-saver"),
@@ -1633,12 +1602,26 @@ mod tests {
     }
 
     #[test]
+    fn docs_name_the_tracker_and_key_minting_limits() {
+        let doc = include_str!("../doc/record-v1.md");
+        let normalized = doc.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            normalized.contains("A ballot is not bound to a tracker"),
+            "record-v1.md must say a ballot names no tracker"
+        );
+        assert!(
+            normalized.contains("a new identity and seat signed with a new key is a new voter"),
+            "record-v1.md must say a newly minted key is a new voter"
+        );
+    }
+
+    #[test]
     fn docs_name_voter_pin_precedence_and_ambiguity_drop() {
         let doc = include_str!("../doc/record-v1.md");
         let normalized = doc.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            normalized.contains("a pin file row for the voter id wins over a seat row"),
-            "record-v1.md must state voter-row pin precedence"
+            normalized.contains("a pin file row for a voter id also pins the seat after its `/`"),
+            "record-v1.md must say a voter-id row pins its seat"
         );
         assert!(
             normalized.contains("are ambiguous and are dropped on that question only"),
@@ -1765,10 +1748,65 @@ mod tests {
         assert!(read.is_empty(), "{read:?}");
     }
 
+    #[test]
+    fn a_later_ballot_stands_past_a_same_hour_pair() {
+        let _home = test_home();
+        let cast = |stance: &str, hour: u8| {
+            sign_as(
+                ballot_entry("alpha/seat-a", stance, &format!("2026-10-21T{hour}:00:00Z")),
+                3,
+            )
+        };
+        let entries = [cast("accept", 10), cast("reject", 10), cast("accept", 12)];
+        let read = tally(&entries).expect("tally");
+        assert_eq!(
+            counted(&read, "accept"),
+            Some(1),
+            "a same-hour pair hid a later ballot: {read:?}"
+        );
+        assert_eq!(counted(&read, "reject"), None, "{read:?}");
+        let entries = [cast("accept", 10), cast("accept", 12), cast("reject", 12)];
+        let read = tally(&entries).expect("tally");
+        assert!(read.is_empty(), "a latest same-hour pair counted: {read:?}");
+    }
+
     fn counted(read: &BTreeMap<String, BTreeMap<String, usize>>, stance: &str) -> Option<usize> {
         read.get("correct-3f9a1c2e")
             .and_then(|stances| stances.get(stance))
             .copied()
+    }
+
+    #[test]
+    fn a_replayed_ballot_does_not_erase_its_voter() {
+        let _home = test_home();
+        let cast = sign_as(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            3,
+        );
+        let mut shouted = cast.clone();
+        shouted.signature.key = shouted.signature.key.to_ascii_uppercase();
+        shouted.signature.sig = shouted.signature.sig.to_ascii_uppercase();
+        let later = sign_as(
+            ballot_entry("alpha/seat-a", "reject", "2026-10-21T12:00:00Z"),
+            3,
+        );
+        for (name, entries, stance) in [
+            ("copy", vec![cast.clone(), cast.clone()], "accept"),
+            ("hex case", vec![cast.clone(), shouted.clone()], "accept"),
+            (
+                "superseded copy",
+                vec![cast.clone(), later.clone(), cast.clone()],
+                "reject",
+            ),
+        ] {
+            let report = check_entries(&entries).unwrap_or_else(|err| panic!("{name}: {err:#}"));
+            let read = tally(&entries).expect("tally");
+            assert_eq!(
+                (report.questions_with_live_ballots, counted(&read, stance)),
+                (1, Some(1)),
+                "a replayed ballot erased its voter ({name}): {read:?}"
+            );
+        }
     }
 
     #[test]
@@ -1887,7 +1925,7 @@ mod tests {
     }
 
     #[test]
-    fn one_seat_counts_once_under_two_keys() {
+    fn one_seat_under_two_keys_counts_under_neither() {
         let _home = test_home();
         let entries = [
             sign_as(
@@ -1899,35 +1937,111 @@ mod tests {
                 2,
             ),
         ];
-        check_entries(&entries).expect("no pin file");
+        let err = check_entries(&entries).expect_err("one seat under two keys");
+        assert!(
+            err_chain(&err).contains("seat inky signs under two keys"),
+            "{}",
+            err_chain(&err)
+        );
         let read = tally(&entries).expect("tally");
-        assert_eq!(counted(&read, "accept"), Some(1), "{read:?}");
-        assert_eq!(counted(&read, "reject"), None, "{read:?}");
+        assert!(read.is_empty(), "{read:?}");
+    }
+
+    fn orders<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
+        if items.len() <= 1 {
+            return vec![items.to_vec()];
+        }
+        let mut out = Vec::new();
+        for at in 0..items.len() {
+            let mut rest = items.to_vec();
+            let first = rest.remove(at);
+            for mut tail in orders(&rest) {
+                tail.insert(0, first.clone());
+                out.push(tail);
+            }
+        }
+        out
     }
 
     #[test]
-    fn digit_and_run_judge_forms_of_one_seat_count_once() {
+    fn a_seat_under_two_keys_reads_the_same_in_every_order() {
         let _home = test_home();
         let entries = [
             sign_as(
                 ballot_entry("alpha/inky", "accept", "2026-10-21T10:00:00Z"),
                 1,
             ),
-            sign_unchecked(
-                ballot_entry("beta/inky-10", "accept", "2026-10-21T11:00:00Z"),
+            sign_as(
+                ballot_entry("beta/inky", "reject", "2026-10-21T11:00:00Z"),
                 2,
             ),
             sign_as(
-                ballot_entry("gamma/run-inky", "accept", "2026-10-21T12:00:00Z"),
+                ballot_entry("gamma/seat-c", "accept", "2026-10-21T10:00:00Z"),
                 3,
             ),
             sign_as(
-                ballot_entry("delta/judge-inky", "accept", "2026-10-21T13:00:00Z"),
+                ballot_entry("delta/seat-d", "reject", "2026-10-21T11:00:00Z"),
                 4,
             ),
         ];
+        let read = |order: &[SignedEntry]| {
+            let check = check_entries(order).map_err(|err| err_chain(&err));
+            (
+                check.map(|report| report.questions_with_live_ballots),
+                tally(order).expect("tally"),
+            )
+        };
+        let first = read(&entries);
+        for order in orders(&entries) {
+            assert_eq!(read(&order), first, "file order changed the result");
+        }
+        let (check, tallied) = first;
+        let err = check.expect_err("a seat signed under two keys passed the check");
+        assert!(err.contains("seat inky"), "{err}");
+        assert_eq!(counted(&tallied, "accept"), Some(1), "{tallied:?}");
+        assert_eq!(counted(&tallied, "reject"), Some(1), "{tallied:?}");
+    }
+
+    #[test]
+    fn a_digit_suffix_is_a_seat_of_its_own() {
+        let _home = test_home();
+        let entries = [
+            sign_as(
+                ballot_entry("alpha/inky", "accept", "2026-10-21T10:00:00Z"),
+                1,
+            ),
+            sign_as(
+                ballot_entry("beta/inky-10", "accept", "2026-10-21T11:00:00Z"),
+                2,
+            ),
+        ];
+        check_entries(&entries).expect("two seats");
         let read = tally(&entries).expect("tally");
-        assert_eq!(counted(&read, "accept"), Some(1), "{read:?}");
+        assert_eq!(counted(&read, "accept"), Some(2), "{read:?}");
+    }
+
+    #[test]
+    fn runs_and_judges_keep_their_ids_whole() {
+        let _home = test_home();
+        for (one, two) in [
+            ("alpha/judge-gpt-oss-120b", "beta/judge-gpt-oss-20b"),
+            ("alpha/judge-llama-3-70b", "beta/judge-llama-3-8b"),
+            ("alpha/judge-qwen", "beta/judge-qwen-72"),
+            ("alpha/run-pr-1234", "beta/run-pr-5678"),
+            ("alpha/judge-grok-4", "beta/grok-4"),
+        ] {
+            let entries = [
+                sign_as(ballot_entry(one, "accept", "2026-10-21T10:00:00Z"), 1),
+                sign_as(ballot_entry(two, "accept", "2026-10-21T11:00:00Z"), 2),
+            ];
+            check_entries(&entries).unwrap_or_else(|err| panic!("{one} {two}: {err:#}"));
+            let read = tally(&entries).expect("tally");
+            assert_eq!(
+                counted(&read, "accept"),
+                Some(2),
+                "{one} and {two} were merged into one voter"
+            );
+        }
     }
 
     #[test]
@@ -2461,28 +2575,32 @@ mod tests {
     }
 
     #[test]
-    fn a_voter_pin_row_overrides_a_conflicting_seat_row() {
+    fn a_voter_pin_row_cannot_give_a_seat_a_second_key() {
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
             // SAFETY: this test holds the process environment lock.
             unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
         });
-        let seat_pin = sign_as(
-            ballot_entry("beta/seat-b", "accept", "2026-10-21T10:00:00Z"),
-            1,
-        );
-        let entry = sign_as(
-            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
-            2,
-        );
-        let rows = format!(
-            "seat-a {}\nalpha/seat-a {}\n",
-            seat_pin.signature.key, entry.signature.key
-        );
-        std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), rows).expect("pin");
-        check_entries(std::slice::from_ref(&entry))
-            .unwrap_or_else(|err| panic!("voter pin row should win over seat row: {err:#}"));
+        let at = "2026-10-21T10:00:00Z";
+        let owner = sign_as(ballot_entry("alpha/inky", "accept", at), 1);
+        let mallory = sign_as(ballot_entry("mallory/inky", "reject", at), 9);
+        let (k1, k9) = (&owner.signature.key, &mallory.signature.key);
+        let pin_path = root.path().join(crate::ballot_sig::PIN_FILE);
+        for rows in [
+            format!("inky {k1}\nmallory/inky {k9}\n"),
+            format!("alpha/inky {k1}\nmallory/inky {k9}\n"),
+        ] {
+            std::fs::write(&pin_path, &rows).expect("pin");
+            let Err(err) = check_entries(std::slice::from_ref(&mallory)) else {
+                panic!("a second key voted under a pinned seat: {rows}");
+            };
+            assert!(
+                err_chain(&err).contains("seat inky is pinned to two keys"),
+                "{}",
+                err_chain(&err)
+            );
+        }
     }
 
     #[test]
@@ -2592,7 +2710,7 @@ mod tests {
     }
 
     #[test]
-    fn a_seat_pin_covers_run_and_judge_aliases() {
+    fn a_seat_pin_does_not_hold_a_run_or_judge_of_that_name() {
         let _home = test_home();
         let root = tempfile::tempdir().expect("root");
         crate::with_env_mutation(|| {
@@ -2608,20 +2726,10 @@ mod tests {
             format!("inky {}\n", pinned.signature.key),
         )
         .expect("pin");
-
         for voter in ["alpha/run-inky", "alpha/judge-inky"] {
-            let held = sign_as(ballot_entry(voter, "accept", "2026-10-21T11:00:00Z"), 1);
-            check_entries(std::slice::from_ref(&held))
-                .unwrap_or_else(|err| panic!("{voter} under pinned key: {err:#}"));
-
             let other = sign_as(ballot_entry(voter, "accept", "2026-10-21T11:00:00Z"), 2);
-            let err = check_entries(std::slice::from_ref(&other))
-                .expect_err("a second key passed a pinned run/judge alias");
-            assert!(
-                err_chain(&err).contains(&format!("{voter} is pinned through seat inky")),
-                "{voter}: {}",
-                err_chain(&err)
-            );
+            check_entries(std::slice::from_ref(&other))
+                .unwrap_or_else(|err| panic!("{voter} was held to seat inky: {err:#}"));
         }
     }
 
@@ -2645,14 +2753,14 @@ mod tests {
         };
         let text = err_chain(&err);
         assert!(text.contains("seat inky is pinned to two keys"), "{text}");
-        let read = tally(&entries).expect("one seat keeps its first key");
-        assert_eq!(counted(&read, "accept"), Some(1), "{read:?}");
+        let read = tally(&entries).expect("one seat under two keys");
+        assert!(read.is_empty(), "{read:?}");
         let later = sign_as(
             ballot_entry("beta/inky", "accept", "2026-10-21T11:00:00Z"),
             2,
         );
-        let read = tally(&[bare.clone(), later]).expect("tally");
-        assert_eq!(counted(&read, "accept"), Some(1), "{read:?}");
+        let read = tally(&[later, bare.clone()]).expect("tally");
+        assert!(read.is_empty(), "{read:?}");
         std::fs::write(&pin_path, format!("inky {key1}\ninky@39u {key1}\n")).expect("pin");
         check_entries(std::slice::from_ref(&bare)).expect("one key under both names");
         let err = check_entries(std::slice::from_ref(&tagged)).expect_err("an unpinned key");
