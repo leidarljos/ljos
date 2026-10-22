@@ -20569,6 +20569,94 @@ pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
     Err(format!("{cite} is not a tracker issue"))
 }
 
+/// Options a panel settles on that send the work back instead of on.
+const NOT_A_GO: &[&str] = &["revise", "reject", "block"];
+
+/// Whether `issue` lets a runner push onto a protected branch: its seat
+/// ballots, the ones a push cite counts ([`cite_stands`]), decide an
+/// option that does not send the work back, `quorum` seats voted, not
+/// all of them the pushing seat, and they run `min(quorum, 2)` model
+/// families. Two conversations of one seat are one seat. A seat's
+/// family is the model its verified slot records ([`slot::family_of`]);
+/// a seat with no slot recording one is a family of its own.
+///
+/// # Errors
+///
+/// Why the push waits, naming the ballots counted.
+pub fn protected_push_stands(issue: &str, quorum: usize) -> std::result::Result<String, String> {
+    let card =
+        issue_record(issue).map_err(|e| format!("the tracker does not read {issue} ({e:#})"))?;
+    if let Some(why) = panel_gate::settle_refusal(issue) {
+        return Err(why);
+    }
+    let (ballots, personas) = cite_ballots(issue)?;
+    let signed = check_seat_signatures(issue, &ballots, &personas)?;
+    let notes = ballot_sig::notes_of(&card);
+    let pins = ballot_sig::pins_for_check()
+        .map(|(pins, _)| pins)
+        .unwrap_or_default();
+    let tracker = slot::tracker_id();
+    let family = |voter: &str| slot::family_of(&tracker, issue, voter, &notes, &pins);
+    let counted = signed.counted(&ballots);
+    protected_decision(issue, &counted, &personas, &seat_name(), quorum, &family)
+        .map(|d| format!("{d}{}", signed.said()))
+        .map_err(|e| format!("{e}{}", signed.said()))
+}
+
+fn protected_decision(
+    issue: &str,
+    counted: &[Value],
+    personas: &std::collections::BTreeSet<String>,
+    pusher: &str,
+    quorum: usize,
+    family: &dyn Fn(&str) -> Option<String>,
+) -> std::result::Result<String, String> {
+    let d = seats_decide(issue, counted, personas, pusher)?;
+    if NOT_A_GO.contains(&d.choice.trim().to_ascii_lowercase().as_str()) {
+        return Err(format!(
+            "the seats on {issue} decide {}, which sends the work back rather than on; counted {}",
+            d.choice, d.counted
+        ));
+    }
+    let mut seats = std::collections::BTreeMap::new();
+    for (agent, _) in seat_ballots(counted, personas) {
+        seats.entry(holder_parts(agent).0).or_insert(agent);
+    }
+    if seats.len() < quorum {
+        return Err(format!(
+            "{} of the {quorum} seats a protected push needs voted on {issue}; counted {}",
+            seats.len(),
+            d.counted
+        ));
+    }
+    let own = holder_parts(pusher).0;
+    if seats.keys().all(|seat| *seat == own) {
+        return Err(format!(
+            "the only seat that voted on {issue} is {own}, the seat pushing; counted {}",
+            d.counted
+        ));
+    }
+    let families: std::collections::BTreeSet<String> = seats
+        .iter()
+        .map(|(seat, agent)| family(agent).unwrap_or_else(|| format!("{seat}'s own")))
+        .collect();
+    let need = quorum.min(2);
+    if families.len() < need {
+        let one = families.iter().next().cloned().unwrap_or_default();
+        return Err(format!(
+            "every seat on {issue} runs {one}, and a protected push needs {need} model families; counted {}",
+            d.counted
+        ));
+    }
+    Ok(format!(
+        "{issue} decides {} with {} seats from {} model families; counted {}",
+        d.choice,
+        seats.len(),
+        families.len(),
+        d.counted
+    ))
+}
+
 /// Why a deed cited on its own does not let a push through.
 #[must_use]
 pub fn deed_alone(cite: &str) -> String {
@@ -47169,6 +47257,72 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(seats_decide("surf-ab12", &[], &personas, "grok")
             .unwrap_err()
             .starts_with("no seat voted on surf-ab12"));
+    }
+
+    #[test]
+    fn a_protected_push_needs_a_quorum_of_seats_from_two_families() {
+        let personas: std::collections::BTreeSet<String> = ["reviewer".to_string()].into();
+        let ballot =
+            |agent: &str, choice: &str| serde_json::json!({"agent": agent, "choice": choice});
+        let family = |agent: &str| match holder_parts(agent).0.as_str() {
+            "inky" | "saddle" => Some("opus".to_string()),
+            "flint" => Some("grok".to_string()),
+            _ => None,
+        };
+        let decide = |ballots: &[Value], pusher: &str, quorum: usize| {
+            protected_decision("surf-ab12", ballots, &personas, pusher, quorum, &family)
+        };
+        let two = [ballot("inky", "approve"), ballot("flint", "approve")];
+        assert_eq!(
+            decide(&two, "inky", 2).unwrap(),
+            "surf-ab12 decides approve with 2 seats from 2 model families; \
+             counted inky for approve, flint for approve"
+        );
+        assert!(decide(&two[..1], "inky", 2)
+            .unwrap_err()
+            .starts_with("the only seat ballot on surf-ab12 is from inky"));
+        let back = [ballot("inky", "Revise"), ballot("flint", "Revise")];
+        assert_eq!(
+            decide(&back, "inky", 2).unwrap_err(),
+            "the seats on surf-ab12 decide Revise, which sends the work back rather than on; \
+             counted inky for Revise, flint for Revise"
+        );
+        assert_eq!(
+            decide(&two, "inky", 3).unwrap_err(),
+            "2 of the 3 seats a protected push needs voted on surf-ab12; \
+             counted inky for approve, flint for approve"
+        );
+        let opus = [ballot("inky", "approve"), ballot("saddle", "approve")];
+        assert_eq!(
+            decide(&opus, "inky", 2).unwrap_err(),
+            "every seat on surf-ab12 runs opus, and a protected push needs 2 model families; \
+             counted inky for approve, saddle for approve"
+        );
+        let tags = [ballot("inky@a1", "approve"), ballot("inky@b2", "approve")];
+        assert!(
+            decide(&tags, "flint", 2)
+                .unwrap_err()
+                .starts_with("1 of the 2 seats"),
+            "two conversations of one seat are one seat"
+        );
+        assert_eq!(
+            decide(&tags, "inky", 1).unwrap_err(),
+            "the only seat that voted on surf-ab12 is inky, the seat pushing; \
+             counted inky@a1 for approve, inky@b2 for approve"
+        );
+        let unrecorded = [ballot("inky", "approve"), ballot("moss", "approve")];
+        assert!(
+            decide(&unrecorded, "inky", 2).is_ok(),
+            "a seat no slot names is a family of its own"
+        );
+        let advised = [ballot("inky", "approve"), ballot("reviewer", "approve")];
+        assert!(decide(&advised, "flint", 2)
+            .unwrap_err()
+            .starts_with("1 of the 2 seats"));
+        let split = [ballot("inky", "approve"), ballot("flint", "revise")];
+        assert!(decide(&split, "inky", 2)
+            .unwrap_err()
+            .starts_with("the seats on surf-ab12 split"));
     }
 
     #[test]
