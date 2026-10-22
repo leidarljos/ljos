@@ -359,6 +359,17 @@ pub fn note_latest_prompt_for(prompt: &str, session: Option<&str>) {
 /// name one conversation by several, and the process that checks the
 /// bind sees whichever the runner stamped on it.
 pub fn note_latest_prompt_as(prompt: &str, sessions: &[String]) {
+    note_latest_prompt_from(prompt, sessions, None);
+}
+
+/// [`note_latest_prompt_as`] recording `runner`, the process that spawned
+/// the hook ([`crate::proc_tree::hook_runner`]): a process under that
+/// very runner is in its conversation whatever its environment names.
+pub fn note_latest_prompt_from(
+    prompt: &str,
+    sessions: &[String],
+    runner: Option<&crate::proc_tree::Proc>,
+) {
     if capture_mode() == CaptureMode::Off || pasted_or_quoted(prompt) {
         return;
     }
@@ -377,7 +388,8 @@ pub fn note_latest_prompt_as(prompt: &str, sessions: &[String]) {
         .open(&path)
         .and_then(|mut f| f.write_all(text.as_bytes()));
     if wrote.is_ok() {
-        let _ = write_prompt_bind(&path, text.as_bytes(), sessions);
+        let runner = runner.map_or_else(|| "-".to_string(), crate::proc_tree::token);
+        let _ = write_prompt_bind(&path, text.as_bytes(), &runner, sessions);
     }
 }
 
@@ -406,11 +418,14 @@ fn bind_session(session: Option<&str>) -> String {
 }
 
 /// The bind the hook writes beside the prompt: version, sha256 of the
-/// bytes, mtime in nanoseconds, and the session ids, one a line. The gate
-/// reads it back, so a later write of the prompt file no longer matches.
+/// bytes, mtime in nanoseconds, the runner that spawned the hook as a
+/// [`crate::proc_tree::token`] or `-`, and the session ids, one a line.
+/// The gate reads it back, so a later write of the prompt file no longer
+/// matches.
 fn write_prompt_bind(
     path: &std::path::Path,
     bytes: &[u8],
+    runner: &str,
     sessions: &[String],
 ) -> std::io::Result<()> {
     use std::io::Write as _;
@@ -429,7 +444,7 @@ fn write_prompt_bind(
     if ids.is_empty() {
         ids.push(bind_session(None));
     }
-    let body = format!("1\n{hash}\n{mtime}\n{}\n", ids.join("\n"));
+    let body = format!("2\n{hash}\n{mtime}\n{runner}\n{}\n", ids.join("\n"));
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -440,10 +455,13 @@ fn write_prompt_bind(
 }
 
 /// Whether the prompt file still matches the bind the hook wrote, and the
-/// bind names a session of the runner above this process
-/// ([`crate::ballot_sig::runner_sessions`]). A bind with any other
+/// bind is this conversation's: it names a session from the environment
+/// of the runner above this process ([`crate::ballot_sig::runner_sessions`]),
+/// or the runner it records is above this process. A bind with any other
 /// session, or none, is a prompt from somewhere else, and with no runner
-/// above nothing matches.
+/// above nothing matches. An MCP call's `_meta` session only narrows
+/// this: one the runner above did not give, or the bind does not name
+/// when the runner gave none, is another conversation's call.
 fn prompt_bind_matches(path: &std::path::Path) -> bool {
     let Ok(bytes) = std::fs::read(path) else {
         return false;
@@ -455,15 +473,28 @@ fn prompt_bind_matches(path: &std::path::Path) -> bool {
         return false;
     };
     let mut lines = bind.lines();
-    let (Some("1"), Some(hash), Some(stored)) = (lines.next(), lines.next(), lines.next()) else {
+    let (Some("2"), Some(hash), Some(stored), Some(spawner)) =
+        (lines.next(), lines.next(), lines.next(), lines.next())
+    else {
         return false;
     };
-    let runner = crate::ballot_sig::runner_sessions();
-    let named = lines
+    let bound: Vec<String> = lines
         .map(crate::ballot_sig::field)
-        .any(|s| s != "-" && runner.contains(&s));
-    if !named {
+        .filter(|s| s != "-")
+        .collect();
+    let runner = crate::ballot_sig::runner_sessions();
+    let above = spawner != "-"
+        && crate::proc_tree::ancestors()
+            .iter()
+            .any(|p| crate::proc_tree::token(p) == spawner);
+    if !(above || bound.iter().any(|s| runner.contains(s))) {
         return false;
+    }
+    if let Some(call) = crate::ballot_sig::call_session() {
+        let within = if runner.is_empty() { &bound } else { &runner };
+        if !within.contains(&call) {
+            return false;
+        }
     }
     hash == hex::encode(sha2::Sha256::digest(bytes)) && stored == mtime.to_string()
 }

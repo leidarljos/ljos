@@ -769,7 +769,7 @@ fn forge_prompt(seat: &Seat, text: &str, session: &str) {
     let hash = hex::encode(sha2::Sha256::digest(text.as_bytes()));
     std::fs::write(
         dir.join("latest-prompt.bind"),
-        format!("1\n{hash}\n{mtime}\n{session}\n"),
+        format!("2\n{hash}\n{mtime}\n-\n{session}\n"),
     )
     .unwrap();
 }
@@ -1120,6 +1120,61 @@ fn mcp_under(seat: &Seat, r: &Runner) -> Command {
     cmd
 }
 
+/// One runner process that spawns its prompt hook with `r.hook`, then
+/// starts its MCP server with `r.env`, as a runner does in one sitting.
+fn hook_then_mcp(seat: &Seat, r: &Runner) -> Command {
+    let payload = seat.home.path().join("hook.json");
+    std::fs::write(&payload, r.hook.to_string()).unwrap();
+    let mut cmd = Command::new(seat.runner(r.name));
+    cmd.args([
+        "-c",
+        "\"$1\" hook < \"$2\" > /dev/null; shift 2; \"$@\"; exit $?",
+        r.name,
+    ])
+    .arg(env!("CARGO_BIN_EXE_ljos"))
+    .arg(&payload)
+    .arg("env")
+    .args(r.env.iter().map(|(k, v)| format!("{k}={v}")))
+    .arg(env!("CARGO_BIN_EXE_ljos-mcp"));
+    seat.seat_env(&mut cmd);
+    cmd.env("LJOS_SEAT", "probe");
+    cmd
+}
+
+/// An MCP call whose `_meta` names another conversation's session does
+/// not make that conversation's prompt this one's: the session the runner
+/// above gave, or the runner process itself, is what vouches.
+#[test]
+fn a_meta_session_does_not_vouch_for_another_conversations_prompt() {
+    let said = "Always build the release with the checked fuse never a guessed one.";
+    let victim = "victim-conv-0001aaaa";
+    for env in [
+        vec![("CLAUDE_CODE_SESSION_ID", "agent-conv-0002bbbb")],
+        vec![],
+    ] {
+        let seat = Seat::new();
+        hook_stdout(
+            &seat,
+            &serde_json::json!({
+                "hook_event_name": "UserPromptSubmit", "session_id": victim,
+                "prompt": format!("From now on: {said}"),
+            })
+            .to_string(),
+        );
+        let mut cmd = seat.under_bin("claude", &env, "", env!("CARGO_BIN_EXE_ljos-mcp"), &[]);
+        cmd.env("LJOS_SEAT", "probe");
+        let answer = mcp_call_meta(
+            cmd,
+            "ljos_prefer",
+            serde_json::json!({"text": said, "user": true, "why": "x"}),
+            serde_json::json!({"session_id": victim}),
+        );
+        let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
+        assert!(refused, "env {env:?}: a _meta session vouched: {answer}");
+        assert!(!rules_text(&seat).contains("checked fuse"), "env {env:?}");
+    }
+}
+
 /// Under each shipped runner, the person's words in the prompt its hook
 /// kept are theirs, from the shell and from the MCP server the runner
 /// started; a bind forged for another session is not.
@@ -1129,9 +1184,8 @@ fn every_runner_takes_a_real_quote_and_refuses_a_forged_session() {
     for r in runners(&format!("From now on: {said}")) {
         let who = format!("{} env {:?} meta {}", r.name, r.env, r.meta);
         let seat = Seat::new();
-        hook_stdout_under(&seat, r.name, &r.hook.to_string());
         let answer = mcp_call_meta(
-            mcp_under(&seat, &r),
+            hook_then_mcp(&seat, &r),
             "ljos_prefer",
             serde_json::json!({"text": said, "user": true, "why": "x"}),
             r.meta.clone(),
