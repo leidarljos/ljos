@@ -44734,11 +44734,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
     }
 
-    /// `ljos panel ISSUE --cloud` writes one prompt per seated persona.
-    /// The process seat and the tracker URL stay out of the file. The
-    /// brief's pack text stays out too.
-    #[test]
-    fn a_cloud_panel_writes_one_prompt_per_persona() {
+    /// `panel_cloud` on probe-l0g0 against a pack whose persona atoms are
+    /// `atoms`: the directory it ran in, the prompt directory, its answer.
+    fn cloud_panel(atoms: &'static str) -> (tempfile::TempDir, PathBuf, Result<String>) {
         let _g = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("tracker");
@@ -44755,13 +44753,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let (url, _seen) = serve_http(|req| {
+        let (url, _seen) = serve_http(move |req| {
             let line = req.lines().next().unwrap_or("");
             if line.starts_with("GET /v1/atoms") && line.contains("kind=persona") {
-                (
-                    200,
-                    r#"{"atoms":[{"id":"atom-a","kind":"persona","name":"ada","anchor":0.5,"text":"LEGIBILITY-VIEW-TOKEN ada","entities":["logo"],"ts":"2026-10-11T10:00:00Z"},{"id":"atom-b","kind":"persona","name":"bea","anchor":0.4,"text":"LEGIBILITY-VIEW-TOKEN bea","entities":["logo"],"ts":"2026-10-11T10:00:00Z"}]}"#.into(),
-                )
+                (200, atoms.into())
             } else if line.starts_with("GET /v1/atoms") {
                 (200, r#"{"atoms":[]}"#.into())
             } else {
@@ -44785,8 +44780,20 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let out = dir.path().join("panel");
         let said = with_fake_on_path(dir.path(), || {
             bind_playbook("probe-l0g0", "company-panel").unwrap();
-            super::panel_cloud::panel_cloud("probe-l0g0", &out).unwrap()
+            super::panel_cloud::panel_cloud("probe-l0g0", &out)
         });
+        (dir, out, said)
+    }
+
+    /// `ljos panel ISSUE --cloud` writes one prompt per seated persona.
+    /// The process seat and the tracker URL stay out of the file. The
+    /// brief's pack text stays out too.
+    #[test]
+    fn a_cloud_panel_writes_one_prompt_per_persona() {
+        let (_dir, out, said) = cloud_panel(
+            r#"{"atoms":[{"id":"atom-a","kind":"persona","name":"ada","anchor":0.5,"text":"LEGIBILITY-VIEW-TOKEN ada","entities":["logo"],"ts":"2026-10-11T10:00:00Z"},{"id":"atom-b","kind":"persona","name":"bea","anchor":0.4,"text":"LEGIBILITY-VIEW-TOKEN bea","entities":["logo"],"ts":"2026-10-11T10:00:00Z"}]}"#,
+        );
+        let said = said.unwrap();
         assert!(said.contains("2 of 2 personas"), "{said}");
         assert!(said.contains("model grok"), "{said}");
         assert!(said.contains("model opus"), "{said}");
@@ -44825,6 +44832,21 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         );
         let n = std::fs::read_dir(&out).unwrap().count();
         assert_eq!(n, 2, "{said}");
+    }
+
+    /// Two personas whose names make one seat would give two prompt files
+    /// the same `LJOS_SEAT` and slot line, so the panel names both and
+    /// writes nothing.
+    #[test]
+    fn a_cloud_panel_refuses_two_personas_on_one_seat() {
+        let (_dir, out, said) = cloud_panel(
+            r#"{"atoms":[{"id":"atom-a","kind":"persona","name":"Ada Rider","anchor":0.5,"text":"ada","entities":["logo"],"ts":"2026-10-11T10:00:00Z"},{"id":"atom-b","kind":"persona","name":"ada-rider","anchor":0.4,"text":"ada","entities":["logo"],"ts":"2026-10-11T10:00:00Z"}]}"#,
+        );
+        let err = format!("{:#}", said.unwrap_err());
+        assert!(err.contains("Ada Rider"), "{err}");
+        assert!(err.contains("and ada-rider"), "{err}");
+        assert!(err.contains("seat ada-rider"), "{err}");
+        assert!(!out.exists(), "{err}");
     }
 
     /// The pack's address, its request lines and its posted atoms.

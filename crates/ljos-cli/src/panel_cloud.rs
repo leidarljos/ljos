@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 /// Model families a cloud panel rotates, in persona name order. Grok is
 /// first. A two-seat panel therefore names two families.
@@ -72,10 +72,23 @@ force-push.
 ///
 /// # Errors
 ///
-/// As [`crate::panel_roster`], or a prompt file cannot be written.
+/// As [`crate::panel_roster`], two personas make the same seat, or a
+/// prompt file cannot be written. A shared seat is refused before any
+/// file is written.
 pub fn panel_cloud(issue: &str, out: &Path) -> Result<String> {
     let (all, mut personas) = crate::panel_roster(issue)?;
     personas.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut seats = std::collections::BTreeMap::new();
+    for persona in &personas {
+        let seat = crate::seat_slug(&persona.name);
+        if let Some(first) = seats.insert(seat.clone(), persona.name.as_str()) {
+            bail!(
+                "panel --cloud: personas {first} and {} both make seat {seat}; rename one so each \
+                 prompt file names its own seat",
+                persona.name
+            );
+        }
+    }
     std::fs::create_dir_all(out).with_context(|| format!("panel --cloud: {}", out.display()))?;
     let mut lines = vec![format!(
         "{} of {all} personas speak to {issue}; cloud prompts in {}; start one cloud seat per \
