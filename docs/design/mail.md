@@ -97,7 +97,7 @@ precondition, not an option.
    ```
    ljos-outbox v1
    draft <outbox draft id>
-   reachbook-hash <the outbox's own message hash>
+   reachbook-hash <the outbox's sha256 of the message, hex>
    expires <RFC 3339, at most 24 h out>
    nonce <16 random bytes, hex>
 
@@ -108,7 +108,9 @@ precondition, not an option.
    which are exactly the bytes mailgate writes to `sendmail` stdin.
    mailgate hashes the bytes it is about to write and refuses on a
    mismatch with `H`. The expiry and nonce are not in `H`; mailgate
-   checks them and spends the nonce. The exporter refuses control
+   checks them and spends the nonce. `reachbook-hash` must equal `H`,
+   so the outbox and the file name the same bytes; any other value is
+   refused. The exporter refuses control
    characters other than tab and newline, and the bidirectional overrides,
    anywhere in the message, so a terminal cannot hide text from the
    person reading it.
