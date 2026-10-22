@@ -518,9 +518,11 @@ trait Accounts {
     fn primary_members(&self, gid: u32) -> Option<Vec<u32>>;
 }
 
-/// The passwd and group databases: names through the C library, and
-/// the accounts in a group from `/etc/passwd` itself
-/// ([`primary_in_files`]), since enumerating NSS can stop short.
+/// The passwd and group databases: a user's name through the C
+/// library, and a group and the accounts in it from `/etc/group` and
+/// `/etc/passwd` themselves ([`group_in_files`], [`primary_in_files`]),
+/// since a lookup by gid returns only the first line and enumerating
+/// NSS can stop short.
 struct SystemAccounts;
 
 /// Runs a `get*_r` lookup with a buffer that grows while it is too small.
@@ -571,40 +573,7 @@ impl Accounts for SystemAccounts {
     }
 
     fn group(&self, gid: u32) -> Option<GroupEntry> {
-        with_buf(|buf| {
-            // SAFETY: group is plain data, so all zeroes is a valid value.
-            let mut entry: libc::group = unsafe { std::mem::zeroed() };
-            let mut found: *mut libc::group = std::ptr::null_mut();
-            // SAFETY: getgrgid_r writes at most buf.len() bytes into buf
-            // and points entry's fields into it.
-            let rc = unsafe {
-                libc::getgrgid_r(
-                    gid,
-                    &mut entry,
-                    buf.as_mut_ptr().cast(),
-                    buf.len(),
-                    &mut found,
-                )
-            };
-            if rc != 0 {
-                return Err(rc);
-            }
-            if found.is_null() || entry.gr_name.is_null() || entry.gr_mem.is_null() {
-                return Ok(None);
-            }
-            let mut members = Vec::new();
-            // SAFETY: gr_mem is a NULL-terminated array of strings in buf.
-            unsafe {
-                let mut at = entry.gr_mem;
-                while !(*at).is_null() {
-                    members.push(os_string(*at));
-                    at = at.add(1);
-                }
-            }
-            // SAFETY: gr_name is a string inside buf.
-            let name = unsafe { os_string(entry.gr_name) };
-            Ok(Some(GroupEntry { name, members }))
-        })
+        group_in_files(Path::new(ETC), gid)
     }
 
     fn primary_members(&self, gid: u32) -> Option<Vec<u32>> {
@@ -633,6 +602,46 @@ fn files_only(etc: &Path, db: &str) -> bool {
         return false;
     };
     sources.split_whitespace().eq(["files"])
+}
+
+/// The one line of `etc/group` for `gid`, read only when group is
+/// that file alone ([`files_only`]). `None` when no line or more than
+/// one has that gid, since a lookup returns only the first and the
+/// members of the others still hold the group, and when the file
+/// cannot be read whole, as for `passwd` ([`primary_in_files`]).
+fn group_in_files(etc: &Path, gid: u32) -> Option<GroupEntry> {
+    if !files_only(etc, "group") {
+        return None;
+    }
+    let text = std::fs::read_to_string(etc.join("group")).ok()?;
+    let mut found = None;
+    for line in text.lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with(['+', '-']) {
+            return None;
+        }
+        let fields: Vec<&str> = line.split(':').collect();
+        let [name, _, id, members] = fields[..] else {
+            return None;
+        };
+        if id.parse::<u32>().ok()? != gid {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(GroupEntry {
+            name: name.into(),
+            members: members
+                .split(',')
+                .filter(|m| !m.is_empty())
+                .map(Into::into)
+                .collect(),
+        });
+    }
+    found
 }
 
 /// The uid of every line of `etc/passwd` whose primary group is `gid`,
@@ -1516,7 +1525,7 @@ mod tests {
         let person = Person::new(&SystemAccounts);
         let staff = FakeAccounts {
             user: Some("u"),
-            group: "staff",
+            group: Some("staff"),
             members: &["u", "v"],
             primary: Some(vec![person.uid]),
         };
@@ -1688,7 +1697,7 @@ mod tests {
     /// for, and the uids whose primary group it is.
     struct FakeAccounts {
         user: Option<&'static str>,
-        group: &'static str,
+        group: Option<&'static str>,
         members: &'static [&'static str],
         primary: Option<Vec<u32>>,
     }
@@ -1699,8 +1708,8 @@ mod tests {
         }
 
         fn group(&self, _gid: u32) -> Option<GroupEntry> {
-            Some(GroupEntry {
-                name: self.group.into(),
+            self.group.map(|name| GroupEntry {
+                name: name.into(),
                 members: self.members.iter().map(Into::into).collect(),
             })
         }
@@ -1722,13 +1731,17 @@ mod tests {
         let uid = unsafe { libc::getuid() };
         let alone = |members, primary| FakeAccounts {
             user: Some("u"),
-            group: "u",
+            group: Some("u"),
             members,
             primary: Some(primary),
         };
         let shared = [
             FakeAccounts {
-                group: "staff",
+                group: Some("staff"),
+                ..alone(&[], vec![uid])
+            },
+            FakeAccounts {
+                group: None,
                 ..alone(&[], vec![uid])
             },
             alone(&["u", "v"], vec![uid]),
@@ -1817,6 +1830,43 @@ mod tests {
         assert_eq!(primary_in_files(etc.path(), 1000), Some(vec![1000, 1001]));
         std::fs::remove_file(etc.path().join("passwd")).unwrap();
         assert_eq!(primary_in_files(etc.path(), 1000), None);
+    }
+
+    /// A group is read from `group` only when `nsswitch.conf` names that
+    /// file alone, and only when one line has its gid: a second line's
+    /// members hold the group as well, though a lookup returns the first.
+    #[test]
+    fn a_group_is_read_only_from_one_line_of_a_group_file_read_whole() {
+        let etc = tempfile::tempdir().unwrap();
+        let write = |name: &str, text: &str| std::fs::write(etc.path().join(name), text).unwrap();
+        let group = "root:x:0:\nu:x:1000:\nstaff:x:50:u,v\n";
+        write("group", group);
+        let read = |gid| {
+            group_in_files(etc.path(), gid).map(|g| {
+                let members: Vec<String> = g
+                    .members
+                    .iter()
+                    .map(|m| m.to_string_lossy().into_owned())
+                    .collect();
+                (g.name.to_string_lossy().into_owned(), members)
+            })
+        };
+        assert_eq!(read(1000), None, "no nsswitch.conf");
+        for conf in ["group: files systemd\n", "group: sss\n", "passwd: files\n"] {
+            write("nsswitch.conf", conf);
+            assert_eq!(read(1000), None, "{conf}");
+        }
+        write("nsswitch.conf", "passwd: files\ngroup: files\n");
+        assert_eq!(read(1000), Some(("u".into(), vec![])));
+        assert_eq!(
+            read(50),
+            Some(("staff".into(), vec!["u".into(), "v".into()]))
+        );
+        assert_eq!(read(7), None);
+        for extra in ["shadow:x:1000:v\n", "+:::\n", "w:x:1000\n", "w:x:ten:\n"] {
+            write("group", &format!("{group}{extra}"));
+            assert_eq!(read(1000), None, "{extra}");
+        }
     }
 
     /// A process younger than a recorded tool call, in that call's cgroup
