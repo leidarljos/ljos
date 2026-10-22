@@ -1713,6 +1713,18 @@ mod tests {
         assert_eq!(got, Some(old_epoch));
     }
 
+    #[test]
+    fn seat_check_accepts_the_same_key_in_uppercase_hex() {
+        let alice = key(8);
+        let note = sign_with(&alice, "d-1", "alice", "ship");
+        let pins: BTreeMap<String, String> = [(
+            "alice".to_string(),
+            hex::encode(alice.verifying_key().to_bytes()).to_ascii_uppercase(),
+        )]
+        .into();
+        assert!(seat_problems("d-1", &[("alice", "ship")], &[note], &pins).is_empty());
+    }
+
     /// One server answers a parent and its subagents: each call is the
     /// session plus the agent it names, and a call that names none is the
     /// parent's.
