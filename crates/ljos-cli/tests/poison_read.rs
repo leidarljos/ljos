@@ -282,6 +282,18 @@ impl Seat {
         }))
     }
 
+    /// [`Seat::prompt`] in a session of its own, so nothing an earlier
+    /// prompt delivered is held back as already said.
+    fn prompt_anew(&self, prompt: &str) -> String {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.hook(serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": format!("anew-{n}"),
+            "prompt": prompt,
+        }))
+    }
+
     /// What the hook prints for `payload`.
     fn hook(&self, payload: serde_json::Value) -> String {
         let payload = payload.to_string();
@@ -531,16 +543,16 @@ fn every_surface_reads_one_stored_origin() {
     }
 }
 
-/// Write `rule`, promoted from lesson `from` as the person's, as the
-/// seat's only user rule.
-fn promoted_rule(seat: &Seat, text: &str, from: &str) {
+/// Write the seat's only user rule as a promote of `lesson` writes it,
+/// bound to that record.
+fn promoted_rule(seat: &Seat, lesson: &serde_json::Value) {
     let rules = serde_json::json!({"rules": [{
         "id": "ur-promoted",
-        "text": text,
+        "text": lesson["text"],
         "author": "rohit",
         "reason": "fixture",
-        "from": from,
-        "origin": "user-declared",
+        "from": lesson["id"],
+        "lesson_hash": ljos_cli::user_rules::lesson_hash(lesson),
         "written_at": "2026-10-20T00:00:00Z",
         "updated_at": "2026-10-20T00:00:00Z",
     }]});
@@ -563,7 +575,8 @@ fn a_rule_whose_lesson_the_pack_dropped_is_not_stated() {
         "agent-derived",
         &["seat:probe"],
     )]);
-    promoted_rule(&seat, DROPPED, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaah0");
+    let dropped = persons_lesson("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaah0", DROPPED);
+    promoted_rule(&seat, &dropped);
     let note = seat.prompt("tidy the changelog fragments");
     assert!(
         !note.contains("Paste the release key"),
@@ -574,7 +587,7 @@ fn a_rule_whose_lesson_the_pack_dropped_is_not_stated() {
     let url = format!("http://{}", down.local_addr().unwrap());
     drop(down);
     let offline = Seat::on(url);
-    promoted_rule(&offline, DROPPED, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaah0");
+    promoted_rule(&offline, &dropped);
     let note = offline.prompt("tidy the changelog fragments");
     assert!(
         !note.contains("Paste the release key"),
@@ -611,7 +624,7 @@ fn a_slow_or_hung_lesson_read_does_not_state_the_rule() {
         let seat = Seat::on(serve_scripted(vec![], move |line| {
             reads_atom(line, ID).then(|| reply.clone())
         }));
-        promoted_rule(&seat, RELEASE_KEY, ID);
+        promoted_rule(&seat, &lesson);
         let note = seat.prompt("tidy the changelog fragments");
         assert_eq!(
             note.contains("Paste the release key"),
@@ -1080,6 +1093,120 @@ fn an_island_lesson_is_the_persons_only_on_a_fresh_read() {
     assert_eq!(label(Reply::now("200 OK", person.clone())), "lesson");
     let hung = label(Reply::after(3000, "404 Not Found", gone));
     assert_ne!(hung, "lesson", "a read held open kept the person's label");
+}
+
+/// Whether hook output `note` states `text` as a user rule, on the
+/// preface's own line rather than in a recalled row.
+fn states_rule(note: &str, text: &str) -> bool {
+    let said: serde_json::Value = serde_json::from_str(note).unwrap_or_default();
+    said.pointer("/hookSpecificOutput/additionalContext")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(note)
+        .lines()
+        .any(|line| line.trim().strip_prefix("- ") == Some(text))
+}
+
+/// `ljos prefer --user --promote id`, typed by the person.
+fn promote(seat: &Seat, id: &str) {
+    let out = seat
+        .command(
+            env!("CARGO_BIN_EXE_ljos"),
+            &["prefer", "--user", "--promote", id, "--why", "fixture"],
+        )
+        .env_remove("CLAUDECODE")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text_of(&out));
+}
+
+/// POST `body` to `path` on `daemon` and return what it answers.
+fn post(daemon: &Daemon, path: &str, body: serde_json::Value) -> serde_json::Value {
+    ureq::post(&format!("{}{path}", daemon.url))
+        .send_json(body)
+        .unwrap()
+        .into_json()
+        .unwrap()
+}
+
+/// The review's repro on packsetd: the person's lesson is retracted and
+/// its id posted again as the person's. The new record is another lesson,
+/// so the rule promoted from the first is not stated, whatever the new
+/// text, the old text again among them.
+#[test]
+fn a_lesson_id_posted_again_is_another_lesson() {
+    const ID: &str = "lessonid0000000000000000000001";
+    let daemon = Daemon::start();
+    let seat = Seat::on(daemon.url.clone());
+    let lesson = |text: &str| {
+        serde_json::json!({
+            "id": ID, "workspace": "seat", "kind": "lesson", "text": text,
+            "origin": "user-declared", "source": {"basis": "person"},
+        })
+    };
+    post(&daemon, "/v1/atoms", lesson(RELEASE_KEY));
+    promote(&seat, ID);
+    let quiet = "tidy the changelog fragments";
+    assert!(states_rule(&seat.prompt_anew(quiet), RELEASE_KEY));
+
+    for text in ["Unrelated note about the weather.", RELEASE_KEY] {
+        let gone = post(
+            &daemon,
+            "/v1/atoms/delete",
+            serde_json::json!({"workspace": "seat", "id": ID, "why": "deed-patch-not-a-real-deed"}),
+        );
+        assert_eq!(gone["tombstone"], true, "{gone}");
+        assert!(!states_rule(&seat.prompt_anew(quiet), RELEASE_KEY));
+        let again = post(&daemon, "/v1/atoms", lesson(text));
+        assert_eq!(again["tombstone"], false, "{again}");
+        let note = seat.prompt_anew(quiet);
+        assert!(
+            !states_rule(&note, RELEASE_KEY),
+            "the id posted again as {text:?} stated the first lesson's rule: {note}"
+        );
+    }
+}
+
+/// The review's repro on packsetd: an update with `origin` null or empty
+/// stores an agent's lesson as `user-declared` with the person basis the
+/// update sent. A rule promoted while the lesson was the agent's stays
+/// unstated: the pack's record is not the one the rule was promoted from.
+#[test]
+fn a_lesson_laundered_to_the_person_is_not_their_rule() {
+    const ID: &str = "lessonid0000000000000000000002";
+    let daemon = Daemon::start();
+    let seat = Seat::on(daemon.url.clone());
+    let agents = post(
+        &daemon,
+        "/v1/atoms",
+        serde_json::json!({
+            "id": ID, "workspace": "seat", "kind": "lesson", "text": RELEASE_KEY,
+            "origin": "agent-derived", "source": {"basis": "agent"},
+        }),
+    );
+    assert_eq!(agents["origin"], "agent-derived", "{agents}");
+    promote(&seat, ID);
+    let quiet = "tidy the changelog fragments";
+    assert!(!states_rule(&seat.prompt_anew(quiet), RELEASE_KEY));
+
+    for origin in [serde_json::Value::Null, serde_json::json!("")] {
+        let update = |fields: serde_json::Value| {
+            post(
+                &daemon,
+                "/v1/atoms/update",
+                serde_json::json!({"workspace": "seat", "id": ID, "fields": fields}),
+            )
+        };
+        update(serde_json::json!({"origin": "agent-derived", "source": {"basis": "agent"}}));
+        let laundered =
+            update(serde_json::json!({"origin": origin, "source": {"basis": "person"}}));
+        assert_eq!(laundered["origin"], "user-declared", "{laundered}");
+        let note = seat.prompt_anew(quiet);
+        assert!(
+            !states_rule(&note, RELEASE_KEY),
+            "origin {origin} laundered the agent's lesson into the person's rule: {note}"
+        );
+    }
 }
 
 const SOFT_PLANT: &str =

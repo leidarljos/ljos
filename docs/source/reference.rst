@@ -276,6 +276,7 @@ Every seat on this machine reads it. The row does not decay and it is not review
 ``--why`` is required with ``--user``.
 ``--promote ID`` copies that lesson into a user rule and leaves the lesson in the pack.
 A promoted rule is stated ahead of a prompt only when the pack answers for that lesson within 400 ms, under the same id, stored as the person's; a pack that is slow, down or answers otherwise leaves it out of the prompt.
+The row keeps a hash of the lesson's kind, text, ``ts``, ``valid_from`` and stored origin, and a record under that id that hashes otherwise, such as an id retracted and posted again, is another lesson; a rule promoted before the hash was kept is not stated until it is promoted again.
 ``--forget ID`` leaves a tombstone so a later sync does not bring the row back.
 ``--sync`` pulls and pushes user rules through the tracker repository. Nothing leaves the machine unless that repository's ``.ljos/sync.toml`` names a scope. Then each machine's rules are sealed with age to the scope's recipients as ``.ljos/user-rules/<host>.json.age``, and a plaintext ``<host>.json`` this machine wrote before is removed. Plaintext files other hosts left are still read. A write and the session start run the same pass and follow ``LJOS_TRACKER_GIT``; ``--sync`` always pushes.
 ``--deny-mention HANDLE``, ``--deny-name NAME``, ``--deny-reply-to HANDLE`` and ``--deny-reply-name NAME`` may be repeated.
