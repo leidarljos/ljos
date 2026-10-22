@@ -963,6 +963,10 @@ fn a_kept_preference_keeps_its_clock() {
     let new_id = new["id"].as_str().unwrap();
     assert_ne!(new_id, id, "{new}");
     assert!(
+        !after.iter().any(|a| a["id"] == held["id"]),
+        "the original is still live: {after:?}"
+    );
+    assert!(
         said.contains(&format!(
             "kept {id} as the person's preference, now {new_id}"
         )),
