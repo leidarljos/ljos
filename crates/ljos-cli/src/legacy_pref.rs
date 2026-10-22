@@ -12,8 +12,10 @@
 //! atom at that time or after is not an older preference, whatever marks
 //! it carries. `via:prompt` alone never promotes: the hook runs under the
 //! runner, and a direct post can wear the tag. Search, the island, the
-//! command gate, session start and any process under a runner do not
-//! write the receipt and do not stamp a basis.
+//! command gate and session start do not write the receipt and do not
+//! stamp a basis, and neither does any run [`person_present`] does not
+//! prove: a runner, a pipe, the doctor or `ljos prefer` from a tool call
+//! only report.
 //!
 //! One atom the pack refuses does not stop the rest. The receipt is
 //! written before any stamp. A permanent refusal is recorded on it as
@@ -25,7 +27,9 @@
 //! this run does not climb. It closes the unmarked atom and writes a
 //! new one born with basis `person`. The closed atom keeps the basis it
 //! had. `source.pending` on the cutoff is that write, recorded before
-//! the close, and the next person-side run finishes it.
+//! the close, and the next person-side run finishes it. The note goes
+//! only once the copy is stored or the original is live again. Two runs
+//! at once take turns on a lock file in the state directory.
 //!
 //! These marks are not proof the person typed the atom. A v0.32.1
 //! `ljos prefer` with `CLAUDECODE=1` and no runner ancestor stored
@@ -59,8 +63,6 @@
 //!   `tool-echo`. Session-end extraction stamps `via:session-end` and
 //!   `session:`. None of those read as the person before, and they are
 //!   not promoted.
-
-use std::sync::Mutex;
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, FixedOffset, Utc};
@@ -179,17 +181,18 @@ pub(crate) fn review_sentence(held: &[(String, String, String)]) -> String {
 /// Stamp basis `person` on every legacy atom a terminal writer marked,
 /// when that atom is older than this pack's cutoff.
 ///
-/// The cutoff is a receipt written once, by the first run of this that
-/// is not under a runner. A later run finds that receipt and does not
-/// write another. Search, the island, the command gate and session start
-/// do not call this. A pack that does not answer is left for the next run.
-/// One refused update does not stop the receipt or the atoms after it.
+/// The cutoff is a receipt written once, by the first run of this the
+/// person makes at a terminal of their own ([`person_present`]), the
+/// check `keep` makes. Anything else returns before reading the pack. A
+/// later run finds that receipt and does not write another. Search, the
+/// island, the command gate and session start do not call this. A pack
+/// that does not answer is left for the next run. One refused update
+/// does not stop the receipt or the atoms after it.
 pub fn migrate_once() {
-    if under_a_runner() {
+    if !person_present() {
         return;
     }
     crate::with_env_mutation(|| {
-        let _guard = gate().lock().unwrap_or_else(|e| e.into_inner());
         let _ = stamp_marked();
     });
 }
@@ -203,6 +206,11 @@ pub fn list() -> Result<String> {
     migrate_once();
     let atoms = live()?;
     let rows = awaiting(&atoms);
+    if rows.is_empty() && earliest_cutoff(&atoms).is_none() && !person_present() {
+        return Ok("older preferences are read at a terminal of your own: \
+                   run `ljos prefer --review` there\n"
+            .to_string());
+    }
     if rows.is_empty() {
         return Ok("no older preferences await review\n".to_string());
     }
@@ -603,6 +611,9 @@ fn record_cutoff(client: &crate::PacksetClient) -> Result<Value> {
 /// The source is read again first. A rewrite may have noted `pending`
 /// on the receipt since `bound` was taken, and this must not wipe it.
 fn remember_refusals(client: &crate::PacksetClient, bound: &Bound, ids: &[String]) -> Result<()> {
+    let Some(_lock) = cutoff_lock() else {
+        bail!("prefer: could not lock the preference cutoff to record a refused preference");
+    };
     let mut source = cutoff_source(client)?.unwrap_or_else(|| bound.source.clone());
     let mut list = refused_ids(&source);
     for id in ids {
@@ -660,6 +671,9 @@ fn bear_person(client: &crate::PacksetClient, atom: &Value) -> Update {
     let Some(id) = atom_id(atom) else {
         return Update::Later;
     };
+    let Some(_lock) = cutoff_lock() else {
+        return Update::Later;
+    };
     let successor = successor_of(client, atom);
     match note_pending(client, &id, &successor) {
         Update::Stamped => {}
@@ -669,12 +683,16 @@ fn bear_person(client: &crate::PacksetClient, atom: &Value) -> Update {
 }
 
 /// Finish one note on the cutoff: the person atom is live, and the
-/// unmarked one is not.
+/// unmarked one is not. The note goes only once the copy is stored or
+/// the original is live again.
 fn finish_born(client: &crate::PacksetClient, id: &str, successor: &Value) -> Update {
     let atoms = match atoms_lean(client, &client.workspace()) {
         Ok(atoms) => atoms,
         Err(_) => return Update::Later,
     };
+    let old = atoms
+        .iter()
+        .find(|atom| atom_id(atom).as_deref() == Some(id));
     // Once the original is closed, the pack answers the successor's post
     // with any other live record that makes the same claim, so a record
     // like that, other than the copy itself, stops the raise here.
@@ -683,14 +701,10 @@ fn finish_born(client: &crate::PacksetClient, id: &str, successor: &Value) -> Up
             && same_claim(atom, successor)
             && !copy_of(atom, successor)
     }) {
-        let _ = drop_pending(client, id);
-        return Update::Refused(SHADOWED);
+        return give_back(client, id, old.is_some(), SHADOWED);
     }
     if person_copy(&atoms, successor, id) {
-        if let Some(old) = atoms
-            .iter()
-            .find(|atom| atom_id(atom).as_deref() == Some(id))
-        {
+        if let Some(old) = old {
             match close_predecessor(client, old) {
                 Update::Stamped => {}
                 other => return other,
@@ -698,32 +712,30 @@ fn finish_born(client: &crate::PacksetClient, id: &str, successor: &Value) -> Up
         }
         return drop_pending(client, id);
     }
-    let closed = if let Some(old) = atoms
-        .iter()
-        .find(|atom| atom_id(atom).as_deref() == Some(id))
-    {
+    if let Some(old) = old {
         match close_predecessor(client, old) {
-            Update::Stamped => true,
-            Update::Refused(code) => {
-                let _ = drop_pending(client, id);
-                return Update::Refused(code);
-            }
+            Update::Stamped => {}
+            Update::Refused(code) => return give_back(client, id, true, code),
             Update::Later => return Update::Later,
         }
-    } else {
-        false
-    };
+    }
     match post_successor(client, successor) {
         Update::Stamped => drop_pending(client, id),
-        Update::Refused(code) => {
-            if closed {
-                let _ = reopen(client, id);
-            }
-            let _ = drop_pending(client, id);
-            Update::Refused(code)
-        }
+        Update::Refused(code) => give_back(client, id, false, code),
         Update::Later => Update::Later,
     }
+}
+
+/// The copy will not be stored, so the original is the preference. The
+/// note goes, and `code` stands, once it is live: `live` says it still
+/// is, or this reopens it. A reopen the pack does not take keeps the
+/// note and is not a refusal, so the next run tries again.
+fn give_back(client: &crate::PacksetClient, id: &str, live: bool, code: u16) -> Update {
+    if !live && !matches!(reopen(client, id), Update::Stamped) {
+        return Update::Later;
+    }
+    let _ = drop_pending(client, id);
+    Update::Refused(code)
 }
 
 fn person_copy(atoms: &[Value], successor: &Value, old: &str) -> bool {
@@ -748,12 +760,17 @@ fn same_claim(a: &Value, b: &Value) -> bool {
 }
 
 /// `atom` is the person's copy of `successor`: the same claim, entities
-/// and clock, born with basis `person`.
+/// and clock, born with basis `person`. A successor without `valid_from`
+/// copies an original stored without one, and the pack fills the copy's
+/// from `ts`, so it is compared only when the successor carries one.
 fn copy_of(atom: &Value, successor: &Value) -> bool {
     same_claim(atom, successor)
-        && ["entities", "ts", "valid_from"]
+        && ["entities", "ts"]
             .iter()
             .all(|key| atom.get(*key) == successor.get(*key))
+        && successor
+            .get("valid_from")
+            .is_none_or(|from| atom.get("valid_from") == Some(from))
         && basis_of(atom) == Some("person")
 }
 
@@ -879,6 +896,8 @@ fn drop_pending(client: &crate::PacksetClient, id: &str) -> Update {
     })
 }
 
+/// Read the cutoff, change its `source`, write it back. The caller holds
+/// [`cutoff_lock`].
 fn alter_cutoff(client: &crate::PacksetClient, change: impl FnOnce(&mut Value)) -> Update {
     let atoms = match atoms_lean(client, &client.workspace()) {
         Ok(atoms) => atoms,
@@ -898,6 +917,9 @@ fn replay_pending(client: &crate::PacksetClient, bound: &Bound) -> Result<bool> 
     if pending.is_empty() {
         return Ok(false);
     }
+    let Some(_lock) = cutoff_lock() else {
+        bail!("prefer: could not lock the preference cutoff to finish a write");
+    };
     let mut later = false;
     for item in &pending {
         let Some(id) = item.get("id").and_then(Value::as_str) else {
@@ -959,9 +981,18 @@ fn send_update(client: &crate::PacksetClient, id: &str, fields: Value) -> Sent {
     }
 }
 
-fn gate() -> &'static Mutex<()> {
-    static GATE: Mutex<()> = Mutex::new(());
-    &GATE
+/// The lock a run holds while it writes the cutoff's `source`: through
+/// one copy, from its note to the note's removal, through the replay of
+/// notes, and through a refusal. It is a file in this user's state
+/// directory, so a doctor and a `prefer` at once take turns. Each writes
+/// the whole source back, and a note the other wrote between that read
+/// and that write would be lost. `None` is a lock that could not be
+/// taken, and the caller writes nothing.
+fn cutoff_lock() -> Option<crate::CommitLock> {
+    let dir = crate::note_queue::state_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let lock = crate::CommitLock::acquire_private(&dir.join("pref-basis.lock"));
+    lock.0.is_some().then_some(lock)
 }
 
 #[cfg(test)]
@@ -1339,6 +1370,197 @@ mod tests {
         assert_eq!(pack.updates.iter().filter(|id| *id == OLD).count(), 2);
     }
 
+    const CUTOFF_ID: &str = "dddddddddddddddddddddddddddddddd";
+
+    fn cutoff_atom() -> Value {
+        json!({
+            "id": CUTOFF_ID,
+            "kind": "receipt",
+            "text": CUTOFF_TEXT,
+            "origin": "user-declared",
+            "entities": ["seat:person", CUTOFF_ENTITY],
+            "source": {},
+            "ts": "2026-10-21T00:00:00Z",
+        })
+    }
+
+    fn older(id: &str, text: &str) -> Value {
+        json!({
+            "id": id,
+            "kind": "preference",
+            "text": text,
+            "origin": "user-declared",
+            "entities": ["seat:person", "horizon:standing"],
+            "source": terminal_source(),
+            "ts": "2020-01-01T00:00:00Z",
+        })
+    }
+
+    /// Two processes raise one preference each at once, both read the
+    /// cutoff before either writes it, and the pack misses both copies.
+    /// Each note survives the other's write, so the next run brings both
+    /// back as the person's.
+    #[test]
+    fn two_upgrades_at_once_keep_both_notes() {
+        let olds = [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2",
+        ];
+        let texts = [
+            "Keep the first note in its own file.",
+            "Keep the second note in its own file.",
+        ];
+        let (url, pack) = serve(vec![
+            older(olds[0], texts[0]),
+            older(olds[1], texts[1]),
+            cutoff_atom(),
+        ]);
+        {
+            let mut pack = pack.lock().unwrap();
+            pack.rise.extend(olds.map(String::from));
+            pack.later_posts.extend(texts.map(String::from));
+            pack.gather = 2;
+        }
+        let state = tempfile::tempdir().unwrap();
+        // Each child starts from the environment another test is not
+        // halfway through changing.
+        let env = crate::test_env_lock();
+        let runs: Vec<std::process::Child> = olds
+            .iter()
+            .zip(texts)
+            .map(|(id, text)| {
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "legacy_pref::tests::one_upgrade_in_its_own_process",
+                        "--test-threads=1",
+                    ])
+                    .env("LJOS_TEST_UPGRADE", older(id, text).to_string())
+                    .env("PACKSET_URL", &url)
+                    .env("PACKSET_WORKSPACE", "seat")
+                    .env("PACKSET_AUTH", "off")
+                    .env("PACKSET_TIMEOUT_MS", "5000")
+                    .env("XDG_STATE_HOME", state.path())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        drop(env);
+        for run in runs {
+            let out = run.wait_with_output().unwrap();
+            let said = String::from_utf8_lossy(&out.stdout).into_owned()
+                + &String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success(), "{said}");
+            assert!(said.contains("1 passed"), "{said}");
+        }
+
+        with_pack(&url, || {
+            stamp_marked().expect("both notes are finished");
+        });
+        let pack = pack.lock().unwrap();
+        for text in texts {
+            assert!(
+                pack.atoms.iter().any(|atom| {
+                    atom.get("text").and_then(Value::as_str) == Some(text)
+                        && basis_of(atom) == Some("person")
+                        && atom.get("valid_to").is_none_or(Value::is_null)
+                }),
+                "{text} was lost: {:?}",
+                pack.atoms
+            );
+        }
+        let cutoff = by_id(&pack.atoms, CUTOFF_ID);
+        assert!(cutoff.pointer("/source/pending").is_none(), "{cutoff}");
+        assert!(refused_ids(&cutoff["source"]).is_empty(), "{cutoff}");
+    }
+
+    /// One side of [`two_upgrades_at_once_keep_both_notes`]: raise the
+    /// preference it was handed. Without one it does nothing.
+    #[test]
+    fn one_upgrade_in_its_own_process() {
+        let Ok(atom) = std::env::var("LJOS_TEST_UPGRADE") else {
+            return;
+        };
+        let atom: Value = serde_json::from_str(&atom).unwrap();
+        let client = pack().unwrap();
+        assert!(matches!(stamp_basis(&client, &atom), Update::Later));
+    }
+
+    /// The pack refuses the copy and then misses the reopen. The note
+    /// stays and the id is not refused, so the closed original is not
+    /// left with nothing to bring it back. Once a reopen goes through, it
+    /// is live and refused.
+    #[test]
+    fn a_refused_copy_keeps_its_note_until_the_original_is_back() {
+        const OLD: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb1";
+        const TEXT: &str = "Keep the refused copy in its own file.";
+        let (url, pack) = serve(vec![older(OLD, TEXT), cutoff_atom()]);
+        {
+            let mut pack = pack.lock().unwrap();
+            pack.rise.push(OLD.to_string());
+            pack.refuse_posts.push(TEXT.to_string());
+            pack.stuck.push(OLD.to_string());
+        }
+
+        with_pack(&url, || {
+            let err = stamp_marked().unwrap_err();
+            assert!(err.to_string().contains("did not answer"), "{err}");
+        });
+        {
+            let mut pack = pack.lock().unwrap();
+            let cutoff = by_id(&pack.atoms, CUTOFF_ID);
+            let pending: Vec<Value> = pending_of(&cutoff["source"])
+                .iter()
+                .filter_map(|item| item.get("id").cloned())
+                .collect();
+            assert_eq!(pending, vec![json!(OLD)], "{cutoff}");
+            assert!(refused_ids(&cutoff["source"]).is_empty(), "{cutoff}");
+            pack.stuck.clear();
+        }
+
+        with_pack(&url, || {
+            assert_eq!(stamp_marked().expect("the original is back"), 0);
+        });
+        let pack = pack.lock().unwrap();
+        let old = by_id(&pack.atoms, OLD);
+        assert!(old.get("valid_to").is_none_or(Value::is_null), "{old}");
+        let cutoff = by_id(&pack.atoms, CUTOFF_ID);
+        assert!(cutoff.pointer("/source/pending").is_none(), "{cutoff}");
+        assert_eq!(refused_ids(&cutoff["source"]), vec![OLD.to_string()]);
+    }
+
+    /// An atom stored before the pack filled `valid_from` has none, and
+    /// the pack fills the copy's from `ts`. That copy is the one this run
+    /// posted: the original stays closed and is not refused.
+    #[test]
+    fn an_original_without_valid_from_takes_the_one_the_pack_fills() {
+        const OLD: &str = "cccccccccccccccccccccccccccccc01";
+        const TEXT: &str = "Keep the unbounded note in its own file.";
+        let original = older(OLD, TEXT);
+        assert!(original.get("valid_from").is_none());
+        let (url, pack) = serve(vec![original, cutoff_atom()]);
+        pack.lock().unwrap().rise.push(OLD.to_string());
+
+        with_pack(&url, || {
+            assert_eq!(stamp_marked().expect("the copy is stored"), 1);
+        });
+        let pack = pack.lock().unwrap();
+        let live: Vec<&Value> = pack
+            .atoms
+            .iter()
+            .filter(|atom| atom.get("text").and_then(Value::as_str) == Some(TEXT))
+            .filter(|atom| atom.get("valid_to").is_none_or(Value::is_null))
+            .collect();
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert_eq!(basis_of(live[0]), Some("person"), "{}", live[0]);
+        assert_eq!(live[0].get("valid_from"), live[0].get("ts"), "{}", live[0]);
+        let cutoff = by_id(&pack.atoms, CUTOFF_ID);
+        assert!(refused_ids(&cutoff["source"]).is_empty(), "{cutoff}");
+        assert!(cutoff.pointer("/source/pending").is_none(), "{cutoff}");
+    }
+
     fn by_id<'a>(atoms: &'a [Value], id: &str) -> &'a Value {
         atoms
             .iter()
@@ -1347,22 +1569,28 @@ mod tests {
     }
 
     fn with_pack(url: &str, f: impl FnOnce()) {
+        // A test that reads XDG_STATE_HOME holds this lock, not only the
+        // mutation gate, so the state directory set here is not theirs.
+        let _env = crate::test_env_lock();
         crate::with_env_mutation(|| {
             let keys = [
                 "PACKSET_URL",
                 "PACKSET_WORKSPACE",
                 "PACKSET_AUTH",
                 "PACKSET_TIMEOUT_MS",
+                "XDG_STATE_HOME",
             ];
             let prev: Vec<(&'static str, Option<String>)> = keys
                 .iter()
                 .map(|key| (*key, std::env::var(key).ok()))
                 .collect();
+            let state = tempfile::tempdir().unwrap();
             unsafe {
                 std::env::set_var("PACKSET_URL", url);
                 std::env::set_var("PACKSET_WORKSPACE", "seat");
                 std::env::set_var("PACKSET_AUTH", "off");
                 std::env::set_var("PACKSET_TIMEOUT_MS", "2000");
+                std::env::set_var("XDG_STATE_HOME", state.path());
             }
             struct Put(Vec<(&'static str, Option<String>)>);
             impl Drop for Put {
@@ -1389,6 +1617,16 @@ mod tests {
         later: Vec<String>,
         /// Updates that set `source.basis` `person` are refused as a rise.
         rise: Vec<String>,
+        /// Texts whose next post is not answered.
+        later_posts: Vec<String>,
+        /// Texts whose post is refused.
+        refuse_posts: Vec<String>,
+        /// Ids whose reopen is not answered.
+        stuck: Vec<String>,
+        /// The first `gather` listings are read as they arrive and held,
+        /// up to a second, until that many have arrived.
+        gather: usize,
+        gathered: usize,
         seq: u64,
     }
 
@@ -1403,15 +1641,23 @@ mod tests {
             refuse: Vec::new(),
             later: Vec::new(),
             rise: Vec::new(),
+            later_posts: Vec::new(),
+            refuse_posts: Vec::new(),
+            stuck: Vec::new(),
+            gather: 0,
+            gathered: 0,
             seq: 1,
         }));
         let shared = Arc::clone(&pack);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut socket) = stream else { break };
-                let req = read_req(&mut socket);
-                let resp = answer(&req, &shared);
-                let _ = socket.write_all(resp.as_bytes());
+                let shared = Arc::clone(&shared);
+                std::thread::spawn(move || {
+                    let req = read_req(&mut socket);
+                    let resp = answer(&req, &shared);
+                    let _ = socket.write_all(resp.as_bytes());
+                });
             }
         });
         (format!("http://{addr}"), pack)
@@ -1453,17 +1699,31 @@ mod tests {
             .map(|(_, rest)| rest)
             .unwrap_or("");
         let (code, payload) = if line.starts_with("GET /v1/atoms") {
-            let pack = pack.lock().unwrap_or_else(|e| e.into_inner());
-            let live: Vec<&Value> = pack
-                .atoms
-                .iter()
-                .filter(|atom| {
-                    atom.get("valid_to")
-                        .and_then(Value::as_str)
-                        .is_none_or(|until| until.is_empty())
-                })
-                .collect();
-            (200, json!({"atoms": live}).to_string())
+            let (held, listing) = {
+                let mut pack = pack.lock().unwrap_or_else(|e| e.into_inner());
+                let held = pack.gathered < pack.gather;
+                pack.gathered += usize::from(held);
+                let live: Vec<&Value> = pack
+                    .atoms
+                    .iter()
+                    .filter(|atom| {
+                        atom.get("valid_to")
+                            .and_then(Value::as_str)
+                            .is_none_or(|until| until.is_empty())
+                    })
+                    .collect();
+                (held, json!({"atoms": live}).to_string())
+            };
+            let since = std::time::Instant::now();
+            while held && since.elapsed() < std::time::Duration::from_secs(1) {
+                let pack = pack.lock().unwrap_or_else(|e| e.into_inner());
+                if pack.gathered >= pack.gather {
+                    break;
+                }
+                drop(pack);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            (200, listing)
         } else if line.starts_with("POST /v1/atoms/update") {
             let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
             let id = parsed
@@ -1477,8 +1737,11 @@ mod tests {
                 .pointer("/fields/source/basis")
                 .and_then(Value::as_str)
                 == Some("person");
+            let reopens = parsed.pointer("/fields/valid_to") == Some(&Value::Null);
             if pack.refuse.iter().any(|seen| seen == &id) {
                 (422, r#"{"error":"refused"}"#.to_string())
+            } else if reopens && pack.stuck.iter().any(|seen| seen == &id) {
+                (503, r#"{"error":"later"}"#.to_string())
             } else if let Some(at) = pack.later.iter().position(|seen| seen == &id) {
                 pack.later.remove(at);
                 (503, r#"{"error":"later"}"#.to_string())
@@ -1505,6 +1768,14 @@ mod tests {
         } else if line.starts_with("POST /v1/atoms") {
             let mut atom: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
             let mut pack = pack.lock().unwrap_or_else(|e| e.into_inner());
+            let text = atom.get("text").and_then(Value::as_str).unwrap_or("");
+            if pack.refuse_posts.iter().any(|seen| seen == text) {
+                return reply(422, r#"{"error":"refused"}"#);
+            }
+            if let Some(at) = pack.later_posts.iter().position(|seen| seen == text) {
+                pack.later_posts.remove(at);
+                return reply(503, r#"{"error":"later"}"#);
+            }
             let id = if atom.get("text").and_then(Value::as_str) == Some(CUTOFF_TEXT) {
                 "dddddddddddddddddddddddddddddddd".to_string()
             } else {
@@ -1520,11 +1791,22 @@ mod tests {
             {
                 atom["ts"] = json!("2026-10-21T00:00:00Z");
             }
+            if atom
+                .get("valid_from")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+            {
+                atom["valid_from"] = atom["ts"].clone();
+            }
             pack.atoms.push(atom.clone());
             (200, atom.to_string())
         } else {
             (404, r#"{"error":"unexpected"}"#.to_string())
         };
+        reply(code, &payload)
+    }
+
+    fn reply(code: u16, payload: &str) -> String {
         let status = match code {
             200 => "200 OK",
             400 => "400 Bad Request",
