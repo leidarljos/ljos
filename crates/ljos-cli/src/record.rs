@@ -1179,6 +1179,7 @@ mod tests {
                 std::env::remove_var("LJOS_SEAT");
                 std::env::remove_var("VISSUE_AGENT");
                 std::env::remove_var("VISSUE_ROOT");
+                std::env::remove_var("CURSOR_AGENT_ID");
             }
         });
         (lock, home)
@@ -1339,6 +1340,13 @@ mod tests {
             "beta/seat-b",
         )
         .expect("run 2");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe {
+                std::env::remove_var("CURSOR_AGENT_ID");
+                std::env::remove_var("LJOS_SEAT_KEY");
+            }
+        });
         assert_ne!(
             first.signature.key, second.signature.key,
             "two runs shared one fallback override key"
