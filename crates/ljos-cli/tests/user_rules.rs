@@ -66,6 +66,34 @@ fn fixture_pack() -> (String, Arc<Mutex<Vec<String>>>) {
     (format!("http://{addr}"), seen)
 }
 
+/// A variable an agent runner stamps on its shell, or one ljos reads to
+/// tell which runner and session it is in. The person at a terminal has
+/// none, whatever shell ran `cargo test`.
+fn runner_var(key: &str) -> bool {
+    [
+        "CURSOR_",
+        "CLAUDE",
+        "CODEX_",
+        "GROK_",
+        "GEMINI_CLI",
+        "OPENCODE_",
+        "AMP_",
+    ]
+    .iter()
+    .any(|p| key.starts_with(p))
+        || [
+            "CLOUD_AGENT_ID",
+            "AGENT_TOOL_NAME",
+            "LJOS_HARNESS_SESSION",
+            "LJOS_SESSION_ID",
+        ]
+        .contains(&key)
+        || (key != "XDG_SESSION_ID"
+            && ["_SESSION_ID", "_THREAD_ID", "_CONVERSATION_ID"]
+                .iter()
+                .any(|s| key.ends_with(s)))
+}
+
 struct Home {
     root: tempfile::TempDir,
 }
@@ -94,6 +122,11 @@ impl Home {
             .env_remove("POLICYD_REQUIRED")
             .env_remove("LJOS_SEAT")
             .stdin(Stdio::null());
+        for (key, _) in std::env::vars_os() {
+            if key.to_str().is_some_and(runner_var) {
+                cmd.env_remove(key);
+            }
+        }
         let _ = std::fs::create_dir_all(self.root.path().join("run"));
         cmd
     }
@@ -271,4 +304,40 @@ fn the_guard_denies_a_mention_and_a_reply_and_allows_another_comment() {
     let allowed_text = output_text(&allowed);
     assert!(allowed.status.success(), "{allowed_text}");
     assert!(!allowed_text.contains("deny:"), "{allowed_text}");
+}
+
+/// The variables an agent runner stamps on the shell that runs the suite.
+const RUNNER_ENV: &[(&str, &str)] = &[
+    ("CURSOR_CONVERSATION_ID", "0199a1b2-c3d4-e5f6-runner"),
+    ("CURSOR_AGENT", "1"),
+    ("CLAUDECODE", "1"),
+    ("CLAUDE_CODE_SESSION_ID", "0199a1b2-claude-session"),
+    ("CODEX_THREAD_ID", "0199a1b2-codex-thread"),
+];
+
+/// Run one test of this file again in a child that carries `env`.
+fn rerun(test: &str, env: &[(&str, &str)]) -> std::process::Output {
+    let mut cmd = Command::new(std::env::current_exe().unwrap());
+    cmd.args(["--exact", test, "--test-threads=1"]);
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+    cmd.output().unwrap()
+}
+
+/// These tests write a user rule as the person at a terminal. A runner's
+/// variables on the shell that runs `cargo test` must not make them an agent's.
+#[test]
+fn the_user_rule_tests_pass_under_a_runner_environment() {
+    for test in [
+        "prefer_user_is_read_by_a_second_seat_and_promote_copies_a_fixture_lesson",
+        "the_guard_denies_a_mention_and_a_reply_and_allows_another_comment",
+    ] {
+        for env in [RUNNER_ENV, &[("CURSOR_CONVERSATION_ID", "x")]] {
+            let out = rerun(test, env);
+            let said = output_text(&out);
+            assert!(out.status.success(), "{test} under {env:?}:\n{said}");
+            assert!(said.contains("1 passed"), "{test} under {env:?}:\n{said}");
+        }
+    }
 }
