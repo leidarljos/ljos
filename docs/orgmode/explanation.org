@@ -327,7 +327,10 @@ or a =/nix/store= entry. Root or the person owns the file, every
 directory from the root down to it, and the directory the root sits
 in, and no one else can write them but the person's primary group,
 and that only when the group bears the person's name and holds no one
-else. A store entry counts only when Nix alone keeps it: a root-owned
+else. That is read from =/etc/group= and =/etc/passwd= themselves, and
+only when =nsswitch.conf= sends both to those files alone; a second
+group line with the same gid, a source such as =systemd=, =sss= or
+=ldap=, or a line that cannot be read means the group is shared. A store entry counts only when Nix alone keeps it: a root-owned
 store the person cannot write, sticky if its group may, holding a
 root-owned entry, or on a single-user install a store the person owns
 and no one else may write. The home roots and a single-user store are
