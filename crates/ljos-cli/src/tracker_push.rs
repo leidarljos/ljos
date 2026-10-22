@@ -1006,9 +1006,14 @@ fn reexport_local(root: &Path, dest: &Path, rel: &str) -> Result<(), String> {
     let Some(scope) = scope else {
         return Err("atoms merge: this tracker names no scope".into());
     };
+    let Some(scope_name) = scope_for_this_host_atoms(rel, &scope) else {
+        return Err(format!(
+            "atoms merge: {rel} names a scope this tracker does not configure"
+        ));
+    };
     let client = crate::pack().map_err(|e| e.to_string())?;
     let atoms = crate::atoms_lean(&client, &client.workspace()).map_err(|e| e.to_string())?;
-    crate::sync::export(root, &scope, &atoms).map_err(|e| e.to_string())?;
+    crate::sync::export_named(root, &scope, &scope_name, &atoms).map_err(|e| e.to_string())?;
     let name =
         atoms_file_name(rel).ok_or_else(|| format!("atoms merge: {rel} has no file name"))?;
     let fresh = root.join(".ljos").join("atoms").join(name);
@@ -1030,7 +1035,30 @@ fn is_this_host_atoms(rel: &str) -> bool {
         return false;
     };
     let host = crate::sync::host();
-    name == format!("{host}.jsonl.age") || name == format!("{host}.digest")
+    if name == format!("{host}.jsonl.age") || name == format!("{host}.digest") {
+        return true;
+    }
+    let Some(rest) = name.strip_prefix(&format!("{host}+")) else {
+        return false;
+    };
+    !rest.is_empty() && (rest.ends_with(".jsonl.age") || rest.ends_with(".digest"))
+}
+
+fn scope_for_this_host_atoms(rel: &str, scope: &crate::sync::Scope) -> Option<String> {
+    let name = atoms_file_name(rel)?;
+    let host = crate::sync::host();
+    if name == format!("{host}.jsonl.age") || name == format!("{host}.digest") {
+        return Some(scope.name.clone());
+    }
+    scope
+        .scopes
+        .keys()
+        .find(|scope_name| {
+            let suffix_age = format!("{host}+{scope_name}.jsonl.age");
+            let suffix_digest = format!("{host}+{scope_name}.digest");
+            name == suffix_age || name == suffix_digest
+        })
+        .cloned()
 }
 
 fn merge_onto(dir: &Path, onto: &str) -> Result<(), String> {
