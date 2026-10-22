@@ -11169,7 +11169,8 @@ mod read_back_tests {
 /// The seat ballots on `issue` that fail their signature check, said as
 /// one refusal. `Ok` when every seat ballot is signed under its pinned key
 /// or is legacy unsigned (committed to the tracker before signing began),
-/// and every signed seat first pinned after slots began is under a slot
+/// and every signed seat that is not standing is under a slot that this
+/// issue already held when its pin was introduced
 /// ([`slot::problems`]), or when `LJOS_UNSIGNED_BALLOTS=allow`; the `Ok`
 /// names the legacy ones.
 ///
@@ -11205,14 +11206,10 @@ pub fn check_seat_signatures(
         .into_iter()
         .filter(|(voter, _)| !old.iter().any(|o| o == voter))
         .collect();
-    let unslotted = slot::problems(
-        issue,
-        &signed,
-        &notes,
-        &pins,
-        &slot::pinned_at,
-        &slot::noted_at,
-    );
+    let unslotted = slot::problems(issue, &signed, &notes, &pins, &|note, voter| {
+        pins.get(voter)
+            .is_some_and(|key| slot::recorded_before_pin(issue, note, voter, key).unwrap_or(true))
+    });
     if unslotted.is_empty() {
         Ok(old)
     } else {
@@ -18304,10 +18301,12 @@ pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
 }
 
 /// Whether a cite stands: a tracker issue its seat ballots decide
-/// ([`seats_decide`]), open or closed. The text says which ballots it
-/// counted. A deed alone does not stand: the pushing seat can mint one
-/// with `deedar create` a moment before the push, so the decision has to
-/// be on an issue another seat voted on.
+/// ([`seats_decide`]), open or closed. The ballots are the ones
+/// [`ballot_rows`] counts, so one session is one ballot here and in
+/// `ljos consensus`. The text says which ballots it counted. A deed
+/// alone does not stand: the pushing seat can mint one with `deedar
+/// create` a moment before the push, so the decision has to be on an
+/// issue another seat voted on.
 pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
     if let Ok(v) = tracker_show_json(cite) {
         if let Some(why) = panel_gate::settle_refusal(cite) {
@@ -18439,12 +18438,16 @@ fn vissue_json(args: &[&str]) -> std::result::Result<Value, String> {
     serde_json::from_str(&said.stdout).map_err(|e| e.to_string())
 }
 
-/// An issue's ballots and the persona names to leave out of them.
+/// An issue's ballots and the persona names to leave out of them. The
+/// rows are what [`panel_gate::counted_ballots`] keeps of `vissue vote
+/// --json`, the same rows [`ballot_rows`] hands to consensus.
 fn cite_ballots(
     cite: &str,
 ) -> std::result::Result<(Vec<Value>, std::collections::BTreeSet<String>), String> {
     let ballots = vissue_json(&["vote", cite, "--json"])
         .map_err(|e| format!("{cite}: the ballots are not readable: {e}"))?;
+    let ballots =
+        panel_gate::counted_ballots(cite, &ballots.as_array().cloned().unwrap_or_default());
     let personas = personas_from_pack()
         .map_err(|e| {
             format!(
@@ -18454,7 +18457,7 @@ fn cite_ballots(
         .into_iter()
         .map(|p| p.name.trim().to_string())
         .collect();
-    Ok((ballots.as_array().cloned().unwrap_or_default(), personas))
+    Ok((ballots, personas))
 }
 
 /// The files that are the seat's law and its reach into each runner: the
