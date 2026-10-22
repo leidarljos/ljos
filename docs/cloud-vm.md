@@ -20,7 +20,9 @@ The woken seat runs `ljos inbox --sync COMMIT`. That fetches until the commit is
 
 Each seat signs its ballots and its handovers with `~/.local/share/ljos/seats/SEAT/ballot.key`. `cloud up` points `LJOS_SEAT_KEY` and `DEEDAR_HOST_SIGNING_KEY` at that file, and writes `VISSUE_AGENT` as the same seat. The machine key `~/.config/deedar/host.key` stays where it is. A later process on that machine does not sign a ballot or a handover that already has a signature.
 
-`LJOS_CLOUD_AGE_SECRET` names the environment variable that holds the age identity for scope `cloud`. The value is an identity file as `age-keygen` writes it. `ljos cloud up` writes that identity to `$XDG_CONFIG_HOME/ljos/cloud.age`, or `~/.config/ljos/cloud.age` when `XDG_CONFIG_HOME` is unset, with mode 0600. The file sits beside this machine's own `age.key`. It stays out of the tracker, out of `~/.config/ljos/env`, and out of the harness config. `ljos doctor` reports the file. Sync opens logs with this identity and with the machine key. With the variable unset, `cloud up` leaves any identity file already written where it is.
+`LJOS_CLOUD_AGE_SECRET` names the environment variable that holds the age identity for scope `cloud`. The value is an identity file as `age-keygen` writes it. `ljos cloud up` writes that identity to `$XDG_CONFIG_HOME/ljos/cloud.age`, or `~/.config/ljos/cloud.age` when `XDG_CONFIG_HOME` is unset, with mode 0600. The file sits beside this machine's own `age.key`. It stays out of the tracker, out of `~/.config/ljos/env`, and out of the harness config. `ljos doctor` reports the file. Sync opens scope `cloud`'s logs with this identity and with the machine key, and every other scope's logs with the machine key alone. With the variable unset, `cloud up` leaves any identity file already written where it is.
+
+`ljos cloud up` also writes `LJOS_WRITE_SCOPE=cloud` into `~/.config/ljos/env` and into the process environment. Memory and lessons written on that machine are tagged `scope:cloud`, so they seal into `<host>+cloud.jsonl.age` when the tracker lists `cloud` under `[scopes]`. `cloud up` does not set `default_scope`. An atom with no `scope:` entity stays on the primary log. A primary scope named `cloud` is refused.
 
 `LJOS_TRACKER_DIR` is the clone. The default is `~/.local/share/ljos/tracker`. `LJOS_BIN_DIR` is the binary directory. The default is `~/.local/bin`. `LJOS_RELEASE_DIR` is an offline directory of binaries and a `SHA256SUMS` file, and of the encoder archives with their `.sha256` files. `LJOS_TRACKER_PUSH_WAIT` is how many seconds `ljos doctor` waits before an unpushed commit counts as stuck. The default is 5.
 
@@ -36,7 +38,7 @@ A `STARTED` claim whose process is gone, older than the lease (`LJOS_LEASE_SECS`
 
 `cloud up` fetches both archives from the release of its own version and checks both sums before it unpacks either. A sum that does not match installs nothing and stops `cloud up`. The runtime goes to `~/.local/lib/onnxruntime`, beside the binary directory. A release without the archives leaves search lexical.
 
-A cloud VM is a run with `CURSOR_AGENT_ID` or `CLOUD_AGENT_ID` set, or a machine with `/run/cursor/api.sock`. A CI job is not one, including GitHub Actions. Anywhere else `cloud up` downloads no encoder, and `packset-embed` is built from source against a source-built ONNX Runtime, as packset's howto says.
+A cloud VM is a run with `CURSOR_AGENT_ID` or `CLOUD_AGENT_ID` set, or a machine with `/run/cursor/api.sock`. A CI job is not one, including GitHub Actions. Anywhere else `cloud up` downloads no encoder and installs none. `sh scripts/install.sh --cloud` sets `WITH_EMBED=0` and does not build `packset-embed`. Search stays lexical.
 
 ## A job step
 
