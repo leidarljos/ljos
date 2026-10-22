@@ -352,9 +352,14 @@ pub fn problems(
                 Some(_) if !stands(launcher) => Some(format!(
                     "{voter}'s slot is from {launcher}, which is not a standing seat"
                 )),
-                Some(_) if pins.get(*voter) != Some(&slot.run_key) => Some(format!(
-                    "{voter} is pinned to a key other than the one its slot names"
-                )),
+                Some(_)
+                    if pins.get(*voter).map(|k| ballot_sig::key_fingerprint(k))
+                        != Some(ballot_sig::key_fingerprint(&slot.run_key)) =>
+                {
+                    Some(format!(
+                        "{voter} is pinned to a key other than the one its slot names"
+                    ))
+                }
                 Some(_) if !before_pin(note, voter) => {
                     Some(format!("{voter}'s key was pinned before its slot"))
                 }
@@ -713,6 +718,29 @@ mod tests {
         assert!(refused(rekeyed, false).contains("other than the one its slot names"));
         let late = slotted(1, "d-1", "review-r1", "ljosbot");
         assert!(refused(late, true).contains("pinned before its slot"));
+    }
+
+    #[test]
+    fn a_run_pinned_in_upper_case_hex_counts_under_its_slot() {
+        let pins: BTreeMap<String, String> = [
+            ("ljosbot".to_string(), public(&key(1))),
+            (
+                "review-r1".to_string(),
+                public(&key(4)).to_ascii_uppercase(),
+            ),
+        ]
+        .into();
+        let slot = slotted(1, "d-1", "review-r1", "ljosbot");
+        let p = problems(
+            "t-1",
+            "d-1",
+            &[("review-r1", "ship")],
+            &[slot],
+            &pins,
+            &standing,
+            &|_, _| true,
+        );
+        assert!(p.is_empty(), "{p:?}");
     }
 
     #[test]
