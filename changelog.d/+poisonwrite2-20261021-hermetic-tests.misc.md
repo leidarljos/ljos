@@ -1,0 +1,1 @@
+The test suites no longer inherit the agent runner that launched `cargo test`. The shared test environment lock and the user rule harness clear `CURSOR_*`, `CLAUDE*`, `CODEX_*` and the other runner and session variables, so the suites pass with or without them.
