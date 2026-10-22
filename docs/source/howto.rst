@@ -169,15 +169,17 @@ The sender does not wait on it and needs to know nothing about the recipient's r
    $ ljos wake claude-review --fire
 
 A command runs under ``sh -c`` with ``LJOS_SEAT`` set to the recipient, so ``ljos inbox`` in it reads the right mail.
+With a prefix wake, ``LJOS_SEAT`` is still the run seat that matched the prefix.
 ``LJOS_WAKE_FROM``, ``LJOS_WAKE_MSG``, ``LJOS_WAKE_ISSUE`` and ``LJOS_WAKE_INTERRUPT`` name the message, so a wake can ignore plain mail and act only on an interrupt.
 The guard judges the command when it is set and again on every run.
 A ``deny`` or an ``ask`` keeps it from running, since nobody is there to answer an ask.
 A command is stopped after 30 seconds; ``--timeout S`` changes that, and an agent run such as ``claude -p`` needs a longer one.
 Two sends close together start two wakes, so a wake that resumes a session holds a lock (``flock -n``) and leaves a running session to its ``Stop`` hook.
 
-A webhook gets the envelope as JSON: the seat, the sender, the message id, the issue and the interrupt flag.
+A webhook gets the envelope as JSON: the seat, the sender, the message id, the issue, the interrupt flag, and ``via`` when a prefix matched.
 The body stays in the pack, and the woken agent reads it with ``ljos inbox``.
 The key is read from ``--key-file`` or the variable ``--key-env`` names, and never written to ``wake.toml``.
+A key is a prefix only when it ends in one trailing ``-`` after a non-empty stem; names such as ``-``, ``--`` and ``a--`` are exact names.
 A Grok Bot wakes this way: make a routine with a webhook trigger, copy its URL and sender key from the routine's panel, and save the key in a file only you can read.
 
 A wake that fails or runs past its timeout is a line in ``~/.local/state/ljos/mail/wake.log``, and the message is still in the pack.
