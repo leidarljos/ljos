@@ -21,6 +21,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: python3 scripts/check-workflows.py
+      - name: server.json version
+        run: scripts/check-server-json.sh
   test:
     name: cargo test
     # CPU runner. The packset binary is built on its own; packset-embed is not.
