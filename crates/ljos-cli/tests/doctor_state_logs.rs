@@ -209,9 +209,10 @@ fn doctor_keeps_every_byte_of_the_note_queue() {
 }
 
 /// Another process holding the note-queue lock does not hold doctor: it
-/// takes no lock to read the queue.
+/// tries the lock once, says the queue is busy in a row the short doctor
+/// shows, and says so no longer once the lock is let go.
 #[test]
-fn doctor_returns_while_the_note_queue_lock_is_held() {
+fn doctor_says_busy_while_the_note_queue_lock_is_held() {
     use std::os::unix::io::AsRawFd;
     for (when, at) in [("just now", SystemTime::now()), ("ahead", ahead())] {
         let home = Home::new();
@@ -223,9 +224,17 @@ fn doctor_returns_while_the_note_queue_lock_is_held() {
         assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
         let before = home.tree();
         let (_, out) = home
-            .doctor(&["--all"])
+            .doctor(&[])
             .unwrap_or_else(|| panic!("doctor waited on the held queue lock ({when})"));
         assert_eq!(home.tree(), before, "touched {when}:\n{out}");
+        let line = row(&out, "note queue").unwrap_or_else(|| panic!("no queue row:\n{out}"));
+        assert!(
+            line.starts_with("warn\tnote queue\tbusy: "),
+            "{when}: {line}"
+        );
         drop(lock);
+        let (_, out) = home.doctor(&["--all"]).expect("doctor hung");
+        let line = row(&out, "note queue").unwrap_or_else(|| panic!("no queue row:\n{out}"));
+        assert!(!line.contains("busy"), "{when}, let go: {line}");
     }
 }
