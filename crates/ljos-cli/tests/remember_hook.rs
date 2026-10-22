@@ -186,7 +186,8 @@ fn prompt_through(home: &Home, hook: &str, session: &str, prompt: &str) -> Strin
     // Claude Code runs the command in `sh -c`; the hook keeps the prompt
     // only when that runner, a program the kernel runs from a file named
     // `claude`, opened the shell.
-    let runner = home.dir.path().join("claude");
+    let runner = home.dir.path().join(".local/bin/claude");
+    std::fs::create_dir_all(runner.parent().unwrap()).unwrap();
     runner::runner_at(&runner);
     let mut cmd = Command::new(&runner);
     cmd.args(["-c", "\"$@\"; exit $?", "claude", "/bin/sh", "-c", hook]);

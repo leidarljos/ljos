@@ -1035,7 +1035,7 @@ model crate alone, pass the rows as JSON tuples:
 Check the seat
 ==============
 
-``ljos doctor`` prints whether the seat is ready and the rows that need action, and exits 1 when a required part does not answer.
+``ljos doctor`` prints whether the seat is ready and the rows that need action, and exits 1 when a required part does not answer or the note queue is damaged.
 ``ljos doctor --all`` prints every row.
 The block is the ``ljos`` row that command printed, taken from ljos 0.32.1.
 ``ljos --version`` printed ``ljos 0.32.1``.
@@ -1057,3 +1057,6 @@ tracker has a different head of the branch, as of the last fetch: two
 seats pushing to two remotes each read only their own writes. A sitting's own tracker push goes to
 every remote that carries the branch. A missing
 claim graph is reported and is not a failure: the first claim creates it.
+A damaged guard bypass log is a ``warn`` row and is not a failure: the guard still judges every command.
+A damaged note queue is a ``no`` row and fails: it holds memory copies the pack has not taken.
+An empty or missing log of either is whole.
