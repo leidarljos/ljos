@@ -18989,7 +18989,9 @@ pub fn redirect_seat_verb(rule: Option<Rule>, line: &str) -> Option<Rule> {
 /// A tag push is ordinary.
 /// That ask does not wait for a seat rule. A seat rule that denies the
 /// dangerous push still denies it. A rule about some other command on the
-/// same line is left as it is when the push itself is ordinary.
+/// same line is left as it is when the push itself is ordinary. A push
+/// that carries `LJOS_CITE` is denied when the cite does not stand
+/// ([`cite_stands`]).
 #[must_use]
 pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<Rule> {
     // A temporary HOME and LJOS_OFF switch the whole guard off, the push
@@ -19000,6 +19002,15 @@ pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<R
     let Some(call) = push_call(line) else {
         return rule.cloned();
     };
+    if let Some(cite) = &call.cite {
+        if let Err(why) = cite_stands(cite) {
+            return Some(Rule {
+                pattern: "built-in push cite".into(),
+                verdict: "deny".into(),
+                reason: format!("LJOS_CITE={cite} does not stand: {why}"),
+            });
+        }
+    }
     let dir = push_dir(&call, cwd);
     let segment = push_segment(&call);
     let about_push = rule.is_some_and(|r| {
@@ -40259,12 +40270,19 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 "{line} -> {gated:?}"
             );
         }
-        assert!(gate_push(
-            None,
-            "LJOS_CITE=gpr_optim-1yg5 git push upstream develop",
-            None
-        )
-        .is_none());
+        let cited = "LJOS_CITE=gpr_optim-1yg5 git push upstream develop";
+        let refused = gate_push(None, cited, None).unwrap();
+        assert_eq!(
+            (refused.verdict.as_str(), refused.pattern.as_str()),
+            ("deny", "built-in push cite")
+        );
+        assert!(
+            refused
+                .reason
+                .starts_with("LJOS_CITE=gpr_optim-1yg5 does not stand: "),
+            "{}",
+            refused.reason
+        );
         assert!(gate_push(None, "git push -u origin feature/x", None).is_none());
         for tags in [
             "git push --tags",
@@ -40294,7 +40312,6 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         };
         for line in [
             "git push",
-            "LJOS_CITE=gpr_optim-1yg5 git push upstream develop",
             "git push origin main",
             "git push -u origin feature/x",
         ] {
@@ -40304,6 +40321,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             let gated = gate_push(ruled.as_ref(), line, None);
             assert!(gated.is_none(), "{line} via ruled_verdict stayed {gated:?}");
         }
+        let gated = gate_push(Some(&trust), cited, None);
+        assert_eq!(gated.map(|r| r.pattern), Some("built-in push cite".into()));
         let codex = hook_call(
             r#"{"hook_event_name":"PreToolUse","session_id":"c-1","turn_id":"t-1","tool_name":"Bash","tool_input":{"command":"git push"}}"#,
         );
@@ -40325,7 +40344,11 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             &cited.cue,
             None,
         );
-        assert!(gated.is_none(), "{gated:?}");
+        assert_eq!(
+            gated.map(|r| r.verdict),
+            Some("deny".into()),
+            "a cite that does not stand"
+        );
         for line in ["git status", "git commit -m save", "cargo build", "rg foo"] {
             let ruled = ruled_verdict(&[], line);
             let gated = gate_push(ruled.as_ref(), line, None);

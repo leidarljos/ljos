@@ -843,6 +843,7 @@ The run's harness id is the ballot's session, so two runs count twice and a run 
 When nothing names the run but the seat, ``ljos vote`` and the tally call the session unverified.
 Persona ballots and Jev ballots are advisory.
 The push gate counts seat ballots from another seat.
+A push whose ``LJOS_CITE`` names an issue those ballots do not decide is denied, and the refusal says why.
 
 Cast persona ballots through Jev
 ================================

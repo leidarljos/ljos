@@ -4036,3 +4036,43 @@ fn duplicate_ballots_from_one_session_have_one_push_verdict() {
     assert!(err.contains("the only seat ballot"), "{err}");
     assert!(err.contains("ljosbot"), "{err}");
 }
+
+/// The push gate runs a push whose `LJOS_CITE` stands: another seat's
+/// signed ballot decides the issue. The same push citing an issue no
+/// ballot decides is denied, and says why.
+#[test]
+fn the_push_gate_denies_a_cite_that_does_not_stand() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_origin, repo) = slot_world(root.path(), &["probe-cite", "probe-none"]);
+    pin_standing(&repo, "inky");
+    cast("inky", "probe-cite", "ship");
+
+    let bin = root.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    executable(
+        &bin.join("vissue"),
+        "#!/bin/sh\n[ \"$1\" = vote ] || exit 1\nif [ \"$2\" = probe-cite ]; then\n  printf '%s\\n' '[{\"agent\":\"inky\",\"choice\":\"ship\"}]'\nelse\n  echo '[]'\nfi\n",
+    );
+    std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+    std::env::set_var("PACKSET_URL", serve_empty_pack());
+    std::env::set_var("PACKSET_WORKSPACE", "seat");
+    std::env::set_var("LJOS_GUARD", "on");
+    std::env::set_var("LJOS_SEAT", "ljosbot");
+    std::env::set_var("VISSUE_AGENT", "ljosbot");
+
+    let stands = ljos_cli::cite_stands("probe-cite");
+    assert!(stands.is_ok(), "{stands:?}");
+    let pushed = ljos_cli::gate_push(None, "LJOS_CITE=probe-cite git push origin main", None);
+    assert_eq!(pushed, None);
+    let refused = ljos_cli::gate_push(None, "LJOS_CITE=probe-none git push origin main", None)
+        .expect("a cite that does not stand was let through");
+    assert_eq!(refused.verdict, "deny");
+    assert!(
+        refused
+            .reason
+            .starts_with("LJOS_CITE=probe-none does not stand: "),
+        "{}",
+        refused.reason
+    );
+}
