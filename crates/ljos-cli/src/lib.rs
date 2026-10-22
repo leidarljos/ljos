@@ -22190,7 +22190,7 @@ pub(crate) fn open_state_dir(path: &Path) -> std::io::Result<(std::fs::File, std
 /// `O_NONBLOCK` is cleared once that check passes, so a later read of a
 /// real log waits for its bytes. A symlink fails the open (`ELOOP`) and is
 /// reported as one.
-fn open_regular_at(
+pub(crate) fn open_regular_at(
     dir: &std::fs::File,
     name: &std::ffi::CStr,
     path: &Path,

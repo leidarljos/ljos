@@ -205,9 +205,15 @@ fn write(dir: &Path, notes: &[Queued], unread: &[u8]) -> Result<Option<SetAside>
     let aside = set_aside(dir, unread)?;
     let path = queue_file(dir);
     if notes.is_empty() {
-        if path.exists() {
-            crate::rewrite_state_file(&path, b"")
-                .with_context(|| format!("empty {}", path.display()))?;
+        // Opened, not stat'ed through the path: a dangling link is refused
+        // instead of read as no queue.
+        let present = crate::open_state_dir(&path)
+            .and_then(|(fd, name)| crate::open_regular_at(&fd, &name, &path, libc::O_RDONLY, 0));
+        match present {
+            Ok(_) => crate::rewrite_state_file(&path, b"")
+                .with_context(|| format!("empty {}", path.display()))?,
+            Err(err) if err.raw_os_error() == Some(libc::ENOENT) => {}
+            Err(err) => return Err(err).with_context(|| format!("empty {}", path.display())),
         }
         return Ok(aside);
     }
@@ -496,6 +502,17 @@ mod tests {
         std::os::unix::fs::symlink(&outside, &path).unwrap();
         assert!(replace_in(&dir, vec![note("p-9", "forged")]).is_err());
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "kept\n");
+    }
+
+    /// Emptying a queue that is a dangling link is refused, and the link
+    /// stays for doctor to name.
+    #[test]
+    fn emptying_a_dangling_linked_queue_is_refused() {
+        let dir = dir("empty-dangling");
+        let path = queue_file(&dir);
+        std::os::unix::fs::symlink(dir.join("gone"), &path).unwrap();
+        assert!(replace_in(&dir, Vec::new()).is_err());
+        assert!(std::fs::symlink_metadata(&path).unwrap().is_symlink());
     }
 
     /// A drain rewrites the queue with the notes left. A line that does
