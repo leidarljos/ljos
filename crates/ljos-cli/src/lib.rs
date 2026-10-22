@@ -43778,35 +43778,22 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(printed(None), process.display().to_string());
     }
 
+    /// A line whose `cd` the shell undoes, or runs where it leaves the line
+    /// alone, still runs `make clean-all` in `project`, and `lnk/..` is
+    /// `project` again, as a logical `cd` takes `..` off by name, though
+    /// `lnk` is a link to a directory whose parent is `elsewhere`.
     #[test]
     fn shell_lines_that_left_the_start_directory_are_still_denied() {
         let _g = env_guard();
-        let root = tempfile::tempdir().unwrap();
-        let danger = root.path().join("danger");
-        let safe = root.path().join("safe");
-        let elsewhere = root.path().join("elsewhere/leaf");
-        std::fs::create_dir_all(&danger).unwrap();
-        std::fs::create_dir_all(&safe).unwrap();
-        std::fs::create_dir_all(&elsewhere).unwrap();
-        std::os::unix::fs::symlink(&elsewhere, danger.join("lnk")).unwrap();
-        let bin = fake_policyd(
-            root.path(),
-            "ljos-policyd",
-            "case \"$*\" in\n\
-             *\"make clean-all\"*)\n\
-             if [ \"$(basename \"$(/bin/pwd -P)\")\" = \"danger\" ]; then\n\
-             printf 'deny\\tmake-clean-all\\n'\n\
-             exit 2\n\
-             fi\n\
-             ;;\n\
-             esac\n\
-             printf 'allow\\n'\n",
-        );
-        let _env = HoldEnv::set(&[
-            ("POLICYD_BIN", bin.to_str().unwrap()),
-            ("LJOS_GUARD", "on"),
-            ("LJOS_OFF", "0"),
-        ]);
+        let (root, _home, _env) = policyd_tree("policyd-left");
+        let project = root.path().join("project");
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir_all(project.join("safe")).unwrap();
+        std::fs::create_dir_all(elsewhere.join("leaf")).unwrap();
+        std::fs::write(project.join("safe/Makefile"), PLAIN_MAKEFILE).unwrap();
+        std::fs::write(elsewhere.join("Makefile"), PLAIN_MAKEFILE).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("leaf"), project.join("lnk")).unwrap();
+        let verdict = |line: &str| tcb_verdict_in(line, Some(&project));
         for line in [
             "cd safe | true && make clean-all",
             "cd safe & make clean-all",
@@ -43814,10 +43801,17 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "pushd safe && popd && make clean-all",
             "cd safe && cd - && make clean-all",
             "cd lnk/.. && make clean-all",
+            "cd lnk && cd .. && make clean-all",
         ] {
-            let rule = tcb_verdict_in(line, Some(&danger)).expect(line);
-            assert_eq!(rule.verdict, "deny", "{line}: {}", rule.reason);
-            assert_eq!(rule.pattern, "ljos-policyd", "{line}: {}", rule.reason);
+            let rule = verdict(line).unwrap_or_else(|| panic!("{line:?} was allowed"));
+            assert_eq!(rule.verdict, "deny", "{line:?}: {}", rule.reason);
+            assert_eq!(rule.pattern, "ljos-policyd", "{line:?}: {}", rule.reason);
+        }
+        for line in [
+            "cd safe && make clean-all",
+            "cd -P lnk/.. && make clean-all",
+        ] {
+            assert!(verdict(line).is_none(), "{line:?}: {:?}", verdict(line));
         }
     }
 
