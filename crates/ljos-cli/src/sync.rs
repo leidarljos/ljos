@@ -272,6 +272,7 @@ pub fn scope_of_repo(root: &Path) -> Result<Option<Scope>> {
     match std::fs::read_to_string(&path) {
         Ok(text) => {
             let scope: Scope = toml::from_str(&text).with_context(|| path.display().to_string())?;
+            check_scope_name(&path, &scope.name)?;
             if scope.name == CLOUD_SCOPE {
                 bail!(
                     "{} names primary scope `cloud`, which is reserved for the shared scope; put cloud under [scopes]",
@@ -285,12 +286,8 @@ pub fn scope_of_repo(root: &Path) -> Result<Option<Scope>> {
                     scope.name
                 );
             }
-            if let Some(name) = scope.scopes.keys().find(|name| name.contains('+')) {
-                bail!(
-                    "{} names `{}` in [scopes], but `+` is reserved in log file names",
-                    path.display(),
-                    name
-                );
+            for name in scope.scopes.keys().chain(scope.projects.values()) {
+                check_scope_name(&path, name)?;
             }
             Ok(Some(scope))
         }
@@ -299,11 +296,33 @@ pub fn scope_of_repo(root: &Path) -> Result<Option<Scope>> {
     }
 }
 
+/// A scope name is non-empty and drawn from `[a-z0-9-]`. `/` would escape
+/// the atoms directory and `+` is the separator in a log file name.
+fn valid_scope_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+fn check_scope_name(path: &Path, name: &str) -> Result<()> {
+    if valid_scope_name(name) {
+        return Ok(());
+    }
+    bail!(
+        "{} names `{name}`, but a scope name is non-empty and only [a-z0-9-]",
+        path.display()
+    );
+}
+
 /// The scope unscoped atoms take. An explicit `default_scope` may name the
 /// primary scope. One that names an extra scope is refused: applying it
 /// would seal an unscoped box atom into that extra scope's log.
 fn configured_default(scope: &Scope) -> Result<String> {
     let chosen = local().default_scope.unwrap_or_else(|| scope.name.clone());
+    if !valid_scope_name(&chosen) {
+        bail!("sync: default_scope `{chosen}` is not a scope name; use [a-z0-9-]");
+    }
     if scope.scopes.contains_key(&chosen) {
         bail!(
             "sync: default_scope `{chosen}` names an extra scope; unscoped atoms stay on the primary scope `{}`",
@@ -2467,6 +2486,40 @@ mod tests {
         assert_eq!(scope.name, "grokbot");
         assert_eq!(scope.for_project("garden"), "grokbot");
         assert!(scope.scopes.contains_key(CLOUD_SCOPE));
+    }
+
+    #[test]
+    fn a_scope_name_is_lowercase_words_and_digits() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".ljos")).unwrap();
+        let path = root.join(".ljos/sync.toml");
+        let refused = [
+            "name = \"\"\nrecipients = []\n",
+            "name = \"Cloud\"\nrecipients = []\n",
+            "name = \"a/b\"\nrecipients = []\n",
+            "name = \"a+b\"\nrecipients = []\n",
+            "name = \"grokbot\"\nrecipients = []\n[scopes]\n\"a/b\" = []\n",
+            "name = \"grokbot\"\nrecipients = []\n[scopes]\n\"a+b\" = []\n",
+            "name = \"grokbot\"\nrecipients = []\n[projects]\ntools = \"Shared\"\n",
+        ];
+        for text in refused {
+            std::fs::write(&path, text).unwrap();
+            let err = scope_of_repo(root).unwrap_err().to_string();
+            assert!(
+                err.contains("[a-z0-9-]"),
+                "expected a name refusal for {text:?}, got {err}"
+            );
+        }
+        std::fs::write(
+            &path,
+            "name = \"grok-bot\"\nrecipients = []\n[scopes]\ncloud = []\nnotes-2 = []\n",
+        )
+        .unwrap();
+        let scope = scope_of_repo(root).unwrap().unwrap();
+        assert_eq!(scope.name, "grok-bot");
+        assert!(scope.scopes.contains_key("cloud"));
+        assert!(scope.scopes.contains_key("notes-2"));
     }
 
     #[test]
