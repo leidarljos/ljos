@@ -3,8 +3,9 @@
 //! "From now on always use bun, never yarn" is the person telling the seat
 //! something to keep. The prompt hook saves that sentence, in the person's
 //! words, as a standing preference, and says so in one line with the id
-//! that takes it back. The person wrote it, so it stands at once: there is
-//! no review to wait for.
+//! that takes it back. It stands at once only when the runner's own
+//! program spawned this hook. A payload piped into `ljos hook` from a
+//! shell, including one that detached from the runner, is not saved.
 //!
 //! An agent's `ljos remember` of words the person typed in their latest
 //! prompt is the same case, so [`said_in_latest_prompt`] lets it stand.
@@ -996,8 +997,10 @@ fn save(stated: &Stated) -> Option<Value> {
         let client = pack().ok()?;
         let workspace = client.workspace();
         let mut atom = atom_body(stated.kind, &stated.text, &workspace);
-        add_entities(&mut atom, [super::SAID_ENTITY.to_string()]);
         stamp_horizon(&mut atom, stated.kind, &stated.text, Some(false));
+        // The caller already required the runner's own program as parent.
+        // A shell in between, or a detached process, never reaches here.
+        add_entities(&mut atom, [super::SAID_ENTITY.to_string()]);
         admit::stamp_person(&mut atom);
         let posted = admit::post_kept(&client, &atom).ok()?;
         admit::satisfy_text(&stated.text);
@@ -1111,13 +1114,20 @@ pub fn capture_stated(call: &HookCall) -> Option<(String, Vec<String>)> {
     } else {
         format!(" `ljos forget {id}` takes it back.")
     };
-    Some((
+    let persons = posted.pointer("/source/basis").and_then(Value::as_str) == Some("person");
+    let line = if persons {
         format!(
             "Saved the person's {what} in their words, standing from now: \"{}\".{undo}",
             stated.text
-        ),
-        vec![key],
-    ))
+        )
+    } else {
+        format!(
+            "Held that sentence for review, not as the person's {what}: \"{}\". \
+             `ljos memories review` keeps it.",
+            stated.text
+        )
+    };
+    Some((line, vec![key]))
 }
 
 /// How much of the person's latest prompt a memory's provenance keeps.
