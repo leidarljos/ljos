@@ -365,8 +365,9 @@ fn strip_xdg_prefix(path: &str) -> Option<&str> {
 }
 
 /// The repository key the hook compares. `https`, `ssh`, and `git@host:`
-/// forms of one GitHub repository share a key. Userinfo is dropped, so a
-/// token in the URL is not part of the key and is not written down.
+/// forms of one GitHub repository share a key. Userinfo is the last `@`
+/// in the authority, before the path, so a token is not part of the key
+/// and an `@` in the path is not userinfo.
 pub(crate) fn push_repo_key(raw: &str) -> String {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -409,9 +410,9 @@ fn local_key(path: &str) -> String {
 
 fn url_key(raw: &str) -> String {
     let rest = raw.split_once("://").map(|(_, rest)| rest).unwrap_or(raw);
-    let rest = rest.split_once('@').map(|(_, host)| host).unwrap_or(rest);
-    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
-    host_path(host, path)
+    let (auth, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let auth = auth.rsplit_once('@').map(|(_, host)| host).unwrap_or(auth);
+    host_path(auth, path)
 }
 
 fn scp_key(left: &str, path: &str) -> String {
@@ -492,5 +493,17 @@ mod tests {
         assert_eq!(push_repo_key(&path), push_repo_key(&file));
         assert_eq!(shell_key(&path), push_repo_key(&path));
         assert!(!push_repo_key(&path).ends_with(".git"));
+    }
+
+    #[test]
+    fn an_at_in_the_path_is_not_userinfo() {
+        let url = "git://127.0.0.1:19418/x@/home/ubuntu/seat/seat.git";
+        let want = "127.0.0.1/x@/home/ubuntu/seat/seat";
+        assert_eq!(push_repo_key(url), want);
+        assert_eq!(shell_key(url), want);
+        assert_ne!(
+            push_repo_key(url),
+            push_repo_key("/home/ubuntu/seat/seat.git")
+        );
     }
 }

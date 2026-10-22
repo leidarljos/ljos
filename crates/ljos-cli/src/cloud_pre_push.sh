@@ -62,21 +62,26 @@ strip_slashes() {
 url_key() {
   rest=${1#*://}
   case "$rest" in
-    *@*) rest=${rest#*@} ;;
+    */*)
+      auth=${rest%%/*}
+      path=${rest#*/}
+      ;;
+    *)
+      auth=$rest
+      path=
+      ;;
   esac
-  host=${rest%%/*}
-  case "$rest" in
-    */*) path=${rest#*/} ;;
-    *) path= ;;
+  case "$auth" in
+    *@*) auth=${auth##*@} ;;
   esac
-  host_path "$host" "$path"
+  host_path "$auth" "$path"
 }
 
 scp_key() {
   left=${1%%:*}
   path=${1#*:}
   case "$left" in
-    *@*) host=${left#*@} ;;
+    *@*) host=${left##*@} ;;
     *) host=$left ;;
   esac
   case "$path" in
