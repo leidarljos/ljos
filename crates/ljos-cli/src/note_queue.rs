@@ -202,6 +202,7 @@ fn set_aside(dir: &Path, unread: &[u8]) -> Result<Option<SetAside>> {
 /// read, is set aside first, so a rewrite drops no byte it could not
 /// parse.
 fn write(dir: &Path, notes: &[Queued], unread: &[u8]) -> Result<Option<SetAside>> {
+    let _durable = crate::bookkeep::durable_write();
     let aside = set_aside(dir, unread)?;
     let path = queue_file(dir);
     if notes.is_empty() {

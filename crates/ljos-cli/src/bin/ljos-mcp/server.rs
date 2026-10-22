@@ -3364,7 +3364,11 @@ fn register_inbound_line(line: &[u8]) {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
         return;
     };
-    if value.get("method").and_then(|method| method.as_str()) != Some("tools/call") {
+    let method = value.get("method").and_then(|method| method.as_str());
+    if method.is_some() {
+        crate::lifetime::note_request();
+    }
+    if method != Some("tools/call") {
         return;
     }
     let Some(name) = value
@@ -3432,25 +3436,37 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for InboundOrder<R> {
     ) -> std::task::Poll<std::io::Result<()>> {
         let this = self.get_mut();
         crate::lifetime::park_reader(cx.waker());
-        if crate::lifetime::closing() {
-            this.ended = true;
-        }
         if !this.ended {
             let before = buf.filled().len();
             let room = buf.remaining();
-            std::task::ready!(std::pin::Pin::new(&mut this.inner).poll_read(cx, buf))?;
-            if buf.filled().len() > before || room == 0 {
-                this.push_bytes(&buf.filled()[before..]);
-                return std::task::Poll::Ready(Ok(()));
+            // A client that has already exited must not discard a read that
+            // has completed. Tokio's stdin thread can hold those bytes after
+            // the fd itself looks empty. A read that is still blocked, with
+            // the write end held open by a launcher, will not finish; that
+            // one is the end of input.
+            match std::pin::Pin::new(&mut this.inner).poll_read(cx, buf) {
+                std::task::Poll::Ready(Ok(())) => {
+                    if buf.filled().len() > before || room == 0 {
+                        this.push_bytes(&buf.filled()[before..]);
+                        return std::task::Poll::Ready(Ok(()));
+                    }
+                    this.ended = true;
+                }
+                std::task::Poll::Ready(Err(err)) => return std::task::Poll::Ready(Err(err)),
+                std::task::Poll::Pending => {
+                    if !crate::lifetime::closing() {
+                        return std::task::Poll::Pending;
+                    }
+                    this.ended = true;
+                }
             }
-            this.ended = true;
         }
         if crate::lifetime::settled() {
             return std::task::Poll::Ready(Ok(()));
         }
         let settle = this
             .settle
-            .get_or_insert_with(|| Box::pin(tokio::time::sleep(crate::lifetime::SETTLE)));
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep(crate::lifetime::settle_window())));
         if std::future::Future::poll(settle.as_mut(), cx).is_ready() {
             return std::task::Poll::Ready(Ok(()));
         }

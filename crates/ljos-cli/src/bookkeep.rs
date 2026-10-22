@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -23,6 +23,34 @@ const COMMAND_DEADLINE: Duration = Duration::from_secs(2);
 /// been touched, and the idle watcher does not finish a session it has
 /// not seen.
 static LAST_ACTIVITY: AtomicU64 = AtomicU64::new(0);
+
+/// Writes that must finish or not start. The server's shutdown cap stays
+/// short unless one of these is still inside the write, because a blocked
+/// stdin read would otherwise hold the process for the whole drain.
+static DURABLE_WRITES: AtomicUsize = AtomicUsize::new(0);
+
+/// Held for the body of a write that replaces a file or posts a pack atom.
+pub struct DurableWrite(());
+
+impl Drop for DurableWrite {
+    fn drop(&mut self) {
+        DURABLE_WRITES.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Mark one write in progress. Drop the guard when the write returns,
+/// including when the task that started it has already been dropped.
+#[must_use]
+pub fn durable_write() -> DurableWrite {
+    DURABLE_WRITES.fetch_add(1, Ordering::AcqRel);
+    DurableWrite(())
+}
+
+/// A [`durable_write`] guard is still held.
+#[must_use]
+pub fn durable_pending() -> bool {
+    DURABLE_WRITES.load(Ordering::Acquire) > 0
+}
 
 /// Events that keep the book. A subagent stop and a bare argv line do not:
 /// the parent session is the one that claimed.
@@ -1230,17 +1258,74 @@ fn load_book(path: &Path) -> Book {
         .unwrap_or_default()
 }
 
+/// Write `bytes` beside `path` and rename them into place. A cut leaves
+/// the previous file or the new one, not a mix of the two. `LJOS_REPLACE_HOLD=1`
+/// pauses after the temp is durable and before the rename, for the test
+/// that sends a signal in that window.
+pub(crate) fn replace_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut tmp_name = path
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_else(|| "book".into());
+    tmp_name.push(format!(".tmp-{}-{stamp}", std::process::id()));
+    let tmp = dir.join(tmp_name);
+    #[cfg(unix)]
+    let mode = existing_mode(path);
+    {
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut out = options.open(&tmp)?;
+        out.write_all(bytes)?;
+        out.sync_all()?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
+    }
+    if std::env::var("LJOS_REPLACE_HOLD").ok().as_deref() == Some("1") {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+    if let Err(err) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn existing_mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::symlink_metadata(path)
+        .ok()
+        .filter(|meta| meta.file_type().is_file())
+        .map(|meta| meta.permissions().mode() & 0o777)
+        .unwrap_or(0o600)
+}
+
 fn store_book(path: &Path, book: &Book) {
+    let _durable = durable_write();
     let Ok(text) = serde_json::to_string(book) else {
         return;
     };
     if std::fs::read_to_string(path).is_ok_and(|prev| prev == text) {
         return;
     }
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Err(e) = std::fs::write(path, text) {
+    if let Err(e) = replace_whole(path, text.as_bytes()) {
         log_line(&format!("book: {e}"));
         return;
     }
@@ -1648,11 +1733,10 @@ fn claim_index(issue: &str) -> PathBuf {
 }
 
 fn remember_owner(issue: &str, path: &Path) {
+    let _durable = durable_write();
     let index = claim_index(issue);
-    if let Some(dir) = index.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(index, format!("{}\n", path.display()));
+    let body = format!("{}\n", path.display());
+    let _ = replace_whole(&index, body.as_bytes());
 }
 
 fn remembered_owner(issue: &str) -> Option<PathBuf> {
@@ -10837,4 +10921,70 @@ print(f"id={ident}")
         );
         assert_eq!(creates(&tracker), 4);
     }
+}
+
+/// A signal during the replace leaves the previous file or the new one.
+#[cfg(all(test, unix))]
+#[test]
+fn sigterm_during_replace_leaves_old_or_new() {
+    const OLD: &[u8] = b"OLDOLDOLDOLDOLDOLD";
+    const NEW: &[u8] = b"NEWNEWNEWNEWNEWNEW";
+    if std::env::var_os("LJOS_REPLACE_CHILD").is_some() {
+        std::env::set_var("LJOS_REPLACE_HOLD", "1");
+        let path = std::env::var("LJOS_REPLACE_PATH").expect("path");
+        let _ = replace_whole(Path::new(&path), NEW);
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("book.json");
+    std::fs::write(&path, OLD).unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "bookkeep::sigterm_during_replace_leaves_old_or_new",
+        ])
+        .env("LJOS_REPLACE_CHILD", "1")
+        .env("LJOS_REPLACE_PATH", &path)
+        .env_remove("LJOS_REPLACE_HOLD")
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut saw_temp = false;
+    while std::time::Instant::now() < deadline {
+        saw_temp = std::fs::read_dir(dir.path()).unwrap().any(|entry| {
+            entry
+                .ok()
+                .and_then(|entry| entry.file_name().into_string().ok())
+                .is_some_and(|name| name.contains(".tmp-"))
+        });
+        if saw_temp {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(saw_temp, "the replace never reached its temp file");
+    let pid = i32::try_from(child.id()).expect("pid");
+    // SAFETY: kill takes a pid and a signal number, no pointers.
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > std::time::Duration::from_secs(5) {
+            let _ = child.kill();
+            panic!("SIGTERM did not end the replace");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert!(
+        !status.success(),
+        "the signal did not stop the child: {status}"
+    );
+    let got = std::fs::read(&path).unwrap();
+    assert!(
+        got.as_slice() == OLD || got.as_slice() == NEW,
+        "torn book: {}",
+        String::from_utf8_lossy(&got)
+    );
 }
