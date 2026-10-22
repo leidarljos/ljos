@@ -27593,17 +27593,23 @@ pub fn tcb_check(argv: &[String]) -> Option<String> {
 /// [`tcb_check`] for a command that will run in `cwd`.
 fn tcb_check_in(argv: &[String], cwd: Option<&Path>) -> Option<String> {
     let bin = policyd_bin()?;
-    Some(tcb_answer(&bin, argv, guard_timeout(), cwd))
+    Some(tcb_answer_in(&bin, argv, guard_timeout(), cwd))
 }
 
 /// What `bin check -- argv` says within `deadline`, as a verdict line.
+#[must_use]
+pub fn tcb_answer(bin: &Path, argv: &[String], deadline: std::time::Duration) -> String {
+    tcb_answer_in(bin, argv, deadline, None)
+}
+
+/// [`tcb_answer`] for a command that will run in `cwd`.
 ///
 /// `cwd` is the directory the checked command will run in. The binary
 /// starts there, so it reads that tree's Makefile or package.json. When
 /// `cwd` is missing or not a directory, the binary keeps this process's
 /// directory.
 #[must_use]
-pub fn tcb_answer(
+pub fn tcb_answer_in(
     bin: &Path,
     argv: &[String],
     deadline: std::time::Duration,
@@ -27626,7 +27632,7 @@ pub fn tcb_answer(
         // ljos-policyd reads a Makefile or package.json from the directory
         // the command will run in. The hook already has that directory.
         // A missing path, or one that is not a directory, leaves this
-        // process's directory, which is what the spawn did before.
+        // process's directory.
         if let Some(dir) = cwd.filter(|path| path.is_dir()) {
             cmd.current_dir(dir);
         }
@@ -41006,7 +41012,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// directory, which is where the hook's command will run. A fake
     /// policyd that prints `pwd -P` shows that directory reached it. A
     /// missing path, or a path that is not a directory, leaves the process
-    /// directory, which is what the spawn did before.
+    /// directory.
     #[test]
     fn the_hook_directory_is_where_policyd_runs() {
         let _g = env_guard();
@@ -41087,7 +41093,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let argv = vec!["git".to_string(), "status".to_string()];
         let quick = std::time::Duration::from_millis(200);
         let answer = |name: &str, body: &str| {
-            tcb_answer(&fake_policyd(dir.path(), name, body), &argv, quick, None)
+            tcb_answer_in(&fake_policyd(dir.path(), name, body), &argv, quick, None)
         };
         assert_eq!(answer("allows", "echo allow"), "allow");
         assert_eq!(
@@ -41130,7 +41136,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             );
             assert!(!said.contains("refused unchecked"), "{name}: {said}");
         }
-        let gone = tcb_answer(&dir.path().join("missing"), &argv, quick, None);
+        let gone = tcb_answer_in(&dir.path().join("missing"), &argv, quick, None);
         assert!(
             gone.starts_with("allow\t") && gone.contains("did not start"),
             "{gone}"
