@@ -45,6 +45,7 @@ fn serve(atoms: Vec<serde_json::Value>) -> String {
             let Ok(mut stream) = stream else { break };
             let req = read_http(&mut stream);
             let path = req.lines().next().unwrap_or("");
+            let mut status = "200 OK";
             let payload = if path.starts_with("GET /v1/status") {
                 serde_json::json!({"embedder": {"available": true, "answering": null}})
             } else if path.starts_with("GET /v1/search") {
@@ -58,6 +59,16 @@ fn serve(atoms: Vec<serde_json::Value>) -> String {
                     })
                     .collect();
                 serde_json::json!({"hits": hits})
+            } else if let Some(rest) = path.strip_prefix("GET /v1/atoms/") {
+                let id = rest.split(['?', ' ']).next().unwrap_or("");
+                atoms
+                    .iter()
+                    .find(|a| a["id"] == id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        status = "404 Not Found";
+                        serde_json::json!({"error": "no atom"})
+                    })
             } else if path.starts_with("GET /v1/atoms") {
                 let kind = path
                     .split(['?', '&', ' '])
@@ -94,7 +105,7 @@ fn serve(atoms: Vec<serde_json::Value>) -> String {
             }
             .to_string();
             let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
                 payload.len()
             );
             let _ = stream.write_all(resp.as_bytes());
