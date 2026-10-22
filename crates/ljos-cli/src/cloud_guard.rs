@@ -2855,12 +2855,14 @@ fn send_pack_push(words: &[String], at: Checkout) -> Push {
         );
     }
     let mut pushed = Vec::new();
+    let repo_why = remote.as_deref().map(|name| send_pack_repo_why(&at, name));
     if let Some(name) = remote {
         pushed.push(name);
     }
     pushed.extend(specs);
-    Push {
+    let mut push = Push {
         reason: None,
+        repo_why: None,
         at,
         words: pushed,
         repo: None,
@@ -2869,7 +2871,50 @@ fn send_pack_push(words: &[String], at: Checkout) -> Push {
         dry_run: dry,
         force,
         delete: false,
+    };
+    if let Some(Err(why)) = repo_why {
+        push.repo_why = Some(why);
     }
+    push
+}
+
+/// `git send-pack` does not run the pre-push hook, so the destination has
+/// to be on the allowlist here. A name git cannot resolve fails closed.
+fn send_pack_repo_why(at: &Checkout, remote: &str) -> Result<(), String> {
+    let url = if remote_is_explicit(remote) {
+        remote.to_string()
+    } else {
+        let out = at.git(&[], &["remote", "get-url", remote]).ok_or_else(|| {
+            format!("git send-pack destination {remote} could not be read; {ALLOW_RULE}")
+        })?;
+        if !out.status.success() {
+            return Err(format!(
+                "git send-pack destination {remote} could not be read; {ALLOW_RULE}"
+            ));
+        }
+        let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if url.is_empty() {
+            return Err(format!(
+                "git send-pack destination {remote} could not be read; {ALLOW_RULE}"
+            ));
+        }
+        url
+    };
+    match crate::cloud_hook::repo_on_allowlist(&url) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!(
+            "git send-pack destination is not a repository this seat may push; {ALLOW_RULE}"
+        )),
+        Err(why) => Err(format!("git send-pack {why}; {ALLOW_RULE}")),
+    }
+}
+
+fn remote_is_explicit(remote: &str) -> bool {
+    remote.contains("://")
+        || remote.starts_with('/')
+        || remote.starts_with('.')
+        || remote.starts_with('~')
+        || remote.contains(':')
 }
 
 fn subtree_push_cursor_ref(words: &[String], at: &Checkout) -> Option<String> {
@@ -2925,6 +2970,9 @@ fn submodule_foreach_cursor_ref(words: &[String], at: &Checkout) -> Option<Strin
 struct Push {
     /// A refusal reason for non-`git push` forms that still write refs.
     reason: Option<String>,
+    /// `git send-pack` names a repository the allowlist does not have.
+    /// Ordinary `git push` leaves this empty: the hook is the backstop.
+    repo_why: Option<String>,
     at: Checkout,
     /// The words past the options: the remote, then the refspecs.
     words: Vec<String>,
@@ -2948,6 +2996,7 @@ impl Push {
     fn read(args: &[String], at: Checkout) -> Self {
         let mut push = Push {
             reason: None,
+            repo_why: None,
             at,
             words: Vec::new(),
             repo: None,
@@ -2993,6 +3042,7 @@ impl Push {
     fn refuse(at: Checkout, reason: String) -> Self {
         Self {
             reason: Some(reason),
+            repo_why: None,
             at,
             words: Vec::new(),
             repo: None,
@@ -3008,6 +3058,9 @@ impl Push {
     fn cursor_ref(&self) -> Option<String> {
         if self.dry_run {
             return None;
+        }
+        if let Some(why) = &self.repo_why {
+            return Some(why.clone());
         }
         if let Some(reason) = &self.reason {
             return Some(reason.clone());
