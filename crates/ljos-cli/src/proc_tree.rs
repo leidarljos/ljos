@@ -384,6 +384,41 @@ fn hook_name(component: &str) -> Option<&'static str> {
         .map(|(_, runner)| *runner)
 }
 
+/// The home this user's passwd entry names. A tool call sets `HOME` for
+/// whatever it starts, but cannot change this.
+#[must_use]
+pub fn own_home() -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut buf = vec![0u8; 1024];
+    loop {
+        // SAFETY: passwd is plain data, so all zeroes is a valid value.
+        let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: getpwuid_r writes at most buf.len() bytes into buf and
+        // points entry's fields into it; buf outlives every read below.
+        let rc = unsafe {
+            libc::getpwuid_r(
+                libc::getuid(),
+                &mut entry,
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                &mut found,
+            )
+        };
+        if rc == libc::ERANGE && buf.len() < 1 << 20 {
+            buf.resize(buf.len() * 2, 0);
+            continue;
+        }
+        if rc != 0 || found.is_null() || entry.pw_dir.is_null() {
+            return None;
+        }
+        // SAFETY: pw_dir is a NUL-terminated string inside buf.
+        let dir = unsafe { std::ffi::CStr::from_ptr(entry.pw_dir) };
+        let home = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes()));
+        return home.is_absolute().then_some(home);
+    }
+}
+
 /// Whether `parts` sits where a runner is installed: a user install
 /// (`.local`, `.cargo`), an npm tree, or a system root (`/usr`, `/opt`,
 /// `/bin`).
