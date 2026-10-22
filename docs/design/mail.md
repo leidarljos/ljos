@@ -84,9 +84,12 @@ here.
   channel (black on white when nothing sets them). A value of one of
   those properties the reducer cannot read, or any `var()`, counts as
   concealing. Any `<style>` block or concealment sets `hidden_content:
-  true` on the message. When the HTML does what the reducer cannot
-  follow (an `@` rule such as `@media`, a concealing rule on an element
-  or other selector, a stylesheet color within 16 of a background set
+  true` on the message. Rules inside `@media`, `@supports` and other
+  block at-rules are read as if they apply; an `@` inside a CSS string
+  or comment is not an at-rule. When the HTML does what the reducer
+  cannot follow (`@import`, a concealing rule on an element or other
+  selector, a rule nested in a style rule or blocks nested more than 8
+  deep, a stylesheet color within 16 of a background set
   anywhere in the part, or of white when its rule sets no background, a
   stylesheet background within 16 of black when its rule sets no color,
   a linked stylesheet, or a `style`, `class`, `id` or `hidden` attribute
