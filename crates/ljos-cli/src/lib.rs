@@ -3328,6 +3328,28 @@ fn occupancy_scope(assignee: &str, issue: &str) -> String {
     }
 }
 
+/// The doctor's `seat source` row: where the seat tracker writes go under
+/// came from. A seat nobody named is a warning, not a failure: reads work,
+/// and only the writes [`write_seat`] guards are refused.
+#[must_use]
+pub fn seat_source_row(who: &Seat) -> Habitat {
+    match derived_seat(who) {
+        Some(from) => Habitat {
+            name: "seat source",
+            state: format!(
+                "{} is derived from {from}; tracker writes are refused until LJOS_SEAT names the seat",
+                who.seat
+            ),
+            ok: false,
+        },
+        None => Habitat {
+            name: "seat source",
+            state: format!("{} named by {}", who.seat, who.source),
+            ok: true,
+        },
+    }
+}
+
 /// The doctor's `seat` row: who votes, who holds, and where the names came
 /// from. The same resolution as [`format_seat_command`].
 #[must_use]
@@ -23193,6 +23215,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
         state: format_seat_row(),
         ok: true,
     });
+    out.push(seat_source_row(&whoami()));
     out.push(cloud::mcp_row());
     out.push(cloud::guard_row());
     // Scope cloud is readable here when cloud up wrote its age identity.
@@ -24004,7 +24027,7 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     {
         return "warn";
     }
-    if row.name == "guard bypass" && !row.ok {
+    if (row.name == "guard bypass" || row.name == "seat source") && !row.ok {
         return "warn";
     }
     if row.ok && row.name == "policy" && row.state.ends_with(POLICY_TABLE_ONLY) {
@@ -49895,6 +49918,51 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
         unsafe {
             std::env::remove_var("ACME_SESSION_ID");
+            for (k, v) in saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_derived_seat_is_a_doctor_warning_that_fails_nothing() {
+        let _env = env_guard();
+        let keys = ["LJOS_SEAT", "VISSUE_AGENT", "XDG_RUNTIME_DIR"];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        let rt = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::remove_var("VISSUE_AGENT");
+            std::env::set_var("XDG_RUNTIME_DIR", rt.path());
+            std::env::set_var("LJOS_SEAT", "saddle");
+        }
+        let named = seat_source_row(&whoami());
+        assert!(named.ok, "{}", named.state);
+        assert_eq!(doctor_word(&named), "ok");
+        assert!(
+            named.state.contains("named by LJOS_SEAT"),
+            "{}",
+            named.state
+        );
+
+        unsafe { std::env::remove_var("LJOS_SEAT") };
+        let who = whoami();
+        let row = seat_source_row(&who);
+        assert_eq!(row.ok, derived_seat(&who).is_none(), "{}", row.state);
+        if !row.ok {
+            assert!(row.state.contains("LJOS_SEAT"), "{}", row.state);
+            assert_eq!(doctor_word(&row), "warn");
+        }
+        let warned = Habitat {
+            name: "seat source",
+            state: "exec-daemon is derived from the program above this shell".into(),
+            ok: false,
+        };
+        assert_eq!(doctor_word(&warned), "warn");
+        assert!(healthy(&[warned]), "a derived seat fails no doctor");
+        unsafe {
             for (k, v) in saved {
                 match v {
                     Some(v) => std::env::set_var(k, v),
