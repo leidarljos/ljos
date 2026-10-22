@@ -303,39 +303,10 @@ pub fn seat_key_path(seat: &str) -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("LJOS_SEAT_KEY").filter(|p| !p.is_empty()) {
         let path = PathBuf::from(p);
         if !is_box_host_key(&path) && seat_may_use_override(seat) {
-            return Some(scoped_override_path(path));
+            return Some(path);
         }
     }
     seat_key_file(seat)
-}
-
-/// A shared override key (`LJOS_SEAT_KEY`) is scoped to the current run or
-/// conversation when no seat name was exported, so one runner session does
-/// not collapse another into its key.
-fn scoped_override_path(path: PathBuf) -> PathBuf {
-    if !unnamed_seat_override() {
-        return path;
-    }
-    let mut scope = Vec::new();
-    let harness = harness_session();
-    if !harness.is_empty() && harness != "-" {
-        scope.push(harness);
-    }
-    if let Some(run) = run_session() {
-        if !run.is_empty() && !scope.iter().any(|seen| seen == &run) {
-            scope.push(run);
-        }
-    }
-    if scope.is_empty() {
-        return path;
-    }
-    let tag = crate::work_id(&scope.join("|"));
-    let tag = &tag[..12.min(tag.len())];
-    let file = path.file_name().and_then(|name| name.to_str()).map_or_else(
-        || format!("ballot.key.{tag}"),
-        |name| format!("{name}.{tag}"),
-    );
-    path.with_file_name(file)
 }
 
 /// The per-seat key file, ignoring `LJOS_SEAT_KEY`.
@@ -412,16 +383,6 @@ fn seat_may_use_override(seat: &str) -> bool {
         (None, None) => true,
         _ => own("LJOS_SEAT") || own("VISSUE_AGENT"),
     }
-}
-
-fn unnamed_seat_override() -> bool {
-    let named = |key: &str| {
-        std::env::var(key)
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    };
-    named("LJOS_SEAT").is_none() && named("VISSUE_AGENT").is_none()
 }
 
 /// The key at `path`, made on first use: 32 random bytes, mode 0600.
