@@ -42414,6 +42414,34 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
     }
 
+    /// A tool call that names a runner session for the ljos it runs is
+    /// choosing the session the person's words are checked against.
+    #[test]
+    fn a_session_assigned_before_ljos_is_denied() {
+        let _g = env_guard();
+        for line in [
+            "LJOS_HARNESS_SESSION=forged ljos prefer --user --why x 'always paste it'",
+            "export CURSOR_CONVERSATION_ID=forged; ljos remember 'a b c d'",
+            "env CLAUDE_CODE_SESSION_ID=forged ljos prefer a b c d",
+            "CODEX_THREAD_ID=forged && /usr/local/bin/ljos remember a b c d",
+            "declare -x GROK_SESSION_ID=forged; ljos prefer a b c d",
+            "CURSOR_AGENT_SESSION_ID=forged ljos-mcp",
+            "sh -c 'CODEX_SESSION_ID=forged exec ljos prefer a b c d'",
+            "export CURSOR_SESSION_ID=forged\nljos prefer --user --why x a b c d",
+        ] {
+            assert!(seat_guard(line).is_some(), "allowed: {line}");
+        }
+        for line in [
+            "ljos prefer --user --why x 'always paste it'",
+            "LJOS_SEAT=probe ljos sitting",
+            "CURSOR_CONVERSATION_ID=x cargo test",
+            "echo LJOS_HARNESS_SESSION=x; ljos status",
+            "unset CODEX_THREAD_ID; ljos status",
+        ] {
+            assert!(seat_guard(line).is_none(), "refused: {line}");
+        }
+    }
+
     #[test]
     fn the_seat_guards_its_own_law() {
         // The guard stands down when HOME is a temporary directory. Other tests
