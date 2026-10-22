@@ -1641,6 +1641,168 @@ fn cloud_guard_refuses_every_push_onto_a_cursor_ref() {
 }
 
 #[test]
+fn cloud_guard_reads_valued_push_options_before_the_subcommand() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-opts", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let repo = clone_of(root.path(), &origin, "probe");
+
+    for line in [
+        "git --attr-source HEAD push origin HEAD:cursor/attr",
+        "git push --recurse-submodules check origin HEAD:cursor/submodule",
+    ] {
+        refused(line, &repo);
+    }
+}
+
+#[test]
+fn cloud_guard_denies_heads_and_tags_shortcuts_under_cursor() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-short-refs", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let repo = clone_of(root.path(), &origin, "probe-short-refs");
+
+    for line in [
+        "git push origin HEAD:heads/cursor/existing",
+        "git push origin HEAD:tags/cursor/probe-tag",
+    ] {
+        refused(line, &repo);
+    }
+}
+
+#[test]
+fn cloud_guard_reads_where_bare_refspecs_land() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-bare-map", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let repo = clone_of(root.path(), &origin, "probe-bare-map");
+
+    git(&repo, &["branch", "cursor/existing"]);
+    git(
+        &repo,
+        &["push", "-q", "origin", "cursor/existing:cursor/existing"],
+    );
+    git(&repo, &["checkout", "-q", "-b", "fix"]);
+    git(&repo, &["config", "push.default", "upstream"]);
+    git(
+        &repo,
+        &[
+            "branch",
+            "--set-upstream-to",
+            "origin/cursor/existing",
+            "fix",
+        ],
+    );
+    git(
+        &repo,
+        &[
+            "config",
+            "remote.origin.push",
+            "refs/heads/main:refs/heads/cursor/mapped",
+        ],
+    );
+
+    refused("git push origin fix", &repo);
+    refused("git push origin main", &repo);
+}
+
+#[test]
+fn cloud_guard_resolves_push_aliases_from_config_and_line_state() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-alias", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let repo = clone_of(root.path(), &origin, "probe-alias");
+
+    git(&repo, &["config", "--global", "alias.p", "push"]);
+
+    for line in [
+        "git p origin HEAD:cursor/alias-global",
+        "git -c 'alias.p=!git push' p origin HEAD:cursor/alias-shell",
+        "git config alias.p2 push && git p2 origin HEAD:cursor/alias-local",
+    ] {
+        refused(line, &repo);
+    }
+}
+
+#[test]
+fn cloud_guard_reads_git_env_and_env_chdir_context() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-git-env", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let dev = clone_of(root.path(), &origin, "dev");
+    let oncur = clone_of(root.path(), &origin, "oncur");
+    git(&oncur, &["checkout", "-q", "-b", "cursor/probe"]);
+
+    for line in [
+        "GIT_DIR=../oncur/.git git push origin HEAD",
+        "env -C ../oncur git push origin HEAD",
+        "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0=HEAD:cursor/from-env git push origin HEAD",
+    ] {
+        refused(line, &dev);
+    }
+
+    allowed("GIT_DIR=../dev/.git git push origin HEAD", &oncur);
+}
+
+#[test]
+fn cloud_guard_refuses_prune_and_mirror_when_they_can_delete_heads() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-prune", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let repo = clone_of(root.path(), &origin, "probe-prune");
+
+    refused("git push --prune origin 'refs/heads/*:refs/heads/*'", &repo);
+    refused("git push --mirror origin", &repo);
+}
+
+#[test]
+fn cloud_guard_refuses_shell_trick_push_forms() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-shell-tricks", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let repo = clone_of(root.path(), &origin, "probe-shell-tricks");
+
+    for line in [
+        "git \"$(echo push)\" origin HEAD:cursor/subcommand",
+        "git $'pu\\163h' origin HEAD:cursor/ansi-c",
+        "printf 'HEAD:cursor/xargs\\n' | xargs git push origin",
+        "git subtree push --prefix . origin cursor/subtree",
+        "git send-pack origin HEAD:refs/heads/cursor/send-pack",
+        "git submodule foreach 'git push origin HEAD:cursor/foreach'",
+    ] {
+        refused(line, &repo);
+    }
+}
+
+#[test]
 fn cloud_guard_reads_the_gh_pr_verb_and_never_its_arguments() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
@@ -2182,12 +2344,7 @@ fn cloud_guard_allows_pushes_that_leave_cursor_refs_alone() {
     ] {
         allowed(line, &develop);
     }
-    for line in [
-        "git push --all",
-        "git push --branches",
-        "git push --mirror",
-        "git push --tags",
-    ] {
+    for line in ["git push --all", "git push --branches", "git push --tags"] {
         allowed(line, &clean);
     }
     let elsewhere = root.path();
