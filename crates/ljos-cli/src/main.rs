@@ -535,7 +535,8 @@ enum Cmd {
         #[arg(long)]
         all: bool,
         /// Fetch the tracker and import its sealed logs before listing.
-        /// `COMMIT` waits until that commit is present. Without it, use
+        /// `COMMIT` fetches until the remote has that commit, for up to
+        /// `LJOS_INBOX_SYNC_WAIT` seconds (30). Without it, use
         /// `LJOS_WAKE_COMMIT` when that is set, otherwise the remote head.
         /// A commit the remote does not have imports the remote head. No
         /// remote: list only.

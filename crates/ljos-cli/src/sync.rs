@@ -1436,12 +1436,47 @@ fn note_commit(root: &Path, commit: &str, fetched: bool) -> String {
     format!("sync: {commit} is not in this checkout; imported the remote head\n")
 }
 
+/// How long `ljos inbox --sync COMMIT` keeps fetching while no remote ref
+/// has the commit: `LJOS_INBOX_SYNC_WAIT` seconds, else 30. `0` fetches
+/// once.
+fn inbox_sync_wait() -> std::time::Duration {
+    let secs = std::env::var("LJOS_INBOX_SYNC_WAIT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(30);
+    std::time::Duration::from_secs(secs)
+}
+
+/// [`catch_up`] every root until one has `commit` on a remote ref, or
+/// `wait` is spent. The wake can name a commit whose push has not landed
+/// yet, so the pause between passes starts at a quarter second and
+/// doubles up to four. When every fetch fails there is no next pass. The
+/// notes are each root's from the last pass.
+fn catch_up_until(roots: &[PathBuf], commit: &str, wait: std::time::Duration) -> Vec<String> {
+    let deadline = std::time::Instant::now() + wait;
+    let mut pause = std::time::Duration::from_millis(250);
+    loop {
+        let said: Vec<String> = roots.iter().map(|root| catch_up(root)).collect();
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero()
+            || said.iter().all(|line| line.contains("fetch failed"))
+            || roots.iter().any(|root| on_remote(root, commit))
+        {
+            return said;
+        }
+        std::thread::sleep(pause.min(left));
+        pause = (pause * 2).min(std::time::Duration::from_secs(4));
+    }
+}
+
 /// Fetch the tracker and import its sealed logs for `ljos inbox --sync`.
 ///
-/// `commit` asks that this checkout contain that commit. Absent, or empty,
-/// the remote head is enough. A commit the remote does not have imports
-/// the remote head and says so. A checkout with no remote is left alone,
-/// and that is not an error. The returned lines are notes for stderr.
+/// `commit` asks that this checkout contain that commit, and the fetch is
+/// tried again until a remote ref has it, for up to [`inbox_sync_wait`].
+/// Absent, or empty, one fetch of the remote head is enough. A commit the
+/// remote still does not have imports the remote head and says so. A
+/// checkout with no remote is left alone, and that is not an error. The
+/// returned lines are notes for stderr.
 ///
 /// # Errors
 ///
@@ -1454,19 +1489,23 @@ pub(crate) fn fetch_for_inbox(commit: Option<&str>) -> Result<String> {
             bail!("sync: {commit} is not a commit");
         }
     }
+    let roots: Vec<PathBuf> = configured_roots()
+        .into_iter()
+        .filter(|root| has_remote(root))
+        .collect();
+    let notes = match commit {
+        Some(commit) => catch_up_until(&roots, commit, inbox_sync_wait()),
+        None => roots.iter().map(|root| catch_up(root)).collect(),
+    };
     let mut out = String::new();
-    for root in configured_roots() {
-        if !has_remote(&root) {
-            continue;
-        }
-        let fetched = catch_up(&root);
+    for (root, fetched) in roots.iter().zip(notes) {
         let fetched_ok = !fetched.contains("fetch failed");
         out.push_str(&fetched);
         if let Some(commit) = commit {
-            out.push_str(&note_commit(&root, commit, fetched_ok));
+            out.push_str(&note_commit(root, commit, fetched_ok));
         }
-        if let Some(scope) = scope_of_repo(&root)? {
-            out.push_str(&import(&root, &scope)?);
+        if let Some(scope) = scope_of_repo(root)? {
+            out.push_str(&import(root, &scope)?);
         }
     }
     Ok(out)
