@@ -1603,6 +1603,50 @@ fn an_address_for_a_host_may_be_github() {
     allowed("curl -X POST http://localhost:8080/x", here);
 }
 
+/// Curl and wget percent-decode the host before they connect, so an
+/// encoded GitHub name reaches GitHub, on the command line, after
+/// `--url`, and in a curlrc.
+#[test]
+fn a_percent_encoded_host_is_decoded_before_the_github_check() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    for url in [
+        "https://api%2egithub%2ecom/user",
+        "https://githu%62.com/user",
+        "https://api.github.com%2e/user",
+        "https://API%2EGitHub%2Ecom./user",
+        "https://api%252egithub%252ecom/user",
+        "https://api.github.com%3a443/user",
+        "https://token%40api.github.com/user",
+    ] {
+        refused(&format!("curl -d x {url}"), here);
+        refused(&format!("curl --json '{{}}' {url}"), here);
+        refused(&format!("curl -T /tmp/f {url}"), here);
+        refused(&format!("curl -X POST --url {url}"), here);
+        refused(&format!("curl -X POST --url={url}"), here);
+        refused(&format!("wget --max-redirect=0 --method=POST {url}"), here);
+        refused(&format!("http --ignore-stdin POST {url} a=b"), here);
+        allowed(&format!("curl -s {url}"), here);
+    }
+    refused(
+        "curl --proto-default https -d x api%2egithub%2ecom/user",
+        here,
+    );
+    allowed("curl -d x https://example%2ecom/x", here);
+
+    fs::write(
+        home.join(".curlrc"),
+        "url = \"https://api%2egithub%2ecom/user\"\nrequest = \"DELETE\"\n",
+    )
+    .unwrap();
+    refused("curl -s https://example.com/x", here);
+    fs::remove_file(home.join(".curlrc")).unwrap();
+}
+
 /// Windows curl also loads `.curlrc` or `_curlrc` from `USERPROFILE`,
 /// `APPDATA`, and `USERPROFILE\Application Data` after `HOME`. A seat that
 /// sets those variables is judged as Windows curl would be.

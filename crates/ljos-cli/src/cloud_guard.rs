@@ -3775,11 +3775,11 @@ fn host_in_url(word: &str) -> Option<String> {
         return None;
     }
     let rest = &word[idx + 3..];
-    let auth = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let auth = percent_decoded(rest.split(['/', '?', '#']).next().unwrap_or(""));
     if auth.is_empty() {
         return None;
     }
-    let hostport = auth.rsplit_once('@').map(|(_, host)| host).unwrap_or(auth);
+    let hostport = auth.rsplit_once('@').map(|(_, host)| host).unwrap_or(&auth);
     if hostport.is_empty() || unreadable_token(hostport) {
         return None;
     }
@@ -3788,6 +3788,34 @@ fn host_in_url(word: &str) -> Option<String> {
         return None;
     }
     Some(host.to_ascii_lowercase())
+}
+
+/// Curl and wget percent-decode the authority before they connect, so
+/// `api%2egithub%2ecom` is `api.github.com`. Decoding until nothing
+/// changes reads a twice-encoded host too, and the userinfo and port are
+/// split after it, so an encoded `@` or `:` splits as well.
+fn percent_decoded(text: &str) -> String {
+    let hex = |b: Option<&u8>| b.and_then(|b| char::from(*b).to_digit(16));
+    let mut bytes = text.as_bytes().to_vec();
+    loop {
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' {
+                if let (Some(hi), Some(lo)) = (hex(bytes.get(i + 1)), hex(bytes.get(i + 2))) {
+                    out.push((hi * 16 + lo) as u8);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        if out.len() == bytes.len() {
+            return String::from_utf8_lossy(&out).into_owned();
+        }
+        bytes = out;
+    }
 }
 
 fn strip_host_port(hostport: &str) -> &str {
@@ -4571,7 +4599,10 @@ fn curl_url_github(url: &str, globoff: bool) -> bool {
     if !globoff && auth.contains(['{', '}', '[', ']']) {
         return true;
     }
-    let hostport = auth.rsplit_once('@').map_or(auth, |(_, host)| host);
+    let auth = percent_decoded(auth);
+    let hostport = auth
+        .rsplit_once('@')
+        .map_or(auth.as_str(), |(_, host)| host);
     let host = strip_host_port(hostport)
         .trim_end_matches('.')
         .to_ascii_lowercase();
