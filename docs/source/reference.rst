@@ -369,7 +369,7 @@ Variable                                                    Read by
 =========================================================== ================================================================================================================================================================================
 ``PACKSET_URL``                                             the pack client; unset, ``http://127.0.0.1:8761`` (``PACKSET_PORT`` moves the port), or this user's own port when 8761 is another user's; ``off`` means no pack
 ``PACKSET_WORKSPACE``                                       the pack workspace; unset, ``seat``
-``LJOS_SEAT``                                               override for who is sitting; unset, the seat is the MCP client that connected or the program above the shell, and the holder is that seat tagged with the conversation's process
+``LJOS_SEAT``                                               override for who is sitting; unset, the seat is the MCP client that connected or the program above the shell, and the holder is that seat tagged with the conversation's process; a tracker write (note, claim, sitting, finish, file, deed) refuses a seat only the program above the shell, or the login user under a runner, gave, and, when ``seats.toml`` lists seats, a seat it does not list
 ``VISSUE_ROOT``, ``VISSUE_AGENT``                           the tracker
 ``DEEDAR_URL``, ``DEEDAR_HOST_SIGNING_KEY``                 the deed store; the key signs handovers, and ``~/.config/deedar/host.key`` is used when the variable is unset
 ``CLAIMDAG_DIR``                                            the claim graph

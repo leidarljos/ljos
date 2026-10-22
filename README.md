@@ -305,7 +305,10 @@ python3 scripts/test_approval.py target/debug/ljos-mcp
 The seat is the program that connected. `ljos-mcp` names it after the client
 that initialised it. `ljos` in a shell that runner opened finds the same name
 through the process tree or a shared session id. A runner's tools and its
-verbs are then one seat, with no variable set.
+verbs are then one seat, with no variable set. A tracker write from a
+shell where only the program above it, or the login user under a runner,
+names the seat is refused until `LJOS_SEAT` is set. When `seats.toml`
+lists seats, so is a write from a seat it does not list.
 
 A shell-only agent such as Grok Bot has no MCP client and no command hook,
 and the process tree does not name its seat. `ljos onboard --harness grokbot`

@@ -1372,6 +1372,9 @@ fn run_command() -> Result<()> {
     {
         bail!("{}", ljos_cli::SUBAGENT_NO_SEAT);
     }
+    if let Some(verb) = tracker_write(&cmd) {
+        ljos_cli::write_seat(verb)?;
+    }
     match cmd {
         Cmd::Remember {
             text,
@@ -3557,6 +3560,23 @@ fn issue_topic_and_tags(id: &str) -> (Vec<String>, Vec<String>) {
         .map(str::to_lowercase)
         .collect();
     (topic, tags)
+}
+
+/// The verb of a command that writes the tracker under this seat. Listing
+/// a deed's citations is a read; a slot names its seat on the line.
+fn tracker_write(cmd: &Cmd) -> Option<&'static str> {
+    Some(match cmd {
+        Cmd::Sitting { .. } => "sitting",
+        Cmd::Claim { .. } => "claim",
+        Cmd::Note { .. } => "note",
+        Cmd::Finish { .. } => "finish",
+        Cmd::Release { .. } => "release",
+        Cmd::Complete { .. } => "complete",
+        Cmd::File { .. } => "file",
+        Cmd::Options { .. } => "options",
+        Cmd::Deed { add, remove, .. } if !add.is_empty() || !remove.is_empty() => "deed",
+        _ => return None,
+    })
 }
 
 /// The identity the tracker records ballots under, so a forecast and a
