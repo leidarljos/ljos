@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 /// Model families a cloud panel rotates, in persona name order. Grok is
 /// first. A two-seat panel therefore names two families.
@@ -53,10 +53,10 @@ Cast the ballot as {persona} (`ljos vote {issue} --for OPTION --as \
 == slot
 slot: {seat} model={family}
 
-The launcher signs `slot: SEAT model={family} run=RUN` under its own pinned \
-key when it starts this run. SEAT is {seat} with the run id appended. RUN \
-is that id. The ballot counts only under that slot. Stay on this seat and \
-on model {family}.
+This line is recorded for the launcher to sign, as \
+`slot: SEAT model={family} run=RUN` under its own pinned key. SEAT is \
+{seat} with the run id appended. RUN is that id. Stay on this seat and on \
+model {family}.
 
 == push
 Push the tracker through ljos with LJOS_TRACKER_GIT=push. Do not push a \
@@ -72,10 +72,23 @@ force-push.
 ///
 /// # Errors
 ///
-/// As [`crate::panel_roster`], or a prompt file cannot be written.
+/// As [`crate::panel_roster`], two personas make the same seat, or a
+/// prompt file cannot be written. A shared seat is refused before any
+/// file is written.
 pub fn panel_cloud(issue: &str, out: &Path) -> Result<String> {
     let (all, mut personas) = crate::panel_roster(issue)?;
     personas.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut seats = std::collections::BTreeMap::new();
+    for persona in &personas {
+        let seat = crate::seat_slug(&persona.name);
+        if let Some(first) = seats.insert(seat.clone(), persona.name.as_str()) {
+            bail!(
+                "panel --cloud: personas {first} and {} both make seat {seat}; rename one so each \
+                 prompt file names its own seat",
+                persona.name
+            );
+        }
+    }
     std::fs::create_dir_all(out).with_context(|| format!("panel --cloud: {}", out.display()))?;
     let mut lines = vec![format!(
         "{} of {all} personas speak to {issue}; cloud prompts in {}; start one cloud seat per \
@@ -121,6 +134,8 @@ mod tests {
         assert!(text.contains("LJOS_TRACKER_GIT=push\n"), "{text}");
         assert!(text.contains("slot: ada-rider model=opus\n"), "{text}");
         assert!(text.contains("slot: SEAT model=opus run=RUN"), "{text}");
+        assert!(text.contains("recorded for the launcher to sign"), "{text}");
+        assert!(!text.contains("counts only under"), "{text}");
         assert!(
             text.contains("ljos vote probe-l0g0 --for OPTION --as Ada Rider"),
             "{text}"
