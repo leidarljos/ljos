@@ -118,7 +118,9 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
     })
     .to_string();
     // The runner spawns the prompt hook and starts the server, and the
-    // prompt's session is the one that runner gave it.
+    // prompt's session is the one that runner gave it. Runner variables
+    // the suite itself was started with would name another runner and
+    // session.
     let installed = runner::install_dir();
     let runner = installed.path().join("claude");
     runner::runner_at(&runner);
@@ -140,6 +142,8 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
         .env("LJOS_CAPTURE", "save")
         .env_remove("LJOS_UNATTENDED")
         .env_remove("LJOS_OFF")
+        .env_remove("CURSOR_AGENT")
+        .env_remove("CURSOR_CONVERSATION_ID")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -175,6 +179,8 @@ fn mcp_remember_is_what_the_cli_lists_and_a_search_counts() {
         .env("LJOS_HARNESS_SESSION", "person-1")
         .env_remove("LJOS_SEAT")
         .env_remove("LJOS_OFF")
+        .env_remove("CURSOR_AGENT")
+        .env_remove("CURSOR_CONVERSATION_ID")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
