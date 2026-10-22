@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/develop' && github.ref != 'refs/heads/main' }}
 
 jobs:
   workflows:
@@ -50,6 +50,16 @@ jobs:
           command -v age-keygen
           command -v packset
           command -v packsetd
+      - name: Build deedar from main
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch main https://github.com/leidarljos/deedar.git "${{ runner.temp }}/deedar"
+          cargo build --locked --manifest-path "${{ runner.temp }}/deedar/Cargo.toml" -p deedar-cli --bin deedar
+          mkdir -p "${{ runner.temp }}/bin"
+          install -m 0755 "${{ runner.temp }}/deedar/target/debug/deedar" "${{ runner.temp }}/bin/deedar"
+          echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
+          export PATH="${{ runner.temp }}/bin:${PATH}"
+          command -v deedar
       - name: Workspace tests
         run: cargo test --workspace
 
