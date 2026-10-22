@@ -340,9 +340,9 @@ pub fn session_start_for(session: Option<&str>) -> String {
     // Other machines' rules arrive before the preface is built. A tracker
     // that does not answer leaves the local file, and the hook does not wait.
     user_rules::sync_for_hook();
-    // A preference stored before a basis existed is stamped first, so this
-    // line still shows the ones the person wrote.
-    legacy_pref::migrate_once();
+    // Older preferences are counted when a cutoff receipt is already in
+    // the pack. Session start does not write one: it runs under the
+    // runner, and the cutoff is a person-side record.
     let mut atoms = session_atoms(400);
     if atoms.is_err() {
         wake_for_recall();
@@ -378,10 +378,10 @@ pub fn session_start_for(session: Option<&str>) -> String {
         }
     }
     if let Ok(got) = &atoms {
-        let n = legacy_pref::awaiting(got).len();
-        if n > 0 {
+        let held = legacy_pref::awaiting(got);
+        if !held.is_empty() {
             line.push(' ');
-            line.push_str(&legacy_pref::review_sentence(n));
+            line.push_str(&legacy_pref::review_sentence(&held));
             line.push('.');
         }
     }
@@ -2105,7 +2105,31 @@ fn parent_and_comm(pid: u32) -> Option<(u32, String)> {
     Some((ppid, comm))
 }
 
-#[cfg(not(target_os = "linux"))]
+/// macOS has no procfs. `ps` prints the parent and the short command name.
+#[cfg(target_os = "macos")]
+fn parent_and_comm(pid: u32) -> Option<(u32, String)> {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "ppid=,comm=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(out.stdout).ok()?;
+    let line = text.lines().next()?.trim();
+    let (ppid, comm) = line.split_once(char::is_whitespace)?;
+    let comm = comm.trim();
+    if comm.is_empty() {
+        return None;
+    }
+    let comm = std::path::Path::new(comm)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(comm);
+    Some((ppid.parse().ok()?, comm.to_string()))
+}
+
+#[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
 fn parent_and_comm(_pid: u32) -> Option<(u32, String)> {
     None
 }
@@ -2134,7 +2158,7 @@ fn ancestry() -> Vec<(u32, String)> {
 /// Programs that run other programs and are nobody's seat.
 const WRAPPERS: &[&str] = &[
     "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "env", "sudo", "doas",
-    "timeout", "nohup", "xargs", "script", "uv", "direnv", "ljos", "ljos-mcp",
+    "timeout", "nohup", "xargs", "script", "setsid", "uv", "direnv", "ljos", "ljos-mcp",
 ];
 
 /// Where a process tree stops being a program and becomes the session
@@ -2200,10 +2224,144 @@ fn own_ancestry() -> Vec<(u32, String)> {
         .collect()
 }
 
-/// Whether this process runs under an agent runner: the environment
-/// carries a runner's conversation, or a process above it is a runner,
-/// one whose server left a seat record or one the runners file names.
-/// Consent is the person's, so the verbs that grant it refuse here.
+/// Names ljos ships for runners, plus any the runners file adds.
+///
+/// An absent runners file is not "no runners": the shapes in
+/// [`HARNESSES_EXAMPLE`] are the names a process tree and a cgroup are
+/// matched against. A file that does not parse contributes nothing of
+/// its own; the shipped names still count.
+fn runner_names() -> Vec<String> {
+    fn shipped() -> &'static [String] {
+        static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+        NAMES.get_or_init(|| {
+            toml::from_str::<Harnesses>(HARNESSES_EXAMPLE)
+                .map(|all| all.harness.into_iter().map(|h| h.name).collect())
+                .unwrap_or_default()
+        })
+    }
+    let mut names = shipped().to_vec();
+    if let Ok(all) = harnesses_with_shipped(&harnesses_path()) {
+        for harness in all.harness {
+            if !names.iter().any(|name| name == &harness.name) {
+                names.push(harness.name);
+            }
+        }
+    }
+    for extra in ["agy", "antigravity"] {
+        if !names.iter().any(|name| name == extra) {
+            names.push(extra.to_string());
+        }
+    }
+    names
+}
+
+/// A cgroup path component names a runner when one of its words is that
+/// runner's name. `cursor-agent` is the word `cursor`. A shell, a
+/// multiplexer or a terminal is not a runner, and a name shorter than
+/// four letters is too small a word to trust inside a path.
+fn scope_word_counts(name: &str) -> bool {
+    name.len() >= 4
+        && !WRAPPERS.contains(&name)
+        && !SESSION.iter().any(|prefix| name.starts_with(prefix))
+        && !TERMINALS.contains(&name)
+}
+
+fn segment_names_runner(segment: &str, runners: &[String]) -> bool {
+    segment
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| scope_word_counts(word) && runners.iter().any(|name| name == word))
+}
+
+/// Whether `text` is `/proc/self/cgroup` for a process still inside a
+/// runner's scope. Each line is `id:controllers:path`.
+fn cgroup_text_names_runner(text: &str, runners: &[String]) -> bool {
+    text.lines().any(|line| {
+        let path = line.rsplit_once(':').map_or(line, |(_, path)| path);
+        path.split('/')
+            .any(|segment| segment_names_runner(segment, runners))
+    })
+}
+
+/// The chain up to the session is only shells and wrappers, or it is
+/// empty because the session (or init) is the parent. `setsid -f`, a
+/// double fork, `script` and a detached tmux all leave this shape: the
+/// runner is no longer an ancestor.
+fn wrappers_only() -> bool {
+    own_ancestry()
+        .iter()
+        .all(|(_, comm)| WRAPPERS.contains(&comm.as_str()))
+}
+
+/// Linux: the cgroup this process was started in. A new session does not
+/// leave it. Writing a different cgroup, which a user service or
+/// `systemd-run --user --scope` does, does leave it.
+#[cfg(target_os = "linux")]
+fn scope_names_runner(runners: &[String]) -> bool {
+    let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+    cgroup_text_names_runner(&text, runners)
+}
+
+/// macOS: the process that owns this one after a detach. `launchctl
+/// submit` can hand it to launchd, and then the name is gone.
+#[cfg(target_os = "macos")]
+fn scope_names_runner(runners: &[String]) -> bool {
+    let Some(comm) = responsible_comm() else {
+        return false;
+    };
+    segment_names_runner(&comm, runners)
+}
+
+#[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
+fn scope_names_runner(_runners: &[String]) -> bool {
+    false
+}
+
+/// The command name of the process macOS holds responsible for this one.
+#[cfg(target_os = "macos")]
+fn responsible_comm() -> Option<String> {
+    use std::ffi::CString;
+    let symbol = CString::new("responsibility_get_pid_responsible_for_pid").ok()?;
+    let found = unsafe { libc::dlsym(libc::RTLD_DEFAULT, symbol.as_ptr()) };
+    if found.is_null() {
+        return None;
+    }
+    let ask: unsafe extern "C" fn(i32, *mut i32) -> i32 = unsafe { std::mem::transmute(found) };
+    let mut pid = 0i32;
+    if unsafe { ask(std::process::id() as i32, &mut pid) } != 0 || pid <= 1 {
+        return None;
+    }
+    let out = std::process::Command::new("ps")
+        .args(["-o", "comm=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(out.stdout).ok()?;
+    let comm = text.trim();
+    if comm.is_empty() {
+        return None;
+    }
+    std::path::Path::new(comm)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+}
+
+/// Whether this process runs under an agent runner.
+///
+/// Any one of these is enough. The environment carries a runner's
+/// conversation. A process above this one is a runner, one whose server
+/// left a seat record or one [`runner_names`] lists. Or the chain above
+/// is only shells and wrappers, which is what `setsid`, a double fork,
+/// `script` and a detached tmux leave, and the scope still names a
+/// runner: the cgroup on Linux, the responsible process on macOS.
+///
+/// The same user can still step out of that scope. On Linux that is a
+/// new cgroup (`systemd-run --user --scope`, or a cgroup the runner's
+/// parent allows). On macOS it is handing the process to launchd. A
+/// cleared environment does not do it. Consent is the person's, so the
+/// verbs that grant it refuse here.
 #[must_use]
 pub fn under_a_runner() -> bool {
     if std::env::vars().any(|(k, v)| runner_session_var(&k, &v))
@@ -2211,13 +2369,13 @@ pub fn under_a_runner() -> bool {
     {
         return true;
     }
-    let mut runners: Vec<String> = harnesses_with_shipped(&harnesses_path())
-        .map(|all| all.harness.into_iter().map(|h| h.name).collect())
-        .unwrap_or_default();
-    runners.extend(["agy", "antigravity"].map(String::from));
-    own_ancestry()
-        .iter()
-        .any(|(pid, comm)| seat_record_path(*pid).exists() || runners.iter().any(|r| r == comm))
+    let runners = runner_names();
+    if own_ancestry().iter().any(|(pid, comm)| {
+        seat_record_path(*pid).exists() || runners.iter().any(|name| name == comm)
+    }) {
+        return true;
+    }
+    wrappers_only() && scope_names_runner(&runners)
 }
 
 /// Path components that name a place, not a program.
@@ -17341,7 +17499,6 @@ pub fn rules_for_gate() -> Vec<Rule> {
 /// empty when the pack does not answer: a reminder is not worth a wait.
 #[must_use]
 pub fn gate_read() -> (Vec<Rule>, Vec<(String, String)>) {
-    legacy_pref::migrate_once();
     let kept = rules_cache_path();
     let listed = pack().and_then(|client| {
         let atoms =
@@ -17429,18 +17586,21 @@ pub fn preferences_line(enforced: usize, could: usize, total: usize) -> String {
 }
 
 fn preferences_row() -> Habitat {
+    // The doctor is a person-side run, so it records the cutoff. Under a
+    // runner the call does nothing and the count below still stands.
     legacy_pref::migrate_once();
     let listed = pack().and_then(|client| {
         atoms_lean(&client, &client.workspace()).context("preferences: GET /v1/atoms failed")
     });
     let (state, held) = match listed {
         Ok(atoms) => {
-            let held = legacy_pref::awaiting(&atoms).len();
+            let held_rows = legacy_pref::awaiting(&atoms);
+            let held = held_rows.len();
             let (enforced, could, total) =
                 preferences_enforced(&preferences_of(&atoms), &rules_of(&atoms));
             let mut line = preferences_line(enforced, could, total);
             if held > 0 {
-                line.push_str(&format!("; {}", legacy_pref::review_sentence(held)));
+                line.push_str(&format!("; {}", legacy_pref::review_sentence(&held_rows)));
             }
             (line, held)
         }
@@ -25114,7 +25274,6 @@ pub fn packset_island(cue: &str, fire: bool) -> Result<Value> {
 /// weights that persona fired, and a fire writes its weights and not the
 /// seat's. The seat's own island is the one with no lens.
 pub fn packset_island_as(cue: &str, fire: bool, lens: Option<&str>) -> Result<Value> {
-    legacy_pref::migrate_once();
     let cue = cue.trim();
     if cue.is_empty() {
         bail!("island: pass the task or question at hand");
@@ -25441,7 +25600,6 @@ pub fn packset_search_as_of(
     as_of: Option<&str>,
     rerank: bool,
 ) -> Result<Vec<Hit>> {
-    legacy_pref::migrate_once();
     let q = query.trim();
     if q.is_empty() {
         bail!("search: empty query");
@@ -35860,6 +36018,30 @@ mod tests {
         assert_eq!(sitting_warn_line(&[calm]), None);
     }
 
+    /// Older preferences and lessons are a warning. They are named, and
+    /// they are not a habitat that failed to answer.
+    #[test]
+    fn held_memories_warn_and_the_doctor_stays_healthy() {
+        let prefs = Habitat {
+            name: "preferences",
+            state: "no preferences stored; 1 older lesson awaits review (`ljos prefer --review`)"
+                .into(),
+            ok: false,
+        };
+        assert_eq!(doctor_word(&prefs), "warn");
+        let mut rows: Vec<Habitat> = REQUIRED
+            .iter()
+            .map(|name| Habitat {
+                name,
+                state: "answers".into(),
+                ok: true,
+            })
+            .collect();
+        rows.push(prefs);
+        assert!(failing(&rows).is_empty(), "{:?}", failing(&rows));
+        assert!(healthy(&rows));
+    }
+
     /// the tarball the release workflow uploads for each target is the one
     /// binstall's metadata asks for, holding every binary of both crates,
     /// and each target's standard library is added to the toolchain that
@@ -37746,14 +37928,13 @@ mod tests {
         let _url = PackUrl::set(&url);
         let found = packset_search_as_of("tag the release", 3, Some("2026-01-01"), true).unwrap();
         assert_eq!(found[0].id.as_deref(), Some("other"));
-        // The upgrade lists the pack before the query. That listing is
-        // not a search: a dated search is still asked once, for the
-        // writer's order, and not again for the encoder's signals.
+        // Search does not run the preference migration. A dated search is
+        // still asked once, for the writer's order, and not again for
+        // the encoder's signals.
         let all = seen.lock().unwrap().clone();
         assert!(
-            all.iter()
-                .any(|l| l.contains("/v1/atoms") && l.contains("embedding=omit")),
-            "{all:?}"
+            !all.iter().any(|l| l.contains("embedding=omit")),
+            "search ran the migration\n{all:?}"
         );
         let lines: Vec<String> = all
             .iter()
@@ -46596,6 +46777,41 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             Some(pane.as_str()),
             "the runner is up in that pane"
         );
+    }
+
+    #[test]
+    fn a_cgroup_word_names_the_runner_that_started_it() {
+        let runners = vec![
+            "cursor".to_string(),
+            "claude".to_string(),
+            "tmux".to_string(),
+        ];
+        assert!(super::cgroup_text_names_runner(
+            "0::/system.slice/pod/cursor-agent/workload\n",
+            &runners
+        ));
+        assert!(super::cgroup_text_names_runner(
+            "0::/user.slice/user-1000.slice/app-claude-123.scope\n",
+            &runners
+        ));
+        assert!(!super::cgroup_text_names_runner(
+            "0::/user.slice/user-1000.slice/session-3.scope\n",
+            &runners
+        ));
+        // tmux is a multiplexer, not a runner, even when a harness uses the name.
+        assert!(!super::cgroup_text_names_runner(
+            "0::/user.slice/user-1000.slice/tmux.service\n",
+            &runners
+        ));
+    }
+
+    /// The test process is not a detached shell, so a runner-shaped cgroup
+    /// around the suite does not make every test a runner. A session
+    /// variable still does.
+    #[test]
+    fn this_process_is_not_under_a_runner_without_one() {
+        let _g = env_guard();
+        assert!(!super::under_a_runner());
     }
 
     #[test]
