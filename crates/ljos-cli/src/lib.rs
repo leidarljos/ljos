@@ -8610,8 +8610,8 @@ pub fn search_with_signals(cue: &str, limit: u32) -> Result<Vec<(Hit, DenseSigna
             .ok()?
             .into_json()
             .ok()?;
-        body["hits"]
-            .as_array()?
+        let raw = body["hits"].as_array()?;
+        let found: Vec<(Hit, DenseSignal)> = raw
             .iter()
             .map(|v| {
                 let hit: Hit = serde_json::from_value(v.clone()).ok()?;
@@ -8622,7 +8622,11 @@ pub fn search_with_signals(cue: &str, limit: u32) -> Result<Vec<(Hit, DenseSigna
                 };
                 Some((hit, signal))
             })
-            .collect()
+            .collect::<Option<_>>()?;
+        if raw.iter().any(|v| carried_origin(v).is_none()) {
+            keep_origins_of(&client, found.iter().map(|(h, _)| h));
+        }
+        Some(found)
     })();
     match raw {
         Some(found) => Ok(found),
@@ -28631,11 +28635,10 @@ fn hit_line(h: &Hit, now: &str) -> String {
 
 /// Whether the pack's stored record says the person stands behind `atom`,
 /// an atom or a search hit: `origin` `user-declared` and `source.basis`
-/// `person`, which only a person-path writer stamps. A missing origin
-/// reads as `user-declared`, as the pack reads it, and still needs the
-/// basis: a direct post, a pack default or a record written before the
-/// basis is not the person's. Kind and entities are the writer's and are
-/// not read.
+/// `person`, which only a person-path writer stamps. A missing or empty
+/// origin is not the person's, and neither is a direct post, a pack
+/// default or a record written before the basis. Kind and entities are
+/// the writer's and are not read.
 #[must_use]
 pub fn person_stored(atom: &Value) -> bool {
     stored_by(atom) == StoredBy::Person
@@ -28690,15 +28693,16 @@ fn person_basis(atom: &Value) -> bool {
         .is_some_and(|b| b.trim().eq_ignore_ascii_case(Basis::Person.as_str()))
 }
 
-/// [`StoredBy`] of `atom`, an atom or a search hit. A missing origin reads
-/// as `user-declared`, as the pack reads it. Entities are never read.
+/// [`StoredBy`] of `atom`, an atom or a search hit. One with no origin, a
+/// null one or an empty one reads as an agent's. packsetd stores every
+/// record with an origin, filling `user-declared` for a write that sent
+/// none, so a body without one is a hit that dropped it, as a milli
+/// document does, or not the pack's record at all. Entities are never
+/// read.
 pub(crate) fn stored_by(atom: &Value) -> StoredBy {
-    let origin = atom
-        .get("origin")
-        .and_then(Value::as_str)
-        .map(|o| o.trim().to_ascii_lowercase())
-        .filter(|o| !o.is_empty())
-        .unwrap_or_else(|| admit::ORIGIN_USER.to_string());
+    let Some(origin) = carried_origin(atom) else {
+        return StoredBy::Agent;
+    };
     match origin.as_str() {
         admit::ORIGIN_USER if person_basis(atom) => StoredBy::Person,
         admit::ORIGIN_PEER => StoredBy::Peer,
@@ -28706,6 +28710,15 @@ pub(crate) fn stored_by(atom: &Value) -> StoredBy {
         "external" => StoredBy::External,
         _ => StoredBy::Agent,
     }
+}
+
+/// The origin `atom` carries, trimmed and lowercased, or `None` when it
+/// carries none or an empty one.
+fn carried_origin(atom: &Value) -> Option<String> {
+    atom.get("origin")
+        .and_then(Value::as_str)
+        .map(|o| o.trim().to_ascii_lowercase())
+        .filter(|o| !o.is_empty())
 }
 
 /// [`stored_by`] for each atom id this process read, or `None` for an id
@@ -28727,9 +28740,10 @@ fn record_origin(id: &str, by: Option<StoredBy>) {
 }
 
 /// Record the stored origin of `atom`, an atom or a search hit, by its id.
+/// A record that carries no origin, an island row or a milli hit, says
+/// nothing of the stored one and records nothing.
 pub(crate) fn keep_origin(atom: &Value) {
-    // An island row drops the origin, which says nothing of the stored one.
-    if atom.get("origin").is_none() && atom.get("activation").is_some() {
+    if carried_origin(atom).is_none() {
         return;
     }
     if let Some(id) = atom.get("id").and_then(Value::as_str) {
@@ -28740,13 +28754,24 @@ pub(crate) fn keep_origin(atom: &Value) {
 /// Record the stored origin of each hit from the pack's listing, read
 /// fresh: the pack can change a held atom's origin in place, and a
 /// long-lived process must not name a hit by the origin it read before.
-/// A hit the listing does not hold keeps what was recorded.
-fn keep_origins_of(client: &PacksetClient, hits: &[Hit]) {
-    if hits.iter().all(|h| h.id.is_none()) {
+/// A hit the listing does not hold is recorded as not held, and a listing
+/// that does not answer clears the person recorded for every hit.
+fn keep_origins_of<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'a Hit>) {
+    let ids: Vec<&str> = hits.into_iter().filter_map(|h| h.id.as_deref()).collect();
+    if ids.is_empty() {
         return;
     }
-    if let Ok(atoms) = atoms_lean(client, &client.workspace()) {
-        atoms.iter().for_each(keep_origin);
+    match atoms_lean(client, &client.workspace()) {
+        Ok(atoms) => {
+            atoms.iter().for_each(keep_origin);
+            for id in ids {
+                let held = atoms
+                    .iter()
+                    .find(|a| a.get("id").and_then(Value::as_str) == Some(id));
+                record_origin(id, held.map(stored_by));
+            }
+        }
+        Err(_) => ids.into_iter().for_each(unrecord_person),
     }
 }
 
@@ -37047,7 +37072,7 @@ mod tests {
             serde_json::json!({
                 "id": id, "text": text, "score": score, "kind": kind,
                 "ts": "2026-10-11T15:00:00.000Z", "entities": ["horizon:standing"],
-                "source": {"basis": "person"},
+                "origin": "user-declared", "source": {"basis": "person"},
                 "ballots": 1, "of": 3, "dense_rank": rank, "cosine": cos
             })
         };
@@ -37410,6 +37435,7 @@ mod tests {
                         "kind": "preference",
                         "text": memory,
                         "entities": ["horizon:standing"],
+                        "origin": "user-declared",
                         "source": {"basis": "person"},
                         "ts": "2020-01-01T00:00:00Z"
                     }]})
@@ -37426,6 +37452,7 @@ mod tests {
                         "kind": "preference",
                         "ts": "2020-01-01T00:00:00.000Z",
                         "entities": ["horizon:standing"],
+                        "origin": "user-declared",
                         "source": {"basis": "person"},
                         "ballots": 2,
                         "of": 3,
@@ -37817,6 +37844,14 @@ mod tests {
         );
         bare.id = Some("bare-claim".into());
         keep_origin(&serde_json::json!({"id": "bare-claim", "source": {"basis": "person"}}));
+        assert_eq!(
+            hit_line(&bare, "2026-09-12T00:00:00.000Z"),
+            "- [unverified agent note (origin agent-derived)] x",
+            "a person basis with no origin read as the person's"
+        );
+        keep_origin(&serde_json::json!({
+            "id": "bare-claim", "origin": "user-declared", "source": {"basis": "person"},
+        }));
         assert_eq!(hit_line(&bare, "2026-09-12T00:00:00.000Z"), "- [claim] x");
     }
 
@@ -48710,6 +48745,61 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         );
     }
 
+    /// A record or a hit with no origin, a null one or an empty one is no
+    /// one's word for the claim, whatever basis it carries. A search hit
+    /// without one, as a milli document comes back, takes what the
+    /// pack's listing holds now, and none when the listing does not hold
+    /// it, never what this process recorded before.
+    #[test]
+    fn a_claim_without_an_origin_is_not_the_persons() {
+        let _g = env_guard();
+        for origin in [
+            None,
+            Some(Value::Null),
+            Some(serde_json::json!("")),
+            Some(serde_json::json!(" ")),
+        ] {
+            let mut atom = serde_json::json!({"id": "0r1g1nle55000000000000000000000000", "kind": "lesson", "text": "t", "source": {"basis": "person"}});
+            if let Some(origin) = origin {
+                atom["origin"] = origin;
+            }
+            assert_eq!(stored_by(&atom), StoredBy::Agent, "{atom}");
+            keep_origin(&atom);
+            assert_eq!(recorded(atom["id"].as_str().unwrap()), None, "{atom}");
+        }
+
+        let listed = "0r1g1nle55000000000000000000000001";
+        let unlisted = "0r1g1nle55000000000000000000000002";
+        record_origin(listed, Some(StoredBy::Person));
+        record_origin(unlisted, Some(StoredBy::Person));
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            let hit = |id: &str| {
+                serde_json::json!({"id": id, "kind": "preference", "text": "Keep the form short.",
+                       "score": 1.0, "source": {"basis": "person"}})
+            };
+            if first.starts_with("GET /v1/search") {
+                return (
+                    200,
+                    serde_json::json!({"hits": [hit(listed), hit(unlisted)]}).to_string(),
+                );
+            }
+            if first.starts_with("GET /v1/atoms") {
+                let held = serde_json::json!({"id": listed, "kind": "preference", "text": "Keep the form short.",
+                                  "workspace": "seat", "origin": "agent-derived",
+                                  "source": {"basis": "agent"}});
+                return (200, serde_json::json!({"atoms": [held]}).to_string());
+            }
+            (404, r#"{"error":"no atom"}"#.into())
+        });
+        let _pack = HoldEnv::set(&[("PACKSET_URL", &url), ("PACKSET_WORKSPACE", "seat")]);
+        let found = search_with_signals("the form", 8).unwrap();
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(recorded_origin(listed), Some(StoredBy::Agent));
+        assert_eq!(recorded(unlisted), Some(None));
+        assert!(found.iter().all(|(h, _)| !person_origin(h)), "{found:?}");
+    }
+
     #[test]
     fn the_timeline_fences_a_tracker_note() {
         let _g = env_guard();
@@ -48896,7 +48986,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     fn a_session_start_says_ljos_is_on_in_one_line() {
         let now = "2026-10-11T12:00:00Z";
         let atoms = vec![
-            serde_json::json!({"kind":"preference","text":"Plain words in denials.","due_at":"2026-10-01T00:00:00Z","source":{"basis":"person"}}),
+            serde_json::json!({"kind":"preference","text":"Plain words in denials.","due_at":"2026-10-01T00:00:00Z","origin":"user-declared","source":{"basis":"person"}}),
             serde_json::json!({"kind":"lesson","text":"BM25+ beat BM25.","due_at":"2027-01-01T00:00:00Z"}),
         ];
         let line = session_start_line_from(Some(&atoms), now, true);
@@ -49572,14 +49662,14 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 std::thread::spawn(move || {
                     let req = read_http(&mut s);
                     let first = req.lines().next().unwrap_or("").to_string();
+                    let held = r#"{"id":"p1","text":"Tag a release with git push origin TAG; --follow-tags leaves v-tags behind.","score":2.0,"kind":"preference","ts":"2026-10-10T18:00:00.000Z","entities":[],"origin":"user-declared","source":{"basis":"person"},"ballots":3,"of":3}"#;
                     let (status, body) = if first.contains("/v1/search") {
                         if first.contains("rerank=1") {
                             std::thread::sleep(std::time::Duration::from_secs(20));
                         }
-                        (
-                            "200 OK",
-                            r#"{"hits":[{"id":"p1","text":"Tag a release with git push origin TAG; --follow-tags leaves v-tags behind.","score":2.0,"kind":"preference","ts":"2026-10-10T18:00:00.000Z","entities":[],"source":{"basis":"person"},"ballots":3,"of":3}]}"#.to_string(),
-                        )
+                        ("200 OK", format!(r#"{{"hits":[{held}]}}"#))
+                    } else if first.starts_with("GET /v1/atoms") {
+                        ("200 OK", format!(r#"{{"atoms":[{held}]}}"#))
                     } else {
                         ("404 Not Found", r#"{"error":"not here"}"#.to_string())
                     };
