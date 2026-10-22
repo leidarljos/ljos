@@ -1259,16 +1259,10 @@ fn catch_up(root: &Path) -> String {
     if git(root, &["fetch", "-q", "--all"]).map_or(true, |o| !o.status.success()) {
         return "sync: fetch failed; reading the logs as they are\n".into();
     }
-    let Some(up) = crate::tracker_upstream(root) else {
+    let refs = followed_refs(root);
+    if refs.is_empty() {
         return String::new();
-    };
-    let mut refs = vec![up.clone()];
-    refs.extend(
-        crate::tracker_mirrors(root, &up)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(r, b)| format!("{r}/{b}")),
-    );
+    }
     let mut stuck = Vec::new();
     let _held = crate::tracker_commit_lock(root);
     for r in refs {
@@ -1292,6 +1286,22 @@ fn catch_up(root: &Path) -> String {
             stuck.join(", ")
         )
     }
+}
+
+/// The remote-tracking refs [`catch_up`] merges: the upstream, and the
+/// same branch on every other remote. None when there is no upstream.
+fn followed_refs(root: &Path) -> Vec<String> {
+    let Some(up) = crate::tracker_upstream(root) else {
+        return Vec::new();
+    };
+    let mut refs = vec![up.clone()];
+    refs.extend(
+        crate::tracker_mirrors(root, &up)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(r, b)| format!("{r}/{b}")),
+    );
+    refs
 }
 
 /// One pass over the tracker repository's scope: pull, take every other
@@ -1392,15 +1402,22 @@ fn is_ancestor(root: &Path, commit: &str) -> bool {
     git(root, &["merge-base", "--is-ancestor", commit, "HEAD"]).is_ok_and(|o| o.status.success())
 }
 
-/// Bring `commit` into `HEAD` when a fetched tip already has it.
+/// Whether a fetched remote-tracking ref reaches `commit`. The object
+/// store is not asked: a commit made here and never pushed is in it too.
+fn on_remote(root: &Path, commit: &str) -> bool {
+    followed_refs(root).iter().any(|remote_ref| {
+        git(root, &["merge-base", "--is-ancestor", commit, remote_ref])
+            .is_ok_and(|o| o.status.success())
+    })
+}
+
+/// Bring `commit` into `HEAD` when a fetched remote ref already has it.
 ///
-/// A commit the remote does not have is named, and the caller still
-/// imports the remote head. A fetch that already failed is not named
-/// twice.
+/// A commit no remote ref reaches is named and not fast-forwarded to,
+/// even when this checkout holds it, and the caller still imports the
+/// remote head. A fetch that already failed is not named twice.
 fn note_commit(root: &Path, commit: &str, fetched: bool) -> String {
-    let spec = format!("{commit}^{{commit}}");
-    let present = git(root, &["cat-file", "-e", &spec]).is_ok_and(|o| o.status.success());
-    if !present {
+    if !on_remote(root, commit) {
         return if fetched {
             format!("sync: {commit} is not on the remote; imported the remote head\n")
         } else {
@@ -3020,6 +3037,67 @@ mod tests {
     fn inbox_sync_refuses_a_name_that_is_not_a_commit() {
         let err = fetch_for_inbox(Some("nope")).unwrap_err();
         assert_eq!(err.to_string(), "sync: nope is not a commit");
+    }
+
+    /// A commit made here and never pushed is in the object store, but no
+    /// remote ref has it. It is named, and `HEAD` is not moved onto it.
+    #[test]
+    fn a_commit_only_this_checkout_has_is_not_on_the_remote() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("remote.git");
+        let root = dir.path().join("local");
+        let git = |cwd: &Path, args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        std::fs::create_dir_all(&remote).unwrap();
+        git(&remote, &["init", "-q", "--bare"]);
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["config", "user.email", "seat@example.invalid"]);
+        git(&root, &["config", "user.name", "seat"]);
+        git(&root, &["config", "core.hooksPath", "/dev/null"]);
+        std::fs::write(root.join("README"), "seed\n").unwrap();
+        git(&root, &["add", "README"]);
+        git(&root, &["commit", "-q", "-m", "seed"]);
+        git(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&root, &["push", "-q", "-u", "origin", "HEAD"]);
+        let head = git(&root, &["rev-parse", "HEAD"]);
+        let local = git(
+            &root,
+            &["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "local"],
+        );
+
+        assert_eq!(
+            note_commit(&root, &local, true),
+            format!("sync: {local} is not on the remote; imported the remote head\n")
+        );
+        assert_eq!(
+            git(&root, &["rev-parse", "HEAD"]),
+            head,
+            "HEAD moved onto a commit the remote does not have"
+        );
+
+        let branch = git(&root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        let refspec = format!("{local}:refs/heads/{branch}");
+        git(&root, &["push", "-q", "origin", &refspec]);
+        git(&root, &["fetch", "-q", "origin"]);
+        assert_eq!(note_commit(&root, &local, true), "");
+        assert_eq!(git(&root, &["rev-parse", "HEAD"]), local);
     }
 
     #[test]
