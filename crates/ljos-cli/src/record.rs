@@ -181,7 +181,7 @@ pub fn verify_entry(entry: &SignedEntry) -> Result<()> {
 ///
 /// Any entry fails validation or signature verification, a pin file voter
 /// is not spelled the way the check looks it up, voter-key pinning detects
-/// a mismatch, or two unreplaced ballots from one voter share an hour.
+/// a mismatch, or two unreplaced ballots under one key share an hour.
 pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
     let mut report = CheckReport {
         entries: entries.len(),
@@ -192,7 +192,6 @@ pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
         validate_pin_voter(voter).with_context(|| format!("pin source: {pin_source}"))?;
     }
     let tracker_pins = pins.clone();
-    let mut ballots = Vec::new();
     for entry in entries {
         verify_entry(entry)?;
         match &entry.entry {
@@ -213,11 +212,10 @@ pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
                     .with_context(|| format!("pin source: {pin_source}"))?;
                 crate::ballot_sig::observe_pin(&mut pins, &ballot.voter, &entry.signature.key)
                     .with_context(|| format!("pin source: {pin_source}"))?;
-                ballots.push(ballot.clone());
             }
         }
     }
-    report.questions_with_live_ballots = tally(&ballots)?.len();
+    report.questions_with_live_ballots = tally(entries)?.len();
     Ok(report)
 }
 
@@ -316,24 +314,35 @@ pub fn ballot_id(ballot: &BallotEntry) -> Result<String> {
     Ok(hex[..16].to_string())
 }
 
-/// Latest unreplaced ballot per voter and question.
+/// Latest unreplaced ballot per signing key and question.
 ///
+/// A key is one vote on a question whatever voter ids it signs under, so
+/// two spellings of one voter, or two voters reading one key file, count
+/// once. Keys are told apart by [`crate::ballot_sig::key_fingerprint`].
 /// A ballot named by another entry's `replaces` never counts, whatever
 /// hour it was cast. Of what remains, the latest `cast_at` wins, and a
-/// `withdrawn` stance contributes no vote. Two unreplaced ballots from
-/// one voter in one hour are an error: file order is not a tie break.
+/// `withdrawn` stance contributes no vote. Two unreplaced ballots under
+/// one key in one hour are an error: file order is not a tie break.
 ///
 /// # Errors
 ///
-/// A `cast_at` is not an hour timestamp, or two unreplaced ballots from
-/// one voter share an hour.
-pub fn tally(ballots: &[BallotEntry]) -> Result<BTreeMap<String, BTreeMap<String, usize>>> {
+/// A `replaces` names no ballot, or one from another voter or question,
+/// a `cast_at` is not an hour timestamp, or two unreplaced ballots under
+/// one key share an hour.
+pub fn tally(entries: &[SignedEntry]) -> Result<BTreeMap<String, BTreeMap<String, usize>>> {
+    let ballots: Vec<(&BallotEntry, &str)> = entries
+        .iter()
+        .filter_map(|entry| match &entry.entry {
+            Entry::Ballot(ballot) => Some((ballot, entry.signature.key.as_str())),
+            Entry::Question(_) => None,
+        })
+        .collect();
     let by_id: BTreeMap<&str, &BallotEntry> = ballots
         .iter()
-        .filter_map(|ballot| ballot.id.as_deref().map(|id| (id, ballot)))
+        .filter_map(|(ballot, _)| ballot.id.as_deref().map(|id| (id, *ballot)))
         .collect();
     let mut replaced = BTreeSet::new();
-    for ballot in ballots {
+    for (ballot, _) in &ballots {
         let Some(target_id) = ballot.replaces.as_deref() else {
             continue;
         };
@@ -363,8 +372,8 @@ pub fn tally(ballots: &[BallotEntry]) -> Result<BTreeMap<String, BTreeMap<String
         }
         replaced.insert(target_id);
     }
-    let mut grouped: BTreeMap<(String, String), Vec<(i64, &BallotEntry)>> = BTreeMap::new();
-    for ballot in ballots {
+    let mut grouped: BTreeMap<(String, String), Vec<(i64, usize)>> = BTreeMap::new();
+    for (at, (ballot, key)) in ballots.iter().enumerate() {
         if ballot.id.as_deref().is_some_and(|id| replaced.contains(id)) {
             continue;
         }
@@ -372,22 +381,35 @@ pub fn tally(ballots: &[BallotEntry]) -> Result<BTreeMap<String, BTreeMap<String
             .with_context(|| format!("ballot cast_at `{}`", ballot.cast_at))?
             .timestamp();
         grouped
-            .entry((ballot.question.clone(), ballot.voter.clone()))
+            .entry((
+                ballot.question.clone(),
+                crate::ballot_sig::key_fingerprint(key),
+            ))
             .or_default()
-            .push((stamp, ballot));
+            .push((stamp, at));
     }
     let mut counts: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
-    for ((question, voter), group) in grouped {
-        let mut hours: BTreeMap<i64, usize> = BTreeMap::new();
-        for (stamp, _) in &group {
-            *hours.entry(*stamp).or_default() += 1;
+    for ((question, _), group) in grouped {
+        let mut hours: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+        for (stamp, at) in &group {
+            hours.entry(*stamp).or_default().push(*at);
         }
-        if hours.values().any(|count| *count > 1) {
-            bail!("two unreplaced ballots from {voter} on {question} in the same hour");
+        if let Some(same) = hours.values().find(|same| same.len() > 1) {
+            let voters: BTreeSet<&str> = same
+                .iter()
+                .map(|at| ballots[*at].0.voter.as_str())
+                .collect();
+            let key = ballots[same[0]].1;
+            bail!(
+                "two unreplaced ballots from {} on {question} in the same hour, both under key {}…",
+                voters.into_iter().collect::<Vec<_>>().join(" and "),
+                &key[..12.min(key.len())]
+            );
         }
-        let Some((_, ballot)) = group.iter().max_by_key(|(stamp, _)| *stamp) else {
+        let Some(&(_, at)) = group.iter().max_by_key(|(stamp, _)| *stamp) else {
             continue;
         };
+        let ballot = ballots[at].0;
         if ballot.stance == "withdrawn" {
             continue;
         }
@@ -1166,18 +1188,18 @@ mod tests {
     #[test]
     fn latest_ballot_per_voter_wins_and_withdrawn_does_not_count() {
         let _home = test_home();
-        let a1 = as_ballot(sign_as(
+        let a1 = sign_as(
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
             3,
-        ));
-        let a2 = as_ballot(sign_as(
+        );
+        let a2 = sign_as(
             ballot_entry("alpha/seat-a", "withdrawn", "2026-10-21T11:00:00Z"),
             3,
-        ));
-        let b1 = as_ballot(sign_as(
+        );
+        let b1 = sign_as(
             ballot_entry("beta/seat-b", "accept", "2026-10-21T10:00:00Z"),
             4,
-        ));
+        );
         let read = tally(&[a1, a2, b1]).expect("tally");
         let by_stance = read.get("correct-3f9a1c2e").expect("question tally");
         assert_eq!(by_stance.get("accept"), Some(&1));
@@ -1195,9 +1217,9 @@ mod tests {
         };
         ballot.question = "correct-3F9A1C2E".to_string();
         let upper = sign_unchecked(upper, 3);
-        let ballots = [as_ballot(lower.clone()), as_ballot(upper.clone())];
-        let Err(err) = check_entries(&[lower, upper]) else {
-            panic!("one voter counted twice: {:?}", tally(&ballots));
+        let entries = [lower, upper];
+        let Err(err) = check_entries(&entries) else {
+            panic!("one voter counted twice: {:?}", tally(&entries));
         };
         assert!(err_chain(&err).contains("lowercase"), "{}", err_chain(&err));
     }
@@ -1213,8 +1235,106 @@ mod tests {
             ballot_entry("alpha/seat-a", "reject", "2026-10-21T10:00:00Z"),
             3,
         );
-        let err = tally(&[as_ballot(accept), as_ballot(reject)]).expect_err("same hour");
+        let err = tally(&[accept, reject]).expect_err("same hour");
         assert!(err.to_string().contains("same hour"), "{err}");
+    }
+
+    fn counted(read: &BTreeMap<String, BTreeMap<String, usize>>, stance: &str) -> Option<usize> {
+        read.get("correct-3f9a1c2e")
+            .and_then(|stances| stances.get(stance))
+            .copied()
+    }
+
+    #[test]
+    fn one_key_counts_once_on_a_question() {
+        let _home = test_home();
+        let entries = [
+            sign_as(
+                ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+                3,
+            ),
+            sign_as(
+                ballot_entry("beta/seat-b", "accept", "2026-10-21T11:00:00Z"),
+                3,
+            ),
+            sign_as(
+                ballot_entry("alpha/run-101", "reject", "2026-10-21T12:00:00Z"),
+                3,
+            ),
+            sign_as(
+                ballot_entry("gamma/seat-c", "accept", "2026-10-21T10:00:00Z"),
+                4,
+            ),
+        ];
+        let report = check_entries(&entries).expect("check");
+        assert_eq!(report.questions_with_live_ballots, 1);
+        let read = tally(&entries).expect("tally");
+        assert_eq!(counted(&read, "reject"), Some(1), "{read:?}");
+        assert_eq!(counted(&read, "accept"), Some(1), "{read:?}");
+    }
+
+    #[test]
+    fn spellings_of_one_voter_under_one_key_count_once() {
+        let _home = test_home();
+        let spellings = [
+            "alpha/seat-a",
+            "Alpha/seat-a",
+            "alpha./seat-a",
+            "alpha_/seat-a",
+            "alpha/Seat-a",
+            "alpha/run-101",
+            "Alpha/run-101",
+            "alpha./run-101",
+            "alpha_/run-101",
+            "alpha/inky",
+            "alpha/inky-39u",
+            "alpha/ljos-bot",
+            "alpha/ljosbot",
+            "alpha/judge-model-1-5",
+        ];
+        let entries: Vec<SignedEntry> = spellings
+            .iter()
+            .zip(1..)
+            .map(|(voter, hour)| {
+                let at = format!("2026-10-21T{hour:02}:00:00Z");
+                sign_unchecked(ballot_entry(voter, "accept", &at), 3)
+            })
+            .collect();
+        let read = tally(&entries).expect("tally");
+        assert_eq!(counted(&read, "accept"), Some(1), "{read:?}");
+    }
+
+    #[test]
+    fn one_key_under_two_voters_in_one_hour_is_flagged() {
+        let _home = test_home();
+        let at = "2026-10-21T10:00:00Z";
+        let entries = [
+            sign_as(ballot_entry("alpha/seat-a", "accept", at), 3),
+            sign_as(ballot_entry("beta/seat-b", "reject", at), 3),
+        ];
+        let err = check_entries(&entries).expect_err("one key, two ballots, one hour");
+        let text = err_chain(&err);
+        assert!(text.contains("same hour"), "{text}");
+        assert!(text.contains("alpha/seat-a and beta/seat-b"), "{text}");
+    }
+
+    #[test]
+    fn a_key_in_capital_hex_is_the_same_key() {
+        let _home = test_home();
+        let lower = sign_as(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            3,
+        );
+        let mut upper = sign_as(
+            ballot_entry("beta/seat-b", "accept", "2026-10-21T11:00:00Z"),
+            3,
+        );
+        upper.signature.key = upper.signature.key.to_ascii_uppercase();
+        assert_ne!(lower.signature.key, upper.signature.key);
+        let entries = [lower, upper];
+        check_entries(&entries).expect("capital hex verifies");
+        let read = tally(&entries).expect("tally");
+        assert_eq!(counted(&read, "accept"), Some(1), "{read:?}");
     }
 
     fn with_replaces(mut entry: UnsignedEntry, id: &str) -> UnsignedEntry {
@@ -1240,16 +1360,14 @@ mod tests {
             ),
             3,
         );
-        let cast_ballot = as_ballot(cast.clone());
-        let withdrawal_ballot = as_ballot(withdrawal.clone());
         for (name, order) in [
             (
                 "cast then withdrawal",
-                vec![cast_ballot.clone(), withdrawal_ballot.clone()],
+                vec![cast.clone(), withdrawal.clone()],
             ),
             (
                 "withdrawal then cast",
-                vec![withdrawal_ballot.clone(), cast_ballot.clone()],
+                vec![withdrawal.clone(), cast.clone()],
             ),
         ] {
             let read = tally(&order).unwrap_or_else(|err| panic!("{name}: {err:#}"));
@@ -1282,13 +1400,13 @@ mod tests {
     #[test]
     fn replaces_must_target_the_same_voter_and_question() {
         let _home = test_home();
-        let missing = as_ballot(sign_as(
+        let missing = sign_as(
             with_replaces(
                 ballot_entry("alpha/seat-a", "withdrawn", "2026-10-21T11:00:00Z"),
                 "deadbeefdeadbeef",
             ),
             3,
-        ));
+        );
         let err = tally(std::slice::from_ref(&missing)).expect_err("missing replace target");
         assert!(
             err_chain(&err).contains("replaces"),
@@ -1296,18 +1414,18 @@ mod tests {
             err_chain(&err)
         );
 
-        let cast = as_ballot(sign_as(
+        let cast = sign_as(
             ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
             3,
-        ));
-        let cast_id = cast.id.clone().expect("id");
-        let other_voter = as_ballot(sign_as(
+        );
+        let cast_id = as_ballot(cast.clone()).id.expect("id");
+        let other_voter = sign_as(
             with_replaces(
                 ballot_entry("beta/seat-b", "withdrawn", "2026-10-21T11:00:00Z"),
                 &cast_id,
             ),
             4,
-        ));
+        );
         let err = tally(&[cast.clone(), other_voter]).expect_err("cross-voter replace");
         assert!(
             err_chain(&err).contains("same voter"),
@@ -1323,7 +1441,7 @@ mod tests {
             panic!("ballot");
         };
         ballot.question = "change-deadbeef".to_string();
-        let other_question = as_ballot(sign_as(other_question_unsigned, 3));
+        let other_question = sign_as(other_question_unsigned, 3);
         let err = tally(&[cast, other_question]).expect_err("cross-question replace");
         assert!(
             err_chain(&err).contains("same question"),
@@ -1739,11 +1857,11 @@ mod tests {
             ballot_entry("alpha/Seat-a", "accept", "2026-10-21T11:00:00Z"),
             1,
         );
-        let ballots = [as_ballot(pinned.clone()), as_ballot(other.clone())];
-        match check_entries(&[pinned, other]) {
+        let entries = [pinned, other];
+        match check_entries(&entries) {
             Ok(_) => panic!(
                 "alpha/Seat-a passed beside alpha/seat-a: {:?}",
-                tally(&ballots)
+                tally(&entries)
             ),
             Err(err) => {
                 let text = err_chain(&err);
