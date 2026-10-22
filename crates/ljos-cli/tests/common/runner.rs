@@ -4,6 +4,20 @@
 
 use std::path::Path;
 
+/// A directory for stand-ins below `~/.local/bin` of the home this user's
+/// passwd entry names, which is where ljos looks for an installed runner
+/// whatever `HOME` says. Removed when dropped.
+pub fn install_dir() -> tempfile::TempDir {
+    let bin = ljos_cli::proc_tree::own_home()
+        .expect("this user's passwd entry names a home")
+        .join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    tempfile::Builder::new()
+        .prefix(".ljos-runner-")
+        .tempdir_in(&bin)
+        .unwrap()
+}
+
 /// Copy `/bin/sh` to `path` unless it is there, and wait until it runs.
 /// A test thread that forked while the copy was open holds it for writing
 /// until that child execs, and an exec meanwhile fails as text file busy.
