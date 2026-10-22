@@ -950,15 +950,15 @@ fn git_config(cwd: &Path, key: &str) -> Option<String> {
 }
 
 fn git_text(cwd: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
         .arg(cwd)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+        .stderr(Stdio::null());
+    crate::apply_git_command_env(&mut cmd);
+    let out = cmd.output().ok()?;
     if !out.status.success() {
         return None;
     }
