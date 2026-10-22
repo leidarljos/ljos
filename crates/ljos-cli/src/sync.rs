@@ -8,7 +8,9 @@
 //! `.ljos/atoms/`, so two machines never touch one file and git never has to
 //! merge a log. A log carries the machine's live atoms of that scope without
 //! their vectors; the receiving pack encodes them again. An atom's scope is
-//! its `scope:NAME` entity, else the machine's default scope.
+//! its `scope:NAME` entity. An atom with none stays on the primary scope.
+//! A machine `default_scope` that names an extra scope is refused, so an
+//! unscoped box atom is never sealed into that shared log.
 //!
 //! Import posts every atom of every other machine's log to this seat's pack,
 //! which answers a text it already holds with the claim it has, so an import
@@ -286,22 +288,34 @@ pub fn scope_of_repo(root: &Path) -> Result<Option<Scope>> {
     }
 }
 
-fn default_scope(repo_scope: &str) -> String {
-    local()
-        .default_scope
-        .unwrap_or_else(|| repo_scope.to_string())
+/// The scope unscoped atoms take. An explicit `default_scope` may name the
+/// primary scope. One that names an extra scope is refused: applying it
+/// would seal an unscoped box atom into that extra scope's log.
+fn configured_default(scope: &Scope) -> Result<String> {
+    let chosen = local().default_scope.unwrap_or_else(|| scope.name.clone());
+    if scope.scopes.contains_key(&chosen) {
+        bail!(
+            "sync: default_scope `{chosen}` names an extra scope; unscoped atoms stay on the primary scope `{}`",
+            scope.name
+        );
+    }
+    Ok(chosen)
 }
 
-/// The scope an atom belongs to: its `scope:NAME` entity, else `default`.
-#[must_use]
-pub fn atom_scope(atom: &Value, default: &str) -> String {
+/// The `scope:NAME` entity on `atom`, when it has one.
+fn explicit_scope(atom: &Value) -> Option<&str> {
     atom["entities"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
         .find_map(|e| e.strip_prefix("scope:"))
-        .map_or_else(|| default.to_string(), str::to_string)
+}
+
+/// The scope an atom belongs to: its `scope:NAME` entity, else `default`.
+#[must_use]
+pub fn atom_scope(atom: &Value, default: &str) -> String {
+    explicit_scope(atom).map_or_else(|| default.to_string(), str::to_string)
 }
 
 /// An atom as it travels: without its vector, and without a sender tag of
@@ -328,15 +342,33 @@ pub fn is_own(atom: &Value) -> bool {
 
 /// The plaintext of this machine's log for a scope: its own live atoms of
 /// that scope, sorted by id, one JSON object a line.
+///
+/// `explicit_only` is how an extra scope is sealed. Only an atom whose
+/// `scope:` entity names that scope is included, so a default cannot pull
+/// an unscoped atom into the shared log.
 #[must_use]
 pub fn log_plaintext(atoms: &[Value], scope: &str, default: &str) -> String {
+    log_lines(atoms, scope, default, false)
+}
+
+fn log_lines(atoms: &[Value], scope: &str, default: &str, explicit_only: bool) -> String {
     let mut mine: Vec<Value> = atoms
         .iter()
-        .filter(|a| is_own(a) && atom_scope(a, default) == scope)
+        .filter(|a| belongs_to_scope(a, scope, default, explicit_only))
         .map(travelling)
         .collect();
     mine.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     mine.iter().map(|a| format!("{a}\n")).collect()
+}
+
+fn belongs_to_scope(atom: &Value, scope: &str, default: &str, explicit_only: bool) -> bool {
+    if !is_own(atom) {
+        return false;
+    }
+    match explicit_scope(atom) {
+        Some(name) => name == scope,
+        None => !explicit_only && default == scope,
+    }
 }
 
 fn log_dir(root: &Path) -> PathBuf {
@@ -500,7 +532,8 @@ fn age_missing(err: &anyhow::Error) -> bool {
 /// The pack not answering, or age refusing to seal for a reason other than
 /// being absent.
 pub fn export(root: &Path, scope: &Scope, atoms: &[Value]) -> Result<String> {
-    export_for_scope(root, scope, &scope.name, atoms, &default_scope(&scope.name))
+    let default = configured_default(scope)?;
+    export_for_scope(root, scope, &scope.name, atoms, &default)
 }
 
 pub(crate) fn export_named(
@@ -509,7 +542,8 @@ pub(crate) fn export_named(
     scope_name: &str,
     atoms: &[Value],
 ) -> Result<String> {
-    export_for_scope(root, scope, scope_name, atoms, &default_scope(&scope.name))
+    let default = configured_default(scope)?;
+    export_for_scope(root, scope, scope_name, atoms, &default)
 }
 
 fn export_for_scope(
@@ -534,7 +568,8 @@ fn export_named_scope(
     default: &str,
 ) -> Result<String> {
     let host = host();
-    let plain = log_plaintext(atoms, scope_name, default);
+    let explicit_only = scope_name != primary_scope;
+    let plain = log_lines(atoms, scope_name, default, explicit_only);
     let count = plain.lines().count();
     std::fs::create_dir_all(log_dir(root))?;
     let [log_rel, digest_rel] = host_log_rels_for_scope(&host, primary_scope, scope_name);
@@ -570,10 +605,10 @@ fn export_named_scope(
 }
 
 fn export_all(root: &Path, scope: &Scope, atoms: &[Value]) -> Result<String> {
+    let default = configured_default(scope)?;
     if !age_on_path() {
         return Ok(age_missing_line());
     }
-    let default = default_scope(&scope.name);
     let mut out = String::new();
     for named_scope in scope.all_scopes() {
         let said = export_named_scope(
@@ -1916,6 +1951,41 @@ mod tests {
             "entities": entities, "embedding": [0.1, 0.2]})
     }
 
+    /// `age` that writes its stdin to `-o`. The caller holds [`crate::test_env_lock`].
+    fn with_fake_age<T>(dir: &Path, body: impl FnOnce() -> T) -> T {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fake_age = dir.join("age");
+        std::fs::write(
+            &fake_age,
+            "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -o) out=\"$2\"; shift 2 ;;\n    -r) shift 2 ;;\n    *) shift ;;\n  esac\ndone\ncat > \"$out\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_age, std::fs::Permissions::from_mode(0o755)).unwrap();
+        struct PathGuard(Option<std::ffi::OsString>);
+        impl Drop for PathGuard {
+            fn drop(&mut self) {
+                // SAFETY: the caller holds the process env lock.
+                unsafe {
+                    if let Some(value) = &self.0 {
+                        std::env::set_var("PATH", value);
+                    } else {
+                        std::env::remove_var("PATH");
+                    }
+                }
+            }
+        }
+        let before = std::env::var_os("PATH");
+        let mut entries = vec![dir.to_path_buf()];
+        if let Some(old) = &before {
+            entries.extend(std::env::split_paths(old));
+        }
+        let joined = std::env::join_paths(entries).unwrap();
+        // SAFETY: the caller holds the process env lock.
+        unsafe { std::env::set_var("PATH", &joined) };
+        let _guard = PathGuard(before);
+        body()
+    }
+
     fn hooked_repo(root: &Path, pre_commit: &str) -> String {
         use std::os::unix::fs::PermissionsExt as _;
         let git = |args: &[&str]| {
@@ -2441,6 +2511,72 @@ mod tests {
         let grok_text = std::fs::read_to_string(dir.path().join(grok_rel)).unwrap();
         assert!(grok_text.contains("box only"), "{grok_text}");
         assert!(!grok_text.contains("cloud only"), "{grok_text}");
+    }
+
+    /// An extra scope used to inherit `default_scope`, so `default_scope =
+    /// "cloud"` sealed an unscoped box atom into `<host>+cloud`.
+    #[test]
+    fn an_unscoped_atom_is_not_sealed_into_an_extra_scope() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(config.join("ljos")).unwrap();
+        // SAFETY: this test holds the process env lock.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config) };
+        let scope: Scope = toml::from_str(
+            "name = \"grokbot\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = [\"age1cloud\"]\n",
+        )
+        .unwrap();
+        let atoms = vec![
+            atom("a", "box only", &[]),
+            atom("b", "cloud only", &["scope:cloud"]),
+            atom("c", "named box", &["scope:grokbot"]),
+            atom("d", "lesson on the primary", &["scope:grokbot"]),
+        ];
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let said = with_fake_age(dir.path(), || export_all(&root, &scope, &atoms)).unwrap();
+        assert!(!said.contains("default_scope"), "{said}");
+        let host = host();
+        let [cloud_rel, _] = host_log_rels_for_scope(&host, "grokbot", "cloud");
+        let cloud = std::fs::read_to_string(root.join(cloud_rel)).unwrap();
+        assert!(cloud.contains("cloud only"), "{cloud}");
+        assert!(!cloud.contains("box only"), "{cloud}");
+        assert!(!cloud.contains("named box"), "{cloud}");
+        assert!(!cloud.contains("lesson on the primary"), "{cloud}");
+        let [primary_rel, _] = host_log_rels_for_scope(&host, "grokbot", "grokbot");
+        let primary = std::fs::read_to_string(root.join(primary_rel)).unwrap();
+        assert!(primary.contains("box only"), "{primary}");
+        assert!(primary.contains("named box"), "{primary}");
+        assert!(primary.contains("lesson on the primary"), "{primary}");
+        assert!(!primary.contains("cloud only"), "{primary}");
+    }
+
+    #[test]
+    fn a_default_scope_naming_an_extra_scope_is_refused() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(config.join("ljos")).unwrap();
+        std::fs::write(config.join("ljos/sync.toml"), "default_scope = \"cloud\"\n").unwrap();
+        // SAFETY: this test holds the process env lock.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config) };
+        let scope: Scope = toml::from_str(
+            "name = \"grokbot\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = [\"age1cloud\"]\n",
+        )
+        .unwrap();
+        let err = export_all(dir.path(), &scope, &[atom("a", "box only", &[])])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("default_scope") && err.contains("cloud"),
+            "{err}"
+        );
+        let named = export_named(dir.path(), &scope, "cloud", &[atom("a", "box only", &[])])
+            .unwrap_err()
+            .to_string();
+        assert!(named.contains("default_scope"), "{named}");
+        assert!(!dir.path().join(".ljos").join("atoms").exists());
     }
 
     #[test]
