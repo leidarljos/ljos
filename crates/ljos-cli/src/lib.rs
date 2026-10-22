@@ -30058,17 +30058,20 @@ mod tests {
         assert_eq!(ids[0], "own21");
         assert_eq!(ids[21], "own00");
         assert_eq!(ids[22], "lesson");
-        let hit = |id: &str, text: &str| packset_client::Hit {
+        let hit = |id: &str, kind: &str, text: &str| packset_client::Hit {
             id: Some(id.into()),
             text: text.into(),
             score: 1.0,
-            kind: "lesson".into(),
+            kind: kind.into(),
             ts: None,
             entities: Vec::new(),
             ballots: None,
             of: None,
         };
-        let related = vec![hit("own21", "note 21"), hit("near", "a related lesson")];
+        let related = vec![
+            hit("own21", "note", "note 21"),
+            hit("near", "lesson", "a related lesson"),
+        ];
         let text = super::recall_lines(&own, related, "2026-10-18T12:00:00.000Z", true);
         assert!(
             text.starts_with(
@@ -30087,10 +30090,15 @@ mod tests {
             text.ends_with("  related:\n  - [lesson] a related lesson\n"),
             "{text}"
         );
-        let prompt = super::recall_lines(&own, vec![hit("own21", "note 21")], "now", false);
-        assert_eq!(prompt, "");
+        let prompt = super::recall_lines(&own, vec![hit("own21", "note", "note 21")], "now", false);
+        assert_eq!(prompt, "\nMemory\n  - [lesson] tagged lesson\n");
         assert_eq!(super::recall_lines(&[], Vec::new(), "now", true), "");
-        let alone = super::recall_lines(&[], vec![hit("near", "a related lesson")], "now", true);
+        let alone = super::recall_lines(
+            &[],
+            vec![hit("near", "lesson", "a related lesson")],
+            "now",
+            true,
+        );
         assert_eq!(alone, "\nMemory\n  - [lesson] a related lesson\n");
     }
 
