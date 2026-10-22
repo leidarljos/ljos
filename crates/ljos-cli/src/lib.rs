@@ -7440,10 +7440,11 @@ fn is_refresher(hit: &Hit) -> bool {
     hit.entities.iter().any(|e| e == "horizon:standing")
 }
 
-/// Whether a recalled claim is the person's own words: it carries
-/// [`SAID_ENTITY`].
+/// Whether a recalled claim is the person's own words: the pack stored it
+/// as the person's and it carries [`SAID_ENTITY`]. The entity alone is the
+/// writer's, and a direct post can carry it.
 fn said_by_person(hit: &Hit) -> bool {
-    hit.entities.iter().any(|e| e == SAID_ENTITY)
+    person_origin(hit) && hit.entities.iter().any(|e| e == SAID_ENTITY)
 }
 
 /// Where a recalled claim sits in a memory list: preferences first, then
@@ -31168,7 +31169,14 @@ mod tests {
         );
         let agent = hit("lesson", vec![]);
         assert_eq!(super::kind_label(&agent), "lesson, agent-derived");
-        let person = hit("lesson", vec![super::SAID_ENTITY.to_string()]);
+        let mut person = hit("lesson", vec![super::SAID_ENTITY.to_string()]);
+        assert_eq!(
+            super::kind_label(&person),
+            "lesson, agent-derived",
+            "the prompt tag alone made a claim the person's words"
+        );
+        person.id = Some("label-person".into());
+        super::keep_origin(&serde_json::json!({"id": "label-person", "origin": "user-declared"}));
         assert_eq!(super::kind_label(&person), "lesson, the person's words");
     }
 
