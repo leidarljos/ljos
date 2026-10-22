@@ -28,6 +28,7 @@ pub mod gates;
 pub mod git_hooks;
 pub mod hud;
 pub mod jev;
+mod kept_prompt;
 pub mod mail;
 pub mod memories;
 pub mod note_queue;
@@ -801,7 +802,10 @@ headless = ["claude", "-p", "{prompt}", "--max-turns", "6", "--allowedTools", "B
 name = "codex"
 config = "~/.codex/config.toml"
 marker = "[mcp_servers.ljos]"
-snippet = "\n[mcp_servers.ljos]\ncommand = \"{server}\"\nargs = []\nenv_vars = [\"XDG_RUNTIME_DIR\"]\nenv = { LJOS_SEAT = \"{name}\" }\n"
+# Codex gives its MCP server only the variables env_vars names: the seat
+# records' directory, and the session the prompt hook binds the kept
+# prompt to.
+snippet = "\n[mcp_servers.ljos]\ncommand = \"{server}\"\nargs = []\nenv_vars = [\"XDG_RUNTIME_DIR\", \"CODEX_SESSION_ID\", \"CODEX_THREAD_ID\"]\nenv = { LJOS_SEAT = \"{name}\" }\n"
 skills = "~/.codex/skills"
 hooks = "~/.codex/hooks.json"
 hook_events = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionEnd"]
@@ -3874,6 +3878,86 @@ fn heal_text_command(
     )))
 }
 
+/// The names a TOML `env_vars = [...]` line lists.
+fn env_var_names(line: &str) -> Option<Vec<String>> {
+    let rest = line.trim().strip_prefix("env_vars")?.trim_start();
+    let inner = rest.strip_prefix('=')?.trim().strip_prefix('[')?;
+    let inner = inner.split(']').next()?;
+    Some(
+        inner
+            .split(',')
+            .map(|v| v.trim().trim_matches('"').to_string())
+            .filter(|v| !v.is_empty())
+            .collect(),
+    )
+}
+
+/// Add to the `env_vars` of the entry under `marker` in `path` the names
+/// the shipped `snippet` forwards and the entry does not, keeping its
+/// own. An entry with no `env_vars` gets the snippet's list.
+fn heal_env_vars(path: &Path, marker: &str, snippet: &str, dry: bool) -> Result<Option<String>> {
+    let Some(want) = snippet.lines().find_map(env_var_names) else {
+        return Ok(None);
+    };
+    if marker.is_empty() || !path.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(path).with_context(|| path.display().to_string())?;
+    let Some(found) = text.find(marker) else {
+        return Ok(None);
+    };
+    let start = text[..found].rfind('\n').map_or(0, |at| at + 1);
+    let end = marker_section_end(&text, start, marker);
+    let quoted = |names: &[String]| {
+        names
+            .iter()
+            .map(|n| format!("\"{n}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut at = start;
+    let mut edit: Option<(usize, usize, String, Vec<String>)> = None;
+    while at < end {
+        let line_end = text[at..end].find('\n').map_or(end, |rel| at + rel);
+        if let Some(have) = env_var_names(&text[at..line_end]) {
+            let missing: Vec<String> = want.iter().filter(|w| !have.contains(w)).cloned().collect();
+            if missing.is_empty() {
+                return Ok(None);
+            }
+            let all: Vec<String> = have.iter().chain(&missing).cloned().collect();
+            edit = Some((
+                at,
+                line_end,
+                format!("env_vars = [{}]", quoted(&all)),
+                missing,
+            ));
+            break;
+        }
+        at = line_end + 1;
+    }
+    // An entry with none gets the line after its last, so the lines
+    // before keep their place.
+    let (from, to, line, missing) = edit.unwrap_or_else(|| {
+        let last = start + text[start..end].trim_end().len();
+        (
+            last,
+            last,
+            format!("\nenv_vars = [{}]", quoted(&want)),
+            want.clone(),
+        )
+    });
+    let rewritten = format!("{}{line}{}", &text[..from], &text[to..]);
+    if !dry {
+        std::fs::write(path, rewritten).with_context(|| path.display().to_string())?;
+    }
+    let verb = if dry { "would add" } else { "added" };
+    Ok(Some(format!(
+        "{verb} {} to env_vars in {}",
+        missing.join(", "),
+        path.display()
+    )))
+}
+
 fn heal_registered(
     h: &Harness,
     server: &Path,
@@ -3898,6 +3982,14 @@ fn heal_registered(
             h.marker.as_deref().unwrap_or(""),
             server,
             replacement,
+            dry,
+        )? {
+            notes.push(note);
+        }
+        if let Some(note) = heal_env_vars(
+            &expand(config),
+            h.marker.as_deref().unwrap_or(""),
+            h.snippet.as_deref().unwrap_or(""),
             dry,
         )? {
             notes.push(note);
@@ -6395,6 +6487,10 @@ fn steps_call(v: &Value, event: Option<&str>) -> HookCall {
                 // writes is named, so the seat's guard sees it.
                 .unwrap_or_else(|| {
                     let name = v["toolCall"]["name"].as_str().unwrap_or("");
+                    if let Some(t) = kept_prompt::written_target(name, args, None) {
+                        let name = if name.is_empty() { "Edit" } else { name };
+                        return format!("{name} {}", t.display());
+                    }
                     // agy 1.4.3 names the file `Path` for `write_file`,
                     // `edit_file` and `view_file`.
                     let path = [
@@ -6504,6 +6600,33 @@ fn turn_is_new(dir: &Path, session: &str, prompt: &str) -> bool {
     true
 }
 
+/// Every id a hook payload names its conversation by, the one
+/// [`hook_call_as`] picks first. Cursor sends a `session_id` beside the
+/// `conversation_id` its shell is stamped with; Grok says `sessionId`.
+#[must_use]
+pub fn payload_sessions(input: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<Value>(input.trim()) else {
+        return Vec::new();
+    };
+    let picked = hook_call_as(input, None).session;
+    let mut out: Vec<String> = picked.into_iter().collect();
+    for key in [
+        "conversation_id",
+        "conversationId",
+        "session_id",
+        "sessionId",
+        "thread_id",
+        "threadId",
+    ] {
+        if let Some(s) = v[key].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            if !out.iter().any(|o| o == s) {
+                out.push(s.to_string());
+            }
+        }
+    }
+    out
+}
+
 /// [`hook_call`] with the event the runner's hooks file named, for a
 /// runner whose payload does not carry one.
 #[must_use]
@@ -6549,8 +6672,11 @@ pub fn hook_call_as(input: &str, event: Option<&str>) -> HookCall {
     } else {
         &v["tool_input"]
     };
-    let session = v["session_id"]
+    let cursor = matches!(shape, HookShape::Cursor | HookShape::CursorShell);
+    let session = v["conversation_id"]
         .as_str()
+        .filter(|_| cursor)
+        .or_else(|| v["session_id"].as_str())
         .or_else(|| v["sessionId"].as_str())
         .or_else(|| v["conversation_id"].as_str())
         .filter(|s| !s.is_empty())
@@ -6615,6 +6741,15 @@ fn cue_for(v: &Value, input: &Value, event: &str) -> String {
     if tool {
         if let Some(command) = command {
             return command;
+        }
+        let name = v["tool_name"]
+            .as_str()
+            .or_else(|| v["toolName"].as_str())
+            .filter(|n| !n.is_empty())
+            .unwrap_or("Edit");
+        let cwd = v["cwd"].as_str().map(Path::new);
+        if let Some(t) = kept_prompt::written_target(name, input, cwd) {
+            return format!("{name} {}", t.display());
         }
         if let Some(file) = file {
             return file;
@@ -19232,47 +19367,14 @@ pub const SEAT_PATHS: &[&str] = &[
     "/.omp/agent/extensions/ljos.ts",
     "/ljos/approvals",
     "/ljos/approvals/",
-    // The prompt the hook kept, and the bind the gate checks. A plain
-    // write would make a sentence count as the person's words.
-    "/ljos/latest-prompt",
-    "/ljos/latest-prompt.bind",
 ];
 
-/// The file names of the prompt the hook kept and its bind, guarded by
-/// name wherever they are spelled: a relative name is the runtime one
-/// once a shell stands in that directory.
-const KEPT_PROMPT_NAMES: &[&str] = &["latest-prompt", "latest-prompt.bind"];
-
-/// Whether a shell word names the runtime ljos directory itself, as
-/// written or through `$XDG_RUNTIME_DIR`. Renaming, removing or linking
-/// it replaces the kept prompt along with everything else in it.
-fn names_runtime_dir(word: &str) -> bool {
-    let word = word.trim_end_matches('/');
-    if let Some(rest) = ["${XDG_RUNTIME_DIR}", "$XDG_RUNTIME_DIR"]
-        .iter()
-        .find_map(|v| word.strip_prefix(v))
-    {
-        return rest.trim_end_matches('/') == "/ljos";
-    }
-    let per_uid = word
-        .strip_prefix("/run/user/")
-        .and_then(|r| r.strip_suffix("/ljos"))
-        .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()));
-    per_uid || (word.starts_with('/') && Path::new(word) == runtime_dir_path())
-}
-
 /// Whether a path names one of [`SEAT_PATHS`]; a backup beside a binary
-/// (`ljos.bak`) is not the binary.
+/// (`ljos.bak`) is not the binary. The kept prompt is judged apart, by
+/// the path a word resolves to.
 #[must_use]
 pub fn is_seat_path(path: &str) -> bool {
     let p = path.trim_matches(|c| c == '"' || c == '\'');
-    let (parent, name) = p.trim_end_matches('/').rsplit_once('/').unwrap_or(("", p));
-    if KEPT_PROMPT_NAMES.contains(&name)
-        || names_runtime_dir(p)
-        || (name.contains(['*', '?', '[']) && names_runtime_dir(parent))
-    {
-        return true;
-    }
     SEAT_PATHS.iter().any(|s| {
         if s.ends_with('/') {
             p.contains(s)
@@ -19475,6 +19577,41 @@ fn shell_words(segment: &str) -> Vec<String> {
     words
 }
 
+/// Whether one of `words` assigns a variable a runner names its session
+/// with: `LJOS_HARNESS_SESSION`, a `CURSOR_*SESSION*`, or any
+/// `*_SESSION_ID`, `*_THREAD_ID` or `*_CONVERSATION_ID`.
+fn assigns_session(words: &[String]) -> bool {
+    words.iter().any(|w| {
+        w.split_once('=').is_some_and(|(k, _)| {
+            k == "LJOS_HARNESS_SESSION"
+                || (k.starts_with("CURSOR_") && k.contains("SESSION"))
+                || ["_SESSION_ID", "_THREAD_ID", "_CONVERSATION_ID"]
+                    .iter()
+                    .any(|s| k.ends_with(s))
+        })
+    })
+}
+
+/// The ljos verb on `line` that writes words as the person's when ljos
+/// is not under a runner: `prefer`, `remember` or `accept`.
+fn writes_persons_words(line: &str) -> Option<&'static str> {
+    nested_lines(line, 0)
+        .iter()
+        .flat_map(|l| raw_segments(l))
+        .find_map(|seg| {
+            let words = shell_words(&seg);
+            let (at, _) = prefix_end(&words);
+            let first = words.get(at)?;
+            if first.rsplit('/').next() != Some("ljos") {
+                return None;
+            }
+            let verb = words.get(at + 1)?;
+            ["prefer", "remember", "accept"]
+                .into_iter()
+                .find(|v| v == verb)
+        })
+}
+
 /// The seat's own guard, before any rule: a shell command that writes one
 /// of [`SEAT_PATHS`] (anything but a reader, or a redirect into it), or a
 /// file tool aimed at one, is refused. A path is a word of its own: a
@@ -19482,9 +19619,19 @@ fn shell_words(segment: &str) -> Vec<String> {
 /// itself write them, run by the person.
 #[must_use]
 pub fn seat_guard(line: &str) -> Option<Rule> {
+    seat_guard_in(line, None)
+}
+
+/// [`seat_guard`] for a command that starts in `cwd`, absent the process
+/// directory. A `cd` on the line moves it for the commands after.
+#[must_use]
+pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if bookkeep::guard_suspended() {
         return None;
     }
+    let mut cwd = cwd
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok());
     let refuse = |what: &str| {
         Rule {
         pattern: "seat-guard".into(),
@@ -19499,14 +19646,41 @@ pub fn seat_guard(line: &str) -> Option<Rule> {
     if nested_too_deep(line) {
         return Some(too_deep_rule().clone());
     }
+    let mut named_session = false;
     for seg in nested_lines(line, 0).iter().flat_map(|l| raw_segments(l)) {
         // Every wrapper off, as a rule sees it: `nice tmux send-keys` and
         // `timeout 5 xdotool type` are the tools they run.
         let words = shell_words(&seg);
         let (at, _) = prefix_end(&words);
+        named_session |= assigns_session(&words[..at]);
         let words = words[at..].to_vec();
         let Some(first) = words.first() else { continue };
         let first = first.rsplit('/').next().unwrap_or(first);
+        if matches!(
+            first,
+            "export" | "declare" | "typeset" | "readonly" | "local"
+        ) {
+            named_session |= assigns_session(&words[1..]);
+        }
+        if named_session && matches!(first, "ljos" | "ljos-mcp") {
+            return Some(Rule {
+                pattern: "seat-guard".into(),
+                verdict: "deny".into(),
+                reason: "A runner session set on the line that runs ljos chooses the session \
+                         the person's words are checked against. Run ljos without it."
+                    .into(),
+            });
+        }
+        if matches!(first, "cd" | "pushd") {
+            cwd = kept_prompt::after_cd(&words, cwd.as_deref());
+            continue;
+        }
+        let reads = READERS.contains(&first) || first == "ljos" || kept_prompt::reads_only(first);
+        if let Some(t) = kept_prompt::reached(&words, cwd.as_deref(), reads)
+            .or_else(|| kept_prompt::code_reaches(&words, line))
+        {
+            return Some(refuse(&t));
+        }
         if first == "ljos" {
             // `ljos approve` is the person's, typed in a terminal of their
             // own. Every line this guard sees is an agent's tool call, so
@@ -19578,7 +19752,18 @@ pub fn seat_guard(line: &str) -> Option<Rule> {
         if first == "ssh" {
             let refs: Vec<&str> = words.iter().map(String::as_str).collect();
             if let Some(remote) = ssh_remote_command(&refs) {
-                if let Some(r) = seat_guard(&remote) {
+                if let Some(verb) = writes_persons_words(&remote) {
+                    return Some(Rule {
+                        pattern: "seat-guard".into(),
+                        verdict: "deny".into(),
+                        reason: format!(
+                            "`ljos {verb}` through ssh runs outside the runner, where it takes \
+                             the words as the person's. Run it here, where they are checked \
+                             against the person's latest prompt."
+                        ),
+                    });
+                }
+                if let Some(r) = seat_guard_in(&remote, home().ok().as_deref()) {
                     return Some(r);
                 }
                 continue;
@@ -28473,14 +28658,22 @@ pub(crate) fn stored_by(atom: &Value) -> StoredBy {
     }
 }
 
-/// [`stored_by`] for each atom id this process read. A
-/// [`packset_client::Hit`] has no origin field, so the readers that parse
-/// the pack's answer record it here by id.
-fn stored_origins() -> &'static std::sync::Mutex<std::collections::BTreeMap<String, StoredBy>> {
-    static SEEN: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::BTreeMap<String, StoredBy>>,
-    > = std::sync::OnceLock::new();
+/// [`stored_by`] for each atom id this process read, or `None` for an id
+/// the pack last answered it does not hold. A [`packset_client::Hit`] has
+/// no origin field, so the readers that parse the pack's answer record it
+/// here by id.
+type Origins = std::collections::BTreeMap<String, Option<StoredBy>>;
+
+fn stored_origins() -> &'static std::sync::Mutex<Origins> {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<Origins>> = std::sync::OnceLock::new();
     SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+}
+
+fn record_origin(id: &str, by: Option<StoredBy>) {
+    stored_origins()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(id.to_string(), by);
 }
 
 /// Record the stored origin of `atom`, an atom or a search hit, by its id.
@@ -28490,28 +28683,19 @@ pub(crate) fn keep_origin(atom: &Value) {
         return;
     }
     if let Some(id) = atom.get("id").and_then(Value::as_str) {
-        stored_origins()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id.to_string(), stored_by(atom));
+        record_origin(id, Some(stored_by(atom)));
     }
 }
 
-/// Record the stored origin of each hit no reader recorded yet, from the
-/// pack's listing. A hit the listing does not hold stays unknown.
+/// Record the stored origin of each hit from the pack's listing, read
+/// fresh: the pack can change a held atom's origin in place, and a
+/// long-lived process must not name a hit by the origin it read before.
+/// A hit the listing does not hold keeps what was recorded.
 fn keep_origins_of(client: &PacksetClient, hits: &[Hit]) {
-    let missing = {
-        let known = stored_origins()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        hits.iter()
-            .filter_map(|h| h.id.as_deref())
-            .any(|id| !known.contains_key(id))
-    };
-    if !missing {
+    if hits.iter().all(|h| h.id.is_none()) {
         return;
     }
-    if let Ok(atoms) = atoms_lean_shared(client, &client.workspace()) {
+    if let Ok(atoms) = atoms_lean(client, &client.workspace()) {
         atoms.iter().for_each(keep_origin);
     }
 }
@@ -28531,6 +28715,12 @@ fn hit_stored_by(h: &Hit) -> StoredBy {
 }
 
 fn recorded_origin(id: &str) -> Option<StoredBy> {
+    recorded(id).flatten()
+}
+
+/// The pack's last answer for `id` in this process: `Some(None)` when it
+/// answered it does not hold the atom, `None` when it was never asked.
+fn recorded(id: &str) -> Option<Option<StoredBy>> {
     stored_origins()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -28549,42 +28739,33 @@ pub(crate) enum Stored {
     Unreachable,
 }
 
-/// How long a listing answers for atoms it did not hold before the pack
-/// is listed again: a long-lived reader sees atoms written since.
-const LISTING_FRESH: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// [`person_stored`] for atom `id` in this seat's pack. When no reader has
-/// recorded it, the pack is listed inside a short bound. Only a listing
-/// the pack answered is remembered, per pack and workspace, so a pack
-/// that was down is asked again on the next read.
+/// [`person_stored`] for atom `id` in this seat's pack, asked of the pack
+/// inside a short bound on every read. A long-lived process (the MCP
+/// server, a hook daemon) outlives a forget or a retraction, so what it
+/// recorded earlier never answers ahead of the pack. Only when the pack
+/// does not answer does the last answer recorded here stand, a held
+/// origin or the pack's not holding it. A failure is never recorded, so
+/// a pack that was down is asked again on the next read.
 pub(crate) fn stored_origin_of(id: &str) -> Stored {
-    static LISTED: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::BTreeMap<String, std::time::Instant>>,
-    > = std::sync::OnceLock::new();
-    if let Some(known) = recorded_origin(id) {
-        return Stored::Origin(known);
+    let asked = with_pack_timeout(400, || {
+        pack().map(|client| client.get_atom(&client.workspace(), id))
+    });
+    match asked {
+        Ok(Ok(atom)) => {
+            let by = stored_by(&atom);
+            record_origin(id, Some(by));
+            Stored::Origin(by)
+        }
+        Ok(Err(packset_client::Error::Bad(_))) => {
+            record_origin(id, None);
+            Stored::Absent
+        }
+        _ => match recorded(id) {
+            Some(Some(by)) => Stored::Origin(by),
+            Some(None) => Stored::Absent,
+            None => Stored::Unreachable,
+        },
     }
-    let Ok(client) = pack() else {
-        return Stored::Unreachable;
-    };
-    let key = format!("{}|{}", client.base(), client.workspace());
-    let listed = LISTED.get_or_init(Default::default);
-    let fresh = listed
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&key)
-        .is_some_and(|at| at.elapsed() < LISTING_FRESH);
-    if !fresh {
-        let Ok(atoms) = session_atoms(400) else {
-            return Stored::Unreachable;
-        };
-        atoms.iter().for_each(keep_origin);
-        listed
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(key, std::time::Instant::now());
-    }
-    recorded_origin(id).map_or(Stored::Absent, Stored::Origin)
 }
 
 /// Whether a recalled hit is an unverified working note. Any claim the
@@ -29676,7 +29857,7 @@ pub fn static_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if line.is_empty() || bookkeep::guard_suspended() {
         return None;
     }
-    if let Some(rule) = seat_guard(line) {
+    if let Some(rule) = seat_guard_in(line, cwd) {
         return Some(rule);
     }
     if let Some(rule) = destructive_delete(line) {
@@ -36662,7 +36843,13 @@ mod tests {
         let _url = PackUrl::set(&url);
         let found = packset_search_as_of("tag the release", 3, Some("2026-01-01"), true).unwrap();
         assert_eq!(found[0].id.as_deref(), Some("other"));
-        let lines = seen.lock().unwrap().clone();
+        let lines: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.contains("/v1/search"))
+            .cloned()
+            .collect();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("rerank=1"), "{lines:?}");
         assert!(lines[0].contains("as_of="), "{lines:?}");
@@ -44492,6 +44679,215 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
     }
 
+    /// The kept prompt's directory is the one the path names once it is
+    /// resolved, however the word spells it: `.` and `..`, a variable with
+    /// a default, a symlink to a parent, a relative name after `cd`, a
+    /// glob. Moving or removing a directory above it replaces it too.
+    #[test]
+    fn the_kept_prompt_is_guarded_however_its_path_is_spelled() {
+        let _g = env_guard();
+        let top = tempfile::tempdir().unwrap();
+        let run = top.path().join("run");
+        std::fs::create_dir_all(run.join("ljos")).unwrap();
+        std::fs::write(run.join("ljos/latest-prompt"), "x").unwrap();
+        let alias = top.path().join("alias");
+        std::os::unix::fs::symlink(&run, &alias).unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", run.to_str().unwrap())]);
+        let (run, alias, top) = (run.display(), alias.display(), top.path().display());
+        for line in [
+            format!("mv {run}/ljos/. /tmp/old"),
+            format!("mv {run}/x/../ljos /tmp/old"),
+            format!("rm -rf {alias}/ljos"),
+            "mv ${XDG_RUNTIME_DIR:-/run/user/1000}/ljos /tmp/old".to_string(),
+            format!("cd {run} && mv ljos ljos.old"),
+            "cd $XDG_RUNTIME_DIR/ljos && rm -f ./*".to_string(),
+            format!("touch {run}/lj?s"),
+            format!("rm -rf {run}"),
+            format!("mv {top} /tmp/elsewhere"),
+            format!("cd {top} && rm -r run"),
+            format!("mv /tmp/ljos {run}/"),
+        ] {
+            assert!(seat_guard(&line).is_some(), "allowed: {line}");
+        }
+        for line in [
+            format!("mv {run}/ljos-notes /tmp/x"),
+            format!("rm -rf {run}/other"),
+            format!("cp notes.txt {top}/"),
+            format!("mv notes.txt {top}/"),
+            format!("ls {alias}/ljos"),
+            format!("cat {run}/ljos/latest-prompt"),
+        ] {
+            assert!(seat_guard(&line).is_none(), "refused: {line}");
+        }
+    }
+
+    /// Code handed to an interpreter writes wherever it likes, so code that
+    /// names the runtime directory, its variable or a kept file is a write,
+    /// and so is a here-document or a pipe fed to one or to a patch tool.
+    #[test]
+    fn interpreter_code_that_names_the_kept_prompt_is_denied() {
+        let _g = env_guard();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
+        for line in [
+            r#"python3 -c "open('/run/user/1000/ljos/latest-prompt','w').write('x')""#,
+            r#"python3 -c 'import os; open(os.environ["XDG_RUNTIME_DIR"]+"/ljos/p","w")'"#,
+            r#"perl -e 'open F, ">", "$ENV{XDG_RUNTIME_DIR}/ljos/latest-prompt.bind"'"#,
+            r#"node -e "require('fs').writeFileSync(process.env.XDG_RUNTIME_DIR+'/ljos/x','')""#,
+            r#"ruby -e 'File.write(ENV["XDG_RUNTIME_DIR"] + "/ljos/latest-prompt", "x")'"#,
+            r#"awk 'BEGIN { print "x" > "/run/user/1000/ljos/latest-prompt" }'"#,
+            "python3 - <<'EOF'\nimport os\nos.rename('/tmp/p', '/run/user/1000/ljos/latest-prompt')\nEOF",
+            "git apply <<'EOF'\n--- /dev/null\n+++ b/run/user/1000/ljos/latest-prompt\n@@ -0,0 +1 @@\n+x\nEOF",
+            "patch -p0 <<'EOF'\n--- a\n+++ /run/user/1000/ljos/latest-prompt.bind\nEOF",
+            r#"printf 'import os\nos.remove("/run/user/1000/ljos/latest-prompt")' | python3"#,
+        ] {
+            assert!(seat_guard(line).is_some(), "allowed: {line}");
+        }
+        for line in [
+            "python3 -c 'print(1)'",
+            "node -e 'console.log(process.version)'",
+            "awk '{print $1}' notes.txt",
+            "git apply fix.patch",
+            "perl -ne 'print if /x/' notes.txt",
+            "printf 'print(1)' | python3",
+        ] {
+            assert!(seat_guard(line).is_none(), "refused: {line}");
+        }
+    }
+
+    /// A file tool names its target whatever it likes: `destination`,
+    /// `target`, `filePath`, a `path` beside `text`, a path inside a list
+    /// of edits. Any string argument that resolves into the runtime ljos
+    /// directory is a target for a tool that does not only read.
+    #[test]
+    fn a_file_tool_aimed_at_the_kept_prompt_by_any_key_is_denied() {
+        let _g = env_guard();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
+        for payload in [
+            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__move_file","tool_input":{"source":"/tmp/p","destination":"/run/user/1000/ljos/latest-prompt"}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__write","tool_input":{"target":"/run/user/1000/ljos/latest-prompt.bind","text":"x"}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"edit","tool_input":{"filePath":"/run/user/1000/ljos/latest-prompt","oldString":"a","newString":"b"}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__write","tool_input":{"path":"/run/user/1000/ljos/latest-prompt","text":"x"}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__symlink","tool_input":{"link":"/run/user/1000/ljos","to":"/tmp/fake"}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__apply","tool_input":{"changes":[{"file":"/run/user/1000/ljos/latest-prompt","text":"x"}]}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__move_file","tool_input":{"source":"/tmp/p","destination":"/run/user/1000/ljos/x/../latest-prompt"}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/tmp/notes","content":"x","also":"/run/user/1000/ljos/latest-prompt"}}"#,
+            r#"{"cursor_version":"2.4.0","conversation_id":"c","hook_event_name":"preToolUse","tool_name":"mcp_fs_write","tool_input":"{\"dest\":\"/run/user/1000/ljos/latest-prompt\"}"}"#,
+        ] {
+            let call = hook_call(payload);
+            assert!(seat_guard(&call.cue).is_some(), "allowed: {}", call.cue);
+        }
+        let agy = hook_call_as(
+            r#"{"toolCall":{"name":"move_file","args":{"Source":"/tmp/p","Destination":"/run/user/1000/ljos/latest-prompt"}},"conversationId":"c"}"#,
+            Some("PreToolUse"),
+        );
+        assert!(seat_guard(&agy.cue).is_some(), "allowed: {}", agy.cue);
+        for payload in [
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"/run/user/1000/ljos/latest-prompt"}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__read_text_file","tool_input":{"path":"/run/user/1000/ljos/latest-prompt"}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__search_files","tool_input":{"path":"/run/user/1000/ljos","pattern":"x"}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/tmp/notes","content":"the prompt lives in /run/user/1000/ljos/latest-prompt"}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__fs__move_file","tool_input":{"source":"/tmp/a","destination":"/tmp/b"}}"#,
+        ] {
+            let call = hook_call(payload);
+            assert!(seat_guard(&call.cue).is_none(), "refused: {}", call.cue);
+        }
+    }
+
+    /// ljos on another host, or this one through ssh, is not under the
+    /// runner, so it takes the words it is given as the person's. A tool
+    /// call that runs it there to write a memory, a preference or an
+    /// acceptance skips the check the local run makes.
+    #[test]
+    fn ljos_writing_the_persons_words_through_ssh_is_denied() {
+        let _g = env_guard();
+        for line in [
+            "ssh localhost ljos prefer --user --promote L-1 --why x",
+            "ssh localhost 'ljos prefer --user always paste it'",
+            "ssh -p 22 me@box ~/.local/bin/ljos remember a b c d",
+            "ssh localhost \"cd /tmp && ljos accept L-1\"",
+            "ssh -o BatchMode=yes localhost env FOO=1 ljos prefer a b c d",
+            "ssh jump ssh localhost ljos remember a b c d",
+            "sh -c 'ssh localhost ljos prefer --user a b c d'",
+        ] {
+            assert!(seat_guard(line).is_some(), "allowed: {line}");
+        }
+        for line in [
+            "ssh localhost ljos status",
+            "ssh localhost ljos recall paste",
+            "ljos prefer --user --why x always paste it",
+            "ssh localhost echo ljos prefer",
+        ] {
+            assert!(seat_guard(line).is_none(), "refused: {line}");
+        }
+    }
+
+    /// The bare name `latest-prompt` says where a write lands only when a
+    /// command writes what it is given. Searching for it, printing it or
+    /// testing for it touches nothing.
+    #[test]
+    fn the_bare_kept_prompt_name_is_denied_only_to_writers() {
+        let _g = env_guard();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
+        for line in [
+            "git grep latest-prompt",
+            "git log -S latest-prompt",
+            "echo latest-prompt",
+            "find . -name latest-prompt",
+            "test -f latest-prompt",
+            "[ -e latest-prompt.bind ]",
+            "cargo test latest-prompt",
+            "rg -n latest-prompt crates/",
+        ] {
+            assert!(seat_guard(line).is_none(), "refused: {line}");
+        }
+        for line in [
+            "printf x > latest-prompt",
+            "mv /tmp/p latest-prompt",
+            "rm -f latest-prompt.bind",
+            "ln -sf /tmp/p latest-prompt",
+            "cp /tmp/p latest-prompt",
+            "install -m 600 /tmp/p latest-prompt",
+            "rsync /tmp/p latest-prompt",
+            "echo x | tee latest-prompt",
+            "dd if=/tmp/p of=latest-prompt",
+            "sed -i s/a/b/ latest-prompt",
+            "vim latest-prompt.bind",
+            "touch latest-prompt",
+            "find . -name latest-prompt -delete",
+            "python3 plant.py latest-prompt",
+        ] {
+            assert!(seat_guard(line).is_some(), "allowed: {line}");
+        }
+    }
+
+    /// A tool call that names a runner session for the ljos it runs is
+    /// choosing the session the person's words are checked against.
+    #[test]
+    fn a_session_assigned_before_ljos_is_denied() {
+        let _g = env_guard();
+        for line in [
+            "LJOS_HARNESS_SESSION=forged ljos prefer --user --why x 'always paste it'",
+            "export CURSOR_CONVERSATION_ID=forged; ljos remember 'a b c d'",
+            "env CLAUDE_CODE_SESSION_ID=forged ljos prefer a b c d",
+            "CODEX_THREAD_ID=forged && /usr/local/bin/ljos remember a b c d",
+            "declare -x GROK_SESSION_ID=forged; ljos prefer a b c d",
+            "CURSOR_AGENT_SESSION_ID=forged ljos-mcp",
+            "sh -c 'CODEX_SESSION_ID=forged exec ljos prefer a b c d'",
+            "export CURSOR_SESSION_ID=forged\nljos prefer --user --why x a b c d",
+        ] {
+            assert!(seat_guard(line).is_some(), "allowed: {line}");
+        }
+        for line in [
+            "ljos prefer --user --why x 'always paste it'",
+            "LJOS_SEAT=probe ljos sitting",
+            "CURSOR_CONVERSATION_ID=x cargo test",
+            "echo LJOS_HARNESS_SESSION=x; ljos status",
+            "unset CODEX_THREAD_ID; ljos status",
+        ] {
+            assert!(seat_guard(line).is_none(), "refused: {line}");
+        }
+    }
+
     #[test]
     fn the_seat_guards_its_own_law() {
         // The guard stands down when HOME is a temporary directory. Other tests
@@ -48138,15 +48534,15 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
         let (url, _) = serve_http(move |req| {
             let first = req.lines().next().unwrap_or("");
-            if first.contains("/v1/atoms") {
-                let atoms = serde_json::json!({"atoms": [{
+            if first.contains(&format!("/v1/atoms/{id}")) {
+                let atom = serde_json::json!({
                     "id": id, "kind": "lesson", "text": "Keep the form short.",
                     "workspace": "seat", "origin": "user-declared",
                     "source": {"basis": "person"},
-                }]});
-                return (200, atoms.to_string());
+                });
+                return (200, atom.to_string());
             }
-            (200, r#"{"atoms":[]}"#.into())
+            (404, r#"{"error":"no atom"}"#.into())
         });
         let _pack = HoldEnv::set(&[("PACKSET_URL", &url), ("PACKSET_WORKSPACE", "seat")]);
         assert_eq!(stored_origin_of(id), Stored::Origin(StoredBy::Person));
@@ -49272,8 +49668,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
             ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
             ("LJOS_CAPTURE", "save"),
-            ("LJOS_HARNESS_SESSION", "chat-person-1"),
         ]);
+        let _runner = crate::ballot_sig::fake_runner_sessions(&["chat-person-1"]);
         let _url = PackUrl::set(&url);
         capture::note_latest_prompt_for(
             "remember this: the integration tests need a local Redis on port 6380, not 6379",
@@ -49322,8 +49718,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
             ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
             ("LJOS_CAPTURE", "save"),
-            ("LJOS_HARNESS_SESSION", "chat-person-1"),
         ]);
+        let _runner = crate::ballot_sig::fake_runner_sessions(&["chat-person-1"]);
         let _url = PackUrl::set(&url);
         capture::note_latest_prompt_for(
             "remember this: the integration tests need a local Redis on port 6380, not 6379",
@@ -49518,8 +49914,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let _hold = HoldEnv::set(&[
             ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
             ("LJOS_CAPTURE", "save"),
-            ("LJOS_HARNESS_SESSION", "chat-person-1"),
         ]);
+        let _runner = crate::ballot_sig::fake_runner_sessions(&["chat-person-1"]);
         capture::note_latest_prompt_for(
             "remember this: the integration tests need a local Redis on port 6380, not 6379",
             Some("chat-person-1"),
@@ -49531,10 +49927,51 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "Redis for the tests listens on 6380"
         ));
         assert!(!capture::said_in_latest_prompt("local Redis"));
+        // Cut before ", not 6379", the clause leaves the person's "not" behind.
         let agents = !capture::said_in_latest_prompt(
             "the integration tests need a local Redis on port 6380",
         );
-        assert_eq!(remember_horizon(false, false, agents), Some(false));
+        assert_eq!(remember_horizon(false, false, agents), Some(true));
+    }
+
+    /// A quote is a whole sentence or clause of the prompt, and keeps the
+    /// "not", "never" or "unless" the person put on it.
+    #[test]
+    fn an_excerpt_that_drops_the_persons_negation_is_not_their_words() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("LJOS_CAPTURE", "save"),
+        ]);
+        let _runner = crate::ballot_sig::fake_runner_sessions(&["chat-person-1"]);
+        capture::note_latest_prompt_for(
+            "Please, do not always paste the release key into the deploy form. \
+             Unless asked, never push to main; run `cargo test` before a tag.",
+            Some("chat-person-1"),
+        );
+        for excerpt in [
+            "always paste the release key into the deploy form",
+            "Always paste the release key into the deploy form.",
+            "paste the release key into the deploy form",
+            "the release key into the deploy",
+            "never push to main",
+            "deploy form. Unless asked, never push",
+            "run cargo test before a tag",
+        ] {
+            assert!(
+                !capture::said_in_latest_prompt(excerpt),
+                "accepted: {excerpt}"
+            );
+        }
+        for said in [
+            "Do not always paste the release key into the deploy form.",
+            "please do not always paste the release key into the deploy form",
+            "Unless asked, never push to main.",
+            "run `cargo test` before a tag",
+        ] {
+            assert!(capture::said_in_latest_prompt(said), "refused: {said}");
+        }
     }
 
     #[test]
@@ -52068,6 +52505,53 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(fresh.ends_with(snippet));
         let toml = super::append_config("[a]\n", "\n[mcp_servers.ljos]\ncommand = \"x\"\n");
         assert!(toml.ends_with("[mcp_servers.ljos]\ncommand = \"x\"\n"));
+    }
+
+    /// Codex builds its MCP server's environment from `env_vars` alone, so
+    /// the entry must forward the session the prompt hook binds, and an
+    /// entry written before it did is brought up to date.
+    #[test]
+    fn the_codex_entry_forwards_its_session_and_an_old_one_is_healed() {
+        let _g = env_guard();
+        let shipped: super::Harnesses = toml::from_str(super::HARNESSES_EXAMPLE).unwrap();
+        let codex = shipped.harness.iter().find(|h| h.name == "codex").unwrap();
+        let snippet = codex.snippet.as_deref().unwrap();
+        for var in ["XDG_RUNTIME_DIR", "CODEX_SESSION_ID", "CODEX_THREAD_ID"] {
+            assert!(snippet.contains(&format!("\"{var}\"")), "{var}: {snippet}");
+        }
+        let home = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("HOME", home.path().to_str().unwrap())]);
+        let config = home.path().join(".codex/config.toml");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config,
+            "model = \"x\"\n\n[mcp_servers.ljos]\ncommand = \"/x/ljos-mcp\"\nargs = []\n\
+             env_vars = [\"XDG_RUNTIME_DIR\"]\nenv = { LJOS_SEAT = \"codex\" }\n\n\
+             [mcp_servers.other]\ncommand = \"o\"\nenv_vars = [\"HOME\"]\n",
+        )
+        .unwrap();
+        let note =
+            super::heal_registered(codex, Path::new("/x/ljos-mcp"), "/x/ljos-mcp", false).unwrap();
+        let text = std::fs::read_to_string(&config).unwrap();
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+        let vars = |name: &str| -> Vec<String> {
+            parsed["mcp_servers"][name]["env_vars"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(
+            vars("ljos"),
+            ["XDG_RUNTIME_DIR", "CODEX_SESSION_ID", "CODEX_THREAD_ID"],
+            "{text}"
+        );
+        assert_eq!(vars("other"), ["HOME"], "{text}");
+        assert!(note.is_some_and(|n| n.contains("env_vars")), "{text}");
+        let again =
+            super::heal_registered(codex, Path::new("/x/ljos-mcp"), "/x/ljos-mcp", false).unwrap();
+        assert!(again.is_none(), "{again:?}");
     }
 
     #[test]
