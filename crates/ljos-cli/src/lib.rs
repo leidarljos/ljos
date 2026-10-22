@@ -9380,7 +9380,11 @@ pub fn hook_trace(input: &str, call: &HookCall, subagent: Option<&str>) {
         return;
     };
     line.push('\n');
-    let _ = append_locked_row(&dir.join("hook-trace.jsonl"), line.as_bytes());
+    let _ = append_locked_row(
+        &dir.join("hook-trace.jsonl"),
+        line.as_bytes(),
+        Durability::BestEffort,
+    );
 }
 
 /// The holders the seat records above this process name, nearest first,
@@ -12666,15 +12670,32 @@ fn store_agent_atom(client: &PacksetClient, atom: Value, prefix: &str) -> Result
         Err(e) if note_can_wait(&e) && atom["kind"].as_str() == Some("lesson") => {
             let text = atom["text"].as_str().unwrap_or("");
             let copies = pack_copy::pack_copies(text);
-            if !copies.is_empty() {
-                let issue = atom["issue"].as_str().unwrap_or("");
-                let workspace = atom["workspace"].as_str().unwrap_or("");
-                let closes = atom_supersedes(&atom);
-                let _ = queue_copies(issue, &copies, workspace, "lesson", &closes);
+            let err = with_post_failure(prefix, e);
+            if copies.is_empty() {
+                return Err(err);
             }
-            Err(with_post_failure(prefix, e))
+            let issue = atom["issue"].as_str().unwrap_or("");
+            let workspace = atom["workspace"].as_str().unwrap_or("");
+            let closes = atom_supersedes(&atom);
+            Err(with_queue_outcome(
+                err,
+                queue_copies(issue, &copies, workspace, "lesson", &closes),
+            ))
         }
         Err(e) => Err(with_post_failure(prefix, e)),
+    }
+}
+
+/// Fold how queueing a down pack's lesson went into the error the caller
+/// reports, so a lesson the queue could not take is not reported as queued.
+/// A queue write that itself failed, now a durable write that waits for the
+/// lock, is named rather than dropped.
+fn with_queue_outcome(err: anyhow::Error, queued: Result<Option<bool>>) -> anyhow::Error {
+    match queued {
+        Ok(Some(true)) => err.context("the lesson is queued for the next send"),
+        Ok(Some(false)) => err.context("the lesson was already queued"),
+        Ok(None) => err,
+        Err(e) => err.context(format!("and it could not be queued: {e:#}")),
     }
 }
 
@@ -12691,10 +12712,14 @@ fn client_or_queue(
         Ok(client) => Ok(client),
         Err(e) if kind == "lesson" && note_can_wait(&e) => {
             let copies = pack_copy::pack_copies(text);
-            if !copies.is_empty() {
-                let _ = queue_copies(issue, &copies, "", "lesson", supersedes);
+            let err = with_post_failure(prefix, e);
+            if copies.is_empty() {
+                return Err(err);
             }
-            Err(with_post_failure(prefix, e))
+            Err(with_queue_outcome(
+                err,
+                queue_copies(issue, &copies, "", "lesson", supersedes),
+            ))
         }
         Err(e) => Err(e),
     }
@@ -21423,9 +21448,37 @@ pub(crate) fn complete_rows_counted<T: serde::de::DeserializeOwned>(
     (rows, dropped)
 }
 
-/// How long [`append_locked_row`] tries for the lock before it skips
-/// the row.
+/// How long a best-effort [`append_locked_row`] tries for the lock before
+/// it skips the row.
 pub(crate) const ROW_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// How long a durable [`append_locked_row`] waits for the lock before it
+/// reports failure. Long enough to outlast a writer that holds the lock for
+/// one `write(2)`, so a verdict or a queued memory is not dropped for a
+/// brush with contention, bounded so a wedged holder still returns.
+pub(crate) const ROW_LOCK_WAIT_DURABLE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How hard [`append_locked_row`] tries for the lock before it gives up.
+#[derive(Clone, Copy)]
+pub(crate) enum Durability {
+    /// A verdict, a proposal or a queued memory, whose loss is a lost
+    /// decision: wait [`ROW_LOCK_WAIT_DURABLE`] and report failure, so the
+    /// caller can roll back or tell the person it did not land.
+    Durable,
+    /// A row the command hook writes, such as the bypass, hook-trace and
+    /// judge logs: try [`ROW_LOCK_WAIT`] and skip, so a lock held by
+    /// something stuck never holds the person's command.
+    BestEffort,
+}
+
+impl Durability {
+    fn lock_wait(self) -> std::time::Duration {
+        match self {
+            Self::Durable => ROW_LOCK_WAIT_DURABLE,
+            Self::BestEffort => ROW_LOCK_WAIT,
+        }
+    }
+}
 
 /// Append `bytes` as one row. The caller includes the trailing newline.
 ///
@@ -21436,17 +21489,24 @@ pub(crate) const ROW_LOCK_WAIT: std::time::Duration = std::time::Duration::from_
 /// otherwise land in whatever the link names. A row that cannot be
 /// written is the caller's to skip.
 ///
-/// Hooks call this on the path of the person's command, so the lock is
-/// tried for [`ROW_LOCK_WAIT`] and then given up with `WouldBlock`. A
-/// writer holds it for one `write(2)`; a lock held longer than that is
-/// not one of ours, and the row is skipped rather than the command.
+/// `durability` sets how long the lock is tried. A [`Durability::Durable`]
+/// row waits [`ROW_LOCK_WAIT_DURABLE`] and reports `WouldBlock` on failure,
+/// so a verdict or a queued memory is not dropped for a brush with
+/// contention. A [`Durability::BestEffort`] row, which the command hook
+/// writes, waits [`ROW_LOCK_WAIT`] and then gives up: a writer holds the
+/// lock for one `write(2)`, and a lock held longer than that is not one of
+/// ours, so the row is skipped rather than the person's command.
 ///
 /// The directory `path` sits in is one ljos made, such as
 /// `$XDG_STATE_HOME/ljos`, and a symlink there is refused as well: it
 /// is opened first and the file is opened from that descriptor, so the
 /// link cannot be swapped in between. What lies above it, `$HOME` or
 /// an XDG base the person pointed elsewhere, is followed as set.
-pub(crate) fn append_locked_row(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn append_locked_row(
+    path: &Path,
+    bytes: &[u8],
+    durability: Durability,
+) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::io::{AsRawFd, FromRawFd};
@@ -21470,7 +21530,8 @@ pub(crate) fn append_locked_row(path: &Path, bytes: &[u8]) -> std::io::Result<()
     // SAFETY: fd was just opened above and nothing else owns it.
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
     file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    let deadline = std::time::Instant::now() + ROW_LOCK_WAIT;
+    let wait = durability.lock_wait();
+    let deadline = std::time::Instant::now() + wait;
     loop {
         // SAFETY: this descriptor stays open until the matching unlock.
         // The lock is advisory, so the row is written on this same
@@ -21486,7 +21547,7 @@ pub(crate) fn append_locked_row(path: &Path, bytes: &[u8]) -> std::io::Result<()
             Some(libc::EWOULDBLOCK) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WouldBlock,
-                    format!("still locked after {}ms", ROW_LOCK_WAIT.as_millis()),
+                    format!("still locked after {}ms", wait.as_millis()),
                 ));
             }
             _ => return Err(err),
@@ -21554,7 +21615,7 @@ pub fn log_bypass(kind: &str, how: &str, command: &str, rule: &Rule) {
     };
     line.push('\n');
     let _ = path.parent().map(std::fs::create_dir_all);
-    if let Err(err) = append_locked_row(&path, line.as_bytes()) {
+    if let Err(err) = append_locked_row(&path, line.as_bytes(), Durability::BestEffort) {
         eprintln!(
             "ljos: the bypass row for `{command}` was not written to {}: {err}",
             path.display()
