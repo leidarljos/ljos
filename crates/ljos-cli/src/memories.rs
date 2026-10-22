@@ -158,16 +158,11 @@ pub fn reviews_path() -> PathBuf {
 /// The latest verdict per id.
 #[must_use]
 pub fn reviews() -> BTreeMap<String, Review> {
-    let mut out = BTreeMap::new();
-    let Ok(f) = std::fs::File::open(reviews_path()) else {
-        return out;
-    };
-    for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
-        if let Ok(r) = serde_json::from_str::<Review>(&line) {
-            out.insert(r.id.clone(), r);
-        }
-    }
-    out
+    let bytes = std::fs::read(reviews_path()).unwrap_or_default();
+    crate::complete_rows::<Review>(&bytes)
+        .into_iter()
+        .map(|r| (r.id.clone(), r))
+        .collect()
 }
 
 /// Append one verdict.
@@ -1210,6 +1205,26 @@ mod tests {
             "{got}"
         );
         assert!(got.starts_with("from now on use [redacted]"));
+    }
+
+    /// A line an older ljos tore, bytes that are not UTF-8 among them, is
+    /// one lost verdict. The verdicts after it still read, and so does a
+    /// file whose last verdict is still being written.
+    #[test]
+    fn a_torn_review_line_keeps_the_verdicts_after_it() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_STATE_HOME", dir.path());
+        let path = reviews_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let row = |id: &str| format!(r#"{{"id":"{id}","verdict":"keep","at":"t","by":"s"}}"#);
+        let mut bytes = format!("{}\n", row("a")).into_bytes();
+        bytes.extend_from_slice(b"{\"id\":\"b\",\"verdict\":\"caf\xc3\n");
+        bytes.extend_from_slice(format!("{}\n", row("c")).as_bytes());
+        bytes.extend_from_slice(b"{\"id\":\"d\",\"verdict\":\"caf\xc3");
+        std::fs::write(&path, bytes).unwrap();
+        let got: Vec<String> = reviews().into_keys().collect();
+        assert_eq!(got, ["a", "c"]);
     }
 
     /// A verdict is one JSON line. Two reviews landing together used to

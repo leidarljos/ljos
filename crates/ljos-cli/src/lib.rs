@@ -21132,6 +21132,21 @@ pub fn bypass_log_path() -> Option<PathBuf> {
     Some(data_base()?.join("ljos").join("bypass.jsonl"))
 }
 
+/// The rows of a log written by [`append_locked_row`], read without its
+/// lock.
+///
+/// A row whose write is still under way has no newline yet, so a last
+/// line without one is left for the next read. A line that does not
+/// parse, including one with bytes that are not UTF-8, is skipped and
+/// the rest are kept: an older ljos wrote rows that could tear.
+pub(crate) fn complete_rows<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Vec<T> {
+    let end = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    bytes[..end]
+        .split(|&b| b == b'\n')
+        .filter_map(|line| serde_json::from_slice(line).ok())
+        .collect()
+}
+
 /// How long [`append_locked_row`] tries for the lock before it skips
 /// the row.
 pub(crate) const ROW_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
@@ -21225,11 +21240,10 @@ pub fn log_bypass(kind: &str, how: &str, command: &str, rule: &Rule) {
 /// guard, and the last one. Passing over the guard is allowed, so the row
 /// stays green; it is there to be read.
 fn bypass_row() -> Habitat {
-    let state =
-        match bypass_log_path().and_then(|p| std::fs::read_to_string(&p).ok().map(|t| (p, t))) {
-            None => "no command has run past the guard".to_string(),
-            Some((path, text)) => bypass_summary(&text, &path.display().to_string()),
-        };
+    let state = match bypass_log_path().and_then(|p| std::fs::read(&p).ok().map(|t| (p, t))) {
+        None => "no command has run past the guard".to_string(),
+        Some((path, bytes)) => bypass_summary(&bytes, &path.display().to_string()),
+    };
     Habitat {
         name: "guard bypass",
         state,
@@ -21239,11 +21253,8 @@ fn bypass_row() -> Habitat {
 
 /// [`bypass_row`]'s text from the log's rows.
 #[must_use]
-pub fn bypass_summary(text: &str, path: &str) -> String {
-    let rows: Vec<Value> = text
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
+pub fn bypass_summary(bytes: &[u8], path: &str) -> String {
+    let rows: Vec<Value> = complete_rows(bytes);
     let Some(last) = rows.last() else {
         return "no command has run past the guard".to_string();
     };
@@ -39327,7 +39338,7 @@ mod tests {
         assert_eq!(rows[0]["kind"], "switch");
         assert_eq!(rows[0]["reason"], "infra-destroy");
         assert_eq!(rows[1]["how"], "grant 0a1b");
-        let said = bypass_summary(&text, "LOG");
+        let said = bypass_summary(text.as_bytes(), "LOG");
         assert!(
             said.starts_with("2 commands ran past the guard")
                 && said.contains("`terraform destroy` past ask pack: cloud (grant 0a1b)")
@@ -39335,7 +39346,7 @@ mod tests {
             "{said}"
         );
         assert_eq!(
-            bypass_summary("", "LOG"),
+            bypass_summary(b"", "LOG"),
             "no command has run past the guard"
         );
     }
@@ -39418,6 +39429,32 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    /// The doctor reads the bypass log while hooks append to it. A row
+    /// cut mid-character is the one still being written; the count is
+    /// of the rows before it.
+    #[test]
+    fn a_torn_bypass_row_leaves_the_count() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = HoldEnv::set(&[("XDG_DATA_HOME", dir.path().to_str().unwrap())]);
+        let rule = Rule {
+            pattern: "ask pack: cloud".into(),
+            verdict: "ask".into(),
+            reason: "infra-destroy: this tears down infrastructure".into(),
+        };
+        log_bypass("switch", "LJOS_ASK_PACK=off", "terraform destroy", &rule);
+        log_bypass("approval", "grant 0a1b", "terraform destroy", &rule);
+        let path = bypass_log_path().unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"{\"kind\":\"switch\",\"command\":\"caf\xc3");
+        std::fs::write(&path, bytes).unwrap();
+        let state = bypass_row().state;
+        assert!(
+            state.starts_with("2 commands ran past the guard"),
+            "{state}"
+        );
     }
 
     /// The fail-open path writes its row before the command runs. A lock

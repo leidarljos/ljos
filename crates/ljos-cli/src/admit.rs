@@ -169,14 +169,11 @@ pub fn post_kept(client: &PacksetClient, atom: &Value) -> Result<Value> {
 }
 
 fn read_latest() -> BTreeMap<String, Record> {
-    let text = std::fs::read_to_string(proposals_path()).unwrap_or_default();
-    let mut by_id = BTreeMap::new();
-    for line in text.lines() {
-        if let Ok(rec) = serde_json::from_str::<Record>(line) {
-            by_id.insert(rec.id.clone(), rec);
-        }
-    }
-    by_id
+    let bytes = std::fs::read(proposals_path()).unwrap_or_default();
+    crate::complete_rows::<Record>(&bytes)
+        .into_iter()
+        .map(|rec| (rec.id.clone(), rec))
+        .collect()
 }
 
 fn append(rec: &Record) -> Result<()> {
@@ -702,6 +699,22 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600, "proposals mode {mode:o}");
+    }
+
+    /// A proposal still being appended is not yet held; the proposals
+    /// before it are.
+    #[test]
+    fn a_torn_last_proposal_leaves_the_others() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("XDG_STATE_HOME", dir.path()) };
+        append(&record("a".into())).unwrap();
+        let path = proposals_path();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"{\"id\":\"b\",\"text\":\"caf\xc3");
+        std::fs::write(&path, bytes).unwrap();
+        let ids: Vec<String> = read_latest().into_keys().collect();
+        assert_eq!(ids, ["a"]);
     }
 
     /// A proposals file swapped for a symlink is not written through.
