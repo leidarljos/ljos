@@ -15,6 +15,63 @@ const MOVERS: &[&str] = &[
     "mv", "rm", "rmdir", "unlink", "ln", "rsync", "shred", "trash",
 ];
 
+/// Programs that write, replace or open for editing the files they are
+/// given, besides [`MOVERS`].
+const WRITERS: &[&str] = &[
+    "cp",
+    "install",
+    "tee",
+    "dd",
+    "touch",
+    "truncate",
+    "chmod",
+    "chown",
+    "mkfifo",
+    "mknod",
+    "vi",
+    "vim",
+    "nvim",
+    "view",
+    "nano",
+    "pico",
+    "emacs",
+    "emacsclient",
+    "ed",
+    "ex",
+    "micro",
+    "hx",
+    "kak",
+    "joe",
+    "sh",
+    "bash",
+    "dash",
+    "zsh",
+    "ksh",
+    "fish",
+];
+
+/// Whether `cmd` given `args` writes the files it names: a mover or
+/// writer, an interpreter running a script, `sed` or `perl` editing in
+/// place, or a `find` that deletes or runs a command.
+fn writes(cmd: &str, args: &[String]) -> bool {
+    MOVERS.contains(&cmd)
+        || WRITERS.contains(&cmd)
+        || interpreter(cmd).is_some()
+        || (matches!(cmd, "sed" | "gsed" | "perl")
+            && args.iter().any(|a| {
+                a == "--in-place"
+                    || a.starts_with("--in-place=")
+                    || (a.starts_with('-') && !a.starts_with("--") && a.contains('i'))
+            }))
+        || (cmd == "find"
+            && args.iter().any(|a| {
+                matches!(
+                    a.as_str(),
+                    "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir"
+                )
+            }))
+}
+
 /// The runtime ljos directories a tool call could write into, resolved:
 /// the one this process uses, `/run/user/UID/ljos`, and the fallback a
 /// shell without `XDG_RUNTIME_DIR` uses.
@@ -219,8 +276,10 @@ pub(crate) fn reached(words: &[String], cwd: Option<&Path>, reader: bool) -> Opt
     if reader {
         return None;
     }
-    if let Some(w) = operands.iter().find(|w| names_one(w)) {
-        return Some((*w).to_string());
+    if writes(cmd, &words[1..]) {
+        if let Some(w) = operands.iter().find(|w| names_one(w)) {
+            return Some((*w).to_string());
+        }
     }
     let paths: Vec<(&str, Option<PathBuf>)> =
         operands.iter().map(|w| (*w, path_of(w, cwd))).collect();
