@@ -6731,8 +6731,10 @@ pub fn tool_error(input: &str) -> String {
 /// searched on the command and the error it gave, and a hit has to pass the
 /// prompt hook's tests. It must also share [`FAILURE_SHARED_WORDS`] content
 /// words with the command and the error, where a prompt needs one, since an
-/// error is long and noisy. One handed over earlier in the session is left
-/// out. Calls that worked are not searched.
+/// error is long and noisy. The floor is the lexical match, not the fused
+/// score: the pack decays that score by age, and age only ranks. The pack's
+/// order, which is that score, is kept. One handed over earlier in the
+/// session is left out. Calls that worked are not searched.
 #[must_use]
 pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<String>) {
     let error: String = error.chars().take(400).collect();
@@ -6746,19 +6748,23 @@ pub fn failure_note(call: &HookCall, error: &str, limit: usize) -> (String, Vec<
     .or_else(|_| packset_search(&cue)) else {
         return (String::new(), Vec::new());
     };
-    let top = hits.iter().map(|h| h.score).fold(0.0_f64, f64::max);
-    if top <= 0.0 {
+    let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
+    let lexical = lexical_match_scores(&texts, &cue);
+    let best_lexical = lexical.iter().copied().fold(0.0_f64, f64::max);
+    if best_lexical <= 0.0 {
         return (String::new(), Vec::new());
     }
     let seen = seen_ids(call.session.as_deref());
     let rows: Vec<&Hit> = hits
         .iter()
-        .filter(|h| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
-        .filter(|h| h.score >= top * HOOK_SCORE_FLOOR)
-        .filter(|h| agreed(h))
-        .filter(|h| shared_cue_words(&h.text, &cue) >= FAILURE_SHARED_WORDS)
-        .filter(|h| shown_on_prompt(h))
-        .filter(|h| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
+        .enumerate()
+        .filter(|(_, h)| !UNREVIEWED_KINDS.contains(&h.kind.as_str()))
+        .filter(|(i, _)| lexical[*i] >= best_lexical * HOOK_SCORE_FLOOR)
+        .filter(|(_, h)| agreed(h))
+        .filter(|(_, h)| shared_cue_words(&h.text, &cue) >= FAILURE_SHARED_WORDS)
+        .filter(|(_, h)| shown_on_prompt(h))
+        .filter(|(_, h)| h.id.as_ref().is_none_or(|id| !seen.contains(id)))
+        .map(|(_, h)| h)
         .take(limit)
         .collect();
     if rows.is_empty() {
@@ -42536,6 +42542,50 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             3,
         );
         assert!(said.is_empty() && ids.is_empty(), "nothing to search on");
+    }
+
+    /// A failed command recalls a memory that shares its words however
+    /// old that memory is. The fused score of a ninety-day-old lesson
+    /// sits under 0.6 of a fresh hit on age alone.
+    #[test]
+    fn a_failed_tool_admits_an_old_memory_that_names_the_subject() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap())]);
+        let hit = |id: &str, text: &str, score: f64, ts: &str| {
+            serde_json::json!({
+                "id": id, "text": text, "score": score, "kind": "lesson",
+                "ts": ts, "entities": ["horizon:standing"],
+                "ballots": 2, "of": 3
+            })
+        };
+        let url = serve_signal_pack(serde_json::json!([
+            hit(
+                "fresh",
+                "Restart the worker after every deploy so it reads the new config",
+                2.0,
+                "2026-10-20T09:00:00.000Z"
+            ),
+            hit(
+                "old",
+                "The frontend reads its API base URL from VITE_API_URL at build time, not at runtime",
+                0.8,
+                "2026-07-22T09:00:00.000Z"
+            ),
+        ]));
+        let _url = PackUrl::set(&url);
+        let call = HookCall {
+            event: "PostToolUseFailure".into(),
+            cue: "cargo test".into(),
+            session: Some("aged-fail".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = failure_note(
+            &call,
+            "the frontend build failed because the API base URL is wrong",
+            3,
+        );
+        assert!(note.contains("VITE_API_URL"), "{note}");
     }
 
     /// A compaction forgets which memories the conversation was handed, so
