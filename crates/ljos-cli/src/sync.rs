@@ -3742,7 +3742,7 @@ mod tests {
         let fake_age = dir.join("age");
         std::fs::write(
             &fake_age,
-            "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -o) out=\"$2\"; shift 2 ;;\n    -r) shift 2 ;;\n    *) shift ;;\n  esac\ndone\ncat > \"$out\"\n",
+            "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -o) out=\"$2\"; shift 2 ;;\n    -r) shift 2 ;;\n    *) shift ;;\n  esac\ndone\nif [ -n \"$out\" ]; then cat > \"$out\"; else cat; fi\n",
         )
         .unwrap();
         std::fs::set_permissions(&fake_age, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -4294,7 +4294,7 @@ mod tests {
         let fake_age = dir.path().join("age");
         std::fs::write(
             &fake_age,
-            "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -o) out=\"$2\"; shift 2 ;;\n    -r) shift 2 ;;\n    *) shift ;;\n  esac\ndone\ncat > \"$out\"\n",
+            "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -o) out=\"$2\"; shift 2 ;;\n    -r) shift 2 ;;\n    *) shift ;;\n  esac\ndone\nif [ -n \"$out\" ]; then cat > \"$out\"; else cat; fi\n",
         )
         .unwrap();
         std::fs::set_permissions(&fake_age, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -6029,6 +6029,60 @@ mod tests {
         let said = import(&root, &scope).unwrap();
         assert!(said.contains("gonehost: 1 cloud atoms taken"), "{said}");
         assert_eq!(posted_texts(&posted), vec!["old cloud words"]);
+    }
+
+    /// A tracker whose `.ljos` or `.ljos/atoms` is a symlink to a local
+    /// directory holding a log sealed to this machine. Import would take
+    /// it as the tracker's, and export would write this host's log there.
+    #[test]
+    fn a_symlinked_tracker_directory_is_not_read_or_written() {
+        for linked in [".ljos", ".ljos/atoms"] {
+            let dir = tempfile::tempdir().unwrap();
+            let _env = begin(dir.path());
+            let machine = make_key();
+            let root = tracker(dir.path());
+            std::fs::remove_dir_all(root.join(".ljos")).unwrap();
+            std::fs::create_dir_all(root.join(".ljos")).unwrap();
+            let outside = dir.path().join("outside");
+            let atoms = if linked == ".ljos" {
+                outside.join("atoms")
+            } else {
+                outside.clone()
+            };
+            std::fs::create_dir_all(&atoms).unwrap();
+            let scope = scope_of(&machine);
+            let toml = format!("name = \"notes\"\nrecipients = [\"{machine}\"]\n");
+            std::fs::write(atoms.parent().unwrap().join("sync.toml"), &toml).unwrap();
+            let body = format!("{}\n", atom("a", "from outside", &[]));
+            seal(
+                &framed("peer", "cloud", &body),
+                std::slice::from_ref(&machine),
+                &atoms.join("peer.jsonl.age"),
+            )
+            .unwrap();
+            if linked == ".ljos" {
+                std::fs::remove_dir(root.join(".ljos")).unwrap();
+            }
+            std::os::unix::fs::symlink(&outside, root.join(linked)).unwrap();
+            let posted = std::sync::Arc::default();
+            point_pack(&serve_pack(std::sync::Arc::clone(&posted)));
+
+            if linked == ".ljos" {
+                let err = scope_of_repo(&root).unwrap_err();
+                assert!(err.to_string().contains("symlink"), "{linked}: {err}");
+            }
+            let err = import(&root, &scope).unwrap_err();
+            assert!(err.to_string().contains("symlink"), "{linked}: {err}");
+            assert!(posted_texts(&posted).is_empty(), "{linked}");
+            let before = std::fs::read_dir(&atoms).unwrap().count();
+            let err = export(&root, &scope, &[atom("b", "mine", &[])]).unwrap_err();
+            assert!(err.to_string().contains("symlink"), "{linked}: {err}");
+            assert_eq!(
+                std::fs::read_dir(&atoms).unwrap().count(),
+                before,
+                "{linked}: export wrote through the symlink"
+            );
+        }
     }
 
     const OLD_COMMIT: &str = "100000000 +0000";
