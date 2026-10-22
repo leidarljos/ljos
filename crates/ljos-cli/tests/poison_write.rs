@@ -67,11 +67,25 @@ fn serve(atoms: Arc<Mutex<Vec<serde_json::Value>>>, asks: bool) -> String {
             } else if path.starts_with("POST /v1/atoms") {
                 let mut atom: serde_json::Value =
                     serde_json::from_str(body).unwrap_or(serde_json::json!({}));
+                let mut stored = atoms.lock().unwrap();
                 if atom.get("id").and_then(|v| v.as_str()).is_none() {
-                    atom["id"] = serde_json::json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+                    atom["id"] = serde_json::json!(format!("{:b>32}", stored.len()));
                 }
-                atoms.lock().unwrap().push(atom.clone());
+                stored.push(atom.clone());
                 (200, atom.to_string())
+            } else if path.starts_with("GET /v1/search") {
+                let hits: Vec<serde_json::Value> = atoms
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|a| {
+                        let mut hit = a.clone();
+                        hit["field"] = serde_json::json!("atom");
+                        hit["score"] = serde_json::json!(1.0);
+                        hit
+                    })
+                    .collect();
+                (200, serde_json::json!({"hits": hits}).to_string())
             } else if path.starts_with("GET /v1/atoms") {
                 let stored = atoms.lock().unwrap().clone();
                 (200, serde_json::json!({"atoms": stored}).to_string())
@@ -895,6 +909,37 @@ fn guard_labels(asks: bool) {
         let theirs = asks && basis == Some("person");
         assert_eq!(labelled, !theirs, "{name} asks {asks}: {reason}");
     }
+}
+
+/// A rule written from a pipe reads in `ljos search` as exactly an
+/// unverified agent note, and the person's from their terminal carries no
+/// such label.
+#[test]
+fn search_labels_a_written_rule_by_its_writer() {
+    let seat = Seat::asking();
+    let agent = ["rule", "*deploy-form*", "--verdict", "ask", "--why", PLANT];
+    let out = seat.command(&agent, false).output().unwrap();
+    assert!(out.status.success(), "{}", text_of(&out));
+    let theirs = "Ask before any deploy runs.";
+    let person = ["rule", "*deploy-run*", "--verdict", "ask", "--why", theirs];
+    let out = shaped(&seat, "terminal", &person);
+    assert!(out.status.success(), "{}", text_of(&out));
+    let out = seat.command(&["search", "deploy"], false).output().unwrap();
+    let found = String::from_utf8_lossy(&out.stdout).into_owned();
+    let label = |text: &str| {
+        found
+            .lines()
+            .find(|l| l.ends_with(text))
+            .and_then(|l| l.split('\t').nth(2))
+            .unwrap_or_else(|| panic!("{text} not found\n{found}"))
+            .to_string()
+    };
+    assert_eq!(
+        label(PLANT),
+        "unverified agent note (origin agent-derived)",
+        "{found}"
+    );
+    assert!(!label(theirs).contains("unverified"), "{found}");
 }
 
 fn mcp_remember(seat: &Seat, text: &str) -> serde_json::Value {
