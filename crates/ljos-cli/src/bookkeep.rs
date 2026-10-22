@@ -627,6 +627,18 @@ pub fn touch_activity() {
     LAST_ACTIVITY.store(unix_secs(), Ordering::Relaxed);
 }
 
+/// Unix seconds of the last [`touch_activity`], or zero.
+#[must_use]
+pub fn last_activity() -> u64 {
+    LAST_ACTIVITY.load(Ordering::Relaxed)
+}
+
+/// Unix seconds now, the clock [`last_activity`] is on.
+#[must_use]
+pub fn now_secs() -> u64 {
+    unix_secs()
+}
+
 /// Tool calls this process has answered. A process that answered one call
 /// and exited was spawned per call: finishing in `Drop` would close the
 /// sitting before the next call. The book stays, and the next start
