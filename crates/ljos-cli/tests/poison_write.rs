@@ -375,6 +375,53 @@ fn a_runner_remember_of_a_plant_is_not_a_standing_fact() {
         !tags.contains("via:prompt"),
         "a plant was the person's: {kept}"
     );
+    assert_eq!(kept["source"]["basis"], "agent", "{kept}");
+    assert!(tags.contains("note-basis:agent"), "{kept}");
+    assert!(tags.contains("note-source:ljos-remember"), "{kept}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unreviewed note"),
+        "{}",
+        text_of(&out)
+    );
+}
+
+/// Words the person just said stay a standing lesson, with the prompt tag.
+#[test]
+fn a_runner_remember_of_the_persons_words_stays_a_lesson() {
+    let seat = Seat::new();
+    let said = "Always build the release with the checked fuse never a guessed one.";
+    note_prompt(&seat, &format!("please remember: {said}"));
+    let out = seat.command(&["remember", said], true).output().unwrap();
+    assert!(out.status.success(), "{}", text_of(&out));
+    let atoms = seat.atoms.lock().unwrap().clone();
+    let kept = atoms
+        .iter()
+        .find(|atom| atom["text"] == said)
+        .unwrap_or_else(|| panic!("the person's lesson was not stored\n{atoms:?}"));
+    assert_eq!(kept["kind"], "lesson", "{kept}");
+    assert_eq!(kept["origin"], "user-declared", "{kept}");
+    let tags = kept["entities"].to_string();
+    assert!(tags.contains("via:prompt"), "{kept}");
+    assert!(tags.contains("horizon:standing"), "{kept}");
+}
+
+/// The person typing `ljos remember` is the words. No prompt hook is required.
+#[test]
+fn a_person_remember_from_the_terminal_stands() {
+    let seat = Seat::new();
+    let out = seat.command(&["remember", PLANT], false).output().unwrap();
+    assert!(out.status.success(), "{}", text_of(&out));
+    let atoms = seat.atoms.lock().unwrap().clone();
+    let kept = atoms
+        .iter()
+        .find(|atom| atom["text"].as_str().unwrap_or("").contains("release key"))
+        .unwrap_or_else(|| panic!("nothing stored\n{atoms:?}\n{}", text_of(&out)));
+    assert_eq!(kept["kind"], "lesson", "{kept}");
+    assert_eq!(kept["origin"], "user-declared", "{kept}");
+    assert!(
+        kept["entities"].to_string().contains("horizon:standing"),
+        "{kept}"
+    );
 }
 
 /// Hold one issue so the work nudge speaks about a lesson, then restore the
