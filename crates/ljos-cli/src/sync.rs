@@ -8024,6 +8024,7 @@ mod tests {
 
     #[test]
     fn commit_logs_commits_each_scope_and_drops_a_removed_one() {
+        let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let git = |args: &[&str]| {
