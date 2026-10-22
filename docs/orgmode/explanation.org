@@ -309,7 +309,10 @@ clause of that prompt and keeps its =not=, =never=, =unless= and
 =only=. The quote and the prompt are read in NFKC with =’=, =ʼ= and =＇= as an apostrophe,
 and a negation counts back to where the sentence ends, across a line
 break or a colon, so "Don’t do this:" on one line still governs the
-next.
+next. A stated choice is read the same way: a line that ends on a
+dangling negation, or on a colon, comma or dash, is joined with the
+next line before it is saved, so "Do not" does not become "Always".
+A finished line, and a blank line, still start a new sentence.
 Only the runner keeps that prompt. =ljos hook= keeps it when the
 process that spawned it is an installed runner, read from the file the
 kernel runs it from (=/proc/<pid>/exe=). That file sits under =.local=,
