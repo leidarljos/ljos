@@ -601,6 +601,25 @@ fn tmux_send_keys_into_an_existing_session_is_not_the_person() {
     prefer_as_agent(&seat, &built, "every Makefile", "tmux send-keys");
 }
 
+/// A terminal shape with `GITHUB_ACTIONS` set is a CI job, not the person,
+/// including when the environment is otherwise the seat's.
+#[test]
+fn a_ci_shaped_environment_is_not_the_person() {
+    let daemon = Daemon::start();
+    let seat = Seat::on(daemon.url.clone());
+    let shaped = terminal::shape(
+        "terminal",
+        ljos(),
+        &["prefer", "Keep the CI notes in one file."],
+    );
+    let out = seat
+        .command(terminal::PYTHON, &shaped)
+        .env("GITHUB_ACTIONS", "true")
+        .output()
+        .unwrap();
+    prefer_as_agent(&seat, &out, "CI notes", "GITHUB_ACTIONS");
+}
+
 /// `systemd-run --user --scope` when the user bus answers, and otherwise
 /// the `run-*.scope` cgroup that command creates. A pty is attached, which
 /// is the shape that used to pass the terminal check after the environment
