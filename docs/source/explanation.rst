@@ -144,11 +144,12 @@ claims at most. With a pack that sends the encoder's cosine on each hit,
 that is the claim the encoder ranks first at a cosine of 0.66 or more,
 word or no word, and a claim that shares a word with the prompt and sits
 within 0.05 of its best cosine. With an older pack, it is the
-preferences and standing lessons that two scorers named and that share a
-word with it. A word counts through its other names, so "golang" names
-what a rule about Go files names, and "virtualenv" what a rule about
-``uv`` names. A claim reaches a session once between compactions. It
-arrives when it first matters, not on every command after.
+preferences and standing lessons that name its subject and match it at
+least 0.6 as well as the best one. A word counts through its other
+names, so "golang" names what a rule about Go files names, and
+"virtualenv" what a rule about ``uv`` names. A claim reaches a session
+once between compactions. It arrives when it first matters, not on
+every command after.
 
 A runner that reports a failed tool, as Grok Build does with
 ``PostToolUseFailure``, gets a search of its own. The hook searches on the
@@ -474,14 +475,14 @@ Judgment, and where a judge slots in
 The seat has always made judgments at four points. Each had a local
 answer, and each answer fed a structure that was already there.
 
-=========== ================================================== =========================================================== ===============================================
-point       the judgment                                       the local answer                                            what consumes it
-=========== ================================================== =========================================================== ===============================================
-prompt hook which claims bear on the prompt                    the encoder's cosine or two scorers, a floor, a shared word the injected context
-prompt hook is this a correction, or a choice put to the agent two phrase lists                                            a proposal, then the nudges
-panel       which option a persona votes for                   one subagent per persona                                    the settle, forecasts, ``learn``, ``calibrate``
-stop        may the agent stop                                 rules on the held issue                                     one more round, once
-=========== ================================================== =========================================================== ===============================================
+=========== ================================================== ================================================================= ===============================================
+point       the judgment                                       the local answer                                                  what consumes it
+=========== ================================================== ================================================================= ===============================================
+prompt hook which claims bear on the prompt                    the encoder's cosine or the lexical match, a floor, a shared word the injected context
+prompt hook is this a correction, or a choice put to the agent two phrase lists                                                  a proposal, then the nudges
+panel       which option a persona votes for                   one subagent per persona                                          the settle, forecasts, ``learn``, ``calibrate``
+stop        may the agent stop                                 rules on the held issue                                           one more round, once
+=========== ================================================== ================================================================= ===============================================
 
 Jev, TypeSafe's decision model, answers the same questions with a
 probability and writes no text. So it replaces the answer at each point
