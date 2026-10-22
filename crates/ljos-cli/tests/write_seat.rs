@@ -49,6 +49,11 @@ impl Bench {
     }
 
     fn ljos(&self, seat: Option<&str>, args: &[&str]) -> Output {
+        let env: Vec<(&str, &str)> = seat.map(|s| ("LJOS_SEAT", s)).into_iter().collect();
+        self.ljos_env(&env, args)
+    }
+
+    fn ljos_env(&self, env: &[(&str, &str)], args: &[&str]) -> Output {
         let home = self.root.join("home");
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
         cmd.args(args)
@@ -60,10 +65,8 @@ impl Bench {
             .env("XDG_RUNTIME_DIR", self.root.join("run"))
             .env("GROK_SESSION_ID", "2c12969d-0000-4000-8000-000000000000")
             .env("LJOS_TRACKER_GIT", "off")
-            .env("PACKSET_URL", "off");
-        if let Some(seat) = seat {
-            cmd.env("LJOS_SEAT", seat);
-        }
+            .env("PACKSET_URL", "off")
+            .envs(env.iter().copied());
         cmd.output().unwrap()
     }
 
@@ -156,4 +159,21 @@ fn with_a_seats_file_only_a_listed_seat_writes() {
         "{listed:?}"
     );
     assert!(b.calls().contains("vissue note"), "{}", b.calls());
+}
+
+#[test]
+fn a_conversation_the_seats_file_maps_writes_as_that_seat() {
+    let b = Bench::new();
+    b.seats("\"0b1c2d3e-0000-4000-8000-000000000000\" = \"saddle\"\n");
+    let out = b.ljos_env(
+        &[(
+            "CURSOR_CONVERSATION_ID",
+            "0b1c2d3e-0000-4000-8000-000000000000",
+        )],
+        &["note", "proj-aaaa", "progress"],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("no seat is named"), "{err}");
+    assert!(!err.contains("no seat named"), "{err}");
+    assert!(b.calls().contains("vissue note proj-aaaa"), "{}", b.calls());
 }
