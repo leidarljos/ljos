@@ -4,7 +4,6 @@
 //! on write. Consensus is a different crate, then the tracker verb. Policyd
 //! is argv law: this process does not reload a pack as a check.
 
-use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -2376,6 +2375,171 @@ pub fn under_a_runner() -> bool {
         return true;
     }
     wrappers_only() && scope_names_runner(&runners)
+}
+
+/// Variables a runner, or the hook it spawned, leaves on what it starts.
+const RUNNER_MARKS: &[&str] = &[
+    "CLAUDECODE",
+    "CURSOR_AGENT",
+    "LJOS_IN_HOOK",
+    "CODEX_SANDBOX",
+    "GEMINI_CLI",
+];
+
+/// Whether the person is at this process, on positive evidence: no
+/// runner's variable in the environment, and [`person_at_terminal`].
+/// Not being [`under_a_runner`] proves nothing, since a tool call can
+/// name its parent `systemd` or leave the runner by a double fork. Every
+/// basis of person a CLI verb decides asks this; anything less is the
+/// agent's.
+#[must_use]
+pub fn person_present() -> bool {
+    !std::env::vars().any(|(k, v)| runner_session_var(&k, &v) || RUNNER_MARKS.contains(&k.as_str()))
+        && person_at_terminal()
+}
+
+/// One `/proc/PID/stat` row, the fields [`person_at_terminal`] reads.
+#[cfg(target_os = "linux")]
+struct StatRow {
+    pid: u32,
+    comm: String,
+    ppid: u32,
+    pgrp: u32,
+    sid: u32,
+    tty: u32,
+    tpgid: i64,
+}
+
+#[cfg(target_os = "linux")]
+fn stat_row(pid: u32) -> Option<StatRow> {
+    let raw = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let comm = raw.get(raw.find('(')? + 1..raw.rfind(')')?)?.to_string();
+    let rest: Vec<&str> = raw.get(raw.rfind(')')? + 1..)?.split_whitespace().collect();
+    Some(StatRow {
+        pid,
+        comm,
+        ppid: rest.get(1)?.parse().ok()?,
+        pgrp: rest.get(2)?.parse().ok()?,
+        sid: rest.get(3)?.parse().ok()?,
+        tty: rest.get(4)?.parse().ok()?,
+        tpgid: rest.get(5)?.parse().ok()?,
+    })
+}
+
+/// Whether `holder` keeps the master side of pseudo-terminal `index` open.
+#[cfg(target_os = "linux")]
+fn holds_pty(holder: u32, index: u32) -> bool {
+    let Ok(fds) = std::fs::read_dir(format!("/proc/{holder}/fd")) else {
+        return false;
+    };
+    fds.flatten().any(|fd| {
+        let master = std::fs::read_link(fd.path())
+            .is_ok_and(|t| t == Path::new("/dev/ptmx") || t == Path::new("/dev/pts/ptmx"));
+        master
+            && std::fs::read_to_string(format!(
+                "/proc/{holder}/fdinfo/{}",
+                fd.file_name().to_string_lossy()
+            ))
+            .is_ok_and(|info| {
+                info.lines()
+                    .filter_map(|l| l.strip_prefix("tty-index:"))
+                    .any(|i| i.trim().parse() == Ok(index))
+            })
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A unit test that stands in for the person at a terminal, which
+    /// `cargo test` never has. The binaries are built without it.
+    pub(crate) static PERSON_AT_TERMINAL: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Whether the kernel says a person's terminal drives this process. Stdin
+/// is this process's controlling terminal, a pseudo-terminal, and its
+/// foreground group is ours. The session leader is this process or one
+/// above it, and the process above that leader holds the terminal's
+/// master side, as a terminal emulator, multiplexer or sshd does. The
+/// chain is read whole to pid 1, past any name: no process on it is a
+/// runner by name, program, install path or seat record, and none was
+/// reparented, which a process outside its own session with a parent in
+/// another shows. Names prove nothing here; a tool call picks its own.
+#[cfg(target_os = "linux")]
+fn person_at_terminal() -> bool {
+    #[cfg(test)]
+    if PERSON_AT_TERMINAL.with(std::cell::Cell::get) {
+        return true;
+    }
+    // SAFETY: isatty reads one descriptor's mode and cannot fail.
+    if unsafe { libc::isatty(0) } != 1 {
+        return false;
+    }
+    let Some(me) = stat_row(std::process::id()) else {
+        return false;
+    };
+    let Ok(rdev) = std::fs::metadata("/proc/self/fd/0").map(|m| {
+        use std::os::unix::fs::MetadataExt as _;
+        m.rdev()
+    }) else {
+        return false;
+    };
+    let (major, minor) = (
+        (me.tty >> 8) & 0xfff,
+        (me.tty & 0xff) | ((me.tty >> 12) & 0xfff00),
+    );
+    if me.tty == 0
+        || u64::from(major) != u64::from(libc::major(rdev))
+        || u64::from(minor) != u64::from(libc::minor(rdev))
+        || me.tpgid != i64::from(me.pgrp)
+    {
+        return false;
+    }
+    let Some(index) = std::fs::read_link("/proc/self/fd/0").ok().and_then(|t| {
+        t.strip_prefix("/dev/pts")
+            .ok()?
+            .to_str()?
+            .parse::<u32>()
+            .ok()
+    }) else {
+        return false;
+    };
+    let mut chain = vec![me];
+    while let Some(ppid) = chain.last().map(|r| r.ppid).filter(|&p| p > 0) {
+        if chain.len() > 64 {
+            return false;
+        }
+        let Some(row) = stat_row(ppid) else {
+            return false;
+        };
+        chain.push(row);
+    }
+    if chain.last().map(|r| r.pid) != Some(1) {
+        return false;
+    }
+    let reparented = chain
+        .windows(2)
+        .any(|w| w[0].sid != w[0].pid && w[0].sid != w[1].sid);
+    let Some(leader) = chain.iter().position(|r| r.pid == chain[0].sid) else {
+        return false;
+    };
+    let Some(holder) = chain.get(leader + 1) else {
+        return false;
+    };
+    let runners: Vec<String> = harnesses_with_shipped(&harnesses_path())
+        .map(|all| all.harness.into_iter().map(|h| h.name).collect())
+        .unwrap_or_default();
+    let runner = chain.iter().any(|r| {
+        seat_record_path(r.pid).exists()
+            || is_harness_program(&r.comm, &program_name(r.pid, &r.comm), &runners)
+            || proc_tree::exe_runner(r.pid).is_some()
+    });
+    !reparented && !runner && holds_pty(holder.pid, index)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn person_at_terminal() -> bool {
+    false
 }
 
 /// Path components that name a place, not a program.
@@ -13337,14 +13501,28 @@ impl Basis {
         }
     }
 
-    /// The basis of `text` given to a CLI verb: the person's at a terminal,
-    /// [`Basis::of`] under a runner.
+    /// The basis of `text` given to a CLI verb: the person's when
+    /// [`person_present`] proves them at the terminal, else [`Basis::of`].
     #[must_use]
     pub fn of_typed(text: &str) -> Self {
-        if under_a_runner() {
-            Self::of(text)
-        } else {
+        if person_present() {
             Self::Person
+        } else {
+            Self::of(text)
+        }
+    }
+
+    /// The basis of a rule a CLI verb writes: the person's only when
+    /// [`person_present`]. The prompt check does not raise a rule. The
+    /// kept prompt, its bind and the runner's transcript are all files the
+    /// agent's login can rewrite, and a reason clause in the prompt says
+    /// nothing of the pattern and verdict the rule enforces.
+    #[must_use]
+    pub fn of_rule() -> Self {
+        if person_present() {
+            Self::Person
+        } else {
+            Self::Agent
         }
     }
 }
@@ -14327,13 +14505,13 @@ pub fn packset_write_remember_note(text: &str, persona: Option<&str>) -> Result<
 }
 
 pub fn packset_prefer(text: &str, persona: Option<&str>) -> Result<Value> {
-    if under_a_runner() {
-        if capture::said_in_latest_prompt(text) {
-            return packset_write_mcp("Prefer", text, persona, Some(false));
-        }
-        return packset_write_agent("Prefer", text, persona, Some(false));
+    if person_present() {
+        return packset_write_as("Prefer", text, persona, Some(false));
     }
-    packset_write_as("Prefer", text, persona, Some(false))
+    if capture::said_in_latest_prompt(text) {
+        return packset_write_mcp("Prefer", text, persona, Some(false));
+    }
+    packset_write_agent("Prefer", text, persona, Some(false))
 }
 
 /// [`packset_write`] for a lesson learned on an issue: it carries an
@@ -17460,20 +17638,25 @@ pub fn format_rules(rules: &[Rule], json: bool) -> String {
         .collect()
 }
 
-/// The live rules in a set of atoms.
-pub fn rules_of(atoms: &[Value]) -> Vec<Rule> {
+/// The live rules in a set of atoms. A reason the pack does not say the
+/// person stands behind, or any reason when `proven` is false because the
+/// listing did not ask for this seat's token, is labelled an unverified
+/// agent note, so no gate states it as the person's.
+pub fn rules_of(atoms: &[Value], proven: bool) -> Vec<Rule> {
     atoms
         .iter()
         .filter(|a| a.get("kind").and_then(Value::as_str) == Some("rule"))
         .filter_map(|a| {
+            let text = a.get("text").and_then(Value::as_str).unwrap_or("");
+            let reason = if text.is_empty() || (proven && person_stored(a)) {
+                text.to_string()
+            } else {
+                format!("unverified agent note: {text}")
+            };
             Some(Rule {
                 pattern: a.get("pattern")?.as_str()?.to_string(),
                 verdict: a.get("verdict")?.as_str()?.to_string(),
-                reason: a
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
+                reason,
             })
         })
         .collect()
@@ -17483,7 +17666,7 @@ pub fn rules_of(atoms: &[Value]) -> Vec<Rule> {
 pub fn rules_from_pack() -> Result<Vec<Rule>> {
     let client = pack()?;
     let atoms = atoms_lean(&client, &client.workspace()).context("rules: GET /v1/atoms failed")?;
-    Ok(rules_of(&atoms))
+    Ok(rules_of(&atoms, listing_asks(&client)))
 }
 
 /// The rules a gate judges by. A read from the pack is kept on disk, and
@@ -17507,7 +17690,7 @@ pub fn gate_read() -> (Vec<Rule>, Vec<(String, String)>) {
     });
     match listed {
         Ok((atoms, asks)) => {
-            let rules = rules_of(&atoms);
+            let rules = rules_of(&atoms, asks);
             if let Some(path) = &kept {
                 keep_rules(path, &rules);
             }
@@ -17597,7 +17780,7 @@ fn preferences_row() -> Habitat {
             let held_rows = legacy_pref::awaiting(&atoms);
             let held = held_rows.len();
             let (enforced, could, total) =
-                preferences_enforced(&preferences_of(&atoms), &rules_of(&atoms));
+                preferences_enforced(&preferences_of(&atoms), &rules_of(&atoms, true));
             let mut line = preferences_line(enforced, could, total);
             if held > 0 {
                 line.push_str(&format!("; {}", legacy_pref::review_sentence(&held_rows)));
@@ -27804,7 +27987,7 @@ pub fn not_assignee_message(
 }
 
 /// Whether a lesson given to `ljos finish` is the person's own: no agent
-/// runner above the process and a terminal on its input. Such a lesson is
+/// runner above the process and [`person_present`]. Such a lesson is
 /// written at once; one an agent gives waits for `ljos accept`.
 #[must_use]
 pub fn lesson_is_the_persons(under_runner: bool, terminal: bool) -> bool {
@@ -27873,7 +28056,7 @@ pub fn lesson_claims(text: &str) -> Vec<String> {
 fn finish_lesson(issue: &str, text: &str) -> String {
     let filed = (|| -> Result<String> {
         let scope = sync::scope_for_lesson(sync::scope_for_issue(issue));
-        let persons = lesson_is_the_persons(under_a_runner(), std::io::stdin().is_terminal());
+        let persons = lesson_is_the_persons(under_a_runner(), person_present());
         let prefix = "finish: POST /v1/atoms failed for the lesson";
         let client = pack()?;
         let workspace = client.workspace();
@@ -54125,7 +54308,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             said.contains("completed the session node for probe-f1n5 as done"),
             "{said}"
         );
-        let persons = lesson_is_the_persons(under_a_runner(), std::io::stdin().is_terminal());
+        let persons = lesson_is_the_persons(under_a_runner(), person_present());
         if persons {
             assert!(said.contains("the lesson was not kept"), "{said}");
             assert!(
@@ -55025,6 +55208,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             std::env::set_var("LJOS_HOLD", "rohit");
             std::env::set_var("LJOS_SEAT", "claude");
         }
+        PERSON_AT_TERMINAL.with(|p| p.set(true));
         user_rules::write_preference(
             "never post or reply to Alan (ocaisa)",
             "he asked not to be pinged",
