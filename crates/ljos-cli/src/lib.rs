@@ -27031,11 +27031,20 @@ pub fn command_refused(text: &str) -> bool {
 }
 
 /// Operator switch: missing TCB is a deny. Unset, absence stays open.
-pub fn policyd_required() -> bool {
+fn env_switch(name: &str) -> bool {
     matches!(
-        std::env::var("POLICYD_REQUIRED").as_deref(),
+        std::env::var(name).as_deref(),
         Ok("1") | Ok("true") | Ok("TRUE")
     )
+}
+
+pub fn policyd_required() -> bool {
+    env_switch("POLICYD_REQUIRED")
+}
+
+/// Operator switch: guard faults allow with a note. Unset, they deny.
+pub fn guard_fail_open() -> bool {
+    env_switch("LJOS_GUARD_FAIL_OPEN")
 }
 
 /// `POLICYD_BIN`, else `ljos-policyd` on PATH.
@@ -33855,6 +33864,22 @@ mod tests {
         match before {
             Some(v) => std::env::set_var("POLICYD_REQUIRED", v),
             None => std::env::remove_var("POLICYD_REQUIRED"),
+        }
+    }
+
+    #[test]
+    fn guard_fail_open_is_the_operator_switch() {
+        let _g = env_guard();
+        let before = std::env::var_os("LJOS_GUARD_FAIL_OPEN");
+        std::env::remove_var("LJOS_GUARD_FAIL_OPEN");
+        assert!(!guard_fail_open());
+        std::env::set_var("LJOS_GUARD_FAIL_OPEN", "1");
+        assert!(guard_fail_open());
+        std::env::set_var("LJOS_GUARD_FAIL_OPEN", "0");
+        assert!(!guard_fail_open());
+        match before {
+            Some(v) => std::env::set_var("LJOS_GUARD_FAIL_OPEN", v),
+            None => std::env::remove_var("LJOS_GUARD_FAIL_OPEN"),
         }
     }
 
