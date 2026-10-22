@@ -21657,10 +21657,13 @@ fn optional_bin(name: &str) -> bool {
 }
 
 /// `ok` when the row answers, `warn` when the policy row names an
-/// `ljos-policyd` without phronesis or a runner skill or runner env ljos
-/// wrote is stale or edited by hand, `info` when the row is optional and
-/// absent, `no` when a required row failed. A stale skill or env ljos
-/// wrote is a warning `ljos doctor --fix` rewrites, not a failure.
+/// `ljos-policyd` without phronesis, a runner skill or runner env ljos
+/// wrote is stale or edited by hand, or the cloud guard file is a known
+/// older version or differs from the seat refusals, `info` when the row
+/// is optional and absent, `no` when a required row failed. A stale skill,
+/// env or cloud guard file ljos wrote is a warning `ljos doctor --fix`
+/// rewrites, not a failure. A cloud guard file that differs is a warning
+/// `ljos cloud up` rewrites.
 #[must_use]
 pub fn doctor_word(row: &Habitat) -> &'static str {
     if cloud::cloud_age_is_unset(row.name, &row.state) {
@@ -21676,6 +21679,8 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
         "warn"
     } else if row.ok {
         "ok"
+    } else if row.name == "cloud guard" && cloud::guard_row_is_warning(&row.state) {
+        "warn"
     } else if OPTIONAL_ROWS.contains(&row.name)
         || optional_bin(row.name)
         || (row.name == "git hooks" && row.state.starts_with(git_hooks::HOOKS_UNSET))
