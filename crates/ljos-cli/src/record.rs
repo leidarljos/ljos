@@ -1682,6 +1682,40 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "a replayed ballot erased its voter")]
+    fn a_replayed_ballot_does_not_erase_its_voter() {
+        let _home = test_home();
+        let cast = sign_as(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            3,
+        );
+        let mut shouted = cast.clone();
+        shouted.signature.key = shouted.signature.key.to_ascii_uppercase();
+        shouted.signature.sig = shouted.signature.sig.to_ascii_uppercase();
+        let later = sign_as(
+            ballot_entry("alpha/seat-a", "reject", "2026-10-21T12:00:00Z"),
+            3,
+        );
+        for (name, entries, stance) in [
+            ("copy", vec![cast.clone(), cast.clone()], "accept"),
+            ("hex case", vec![cast.clone(), shouted.clone()], "accept"),
+            (
+                "superseded copy",
+                vec![cast.clone(), later.clone(), cast.clone()],
+                "reject",
+            ),
+        ] {
+            let report = check_entries(&entries).unwrap_or_else(|err| panic!("{name}: {err:#}"));
+            let read = tally(&entries).expect("tally");
+            assert_eq!(
+                (report.questions_with_live_ballots, counted(&read, stance)),
+                (1, Some(1)),
+                "a replayed ballot erased its voter ({name}): {read:?}"
+            );
+        }
+    }
+
+    #[test]
     fn one_key_counts_once_on_a_question() {
         let _home = test_home();
         let entries = [
