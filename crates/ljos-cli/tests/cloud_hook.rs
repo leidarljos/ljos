@@ -1054,7 +1054,7 @@ fn a_wget_config_that_moves_the_target_may_be_github() {
     let here = root.path();
     let line = "wget -q https://example.com/x";
 
-    fs::write(home.join(".wgetrc"), "method = POST\n").unwrap();
+    fs::write(home.join(".wgetrc"), "method = POST\nmax_redirect = 0\n").unwrap();
     allowed(line, here);
     for moved in [
         "input = /tmp/urls",
@@ -1067,18 +1067,29 @@ fn a_wget_config_that_moves_the_target_may_be_github() {
         "header = Host: api.github.com",
         "header = host:api.github.com",
     ] {
-        fs::write(home.join(".wgetrc"), format!("method = POST\n{moved}\n")).unwrap();
+        fs::write(
+            home.join(".wgetrc"),
+            format!("method = POST\nmax_redirect = 0\n{moved}\n"),
+        )
+        .unwrap();
         let hit = cloud_refusal(line, here);
         assert!(
             hit.is_some_and(|hit| hit.pattern == "cloud-cursor-push"),
             "`{moved}` in ~/.wgetrc was allowed"
         );
     }
-    fs::write(home.join(".wgetrc"), "method = POST\nheader = X-Host: a\n").unwrap();
+    fs::write(
+        home.join(".wgetrc"),
+        "method = POST\nmax_redirect = 0\nheader = X-Host: a\n",
+    )
+    .unwrap();
     allowed(line, here);
     fs::remove_file(home.join(".wgetrc")).unwrap();
 
-    allowed("wget --method=DELETE https://example.com/x", here);
+    allowed(
+        "wget --max-redirect=0 --method=DELETE https://example.com/x",
+        here,
+    );
     refused(
         "wget -e https_proxy=https://api.github.com/ --method=DELETE https://example.com/x",
         here,
@@ -1181,13 +1192,13 @@ fn a_wget_command_line_that_moves_the_target_may_be_github() {
         format!("--config {}", cfg.display()),
     ] {
         refused(
-            &format!("wget --method=POST {moved} https://example.invalid/x"),
+            &format!("wget --method=POST --max-redirect=0 {moved} https://example.invalid/x"),
             here,
         );
         allowed(&format!("wget {moved} https://example.invalid/x"), here);
     }
     allowed(
-        "wget --method=POST -O /tmp/i -nv https://example.invalid/x",
+        "wget --method=POST --max-redirect=0 -O /tmp/i -nv https://example.invalid/x",
         here,
     );
 
@@ -1208,7 +1219,7 @@ fn a_config_the_client_may_load_is_judged_beside_another_host() {
     ljos_cli::cloud::up(false).unwrap();
     let here = root.path();
     let curl = "curl -X POST https://example.com/x";
-    let wget = "wget --method=POST https://example.com/x";
+    let wget = "wget --method=POST --max-redirect=0 https://example.com/x";
     let target = root.path().join("target.rc");
     let link = |name: &str| {
         let path = home.join(name);
@@ -1232,7 +1243,7 @@ fn a_config_the_client_may_load_is_judged_beside_another_host() {
     std::os::unix::fs::symlink(&target, &named).unwrap();
     refused(
         &format!(
-            "wget --config={} --method=POST https://example.com/x",
+            "wget --config={} --method=POST --max-redirect=0 https://example.com/x",
             named.display()
         ),
         here,
@@ -1273,6 +1284,61 @@ fn a_config_the_client_may_load_is_judged_beside_another_host() {
         allowed(curl, here);
         fs::remove_file(home.join(".curlrc")).unwrap();
     }
+}
+
+/// A redirect can lead anywhere, and a 307 or 308 keeps the method.
+/// Curl follows one with `-L`. Wget follows one unless `max_redirect`
+/// is 0.
+#[test]
+fn a_followed_redirect_may_lead_to_github() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+
+    for follow in [
+        "-L",
+        "-sL",
+        "--location",
+        "--location-trusted",
+        "-L --no-location",
+    ] {
+        refused(
+            &format!("curl {follow} -X POST https://example.com/x"),
+            here,
+        );
+        allowed(&format!("curl {follow} https://example.com/x"), here);
+    }
+    allowed("curl -X POST https://example.com/x", here);
+    fs::write(home.join(".curlrc"), "location\n").unwrap();
+    refused("curl -X POST https://example.com/x", here);
+    fs::write(home.join(".curlrc"), "-L\n").unwrap();
+    refused("curl -X POST https://example.com/x", here);
+    fs::remove_file(home.join(".curlrc")).unwrap();
+
+    refused("wget --method=POST https://example.com/x", here);
+    refused("wget --post-data=a=b https://example.com/x", here);
+    refused(
+        "wget --max-redirect=0 --max-redirect=5 --method=POST https://example.com/x",
+        here,
+    );
+    allowed("wget https://example.com/x", here);
+    for stay in [
+        "--max-redirect=0",
+        "--max-redirect 0",
+        "--max-r=0",
+        "-e max_redirect=0",
+    ] {
+        allowed(
+            &format!("wget {stay} --method=POST https://example.com/x"),
+            here,
+        );
+    }
+    fs::write(home.join(".wgetrc"), "max_redirect = 0\n").unwrap();
+    allowed("wget --method=POST https://example.com/x", here);
+    fs::remove_file(home.join(".wgetrc")).unwrap();
 }
 
 /// A curl option that names a proxy, a resolver, a socket, an address
