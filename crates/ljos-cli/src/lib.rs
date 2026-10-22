@@ -29439,13 +29439,11 @@ fn record_listed(atom: &Value, proven: bool) {
     }
 }
 
-/// Record the stored origin of `atom`, an atom from a proven listing or
-/// by-id read, by its id. A record that carries no origin, an island row
-/// or a milli hit, says nothing of the stored one and records nothing.
+/// Record the stored origin of `atom`, a row from a proven listing, by
+/// its id. A row with no origin, a null one or an empty one is an
+/// agent's, as [`stored_by`] reads it, and overwrites a person recorded
+/// before: an older packsetd lists a stored row without its origin.
 pub(crate) fn keep_origin(atom: &Value) {
-    if carried_origin(atom).is_none() {
-        return;
-    }
     if let Some(id) = atom.get("id").and_then(Value::as_str) {
         record_held(id, atom);
     }
@@ -50649,8 +50647,16 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 atom["origin"] = origin;
             }
             assert_eq!(stored_by(&atom), StoredBy::Agent, "{atom}");
-            keep_origin(&atom);
-            assert_eq!(recorded(atom["id"].as_str().unwrap()), None, "{atom}");
+            let id = atom["id"].as_str().unwrap();
+            let readers: [fn(&Value); 2] = [keep_origin, |a| record_listed(a, true)];
+            for listed in readers {
+                let mut persons = atom.clone();
+                persons["origin"] = serde_json::json!("user-declared");
+                keep_origin(&persons);
+                assert_eq!(recorded(id), Some(Some(StoredBy::Person)), "{persons}");
+                listed(&atom);
+                assert_eq!(recorded(id), Some(Some(StoredBy::Agent)), "{atom}");
+            }
         }
 
         let listed = "0r1g1nle55000000000000000000000001";
