@@ -456,3 +456,158 @@ fn install_replaces_a_binary_that_is_running() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+/// gh writes "no attestations found" on stdout, and the attestation API
+/// answers HTTP 404. Both are a warning that names the reason. `--attest`
+/// still refuses the install.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn install_warns_when_no_attestation_is_published() {
+    let target = if cfg!(target_arch = "x86_64") {
+        "x86_64-unknown-linux-gnu"
+    } else {
+        "aarch64-unknown-linux-gnu"
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let stage = dir.path().join("stage");
+    let stubs = dir.path().join("stubs");
+    std::fs::create_dir_all(&stage).unwrap();
+    std::fs::create_dir_all(&stubs).unwrap();
+    let stub = "#!/bin/sh\nexit 0\n";
+    let gz = |name: &str, files: &[(&str, &str)]| pack(&stage, name, files, false);
+    let xz = |name: &str, files: &[(&str, &str)]| pack(&stage, name, files, true);
+    gz(
+        &format!("ljos-v9.9.9-{target}.tar.gz"),
+        &[("ljos", stub), ("ljos-mcp", stub)],
+    );
+    gz(
+        &format!("packset-v9.9.9-{target}.tar.gz"),
+        &[("packset", stub), ("packsetd", stub), ("packset-mcp", stub)],
+    );
+    xz(&format!("vissue-cli-{target}.tar.xz"), &[("vissue", stub)]);
+    xz(
+        &format!("vissue-mcp-{target}.tar.xz"),
+        &[("vissue-mcp", stub)],
+    );
+    gz(
+        &format!("deedar-v9.9.9-{target}.tar.gz"),
+        &[("deedar", stub)],
+    );
+    gz(
+        &format!("claimdag-v9.9.9-{target}.tar.gz"),
+        &[("claimdag", stub)],
+    );
+    gz(
+        &format!("ljos-policyd-v9.9.9-{target}.tar.gz"),
+        &[("ljos-policyd", stub)],
+    );
+    gz(
+        &format!("consensus-v9.9.9-{target}.tar.gz"),
+        &[("ljos-consensus", stub)],
+    );
+    script(
+        &stubs,
+        "curl",
+        "#!/bin/sh\n\
+         out=\n\
+         url=\n\
+         while [ $# -gt 0 ]; do\n\
+           case \"$1\" in\n\
+             -o) out=$2; shift 2 ;;\n\
+             -w|-H) shift 2 ;;\n\
+             -*) shift ;;\n\
+             *) url=$1; shift ;;\n\
+           esac\n\
+         done\n\
+         case \"$url\" in\n\
+           */releases/latest)\n\
+             repo=${url%/releases/latest}\n\
+             repo=${repo##*/}\n\
+             printf 'https://github.com/leidarljos/%s/releases/tag/v9.9.9' \"$repo\"\n\
+             exit 0 ;;\n\
+           */attestations/*)\n\
+             [ -n \"$out\" ] && : > \"$out\"\n\
+             printf '404'\n\
+             exit 0 ;;\n\
+         esac\n\
+         base=${url##*/}\n\
+         cp \"$STAGE/$base\" \"$out\"\n",
+    );
+    script(
+        &stubs,
+        "gh",
+        "#!/bin/sh\n\
+         case \"$1 $2\" in\n\
+           'attestation --help') exit 0 ;;\n\
+           'auth status') [ \"$GH_MODE\" = signed-in ]; exit ;;\n\
+           'attestation verify') printf '%s\\n' 'no attestations found'; exit 1 ;;\n\
+         esac\n\
+         exit 1\n",
+    );
+    let path = format!("{}:/usr/bin:/bin", stubs.display());
+    let run = |name: &str, mode: &str, extra: &[&str]| {
+        let home = dir.path().join(name);
+        std::fs::create_dir_all(&home).unwrap();
+        let out = Command::new("sh")
+            .arg(install_sh())
+            .args(["--no-onboard", "--no-embed", "--bin-dir"])
+            .arg(home.join("bin"))
+            .args(extra)
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", &path)
+            .env("STAGE", &stage)
+            .env("GH_MODE", mode)
+            .output()
+            .unwrap();
+        (out.status.success(), said(&out))
+    };
+    let (ok, text) = run("signed-in", "signed-in", &[]);
+    assert!(ok, "{text}");
+    assert!(
+        text.contains("no attestation published (no attestations found)"),
+        "{text}"
+    );
+    assert!(!text.contains("does not verify:"), "{text}");
+    assert!(text.contains("8 not published"), "{text}");
+    let (ok, text) = run("bundle", "bundle", &[]);
+    assert!(ok, "{text}");
+    assert!(
+        text.contains("no attestation published (HTTP 404)"),
+        "{text}"
+    );
+    assert!(!text.contains("does not verify:"), "{text}");
+    assert!(text.contains("8 not published"), "{text}");
+    let (ok, text) = run("attest", "signed-in", &["--attest"]);
+    assert!(!ok, "{text}");
+    assert!(text.contains("published no build attestation"), "{text}");
+}
+
+fn pack(stage: &Path, name: &str, files: &[(&str, &str)], xz: bool) {
+    let tree = stage.join(format!(".{name}.d"));
+    std::fs::create_dir_all(&tree).unwrap();
+    for (file, body) in files {
+        script(&tree, file, body);
+    }
+    let dest = stage.join(name);
+    let mut cmd = Command::new("tar");
+    cmd.arg("-C").arg(&tree);
+    cmd.arg(if xz { "-cJf" } else { "-czf" });
+    cmd.arg(&dest);
+    for (file, _) in files {
+        cmd.arg(file);
+    }
+    let out = cmd.output().unwrap();
+    assert!(out.status.success(), "{}", said(&out));
+    let sum = Command::new("sha256sum").arg(&dest).output().unwrap();
+    assert!(sum.status.success(), "{}", said(&sum));
+    let hex = String::from_utf8_lossy(&sum.stdout);
+    std::fs::write(
+        stage.join(format!("{name}.sha256")),
+        format!("{}\n", hex.split_whitespace().next().unwrap()),
+    )
+    .unwrap();
+}

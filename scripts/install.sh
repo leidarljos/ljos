@@ -50,8 +50,10 @@
 #     fetched from GitHub's public API (needs jq or python3 to read it)
 #     and checked offline
 # With none of them it says so once and goes on; --attest stops there.
-# An attestation that is found and does not verify is a warning, or
-# with --attest the end of the install. One line at the end sums up.
+# No published attestation (HTTP 404, or "no attestations found") is a
+# warning that names that reason. One that is found and does not verify
+# is a warning too, or with --attest the end of the install. One line
+# at the end sums up.
 #
 # A pinned version that has no release for this platform is built from
 # that version's crate, never from a newer one.
@@ -273,10 +275,17 @@ for a in json.load(open(sys.argv[1]))["attestations"]:
   esac
 }
 
+# The first line that says a build attestation was not published.
+attest_gap() {
+  grep -i -m 1 -E 'no attestations found|HTTP 404|404 Not Found' "$1" 2>/dev/null \
+    | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true
+}
+
 # Check FILE (whose SHA-256 is DIGEST) against the build attestations of
 # REPO's workflows. Prints one word: verified, missing (the release has
 # none), unchecked (nothing here can check one) or failed (found, and it
-# does not verify). --attest stops on anything but verified.
+# does not verify). --attest stops on anything but verified. gh writes
+# "no attestations found" on stdout, so both streams are kept.
 attest() {
   file=$1 repo=$2 digest=$3
   name=$(basename "$file")
@@ -285,9 +294,9 @@ attest() {
       printf 'unchecked'
       return ;;
     gh)
-      if gh attestation verify "$file" --repo "$OWNER/$repo" >/dev/null 2>"$TMP/attest.err"; then
+      if gh attestation verify "$file" --repo "$OWNER/$repo" >"$TMP/attest.err" 2>&1; then
         printf 'verified'
-      elif grep -qi 'no attestations found' "$TMP/attest.err"; then
+      elif [ -n "$(attest_gap "$TMP/attest.err")" ]; then
         [ "$ATTEST" = 0 ] || die "$name: $OWNER/$repo published no build attestation for it"
         printf 'missing'
       else
@@ -301,6 +310,7 @@ attest() {
   case $code in
     200) ;;
     404)
+      printf '%s\n' 'HTTP 404' > "$TMP/attest.err"
       [ "$ATTEST" = 0 ] || die "$name: $OWNER/$repo published no build attestation for it"
       printf 'missing'
       return ;;
@@ -312,7 +322,7 @@ attest() {
   bundles_of "$answer" > "$answer.jsonl" 2>/dev/null || : > "$answer.jsonl"
   ok=0
   if [ "$VERIFIER" = gh-bundle ]; then
-    gh attestation verify "$file" --repo "$OWNER/$repo" --bundle "$answer.jsonl" >/dev/null 2>"$TMP/attest.err" && ok=1
+    gh attestation verify "$file" --repo "$OWNER/$repo" --bundle "$answer.jsonl" >"$TMP/attest.err" 2>&1 && ok=1
   else
     # cosign 2.x reads this bundle format only behind --new-bundle-format;
     # cosign 3 reads it by default and may drop the flag.
@@ -323,7 +333,7 @@ attest() {
         if cosign verify-blob-attestation $flag --bundle "$answer.one" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             --certificate-identity-regexp "^https://github\.com/$OWNER/$repo/\.github/workflows/" \
-            --type https://slsa.dev/provenance/v1 "$file" >/dev/null 2>"$TMP/attest.err"; then
+            --type https://slsa.dev/provenance/v1 "$file" >"$TMP/attest.err" 2>&1; then
           ok=1
           break
         fi
@@ -333,6 +343,9 @@ attest() {
   fi
   if [ "$ok" = 1 ]; then
     printf 'verified'
+  elif [ -n "$(attest_gap "$TMP/attest.err")" ]; then
+    [ "$ATTEST" = 0 ] || die "$name: $OWNER/$repo published no build attestation for it"
+    printf 'missing'
   else
     [ "$ATTEST" = 0 ] || die "$name: its build attestation does not verify: $(head -n 1 "$TMP/attest.err" 2>/dev/null)"
     printf 'failed'
@@ -397,7 +410,13 @@ install_one() {
   label=$repo
   case $crate in *-mcp) label=$crate ;; esac
   say "  $label $tag"
-  [ "$attested" != failed ] || warn "$asset: its build attestation does not verify: $(head -n 1 "$TMP/attest.err" 2>/dev/null)"
+  gap=$(attest_gap "$TMP/attest.err")
+  if [ "$attested" = missing ] || { [ "$attested" = failed ] && [ -n "$gap" ]; }; then
+    [ -n "$gap" ] || gap=$(head -n 1 "$TMP/attest.err" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [ -n "$gap" ] && warn "$asset: no attestation published ($gap)"
+  elif [ "$attested" = failed ]; then
+    warn "$asset: its build attestation does not verify: $(head -n 1 "$TMP/attest.err" 2>/dev/null)"
+  fi
 }
 
 for pin in $PINS; do
