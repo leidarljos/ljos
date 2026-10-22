@@ -296,7 +296,12 @@ raise SystemExit(os.waitstatus_to_exitcode(status))
 
 fn keep_on_a_terminal(seat: &Seat, bin: &str, id: &str, workspace: &str) -> Output {
     const SCRIPT: &str = r#"
-import os, pty, sys
+import ctypes, os, pty, sys
+libc = ctypes.CDLL(None)
+libc.prctl.argtypes = [ctypes.c_int, ctypes.c_char_p]
+libc.prctl.restype = ctypes.c_int
+if libc.prctl(15, b"gnome-terminal-") != 0:
+    raise SystemExit(91)
 pid, fd = pty.fork()
 if pid == 0:
     os.execv(sys.argv[1], [sys.argv[1], "prefer", "--review", "--keep", sys.argv[2]])

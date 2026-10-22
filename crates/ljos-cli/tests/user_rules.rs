@@ -139,6 +139,9 @@ impl Home {
             .env_remove("POLICYD_BIN")
             .env_remove("POLICYD_REQUIRED")
             .env_remove("LJOS_SEAT")
+            // The CI job sets this. It means the process is not the person,
+            // and this command is the person's, so the variable stays here.
+            .env_remove("GITHUB_ACTIONS")
             .stdin(Stdio::null());
         for (key, _) in std::env::vars_os() {
             if key.to_str().is_some_and(runner_var) {

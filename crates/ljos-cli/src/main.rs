@@ -303,11 +303,13 @@ enum Cmd {
         /// Pull and push user rules through the tracker repository. Pass `--user`.
         #[arg(long)]
         sync: bool,
-        /// List preferences stored before a basis was kept. With `--keep`,
-        /// keep one of them as the person's, from a terminal with no runner.
+        /// List preferences stored before a basis was kept. With `--user`,
+        /// list user rules stored before one. With `--keep`, keep one as
+        /// the person's, from a terminal with no runner.
         #[arg(long)]
         review: bool,
-        /// Keep this older preference as the person's. Pass with `--review`.
+        /// Keep this older preference, or with `--user` this older user
+        /// rule, as the person's. Pass with `--review`.
         #[arg(long, value_name = "ID", requires = "review")]
         keep: Option<String>,
     },
@@ -1433,6 +1435,35 @@ fn run_command() -> Result<()> {
             review,
             keep,
         } => {
+            // A person-side prefer records the user-rule cutoff. Under a
+            // runner it does not, so a hook cannot decide which old rows
+            // are new.
+            ljos_cli::user_rules::note_cutoff();
+            if review && user {
+                if sync
+                    || promote.is_some()
+                    || forget.is_some()
+                    || why.is_some()
+                    || !text.is_empty()
+                    || !deny.is_empty()
+                    || !ask.is_empty()
+                    || as_persona.is_some()
+                    || !deny_mention.is_empty()
+                    || !deny_name.is_empty()
+                    || !deny_reply_to.is_empty()
+                    || !deny_reply_name.is_empty()
+                {
+                    bail!(
+                        "prefer: --user --review lists older user rules and takes none of the other flags"
+                    );
+                }
+                if let Some(id) = keep {
+                    print!("{}", ljos_cli::user_rules::keep_held(&id)?);
+                } else {
+                    print!("{}", ljos_cli::user_rules::review_list()?);
+                }
+                return Ok(());
+            }
             if review {
                 if user
                     || sync
@@ -2429,6 +2460,7 @@ fn run_command() -> Result<()> {
                 }
             }
             if !json {
+                ljos_cli::user_rules::note_cutoff();
                 print!("{}", ljos_cli::user_rules::format_list());
             }
         }

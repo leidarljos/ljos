@@ -309,6 +309,18 @@ fn setsid_prefer(seat: &Seat, text: &str) -> std::process::Output {
     detached(seat, "prefer", &format!("{bin} prefer '{text}'"))
 }
 
+/// `setsid -f` of `python3`, which then execs ljos. python is not a
+/// wrapper, so a check that reads the cgroup only for an all-wrapper
+/// chain never sees it. The environment is the seat's, with no runner
+/// variable.
+fn setsid_python_prefer(seat: &Seat, text: &str) -> std::process::Output {
+    let bin = ljos();
+    let body = format!(
+        "python3 -c 'import os, sys; os.execv(sys.argv[1], [sys.argv[1], \"prefer\", sys.argv[2]])' '{bin}' '{text}'"
+    );
+    detached(seat, "python", &body)
+}
+
 fn script_keep(seat: &Seat) -> std::process::Output {
     let log = seat.home.path().join("script.log");
     let bin = ljos();
@@ -470,30 +482,25 @@ fn detaching_does_not_make_this_process_the_person() {
         .unwrap();
     let direct_err = String::from_utf8_lossy(&direct.stderr);
     assert!(
-        direct_err.contains("needs a terminal"),
-        "a direct keep should miss the terminal, not the runner\n{}",
-        text_of(&direct)
-    );
-    assert!(
-        !direct_err.contains("a runner cannot keep"),
-        "the test process itself was taken for a runner\n{}",
+        direct_err.contains("a runner cannot keep"),
+        "the runner cgroup did not count without a detach\n{}",
         text_of(&direct)
     );
 
+    // python holds the pty. It is not a wrapper, and the cgroup still names
+    // the runner, so the typed command is the runner's.
     let shaped = terminal::shape(
         "terminal",
         ljos(),
         &["prefer", "Keep the release notes in one file."],
     );
     let typed = seat.command(terminal::PYTHON, &shaped).output().unwrap();
-    assert!(
-        typed.status.success(),
-        "terminal prefer\n{}",
-        text_of(&typed)
+    prefer_as_agent(
+        &seat,
+        &typed,
+        "release notes",
+        "terminal inside the runner cgroup",
     );
-    let stored = atoms(&seat.url);
-    let stored = by_text(&stored, "release notes");
-    assert_eq!(basis(stored), Some("person"), "{stored}");
 
     keep_refused(&setsid_keep(&seat), "setsid");
     keep_refused(&env_i_keep(&seat), "setsid env -i");
@@ -503,6 +510,12 @@ fn detaching_does_not_make_this_process_the_person() {
 
     let detached = setsid_prefer(&seat, "Name release branches after the month.");
     prefer_as_agent(&seat, &detached, "release branches", "setsid prefer");
+
+    // setsid -f python3: python is the parent, so the chain is not only
+    // wrappers, and the environment is the seat's clean one. The cgroup
+    // still has to count.
+    let via_python = setsid_python_prefer(&seat, "Write the notes before the tag.");
+    prefer_as_agent(&seat, &via_python, "before the tag", "setsid python3");
 
     let hook = forged_hook(&seat);
     assert!(hook.status.success(), "hook\n{}", text_of(&hook));
@@ -519,4 +532,176 @@ fn detaching_does_not_make_this_process_the_person() {
             .is_some_and(|text| text.contains("use bun"))
     });
     assert!(saved.is_none(), "forged hook stored {saved:?}");
+}
+
+/// `tmux send-keys` into a session that already exists types into a real
+/// pane. The pane has a terminal. The server was started in the runner's
+/// cgroup, so the command is still the runner's.
+#[test]
+fn tmux_send_keys_into_an_existing_session_is_not_the_person() {
+    ensure_runner_scope();
+    let daemon = Daemon::start();
+    let seat = Seat::on(daemon.url.clone());
+    let sock = seat.home.path().join("send.sock");
+    let out_path = seat.home.path().join("send.out");
+    let err_path = seat.home.path().join("send.err");
+    let done = seat.home.path().join("send.done");
+    let sock_s = sock.display().to_string();
+    let started = seat
+        .command(
+            "tmux",
+            &[
+                "-S",
+                &sock_s,
+                "-f",
+                "/dev/null",
+                "new-session",
+                "-d",
+                "-s",
+                "stay",
+            ],
+        )
+        .output()
+        .unwrap();
+    assert!(started.status.success(), "tmux\n{}", text_of(&started));
+    std::thread::sleep(Duration::from_millis(300));
+    let line = format!(
+        "{} prefer 'Use tabs in every Makefile.' >'{}' 2>'{}'; echo $? > '{}'",
+        ljos(),
+        out_path.display(),
+        err_path.display(),
+        done.display()
+    );
+    let sent = seat
+        .command(
+            "tmux",
+            &["-S", &sock_s, "send-keys", "-t", "stay", &line, "Enter"],
+        )
+        .output()
+        .unwrap();
+    assert!(sent.status.success(), "send-keys\n{}", text_of(&sent));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !done.is_file() {
+        assert!(
+            Instant::now() < deadline,
+            "send-keys did not run\n{}",
+            text_of(&sent)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = Command::new("tmux")
+        .args(["-S", &sock_s, "kill-server"])
+        .output();
+    let mut built = Command::new("true").output().unwrap();
+    built.stdout = std::fs::read(&out_path).unwrap_or_default();
+    built.stderr = std::fs::read(&err_path).unwrap_or_default();
+    if std::fs::read_to_string(&done).unwrap_or_default().trim() != "0" {
+        built.status = std::os::unix::process::ExitStatusExt::from_raw(1 << 8);
+    }
+    prefer_as_agent(&seat, &built, "every Makefile", "tmux send-keys");
+}
+
+/// A terminal shape with `GITHUB_ACTIONS` set is a CI job, not the person,
+/// including when the environment is otherwise the seat's.
+#[test]
+fn a_ci_shaped_environment_is_not_the_person() {
+    let daemon = Daemon::start();
+    let seat = Seat::on(daemon.url.clone());
+    let shaped = terminal::shape(
+        "terminal",
+        ljos(),
+        &["prefer", "Keep the CI notes in one file."],
+    );
+    let out = seat
+        .command(terminal::PYTHON, &shaped)
+        .env("GITHUB_ACTIONS", "true")
+        .output()
+        .unwrap();
+    prefer_as_agent(&seat, &out, "CI notes", "GITHUB_ACTIONS");
+}
+
+/// `systemd-run --user --scope` when the user bus answers, and otherwise
+/// the `run-*.scope` cgroup that command creates. A pty is attached, which
+/// is the shape that used to pass the terminal check after the environment
+/// was cleared.
+#[test]
+fn a_transient_scope_is_not_the_person() {
+    let daemon = Daemon::start();
+    let seat = Seat::on(daemon.url.clone());
+    let out = if user_bus_answers() {
+        systemd_run_prefer(&seat, "Keep release notes in one file.")
+    } else {
+        scope_prefer(&seat, "Keep release notes in one file.")
+    };
+    prefer_as_agent(&seat, &out, "release notes", "transient scope");
+}
+
+fn user_bus_answers() -> bool {
+    // Some systemd builds accept `--scope` and reject `--pty` on it
+    // (`--pty/--pipe is not compatible in timer or --scope mode`). The
+    // probe has to be the command the test runs, or that host takes a
+    // path that cannot start.
+    Command::new("systemd-run")
+        .args([
+            "--user",
+            "--scope",
+            "--collect",
+            "--quiet",
+            "--pty",
+            "--",
+            "true",
+        ])
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+fn systemd_run_prefer(seat: &Seat, text: &str) -> std::process::Output {
+    seat.command(
+        "systemd-run",
+        &[
+            "--user",
+            "--scope",
+            "--collect",
+            "--pty",
+            "--",
+            ljos(),
+            "prefer",
+            text,
+        ],
+    )
+    .output()
+    .unwrap_or_else(|err| panic!("systemd-run: {err}"))
+}
+
+/// Move a detached `script` into a transient scope and run `ljos prefer`
+/// on the pty `script` opens. The cgroup name is what `systemd-run
+/// --scope` uses, and it does not contain a runner's name.
+fn scope_prefer(seat: &Seat, text: &str) -> std::process::Output {
+    let cg = PathBuf::from("/sys/fs/cgroup/system.slice/run-u1000-ljostest.scope");
+    if !cg.is_dir() {
+        let made = Command::new("sudo")
+            .args(["-n", "mkdir", "-p"])
+            .arg(&cg)
+            .output()
+            .unwrap_or_else(|err| panic!("sudo mkdir {cg:?}: {err}"));
+        assert!(
+            made.status.success(),
+            "could not create {cg:?}\n{}",
+            text_of(&made)
+        );
+    }
+    let log = seat.home.path().join("scope-script.log");
+    let bin = ljos();
+    let procs = cg.join("cgroup.procs");
+    let body = format!(
+        "echo $$ | sudo -n tee '{procs}' >/dev/null && script -q -e -c \"{bin} prefer '{text}'\" '{log}'",
+        procs = procs.display(),
+        log = log.display(),
+    );
+    let mut out = detached(seat, "scope", &body);
+    if let Ok(logged) = std::fs::read(&log) {
+        out.stderr.extend(logged.iter().copied());
+        out.stdout.extend(logged);
+    }
+    out
 }
