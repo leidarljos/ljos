@@ -351,6 +351,14 @@ pub fn note_latest_prompt(prompt: &str) {
 
 /// [`note_latest_prompt`] recording `session`, the hook's session id.
 pub fn note_latest_prompt_for(prompt: &str, session: Option<&str>) {
+    let sessions: Vec<String> = session.map(str::to_string).into_iter().collect();
+    note_latest_prompt_as(prompt, &sessions);
+}
+
+/// [`note_latest_prompt`] recording every id in `sessions`: a runner may
+/// name one conversation by several, and the process that checks the
+/// bind sees whichever the runner stamped on it.
+pub fn note_latest_prompt_as(prompt: &str, sessions: &[String]) {
     if capture_mode() == CaptureMode::Off || pasted_or_quoted(prompt) {
         return;
     }
@@ -369,7 +377,7 @@ pub fn note_latest_prompt_for(prompt: &str, session: Option<&str>) {
         .open(&path)
         .and_then(|mut f| f.write_all(text.as_bytes()));
     if wrote.is_ok() {
-        let _ = write_prompt_bind(&path, text.as_bytes(), session);
+        let _ = write_prompt_bind(&path, text.as_bytes(), sessions);
     }
 }
 
@@ -398,12 +406,12 @@ fn bind_session(session: Option<&str>) -> String {
 }
 
 /// The bind the hook writes beside the prompt: version, sha256 of the
-/// bytes, mtime in nanoseconds, and the session id. The gate reads it
-/// back, so a later write of the prompt file no longer matches.
+/// bytes, mtime in nanoseconds, and the session ids, one a line. The gate
+/// reads it back, so a later write of the prompt file no longer matches.
 fn write_prompt_bind(
     path: &std::path::Path,
     bytes: &[u8],
-    session: Option<&str>,
+    sessions: &[String],
 ) -> std::io::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
@@ -411,7 +419,17 @@ fn write_prompt_bind(
         return Err(std::io::Error::other("prompt mtime"));
     };
     let hash = hex::encode(sha2::Sha256::digest(bytes));
-    let body = format!("1\n{hash}\n{mtime}\n{}\n", bind_session(session));
+    let mut ids: Vec<String> = Vec::new();
+    for s in sessions {
+        let s = bind_session(Some(s));
+        if s != "-" && !ids.contains(&s) {
+            ids.push(s);
+        }
+    }
+    if ids.is_empty() {
+        ids.push(bind_session(None));
+    }
+    let body = format!("1\n{hash}\n{mtime}\n{}\n", ids.join("\n"));
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -437,13 +455,14 @@ fn prompt_bind_matches(path: &std::path::Path) -> bool {
         return false;
     };
     let mut lines = bind.lines();
-    let (Some("1"), Some(hash), Some(stored), Some(session)) =
-        (lines.next(), lines.next(), lines.next(), lines.next())
-    else {
+    let (Some("1"), Some(hash), Some(stored)) = (lines.next(), lines.next(), lines.next()) else {
         return false;
     };
-    let session = crate::ballot_sig::field(session);
-    if session == "-" || !crate::ballot_sig::runner_sessions().contains(&session) {
+    let runner = crate::ballot_sig::runner_sessions();
+    let named = lines
+        .map(crate::ballot_sig::field)
+        .any(|s| s != "-" && runner.contains(&s));
+    if !named {
         return false;
     }
     hash == hex::encode(sha2::Sha256::digest(bytes)) && stored == mtime.to_string()
