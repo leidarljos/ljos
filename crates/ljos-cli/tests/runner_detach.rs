@@ -637,8 +637,20 @@ fn a_transient_scope_is_not_the_person() {
 }
 
 fn user_bus_answers() -> bool {
+    // Some systemd builds accept `--scope` and reject `--pty` on it
+    // (`--pty/--pipe is not compatible in timer or --scope mode`). The
+    // probe has to be the command the test runs, or that host takes a
+    // path that cannot start.
     Command::new("systemd-run")
-        .args(["--user", "--scope", "--collect", "--quiet", "--", "true"])
+        .args([
+            "--user",
+            "--scope",
+            "--collect",
+            "--quiet",
+            "--pty",
+            "--",
+            "true",
+        ])
         .output()
         .is_ok_and(|out| out.status.success())
 }
