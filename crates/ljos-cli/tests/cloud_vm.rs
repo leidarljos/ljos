@@ -2109,8 +2109,6 @@ fn cloud_guard_refuses_gh_api_aliases_ready_and_reopen() {
 
     for line in [
         "gh api repos/acme/widgets/issues -f title=t -f body=b",
-        "gh api graphql -f query='query { viewer { login } }'",
-        "gh api graphql -F query=@read.graphql",
         "gh pr comment --body 'please pr create a follow-up'",
     ] {
         let hit = refused(line, here);
@@ -2121,6 +2119,8 @@ fn cloud_guard_refuses_gh_api_aliases_ready_and_reopen() {
         "gh api repos/acme/widgets/pulls/7",
         "gh api --method GET repos/acme/widgets/pulls/7/merge",
         "gh api -X GET repos/acme/widgets/pulls -f per_page=5",
+        "gh api graphql -f query='query { viewer { login } }'",
+        "gh api graphql -F query=@read.graphql",
         "gh pr list",
         "gh pr checkout 7",
     ] {
@@ -2223,7 +2223,6 @@ fn cloud_guard_refuses_gh_api_ref_writes() {
         "gh api --method PATCH repos/acme/widgets/git/refs/heads/develop -f sha=0123456789012345678901234567890123456789",
         "gh api --method POST repos/acme/widgets/git/refs -f ref=refs/heads/develop -f sha=0123456789012345678901234567890123456789",
         "gh api graphql -f query='mutation { createRef(input: {repositoryId: \"R\", name: \"refs/heads/develop\", oid: \"O\"}) { clientMutationId } }'",
-        "gh api graphql -f query='query { viewer { login } }'",
         "gh api graphql -f query='mutation { addComment(input: {body: \"deleteRef\"}) { clientMutationId } }'",
     ] {
         let hit = refused(line, here);
@@ -2233,6 +2232,7 @@ fn cloud_guard_refuses_gh_api_ref_writes() {
         "gh api repos/acme/widgets/git/refs/heads/main",
         "gh api --method GET repos/acme/widgets/git/refs/heads/main",
         "gh api --paginate repos/acme/widgets/git/matching-refs/heads/develop",
+        "gh api graphql -f query='query { viewer { login } }'",
     ] {
         allowed(line, here);
     }
