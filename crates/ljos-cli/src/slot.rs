@@ -59,17 +59,26 @@ const SLOT_LINE: &str = "Note: \"slot: ";
 /// The tracker's history is incomplete after a deepen was tried
 /// ([`require_tracker_history`]). Missing parents are not "no slots".
 pub fn starts() -> std::result::Result<Option<Vec<Vec<String>>>, String> {
-    let Some(root) = ballot_sig::env_root() else {
-        return Ok(None);
-    };
-    if ballot_sig::git_in(&root, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true")
+    match ballot_sig::env_root() {
+        Some(root) => starts_in(&root),
+        None => Ok(None),
+    }
+}
+
+/// [`starts`] for the tracker at `root`.
+///
+/// # Errors
+///
+/// As [`starts`].
+pub fn starts_in(root: &Path) -> std::result::Result<Option<Vec<Vec<String>>>, String> {
+    if ballot_sig::git_in(root, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true")
     {
         return Ok(None);
     }
-    require_tracker_history(&root)?;
+    require_tracker_history(root)?;
     let pick = format!("-S{SLOT_LINE}");
     let log = ballot_sig::git_in(
-        &root,
+        root,
         &[
             "--no-pager",
             "log",
@@ -81,7 +90,7 @@ pub fn starts() -> std::result::Result<Option<Vec<Vec<String>>>, String> {
     .unwrap_or_default();
     let held = |commit: &str| {
         ballot_sig::git_in(
-            &root,
+            root,
             &["--no-pager", "grep", "-q", "-F", "-e", SLOT_LINE, commit],
         )
         .is_some()
@@ -109,18 +118,33 @@ pub fn starts() -> std::result::Result<Option<Vec<Vec<String>>>, String> {
 ///
 /// [`require_tracker_history`] could not make the history readable.
 pub fn stood(starts: &[Vec<String>], seat: &str, key: &str) -> std::result::Result<bool, String> {
-    if let Some(root) = ballot_sig::env_root() {
-        require_tracker_history(&root)?;
+    match ballot_sig::env_root() {
+        Some(root) => stood_in(&root, starts, seat, key),
+        None => Ok(false),
     }
+}
+
+/// [`stood`] in the tracker at `root`.
+///
+/// # Errors
+///
+/// As [`stood`].
+pub fn stood_in(
+    root: &Path,
+    starts: &[Vec<String>],
+    seat: &str,
+    key: &str,
+) -> std::result::Result<bool, String> {
+    require_tracker_history(root)?;
     if starts.is_empty() {
-        return pin_line_at("HEAD", seat, key);
+        return pin_line_at_in(root, "HEAD", seat, key);
     }
     for parents in starts {
         if parents.is_empty() {
             return Ok(false);
         }
         for parent in parents {
-            if !pin_line_at(parent, seat, key)? {
+            if !pin_line_at_in(root, parent, seat, key)? {
                 return Ok(false);
             }
         }
@@ -194,13 +218,16 @@ pub fn require_tracker_history(root: &Path) -> std::result::Result<(), String> {
         history_cache().ready.push(key);
         return Ok(());
     }
+    // Only a fetch that ran to the end is remembered, so a remote that
+    // did not answer is tried again on the next check.
     if !deepened {
         if let Some(remote) = remote_name(root) {
-            history_cache().deepened.push(key.clone());
-            deepen(root, &remote);
-            if !history_gap(root) {
-                history_cache().ready.push(key);
-                return Ok(());
+            if deepen(root, &remote) {
+                history_cache().deepened.push(key.clone());
+                if !history_gap(root) {
+                    history_cache().ready.push(key);
+                    return Ok(());
+                }
             }
         }
     }
@@ -227,9 +254,13 @@ fn history_cache() -> std::sync::MutexGuard<'static, HistoryCache> {
 
 /// Shallow history, missing objects, or parents rewritten by a replace
 /// ref or a grafts file. The rewrite is also refused up front in
-/// [`require_tracker_history`]: fetching does not remove it.
+/// [`require_tracker_history`]: fetching does not remove it. A git that
+/// could not say whether the checkout is shallow or missing objects is a
+/// gap too.
 fn history_gap(root: &Path) -> bool {
-    shallow_repo(root) || missing_objects(root) || parent_rewrite(root).is_some()
+    shallow_repo(root) != Some(false)
+        || missing_objects(root) != Some(false)
+        || parent_rewrite(root).is_some()
 }
 
 /// Why `root`'s parent list is not the one in the commit objects, or
@@ -291,14 +322,20 @@ fn git_abs(root: &Path, args: &[&str]) -> Option<std::path::PathBuf> {
     (!text.is_empty()).then(|| std::path::PathBuf::from(text))
 }
 
-fn shallow_repo(root: &Path) -> bool {
-    ballot_sig::git_in(root, &["rev-parse", "--is-shallow-repository"]).as_deref() == Some("true")
+/// Whether `root` is shallow; `None` when git did not answer.
+fn shallow_repo(root: &Path) -> Option<bool> {
+    match ballot_sig::git_in(root, &["rev-parse", "--is-shallow-repository"])?.as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
 }
 
-fn missing_objects(root: &Path) -> bool {
-    git_stdout(root, &["rev-list", "--objects", "--all", "--missing=print"])
-        .lines()
-        .any(|line| line.starts_with('?'))
+/// Whether `root` lacks an object reachable from a ref; `None` when the
+/// walk failed.
+fn missing_objects(root: &Path) -> Option<bool> {
+    ballot_sig::git_in(root, &["rev-list", "--objects", "--all", "--missing=print"])
+        .map(|text| text.lines().any(|line| line.starts_with('?')))
 }
 
 fn remote_name(root: &Path) -> Option<String> {
@@ -309,15 +346,24 @@ fn remote_name(root: &Path) -> Option<String> {
     })
 }
 
-fn deepen(root: &Path, remote: &str) {
-    git_fetch(root, &["fetch", "--unshallow", remote]);
-    if shallow_repo(root) {
-        git_fetch(root, &["fetch", "--deepen=2147483647", remote]);
+/// Fetch `remote`'s whole history into `root`. False when a fetch failed
+/// or the checkout is still shallow, or not known not to be.
+fn deepen(root: &Path, remote: &str) -> bool {
+    if !git_fetch(root, &["fetch", "--unshallow", remote]) {
+        return false;
+    }
+    match shallow_repo(root) {
+        Some(false) => true,
+        Some(true) => {
+            git_fetch(root, &["fetch", "--deepen=2147483647", remote])
+                && shallow_repo(root) == Some(false)
+        }
+        None => false,
     }
 }
 
-fn git_fetch(root: &Path, args: &[&str]) {
-    let _ = std::process::Command::new("git")
+fn git_fetch(root: &Path, args: &[&str]) -> bool {
+    std::process::Command::new("git")
         .arg("-c")
         .arg("protocol.file.allow=always")
         .arg("-C")
@@ -326,14 +372,8 @@ fn git_fetch(root: &Path, args: &[&str]) {
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status();
-}
-
-fn git_stdout(root: &Path, args: &[&str]) -> String {
-    let Ok(out) = ballot_sig::git_history(root).args(args).output() else {
-        return String::new();
-    };
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// A slot note's fields.
@@ -722,10 +762,20 @@ pub fn dropped_pins(pins: &BTreeMap<String, String>) -> Vec<String> {
 }
 
 fn pin_line_at(commit: &str, seat: &str, key: &str) -> std::result::Result<bool, String> {
-    if let Some(root) = ballot_sig::env_root() {
-        require_tracker_history(&root)?;
+    match ballot_sig::env_root() {
+        Some(root) => pin_line_at_in(&root, commit, seat, key),
+        None => Ok(false),
     }
-    let Some(text) = file_at(commit, ballot_sig::PIN_FILE) else {
+}
+
+fn pin_line_at_in(
+    root: &Path,
+    commit: &str,
+    seat: &str,
+    key: &str,
+) -> std::result::Result<bool, String> {
+    require_tracker_history(root)?;
+    let Some(text) = file_at_in(root, commit, ballot_sig::PIN_FILE) else {
         return Ok(false);
     };
     Ok(text.lines().any(|line| {
@@ -1157,11 +1207,9 @@ mod tests {
             git_ok(&shallow, &["rev-parse", "--is-shallow-repository"]).trim(),
             "true"
         );
-        std::env::set_var("VISSUE_ROOT", &shallow);
-
-        let at = starts().unwrap().expect("a git tracker");
+        let at = starts_in(&shallow).unwrap().expect("a git tracker");
         assert!(
-            stood(&at, "eessi", "aa").unwrap(),
+            stood_in(&shallow, &at, "eessi", "aa").unwrap(),
             "a seat pinned before slots did not stand after deepen: {at:?}"
         );
         assert_eq!(
@@ -1173,6 +1221,29 @@ mod tests {
             crate::ballot_sig::recorded_before_signing_in(&shallow, "probe-old", "elder", "rail")
                 .unwrap(),
             "a ballot recorded before the pin was not dated"
+        );
+    }
+
+    /// A deepen whose fetch failed is not remembered: once the remote
+    /// answers, the next check deepens.
+    #[test]
+    fn a_failed_deepen_is_tried_again() {
+        let _lock = crate::test_env_lock();
+        let root = tempfile::tempdir().unwrap();
+        quiet_git_config(root.path());
+        let origin = root.path().join("origin");
+        pinned_before_slots(&origin);
+        let shallow = shallow_of(root.path(), &origin);
+        let away = root.path().join("away");
+        std::fs::rename(&origin, &away).unwrap();
+        let err = require_tracker_history(&shallow).unwrap_err();
+        assert!(err.contains(HISTORY_INCOMPLETE), "{err}");
+        std::fs::rename(&away, &origin).unwrap();
+        require_tracker_history(&shallow).unwrap();
+        assert_eq!(
+            git_ok(&shallow, &["rev-parse", "--is-shallow-repository"]).trim(),
+            "false",
+            "the clone stayed shallow"
         );
     }
 
