@@ -299,8 +299,9 @@ pub fn public_key() -> Result<String> {
 /// A `.ljos/sync.toml` that is present and does not parse.
 pub fn scope_of_repo(root: &Path) -> Result<Option<Scope>> {
     let path = root.join(".ljos").join("sync.toml");
-    match std::fs::read_to_string(&path) {
-        Ok(text) => {
+    match read_beneath(root, ".ljos/sync.toml")? {
+        Some(bytes) => {
+            let text = String::from_utf8(bytes).with_context(|| path.display().to_string())?;
             let scope: Scope = toml::from_str(&text).with_context(|| path.display().to_string())?;
             check_scope_name(&path, &scope.name)?;
             if scope.name == CLOUD_SCOPE {
@@ -321,8 +322,7 @@ pub fn scope_of_repo(root: &Path) -> Result<Option<Scope>> {
             }
             Ok(Some(scope))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| path.display().to_string()),
+        None => Ok(None),
     }
 }
 
@@ -564,6 +564,141 @@ fn seal(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
     }
     std::fs::rename(&tmp, out)?;
     Ok(())
+}
+
+/// The directory `rel` below `root`, opened one component at a time with
+/// `O_NOFOLLOW`. A tracker can commit `.ljos` or `.ljos/atoms` as a
+/// symlink to a local directory, and reading through it imports logs
+/// that never were in the tracker. None when one is missing.
+fn open_dir_beneath(root: &Path, rel: &str) -> Result<Option<std::fs::File>> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::OpenOptionsExt;
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let mut dir = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(root)
+    {
+        Ok(dir) => dir,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).with_context(|| format!("sync: {}", root.display())),
+    };
+    let mut walked = root.to_path_buf();
+    for name in rel.split('/').filter(|name| !name.is_empty()) {
+        walked.push(name);
+        let cname = c_name(name)?;
+        // SAFETY: dir is an open directory fd and cname is NUL-terminated.
+        let fd = unsafe { libc::openat(dir.as_raw_fd(), cname.as_ptr(), flags) };
+        if fd < 0 {
+            let err = std::io::Error::last_os_error();
+            return match err.raw_os_error() {
+                Some(libc::ENOENT) => Ok(None),
+                Some(libc::ELOOP | libc::ENOTDIR) => Err(not_a_dir(&walked)),
+                _ => Err(err).with_context(|| format!("sync: {}", walked.display())),
+            };
+        }
+        // SAFETY: fd is new, owned here, and opened with O_CLOEXEC.
+        dir = unsafe { std::fs::File::from_raw_fd(fd) };
+    }
+    Ok(Some(dir))
+}
+
+fn c_name(name: &str) -> Result<std::ffi::CString> {
+    if name == "." || name == ".." {
+        bail!("sync: `{name}` is not a path component");
+    }
+    std::ffi::CString::new(name).map_err(|_| anyhow::anyhow!("sync: NUL in `{name}`"))
+}
+
+fn not_a_dir(path: &Path) -> anyhow::Error {
+    let linked = std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink());
+    let what = if linked {
+        "is a symlink"
+    } else {
+        "is not a directory"
+    };
+    anyhow::anyhow!(
+        "sync: {} {what}; nothing is read or written through it",
+        path.display()
+    )
+}
+
+fn split_rel(rel: &str) -> (&str, &str) {
+    rel.rsplit_once('/').unwrap_or(("", rel))
+}
+
+/// The bytes of the regular file `rel` below `root`, with no symlink at
+/// any component. None when it is missing.
+fn read_beneath(root: &Path, rel: &str) -> Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::fs::MetadataExt;
+    let (parent, name) = split_rel(rel);
+    let Some(dir) = open_dir_beneath(root, parent)? else {
+        return Ok(None);
+    };
+    let cname = c_name(name)?;
+    // SAFETY: dir is an open directory fd and cname is NUL-terminated.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            cname.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
+    };
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        return match err.raw_os_error() {
+            Some(libc::ENOENT) => Ok(None),
+            _ => bail!("sync: {} is not a regular file", root.join(rel).display()),
+        };
+    }
+    // SAFETY: fd is new, owned here, and opened with O_CLOEXEC.
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() || meta.nlink() != 1 {
+        bail!("sync: {} is not a regular file", root.join(rel).display());
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
+}
+
+/// Names in the directory `rel` below `root`, with no symlink at any
+/// component. Empty when it is missing.
+fn list_beneath(root: &Path, rel: &str) -> Result<Vec<String>> {
+    use std::os::fd::IntoRawFd;
+    let Some(dir) = open_dir_beneath(root, rel)? else {
+        return Ok(Vec::new());
+    };
+    let fd = dir.into_raw_fd();
+    // SAFETY: fd is an open directory fd owned here; fdopendir takes it.
+    let stream = unsafe { libc::fdopendir(fd) };
+    if stream.is_null() {
+        let err = std::io::Error::last_os_error();
+        // SAFETY: fdopendir failed, so fd is still ours to close.
+        unsafe { libc::close(fd) };
+        return Err(err).with_context(|| format!("sync: {}", root.join(rel).display()));
+    }
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: stream is open; readdir returns null at the end.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        // SAFETY: d_name is NUL-terminated inside the entry readdir returned.
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if let Ok(name) = name.to_str() {
+            if name != "." && name != ".." {
+                names.push(name.to_string());
+            }
+        }
+    }
+    // SAFETY: stream is open and closed once; this closes fd too.
+    unsafe { libc::closedir(stream) };
+    names.sort();
+    Ok(names)
 }
 
 /// The public key written above an age identity (`# public key: age1...`).
@@ -1130,12 +1265,8 @@ fn stale_scope_rels(root: &Path, scope: &Scope) -> Vec<String> {
             rels.push(format!(".ljos/atoms/{name}"));
         }
     };
-    if let Ok(entries) = std::fs::read_dir(log_dir(root)) {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                push(name);
-            }
-        }
+    for name in list_beneath(root, ".ljos/atoms").unwrap_or_default() {
+        push(&name);
     }
     if let Ok(out) = git(root, &["ls-files", "--", ".ljos/atoms"]) {
         if out.status.success() {
@@ -1278,11 +1409,10 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
 }
 
 fn any_log_file(root: &Path) -> bool {
-    std::fs::read_dir(log_dir(root))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .any(|entry| entry.path().to_string_lossy().ends_with(".jsonl.age"))
+    list_beneath(root, ".ljos/atoms")
+        .unwrap_or_default()
+        .iter()
+        .any(|name| name.ends_with(".jsonl.age"))
 }
 
 struct ImportJob {
@@ -1299,11 +1429,11 @@ fn import_jobs(root: &Path, scope: &Scope, me: &str) -> Result<(Vec<ImportJob>, 
     // its first miss. A log sealed to one of them that still does not open
     // is an error, and it is raised before the pack is asked.
     let mut mine: BTreeMap<PathBuf, String> = BTreeMap::new();
-    if let Ok(entries) = std::fs::read_dir(log_dir(root)) {
-        let mut paths: Vec<PathBuf> = entries
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.to_string_lossy().ends_with(".jsonl.age"))
+    {
+        let mut paths: Vec<PathBuf> = list_beneath(root, ".ljos/atoms")?
+            .into_iter()
+            .filter(|name| name.ends_with(".jsonl.age"))
+            .map(|name| log_dir(root).join(name))
             .collect();
         // `+` sorts before `.`, so `<host>+cloud` would be read before
         // `<host>`. The primary log comes first; retirement of every log
@@ -1334,9 +1464,11 @@ fn import_jobs(root: &Path, scope: &Scope, me: &str) -> Result<(Vec<ImportJob>, 
             }
             let identities = identities_for_open(&scope_name);
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            let bytes =
-                std::fs::read(&path).with_context(|| format!("sync: {}", path.display()))?;
-            match open_log(&bytes, &host, &scope_name, &format!(".ljos/atoms/{name}"))? {
+            let rel = format!(".ljos/atoms/{name}");
+            let Some(bytes) = read_beneath(root, &rel)? else {
+                continue;
+            };
+            match open_log(&bytes, &host, &scope_name, &rel)? {
                 Opened::Atoms(plain) => jobs.push(ImportJob {
                     host,
                     scope_name,
@@ -1691,6 +1823,9 @@ fn tracked_modes_are_regular(root: &Path, rel: &str) -> bool {
 }
 
 fn gone_log_state(root: &Path, rel: &str) -> GoneLog {
+    if open_dir_beneath(root, split_rel(rel).0).is_err() {
+        return GoneLog::Refused;
+    }
     let kind = worktree_kind(&root.join(rel));
     if matches!(kind, WorktreeKind::Unsafe) || !tracked_modes_are_regular(root, rel) {
         return GoneLog::Refused;
@@ -1857,24 +1992,6 @@ fn open_log(bytes: &[u8], host: &str, scope_name: &str, label: &str) -> Result<O
     )))
 }
 
-/// Read a regular file without following a symlink at the last component.
-fn read_regular_nofollow(path: &Path) -> Result<Vec<u8>> {
-    use std::io::Read;
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .with_context(|| format!("sync: {}", path.display()))?;
-    let meta = file.metadata()?;
-    if !meta.file_type().is_file() || meta.nlink() != 1 {
-        bail!("sync: {} is not a regular file", path.display());
-    }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    Ok(bytes)
-}
-
 fn sealed_bytes(root: &Path, rel: &str) -> Result<Option<Vec<u8>>> {
     if !tracked_modes_are_regular(root, rel) {
         bail!("sync: {rel} is not a regular file; the log was kept");
@@ -1884,7 +2001,9 @@ fn sealed_bytes(root: &Path, rel: &str) -> Result<Option<Vec<u8>>> {
         WorktreeKind::Unsafe => {
             bail!("sync: {rel} is not a regular file; the log was kept");
         }
-        WorktreeKind::Regular => read_regular_nofollow(&path).map(Some),
+        WorktreeKind::Regular => read_beneath(root, rel)?
+            .map(Some)
+            .with_context(|| format!("sync: {rel} went missing; the log was kept")),
         WorktreeKind::Missing if in_head(root, rel) => head_blob(root, rel).map(Some),
         WorktreeKind::Missing => Ok(None),
     }
