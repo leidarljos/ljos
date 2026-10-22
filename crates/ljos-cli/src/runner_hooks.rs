@@ -30,6 +30,109 @@ pub const RUNNERS: &[&str] = &[
     "openhands",
 ];
 
+#[derive(Clone, Copy)]
+struct RunnerContract {
+    asks: bool,
+    deny_by_exit: bool,
+}
+
+const RUNNER_CONTRACTS: &[(&str, RunnerContract)] = &[
+    (
+        "copilot",
+        RunnerContract {
+            asks: true,
+            deny_by_exit: false,
+        },
+    ),
+    (
+        "gemini",
+        RunnerContract {
+            asks: false,
+            deny_by_exit: false,
+        },
+    ),
+    (
+        "windsurf",
+        RunnerContract {
+            asks: false,
+            deny_by_exit: true,
+        },
+    ),
+    (
+        "factory",
+        RunnerContract {
+            asks: true,
+            deny_by_exit: true,
+        },
+    ),
+    (
+        "kiro",
+        RunnerContract {
+            asks: false,
+            deny_by_exit: true,
+        },
+    ),
+    (
+        "cline",
+        RunnerContract {
+            asks: false,
+            deny_by_exit: false,
+        },
+    ),
+    (
+        "qwen",
+        RunnerContract {
+            asks: true,
+            deny_by_exit: true,
+        },
+    ),
+    (
+        "crush",
+        RunnerContract {
+            asks: false,
+            deny_by_exit: true,
+        },
+    ),
+    (
+        "auggie",
+        RunnerContract {
+            asks: false,
+            deny_by_exit: false,
+        },
+    ),
+    (
+        "goose",
+        RunnerContract {
+            asks: false,
+            deny_by_exit: true,
+        },
+    ),
+    (
+        "amp",
+        RunnerContract {
+            asks: true,
+            deny_by_exit: true,
+        },
+    ),
+    (
+        "openhands",
+        RunnerContract {
+            asks: false,
+            deny_by_exit: true,
+        },
+    ),
+];
+
+fn contract(runner: &str) -> RunnerContract {
+    RUNNER_CONTRACTS
+        .iter()
+        .find_map(|(name, contract)| (*name == runner).then_some(*contract))
+        .unwrap_or(RunnerContract {
+            asks: false,
+            deny_by_exit: false,
+        })
+}
+
 /// Runners whose hook entry must name one program with no arguments (Amp's
 /// delegate) or a `.sh` file (Auggie): onboard writes this script beside
 /// the settings file, and the entry names it.
@@ -53,7 +156,15 @@ pub fn is_runner(name: &str) -> bool {
 
 /// Whether the runner shows the person a prompt on an `ask`.
 fn asks(runner: &str) -> bool {
-    matches!(runner, "copilot" | "factory" | "qwen" | "amp")
+    contract(runner).asks
+}
+
+fn reason_stderr(reason: &str) -> String {
+    if reason.trim().is_empty() {
+        "ljos denied this command.\n".to_string()
+    } else {
+        format!("{reason}\n")
+    }
 }
 
 /// The event names Gemini CLI uses, as the seat's.
@@ -309,12 +420,14 @@ pub fn answer(runner: &str, event: &str, out: &str) -> (String, String, i32) {
         );
     }
     let line = |v: Value| v.to_string() + "\n";
-    match (runner, said.decision.as_deref()) {
+    let reason = said.reason.clone();
+    let context = said.context.clone();
+    let mut rendered = match (runner, said.decision.as_deref()) {
         ("factory" | "qwen", _) => (out.to_string(), String::new(), 0),
         ("copilot", Some(d)) => (
             line(json!({
                 "permissionDecision": d,
-                "permissionDecisionReason": said.reason,
+                "permissionDecisionReason": reason.clone(),
             })),
             String::new(),
             0,
@@ -324,72 +437,79 @@ pub fn answer(runner: &str, event: &str, out: &str) -> (String, String, i32) {
             let mut v = Map::new();
             if let Some(d) = d {
                 v.insert("decision".into(), json!(d));
-                v.insert("reason".into(), json!(said.reason));
+                v.insert("reason".into(), json!(reason.clone()));
             }
-            if !said.context.is_empty() {
+            if !context.is_empty() {
                 v.insert(
                     "hookSpecificOutput".into(),
-                    json!({ "hookEventName": event, "additionalContext": said.context }),
+                    json!({ "hookEventName": event, "additionalContext": context }),
                 );
             }
             (line(Value::Object(v)), String::new(), 0)
         }
-        ("windsurf" | "kiro" | "goose", Some(_)) => (String::new(), said.reason + "\n", 2),
+        ("windsurf" | "kiro" | "goose", Some(_)) => (String::new(), reason_stderr(&reason), 2),
         ("goose", None) => (String::new(), String::new(), 0),
         ("openhands", Some(_)) => (
-            line(json!({ "decision": "deny", "reason": said.reason })),
-            said.reason + "\n",
+            line(json!({ "decision": "deny", "reason": reason.clone() })),
+            reason_stderr(&reason),
             2,
         ),
-        ("openhands", None) if !said.context.is_empty() => (
-            line(json!({ "additionalContext": said.context })),
+        ("openhands", None) if !context.is_empty() => (
+            line(json!({ "additionalContext": context })),
             String::new(),
             0,
         ),
-        ("amp", Some("ask")) => (String::new(), said.reason + "\n", 1),
-        ("amp", Some(_)) => (String::new(), said.reason + "\n", 2),
+        ("amp", Some("ask")) => (String::new(), reason_stderr(&reason), 1),
+        ("amp", Some(_)) => (String::new(), reason_stderr(&reason), 2),
         ("amp", None) => (String::new(), String::new(), 0),
         ("auggie", Some(d)) => (
             line(json!({ "hookSpecificOutput": {
                 "hookEventName": if event.is_empty() { "PreToolUse" } else { event },
                 "permissionDecision": d,
-                "permissionDecisionReason": said.reason,
+                "permissionDecisionReason": reason.clone(),
             }})),
             String::new(),
             0,
         ),
-        ("auggie", None) if !said.context.is_empty() => (
+        ("auggie", None) if !context.is_empty() => (
             line(json!({ "hookSpecificOutput": {
                 "hookEventName": if event.is_empty() { "PreToolUse" } else { event },
-                "additionalContext": said.context,
+                "additionalContext": context,
             }})),
             String::new(),
             0,
         ),
-        ("kiro", None) if !said.context.is_empty() => (said.context + "\n", String::new(), 0),
+        ("kiro", None) if !context.is_empty() => (context + "\n", String::new(), 0),
         ("windsurf" | "kiro", None) => (String::new(), String::new(), 0),
         ("cline", Some(_)) => (
-            line(json!({ "cancel": true, "errorMessage": said.reason })),
+            line(json!({ "cancel": true, "errorMessage": reason.clone() })),
             String::new(),
             0,
         ),
         ("cline", None) => {
             let mut v = json!({ "cancel": false });
-            if !said.context.is_empty() {
-                v["contextModification"] = json!(said.context);
+            if !context.is_empty() {
+                v["contextModification"] = json!(context);
             }
             (line(v), String::new(), 0)
         }
         ("crush", Some(d)) => (
-            line(json!({ "decision": d, "reason": said.reason })),
+            line(json!({ "decision": d, "reason": reason.clone() })),
             String::new(),
             0,
         ),
-        ("crush", None) if !said.context.is_empty() => {
-            (line(json!({ "context": said.context })), String::new(), 0)
+        ("crush", None) if !context.is_empty() => {
+            (line(json!({ "context": context })), String::new(), 0)
         }
         _ => (String::new(), String::new(), 0),
+    };
+    if said.decision.as_deref() == Some("deny") && contract(runner).deny_by_exit {
+        rendered.2 = 2;
+        if rendered.1.trim().is_empty() {
+            rendered.1 = reason_stderr(&reason);
+        }
     }
+    rendered
 }
 
 /// The event name in a runner's stdin, as the runner spelled it.
@@ -1001,6 +1121,20 @@ mod tests {
     const ASK: &str = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"a push"}}"#;
     const NOTE: &str = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"lesson: run the tests"}}"#;
 
+    #[test]
+    fn each_runner_has_one_contract_row() {
+        for runner in RUNNERS {
+            assert_eq!(
+                RUNNER_CONTRACTS
+                    .iter()
+                    .filter(|(name, _)| name == runner)
+                    .count(),
+                1,
+                "{runner}"
+            );
+        }
+    }
+
     fn payload(runner: &str, input: Value) -> Value {
         serde_json::from_str(&normalize_input(runner, &input.to_string())).unwrap()
     }
@@ -1111,23 +1245,23 @@ mod tests {
             assert!(err.contains("force push"), "{runner}");
         }
 
+        for runner in ["factory", "qwen"] {
+            let (out, err, code) = answer(runner, "PreToolUse", DENY);
+            assert_eq!(out.as_str(), DENY, "{runner}");
+            assert_eq!(code, 2, "{runner}");
+            assert!(err.contains("force push"), "{runner}: {err}");
+        }
+
         let (out, _, _) = answer("cline", "PreToolUse", DENY);
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["cancel"], json!(true));
         assert!(v["errorMessage"].as_str().unwrap().contains("force push"));
 
-        let (out, _, _) = answer("crush", "PreToolUse", DENY);
+        let (out, err, code) = answer("crush", "PreToolUse", DENY);
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["decision"], json!("deny"));
-
-        for runner in ["factory", "qwen"] {
-            let (out, _, code) = answer(runner, "PreToolUse", DENY);
-            assert_eq!(
-                (out.as_str(), code),
-                (DENY, 0),
-                "{runner} takes Claude Code's shape"
-            );
-        }
+        assert_eq!(code, 2);
+        assert!(err.contains("force push"));
     }
 
     #[test]
