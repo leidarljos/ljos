@@ -204,7 +204,7 @@ The hook books as a seat. The process tree is not one.
 The holder is =SEAT@TAG=, the same name =ljos claim= uses for that conversation. =LJOS_SESSION_ID= alone is kept as written.
 =LJOS_SEAT= wins when it is set and is not =seat=, =you=, =agent=, or a name that slugs to =runner=.
 Otherwise =seats.toml= is read through =CURSOR_CONVERSATION_ID=.
-The file is =$LJOS_SEATS= when that is set, otherwise =$XDG_CONFIG_HOME/ljos/seats.toml=, otherwise =~/.config/ljos/seats.toml=.
+The file is =$XDG_CONFIG_HOME/ljos/seats.toml= when that is absolute, otherwise =~/.config/ljos/seats.toml=. No variable names another file.
 Each key is a conversation id and each value is the seat name.
 An id with no row is =grokbot-= plus the first eight characters of the id.
 With none of these, an =ANTIGRAVITY_CONVERSATION_ID= books as =antigravity= and an =OPENCODE_SESSION_ID= books as =opencode=.

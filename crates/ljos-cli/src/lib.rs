@@ -3695,11 +3695,19 @@ pub fn registered_seat(seat: &str) -> Result<()> {
 
 /// The seats `path` lists, slugged: every name it maps a conversation to
 /// (`"ID" = "NAME"`) and every name in a `seats = [...]` array. `None`
-/// only when the file is missing.
+/// only when nothing is at the path; a link to nothing is an error.
 fn listed_seats(path: &Path) -> Result<Option<std::collections::BTreeSet<String>>> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if std::fs::symlink_metadata(path).is_ok() {
+                bail!(
+                    "the seats file {} links to a file that is not there, so no seat may write; nothing was written",
+                    path.display()
+                );
+            }
+            return Ok(None);
+        }
         Err(e) => bail!("cannot read the seats file {}: {e}", path.display()),
     };
     let table: toml::Table = toml::from_str(&text)
@@ -4354,20 +4362,14 @@ fn fallback_seat(id: &str) -> Option<String> {
     Some(format!("grokbot-{prefix}"))
 }
 
+/// `seats.toml` in the ljos config directory, the base every user config
+/// layer is read from. No variable names another file: a shell that could
+/// point the check at a file of its own would pass it.
 fn seats_file() -> PathBuf {
-    if let Some(path) = std::env::var_os("LJOS_SEATS").filter(|value| !value.is_empty()) {
-        return PathBuf::from(path);
-    }
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|value| !value.is_empty())
-                .map(|home| PathBuf::from(home).join(".config"))
-        })
-        .unwrap_or_else(|| PathBuf::from(".config"));
-    base.join("ljos").join("seats.toml")
+    config_base()
+        .unwrap_or_else(|| PathBuf::from(".config"))
+        .join("ljos")
+        .join("seats.toml")
 }
 
 fn mapped_seat(path: &Path, id: &str) -> Option<String> {
@@ -50927,7 +50929,6 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "LJOS_SEAT",
             "VISSUE_AGENT",
             "LJOS_HOLD",
-            "LJOS_SEATS",
             "CODEX_THREAD_ID",
             "CODEX_SESSION_ID",
             "GROK_SESSION_ID",
@@ -50941,7 +50942,6 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 std::env::remove_var(k);
             }
             std::env::set_var("XDG_RUNTIME_DIR", dir.path());
-            std::env::set_var("LJOS_SEATS", dir.path().join("seats.toml"));
             std::env::set_var("USER", "probe-login");
             std::env::set_var("GROK_SESSION_ID", "2c12969d-0000-4000-8000-000000000000");
         }
@@ -50951,8 +50951,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             source: "the login user".into(),
         });
         unsafe { std::env::set_var("LJOS_SEAT", "rohit") };
-        let named = doctor_seat_source();
-        let writes = write_seat("note");
+        let (named, writes) =
+            with_config_home(dir.path(), || (doctor_seat_source(), write_seat("note")));
         unsafe {
             for (k, v) in saved {
                 match v {
@@ -50987,15 +50987,14 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "LJOS_SEAT",
             "VISSUE_AGENT",
             "LJOS_HOLD",
-            "LJOS_SEATS",
             "CURSOR_CONVERSATION_ID",
             "XDG_RUNTIME_DIR",
         ];
         let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
         let dir = tempfile::tempdir().unwrap();
-        let seats = dir.path().join("seats.toml");
+        std::fs::create_dir_all(dir.path().join("ljos")).unwrap();
         std::fs::write(
-            &seats,
+            dir.path().join("ljos/seats.toml"),
             "\"0b1c2d3e-0000-4000-8000-000000000000\" = \"saddle\"\n",
         )
         .unwrap();
@@ -51004,14 +51003,13 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 std::env::remove_var(k);
             }
             std::env::set_var("XDG_RUNTIME_DIR", dir.path());
-            std::env::set_var("LJOS_SEATS", &seats);
             std::env::set_var(
                 "CURSOR_CONVERSATION_ID",
                 "0b1c2d3e-0000-4000-8000-000000000000",
             );
         }
-        let row = doctor_seat_source();
-        let seat = resolve_seat().seat;
+        let (row, seat) =
+            with_config_home(dir.path(), || (doctor_seat_source(), resolve_seat().seat));
         unsafe {
             for (k, v) in saved {
                 match v {

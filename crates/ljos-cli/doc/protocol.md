@@ -625,12 +625,15 @@ Every write records the seat that was checked. An `--assignee` (or MCP
 --assignee NAME` hands an issue to another seat, and NAME must itself be
 a seat the seats file lists.
 
-The seats file is `$LJOS_SEATS`, else `~/.config/ljos/seats.toml`. Its
+The seats file is `seats.toml` in the ljos config directory,
+`$XDG_CONFIG_HOME/ljos/seats.toml` when that is absolute, else
+`~/.config/ljos/seats.toml`; no variable names another file. Its
 seats are every string value at the top level, `"CONVERSATION-ID" =
 "NAME"` lines, and the strings of a `seats = ["NAME", ...]` array. With
 no file, any named seat writes. A file that lists no seat refuses every
 write, and a file that is not TOML refuses every write until it is
-fixed. Reads need no seat. `ljos doctor` shows the `seat source` row, a
+fixed. So does a seats file that cannot be read, or a link to a file
+that is not there. Reads need no seat. `ljos doctor` shows the `seat source` row, a
 warning, never a failure, when the seat is derived.
 
 ## One-command consent

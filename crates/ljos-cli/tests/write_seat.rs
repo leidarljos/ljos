@@ -358,3 +358,58 @@ fn a_seats_file_that_is_not_toml_refuses_every_write() {
     }
     assert_eq!(b.calls(), "", "nothing reached the tracker");
 }
+
+#[test]
+fn ljos_seats_does_not_point_the_check_at_another_file() {
+    let b = Bench::new();
+    let path = b.seats("seats = [\"saddle\"]\n");
+    let own = b.root.join("mine.toml");
+    std::fs::write(&own, "seats = [\"stranger\"]\n").unwrap();
+    let out = b.ljos_env(
+        &[
+            ("LJOS_SEAT", "stranger"),
+            ("LJOS_SEATS", own.to_str().unwrap()),
+        ],
+        &["note", "proj-aaaa", "progress"],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(err.contains("no seat named stranger"), "{err}");
+    assert!(err.contains(&path.display().to_string()), "{err}");
+    assert_eq!(b.calls(), "", "nothing reached the tracker");
+}
+
+#[test]
+fn a_seats_file_that_links_to_nothing_refuses_every_write() {
+    let b = Bench::new();
+    let path = b.seats("");
+    std::fs::remove_file(&path).unwrap();
+    std::os::unix::fs::symlink(b.root.join("gone.toml"), &path).unwrap();
+    for seat in ["saddle", "rohit"] {
+        for args in WRITES {
+            let out = b.ljos(Some(seat), args);
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                !out.status.success(),
+                "{seat} {args:?} went through: {out:?}"
+            );
+            assert!(
+                err.contains(&format!(
+                    "the seats file {} links to a file that is not there",
+                    path.display()
+                )),
+                "{seat} {args:?}: {err}"
+            );
+        }
+    }
+    assert_eq!(b.calls(), "", "nothing reached the tracker");
+
+    std::fs::remove_file(&path).unwrap();
+    b.ljos(Some("rohit"), &["note", "proj-aaaa", "progress"]);
+    let calls = b.calls();
+    let note = calls
+        .lines()
+        .find(|l| l.starts_with("vissue note proj-aaaa"))
+        .unwrap_or_else(|| panic!("rohit with no seats file wrote nothing: {calls}"));
+    assert!(note.ends_with("VISSUE_AGENT=rohit"), "{note}");
+}
