@@ -191,13 +191,13 @@ pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
     for voter in pins.keys() {
         validate_pin_voter(voter).with_context(|| format!("pin source: {pin_source}"))?;
     }
-    let tracker_pins = pins.clone();
+    let seat_pins = seat_pins(&pins);
     for entry in entries {
         verify_entry(entry)?;
         match &entry.entry {
             Entry::Question(question) => {
                 report.questions += 1;
-                observe_seat_pin(&tracker_pins, &question.opened_by, &entry.signature.key)
+                observe_seat_pin(&seat_pins, &question.opened_by, &entry.signature.key)
                     .with_context(|| format!("pin source: {pin_source}"))?;
                 crate::ballot_sig::observe_pin(
                     &mut pins,
@@ -208,7 +208,7 @@ pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
             }
             Entry::Ballot(ballot) => {
                 report.ballots += 1;
-                observe_seat_pin(&tracker_pins, &ballot.voter, &entry.signature.key)
+                observe_seat_pin(&seat_pins, &ballot.voter, &entry.signature.key)
                     .with_context(|| format!("pin source: {pin_source}"))?;
                 crate::ballot_sig::observe_pin(&mut pins, &ballot.voter, &entry.signature.key)
                     .with_context(|| format!("pin source: {pin_source}"))?;
@@ -221,8 +221,9 @@ pub fn check_entries(entries: &[SignedEntry]) -> Result<CheckReport> {
 
 /// Refuse a pin row the lookups would never match. Nothing is stripped:
 /// a BOM or a zero-width space before `seat-a` would leave that seat's
-/// pin unread. A row naming a tracker voter no record voter can spell,
-/// such as `judge:<model>`, is left alone.
+/// pin unread. A row with `/` must be a voter id as written. A bare row
+/// pins the seat [`voter_seat`] folds it to, so `inky@39u` pins `inky`
+/// and `judge:model-1.5` pins `judge-model-1-5`.
 fn validate_pin_voter(voter: &str) -> Result<()> {
     if !voter.bytes().all(|b| b.is_ascii_graphic()) {
         bail!("pin voter {voter:?} is not printable ASCII");
@@ -237,19 +238,50 @@ fn validate_pin_voter(voter: &str) -> Result<()> {
     Ok(())
 }
 
-fn observe_seat_pin(tracker_pins: &BTreeMap<String, String>, voter: &str, key: &str) -> Result<()> {
-    let Some((_, seat_or_run)) = split_voter(voter) else {
+/// Bare pin rows by the seat each folds to, as row to key. A seat the
+/// tracker pinned under two names, such as `inky` and `inky@39u`, holds
+/// both keys.
+fn seat_pins(pins: &BTreeMap<String, String>) -> BTreeMap<String, BTreeMap<String, String>> {
+    let mut seats: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for (row, key) in pins {
+        if row.contains('/') {
+            continue;
+        }
+        if let Some(seat) = voter_seat(row) {
+            seats
+                .entry(seat)
+                .or_default()
+                .insert(row.clone(), key.clone());
+        }
+    }
+    seats
+}
+
+/// Hold `voter` to its seat's pinned keys. The voter id is already
+/// canonical, so the part after `/` is the seat as [`seat_pins`] keys it.
+fn observe_seat_pin(
+    seat_pins: &BTreeMap<String, BTreeMap<String, String>>,
+    voter: &str,
+    key: &str,
+) -> Result<()> {
+    let Some((_, seat)) = split_voter(voter) else {
         return Ok(());
     };
-    let seat = crate::seat_slug(seat_or_run);
-    if let Some(seat_key) = tracker_pins.get(&seat).filter(|pinned| *pinned != key) {
-        bail!(
-            "{voter} is pinned through seat {seat} to key {}…, got {}…",
-            &seat_key[..12.min(seat_key.len())],
-            &key[..12.min(key.len())]
-        );
+    let Some(rows) = seat_pins.get(seat) else {
+        return Ok(());
+    };
+    if rows.values().any(|pinned| pinned == key) {
+        return Ok(());
     }
-    Ok(())
+    let pinned: Vec<String> = rows
+        .iter()
+        .map(|(row, pinned)| format!("{}… ({row})", &pinned[..12.min(pinned.len())]))
+        .collect();
+    bail!(
+        "{voter} is pinned through seat {seat} to key {}, got {}…",
+        pinned.join(" or "),
+        &key[..12.min(key.len())]
+    );
 }
 
 /// Validate every `.json` entry under `dir`.
@@ -1945,13 +1977,78 @@ mod tests {
                 err_chain(&err)
             );
         }
-        std::fs::write(
-            &pin_path,
-            format!("judge:model-1.5 {key}\ninky@39u {key}\nseat-b {key}\nalpha/run-101 {key}\n"),
-        )
-        .expect("pin");
-        check_entries(std::slice::from_ref(&entry))
-            .expect("tracker-only voters are not record seats");
+    }
+
+    #[test]
+    fn holder_judge_and_legacy_pin_rows_hold_their_seat() {
+        let _home = test_home();
+        let root = tempfile::tempdir().expect("root");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+        });
+        let at = "2026-10-21T10:00:00Z";
+        let key = sign_as(ballot_entry("beta/seat-b", "accept", at), 1)
+            .signature
+            .key;
+        let rows: String = [
+            "inky@39u",
+            "disk-saver-t4t",
+            "ljos-bot",
+            "judge:model-1.5",
+            "seat-b",
+            "alpha/run-101",
+        ]
+        .iter()
+        .map(|row| format!("{row} {key}\n"))
+        .collect();
+        std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), rows).expect("pin");
+        for (voter, seat) in [
+            ("alpha/inky", "inky"),
+            ("alpha/disk-saver", "disk-saver"),
+            ("alpha/ljosbot", "ljosbot"),
+            ("alpha/judge-model-1-5", "judge-model-1-5"),
+        ] {
+            let other = sign_as(ballot_entry(voter, "accept", at), 2);
+            let err = check_entries(std::slice::from_ref(&other))
+                .expect_err("a second key voted under a pinned seat's alias");
+            assert!(
+                err_chain(&err).contains(&format!("{voter} is pinned through seat {seat}")),
+                "{voter}: {}",
+                err_chain(&err)
+            );
+            let held = sign_as(ballot_entry(voter, "accept", at), 1);
+            check_entries(std::slice::from_ref(&held))
+                .unwrap_or_else(|err| panic!("{voter} under its pinned key: {err:#}"));
+        }
+        let free = sign_as(ballot_entry("alpha/seat-a", "accept", at), 2);
+        check_entries(std::slice::from_ref(&free)).expect("no row folds to seat-a");
+    }
+
+    #[test]
+    fn a_seat_pinned_under_two_names_takes_either_key() {
+        let _home = test_home();
+        let root = tempfile::tempdir().expect("root");
+        crate::with_env_mutation(|| {
+            // SAFETY: this test holds the process environment lock.
+            unsafe { std::env::set_var("VISSUE_ROOT", root.path()) };
+        });
+        let at = "2026-10-21T10:00:00Z";
+        let bare = sign_as(ballot_entry("alpha/inky", "accept", at), 1);
+        let tagged = sign_as(ballot_entry("beta/inky", "accept", at), 2);
+        let rows = format!(
+            "inky {}\ninky@39u {}\n",
+            bare.signature.key, tagged.signature.key
+        );
+        std::fs::write(root.path().join(crate::ballot_sig::PIN_FILE), rows).expect("pin");
+        check_entries(&[bare, tagged]).expect("each key the seat was pinned under");
+        let third = sign_as(ballot_entry("gamma/inky", "accept", at), 3);
+        let err = check_entries(std::slice::from_ref(&third)).expect_err("an unpinned key");
+        let text = err_chain(&err);
+        assert!(
+            text.contains("(inky)") && text.contains("(inky@39u)"),
+            "{text}"
+        );
     }
 
     #[test]
