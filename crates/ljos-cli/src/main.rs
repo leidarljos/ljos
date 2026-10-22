@@ -1037,7 +1037,7 @@ enum Cmd {
         /// Print every row, the ones that answer included.
         #[arg(long, visible_alias = "verbose")]
         all: bool,
-        /// Refresh runner skills and runner env files this ljos wrote. A skill edited by hand, and an env file ljos did not write, are left in place.
+        /// Refresh runner skills and runner env files this ljos wrote, and replace a stale cloud guard rule file. A skill edited by hand, an env file ljos did not write, and a cloud guard file that is missing or not a known older version are left in place.
         #[arg(long)]
         fix: bool,
     },
@@ -1303,6 +1303,7 @@ fn run_command() -> Result<()> {
         Cmd::Doctor { fix: true, .. } => {
             ljos_cli::runner_skills::refresh_for_fix();
             ljos_cli::runner_env::refresh_for_fix();
+            ljos_cli::cloud::replace_stale_guard();
         }
         Cmd::Doctor { .. } => {}
         _ => {
