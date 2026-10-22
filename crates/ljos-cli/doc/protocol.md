@@ -621,7 +621,9 @@ hook books. The seat is the one `ljos seat` prints, so a conversation id
 the seats file maps writes as that seat. A seat taken only from the
 program above the shell, or from the login user under a runner, is
 refused and nothing is written: `export LJOS_SEAT=NAME` and run it
-again. A hook that has no seat it may write as books nothing.
+again. A hook that has no seat it may write as books nothing. A commit
+in the tracker's own checkout is never booked, but the git hook checks
+its seat and says, in the book log too, when that seat may not write.
 
 Every write records the seat that was checked. An `--assignee` (or MCP
 `assignee`) that names another seat is refused; only `ljos release HEX

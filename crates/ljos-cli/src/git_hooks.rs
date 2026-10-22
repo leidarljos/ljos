@@ -721,7 +721,10 @@ fn book_commit(hook: &str) -> Result<()> {
         return Ok(());
     };
     let repo_path = PathBuf::from(&repo);
-    if crate::bookkeep::path_is_temp(Some(&repo_path)) || skip_repo(&repo_path) {
+    // A commit in the tracker's checkout is a tracker write: never booked,
+    // but its seat is checked as any other write's is.
+    let tracker = tracker_repo(&repo_path);
+    if !tracker && (crate::bookkeep::path_is_temp(Some(&repo_path)) || skip_repo(&repo_path)) {
         return Ok(());
     }
     let Some(head) = git_line(&["rev-parse", "HEAD"]) else {
@@ -731,7 +734,12 @@ fn book_commit(hook: &str) -> Result<()> {
     // grokbot-<id8> fallback, or an agy or opencode conversation, the
     // commit stays unbooked; a subagent is told.
     let Some(seat) = crate::git_hook_seat() else {
-        if crate::unseated_subagent() {
+        if tracker {
+            refuse_tracker_commit(
+                &head,
+                "no seat is named; export LJOS_SEAT=<your seat> to write the tracker",
+            );
+        } else if crate::unseated_subagent() {
             // Stdout: the installed hook shows that line and drops stderr.
             println!(
                 "ljos: commit {} not booked: this subagent has no seat; export LJOS_SEAT=<your seat> (the parent's) to book it",
@@ -744,10 +752,17 @@ fn book_commit(hook: &str) -> Result<()> {
     // Every path below writes the tracker: a repointed citation, a named
     // issue, an open sitting, a new claim.
     if let Err(e) = crate::write_seat("commit") {
-        println!(
-            "ljos: commit {} not booked: {e:#}",
-            &head[..head.len().min(12)]
-        );
+        if tracker {
+            refuse_tracker_commit(&head, &format!("{e:#}"));
+        } else {
+            println!(
+                "ljos: commit {} not booked: {e:#}",
+                &head[..head.len().min(12)]
+            );
+        }
+        return Ok(());
+    }
+    if tracker {
         return Ok(());
     }
     let _children = HookChildren::enter();
@@ -868,6 +883,28 @@ fn mid_rewrite() -> bool {
     dir.join("rebase-merge").is_dir()
         || dir.join("rebase-apply").is_dir()
         || dir.join("MERGE_HEAD").is_file()
+}
+
+/// Whether `repo` is the tracker's checkout, `VISSUE_ROOT` or `ISSUE_ROOT`.
+fn tracker_repo(repo: &Path) -> bool {
+    ["VISSUE_ROOT", "ISSUE_ROOT"].iter().any(|key| {
+        std::env::var_os(key)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .is_some_and(|root| useful_root(&root) && covered(repo, &root))
+    })
+}
+
+/// A tracker commit no seat that may write the tracker made. It has landed
+/// and a post-commit hook cannot take it back, so the refusal is said on
+/// stdout, which the installed hook shows, and kept in the book log.
+fn refuse_tracker_commit(head: &str, why: &str) {
+    let line = format!(
+        "ljos: tracker commit {} was not made by a seat that may write the tracker: {why}",
+        &head[..head.len().min(12)]
+    );
+    println!("{line}");
+    crate::bookkeep::log_line(&format!("git-hooks: {line}"));
 }
 
 fn skip_repo(repo: &Path) -> bool {

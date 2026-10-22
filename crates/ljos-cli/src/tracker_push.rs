@@ -672,6 +672,7 @@ fn git(dir: &Path, args: &[&str]) -> Output {
         .env("GIT_SEQUENCE_EDITOR", "true")
         .stdin(std::process::Stdio::null());
     crate::git_hooks::hook_child_env(&mut cmd);
+    crate::seat_git_child(&mut cmd);
     cmd.output().unwrap_or_else(|e| Output {
         status: std::process::ExitStatus::from_raw(1),
         stdout: Vec::new(),

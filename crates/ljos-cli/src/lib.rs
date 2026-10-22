@@ -3774,6 +3774,14 @@ pub fn checked_seat() -> Option<String> {
         .or_else(|| CALL_SEAT.try_with(|s| s.seat.clone()).ok())
 }
 
+/// Name [`checked_seat`] on a `git` child that may commit to the tracker,
+/// so the commit hook checks the seat this process writes as.
+pub(crate) fn seat_git_child(cmd: &mut std::process::Command) {
+    if let Some(seat) = checked_seat() {
+        cmd.env("LJOS_SEAT", seat);
+    }
+}
+
 /// Whether a conversation under a runner may accept a proposal: only one
 /// another conversation filed, such as a worker it started. `proposer` is
 /// the holder the proposal's atom names, `holder` this conversation's.
@@ -29480,6 +29488,7 @@ pub fn commit_paths(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
         clear_git_repo_env(&mut cmd);
         apply_git_command_env(&mut cmd);
         git_hooks::hook_child_env(&mut cmd);
+        seat_git_child(&mut cmd);
         cmd.output()
     };
     // `Err` is a busy index, with what git said.
