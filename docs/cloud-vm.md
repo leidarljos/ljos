@@ -101,7 +101,7 @@ A run's seat is new, and the tracker pins its key the first time it signs. Any w
 ljos slot ISSUE ridley-review --model grok-4 --run "$AGENT_ID"
 ```
 
-`ridley-review` is the run's `LJOS_SEAT`, and the run id is appended the way `cloud up` appends it. The slot is signed under the launcher's pinned key, and the launcher has to be a standing seat. `ljos consensus` and the push gate count the run's ballot on that issue when the slot verifies and that issue's own entry already held the line in the commit that introduced the run seat's pin. A copy of the line on another issue does not count, and an author date is not read. The push gate counts the same ballots `ljos consensus` counts: one session is one ballot. A standing seat needs no slot. On a tracker that is not a git repository only the list stands, and that order is not checked.
+`ridley-review` is the run's `LJOS_SEAT`, and the run id is appended the way `cloud up` appends it. The slot is signed under the launcher's pinned key, and the launcher has to be a standing seat. `ljos consensus` and the push gate count the run's ballot on that issue when the slot verifies and that issue's own entry already held the line in the commit that introduced the run seat's pin. A copy of the line on another issue does not count, and an author date is not read. The push gate counts the same ballots `ljos consensus` counts: one session is one ballot. A standing seat needs no slot. On a tracker that is not a git repository only the list stands, and that order is not checked. The push gate reads one line per seat from `.ljos-seat-keys`: a second line for a seat refuses the pin file, so appending a line does not re-pin a seat.
 
 ## A panel
 
