@@ -4,7 +4,6 @@
 //! on write. Consensus is a different crate, then the tracker verb. Policyd
 //! is argv law: this process does not reload a pack as a check.
 
-use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -27,6 +26,7 @@ pub mod extract;
 pub mod gates;
 pub mod git_hooks;
 pub mod hud;
+pub mod idle_drop;
 pub mod jev;
 mod kept_prompt;
 pub mod legacy_pref;
@@ -2224,18 +2224,6 @@ fn own_ancestry() -> Vec<(u32, String)> {
         .collect()
 }
 
-/// Whether the nearest session process above this one is one a person
-/// types into: a terminal emulator, a multiplexer or a login. A process
-/// that reaches the service manager or init first, or no session at all,
-/// was started by a program, whatever its stdin is.
-#[must_use]
-pub(crate) fn under_a_persons_terminal() -> bool {
-    ancestry()
-        .into_iter()
-        .find(|(_, comm)| is_session(comm))
-        .is_some_and(|(_, comm)| !comm.starts_with("systemd") && !comm.starts_with("init"))
-}
-
 /// Names ljos ships for runners, plus any the runners file adds.
 ///
 /// An absent runners file is not "no runners": the shapes in
@@ -2388,6 +2376,171 @@ pub fn under_a_runner() -> bool {
         return true;
     }
     wrappers_only() && scope_names_runner(&runners)
+}
+
+/// Variables a runner, or the hook it spawned, leaves on what it starts.
+const RUNNER_MARKS: &[&str] = &[
+    "CLAUDECODE",
+    "CURSOR_AGENT",
+    "LJOS_IN_HOOK",
+    "CODEX_SANDBOX",
+    "GEMINI_CLI",
+];
+
+/// Whether the person is at this process, on positive evidence: no
+/// runner's variable in the environment, and [`person_at_terminal`].
+/// Not being [`under_a_runner`] proves nothing, since a tool call can
+/// name its parent `systemd` or leave the runner by a double fork. Every
+/// basis of person a CLI verb decides asks this; anything less is the
+/// agent's.
+#[must_use]
+pub fn person_present() -> bool {
+    !std::env::vars().any(|(k, v)| runner_session_var(&k, &v) || RUNNER_MARKS.contains(&k.as_str()))
+        && person_at_terminal()
+}
+
+/// One `/proc/PID/stat` row, the fields [`person_at_terminal`] reads.
+#[cfg(target_os = "linux")]
+struct StatRow {
+    pid: u32,
+    comm: String,
+    ppid: u32,
+    pgrp: u32,
+    sid: u32,
+    tty: u32,
+    tpgid: i64,
+}
+
+#[cfg(target_os = "linux")]
+fn stat_row(pid: u32) -> Option<StatRow> {
+    let raw = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let comm = raw.get(raw.find('(')? + 1..raw.rfind(')')?)?.to_string();
+    let rest: Vec<&str> = raw.get(raw.rfind(')')? + 1..)?.split_whitespace().collect();
+    Some(StatRow {
+        pid,
+        comm,
+        ppid: rest.get(1)?.parse().ok()?,
+        pgrp: rest.get(2)?.parse().ok()?,
+        sid: rest.get(3)?.parse().ok()?,
+        tty: rest.get(4)?.parse().ok()?,
+        tpgid: rest.get(5)?.parse().ok()?,
+    })
+}
+
+/// Whether `holder` keeps the master side of pseudo-terminal `index` open.
+#[cfg(target_os = "linux")]
+fn holds_pty(holder: u32, index: u32) -> bool {
+    let Ok(fds) = std::fs::read_dir(format!("/proc/{holder}/fd")) else {
+        return false;
+    };
+    fds.flatten().any(|fd| {
+        let master = std::fs::read_link(fd.path())
+            .is_ok_and(|t| t == Path::new("/dev/ptmx") || t == Path::new("/dev/pts/ptmx"));
+        master
+            && std::fs::read_to_string(format!(
+                "/proc/{holder}/fdinfo/{}",
+                fd.file_name().to_string_lossy()
+            ))
+            .is_ok_and(|info| {
+                info.lines()
+                    .filter_map(|l| l.strip_prefix("tty-index:"))
+                    .any(|i| i.trim().parse() == Ok(index))
+            })
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A unit test that stands in for the person at a terminal, which
+    /// `cargo test` never has. The binaries are built without it.
+    pub(crate) static PERSON_AT_TERMINAL: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Whether the kernel says a person's terminal drives this process. Stdin
+/// is this process's controlling terminal, a pseudo-terminal, and its
+/// foreground group is ours. The session leader is this process or one
+/// above it, and the process above that leader holds the terminal's
+/// master side, as a terminal emulator, multiplexer or sshd does. The
+/// chain is read whole to pid 1, past any name: no process on it is a
+/// runner by name, program, install path or seat record, and none was
+/// reparented, which a process outside its own session with a parent in
+/// another shows. Names prove nothing here; a tool call picks its own.
+#[cfg(target_os = "linux")]
+fn person_at_terminal() -> bool {
+    #[cfg(test)]
+    if PERSON_AT_TERMINAL.with(std::cell::Cell::get) {
+        return true;
+    }
+    // SAFETY: isatty reads one descriptor's mode and cannot fail.
+    if unsafe { libc::isatty(0) } != 1 {
+        return false;
+    }
+    let Some(me) = stat_row(std::process::id()) else {
+        return false;
+    };
+    let Ok(rdev) = std::fs::metadata("/proc/self/fd/0").map(|m| {
+        use std::os::unix::fs::MetadataExt as _;
+        m.rdev()
+    }) else {
+        return false;
+    };
+    let (major, minor) = (
+        (me.tty >> 8) & 0xfff,
+        (me.tty & 0xff) | ((me.tty >> 12) & 0xfff00),
+    );
+    if me.tty == 0
+        || u64::from(major) != u64::from(libc::major(rdev))
+        || u64::from(minor) != u64::from(libc::minor(rdev))
+        || me.tpgid != i64::from(me.pgrp)
+    {
+        return false;
+    }
+    let Some(index) = std::fs::read_link("/proc/self/fd/0").ok().and_then(|t| {
+        t.strip_prefix("/dev/pts")
+            .ok()?
+            .to_str()?
+            .parse::<u32>()
+            .ok()
+    }) else {
+        return false;
+    };
+    let mut chain = vec![me];
+    while let Some(ppid) = chain.last().map(|r| r.ppid).filter(|&p| p > 0) {
+        if chain.len() > 64 {
+            return false;
+        }
+        let Some(row) = stat_row(ppid) else {
+            return false;
+        };
+        chain.push(row);
+    }
+    if chain.last().map(|r| r.pid) != Some(1) {
+        return false;
+    }
+    let reparented = chain
+        .windows(2)
+        .any(|w| w[0].sid != w[0].pid && w[0].sid != w[1].sid);
+    let Some(leader) = chain.iter().position(|r| r.pid == chain[0].sid) else {
+        return false;
+    };
+    let Some(holder) = chain.get(leader + 1) else {
+        return false;
+    };
+    let runners: Vec<String> = harnesses_with_shipped(&harnesses_path())
+        .map(|all| all.harness.into_iter().map(|h| h.name).collect())
+        .unwrap_or_default();
+    let runner = chain.iter().any(|r| {
+        seat_record_path(r.pid).exists()
+            || is_harness_program(&r.comm, &program_name(r.pid, &r.comm), &runners)
+            || proc_tree::exe_runner(r.pid).is_some()
+    });
+    !reparented && !runner && holds_pty(holder.pid, index)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn person_at_terminal() -> bool {
+    false
 }
 
 /// Path components that name a place, not a program.
@@ -3115,28 +3268,128 @@ fn login_user() -> String {
 /// The seat is a process name nobody chose.
 pub fn ballot_seat(verb: &str) -> Result<String> {
     let who = whoami();
+    match derived_seat(&who) {
+        Some(Derived::LoginUser) => bail!(
+            "{verb}: this shell runs under an agent runner, and nothing names its seat, \
+             so this ballot would count for {}, the login user. \
+             Set LJOS_SEAT to the seat's name (`export LJOS_SEAT=NAME`) and run it again; nothing was written",
+            who.seat
+        ),
+        Some(Derived::ProcessTree) => bail!(
+            "{verb}: no seat is named, so this ballot would count for {}, the program above this shell. \
+             Set LJOS_SEAT to the seat's name (`export LJOS_SEAT=NAME`) and run it again; nothing was written",
+            who.seat
+        ),
+        None => Ok(who.seat),
+    }
+}
+
+/// Where a seat nobody named came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Derived {
+    /// The program above this shell.
+    ProcessTree,
+    /// The login user of a shell under an agent runner.
+    LoginUser,
+}
+
+impl std::fmt::Display for Derived {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ProcessTree => "the program above this shell",
+            Self::LoginUser => "the login user of a shell under an agent runner",
+        })
+    }
+}
+
+/// Whether `who` is a seat nobody named: `LJOS_SEAT`, `VISSUE_AGENT`, an
+/// MCP client's name, a tool call's seat or a runner's record would each
+/// have named it. A person at a terminal with no runner above is their
+/// login user, and that is named enough.
+#[must_use]
+pub fn derived_seat(who: &Seat) -> Option<Derived> {
     let named = CALL_SEAT.try_with(|_| ()).is_ok()
         || ANNOUNCED.get().is_some()
         || named_var("LJOS_SEAT").is_some()
         || named_var("VISSUE_AGENT").is_some()
         || seat_from_tree_records().is_some()
         || seat_from_runner_env().is_some();
-    if !named && who.seat == login_user() && under_a_runner() {
+    if named {
+        return None;
+    }
+    if who.seat == login_user() && under_a_runner() {
+        return Some(Derived::LoginUser);
+    }
+    if program_above().is_some_and(|p| p.seat == who.seat) {
+        return Some(Derived::ProcessTree);
+    }
+    None
+}
+
+/// The seat a tracker write (note, claim, sitting, finish, file, deed) is
+/// made under. Refused, as a ballot is, when nothing named the seat: a
+/// subagent shell wrote hundreds of notes as `exec-daemon` and `cursor`.
+///
+/// # Errors
+///
+/// The seat is the program above this shell, or the login user under a
+/// runner.
+pub fn write_seat(verb: &str) -> Result<Seat> {
+    let who = whoami();
+    if let Some(from) = derived_seat(&who) {
         bail!(
-            "{verb}: this shell runs under an agent runner, and nothing names its seat, \
-             so this ballot would count for {}, the login user. \
-             Set LJOS_SEAT to the seat's name (`export LJOS_SEAT=NAME`) and run it again; nothing was written",
-            who.seat
+            "{verb}: no seat is named, so this write would be made as {}, {from}. \
+             Export LJOS_SEAT=NAME with your seat's name (the seats file is {}) and run it again; nothing was written",
+            who.seat,
+            seats_file().display()
         );
     }
-    if !named && program_above().is_some_and(|p| p.seat == who.seat) {
-        bail!(
-            "{verb}: no seat is named, so this ballot would count for {}, the program above this shell. \
-             Set LJOS_SEAT to the seat's name (`export LJOS_SEAT=NAME`) and run it again; nothing was written",
-            who.seat
-        );
+    registered_seat(&who.seat)?;
+    Ok(who)
+}
+
+/// Refuse a tracker write from a seat the seats file does not list. A
+/// file that lists no seat, or is missing as on a fresh single-user
+/// install, refuses nothing.
+///
+/// # Errors
+///
+/// The seats file lists seats and `seat` is not one of them, or the file
+/// cannot be read as TOML.
+pub fn registered_seat(seat: &str) -> Result<()> {
+    let path = seats_file();
+    let Some(listed) = listed_seats(&path)? else {
+        return Ok(());
+    };
+    let slug = canonical_seat_name(seat);
+    if listed.contains(&slug) {
+        return Ok(());
     }
-    Ok(who.seat)
+    bail!(
+        "no seat named {slug} in {}, which lists {}. \
+         Set LJOS_SEAT to a seat it lists, or add yours to it; nothing was written",
+        path.display(),
+        listed.into_iter().collect::<Vec<_>>().join(", ")
+    )
+}
+
+/// The seat names `path` maps conversations to, slugged. `None` when the
+/// file is missing or names no seat.
+fn listed_seats(path: &Path) -> Result<Option<std::collections::BTreeSet<String>>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => bail!("cannot read the seats file {}: {e}", path.display()),
+    };
+    let table: toml::Table = toml::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("the seats file {} is not TOML: {e}", path.display()))?;
+    let listed: std::collections::BTreeSet<String> = table
+        .values()
+        .filter_map(toml::Value::as_str)
+        .map(canonical_seat_name)
+        .filter(|slug| !slug.is_empty())
+        .collect();
+    Ok((!listed.is_empty()).then_some(listed))
 }
 
 /// Append one line, `ts seat verb what`, to the state dir's recall.log, so
@@ -3237,6 +3490,28 @@ fn occupancy_scope(assignee: &str, issue: &str) -> String {
         assignee.to_string()
     } else {
         format!("{assignee}:{issue}")
+    }
+}
+
+/// The doctor's `seat source` row: where the seat tracker writes go under
+/// came from. A seat nobody named is a warning, not a failure: reads work,
+/// and only the writes [`write_seat`] guards are refused.
+#[must_use]
+pub fn seat_source_row(who: &Seat) -> Habitat {
+    match derived_seat(who) {
+        Some(from) => Habitat {
+            name: "seat source",
+            state: format!(
+                "{} is derived from {from}; tracker writes are refused until LJOS_SEAT names the seat",
+                who.seat
+            ),
+            ok: false,
+        },
+        None => Habitat {
+            name: "seat source",
+            state: format!("{} named by {}", who.seat, who.source),
+            ok: true,
+        },
     }
 }
 
@@ -12810,6 +13085,19 @@ pub fn atoms_timeout() -> std::time::Duration {
     }
 }
 
+type Listing = Option<(std::time::Instant, String, Vec<Value>)>;
+
+/// The listing [`atoms_lean_shared`] last fetched. A whole pack, so a
+/// long-lived server drops it once idle.
+static LAST_LISTING: std::sync::Mutex<Listing> = std::sync::Mutex::new(None);
+
+/// Forget the listing [`atoms_lean_shared`] holds.
+pub fn drop_listing_cache() {
+    *LAST_LISTING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+}
+
 /// [`atoms_lean`] for the reads one prompt makes side by side (the due line
 /// and the mail): the second takes the listing the first fetched when it is
 /// under two seconds old, so the prompt pays for the listing once.
@@ -12818,10 +13106,8 @@ pub fn atoms_timeout() -> std::time::Duration {
 ///
 /// The pack not answering, or an answer that is not atoms.
 pub(crate) fn atoms_lean_shared(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>> {
-    type Listing = Option<(std::time::Instant, String, Vec<Value>)>;
-    static LAST: std::sync::Mutex<Listing> = std::sync::Mutex::new(None);
     let key = format!("{}|{workspace}", client.base());
-    let mut last = LAST
+    let mut last = LAST_LISTING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some((at, held, atoms)) = last.as_ref() {
@@ -13349,14 +13635,28 @@ impl Basis {
         }
     }
 
-    /// The basis of `text` given to a CLI verb: the person's at a terminal,
-    /// [`Basis::of`] under a runner.
+    /// The basis of `text` given to a CLI verb: the person's when
+    /// [`person_present`] proves them at the terminal, else [`Basis::of`].
     #[must_use]
     pub fn of_typed(text: &str) -> Self {
-        if under_a_runner() {
-            Self::of(text)
-        } else {
+        if person_present() {
             Self::Person
+        } else {
+            Self::of(text)
+        }
+    }
+
+    /// The basis of a rule a CLI verb writes: the person's only when
+    /// [`person_present`]. The prompt check does not raise a rule. The
+    /// kept prompt, its bind and the runner's transcript are all files the
+    /// agent's login can rewrite, and a reason clause in the prompt says
+    /// nothing of the pattern and verdict the rule enforces.
+    #[must_use]
+    pub fn of_rule() -> Self {
+        if person_present() {
+            Self::Person
+        } else {
+            Self::Agent
         }
     }
 }
@@ -14065,7 +14365,19 @@ fn note_queue_row() -> Habitat {
         ok: false,
         state,
     };
-    let bytes = match doctor_state_log("note queue", &queue) {
+    // One descriptor for the state dir serves the queue read and the
+    // damaged-file listing, so both see the same directory.
+    let opened = match open_state_dir(&queue) {
+        Ok(opened) => Some(opened),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return damaged(doctor_state_read("note queue", &queue, Err(err)).unwrap_err()),
+    };
+    let read = opened
+        .as_ref()
+        .map_or(Ok((Vec::new(), None)), |(fd, name)| {
+            read_state_file_dated_at(fd, name, &queue, DOCTOR_READ_LIMIT)
+        });
+    let bytes = match doctor_state_read("note queue", &queue, read) {
         Ok(bytes) => bytes,
         Err(state) => return damaged(state),
     };
@@ -14077,7 +14389,9 @@ fn note_queue_row() -> Habitat {
             queue.display()
         ));
     }
-    let set_aside = note_queue::set_aside_in(&dir);
+    let set_aside = opened
+        .map(|(fd, _)| note_queue::set_aside_at(&fd, &dir))
+        .unwrap_or_default();
     let state = if let Some(lock) = note_queue::busy_in(&dir) {
         format!(
             "{QUEUE_BUSY}another process holds {}, so a note may be landing or leaving; {waiting} note(s) wait. Run `ljos doctor` again once it lets go",
@@ -14339,13 +14653,13 @@ pub fn packset_write_remember_note(text: &str, persona: Option<&str>) -> Result<
 }
 
 pub fn packset_prefer(text: &str, persona: Option<&str>) -> Result<Value> {
-    if under_a_runner() {
-        if capture::said_in_latest_prompt(text) {
-            return packset_write_mcp("Prefer", text, persona, Some(false));
-        }
-        return packset_write_agent("Prefer", text, persona, Some(false));
+    if person_present() {
+        return packset_write_as("Prefer", text, persona, Some(false));
     }
-    packset_write_as("Prefer", text, persona, Some(false))
+    if capture::said_in_latest_prompt(text) {
+        return packset_write_mcp("Prefer", text, persona, Some(false));
+    }
+    packset_write_agent("Prefer", text, persona, Some(false))
 }
 
 /// [`packset_write`] for a lesson learned on an issue: it carries an
@@ -17472,20 +17786,25 @@ pub fn format_rules(rules: &[Rule], json: bool) -> String {
         .collect()
 }
 
-/// The live rules in a set of atoms.
-pub fn rules_of(atoms: &[Value]) -> Vec<Rule> {
+/// The live rules in a set of atoms. A reason the pack does not say the
+/// person stands behind, or any reason when `proven` is false because the
+/// listing did not ask for this seat's token, is labelled an unverified
+/// agent note, so no gate states it as the person's.
+pub fn rules_of(atoms: &[Value], proven: bool) -> Vec<Rule> {
     atoms
         .iter()
         .filter(|a| a.get("kind").and_then(Value::as_str) == Some("rule"))
         .filter_map(|a| {
+            let text = a.get("text").and_then(Value::as_str).unwrap_or("");
+            let reason = if text.is_empty() || (proven && person_stored(a)) {
+                text.to_string()
+            } else {
+                format!("unverified agent note: {text}")
+            };
             Some(Rule {
                 pattern: a.get("pattern")?.as_str()?.to_string(),
                 verdict: a.get("verdict")?.as_str()?.to_string(),
-                reason: a
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
+                reason,
             })
         })
         .collect()
@@ -17495,7 +17814,7 @@ pub fn rules_of(atoms: &[Value]) -> Vec<Rule> {
 pub fn rules_from_pack() -> Result<Vec<Rule>> {
     let client = pack()?;
     let atoms = atoms_lean(&client, &client.workspace()).context("rules: GET /v1/atoms failed")?;
-    Ok(rules_of(&atoms))
+    Ok(rules_of(&atoms, listing_asks(&client)))
 }
 
 /// The rules a gate judges by. A read from the pack is kept on disk, and
@@ -17519,7 +17838,7 @@ pub fn gate_read() -> (Vec<Rule>, Vec<(String, String)>) {
     });
     match listed {
         Ok((atoms, asks)) => {
-            let rules = rules_of(&atoms);
+            let rules = rules_of(&atoms, asks);
             if let Some(path) = &kept {
                 keep_rules(path, &rules);
             }
@@ -17609,7 +17928,7 @@ fn preferences_row() -> Habitat {
             let held_rows = legacy_pref::awaiting(&atoms);
             let held = held_rows.len();
             let (enforced, could, total) =
-                preferences_enforced(&preferences_of(&atoms), &rules_of(&atoms));
+                preferences_enforced(&preferences_of(&atoms), &rules_of(&atoms, true));
             let mut line = preferences_line(enforced, could, total);
             if held > 0 {
                 line.push_str(&format!("; {}", legacy_pref::review_sentence(&held_rows)));
@@ -22354,7 +22673,7 @@ impl From<StateRefusal> for std::io::Error {
 /// person pointed elsewhere, is followed as set. Every state-log read,
 /// write and rewrite goes through here, so the reader refuses the same
 /// links the writer does.
-fn open_state_dir(path: &Path) -> std::io::Result<(std::fs::File, std::ffi::CString)> {
+pub(crate) fn open_state_dir(path: &Path) -> std::io::Result<(std::fs::File, std::ffi::CString)> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::OpenOptionsExt;
     let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
@@ -22394,7 +22713,7 @@ fn open_state_dir(path: &Path) -> std::io::Result<(std::fs::File, std::ffi::CStr
 /// `O_NONBLOCK` is cleared once that check passes, so a later read of a
 /// real log waits for its bytes. A symlink fails the open (`ELOOP`) and is
 /// reported as one.
-fn open_regular_at(
+pub(crate) fn open_regular_at(
     dir: &std::fs::File,
     name: &std::ffi::CStr,
     path: &Path,
@@ -22471,9 +22790,20 @@ fn read_state_file_dated(
     path: &Path,
     limit: u64,
 ) -> std::io::Result<(Vec<u8>, Option<std::time::SystemTime>)> {
-    use std::io::Read;
     let (dir, name) = open_state_dir(path)?;
-    let mut file = match open_regular_at(&dir, &name, path, libc::O_RDONLY, 0) {
+    read_state_file_dated_at(&dir, &name, path, limit)
+}
+
+/// [`read_state_file_dated`] for `name` in the state dir already open as
+/// `dir`.
+fn read_state_file_dated_at(
+    dir: &std::fs::File,
+    name: &std::ffi::CStr,
+    path: &Path,
+    limit: u64,
+) -> std::io::Result<(Vec<u8>, Option<std::time::SystemTime>)> {
+    use std::io::Read;
+    let mut file = match open_regular_at(dir, name, path, libc::O_RDONLY, 0) {
         Ok(file) => file,
         Err(err) if err.raw_os_error() == Some(libc::ENOENT) => return Ok((Vec::new(), None)),
         Err(err) => return Err(err),
@@ -22860,9 +23190,18 @@ const DOCTOR_READ_LIMIT: u64 = 32 << 20;
 /// ahead of the clock than the grace is no live write either, since the
 /// kernel dates a write by the clock: it is a touch or a clock set back.
 fn doctor_state_log(what: &str, path: &Path) -> std::result::Result<Vec<u8>, String> {
+    doctor_state_read(what, path, read_state_file_dated(path, DOCTOR_READ_LIMIT))
+}
+
+/// [`doctor_state_log`]'s answer for a read of the log at `path`.
+fn doctor_state_read(
+    what: &str,
+    path: &Path,
+    read: std::io::Result<(Vec<u8>, Option<std::time::SystemTime>)>,
+) -> std::result::Result<Vec<u8>, String> {
     let damaged =
         |why: &dyn std::fmt::Display| format!("the {what} at {} is damaged: {why}", path.display());
-    let (bytes, modified) = match read_state_file_dated(path, DOCTOR_READ_LIMIT) {
+    let (bytes, modified) = match read {
         Ok(read) => read,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => return Err(damaged(&err)),
@@ -23120,6 +23459,7 @@ pub fn doctor_seat() -> Vec<Habitat> {
         state: format_seat_row(),
         ok: true,
     });
+    out.push(seat_source_row(&whoami()));
     out.push(cloud::mcp_row());
     out.push(cloud::guard_row());
     // Scope cloud is readable here when cloud up wrote its age identity.
@@ -23931,7 +24271,7 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     {
         return "warn";
     }
-    if row.name == "guard bypass" && !row.ok {
+    if (row.name == "guard bypass" || row.name == "seat source") && !row.ok {
         return "warn";
     }
     if row.ok && row.name == "policy" && row.state.ends_with(POLICY_TABLE_ONLY) {
@@ -27831,7 +28171,7 @@ pub fn not_assignee_message(
 }
 
 /// Whether a lesson given to `ljos finish` is the person's own: no agent
-/// runner above the process and a terminal on its input. Such a lesson is
+/// runner above the process and [`person_present`]. Such a lesson is
 /// written at once; one an agent gives waits for `ljos accept`.
 #[must_use]
 pub fn lesson_is_the_persons(under_runner: bool, terminal: bool) -> bool {
@@ -27900,7 +28240,7 @@ pub fn lesson_claims(text: &str) -> Vec<String> {
 fn finish_lesson(issue: &str, text: &str) -> String {
     let filed = (|| -> Result<String> {
         let scope = sync::scope_for_lesson(sync::scope_for_issue(issue));
-        let persons = lesson_is_the_persons(under_a_runner(), std::io::stdin().is_terminal());
+        let persons = lesson_is_the_persons(under_a_runner(), person_present());
         let prefix = "finish: POST /v1/atoms failed for the lesson";
         let client = pack()?;
         let workspace = client.workspace();
@@ -49832,6 +50172,51 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     #[test]
+    fn a_derived_seat_is_a_doctor_warning_that_fails_nothing() {
+        let _env = env_guard();
+        let keys = ["LJOS_SEAT", "VISSUE_AGENT", "XDG_RUNTIME_DIR"];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        let rt = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::remove_var("VISSUE_AGENT");
+            std::env::set_var("XDG_RUNTIME_DIR", rt.path());
+            std::env::set_var("LJOS_SEAT", "saddle");
+        }
+        let named = seat_source_row(&whoami());
+        assert!(named.ok, "{}", named.state);
+        assert_eq!(doctor_word(&named), "ok");
+        assert!(
+            named.state.contains("named by LJOS_SEAT"),
+            "{}",
+            named.state
+        );
+
+        unsafe { std::env::remove_var("LJOS_SEAT") };
+        let who = whoami();
+        let row = seat_source_row(&who);
+        assert_eq!(row.ok, derived_seat(&who).is_none(), "{}", row.state);
+        if !row.ok {
+            assert!(row.state.contains("LJOS_SEAT"), "{}", row.state);
+            assert_eq!(doctor_word(&row), "warn");
+        }
+        let warned = Habitat {
+            name: "seat source",
+            state: "exec-daemon is derived from the program above this shell".into(),
+            ok: false,
+        };
+        assert_eq!(doctor_word(&warned), "warn");
+        assert!(healthy(&[warned]), "a derived seat fails no doctor");
+        unsafe {
+            for (k, v) in saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_codex_call_and_its_shell_hold_one_name() {
         let _env = env_guard();
         let keys = [
@@ -54156,7 +54541,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             said.contains("completed the session node for probe-f1n5 as done"),
             "{said}"
         );
-        let persons = lesson_is_the_persons(under_a_runner(), std::io::stdin().is_terminal());
+        let persons = lesson_is_the_persons(under_a_runner(), person_present());
         if persons {
             assert!(said.contains("the lesson was not kept"), "{said}");
             assert!(
@@ -55056,6 +55441,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             std::env::set_var("LJOS_HOLD", "rohit");
             std::env::set_var("LJOS_SEAT", "claude");
         }
+        PERSON_AT_TERMINAL.with(|p| p.set(true));
         user_rules::write_preference(
             "never post or reply to Alan (ocaisa)",
             "he asked not to be pinged",

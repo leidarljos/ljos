@@ -60,7 +60,6 @@
 //!   `session:`. None of those read as the person before, and they are
 //!   not promoted.
 
-use std::io::IsTerminal;
 use std::sync::Mutex;
 
 use anyhow::{bail, Context, Result};
@@ -68,7 +67,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use serde_json::{json, Value};
 
 use crate::admit::ORIGIN_USER;
-use crate::{atoms_lean, pack, under_a_runner};
+use crate::{atoms_lean, pack, person_present, under_a_runner};
 
 /// The receipt that records the cutoff. Its server `ts` is the bound.
 const CUTOFF_ENTITY: &str = "receipt:pref-basis-cutoff";
@@ -292,14 +291,15 @@ fn source_field<'a>(atom: &'a Value, key: &str) -> &'a str {
 
 /// Keep one held-back preference or lesson as the person's.
 ///
-/// A runner is refused, and so is a pipe, and so is a pty with no
-/// terminal emulator, multiplexer or login above it. The person types
-/// this at a terminal of their own.
+/// A runner is refused, and so is anything [`person_present`] does not
+/// prove: a pipe, a pty a tool call opened, a process left by a double
+/// fork. The person types this at a terminal of their own.
 ///
 /// # Errors
 ///
 /// The id is not a held-back preference or lesson, this process is under
-/// a runner or not a terminal, or the pack refused the update.
+/// a runner or the person is not at its terminal, or the pack refused the
+/// update.
 pub fn keep(id: &str) -> Result<String> {
     if under_a_runner() {
         bail!(
@@ -307,17 +307,9 @@ pub fn keep(id: &str) -> Result<String> {
              Run `ljos prefer --review --keep {id}` from a terminal of your own"
         );
     }
-    if !std::io::stdin().is_terminal() {
+    if !person_present() {
         bail!(
             "prefer: keeping a preference or a lesson needs a terminal. \
-             Run `ljos prefer --review --keep {id}` from a terminal of your own"
-        );
-    }
-    // A program can open a pty and leave its runner behind, so the
-    // terminal has to be one a person opened.
-    if !crate::under_a_persons_terminal() {
-        bail!(
-            "prefer: no terminal emulator, multiplexer or login is above this process. \
              Run `ljos prefer --review --keep {id}` from a terminal of your own"
         );
     }
