@@ -1322,6 +1322,10 @@ mod tests {
                 std::env::set_var("LJOS_SEAT_KEY", &shared);
                 std::env::remove_var("LJOS_SEAT");
                 std::env::remove_var("VISSUE_AGENT");
+                // On GitHub Actions the run id names the run before the
+                // agent id does, and both signings would share it.
+                std::env::remove_var("GITHUB_ACTIONS");
+                std::env::remove_var("GITHUB_RUN_ID");
                 std::env::set_var("CURSOR_AGENT_ID", "agent-run-1111");
             }
         });

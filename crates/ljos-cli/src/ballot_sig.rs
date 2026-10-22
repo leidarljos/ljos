@@ -505,6 +505,23 @@ pub(crate) fn tracker_git(args: &[&str]) -> Option<String> {
     git_in(&env_root()?, args)
 }
 
+/// Whether `VISSUE_ROOT` names a git checkout. `None` when no tracker root is
+/// configured or git could not run.
+#[must_use]
+pub fn tracker_is_git_checkout() -> Option<bool> {
+    let root = env_root()?;
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return Some(false);
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim() == "true")
+}
+
 pub(crate) fn git_in(root: &Path, args: &[&str]) -> Option<String> {
     let out = std::process::Command::new("git")
         .arg("-C")
@@ -992,7 +1009,11 @@ fn signing_key(voter: &str) -> Result<(SigningKey, String)> {
         Some(p) if !pins().contains_key(voter.trim()) => pin_first(&p, voter.trim(), &mine)?,
         _ => pins(),
     };
-    if let Some(k) = pinned.get(voter.trim()).filter(|k| **k != mine) {
+    let mine_fp = key_fingerprint(&mine);
+    if let Some(k) = pinned
+        .get(voter.trim())
+        .filter(|k| key_fingerprint(k) != mine_fp)
+    {
         bail!(
             "seat {voter} is pinned to key {}…, and this key is {}…; the ballot is unsigned and no gate counts it",
             &k[..12.min(k.len())],
@@ -1346,7 +1367,7 @@ pub fn seat_check(
                 out.push(format!("{voter}'s signature does not verify"));
             }
             Some(n) => match pins.get(*voter) {
-                Some(k) if *k == n.key => {}
+                Some(k) if key_fingerprint(k) == key_fingerprint(&n.key) => {}
                 Some(_) => out.push(format!(
                     "{voter}'s ballot is signed by a key other than its pinned one"
                 )),
@@ -1378,9 +1399,26 @@ pub fn unsigned_allowed() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::process::Command;
 
     fn key(b: u8) -> SigningKey {
         SigningKey::from_bytes(&[b; 32])
+    }
+
+    fn git(dir: &Path, args: &[&str], env: &[(&str, String)]) {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(dir).args(args);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]
@@ -1570,6 +1608,61 @@ mod tests {
         let pins: BTreeMap<String, String> = [(
             "alice".to_string(),
             hex::encode(alice.verifying_key().to_bytes()),
+        )]
+        .into();
+        assert!(seat_problems("d-1", &[("alice", "ship")], &[note], &pins).is_empty());
+    }
+
+    #[test]
+    fn a_legacy_ballot_is_read_on_its_own_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("issues.org");
+        git(dir.path(), &["init"], &[]);
+        git(dir.path(), &["config", "user.name", "Rohit Goswami"], &[]);
+        git(
+            dir.path(),
+            &["config", "user.email", "rgoswami@ieee.org"],
+            &[],
+        );
+        std::fs::write(
+            &file,
+            "* TODO [#C] old\n:PROPERTIES:\n:ID:         probe-old\n:END:\n- [X] elder: rail\n",
+        )
+        .unwrap();
+        git(dir.path(), &["add", "issues.org"], &[]);
+        git(dir.path(), &["commit", "-m", "old ballot"], &[]);
+        std::fs::write(dir.path().join(PIN_FILE), "inky 00\n").unwrap();
+        git(dir.path(), &["add", PIN_FILE], &[]);
+        git(dir.path(), &["commit", "-m", "first pin"], &[]);
+        std::fs::write(
+            &file,
+            "* TODO [#C] old\n:PROPERTIES:\n:ID:         probe-old\n:END:\n- [X] elder: rail\n\
+             * TODO [#C] new\n:PROPERTIES:\n:ID:         probe-new\n:END:\n- [X] elder: rail\n",
+        )
+        .unwrap();
+        git(dir.path(), &["add", "issues.org"], &[]);
+        git(dir.path(), &["commit", "-m", "new ballot"], &[]);
+        assert!(recorded_before_signing_in(
+            dir.path(),
+            "probe-old",
+            "elder",
+            "rail"
+        ));
+        assert!(!recorded_before_signing_in(
+            dir.path(),
+            "probe-new",
+            "elder",
+            "rail"
+        ));
+    }
+
+    #[test]
+    fn seat_check_accepts_the_same_key_in_uppercase_hex() {
+        let alice = key(8);
+        let note = sign_with(&alice, "d-1", "alice", "ship");
+        let pins: BTreeMap<String, String> = [(
+            "alice".to_string(),
+            hex::encode(alice.verifying_key().to_bytes()).to_ascii_uppercase(),
         )]
         .into();
         assert!(seat_problems("d-1", &[("alice", "ship")], &[note], &pins).is_empty());

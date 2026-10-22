@@ -728,13 +728,10 @@ fn cloud_up_installs_points_the_harness_and_clones() {
     assert!(home.join(".local/bin/packsetd").is_file());
     let mcp = fs::read_to_string(home.join(".cursor/mcp.json")).unwrap();
     let doc: serde_json::Value = serde_json::from_str(&mcp).unwrap();
-    assert_eq!(doc["mcpServers"]["ljos"]["command"], "ljos-mcp", "{mcp}");
-    assert!(
-        !doc["mcpServers"]["ljos"]["command"]
-            .as_str()
-            .unwrap_or("")
-            .contains(home.to_str().unwrap()),
-        "{mcp}"
+    assert_eq!(
+        doc["mcpServers"]["ljos"]["command"],
+        server.display().to_string(),
+        "PATH did not have the install dir when cloud up started: {mcp}"
     );
     assert!(mcp.contains("\"LJOS_TRACKER_GIT\": \"push\""), "{mcp}");
     let env = fs::read_to_string(home.join(".config/ljos/env")).unwrap();
@@ -809,7 +806,11 @@ fn cloud_up_puts_ljos_mcp_on_path_before_the_config() {
     assert_eq!(fs::read_to_string(&marker).unwrap(), "ran");
     let mcp = fs::read_to_string(home.join(".cursor/mcp.json")).unwrap();
     let doc: serde_json::Value = serde_json::from_str(&mcp).unwrap();
-    assert_eq!(doc["mcpServers"]["ljos"]["command"], "ljos-mcp", "{mcp}");
+    assert_eq!(
+        doc["mcpServers"]["ljos"]["command"],
+        bin.join("ljos-mcp").display().to_string(),
+        "{mcp}"
+    );
     let bashrc = fs::read_to_string(home.join(".bashrc")).unwrap();
     let bin_line = format!("export PATH=\"{}:$PATH\"", bin.display());
     assert!(bashrc.contains(&bin_line), "{bashrc}");
@@ -905,6 +906,73 @@ fn cloud_up_puts_the_install_dir_ahead_of_a_stale_binary() {
     assert!(said.contains("cloud up wrote"), "{said}");
 }
 
+/// The Cursor command `cloud up` writes when it starts with `path` and
+/// installs into `bin`.
+fn cloud_up_command(root: &Path, bin: &Path, path: &str) -> String {
+    let home = root.join("home");
+    let rel = root.join("rel");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    let names = ["ljos", "ljos-mcp", "ljos-policyd"];
+    for name in names {
+        executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
+    }
+    fs::write(rel.join("SHA256SUMS"), sums(&rel, &names)).unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::set_var("LJOS_BIN_DIR", bin);
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::set_var("PATH", path);
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    clear_agent_ids();
+    let said = ljos_cli::cloud::up(false).unwrap();
+    let mcp = fs::read_to_string(home.join(".cursor/mcp.json")).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&mcp).unwrap();
+    let command = doc["mcpServers"]["ljos"]["command"].as_str();
+    command
+        .unwrap_or_else(|| panic!("{mcp}\n{said}"))
+        .to_string()
+}
+
+/// Putting the install dir first reaches this process and shells that
+/// read the edited profile. A client started any other way keeps the
+/// PATH `cloud up` found, so the bare name is written only when that PATH
+/// already runs this install. A trailing slash or a symlink names the
+/// same directory.
+#[test]
+fn cloud_up_writes_the_bare_name_only_when_path_already_runs_this_install() {
+    let _g = Guard::new();
+    for (shape, bare) in [
+        ("{stale}:/usr/bin:/bin", false),
+        ("{stale}:{bin}/:/usr/bin:/bin", false),
+        ("{stale}:{link}:/usr/bin:/bin", false),
+        ("{bin}/:/usr/bin:/bin", true),
+        ("{link}:{stale}:/usr/bin:/bin", true),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("custom/bin");
+        let stale = root.path().join("stale/bin");
+        let link = root.path().join("link");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&stale).unwrap();
+        executable(&stale.join("ljos-mcp"), "#!/bin/sh\nexit 1\n");
+        std::os::unix::fs::symlink(&bin, &link).unwrap();
+        let path = shape
+            .replace("{stale}", stale.to_str().unwrap())
+            .replace("{bin}", bin.to_str().unwrap())
+            .replace("{link}", link.to_str().unwrap());
+        let want = if bare {
+            "ljos-mcp".to_string()
+        } else {
+            bin.join("ljos-mcp").display().to_string()
+        };
+        assert_eq!(cloud_up_command(root.path(), &bin, &path), want, "{shape}");
+    }
+}
+
 #[test]
 fn cloud_up_writes_custom_ljos_bin_dir_into_shell_profiles() {
     let _g = Guard::new();
@@ -948,23 +1016,54 @@ fn cloud_up_writes_custom_ljos_bin_dir_into_shell_profiles() {
     assert!(line_at < guard_at, "{bashrc}");
 }
 
+/// The head of Ubuntu's `/etc/skel/.bashrc`, carried here because the
+/// host's own copy depends on its distribution.
+const UBUNTU_SKEL_BASHRC: &str = "\
+# ~/.bashrc: executed by bash(1) for non-login shells.
+# see /usr/share/doc/bash/examples/startup-files (in the package bash-doc)
+# for examples
+
+# If not running interactively, don't do anything
+case $- in
+    *i*) ;;
+      *) return;;
+esac
+
+# don't put duplicate lines or lines starting with space in the history.
+# See bash(1) for more options
+HISTCONTROL=ignoreboth
+";
+
 /// Ubuntu's skel bashrc returns from a `case $-` before any later PATH
 /// export. A non-interactive `bash -c '. ~/.bashrc'` never sees a line
 /// appended after that case.
 #[test]
 fn cloud_up_inserts_path_before_ubuntu_skel_interactive_case() {
     let _g = Guard::new();
-    let skel = fs::read_to_string("/etc/skel/.bashrc").unwrap();
-    assert!(
-        skel.contains("case $- in\n    *i*) ;;\n      *) return;;\n"),
-        "expected the Ubuntu skel case guard, got:\n{skel}"
+    assert_path_before_guard(UBUNTU_SKEL_BASHRC, "case $- in");
+}
+
+/// The same guard as an `if` whose test, `return` and `fi` are on lines
+/// of their own.
+#[test]
+fn cloud_up_inserts_path_before_a_multi_line_if_guard() {
+    let _g = Guard::new();
+    assert_path_before_guard(
+        "# rc\nif [ -z \"$PS1\" ]; then\n    return\nfi\necho prompt\n",
+        "if [ -z",
     );
+}
+
+/// Cloud up over a home whose `.bashrc` is `rc` puts the PATH export
+/// before `guard`, and a non-interactive bash that sources the file finds
+/// this install's `ljos-mcp`.
+fn assert_path_before_guard(rc: &str, guard: &str) {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("home");
     let rel = root.path().join("rel");
     fs::create_dir_all(&rel).unwrap();
     fs::create_dir_all(&home).unwrap();
-    fs::write(home.join(".bashrc"), &skel).unwrap();
+    fs::write(home.join(".bashrc"), rc).unwrap();
     for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
         executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
     }
@@ -988,9 +1087,7 @@ fn cloud_up_inserts_path_before_ubuntu_skel_interactive_case() {
     let bashrc = fs::read_to_string(home.join(".bashrc")).unwrap();
     let line = format!("export PATH=\"{}:$PATH\"", bin.display());
     let path_at = bashrc.find(&line).unwrap_or_else(|| panic!("{bashrc}"));
-    let guard_at = bashrc
-        .find("case $- in")
-        .unwrap_or_else(|| panic!("{bashrc}"));
+    let guard_at = bashrc.find(guard).unwrap_or_else(|| panic!("{bashrc}"));
     assert!(path_at < guard_at, "{bashrc}");
     let out = Command::new("bash")
         .arg("-c")
@@ -3215,20 +3312,99 @@ fn doctor_leaves_dollar_home_literal_for_opencode() {
         "{tilde}"
     );
     fs::remove_file(home.join(".config/opencode/opencode.json")).unwrap();
-    fs::create_dir_all(home.join(".cursor")).unwrap();
+    let config = root.path().join("mcp.json");
     fs::write(
-        home.join(".cursor/mcp.json"),
+        &config,
         serde_json::json!({
             "mcpServers": { "ljos": { "command": "$HOME/.local/bin/ljos-mcp" } }
         })
         .to_string(),
     )
     .unwrap();
+    std::env::set_var("LJOS_MCP_CONFIG", &config);
     assert!(
         ljos_cli::cloud::missing_mcp_line().is_none(),
         "a shell harness still expands $HOME: {:?}",
         ljos_cli::cloud::missing_mcp_line()
     );
+}
+
+/// Write `command` as the ljos entry of the JSON file at `path`, check it
+/// with doctor, and return the missing line.
+fn doctor_on_command(path: &Path, command: &str) -> Option<String> {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let doc = serde_json::json!({ "mcpServers": { "ljos": { "command": command } } });
+    fs::write(path, doc.to_string()).unwrap();
+    ljos_cli::cloud::missing_mcp_line()
+}
+
+/// Cursor substitutes `${env:NAME}` and `${userHome}` and nothing else
+/// (https://cursor.com/docs/context/mcp, "Config interpolation").
+#[test]
+fn doctor_expands_home_in_cursor_mcp_json_the_way_cursor_does() {
+    let _g = Guard::new();
+    clear_agent_ids();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    fs::create_dir_all(home.join(".local/bin")).unwrap();
+    executable(&home.join(".local/bin/ljos-mcp"), "#!/bin/sh\nexit 0\n");
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::remove_var("LJOS_MCP_CONFIG");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    let config = home.join(".cursor/mcp.json");
+    for ready in ["${env:HOME}", "${userHome}"] {
+        let command = format!("{ready}/.local/bin/ljos-mcp");
+        let line = doctor_on_command(&config, &command);
+        assert!(line.is_none(), "Cursor expands {command}: {line:?}");
+    }
+    for literal in ["$HOME", "${HOME}", "~"] {
+        let command = format!("{literal}/.local/bin/ljos-mcp");
+        let line = doctor_on_command(&config, &command).unwrap_or_default();
+        assert!(
+            line.contains(&format!("{command} does not exist")),
+            "Cursor leaves {command} as text: {line}"
+        );
+    }
+}
+
+/// Claude Code substitutes `${VAR}` and `${VAR:-default}` in the entries
+/// `claude mcp add` stores in ~/.claude.json, and keeps an unset `${VAR}`
+/// as written (https://docs.claude.com/en/docs/claude-code/mcp).
+#[test]
+fn doctor_expands_home_in_claude_json_the_way_claude_code_does() {
+    let _g = Guard::new();
+    clear_agent_ids();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    fs::create_dir_all(home.join(".local/bin")).unwrap();
+    executable(&home.join(".local/bin/ljos-mcp"), "#!/bin/sh\nexit 0\n");
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::remove_var("LJOS_MCP_CONFIG");
+    std::env::remove_var("LJOS_TEST_NO_SUCH_HOME");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    let config = home.join(".claude.json");
+    let fallback = format!("${{LJOS_TEST_NO_SUCH_HOME:-{}}}", home.display());
+    for ready in ["${HOME}", fallback.as_str()] {
+        let command = format!("{ready}/.local/bin/ljos-mcp");
+        let line = doctor_on_command(&config, &command);
+        assert!(line.is_none(), "Claude Code expands {command}: {line:?}");
+    }
+    for literal in [
+        "$HOME",
+        "~",
+        "${env:HOME}",
+        "${userHome}",
+        "${LJOS_TEST_NO_SUCH_HOME}",
+    ] {
+        let command = format!("{literal}/.local/bin/ljos-mcp");
+        let line = doctor_on_command(&config, &command).unwrap_or_default();
+        assert!(
+            line.contains(&format!("{command} does not exist")),
+            "Claude Code leaves {command} as text: {line}"
+        );
+    }
 }
 
 #[test]
@@ -3324,6 +3500,55 @@ fn doctor_warns_when_shell_path_finds_ljos_mcp() {
     assert!(row.state.contains("warning:"), "{row:?}");
 }
 
+/// An absolute `ljos-mcp` that exists is not proof it is this install. A
+/// stale copy left in another directory is what the client starts.
+#[test]
+fn doctor_warns_on_an_absolute_ljos_mcp_from_another_install() {
+    let _g = Guard::new();
+    clear_agent_ids();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join(".local/bin");
+    let old = home.join("old/bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&old).unwrap();
+    executable(&bin.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
+    executable(&old.join("ljos-mcp"), "#!/bin/sh\nexit 1\n");
+    fs::create_dir_all(home.join(".cursor")).unwrap();
+    let write = |command: &Path| {
+        let doc = serde_json::json!({
+            "mcpServers": { "ljos": { "command": command, "args": [] } }
+        });
+        fs::write(home.join(".cursor/mcp.json"), doc.to_string()).unwrap();
+    };
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+    std::env::remove_var("LJOS_MCP_CONFIG");
+
+    write(&old.join("ljos-mcp"));
+    let row = ljos_cli::cloud::mcp_row();
+    assert_eq!(ljos_cli::doctor_word(&row), "warn", "{row:?}");
+    assert!(
+        row.state
+            .contains(&old.join("ljos-mcp").display().to_string()),
+        "{row:?}"
+    );
+    assert!(
+        row.state
+            .contains(&bin.join("ljos-mcp").display().to_string()),
+        "{row:?}"
+    );
+    assert!(
+        row.state.contains("ljos onboard --harness cursor"),
+        "{row:?}"
+    );
+
+    write(&bin.join("ljos-mcp"));
+    let row = ljos_cli::cloud::mcp_row();
+    assert_eq!(ljos_cli::doctor_word(&row), "ok", "{row:?}");
+}
+
 #[test]
 fn doctor_respects_env_path_in_the_entry() {
     let _g = Guard::new();
@@ -3388,24 +3613,90 @@ fn doctor_reads_path_from_the_ljos_entry_only() {
         owned.contains("not on env.PATH"),
         "the ljos table's own PATH still counts: {owned}"
     );
+}
 
-    fs::remove_file(home.join(".codex/config.toml")).unwrap();
-    fs::create_dir_all(home.join(".cursor")).unwrap();
-    for value in ["${env:PATH}", "$PATH"] {
-        fs::write(
+/// env.PATH is read with the client's own syntax: Cursor `${env:PATH}`
+/// (https://cursor.com/docs/context/mcp), Claude Code `${PATH}`
+/// (https://docs.claude.com/en/docs/claude-code/mcp), hermes `${PATH}` or
+/// `${env:PATH}` (https://hermes-agent.nousresearch.com/docs/reference/mcp-config-reference),
+/// and Codex none.
+#[test]
+fn doctor_expands_env_path_the_way_each_client_does() {
+    let _g = Guard::new();
+    clear_agent_ids();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let bin = home.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    executable(&bin.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+    std::env::remove_var("LJOS_MCP_CONFIG");
+    let json = |path: &Path, value: &str| {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let doc = serde_json::json!({
+            "mcpServers": { "ljos": { "command": "ljos-mcp", "env": { "PATH": value } } }
+        });
+        fs::write(path, doc.to_string()).unwrap();
+        ljos_cli::cloud::missing_mcp_line()
+    };
+    let cases = [
+        (
             home.join(".cursor/mcp.json"),
+            "${env:PATH}",
+            ["$PATH", "${PATH}"],
+        ),
+        (
+            home.join(".claude.json"),
+            "${PATH}",
+            ["$PATH", "${env:PATH}"],
+        ),
+    ];
+    for (path, ready, literals) in cases {
+        let line = json(&path, ready);
+        assert!(
+            line.is_none(),
+            "{} expands {ready}: {line:?}",
+            path.display()
+        );
+        for literal in literals {
+            let line = json(&path, literal).unwrap_or_default();
+            assert!(
+                line.contains("ljos-mcp is not on env.PATH"),
+                "{} leaves {literal} as text: {line}",
+                path.display()
+            );
+        }
+        fs::remove_file(&path).unwrap();
+    }
+
+    let hermes = home.join(".hermes/config.yaml");
+    fs::create_dir_all(hermes.parent().unwrap()).unwrap();
+    for ready in ["${PATH}", "${env:PATH}"] {
+        fs::write(
+            &hermes,
             format!(
-                "{{\"mcpServers\":{{\"ljos\":{{\"command\":\"ljos-mcp\",\"args\":[],\"env\":{{\"PATH\":\"{value}\"}}}}}}}}\n"
+                "mcp_servers:\n  ljos:\n    command: ljos-mcp\n    env:\n      PATH: \"{ready}\"\n"
             ),
         )
         .unwrap();
-        let expanded = ljos_cli::cloud::missing_mcp_line();
-        assert!(
-            expanded.is_none(),
-            "{value} in JSON env.PATH should expand: {}",
-            expanded.unwrap_or_default()
-        );
+        let line = ljos_cli::cloud::missing_mcp_line();
+        assert!(line.is_none(), "hermes expands {ready}: {line:?}");
     }
+    fs::remove_file(&hermes).unwrap();
+
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(
+        home.join(".codex/config.toml"),
+        "[mcp_servers.ljos]\ncommand = \"ljos-mcp\"\n\n[mcp_servers.ljos.env]\nPATH = \"$PATH\"\n",
+    )
+    .unwrap();
+    let line = ljos_cli::cloud::missing_mcp_line().unwrap_or_default();
+    assert!(
+        line.contains("ljos-mcp is not on env.PATH"),
+        "Codex passes $PATH as text: {line}"
+    );
 }
 
 #[test]
