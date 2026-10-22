@@ -5878,7 +5878,15 @@ mod tests {
         let home = Path::new("/home/someone");
         let got = super::super::resolve_config_base(None, Some(home)).expect("isolated base");
         assert_ne!(got, home.join(".config"));
-        assert!(!got.starts_with(home), "{got:?}");
+        // The isolated directory follows TMPDIR. A TMPDIR under a home
+        // still is not that home's config.
+        let tmp = std::env::temp_dir();
+        if got.starts_with(home) {
+            assert!(
+                got.starts_with(&tmp),
+                "{got:?} is under {home:?} and not the temp directory"
+            );
+        }
         let rules = super::super::user_rules::rules_path().expect("rules path");
         if std::env::var_os("XDG_CONFIG_HOME")
             .filter(|value| !value.is_empty())
@@ -5886,7 +5894,11 @@ mod tests {
         {
             let login = std::env::var_os("HOME").map(PathBuf::from);
             if let Some(login) = login {
-                assert!(!rules.starts_with(&login), "{rules:?} is the login config");
+                let login_rules = login.join(".config").join("ljos").join("user-rules.json");
+                assert_ne!(rules, login_rules, "{rules:?} is the login config");
+                if !rules.starts_with(&tmp) {
+                    assert!(!rules.starts_with(&login), "{rules:?} is the login config");
+                }
             }
         }
     }
