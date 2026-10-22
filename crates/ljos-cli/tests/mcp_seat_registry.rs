@@ -96,6 +96,10 @@ fn a_seats_file_keeps_unlisted_seats_off_the_tracker() {
             "ljos_predict",
             serde_json::json!({"seat": "stranger", "issue": "proj-aaaa", "expect": "accept"}),
         ),
+        (
+            "ljos_bump_plan",
+            serde_json::json!({"seat": "stranger", "bundle": "bundle", "project": "proj", "parent": "proj-aaaa"}),
+        ),
     ] {
         let said = call(tool, args);
         assert!(said.contains("no seat named stranger in"), "{tool}: {said}");
@@ -108,6 +112,11 @@ fn a_seats_file_keeps_unlisted_seats_off_the_tracker() {
         !tally.contains("no seat named"),
         "a tally is a read: {tally}"
     );
+    let dry = call(
+        "ljos_bump_plan",
+        serde_json::json!({"seat": "stranger", "bundle": "bundle", "project": "proj", "parent": "proj-aaaa", "dry_run": true}),
+    );
+    assert!(!dry.contains("no seat named"), "a dry run is a read: {dry}");
 
     let listed = note("saddle");
     assert!(!listed.contains("no seat named"), "{listed}");

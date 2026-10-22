@@ -113,6 +113,14 @@ const WRITES: &[&[&str]] = &[
         "--key",
         "00",
     ],
+    &[
+        "bump-plan",
+        "bundle",
+        "--project",
+        "proj",
+        "--parent",
+        "proj-aaaa",
+    ],
 ];
 
 #[test]
@@ -283,6 +291,65 @@ fn a_panel_decision_is_filed_as_the_seat_the_check_named() {
         .and_then(|(_, rest)| rest.lines().next())
         .unwrap_or_else(|| panic!("no create: {calls}"));
     assert_eq!(create, "saddle", "{calls}");
+}
+
+/// A bundle of one module, so a plan makes one issue.
+fn one_module_bundle(b: &Bench) -> String {
+    let bundle = b.root.join("bundle");
+    std::fs::create_dir_all(bundle.join("locks")).unwrap();
+    std::fs::write(
+        bundle.join("locks/default.lock.json"),
+        r#"{"package":"eOn","version":"2.17.10","toolchain":{"name":"foss","version":"2026.1"},"dependencies":[]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        bundle.join("package.sbom.cdx.json"),
+        r#"{"dependencies":[]}"#,
+    )
+    .unwrap();
+    bundle.display().to_string()
+}
+
+#[test]
+fn a_bump_plan_is_filed_only_as_a_listed_seat() {
+    let b = Bench::new();
+    let bundle = one_module_bundle(&b);
+    // No issue is on the tracker yet, so the plan creates it.
+    script(
+        &b.root,
+        "vissue",
+        &format!(
+            "#!/bin/sh\necho \"vissue $* VISSUE_AGENT=${{VISSUE_AGENT:-}}\" >> '{}'\n[ \"$1\" = show ] && exit 1\nexit 0\n",
+            b.log.display()
+        ),
+    );
+    b.seats("seats = [\"saddle\", \"inky\"]\n");
+    let plan = [
+        "bump-plan",
+        &bundle,
+        "--project",
+        "proj",
+        "--parent",
+        "proj-aaaa",
+    ];
+
+    let dry = b.ljos(None, &[&plan[..], &["--dry-run"][..]].concat());
+    assert!(dry.status.success(), "a dry run is a read: {dry:?}");
+    assert_eq!(b.calls(), "", "a dry run writes nothing");
+
+    let unlisted = b.ljos(Some("stranger"), &plan);
+    let err = String::from_utf8_lossy(&unlisted.stderr);
+    assert!(!unlisted.status.success(), "{unlisted:?}");
+    assert!(err.contains("no seat named stranger"), "{err}");
+    assert_eq!(b.calls(), "", "nothing reached the tracker");
+
+    b.ljos_env(&[("LJOS_SEAT", "saddle"), ("VISSUE_AGENT", "inky")], &plan);
+    let calls = b.calls();
+    let create = calls
+        .lines()
+        .find(|l| l.starts_with("vissue create"))
+        .unwrap_or_else(|| panic!("no create: {calls}"));
+    assert!(create.ends_with("VISSUE_AGENT=saddle"), "{create}");
 }
 
 #[test]

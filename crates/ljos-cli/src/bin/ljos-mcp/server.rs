@@ -266,7 +266,8 @@ const SEAT_FREE_TOOLS: &[&str] = &[
 ];
 
 /// Tools that write the tracker under the call's seat. `ljos_deed`
-/// without an accession lists what an issue cites, which is a read.
+/// without an accession lists what an issue cites, and `ljos_bump_plan`
+/// with `dry_run` lists the rows; both are reads.
 const TRACKER_WRITES: &[&str] = &[
     "ljos_start",
     "ljos_sitting",
@@ -294,6 +295,11 @@ fn writes_tracker(name: &str, args: Option<&serde_json::Map<String, serde_json::
                 .is_some_and(|v| !v.is_null() && *v != serde_json::Value::Bool(false))
         };
         return set("choice") || set("jev") || set("withdraw");
+    }
+    if name == "ljos_bump_plan" {
+        return !args
+            .and_then(|a| a.get("dry_run"))
+            .is_some_and(|dry| *dry == serde_json::Value::Bool(true));
     }
     TRACKER_WRITES.contains(&name)
 }

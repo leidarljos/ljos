@@ -615,13 +615,13 @@ A tracker write needs a seat somebody named, as a ballot does: `note`,
 `claim`, `sitting`, `finish`, `release`, `complete`, `file`, `options`,
 `deed --add/--remove`, `workflow --start/--round`, `consensus` when it may
 file, `playbook`, `reap --apply`, `vote` (a ballot, `--jev` or
-`--withdraw`), `predict`, `slot`, `open-panel`, the matching MCP tools,
-and what a runner hook or a git hook books. The seat is the one
-`ljos seat` prints, so a conversation id the seats file maps writes as
-that seat. A seat taken only from the program above the shell, or from
-the login user under a runner, is refused and nothing is written:
-`export LJOS_SEAT=NAME` and run it again. A hook that has no seat it may
-write as books nothing.
+`--withdraw`), `predict`, `slot`, `open-panel`, `bump-plan` without
+`--dry-run`, the matching MCP tools, and what a runner hook or a git
+hook books. The seat is the one `ljos seat` prints, so a conversation id
+the seats file maps writes as that seat. A seat taken only from the
+program above the shell, or from the login user under a runner, is
+refused and nothing is written: `export LJOS_SEAT=NAME` and run it
+again. A hook that has no seat it may write as books nothing.
 
 Every write records the seat that was checked. An `--assignee` (or MCP
 `assignee`) that names another seat is refused; only `ljos release HEX
