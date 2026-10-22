@@ -3348,10 +3348,13 @@ fn register_inbound_line(line: &[u8]) {
     ensure_queued(&id, order);
 }
 
-/// Stdin, with ordered tool calls queued as each line arrives.
+/// Stdin, with ordered tool calls queued as each line arrives. Its end
+/// reaches rmcp once the calls in flight have answered.
 pub struct InboundOrder<R> {
     inner: R,
     pending: Vec<u8>,
+    ended: bool,
+    settle: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
 }
 
 impl<R> InboundOrder<R> {
@@ -3359,6 +3362,8 @@ impl<R> InboundOrder<R> {
         Self {
             inner,
             pending: Vec::new(),
+            ended: false,
+            settle: None,
         }
     }
 
@@ -3386,10 +3391,30 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for InboundOrder<R> {
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         let this = self.get_mut();
-        let before = buf.filled().len();
-        std::task::ready!(std::pin::Pin::new(&mut this.inner).poll_read(cx, buf))?;
-        this.push_bytes(&buf.filled()[before..]);
-        std::task::Poll::Ready(Ok(()))
+        crate::lifetime::park_reader(cx.waker());
+        if crate::lifetime::closing() {
+            this.ended = true;
+        }
+        if !this.ended {
+            let before = buf.filled().len();
+            let room = buf.remaining();
+            std::task::ready!(std::pin::Pin::new(&mut this.inner).poll_read(cx, buf))?;
+            if buf.filled().len() > before || room == 0 {
+                this.push_bytes(&buf.filled()[before..]);
+                return std::task::Poll::Ready(Ok(()));
+            }
+            this.ended = true;
+        }
+        if crate::lifetime::settled() {
+            return std::task::Poll::Ready(Ok(()));
+        }
+        let settle = this
+            .settle
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep(crate::lifetime::SETTLE)));
+        if std::future::Future::poll(settle.as_mut(), cx).is_ready() {
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::task::Poll::Pending
     }
 }
 
@@ -3472,6 +3497,7 @@ impl ServerHandler for LjosServer {
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, McpError> {
+        let _in_flight = crate::lifetime::call_in_flight();
         // Queued when the line was read. This waits for the ordered calls
         // ahead of it and holds the place until the answer is built. A free
         // tool, the guard and approval included, waits for nothing.
@@ -3506,7 +3532,7 @@ impl ServerHandler for LjosServer {
             ));
         }
         let name = request.name.to_string();
-        ljos_cli::bookkeep::touch_activity();
+        let _activity = ljos_cli::idle_drop::call_started();
         let seat_text = match seat_argument(request.arguments.as_ref()) {
             Ok(text) => text,
             Err(e) => {
