@@ -256,11 +256,13 @@ elif cmd == "deed":
                 sys.exit(0)
         sys.exit(0)
     acc = rest[rest.index("--add") + 1]
-    needle = f":ID:         {iid}\n:END:\n"
+    needle = f":ID:         {iid}\n"
     for f in files():
         text = f.read_text()
-        if needle in text:
-            f.write_text(text.replace(needle, needle + f"cited {acc}\n", 1))
+        at = text.find(needle)
+        if at >= 0:
+            end = text.index(":END:\n", at) + len(":END:\n")
+            f.write_text(text[:end] + f"cited {acc}\n" + text[end:])
             sys.exit(0)
     sys.exit("no issue " + iid)
 elif cmd == "note":
@@ -348,6 +350,32 @@ fn book_files(hab: &Hab) -> Vec<PathBuf> {
 
 fn install(hab: &Hab) {
     hab.ljos(&["git-hooks", "install"]);
+}
+
+/// A sitting on `id` for `holder` of `seat`: an open ticket the tracker
+/// has claimed by `holder`, and a hold whose conversation is this test,
+/// the ancestor of every hook its commits run. A runner's commit waits
+/// for one.
+fn sit(hab: &Hab, id: &str, holder: &str, seat: &str) {
+    let project = hab.tracker.join("Software/probe");
+    fs::create_dir_all(&project).unwrap();
+    let issues = project.join("issues.org");
+    let mut text = fs::read_to_string(&issues).unwrap_or_default();
+    text.push_str(&format!(
+        "* STARTED [#C] held work\n:PROPERTIES:\n:ID:         {id}\n:CLAIMED_BY: {holder}\n:END:\n"
+    ));
+    fs::write(&issues, text).unwrap();
+    let comm = fs::read_to_string("/proc/self/comm").unwrap();
+    fs::create_dir_all(hab.run.join("ljos")).unwrap();
+    fs::write(
+        hab.run.join("ljos").join(format!("hold-{id}")),
+        format!(
+            "{holder}\n{seat}\n{}\n{}\n2026-01-01T00:00:00Z\n{id}\n-\n",
+            std::process::id(),
+            comm.trim()
+        ),
+    )
+    .unwrap();
 }
 
 /// A PostToolUse that also carries `prompt` still cites the commit.
@@ -1540,6 +1568,18 @@ fn a_skip_list_books_nothing_and_reinstall_keeps_the_config() {
     assert_eq!(vissue_log(&hab.tracker), "");
 }
 
+fn commit_env(hab: &Hab, extra: &[(&str, &str)], drop_seat: bool) -> Vec<(String, String)> {
+    hab.base_env()
+        .into_iter()
+        .filter(|(key, _)| !drop_seat || key != "LJOS_SEAT")
+        .chain(
+            extra
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string())),
+        )
+        .collect()
+}
+
 fn commit_with(
     hab: &Hab,
     name: &str,
@@ -1548,16 +1588,7 @@ fn commit_with(
     drop_seat: bool,
 ) -> String {
     fs::write(hab.repo.join(name), "x\n").unwrap();
-    let env: Vec<(String, String)> = hab
-        .base_env()
-        .into_iter()
-        .filter(|(key, _)| !drop_seat || key != "LJOS_SEAT")
-        .chain(
-            extra
-                .iter()
-                .map(|(key, value)| ((*key).to_string(), (*value).to_string())),
-        )
-        .collect();
+    let env = commit_env(hab, extra, drop_seat);
     let run = |args: &[&str]| {
         let out = Command::new("/usr/bin/git")
             .arg("-C")
@@ -1586,6 +1617,7 @@ fn an_agy_commit_is_booked_from_the_git_hook() {
     let hab = Hab::new("repo");
     install(&hab);
     let id = "agy-conv-0001-deed";
+    sit(&hab, "probe-51a1", "antigravity@sit", "antigravity");
     let sha = commit_with(
         &hab,
         "agy.txt",
@@ -1608,6 +1640,7 @@ fn an_opencode_shell_commit_is_booked() {
     let hab = Hab::new("repo");
     install(&hab);
     let id = "ses_cloudflare96de8ec";
+    sit(&hab, "probe-51a1", "opencode@sit", "opencode");
     let sha = commit_with(
         &hab,
         "cf.txt",
@@ -1627,6 +1660,7 @@ fn an_opencode_shell_commit_is_booked() {
 fn a_claude_session_is_not_booked_by_the_git_hook() {
     let hab = Hab::new("repo");
     install(&hab);
+    sit(&hab, "probe-51a1", "grokbot@sit", "grokbot");
     commit_with(
         &hab,
         "claude.txt",
@@ -1652,22 +1686,28 @@ fn a_git_hook_books_only_a_seat_the_seats_file_lists() {
     install(&hab);
     fs::create_dir_all(hab.config.join("ljos")).unwrap();
     fs::write(hab.config.join("ljos/seats.toml"), "seats = [\"saddle\"]\n").unwrap();
+    let cursor = "0b1c2d3e-0000-4000-8000-000000000000";
+    let agy = "agy-conv-0003-deed";
+    sit(
+        &hab,
+        "probe-51a1",
+        "grokbot-0b1c2d3e@sit",
+        "grokbot-0b1c2d3e",
+    );
+    sit(&hab, "probe-51a2", "antigravity@sit", "antigravity");
     commit_with(&hab, "a.txt", "probe-32fx: unlisted seat", &[], false);
     commit_with(
         &hab,
         "b.txt",
         "unmapped conversation",
-        &[(
-            "CURSOR_CONVERSATION_ID",
-            "0b1c2d3e-0000-4000-8000-000000000000",
-        )],
+        &[("CURSOR_CONVERSATION_ID", cursor)],
         true,
     );
     commit_with(
         &hab,
         "c.txt",
         "agy conversation",
-        &[("ANTIGRAVITY_CONVERSATION_ID", "agy-conv-0003-deed")],
+        &[("ANTIGRAVITY_CONVERSATION_ID", agy)],
         true,
     );
     assert_eq!(vissue_log(&hab.tracker), "");
