@@ -679,6 +679,17 @@ fn finish_born(client: &packset_client::PacksetClient, id: &str, successor: &Val
         Ok(atoms) => atoms,
         Err(_) => return Update::Later,
     };
+    // Once the original is closed, the pack answers the successor's post
+    // with any other live record that makes the same claim, so a record
+    // like that, other than the copy itself, stops the raise here.
+    if atoms.iter().any(|atom| {
+        atom_id(atom).as_deref() != Some(id)
+            && same_claim(atom, successor)
+            && !copy_of(atom, successor)
+    }) {
+        let _ = drop_pending(client, id);
+        return Update::Refused(SHADOWED);
+    }
     if person_copy(&atoms, successor, id) {
         if let Some(old) = atoms
             .iter()
@@ -720,22 +731,34 @@ fn finish_born(client: &packset_client::PacksetClient, id: &str, successor: &Val
 }
 
 fn person_copy(atoms: &[Value], successor: &Value, old: &str) -> bool {
-    let text = successor
-        .get("text")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim();
-    let kind = successor.get("kind").and_then(Value::as_str).unwrap_or("");
-    atoms.iter().any(|atom| {
-        atom.get("text")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            == text
-            && atom.get("kind").and_then(Value::as_str).unwrap_or("") == kind
-            && basis_of(atom) == Some("person")
-            && atom_id(atom).as_deref() != Some(old)
-    })
+    atoms
+        .iter()
+        .any(|atom| atom_id(atom).as_deref() != Some(old) && copy_of(atom, successor))
+}
+
+/// The code a raise is refused with when another live record makes the
+/// claim and would be taken for the person's copy.
+const SHADOWED: u16 = 409;
+
+/// The fields the pack compares when it answers a post with a live record
+/// that already makes the claim.
+fn same_claim(a: &Value, b: &Value) -> bool {
+    [
+        "text", "kind", "set", "pattern", "verdict", "from", "to", "about", "agent", "issue",
+        "name",
+    ]
+    .iter()
+    .all(|key| a.get(*key) == b.get(*key))
+}
+
+/// `atom` is the person's copy of `successor`: the same claim, entities
+/// and clock, born with basis `person`.
+fn copy_of(atom: &Value, successor: &Value) -> bool {
+    same_claim(atom, successor)
+        && ["entities", "ts", "valid_from"]
+            .iter()
+            .all(|key| atom.get(*key) == successor.get(*key))
+        && basis_of(atom) == Some("person")
 }
 
 /// The same claim, born with basis `person`. No id and no floor: those
@@ -806,16 +829,16 @@ fn post_successor(client: &packset_client::PacksetClient, successor: &Value) -> 
         .send_json(successor)
     {
         Ok(resp) => match resp.into_json::<Value>() {
-            Ok(body) if born_person(&body) => Update::Stamped,
+            Ok(body) if copy_of(body.get("atom").unwrap_or(&body), successor) => Update::Stamped,
+            // Another record answered for the copy.
+            Ok(body) if body.get("atom").unwrap_or(&body).get("id").is_some() => {
+                Update::Refused(SHADOWED)
+            }
             _ => Update::Later,
         },
         Err(ureq::Error::Status(code, _)) if permanent(code) => Update::Refused(code),
         Err(_) => Update::Later,
     }
-}
-
-fn born_person(body: &Value) -> bool {
-    basis_of(body) == Some("person") || basis_of(&body["atom"]) == Some("person")
 }
 
 /// Writes still owed on the cutoff, each `{id, atom}`.
@@ -1488,7 +1511,13 @@ mod tests {
                 id
             };
             atom["id"] = json!(id);
-            atom["ts"] = json!("2026-10-21T00:00:00Z");
+            if atom
+                .get("ts")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+            {
+                atom["ts"] = json!("2026-10-21T00:00:00Z");
+            }
             pack.atoms.push(atom.clone());
             (200, atom.to_string())
         } else {
