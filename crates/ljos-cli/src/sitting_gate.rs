@@ -67,14 +67,7 @@ pub fn guard_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     let first = calls.iter().find(|call| writes_history(call))?;
     let issue = match live_sitting() {
         Ok(issue) => issue,
-        Err(why) => {
-            return Some(refusal(&format!(
-                "`git {}` writes history, and {why}. Run `ljos sitting ID` on the open ticket \
-                 this work belongs to, then run it again. The person at their own terminal \
-                 is not gated",
-                first.sub
-            )))
-        }
+        Err(why) => return Some(refusal(&no_sitting(&first.sub, &why))),
     };
     let pushes = calls
         .iter()
@@ -82,28 +75,46 @@ pub fn guard_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     for push in pushes {
         let cfg = match crate::gates::consensus_push(Some(&push.cwd)) {
             Ok(cfg) => cfg,
-            Err(why) => {
-                return Some(refusal(&format!(
-                    "the settings that name the protected branches do not read: {why}"
-                )))
-            }
+            Err(why) => return Some(refusal(&unread_settings(&why))),
         };
         let Some(dest) = crate::gates::protected_push(push, line, &cfg.branches) else {
             continue;
         };
         if let Err(why) = crate::protected_push_stands(&issue, cfg.quorum) {
-            let named: Vec<String> = cfg.branches.iter().map(|b| format!("`{b}`")).collect();
-            return Some(refusal(&format!(
-                "`git push` may land on {dest}, and a runner's push onto {} waits for the \
-                 seats on the ticket it sits on: {why}. Run `ljos consensus {issue} --no-file` \
-                 to see where they stand, then run it again once they clear it. A push onto \
-                 this seat's own topic branch needs only the sitting. The person at their own \
-                 terminal is not gated",
-                named.join(", ")
-            )));
+            let dest = format!("may land on {dest}");
+            return Some(refusal(&seats_wait(&dest, &cfg.branches, &issue, &why)));
         }
     }
     None
+}
+
+/// Why `git VERB` waits for a sitting, from [`live_sitting`]'s `why`.
+#[must_use]
+pub fn no_sitting(verb: &str, why: &str) -> String {
+    format!(
+        "`git {verb}` writes history, and {why}. Run `ljos sitting ID` on the open ticket \
+         this work belongs to, then run it again. The person at their own terminal is not gated"
+    )
+}
+
+/// Why a push waits when [`crate::gates::consensus_push`] does not read.
+#[must_use]
+pub fn unread_settings(why: &str) -> String {
+    format!("the settings that name the protected branches do not read: {why}")
+}
+
+/// Why a push that `dest` (`may land on BRANCH`) waits for the seats on
+/// `issue`, from [`crate::protected_push_stands`]'s `why`.
+#[must_use]
+pub fn seats_wait(dest: &str, branches: &[String], issue: &str, why: &str) -> String {
+    let named: Vec<String> = branches.iter().map(|b| format!("`{b}`")).collect();
+    format!(
+        "`git push` {dest}, and a runner's push onto {} waits for the seats on the ticket \
+         it sits on: {why}. Run `ljos consensus {issue} --no-file` to see where they stand, \
+         then run it again once they clear it. A push onto this seat's own topic branch \
+         needs only the sitting. The person at their own terminal is not gated",
+        named.join(", ")
+    )
 }
 
 fn writes_history(call: &GitCall) -> bool {
