@@ -26,6 +26,11 @@ use std::process::{Command, Stdio};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
+/// The shared scope a box and its VMs use. It is an extra scope under
+/// `[scopes]`. A primary named this would send unscoped atoms and every
+/// finish lesson into the shared log.
+pub const CLOUD_SCOPE: &str = "cloud";
+
 /// The scope a tracker repository shares: `.ljos/sync.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct Scope {
@@ -267,6 +272,12 @@ pub fn scope_of_repo(root: &Path) -> Result<Option<Scope>> {
     match std::fs::read_to_string(&path) {
         Ok(text) => {
             let scope: Scope = toml::from_str(&text).with_context(|| path.display().to_string())?;
+            if scope.name == CLOUD_SCOPE {
+                bail!(
+                    "{} names primary scope `cloud`, which is reserved for the shared scope; put cloud under [scopes]",
+                    path.display()
+                );
+            }
             if scope.scopes.contains_key(&scope.name) {
                 bail!(
                     "{} repeats `{}` in [scopes]; keep the primary scope in `name` and `recipients`",
@@ -2421,6 +2432,41 @@ mod tests {
         assert_eq!(scope.for_project("garden"), "personal");
         let bare: Scope = toml::from_str("name = \"shared\"\nrecipients = []\n").unwrap();
         assert!(bare.projects.is_empty());
+    }
+
+    /// Finish tags a lesson `scope:<primary>`. A primary named `cloud`
+    /// would put that lesson, and every unscoped atom, on the shared log.
+    #[test]
+    fn a_primary_scope_named_cloud_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".ljos")).unwrap();
+        let path = root.join(".ljos/sync.toml");
+        std::fs::write(&path, "name = \"cloud\"\nrecipients = [\"age1cloud\"]\n").unwrap();
+        let alone = scope_of_repo(root).unwrap_err().to_string();
+        assert!(
+            alone.contains("primary") && alone.contains("cloud"),
+            "{alone}"
+        );
+        std::fs::write(
+            &path,
+            "name = \"cloud\"\nrecipients = [\"age1cloud\"]\n[scopes]\nnotes = [\"age1notes\"]\n",
+        )
+        .unwrap();
+        let beside = scope_of_repo(root).unwrap_err().to_string();
+        assert!(
+            beside.contains("primary") && beside.contains("[scopes]"),
+            "{beside}"
+        );
+        std::fs::write(
+            &path,
+            "name = \"grokbot\"\nrecipients = [\"age1box\"]\n[scopes]\ncloud = [\"age1cloud\"]\n",
+        )
+        .unwrap();
+        let scope = scope_of_repo(root).unwrap().unwrap();
+        assert_eq!(scope.name, "grokbot");
+        assert_eq!(scope.for_project("garden"), "grokbot");
+        assert!(scope.scopes.contains_key(CLOUD_SCOPE));
     }
 
     #[test]
