@@ -576,6 +576,122 @@ fn cloud_up_wakes_box_seats_with_keys_passed_by_name() {
 }
 
 #[test]
+fn cloud_up_refuses_a_seat_collision_and_keeps_a_hand_set_wake() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let config = home.join(".config");
+    let rel = root.path().join("rel");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(config.join("ljos")).unwrap();
+    for name in ["ljos", "ljos-mcp", "ljos-policyd"] {
+        executable(&rel.join(name), "#!/bin/sh\nexit 0\n");
+    }
+    fs::write(
+        rel.join("SHA256SUMS"),
+        sums(&rel, &["ljos", "ljos-mcp", "ljos-policyd"]),
+    )
+    .unwrap();
+    let wakes = config.join("ljos/wake.toml");
+    fs::write(
+        &wakes,
+        "\
+[claude-review]
+command = \"true\"
+
+[inky]
+webhook = \"https://old.example/hook\"
+key_env = \"LJOS_WAKE_INKY_KEY\"
+source = \"env\"
+
+[saddle]
+webhook = \"https://kept.example/hook\"
+key_env = \"SADDLE_HAND_KEY\"
+",
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", &config);
+    std::env::set_var("XDG_STATE_HOME", home.join(".local/state"));
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::remove_var("LJOS_BIN_DIR");
+    std::env::remove_var("LJOS_TRACKER_REMOTE");
+    std::env::remove_var("LJOS_TRACKER_GIT");
+    std::env::remove_var("LJOS_TRACKER_DIR");
+    std::env::set_var("PATH", "/usr/bin:/bin");
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    clear_agent_ids();
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("LJOS_WAKE_") {
+            std::env::remove_var(&key);
+        }
+    }
+    let inky = "https://api2.cursor.sh/automations/webhook/inky";
+    std::env::set_var("LJOS_WAKE_INKY_URL", inky);
+    std::env::set_var("LJOS_WAKE_INKY_KEY", "inky-sender-key");
+    std::env::set_var(
+        "LJOS_WAKE_GROK_BOT_URL",
+        "https://api2.cursor.sh/automations/webhook/grok-a",
+    );
+    std::env::set_var(
+        "LJOS_WAKE_GROK-BOT_URL",
+        "https://api2.cursor.sh/automations/webhook/grok-b",
+    );
+    std::env::set_var(
+        "LJOS_WAKE_SADDLE_URL",
+        "https://api2.cursor.sh/automations/webhook/saddle",
+    );
+    std::env::set_var(
+        "LJOS_WAKE_EVIL_URL",
+        "http://localhost.attacker.invalid/hook",
+    );
+
+    let said = ljos_cli::cloud::up(false).unwrap();
+    assert!(
+        said.contains(
+            "wake inky: posts to LJOS_WAKE_INKY_URL with the key in LJOS_WAKE_INKY_KEY\n"
+        ),
+        "{said}"
+    );
+    assert!(
+        said.contains("wake grok-bot: LJOS_WAKE_GROK-BOT_URL and LJOS_WAKE_GROK_BOT_URL name the same seat, so no wake was written"),
+        "{said}"
+    );
+    assert!(
+        said.contains(
+            "wake saddle: left the wake cloud up did not write; LJOS_WAKE_SADDLE_URL did not replace it"
+        ),
+        "{said}"
+    );
+    assert!(
+        said.contains(
+            "wake evil: LJOS_WAKE_EVIL_URL is not https, nor http on this machine, so no wake was written"
+        ),
+        "{said}"
+    );
+    assert!(!said.contains("localhost.attacker.invalid"), "{said}");
+    assert!(!said.contains("inky-sender-key"), "{said}");
+    assert!(!said.contains("api2.cursor.sh"), "{said}");
+    let table = ljos_cli::wake::load();
+    assert_eq!(table["inky"].webhook.as_deref(), Some(inky));
+    assert_eq!(table["inky"].source.as_deref(), Some("env"));
+    assert_eq!(table["inky"].key_env.as_deref(), Some("LJOS_WAKE_INKY_KEY"));
+    assert_eq!(
+        table["saddle"].webhook.as_deref(),
+        Some("https://kept.example/hook")
+    );
+    assert_eq!(table["saddle"].key_env.as_deref(), Some("SADDLE_HAND_KEY"));
+    assert!(table["saddle"].source.is_none(), "{table:?}");
+    assert_eq!(table["claude-review"].command.as_deref(), Some("true"));
+    assert!(!table.contains_key("grok-bot"), "{table:?}");
+    assert!(!table.contains_key("evil"), "{table:?}");
+    let text = fs::read_to_string(&wakes).unwrap();
+    assert!(!text.contains("inky-sender-key"), "{text}");
+    ljos_cli::cloud::up(false).unwrap();
+    assert_eq!(fs::read_to_string(&wakes).unwrap(), text);
+}
+
+#[test]
 fn cloud_up_installs_cloud_guard_refusals_idempotently() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();

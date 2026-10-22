@@ -112,8 +112,10 @@ receipt is written when the note is delivered, on =postToolUse= as
 
 =send= and =reply= start the recipient's wake, when it has one, after the message is written.
 =ljos wake --command CMD= runs =CMD= under =sh -c= with =LJOS_SEAT= set to the seat, so =ljos inbox= in it reads that seat's mail.
+With a prefix wake, =LJOS_SEAT= is still the run seat that matched the prefix.
 =LJOS_WAKE_FROM=, =LJOS_WAKE_MSG=, =LJOS_WAKE_ISSUE= and =LJOS_WAKE_INTERRUPT= name the message.
-=ljos wake --webhook URL --key-file FILE= posts the envelope (seat, sender, id, issue, interrupt) to an https URL with the key in that file as a bearer token, and never the body.
+=ljos wake --webhook URL --key-file FILE= posts the envelope (seat, sender, id, issue, interrupt, and =via= when a prefix matched) to an https URL with the key in that file as a bearer token, and never the body.
+A key is a prefix only when it ends in one trailing =-= after a non-empty stem; names such as =-=, =--= and =a--= are exact names.
 The sender waits on neither, and a wake that fails or runs past its timeout is a line in =~/.local/state/ljos/mail/wake.log=.
 On =Stop=, unread interrupt mail holds the turn once and is receipted, so a running session reads it before it goes idle.
 A seat the pack has never heard from is refused with the known seat it most likely meant.
@@ -361,6 +363,18 @@ stdin is an argv line and answered in plain lines.
 | =PreToolUse= | applies the TCB and pack rules to the command (matcher =Bash|Edit|Write|MultiEdit|NotebookEdit|apply_patch=); a deny blocks. It keeps the call's =agent_id= for each =ljos= line, and on a seat MCP tool (=^mcp__.+__ljos_.+$=) only notes a subagent's call, so the ballot binds the session plus that agent |
 | =Stop= | speaks only when the turn ran no tool; blocks one turn that was asked for a decision and cast no ballot; with no issue held, blocks one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript; then holds one turn for unread interrupt mail (=decision: block=, or =followup_message= in Cursor) and receipts it |
 | =SubagentStop= | names the issue the subagent's conversation has claimed and asks for the ballot on a decision; with Jev on, audits the turn once |
+
+The hook's book names the runner that owns its sitting, and the next
+session or MCP call finishes the sitting once that process is gone. The
+owner is the nearest harness ljos knows by name above the hook, else the
+nearest program that is neither a shell nor a wrapper, else the outermost
+shell. The walk stops below a terminal, a multiplexer or init, none of
+which owns a sitting. The book keeps the owner's pid and start time, so a
+pid used again by another process is gone. The walk reads =/proc= and
+holds on Linux only. On macOS and other systems the hook's parent owns
+the sitting: a runner starts the hook through =sh -c=, which exits with
+it, so there the next MCP call finishes the hook's sitting, and
+=ljos_start= files a new claim instead of keeping the one a Write took.
 
 * What a rule reads
 
