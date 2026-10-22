@@ -10293,7 +10293,8 @@ pub fn search_within(cue: &str, limit: u32, ms: u64) -> Result<(Vec<Hit>, bool)>
 /// ballots than [`agreed`] asks, whose stored atom is among them, takes
 /// that atom's count, which is none: which of the tied lessons a ballot
 /// keeps at its cut is arbitrary, and one it dropped would have come in
-/// as the atom.
+/// as the atom. A body that does not parse, a NaN from a writer that is
+/// not packset, has no hits and no echo, so the stored atoms answer.
 fn search_relevant(
     client: &PacksetClient,
     cue: &str,
@@ -10330,7 +10331,8 @@ fn search_relevant(
             _ => packset_client::Error::Http(e),
         })
         .context("search: GET /v1/search failed")?
-        .into_json()?;
+        .into_json()
+        .unwrap_or_else(|_| serde_json::json!({ "hits": [] }));
     let chosen = body["hits"].as_array().map_or(0, Vec::len);
     if body["rank"].as_str() != Some("relevance") || chosen >= limit as usize {
         let mut extra = Vec::new();
@@ -37853,6 +37855,53 @@ mod tests {
                 "{note}"
             );
         }
+    }
+
+    /// A writer whose every search body carries a NaN, which is not JSON,
+    /// is read as one that found nothing: the stored atoms that best match
+    /// answer, and the old lesson still reaches the prompt.
+    #[test]
+    fn a_search_body_that_does_not_parse_leaves_the_stored_atoms() {
+        let _env = env_guard();
+        let runtime = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let _hold = HoldEnv::set(&[
+            ("XDG_RUNTIME_DIR", runtime.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.path().to_str().unwrap()),
+        ]);
+        let atoms = serde_json::json!([
+            {
+                "id": "fresh", "kind": "lesson",
+                "text": "Operator Figma recorded that the registry rejected the token",
+                "ts": "2026-10-20T09:00:00.000Z", "entities": ["horizon:standing"]
+            },
+            {
+                "id": "old", "kind": "lesson",
+                "text": "With pnpm the registry rejected the token because the CI secret expired",
+                "ts": "2026-01-14T09:00:00.000Z", "entities": ["horizon:standing"]
+            }
+        ]);
+        let (url, _) = serve_http(move |req| {
+            let first = req.lines().next().unwrap_or("");
+            if first.contains("/v1/search") {
+                let body = r#"{"hits":[{"id":"fresh","kind":"lesson","score":NaN,
+                    "text":"Operator Figma recorded that the registry rejected the token"}]}"#;
+                return (200, body.into());
+            }
+            if first.contains("/v1/atoms") {
+                return (200, serde_json::json!({"atoms": atoms}).to_string());
+            }
+            (404, r#"{"error":"missing"}"#.into())
+        });
+        let _url = PackUrl::set(&url);
+        let prompt = HookCall {
+            event: "UserPromptSubmit".into(),
+            cue: "npm: the registry rejected my token".into(),
+            session: Some("nan-body".into()),
+            shape: HookShape::default(),
+        };
+        let (note, _) = hook_note(&prompt, 5);
+        assert!(note.contains("CI secret expired"), "{note}");
     }
 
     /// The prompt hook hands over a paraphrase the encoder ranked first
