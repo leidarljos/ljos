@@ -3283,6 +3283,29 @@ fn pin_standing(repo: &Path, seat: &str) -> String {
     pin_at(repo, seat, "1792700000")
 }
 
+/// The public key the run `base` with id `run` mints in the `vm-data`
+/// beside this world's `HOME`, the hex `ljos cloud up` prints on that run.
+fn run_key(base: &str, run: &str) -> String {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+    let before = std::env::var_os("XDG_DATA_HOME");
+    std::env::set_var("XDG_DATA_HOME", home.parent().unwrap().join("vm-data"));
+    let seat = ljos_cli::cloud::run_seat(base, run);
+    let path = ljos_cli::cloud::prepare_seat_key(&seat).unwrap();
+    let key = ljos_cli::ballot_sig::load_or_create(&path).unwrap();
+    match before {
+        Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+        None => std::env::remove_var("XDG_DATA_HOME"),
+    }
+    ljos_cli::ballot_sig::signed_hex(&key, b"pin").0
+}
+
+/// Slot the run `base` with id `run` on `issue` under its minted key, as
+/// the seat this process signs as.
+fn slot_run(issue: &str, base: &str, run: &str) -> anyhow::Result<String> {
+    let key = run_key(base, run);
+    ljos_cli::slot::write(issue, base, "grok-4", run, &key)
+}
+
 /// A box clone signing as `ljosbot`, over an origin holding `issues` on
 /// one board.
 fn slot_world(root: &Path, issues: &[&str]) -> (PathBuf, PathBuf) {
@@ -3313,14 +3336,13 @@ fn a_launcher_slots_the_seat_its_run_takes() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (origin, box_repo) = slot_world(root.path(), &["probe-slot"]);
-    let err = ljos_cli::slot::write("probe-slot", "ridley-review", "grok-4", "cafebabe0001abcd")
+    let err = slot_run("probe-slot", "ridley-review", "cafebabe0001abcd")
         .unwrap_err()
         .to_string();
     assert!(err.contains("ljosbot has no pinned key"), "{err}");
 
     let public = pin_standing(&box_repo, "ljosbot");
-    let said =
-        ljos_cli::slot::write("probe-slot", "ridley-review", "grok-4", "cafebabe0001abcd").unwrap();
+    let said = slot_run("probe-slot", "ridley-review", "cafebabe0001abcd").unwrap();
     let pushed = ljos_cli::persist_tracker("probe-slot", "slotted");
     assert!(pushed.contains("pushed"), "{pushed}");
 
@@ -3342,19 +3364,30 @@ fn a_launcher_slots_the_seat_its_run_takes() {
     assert_eq!(slot.seat, run_seat);
     assert_eq!(slot.model, "grok-4");
     assert_eq!(slot.run, "cafebabe0001abcd");
+    assert_eq!(slot.run_key, run_key("ridley-review", "cafebabe0001abcd"));
     assert_eq!(slot.launcher, "ljosbot");
     assert_eq!(slot.key, public);
     assert!(ljos_cli::slot::verifies("probe-slot", &slot));
+    let err = ljos_cli::slot::write(
+        "probe-slot",
+        "ridley-review",
+        "grok-4",
+        "cafebabe0001abcd",
+        "not-a-key",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("is not a public seat key"), "{err}");
 
     let pins = box_repo.join(".ljos-seat-keys");
     let mut text = fs::read_to_string(&pins).unwrap();
     text.push_str(&format!("ridley-taken-cafebabe0001abcd {public}\n"));
     fs::write(&pins, text).unwrap();
-    let err = ljos_cli::slot::write("probe-slot", "ridley-taken", "grok-4", "cafebabe0001abcd")
+    let err = slot_run("probe-slot", "ridley-taken", "cafebabe0001abcd")
         .unwrap_err()
         .to_string();
     assert!(err.contains("is already pinned"), "{err}");
-    let err = ljos_cli::slot::write("probe-slot", "ljosbot", "grok-4", "ljosbot")
+    let err = slot_run("probe-slot", "ljosbot", "ljosbot")
         .unwrap_err()
         .to_string();
     assert!(err.contains("does not slot itself"), "{err}");
@@ -3366,7 +3399,7 @@ fn a_run_ballot_counts_for_a_push_under_its_slot_and_not_without_one() {
     let root = tempfile::tempdir().unwrap();
     let (origin, box_repo) = slot_world(root.path(), &["probe-slot", "probe-bare"]);
     pin_standing(&box_repo, "ljosbot");
-    ljos_cli::slot::write("probe-slot", "ridley-review", "grok-4", "cafebabe0001abcd").unwrap();
+    slot_run("probe-slot", "ridley-review", "cafebabe0001abcd").unwrap();
     let pushed = ljos_cli::persist_tracker("probe-slot", "slotted");
     assert!(pushed.contains("pushed"), "{pushed}");
 
@@ -3406,6 +3439,36 @@ fn a_run_ballot_counts_for_a_push_under_its_slot_and_not_without_one() {
     );
 }
 
+/// A writer that sees the slot and pins the run's seat first, under its
+/// own key, does not vote as the run: the slot names the key the run
+/// minted, and only that key's ballots count.
+#[test]
+fn a_seat_pinned_first_under_another_key_does_not_vote_as_the_run() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_origin, repo) = slot_world(root.path(), &["probe-k"]);
+    pin_standing(&repo, "ljosbot");
+    slot_run("probe-k", "ridley-review", "cafebabe0001abcd").unwrap();
+    let pushed = ljos_cli::persist_tracker("probe-k", "slotted");
+    assert!(pushed.contains("pushed"), "{pushed}");
+    std::env::set_var("XDG_DATA_HOME", root.path().join("mallory-data"));
+    let run = ljos_cli::cloud::run_seat("ridley-review", "cafebabe0001abcd");
+    cast(&run, "probe-k", "hold");
+
+    let rows = [serde_json::json!({"agent": run, "choice": "hold"})];
+    let left =
+        ljos_cli::check_seat_signatures("probe-k", &rows, &std::collections::BTreeSet::new())
+            .unwrap()
+            .left_out;
+    assert_eq!(
+        left,
+        vec![(
+            run.clone(),
+            format!("{run} is pinned to a key other than the one its slot names")
+        )]
+    );
+}
+
 /// Cast and sign `seat`'s ballot for `choice` on `issue`, and push it.
 fn cast(seat: &str, issue: &str, choice: &str) {
     std::env::set_var("LJOS_SEAT", seat);
@@ -3429,7 +3492,7 @@ fn a_seat_pinned_before_slots_stands_and_an_unslotted_one_is_left_out() {
     let (_origin, repo) = slot_world(root.path(), &["probe-box", "probe-slot"]);
     pin_standing(&repo, "eessi");
     pin_standing(&repo, "ljosbot");
-    ljos_cli::slot::write("probe-slot", "ridley-review", "grok-4", "cafebabe0001abcd").unwrap();
+    slot_run("probe-slot", "ridley-review", "cafebabe0001abcd").unwrap();
     let pushed = ljos_cli::persist_tracker("probe-slot", "slotted");
     assert!(pushed.contains("pushed"), "{pushed}");
     cast("eessi", "probe-box", "ship");
@@ -3459,7 +3522,7 @@ fn a_seat_pinned_before_slots_stands_and_an_unslotted_one_is_left_out() {
 
     std::env::set_var("LJOS_SEAT", "eessi");
     std::env::set_var("VISSUE_AGENT", "eessi");
-    let said = ljos_cli::slot::write("probe-box", "ridley-other", "grok-4", "feedface0003abcd");
+    let said = slot_run("probe-box", "ridley-other", "feedface0003abcd");
     assert!(
         said.is_ok(),
         "a seat pinned before slots did not launch: {said:?}"
@@ -3541,7 +3604,7 @@ fn a_removed_pin_does_not_drop_a_run_ballot() {
     let root = tempfile::tempdir().unwrap();
     let (_origin, repo) = slot_world(root.path(), &["probe-d"]);
     pin_standing(&repo, "ljosbot");
-    ljos_cli::slot::write("probe-d", "ridley-review", "grok-4", "cafebabe0001abcd").unwrap();
+    slot_run("probe-d", "ridley-review", "cafebabe0001abcd").unwrap();
     let pushed = ljos_cli::persist_tracker("probe-d", "slotted");
     assert!(pushed.contains("pushed"), "{pushed}");
     cast("ljosbot", "probe-d", "ship");
@@ -3577,7 +3640,7 @@ fn a_backdated_pin_does_not_make_a_standing_seat() {
     let root = tempfile::tempdir().unwrap();
     let (_origin, repo) = slot_world(root.path(), &["probe-bare", "probe-slot"]);
     pin_standing(&repo, "ljosbot");
-    ljos_cli::slot::write("probe-slot", "ridley-first", "grok-4", "cafebabe0001abcd").unwrap();
+    slot_run("probe-slot", "ridley-first", "cafebabe0001abcd").unwrap();
     let pushed = ljos_cli::persist_tracker("probe-slot", "slotted");
     assert!(pushed.contains("pushed"), "{pushed}");
     let public = pin_at(&repo, "mallory", "1700000000");
@@ -3601,7 +3664,7 @@ fn a_backdated_pin_does_not_make_a_standing_seat() {
 
     std::env::set_var("LJOS_SEAT", "mallory");
     std::env::set_var("VISSUE_AGENT", "mallory");
-    let err = ljos_cli::slot::write("probe-bare", "ridley-review", "grok-4", "feedface0002abcd")
+    let err = slot_run("probe-bare", "ridley-review", "feedface0002abcd")
         .unwrap_err()
         .to_string();
     assert!(err.contains("mallory is not a standing seat"), "{err}");
@@ -3632,7 +3695,7 @@ fn a_backdated_pin_does_not_make_a_standing_seat() {
 
     std::env::set_var("LJOS_SEAT", "ljosbot");
     std::env::set_var("VISSUE_AGENT", "ljosbot");
-    let said = ljos_cli::slot::write("probe-bare", "ridley-review", "grok-4", "feedface0002abcd");
+    let said = slot_run("probe-bare", "ridley-review", "feedface0002abcd");
     assert!(
         said.is_ok(),
         "a seat pinned before slots, dated after them, was refused: {said:?}"
@@ -3648,7 +3711,7 @@ fn an_unpinned_listed_name_pinned_after_slots_does_not_stand() {
     let root = tempfile::tempdir().unwrap();
     let (_origin, repo) = slot_world(root.path(), &["probe-b", "probe-slot"]);
     pin_standing(&repo, "ljosbot");
-    ljos_cli::slot::write("probe-slot", "ridley-first", "grok-4", "cafebabe0001abcd").unwrap();
+    slot_run("probe-slot", "ridley-first", "cafebabe0001abcd").unwrap();
     let pushed = ljos_cli::persist_tracker("probe-slot", "slotted");
     assert!(pushed.contains("pushed"), "{pushed}");
     std::env::set_var("XDG_DATA_HOME", root.path().join("mallory-data"));
@@ -3666,7 +3729,7 @@ fn an_unpinned_listed_name_pinned_after_slots_does_not_stand() {
             "disk-saver is not a standing seat, and no slot on probe-b names it".to_string()
         )]
     );
-    let err = ljos_cli::slot::write("probe-b", "ridley-review", "grok-4", "feedface0002abcd")
+    let err = slot_run("probe-b", "ridley-review", "feedface0002abcd")
         .unwrap_err()
         .to_string();
     assert!(err.contains("disk-saver is not a standing seat"), "{err}");
@@ -3706,7 +3769,19 @@ fn a_slot_line_replayed_from_another_issue_does_not_backdate_it() {
     )
     .unwrap();
     let run = "review-replay-0001";
-    let note = ljos_cli::slot::sign(&launcher, "probe-slot", run, "grok", "r1", "ljosbot");
+    let run_key =
+        ljos_cli::ballot_sig::load_or_create(&ljos_cli::cloud::prepare_seat_key(run).unwrap())
+            .unwrap();
+    let (public, _) = ljos_cli::ballot_sig::signed_hex(&run_key, b"pin");
+    let note = ljos_cli::slot::sign(
+        &launcher,
+        "probe-slot",
+        run,
+        "grok",
+        "r1",
+        &public,
+        "ljosbot",
+    );
     let layout = vissue_core::Layout::resolve(None, None).unwrap();
     vissue_core::ops::note(&layout, "probe-other", &note).unwrap();
     commit_dated(
@@ -3716,10 +3791,6 @@ fn a_slot_line_replayed_from_another_issue_does_not_backdate_it() {
         "1700000000",
     );
 
-    let run_key =
-        ljos_cli::ballot_sig::load_or_create(&ljos_cli::cloud::prepare_seat_key(run).unwrap())
-            .unwrap();
-    let (public, _) = ljos_cli::ballot_sig::signed_hex(&run_key, b"pin");
     let pins = repo.join(".ljos-seat-keys");
     let mut text = fs::read_to_string(&pins).unwrap();
     text.push_str(&format!("{run} {public}\n"));
