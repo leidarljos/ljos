@@ -567,8 +567,9 @@ pub fn ballot_id(ballot: &BallotEntry) -> Result<String> {
 
 /// Latest unreplaced ballot per voter and question.
 ///
-/// Voters are counted per question, by signing key fingerprint. A ballot
-/// named by another entry's `replaces` never counts. Of what remains, the
+/// Voters are counted per question, by signing key fingerprint. Copies
+/// of one ballot under one key count as that ballot once. A ballot named
+/// by another entry's `replaces` never counts. Of what remains, the
 /// latest `cast_at` per key wins, and a latest `withdrawn` contributes no
 /// vote. When one seat appears under a second key on the same question,
 /// only the first key's ballot keeps counting. An ambiguous voter (two
@@ -579,17 +580,21 @@ pub fn ballot_id(ballot: &BallotEntry) -> Result<String> {
 /// A `replaces` names no ballot, or one from another voter or question, or
 /// a `cast_at` is not an hour timestamp.
 pub fn tally(entries: &[SignedEntry]) -> Result<BTreeMap<String, BTreeMap<String, usize>>> {
-    let ballots: Vec<(&BallotEntry, String, Option<String>)> = entries
-        .iter()
-        .filter_map(|entry| match &entry.entry {
-            Entry::Ballot(ballot) => {
-                let key = crate::ballot_sig::key_fingerprint(&entry.signature.key);
-                let seat = split_voter(&ballot.voter).and_then(|(_, seat)| voter_seat(seat));
-                Some((ballot, key, seat))
-            }
-            Entry::Question(_) => None,
-        })
-        .collect();
+    let mut copies = BTreeSet::new();
+    let mut ballots: Vec<(&BallotEntry, String, Option<String>)> = Vec::new();
+    for entry in entries {
+        let Entry::Ballot(ballot) = &entry.entry else {
+            continue;
+        };
+        let key = crate::ballot_sig::key_fingerprint(&entry.signature.key);
+        // A second file with one ballot under one key is a copy, whatever
+        // the hex case of its key and signature, not a second ballot.
+        if !copies.insert((ballot_id(ballot)?, key.clone())) {
+            continue;
+        }
+        let seat = split_voter(&ballot.voter).and_then(|(_, seat)| voter_seat(seat));
+        ballots.push((ballot, key, seat));
+    }
     let by_id: BTreeMap<&str, usize> = ballots
         .iter()
         .enumerate()
@@ -1682,7 +1687,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a replayed ballot erased its voter")]
     fn a_replayed_ballot_does_not_erase_its_voter() {
         let _home = test_home();
         let cast = sign_as(

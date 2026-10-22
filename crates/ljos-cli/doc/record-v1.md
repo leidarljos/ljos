@@ -180,6 +180,9 @@ Tally is pure over signed ballot entries and counts per question. A
 voter is a signing key fingerprint: two key strings are one voter when
 they differ only in hex case or in a small-order part.
 
+- files that hold one ballot (one ballot id) under one voter are one
+  ballot, whatever the hex case of their key and signature: a replayed
+  copy neither counts twice nor makes the voter ambiguous
 - `replaces` must name the id of a ballot in the same check, from the
   same voter (key fingerprint), on the same question. A missing target,
   or another voter's or another question's ballot, fails the check.
