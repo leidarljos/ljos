@@ -5329,7 +5329,8 @@ mod tests {
     }
 
     /// A row that once held another issue does not carry that issue's lesson
-    /// title or superseded atom into the next issue's rewrite.
+    /// title or superseded atom into the next issue's rewrite. The rewrite
+    /// names the second issue's own title.
     #[test]
     fn a_second_issue_does_not_rewrite_with_the_first_issue_lesson() {
         let _g = lock();
@@ -5412,6 +5413,8 @@ mod tests {
         switched.prompt = "Now add a kebab-case helper".into();
         bind_prompt(&mut switched, &repo_s, unix_secs());
         let row = switched.repos.get_mut(&repo_s).expect("repo row");
+        row.title = Some("Now add a kebab-case helper".into());
+        row.deeds = vec![old.clone()];
         row.finished = true;
         row.lesson = true;
         store_book(&path, &switched);
@@ -5420,8 +5423,8 @@ mod tests {
         let queued =
             std::fs::read_to_string(state.join("ljos/note-queue.jsonl")).unwrap_or_default();
         assert!(
-            queued.trim().is_empty(),
-            "a rebind with no deeds should not rewrite any lesson\n{queued}"
+            queued.contains("kebab case helper"),
+            "the second issue title was lost\n{queued}"
         );
         assert!(
             !queued.contains("slugify"),
