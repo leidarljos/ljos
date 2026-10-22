@@ -30532,7 +30532,11 @@ mod tests {
         std::fs::create_dir_all(&decoy).unwrap();
         let issues = seeded_tracker(&real);
         seeded_tracker(&decoy);
-        std::fs::write(decoy.join(".gitignore"), format!("{}\n", ballot_sig::PIN_FILE)).unwrap();
+        std::fs::write(
+            decoy.join(".gitignore"),
+            format!("{}\n", ballot_sig::PIN_FILE),
+        )
+        .unwrap();
         let decoy_add = std::process::Command::new("git")
             .arg("-C")
             .arg(&decoy)
@@ -30573,7 +30577,9 @@ mod tests {
         assert!(log.status.success(), "real log failed");
         let subjects = String::from_utf8_lossy(&log.stdout);
         assert!(
-            subjects.lines().any(|line| line == "chore(issues): pin saddle key"),
+            subjects
+                .lines()
+                .any(|line| line == "chore(issues): pin saddle key"),
             "pin commit missing under hook child env: {subjects}"
         );
         for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
