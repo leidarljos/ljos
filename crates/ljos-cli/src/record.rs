@@ -1337,6 +1337,55 @@ mod tests {
         assert_eq!(counted(&read, "accept"), Some(1), "{read:?}");
     }
 
+    #[test]
+    fn a_key_with_a_small_order_part_is_the_same_key() {
+        let _home = test_home();
+        let seed = [3u8; 32];
+        let first = sign_as(
+            ballot_entry("alpha/seat-a", "accept", "2026-10-21T10:00:00Z"),
+            3,
+        );
+        let mut order_two = [0xff; 32];
+        order_two[0] = 0xec;
+        order_two[31] = 0x7f;
+        let order_two = ed25519_dalek::VerifyingKey::from_bytes(&order_two).expect("point");
+        assert!(order_two.is_weak());
+        let public = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key();
+        let twin = (public.to_edwards() + order_two.to_edwards())
+            .compress()
+            .to_bytes();
+        let twin = ed25519_dalek::VerifyingKey::from_bytes(&twin).expect("twin");
+        assert!(!twin.is_weak());
+        let secret = ed25519_dalek::hazmat::ExpandedSecretKey::from(&seed);
+        // Under the twin a signature verifies only when its challenge is even.
+        let second = (11..24)
+            .find_map(|hour| {
+                let at = format!("2026-10-21T{hour}:00:00Z");
+                let mut unsigned = ballot_entry("beta/seat-b", "accept", &at);
+                let Entry::Ballot(ballot) = &mut unsigned.entry else {
+                    panic!("ballot");
+                };
+                ballot.id = Some(ballot_id(ballot).expect("id"));
+                let payload = signing_payload(&unsigned).expect("payload");
+                let sig = ed25519_dalek::hazmat::raw_sign::<sha2::Sha512>(&secret, &payload, &twin);
+                twin.verify_strict(&payload, &sig)
+                    .is_ok()
+                    .then(|| SignedEntry {
+                        schema: unsigned.schema,
+                        entry: unsigned.entry,
+                        signature: EntrySignature {
+                            key: hex::encode(twin.to_bytes()),
+                            sig: hex::encode(sig.to_bytes()),
+                        },
+                    })
+            })
+            .expect("a ballot the twin key verifies");
+        let entries = [first, second];
+        check_entries(&entries).expect("both keys verify");
+        let read = tally(&entries).expect("tally");
+        assert_eq!(counted(&read, "accept"), Some(1), "{read:?}");
+    }
+
     fn with_replaces(mut entry: UnsignedEntry, id: &str) -> UnsignedEntry {
         let Entry::Ballot(ballot) = &mut entry.entry else {
             panic!("ballot");
