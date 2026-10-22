@@ -803,18 +803,21 @@ fn incoming_with_sender(
     Incoming { post, retired }
 }
 
-fn taken_path(scope: &str, host: &str) -> PathBuf {
-    state_dir().join(scope).join(format!("{host}.taken"))
+fn taken_path(root: &Path, scope: &str, host: &str) -> PathBuf {
+    state_dir()
+        .join(crate::work_id(&root.display().to_string()))
+        .join(scope)
+        .join(format!("{host}.taken"))
 }
 
-fn read_taken(scope: &str, host: &str) -> BTreeSet<String> {
-    std::fs::read_to_string(taken_path(scope, host))
+fn read_taken(root: &Path, scope: &str, host: &str) -> BTreeSet<String> {
+    std::fs::read_to_string(taken_path(root, scope, host))
         .map(|t| t.lines().map(str::to_string).collect())
         .unwrap_or_default()
 }
 
-fn write_taken(scope: &str, host: &str, plain: &str) -> Result<()> {
-    let path = taken_path(scope, host);
+fn write_taken(root: &Path, scope: &str, host: &str, plain: &str) -> Result<()> {
+    let path = taken_path(root, scope, host);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -888,7 +891,12 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
             })
             .filter_map(|a| a["text"].as_str().map(crate::work_id))
             .collect();
-        let got = incoming_with_sender(&plain, &sender, &read_taken(&scope_name, &host), &held);
+        let got = incoming_with_sender(
+            &plain,
+            &sender,
+            &read_taken(root, &scope_name, &host),
+            &held,
+        );
         let (mut kept, mut refused) = (0usize, 0usize);
         for mut atom in got.post {
             if let Some(map) = atom.as_object_mut() {
@@ -917,7 +925,7 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
                 }
             }
         }
-        write_taken(&scope_name, &host, &plain)?;
+        write_taken(root, &scope_name, &host, &plain)?;
         out.push_str(&format!(
             "sync: {host}: {kept} {} atoms taken, {refused} refused, {retired} retired\n",
             scope_name
@@ -1062,7 +1070,7 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, push: bool) -> Result<S
                 std::fs::remove_file(path)?;
             }
         }
-        let _ = std::fs::remove_file(taken_path(&log.scope_name, gone));
+        let _ = std::fs::remove_file(taken_path(root, &log.scope_name, gone));
     }
     for name in &names {
         for rel in host_log_rels_for_scope(&me, &scope.name, name) {
@@ -2833,6 +2841,19 @@ mod tests {
             .to_string();
         assert!(named.contains("default_scope"), "{named}");
         assert!(!dir.path().join(".ljos").join("atoms").exists());
+    }
+
+    #[test]
+    fn taken_files_are_keyed_by_tracker_as_well_as_scope() {
+        let a = taken_path(Path::new("/tmp/tracker-a"), "grokbot", "peer");
+        let b = taken_path(Path::new("/tmp/tracker-b"), "grokbot", "peer");
+        assert_ne!(a, b, "two trackers shared one taken file");
+        assert_eq!(a.file_name().unwrap(), "peer.taken");
+        assert_eq!(a.parent().unwrap().file_name().unwrap(), "grokbot");
+        assert_ne!(
+            a.parent().unwrap().parent().unwrap(),
+            b.parent().unwrap().parent().unwrap()
+        );
     }
 
     #[test]
