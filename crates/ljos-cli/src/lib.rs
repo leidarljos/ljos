@@ -7367,7 +7367,7 @@ fn recall_rank(hit: &Hit) -> u8 {
         0
     } else if said_by_person(hit) {
         1
-    } else if hit.kind == packset_core::record::NOTE_KIND {
+    } else if unverified_note_hit(hit) {
         3
     } else {
         2
@@ -7402,7 +7402,7 @@ where
 /// rehearsal promotes it. Notes are excluded from prompt injection: they
 /// are unverified working notes, not facts.
 fn shown_on_prompt(hit: &Hit) -> bool {
-    if hit.kind == packset_core::record::NOTE_KIND {
+    if unverified_note_hit(hit) {
         return false;
     }
     is_refresher(hit) || hit.entities.iter().any(|e| e == "horizon:transient")
@@ -30352,6 +30352,39 @@ mod tests {
             true,
         );
         assert_eq!(alone, "\nMemory\n  - [lesson] a related lesson\n");
+    }
+
+    /// A refused note that `post_note_kind` downgraded to `summary` keeps its
+    /// note provenance tags. The lexical prompt filters must treat it as a
+    /// note so the downgrade does not smuggle it back into prompt facts.
+    #[test]
+    fn a_downgraded_note_stays_out_of_prompt_facts() {
+        let tagged = |kind: &str, entities: Vec<String>| packset_client::Hit {
+            id: Some("x".into()),
+            text: "a working note".into(),
+            score: 1.0,
+            kind: kind.into(),
+            ts: None,
+            entities,
+            ballots: None,
+            of: None,
+        };
+        let downgraded = tagged(
+            "summary",
+            vec![
+                "horizon:standing".into(),
+                format!("{}ljos-note", super::NOTE_SOURCE_ENTITY),
+            ],
+        );
+        assert!(super::unverified_note_hit(&downgraded));
+        assert!(
+            !super::shown_on_prompt(&downgraded),
+            "a downgraded note was shown on a prompt"
+        );
+        assert_eq!(super::recall_rank(&downgraded), 3);
+        let lesson = tagged("lesson", vec!["horizon:standing".into()]);
+        assert!(super::shown_on_prompt(&lesson));
+        assert_eq!(super::recall_rank(&lesson), 2);
     }
 
     /// A prompt naming an issue is handed the issue's recall.
