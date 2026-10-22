@@ -1361,8 +1361,8 @@ fn swap_encoder(
     Ok(())
 }
 
-/// A cloud VM. A CI job is not one, and the box and a laptop build
-/// packset-embed from source. The same [`runtime`] answers doctor.
+/// A cloud VM. A CI job is not one, so `cloud up` does not download
+/// the encoder. The same [`runtime`] answers doctor.
 fn cloud_vm() -> bool {
     let rt = runtime();
     !rt.ci && (rt.cloud_id || rt.api_socket)
