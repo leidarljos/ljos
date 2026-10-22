@@ -1347,6 +1347,52 @@ fn a_followed_redirect_may_lead_to_github() {
     fs::remove_file(home.join(".wgetrc")).unwrap();
 }
 
+/// Wget reads a `-e` command as a wgetrc line, the name in any case and
+/// with `-` and `_` dropped, so each spelling of `post-data` or
+/// `post-file` sends a POST.
+#[test]
+fn a_wget_execute_body_is_a_write() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    for exec in [
+        "-e post-data=hello",
+        "--execute=post-data=hello",
+        "--execute post-data=hello",
+        "-epost-data=hello",
+        "-qe post-data=hello",
+        "-e POST-DATA=hello",
+        "-e Post_Data=hello",
+        "-e postdata=hello",
+        "-e post__data=hello",
+        "-e 'post-data = hello'",
+        "-e post-file=/tmp/body",
+        "-e POST_FILE=/tmp/body",
+        "-e postFile=/tmp/body",
+        "-e body-data=hello",
+    ] {
+        refused(
+            &format!("wget --max-redirect=0 {exec} https://api.github.com/user"),
+            here,
+        );
+        refused(&format!("wget {exec} https://example.com/x"), here);
+        allowed(
+            &format!("wget --max-redirect=0 {exec} https://example.com/x"),
+            here,
+        );
+    }
+    for stay in ["-e max-redirect=0", "-e MAX_REDIRECT=0", "-e maxredirect=0"] {
+        allowed(
+            &format!("wget {stay} -e post-data=x https://example.com/x"),
+            here,
+        );
+    }
+    allowed("wget -e robots=off https://api.github.com/user", here);
+}
+
 /// A proxy can forward a request anywhere. The clients take one from
 /// the environment, and the guard reads the environment the command
 /// gets: the process, an `export` on the line, and a prefix.

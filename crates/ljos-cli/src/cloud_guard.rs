@@ -4914,17 +4914,19 @@ fn wget_key_moves_target(key: &str, value: &str) -> bool {
     }
 }
 
+/// Wget reads a `-e` command as a wgetrc line: the name in any case, with
+/// every `-` and `_` dropped, so `-e post-data=x` is a POST.
 fn note_wget_exec(value: &str, tune: &mut Tune) {
     let lower = value.to_ascii_lowercase();
     let (key, val) = lower.split_once('=').unwrap_or((lower.as_str(), ""));
-    let key = key.trim();
-    if wget_key_moves_target(&key.replace(['_', '-'], ""), val) {
+    let key = key.trim().replace(['_', '-'], "");
+    if wget_key_moves_target(&key, val) {
         tune.github = true;
     }
-    match key {
+    match key.as_str() {
         "method" => tune.method = Some(val.trim().to_ascii_uppercase()),
-        "body_data" | "body_file" | "post_data" | "post_file" | "header" => tune.body = true,
-        "max_redirect" | "maxredirect" | "max-redirect" => tune.no_follow = zero(val),
+        "bodydata" | "bodyfile" | "postdata" | "postfile" | "header" => tune.body = true,
+        "maxredirect" => tune.no_follow = zero(val),
         _ => {}
     }
 }
