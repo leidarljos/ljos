@@ -28768,6 +28768,18 @@ fn recorded_origin(id: &str) -> Option<StoredBy> {
     recorded(id).flatten()
 }
 
+/// Clear the person recorded for `id`, so a read that did not stand
+/// leaves the claim no one's. Any other record stays: it already says
+/// less than the person.
+fn unrecord_person(id: &str) {
+    let mut seen = stored_origins()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if seen.get(id) == Some(&Some(StoredBy::Person)) {
+        seen.remove(id);
+    }
+}
+
 /// The pack's last answer for `id` in this process: `Some(None)` when it
 /// answered it does not hold the atom, `None` when it was never asked.
 fn recorded(id: &str) -> Option<Option<StoredBy>> {
@@ -28785,36 +28797,56 @@ pub(crate) enum Stored {
     Origin(StoredBy),
     /// The pack answered and does not hold it.
     Absent,
-    /// The pack did not answer.
-    Unreachable,
+    /// No answer this read can stand on: the pack did not answer inside
+    /// the bound, or answered with a record under another id.
+    Unverified,
 }
 
-/// [`person_stored`] for atom `id` in this seat's pack, asked of the pack
-/// inside a short bound on every read. A long-lived process (the MCP
-/// server, a hook daemon) outlives a forget or a retraction, so what it
-/// recorded earlier never answers ahead of the pack. Only when the pack
-/// does not answer does the last answer recorded here stand, a held
-/// origin or the pack's not holding it. A failure is never recorded, so
-/// a pack that was down is asked again on the next read.
-pub(crate) fn stored_origin_of(id: &str) -> Stored {
-    let asked = with_pack_timeout(400, || {
+/// How long a read waits for the pack to answer for one atom id.
+const ATOM_NOW_MS: u64 = 400;
+
+/// Atom `id` as this seat's pack answers for it now, asked inside
+/// [`ATOM_NOW_MS`]: `Ok(Some(record))` when it holds it live, `Ok(None)`
+/// when it answered that it does not, and `Err` saying why when there is
+/// no answer to stand on.
+pub(crate) fn atom_now(id: &str) -> std::result::Result<Option<Value>, String> {
+    let asked = with_pack_timeout(ATOM_NOW_MS, || {
         pack().map(|client| client.get_atom(&client.workspace(), id))
     });
     match asked {
-        Ok(Ok(atom)) => {
+        Ok(Ok(atom)) if atom.get("id").and_then(Value::as_str) != Some(id) => {
+            Err(format!("the pack answered for {id} with another atom"))
+        }
+        Ok(Ok(atom)) if atom.get("tombstone") == Some(&Value::Bool(true)) => Ok(None),
+        Ok(Ok(atom)) => Ok(Some(atom)),
+        Ok(Err(packset_client::Error::Bad(_))) => Ok(None),
+        Ok(Err(err)) => Err(format!("the pack did not answer for {id}: {err}")),
+        Err(err) => Err(format!("no pack to ask for {id}: {err:#}")),
+    }
+}
+
+/// [`stored_by`] for atom `id` in this seat's pack, from the by-id read
+/// [`atom_now`] makes now. Only that read names the person. A long-lived
+/// process (the MCP server, a hook daemon) outlives a forget, a
+/// retraction or a downgrade, so nothing it recorded earlier answers for
+/// the pack: a read that does not stand clears the person recorded for
+/// the id, and the next label names the claim no one's until the pack
+/// answers again.
+pub(crate) fn stored_origin_of(id: &str) -> Stored {
+    match atom_now(id) {
+        Ok(Some(atom)) => {
             let by = stored_by(&atom);
             record_origin(id, Some(by));
             Stored::Origin(by)
         }
-        Ok(Err(packset_client::Error::Bad(_))) => {
+        Ok(None) => {
             record_origin(id, None);
             Stored::Absent
         }
-        _ => match recorded(id) {
-            Some(Some(by)) => Stored::Origin(by),
-            Some(None) => Stored::Absent,
-            None => Stored::Unreachable,
-        },
+        Err(_) => {
+            unrecord_person(id);
+            Stored::Unverified
+        }
     }
 }
 
@@ -48656,7 +48688,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         drop(down);
         {
             let _pack = HoldEnv::set(&[("PACKSET_URL", &dead), ("PACKSET_WORKSPACE", "seat")]);
-            assert_eq!(stored_origin_of(id), Stored::Unreachable);
+            assert_eq!(stored_origin_of(id), Stored::Unverified);
         }
         let (url, _) = serve_http(move |req| {
             let first = req.lines().next().unwrap_or("");
