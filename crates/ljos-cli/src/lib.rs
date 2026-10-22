@@ -27149,8 +27149,43 @@ fn held_from_records_in(
     seat: &str,
     graph: &str,
 ) -> Option<String> {
+    newest_record_in(holders, dir, chain, seat, graph, &|_| true).map(|(node, _)| node)
+}
+
+/// The issue this conversation holds and the record that says so, only
+/// while the conversation that took it still runs ([`hold_alive`]). The
+/// holders are the ones [`held_issue`] asks. File reads only, so a hook
+/// can afford it. A record whose process is gone, or is now another
+/// program, holds nothing here.
+#[must_use]
+pub fn live_held_issue() -> Option<(String, Hold)> {
+    let mut holders: Vec<String> = runner_record_holders();
+    let own = holder_name();
+    if !holders.contains(&own) {
+        holders.push(own);
+    }
+    newest_record_in(
+        &holders,
+        &runtime_dir(),
+        &own_ancestry(),
+        &seat_name(),
+        &claim_graph_scope(),
+        &hold_alive,
+    )
+}
+
+/// [`held_from_records_in`] with each record's [`Hold`], and only the
+/// records `keep` takes.
+fn newest_record_in(
+    holders: &[String],
+    dir: &std::path::Path,
+    chain: &[(u32, String)],
+    seat: &str,
+    graph: &str,
+    keep: &dyn Fn(&Hold) -> bool,
+) -> Option<(String, Hold)> {
     let pids: Vec<String> = chain.iter().map(|(p, _)| p.to_string()).collect();
-    let mut best: Option<(String, String)> = None;
+    let mut best: Option<(String, Hold)> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         if !entry.file_name().to_string_lossy().starts_with("hold-") {
             continue;
@@ -27175,11 +27210,22 @@ fn held_from_records_in(
         }
         let by_process = !is_session(comm) && *record_seat == seat && pids.iter().any(|p| p == pid);
         let ours = holders.iter().any(|h| h == holder) || by_process;
-        if ours && !node.is_empty() && best.as_ref().is_none_or(|(t, _)| *at > t.as_str()) {
-            best = Some(((*at).to_string(), (*node).to_string()));
+        let hold = Hold {
+            assignee: (*holder).to_string(),
+            seat: (*record_seat).to_string(),
+            pid: pid.parse().unwrap_or(0),
+            comm: (*comm).to_string(),
+            since: (*at).to_string(),
+        };
+        if ours
+            && !node.is_empty()
+            && best.as_ref().is_none_or(|(_, b)| *at > b.since.as_str())
+            && keep(&hold)
+        {
+            best = Some(((*node).to_string(), hold));
         }
     }
-    best.map(|(_, node)| node)
+    best
 }
 
 fn drop_hold(actor: &str) {
@@ -37776,6 +37822,37 @@ mod tests {
         );
         assert_eq!(held_from_records(&["sess-nobody".to_string()]), None);
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+    }
+
+    #[test]
+    fn a_hold_whose_conversation_is_gone_is_not_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let me = std::process::id();
+        let (_, comm) = parent_and_comm(me).expect("this process");
+        let rec = |name: &str, pid: u32, comm: &str, at: &str, node: &str| {
+            std::fs::write(
+                dir.path().join(format!("hold-{name}")),
+                format!("sess-a\nacme\n{pid}\n{comm}\n{at}\n{node}\n"),
+            )
+            .unwrap();
+        };
+        rec("a", me, &comm, "2026-09-27T10:00:00Z", "acme-live");
+        rec("b", u32::MAX, &comm, "2026-09-27T12:00:00Z", "acme-gone");
+        rec(
+            "c",
+            me,
+            "not-this-one",
+            "2026-09-27T13:00:00Z",
+            "acme-reused",
+        );
+        let holders = ["sess-a".to_string()];
+        let newest = |keep: &dyn Fn(&Hold) -> bool| {
+            newest_record_in(&holders, dir.path(), &[], "acme", "-", keep).map(|(node, _)| node)
+        };
+        assert_eq!(newest(&|_| true).as_deref(), Some("acme-reused"));
+        assert_eq!(newest(&hold_alive).as_deref(), Some("acme-live"));
+        std::fs::remove_file(dir.path().join("hold-a")).unwrap();
+        assert_eq!(newest(&hold_alive), None);
     }
 
     #[test]
