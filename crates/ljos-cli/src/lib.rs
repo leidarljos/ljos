@@ -21063,11 +21063,8 @@ pub fn tracker_state(identity: &str, source: &str) -> (String, bool) {
 }
 
 fn git_in(dir: &Path, args: &[&str]) -> Option<std::process::Output> {
-    let mut cmd = std::process::Command::new("git");
-    cmd.arg("-C")
-        .arg(dir)
-        .args(args)
-        .stdin(std::process::Stdio::null());
+    let mut cmd = git_at(dir);
+    cmd.args(args).stdin(std::process::Stdio::null());
     git_hooks::hook_child_env(&mut cmd);
     cmd.output().ok()
 }
@@ -25617,6 +25614,25 @@ impl Drop for CommitLock {
 /// The file ljos locks around every write to a tracker checkout's index.
 pub const TRACKER_LOCK: &str = ".ljos-commit.lock";
 
+/// Repository variables git follows instead of the default `.git`.
+/// `GIT_DIR` names that directory even when the command also passes `-C`.
+/// https://git-scm.com/docs/git#Documentation/git.txt-GITDIR
+const GIT_REPO_ENV: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_PREFIX",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+];
+
+fn clear_git_repo_env(cmd: &mut std::process::Command) {
+    for key in GIT_REPO_ENV {
+        cmd.env_remove(key);
+    }
+}
+
 /// A child git command that follows `-C` in `dir` and does not inherit an
 /// exported repository from the parent process.
 pub(crate) fn git_at(dir: &Path) -> std::process::Command {
@@ -25624,17 +25640,7 @@ pub(crate) fn git_at(dir: &Path) -> std::process::Command {
     // A test may name a decoy on this command. Drop it with the variables
     // a hook would have exported, so `-C` is the checkout.
     apply_git_command_env(&mut cmd);
-    for key in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_PREFIX",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_COMMON_DIR",
-        "GIT_NAMESPACE",
-    ] {
-        cmd.env_remove(key);
-    }
+    clear_git_repo_env(&mut cmd);
     cmd.arg("-C").arg(dir);
     cmd
 }
@@ -26106,6 +26112,10 @@ pub fn commit_paths(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
             .arg("--")
             .args(paths)
             .stdin(std::process::Stdio::null());
+        // An inherited `GIT_DIR` overrides `-C` (git's GIT_DIR). Drop it,
+        // then put back a checkout this thread named on the command. A
+        // dotfiles test has no `.git` under the work tree.
+        clear_git_repo_env(&mut cmd);
         apply_git_command_env(&mut cmd);
         git_hooks::hook_child_env(&mut cmd);
         cmd.output()
@@ -30483,13 +30493,12 @@ mod tests {
 
     fn seeded_tracker(root: &Path) -> PathBuf {
         let run = |args: &[&str]| {
-            let o = std::process::Command::new("git")
-                .arg("-C")
-                .arg(root)
-                .args(args)
-                .output()
-                .unwrap();
-            assert!(o.status.success(), "git {args:?}");
+            let o = super::git_at(root).args(args).output().unwrap();
+            assert!(
+                o.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
         };
         run(&["init", "-q"]);
         run(&["config", "user.email", "seat@example.invalid"]);
@@ -30770,6 +30779,55 @@ mod tests {
         for var in ["LJOS_TRACKER_GIT", "LJOS_SEAT"] {
             std::env::remove_var(var);
         }
+    }
+
+    /// `GIT_DIR` names the repository in place of `-C`. A writer may export
+    /// it while it holds the env lock; these spawns do not take that lock,
+    /// so an inherited directory must not steal `issues.org`.
+    #[test]
+    fn git_spawns_ignore_an_inherited_git_dir() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        let decoy = dir.path().join("decoy");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&decoy).unwrap();
+        let decoy_git = |args: &[&str]| {
+            let out = super::git_at(&decoy).args(args).output().unwrap();
+            assert!(
+                out.status.success(),
+                "decoy git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        decoy_git(&["init", "-q"]);
+        decoy_git(&["config", "user.email", "seat@example.invalid"]);
+        decoy_git(&["config", "user.name", "seat"]);
+        std::fs::write(decoy.join("readme"), "no issues\n").unwrap();
+        decoy_git(&["add", "readme"]);
+        decoy_git(&["commit", "-q", "-m", "decoy"]);
+
+        std::env::set_var("GIT_DIR", decoy.join(".git"));
+        std::env::set_var("GIT_WORK_TREE", &decoy);
+        let issues = seeded_tracker(&real);
+        assert!(
+            real.join("Software/probe/issues.org").is_file(),
+            "seeded tracker wrote into the decoy: {issues:?}"
+        );
+        std::fs::write(&issues, "* DONE [#C] Probe\n").unwrap();
+        assert_eq!(
+            commit_paths(&real.join("Software/probe"), &["issues.org"], "done"),
+            PathCommit::Made
+        );
+        std::fs::write(real.join(".gitattributes"), "issues.org merge=vissue\n").unwrap();
+        let missing = tracker_merge_driver_missing(&real);
+        assert!(
+            missing
+                .as_deref()
+                .unwrap_or("")
+                .contains("vissue merge-driver"),
+            "{missing:?}"
+        );
     }
 
     /// Paths HEAD already holds, as another seat's commit leaves them, are
@@ -32812,14 +32870,7 @@ mod tests {
     #[test]
     fn a_clone_without_the_named_merge_driver_is_reported() {
         let dir = tempfile::tempdir().unwrap();
-        let git = |args: &[&str]| {
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(dir.path())
-                .args(args)
-                .output()
-                .unwrap()
-        };
+        let git = |args: &[&str]| super::git_at(dir.path()).args(args).output().unwrap();
         git(&["init", "-q"]);
         assert!(
             tracker_merge_driver_missing(dir.path()).is_none(),
