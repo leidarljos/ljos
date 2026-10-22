@@ -446,13 +446,13 @@ mod tests {
     fn shell_key(url: &str) -> String {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("pre-push");
-        fs::write(&script, HOOK_SCRIPT).unwrap();
-        let out = Command::new("sh")
-            .arg(&script)
-            .arg(url)
-            .env("LJOS_HOOK_KEY", "1")
-            .output()
-            .unwrap();
+        let prefix = HOOK_SCRIPT
+            .split_once("# ljos-push-gate\n")
+            .expect("gate marker")
+            .0;
+        let body = format!("{prefix}# ljos-push-gate\nnormalize \"$1\"\n");
+        fs::write(&script, body).unwrap();
+        let out = Command::new("sh").arg(&script).arg(url).output().unwrap();
         assert!(
             out.status.success(),
             "normalize {url}: {}",
@@ -505,5 +505,30 @@ mod tests {
             push_repo_key(url),
             push_repo_key("/home/ubuntu/seat/seat.git")
         );
+    }
+
+    #[test]
+    fn the_shipped_hook_has_no_environment_switch() {
+        assert!(!HOOK_SCRIPT.contains("LJOS_HOOK_KEY"));
+        assert!(HOOK_SCRIPT.contains("# ljos-push-gate\n"));
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("pre-push");
+        fs::write(&script, HOOK_SCRIPT).unwrap();
+        let out = Command::new("sh")
+            .arg(&script)
+            .arg("origin")
+            .arg("https://example.invalid/a.git")
+            .env("LJOS_HOOK_KEY", "1")
+            .env("XDG_CONFIG_HOME", dir.path())
+            .env("HOME", dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "the gate did not run: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("pre-push:"), "{err}");
     }
 }

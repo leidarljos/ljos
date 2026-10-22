@@ -110,11 +110,7 @@ host_path() {
   fi
 }
 
-if [ "${LJOS_HOOK_KEY-}" = 1 ]; then
-  normalize "${1-}"
-  exit 0
-fi
-
+# ljos-push-gate
 set -eu
 z=0000000000000000000000000000000000000000
 base=${HOME:-}/.config
