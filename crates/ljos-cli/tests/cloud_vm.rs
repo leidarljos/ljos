@@ -1531,6 +1531,25 @@ fn cloud_guard_refuses_every_push_onto_a_cursor_ref() {
 }
 
 #[test]
+fn cloud_guard_reads_valued_push_options_before_the_subcommand() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    seat_env(root.path());
+    ljos_cli::cloud::up(false).unwrap();
+    let origin = init_bare(root.path());
+    let body = board(&[issue_block("probe-opts", "TODO", "", &[])]);
+    seed(root.path(), &origin, &body);
+    let repo = clone_of(root.path(), &origin, "probe");
+
+    for line in [
+        "git --attr-source HEAD push origin HEAD:cursor/attr",
+        "git push --recurse-submodules check origin HEAD:cursor/submodule",
+    ] {
+        refused(line, &repo);
+    }
+}
+
+#[test]
 fn cloud_guard_reads_the_gh_pr_verb_and_never_its_arguments() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
