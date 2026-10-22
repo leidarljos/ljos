@@ -503,9 +503,11 @@ pub fn tracker_is_git_checkout() -> Option<bool> {
 /// `git` in `root` with replacements and grafts off. Pin order is the
 /// parents stored in the commits. A `refs/replace` ref or `info/grafts`
 /// rewrites those parents, so a read of tracker history must not follow
-/// either.
+/// either. An exported `GIT_DIR` or object directory would answer for
+/// another repository in place of `root`, so those are dropped too.
 pub(crate) fn git_history(root: &Path) -> std::process::Command {
     let mut cmd = std::process::Command::new("git");
+    crate::clear_git_repo_env(&mut cmd);
     cmd.arg("--no-replace-objects")
         .arg("-C")
         .arg(root)
