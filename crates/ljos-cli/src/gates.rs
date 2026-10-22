@@ -719,13 +719,7 @@ fn load_config(root: &Path) -> Result<GateConfig, String> {
 /// keys it sets. Identity is whatever the last of these files names. With
 /// none of them naming a person, there is no identity gate.
 fn config_layers(root: &Path) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Some(base) = user_config_base() {
-        paths.push(base.join("ljos").join("ljos.toml"));
-        if let Some(seat) = configured_seat() {
-            paths.push(base.join("ljos").join("seats").join(seat).join("ljos.toml"));
-        }
-    }
+    let mut paths = person_layers();
     paths.push(root.join("ljos.toml"));
     if let Some(path) = std::env::var_os("LJOS_CONFIG").filter(|path| !path.is_empty()) {
         paths.push(PathBuf::from(path));
@@ -760,7 +754,7 @@ fn clean_seat(name: &str) -> Option<String> {
     Some(name.to_string())
 }
 
-fn apply_gate_file(cfg: &mut GateConfig, path: &Path) -> Result<(), String> {
+fn read_layer(path: &Path) -> Result<Option<toml::map::Map<String, toml::Value>>, String> {
     let text = std::fs::read_to_string(path).map_err(|e| {
         format!(
             "`{}` cannot be read ({e}). Fix the file, then retry.",
@@ -768,7 +762,7 @@ fn apply_gate_file(cfg: &mut GateConfig, path: &Path) -> Result<(), String> {
         )
     })?;
     if text.trim().is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let value: toml::Value = toml::from_str(&text).map_err(|e| {
         format!(
@@ -776,12 +770,20 @@ fn apply_gate_file(cfg: &mut GateConfig, path: &Path) -> Result<(), String> {
             path.display()
         )
     })?;
-    let Some(root) = value.as_table() else {
-        return Err(format!(
+    match value {
+        toml::Value::Table(root) => Ok(Some(root)),
+        _ => Err(format!(
             "`{}` is not a table. Fix the file, then retry.",
             path.display()
-        ));
+        )),
+    }
+}
+
+fn apply_gate_file(cfg: &mut GateConfig, path: &Path) -> Result<(), String> {
+    let Some(root) = read_layer(path)? else {
+        return Ok(());
     };
+    let root = &root;
     let gates = root.get("gates").and_then(toml::Value::as_table);
     let src = gates.unwrap_or(root);
     if src.contains_key("test") {
@@ -954,6 +956,16 @@ pub(crate) fn lease_protected(cwd: Option<&Path>) -> Option<Vec<String>> {
 /// The config layers that do not live in a checkout: the user and seat
 /// `ljos.toml`, then `LJOS_CONFIG`.
 fn user_layers() -> Vec<PathBuf> {
+    let mut paths = person_layers();
+    if let Some(path) = std::env::var_os("LJOS_CONFIG").filter(|path| !path.is_empty()) {
+        paths.push(PathBuf::from(path));
+    }
+    paths
+}
+
+/// The user and seat `ljos.toml`: the person's own files, which the seat
+/// guard keeps a runner from writing.
+fn person_layers() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(base) = user_config_base() {
         paths.push(base.join("ljos").join("ljos.toml"));
@@ -961,10 +973,88 @@ fn user_layers() -> Vec<PathBuf> {
             paths.push(base.join("ljos").join("seats").join(seat).join("ljos.toml"));
         }
     }
-    if let Some(path) = std::env::var_os("LJOS_CONFIG").filter(|path| !path.is_empty()) {
-        paths.push(PathBuf::from(path));
-    }
     paths
+}
+
+/// What a runner's push onto one of `branches` waits for: `quorum` seats
+/// agreeing on the ticket it sits on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsensusPush {
+    pub quorum: usize,
+    pub branches: Vec<String>,
+}
+
+/// The [`ConsensusPush`] settings: `quorum` (2 seats unless set) and
+/// `consensus_branches` (`develop` and `main` unless set), under `[gates]`
+/// or at the top of a file. The user and seat `ljos.toml` set either. The
+/// repository's `ljos.toml`, `LJOS_CONFIG` and `.ljos/gates.toml` only
+/// raise the quorum and add branches, since a runner can write them.
+///
+/// # Errors
+///
+/// A layer that does not parse, or a key of the wrong kind.
+pub fn consensus_push(cwd: Option<&Path>) -> Result<ConsensusPush, String> {
+    let mut out = ConsensusPush {
+        quorum: 2,
+        branches: vec!["develop".into(), "main".into()],
+    };
+    for path in person_layers() {
+        let (quorum, branches) = consensus_keys(&path)?;
+        out.quorum = quorum.unwrap_or(out.quorum);
+        out.branches = branches.unwrap_or(out.branches);
+    }
+    let root = cwd.and_then(repo_root);
+    let mut rest: Vec<PathBuf> = root.iter().map(|r| r.join("ljos.toml")).collect();
+    if let Some(path) = std::env::var_os("LJOS_CONFIG").filter(|path| !path.is_empty()) {
+        rest.push(PathBuf::from(path));
+    }
+    rest.extend(root.iter().map(|r| r.join(".ljos").join("gates.toml")));
+    for path in rest {
+        let (quorum, branches) = consensus_keys(&path)?;
+        out.quorum = out.quorum.max(quorum.unwrap_or(0));
+        for branch in branches.unwrap_or_default() {
+            if !out.branches.contains(&branch) {
+                out.branches.push(branch);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn consensus_keys(path: &Path) -> Result<(Option<usize>, Option<Vec<String>>), String> {
+    if !path.is_file() {
+        return Ok((None, None));
+    }
+    let Some(root) = read_layer(path)? else {
+        return Ok((None, None));
+    };
+    let src = root
+        .get("gates")
+        .and_then(toml::Value::as_table)
+        .unwrap_or(&root);
+    let quorum = match src.get("quorum") {
+        None => None,
+        Some(toml::Value::Integer(n)) if *n >= 1 => Some(usize::try_from(*n).unwrap_or(usize::MAX)),
+        Some(_) => {
+            return Err(format!(
+                "`{}` key `quorum` must be a whole number of seats, 1 or more. Fix the file, then retry.",
+                path.display()
+            ))
+        }
+    };
+    let branches = if src.contains_key("consensus_branches") {
+        let names = req_strings(src, "consensus_branches", path)?;
+        Some(
+            names
+                .iter()
+                .map(|name| branch_of(name))
+                .filter(|name| !name.is_empty())
+                .collect(),
+        )
+    } else {
+        None
+    };
+    Ok((quorum, branches))
 }
 
 fn repo_root(cwd: &Path) -> Option<PathBuf> {
@@ -4281,6 +4371,45 @@ esac
         );
         let stale = take_push_warning().expect("a failing record is a warning");
         assert!(stale.contains("did not exit 0"), "{stale}");
+    }
+
+    #[test]
+    fn the_person_sets_the_consensus_push_and_a_checkout_only_tightens_it() {
+        let dir = repo();
+        let cwd = dir.path();
+        let home = tempfile::tempdir().unwrap();
+        let _layers = layers(home.path(), Some("box"));
+        let read = || consensus_push(Some(cwd)).unwrap();
+        let names = |all: &[&str]| all.iter().map(|b| (*b).to_string()).collect::<Vec<_>>();
+        assert_eq!(read().quorum, 2);
+        assert_eq!(read().branches, names(&["develop", "main"]));
+        write_toml(
+            &home.path().join("ljos/ljos.toml"),
+            "[gates]\nquorum = 3\nconsensus_branches = [\"main\", \"release\"]\n",
+        );
+        assert_eq!(read().quorum, 3);
+        assert_eq!(read().branches, names(&["main", "release"]));
+        write_toml(
+            &home.path().join("ljos/seats/box/ljos.toml"),
+            "quorum = 1\n",
+        );
+        assert_eq!(read().quorum, 1, "the seat file is the person's too");
+        write_toml(
+            &cwd.join("ljos.toml"),
+            "quorum = 1\nconsensus_branches = []\n",
+        );
+        gates(
+            cwd,
+            "quorum = 2\nconsensus_branches = [\"refs/heads/stable\"]\n",
+        );
+        assert_eq!(read().quorum, 2, "a checkout raises the quorum");
+        assert_eq!(read().branches, names(&["main", "release", "stable"]));
+        write_toml(&cwd.join("ljos.toml"), "quorum = 0\n");
+        let zero = consensus_push(Some(cwd)).unwrap_err();
+        assert!(zero.contains("`quorum`"), "{zero}");
+        write_toml(&cwd.join("ljos.toml"), "quorum = [\n");
+        let broken = consensus_push(Some(cwd)).unwrap_err();
+        assert!(broken.contains("does not parse"), "{broken}");
     }
 
     #[test]
