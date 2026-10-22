@@ -448,17 +448,34 @@ pub fn load_or_create(path: &std::path::Path) -> Result<SigningKey> {
 /// signing began in this tracker, by commit order: its `] VOTER: CHOICE`
 /// line is in that issue's own entry in every parent of each commit that
 /// brought the pin file into a tree none of its parents held it in. No
-/// git date is read. `false` on a tracker that is not a git repository or
-/// has no pin committed; `LJOS_UNSIGNED_BALLOTS=allow` is for a tracker
+/// git date is read. `Ok(false)` on a tracker that is not a git repository
+/// or has no pin committed; `LJOS_UNSIGNED_BALLOTS=allow` is for a tracker
 /// that never signed.
-#[must_use]
-pub fn recorded_before_signing(issue: &str, voter: &str, choice: &str) -> bool {
-    env_root().is_some_and(|root| recorded_before_signing_in(&root, issue, voter, choice))
+///
+/// # Errors
+///
+/// [`crate::slot::require_tracker_history`] could not make the history
+/// readable. A missing parent is not "the ballot was not there yet".
+pub fn recorded_before_signing(issue: &str, voter: &str, choice: &str) -> Result<bool, String> {
+    let Some(root) = env_root() else {
+        return Ok(false);
+    };
+    recorded_before_signing_in(&root, issue, voter, choice)
 }
 
 /// [`recorded_before_signing`] in the tracker at `root`.
-#[must_use]
-pub fn recorded_before_signing_in(root: &Path, issue: &str, voter: &str, choice: &str) -> bool {
+///
+/// # Errors
+///
+/// [`crate::slot::require_tracker_history`] could not make the history
+/// readable.
+pub fn recorded_before_signing_in(
+    root: &Path,
+    issue: &str,
+    voter: &str,
+    choice: &str,
+) -> Result<bool, String> {
+    crate::slot::require_tracker_history(root)?;
     let log = git_in(
         root,
         &[
@@ -484,13 +501,13 @@ pub fn recorded_before_signing_in(root: &Path, issue: &str, voter: &str, choice:
         })
         .collect();
     let needle = format!("] {}: {}", voter.trim(), choice.trim());
-    !starts.is_empty()
+    Ok(!starts.is_empty()
         && starts.iter().all(|parents| {
             !parents.is_empty()
                 && parents
                     .iter()
                     .all(|p| crate::slot::note_on_issue_at_in(root, p, issue, &needle))
-        })
+        }))
 }
 
 pub(crate) fn env_root() -> Option<PathBuf> {
@@ -1697,18 +1714,8 @@ mod tests {
         .unwrap();
         git(dir.path(), &["add", "issues.org"], &[]);
         git(dir.path(), &["commit", "-m", "new ballot"], &[]);
-        assert!(recorded_before_signing_in(
-            dir.path(),
-            "probe-old",
-            "elder",
-            "rail"
-        ));
-        assert!(!recorded_before_signing_in(
-            dir.path(),
-            "probe-new",
-            "elder",
-            "rail"
-        ));
+        assert!(recorded_before_signing_in(dir.path(), "probe-old", "elder", "rail").unwrap());
+        assert!(!recorded_before_signing_in(dir.path(), "probe-new", "elder", "rail").unwrap());
     }
 
     #[test]
