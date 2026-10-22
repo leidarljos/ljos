@@ -167,6 +167,12 @@ fn seat_env(root: &Path) -> (PathBuf, PathBuf) {
         "GITHUB_PAT",
         "CURL_HOME",
         "WGETRC",
+        "http_proxy",
+        "HTTP_PROXY",
+        "https_proxy",
+        "HTTPS_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
     ] {
         std::env::remove_var(key);
     }
@@ -1339,6 +1345,44 @@ fn a_followed_redirect_may_lead_to_github() {
     fs::write(home.join(".wgetrc"), "max_redirect = 0\n").unwrap();
     allowed("wget --method=POST https://example.com/x", here);
     fs::remove_file(home.join(".wgetrc")).unwrap();
+}
+
+/// A proxy can forward a request anywhere. The clients take one from
+/// the environment, and the guard reads the environment the command
+/// gets: the process, an `export` on the line, and a prefix.
+#[test]
+fn a_proxy_in_the_environment_may_reach_github() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    ljos_cli::cloud::up(false).unwrap();
+    let here = root.path();
+    let curl = "curl -X POST https://example.com/x";
+    let wget = "wget --max-redirect=0 --method=POST http://example.com/x";
+    let relay = "http://relay.example:3128";
+
+    for key in [
+        "http_proxy",
+        "HTTP_PROXY",
+        "https_proxy",
+        "HTTPS_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
+    ] {
+        refused(&format!("{key}={relay} {curl}"), here);
+        refused(&format!("env {key}={relay} {wget}"), here);
+        refused(&format!("export {key}={relay}; {curl}"), here);
+        refused(&format!("NO_PROXY='*' {key}={relay} {curl}"), here);
+        allowed(&format!("{key}={relay} curl https://example.com/x"), here);
+        allowed(&format!("{key}= {curl}"), here);
+        std::env::set_var(key, relay);
+        refused(curl, here);
+        refused("http --ignore-stdin POST https://example.com/x a=b", here);
+        std::env::remove_var(key);
+    }
+    allowed(curl, here);
+    allowed(wget, here);
 }
 
 /// A curl option that names a proxy, a resolver, a socket, an address

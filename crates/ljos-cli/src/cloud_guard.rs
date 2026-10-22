@@ -425,7 +425,10 @@ fn judge_depth(line: &str, cwd: Option<&Path>, incoming: &WalkIn) -> Verdict {
                     if http_targets_github(&words) {
                         verdict.saw_ref = true;
                     }
-                    if let Some(why) = http_ref_write(&words, &run.env, here.as_deref()) {
+                    // An `export` or assignment earlier on the line reaches
+                    // the client too; a prefix on this command wins.
+                    let env: Vec<_> = names.iter().chain(&run.env).cloned().collect();
+                    if let Some(why) = http_ref_write(&words, &env, here.as_deref()) {
                         if verdict.push.is_none() {
                             verdict.push = Some(why);
                         }
@@ -3825,6 +3828,7 @@ fn http_ref_write(
         return None;
     }
     let (shape, config_github) = http_shape(cmd, words, env, cwd);
+    let config_github = config_github || proxy_env(env);
     // A host that is not GitHub is left alone, including a clustered
     // DELETE. Cargo and npm talk to those hosts. A config file can name
     // the host when the command line does not.
@@ -3837,6 +3841,22 @@ fn http_ref_write(
             "an HTTP client can write refs on GitHub and the destination is not limited to this seat; {ALLOW_RULE}"
         )),
     }
+}
+
+/// Curl, wget, and httpie send through a proxy these variables name, and
+/// the proxy can forward anywhere. `NO_PROXY` may exempt a host, but a
+/// write is not allowed on that.
+fn proxy_env(env: &[(String, String)]) -> bool {
+    [
+        "http_proxy",
+        "HTTP_PROXY",
+        "https_proxy",
+        "HTTPS_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
+    ]
+    .iter()
+    .any(|key| prefixed_or_process(env, key).is_some_and(|value| !value.trim().is_empty()))
 }
 
 enum HttpShape {
