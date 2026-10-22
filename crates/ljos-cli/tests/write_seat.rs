@@ -67,6 +67,14 @@ impl Bench {
         cmd.output().unwrap()
     }
 
+    fn seats(&self, body: &str) -> PathBuf {
+        let dir = self.root.join("home/.config/ljos");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("seats.toml");
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
     fn calls(&self) -> String {
         std::fs::read_to_string(&self.log).unwrap_or_default()
     }
@@ -119,4 +127,33 @@ fn a_named_seat_writes_and_a_read_needs_no_seat() {
         !err.contains("no seat is named"),
         "listing is a read: {err}"
     );
+}
+
+#[test]
+fn with_a_seats_file_only_a_listed_seat_writes() {
+    let b = Bench::new();
+    let note = ["note", "proj-aaaa", "progress"];
+    let open = b.ljos(Some("stranger"), &note);
+    assert!(
+        !String::from_utf8_lossy(&open.stderr).contains("no seat named"),
+        "with no seats file any named seat writes: {open:?}"
+    );
+    assert!(b.calls().contains("vissue note"), "{}", b.calls());
+
+    let b = Bench::new();
+    let path = b.seats("\"0b1c2d3e-0000-4000-8000-000000000000\" = \"saddle\"\n");
+    let refused = b.ljos(Some("stranger"), &note);
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(err.contains("no seat named stranger"), "{err}");
+    assert!(err.contains(&path.display().to_string()), "{err}");
+    assert!(err.contains("saddle"), "names the seats it lists: {err}");
+    assert_eq!(b.calls(), "", "nothing reached the tracker");
+
+    let listed = b.ljos(Some("saddle"), &note);
+    assert!(
+        !String::from_utf8_lossy(&listed.stderr).contains("no seat named"),
+        "{listed:?}"
+    );
+    assert!(b.calls().contains("vissue note"), "{}", b.calls());
 }
