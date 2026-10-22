@@ -21,9 +21,11 @@
 //! as concealing.
 //!
 //! Every `<style>` block, wherever it sits, is read before the body, and
-//! any block or concealment marks the part as hiding content. When the
-//! HTML does what the reducer cannot follow (an `@` rule such as
-//! `@media`, a concealing rule on any selector other than a class or id,
+//! any block or concealment marks the part as hiding content. Rules
+//! inside `@media`, `@supports` and other block at-rules are read as if
+//! they apply. When the HTML does what the reducer cannot follow
+//! (`@import`, a concealing rule on any selector other than a class or
+//! id, a rule nested in a style rule or blocks nested more than 8 deep,
 //! a stylesheet color within 16 of a background set anywhere, of white
 //! when its rule sets no background, or a stylesheet background within
 //! 16 of black when its rule sets no color, a linked stylesheet, or a
@@ -271,7 +273,7 @@ fn css_text(css: &str) -> String {
                 out.push(c);
                 if c == '\\' {
                     out.extend(chars.next());
-                } else if c == q {
+                } else if c == q || matches!(c, '\n' | '\r' | '\x0c') {
                     quote = None;
                 }
             }
@@ -638,46 +640,72 @@ impl HiddenRules {
     /// sets `withheld`.
     fn read(&mut self, css: &str) {
         self.styled = true;
-        let css = css_text(&css.to_ascii_lowercase());
-        if css.contains('@') {
+        self.rules(&css_text(&css.to_ascii_lowercase()), 0);
+    }
+
+    /// The rules in `css`. Those inside `@media`, `@supports` or any
+    /// other block at-rule are read as if they apply; `@import`, or
+    /// blocks nested more than 8 deep, withhold.
+    fn rules(&mut self, mut css: &str, depth: usize) {
+        if depth > 8 {
             self.withheld = true;
+            return;
         }
-        for rule in css.split('}') {
-            let Some((selectors, body)) = rule.split_once('{') else {
-                continue;
-            };
-            let decls = declarations(body);
-            let set = own(&decls, None, 16.0);
-            if let Some(set) = &set {
-                if let Some(fg) = &set.fg {
-                    self.withheld |= set.bg.is_none() && close(fg, &WHITE);
-                    self.colors.push(fg.clone());
-                }
-                if let Some(bg) = &set.bg {
-                    self.withheld |= set.fg.is_none() && close(bg, &BLACK);
-                    self.backgrounds.push(bg.clone());
-                }
+        while let Some((prelude, block, rest)) = next_rule(css) {
+            css = rest;
+            let mut prelude = prelude.trim();
+            while let Some(p) = prelude
+                .strip_prefix("<!--")
+                .or_else(|| prelude.strip_prefix("-->"))
+            {
+                prelude = p.trim_start();
             }
-            let conceals = hides(&decls)
-                || set.is_none_or(|set| {
-                    set.opacity.is_some_and(|n| n <= 0.05)
-                        || set.font_px.is_some_and(|n| n <= 1.0)
-                        || set.fg.is_some_and(|c| alpha(&c) <= 0.05)
-                });
-            if !conceals {
-                continue;
+            match (prelude.strip_prefix('@'), block) {
+                (Some(at), _) if at.starts_with("import") => self.withheld = true,
+                (Some(_), Some(block)) => self.rules(block, depth + 1),
+                (None, Some(block)) => self.rule(prelude, block),
+                (_, None) => {}
             }
-            for selector in selectors.split(',') {
-                let last = selector
-                    .trim()
-                    .rsplit(|c: char| c.is_whitespace() || ">+~".contains(c))
-                    .next()
-                    .unwrap_or("");
-                match (last.rsplit_once('.'), last.rsplit_once('#')) {
-                    (Some((_, class)), _) if simple(class) => self.classes.push(class.to_string()),
-                    (None, Some((_, id))) if simple(id) => self.ids.push(id.to_string()),
-                    _ => self.withheld = true,
-                }
+        }
+    }
+
+    /// One style rule. A rule nested inside it is not followed.
+    fn rule(&mut self, selectors: &str, body: &str) {
+        if unquoted(body).any(|(_, c)| c == '{') {
+            self.withheld = true;
+            return;
+        }
+        let decls = declarations(body);
+        let set = own(&decls, None, 16.0);
+        if let Some(set) = &set {
+            if let Some(fg) = &set.fg {
+                self.withheld |= set.bg.is_none() && close(fg, &WHITE);
+                self.colors.push(fg.clone());
+            }
+            if let Some(bg) = &set.bg {
+                self.withheld |= set.fg.is_none() && close(bg, &BLACK);
+                self.backgrounds.push(bg.clone());
+            }
+        }
+        let conceals = hides(&decls)
+            || set.is_none_or(|set| {
+                set.opacity.is_some_and(|n| n <= 0.05)
+                    || set.font_px.is_some_and(|n| n <= 1.0)
+                    || set.fg.is_some_and(|c| alpha(&c) <= 0.05)
+            });
+        if !conceals {
+            return;
+        }
+        for selector in selectors.split(',') {
+            let last = selector
+                .trim()
+                .rsplit(|c: char| c.is_whitespace() || ">+~".contains(c))
+                .next()
+                .unwrap_or("");
+            match (last.rsplit_once('.'), last.rsplit_once('#')) {
+                (Some((_, class)), _) if simple(class) => self.classes.push(class.to_string()),
+                (None, Some((_, id))) if simple(id) => self.ids.push(id.to_string()),
+                _ => self.withheld = true,
             }
         }
     }
@@ -689,6 +717,59 @@ impl HiddenRules {
     fn has_id(&self, id: &str) -> bool {
         self.ids.iter().any(|i| i.eq_ignore_ascii_case(id))
     }
+}
+
+/// The first rule or statement in `css`: its prelude, its block if it
+/// has one, and the CSS after it. A block the sheet leaves open runs to
+/// the end.
+fn next_rule(css: &str) -> Option<(&str, Option<&str>, &str)> {
+    if css.trim().is_empty() {
+        return None;
+    }
+    let (mut depth, mut open) = (0usize, 0);
+    for (i, c) in unquoted(css) {
+        match c {
+            ';' if depth == 0 => return Some((&css[..i], None, &css[i + 1..])),
+            '{' => {
+                if depth == 0 {
+                    open = i;
+                }
+                depth += 1;
+            }
+            '}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((&css[..open], Some(&css[open + 1..i]), &css[i + 1..]));
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(if depth > 0 {
+        (&css[..open], Some(&css[open + 1..]), "")
+    } else {
+        (css, None, "")
+    })
+}
+
+/// The characters of `css` outside strings, with their offsets. A
+/// string ends at its quote or at a line break.
+fn unquoted(css: &str) -> impl Iterator<Item = (usize, char)> + '_ {
+    let (mut quote, mut escaped) = (None, false);
+    css.char_indices().filter(move |&(_, c)| {
+        let Some(q) = quote else {
+            quote = matches!(c, '"' | '\'').then_some(c);
+            return quote.is_none();
+        };
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == q || matches!(c, '\n' | '\r' | '\x0c') {
+            quote = None;
+        }
+        false
+    })
 }
 
 fn simple(name: &str) -> bool {
@@ -1029,8 +1110,11 @@ mod tests {
             "div > p { font-size: 0 }",
             "* { opacity: 0 }",
             "a:hover, .x { display: none }",
-            "@media (max-width: 600px) { .x { display: none } }",
+            "@media screen { div > p { display: none } }",
+            "@keyframes k { to { opacity: 0 } }",
+            ".a { .x { display: none } }",
             "@import url(https://example.test/x.css);",
+            "@media screen { @IMPORT 'x.css'; }",
             ".a { color: #fff } body { background: white }",
         ] {
             let got = visible_text(&format!("<style>{css}</style><p>Hello</p><p>secret</p>"));
@@ -1038,6 +1122,33 @@ mod tests {
         }
         let linked = visible_text("<link rel=stylesheet href=https://example.test/x.css><p>Hi</p>");
         assert!(linked.withheld);
+        let deep = format!(
+            "<style>{}.x{{display:none}}</style>",
+            "@media screen{".repeat(9)
+        );
+        assert!(visible_text(&deep).withheld);
+    }
+
+    #[test]
+    fn at_rules_apply_as_if_they_match() {
+        for css in [
+            "@media screen { .a { color: red } }",
+            ".a::after { content: \"a@b\" }",
+            "/* @import url(x.css); */ .a { font-family: '@import' }",
+            "@charset \"utf-8\"; @font-face { font-family: f; src: url(f.woff) }",
+        ] {
+            let got = visible_text(&format!("<style>{css}</style><p class=a>Hello</p>"));
+            assert_eq!(got.text, "Hello", "{css}");
+            assert!(got.hidden_content && !got.withheld, "{css}");
+        }
+        let got = visible_text(
+            "<style><!-- @media (max-width: 600px) { .x { display: none } }\
+             @supports (display: grid) { @media print { #y { font-size: 0 } } } -->\
+             .z { content: \"a\n}.w{display:/**/none}</style>\
+             <p>Shown</p><p class=x>SECRET</p><p id=y>SECRET</p><p class=w>SECRET</p>",
+        );
+        assert_eq!(got.text, "Shown");
+        assert!(got.hidden_content && !got.withheld, "{got:?}");
     }
 
     #[test]
