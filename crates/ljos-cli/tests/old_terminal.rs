@@ -14,6 +14,9 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+#[path = "common/terminal.rs"]
+mod terminal;
+
 const VERSIONS: &[&str] = &["0.17.0", "0.22.0", "0.25.0", "0.29.0"];
 const RUNNER_LESSON: &str = "The lint job must pass before a merge.";
 const AGENT_LESSON: &str = "The deploy window closes at four on Friday.";
@@ -366,7 +369,10 @@ fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
         assert_terminal_shape(remembered);
 
         let review = seat
-            .command(new, &["prefer", "--review"])
+            .command(
+                terminal::PYTHON,
+                &terminal::shape("terminal", new, &["prefer", "--review"]),
+            )
             .env("PACKSET_WORKSPACE", &workspace)
             .output()
             .unwrap();
@@ -420,7 +426,10 @@ fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
     let held_id = held["id"].as_str().unwrap().to_string();
 
     let review = seat
-        .command(new, &["prefer", "--review"])
+        .command(
+            terminal::PYTHON,
+            &terminal::shape("terminal", new, &["prefer", "--review"]),
+        )
         .env("PACKSET_WORKSPACE", "held")
         .output()
         .unwrap();

@@ -1496,8 +1496,8 @@ fn run_command() -> Result<()> {
                 }
                 return Ok(());
             }
-            // A person-side prefer records the cutoff before this write.
-            // Under a runner it does not.
+            // A prefer the person types at a terminal of their own records
+            // the cutoff before this write. Any other run does not.
             ljos_cli::legacy_pref::migrate_once();
             if user {
                 if sync {

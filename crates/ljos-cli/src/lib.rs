@@ -18277,8 +18277,8 @@ pub fn preferences_line(enforced: usize, could: usize, total: usize) -> String {
 }
 
 fn preferences_row() -> Habitat {
-    // The doctor is a person-side run, so it records the cutoff. Under a
-    // runner the call does nothing and the count below still stands.
+    // The doctor records the cutoff only with the person at a terminal of
+    // their own. Without them the call does nothing and the row reports.
     legacy_pref::migrate_once();
     let listed = pack().and_then(|client| {
         atoms_lean(&client, &client.workspace()).context("preferences: GET /v1/atoms failed")

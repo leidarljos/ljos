@@ -399,6 +399,15 @@ raise SystemExit(os.waitstatus_to_exitcode(status))
         .unwrap()
 }
 
+/// `bin ARGS` on a pty a terminal holds, the person's shape. Only that
+/// writes the cutoff and promotes.
+fn on_a_terminal(seat: &Seat, bin: &str, args: &[&str]) -> Output {
+    seat.command(terminal::PYTHON, &terminal::shape("terminal", bin, args))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
 fn marker_files(seat: &Seat) -> Vec<PathBuf> {
     let dir = seat.home.path().join("state/ljos/pref-basis");
     let mut out = Vec::new();
@@ -613,7 +622,7 @@ fn preferences_from_v0_32_1_follow_the_writer_that_stored_them() {
         .unwrap();
     let runner_review_out = succeeded(&runner_review, "review under a runner");
     assert!(
-        runner_review_out.contains("no older preferences await review"),
+        runner_review_out.contains("at a terminal of your own"),
         "{runner_review_out}"
     );
 
@@ -628,7 +637,10 @@ fn preferences_from_v0_32_1_follow_the_writer_that_stored_them() {
     assert!(basis(by_text(&untouched, "use bun")).is_none());
     assert!(basis(by_text(&untouched, "release key")).is_none());
 
-    let review = succeeded(&seat.output(new, &["prefer", "--review"]), "review");
+    let review = succeeded(
+        &on_a_terminal(&seat, new, &["prefer", "--review"]),
+        "review",
+    );
     assert!(
         review.contains("2 older preferences await review"),
         "{review}"
@@ -860,7 +872,7 @@ fn preferences_from_v0_32_1_follow_the_writer_that_stored_them() {
         "late typed ts {}",
         late_typed["ts"]
     );
-    let again = seat.output(new, &["prefer", "--review"]);
+    let again = on_a_terminal(&seat, new, &["prefer", "--review"]);
     assert!(again.status.success(), "{}", text_of(&again));
     let again_out = String::from_utf8_lossy(&again.stdout);
     assert!(
@@ -957,7 +969,10 @@ fn a_kept_preference_keeps_its_clock() {
         }),
     );
     let id = held["id"].as_str().unwrap();
-    let listed = succeeded(&seat.output(bin, &["prefer", "--review"]), "review");
+    let listed = succeeded(
+        &on_a_terminal(&seat, bin, &["prefer", "--review"]),
+        "review",
+    );
     assert!(listed.contains(id), "{listed}");
 
     let said = succeeded(&keep_on_a_terminal(&seat, bin, id), "keep");
@@ -1035,7 +1050,7 @@ fn a_raise_another_record_would_answer_closes_nothing() {
         .expect("POST /v1/atoms/update");
 
     succeeded(
-        &seat.output(env!("CARGO_BIN_EXE_ljos"), &["prefer", "--review"]),
+        &on_a_terminal(&seat, env!("CARGO_BIN_EXE_ljos"), &["prefer", "--review"]),
         "review",
     );
     let after = atoms(&daemon.url, &daemon.token);
@@ -1124,7 +1139,10 @@ raise SystemExit(int(open(done).read()))
         }),
     );
     let id = held["id"].as_str().unwrap();
-    succeeded(&seat.output(bin, &["prefer", "--review"]), "review");
+    succeeded(
+        &on_a_terminal(&seat, bin, &["prefer", "--review"]),
+        "review",
+    );
     let before = atoms(&daemon.url, &daemon.token);
 
     let done = seat.run.path().join("kept");
@@ -1199,4 +1217,56 @@ fn a_program_or_an_adopted_terminal_cannot_keep_a_preference() {
         );
     }
     succeeded(&keep_on_a_terminal(&seat, bin, id), "keep");
+}
+
+/// With stdin closed, `ljos prefer --review`, the doctor and a plain
+/// `ljos prefer` only report: none writes the cutoff or promotes an older
+/// preference. The same review at a terminal does both.
+#[test]
+fn only_the_person_at_a_terminal_writes_the_cutoff() {
+    let daemon = Daemon::start();
+    let seat = Seat::on(daemon.url.clone(), daemon.token.clone());
+    let bin = env!("CARGO_BIN_EXE_ljos");
+    post_atom(
+        &daemon.url,
+        &daemon.token,
+        json!({
+            "schema": "inside.atom/v1",
+            "workspace": "seat",
+            "kind": "preference",
+            "level": "explicit",
+            "origin": "user-declared",
+            "text": TERMINAL,
+            "entities": ["seat:person", "horizon:standing"],
+            "source": {"harness": "person", "seat": "person", "session": "person", "via": "ljos"},
+        }),
+    );
+
+    let review = succeeded(&seat.output(bin, &["prefer", "--review"]), "review");
+    assert!(review.contains("at a terminal of your own"), "{review}");
+    let doctor = seat.doctor(bin);
+    let typed = seat.output(bin, &["prefer", LATE_TYPED]);
+    let after = atoms(&daemon.url, &daemon.token);
+    assert!(
+        cutoffs(&after).is_empty(),
+        "{after:?}\n{}\n{}",
+        text_of(&doctor),
+        text_of(&typed)
+    );
+    assert!(
+        basis(by_text(&after, "release notes")).is_none(),
+        "{after:?}"
+    );
+
+    let review = succeeded(
+        &on_a_terminal(&seat, bin, &["prefer", "--review"]),
+        "review",
+    );
+    assert!(
+        review.contains("no older preferences await review"),
+        "{review}"
+    );
+    let migrated = atoms(&daemon.url, &daemon.token);
+    assert_eq!(cutoffs(&migrated).len(), 1, "{migrated:?}");
+    assert_eq!(basis(by_text(&migrated, "release notes")), Some("person"));
 }

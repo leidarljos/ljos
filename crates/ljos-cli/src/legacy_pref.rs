@@ -12,8 +12,10 @@
 //! atom at that time or after is not an older preference, whatever marks
 //! it carries. `via:prompt` alone never promotes: the hook runs under the
 //! runner, and a direct post can wear the tag. Search, the island, the
-//! command gate, session start and any process under a runner do not
-//! write the receipt and do not stamp a basis.
+//! command gate and session start do not write the receipt and do not
+//! stamp a basis, and neither does any run [`person_present`] does not
+//! prove: a runner, a pipe, the doctor or `ljos prefer` from a tool call
+//! only report.
 //!
 //! One atom the pack refuses does not stop the rest. The receipt is
 //! written before any stamp. A permanent refusal is recorded on it as
@@ -179,13 +181,15 @@ pub(crate) fn review_sentence(held: &[(String, String, String)]) -> String {
 /// Stamp basis `person` on every legacy atom a terminal writer marked,
 /// when that atom is older than this pack's cutoff.
 ///
-/// The cutoff is a receipt written once, by the first run of this that
-/// is not under a runner. A later run finds that receipt and does not
-/// write another. Search, the island, the command gate and session start
-/// do not call this. A pack that does not answer is left for the next run.
-/// One refused update does not stop the receipt or the atoms after it.
+/// The cutoff is a receipt written once, by the first run of this the
+/// person makes at a terminal of their own ([`person_present`]), the
+/// check `keep` makes. Anything else returns before reading the pack. A
+/// later run finds that receipt and does not write another. Search, the
+/// island, the command gate and session start do not call this. A pack
+/// that does not answer is left for the next run. One refused update
+/// does not stop the receipt or the atoms after it.
 pub fn migrate_once() {
-    if under_a_runner() {
+    if !person_present() {
         return;
     }
     crate::with_env_mutation(|| {
@@ -203,6 +207,11 @@ pub fn list() -> Result<String> {
     migrate_once();
     let atoms = live()?;
     let rows = awaiting(&atoms);
+    if rows.is_empty() && earliest_cutoff(&atoms).is_none() && !person_present() {
+        return Ok("older preferences are read at a terminal of your own: \
+                   run `ljos prefer --review` there\n"
+            .to_string());
+    }
     if rows.is_empty() {
         return Ok("no older preferences await review\n".to_string());
     }
