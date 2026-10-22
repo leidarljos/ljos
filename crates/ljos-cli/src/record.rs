@@ -383,6 +383,7 @@ pub struct TrackerReport {
 /// The root holds no project, an issue file cannot be read or parsed, or
 /// the pin file is malformed.
 pub fn check_tracker(root: &Path) -> Result<TrackerReport> {
+    crate::slot::require_tracker_history(root).map_err(anyhow::Error::msg)?;
     let layout = vissue_core::Layout::resolve(Some(root), None)?;
     let projects = vissue_core::store::list_projects(&layout)?;
     if projects.is_empty() {
@@ -421,6 +422,7 @@ pub fn check_tracker(root: &Path) -> Result<TrackerReport> {
             let span = (file == board).then_some((heading.line_start, heading.line_end));
             let legacy = |voter: &str, choice: &str| {
                 crate::ballot_sig::recorded_before_signing_in(root, issue, voter, choice)
+                    .unwrap_or(false)
             };
             let cast: Vec<&str> = ballots.iter().map(|b| b.agent.as_str()).collect();
             for ballot in &ballots {
