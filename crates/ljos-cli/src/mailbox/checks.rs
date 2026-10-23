@@ -280,23 +280,49 @@ fn plain_text_only(headers: &[(String, String)], body: &str) -> Vec<String> {
 }
 
 /// A `<` that opens a closing tag, comment or declaration, or an `&`
-/// that starts a named or numeric entity. An opening tag such as
-/// `<https://...>` is left to the scan of `rendered`.
+/// that starts a named or numeric entity. A numeric reference is markup
+/// with or without its `;`, because `rendered` decodes both and a client
+/// does too. An opening tag such as `<https://...>` is left to the scan
+/// of `rendered`.
 fn has_markup(body: &str) -> bool {
     let bytes = body.as_bytes();
     bytes.iter().enumerate().any(|(i, &b)| {
         let next = bytes.get(i + 1).copied().unwrap_or(0);
         match b {
             b'<' => matches!(next, b'/' | b'!' | b'?'),
-            b'&' => {
-                let name: Vec<u8> = bytes[i + 1..]
-                    .iter()
-                    .copied()
-                    .take_while(|c| c.is_ascii_alphanumeric() || *c == b'#')
-                    .collect();
-                !name.is_empty() && bytes.get(i + 1 + name.len()) == Some(&b';')
-            }
+            b'&' => entity_at(&bytes[i + 1..]),
             _ => false,
+        }
+    })
+}
+
+/// A named entity that ends in `;`, or a numeric reference (`&#` digits
+/// or `&#x` hex digits) with at least one digit. The semicolon on a
+/// numeric reference is optional.
+fn entity_at(rest: &[u8]) -> bool {
+    if numeric_reference(rest) {
+        return true;
+    }
+    let name_len = rest
+        .iter()
+        .take_while(|c| c.is_ascii_alphanumeric() || **c == b'#')
+        .count();
+    name_len > 0 && rest.get(name_len) == Some(&b';')
+}
+
+fn numeric_reference(rest: &[u8]) -> bool {
+    let Some(n) = rest.strip_prefix(b"#") else {
+        return false;
+    };
+    let (digits, hex) = match n.strip_prefix(b"x").or_else(|| n.strip_prefix(b"X")) {
+        Some(hex) => (hex, true),
+        None => (n, false),
+    };
+    digits.first().is_some_and(|c| {
+        if hex {
+            c.is_ascii_hexdigit()
+        } else {
+            c.is_ascii_digit()
         }
     })
 }

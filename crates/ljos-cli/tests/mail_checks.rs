@@ -259,6 +259,21 @@ fn markup_in_the_body_is_refused_so_a_term_cannot_hide_in_it() {
 }
 
 #[test]
+fn a_numeric_reference_without_a_semicolon_is_markup() {
+    let s = setup(DENY);
+    for body in [
+        "Status of proj&#1077ect-x.",
+        "Status of pro&#xfff9ject-x.",
+        "Status of pro&#X65ject-x.",
+        "Status of proj&#101ct-x.",
+    ] {
+        let draft = CLEAN.replace("See you at noon about topic-a.", body);
+        let got = refused(&draft, &s.config);
+        assert!(got.iter().any(|r| r.contains("HTML")), "{body}: {got:?}");
+    }
+}
+
+#[test]
 fn a_bracketed_link_passes_and_a_term_joined_by_tags_or_references_does_not() {
     let s = setup(DENY);
     for body in [
