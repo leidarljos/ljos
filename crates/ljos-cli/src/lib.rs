@@ -24544,7 +24544,8 @@ fn root_source() -> String {
 /// resolved, and where the root came from. A root that is relative, missing,
 /// or holds no prefix directory fails the row: tickets filed there are
 /// invisible to every other seat. When the root is a git checkout with an
-/// upstream, the row also names how many commits origin lacks.
+/// upstream, the row also names how many commits origin lacks, and in any
+/// checkout the issue files that hold uncommitted edits.
 pub fn tracker_state(identity: &str, source: &str) -> (String, bool) {
     let version = identity.lines().next().unwrap_or("").trim();
     let field = |key: &str| {
@@ -24568,13 +24569,50 @@ pub fn tracker_state(identity: &str, source: &str) -> (String, bool) {
         None
     };
     let base = format!("{version} root={root} prefix={prefix} from {source}");
-    match problem {
-        Some(why) => (format!("{base}; {why}"), false),
+    let (state, ok) = match problem {
+        Some(why) => return (format!("{base}; {why}"), false),
         None => match tracker_git_drift(path) {
             Some((extra, git_ok)) => (format!("{base}; {extra}"), git_ok),
             None => (base, true),
         },
+    };
+    match tracker_uncommitted(path) {
+        Some(edits) => (format!("{state}; {edits}"), ok),
+        None => (state, ok),
     }
+}
+
+/// What the tracker row says when issue files hold uncommitted edits.
+const UNCOMMITTED_EDITS: &str = "uncommitted issue edits";
+
+/// The issue files in the tracker checkout whose edits no commit holds: a
+/// raw `vissue` write, or a tracker commit that failed. No other host and
+/// no rebuilt one sees them. Under `LJOS_TRACKER_GIT=off` ljos leaves the
+/// tracker uncommitted on purpose, and nothing is said.
+fn tracker_uncommitted(root: &Path) -> Option<String> {
+    let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
+    if matches!(mode.as_str(), "off" | "0" | "false") {
+        return None;
+    }
+    let status = git_ok_stdout(
+        root,
+        &["status", "--porcelain", "--untracked-files=all", "--", "."],
+    )?;
+    let files: Vec<&str> = status
+        .lines()
+        .filter_map(|line| line.get(3..))
+        .map(|path| path.rsplit(" -> ").next().unwrap_or(path).trim_matches('"'))
+        .filter(|path| path.ends_with(".org"))
+        .collect();
+    let first = files.first()?;
+    let more = match files.len() {
+        1 => String::new(),
+        n => format!(" and {} more", n - 1),
+    };
+    Some(format!(
+        "{UNCOMMITTED_EDITS} in {first}{more}; commit them in {} or no other host sees them",
+        root.display()
+    ))
 }
 
 fn git_in(dir: &Path, args: &[&str]) -> Option<std::process::Output> {
@@ -25114,7 +25152,9 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     if cloud::cloud_age_is_unset(row.name, &row.state) {
         return "info";
     }
-    if row.name == "tracker" && names_unpushed(&row.state) {
+    if row.name == "tracker"
+        && (names_unpushed(&row.state) || row.state.contains(UNCOMMITTED_EDITS))
+    {
         return "warn";
     }
     // A headerless log is left unread until someone pins it. The row names

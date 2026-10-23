@@ -504,6 +504,9 @@ under equal weights is a count; under calibrated rows it is not.
   healthy while that shell or a git child of it is alive. The row also fails when another remote
   of the tracker has a different head of the branch, as of the last fetch;
   seats that push to different remotes never see each other's claims.
+- `uncommitted issue edits in FILE` on the `doctor` tracker row: a raw
+  `vissue` write or a failed tracker commit left issue edits in the
+  checkout, and no other host sees them. Commit them in the tracker.
 - `deedar: warning: this deed is signed by ed25519:...`: the host key is
   not a signer the store's `layout` lists, and `evidence` will refuse the
   deed. Add the printed `signer =` line to that file.
