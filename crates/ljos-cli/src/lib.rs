@@ -29056,7 +29056,7 @@ const GIT_REPO_ENV: &[&str] = &[
     "GIT_NAMESPACE",
 ];
 
-fn clear_git_repo_env(cmd: &mut std::process::Command) {
+pub(crate) fn clear_git_repo_env(cmd: &mut std::process::Command) {
     for key in GIT_REPO_ENV {
         cmd.env_remove(key);
     }

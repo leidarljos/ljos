@@ -8,9 +8,9 @@
 
 ## Environment
 
-`LJOS_TRACKER_REMOTE` is the https git URL of the shared tracker. Unset, `cloud up` installs the binaries and does not turn push mode on.
+`LJOS_TRACKER_REMOTE` is the https git URL of the shared tracker. Unset, `cloud up` installs the binaries and does not turn push mode on. It does not write or commit in the working repository.
 
-When that remote cannot be cloned, `cloud up` has already written `~/.config/ljos/env`, the cloud guard rules, the pre-push hook, and the seat key. It warns, names the repository, and says to grant the Cursor GitHub app access to that repository. The machine keeps a local tracker and sets `LJOS_TRACKER_GIT=commit`. `ljos doctor` shows the tracker row as `warn`. A directory that is already there and is not a git checkout is still an error.
+When that remote cannot be cloned, `cloud up` has already written `~/.config/ljos/env`, the cloud guard rules, the pre-push hook, and the seat key. It warns, names the repository, and says to grant the Cursor GitHub app access to that repository. The machine keeps a local tracker and sets `LJOS_TRACKER_GIT=commit`. `ljos doctor` shows the tracker row as `warn`. A directory that is already there and is not a git checkout is still an error. A directory inside the working repository is not the tracker checkout. It is left untouched, and the local tracker is kept outside that repository.
 
 `LJOS_TRACKER_GIT=push` commits each tracker write, fetches, rebases with the per-issue field merge, and pushes. It retries a few times and never forces. A failed push stays committed. The next write and the end of the session try again. `commit` commits and does not fetch or push. `off` skips the commit.
 

@@ -6,6 +6,9 @@
 //! when this machine can read it. A clone the credential cannot read
 //! is a warning: the env file, the guard, the hook, and the seat are
 //! written first, and the machine keeps a local tracker in commit mode.
+//! That checkout is never the working repository. A directory inside the
+//! product is left untouched, so the merge attributes are not committed
+//! there when the clone fails or the remote is unset.
 //! The command is the bare name when PATH already runs this install, and
 //! the absolute path when another copy or none would run. It writes a
 //! webhook wake for each `LJOS_WAKE_<SEAT>_URL`. Entries this command
@@ -157,9 +160,15 @@ pub fn up_at(force: bool, repoint: bool) -> Result<String> {
     lines.push(crate::cloud_hook::ensure(repoint)?);
 
     let remote = nonempty_var("LJOS_TRACKER_REMOTE");
-    let tracker = remote.as_ref().map(|_| tracker_dir(&home));
-    let git_mode = if let (Some(remote), Some(dest)) = (remote.as_deref(), tracker.as_deref()) {
-        let hold = ensure_tracker(remote, dest, &seat)?;
+    let (tracker, git_mode) = if let Some(remote) = remote.as_deref() {
+        // Resolve the directory before any git command. A path inside the
+        // working repository is that repository to `git rev-parse`, and
+        // publishing it commits the tracker's attributes into the product.
+        let (dest, moved) = place_tracker(&home)?;
+        if let Some(moved) = moved {
+            lines.push(moved);
+        }
+        let hold = ensure_tracker(remote, &dest, &seat)?;
         let mode = hold.git_mode();
         lines.push(hold.line().to_string());
         pairs.push(("LJOS_TRACKER_GIT", mode.to_string()));
@@ -168,12 +177,12 @@ pub fn up_at(force: bool, repoint: bool) -> Result<String> {
         pairs.push(("ISSUE_ROOT", dest.display().to_string()));
         write_env(&env_path, &pairs)?;
         apply_env(&pairs);
-        Some(mode)
+        (Some(dest), Some(mode))
     } else {
         lines.push(
             "tracker: LJOS_TRACKER_REMOTE is unset, so this machine has no shared tracker".into(),
         );
-        None
+        (None, None)
     };
     let mcp_tracker = match (tracker.as_deref(), remote.as_deref(), git_mode) {
         (Some(root), Some(remote), Some(git_mode)) => Some(McpTracker {
@@ -1936,6 +1945,13 @@ pub(crate) fn tracker_repo_name(remote: &str) -> String {
 }
 
 fn ensure_tracker(remote: &str, dest: &Path, seat: &str) -> Result<TrackerHold> {
+    if let Some(top) = enclosing_checkout(dest) {
+        bail!(
+            "tracker: {} is inside {}, so it was not written",
+            dest.display(),
+            top.display()
+        );
+    }
     if is_work_tree(dest) {
         return hold_checkout(remote, dest, seat);
     }
@@ -1982,7 +1998,7 @@ fn hold_checkout(remote: &str, dest: &Path, seat: &str) -> Result<TrackerHold> {
 
 fn refresh_shared(dest: &Path, seat: &str) -> Result<TrackerHold> {
     ensure_identity(dest, seat)?;
-    match crate::tracker_push::publish(dest) {
+    match publish_own(dest) {
         Ok(()) => Ok(TrackerHold::Shared(format!(
             "tracker: updated {}",
             dest.display()
@@ -1992,6 +2008,21 @@ fn refresh_shared(dest: &Path, seat: &str) -> Result<TrackerHold> {
             dest.display()
         ))),
     }
+}
+
+/// Publish `dest` only when that directory is its own checkout.
+///
+/// `publish` commits in the toplevel git reports. A subdirectory of the
+/// working repository is that repository, so the tracker's attributes
+/// would land in the product.
+fn publish_own(dest: &Path) -> Result<(), String> {
+    if is_work_tree(dest) {
+        return crate::tracker_push::publish(dest);
+    }
+    Err(format!(
+        "{} is inside another checkout, so the tracker was not published there",
+        dest.display()
+    ))
 }
 
 fn adopt_or_local(remote: &str, dest: &Path, seat: &str) -> Result<TrackerHold> {
@@ -2061,13 +2092,9 @@ fn clone_tracker(remote: &str, dest: &Path, seat: &str) -> Result<String> {
         .context("tracker path has no name")?
         .to_string_lossy()
         .to_string();
-    let out = Command::new("git")
-        .current_dir(parent)
-        .args(["clone", "--quiet", remote, &name])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .context("git clone")?;
+    // `-C` and a cleared repository environment, so an exported `GIT_DIR`
+    // cannot clone into the working repository.
+    let out = git_output(parent, &["clone", "--quiet", remote, &name])?;
     if !out.status.success() {
         bail!(
             "tracker: clone of {remote} failed: {}",
@@ -2075,7 +2102,7 @@ fn clone_tracker(remote: &str, dest: &Path, seat: &str) -> Result<String> {
         );
     }
     ensure_identity(dest, seat)?;
-    match crate::tracker_push::publish(dest) {
+    match publish_own(dest) {
         Ok(()) => Ok(format!("tracker: cloned {remote} to {}", dest.display())),
         Err(e) => Ok(format!(
             "tracker: cloned {remote} to {}; push queued: {e}",
@@ -2096,13 +2123,11 @@ fn command_detail(out: &std::process::Output) -> String {
 }
 
 fn git_output(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
-    Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
+    let mut cmd = crate::git_at(dir);
+    cmd.args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(std::process::Stdio::null())
-        .output()
+        .stdin(std::process::Stdio::null());
+    cmd.output()
         .with_context(|| format!("git {}", args.join(" ")))
 }
 
@@ -2159,13 +2184,7 @@ fn ensure_identity(dir: &Path, seat: &str) -> Result<()> {
 }
 
 fn git_local(dir: &Path, key: &str) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["config", "--local", "--get", key])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
+    let out = git_output(dir, &["config", "--local", "--get", key]).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -2174,13 +2193,7 @@ fn git_local(dir: &Path, key: &str) -> Option<String> {
 }
 
 fn git_set(dir: &Path, key: &str, value: &str) -> Result<()> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["config", "--local", key, value])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .with_context(|| format!("git config {key}"))?;
+    let out = git_output(dir, &["config", "--local", key, value])?;
     if out.status.success() {
         Ok(())
     } else {
@@ -2191,17 +2204,103 @@ fn git_set(dir: &Path, key: &str, value: &str) -> Result<()> {
     }
 }
 
+/// True only when `dir` is the top of its own checkout.
+///
+/// `--is-inside-work-tree` is also true for a subdirectory of the product.
+/// Treating that directory as the tracker makes `publish` commit into the
+/// product. An exported `GIT_DIR` is ignored, so the working repository
+/// cannot answer for `dir`.
 fn is_work_tree(dir: &Path) -> bool {
-    let Ok(out) = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .stdin(std::process::Stdio::null())
-        .output()
-    else {
-        return false;
+    match own_toplevel(dir) {
+        Some(top) => same_place(dir, &top),
+        None => false,
+    }
+}
+
+fn own_toplevel(dir: &Path) -> Option<PathBuf> {
+    if !dir.is_dir() {
+        return None;
+    }
+    let out = git_output(dir, &["rev-parse", "--show-toplevel"]).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let top = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    if top.as_os_str().is_empty() {
+        return None;
+    }
+    Some(place_of(&top))
+}
+
+/// The checkout that contains `path`, when `path` is not that checkout.
+///
+/// Standing in the tracker and naming it returns nothing: that directory
+/// is the tracker. A missing directory is judged from the nearest existing
+/// ancestor, so a path that has not been created yet is still inside the
+/// product.
+fn enclosing_checkout(path: &Path) -> Option<PathBuf> {
+    if is_work_tree(path) {
+        return None;
+    }
+    let place = place_of(path);
+    let ancestor = existing_ancestor(&place)?;
+    let top = own_toplevel(&ancestor)?;
+    (!same_place(&place, &top)).then_some(top)
+}
+
+fn existing_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut cursor = path.to_path_buf();
+    if cursor.is_file() && !cursor.pop() {
+        return None;
+    }
+    while !cursor.as_os_str().is_empty() && !cursor.exists() {
+        if !cursor.pop() {
+            return None;
+        }
+    }
+    if cursor.is_file() && !cursor.pop() {
+        return None;
+    }
+    cursor.is_dir().then_some(cursor)
+}
+
+fn same_place(left: &Path, right: &Path) -> bool {
+    place_of(left) == place_of(right)
+}
+
+/// `path` with `.` and `..` removed and an existing prefix canonicalized.
+/// The missing tail stays, so a tracker directory that does not exist yet
+/// can still be compared with a checkout.
+fn place_of(path: &Path) -> PathBuf {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(path),
+            Err(_) => path.to_path_buf(),
+        }
     };
-    out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true"
+    let mut base = PathBuf::new();
+    for component in abs.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                base.pop();
+            }
+            other => base.push(other.as_os_str()),
+        }
+    }
+    let mut rest = PathBuf::new();
+    while !base.as_os_str().is_empty() && !base.exists() {
+        let Some(name) = base.file_name().map(std::ffi::OsStr::to_os_string) else {
+            break;
+        };
+        if !base.pop() {
+            break;
+        }
+        rest = PathBuf::from(name).join(rest);
+    }
+    fs::canonicalize(&base).unwrap_or(base).join(rest)
 }
 
 struct McpTracker<'a> {
@@ -3199,11 +3298,39 @@ fn bin_dir(home: &Path) -> PathBuf {
         .unwrap_or_else(|| home.join(".local/bin"))
 }
 
-fn tracker_dir(home: &Path) -> PathBuf {
+fn named_tracker_dir(home: &Path) -> PathBuf {
     std::env::var_os("LJOS_TRACKER_DIR")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".local/share/ljos/tracker"))
+}
+
+/// The tracker directory, moved outside the working repository when the
+/// named path sits inside another checkout.
+///
+/// The line is the move. There is no directory this machine can keep when
+/// the named path and the default under `home` are both inside a checkout:
+/// writing either one would be a write in that checkout.
+fn place_tracker(home: &Path) -> Result<(PathBuf, Option<String>)> {
+    let chosen = named_tracker_dir(home);
+    let Some(top) = enclosing_checkout(&chosen) else {
+        return Ok((chosen, None));
+    };
+    let fallback = home.join(".local/share/ljos/tracker");
+    if !same_place(&fallback, &chosen) && enclosing_checkout(&fallback).is_none() {
+        let line = format!(
+            "tracker: {} is inside {}, so this machine keeps the tracker at {}",
+            chosen.display(),
+            top.display(),
+            fallback.display()
+        );
+        return Ok((fallback, Some(line)));
+    }
+    bail!(
+        "tracker: {} is inside {}, so this machine does not keep a tracker in that checkout",
+        chosen.display(),
+        top.display()
+    );
 }
 
 fn seat_matches_file() -> bool {

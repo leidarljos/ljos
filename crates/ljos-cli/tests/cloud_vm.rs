@@ -4397,6 +4397,202 @@ fn install_sh_cloud_reuses_binaries_that_already_answer() {
     assert!(!said.contains("Installing ljos"), "{said}");
 }
 
+/// `install.sh --cloud` from a product checkout must not commit the
+/// tracker's merge attributes into that checkout. The product's origin is
+/// the tracker URL and the tracker directory is an empty directory inside
+/// the product, which is the checkout git walks up to when the clone fails.
+#[test]
+fn install_sh_cloud_leaves_the_product_checkout_untouched() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let product = root.path().join("product");
+    let bins = root.path().join("bin");
+    let runtime = root.path().join("run");
+    let hooks = root.path().join("no-hooks");
+    let gitconfig = root.path().join("gitconfig");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&bins).unwrap();
+    fs::create_dir_all(&runtime).unwrap();
+    fs::create_dir_all(&hooks).unwrap();
+    fs::create_dir_all(root.path().join("tmp")).unwrap();
+    fs::write(&gitconfig, b"").unwrap();
+    let remote = "file:///no/such/HaoZeke/grokbot_ljostracker.git";
+    let inside = product.join("tracker-dest");
+    fs::create_dir_all(&inside).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", &gitconfig)
+            .env("GIT_CONFIG_SYSTEM", &gitconfig)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_PREFIX")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_NAMESPACE")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}\n{}",
+            String::from_utf8_lossy(&out.stderr),
+            String::from_utf8_lossy(&out.stdout)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    git(&[
+        "-c",
+        "user.email=seat@example.invalid",
+        "-c",
+        "user.name=seat",
+        "-c",
+        "commit.gpgsign=false",
+        "init",
+        "-q",
+        "-b",
+        "main",
+        product.to_str().unwrap(),
+    ]);
+    git(&[
+        "-C",
+        product.to_str().unwrap(),
+        "config",
+        "user.email",
+        "seat@example.invalid",
+    ]);
+    git(&[
+        "-C",
+        product.to_str().unwrap(),
+        "config",
+        "user.name",
+        "seat",
+    ]);
+    git(&[
+        "-C",
+        product.to_str().unwrap(),
+        "config",
+        "commit.gpgsign",
+        "false",
+    ]);
+    git(&[
+        "-C",
+        product.to_str().unwrap(),
+        "config",
+        "core.hooksPath",
+        hooks.to_str().unwrap(),
+    ]);
+    fs::write(product.join("README"), "product\n").unwrap();
+    git(&["-C", product.to_str().unwrap(), "add", "README"]);
+    git(&[
+        "-C",
+        product.to_str().unwrap(),
+        "commit",
+        "-q",
+        "-m",
+        "seed the product",
+    ]);
+    git(&[
+        "-C",
+        product.to_str().unwrap(),
+        "remote",
+        "add",
+        "origin",
+        remote,
+    ]);
+    let before = git(&["-C", product.to_str().unwrap(), "rev-parse", "HEAD"]);
+    fs::copy(env!("CARGO_BIN_EXE_ljos"), bins.join("ljos")).unwrap();
+    executable(&bins.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
+    executable(&bins.join("ljos-policyd"), "#!/bin/sh\nexit 0\n");
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(bins.join("ljos"), fs::Permissions::from_mode(0o755)).unwrap();
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/install.sh");
+    let out = Command::new("sh")
+        .arg(&script)
+        .arg("--cloud")
+        .arg("--bin-dir")
+        .arg(&bins)
+        .current_dir(&product)
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .env("CI", "true")
+        .env("TMPDIR", root.path().join("tmp"))
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .env("LJOS_BIN_DIR", &bins)
+        .env("LJOS_SEAT", "eessi")
+        .env("LJOS_TRACKER_REMOTE", remote)
+        .env("LJOS_TRACKER_DIR", &inside)
+        .env("DEEDAR_HOST_SIGNING_KEY", "off")
+        .env("PACKSET_URL", "off")
+        .env("GIT_CONFIG_GLOBAL", &gitconfig)
+        .env("GIT_CONFIG_SYSTEM", &gitconfig)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .unwrap();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{said}");
+    let after = git(&["-C", product.to_str().unwrap(), "rev-parse", "HEAD"]);
+    assert_eq!(after, before, "product gained a commit:\n{said}");
+    let status = git(&["-C", product.to_str().unwrap(), "status", "--porcelain"]);
+    assert!(status.is_empty(), "product is dirty:\n{status}\n{said}");
+    assert!(
+        !product.join(".gitattributes").exists(),
+        "product gained .gitattributes"
+    );
+    assert!(!inside.join(".git").exists());
+    assert!(!inside.join(".gitattributes").exists());
+    let origin = git(&[
+        "-C",
+        product.to_str().unwrap(),
+        "remote",
+        "get-url",
+        "origin",
+    ]);
+    assert_eq!(origin.trim(), remote);
+    let tracker = home.join(".local/share/ljos/tracker");
+    let top = git(&[
+        "-C",
+        tracker.to_str().unwrap(),
+        "rev-parse",
+        "--show-toplevel",
+    ]);
+    assert_eq!(
+        fs::canonicalize(Path::new(top.trim())).unwrap(),
+        fs::canonicalize(&tracker).unwrap(),
+        "local tracker is not its own checkout:\n{said}"
+    );
+    let attrs = fs::read_to_string(tracker.join(".gitattributes")).unwrap();
+    assert!(attrs.contains("*.org merge=ljos-org"), "{attrs}");
+    assert!(attrs.contains(".ljos/atoms/* merge=ljos-atoms"), "{attrs}");
+    assert!(said.contains("is inside"), "{said}");
+    assert!(said.contains(tracker.to_str().unwrap()), "{said}");
+    assert!(
+        said.contains("Grant the Cursor GitHub app access to HaoZeke/grokbot_ljostracker"),
+        "{said}"
+    );
+    assert!(said.contains("LJOS_TRACKER_GIT=commit"), "{said}");
+    assert!(!said.contains("push queued"), "{said}");
+    let env = fs::read_to_string(home.join(".config/ljos/env")).unwrap();
+    assert!(env.contains("LJOS_TRACKER_GIT=commit\n"), "{env}");
+    assert!(
+        env.contains(&format!("VISSUE_ROOT={}\n", tracker.display())),
+        "{env}"
+    );
+    assert!(
+        !env.contains(&format!("VISSUE_ROOT={}", product.display())),
+        "{env}"
+    );
+}
+
 #[test]
 fn cloud_up_tags_vm_writes_scope_cloud_without_a_default_scope() {
     let _g = Guard::new();
