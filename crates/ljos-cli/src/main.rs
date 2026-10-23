@@ -468,8 +468,9 @@ enum Cmd {
         /// No parent, even while an issue is held.
         #[arg(long, conflicts_with = "parent")]
         top: bool,
-        /// The project; the parent's when omitted. Another project than
-        /// the held issue's files at its top level.
+        /// The project; the parent's when omitted. A `--parent` files in
+        /// its own project whatever this names. Another project than the
+        /// held issue's files at its top level.
         #[arg(short, long)]
         project: Option<String>,
         /// The type tag: bug, task, feature, decision.

@@ -422,7 +422,8 @@ Every piece of work has an issue before it has a claim.
   `ljos ask NAME "..."` puts a question to it in that session.
 - Work found while sitting is filed with `ljos file "TITLE" -t bug`: a
   child of the held issue, in its project, committed. `--parent ID`
-  names another parent and `--top` none. A bug in a tool found
+  names another parent, and the child goes in that parent's project
+  whatever `-p` names; `--top` names none. A bug in a tool found
   mid-sitting goes to the tool's project: `-p PROJECT` naming another
   project than the held issue's files at its top level, and says so.
   `ljos file "TITLE" --options A,B` writes `Options: A, B` as the first body

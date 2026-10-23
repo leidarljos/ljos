@@ -10617,7 +10617,9 @@ fn runner_record_holders() -> Vec<String> {
 /// no parent and `--parent` names one. Otherwise the held issue is the
 /// parent, unless `-p` names another project: a child lives in its
 /// parent's project, so a tool bug filed with `-p` mid-sitting goes to
-/// the top of that project, not under the work being sat on.
+/// the top of that project, not under the work being sat on. For the
+/// same reason a `--parent` files in that parent's project whatever `-p`
+/// names, and the line says so.
 #[must_use]
 pub fn file_placement(
     top: bool,
@@ -10645,7 +10647,18 @@ pub fn file_placement(
             (held, _) => held,
         }
     };
-    let project = project.or_else(|| parent.as_deref().and_then(project_of).map(str::to_string));
+    let home = parent.as_deref().and_then(project_of);
+    let project = match (home, project) {
+        (Some(home), Some(asked)) if home != asked => {
+            passed_over = Some(format!(
+                "filed in {home}, the project of its parent {}: a child lives in its \
+                 parent's project; --top -p {asked} files at the top of {asked}\n",
+                parent.as_deref().unwrap_or_default()
+            ));
+            Some(home.to_string())
+        }
+        (home, asked) => asked.or_else(|| home.map(str::to_string)),
+    };
     (parent, project, passed_over)
 }
 
@@ -37150,10 +37163,15 @@ mod tests {
         let said = said.expect("a line");
         assert!(said.contains("filed at the top of Tools"), "{said}");
         assert!(said.contains("--parent garden-06v8"), "{said}");
-        // --parent and --top still win.
+        // --parent and --top still win, and a --parent brings its project.
         let (parent, project, _) = file_placement(false, s("Tools-example"), s("Tools"), held());
         assert_eq!(parent, s("Tools-example"));
         assert_eq!(project, s("Tools"));
+        let (parent, project, said) = file_placement(false, s("ljos-gkq2"), s("Software"), None);
+        assert_eq!((parent, project), (s("ljos-gkq2"), s("ljos")));
+        assert!(said.expect("a line").contains("--top -p Software"));
+        let (_, project, _) = file_placement(false, s("ljos-policyd-ab12"), None, held());
+        assert_eq!(project, s("ljos-policyd"));
         let (parent, project, said) = file_placement(true, None, None, held());
         assert_eq!((parent, project, said), (None, None, None));
     }
