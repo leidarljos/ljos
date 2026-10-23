@@ -165,6 +165,20 @@ fn characters_that_hide_reorder_or_break_text_are_refused_anywhere() {
 }
 
 #[test]
+fn a_denied_term_split_by_any_default_ignorable_character_is_refused() {
+    for (split, code, what) in [
+        ('\u{200b}', "U+200B", "zero width space"),
+        ('\u{fe0f}', "U+FE0F", "variation selector"),
+        ('\u{e0100}', "U+E0100", "supplementary variation selector"),
+        ('\u{e0041}', "U+E0041", "tag character"),
+    ] {
+        let bad = MESSAGE.replace("noon", &format!("noon on proj{split}ect-x"));
+        let err = export(&draft(&bad), now() + Duration::hours(1), now()).unwrap_err();
+        assert!(err.to_string().contains(code), "{what}: {err}");
+    }
+}
+
+#[test]
 fn the_expiry_is_after_now_and_at_most_a_day_out() {
     let ok = |hours: i64| export(&draft(MESSAGE), now() + Duration::hours(hours), now()).is_ok();
     assert!(ok(24));

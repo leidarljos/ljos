@@ -38,6 +38,7 @@ regex-automata = "0.4"
 chrono = "0.4"
 ed25519-dalek = "2"
 hex = "0.4"
+icu_properties = { version = "2.2", default-features = false, features = ["compiled_data"] }
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 # Wake posts disable redirects, so this parser checks the host it reaches.
 url = "2"

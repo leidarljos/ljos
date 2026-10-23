@@ -14,7 +14,10 @@
 //! only that block, and deletes a file that held nothing else.
 //!
 //! `post-commit` and `post-rewrite` book the commit. Booking never fails
-//! the hook.
+//! the hook. `pre-commit` and `pre-push` run the sitting gate under an
+//! agent runner: a commit needs a live sitting, and a push onto a
+//! protected branch also needs the sitting's ticket to clear it. That
+//! refusal fails the hook. `pre-push` copies stdin like `post-rewrite`.
 //!
 //! `pre-commit install` follows `core.hooksPath` and would replace stubs
 //! ljos owns. Install the framework into the repository, then let the stub
@@ -40,7 +43,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
 /// Every hook git looks up by name. A global `core.hooksPath` hides the
 /// repository's copy of each of these, so the stub has to exist for each.
@@ -77,6 +80,10 @@ const HOOK_NAMES: &[&str] = &[
 
 fn books_commit(name: &str) -> bool {
     matches!(name, "post-commit" | "post-rewrite")
+}
+
+fn gates_git(name: &str) -> bool {
+    matches!(name, "pre-commit" | "pre-push")
 }
 
 /// `install`, `uninstall`, or `status`.
@@ -399,12 +406,20 @@ fn ljos_executable() -> String {
 }
 
 /// The block appended to a hook. `post-commit` and `post-rewrite` book
-/// through `ljos git-hook`. The absolute path is the fallback when `ljos`
-/// is not on `PATH`. `post-rewrite` copies stdin when the caller has not,
-/// so this block and a chained hook can both read the old and new shas.
+/// through `ljos git-hook`, and the `pre-commit` and `pre-push` blocks
+/// fail the hook when it refuses. The absolute path is the fallback when
+/// `ljos` is not on `PATH`; a `pre-commit` or `pre-push` with neither
+/// runs nothing. `post-rewrite` and `pre-push` copy stdin when the caller
+/// has not, so this block and a chained hook can both read the shas and
+/// refs.
 fn hook_block(name: &str) -> String {
     let bin = shell_quote(&ljos_executable());
-    if name == "post-rewrite" {
+    let (otherwise, fail) = if gates_git(name) {
+        (format!("elif [ -x {bin} ]; then"), "exit 1")
+    } else {
+        ("else".to_string(), "true")
+    };
+    if matches!(name, "post-rewrite" | "pre-push") {
         return format!(
             "{BLOCK_BEGIN}\n\
              if [ -z \"${{_ljos_in:-}}\" ]; then\n\
@@ -415,15 +430,15 @@ fn hook_block(name: &str) -> String {
              fi\n\
              if command -v ljos >/dev/null 2>&1; then\n\
              \tif [ -n \"${{_ljos_in:-}}\" ]; then\n\
-             \t\tljos git-hook {name} \"$@\" < \"$_ljos_in\" >&2 || true\n\
+             \t\tljos git-hook {name} \"$@\" < \"$_ljos_in\" >&2 || {fail}\n\
              \telse\n\
-             \t\tljos git-hook {name} \"$@\" >&2 || true\n\
+             \t\tljos git-hook {name} \"$@\" >&2 || {fail}\n\
              \tfi\n\
-             else\n\
+             {otherwise}\n\
              \tif [ -n \"${{_ljos_in:-}}\" ]; then\n\
-             \t\t{bin} git-hook {name} \"$@\" < \"$_ljos_in\" >&2 || true\n\
+             \t\t{bin} git-hook {name} \"$@\" < \"$_ljos_in\" >&2 || {fail}\n\
              \telse\n\
-             \t\t{bin} git-hook {name} \"$@\" >&2 || true\n\
+             \t\t{bin} git-hook {name} \"$@\" >&2 || {fail}\n\
              \tfi\n\
              fi\n\
              {BLOCK_END}\n"
@@ -432,9 +447,9 @@ fn hook_block(name: &str) -> String {
     format!(
         "{BLOCK_BEGIN}\n\
          if command -v ljos >/dev/null 2>&1; then\n\
-         \tljos git-hook {name} \"$@\" >&2 || true\n\
-         else\n\
-         \t{bin} git-hook {name} \"$@\" >&2 || true\n\
+         \tljos git-hook {name} \"$@\" >&2 || {fail}\n\
+         {otherwise}\n\
+         \t{bin} git-hook {name} \"$@\" >&2 || {fail}\n\
          fi\n\
          {BLOCK_END}\n"
     )
@@ -632,9 +647,10 @@ fn hook_body(name: &str) -> String {
         "#!/bin/sh\n\
          # ljos books the commit, then chains to this repository's\n\
          # .git/hooks/{name}, or to the core.hooksPath recorded in\n\
-         # previous-hooks-path. Booking cannot fail the hook. The chained\n\
-         # hook's exit status is kept. post-rewrite keeps a copy of stdin\n\
-         # for that hook.\n\
+         # previous-hooks-path. Booking cannot fail the hook; a refusal\n\
+         # from ljos in pre-commit or pre-push does. The chained hook's\n\
+         # exit status is kept. post-rewrite and pre-push keep a copy of\n\
+         # stdin for that hook.\n\
          #\n\
          # pre-commit install follows core.hooksPath and would replace this\n\
          # file. Install the framework into the repository, then re-run\n\
@@ -692,19 +708,105 @@ pub fn run_git_commit(hook: &str) -> Result<()> {
 
 /// Run the ljos part of git hook `name`.
 ///
-/// `post-commit` and `post-rewrite` book the commit. Any other name
-/// succeeds and does nothing. Arguments git passed the hook are ignored.
+/// `post-commit` and `post-rewrite` book the commit. `pre-commit` and
+/// `pre-push` run the sitting gate ([`gate`]). Any other name succeeds
+/// and does nothing. Arguments git passed the hook are ignored.
 ///
 /// # Errors
 ///
-/// None. Booking that did not land is a line in the book log.
+/// The sitting gate's refusal. Booking that did not land is a line in
+/// the book log.
 pub fn run_named(name: &str) -> Result<()> {
     let name = name.trim();
     if books_commit(name) {
         run_git_commit(name)
+    } else if gates_git(name) {
+        gate(name)
     } else {
         Ok(())
     }
+}
+
+/// The guard's sitting gate for a commit or push it did not see, such as
+/// one a script runs: under a runner, `pre-commit` needs a live sitting,
+/// and `pre-push` also needs that ticket to clear each ref it sends onto
+/// a branch [`crate::gates::consensus_push`] names. A store or a tracker
+/// checkout, which ljos writes itself, is not gated, and nor is the
+/// person.
+fn gate(name: &str) -> Result<()> {
+    if !crate::under_a_runner() {
+        return Ok(());
+    }
+    let repo = git_line(&["rev-parse", "--show-toplevel"])
+        .map(PathBuf::from)
+        .or_else(git_dir);
+    if repo
+        .as_deref()
+        .is_some_and(|repo| is_store(repo) || holds_tracker(repo))
+    {
+        return Ok(());
+    }
+    // In a hook the process tree names the hook's own shell. The seat a
+    // booking would take is the one the sitting was taken under; without
+    // one, the runner's seat records still name its holder.
+    let seat = crate::git_hook_seat();
+    let _actor = seat.as_deref().map(crate::HookActor::enter);
+    let verb = if name == "pre-push" { "push" } else { "commit" };
+    let issue = crate::sitting_gate::live_sitting().map_err(|why| {
+        anyhow!(
+            "sitting-gate: {}",
+            crate::sitting_gate::no_sitting(verb, &why)
+        )
+    })?;
+    if name != "pre-push" {
+        return Ok(());
+    }
+    let cfg = crate::gates::consensus_push(repo.as_deref()).map_err(|why| {
+        anyhow!(
+            "sitting-gate: {}",
+            crate::sitting_gate::unread_settings(&why)
+        )
+    })?;
+    let dest = match std::io::read_to_string(std::io::stdin()) {
+        Ok(refs) => protected_ref(&refs, &cfg.branches),
+        Err(e) => Some(format!("sends refs the hook cannot read ({e})")),
+    };
+    let Some(dest) = dest else {
+        return Ok(());
+    };
+    crate::protected_push_stands(&issue, cfg.quorum)
+        .map(drop)
+        .map_err(|why| {
+            let wait = crate::sitting_gate::seats_wait(&dest, &cfg.branches, &issue, &why);
+            anyhow!("sitting-gate: {wait}")
+        })
+}
+
+/// What a push whose pre-push stdin is `refs` sends onto a branch in
+/// `branches`, as `sends BRANCH`, or `None` when no ref lands on one.
+/// Git runs the hook with no lines when nothing is to be sent. A line
+/// not in git's four-field form cannot be read, so it is taken to land
+/// on one.
+fn protected_ref(refs: &str, branches: &[String]) -> Option<String> {
+    for line in refs.lines().filter(|l| !l.trim().is_empty()) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let [_, _, remote, _] = fields[..] else {
+            return Some(format!("lists `{line}`, which is not a ref git would send"));
+        };
+        let Some(branch) = remote.strip_prefix("refs/heads/") else {
+            continue;
+        };
+        if let Some(b) = branches.iter().find(|b| b.eq_ignore_ascii_case(branch)) {
+            return Some(format!("sends `{b}`"));
+        }
+    }
+    None
+}
+
+/// Whether `repo` is a tracker checkout: it holds `vissue.toml` or
+/// `Software/`, as `vissue` reads a tracker root.
+fn holds_tracker(repo: &Path) -> bool {
+    repo.join("vissue.toml").is_file() || repo.join("Software").is_dir()
 }
 
 fn book_commit(hook: &str) -> Result<()> {
@@ -1315,7 +1417,23 @@ mod tests {
 
     #[test]
     fn a_hook_that_does_not_book_succeeds() {
-        super::run_named("pre-push").unwrap();
+        super::run_named("post-checkout").unwrap();
+    }
+
+    #[test]
+    fn a_pre_push_ref_list_names_the_protected_branch_it_sends() {
+        let branches = vec!["develop".to_string(), "main".to_string()];
+        let line = |dst: &str| format!("refs/heads/x 1111 {dst} 0000\n");
+        assert_eq!(protected_ref("", &branches), None);
+        assert_eq!(protected_ref(&line("refs/heads/topic"), &branches), None);
+        assert_eq!(protected_ref(&line("refs/tags/main"), &branches), None);
+        let both = line("refs/heads/topic") + &line("refs/heads/Main");
+        assert_eq!(
+            protected_ref(&both, &branches).as_deref(),
+            Some("sends `main`")
+        );
+        let odd = protected_ref("refs/heads/x main\n", &branches).unwrap();
+        assert!(odd.contains("not a ref git would send"), "{odd}");
     }
 
     #[test]

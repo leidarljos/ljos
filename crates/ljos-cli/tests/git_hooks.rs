@@ -256,11 +256,13 @@ elif cmd == "deed":
                 sys.exit(0)
         sys.exit(0)
     acc = rest[rest.index("--add") + 1]
-    needle = f":ID:         {iid}\n:END:\n"
+    needle = f":ID:         {iid}\n"
     for f in files():
         text = f.read_text()
-        if needle in text:
-            f.write_text(text.replace(needle, needle + f"cited {acc}\n", 1))
+        at = text.find(needle)
+        if at >= 0:
+            end = text.index(":END:\n", at) + len(":END:\n")
+            f.write_text(text[:end] + f"cited {acc}\n" + text[end:])
             sys.exit(0)
     sys.exit("no issue " + iid)
 elif cmd == "note":
@@ -348,6 +350,32 @@ fn book_files(hab: &Hab) -> Vec<PathBuf> {
 
 fn install(hab: &Hab) {
     hab.ljos(&["git-hooks", "install"]);
+}
+
+/// A sitting on `id` for `holder` of `seat`: an open ticket the tracker
+/// has claimed by `holder`, and a hold whose conversation is this test,
+/// the ancestor of every hook its commits run. A runner's commit waits
+/// for one.
+fn sit(hab: &Hab, id: &str, holder: &str, seat: &str) {
+    let project = hab.tracker.join("Software/probe");
+    fs::create_dir_all(&project).unwrap();
+    let issues = project.join("issues.org");
+    let mut text = fs::read_to_string(&issues).unwrap_or_default();
+    text.push_str(&format!(
+        "* STARTED [#C] held work\n:PROPERTIES:\n:ID:         {id}\n:CLAIMED_BY: {holder}\n:END:\n"
+    ));
+    fs::write(&issues, text).unwrap();
+    let comm = fs::read_to_string("/proc/self/comm").unwrap();
+    fs::create_dir_all(hab.run.join("ljos")).unwrap();
+    fs::write(
+        hab.run.join("ljos").join(format!("hold-{id}")),
+        format!(
+            "{holder}\n{seat}\n{}\n{}\n2026-01-01T00:00:00Z\n{id}\n-\n",
+            std::process::id(),
+            comm.trim()
+        ),
+    )
+    .unwrap();
 }
 
 /// A PostToolUse that also carries `prompt` still cites the commit.
@@ -1511,6 +1539,87 @@ fn a_repo_pre_commit_still_blocks_and_later_hooks_still_run() {
     assert!(text.contains("refs/heads/"), "{text}");
 }
 
+/// Under a runner, the installed `pre-commit` and `pre-push` hold what no
+/// shell line showed the guard: a commit waits for a live sitting, and a
+/// push onto develop or main for the sitting's ticket to clear it. A topic
+/// branch needs only the sitting. The person is not gated.
+#[test]
+fn the_installed_hooks_hold_a_runner_to_its_sitting() {
+    let hab = Hab::new("repo");
+    install(&hab);
+    let bare = hab.root.join("bare.git");
+    fs::create_dir_all(&bare).unwrap();
+    git_bare(&bare, &["init", "--bare", "-q"]);
+    hab.git(
+        &hab.repo,
+        &["remote", "add", "origin", bare.to_str().unwrap()],
+    );
+    let runner = [("GROK_SESSION_ID", "5b0c2a71-9d1e-4f3a-8c6b-2e7f1a0d9c43")];
+    let as_runner = |args: &[&str]| {
+        Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(&hab.repo)
+            .args(args)
+            .current_dir(&hab.repo)
+            .env_clear()
+            .envs(commit_env(&hab, &runner, false))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let refused = |out: &Output, why: &str| {
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "the hook let it through: {err}");
+        assert!(err.contains("sitting-gate"), "{err}");
+        assert!(err.contains(why), "wanted {why:?}: {err}");
+    };
+
+    fs::write(hab.repo.join("work.txt"), "x\n").unwrap();
+    hab.git(&hab.repo, &["add", "work.txt"]);
+    refused(
+        &as_runner(&["commit", "-q", "-m", "work"]),
+        "ljos sitting ID",
+    );
+    refused(
+        &as_runner(&["push", "-q", "origin", "HEAD:topic"]),
+        "`git push` writes history",
+    );
+
+    sit(&hab, "probe-51a1", "grokbot@sit", "grokbot");
+    for args in [
+        &["commit", "-q", "-m", "work"][..],
+        &["push", "-q", "origin", "HEAD:topic"],
+    ] {
+        let out = as_runner(args);
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    for (dest, sent) in [
+        ("HEAD:develop", "sends `develop`"),
+        ("HEAD:main", "sends `main`"),
+    ] {
+        let out = as_runner(&["push", "-q", "origin", dest]);
+        refused(&out, "ljos consensus probe-51a1 --no-file");
+        refused(&out, sent);
+    }
+    let person = git_status(&hab, &["push", "-q", "origin", "HEAD:main"]);
+    assert!(
+        person.status.success(),
+        "{}",
+        String::from_utf8_lossy(&person.stderr)
+    );
+    // Up to date, git runs pre-push with no refs: nothing lands on main.
+    let again = as_runner(&["push", "-q", "origin", "HEAD:main"]);
+    assert!(
+        again.status.success(),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+}
+
 /// A path listed in `[git_hooks] skip` is not booked, and reinstall leaves
 /// that file alone.
 #[test]
@@ -1540,6 +1649,18 @@ fn a_skip_list_books_nothing_and_reinstall_keeps_the_config() {
     assert_eq!(vissue_log(&hab.tracker), "");
 }
 
+fn commit_env(hab: &Hab, extra: &[(&str, &str)], drop_seat: bool) -> Vec<(String, String)> {
+    hab.base_env()
+        .into_iter()
+        .filter(|(key, _)| !drop_seat || key != "LJOS_SEAT")
+        .chain(
+            extra
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string())),
+        )
+        .collect()
+}
+
 fn commit_with(
     hab: &Hab,
     name: &str,
@@ -1548,16 +1669,7 @@ fn commit_with(
     drop_seat: bool,
 ) -> String {
     fs::write(hab.repo.join(name), "x\n").unwrap();
-    let env: Vec<(String, String)> = hab
-        .base_env()
-        .into_iter()
-        .filter(|(key, _)| !drop_seat || key != "LJOS_SEAT")
-        .chain(
-            extra
-                .iter()
-                .map(|(key, value)| ((*key).to_string(), (*value).to_string())),
-        )
-        .collect();
+    let env = commit_env(hab, extra, drop_seat);
     let run = |args: &[&str]| {
         let out = Command::new("/usr/bin/git")
             .arg("-C")
@@ -1586,6 +1698,7 @@ fn an_agy_commit_is_booked_from_the_git_hook() {
     let hab = Hab::new("repo");
     install(&hab);
     let id = "agy-conv-0001-deed";
+    sit(&hab, "probe-51a1", "antigravity@sit", "antigravity");
     let sha = commit_with(
         &hab,
         "agy.txt",
@@ -1608,6 +1721,7 @@ fn an_opencode_shell_commit_is_booked() {
     let hab = Hab::new("repo");
     install(&hab);
     let id = "ses_cloudflare96de8ec";
+    sit(&hab, "probe-51a1", "opencode@sit", "opencode");
     let sha = commit_with(
         &hab,
         "cf.txt",
@@ -1627,6 +1741,7 @@ fn an_opencode_shell_commit_is_booked() {
 fn a_claude_session_is_not_booked_by_the_git_hook() {
     let hab = Hab::new("repo");
     install(&hab);
+    sit(&hab, "probe-51a1", "grokbot@sit", "grokbot");
     commit_with(
         &hab,
         "claude.txt",
@@ -1652,22 +1767,28 @@ fn a_git_hook_books_only_a_seat_the_seats_file_lists() {
     install(&hab);
     fs::create_dir_all(hab.config.join("ljos")).unwrap();
     fs::write(hab.config.join("ljos/seats.toml"), "seats = [\"saddle\"]\n").unwrap();
+    let cursor = "0b1c2d3e-0000-4000-8000-000000000000";
+    let agy = "agy-conv-0003-deed";
+    sit(
+        &hab,
+        "probe-51a1",
+        "grokbot-0b1c2d3e@sit",
+        "grokbot-0b1c2d3e",
+    );
+    sit(&hab, "probe-51a2", "antigravity@sit", "antigravity");
     commit_with(&hab, "a.txt", "probe-32fx: unlisted seat", &[], false);
     commit_with(
         &hab,
         "b.txt",
         "unmapped conversation",
-        &[(
-            "CURSOR_CONVERSATION_ID",
-            "0b1c2d3e-0000-4000-8000-000000000000",
-        )],
+        &[("CURSOR_CONVERSATION_ID", cursor)],
         true,
     );
     commit_with(
         &hab,
         "c.txt",
         "agy conversation",
-        &[("ANTIGRAVITY_CONVERSATION_ID", "agy-conv-0003-deed")],
+        &[("ANTIGRAVITY_CONVERSATION_ID", agy)],
         true,
     );
     assert_eq!(vissue_log(&hab.tracker), "");
