@@ -10,7 +10,7 @@ as `ljos VERB` in the shell.
 | question | store | verbs |
 |---|---|---|
 | what did the human freeze | cards | `cards` (read-only; never extract-on-write) |
-| what is the work, what blocks it, who agrees | tracker (vissue) | `file`, `options`, `note`, `recall`, `vote`, `consensus`, `deed`; `vissue append`, `vissue update` |
+| what is the work, what blocks it, who agrees | tracker (vissue) | `file`, `options`, `note`, `recall`, `vote`, `consensus`, `deed` |
 | what does this seat know, standing | pack (packset) | `search`, `island`, `remember`, `prefer`, `forget`, `due`, `graded` |
 | what did the work produce | deed store (deedar) | `evidence`, `current`; `deedar create` |
 | which work is claimable right now | claim graph (claimdag) | `claim`, `release`, `complete` |
@@ -135,7 +135,7 @@ lessons to another scope (`tools = "shared"`). Where `ljos cloud up` has
 set `LJOS_WRITE_SCOPE=cloud`, memory and lessons are tagged `scope:cloud`.
 That tag is explicit. `cloud up` does not set `default_scope`.
 
-No issue yet? `vissue q -p PROJECT "TITLE"` mints one and prints its id.
+No issue yet? `ljos file "TITLE" --top -p PROJECT` files one and prints its id.
 Every piece of work has an issue before it has a claim.
 
 ## During the work
@@ -353,9 +353,8 @@ Every piece of work has an issue before it has a claim.
 - At a usage limit the hook keeps the turn open once. Spend it on the record and
   nothing else: `ljos note` the held issue with what is done and left,
   `ljos file` each item left, `ljos note` each lesson, then stop.
-- Progress goes on the issue, dated: `ljos note ISSUE "..."`; a longer
-  report is `vissue append ISSUE "..."` (or `--file F`); a tag is
-  `vissue update ISSUE -t TAG`.
+- Progress goes on the issue, dated: `ljos note ISSUE "..."`, a longer
+  report too. Tags go on when the issue is filed: `ljos file --tags`.
 - An issue another seat sits on refuses your sitting. To help, `ljos
   note ISSUE "..."` adds an assist to its logbook, and the note names
   the seat that has it; `ljos send SEAT "..."` reaches that seat now.
@@ -438,9 +437,9 @@ same four steps are:
 2. `ljos island TASK --fire` when the island served: the strongest memories
    fire together and their links gain weight.
 3. `ljos complete ISSUE --status done` (`failed`, `cancelled`). Completing
-   the session node does not close the ticket: `vissue update ISSUE -s DONE`
-   does, when the work is accepted.
-   Nor does `finish`: `--close` on it does, for the same acceptance.
+   the session node does not close the ticket, nor does a plain `finish`.
+   `ljos finish ISSUE --close` does, when the work is accepted, and
+   `--status cancelled --close` closes it as CANCELLED.
 4. `ljos learn ISSUE --outcome OPTION` when the world says which option was
    right. Every voter's record takes the outcome; the record moves a
    voter's weight once it sets the voter apart from the panel, which a first

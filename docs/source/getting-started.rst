@@ -144,7 +144,7 @@ superseded, and travel in a handover. A person can also set one by hand:
    remembered your lesson (id 1735...); the hook shows it from the next prompt
    fired the island for "Ship the fuse change?": 3 memories. Those links gained weight under the seat, not under a persona. The next walk of this title follows them.
    Learned. 6 trust rows rewritten. ... persona anchors moved. The outcome is kept: once 5 issues have one, ljos consensus discounts voters who err together. ... No stated probability, so there is no Brier score. A hard vote is not a claim of certainty.
-   the ticket demo-... stays open and nobody holds it; `ljos finish demo-... --close` or `vissue update demo-... -s DONE` closes it when the work is accepted
+   the ticket demo-... stays open and nobody holds it; `ljos finish demo-... --close` closes it when the work is accepted
    tracker git: committed chore(issues): demo-... finished by alice; no remote, kept local
 
 ``sitting`` opens in order: doctor, cards, what is due, the island the title touches, blockers, the playbook, recall, the timeline, reclaim, then the claim.

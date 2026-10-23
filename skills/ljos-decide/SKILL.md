@@ -9,8 +9,9 @@ A decision lives on a ticket. Each voter casts one ballot, and
 `ljos consensus` reads the result, weighting voters by how often they were
 right before.
 
-1. File the decision: `vissue q -p PROJECT -t decision "Choose X or Y for Z"`.
-   List the options on a body line that starts `Options:`.
+1. File the decision:
+   `ljos file "Choose X or Y for Z" --top -p PROJECT -t decision --options X,Y`.
+   `--options` writes the body line that starts `Options:`.
 2. Open a sitting on it (`ljos sitting ISSUE`). A decision ticket binds the
    panel recipe and writes one brief per persona.
 3. Cast ballots. Your own:

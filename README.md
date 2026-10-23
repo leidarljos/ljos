@@ -121,7 +121,7 @@ The hooks also keep the work on the tracker once a conversation sits on an
 issue: after forty tool calls without a word to the seat, they remind it to
 record the work. With `LJOS_TRACK_WORK=on` in the environment or in
 `~/.config/ljos/env`, a conversation with no issue is told on the first tool
-result to open one with `vissue q` and sit, and `Stop` blocks that turn once
+result to open one with `ljos file` and sit, and `Stop` blocks that turn once
 if it used tools and never touched the seat. Without it, a conversation that
 never sits hears nothing about the tracker. Of the shapes ljos carries, `grok` and
 `antigravity` register `Stop`. For `claude` or `codex`, add `Stop` to that

@@ -520,7 +520,7 @@ pub fn persona_agent(p: &Persona) -> (String, String) {
          2. Decide as yourself before you see another voice: do not read `vissue vote ISSUE`, `vissue show ISSUE` or `ljos consensus ISSUE` until your ballot is cast.\n\
          3. Cast one ballot: `ljos vote ISSUE --for OPTION --expect '{{\"OPTION\": SHARE}}' --confidence P --used none --as {who}`, with your forecast of the others' shares and the probability you give your own choice.\n\
          4. Check the tracker holds it: `vissue vote ISSUE --json` has your row. Only the tracker is proof; a ballot you did not see there was not cast, so say that instead of reporting a vote.\n\
-         5. Note why, in short sentences, with the evidence your ballot stands on: `vissue note ISSUE \"{who}: ...\"`.\n\n\
+         5. Note why, in short sentences, with the evidence your ballot stands on: `ljos note ISSUE \"{who}: ...\"`.\n\n\
          Do not edit files, push, or ssh. Stop after the note.\n",
         view = p.view.trim(),
         anchor = p.anchor,
@@ -10451,7 +10451,8 @@ pub fn tracks_work() -> bool {
 }
 
 /// What the hooks tell a conversation that holds no issue.
-const OPEN_AN_ISSUE: &str = "Work goes on an issue: `vissue q -p PROJECT \"TITLE\"` prints an id, \
+const OPEN_AN_ISSUE: &str =
+    "Work goes on an issue: `ljos file \"TITLE\" --top -p PROJECT` prints an id, \
      then `ljos sitting ID` opens it.";
 
 /// Whether a hook call's cue is the seat's own verbs or tools.
@@ -26965,7 +26966,7 @@ fn stamp_tracker(node: &str, assignee: &str) -> Result<Option<String>> {
         .map(|_| Some(format!("tracker: {node} STARTED under {assignee}")))
         .with_context(|| {
             format!(
-                "claim: the claim graph took {node} but the tracker refused to stamp it under {assignee}; `ljos release {node} --assignee {assignee}` frees the graph, or `vissue claim {node} --force` takes the tracker over"
+                "claim: the claim graph took {node} but the tracker refused to stamp it under {assignee}; `ljos release {node} --assignee {assignee}` frees the graph, or the person's `vissue claim {node} --force` takes the tracker over"
             )
         })
 }
@@ -27376,7 +27377,7 @@ fn with_unstamp(said: String, node: &str, id: &str, holder: &str, reopen: bool) 
         Ok(Some(line)) => line,
         Ok(None) => return out,
         Err(e) => format!(
-            "tracker: could not drop {holder}'s claim on {node} ({e:#}); `vissue update {node} -s TODO` drops it"
+            "tracker: could not drop {holder}'s claim on {node} ({e:#}); the person's `vissue update {node} -s TODO` drops it"
         ),
     };
     if !out.is_empty() && !out.ends_with('\n') {
@@ -29226,7 +29227,7 @@ pub fn finish(
         out.push_str(&format!("closed the ticket {issue} as {state}\n"));
     } else {
         out.push_str(&format!(
-            "the ticket {issue} stays open and nobody holds it; `ljos finish {issue} --close` or `vissue update {issue} -s DONE` closes it when the work is accepted\n"
+            "the ticket {issue} stays open and nobody holds it; `ljos finish {issue} --close` closes it when the work is accepted\n"
         ));
     }
     // A cloud seat's deeds leave with the tracker. A box writes nothing.
@@ -38233,8 +38234,8 @@ mod tests {
             .expect("a new stretch opens on the next result");
         assert!(fresh.contains("ljos sitting"), "{fresh}");
         assert!(
-            fresh.contains("vissue q")
-                && !fresh.contains("ljos file")
+            fresh.contains("ljos file \"TITLE\" --top -p PROJECT")
+                && !fresh.contains("vissue q")
                 && fresh.contains("subagents"),
             "{fresh}"
         );
@@ -43412,7 +43413,7 @@ mod tests {
         unsafe { std::env::set_var("LJOS_TRACK_WORK", "on") };
         let reason = seat_stop_reason(&input, false, false).expect("held");
         assert!(
-            reason.contains("ljos sitting") && reason.contains("vissue q"),
+            reason.contains("ljos sitting") && reason.contains("ljos file"),
             "{reason}"
         );
         assert!(seat_stop_reason(&input, true, false).is_none());

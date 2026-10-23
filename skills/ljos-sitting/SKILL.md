@@ -10,8 +10,8 @@ agent, in Cursor or any other tool, can see who has it and what it taught.
 
 ## Start
 
-1. Find or make the ticket. `vissue q -p PROJECT "TITLE"` makes one and prints
-   its id (see the ljos-file skill).
+1. Find or make the ticket. `ljos file "TITLE" --top -p PROJECT` makes one and
+   prints its id (see the ljos-file skill).
 2. `ljos sitting ISSUE`. It prints whether ljos is ready, anything that
    needs action (a store down, cards the person froze, reviews due, open
    blockers), the memories the title brings up, and the claim. It stops at
