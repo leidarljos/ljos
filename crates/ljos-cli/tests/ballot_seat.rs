@@ -75,7 +75,7 @@ fn a_ballot_from_a_shell_with_no_seat_is_refused() {
 
     // The stub tracker holds the ballot once `vissue vote` wrote it, so the
     // cast is proved by the tracker's read-back, not by the exit of the vote.
-    let cast = ljos(Some("saddle"), &vote);
+    let cast = ljos(Some("reviewer"), &vote);
     assert!(cast.status.success(), "{cast:?}");
     assert!(
         String::from_utf8_lossy(&cast.stdout).contains("recorded on the tracker: reviewer for a"),

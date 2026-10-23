@@ -266,7 +266,8 @@ const SEAT_FREE_TOOLS: &[&str] = &[
 ];
 
 /// Tools that write the tracker under the call's seat. `ljos_deed`
-/// without an accession lists what an issue cites, which is a read.
+/// without an accession lists what an issue cites, and `ljos_bump_plan`
+/// with `dry_run` lists the rows; both are reads.
 const TRACKER_WRITES: &[&str] = &[
     "ljos_start",
     "ljos_sitting",
@@ -294,6 +295,11 @@ fn writes_tracker(name: &str, args: Option<&serde_json::Map<String, serde_json::
                 .is_some_and(|v| !v.is_null() && *v != serde_json::Value::Bool(false))
         };
         return set("choice") || set("jev") || set("withdraw");
+    }
+    if name == "ljos_bump_plan" {
+        return !args
+            .and_then(|a| a.get("dry_run"))
+            .is_some_and(|dry| *dry == serde_json::Value::Bool(true));
     }
     TRACKER_WRITES.contains(&name)
 }
@@ -640,7 +646,7 @@ pub struct PredictArgs {
     pub issue: String,
     /// The option you expect to win, or an object of option to share.
     pub expect: serde_json::Value,
-    /// Forecast as this persona; absent, the seat's identity.
+    /// This seat's own name; another seat is refused.
     #[serde(rename = "as")]
     pub as_persona: Option<String>,
 }
@@ -732,8 +738,8 @@ pub struct VoteArgs {
     /// does not depend on a second call. Absent, the ballot stands alone.
     #[serde(default)]
     pub expect: Option<serde_json::Value>,
-    /// Cast as this persona (a name written with `ljos_persona`) instead of
-    /// the seat's own identity.
+    /// This seat's own name. A ballot or a withdrawal `as` another seat is
+    /// refused: a persona votes from a session seated as that persona.
     #[serde(rename = "as")]
     pub as_persona: Option<String>,
     /// With `as` and no `choice`: ask Jev for the persona's ballot. A sure
@@ -741,7 +747,7 @@ pub struct VoteArgs {
     /// not cast, and the reply says to start a subagent from its brief.
     #[serde(default)]
     pub jev: bool,
-    /// Take back the ballot and its forecast, as the seat or `as` a persona.
+    /// Take back this seat's ballot and its forecast.
     /// The logbook gains a ballot-withdrawn note, and the tally leaves it out.
     #[serde(default)]
     pub withdraw: bool,
@@ -1840,7 +1846,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when a decision has more than one defensible answer: cast one ballot, or omit the option to read the count. Pass `confidence` in (0, 1], the probability that the choice is the outcome (DeGroot 1974, doi:10.1080/01621459.1974.10480137). Omit it only when you are not forecasting; a hard vote is not scored. ljos_learn scores confidence once the outcome is named; no settle and no push cite weighs it. Pass `expect` as the option you think the others will pick, or an object of option to share: that private forecast is what the surprisingly popular reading needs, and it belongs on this ballot rather than a later call. Pass `used` as comma-separated deed accessions, or `none` when the ballot used no deed (doi:10.1007/3-540-44503-X_20). The text that comes back is a count, not the settle. Call ljos_consensus before acting. Pass `as` for a persona.",
+        description = "Call this when a decision has more than one defensible answer: cast one ballot, or omit the option to read the count. Pass `confidence` in (0, 1], the probability that the choice is the outcome (DeGroot 1974, doi:10.1080/01621459.1974.10480137). Omit it only when you are not forecasting; a hard vote is not scored. ljos_learn scores confidence once the outcome is named; no settle and no push cite weighs it. Pass `expect` as the option you think the others will pick, or an object of option to share: that private forecast is what the surprisingly popular reading needs, and it belongs on this ballot rather than a later call. Pass `used` as comma-separated deed accessions, or `none` when the ballot used no deed (doi:10.1007/3-540-44503-X_20). The text that comes back is a count, not the settle. Call ljos_consensus before acting. A ballot is this seat's; `as` another seat is refused.",
         annotations(
             title = "Vote",
             read_only_hint = false,
@@ -1855,8 +1861,8 @@ impl LjosServer {
     ) -> Result<Json<Said>, McpError> {
         match &args.choice {
             Some(c) => {
-                let who = identity_or_seat(args.as_persona.as_deref())
-                    .unwrap_or_else(|| "seat".to_string());
+                let who =
+                    ljos_cli::ballot_voter("vote", args.as_persona.as_deref()).map_err(refused)?;
                 let cast = ljos_cli::panel_gate::claim_session_ballot(&args.issue, &who)
                     .map_err(refused)?;
                 let used = args.used.as_deref().unwrap_or("");
@@ -1878,17 +1884,13 @@ impl LjosServer {
                     argv.push(format!("{p}"));
                 }
                 let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-                let mut said = habitat_as("vissue", &refs, args.as_persona.as_deref())?;
+                let mut said = habitat_as("vissue", &refs, Some(&who))?;
                 cast.keep();
-                let who = identity_or_seat(args.as_persona.as_deref())
-                    .unwrap_or_else(|| "seat".to_string());
                 match ljos_cli::ballot_sig::sign_ballot(&args.issue, &who, c) {
                     Ok(line) => said.0.text.push_str(&line),
                     Err(e) => said.0.text.push_str(&format!("ljos vote: {e:#}\n")),
                 }
                 if let Some(text) = args.expect.as_ref().and_then(expect_text) {
-                    let who = identity_or_seat(args.as_persona.as_deref())
-                        .unwrap_or_else(|| "seat".to_string());
                     write_prediction(&args.issue, &who, &text).map_err(refused)?;
                     said.0
                         .text
@@ -1900,13 +1902,10 @@ impl LjosServer {
                 Ok(said)
             }
             None if args.withdraw => {
-                let mut said = habitat_as(
-                    "vissue",
-                    &["vote", &args.issue, "--withdraw"],
-                    args.as_persona.as_deref(),
-                )?;
-                let who = identity_or_seat(args.as_persona.as_deref())
-                    .unwrap_or_else(|| "seat".to_string());
+                let who =
+                    ljos_cli::ballot_voter("vote", args.as_persona.as_deref()).map_err(refused)?;
+                let mut said =
+                    habitat_as("vissue", &["vote", &args.issue, "--withdraw"], Some(&who))?;
                 match ljos_cli::ballot_sig::note_withdrawn(&args.issue, &who) {
                     Ok(_) => {}
                     Err(e) => said.0.text.push_str(&format!("ljos vote: {e:#}\n")),
@@ -2352,8 +2351,7 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<PredictArgs>,
     ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, McpError> {
-        let who =
-            identity_or_seat(args.as_persona.as_deref()).unwrap_or_else(|| "seat".to_string());
+        let who = ljos_cli::ballot_voter("predict", args.as_persona.as_deref()).map_err(refused)?;
         let expect = match &args.expect {
             serde_json::Value::String(s) => s.clone(),
             other => other.to_string(),

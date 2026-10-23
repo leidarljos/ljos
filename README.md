@@ -124,7 +124,7 @@ The hooks also keep the work on the tracker once a conversation sits on an
 issue: after forty tool calls without a word to the seat, they remind it to
 record the work. With `LJOS_TRACK_WORK=on` in the environment or in
 `~/.config/ljos/env`, a conversation with no issue is told on the first tool
-result to open one with `vissue q` and sit, and `Stop` blocks that turn once
+result to open one with `ljos file` and sit, and `Stop` blocks that turn once
 if it used tools and never touched the seat. Without it, a conversation that
 never sits hears nothing about the tracker. Of the shapes ljos carries, `grok` and
 `antigravity` register `Stop`. For `claude` or `codex`, add `Stop` to that
@@ -359,6 +359,8 @@ With no remote it only lists.
 A decision panel runs at most `LJOS_PANEL_CONCURRENCY` members at once, and
 the next starts as one exits. Unset, that is the machine's parallelism clamped
 to 4. `LJOS_MAX_PARALLEL` is the same knob. `0` starts every member.
+Each member sits as its persona: `LJOS_SEAT` and `VISSUE_AGENT` are the
+persona's name, not the opener's seat.
 
 ## Commands
 
@@ -439,8 +441,8 @@ guard and memory first: `rule`, `request_approval`, `prefer`, `remember`,
 `search`, `start`, `guard_check`, `file`, `options`, `note`, `recall`, `sitting`,
 `finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
 `doctor`, each with the prefix `ljos_`.
-Every listed tool costs its description and schema on every session: 8,103
-tokens for the core set against 17,738 for all fifty-two (o200k_base
+Every listed tool costs its description and schema on every session: 8,109
+tokens for the core set against 17,743 for all fifty-two (o200k_base
 count of `initialize` instructions and the `tools/list` result). `LJOS_MCP_TOOLS=all` in the server's environment lists every tool;
 `LJOS_MCP_TOOLS=core,island,due` adds named ones. A tool that fails answers
 with a result marked `isError` that carries the reason, so the model reads

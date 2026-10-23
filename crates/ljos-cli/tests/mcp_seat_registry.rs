@@ -96,6 +96,10 @@ fn a_seats_file_keeps_unlisted_seats_off_the_tracker() {
             "ljos_predict",
             serde_json::json!({"seat": "stranger", "issue": "proj-aaaa", "expect": "accept"}),
         ),
+        (
+            "ljos_bump_plan",
+            serde_json::json!({"seat": "stranger", "bundle": "bundle", "project": "proj", "parent": "proj-aaaa"}),
+        ),
     ] {
         let said = call(tool, args);
         assert!(said.contains("no seat named stranger in"), "{tool}: {said}");
@@ -108,6 +112,11 @@ fn a_seats_file_keeps_unlisted_seats_off_the_tracker() {
         !tally.contains("no seat named"),
         "a tally is a read: {tally}"
     );
+    let dry = call(
+        "ljos_bump_plan",
+        serde_json::json!({"seat": "stranger", "bundle": "bundle", "project": "proj", "parent": "proj-aaaa", "dry_run": true}),
+    );
+    assert!(!dry.contains("no seat named"), "a dry run is a read: {dry}");
 
     let listed = note("saddle");
     assert!(!listed.contains("no seat named"), "{listed}");
@@ -142,4 +151,42 @@ fn a_listed_seat_cannot_write_as_another_assignee() {
             "{tool}: {said}"
         );
     }
+}
+
+#[test]
+fn a_listed_seat_cannot_vote_or_withdraw_as_another() {
+    let root = tempfile::tempdir().unwrap();
+    let call = server(root.path());
+    let seats = root.path().join("config/ljos/seats.toml");
+    std::fs::create_dir_all(seats.parent().unwrap()).unwrap();
+    std::fs::write(&seats, "seats = [\"saddle\", \"stranger\"]\n").unwrap();
+    for args in [
+        serde_json::json!({"issue": "proj-aaaa", "choice": "accept", "used": "none"}),
+        serde_json::json!({"issue": "proj-aaaa", "withdraw": true}),
+    ] {
+        let mut args = args;
+        args["seat"] = "saddle".into();
+        args["as"] = "stranger".into();
+        let said = call("ljos_vote", args);
+        assert!(said.contains("\"isError\":true"), "{said}");
+        assert!(
+            said.contains("--as stranger is not this seat, saddle"),
+            "{said}"
+        );
+    }
+}
+
+#[test]
+fn a_listed_seat_cannot_forecast_as_another() {
+    let root = tempfile::tempdir().unwrap();
+    let call = server(root.path());
+    let said = call(
+        "ljos_predict",
+        serde_json::json!({"seat": "saddle", "issue": "proj-aaaa", "expect": "accept", "as": "stranger"}),
+    );
+    assert!(said.contains("\"isError\":true"), "{said}");
+    assert!(
+        said.contains("--as stranger is not this seat, saddle"),
+        "{said}"
+    );
 }

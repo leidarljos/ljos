@@ -192,8 +192,8 @@ fn parallel_persona_votes_and_notes_all_land_in_one_tracker() {
             let session = format!("sess-{issue}-{persona}");
             let child = world
                 .ljos(
-                    "clerk",
-                    "clerk",
+                    persona,
+                    persona,
                     &session,
                     &[
                         "vote", issue, "--for", choice, "--used", "none", "--as", persona,

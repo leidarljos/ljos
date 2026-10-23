@@ -8,17 +8,16 @@ use ljos_cli::{
     forecasts_from_json, format_bump_rows, format_consolidation, format_doctor,
     format_doctor_short, format_findings, format_hits, format_hubs, format_island,
     format_playbooks, format_readings, format_remembered, format_seat_command, format_steps,
-    format_write_ack, graded, habit, habits, handover, healthy, hook_note, identity_or_seat,
-    island_entities, join, learn_anchors, learn_and_write, learn_reading, learn_shared, mark_seen,
-    now_utc, on_path, onboard_to, pack, packset_consolidate, packset_forget, packset_hubs,
-    packset_island_as, packset_search_as_of, packset_write_as, panel, panel_steps, parse_every,
-    personas_from_pack, playbooks_from_pack, policy_with_memory, post_hook_stdout, predictions_of,
-    prompt_hook_stdout, protocol_text, read_campaign, receive, release, remember_findings,
-    rows_about, run, run_as, run_captured, session_end, settle_discount, sitting_gated,
-    stop_hook_stdout, timeline, topic_words, tracker_show_json, trim_num, trust_from_pack,
-    uncite_deed, with_discount, withdraw_prediction, write_outcome, write_persona_as,
-    write_prediction, write_rule, write_trust, Persona, PersonaWrite, Reading, Rule, Trust,
-    HARNESSES_EXAMPLE, LEARN_BETA,
+    format_write_ack, graded, habit, habits, handover, healthy, hook_note, island_entities, join,
+    learn_anchors, learn_and_write, learn_reading, learn_shared, mark_seen, now_utc, on_path,
+    onboard_to, pack, packset_consolidate, packset_forget, packset_hubs, packset_island_as,
+    packset_search_as_of, packset_write_as, panel, panel_steps, parse_every, personas_from_pack,
+    playbooks_from_pack, policy_with_memory, post_hook_stdout, predictions_of, prompt_hook_stdout,
+    protocol_text, read_campaign, receive, release, remember_findings, rows_about, run, run_as,
+    run_captured, session_end, settle_discount, sitting_gated, stop_hook_stdout, timeline,
+    topic_words, tracker_show_json, trim_num, trust_from_pack, uncite_deed, with_discount,
+    withdraw_prediction, write_outcome, write_persona_as, write_prediction, write_rule,
+    write_trust, Persona, PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
 };
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -469,8 +468,9 @@ enum Cmd {
         /// No parent, even while an issue is held.
         #[arg(long, conflicts_with = "parent")]
         top: bool,
-        /// The project; the parent's when omitted. Another project than
-        /// the held issue's files at its top level.
+        /// The project; the parent's when omitted. A `--parent` files in
+        /// its own project whatever this names. Another project than the
+        /// held issue's files at its top level.
         #[arg(short, long)]
         project: Option<String>,
         /// The type tag: bug, task, feature, decision.
@@ -686,7 +686,9 @@ enum Cmd {
         /// popular reading has a forecast without a second verb.
         #[arg(long)]
         expect: Option<String>,
-        /// Cast as this persona instead of the seat's identity.
+        /// This seat's own name. A ballot or a withdrawal `--as` another
+        /// seat is refused: a persona votes from a session seated as it.
+        /// With `--jev`, the persona Jev answers for.
         #[arg(long = "as")]
         as_persona: Option<String>,
         /// Ask Jev for the persona's ballot (needs `--as`, not `--for`):
@@ -694,9 +696,9 @@ enum Cmd {
         /// a subagent when it is not.
         #[arg(long, requires = "as_persona", conflicts_with = "choice")]
         jev: bool,
-        /// Take back the ballot and its forecast, as the seat or `--as` a
-        /// persona: a ballot cast on the wrong issue or with no basis stops
-        /// counting, and the issue's logbook keeps what it was.
+        /// Take back this seat's ballot and its forecast: a ballot cast on
+        /// the wrong issue or with no basis stops counting, and the issue's
+        /// logbook keeps what it was.
         #[arg(long, conflicts_with_all = ["choice", "jev", "confidence", "used", "expect"])]
         withdraw: bool,
     },
@@ -902,7 +904,7 @@ enum Cmd {
         /// The option you expect to win, or a JSON object of option to share.
         #[arg(long)]
         expect: String,
-        /// Forecast as this persona instead of the seat's identity.
+        /// This seat's own name; another seat is refused.
         #[arg(long = "as")]
         as_persona: Option<String>,
     },
@@ -1251,7 +1253,7 @@ enum Cmd {
         /// The name that holds it. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
-        /// Also close the tracker ticket. Only when the work is accepted, not when the sitting ends.
+        /// Also close the tracker ticket, as CANCELLED with `--status cancelled`. Only when the work is accepted or dropped, not when the sitting ends.
         #[arg(long)]
         close: bool,
     },
@@ -1847,6 +1849,7 @@ fn run_command() -> Result<()> {
             let out =
                 std::process::Command::new(which::which("vissue").context("vissue not on PATH")?)
                     .args(&argv)
+                    .env("VISSUE_AGENT", ljos_cli::seat_name())
                     .stdin(std::process::Stdio::null())
                     .output()?;
             let text = String::from_utf8_lossy(&out.stdout);
@@ -2060,7 +2063,7 @@ fn run_command() -> Result<()> {
             withdraw,
         } => match choice {
             None if withdraw => {
-                let who = identity_or_seat(as_persona.as_deref()).unwrap_or_else(whoami_tracker);
+                let who = ljos_cli::ballot_voter("vote", as_persona.as_deref())?;
                 // A ballot already taken back still leaves its forecast to
                 // take back, so a second withdraw finishes the first.
                 match ljos_cli::run_captured_as(
@@ -2125,8 +2128,7 @@ fn run_command() -> Result<()> {
                 }
             }
             Some(c) => {
-                ljos_cli::ballot_seat("vote")?;
-                let who = identity_or_seat(as_persona.as_deref()).unwrap_or_else(whoami_tracker);
+                let who = ljos_cli::ballot_voter("vote", as_persona.as_deref())?;
                 let cast = ljos_cli::panel_gate::claim_session_ballot(&issue, &who)?;
                 let used = used.as_deref().unwrap_or("");
                 if used.is_empty() {
@@ -2147,7 +2149,7 @@ fn run_command() -> Result<()> {
                     args.push(format!("{p}"));
                 }
                 let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-                run_as("vissue", &refs, as_persona.as_deref())?;
+                run_as("vissue", &refs, Some(&who))?;
                 // Read the ballot back: only the tracker is proof it exists.
                 let rows: Vec<serde_json::Value> =
                     ljos_cli::run_captured("vissue", &["vote", &issue, "--json"])
@@ -2170,8 +2172,6 @@ fn run_command() -> Result<()> {
                     Err(e) => eprintln!("ljos vote: {e:#}"),
                 }
                 if let Some(expect) = expect.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
-                    let who =
-                        identity_or_seat(as_persona.as_deref()).unwrap_or_else(whoami_tracker);
                     write_prediction(&issue, &who, expect).with_context(|| {
                         format!("ballot cast; forecast for {who} was not recorded")
                     })?;
@@ -2406,10 +2406,7 @@ fn run_command() -> Result<()> {
             expect,
             as_persona,
         } => {
-            ljos_cli::ballot_seat("predict")?;
-            let who = as_persona
-                .or_else(|| std::env::var("VISSUE_AGENT").ok())
-                .unwrap_or_else(whoami_tracker);
+            let who = ljos_cli::ballot_voter("predict", as_persona.as_deref())?;
             let body = write_prediction(&issue, &who, &expect)?;
             println!("{}", serde_json::to_string_pretty(&body)?);
         }
@@ -3610,8 +3607,8 @@ fn issue_topic_and_tags(id: &str) -> (Vec<String>, Vec<String>) {
 
 /// The verb of a command that writes the tracker under this seat. Listing
 /// a deed's citations, a workflow's status, a consensus read with
-/// `--no-file` and a dry-run reap are reads; a slot names its seat on the
-/// line.
+/// `--no-file`, a dry-run reap and a dry-run bump plan are reads; a slot
+/// names its seat on the line.
 fn tracker_write(cmd: &Cmd) -> Option<&'static str> {
     Some(match cmd {
         Cmd::Sitting { .. } => "sitting",
@@ -3637,18 +3634,10 @@ fn tracker_write(cmd: &Cmd) -> Option<&'static str> {
         } if choice.is_some() || *jev || *withdraw => "vote",
         Cmd::Predict { .. } => "predict",
         Cmd::Slot { .. } => "slot",
+        Cmd::OpenPanel { .. } => "open-panel",
+        Cmd::BumpPlan { dry_run: false, .. } => "bump-plan",
         _ => return None,
     })
-}
-
-/// The identity the tracker records ballots under, so a forecast and a
-/// ballot from the same seat carry the same name.
-fn whoami_tracker() -> String {
-    run_captured("vissue", &["whoami"])
-        .ok()
-        .and_then(|s| s.stdout.lines().next().map(|l| l.trim().to_string()))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "seat".to_string())
 }
 
 /// The pack's rows, or none with a note: a seat without a pack still settles.

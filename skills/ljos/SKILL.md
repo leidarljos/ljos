@@ -16,7 +16,7 @@ as `ljos VERB` in the shell.
 | question | store | verbs |
 |---|---|---|
 | what did the human freeze | cards | `cards` (read-only; never extract-on-write) |
-| what is the work, what blocks it, who agrees | tracker (vissue) | `file`, `options`, `note`, `recall`, `vote`, `consensus`, `deed`; `vissue append`, `vissue update` |
+| what is the work, what blocks it, who agrees | tracker (vissue) | `file`, `options`, `note`, `recall`, `vote`, `consensus`, `deed` |
 | what does this seat know, standing | pack (packset) | `search`, `island`, `remember`, `prefer`, `forget`, `due`, `graded` |
 | what did the work produce | deed store (deedar) | `evidence`, `current`; `deedar create` |
 | which work is claimable right now | claim graph (claimdag) | `claim`, `release`, `complete` |
@@ -215,7 +215,7 @@ lessons to another scope (`tools = "shared"`). Where `ljos cloud up` has
 set `LJOS_WRITE_SCOPE=cloud`, memory and lessons are tagged `scope:cloud`.
 That tag is explicit. `cloud up` does not set `default_scope`.
 
-No issue yet? `vissue q -p PROJECT "TITLE"` mints one and prints its id.
+No issue yet? `ljos file "TITLE" --top -p PROJECT` files one and prints its id.
 Every piece of work has an issue before it has a claim.
 
 Under a runner, git waits for the sitting. `git commit`, `merge`,
@@ -434,7 +434,8 @@ is active for this seat. The person at their own terminal is never gated.
   `ljos ask NAME "..."` puts a question to it in that session.
 - Work found while sitting is filed with `ljos file "TITLE" -t bug`: a
   child of the held issue, in its project, committed. `--parent ID`
-  names another parent and `--top` none. A bug in a tool found
+  names another parent, and the child goes in that parent's project
+  whatever `-p` names; `--top` names none. A bug in a tool found
   mid-sitting goes to the tool's project: `-p PROJECT` naming another
   project than the held issue's files at its top level, and says so.
   `ljos file "TITLE" --options A,B` writes `Options: A, B` as the first body
@@ -445,9 +446,8 @@ is active for this seat. The person at their own terminal is never gated.
 - At a usage limit the hook keeps the turn open once. Spend it on the record and
   nothing else: `ljos note` the held issue with what is done and left,
   `ljos file` each item left, `ljos note` each lesson, then stop.
-- Progress goes on the issue, dated: `ljos note ISSUE "..."`; a longer
-  report is `vissue append ISSUE "..."` (or `--file F`); a tag is
-  `vissue update ISSUE -t TAG`.
+- Progress goes on the issue, dated: `ljos note ISSUE "..."`, a longer
+  report too. Tags go on when the issue is filed: `ljos file --tags`.
 - An issue another seat sits on refuses your sitting. To help, `ljos
   note ISSUE "..."` adds an assist to its logbook, and the note names
   the seat that has it; `ljos send SEAT "..."` reaches that seat now.
@@ -530,9 +530,9 @@ same four steps are:
 2. `ljos island TASK --fire` when the island served: the strongest memories
    fire together and their links gain weight.
 3. `ljos complete ISSUE --status done` (`failed`, `cancelled`). Completing
-   the session node does not close the ticket: `vissue update ISSUE -s DONE`
-   does, when the work is accepted.
-   Nor does `finish`: `--close` on it does, for the same acceptance.
+   the session node does not close the ticket, nor does a plain `finish`.
+   `ljos finish ISSUE --close` does, when the work is accepted, and
+   `--status cancelled --close` closes it as CANCELLED.
 4. `ljos learn ISSUE --outcome OPTION` when the world says which option was
    right. Every voter's record takes the outcome; the record moves a
    voter's weight once it sets the voter apart from the panel, which a first
@@ -596,6 +596,9 @@ under equal weights is a count; under calibrated rows it is not.
   healthy while that shell or a git child of it is alive. The row also fails when another remote
   of the tracker has a different head of the branch, as of the last fetch;
   seats that push to different remotes never see each other's claims.
+- `uncommitted issue edits in FILE` on the `doctor` tracker row: a raw
+  `vissue` write or a failed tracker commit left issue edits in the
+  checkout, and no other host sees them. Commit them in the tracker.
 - `deedar: warning: this deed is signed by ed25519:...`: the host key is
   not a signer the store's `layout` lists, and `evidence` will refuse the
   deed. Add the printed `signer =` line to that file.
@@ -622,6 +625,13 @@ under equal weights is a count; under calibrated rows it is not.
   machine trailer is refused. The author and committer are checked only
   when `name` and `email` are set in `.ljos/gates.toml` or in the user,
   repository, or seat `ljos.toml`.
+- Under an agent runner the guard refuses a raw `vissue` verb that
+  writes: `create`, `q`, `refile`, `note`, `append`, `vote` with a
+  ballot, `claim`, `release`, `close`, `cancel` and `update`. The deny
+  names the ljos verb to run instead, which checks the seat, files in
+  the parent's project and commits the tracker. Reads run, the tally
+  included, and the person at a terminal runs any verb. The `vissue`
+  ljos runs for its own verbs is not a tool call and is not judged.
 - `ljos hook` is the memory hook: a runner or a policy layer pipes the
   action about to happen (its hook JSON, or the plain argv) and gets back
   the memories that action activates, what two of the pack's scorers
@@ -698,31 +708,39 @@ conversations of one runner hold two tickets, and a second sitting does not
 release the first. `ljos seat` prints both names
 and where they came from. `LJOS_SEAT` names the seat; a `*_SESSION_ID` still
 names the holder. `VISSUE_AGENT` is
-the tracker's own name for the same thing; `--as` names a persona over
-both; a person at a terminal is their login user.
+the tracker's own name for the same thing; a person at a terminal is
+their login user. `--as` on a ballot or a withdrawal may name only this
+seat; another seat is refused, so a persona votes from a session seated
+as that persona.
 
 A tracker write needs a seat somebody named, as a ballot does: `note`,
 `claim`, `sitting`, `finish`, `release`, `complete`, `file`, `options`,
 `deed --add/--remove`, `workflow --start/--round`, `consensus` when it may
 file, `playbook`, `reap --apply`, `vote` (a ballot, `--jev` or
-`--withdraw`), `predict`, `slot`, the matching MCP tools, and what a
-runner hook or a git hook books. The seat is the one `ljos seat` prints,
-so a conversation id the seats file maps writes as that seat. A seat
-taken only from the program above the shell, or from the login user
-under a runner, is refused and nothing is written: `export LJOS_SEAT=NAME`
-and run it again. A hook that has no seat it may write as books nothing.
+`--withdraw`), `predict`, `slot`, `open-panel`, `bump-plan` without
+`--dry-run`, the matching MCP tools, and what a runner hook or a git
+hook books. The seat is the one `ljos seat` prints, so a conversation id
+the seats file maps writes as that seat. A seat taken only from the
+program above the shell, or from the login user under a runner, is
+refused and nothing is written: `export LJOS_SEAT=NAME` and run it
+again. A hook that has no seat it may write as books nothing. A commit
+in the tracker's own checkout is never booked, but the git hook checks
+its seat and says, in the book log too, when that seat may not write.
 
 Every write records the seat that was checked. An `--assignee` (or MCP
 `assignee`) that names another seat is refused; only `ljos release HEX
 --assignee NAME` hands an issue to another seat, and NAME must itself be
 a seat the seats file lists.
 
-The seats file is `$LJOS_SEATS`, else `~/.config/ljos/seats.toml`. Its
+The seats file is `seats.toml` in the ljos config directory,
+`$XDG_CONFIG_HOME/ljos/seats.toml` when that is absolute, else
+`~/.config/ljos/seats.toml`; no variable names another file. Its
 seats are every string value at the top level, `"CONVERSATION-ID" =
 "NAME"` lines, and the strings of a `seats = ["NAME", ...]` array. With
 no file, any named seat writes. A file that lists no seat refuses every
 write, and a file that is not TOML refuses every write until it is
-fixed. Reads need no seat. `ljos doctor` shows the `seat source` row, a
+fixed. So does a seats file that cannot be read, or a link to a file
+that is not there. Reads need no seat. `ljos doctor` shows the `seat source` row, a
 warning, never a failure, when the seat is derived.
 
 ## One-command consent

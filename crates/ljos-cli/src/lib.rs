@@ -521,7 +521,7 @@ pub fn persona_agent(p: &Persona) -> (String, String) {
          2. Decide as yourself before you see another voice: do not read `vissue vote ISSUE`, `vissue show ISSUE` or `ljos consensus ISSUE` until your ballot is cast.\n\
          3. Cast one ballot: `ljos vote ISSUE --for OPTION --expect '{{\"OPTION\": SHARE}}' --confidence P --used none --as {who}`, with your forecast of the others' shares and the probability you give your own choice.\n\
          4. Check the tracker holds it: `vissue vote ISSUE --json` has your row. Only the tracker is proof; a ballot you did not see there was not cast, so say that instead of reporting a vote.\n\
-         5. Note why, in short sentences, with the evidence your ballot stands on: `vissue note ISSUE \"{who}: ...\"`.\n\n\
+         5. Note why, in short sentences, with the evidence your ballot stands on: `ljos note ISSUE \"{who}: ...\"`.\n\n\
          Do not edit files, push, or ssh. Stop after the note.\n",
         view = p.view.trim(),
         anchor = p.anchor,
@@ -3510,32 +3510,6 @@ fn login_user() -> String {
         .unwrap_or_else(|| "seat".to_string())
 }
 
-/// The seat a ballot or a forecast counts for. Refused when nothing named
-/// the seat and it is only the program above this shell. `LJOS_SEAT`,
-/// `VISSUE_AGENT`, an MCP client's name or a runner's record name a seat;
-/// a person at a terminal is their login user.
-///
-/// # Errors
-///
-/// The seat is a process name nobody chose.
-pub fn ballot_seat(verb: &str) -> Result<String> {
-    let who = whoami();
-    match derived_seat(&who) {
-        Some(Derived::LoginUser) => bail!(
-            "{verb}: this shell runs under an agent runner, and nothing names its seat, \
-             so this ballot would count for {}, the login user. \
-             Set LJOS_SEAT to the seat's name (`export LJOS_SEAT=NAME`) and run it again; nothing was written",
-            who.seat
-        ),
-        Some(Derived::ProcessTree) => bail!(
-            "{verb}: no seat is named, so this ballot would count for {}, the program above this shell. \
-             Set LJOS_SEAT to the seat's name (`export LJOS_SEAT=NAME`) and run it again; nothing was written",
-            who.seat
-        ),
-        None => Ok(who.seat),
-    }
-}
-
 /// Where a seat nobody named came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Derived {
@@ -3673,6 +3647,27 @@ pub fn write_assignee(
     Ok(assignee)
 }
 
+/// The name a ballot or a withdrawal records: this process's seat, the one
+/// [`write_seat`] checked. `--as` (MCP `as`) may name that seat and no
+/// other; a persona votes from a session seated as that persona.
+///
+/// # Errors
+///
+/// `named` is another seat.
+pub fn ballot_voter(verb: &str, named: Option<&str>) -> Result<String> {
+    let seat = seat_name();
+    if let Some(name) = named.map(str::trim).filter(|n| !n.is_empty()) {
+        let slug = canonical_seat_name(name);
+        if slug != canonical_seat_name(&seat) {
+            bail!(
+                "{verb}: --as {name} is not this seat, {seat}; a ballot is recorded as the seat that casts it. \
+                 Drop --as, or cast it from a session seated as {name} (`export LJOS_SEAT={slug}`); nothing was written"
+            );
+        }
+    }
+    Ok(seat)
+}
+
 /// Refuse a tracker write from a seat the seats file does not list. A
 /// missing file, as on a fresh single-user install, refuses nothing; a
 /// file that is there and lists no seat refuses every write.
@@ -3707,11 +3702,19 @@ pub fn registered_seat(seat: &str) -> Result<()> {
 
 /// The seats `path` lists, slugged: every name it maps a conversation to
 /// (`"ID" = "NAME"`) and every name in a `seats = [...]` array. `None`
-/// only when the file is missing.
+/// only when nothing is at the path; a link to nothing is an error.
 fn listed_seats(path: &Path) -> Result<Option<std::collections::BTreeSet<String>>> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if std::fs::symlink_metadata(path).is_ok() {
+                bail!(
+                    "the seats file {} links to a file that is not there, so no seat may write; nothing was written",
+                    path.display()
+                );
+            }
+            return Ok(None);
+        }
         Err(e) => bail!("cannot read the seats file {}: {e}", path.display()),
     };
     let table: toml::Table = toml::from_str(&text)
@@ -3772,6 +3775,23 @@ pub fn seat_name() -> String {
     hook_actor()
         .or_else(|| seated().map(|s| s.seat))
         .unwrap_or_else(|| whoami().seat)
+}
+
+/// The seat this process's write check named: a git hook's, a [`Seated`]
+/// guard's, or an MCP call's. `None` outside one.
+#[must_use]
+pub fn checked_seat() -> Option<String> {
+    hook_actor()
+        .or_else(|| seated().map(|s| s.seat))
+        .or_else(|| CALL_SEAT.try_with(|s| s.seat.clone()).ok())
+}
+
+/// Name [`checked_seat`] on a `git` child that may commit to the tracker,
+/// so the commit hook checks the seat this process writes as.
+pub(crate) fn seat_git_child(cmd: &mut std::process::Command) {
+    if let Some(seat) = checked_seat() {
+        cmd.env("LJOS_SEAT", seat);
+    }
 }
 
 /// Whether a conversation under a runner may accept a proposal: only one
@@ -4366,20 +4386,14 @@ fn fallback_seat(id: &str) -> Option<String> {
     Some(format!("grokbot-{prefix}"))
 }
 
+/// `seats.toml` in the ljos config directory, the base every user config
+/// layer is read from. No variable names another file: a shell that could
+/// point the check at a file of its own would pass it.
 fn seats_file() -> PathBuf {
-    if let Some(path) = std::env::var_os("LJOS_SEATS").filter(|value| !value.is_empty()) {
-        return PathBuf::from(path);
-    }
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|value| !value.is_empty())
-                .map(|home| PathBuf::from(home).join(".config"))
-        })
-        .unwrap_or_else(|| PathBuf::from(".config"));
-    base.join("ljos").join("seats.toml")
+    config_base()
+        .unwrap_or_else(|| PathBuf::from(".config"))
+        .join("ljos")
+        .join("seats.toml")
 }
 
 fn mapped_seat(path: &Path, id: &str) -> Option<String> {
@@ -9766,11 +9780,13 @@ pub fn decision_member_task(brief: &str, persona: &str, issue: &str) -> String {
 /// Fork the panel opener and return at once. The opener files or reuses the
 /// decision, writes the briefs, and starts one headless member per persona.
 /// A second call for the same prompt in this session does not fork again.
-/// A panel member (`LJOS_PANEL_CHILD`) does not fork one of its own.
+/// A panel member (`LJOS_PANEL_CHILD`) does not fork one of its own, and a
+/// seat that may not write the tracker forks nothing.
 ///
 /// # Errors
 ///
-/// The runtime directory cannot be written, or the opener did not start.
+/// The seat may not write the tracker, the runtime directory cannot be
+/// written, or the opener did not start.
 pub fn start_decision_panel(
     prompt: &str,
     session: Option<&str>,
@@ -9779,6 +9795,7 @@ pub fn start_decision_panel(
     if std::env::var_os("LJOS_PANEL_CHILD").is_some() {
         return Ok(decision_hold());
     }
+    write_seat("open-panel")?;
     let key: String = prompt.chars().take(80).collect();
     let seen_key = format!("panel-open:{key}");
     if seen_ids(session).contains(&seen_key) {
@@ -9926,9 +9943,9 @@ pub fn panel_concurrency() -> usize {
 /// Start each member once fewer than `at_once` are running. The opener counts
 /// its own children rather than leaving the count to a shell: under dash,
 /// `jobs` inside a command substitution lists none.
-fn start_members(members: &[(PathBuf, Vec<String>)], at_once: usize) -> Result<()> {
+fn start_members(members: &[(String, PathBuf, Vec<String>)], at_once: usize) -> Result<()> {
     let mut running: Vec<std::process::Child> = Vec::new();
-    for (log, argv) in members {
+    for (persona, log, argv) in members {
         loop {
             running.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
             if running.len() < at_once.max(1) {
@@ -9936,7 +9953,7 @@ fn start_members(members: &[(PathBuf, Vec<String>)], at_once: usize) -> Result<(
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        running.push(spawn_member(argv, log)?);
+        running.push(spawn_member(persona, argv, log)?);
     }
     Ok(())
 }
@@ -9965,7 +9982,7 @@ pub fn open_decision_panel(prompt: &str, cwd: Option<&str>, log: &Path) -> Resul
     let briefs = runtime_dir().join(format!("panel-{issue}"));
     let wrote = panel(&issue, &briefs)?;
     append_log(log, &wrote);
-    let mut members: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    let mut members: Vec<(String, PathBuf, Vec<String>)> = Vec::new();
     for path in std::fs::read_dir(&briefs)
         .with_context(|| format!("read {}", briefs.display()))?
         .flatten()
@@ -9985,7 +10002,7 @@ pub fn open_decision_panel(prompt: &str, cwd: Option<&str>, log: &Path) -> Resul
         std::fs::write(&task_file, task)?;
         let argv = panel_member_argv(&task_file, cwd, &persona);
         let member_log = briefs.join(format!("{persona}.log"));
-        members.push((member_log, argv));
+        members.push((persona, member_log, argv));
     }
     let n = members.len();
     let at_once = match panel_concurrency() {
@@ -10053,6 +10070,7 @@ fn file_yes_no(parent: Option<&str>, prompt: &str) -> Result<String> {
     argv.push(title);
     let out = std::process::Command::new(which::which("vissue").context("vissue not on PATH")?)
         .args(&argv)
+        .env("VISSUE_AGENT", seat_name())
         .stdin(std::process::Stdio::null())
         .output()
         .context("vissue create")?;
@@ -10071,10 +10089,12 @@ fn file_yes_no(parent: Option<&str>, prompt: &str) -> Result<String> {
     Ok(id)
 }
 
-/// One member, in a session of its own where `setsid` is on `PATH`.
+/// One member, seated as its persona, in a session of its own where
+/// `setsid` is on `PATH`. The opener's seat is not inherited: a member's
+/// ballot is its own seat's.
 /// `setsid` forks only when it starts as a process group leader, which a
 /// spawned child is not, so the handle returned is the member's own.
-fn spawn_member(argv: &[String], log: &Path) -> Result<std::process::Child> {
+fn spawn_member(persona: &str, argv: &[String], log: &Path) -> Result<std::process::Child> {
     if argv.is_empty() {
         bail!("panel member has no argv");
     }
@@ -10093,6 +10113,8 @@ fn spawn_member(argv: &[String], log: &Path) -> Result<std::process::Child> {
         c
     };
     cmd.env("LJOS_PANEL_CHILD", "1")
+        .env("LJOS_SEAT", persona)
+        .env("VISSUE_AGENT", persona)
         .stdin(std::process::Stdio::null())
         .stdout(file)
         .stderr(err)
@@ -10430,7 +10452,8 @@ pub fn tracks_work() -> bool {
 }
 
 /// What the hooks tell a conversation that holds no issue.
-const OPEN_AN_ISSUE: &str = "Work goes on an issue: `vissue q -p PROJECT \"TITLE\"` prints an id, \
+const OPEN_AN_ISSUE: &str =
+    "Work goes on an issue: `ljos file \"TITLE\" --top -p PROJECT` prints an id, \
      then `ljos sitting ID` opens it.";
 
 /// Whether a hook call's cue is the seat's own verbs or tools.
@@ -10595,7 +10618,9 @@ fn runner_record_holders() -> Vec<String> {
 /// no parent and `--parent` names one. Otherwise the held issue is the
 /// parent, unless `-p` names another project: a child lives in its
 /// parent's project, so a tool bug filed with `-p` mid-sitting goes to
-/// the top of that project, not under the work being sat on.
+/// the top of that project, not under the work being sat on. For the
+/// same reason a `--parent` files in that parent's project whatever `-p`
+/// names, and the line says so.
 #[must_use]
 pub fn file_placement(
     top: bool,
@@ -10623,7 +10648,18 @@ pub fn file_placement(
             (held, _) => held,
         }
     };
-    let project = project.or_else(|| parent.as_deref().and_then(project_of).map(str::to_string));
+    let home = parent.as_deref().and_then(project_of);
+    let project = match (home, project) {
+        (Some(home), Some(asked)) if home != asked => {
+            passed_over = Some(format!(
+                "filed in {home}, the project of its parent {}: a child lives in its \
+                 parent's project; --top -p {asked} files at the top of {asked}\n",
+                parent.as_deref().unwrap_or_default()
+            ));
+            Some(home.to_string())
+        }
+        (home, asked) => asked.or_else(|| home.map(str::to_string)),
+    };
     (parent, project, passed_over)
 }
 
@@ -21702,6 +21738,87 @@ pub fn redirect_seat_verb(rule: Option<Rule>, line: &str) -> Option<Rule> {
     Some(r)
 }
 
+/// A tracker verb that writes, run raw under an agent runner. ljos is the
+/// tracker's front end there: the raw verb skips the seat check, the
+/// parent's project and the tracker commit, and a ticket filed from the
+/// tracker root lands in whatever project the directory names. The deny
+/// names the ljos verb to run in its place. Reads pass, the tally read
+/// `vissue vote ID` included, and so does the person at a terminal. The
+/// `vissue` children ljos runs itself are not tool calls and never reach
+/// this guard.
+fn raw_tracker_write(line: &str) -> Option<Rule> {
+    let (verb, cmd) = nested_lines(line, 0)
+        .iter()
+        .flat_map(|l| raw_segments(l))
+        .find_map(|seg| tracker_write_instead(&shell_words(&seg)))?;
+    if !under_a_runner() {
+        return None;
+    }
+    Some(Rule {
+        pattern: format!("vissue {verb}"),
+        verdict: "deny".into(),
+        reason: format!(
+            "`vissue {verb}` under an agent runner writes the tracker past the seat check, \
+             the parent's project and the tracker commit; ljos is the tracker's front end. \
+             Run `{cmd}` instead."
+        ),
+    })
+}
+
+/// The tracker verb a command writes with and the ljos command that does
+/// the same write, its issue carried over. `None` for a read.
+fn tracker_write_instead(words: &[String]) -> Option<(String, String)> {
+    let (at, _) = prefix_end(words);
+    let words = &words[at..];
+    if words.first()?.rsplit('/').next()? != "vissue" {
+        return None;
+    }
+    let verb = words.get(1)?.as_str();
+    let args: Vec<&str> = words[2..]
+        .iter()
+        .map(String::as_str)
+        .take_while(|w| !is_redirection(w))
+        .collect();
+    let id = args.iter().find(|w| !w.starts_with('-')).unwrap_or(&"ID");
+    let value = |flags: &[&str]| {
+        args.windows(2)
+            .find(|w| flags.contains(&w[0]))
+            .map(|w| w[1])
+    };
+    let cmd = match verb {
+        "create" | "q" => match value(&["--parent"]) {
+            Some(parent) => format!("ljos file \"TITLE\" --parent {parent}"),
+            None => "ljos file \"TITLE\" --top -p PROJECT".into(),
+        },
+        "refile" => "ljos file \"TITLE\" --parent PARENT".into(),
+        "note" | "append" => format!("ljos note {id} \"...\""),
+        "vote" => {
+            let ballot = args
+                .iter()
+                .any(|w| *w == "--for" || w.starts_with("--for=") || *w == "--withdraw");
+            if !ballot {
+                return None;
+            }
+            format!("ljos vote {}", args.join(" "))
+        }
+        "claim" => format!("ljos sitting {id}"),
+        "release" => format!("ljos release {id}"),
+        "close" => format!("ljos finish {id} --close"),
+        "cancel" => format!("ljos finish {id} --status cancelled --close"),
+        "update" => match value(&["-s", "--state"])
+            .map(str::to_ascii_uppercase)
+            .as_deref()
+        {
+            Some("DONE") => format!("ljos finish {id} --close"),
+            Some("CANCELLED") => format!("ljos finish {id} --status cancelled --close"),
+            Some("STARTED") => format!("ljos sitting {id}"),
+            _ => format!("ljos note {id} \"...\""),
+        },
+        _ => return None,
+    };
+    Some((verb.to_string(), cmd))
+}
+
 /// The verdict the push gate makes of a line: `None` lets it run. An
 /// ordinary branch push is allowed, including when a seat rule says
 /// `git push*` and when the remote's owner cannot be read. Force, a
@@ -24519,7 +24636,8 @@ fn root_source() -> String {
 /// resolved, and where the root came from. A root that is relative, missing,
 /// or holds no prefix directory fails the row: tickets filed there are
 /// invisible to every other seat. When the root is a git checkout with an
-/// upstream, the row also names how many commits origin lacks.
+/// upstream, the row also names how many commits origin lacks, and in any
+/// checkout the issue files that hold uncommitted edits.
 pub fn tracker_state(identity: &str, source: &str) -> (String, bool) {
     let version = identity.lines().next().unwrap_or("").trim();
     let field = |key: &str| {
@@ -24543,13 +24661,50 @@ pub fn tracker_state(identity: &str, source: &str) -> (String, bool) {
         None
     };
     let base = format!("{version} root={root} prefix={prefix} from {source}");
-    match problem {
-        Some(why) => (format!("{base}; {why}"), false),
+    let (state, ok) = match problem {
+        Some(why) => return (format!("{base}; {why}"), false),
         None => match tracker_git_drift(path) {
             Some((extra, git_ok)) => (format!("{base}; {extra}"), git_ok),
             None => (base, true),
         },
+    };
+    match tracker_uncommitted(path) {
+        Some(edits) => (format!("{state}; {edits}"), ok),
+        None => (state, ok),
     }
+}
+
+/// What the tracker row says when issue files hold uncommitted edits.
+const UNCOMMITTED_EDITS: &str = "uncommitted issue edits";
+
+/// The issue files in the tracker checkout whose edits no commit holds: a
+/// raw `vissue` write, or a tracker commit that failed. No other host and
+/// no rebuilt one sees them. Under `LJOS_TRACKER_GIT=off` ljos leaves the
+/// tracker uncommitted on purpose, and nothing is said.
+fn tracker_uncommitted(root: &Path) -> Option<String> {
+    let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
+    if matches!(mode.as_str(), "off" | "0" | "false") {
+        return None;
+    }
+    let status = git_ok_stdout(
+        root,
+        &["status", "--porcelain", "--untracked-files=all", "--", "."],
+    )?;
+    let files: Vec<&str> = status
+        .lines()
+        .filter_map(|line| line.get(3..))
+        .map(|path| path.rsplit(" -> ").next().unwrap_or(path).trim_matches('"'))
+        .filter(|path| path.ends_with(".org"))
+        .collect();
+    let first = files.first()?;
+    let more = match files.len() {
+        1 => String::new(),
+        n => format!(" and {} more", n - 1),
+    };
+    Some(format!(
+        "{UNCOMMITTED_EDITS} in {first}{more}; commit them in {} or no other host sees them",
+        root.display()
+    ))
 }
 
 fn git_in(dir: &Path, args: &[&str]) -> Option<std::process::Output> {
@@ -25089,7 +25244,9 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     if cloud::cloud_age_is_unset(row.name, &row.state) {
         return "info";
     }
-    if row.name == "tracker" && names_unpushed(&row.state) {
+    if row.name == "tracker"
+        && (names_unpushed(&row.state) || row.state.contains(UNCOMMITTED_EDITS))
+    {
         return "warn";
     }
     // An idle gate on the person's machine is no fault. Under a runner,
@@ -27048,7 +27205,7 @@ fn stamp_tracker(node: &str, assignee: &str) -> Result<Option<String>> {
         .map(|_| Some(format!("tracker: {node} STARTED under {assignee}")))
         .with_context(|| {
             format!(
-                "claim: the claim graph took {node} but the tracker refused to stamp it under {assignee}; `ljos release {node} --assignee {assignee}` frees the graph, or `vissue claim {node} --force` takes the tracker over"
+                "claim: the claim graph took {node} but the tracker refused to stamp it under {assignee}; `ljos release {node} --assignee {assignee}` frees the graph, or the person's `vissue claim {node} --force` takes the tracker over"
             )
         })
 }
@@ -27459,7 +27616,7 @@ fn with_unstamp(said: String, node: &str, id: &str, holder: &str, reopen: bool) 
         Ok(Some(line)) => line,
         Ok(None) => return out,
         Err(e) => format!(
-            "tracker: could not drop {holder}'s claim on {node} ({e:#}); `vissue update {node} -s TODO` drops it"
+            "tracker: could not drop {holder}'s claim on {node} ({e:#}); the person's `vissue update {node} -s TODO` drops it"
         ),
     };
     if !out.is_empty() && !out.ends_with('\n') {
@@ -29270,8 +29427,14 @@ pub fn finish(
     };
     // A finish that does not close hands the issue back the way a release
     // does: the claim is gone either way, and an issue left STARTED under
-    // nobody drops out of every ready list. A close sets DONE below.
-    let reopen = !(close && status.eq_ignore_ascii_case("done"));
+    // nobody drops out of every ready list. A close sets DONE, or
+    // CANCELLED for a cancelled sitting, below. A failed one stays open.
+    let closed_as = match status {
+        "done" if close => Some("DONE"),
+        "cancelled" if close => Some("CANCELLED"),
+        _ => None,
+    };
+    let reopen = closed_as.is_none();
     let completed = match complete_as(issue, Some(status), assignee, gen, reopen) {
         Ok(done) => done,
         Err(e) => {
@@ -29343,13 +29506,13 @@ pub fn finish(
     // A sitting ending is not the work being accepted: a review can be
     // posted and still be open, a build can be green and still unmerged.
     // The ticket closes only when asked, so a blocker on it stays a blocker.
-    if close && status.eq_ignore_ascii_case("done") {
-        run_as("vissue", &["update", issue, "-s", "DONE"], None)
+    if let Some(state) = closed_as {
+        run_as("vissue", &["update", issue, "-s", state], None)
             .with_context(|| format!("finish: could not close the ticket {issue}"))?;
-        out.push_str(&format!("closed the ticket {issue}\n"));
+        out.push_str(&format!("closed the ticket {issue} as {state}\n"));
     } else {
         out.push_str(&format!(
-            "the ticket {issue} stays open and nobody holds it; `ljos finish {issue} --close` or `vissue update {issue} -s DONE` closes it when the work is accepted\n"
+            "the ticket {issue} stays open and nobody holds it; `ljos finish {issue} --close` closes it when the work is accepted\n"
         ));
     }
     // A cloud seat's deeds leave with the tracker. A box writes nothing.
@@ -29980,6 +30143,7 @@ pub fn commit_paths(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
         clear_git_repo_env(&mut cmd);
         apply_git_command_env(&mut cmd);
         git_hooks::hook_child_env(&mut cmd);
+        seat_git_child(&mut cmd);
         cmd.output()
     };
     // `Err` is a busy index, with what git said.
@@ -32222,6 +32386,9 @@ pub fn static_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         return None;
     }
     if let Some(rule) = seat_guard_in(line, cwd) {
+        return Some(rule);
+    }
+    if let Some(rule) = raw_tracker_write(line) {
         return Some(rule);
     }
     if let Some(rule) = destructive_delete(line) {
@@ -37238,10 +37405,15 @@ mod tests {
         let said = said.expect("a line");
         assert!(said.contains("filed at the top of Tools"), "{said}");
         assert!(said.contains("--parent garden-06v8"), "{said}");
-        // --parent and --top still win.
+        // --parent and --top still win, and a --parent brings its project.
         let (parent, project, _) = file_placement(false, s("Tools-example"), s("Tools"), held());
         assert_eq!(parent, s("Tools-example"));
         assert_eq!(project, s("Tools"));
+        let (parent, project, said) = file_placement(false, s("ljos-gkq2"), s("Software"), None);
+        assert_eq!((parent, project), (s("ljos-gkq2"), s("ljos")));
+        assert!(said.expect("a line").contains("--top -p Software"));
+        let (_, project, _) = file_placement(false, s("ljos-policyd-ab12"), None, held());
+        assert_eq!(project, s("ljos-policyd"));
         let (parent, project, said) = file_placement(true, None, None, held());
         assert_eq!((parent, project, said), (None, None, None));
     }
@@ -38437,8 +38609,8 @@ mod tests {
             .expect("a new stretch opens on the next result");
         assert!(fresh.contains("ljos sitting"), "{fresh}");
         assert!(
-            fresh.contains("vissue q")
-                && !fresh.contains("ljos file")
+            fresh.contains("ljos file \"TITLE\" --top -p PROJECT")
+                && !fresh.contains("vissue q")
                 && fresh.contains("subagents"),
             "{fresh}"
         );
@@ -43616,7 +43788,7 @@ mod tests {
         unsafe { std::env::set_var("LJOS_TRACK_WORK", "on") };
         let reason = seat_stop_reason(&input, false, false).expect("held");
         assert!(
-            reason.contains("ljos sitting") && reason.contains("vissue q"),
+            reason.contains("ljos sitting") && reason.contains("ljos file"),
             "{reason}"
         );
         assert!(seat_stop_reason(&input, true, false).is_none());
@@ -43705,6 +43877,19 @@ mod tests {
         let argv_path = dir.path().join("argv.txt");
         unsafe { std::env::set_var("LJOS_PANEL_BIN", &opener) };
         unsafe { std::env::set_var("LJOS_TEST_ARGV", &argv_path) };
+        let unnamed = start_decision_panel(
+            "so what do we think? is this the right answer?",
+            Some("sess-open"),
+            Some(dir.path().to_str().unwrap()),
+        )
+        .expect_err("an unnamed seat opens no panel");
+        assert!(
+            format!("{unnamed:#}").contains("no seat is named"),
+            "{unnamed:#}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!argv_path.exists(), "an unnamed seat forked an opener");
+        unsafe { std::env::set_var("LJOS_SEAT", "saddle") };
         let said = start_decision_panel(
             "so what do we think? is this the right answer?",
             Some("sess-open"),
@@ -43719,6 +43904,7 @@ mod tests {
             })
             .unwrap_or_default();
         assert!(argv.contains("open-panel"), "{argv}");
+        unsafe { std::env::remove_var("LJOS_SEAT") };
         unsafe { std::env::remove_var("LJOS_PANEL_BIN") };
         unsafe { std::env::remove_var("LJOS_TEST_ARGV") };
         unsafe { std::env::remove_var("LJOS_IN_HOOK") };
@@ -51918,6 +52104,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "LJOS_SEAT",
             "VISSUE_AGENT",
             "CODEX_THREAD_ID",
+            "CURSOR_CONVERSATION_ID",
             "XDG_RUNTIME_DIR",
         ];
         let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
@@ -51932,14 +52119,20 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let who = whoami();
         assert_eq!(who.seat, "codex", "{who:?}");
         assert!(who.holder.starts_with("codex@"), "{who:?}");
-        assert_eq!(ballot_seat("vote").unwrap(), "codex");
+        let voter = with_config_home(rt.path(), || write_seat("vote"));
+        assert_eq!(voter.unwrap().seat, "codex");
         unsafe {
             std::env::remove_var("CODEX_THREAD_ID");
             std::env::set_var("ACME_SESSION_ID", "a-runner-nobody-names-0001");
         }
         if whoami().seat == login_user() {
-            let err = ballot_seat("vote").unwrap_err().to_string();
-            assert!(err.contains("nothing names its seat"), "{err}");
+            let err = with_config_home(rt.path(), || write_seat("vote"))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("the login user of a shell under an agent runner"),
+                "{err}"
+            );
         }
         unsafe {
             std::env::remove_var("ACME_SESSION_ID");
@@ -52004,7 +52197,6 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "LJOS_SEAT",
             "VISSUE_AGENT",
             "LJOS_HOLD",
-            "LJOS_SEATS",
             "CODEX_THREAD_ID",
             "CODEX_SESSION_ID",
             "GROK_SESSION_ID",
@@ -52018,7 +52210,6 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 std::env::remove_var(k);
             }
             std::env::set_var("XDG_RUNTIME_DIR", dir.path());
-            std::env::set_var("LJOS_SEATS", dir.path().join("seats.toml"));
             std::env::set_var("USER", "probe-login");
             std::env::set_var("GROK_SESSION_ID", "2c12969d-0000-4000-8000-000000000000");
         }
@@ -52028,8 +52219,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             source: "the login user".into(),
         });
         unsafe { std::env::set_var("LJOS_SEAT", "rohit") };
-        let named = doctor_seat_source();
-        let writes = write_seat("note");
+        let (named, writes) =
+            with_config_home(dir.path(), || (doctor_seat_source(), write_seat("note")));
         unsafe {
             for (k, v) in saved {
                 match v {
@@ -52064,15 +52255,14 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "LJOS_SEAT",
             "VISSUE_AGENT",
             "LJOS_HOLD",
-            "LJOS_SEATS",
             "CURSOR_CONVERSATION_ID",
             "XDG_RUNTIME_DIR",
         ];
         let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
         let dir = tempfile::tempdir().unwrap();
-        let seats = dir.path().join("seats.toml");
+        std::fs::create_dir_all(dir.path().join("ljos")).unwrap();
         std::fs::write(
-            &seats,
+            dir.path().join("ljos/seats.toml"),
             "\"0b1c2d3e-0000-4000-8000-000000000000\" = \"saddle\"\n",
         )
         .unwrap();
@@ -52081,14 +52271,13 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 std::env::remove_var(k);
             }
             std::env::set_var("XDG_RUNTIME_DIR", dir.path());
-            std::env::set_var("LJOS_SEATS", &seats);
             std::env::set_var(
                 "CURSOR_CONVERSATION_ID",
                 "0b1c2d3e-0000-4000-8000-000000000000",
             );
         }
-        let row = doctor_seat_source();
-        let seat = resolve_seat().seat;
+        let (row, seat) =
+            with_config_home(dir.path(), || (doctor_seat_source(), resolve_seat().seat));
         unsafe {
             for (k, v) in saved {
                 match v {
@@ -57178,13 +57367,14 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     fn a_panel_runs_no_more_members_at_once_than_its_bound() {
         let dir = tempfile::tempdir().unwrap();
         let ledger = dir.path().join("ledger");
-        let members: Vec<(PathBuf, Vec<String>)> = (0..5)
+        let members: Vec<(String, PathBuf, Vec<String>)> = (0..5)
             .map(|n| {
                 let run = format!(
                     "echo + >> '{0}'; sleep 0.3; echo - >> '{0}'",
                     ledger.display()
                 );
                 (
+                    format!("m{n}"),
                     dir.path().join(format!("m{n}.log")),
                     vec!["sh".into(), "-c".into(), run],
                 )
@@ -57209,6 +57399,27 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             })
             .max();
         assert_eq!(peak, Some(2), "{seen}");
+    }
+
+    #[test]
+    fn a_decision_panel_member_sits_as_its_persona() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("seat");
+        let run = format!(
+            "printf '%s %s' \"$LJOS_SEAT\" \"$VISSUE_AGENT\" > '{}.tmp' && mv '{0}.tmp' '{0}'",
+            out.display()
+        );
+        let members = vec![(
+            "skeptic".to_string(),
+            dir.path().join("skeptic.log"),
+            vec!["sh".into(), "-c".into(), run],
+        )];
+        start_members(&members, 1).unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !out.exists() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "skeptic skeptic");
     }
 
     #[test]

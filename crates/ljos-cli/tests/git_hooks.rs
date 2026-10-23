@@ -1804,3 +1804,81 @@ fn a_git_hook_books_only_a_seat_the_seats_file_lists() {
     let org = fs::read_to_string(hab.tracker.join("Software/probe/issues.org")).unwrap_or_default();
     assert!(org.contains(&format!("deed-file-commit-{sha}")), "{org}");
 }
+
+fn book_log(hab: &Hab) -> String {
+    fs::read_to_string(hab.run.join("ljos/book.log")).unwrap_or_default()
+}
+
+/// A commit made by hand in the tracker's own checkout is a tracker write.
+/// It is never booked, and a seat the seats file does not list, or no seat
+/// at all, is told so and kept in the book log.
+#[test]
+fn a_tracker_commit_is_checked_as_a_tracker_write() {
+    let hab = Hab::new("repo");
+    install(&hab);
+    fs::create_dir_all(hab.config.join("ljos")).unwrap();
+    fs::write(hab.config.join("ljos/seats.toml"), "seats = [\"saddle\"]\n").unwrap();
+    let commit = |name: &str, seat: Option<&str>| -> String {
+        fs::write(hab.tracker.join(name), "x\n").unwrap();
+        let env: Vec<(String, String)> = env_without_seat(&hab)
+            .into_iter()
+            .chain(seat.map(|s| ("LJOS_SEAT".to_string(), s.to_string())))
+            .collect();
+        let run = |args: &[&str]| {
+            let out = Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(&hab.tracker)
+                .args(args)
+                .current_dir(&hab.tracker)
+                .env_clear()
+                .envs(env.clone())
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stderr).to_string()
+        };
+        run(&["add", name]);
+        run(&["commit", "-q", "-m", name])
+    };
+
+    let unlisted = commit("stranger.org", Some("stranger"));
+    assert!(unlisted.contains("tracker commit"), "{unlisted}");
+    assert!(unlisted.contains("no seat named stranger"), "{unlisted}");
+    let unnamed = commit("unnamed.org", None);
+    assert!(unnamed.contains("tracker commit"), "{unnamed}");
+    assert!(unnamed.contains("no seat is named"), "{unnamed}");
+    let log = book_log(&hab);
+    assert!(log.contains("no seat named stranger"), "{log}");
+    assert!(log.contains("no seat is named"), "{log}");
+
+    let listed = commit("saddle.org", Some("saddle"));
+    assert!(!listed.contains("tracker commit"), "{listed}");
+    assert_eq!(vissue_log(&hab.tracker), "", "a tracker commit was booked");
+    assert_eq!(deeds(&hab.tracker), 0);
+}
+
+/// ljos's own tracker commit runs as the seat its write check named, so
+/// the hook passes it when `VISSUE_AGENT` alone named that seat.
+#[test]
+fn an_ljos_tracker_commit_is_checked_as_the_seat_that_wrote() {
+    let hab = Hab::new("repo");
+    seed_issue(&hab, "probe-32fx", "TODO");
+    install(&hab);
+    fs::create_dir_all(hab.config.join("ljos")).unwrap();
+    fs::write(hab.config.join("ljos/seats.toml"), "seats = [\"saddle\"]\n").unwrap();
+    let filed = hab.ljos_in(
+        &hab.repo,
+        &["file", "a tracker write", "--top", "-p", "probe"],
+        None,
+        &[("LJOS_SEAT", ""), ("VISSUE_AGENT", "saddle")],
+    );
+    let said = String::from_utf8_lossy(&filed.stdout);
+    let made = hab.git(&hab.tracker, &["log", "--format=%s"]);
+    assert!(!made.stdout.is_empty(), "no tracker commit: {said}");
+    let log = book_log(&hab);
+    assert!(!log.contains("tracker commit"), "{log}");
+}
