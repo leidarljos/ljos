@@ -119,6 +119,22 @@ fn terms_and_pairs_are_found_after_folding() {
 }
 
 #[test]
+fn a_confusable_lookalike_of_a_denied_term_is_refused() {
+    let s = setup(DENY);
+    for (body, what) in [
+        ("Status of proj\u{0435}ct-x.", "cyrillic ie"),
+        ("Status of pr\u{03bf}ject-x.", "greek omicron"),
+        ("Status of pr\u{039f}ject-x.", "greek capital omicron"),
+        ("Status of proj&#1077ct-x.", "cyrillic ie reference"),
+        ("Status of pr&#x3bfject-x.", "greek omicron reference"),
+    ] {
+        let draft = CLEAN.replace("See you at noon about topic-a.", body);
+        let got = refused(&draft, &s.config);
+        assert!(got.iter().any(|r| r.contains("term")), "{what}: {got:?}");
+    }
+}
+
+#[test]
 fn a_term_split_by_any_default_ignorable_character_is_found() {
     let s = setup(DENY);
     for (split, what) in [

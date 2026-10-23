@@ -2,9 +2,10 @@
 //!
 //! An empty list of refusals grants nothing: a draft still needs the
 //! ballot, the policy check and the owner's yes. Every comparison runs on
-//! folded text (default-ignorable characters removed, NFKC, lower case),
-//! so a full-width letter, a zero-width space or a variation selector does
-//! not slip a term past.
+//! folded text (default-ignorable characters removed, NFKC, lower case,
+//! the UTS #39 confusable skeleton, then lower case again), so a
+//! full-width letter, a zero-width space, a variation selector or a
+//! Cyrillic or Greek lookalike does not slip a term past.
 //! The term, pair and attribution scans read the body twice, as written
 //! and as a client that sniffs HTML would show it, and refuse when
 //! either hits. A draft the checks cannot read, such as a base64 body,
@@ -17,6 +18,7 @@ use std::path::Path;
 use anyhow::{bail, Context as _, Result};
 use icu_properties::{props::DefaultIgnorableCodePoint, CodePointSetData};
 use unicode_normalization::UnicodeNormalization as _;
+use unicode_security::confusable_detection::skeleton;
 
 use super::config::MailConfig;
 
@@ -439,13 +441,18 @@ fn addresses(value: &str) -> Vec<String> {
     out
 }
 
-/// Default_Ignorable_Code_Point characters removed, then NFKC, then
-/// lower case. NFKC keeps variation selectors and tag characters, so a
-/// term split by one would otherwise not match.
+/// Default_Ignorable_Code_Point characters removed, then NFKC, lower
+/// case, the UTS #39 confusable skeleton, and lower case again. NFKC
+/// keeps variation selectors, and a Cyrillic or Greek lookalike is a
+/// different code point from the letter it imitates, so a denied term
+/// would otherwise not match. Lower case comes first so a capital I is
+/// folded before the skeleton can map it to l, and again afterwards
+/// because a prototype can be upper case.
 fn fold(text: &str) -> String {
     let ignorable = CodePointSetData::new::<DefaultIgnorableCodePoint>();
     let visible: String = text.chars().filter(|c| !ignorable.contains(*c)).collect();
-    visible.nfkc().collect::<String>().to_lowercase()
+    let lower = visible.nfkc().collect::<String>().to_lowercase();
+    skeleton(&lower).collect::<String>().to_lowercase()
 }
 
 /// `needle` in `hay` with no letter or digit on either side.

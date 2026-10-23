@@ -56,6 +56,8 @@ rmcp.workspace = true
 schemars.workspace = true
 tokio.workspace = true
 unicode-normalization = "0.1"
+# UTS #39 confusable skeleton. Nothing else in the tree carries that map.
+unicode-security = "0.1.2"
 
 [dev-dependencies]
 ed25519-dalek = { version = "2", features = ["hazmat"] }
