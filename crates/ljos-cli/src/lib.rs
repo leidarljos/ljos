@@ -21636,6 +21636,87 @@ pub fn redirect_seat_verb(rule: Option<Rule>, line: &str) -> Option<Rule> {
     Some(r)
 }
 
+/// A tracker verb that writes, run raw under an agent runner. ljos is the
+/// tracker's front end there: the raw verb skips the seat check, the
+/// parent's project and the tracker commit, and a ticket filed from the
+/// tracker root lands in whatever project the directory names. The deny
+/// names the ljos verb to run in its place. Reads pass, the tally read
+/// `vissue vote ID` included, and so does the person at a terminal. The
+/// `vissue` children ljos runs itself are not tool calls and never reach
+/// this guard.
+fn raw_tracker_write(line: &str) -> Option<Rule> {
+    let (verb, cmd) = nested_lines(line, 0)
+        .iter()
+        .flat_map(|l| raw_segments(l))
+        .find_map(|seg| tracker_write_instead(&shell_words(&seg)))?;
+    if !under_a_runner() {
+        return None;
+    }
+    Some(Rule {
+        pattern: format!("vissue {verb}"),
+        verdict: "deny".into(),
+        reason: format!(
+            "`vissue {verb}` under an agent runner writes the tracker past the seat check, \
+             the parent's project and the tracker commit; ljos is the tracker's front end. \
+             Run `{cmd}` instead."
+        ),
+    })
+}
+
+/// The tracker verb a command writes with and the ljos command that does
+/// the same write, its issue carried over. `None` for a read.
+fn tracker_write_instead(words: &[String]) -> Option<(String, String)> {
+    let (at, _) = prefix_end(words);
+    let words = &words[at..];
+    if words.first()?.rsplit('/').next()? != "vissue" {
+        return None;
+    }
+    let verb = words.get(1)?.as_str();
+    let args: Vec<&str> = words[2..]
+        .iter()
+        .map(String::as_str)
+        .take_while(|w| !is_redirection(w))
+        .collect();
+    let id = args.iter().find(|w| !w.starts_with('-')).unwrap_or(&"ID");
+    let value = |flags: &[&str]| {
+        args.windows(2)
+            .find(|w| flags.contains(&w[0]))
+            .map(|w| w[1])
+    };
+    let cmd = match verb {
+        "create" | "q" => match value(&["--parent"]) {
+            Some(parent) => format!("ljos file \"TITLE\" --parent {parent}"),
+            None => "ljos file \"TITLE\" --top -p PROJECT".into(),
+        },
+        "refile" => "ljos file \"TITLE\" --parent PARENT".into(),
+        "note" | "append" => format!("ljos note {id} \"...\""),
+        "vote" => {
+            let ballot = args
+                .iter()
+                .any(|w| *w == "--for" || w.starts_with("--for=") || *w == "--withdraw");
+            if !ballot {
+                return None;
+            }
+            format!("ljos vote {}", args.join(" "))
+        }
+        "claim" => format!("ljos sitting {id}"),
+        "release" => format!("ljos release {id}"),
+        "close" => format!("ljos finish {id} --close"),
+        "cancel" => format!("ljos finish {id} --status cancelled --close"),
+        "update" => match value(&["-s", "--state"])
+            .map(str::to_ascii_uppercase)
+            .as_deref()
+        {
+            Some("DONE") => format!("ljos finish {id} --close"),
+            Some("CANCELLED") => format!("ljos finish {id} --status cancelled --close"),
+            Some("STARTED") => format!("ljos sitting {id}"),
+            _ => format!("ljos note {id} \"...\""),
+        },
+        _ => return None,
+    };
+    Some((verb.to_string(), cmd))
+}
+
 /// The verdict the push gate makes of a line: `None` lets it run. An
 /// ordinary branch push is allowed, including when a seat rule says
 /// `git push*` and when the remote's owner cannot be read. Force, a
@@ -32093,6 +32174,9 @@ pub fn static_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         return None;
     }
     if let Some(rule) = seat_guard_in(line, cwd) {
+        return Some(rule);
+    }
+    if let Some(rule) = raw_tracker_write(line) {
         return Some(rule);
     }
     if let Some(rule) = destructive_delete(line) {

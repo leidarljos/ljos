@@ -529,6 +529,13 @@ under equal weights is a count; under calibrated rows it is not.
   machine trailer is refused. The author and committer are checked only
   when `name` and `email` are set in `.ljos/gates.toml` or in the user,
   repository, or seat `ljos.toml`.
+- Under an agent runner the guard refuses a raw `vissue` verb that
+  writes: `create`, `q`, `refile`, `note`, `append`, `vote` with a
+  ballot, `claim`, `release`, `close`, `cancel` and `update`. The deny
+  names the ljos verb to run instead, which checks the seat, files in
+  the parent's project and commits the tracker. Reads run, the tally
+  included, and the person at a terminal runs any verb. The `vissue`
+  ljos runs for its own verbs is not a tool call and is not judged.
 - `ljos hook` is the memory hook: a runner or a policy layer pipes the
   action about to happen (its hook JSON, or the plain argv) and gets back
   the memories that action activates, what two of the pack's scorers
