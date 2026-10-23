@@ -681,12 +681,28 @@ pub(crate) fn clean(text: &str) -> String {
 /// Control characters other than tab and newline, the
 /// Default_Ignorable_Code_Point characters `fold` strips (bidirectional
 /// marks, overrides and isolates, zero-width characters, variation
-/// selectors, tag characters), and the line and paragraph separators:
-/// each can hide, reorder or break text a person reads.
+/// selectors, tag characters), the line and paragraph separators, the
+/// interlinear annotation characters (U+FFF9 to U+FFFB), the prepended
+/// concatenation marks, and the Egyptian hieroglyph format controls
+/// (U+13430 to U+1345F). None of those last three sets are
+/// default-ignorable, and each can hide, reorder or break text a person
+/// reads. Export refuses a draft that contains one.
 pub(crate) fn hiding(c: char) -> bool {
     (c.is_control() && c != '\t' && c != '\n')
         || matches!(c, '\u{2028}' | '\u{2029}')
         || CodePointSetData::new::<DefaultIgnorableCodePoint>().contains(c)
+        || matches!(
+            c,
+            '\u{FFF9}'..='\u{FFFB}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{06DD}'
+                | '\u{070F}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08E2}'
+                | '\u{110BD}'
+                | '\u{110CD}'
+                | '\u{13430}'..='\u{1345F}'
+        )
 }
 
 #[cfg(test)]
@@ -727,9 +743,33 @@ mod tests {
     #[test]
     fn clean_replaces_what_could_hide_reorder_or_break_a_line() {
         for c in [
-            '\u{1b}', '\u{85}', '\u{ad}', '\u{180e}', '\u{200b}', '\u{200c}', '\u{200d}',
-            '\u{200e}', '\u{200f}', '\u{2028}', '\u{2029}', '\u{202e}', '\u{2060}', '\u{2064}',
-            '\u{2068}', '\u{feff}',
+            '\u{1b}',
+            '\u{85}',
+            '\u{ad}',
+            '\u{180e}',
+            '\u{200b}',
+            '\u{200c}',
+            '\u{200d}',
+            '\u{200e}',
+            '\u{200f}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{202e}',
+            '\u{2060}',
+            '\u{2064}',
+            '\u{2068}',
+            '\u{feff}',
+            '\u{fff9}',
+            '\u{fffb}',
+            '\u{0600}',
+            '\u{06dd}',
+            '\u{070f}',
+            '\u{0890}',
+            '\u{08e2}',
+            '\u{110bd}',
+            '\u{110cd}',
+            '\u{13430}',
+            '\u{1345f}',
         ] {
             assert_eq!(clean(&format!("a{c}b")), "a\u{FFFD}b", "U+{:04X}", c as u32);
         }

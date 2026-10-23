@@ -165,6 +165,31 @@ fn characters_that_hide_reorder_or_break_text_are_refused_anywhere() {
 }
 
 #[test]
+fn format_controls_outside_default_ignorable_are_refused() {
+    for (c, what) in [
+        ('\u{fff9}', "interlinear annotation anchor"),
+        ('\u{fffa}', "interlinear annotation separator"),
+        ('\u{fffb}', "interlinear annotation terminator"),
+        ('\u{0600}', "arabic number sign"),
+        ('\u{0605}', "arabic number mark above"),
+        ('\u{06dd}', "arabic end of ayah"),
+        ('\u{070f}', "syriac abbreviation mark"),
+        ('\u{0890}', "arabic pound mark above"),
+        ('\u{0891}', "arabic piastre mark above"),
+        ('\u{08e2}', "arabic disputed end of ayah"),
+        ('\u{110bd}', "kaithi number sign"),
+        ('\u{110cd}', "kaithi number sign above"),
+        ('\u{13430}', "egyptian hieroglyph vertical joiner"),
+        ('\u{1345f}', "egyptian hieroglyph format control"),
+    ] {
+        let bad = MESSAGE.replace("noon", &format!("no{c}on"));
+        let err = export(&draft(&bad), now() + Duration::hours(1), now()).unwrap_err();
+        let code = format!("U+{:04X}", c as u32);
+        assert!(err.to_string().contains(&code), "{what}: {err}");
+    }
+}
+
+#[test]
 fn a_denied_term_split_by_any_default_ignorable_character_is_refused() {
     for (split, code, what) in [
         ('\u{200b}', "U+200B", "zero width space"),
