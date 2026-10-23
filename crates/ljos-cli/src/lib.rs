@@ -48,6 +48,7 @@ pub mod record;
 pub mod runner_env;
 pub mod runner_hooks;
 pub mod runner_skills;
+pub mod sitting_gate;
 pub mod slot;
 pub mod subagent;
 pub mod sync;
@@ -20877,6 +20878,94 @@ pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
     Err(format!("{cite} is not a tracker issue"))
 }
 
+/// Options a panel settles on that send the work back instead of on.
+const NOT_A_GO: &[&str] = &["revise", "reject", "block"];
+
+/// Whether `issue` lets a runner push onto a protected branch: its seat
+/// ballots, the ones a push cite counts ([`cite_stands`]), decide an
+/// option that does not send the work back, `quorum` seats voted, not
+/// all of them the pushing seat, and they run `min(quorum, 2)` model
+/// families. Two conversations of one seat are one seat. A seat's
+/// family is the model its verified slot records ([`slot::family_of`]);
+/// a seat with no slot recording one is a family of its own.
+///
+/// # Errors
+///
+/// Why the push waits, naming the ballots counted.
+pub fn protected_push_stands(issue: &str, quorum: usize) -> std::result::Result<String, String> {
+    let card =
+        issue_record(issue).map_err(|e| format!("the tracker does not read {issue} ({e:#})"))?;
+    if let Some(why) = panel_gate::settle_refusal(issue) {
+        return Err(why);
+    }
+    let (ballots, personas) = cite_ballots(issue)?;
+    let signed = check_seat_signatures(issue, &ballots, &personas)?;
+    let notes = ballot_sig::notes_of(&card);
+    let pins = ballot_sig::pins_for_check()
+        .map(|(pins, _)| pins)
+        .unwrap_or_default();
+    let tracker = slot::tracker_id();
+    let family = |voter: &str| slot::family_of(&tracker, issue, voter, &notes, &pins);
+    let counted = signed.counted(&ballots);
+    protected_decision(issue, &counted, &personas, &seat_name(), quorum, &family)
+        .map(|d| format!("{d}{}", signed.said()))
+        .map_err(|e| format!("{e}{}", signed.said()))
+}
+
+fn protected_decision(
+    issue: &str,
+    counted: &[Value],
+    personas: &std::collections::BTreeSet<String>,
+    pusher: &str,
+    quorum: usize,
+    family: &dyn Fn(&str) -> Option<String>,
+) -> std::result::Result<String, String> {
+    let d = seats_decide(issue, counted, personas, pusher)?;
+    if NOT_A_GO.contains(&d.choice.trim().to_ascii_lowercase().as_str()) {
+        return Err(format!(
+            "the seats on {issue} decide {}, which sends the work back rather than on; counted {}",
+            d.choice, d.counted
+        ));
+    }
+    let mut seats = std::collections::BTreeMap::new();
+    for (agent, _) in seat_ballots(counted, personas) {
+        seats.entry(holder_parts(agent).0).or_insert(agent);
+    }
+    if seats.len() < quorum {
+        return Err(format!(
+            "{} of the {quorum} seats a protected push needs voted on {issue}; counted {}",
+            seats.len(),
+            d.counted
+        ));
+    }
+    let own = holder_parts(pusher).0;
+    if seats.keys().all(|seat| *seat == own) {
+        return Err(format!(
+            "the only seat that voted on {issue} is {own}, the seat pushing; counted {}",
+            d.counted
+        ));
+    }
+    let families: std::collections::BTreeSet<String> = seats
+        .iter()
+        .map(|(seat, agent)| family(agent).unwrap_or_else(|| format!("{seat}'s own")))
+        .collect();
+    let need = quorum.min(2);
+    if families.len() < need {
+        let one = families.iter().next().cloned().unwrap_or_default();
+        return Err(format!(
+            "every seat on {issue} runs {one}, and a protected push needs {need} model families; counted {}",
+            d.counted
+        ));
+    }
+    Ok(format!(
+        "{issue} decides {} with {} seats from {} model families; counted {}",
+        d.choice,
+        seats.len(),
+        families.len(),
+        d.counted
+    ))
+}
+
 /// Why a deed cited on its own does not let a push through.
 #[must_use]
 pub fn deed_alone(cite: &str) -> String {
@@ -23234,6 +23323,9 @@ pub fn doctor() -> Vec<Habitat> {
     out.extend(jev::doctor_row());
     out.push(seat_binary_row());
     out.push(git_hooks::doctor_row());
+    out.push(sitting_gate::doctor_row(
+        std::env::current_dir().ok().as_deref(),
+    ));
     out.push(policy_row());
     out.extend(guard_off_row());
     out.extend(guard_fail_open_row());
@@ -25000,6 +25092,17 @@ pub fn doctor_word(row: &Habitat) -> &'static str {
     if row.name == "tracker" && names_unpushed(&row.state) {
         return "warn";
     }
+    // An idle gate on the person's machine is no fault. Under a runner,
+    // settings that do not read refuse every protected push: a warning.
+    if row.name == "sitting gate" {
+        return if row.state.starts_with(sitting_gate::GATE_IDLE) {
+            "info"
+        } else if row.ok {
+            "ok"
+        } else {
+            "warn"
+        };
+    }
     // A headerless log is left unread until someone pins it. The row names
     // the command; it does not mean the seat failed to start.
     if row.name == "sync" && !row.ok {
@@ -25192,9 +25295,11 @@ pub fn format_doctor_short(rows: &[Habitat]) -> String {
 /// optional row of a [`READY_PARTS`] part that is off leaves the part out
 /// of the ready line, and the row says why. The other optional rows, such
 /// as a cloud guard on a machine that never ran `cloud up`, stay behind
-/// `ljos doctor --all`.
+/// `ljos doctor --all`. The sitting gate row is always printed: whether
+/// this seat's git is gated is the first thing a runner needs to know.
 fn shown_short(word: &str, name: &str) -> bool {
     matches!(word, "no" | "warn")
+        || name == "sitting gate"
         || (word == "info" && READY_PARTS.iter().any(|(_, rows)| rows.contains(&name)))
 }
 
@@ -27525,8 +27630,43 @@ fn held_from_records_in(
     seat: &str,
     graph: &str,
 ) -> Option<String> {
+    newest_record_in(holders, dir, chain, seat, graph, &|_| true).map(|(node, _)| node)
+}
+
+/// The issue this conversation holds and the record that says so, only
+/// while the conversation that took it still runs ([`hold_alive`]). The
+/// holders are the ones [`held_issue`] asks. File reads only, so a hook
+/// can afford it. A record whose process is gone, or is now another
+/// program, holds nothing here.
+#[must_use]
+pub fn live_held_issue() -> Option<(String, Hold)> {
+    let mut holders: Vec<String> = runner_record_holders();
+    let own = holder_name();
+    if !holders.contains(&own) {
+        holders.push(own);
+    }
+    newest_record_in(
+        &holders,
+        &runtime_dir(),
+        &own_ancestry(),
+        &seat_name(),
+        &claim_graph_scope(),
+        &hold_alive,
+    )
+}
+
+/// [`held_from_records_in`] with each record's [`Hold`], and only the
+/// records `keep` takes.
+fn newest_record_in(
+    holders: &[String],
+    dir: &std::path::Path,
+    chain: &[(u32, String)],
+    seat: &str,
+    graph: &str,
+    keep: &dyn Fn(&Hold) -> bool,
+) -> Option<(String, Hold)> {
     let pids: Vec<String> = chain.iter().map(|(p, _)| p.to_string()).collect();
-    let mut best: Option<(String, String)> = None;
+    let mut best: Option<(String, Hold)> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         if !entry.file_name().to_string_lossy().starts_with("hold-") {
             continue;
@@ -27551,11 +27691,22 @@ fn held_from_records_in(
         }
         let by_process = !is_session(comm) && *record_seat == seat && pids.iter().any(|p| p == pid);
         let ours = holders.iter().any(|h| h == holder) || by_process;
-        if ours && !node.is_empty() && best.as_ref().is_none_or(|(t, _)| *at > t.as_str()) {
-            best = Some(((*at).to_string(), (*node).to_string()));
+        let hold = Hold {
+            assignee: (*holder).to_string(),
+            seat: (*record_seat).to_string(),
+            pid: pid.parse().unwrap_or(0),
+            comm: (*comm).to_string(),
+            since: (*at).to_string(),
+        };
+        if ours
+            && !node.is_empty()
+            && best.as_ref().is_none_or(|(_, b)| *at > b.since.as_str())
+            && keep(&hold)
+        {
+            best = Some(((*node).to_string(), hold));
         }
     }
-    best.map(|(_, node)| node)
+    best
 }
 
 fn drop_hold(actor: &str) {
@@ -31220,7 +31371,7 @@ fn policy_reading_in(
     // is switched off judges nothing, policyd included.
     let off = bookkeep::guard_suspended();
     let fast = if off {
-        None
+        sitting_gate::guard_line(&line, cwd)
     } else {
         static_guard_in(&line, cwd)
     };
@@ -31550,7 +31701,7 @@ pub fn tcb_verdict(line: &str) -> Option<Rule> {
 pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     clear_guard_note();
     if bookkeep::guard_suspended() {
-        return None;
+        return sitting_gate::guard_line(line, cwd);
     }
     let start = match guard_start_directory(cwd) {
         Ok(dir) => dir,
@@ -32046,7 +32197,9 @@ pub fn unhealthy_note(why: &str) -> String {
 /// `None` means the slow check may run. A timeout there denies the line
 /// unless `LJOS_GUARD_FAIL_OPEN` is set.
 /// A temp home is not a seat unless `LJOS_GUARD=on`, and this returns
-/// `None` there too. A temp working directory is still judged.
+/// `None` there too, past the sitting gate ([`sitting_gate::guard_line`]),
+/// which judges a runner's history writes under any home and with
+/// `LJOS_OFF` set. A temp working directory is still judged.
 ///
 /// `cwd` is the directory the command would run in. Absent, the process
 /// directory. The gates read that checkout's `.ljos/gates.toml` and tip.
@@ -32059,7 +32212,13 @@ pub fn static_guard(line: &str) -> Option<Rule> {
 #[must_use]
 pub fn static_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     let line = line.trim();
-    if line.is_empty() || bookkeep::guard_suspended() {
+    if line.is_empty() {
+        return None;
+    }
+    if let Some(rule) = sitting_gate::guard_line(line, cwd) {
+        return Some(rule);
+    }
+    if bookkeep::guard_suspended() {
         return None;
     }
     if let Some(rule) = seat_guard_in(line, cwd) {
@@ -32801,6 +32960,49 @@ pub fn push_cite_reading_on_roster(issue: &str, rows: &[Value], pusher: &str) ->
             Err(why),
         ),
     }
+}
+
+/// Whether `issue` clears a runner's push onto a protected branch
+/// ([`protected_push_stands`]), under the quorum and branches
+/// [`gates::consensus_push`] reads from `cwd`: the line and the
+/// `protected_push` object `ljos consensus` prints. Neither changes how
+/// that command exits.
+#[must_use]
+pub fn protected_push_reading(issue: &str, cwd: Option<&std::path::Path>) -> (String, Value) {
+    let cfg = match gates::consensus_push(cwd) {
+        Ok(cfg) => cfg,
+        Err(why) => {
+            return (
+                format!("protected push: the settings do not read: {why}\n"),
+                serde_json::json!({"issue": issue, "stands": false, "refusal": why}),
+            )
+        }
+    };
+    let named = cfg
+        .branches
+        .iter()
+        .map(|b| format!("`{b}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut json = serde_json::json!({
+        "issue": issue, "quorum": cfg.quorum, "branches": cfg.branches,
+    });
+    let words = match protected_push_stands(issue, cfg.quorum) {
+        Ok(decided) => {
+            let words = format!("protected push: {issue} clears a push onto {named}: {decided}\n");
+            json["stands"] = true.into();
+            json["decided"] = decided.into();
+            words
+        }
+        Err(why) => {
+            let words =
+                format!("protected push: {issue} does not clear a push onto {named}: {why}\n");
+            json["stands"] = false.into();
+            json["refusal"] = why.into();
+            words
+        }
+    };
+    (words, json)
 }
 
 /// [`push_cite_reading`] with the signature check already made: a refusal
@@ -38152,6 +38354,37 @@ mod tests {
         );
         assert_eq!(held_from_records(&["sess-nobody".to_string()]), None);
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+    }
+
+    #[test]
+    fn a_hold_whose_conversation_is_gone_is_not_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let me = std::process::id();
+        let (_, comm) = parent_and_comm(me).expect("this process");
+        let rec = |name: &str, pid: u32, comm: &str, at: &str, node: &str| {
+            std::fs::write(
+                dir.path().join(format!("hold-{name}")),
+                format!("sess-a\nacme\n{pid}\n{comm}\n{at}\n{node}\n"),
+            )
+            .unwrap();
+        };
+        rec("a", me, &comm, "2026-09-27T10:00:00Z", "acme-live");
+        rec("b", u32::MAX, &comm, "2026-09-27T12:00:00Z", "acme-gone");
+        rec(
+            "c",
+            me,
+            "not-this-one",
+            "2026-09-27T13:00:00Z",
+            "acme-reused",
+        );
+        let holders = ["sess-a".to_string()];
+        let newest = |keep: &dyn Fn(&Hold) -> bool| {
+            newest_record_in(&holders, dir.path(), &[], "acme", "-", keep).map(|(node, _)| node)
+        };
+        assert_eq!(newest(&|_| true).as_deref(), Some("acme-reused"));
+        assert_eq!(newest(&hold_alive).as_deref(), Some("acme-live"));
+        std::fs::remove_file(dir.path().join("hold-a")).unwrap();
+        assert_eq!(newest(&hold_alive), None);
     }
 
     #[test]
@@ -47830,6 +48063,72 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(seats_decide("surf-ab12", &[], &personas, "grok")
             .unwrap_err()
             .starts_with("no seat voted on surf-ab12"));
+    }
+
+    #[test]
+    fn a_protected_push_needs_a_quorum_of_seats_from_two_families() {
+        let personas: std::collections::BTreeSet<String> = ["reviewer".to_string()].into();
+        let ballot =
+            |agent: &str, choice: &str| serde_json::json!({"agent": agent, "choice": choice});
+        let family = |agent: &str| match holder_parts(agent).0.as_str() {
+            "inky" | "saddle" => Some("opus".to_string()),
+            "flint" => Some("grok".to_string()),
+            _ => None,
+        };
+        let decide = |ballots: &[Value], pusher: &str, quorum: usize| {
+            protected_decision("surf-ab12", ballots, &personas, pusher, quorum, &family)
+        };
+        let two = [ballot("inky", "approve"), ballot("flint", "approve")];
+        assert_eq!(
+            decide(&two, "inky", 2).unwrap(),
+            "surf-ab12 decides approve with 2 seats from 2 model families; \
+             counted inky for approve, flint for approve"
+        );
+        assert!(decide(&two[..1], "inky", 2)
+            .unwrap_err()
+            .starts_with("the only seat ballot on surf-ab12 is from inky"));
+        let back = [ballot("inky", "Revise"), ballot("flint", "Revise")];
+        assert_eq!(
+            decide(&back, "inky", 2).unwrap_err(),
+            "the seats on surf-ab12 decide Revise, which sends the work back rather than on; \
+             counted inky for Revise, flint for Revise"
+        );
+        assert_eq!(
+            decide(&two, "inky", 3).unwrap_err(),
+            "2 of the 3 seats a protected push needs voted on surf-ab12; \
+             counted inky for approve, flint for approve"
+        );
+        let opus = [ballot("inky", "approve"), ballot("saddle", "approve")];
+        assert_eq!(
+            decide(&opus, "inky", 2).unwrap_err(),
+            "every seat on surf-ab12 runs opus, and a protected push needs 2 model families; \
+             counted inky for approve, saddle for approve"
+        );
+        let tags = [ballot("inky@a1", "approve"), ballot("inky@b2", "approve")];
+        assert!(
+            decide(&tags, "flint", 2)
+                .unwrap_err()
+                .starts_with("1 of the 2 seats"),
+            "two conversations of one seat are one seat"
+        );
+        assert_eq!(
+            decide(&tags, "inky", 1).unwrap_err(),
+            "the only seat that voted on surf-ab12 is inky, the seat pushing; \
+             counted inky@a1 for approve, inky@b2 for approve"
+        );
+        let unrecorded = [ballot("inky", "approve"), ballot("moss", "approve")];
+        assert!(
+            decide(&unrecorded, "inky", 2).is_ok(),
+            "a seat no slot names is a family of its own"
+        );
+        let advised = [ballot("inky", "approve"), ballot("reviewer", "approve")];
+        assert!(decide(&advised, "flint", 2)
+            .unwrap_err()
+            .starts_with("1 of the 2 seats"));
+        let split = [ballot("inky", "approve"), ballot("flint", "revise")];
+        assert!(decide(&split, "inky", 2)
+            .unwrap_err()
+            .starts_with("the seats on surf-ab12 split"));
     }
 
     #[test]

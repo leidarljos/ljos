@@ -164,16 +164,25 @@ if cmd == "create":
     print(iid)
 elif cmd == "claim":
     rewrite(rest[0], "STARTED")
+    needle = f":ID:         {rest[0]}\n"
+    holder = os.environ.get("VISSUE_AGENT", "")
+    for f in files():
+        text = f.read_text()
+        if holder and needle in text:
+            f.write_text(text.replace(needle, needle + f":CLAIMED_BY: {holder}\n", 1))
+            break
 elif cmd == "update":
     state = rest[rest.index("-s") + 1]
     rewrite(rest[0], state)
 elif cmd == "deed":
     iid, acc = rest[0], rest[rest.index("--add") + 1]
-    needle = f":ID:         {iid}\n:END:\n"
+    needle = f":ID:         {iid}\n"
     for f in files():
         text = f.read_text()
-        if needle in text:
-            f.write_text(text.replace(needle, needle + f"cited {acc}\n", 1))
+        at = text.find(needle)
+        if at >= 0:
+            end = text.index(":END:\n", at) + len(":END:\n")
+            f.write_text(text[:end] + f"cited {acc}\n" + text[end:])
             sys.exit(0)
     sys.exit("no issue " + iid)
 elif cmd == "claims":
@@ -218,6 +227,34 @@ print(f"id={ident}")
 
 fn ljos(hab: &Habitat, payload: &str, extra: &[(&str, &str)]) -> std::process::Output {
     ljos_cmd(hab, &["hook"], payload, extra)
+}
+
+/// A sitting for the habitat's holder: an open ticket the tracker has
+/// claimed by `book-holder`, and a hold whose conversation is this test,
+/// the parent of every `ljos hook` it runs.
+fn sit(hab: &Habitat) {
+    let project = hab.tracker.join("Software/probe");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(project.join("issues.org"))
+        .unwrap()
+        .write_all(
+            b"* STARTED [#C] probe work\n:PROPERTIES:\n:ID:         probe-0001\n:CLAIMED_BY: book-holder\n:END:\n",
+        )
+        .unwrap();
+    let comm = std::fs::read_to_string("/proc/self/comm").unwrap();
+    std::fs::create_dir_all(hab.run.join("ljos")).unwrap();
+    std::fs::write(
+        hab.run.join("ljos/hold-probe-sitting"),
+        format!(
+            "book-holder\nprobe-seat\n{}\n{}\n2026-01-01T00:00:00Z\nprobe-0001\n-\n",
+            std::process::id(),
+            comm.trim()
+        ),
+    )
+    .unwrap();
 }
 
 /// `ljos ARGS` in the habitat's repo. The command must succeed.
@@ -643,13 +680,14 @@ server.serve_forever()
         &[("PACKSET_URL", url.as_str())],
     );
     record_evidence(&hab.repo);
+    sit(&hab);
     let asked = ljos(
         &hab,
         &claude(
             "PreToolUse",
             "memory-1",
             &cwd,
-            serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git push --force origin main"}}),
+            serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "git push --force origin feature"}}),
         ),
         &[("PACKSET_URL", url.as_str())],
     );
@@ -697,6 +735,7 @@ server.serve_forever()
 fn an_ask_is_rendered_for_each_harness() {
     let (_dir, hab) = habitat();
     record_evidence(&hab.repo);
+    sit(&hab);
     let policyd = hab.bin.join("ljos-policyd");
     script(
         &hab.bin,
@@ -707,7 +746,7 @@ fn an_ask_is_rendered_for_each_harness() {
     let env = [("POLICYD_BIN", policyd.to_str().unwrap())];
     let command = serde_json::json!({
         "tool_name": "Bash",
-        "tool_input": {"command": "git push --force origin main"}
+        "tool_input": {"command": "git push --force origin feature"}
     });
     // Claude Code and opencode stop on permissionDecision ask. opencode's
     // plugin throws before the tool runs; the payload it sends has no
@@ -765,7 +804,7 @@ fn an_ask_is_rendered_for_each_harness() {
             "cwd": cwd,
             "toolCall": {
                 "name": "run_command",
-                "args": {"CommandLine": "git push --force origin main"}
+                "args": {"CommandLine": "git push --force origin feature"}
             }
         })
         .to_string(),
@@ -782,7 +821,7 @@ fn an_ask_is_rendered_for_each_harness() {
             "cursor_version": "2.4.0",
             "conversation_id": "force-cursor-shell",
             "hook_event_name": "beforeShellExecution",
-            "command": "git push --force origin main",
+            "command": "git push --force origin feature",
             "cwd": cwd,
         })
         .to_string(),
@@ -800,7 +839,7 @@ fn an_ask_is_rendered_for_each_harness() {
             "conversation_id": "force-cursor-tool",
             "hook_event_name": "preToolUse",
             "tool_name": "Shell",
-            "tool_input": {"command": "git push --force origin main"},
+            "tool_input": {"command": "git push --force origin feature"},
             "cwd": cwd,
         })
         .to_string(),
@@ -822,7 +861,7 @@ fn an_ask_is_rendered_for_each_harness() {
             "session_id": "force-gemini",
             "cwd": cwd,
             "tool_name": "run_shell_command",
-            "tool_input": {"command": "git push --force origin main"}
+            "tool_input": {"command": "git push --force origin feature"}
         })
         .to_string(),
         &env,
@@ -1154,7 +1193,7 @@ fn a_refused_commit_is_not_cited() {
     assert_eq!(deeds.lines().count(), 1, "{deeds}");
 }
 
-const NORMAL_GIT: &str = "git add .; git commit -m note; git push";
+const NORMAL_GIT: &str = "git add .; git commit -m note; git push origin topic";
 
 fn child_repo(parent: &Path) -> PathBuf {
     let child = parent.join("path/to/git/repo");
@@ -1211,6 +1250,7 @@ fn assert_ordinary(out: &std::process::Output, payload: &str) {
 #[test]
 fn a_relative_workdir_resolves_and_a_normal_git_command_is_allowed() {
     let (_dir, hab) = habitat();
+    sit(&hab);
     let child = child_repo(&hab.repo);
     let session = hab.repo.to_str().unwrap();
     let forwarded = pretool(session, Some("path/to/git/repo"), NORMAL_GIT);
@@ -1776,6 +1816,7 @@ server.serve_forever()
 fn a_workdir_that_does_not_resolve_denies_the_command() {
     use std::os::unix::fs::PermissionsExt;
     let (_dir, hab) = habitat();
+    sit(&hab);
     let session = hab.repo.to_str().unwrap();
     let missing = hab.root.join("gone");
     let looped = hab.root.join("loop-a");

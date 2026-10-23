@@ -603,6 +603,37 @@ pub fn write(issue: &str, seat: &str, model: &str, run: &str, run_key: &str) -> 
     ))
 }
 
+/// The model family `voter`'s slot on `issue` records: the slot's model,
+/// read as one of [`crate::panel_cloud::FAMILIES`] when it names one. A
+/// slot counts only when it verifies on `tracker`, under a key `pins`
+/// holds for its launcher, and names the key `pins` holds for `voter`.
+/// `None` when no such slot names the voter.
+#[must_use]
+pub fn family_of(
+    tracker: &str,
+    issue: &str,
+    voter: &str,
+    notes: &[String],
+    pins: &BTreeMap<String, String>,
+) -> Option<String> {
+    let pinned = |seat: &str, key: &str| {
+        pins.get(seat)
+            .is_some_and(|k| ballot_sig::key_fingerprint(k) == ballot_sig::key_fingerprint(key))
+    };
+    let slot = notes.iter().filter_map(|n| parse(n)).find(|slot| {
+        slot.seat == voter
+            && verifies(tracker, issue, slot)
+            && pinned(&slot.launcher, &slot.key)
+            && pinned(voter, &slot.run_key)
+    })?;
+    let model = slot.model.to_ascii_lowercase();
+    let family = crate::panel_cloud::FAMILIES
+        .iter()
+        .find(|family| model.contains(*family))
+        .map_or(model.clone(), |family| (*family).to_string());
+    Some(family)
+}
+
 /// Why the run seats among `seats` do not count on `issue`. A seat that
 /// `stands` needs no slot. Any other needs a slot in `notes` that names it
 /// and its pinned key and verifies, signed under the pin of a seat that
@@ -967,6 +998,69 @@ mod tests {
 
     fn public(k: &SigningKey) -> String {
         hex::encode(k.verifying_key().to_bytes())
+    }
+
+    #[test]
+    fn a_family_is_the_model_a_verified_slot_records() {
+        let pins: BTreeMap<String, String> = [
+            ("ljosbot", public(&key(1))),
+            ("review-r1", public(&key(4))),
+            ("review-r2", public(&key(5))),
+        ]
+        .into_iter()
+        .map(|(seat, k)| (seat.to_string(), k))
+        .collect();
+        let slot = |k: u8, seat: &str, model: &str, run_key: u8| {
+            sign(
+                &key(k),
+                "t-1",
+                "d-1",
+                seat,
+                model,
+                "r",
+                &public(&key(run_key)),
+                "ljosbot",
+            )
+        };
+        let family = |notes: &[String], voter: &str| family_of("t-1", "d-1", voter, notes, &pins);
+        let notes = [
+            slot(1, "review-r1", "claude-opus-5", 4),
+            slot(1, "review-r2", "grok 4", 5),
+        ];
+        assert_eq!(family(&notes, "review-r1").as_deref(), Some("opus"));
+        assert_eq!(family(&notes, "review-r2").as_deref(), Some("grok"));
+        assert_eq!(family(&notes, "ljosbot"), None, "no slot names it");
+        let other = [slot(1, "review-r1", "gemini-3", 4)];
+        assert_eq!(
+            family(&other, "review-r1").as_deref(),
+            Some("gemini-3"),
+            "a model outside the rotation is its own family"
+        );
+        assert_eq!(
+            family(&[slot(2, "review-r1", "opus", 4)], "review-r1"),
+            None,
+            "signed by a key the launcher is not pinned to"
+        );
+        assert_eq!(
+            family(&[slot(1, "review-r1", "opus", 5)], "review-r1"),
+            None,
+            "names a key the voter is not pinned to"
+        );
+        let elsewhere = sign(
+            &key(1),
+            "t-1",
+            "d-2",
+            "review-r1",
+            "opus",
+            "r",
+            &public(&key(4)),
+            "ljosbot",
+        );
+        assert_eq!(
+            family(&[elsewhere], "review-r1"),
+            None,
+            "signed for another issue"
+        );
     }
 
     /// A slot for `seat` on `issue` of tracker `t-1` naming the run key
