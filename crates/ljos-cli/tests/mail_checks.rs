@@ -119,6 +119,21 @@ fn terms_and_pairs_are_found_after_folding() {
 }
 
 #[test]
+fn a_term_split_by_any_default_ignorable_character_is_found() {
+    let s = setup(DENY);
+    for (split, what) in [
+        ('\u{200b}', "zero width space"),
+        ('\u{fe0f}', "variation selector"),
+        ('\u{e0100}', "supplementary variation selector"),
+        ('\u{e0041}', "tag character"),
+    ] {
+        let draft = CLEAN.replace("about topic-a", &format!("about proj{split}ect-x"));
+        let got = refused(&draft, &s.config);
+        assert!(got.iter().any(|r| r.contains("term")), "{what}: {got:?}");
+    }
+}
+
+#[test]
 fn attribution_is_refused_by_default_and_by_config() {
     let s = setup(DENY);
     for body in [

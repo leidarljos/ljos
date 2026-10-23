@@ -2725,6 +2725,7 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "hex",
+ "icu_properties",
  "libc",
  "packset-client",
  "packset-core",
