@@ -29141,8 +29141,14 @@ pub fn finish(
     };
     // A finish that does not close hands the issue back the way a release
     // does: the claim is gone either way, and an issue left STARTED under
-    // nobody drops out of every ready list. A close sets DONE below.
-    let reopen = !(close && status.eq_ignore_ascii_case("done"));
+    // nobody drops out of every ready list. A close sets DONE, or
+    // CANCELLED for a cancelled sitting, below. A failed one stays open.
+    let closed_as = match status {
+        "done" if close => Some("DONE"),
+        "cancelled" if close => Some("CANCELLED"),
+        _ => None,
+    };
+    let reopen = closed_as.is_none();
     let completed = match complete_as(issue, Some(status), assignee, gen, reopen) {
         Ok(done) => done,
         Err(e) => {
@@ -29214,10 +29220,10 @@ pub fn finish(
     // A sitting ending is not the work being accepted: a review can be
     // posted and still be open, a build can be green and still unmerged.
     // The ticket closes only when asked, so a blocker on it stays a blocker.
-    if close && status.eq_ignore_ascii_case("done") {
-        run_as("vissue", &["update", issue, "-s", "DONE"], None)
+    if let Some(state) = closed_as {
+        run_as("vissue", &["update", issue, "-s", state], None)
             .with_context(|| format!("finish: could not close the ticket {issue}"))?;
-        out.push_str(&format!("closed the ticket {issue}\n"));
+        out.push_str(&format!("closed the ticket {issue} as {state}\n"));
     } else {
         out.push_str(&format!(
             "the ticket {issue} stays open and nobody holds it; `ljos finish {issue} --close` or `vissue update {issue} -s DONE` closes it when the work is accepted\n"

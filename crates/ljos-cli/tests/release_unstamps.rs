@@ -156,13 +156,16 @@ fn release_reopens_and_complete_keeps_the_state() {
 /// `ljos finish` without `--close` ends the sitting the way a release
 /// does: the claim goes, and the issue is back to the state before the
 /// claim, so nothing reads STARTED with nobody on it (ljos-cjd8). A finish
-/// with `--close` keeps the state for the DONE that follows.
+/// with `--close` keeps the state for the DONE that follows, or the
+/// CANCELLED of a cancelled sitting.
 #[test]
 fn finish_without_close_reopens_and_finish_with_close_does_not() {
     const FINISH_ORG: &str = "#+TITLE: proj issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n\
 * STARTED [#C] finished open\n:PROPERTIES:\n:ID:         proj-eeee\n:CREATED:    [2026-10-11 Sun]\n\
 :CLAIMED_BY: saddle@main\n:CLAIMED_AT: [2026-10-11 Sun 05:00]\n:END:\n\n\
 * STARTED [#C] finished closed\n:PROPERTIES:\n:ID:         proj-ffff\n:CREATED:    [2026-10-11 Sun]\n\
+:CLAIMED_BY: saddle@main\n:CLAIMED_AT: [2026-10-11 Sun 05:00]\n:END:\n\n\
+* STARTED [#C] finished cancelled\n:PROPERTIES:\n:ID:         proj-kkkk\n:CREATED:    [2026-10-11 Sun]\n\
 :CLAIMED_BY: saddle@main\n:CLAIMED_AT: [2026-10-11 Sun 05:00]\n:END:\n";
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("calls.log");
@@ -227,8 +230,19 @@ fn finish_without_close_reopens_and_finish_with_close_does_not() {
         "2",
         "--close",
     ]);
+    let cancelled = ljos(&[
+        "finish",
+        "proj-kkkk",
+        "--status",
+        "cancelled",
+        "--assignee",
+        "saddle@main",
+        "--gen",
+        "2",
+        "--close",
+    ]);
     let org = std::fs::read_to_string(&file).unwrap();
-    for id in ["proj-eeee", "proj-ffff"] {
+    for id in ["proj-eeee", "proj-ffff", "proj-kkkk"] {
         assert!(
             !heading(&org, id).contains(":CLAIMED_BY:"),
             "{id} still claimed:\n{org}"
@@ -247,8 +261,16 @@ fn finish_without_close_reopens_and_finish_with_close_does_not() {
         closed.contains("no longer claimed by saddle@main; its state stays"),
         "{closed}"
     );
+    assert!(
+        cancelled.contains("closed the ticket proj-kkkk as CANCELLED"),
+        "{cancelled}"
+    );
     let calls = std::fs::read_to_string(&log).unwrap();
     assert!(calls.contains("vissue update proj-ffff -s DONE"), "{calls}");
+    assert!(
+        calls.contains("vissue update proj-kkkk -s CANCELLED"),
+        "{calls}"
+    );
 }
 
 /// The claim graph refuses a release of a node nobody holds there: a

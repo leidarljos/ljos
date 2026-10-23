@@ -1252,7 +1252,7 @@ enum Cmd {
         /// The name that holds it. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
-        /// Also close the tracker ticket. Only when the work is accepted, not when the sitting ends.
+        /// Also close the tracker ticket, as CANCELLED with `--status cancelled`. Only when the work is accepted or dropped, not when the sitting ends.
         #[arg(long)]
         close: bool,
     },
