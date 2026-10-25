@@ -96,6 +96,14 @@ pub fn admit() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bytes);
     let event = flag_value(&args, "--event");
+    // These two events are judged on preToolUse. Answer them before the
+    // queue, so a slow server cannot turn an allow into exit 2 and the
+    // call does not load the seat or the pack.
+    if !args.iter().any(|a| a == "--prompt") {
+        if let Some(code) = crate::emit_cursor_side_answer(&input, event.as_deref()) {
+            std::process::exit(code);
+        }
+    }
     let gate = !args.iter().any(|a| a == "--prompt")
         && crate::is_gate_event(&crate::hook_call_as(&input, event.as_deref()).event);
     match wait_turn() {
@@ -110,9 +118,14 @@ pub fn admit() {
             let why = format!("hook queue: {why}");
             if gate {
                 if let Some(text) = crate::hook_failure_output(&input, event.as_deref(), &why) {
+                    let code = crate::gate_exit(&text);
                     let mut out = std::io::stdout().lock();
                     let _ = out.write_all(text.as_bytes());
                     let _ = out.flush();
+                    if code != 0 {
+                        eprintln!("ljos hook: {why}; the call is refused");
+                    }
+                    std::process::exit(code);
                 }
                 eprintln!("ljos hook: {why}; the call is refused");
                 std::process::exit(crate::GATE_REFUSED_EXIT);

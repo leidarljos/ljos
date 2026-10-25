@@ -8,6 +8,8 @@ use std::io::Write;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[path = "common/seat_root.rs"]
@@ -734,5 +736,223 @@ fn the_drainer_books_each_queued_call_as_its_payloads_conversation() {
             format!("probe-0002 probe-seat@{}", ljos_cli::session_tag(Y)),
         ],
         "the holders the drainer claimed as"
+    );
+}
+
+const ALLOW: &str = "{\"permission\":\"allow\"}\n";
+
+/// A server that accepts and then waits `delay` before it answers.
+/// The count is how many connections arrived.
+fn delaying_server(sock: &Path, delay: Duration) -> Arc<AtomicUsize> {
+    let _ = std::fs::remove_file(sock);
+    std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(sock).unwrap();
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&accepts);
+    std::thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            count.fetch_add(1, Ordering::SeqCst);
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                let mut conn = conn;
+                let _ = writeln!(conn, "late");
+                std::thread::sleep(Duration::from_secs(30));
+            });
+        }
+    });
+    accepts
+}
+
+fn mcp_payload(tool: &str) -> String {
+    serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": format!("c-{tool}"),
+        "hook_event_name": "beforeMCPExecution",
+        "tool_name": tool,
+        "tool_input": "{\"issue\":\"probe-1\",\"text\":\"note from the seat\"}",
+        "mcp_server_name": "ljos",
+        "command": "ljos-mcp",
+    })
+    .to_string()
+}
+
+fn read_payload() -> String {
+    serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": "c-read",
+        "hook_event_name": "beforeReadFile",
+        "file_path": "/tmp/readme",
+        "content": "seed",
+    })
+    .to_string()
+}
+
+fn github_comment_payload() -> String {
+    serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": "c-gh",
+        "hook_event_name": "beforeMCPExecution",
+        "tool_name": "add_issue_comment",
+        "mcp_server_name": "github",
+        "tool_input": {"body": "please ask @ocaisa", "owner": "org", "repo": "repo"},
+    })
+    .to_string()
+}
+
+fn write_mention_rule(hab: &Hab) {
+    let path = hab.home.join(".config/ljos/user-rules.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        r#"{"rules":[{"id":"ur-ocaisa","text":"never post or reply to Alan (ocaisa)","author":"rohit","reason":"he asked not to be pinged","deny_mention":{"handles":["ocaisa"],"names":["Alan"]},"deny_reply_to":{"handles":["ocaisa"],"names":["Alan"]},"written_at":"2026-10-25T00:00:00Z","updated_at":"2026-10-25T00:00:00Z","basis":"person"}]}"#,
+    )
+    .unwrap();
+}
+
+/// Wait until the child exits, or panic once `limit` has passed.
+fn finished(mut child: std::process::Child, limit: Duration, what: &str) -> (Duration, Output) {
+    let started = Instant::now();
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            let took = started.elapsed();
+            return (took, child.wait_with_output().unwrap());
+        }
+        if started.elapsed() > limit {
+            let _ = child.kill();
+            let out = child.wait_with_output().unwrap();
+            panic!(
+                "{what}: still running after {limit:?}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn assert_one_allow(out: &Output, took: Duration, accepts: &AtomicUsize, what: &str) {
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        took < Duration::from_millis(1500),
+        "{what} took {took:?}\n{stdout}\n{stderr}"
+    );
+    assert_eq!(out.status.code(), Some(0), "{what}: {stdout}\n{stderr}");
+    assert_eq!(stdout, ALLOW, "{what}");
+    assert!(stderr.trim().is_empty(), "{what} wrote on stderr: {stderr}");
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(value["permission"], "allow", "{what}");
+    assert_eq!(
+        accepts.load(Ordering::SeqCst),
+        0,
+        "{what} talked to the server"
+    );
+}
+
+/// A slow server used to print allow and exit 2. The call now answers
+/// before it talks to the server.
+#[test]
+fn a_slow_server_still_allows_mcp_and_read_calls() {
+    let hab = hab("slowmcp");
+    let sock = hab.run.join("ljos/hookd.sock");
+    let accepts = delaying_server(&sock, Duration::from_secs(8));
+    std::thread::sleep(Duration::from_millis(20));
+    for tool in ["ljos_note", "ljos_vote"] {
+        let mut cmd = ljos(&hab, &["hook"]);
+        cmd.env("LJOS_HOOK_ADMIT_MS", "4000");
+        let (took, out) = finished(feed(cmd, &mcp_payload(tool)), Duration::from_secs(6), tool);
+        assert_one_allow(&out, took, &accepts, tool);
+    }
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOK_ADMIT_MS", "4000");
+    let (took, out) = finished(feed(cmd, &read_payload()), Duration::from_secs(6), "read");
+    assert_one_allow(&out, took, &accepts, "read");
+}
+
+/// The server stays silent past the runner's hook budget. The call
+/// answers anyway, and does not load a seat to do it.
+#[test]
+fn a_silent_server_does_not_outrun_the_hook_budget() {
+    let hab = hab("loadmcp");
+    let sock = hab.run.join("ljos/hookd.sock");
+    let accepts = delaying_server(&sock, Duration::from_secs(30));
+    std::thread::sleep(Duration::from_millis(20));
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOK_ADMIT_MS", "20000");
+    let (took, out) = finished(
+        feed(cmd, &mcp_payload("ljos_note")),
+        Duration::from_secs(2),
+        "a call whose server stays silent",
+    );
+    assert_one_allow(&out, took, &accepts, "silent server");
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOK_ADMIT_MS", "20000");
+    let (took, out) = finished(
+        feed(cmd, &mcp_payload("ljos_vote")),
+        Duration::from_secs(2),
+        "a second call whose server stays silent",
+    );
+    assert_one_allow(&out, took, &accepts, "silent server vote");
+}
+
+/// A user-rule denial still refuses the MCP call when the server is slow.
+/// A shell call that gets no slot is still refused.
+#[test]
+fn a_slow_server_still_refuses_a_real_denial_and_a_shell_call() {
+    let hab = hab("denymcp");
+    write_mention_rule(&hab);
+    let sock = hab.run.join("ljos/hookd.sock");
+    let accepts = delaying_server(&sock, Duration::from_secs(8));
+    std::thread::sleep(Duration::from_millis(20));
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOK_ADMIT_MS", "4000");
+    let (took, out) = finished(
+        feed(cmd, &github_comment_payload()),
+        Duration::from_secs(6),
+        "a mentioned comment",
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        took < Duration::from_millis(1500),
+        "denial took {took:?}\n{stdout}\n{stderr}"
+    );
+    assert_eq!(out.status.code(), Some(2), "{stdout}\n{stderr}");
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    assert_eq!(value["permission"], "deny", "{stdout}");
+    assert!(
+        value["user_message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("ocaisa")
+            || value["user_message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Alan"),
+        "{stdout}"
+    );
+    assert_eq!(stdout.lines().filter(|l| !l.trim().is_empty()).count(), 1);
+    assert_eq!(
+        accepts.load(Ordering::SeqCst),
+        0,
+        "the denial waited on the server"
+    );
+
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOK_ADMIT_MS", "800");
+    let (took, out) = finished(
+        feed(cmd, &cursor_shell(&hab, "shell", "ls")),
+        Duration::from_secs(5),
+        "a shell call with no slot",
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(2), "{stdout}\n{stderr}");
+    assert!(stdout.contains("\"permission\":\"deny\""), "{stdout}");
+    assert!(took < Duration::from_secs(3), "shell refusal took {took:?}");
+    assert!(
+        accepts.load(Ordering::SeqCst) >= 1,
+        "the shell call did not ask the server"
     );
 }

@@ -1,0 +1,1 @@
+`beforeMCPExecution` and `beforeReadFile` answer from the local user-rule file before they wait for a hook slot and before they load the seat or the pack. An allow exits 0. A refusal still exits 2. A slow server leaves that allow on exit 0, and the call answers without searching the pack.

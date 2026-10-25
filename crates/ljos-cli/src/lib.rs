@@ -13130,6 +13130,71 @@ pub const CURSOR_GATE_DEADLINE_MS: u64 = 8_000;
 /// `failClosed` on its permission events.
 pub const GATE_REFUSED_EXIT: i32 = 2;
 
+/// The status that goes with `output`. Exit 2 is a refusal on its own,
+/// so it is used unless the JSON explicitly allows the call. An allow
+/// paired with exit 2 is reported as a refusal.
+#[must_use]
+pub fn gate_exit(output: &str) -> i32 {
+    if output_allows(output) {
+        0
+    } else {
+        GATE_REFUSED_EXIT
+    }
+}
+
+/// Whether `output` is one JSON object that allows the call.
+fn output_allows(output: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(output.trim()) else {
+        return false;
+    };
+    let decision = value
+        .get("permission")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("decision").and_then(Value::as_str))
+        .or_else(|| {
+            value
+                .pointer("/hookSpecificOutput/permissionDecision")
+                .and_then(Value::as_str)
+        });
+    decision == Some("allow")
+}
+
+/// `beforeMCPExecution` and `beforeReadFile` are judged on `preToolUse`.
+/// They still answer, because a permission hook that prints nothing is
+/// refused when `failClosed` is set. The answer is allow, or the
+/// user-rule denial when one matches. `None` for every other call.
+/// The seat and the pack are not read.
+#[must_use]
+pub fn cursor_side_answer(input: &str, event: Option<&str>) -> Option<(String, i32)> {
+    let call = hook_call_as(input, event);
+    if !call.shape.is_cursor()
+        || !matches!(call.event.as_str(), "beforeMCPExecution" | "beforeReadFile")
+    {
+        return None;
+    }
+    let ruled = user_rules::guard_payload(input);
+    let output = hook_output_ruled(&call, "", ruled.as_ref());
+    let code = gate_exit(&output);
+    Some((output, code))
+}
+
+/// Write [`cursor_side_answer`] and return its status. `None` when this
+/// call is not one of those events.
+pub fn emit_cursor_side_answer(input: &str, event: Option<&str>) -> Option<i32> {
+    let (output, code) = cursor_side_answer(input, event)?;
+    let mut out = std::io::stdout().lock();
+    GATE_ANSWERED.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = std::io::Write::write_all(&mut out, output.as_bytes());
+    let _ = std::io::Write::flush(&mut out);
+    drop(out);
+    hookd::note_time(
+        "hook",
+        hookd::started().elapsed(),
+        std::time::Duration::ZERO,
+    );
+    Some(code)
+}
+
 /// A gate's refusal when the hook fails before it reaches a verdict: an
 /// error, a panic, or no verdict by the deadline. The seat says deny in
 /// the runner's own JSON, with a reason, rather than leave the failure to
@@ -13158,9 +13223,9 @@ pub fn hook_failure_output(input: &str, event: Option<&str>, error: &str) -> Opt
     (!out.trim().is_empty()).then_some(out)
 }
 
-/// Write the gate's refusal for `error` and exit with
-/// [`GATE_REFUSED_EXIT`], unless this process is not answering a gate or
-/// has already answered. Returns when there is nothing to refuse.
+/// Write the gate's failure answer and exit. An explicit allow exits 0.
+/// Anything else exits [`GATE_REFUSED_EXIT`]. Returns when this process
+/// is not answering a gate or has already answered.
 pub fn refuse_failed_gate(error: &str) {
     let Some((input, event)) = GATE_CALL.get() else {
         return;
@@ -13172,14 +13237,18 @@ pub fn refuse_failed_gate(error: &str) {
     let Some(text) = hook_failure_output(input, event.as_deref(), error) else {
         return;
     };
+    let code = gate_exit(&text);
     let mut out = std::io::stdout().lock();
     if answered() {
         return;
     }
+    GATE_ANSWERED.store(true, std::sync::atomic::Ordering::SeqCst);
     let _ = std::io::Write::write_all(&mut out, text.as_bytes());
     let _ = std::io::Write::flush(&mut out);
-    eprintln!("ljos hook: {error}; the call is refused");
-    std::process::exit(GATE_REFUSED_EXIT);
+    if code != 0 {
+        eprintln!("ljos hook: {error}; the call is refused");
+    }
+    std::process::exit(code);
 }
 
 /// Write a gate's answer and mark it given, so a failure after it, or the
@@ -51352,6 +51421,35 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             .iter()
             .filter(|(e, _)| CURSOR_FAIL_CLOSED.contains(e))
             .all(|(_, t)| *t * 1000 > CURSOR_GATE_DEADLINE_MS));
+    }
+
+    /// An allow is not a refusal. Exit 2 would make the runner stop the
+    /// call. A shell failure still exits 2. A side event answers from
+    /// the payload alone.
+    #[test]
+    fn an_allow_exits_zero_and_a_shell_failure_exits_two() {
+        let mcp = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"ljos_note","tool_input":"{}","mcp_server_name":"ljos","command":"ljos-mcp"}"#;
+        let vote = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"ljos_vote","tool_input":"{}","mcp_server_name":"ljos","command":"ljos-mcp"}"#;
+        let read = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeReadFile","file_path":"/w/a"}"#;
+        for input in [mcp, vote, read] {
+            let failed = hook_failure_output(input, None, "no slot").unwrap();
+            assert_eq!(failed, "{\"permission\":\"allow\"}\n", "{input}");
+            assert_eq!(gate_exit(&failed), 0, "{input}");
+            let (out, code) = cursor_side_answer(input, None).unwrap();
+            assert_eq!(out, "{\"permission\":\"allow\"}\n", "{input}");
+            assert_eq!(code, 0, "{input}");
+        }
+        let shell = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeShellExecution","command":"ls","cwd":"/w"}"#;
+        let failed = hook_failure_output(shell, None, "no slot").unwrap();
+        assert!(failed.contains("\"permission\":\"deny\""), "{failed}");
+        assert_eq!(gate_exit(&failed), GATE_REFUSED_EXIT);
+        assert!(cursor_side_answer(shell, None).is_none());
+        assert_eq!(gate_exit("{}"), GATE_REFUSED_EXIT);
+        assert_eq!(gate_exit(""), GATE_REFUSED_EXIT);
+        assert_eq!(
+            gate_exit("{\"permission\":\"allow\"}\n{\"permission\":\"deny\"}"),
+            GATE_REFUSED_EXIT
+        );
     }
 
     /// A persona becomes an agent definition. Grok and Claude Code read the
