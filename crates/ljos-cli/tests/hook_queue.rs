@@ -1,5 +1,7 @@
 //! ljos-0re8: a burst of tool calls queues for the seat's hook instead of
-//! stampeding it, and a gate that cannot get its turn is refused.
+//! stampeding it. Each call answers from its own process within a small,
+//! fixed budget; the book, the claim it files and the tracker commit are
+//! applied after the answer by one drainer.
 #![cfg(target_os = "linux")]
 
 use std::io::Write;
@@ -14,6 +16,8 @@ mod seat_root;
 /// Each tracker call of the shim sleeps this long, standing in for a
 /// tracker large enough that reading it takes a while.
 const TRACKER_READ: &str = "0.15";
+
+const TIME: &str = "/usr/bin/time";
 
 const VISSUE: &str = r#"#!/usr/bin/env python3
 import os, sys, time, pathlib, fcntl
@@ -128,7 +132,19 @@ fn hab(name: &str) -> Hab {
 }
 
 fn ljos(hab: &Hab, args: &[&str]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    ljos_under(hab, None, args)
+}
+
+/// `ljos ARGS`, run under `wrapper` (for `/usr/bin/time -v`) when given.
+fn ljos_under(hab: &Hab, wrapper: Option<&[&str]>, args: &[&str]) -> Command {
+    let mut cmd = match wrapper {
+        Some([program, rest @ ..]) => {
+            let mut cmd = Command::new(program);
+            cmd.args(rest).arg(env!("CARGO_BIN_EXE_ljos"));
+            cmd
+        }
+        _ => Command::new(env!("CARGO_BIN_EXE_ljos")),
+    };
     cmd.args(args)
         .env_clear()
         .env("PATH", format!("{}:/usr/bin:/bin", hab.bin.display()))
@@ -193,6 +209,42 @@ fn cursor_shell(hab: &Hab, conversation: &str, command: &str) -> String {
     .to_string()
 }
 
+fn claude_edit(hab: &Hab, session: &str) -> String {
+    serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": session,
+        "tool_name": "Edit",
+        "tool_input": {
+            "file_path": hab.repo.join("README.md"),
+            "old_string": "seed",
+            "new_string": "grown",
+        },
+        "cwd": hab.repo,
+    })
+    .to_string()
+}
+
+fn drain(hab: &Hab) {
+    let out = within(
+        feed(ljos(hab, &["hook", "--drain"]), ""),
+        Duration::from_secs(60),
+        "ljos hook --drain",
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn creates(hab: &Hab) -> usize {
+    std::fs::read_to_string(hab.tracker.join("vissue.log"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.starts_with("create "))
+        .count()
+}
+
 fn lock_file(path: &Path) -> std::fs::File {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let file = std::fs::OpenOptions::new()
@@ -218,6 +270,131 @@ fn wait_for(path: &Path) {
         );
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// Peak resident set size in kilobytes, from `/usr/bin/time -v`.
+fn max_rss_kb(stderr: &str) -> u64 {
+    stderr
+        .lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("Maximum resident set size (kbytes):")
+                .and_then(|v| v.trim().parse().ok())
+        })
+        .unwrap_or_else(|| panic!("no rss line from {TIME} -v:\n{stderr}"))
+}
+
+/// Twenty tool calls at once, half of them the first write of a session.
+/// On develop each write filed its claim inside the call, under the book
+/// lock, and the calls queued behind each other for seconds.
+#[test]
+fn twenty_calls_at_once_each_answer_inside_200_ms_and_30_mb() {
+    assert!(
+        Path::new(TIME).is_file(),
+        "{TIME} is needed to measure each call; install GNU time"
+    );
+    let hab = hab("twenty");
+    let warm = within(
+        feed(ljos(&hab, &["hook"]), &cursor_shell(&hab, "warm", "ls")),
+        Duration::from_secs(10),
+        "warm-up call",
+    );
+    assert!(warm.status.success());
+    wait_for(&hab.run.join("ljos/hookd.sock"));
+    drain(&hab);
+    let calls: Vec<_> = (0..20)
+        .map(|i| {
+            let payload = if i % 2 == 0 {
+                claude_edit(&hab, &format!("burst-{i}"))
+            } else {
+                cursor_shell(&hab, &format!("burst-{i}"), "ls -la")
+            };
+            let started = Instant::now();
+            let child = feed(ljos_under(&hab, Some(&[TIME, "-v"]), &["hook"]), &payload);
+            (i, started, child)
+        })
+        .collect();
+    let mut rows = Vec::new();
+    for (i, started, child) in calls {
+        let out = within(child, Duration::from_secs(10), "a burst call");
+        let took = started.elapsed();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        assert!(out.status.success(), "call {i}: {stdout}\n{stderr}");
+        assert!(!stdout.contains("deny"), "call {i} was refused: {stdout}");
+        if i % 2 == 1 {
+            assert!(
+                stdout.contains("\"permission\":\"allow\""),
+                "call {i}: {stdout}"
+            );
+        }
+        rows.push((i, took, max_rss_kb(&stderr)));
+    }
+    let report: Vec<String> = rows
+        .iter()
+        .map(|(i, took, kb)| format!("call {i}: {} ms, {kb} KB", took.as_millis()))
+        .collect();
+    eprintln!("{}", report.join("\n"));
+    for (i, took, kb) in &rows {
+        assert!(
+            *took < Duration::from_millis(200),
+            "call {i} took {took:?}:\n{}",
+            report.join("\n")
+        );
+        assert!(*kb < 30 * 1024, "call {i} peaked at {kb} KB");
+    }
+    drain(&hab);
+    assert_eq!(creates(&hab), 10, "every first write still files its claim");
+    let times = std::fs::read_to_string(hab.run.join("ljos/hook-times.log")).unwrap();
+    let mut gates = 0;
+    for line in times.lines() {
+        let words: Vec<&str> = line.split(' ').collect();
+        assert!(
+            words.len() == 4
+                && ["hook", "refused", "book"].contains(&words[0])
+                && words[1..].iter().all(|w| w.parse::<u64>().is_ok()),
+            "a torn timing line {line:?} in:\n{times}"
+        );
+        gates += usize::from(words[0] == "hook");
+    }
+    assert_eq!(gates, 21, "one timing line per gate call:\n{times}");
+}
+
+/// A call made while another process holds the book lock still gets its
+/// answer at once; its book waits and is applied once the lock is free.
+#[test]
+fn a_call_gets_its_answer_while_another_process_holds_the_book_lock() {
+    let hab = hab("booklock");
+    let held = lock_file(&hab.run.join("ljos/book.lock"));
+    for (what, payload) in [
+        ("edit", claude_edit(&hab, "locked-out")),
+        ("shell", cursor_shell(&hab, "locked-out-shell", "ls")),
+    ] {
+        let started = Instant::now();
+        let out = within(
+            feed(ljos(&hab, &["hook"]), &payload),
+            Duration::from_secs(5),
+            what,
+        );
+        assert!(out.status.success(), "{what}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{what} took {:?} behind the book lock",
+            started.elapsed()
+        );
+        if what == "shell" {
+            let said = String::from_utf8_lossy(&out.stdout);
+            assert!(said.contains("\"permission\":\"allow\""), "{said}");
+        }
+    }
+    assert_eq!(creates(&hab), 0, "nothing books while the lock is held");
+    drop(held);
+    drain(&hab);
+    assert_eq!(
+        creates(&hab),
+        1,
+        "the queued write claimed once the lock was free"
+    );
 }
 
 /// A pack that accepts and never answers costs a gate one short wait, and

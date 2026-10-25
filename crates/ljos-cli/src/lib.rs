@@ -16,6 +16,7 @@ pub mod admit;
 pub mod approval;
 pub mod ask_pack;
 pub mod ballot_sig;
+pub mod book_queue;
 pub mod bookkeep;
 pub mod capture;
 pub mod cloud;
@@ -2137,9 +2138,27 @@ fn parent_and_comm(_pid: u32) -> Option<(u32, String)> {
     None
 }
 
+/// The ancestry of the hook call a queued book job came from. The
+/// drainer applies the job under its own parent, so a hold it writes
+/// names the runner the call came from.
+static ANCESTRY_FOR: std::sync::Mutex<Option<Vec<(u32, String)>>> = std::sync::Mutex::new(None);
+
+pub(crate) fn act_for_ancestry(chain: Option<Vec<(u32, String)>>) {
+    *ANCESTRY_FOR
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = chain;
+}
+
 /// The processes above this one, nearest first, as (pid, name); stops
-/// below init.
-fn ancestry() -> Vec<(u32, String)> {
+/// below init. A queued book job reads the chain its call had.
+pub(crate) fn ancestry() -> Vec<(u32, String)> {
+    if let Some(chain) = ANCESTRY_FOR
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        return chain;
+    }
     let mut out = Vec::new();
     let mut pid = std::process::id();
     for _ in 0..32 {

@@ -258,6 +258,10 @@ fn write_file_hook(hab: &Habitat) {
         "ljos hook: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let mut drain = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    drain.args(["hook", "--drain"]);
+    agy_env(&mut drain, hab);
+    assert!(drain.status().unwrap().success(), "ljos hook --drain");
 }
 
 /// One `ljos_finish` to the server as `ljos onboard` registers it for agy,

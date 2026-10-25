@@ -327,7 +327,13 @@ fn run_ljos(
         .unwrap()
         .write_all(payload.as_bytes())
         .unwrap();
-    child.wait_with_output().unwrap()
+    let out = child.wait_with_output().unwrap();
+    // A hook's book is applied after its answer; what the test reads next
+    // is the book after it.
+    if args.first() == Some(&"hook") && !args.contains(&"--drain") {
+        let _ = run_ljos(hab, &["hook", "--drain"], "", dir, extra);
+    }
+    out
 }
 
 fn claude(event: &str, session: &str, cwd: &Path, extra: serde_json::Value) -> String {

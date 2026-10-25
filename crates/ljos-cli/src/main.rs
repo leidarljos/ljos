@@ -980,6 +980,15 @@ enum Cmd {
         /// Print the SessionStart brief on stderr once for this conversation.
         #[arg(long, conflicts_with_all = ["prompt", "runner", "git_commit"])]
         brief_once: bool,
+        /// Apply the bookkeeping that hook calls queued, and wait until none is left.
+        #[arg(long, conflicts_with_all = ["prompt", "runner", "git_commit", "brief_once"])]
+        drain: bool,
+        /// With --drain, leave the work to a drainer that already runs.
+        #[arg(long, requires = "drain", hide = true)]
+        no_wait: bool,
+        /// Apply these queued book jobs, in order. The drainer runs this.
+        #[arg(long, num_args = 1.., hide = true, conflicts_with = "drain")]
+        apply_book: Vec<std::path::PathBuf>,
     },
     /// Run the ljos part of one git hook. The block `ljos git-hooks install` appends calls this.
     GitHook {
@@ -1382,6 +1391,19 @@ fn run_command() -> Result<()> {
     ) && ljos_cli::unseated_subagent()
     {
         bail!("{}", ljos_cli::SUBAGENT_NO_SEAT);
+    }
+    // These act on the claims the hooks keep, and the hooks of the tool
+    // calls before this one may still be queued.
+    if matches!(
+        cmd,
+        Cmd::Sitting { .. }
+            | Cmd::Claim { .. }
+            | Cmd::Slot { .. }
+            | Cmd::Finish { .. }
+            | Cmd::Release { .. }
+            | Cmd::Complete { .. }
+    ) {
+        ljos_cli::book_queue::catch_up();
     }
     let checked = tracker_write(&cmd).map(ljos_cli::write_seat).transpose()?;
     let _seated = checked.as_ref().map(ljos_cli::Seated::enter);
@@ -2499,9 +2521,18 @@ fn run_command() -> Result<()> {
             git_commit,
             git_hook,
             brief_once,
+            drain,
+            no_wait,
+            apply_book,
         } => {
             if text {
                 return prompt_as_text(limit);
+            }
+            if drain {
+                std::process::exit(ljos_cli::book_queue::drain(!no_wait));
+            }
+            if !apply_book.is_empty() {
+                std::process::exit(ljos_cli::book_queue::apply(&apply_book));
             }
             if git_commit {
                 return ljos_cli::git_hooks::run_git_commit(
@@ -3090,15 +3121,21 @@ fn run_command() -> Result<()> {
             // A Stop the audit held never reaches this line, except an agy
             // stop that is idle: that one is the session end and finishes.
             // A mid-loop agy stop, fullyIdle absent, does not finish.
-            if let Some(rule) = verdict.filter(|rule| rule.verdict == "ask") {
-                ljos_cli::bookkeep::note_ask(&input, &call, &rule.reason);
-            }
+            // The book is queued, not kept in this call: it waits on a lock
+            // every seat shares, and a claim reads the whole tracker. A
+            // gate's book is queued once its answer is out.
+            let ask = verdict
+                .filter(|rule| rule.verdict == "ask")
+                .map(|rule| rule.reason.clone());
             let agy_mid_loop = call.shape == ljos_cli::HookShape::Steps
                 && call.event == "Stop"
                 && !ljos_cli::stop_is_idle(&input);
-            if verdict.is_none() && !agy_mid_loop {
-                let (extra, ids) =
-                    ljos_cli::hook_timed("bookkeep", || ljos_cli::bookkeep::observe(&input, &call));
+            let book = verdict.is_none() && !agy_mid_loop;
+            let gate = ljos_cli::is_gate_event(&call.event);
+            if book && !gate {
+                let extra = ljos_cli::hook_timed("bookkeep", || {
+                    ljos_cli::book_queue::book_later(&input, &call)
+                });
                 if !extra.is_empty() {
                     context = if context.is_empty() {
                         extra
@@ -3106,10 +3143,17 @@ fn run_command() -> Result<()> {
                         format!("{context}\n{extra}")
                     };
                 }
-                seen_later.extend(ids);
             }
             let output = ljos_cli::approval::hook_output(&input, &call, &context, verdict);
             ljos_cli::answer_gate(&output);
+            if let Some(reason) = ask {
+                ljos_cli::book_queue::enqueue_ask(&input, &call, &reason);
+            }
+            if book && gate {
+                ljos_cli::hook_timed("bookkeep", || {
+                    ljos_cli::book_queue::enqueue(&input, &call);
+                });
+            }
             ljos_cli::keep_hook_answer(&call, &input, &output);
             if !seen_later.is_empty() {
                 mark_seen(call.session.as_deref(), &seen_later);

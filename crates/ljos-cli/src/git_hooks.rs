@@ -885,6 +885,8 @@ fn book_commit(hook: &str) -> Result<()> {
     // Finish idle rows in other checkouts before this commit is cited into
     // an open sitting. That path returns without observe, which is the
     // other place the idle sweep runs.
+    // The tool calls before this commit may still have their book queued.
+    crate::book_queue::catch_up();
     let session = crate::harness_book_session().unwrap_or_else(crate::bookkeep::seat_session);
     crate::bookkeep::sweep_idle_sittings(&session, &repo);
     // A subject or body that names an open issue (`ljos-policyd-32fx: ...`,

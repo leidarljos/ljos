@@ -347,11 +347,11 @@ fn temp_roots() -> Vec<PathBuf> {
 }
 
 /// A book lock that is not free within this long is not waited for: the
-/// call keeps no book, and the book log says so.
+/// job stays queued, or a direct call queues one.
 pub(crate) const BOOK_LOCK_WAIT: Duration = Duration::from_secs(1);
 
-/// The book lock within [`BOOK_LOCK_WAIT`], with the wait logged.
-/// `None` when another holder kept it.
+/// The book lock within [`BOOK_LOCK_WAIT`], with the wait logged for
+/// `ljos doctor`. `None` when another holder kept it.
 fn book_lock() -> Option<super::CommitLock> {
     let asked = std::time::Instant::now();
     let held = super::hook_timed("book_lock", || {
@@ -364,16 +364,33 @@ fn book_lock() -> Option<super::CommitLock> {
     held
 }
 
+/// Whether `event` is one the book keeps.
+#[must_use]
+pub fn books(event: &str) -> bool {
+    BOOK_EVENTS.contains(&event)
+}
+
 /// Keep the book for this hook call. The string is recall to inject, and
 /// only on session start and on a prompt. Empty when there is nothing to
 /// say. Never an error: a habitat that did not answer is a line in the
-/// book log, and so is a book lock that stayed taken.
+/// book log. When jobs are queued, or the book lock stays taken, the call
+/// is queued behind them instead.
 #[must_use]
 pub fn observe(raw: &str, call: &super::HookCall) -> (String, Vec<String>) {
+    if books(&call.event) && super::book_queue::has_pending() {
+        super::book_queue::enqueue(raw, call);
+        return (String::new(), Vec::new());
+    }
     let raw = raw.to_string();
     let call = call.clone();
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observe_inner(&raw, &call))) {
-        Ok(text) => (text.unwrap_or_default(), Vec::new()),
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        observe_inner(&raw, &call, false)
+    })) {
+        Ok(Some(text)) => (text, Vec::new()),
+        Ok(None) => {
+            super::book_queue::enqueue(&raw, &call);
+            (String::new(), Vec::new())
+        }
         Err(_) => {
             log_line("bookkeep panicked");
             (String::new(), Vec::new())
@@ -381,8 +398,71 @@ pub fn observe(raw: &str, call: &super::HookCall) -> (String, Vec<String>) {
     }
 }
 
+/// [`observe`] for a job the book queue holds. False when the book lock
+/// stayed taken, so the job is tried again later.
+pub(crate) fn observe_queued(raw: &str, call: &super::HookCall) -> bool {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        observe_inner(raw, call, true)
+    })) {
+        Ok(done) => done.is_some(),
+        Err(_) => {
+            log_line("bookkeep panicked");
+            true
+        }
+    }
+}
+
+/// The recall a SessionStart or prompt hook hands the model, read from
+/// the book as it stands, without its lock. The call's own bookkeeping is
+/// queued, and the issue it would name is the one the book already holds.
+#[must_use]
+pub fn recall_for(raw: &str, call: &super::HookCall) -> String {
+    if !matches!(call.event.as_str(), "SessionStart" | "UserPromptSubmit") {
+        return String::new();
+    }
+    let Ok(seat) = super::write_seat("hook") else {
+        return String::new();
+    };
+    let _seated = super::Seated::enter(&seat);
+    let value: Value = serde_json::from_str(raw.trim()).unwrap_or(Value::Null);
+    let mut book = load_book(&book_path(&session_key(call)));
+    let repo = repo_key(&mut book, &value);
+    let held = book.repos.get(&repo).map(|row| {
+        (
+            row.issue.clone().filter(|_| !row.finished),
+            row.recall.clone(),
+        )
+    });
+    match held {
+        Some((Some(issue), cached)) => claimed_recall(&issue, &cached),
+        Some((None, cached)) => cached,
+        None => String::new(),
+    }
+}
+
+/// The runner and HEAD a queued job was made under. The drainer runs
+/// later and under another parent, so these stand in for what
+/// [`hook_owner`] and [`note_start`] would read now.
+static ACTING_FOR: std::sync::Mutex<Option<ActingFor>> = std::sync::Mutex::new(None);
+
+/// The owner [`hook_owner`] names, as (pid, start time), and HEAD.
+pub(crate) type ActingFor = ((u32, u64), Option<String>);
+
+pub(crate) fn act_for(owner: Option<ActingFor>) {
+    *ACTING_FOR
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = owner;
+}
+
+fn acting_for() -> Option<ActingFor> {
+    ACTING_FOR
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 /// `None` when the book lock stayed taken past [`BOOK_LOCK_WAIT`].
-fn observe_inner(raw: &str, call: &super::HookCall) -> Option<String> {
+fn observe_inner(raw: &str, call: &super::HookCall, queued: bool) -> Option<String> {
     if !BOOK_EVENTS.contains(&call.event.as_str()) {
         return Some(String::new());
     }
@@ -399,7 +479,7 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> Option<String> {
     let value: Value = serde_json::from_str(raw.trim()).unwrap_or(Value::Null);
     let Some(_held) = book_lock() else {
         log_line(&format!(
-            "{}: book lock busy past {} ms; nothing booked",
+            "{}: book lock busy past {} ms; the job waits",
             call.event,
             BOOK_LOCK_WAIT.as_millis()
         ));
@@ -591,6 +671,9 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> Option<String> {
     // The book is stored; the pack read below must not hold other hooks
     // on the lock.
     drop(_held);
+    if queued {
+        return Some(String::new());
+    }
     Some(match held {
         Some((Some(issue), cached)) => claimed_recall(&issue, &cached),
         Some((None, cached)) => cached,
@@ -1260,7 +1343,7 @@ fn env_session(key: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-fn session_key(call: &super::HookCall) -> String {
+pub(crate) fn session_key(call: &super::HookCall) -> String {
     call.session
         .as_deref()
         .map(str::trim)
@@ -2451,7 +2534,10 @@ fn next_owner(event: &str, current: (u32, u64), incoming: (u32, u64)) -> (u32, u
 /// it and never owns one: when one of those ran the hook itself, the hook
 /// is the owner, and its sitting is orphaned once it exits. With no
 /// `/proc` (macOS) the walk is empty and the parent is the owner.
-fn hook_owner() -> (u32, u64) {
+pub(crate) fn hook_owner() -> (u32, u64) {
+    if let Some((owner, _)) = acting_for() {
+        return owner;
+    }
     let chain = super::proc_tree::ancestors();
     if chain.is_empty() {
         // SAFETY: getppid only reads the parent pid.
@@ -2752,7 +2838,10 @@ fn note_start(book: &mut Book, repo: &str) {
     {
         return;
     }
-    let Ok(sha) = head_sha(repo) else {
+    // A queued job records HEAD as it was when the call came, not after
+    // the commits that ran while the job waited.
+    let at_call = acting_for().and_then(|(_, head)| head);
+    let Some(sha) = at_call.or_else(|| head_sha(repo).ok()) else {
         return;
     };
     book.repos.entry(repo.to_string()).or_default().start_sha = Some(sha);
@@ -3146,17 +3235,24 @@ fn cancel_placeholder(auto: &str, named: &str) {
 /// Remember a guard ask on this repository. The book file is the only
 /// write: a slow tracker must not sit on the path that is about to ask.
 pub fn note_ask(raw: &str, call: &super::HookCall, reason: &str) {
+    if !note_ask_within(raw, call, reason) {
+        super::book_queue::enqueue_ask(raw, call, reason);
+    }
+}
+
+/// [`note_ask`] within [`BOOK_LOCK_WAIT`]. False when the lock stayed
+/// taken and nothing was written.
+pub(crate) fn note_ask_within(raw: &str, call: &super::HookCall, reason: &str) -> bool {
     if !matches!(call.event.as_str(), "PreToolUse" | "argv") {
-        return;
+        return true;
     }
     let reason = collapse(reason);
     if reason.is_empty() {
-        return;
+        return true;
     }
     let value: Value = serde_json::from_str(raw.trim()).unwrap_or(Value::Null);
     let Some(_held) = book_lock() else {
-        log_line("ask: book lock busy; the ask is not noted");
-        return;
+        return false;
     };
     let path = book_path(&session_key(call));
     let mut book = load_book(&path);
@@ -3173,6 +3269,7 @@ pub fn note_ask(raw: &str, call: &super::HookCall, reason: &str) {
     }
     book.last_unix = now;
     store_book(&path, &book);
+    true
 }
 
 fn note_failure(book: &mut Book, repo: &str, text: &str) {

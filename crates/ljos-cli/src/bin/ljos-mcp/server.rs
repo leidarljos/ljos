@@ -3642,6 +3642,9 @@ impl ServerHandler for LjosServer {
             if !seated {
                 return;
             }
+            // The book the hooks queued comes first: a finish or a start
+            // acts on the claim a write's hook took.
+            ljos_cli::book_queue::catch_up();
             ljos_cli::bookkeep::resume_seat();
             if writes {
                 ljos_cli::bookkeep::before_mcp_write(&tool, args.as_ref());

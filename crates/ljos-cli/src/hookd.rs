@@ -137,8 +137,8 @@ pub fn release() {
 }
 
 /// Whether `args` (after the program name) are a hook call that reads a
-/// payload and answers it. The git and runner forms and `--text` are not
-/// admitted here.
+/// payload and answers it. The git and runner forms, `--text` and the
+/// queue's own verbs are not admitted here.
 fn admitted_command(args: &[String]) -> bool {
     if args.first().map(String::as_str) != Some("hook") {
         return false;
@@ -152,6 +152,8 @@ fn admitted_command(args: &[String]) -> bool {
                 | "--git-hook"
                 | "--brief-once"
                 | "--runner"
+                | "--drain"
+                | "--apply-book"
                 | "-h"
                 | "--help"
         )
@@ -567,6 +569,7 @@ mod tests {
         assert!(admitted_command(&args(&["hook", "--prompt"])));
         assert!(!admitted_command(&args(&["hook", "--git-commit"])));
         assert!(!admitted_command(&args(&["hook", "--runner=gemini"])));
+        assert!(!admitted_command(&args(&["hook", "--drain"])));
         assert!(!admitted_command(&args(&["note", "x"])));
         assert!(!admitted_command(&args(&[])));
     }

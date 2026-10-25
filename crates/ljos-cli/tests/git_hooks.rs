@@ -109,6 +109,11 @@ impl Hab {
             "ljos {args:?} failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
+        // A hook's book is applied after its answer; what the test reads
+        // next is the book after it.
+        if args.first() == Some(&"hook") && !args.contains(&"--drain") {
+            self.ljos_in(cwd, &["hook", "--drain"], None, extra);
+        }
         out
     }
 

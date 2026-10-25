@@ -184,6 +184,15 @@ fn hook_through_a_shell(hab: &Habitat, payload: &str) {
         "ljos hook: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    drain(hab);
+}
+
+/// Apply the book the hook queued, so the test reads the book after it.
+fn drain(hab: &Habitat) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    cmd.args(["hook", "--drain"]);
+    seat_env(&mut cmd, hab);
+    assert!(cmd.status().unwrap().success(), "ljos hook --drain");
 }
 
 /// A process named `name` that runs `body` and then stays up until its
@@ -229,6 +238,7 @@ fn hook_done(hab: &Habitat) {
         let status = std::fs::read_to_string(&done).unwrap_or_default();
         if !status.trim().is_empty() {
             assert_eq!(status.trim(), "0", "ljos hook failed");
+            drain(hab);
             return;
         }
         std::thread::sleep(Duration::from_millis(100));
