@@ -1,0 +1,1 @@
+A pre-tool hook reads the pack's rules and preferences by kind, each within 400 ms. When the pack does not answer in time the call decides from the rules kept on disk, without memory recall, and the hooks of the next 30 s do the same without asking, so a hung `packsetd` costs one short wait instead of one per tool call.

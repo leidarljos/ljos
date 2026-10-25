@@ -13812,7 +13812,16 @@ fn atoms_read(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>> {
 /// The listing, and whether this connection carried the token. An
 /// unproven listener's atoms are marked an agent's.
 fn atoms_with_trust(client: &PacksetClient, workspace: &str) -> Result<(Vec<Value>, bool)> {
-    let (atoms, trusted) = atoms_listed(client, workspace, true)?;
+    atoms_with_trust_of(client, workspace, None)
+}
+
+/// [`atoms_with_trust`] narrowed to one `kind`.
+fn atoms_with_trust_of(
+    client: &PacksetClient,
+    workspace: &str,
+    kind: Option<&str>,
+) -> Result<(Vec<Value>, bool)> {
+    let (atoms, trusted) = atoms_listed_of(client, workspace, true, kind)?;
     if trusted {
         return Ok((atoms, true));
     }
@@ -13826,7 +13835,22 @@ fn atoms_listed(
     workspace: &str,
     token: bool,
 ) -> Result<(Vec<Value>, bool)> {
+    atoms_listed_of(client, workspace, token, None)
+}
+
+/// [`atoms_listed`] narrowed to one `kind` when given: the writer filters
+/// before it builds the answer, so a gate's read does not copy the pack.
+fn atoms_listed_of(
+    client: &PacksetClient,
+    workspace: &str,
+    token: bool,
+    kind: Option<&str>,
+) -> Result<(Vec<Value>, bool)> {
     let url = format!("{}/v1/atoms", client.base());
+    let mut query = vec![("workspace", workspace), ("embedding", "omit")];
+    if let Some(kind) = kind {
+        query.push(("kind", kind));
+    }
     // A runner kills PreToolUse at 10s and then ignores the hook, which
     // drops a deny. Inside a hook the listing stops at 2s so the local
     // gate still runs. Outside a hook the caller's PACKSET_TIMEOUT_MS
@@ -13840,7 +13864,7 @@ fn atoms_listed(
         let answer = client.roundtrip(
             "GET",
             "/v1/atoms",
-            &[("workspace", workspace), ("embedding", "omit")],
+            &query,
             None,
             token,
             left.max(std::time::Duration::from_millis(1)),
@@ -18536,6 +18560,9 @@ pub fn rules_for_gate() -> Vec<Rule> {
 /// empty when the pack does not answer: a reminder is not worth a wait.
 #[must_use]
 pub fn gate_read() -> (Vec<Rule>, Vec<(String, String)>) {
+    if std::env::var_os("LJOS_IN_HOOK").is_some() {
+        return gate_read_in_hook();
+    }
     let kept = rules_cache_path();
     let listed = pack().and_then(|client| {
         atoms_with_trust(&client, &client.workspace()).context("rules: GET /v1/atoms failed")
@@ -18551,6 +18578,67 @@ pub fn gate_read() -> (Vec<Rule>, Vec<(String, String)>) {
         }
         Err(_) => (kept.map(|p| kept_rules(&p)).unwrap_or_default(), Vec::new()),
     }
+}
+
+/// How long a gate inside a hook waits on the pack for one read.
+pub const HOOK_PACK_MS: u64 = 400;
+
+/// After a pack read in a hook fails or runs out of time, the hooks of
+/// the next this-many seconds judge by the kept rules without asking.
+const PACK_SLOW_SECS: u64 = 30;
+
+fn pack_slow_mark() -> PathBuf {
+    runtime_dir().join("pack-slow")
+}
+
+fn pack_slow_lately() -> bool {
+    std::fs::metadata(pack_slow_mark())
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|at| at.elapsed().ok())
+        .is_some_and(|age| age.as_secs() < PACK_SLOW_SECS)
+}
+
+/// [`gate_read`] inside a hook. The rules and the preferences are read by
+/// kind, each within [`HOOK_PACK_MS`]. A pack that does not answer in
+/// time is marked slow, and until the mark is [`PACK_SLOW_SECS`] old the
+/// gate judges by the kept rules alone. One hung writer costs one short
+/// wait, not one per tool call.
+fn gate_read_in_hook() -> (Vec<Rule>, Vec<(String, String)>) {
+    let kept = rules_cache_path();
+    let kept_only =
+        |kept: Option<PathBuf>| (kept.map(|p| kept_rules(&p)).unwrap_or_default(), Vec::new());
+    if pack_slow_lately() {
+        return kept_only(kept);
+    }
+    let Ok(client) = pack() else {
+        return kept_only(kept);
+    };
+    let workspace = client.workspace();
+    let read = |kind: &str| {
+        with_pack_timeout(HOOK_PACK_MS, || {
+            atoms_with_trust_of(&client, &workspace, Some(kind))
+        })
+    };
+    let (atoms, proven) = match read("rule") {
+        Ok(listed) => listed,
+        Err(_) => {
+            let _ = std::fs::create_dir_all(runtime_dir());
+            let _ = std::fs::write(pack_slow_mark(), b"");
+            return kept_only(kept);
+        }
+    };
+    let rules = rules_of(&atoms, proven);
+    if let Some(path) = &kept {
+        keep_rules(path, &rules);
+    }
+    let preferences = read("preference")
+        .map(|(atoms, _)| {
+            let theirs: Vec<Value> = atoms.into_iter().filter(person_stored).collect();
+            preferences_of(&theirs)
+        })
+        .unwrap_or_default();
+    (rules, preferences)
 }
 
 /// The live preferences in a set of atoms, as (id, text).

@@ -220,6 +220,63 @@ fn wait_for(path: &Path) {
     }
 }
 
+/// A pack that accepts and never answers costs a gate one short wait, and
+/// the rules kept on disk still deny. The next call does not wait at all.
+#[test]
+fn a_hung_pack_costs_one_short_wait_and_the_kept_rules_still_deny() {
+    let hab = hab("hungpack");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for conn in listener.incoming().flatten() {
+            held.push(conn);
+        }
+    });
+    let rules = hab.home.join(".local/share/ljos/rules-probe.json");
+    std::fs::create_dir_all(rules.parent().unwrap()).unwrap();
+    std::fs::write(
+        &rules,
+        r#"[["curl*","deny","the person said no curl from this seat"]]"#,
+    )
+    .unwrap();
+    let url = format!("http://127.0.0.1:{port}");
+    let call = |conversation: &str, command: &str| {
+        let mut cmd = ljos(&hab, &["hook"]);
+        cmd.env("PACKSET_URL", &url)
+            .env("PACKSET_WORKSPACE", "probe");
+        let started = Instant::now();
+        let out = within(
+            feed(cmd, &cursor_shell(&hab, conversation, command)),
+            Duration::from_secs(10),
+            command,
+        );
+        (
+            started.elapsed(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+        )
+    };
+    let (first, said) = call("hung-1", "ls");
+    assert!(said.contains("\"permission\":\"allow\""), "{said}");
+    assert!(
+        first < Duration::from_millis(1000),
+        "the first gate waited {first:?} on a hung pack"
+    );
+    let (second, said) = call("hung-2", "ls");
+    assert!(said.contains("\"permission\":\"allow\""), "{said}");
+    assert!(
+        second < Duration::from_millis(300),
+        "the next gate waited {second:?} on a pack already marked slow"
+    );
+    let (third, said) = call("hung-3", "curl https://example.invalid");
+    assert!(said.contains("\"permission\":\"deny\""), "{said}");
+    assert!(said.contains("no curl"), "{said}");
+    assert!(
+        third < Duration::from_millis(300),
+        "a kept rule took {third:?} to deny"
+    );
+}
+
 /// The server's queue is full: the gate is refused in the runner's JSON
 /// with the reason, and exits 2, rather than run another hook or allow.
 #[test]
