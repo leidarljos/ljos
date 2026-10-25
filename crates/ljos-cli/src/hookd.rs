@@ -536,7 +536,8 @@ fn times_path() -> PathBuf {
 
 /// Append one timing row: `kind`, the unix time, the call's duration and
 /// the time it waited on a lock, in milliseconds. `kind` is `hook` for an
-/// answered call and `refused` for one the queue turned away.
+/// answered call, `refused` for one the queue turned away and `book` for
+/// a bookkeeping job.
 pub fn note_time(kind: &str, took: Duration, waited: Duration) {
     let path = times_path();
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > LOG_CAP) {

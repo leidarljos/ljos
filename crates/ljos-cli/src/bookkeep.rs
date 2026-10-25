@@ -346,16 +346,34 @@ fn temp_roots() -> Vec<PathBuf> {
         .collect()
 }
 
+/// A book lock that is not free within this long is not waited for: the
+/// call keeps no book, and the book log says so.
+pub(crate) const BOOK_LOCK_WAIT: Duration = Duration::from_secs(1);
+
+/// The book lock within [`BOOK_LOCK_WAIT`], with the wait logged.
+/// `None` when another holder kept it.
+fn book_lock() -> Option<super::CommitLock> {
+    let asked = std::time::Instant::now();
+    let held = super::hook_timed("book_lock", || {
+        super::CommitLock::acquire_by(
+            &super::runtime_dir().join("book.lock"),
+            asked + BOOK_LOCK_WAIT,
+        )
+    });
+    super::hookd::note_time("book", asked.elapsed(), asked.elapsed());
+    held
+}
+
 /// Keep the book for this hook call. The string is recall to inject, and
 /// only on session start and on a prompt. Empty when there is nothing to
 /// say. Never an error: a habitat that did not answer is a line in the
-/// book log.
+/// book log, and so is a book lock that stayed taken.
 #[must_use]
 pub fn observe(raw: &str, call: &super::HookCall) -> (String, Vec<String>) {
     let raw = raw.to_string();
     let call = call.clone();
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observe_inner(&raw, &call))) {
-        Ok(text) => (text, Vec::new()),
+        Ok(text) => (text.unwrap_or_default(), Vec::new()),
         Err(_) => {
             log_line("bookkeep panicked");
             (String::new(), Vec::new())
@@ -363,24 +381,30 @@ pub fn observe(raw: &str, call: &super::HookCall) -> (String, Vec<String>) {
     }
 }
 
-fn observe_inner(raw: &str, call: &super::HookCall) -> String {
+/// `None` when the book lock stayed taken past [`BOOK_LOCK_WAIT`].
+fn observe_inner(raw: &str, call: &super::HookCall) -> Option<String> {
     if !BOOK_EVENTS.contains(&call.event.as_str()) {
-        return String::new();
+        return Some(String::new());
     }
     // Every claim, note, deed and finish below is written as this seat.
     let seat = match super::write_seat("hook") {
         Ok(seat) => seat,
         Err(e) => {
             log_line(&format!("{}: nothing booked: {e:#}", call.event));
-            return String::new();
+            return Some(String::new());
         }
     };
     let _seated = super::Seated::enter(&seat);
     let session = session_key(call);
     let value: Value = serde_json::from_str(raw.trim()).unwrap_or(Value::Null);
-    let _held = super::hook_timed("book_lock", || {
-        super::CommitLock::acquire(&super::runtime_dir().join("book.lock"))
-    });
+    let Some(_held) = book_lock() else {
+        log_line(&format!(
+            "{}: book lock busy past {} ms; nothing booked",
+            call.event,
+            BOOK_LOCK_WAIT.as_millis()
+        ));
+        return None;
+    };
     // A runner killed before Stop leaves its claims open. The next session
     // finishes those whose pid is gone, and replaces a deed whose commit is
     // no longer in the checkout with the one that is.
@@ -567,11 +591,11 @@ fn observe_inner(raw: &str, call: &super::HookCall) -> String {
     // The book is stored; the pack read below must not hold other hooks
     // on the lock.
     drop(_held);
-    match held {
+    Some(match held {
         Some((Some(issue), cached)) => claimed_recall(&issue, &cached),
         Some((None, cached)) => cached,
         None => String::new(),
-    }
+    })
 }
 
 /// The recall a SessionStart or prompt hook hands the model for the issue
@@ -3130,7 +3154,10 @@ pub fn note_ask(raw: &str, call: &super::HookCall, reason: &str) {
         return;
     }
     let value: Value = serde_json::from_str(raw.trim()).unwrap_or(Value::Null);
-    let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
+    let Some(_held) = book_lock() else {
+        log_line("ask: book lock busy; the ask is not noted");
+        return;
+    };
     let path = book_path(&session_key(call));
     let mut book = load_book(&path);
     let repo = repo_key(&mut book, &value);
