@@ -27,6 +27,7 @@ mod deedbag;
 pub mod extract;
 pub mod gates;
 pub mod git_hooks;
+pub mod hookd;
 pub mod hud;
 pub mod idle_drop;
 pub mod jev;
@@ -12264,6 +12265,8 @@ pub fn answer_gate(output: &str) {
     GATE_ANSWERED.store(true, std::sync::atomic::Ordering::SeqCst);
     let _ = std::io::Write::write_all(&mut out, output.as_bytes());
     let _ = std::io::Write::flush(&mut out);
+    drop(out);
+    hookd::release();
 }
 
 /// Arm the refusals of a gate call: a panic in the hook writes the deny of
@@ -12285,7 +12288,9 @@ pub fn arm_gate(input: &str, event: Option<&str>) {
     }));
     if call.shape.is_cursor() {
         std::thread::spawn(|| {
-            std::thread::sleep(std::time::Duration::from_millis(CURSOR_GATE_DEADLINE_MS));
+            // Counted from the call's start: a wait for a hook slot is
+            // part of what the runner waits.
+            std::thread::sleep(hookd::left_of(CURSOR_GATE_DEADLINE_MS));
             let secs = CURSOR_GATE_DEADLINE_MS / 1000;
             refuse_failed_gate(&format!("no verdict in {secs} s"));
         });

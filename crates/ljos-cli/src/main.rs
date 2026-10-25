@@ -1324,6 +1324,13 @@ fn exit_relay_fault(runner: &str, event: &str, what: &str) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    // Both run before the seat's environment, the tracker or the pack is
+    // read: the server stays small, and a hook call waits its turn before
+    // it costs anything.
+    if std::env::args_os().nth(1).is_some_and(|a| a == "hookd") {
+        std::process::exit(ljos_cli::hookd::serve());
+    }
+    ljos_cli::hookd::admit();
     let ran = run_command();
     if let Err(e) = &ran {
         // A gate whose hook fails answers deny in the runner's JSON and
@@ -2506,8 +2513,14 @@ fn run_command() -> Result<()> {
                 return Ok(());
             }
             use std::io::Read;
-            let mut bytes = Vec::new();
-            std::io::stdin().read_to_end(&mut bytes)?;
+            let bytes = match ljos_cli::hookd::take_stdin() {
+                Some(bytes) => bytes,
+                None => {
+                    let mut bytes = Vec::new();
+                    std::io::stdin().read_to_end(&mut bytes)?;
+                    bytes
+                }
+            };
             let input = match String::from_utf8(bytes) {
                 Ok(text) => text,
                 Err(_) => {
