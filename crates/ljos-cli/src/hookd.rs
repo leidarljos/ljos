@@ -557,6 +557,87 @@ pub fn note_time(kind: &str, took: Duration, waited: Duration) {
     let _ = file.write_all(line.as_bytes());
 }
 
+/// The 95th percentile of `values`, or `None` when there are none.
+fn p95(values: &mut [u64]) -> Option<u64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable();
+    let rank = (values.len() * 95).div_ceil(100).max(1) - 1;
+    Some(values[rank])
+}
+
+/// Hook latency and lock waits from the timing log, for `ljos doctor`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Timings {
+    pub calls: usize,
+    pub p95_ms: Option<u64>,
+    pub admit_p95_ms: Option<u64>,
+    pub refused: usize,
+    pub book_jobs: usize,
+    pub book_lock_p95_ms: Option<u64>,
+}
+
+/// [`Timings`] from the log text.
+#[must_use]
+pub fn timings_of(text: &str) -> Timings {
+    let mut took = Vec::new();
+    let mut admit = Vec::new();
+    let mut book = Vec::new();
+    let mut refused = 0;
+    for line in text.lines() {
+        let mut words = line.split_whitespace();
+        let kind = words.next();
+        let _at = words.next();
+        let (Some(ms), Some(wait)) = (
+            words.next().and_then(|w| w.parse::<u64>().ok()),
+            words.next().and_then(|w| w.parse::<u64>().ok()),
+        ) else {
+            continue;
+        };
+        match kind {
+            Some("hook") => {
+                took.push(ms);
+                admit.push(wait);
+            }
+            Some("refused") => refused += 1,
+            Some("book") => book.push(wait),
+            _ => {}
+        }
+    }
+    Timings {
+        calls: took.len(),
+        p95_ms: p95(&mut took),
+        admit_p95_ms: p95(&mut admit),
+        refused,
+        book_jobs: book.len(),
+        book_lock_p95_ms: p95(&mut book),
+    }
+}
+
+/// The doctor's line for hook latency and lock waits.
+#[must_use]
+pub fn timings_line() -> String {
+    let path = times_path();
+    let mut text = std::fs::read_to_string(path.with_extension("log.1")).unwrap_or_default();
+    text.push_str(&std::fs::read_to_string(&path).unwrap_or_default());
+    let t = timings_of(&text);
+    let ms = |v: Option<u64>| v.map_or_else(|| "-".to_string(), |v| format!("{v} ms"));
+    if t.calls == 0 && t.refused == 0 && t.book_jobs == 0 {
+        return "no hook calls timed yet".to_string();
+    }
+    format!(
+        "p95 {} over {} gate calls; queue wait p95 {}; {} refused by the queue; \
+         book lock wait p95 {} over {} jobs",
+        ms(t.p95_ms),
+        t.calls,
+        ms(t.admit_p95_ms),
+        t.refused,
+        ms(t.book_lock_p95_ms),
+        t.book_jobs
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -586,6 +667,23 @@ mod tests {
             Some("Stop")
         );
         assert_eq!(flag_value(&args(&["hook"]), "--event"), None);
+    }
+
+    #[test]
+    fn timings_read_p95_and_waits_from_the_log() {
+        let mut text = String::new();
+        for ms in 1..=100 {
+            text.push_str(&format!("hook 0 {ms} {}\n", ms / 10));
+        }
+        text.push_str("refused 0 3000 0\nbook 0 40 900\nbook 0 10 5\ngarbage\n");
+        let t = timings_of(&text);
+        assert_eq!(t.calls, 100);
+        assert_eq!(t.p95_ms, Some(95));
+        assert_eq!(t.admit_p95_ms, Some(9));
+        assert_eq!(t.refused, 1);
+        assert_eq!(t.book_jobs, 2);
+        assert_eq!(t.book_lock_p95_ms, Some(900));
+        assert_eq!(timings_of(""), Timings::default());
     }
 
     #[test]

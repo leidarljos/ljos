@@ -1,0 +1,1 @@
+`ljos doctor --all` has a hook latency row: the 95th percentile of gate calls and of their wait for a slot, how many calls the queue refused, and the 95th percentile wait for `book.lock` over the book jobs. The hooks write these to `hook-times.log` in the runtime directory, cut back past 256 KB.

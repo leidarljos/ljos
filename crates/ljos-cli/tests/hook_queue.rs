@@ -630,3 +630,38 @@ fn reads_commit_nothing_and_queued_claims_commit_once() {
         );
     }
 }
+
+/// `ljos doctor` says how long gate calls took and how long they waited.
+#[test]
+fn doctor_reports_hook_p95_and_lock_waits() {
+    let hab = hab("doctor");
+    for i in 0..3 {
+        let out = within(
+            feed(
+                ljos(&hab, &["hook"]),
+                &cursor_shell(&hab, &format!("doc-{i}"), "ls"),
+            ),
+            Duration::from_secs(5),
+            "a call",
+        );
+        assert!(out.status.success());
+    }
+    drain(&hab);
+    let out = within(
+        feed(ljos(&hab, &["doctor", "--all"]), ""),
+        Duration::from_secs(60),
+        "ljos doctor",
+    );
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let line = said
+        .lines()
+        .find(|l| l.contains("hook latency"))
+        .unwrap_or_else(|| panic!("no hook latency line:\n{said}"));
+    assert!(line.contains("over 3 gate calls"), "{line}");
+    assert!(line.contains("queue wait p95"), "{line}");
+    assert!(line.contains("book lock wait p95"), "{line}");
+}

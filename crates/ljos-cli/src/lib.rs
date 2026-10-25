@@ -24517,6 +24517,13 @@ pub fn doctor_seat() -> Vec<Habitat> {
     out.push(doctor_seat_source());
     out.push(cloud::mcp_row());
     out.push(cloud::guard_row());
+    // What gate calls took and what they waited on, from the log the hook
+    // queue and the book drainer write in the runtime directory.
+    out.push(Habitat {
+        name: "hook latency",
+        state: hookd::timings_line(),
+        ok: true,
+    });
     // Scope cloud is readable here when cloud up wrote its age identity.
     // The key is not in the tracker.
     out.push(cloud::cloud_age_row());
