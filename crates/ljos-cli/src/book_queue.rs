@@ -4,7 +4,8 @@
 //! the tracker there. That cost seconds and hundreds of megabytes per call,
 //! with every other hook waiting on the lock. A call now leaves a job in
 //! the runtime directory and answers. One drainer per user applies the
-//! jobs in the order they came, one process at a time.
+//! jobs in the order they came, one process at a time, and commits each
+//! tracker file once per batch.
 //!
 //! A job carries what the call knew and the drainer cannot learn later:
 //! the environment, the directory, the runner above the call and HEAD at
@@ -29,6 +30,9 @@ const STALE: Duration = Duration::from_secs(600);
 /// How long a reader that acts on the book waits for the jobs queued
 /// before it.
 const CATCH_UP: Duration = Duration::from_secs(5);
+/// Variables the hook sets per call. Jobs that differ only in these share
+/// a batch, and the apply process sets them again for each job.
+const PER_CALL: &[&str] = &["LJOS_HARNESS_SESSION"];
 
 #[derive(Serialize, Deserialize)]
 struct Job {
@@ -337,7 +341,9 @@ fn drain_held() {
         let mut batch = vec![first.clone()];
         for path in jobs.iter().skip(1).take(BATCH - 1) {
             match read_job(path) {
-                Some(job) if job.env == head.env && job.cwd == head.cwd => batch.push(path.clone()),
+                Some(job) if job.cwd == head.cwd && same_env(&job, &head) => {
+                    batch.push(path.clone());
+                }
                 _ => break,
             }
         }
@@ -369,6 +375,31 @@ fn drain_held() {
         // Nothing is held here but the drainer's own lock.
         std::thread::sleep(Duration::from_millis(250));
     }
+}
+
+fn same_env(a: &Job, b: &Job) -> bool {
+    let kept = |job: &Job| {
+        job.env
+            .iter()
+            .filter(|(k, _)| !PER_CALL.contains(&k.as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    kept(a) == kept(b)
+}
+
+/// Set the variables of [`PER_CALL`] and the payload's session as the
+/// call that left `job` had them.
+fn wear_call(job: &Job) {
+    crate::with_env_mutation(|| {
+        for key in PER_CALL {
+            match job.env.iter().find(|(k, _)| k == key) {
+                Some((_, v)) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    });
+    crate::ballot_sig::export_hook_session(job.payload_session.as_deref());
 }
 
 /// Apply `batch` in a child that has the first job's environment and
@@ -412,16 +443,18 @@ fn run_batch(head: &Job, batch: &[PathBuf]) {
     }
 }
 
-/// `ljos hook --apply-book JOB...`: apply the jobs in order. A job the
-/// book lock keeps out stays queued, and so do the ones after it.
+/// `ljos hook --apply-book JOB...`: apply the jobs in order and commit the
+/// tracker once at the end. A job the book lock keeps out stays queued,
+/// and so do the ones after it.
 #[must_use]
 pub fn apply(files: &[PathBuf]) -> i32 {
+    crate::batch_tracker_commits();
     for path in files {
         let Some(job) = read_job(path) else {
             let _ = std::fs::remove_file(path);
             continue;
         };
-        crate::ballot_sig::export_hook_session(job.payload_session.as_deref());
+        wear_call(&job);
         crate::act_for_ancestry(Some(job.ancestry.clone()));
         crate::bookkeep::act_for(Some((job.owner, job.head.clone())));
         let call = crate::HookCall {
@@ -441,6 +474,12 @@ pub fn apply(files: &[PathBuf]) -> i32 {
     }
     crate::act_for_ancestry(None);
     crate::bookkeep::act_for(None);
+    let said = crate::flush_tracker_commits();
+    for line in said.lines() {
+        if line.contains("could not") || line.contains("refused") {
+            crate::bookkeep::log_line(line.trim());
+        }
+    }
     0
 }
 

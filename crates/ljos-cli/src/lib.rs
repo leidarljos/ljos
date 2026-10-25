@@ -30423,6 +30423,18 @@ fn persist_tracker_with(issue: &str, verb: &str, also: &[String]) -> String {
     if matches!(mode.as_str(), "off" | "0" | "false") {
         return "tracker git: off (LJOS_TRACKER_GIT)\n".into();
     }
+    if also.is_empty() {
+        let mut held = TRACKER_BATCH
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(batch) = held.as_mut() {
+            let write = (issue.to_string(), verb.to_string());
+            if !batch.contains(&write) {
+                batch.push(write);
+            }
+            return "tracker git: held for the batch commit\n".into();
+        }
+    }
     let path = match tracker_issue_path(issue) {
         Ok(path) => path,
         Err(e) => return format!("tracker git: could not find {issue}: {e}\n"),
@@ -30452,6 +30464,51 @@ fn tracker_issue_path(issue: &str) -> Result<PathBuf, String> {
     Ok(hit.path)
 }
 
+/// The tracker writes [`persist_tracker`] holds while a batch of queued
+/// book jobs runs, as (issue, verb). `None` outside a batch.
+static TRACKER_BATCH: std::sync::Mutex<Option<Vec<(String, String)>>> = std::sync::Mutex::new(None);
+
+/// Hold every [`persist_tracker`] from here until
+/// [`flush_tracker_commits`], so a batch of book jobs commits each
+/// tracker file once, after the book lock is let go.
+pub fn batch_tracker_commits() {
+    *TRACKER_BATCH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Vec::new());
+}
+
+/// Commit the writes [`batch_tracker_commits`] held: one commit per
+/// tracker file, naming every write in it. The lines say what did not
+/// commit, as [`persist_tracker`] does.
+pub fn flush_tracker_commits() -> String {
+    let Some(writes) = TRACKER_BATCH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    else {
+        return String::new();
+    };
+    let mut out = String::new();
+    let mut files: Vec<(PathBuf, Vec<(String, String)>)> = Vec::new();
+    for (issue, verb) in writes {
+        let path = match tracker_issue_path(&issue) {
+            Ok(path) => path,
+            Err(e) => {
+                out.push_str(&format!("tracker git: could not find {issue}: {e}\n"));
+                continue;
+            }
+        };
+        match files.iter_mut().find(|(seen, _)| *seen == path) {
+            Some((_, list)) => list.push((issue, verb)),
+            None => files.push((path, vec![(issue, verb)])),
+        }
+    }
+    for (path, list) in files {
+        out.push_str(&persist_tracker_writes(&path, &list, &[]));
+    }
+    out
+}
+
 /// `show_json` writes the range as `{path}:{start}-{end}`.
 fn path_before_line_range(file: &str) -> Option<PathBuf> {
     let (path, span) = file.rsplit_once(':')?;
@@ -30476,6 +30533,12 @@ pub fn persist_tracker_file(path: &Path, issue: &str, verb: &str) -> String {
 /// root is named from the root, beside the issue's path from there, so one
 /// commit carries both.
 fn persist_tracker_paths(path: &Path, issue: &str, verb: &str, also: &[String]) -> String {
+    persist_tracker_writes(path, &[(issue.to_string(), verb.to_string())], also)
+}
+
+/// [`persist_tracker_paths`] for several writes to the one file at
+/// `path`, in one commit.
+fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[String]) -> String {
     let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
     if matches!(mode.as_str(), "off" | "0" | "false") {
         return "tracker git: off (LJOS_TRACKER_GIT)\n".into();
@@ -30579,8 +30642,14 @@ fn persist_tracker_paths(path: &Path, issue: &str, verb: &str, also: &[String]) 
         Err(e) => return format!("tracker git: {e}\n"),
     }
     let seat = tracker_seat();
-    stamp_seat_logbook(path, issue, verb, &seat);
-    let message = format!("chore(issues): {issue} {verb} by {seat}");
+    for (issue, verb) in writes {
+        stamp_seat_logbook(path, issue, verb, &seat);
+    }
+    let named: Vec<String> = writes
+        .iter()
+        .map(|(issue, verb)| format!("{issue} {verb}"))
+        .collect();
+    let message = format!("chore(issues): {} by {seat}", named.join(", "));
     let committed = commit_paths(dir, &live, &message);
     if !matches!(committed, PathCommit::Refused(_)) {
         commit_seat_pin(dir, &seat);

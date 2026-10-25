@@ -257,6 +257,19 @@ fn creates(hab: &Hab) -> usize {
         .count()
 }
 
+fn commits(dir: &Path) -> Vec<String> {
+    let out = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(dir)
+        .args(["log", "--format=%s"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
 fn lock_file(path: &Path) -> std::fs::File {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let file = std::fs::OpenOptions::new()
@@ -570,4 +583,50 @@ fn a_server_killed_mid_wait_falls_back_and_fails_closed() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("\"permission\":\"allow\""), "{stdout}");
+}
+
+/// A read-only call makes no tracker commit, and the claims a burst of
+/// writes files are committed together, once per tracker file.
+#[test]
+fn reads_commit_nothing_and_queued_claims_commit_once() {
+    let hab = hab("batch");
+    let before = commits(&hab.tracker).len();
+    let out = within(
+        feed(
+            ljos(&hab, &["hook"]),
+            &cursor_shell(&hab, "reader", "cat README.md"),
+        ),
+        Duration::from_secs(5),
+        "a read",
+    );
+    assert!(out.status.success());
+    drain(&hab);
+    assert_eq!(
+        commits(&hab.tracker).len(),
+        before,
+        "a read committed the tracker"
+    );
+    let draining = lock_file(&hab.run.join("ljos/bookq.lock"));
+    for i in 0..4 {
+        let out = within(
+            feed(
+                ljos(&hab, &["hook"]),
+                &claude_edit(&hab, &format!("writer-{i}")),
+            ),
+            Duration::from_secs(5),
+            "a write",
+        );
+        assert!(out.status.success());
+    }
+    drop(draining);
+    drain(&hab);
+    assert_eq!(creates(&hab), 4);
+    let made = commits(&hab.tracker);
+    assert_eq!(made.len(), before + 1, "{made:?}");
+    for n in 1..=4 {
+        assert!(
+            made[0].contains(&format!("probe-{n:04x} claimed")),
+            "{made:?}"
+        );
+    }
 }
