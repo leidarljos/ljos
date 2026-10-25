@@ -509,6 +509,7 @@ fn observe_inner(raw: &str, call: &super::HookCall, queued: bool) -> Option<Stri
         (book.owner_pid, book.owner_start),
         hook_owner(),
     );
+    let mut claim_later: Option<Option<String>> = None;
     let mut prompt_set = false;
     if call.event == "UserPromptSubmit" {
         let prompt = collapse(&call.cue);
@@ -607,7 +608,13 @@ fn observe_inner(raw: &str, call: &super::HookCall, queued: bool) -> Option<Stri
             || writes_worktree(&repo, &call.cue)
         {
             let offered = subject_title.then_some(offered.as_str());
-            let _ = ensure_claim(&mut book, &path, &repo, offered);
+            // Nothing later in a queued tool call reads the issue, so the
+            // claim is filed once the book lock is let go.
+            if queued && call.event == "PreToolUse" {
+                claim_later = Some(offered.map(str::to_string));
+            } else {
+                let _ = ensure_claim(&mut book, &path, &repo, offered);
+            }
         }
         // The commit has not happened on the way in. Cite it on the way
         // out when the evidence says it landed, every new sha since the
@@ -649,7 +656,7 @@ fn observe_inner(raw: &str, call: &super::HookCall, queued: bool) -> Option<Stri
     // row whose issue is null. The commit's before-hook is the exception:
     // it records HEAD so the after-hook can tell the new sha from the one
     // the sitting began on.
-    let keep_baseline = commit && !landed;
+    let keep_baseline = (commit && !landed) || claim_later.is_some();
     if !keep_baseline {
         drop_unclaimed_rows(&mut book);
     }
@@ -671,6 +678,9 @@ fn observe_inner(raw: &str, call: &super::HookCall, queued: bool) -> Option<Stri
     // The book is stored; the pack read below must not hold other hooks
     // on the lock.
     drop(_held);
+    if let Some(offered) = claim_later {
+        claim_unlocked(&path, &repo, offered.as_deref());
+    }
     if queued {
         return Some(String::new());
     }
@@ -1560,21 +1570,70 @@ fn ensure_claim(
     repo: &str,
     offered: Option<&str>,
 ) -> Result<(), String> {
+    let Some((project, title)) = claim_plan(book, own, repo, offered) else {
+        return Ok(());
+    };
+    claim_record(book, repo, file_and_claim(&project, &title));
+    Ok(())
+}
+
+/// [`ensure_claim`] for a queued job, with the book lock let go while the
+/// tracker files and claims the issue: that reads the whole tracker, and
+/// every other bookkeeper on the host waits on the lock.
+fn claim_unlocked(own: &Path, repo: &str, offered: Option<&str>) {
+    let plan = {
+        let Some(_held) = book_lock() else {
+            log_line("claim: book lock busy; the next write claims");
+            return;
+        };
+        let mut book = load_book(own);
+        let plan = claim_plan(&mut book, own, repo, offered);
+        store_book(own, &book);
+        plan
+    };
+    let Some((project, title)) = plan else {
+        return;
+    };
+    let filed = file_and_claim(&project, &title);
+    let _held = super::CommitLock::acquire(&super::runtime_dir().join("book.lock"));
+    let mut book = load_book(own);
+    if let (Ok(issue), Some(row)) = (&filed, book.repos.get(repo)) {
+        if row.issue.as_deref().is_some_and(|held| held != issue) {
+            log_line(&format!(
+                "claim: {issue} filed while the book took {}; kept the book's",
+                row.issue.as_deref().unwrap_or_default()
+            ));
+            return;
+        }
+    }
+    claim_record(&mut book, repo, filed);
+    store_book(own, &book);
+}
+
+/// What [`ensure_claim`] would file for `repo`: the project and the title.
+/// `None` when the row already holds an issue, a claim failed there, or
+/// the seat's hold in this checkout was taken instead.
+fn claim_plan(
+    book: &mut Book,
+    own: &Path,
+    repo: &str,
+    offered: Option<&str>,
+) -> Option<(String, String)> {
     let row = book.repos.entry(repo.to_string()).or_default();
     if row.claim_failed {
-        return Ok(());
+        return None;
     }
     if let Some(issue) = row.issue.clone() {
         if row.recall.is_empty() {
             row.recall = recall_line(&issue);
         }
-        return Ok(());
+        return None;
     }
     // The seat may already hold an issue in this checkout under another
     // book: `ljos_start` in the MCP server keys its book by the seat, the
     // harness hook by the harness session. That issue is this sitting's.
     if take_held_issue(book, own, repo) {
-        return Ok(());
+        return None;
     }
     // A hold from another repository is a different ticket. This sitting
     // files its own claim for the repository the tool just wrote.
@@ -1584,8 +1643,11 @@ fn ensure_claim(
         Some(subject) => title_from(subject, repo),
         None => title_from(&book.prompt, repo),
     };
-    let project = project_for(repo);
-    match file_and_claim(&project, &title) {
+    Some((project_for(repo), title))
+}
+
+fn claim_record(book: &mut Book, repo: &str, filed: Result<String, String>) {
+    match filed {
         Ok(issue) => {
             let line = super::persist_tracker(&issue, "claimed");
             if line.contains("could not") || line.contains("refused") {
@@ -1597,12 +1659,10 @@ fn ensure_claim(
             row.filed = true;
             row.named = false;
             row.recall = recall_line(&issue);
-            Ok(())
         }
         Err(e) => {
             log_line(&format!("claim: {e}"));
             book.repos.entry(repo.to_string()).or_default().claim_failed = true;
-            Ok(())
         }
     }
 }

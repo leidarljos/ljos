@@ -28,6 +28,18 @@ with (root / "vissue.log").open("a") as fh:
 cmd, rest = args[0], args[1:]
 time.sleep(float(os.environ.get("SHIM_TRACKER_READ", "0")))
 if cmd == "create":
+    lock = pathlib.Path(os.environ.get("XDG_RUNTIME_DIR", "/nonexistent")) / "ljos" / "book.lock"
+    state = "absent"
+    if lock.exists():
+        with lock.open("a") as fh:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fh, fcntl.LOCK_UN)
+                state = "free"
+            except BlockingIOError:
+                state = "held"
+    with (root / "book-lock.log").open("a") as fh:
+        fh.write(state + "\n")
     proj = rest[rest.index("-p") + 1] if "-p" in rest else "probe"
     title = [a for a in rest if not a.startswith("-") and a != proj][-1]
     with (root / ".seq").open("a+") as fh:
@@ -394,6 +406,27 @@ fn a_call_gets_its_answer_while_another_process_holds_the_book_lock() {
         creates(&hab),
         1,
         "the queued write claimed once the lock was free"
+    );
+}
+
+/// Filing a claim reads the tracker, so a queued claim is filed with the
+/// book lock let go and no other bookkeeper on the host waits on it.
+#[test]
+fn a_queued_claim_is_filed_with_the_book_lock_free() {
+    let hab = hab("claimfree");
+    let out = within(
+        feed(ljos(&hab, &["hook"]), &claude_edit(&hab, "claimer")),
+        Duration::from_secs(5),
+        "a write",
+    );
+    assert!(out.status.success());
+    drain(&hab);
+    assert_eq!(creates(&hab), 1);
+    let seen = std::fs::read_to_string(hab.tracker.join("book-lock.log")).unwrap_or_default();
+    assert_eq!(
+        seen.trim(),
+        "free",
+        "the claim was filed under the book lock"
     );
 }
 
