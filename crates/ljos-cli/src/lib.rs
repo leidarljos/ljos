@@ -28664,12 +28664,18 @@ fn hold_record_path(actor: &str) -> PathBuf {
     runtime_dir().join(format!("hold-{actor}"))
 }
 
-/// The process that owns this conversation: the nearest ancestor that is
-/// not a shell or a wrapper. For the MCP server that is the runner; for
-/// the command line it is the runner above the shell, else the shell the
-/// person types into. A short-lived program that ran this command is that
-/// owner, so its claim is not kept by the daemon above it after it exits.
+/// The process that owns this conversation: for the MCP server, this
+/// server itself; for the command line, the nearest ancestor that is
+/// not a shell or a wrapper, else the shell the person types into. A
+/// short-lived program that ran this command is that owner, so its
+/// claim is not kept by the daemon above it after it exits.
 fn conversation_process() -> (u32, String) {
+    if std::env::args_os()
+        .next()
+        .is_some_and(|p| Path::new(&p).file_name() == Some("ljos-mcp".as_ref()))
+    {
+        return (std::process::id(), "ljos-mcp".to_string());
+    }
     owner_of(&ancestry()).unwrap_or_else(|| (std::process::id(), String::new()))
 }
 
@@ -28760,63 +28766,36 @@ fn held_from_records_in(
     newest_record_in(holders, dir, chain, seat, graph, &|_| true).map(|(node, _)| node)
 }
 
-/// The issue this conversation holds and the record that says so, only
-/// while the conversation that took it still runs ([`hold_alive`]). The
-/// holders are the ones [`held_issue`] asks. File reads only, so a hook
-/// can afford it. A record whose process is gone, or is now another
-/// program, holds nothing here.
+/// The candidates this conversation holds, newest first, only while the
+/// conversation that took each still runs ([`hold_alive`]).
 #[must_use]
-pub fn live_held_issue() -> Option<(String, Hold)> {
-    // A conversation named by the hook payload or by the shell's
-    // `CURSOR_CONVERSATION_ID` holds under its one name. A process above
-    // it, or a runner's record, may serve every conversation of one user,
-    // so it names none of them.
+pub fn live_held_issues() -> Vec<(String, Hold)> {
     if call_conversation_unusable() || cursor_agent_without_id() {
-        return None;
+        return Vec::new();
     }
     if let Some(id) = cursor_conversation() {
         let (dir, seat, graph) = (runtime_dir(), seat_name(), claim_graph_scope());
         if !subagent_id(&id) {
             let own = holder_name();
-            let found = newest_record_in(
-                &[own.clone(), seat.clone()],
-                &dir,
-                &[],
-                &seat,
-                &graph,
-                &hold_alive,
-            );
-            if let Some((ref node, ref hold)) = found {
-                if hold.assignee == seat && own != seat {
-                    let path = hold_record_path(&work_id(&occupancy_scope(&seat, node)));
-                    if let Ok(text) = std::fs::read_to_string(&path) {
-                        if let Some(rest) = text.strip_prefix(&format!("{seat}\n")) {
-                            let _ = std::fs::write(&path, format!("{own}\n{rest}"));
-                        }
-                    }
-                    let mut adopted = hold.clone();
-                    adopted.assignee = own;
-                    return Some((node.clone(), adopted));
-                }
+            if own != seat {
+                adopt_bare_seat_hold(&dir, &seat, &own, &graph);
             }
-            return found;
+            return records_in(&[own], &dir, &[], &seat, &graph, &hold_alive);
         }
-        // A subagent works under its parent's sitting: the seat records
-        // and the hold of a conversation process above it count.
         let chain = conversation_ancestry();
         let mut holders = runner_record_holders(&chain);
         let own = holder_name();
         if !holders.contains(&own) {
             holders.push(own);
         }
-        return newest_record_in(&holders, &dir, &chain, &seat, &graph, &hold_alive);
+        return records_in(&holders, &dir, &chain, &seat, &graph, &hold_alive);
     }
     let mut holders: Vec<String> = runner_record_holders(&own_ancestry());
     let own = holder_name();
     if !holders.contains(&own) {
         holders.push(own);
     }
-    newest_record_in(
+    records_in(
         &holders,
         &runtime_dir(),
         &own_ancestry(),
@@ -28824,6 +28803,92 @@ pub fn live_held_issue() -> Option<(String, Hold)> {
         &claim_graph_scope(),
         &hold_alive,
     )
+}
+
+/// The issue this conversation holds and the record that says so, only
+/// while the conversation that took it still runs ([`hold_alive`]). The
+/// holders are the ones [`held_issue`] asks. File reads only, so a hook
+/// can afford it. A record whose process is gone, or is now another
+/// program, holds nothing here.
+#[must_use]
+pub fn live_held_issue() -> Option<(String, Hold)> {
+    live_held_issues().into_iter().next()
+}
+
+/// Adopt a live bare-seat hold record for this conversation when the
+/// tracker has the ticket open under the bare seat. A bare-seat record
+/// can be adopted when `holder_from_bare_session_record` names this
+/// conversation, or once for the first conversation when the bare-seat
+/// record was written by `ljos-mcp` and `first-hook-conv` was not yet
+/// set. The transition from `seat` to `own` is made once under an
+/// exclusive lock by rewriting the record in place and also writing the
+/// conversation-scoped record.
+fn adopt_bare_seat_hold(dir: &Path, seat: &str, own: &str, graph: &str) {
+    let Some((node, hold)) =
+        newest_record_in(&[seat.to_string()], dir, &[], seat, graph, &hold_alive)
+    else {
+        return;
+    };
+    if let Some(expected) = holder_from_bare_session_record(seat) {
+        if expected != own {
+            return;
+        }
+    } else if hold.comm != "ljos-mcp" || dir.join("first-hook-conv").exists() {
+        return;
+    }
+    let bare_paths = [
+        dir.join(format!("hold-{}", work_id(&occupancy_scope(seat, &node)))),
+        dir.join(format!("hold-{}", work_id(&node))),
+    ];
+    let Some(bare_path) = bare_paths
+        .into_iter()
+        .find(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && !m.permissions().readonly()))
+    else {
+        return;
+    };
+    let Ok(card) = issue_record(&node) else {
+        return;
+    };
+    let state = card["state"].as_str().unwrap_or("").trim();
+    if state.is_empty() || matches!(state, "DONE" | "CANCELLED") {
+        return;
+    }
+    let by = card["claimed_by"].as_str().unwrap_or("").trim();
+    if holder_parts(by).1.is_some() || !same_seat_here(by, seat) {
+        return;
+    }
+    let _lock = CommitLock::acquire(&dir.join("hold-adopt.lock"));
+    let Ok(meta) = std::fs::metadata(&bare_path) else {
+        return;
+    };
+    if !meta.is_file() || meta.permissions().readonly() {
+        return;
+    }
+    let Ok(text) = std::fs::read_to_string(&bare_path) else {
+        return;
+    };
+    let Some(rest) = text.strip_prefix(&format!("{seat}\n")) else {
+        return;
+    };
+    let new_text = format!("{own}\n{rest}");
+    if std::fs::write(&bare_path, new_text.as_bytes()).is_ok() {
+        let own_path = dir.join(format!("hold-{}", work_id(&occupancy_scope(own, &node))));
+        if own_path != bare_path {
+            let _ = bookkeep::replace_whole(&own_path, new_text.as_bytes());
+        }
+        let first = dir.join("first-hook-conv");
+        if !first.exists() {
+            if let Some(id) = cursor_conversation() {
+                let _ = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&first)
+                    .and_then(|mut f| {
+                        std::io::Write::write_all(&mut f, format!("{id}\n").as_bytes())
+                    });
+            }
+        }
+    }
 }
 
 /// The ancestors a subagent shares with the conversation that started it:
@@ -28845,26 +28910,28 @@ fn conversation_ancestry() -> Vec<(u32, String)> {
                     k == "CURSOR_CONVERSATION_ID"
                         && usable_session_id(v).is_some_and(|id| !subagent_id(id))
                 });
-            let dedicated_runner =
-                comm == "cursor-agent" && !env.iter().any(|(k, _)| k == "CURSOR_CONVERSATION_ID");
+            let dedicated_runner = comm == "cursor-agent";
             has_conv || dedicated_runner
         })
         .collect()
 }
 
 /// [`held_from_records_in`] with each record's [`Hold`], and only the
-/// records `keep` takes.
-fn newest_record_in(
+/// records `keep` takes, sorted newest first.
+fn records_in(
     holders: &[String],
     dir: &std::path::Path,
     chain: &[(u32, String)],
     seat: &str,
     graph: &str,
     keep: &dyn Fn(&Hold) -> bool,
-) -> Option<(String, Hold)> {
+) -> Vec<(String, Hold)> {
     let pids: Vec<String> = chain.iter().map(|(p, _)| p.to_string()).collect();
-    let mut best: Option<(String, Hold)> = None;
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(String, Hold)> = Vec::new();
+    for entry in entries.flatten() {
         if !entry.file_name().to_string_lossy().starts_with("hold-") {
             continue;
         }
@@ -28895,15 +28962,25 @@ fn newest_record_in(
             comm: (*comm).to_string(),
             since: (*at).to_string(),
         };
-        if ours
-            && !node.is_empty()
-            && best.as_ref().is_none_or(|(_, b)| *at > b.since.as_str())
-            && keep(&hold)
-        {
-            best = Some(((*node).to_string(), hold));
+        if ours && !node.is_empty() && keep(&hold) {
+            found.push(((*node).to_string(), hold));
         }
     }
-    best
+    found.sort_by(|a, b| b.1.since.cmp(&a.1.since));
+    found
+}
+
+fn newest_record_in(
+    holders: &[String],
+    dir: &std::path::Path,
+    chain: &[(u32, String)],
+    seat: &str,
+    graph: &str,
+    keep: &dyn Fn(&Hold) -> bool,
+) -> Option<(String, Hold)> {
+    records_in(holders, dir, chain, seat, graph, keep)
+        .into_iter()
+        .next()
 }
 
 fn drop_hold(actor: &str) {

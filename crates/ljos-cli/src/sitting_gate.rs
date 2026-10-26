@@ -202,32 +202,47 @@ pub fn live_sitting() -> Result<String, String> {
                 .into(),
         );
     }
-    let Some((issue, hold)) = crate::live_held_issue() else {
+    let candidates = crate::live_held_issues();
+    if candidates.is_empty() {
         return Err("this conversation holds no live sitting".into());
-    };
-    let card = crate::issue_record(&issue).map_err(|e| {
-        format!("the tracker does not read {issue} ({e:#}), so its sitting cannot be checked")
-    })?;
-    let state = card["state"].as_str().unwrap_or("").trim();
-    if state.is_empty() || matches!(state, "DONE" | "CANCELLED") {
-        let state = if state.is_empty() {
-            "in no state"
-        } else {
-            state
+    }
+    let mut first_err = None;
+    for (issue, hold) in candidates {
+        let card = match crate::issue_record(&issue) {
+            Ok(c) => c,
+            Err(e) => {
+                first_err.get_or_insert_with(|| {
+                    format!("the tracker does not read {issue} ({e:#}), so its sitting cannot be checked")
+                });
+                continue;
+            }
         };
-        return Err(format!("{issue} is {state} on the tracker, not open"));
+        let state = card["state"].as_str().unwrap_or("").trim();
+        if state.is_empty() || matches!(state, "DONE" | "CANCELLED") {
+            let state = if state.is_empty() {
+                "in no state"
+            } else {
+                state
+            };
+            first_err.get_or_insert_with(|| format!("{issue} is {state} on the tracker, not open"));
+            continue;
+        }
+        let by = card["claimed_by"].as_str().unwrap_or("").trim();
+        if !crate::same_seat_here(by, &hold.assignee)
+            || !crate::same_conversation_tag(by, &hold.assignee)
+        {
+            first_err.get_or_insert_with(|| {
+                if by.is_empty() {
+                    format!("the tracker names no holder on {issue}")
+                } else {
+                    format!("the tracker has {issue} claimed by {by}, not by this seat")
+                }
+            });
+            continue;
+        }
+        return Ok(issue);
     }
-    let by = card["claimed_by"].as_str().unwrap_or("").trim();
-    if !crate::same_seat_here(by, &hold.assignee)
-        || !crate::same_conversation_tag(by, &hold.assignee)
-    {
-        return Err(if by.is_empty() {
-            format!("the tracker names no holder on {issue}")
-        } else {
-            format!("the tracker has {issue} claimed by {by}, not by this seat")
-        });
-    }
-    Ok(issue)
+    Err(first_err.unwrap_or_else(|| "this conversation holds no live sitting".into()))
 }
 
 fn refusal(detail: &str) -> Rule {

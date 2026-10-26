@@ -1142,6 +1142,77 @@ fn an_mcp_sitting_covers_the_conversations_merge_with_and_without_meta() {
     let _ = srv1.kill();
     let _ = srv1.wait();
 
+    let clear_holds = || {
+        for entry in std::fs::read_dir(home.run.join("ljos")).unwrap().flatten() {
+            if entry.file_name().to_string_lossy().starts_with("hold-") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+        let _ = std::fs::remove_file(&home.card);
+        seed_tracker();
+    };
+    let bare_record = || {
+        std::fs::read_dir(home.run.join("ljos"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("hold-")
+            })
+            .expect("hold record after a bare sitting")
+    };
+
+    // 1b. X sits without _meta; another conversation gates first. The
+    // other conversation must not take X's sitting.
+    clear_holds();
+    let _ = home.hook_with(&pre_x, &[]);
+    let (_, mut srv1b) = mcp_call(None);
+    refused(
+        &home.hook(CONV_Y, MERGE, &[]),
+        "Y's merge gated before X's, after X's MCP sitting without _meta",
+    );
+    allowed(
+        &home.hook(CONV_X, MERGE, &[]),
+        "X's merge after Y gated first",
+    );
+    let _ = srv1b.kill();
+    let _ = srv1b.wait();
+
+    // 1c. X sits without _meta and the record cannot be rewritten: the
+    // seat is not adopted, so it must not cover a second conversation.
+    clear_holds();
+    let _ = home.hook_with(&pre_x, &[]);
+    let (_, mut srv1c) = mcp_call(None);
+    let record = bare_record();
+    let mut rlines: Vec<String> = std::fs::read_to_string(&record)
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect();
+    rlines[0] = "inky".into();
+    let bare_actor = ljos_cli::work_id(&format!("inky:{ISSUE}"));
+    let bare_path = home.run.join(format!("ljos/hold-{bare_actor}"));
+    std::fs::remove_file(&record).unwrap();
+    std::fs::write(&bare_path, rlines.join("\n") + "\n").unwrap();
+    home.card("inky");
+    let mut perms = std::fs::metadata(&bare_path).unwrap().permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&bare_path, perms).unwrap();
+    let _ = home.hook(CONV_X, MERGE, &[]);
+    refused(
+        &home.hook(CONV_Y, MERGE, &[]),
+        "Y's merge after X adopted a bare record it could not rewrite",
+    );
+    let mut perms = std::fs::metadata(&bare_path).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(&bare_path, perms).unwrap();
+    let _ = srv1c.kill();
+    let _ = srv1c.wait();
+
     // Clean hold-* records and re-seed before testing _meta.
     for entry in std::fs::read_dir(home.run.join("ljos")).unwrap().flatten() {
         if entry.file_name().to_string_lossy().starts_with("hold-") {
@@ -2447,5 +2518,387 @@ fn rv3b_a_claude_mcp_binding_is_gone_after_thirty_seconds() {
     assert!(
         !card.contains(&holder(P)),
         "35 s later a bare call was still seated as Claude's conversation:\n{card}\n{other}"
+    );
+}
+
+/// A bare-seat assignee written into another conversation's `hold-*`
+/// file does not let an unrelated conversation pass on its first check:
+/// adoption requires the exact bare-seat record path and does not
+/// synthesize an adopted holder when no transition happened.
+#[test]
+fn a_bare_seat_assignee_on_anothers_hold_record_does_not_pass_first_check() {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+
+    let holds: Vec<PathBuf> = std::fs::read_dir(home.run.join("ljos"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("hold-"))
+        })
+        .collect();
+    assert_eq!(holds.len(), 1);
+    let hold_path = &holds[0];
+    let mut lines: Vec<String> = std::fs::read_to_string(hold_path)
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect();
+    lines[0] = "inky".to_string();
+    std::fs::write(hold_path, lines.join("\n") + "\n").unwrap();
+    home.card("inky");
+
+    refused(
+        &home.hook(CONV_Y, MERGE, &[("CURSOR_CONVERSATION_ID", CONV_Y)]),
+        "Y's first check against a bare-seat line in X's hold record",
+    );
+
+    // If the tracker row stays claimed by X's conversation tag while a
+    // bare-seat hold record exists, Y cannot adopt it.
+    home.card(&holder(CONV_X));
+    refused(
+        &home.hook(CONV_Y, MERGE, &[("CURSOR_CONVERSATION_ID", CONV_Y)]),
+        "Y's check when the tracker row carries X's tag",
+    );
+
+    // When the tracker row is bare-seat (`inky`) and the bare-seat hold
+    // record is present, X adopts it on first check and Y is refused.
+    let pre_x = serde_json::json!({
+        "conversation_id": CONV_X,
+        "hook_event_name": "beforeMCPExecution",
+        "cursor_version": "2.4.0",
+        "tool_name": "ljos_sitting",
+        "tool_input": "{}",
+        "workspace_roots": ["/"]
+    })
+    .to_string();
+    let _ = home.hook_with(&pre_x, &[]);
+    let bare_actor = ljos_cli::work_id(&format!("inky:{ISSUE}"));
+    let bare_path = home.run.join(format!("ljos/hold-{bare_actor}"));
+    std::fs::rename(hold_path, &bare_path).unwrap();
+    home.card("inky");
+    allowed(
+        &home.hook(CONV_X, MERGE, &[("CURSOR_CONVERSATION_ID", CONV_X)]),
+        "X's first check adopts the bare-seat hold record",
+    );
+    refused(
+        &home.hook(CONV_Y, MERGE, &[("CURSOR_CONVERSATION_ID", CONV_Y)]),
+        "Y's check after X adopted the bare-seat hold record",
+    );
+}
+
+/// When two conversations race to adopt one bare-seat sitting record,
+/// the atomic transition under the adoption lock lets at most one
+/// conversation adopt it on every round, and the winner keeps passing
+/// while the other is refused.
+#[test]
+fn two_conversations_racing_on_a_bare_seat_hold_adopts_at_most_one() {
+    let home = std::sync::Arc::new(Box_::new());
+    home.card("inky");
+    let bare_actor = ljos_cli::work_id(&format!("inky:{ISSUE}"));
+    let bare_path = home.run.join(format!("ljos/hold-{bare_actor}"));
+    std::fs::create_dir_all(home.run.join("ljos")).unwrap();
+    let x_actor = ljos_cli::work_id(&format!("{}:{ISSUE}", holder(CONV_X)));
+    let y_actor = ljos_cli::work_id(&format!("{}:{ISSUE}", holder(CONV_Y)));
+    let x_path = home.run.join(format!("ljos/hold-{x_actor}"));
+    let y_path = home.run.join(format!("ljos/hold-{y_actor}"));
+
+    let fake_bin = home.run.join("fake-mcp");
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    let fake_mcp = fake_bin.join("ljos-mcp");
+    std::os::unix::fs::symlink("/bin/sleep", &fake_mcp).unwrap();
+    let mut sleeper = Command::new(&fake_mcp).arg("300").spawn().unwrap();
+    let pid = sleeper.id();
+
+    for round in 0..32 {
+        for entry in std::fs::read_dir(home.run.join("ljos")).unwrap().flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("session-")
+                || name.starts_with("hold-")
+                || name == "first-hook-conv"
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+        let _ = (&x_path, &y_path);
+        std::fs::write(
+            &bare_path,
+            format!("inky\ninky\n{pid}\nljos-mcp\n2026-10-25T00:00:00Z\n{ISSUE}\n-\n"),
+        )
+        .unwrap_or_else(|e| panic!("round {round}: {e}"));
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let h1 = std::sync::Arc::clone(&home);
+        let b1 = std::sync::Arc::clone(&barrier);
+        let t1 = std::thread::spawn(move || {
+            b1.wait();
+            h1.hook(CONV_X, MERGE, &[("LJOS_HOOKD", "off")])
+        });
+        let h2 = std::sync::Arc::clone(&home);
+        let b2 = std::sync::Arc::clone(&barrier);
+        let t2 = std::thread::spawn(move || {
+            b2.wait();
+            h2.hook(CONV_Y, MERGE, &[("LJOS_HOOKD", "off")])
+        });
+
+        let out_x = t1.join().unwrap();
+        let out_y = t2.join().unwrap();
+        let x_ok = !out_x.contains("sitting-gate");
+        let y_ok = !out_y.contains("sitting-gate");
+        assert!(
+            x_ok ^ y_ok,
+            "round {round}: expected exactly one winner, got x_ok={x_ok} ({out_x}) y_ok={y_ok} ({out_y})"
+        );
+        assert!(
+            std::fs::read_to_string(&bare_path)
+                .unwrap_or_default()
+                .lines()
+                .next()
+                .is_some_and(|l| l != "inky"),
+            "round {round}: bare-seat hold still has bare assignee"
+        );
+        let (winner, loser) = if x_ok {
+            (CONV_X, CONV_Y)
+        } else {
+            (CONV_Y, CONV_X)
+        };
+        allowed(
+            &home.hook(winner, MERGE, &[("LJOS_HOOKD", "off")]),
+            &format!("round {round}: winner {winner} follow-up check"),
+        );
+        refused(
+            &home.hook(loser, MERGE, &[("LJOS_HOOKD", "off")]),
+            &format!("round {round}: loser {loser} follow-up check"),
+        );
+    }
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+}
+
+/// A live bare-seat sitting is not handed to Z because a
+/// `session-bare-SEAT` record names Z. Any program of the user can write
+/// that record.
+#[test]
+fn a_forged_bare_session_record_does_not_hand_z_a_bare_seat_sitting() {
+    let home = Box_::new();
+    home.card("inky");
+    let mut sleeper = Command::new("sleep").arg("300").spawn().unwrap();
+    let comm = std::fs::read_to_string(format!("/proc/{}/comm", sleeper.id())).unwrap();
+    std::fs::create_dir_all(home.run.join("ljos")).unwrap();
+    let bare = ljos_cli::work_id(&format!("inky:{ISSUE}"));
+    std::fs::write(
+        home.run.join(format!("ljos/hold-{bare}")),
+        format!(
+            "inky\ninky\n{}\n{}\n2026-10-25T00:00:00Z\n{ISSUE}\n-\n",
+            sleeper.id(),
+            comm.trim()
+        ),
+    )
+    .unwrap();
+    // Name Y in `first-hook-conv`, so Z's hook cannot adopt a bare-seat
+    // hold through first-caller adoption.
+    std::fs::write(home.run.join("ljos/first-hook-conv"), format!("{CONV_Y}\n")).unwrap();
+    refused(
+        &home.hook(CONV_Z, MERGE, &[]),
+        "Z's merge on Y's bare-seat sitting",
+    );
+    std::fs::write(
+        home.run.join("ljos/session-bare-inky"),
+        format!("inky\n{}\nids\t{CONV_Z}\n", holder(CONV_Z)),
+    )
+    .unwrap();
+    refused(
+        &home.hook(CONV_Z, MERGE, &[]),
+        "Z's merge after a session-bare-inky record names Z",
+    );
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+}
+
+/// What a bare `ljos_sitting` answers does not depend on whether a
+/// cargo test binary is among the server's ancestors. The same call is
+/// made from this test's process tree and from a server that `setsid -f`
+/// detached from it.
+#[test]
+fn a_bare_mcp_sitting_answers_the_same_outside_a_cargo_test_runner() {
+    let home = Box_::new();
+    let org_dir = home.run.join("tracker/Software/proj");
+    std::fs::create_dir_all(&org_dir).unwrap();
+    let seed_tracker = || {
+        std::fs::write(
+            org_dir.join("issues.org"),
+            format!(
+                "#+TITLE: proj issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n* TODO [#C] the merge\n:PROPERTIES:\n:ID:         {ISSUE}\n:CREATED:    [2026-10-25 Sun]\n:END:\n"
+            ),
+        )
+        .unwrap();
+    };
+    seed_tracker();
+    let cache = home.home.join(".cache/ljos");
+    std::fs::create_dir_all(&cache).unwrap();
+    for name in [
+        "ljos",
+        "ljos-policyd",
+        "vissue-cli",
+        "vissue-mcp",
+        "deedar-cli",
+        "claimdag-cli",
+        "packset",
+        "packset-embed",
+    ] {
+        std::fs::write(cache.join(format!("crate-{name}")), "99.0.0\n").unwrap();
+    }
+    for name in ["deedar", "packset", "packsetd", "ljos-policyd"] {
+        script(
+            &home.bin.join(name),
+            &format!(
+                "#!/bin/sh\ncase \"$1\" in\n  --version|version) echo '{name} 99.0.0 (phronesis)' ;;\n  *) echo ok ;;\nesac\nexit 0\n"
+            ),
+        );
+    }
+    script(
+        &home.bin.join("claimdag"),
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'claimdag 99.0.0' ;;\n  list) echo '[]' ;;\n  claim) echo gen=2 ;;\n  *) echo ok ;;\nesac\nexit 0\n",
+    );
+    let card_path = home.card.display().to_string();
+    script(
+        &home.bin.join("vissue"),
+        &format!(
+            "#!/usr/bin/env python3\nimport json, os, pathlib, sys\n\
+             card = pathlib.Path({card_path:?})\n\
+             cmd = sys.argv[1] if len(sys.argv) > 1 else ''\n\
+             if cmd == '--version':\n\tprint('vissue 99.0.0')\n\
+             elif cmd == 'vote':\n\tprint('--used --confidence')\n\
+             elif cmd == 'identity':\n\tprint('vissue 99.0.0\\nroot=' + os.environ.get('VISSUE_ROOT','') + '\\nprefix=Software')\n\
+             elif cmd == 'claim':\n\tby = os.environ.get('VISSUE_AGENT', '')\n\tcard.write_text(json.dumps({{'id': {ISSUE:?}, 'state': 'STARTED', 'claimed_by': by}}))\n\tprint('claimed')\n\
+             elif cmd == 'show':\n\tprint(card.read_text() if card.exists() else json.dumps({{'id': {ISSUE:?}, 'title': 'the merge', 'state': 'TODO'}}))\n\
+             elif cmd == 'claims':\n\tprint('[]')\n\
+             else:\n\tprint('{{}}')\n"
+        ),
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let mut buf = [0u8; 2048];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let body =
+                r#"{"atoms":[],"island":[],"fired":0,"live":0,"embedder":{"available":false}}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = std::io::Write::write_all(&mut stream, resp.as_bytes());
+        }
+    });
+    let pack_url = format!("http://{addr}");
+
+    let mcp_call = |meta: Option<serde_json::Value>,
+                    detached: bool|
+     -> (serde_json::Value, Child) {
+        let bin_dir = Path::new(env!("CARGO_BIN_EXE_ljos")).parent().unwrap();
+        let mut cmd = if detached {
+            let mut c = Command::new("setsid");
+            c.args(["-f", env!("CARGO_BIN_EXE_ljos-mcp")]);
+            c
+        } else {
+            Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
+        };
+        cmd.env_clear()
+            .env(
+                "PATH",
+                format!("{}:{}:/usr/bin:/bin", home.bin.display(), bin_dir.display()),
+            )
+            .env("HOME", &home.home)
+            .env("XDG_CONFIG_HOME", home.home.join(".config"))
+            .env("XDG_STATE_HOME", home.home.join(".local/state"))
+            .env("XDG_DATA_HOME", home.home.join(".local/share"))
+            .env("XDG_CACHE_HOME", home.home.join(".cache"))
+            .env("XDG_RUNTIME_DIR", &home.run)
+            .env("VISSUE_ROOT", home.run.join("tracker"))
+            .env("VISSUE_NO_ROUTE", "1")
+            .env("LJOS_SEAT", "inky")
+            .env("LJOS_PROJECT", "proj")
+            .env("LJOS_TRACKER_GIT", "off")
+            .env("PACKSET_URL", &pack_url)
+            .env("PACKSET_WORKSPACE", "seat")
+            .current_dir(&home.repo)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = cmd.spawn().unwrap();
+        let mut params = serde_json::json!({
+            "name": "ljos_sitting",
+            "arguments": {"issue": ISSUE}
+        });
+        if let Some(m) = meta {
+            params["_meta"] = m;
+        }
+        let reqs = [
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "cursor", "version": "2.4.0"}}
+            }),
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": params}),
+        ];
+        {
+            let stdin = child.stdin.as_mut().unwrap();
+            for r in &reqs {
+                writeln!(stdin, "{r}").unwrap();
+            }
+            stdin.flush().unwrap();
+        }
+        use std::io::BufRead;
+        let stdout = child.stdout.take().unwrap();
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut answer = serde_json::Value::Null;
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap() > 0 {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                if v.get("id") == Some(&serde_json::json!(2)) {
+                    answer = v;
+                    break;
+                }
+            }
+            line.clear();
+        }
+        (answer, child)
+    };
+
+    let clear = || {
+        for entry in std::fs::read_dir(home.run.join("ljos"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("hold-")
+                || name.starts_with("session-")
+                || name == "first-hook-conv"
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+        let _ = std::fs::remove_file(&home.card);
+        seed_tracker();
+    };
+    clear();
+    let (inside, mut srv) = mcp_call(None, false);
+    let _ = srv.kill();
+    let _ = srv.wait();
+    clear();
+    let (outside, mut srv) = mcp_call(None, true);
+    let _ = srv.wait();
+    assert_eq!(
+        inside["result"]["isError"] == true,
+        outside["result"]["isError"] == true,
+        "a bare ljos_sitting answered differently under the test runner:\ninside {inside}\noutside {outside}"
     );
 }
