@@ -29,10 +29,10 @@ ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the relea
 ```
 
 The programs land in `~/.local/bin`, and the `export` line puts it on PATH
-in the shell you pasted into. From the next release on, when `~/.local/bin`
-is not on PATH, the installer also adds that line to `~/.profile` and
-`~/.bashrc`, and to `~/.zshrc` when there is one, so a new shell finds
-`ljos`; `--no-modify-path` leaves them alone.
+in the shell you pasted into. When `~/.local/bin` is not on PATH, the
+installer also adds that line to `~/.profile` and `~/.bashrc`, and to
+`~/.zshrc` when there is one, so a new shell finds `ljos`. That edit
+ships in v0.33.0. `--no-modify-path` leaves the profiles alone.
 
 The installer downloads each program from its GitHub release, checks it
 against the published SHA-256 sum, and builds from source with `cargo` where a
