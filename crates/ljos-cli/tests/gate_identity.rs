@@ -297,6 +297,34 @@ fn refused(said: &str, what: &str) {
     assert!(said.contains("holds no live sitting"), "{what}:\n{said}");
 }
 
+fn book_path(home: &Box_, conv: &str) -> PathBuf {
+    home.run
+        .join(format!("ljos/book-{}.json", ljos_cli::session_tag(conv)))
+}
+
+fn book_clock(path: &Path) -> u64 {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| v.get("last_unix").and_then(|n| n.as_u64()))
+        .unwrap_or(0)
+}
+
+fn set_book_clock(path: &Path, unix: u64) {
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    value["last_unix"] = serde_json::json!(unix);
+    std::fs::write(path, value.to_string()).unwrap();
+}
+
+fn drain(home: &Box_) {
+    let out = home
+        .command(env!("CARGO_BIN_EXE_ljos"), &["hook", "--drain"], &[])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "drain: {}", text_of(&out));
+}
+
 fn sits_nowhere(row: &str, what: &str) {
     assert!(row.contains("holds no live sitting"), "{what}:\n{row}");
 }
@@ -402,8 +430,9 @@ fn the_diag_repro_allows_a_without_its_id_in_the_hook_env() {
 }
 
 /// A `conversation_id` that names nobody is refused, whatever id the
-/// hook's own environment carries. Only a payload without the field
-/// falls back to the environment.
+/// hook's own environment carries. A blank string is not such a name:
+/// it is resolved below. A payload without the field still falls back
+/// to the environment.
 #[test]
 fn an_unusable_conversation_id_is_refused_not_read_from_the_env() {
     let home = Box_::new();
@@ -412,8 +441,6 @@ fn an_unusable_conversation_id_is_refused_not_read_from_the_env() {
     home.card(&holder(CONV_X));
     let env = [("CURSOR_CONVERSATION_ID", CONV_X)];
     for bad in [
-        serde_json::json!(""),
-        serde_json::json!("   "),
         serde_json::json!("-"),
         serde_json::json!(null),
         serde_json::json!("null"),
@@ -427,6 +454,150 @@ fn an_unusable_conversation_id_is_refused_not_read_from_the_env() {
     allowed(
         &home.hook_with(&home.payload(None, MERGE), &env),
         "a merge with no conversation_id, X's id in the env",
+    );
+}
+
+/// A blank `conversation_id` is the id the CLI would read. With that id
+/// in the environment the sitting is found and the book's clock moves.
+/// With no id there, the call is refused as a payload that names nobody.
+#[test]
+fn a_blank_conversation_id_reads_the_env_and_touches_the_book() {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    let x = [("CURSOR_CONVERSATION_ID", CONV_X)];
+    for blank in [serde_json::json!(""), serde_json::json!("   ")] {
+        allowed(
+            &home.hook_with(&home.payload(Some(blank.clone()), MERGE), &x),
+            &format!("a merge whose conversation_id is {blank}, X in the env"),
+        );
+    }
+    let said = home.hook_with(&home.payload(Some("".into()), MERGE), &[]);
+    refused(
+        &said,
+        "a merge whose conversation_id is blank and no id is stamped",
+    );
+    assert!(
+        said.contains("names no conversation"),
+        "blank with no env id was not refused as naming nobody:\n{said}"
+    );
+    allowed(
+        &home.hook_with(
+            &home.payload(Some("".into()), MERGE),
+            &[
+                ("CURSOR_CONVERSATION_ID", CONV_X),
+                ("CURSOR_AGENT_ID", CONV_Y),
+                ("LJOS_SESSION_ID", CONV_Z),
+            ],
+        ),
+        "blank id, X in CURSOR_CONVERSATION_ID ahead of the agent id and LJOS_SESSION_ID",
+    );
+    refused(
+        &home.hook_with(
+            &home.payload(Some("".into()), MERGE),
+            &[
+                ("CURSOR_AGENT_ID", CONV_Y),
+                ("CURSOR_CONVERSATION_ID", CONV_Z),
+            ],
+        ),
+        "blank id, Z in CURSOR_CONVERSATION_ID, Y only in CURSOR_AGENT_ID",
+    );
+    let said = home.hook_with(
+        &home.payload(Some("".into()), MERGE),
+        &[("CURSOR_AGENT_ID", CONV_X)],
+    );
+    refused(
+        &said,
+        "blank id with only CURSOR_AGENT_ID, which names no session",
+    );
+    assert!(
+        said.contains("names no conversation"),
+        "CURSOR_AGENT_ID alone was not refused as naming nobody:\n{said}"
+    );
+
+    let y_sat = home
+        .command(
+            "setsid",
+            &["-w", env!("CARGO_BIN_EXE_ljos"), "claim", ISSUE],
+            &[("CODEX_THREAD_ID", CONV_Y)],
+        )
+        .output()
+        .unwrap();
+    assert!(y_sat.status.success(), "claim under Y: {}", text_of(&y_sat));
+    home.card(&holder(CONV_Y));
+    allowed(
+        &home.hook_with(
+            &home.payload(Some("".into()), MERGE),
+            &[
+                ("CODEX_THREAD_ID", CONV_Y),
+                ("CURSOR_CONVERSATION_ID", CONV_X),
+            ],
+        ),
+        "blank id, Y in CODEX_THREAD_ID ahead of X in CURSOR_CONVERSATION_ID",
+    );
+    home.card(&holder(CONV_X));
+    let said = home.hook_with(
+        &home.payload(Some("".into()), MERGE),
+        &[
+            ("CODEX_THREAD_ID", CONV_Y),
+            ("CURSOR_CONVERSATION_ID", CONV_X),
+        ],
+    );
+    assert!(
+        said.contains("sitting-gate") && said.contains("\"permission\":\"deny\""),
+        "blank id judged as Y while the tracker names X:\n{said}"
+    );
+
+    let raw = home
+        .command(
+            "setsid",
+            &["-w", env!("CARGO_BIN_EXE_ljos"), "claim", ISSUE],
+            &[("LJOS_SESSION_ID", CONV_Z)],
+        )
+        .output()
+        .unwrap();
+    assert!(raw.status.success(), "claim under Z: {}", text_of(&raw));
+    home.card(CONV_Z);
+    allowed(
+        &home.hook_with(
+            &home.payload(Some("".into()), MERGE),
+            &[("LJOS_SESSION_ID", CONV_Z)],
+        ),
+        "blank id, Z in LJOS_SESSION_ID alone",
+    );
+
+    home.card(&holder(CONV_X));
+    let touch = |conv: Option<serde_json::Value>, env: &[(&str, &str)]| {
+        let mut payload = serde_json::json!({
+            "cursor_version": "2.4.0",
+            "hook_event_name": "beforeShellExecution",
+            "cwd": home.repo,
+            "command": "true",
+        });
+        if let Some(conv) = conv {
+            payload["conversation_id"] = conv;
+        }
+        home.hook_with(&payload.to_string(), env);
+        drain(&home);
+    };
+    let path = book_path(&home, CONV_X);
+    touch(Some(CONV_X.into()), &x);
+    let stamped = book_clock(&path);
+    assert!(stamped > 1, "a payload id did not touch {}", path.display());
+    set_book_clock(&path, 1);
+    touch(Some("".into()), &x);
+    let refreshed = book_clock(&path);
+    assert!(
+        refreshed > 1,
+        "a blank id did not refresh the same book ({})",
+        path.display()
+    );
+    set_book_clock(&path, 1);
+    touch(Some(CONV_X.into()), &x);
+    assert!(
+        book_clock(&path) > 1,
+        "the payload id did not refresh the same book again"
     );
 }
 

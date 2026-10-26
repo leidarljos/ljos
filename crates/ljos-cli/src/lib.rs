@@ -1453,7 +1453,13 @@ fn own_seat(name: &str) -> bool {
 /// runner stamped, one occupancy name and the keys it came from. No
 /// product list.
 fn session_actor() -> Option<(String, String)> {
-    let mut parts = stamped_sessions();
+    session_choice(stamped_sessions())
+}
+
+/// One occupancy name from `parts`, in the order [`session_actor`] uses.
+/// `CODEX_THREAD_ID` alone, then `CURSOR_CONVERSATION_ID` alone, then the
+/// one remaining variable, else a hash of all of them.
+fn session_choice(mut parts: Vec<(String, String)>) -> Option<(String, String)> {
     if parts.is_empty() {
         return None;
     }
@@ -1794,14 +1800,17 @@ fn spawn_while_busy<T>(mut spawn: impl FnMut() -> std::io::Result<T>) -> std::io
 enum CallConversation {
     /// No hook call, or one whose payload has no session key.
     Unbound,
-    /// A `conversation_id` that names nobody: empty, `-`, null,
-    /// short, not a string.
+    /// A `conversation_id` that names nobody: `-`, null, short, not a
+    /// string, or a blank string when the environment names no conversation.
     Unusable,
     /// Another runner's session key that names nobody. The gate refuses;
     /// the seat is still read from the environment, as that runner's
     /// payload id never named it.
     UnusableOther,
     Named(String),
+    /// A blank `conversation_id` resolved from `LJOS_SESSION_ID` alone.
+    /// The holder is that id, as the CLI keeps a name chosen that way.
+    Kept(String),
 }
 
 static CALL_CURSOR_CONVERSATION: std::sync::Mutex<CallConversation> =
@@ -1822,17 +1831,25 @@ pub fn usable_session_id(id: &str) -> Option<&str> {
 /// A payload's `conversation_id` is the `CURSOR_CONVERSATION_ID` the
 /// runner stamps on that conversation's shells, so the hook resolves
 /// the holder `ljos sitting` resolved there. The hook's own environment
-/// may belong to another conversation and is not read for the id. A
-/// `conversation_id` that is there but unusable names nobody, and the
-/// environment does not stand in for it. Only `conversation_id` names a
-/// call's conversation here, never `session_id`. Another runner's
+/// may belong to another conversation and is not read for a non-empty id.
+/// A blank `conversation_id` names nothing of its own: the id is read
+/// from the environment in [`session_actor`]'s order. A non-empty
+/// `conversation_id` that is unusable names nobody, and the environment
+/// does not stand in for it. Only `conversation_id` names a call's
+/// conversation here, never `session_id`. Another runner's
 /// payload leaves the environment as the source, unless it carries a
 /// session key that names nobody, which the gate refuses.
 pub fn bind_call_conversation(raw: &str, call: &HookCall) {
     let cursor = matches!(call.shape, HookShape::Cursor | HookShape::CursorShell);
     let v = serde_json::from_str::<Value>(raw.trim()).unwrap_or(Value::Null);
     let has = |key: &str| v.get(key).is_some();
-    let bound = if has("conversation_id") {
+    let bound = if has("conversation_id") && blank_conversation_value(&v["conversation_id"]) {
+        match blank_resolved() {
+            Some((id, keys)) if keys == "LJOS_SESSION_ID" => CallConversation::Kept(id),
+            Some((id, _)) => CallConversation::Named(id),
+            None => CallConversation::Unusable,
+        }
+    } else if has("conversation_id") {
         match v["conversation_id"].as_str().and_then(usable_session_id) {
             Some(id) => CallConversation::Named(id.to_string()),
             None => CallConversation::Unusable,
@@ -1847,6 +1864,49 @@ pub fn bind_call_conversation(raw: &str, call: &HookCall) {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = bound;
 }
 
+/// A `conversation_id` string that trims to nothing and carries no
+/// control character. `-`, `null`, a short id, and a non-string are not
+/// blank: those name nobody.
+fn blank_conversation_value(v: &Value) -> bool {
+    v.as_str()
+        .is_some_and(|s| !s.chars().any(char::is_control) && s.trim().is_empty())
+}
+
+/// Whether `raw` carries a blank `conversation_id` string.
+#[must_use]
+pub fn blank_conversation_field(raw: &str) -> bool {
+    let v = serde_json::from_str::<Value>(raw.trim()).unwrap_or(Value::Null);
+    blank_conversation_value(&v["conversation_id"])
+}
+
+/// The conversation a blank payload id resolves to, and the key it came
+/// from. Same order as [`session_actor`], read from [`stamp_env`] rather
+/// than the bound call. `CURSOR_CONVERSATION_ID` keeps the place it has
+/// for the CLI.
+fn blank_resolved() -> Option<(String, String)> {
+    session_choice(stamped_env_sessions())
+}
+
+/// Put the id a blank `conversation_id` resolved to on `call`, so the
+/// book is keyed as it is when the payload carries that id. A call that
+/// already has a session, and a payload that is not blank, are left alone.
+/// Call after [`bind_call_conversation`].
+pub fn adopt_blank_conversation(raw: &str, call: &mut HookCall) {
+    if call
+        .session
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        return;
+    }
+    if !blank_conversation_field(raw) {
+        return;
+    }
+    if let Some(id) = call_cursor_conversation() {
+        call.session = Some(id);
+    }
+}
+
 fn call_conversation() -> CallConversation {
     CALL_CURSOR_CONVERSATION
         .lock()
@@ -1858,7 +1918,7 @@ fn call_conversation() -> CallConversation {
 #[must_use]
 pub fn call_cursor_conversation() -> Option<String> {
     match call_conversation() {
-        CallConversation::Named(id) => Some(id),
+        CallConversation::Named(id) | CallConversation::Kept(id) => Some(id),
         _ => None,
     }
 }
@@ -1907,7 +1967,7 @@ fn cursor_agent_without_id() -> bool {
 /// bound id.
 fn cursor_conversation() -> Option<String> {
     match call_conversation() {
-        CallConversation::Named(id) => Some(id),
+        CallConversation::Named(id) | CallConversation::Kept(id) => Some(id),
         CallConversation::Unusable => None,
         CallConversation::Unbound | CallConversation::UnusableOther => {
             if call_conversation() == CallConversation::Unbound
@@ -2501,9 +2561,17 @@ pub fn tmux_spawn_socket_keys(line: &str, cwd: Option<&str>) -> Vec<String> {
 pub(crate) fn stamped_sessions() -> Vec<(String, String)> {
     match call_conversation() {
         CallConversation::Named(id) => return vec![("CURSOR_CONVERSATION_ID".to_string(), id)],
+        CallConversation::Kept(id) => return vec![("LJOS_SESSION_ID".to_string(), id)],
         CallConversation::Unusable => return Vec::new(),
         CallConversation::Unbound | CallConversation::UnusableOther => {}
     }
+    stamped_env_sessions()
+}
+
+/// Every usable session variable in [`stamp_env`], sorted. This does not
+/// read the bound call, so a blank payload can resolve an id before the
+/// bind is stored.
+fn stamped_env_sessions() -> Vec<(String, String)> {
     let mut found: Vec<(String, String)> = stamp_env()
         .into_iter()
         .filter(|(k, v)| runner_session_var(k, v) && usable_session_id(v).is_some())
