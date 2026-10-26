@@ -218,6 +218,21 @@ impl Box_ {
     }
 }
 
+/// `child`'s comm once it has exec'd `want`. `spawn` returns when the
+/// exec's close-on-exec pipe closes, a moment before the kernel renames
+/// the process, so the first read can still give the parent's thread name.
+fn exec_comm(child: &Child, want: &str) -> String {
+    let path = format!("/proc/{}/comm", child.id());
+    for _ in 0..500 {
+        let comm = std::fs::read_to_string(&path).unwrap();
+        if comm.trim() == want {
+            return comm;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    panic!("{path} never named {want}");
+}
+
 /// `ljos hookd` started as conversation `conv` would start it, once its
 /// socket answers. Killed on drop.
 struct Hookd(Child);
@@ -353,7 +368,7 @@ fn the_diag_repro_allows_a_without_its_id_in_the_hook_env() {
     let home = Box_::new();
     home.card(&holder(CONV_A));
     let mut sleeper = Command::new("sleep").arg("300").spawn().unwrap();
-    let comm = std::fs::read_to_string(format!("/proc/{}/comm", sleeper.id())).unwrap();
+    let comm = exec_comm(&sleeper, "sleep");
     std::fs::create_dir_all(home.run.join("ljos")).unwrap();
     std::fs::write(
         home.run.join("ljos/hold-live"),
@@ -2687,7 +2702,7 @@ fn a_forged_bare_session_record_does_not_hand_z_a_bare_seat_sitting() {
     let home = Box_::new();
     home.card("inky");
     let mut sleeper = Command::new("sleep").arg("300").spawn().unwrap();
-    let comm = std::fs::read_to_string(format!("/proc/{}/comm", sleeper.id())).unwrap();
+    let comm = exec_comm(&sleeper, "sleep");
     std::fs::create_dir_all(home.run.join("ljos")).unwrap();
     let bare = ljos_cli::work_id(&format!("inky:{ISSUE}"));
     std::fs::write(
