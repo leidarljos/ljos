@@ -1245,52 +1245,52 @@ mod tests {
         let cases = [
             (
                 "windsurf",
-                json!({"agent_action_name": "pre_run_command", "trajectory_id": "t1",
+                json!({"agent_action_name": "pre_run_command", "trajectory_id": "task-0001",
                        "tool_info": {"command_line": "git push -f", "cwd": "/tmp"}}),
             ),
             (
                 "cline",
-                json!({"hookName": "PreToolUse", "taskId": "t1", "workspaceRoots": ["/tmp"],
+                json!({"hookName": "PreToolUse", "taskId": "task-0001", "workspaceRoots": ["/tmp"],
                        "preToolUse": {"toolName": "execute_command", "parameters": {"command": "git push -f"}}}),
             ),
             (
                 "cline",
-                json!({"hookName": "tool_call", "taskId": "t1", "workspaceRoots": ["/tmp"],
+                json!({"hookName": "tool_call", "taskId": "task-0001", "workspaceRoots": ["/tmp"],
                        "tool_call": {"id": "c", "name": "run_commands", "input": {"commands": ["git push -f"]}}}),
             ),
             (
                 "copilot",
-                json!({"sessionId": "t1", "timestamp": 1, "cwd": "/tmp", "toolName": "bash",
+                json!({"sessionId": "task-0001", "timestamp": 1, "cwd": "/tmp", "toolName": "bash",
                        "toolArgs": "{\"command\": \"git push -f\"}"}),
             ),
             (
                 "copilot",
-                json!({"hook_event_name": "PreToolUse", "session_id": "t1", "cwd": "/tmp",
+                json!({"hook_event_name": "PreToolUse", "session_id": "task-0001", "cwd": "/tmp",
                        "tool_name": "Bash", "tool_input": {"command": "git push -f"}}),
             ),
             (
                 "gemini",
-                json!({"hook_event_name": "BeforeTool", "session_id": "t1", "cwd": "/tmp",
+                json!({"hook_event_name": "BeforeTool", "session_id": "task-0001", "cwd": "/tmp",
                        "tool_name": "run_shell_command", "tool_input": {"command": "git push -f"}}),
             ),
             (
                 "crush",
-                json!({"event": "PreToolUse", "session_id": "t1", "cwd": "/tmp",
+                json!({"event": "PreToolUse", "session_id": "task-0001", "cwd": "/tmp",
                        "tool_name": "bash", "tool_input": {"command": "git push -f"}}),
             ),
             (
                 "kiro",
-                json!({"hook_event_name": "PreToolUse", "session_id": "t1", "cwd": "/tmp",
+                json!({"hook_event_name": "PreToolUse", "session_id": "task-0001", "cwd": "/tmp",
                        "tool_name": "shell", "tool_input": {"command": "git push -f"}}),
             ),
             (
                 "factory",
-                json!({"hook_event_name": "PreToolUse", "session_id": "t1", "cwd": "/tmp",
+                json!({"hook_event_name": "PreToolUse", "session_id": "task-0001", "cwd": "/tmp",
                        "tool_name": "Execute", "tool_input": {"command": "git push -f"}}),
             ),
             (
                 "qwen",
-                json!({"hook_event_name": "PreToolUse", "session_id": "t1", "cwd": "/tmp",
+                json!({"hook_event_name": "PreToolUse", "session_id": "task-0001", "cwd": "/tmp",
                        "tool_name": "run_shell_command", "tool_input": {"command": "git push -f"}}),
             ),
         ];
@@ -1299,7 +1299,7 @@ mod tests {
             let call = crate::hook_call(&v.to_string());
             assert_eq!(call.event, "PreToolUse", "{runner}: {v}");
             assert_eq!(call.cue, "git push -f", "{runner}: {v}");
-            assert_eq!(call.session.as_deref(), Some("t1"), "{runner}: {v}");
+            assert_eq!(call.session.as_deref(), Some("task-0001"), "{runner}: {v}");
             assert_eq!(
                 crate::hook_directory(&v.to_string()).unwrap(),
                 std::fs::canonicalize("/tmp").unwrap(),

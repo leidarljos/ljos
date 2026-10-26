@@ -1792,10 +1792,15 @@ fn spawn_while_busy<T>(mut spawn: impl FnMut() -> std::io::Result<T>) -> std::io
 /// What the call this process answers said of its conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CallConversation {
-    /// No hook call, or one whose payload has no `conversation_id`.
+    /// No hook call, or one whose payload has no session key.
     Unbound,
-    /// A `conversation_id` that names nobody: empty, `-`, null, short.
+    /// A `conversation_id` that names nobody: empty, `-`, null,
+    /// short, not a string.
     Unusable,
+    /// Another runner's session key that names nobody. The gate refuses;
+    /// the seat is still read from the environment, as that runner's
+    /// payload id never named it.
+    UnusableOther,
     Named(String),
 }
 
@@ -1819,18 +1824,24 @@ pub fn usable_session_id(id: &str) -> Option<&str> {
 /// the holder `ljos sitting` resolved there. The hook's own environment
 /// may belong to another conversation and is not read for the id. A
 /// `conversation_id` that is there but unusable names nobody, and the
-/// environment does not stand in for it. Any other runner, or a payload
-/// without the field, leaves the environment as the source.
+/// environment does not stand in for it. Only `conversation_id` names a
+/// call's conversation here, never `session_id`. Another runner's
+/// payload leaves the environment as the source, unless it carries a
+/// session key that names nobody, which the gate refuses.
 pub fn bind_call_conversation(raw: &str, call: &HookCall) {
+    let cursor = matches!(call.shape, HookShape::Cursor | HookShape::CursorShell);
     let v = serde_json::from_str::<Value>(raw.trim()).unwrap_or(Value::Null);
-    let bound = match v.get("conversation_id") {
-        Some(val) => match val.as_str().and_then(usable_session_id) {
+    let has = |key: &str| v.get(key).is_some();
+    let bound = if has("conversation_id") {
+        match v["conversation_id"].as_str().and_then(usable_session_id) {
             Some(id) => CallConversation::Named(id.to_string()),
             None => CallConversation::Unusable,
-        },
-        None => CallConversation::Unbound,
+        }
+    } else if !cursor && call.session.is_none() && HOOK_SESSION_KEYS.iter().any(|key| has(key)) {
+        CallConversation::UnusableOther
+    } else {
+        CallConversation::Unbound
     };
-    let _ = call;
     *CALL_CURSOR_CONVERSATION
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = bound;
@@ -1860,10 +1871,13 @@ fn hold_env_allowed() -> bool {
         && std::env::var_os("CURSOR_AGENT").is_none()
 }
 
-/// Whether the bound call carried a `conversation_id` that names nobody.
+/// Whether the bound call carried a session key that names nobody.
 #[must_use]
 pub fn call_conversation_unusable() -> bool {
-    call_conversation() == CallConversation::Unusable
+    matches!(
+        call_conversation(),
+        CallConversation::Unusable | CallConversation::UnusableOther
+    )
 }
 
 /// The conversation this process speaks for: the bound call's,
@@ -1872,10 +1886,12 @@ fn cursor_conversation() -> Option<String> {
     match call_conversation() {
         CallConversation::Named(id) => Some(id),
         CallConversation::Unusable => None,
-        CallConversation::Unbound => std::env::var("CURSOR_CONVERSATION_ID")
-            .ok()
-            .map(|id| id.trim().to_string())
-            .filter(|id| !id.is_empty()),
+        CallConversation::Unbound | CallConversation::UnusableOther => {
+            std::env::var("CURSOR_CONVERSATION_ID")
+                .ok()
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty())
+        }
     }
 }
 
@@ -1889,7 +1905,7 @@ fn stamped_sessions() -> Vec<(String, String)> {
     match call_conversation() {
         CallConversation::Named(id) => return vec![("CURSOR_CONVERSATION_ID".to_string(), id)],
         CallConversation::Unusable => return Vec::new(),
-        CallConversation::Unbound => {}
+        CallConversation::Unbound | CallConversation::UnusableOther => {}
     }
     let mut found: Vec<(String, String)> = std::env::vars()
         .filter(|(k, v)| runner_session_var(k, v))
@@ -7619,6 +7635,10 @@ pub fn payload_sessions(input: &str) -> Vec<String> {
     out
 }
 
+/// The keys a hook payload names its session by, in the order a runner
+/// is read when no `conversation_id` was bound.
+const HOOK_SESSION_KEYS: &[&str] = &["session_id", "sessionId", "conversation_id"];
+
 /// [`hook_call`] with the event the runner's hooks file named, for a
 /// runner whose payload does not carry one.
 #[must_use]
@@ -7670,11 +7690,9 @@ pub fn hook_call_as(input: &str, event: Option<&str>) -> HookCall {
     let session = if cursor && v.get("conversation_id").is_some() {
         v["conversation_id"].as_str().and_then(usable_session_id)
     } else {
-        v["session_id"]
-            .as_str()
-            .or_else(|| v["sessionId"].as_str())
-            .or_else(|| v["conversation_id"].as_str())
-            .filter(|s| !s.is_empty())
+        HOOK_SESSION_KEYS
+            .iter()
+            .find_map(|key| v[*key].as_str().and_then(usable_session_id))
     }
     .map(str::to_string);
     let from_payload = v["hook_event_name"]
@@ -42063,12 +42081,12 @@ mod tests {
         assert_eq!(tool.cue, "cargo test");
         let prompt = hook_call(r#"{"hook_event_name":"UserPromptSubmit","prompt":"fix the fuse"}"#);
         assert_eq!(prompt.cue, "fix the fuse");
-        let grok = hook_call(r#"{"hookEventName":"post_tool_use","sessionId":"s1"}"#);
+        let grok = hook_call(r#"{"hookEventName":"post_tool_use","sessionId":"grok-sess-0001"}"#);
         assert_eq!(grok.event, "PostToolUse");
-        assert_eq!(grok.session.as_deref(), Some("s1"));
-        hold_hook_context(Some("s1"), "held pack");
-        assert_eq!(take_hook_context(Some("s1")), "held pack");
-        assert!(take_hook_context(Some("s1")).is_empty());
+        assert_eq!(grok.session.as_deref(), Some("grok-sess-0001"));
+        hold_hook_context(Some("grok-sess-0001"), "held pack");
+        assert_eq!(take_hook_context(Some("grok-sess-0001")), "held pack");
+        assert!(take_hook_context(Some("grok-sess-0001")).is_empty());
         let session = format!("hold-{}", std::process::id());
         hold_hook_note(Some(&session), "pack line", &["m1".to_string()]);
         hold_hook_context(Some(&session), "");

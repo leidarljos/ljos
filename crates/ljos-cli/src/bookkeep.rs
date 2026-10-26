@@ -9500,7 +9500,7 @@ print(f"id={ident}")
         let _saved = saved_env();
         let (dir, _tracker, repo) = scratch();
         let _bins = arm(dir.path(), &_tracker);
-        let session = "qpiw";
+        let session = "sess-qpiw";
         prompt_and_edit(&repo, session, "Add a readme line");
         let sha = commit_file(&repo, "README.md", "hello from cloudflare\n");
         let (post, post_call) = payload(
@@ -9568,7 +9568,7 @@ print(f"id={ident}")
         let (dir, tracker, repo) = scratch();
         let _bins = arm(dir.path(), &tracker);
         let gone = dead_pid();
-        for session in ["dead-a", "dead-b"] {
+        for session in ["dead-run-a", "dead-run-b"] {
             prompt_and_edit(&repo, session, "Add a readme line");
             set_owner(dir.path(), session, gone);
         }
@@ -9580,7 +9580,7 @@ print(f"id={ident}")
             serde_json::json!({"prompt": "a later sitting"}),
         );
         let _ = observe(&start, &start_call);
-        for session in ["dead-a", "dead-b"] {
+        for session in ["dead-run-a", "dead-run-b"] {
             let book = book_json(dir.path(), session);
             let row = book["repos"].as_object().unwrap().values().next().unwrap();
             assert_eq!(row["finished"], true, "{session}: {book}");
@@ -9611,7 +9611,7 @@ print(f"id={ident}")
         });
         set_var("PACKSET_URL", &kept);
         set_var("PACKSET_TIMEOUT_MS", "2000");
-        let session = "gfiz";
+        let session = "sess-gfiz";
         prompt_and_edit(&repo, session, "Add a readme line");
         let abandoned = commit_file(&repo, "README.md", "hello from the first sha\n");
         let (post, post_call) = payload(
@@ -10441,12 +10441,12 @@ print(f"id={ident}")
         }
         let (raw, call) = payload(
             "PostToolUse",
-            "conv-a",
+            "conv-aaaa",
             &repo,
             serde_json::json!({"tool_name": "Edit", "tool_input": {"file_path": "README.md"}}),
         );
         let _ = observe(&raw, &call);
-        let issue_a = issue_of("conv-a", &repo).expect("conversation A filed");
+        let issue_a = issue_of("conv-aaaa", &repo).expect("conversation A filed");
         assert!(
             held_by_this_seat(&issue_a),
             "the planted hold would not be eligible"
@@ -10460,14 +10460,17 @@ print(f"id={ident}")
         CLAIM_DIR_SCANS.store(0, Ordering::SeqCst);
         let (raw, call) = payload(
             "PostToolUse",
-            "conv-b",
+            "conv-bbbb",
             &repo,
             serde_json::json!({"tool_name": "Edit", "tool_input": {"file_path": "NOTES.md"}}),
         );
         let _ = observe(&raw, &call);
-        let issue_b = issue_of("conv-b", &repo).expect("conversation B filed its own");
+        let issue_b = issue_of("conv-bbbb", &repo).expect("conversation B filed its own");
         assert_ne!(issue_b, issue_a, "B took A's claim");
-        assert_eq!(issue_of("conv-a", &repo).as_deref(), Some(issue_a.as_str()));
+        assert_eq!(
+            issue_of("conv-aaaa", &repo).as_deref(),
+            Some(issue_a.as_str())
+        );
         assert_eq!(creates(&tracker), 2);
         let log = std::fs::read_to_string(dir.path().join("run/ljos/book.log")).unwrap_or_default();
         assert!(

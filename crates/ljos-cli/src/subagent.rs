@@ -155,7 +155,8 @@ pub fn note_hook_call(input: &str, event: &str) -> bool {
     crate::ballot_sig::hook_agent(agent.clone());
     let tool = text(&v, &["tool_name", "toolName"]).unwrap_or_default();
     let seat_tool = event == "PreToolUse" && is_seat_mcp_tool(&tool);
-    let session = text(&v, &["session_id", "sessionId", "conversation_id"])
+    let session = crate::hook_call_as(input, Some(event))
+        .session
         .map(|s| crate::ballot_sig::field(&s));
     let call = text(&v, &["tool_use_id", "toolUseId"])
         .map(|c| token(&c))

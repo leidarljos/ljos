@@ -1258,7 +1258,7 @@ fn pretool(cwd: &str, workdir: Option<&str>, command: &str) -> String {
     }
     serde_json::json!({
         "hook_event_name": "PreToolUse",
-        "session_id": "workdir",
+        "session_id": "workdir-sess",
         "cwd": cwd,
         "tool_name": "Bash",
         "tool_input": tool_input,

@@ -193,7 +193,7 @@ fn writes_history(call: &GitCall) -> bool {
 pub fn live_sitting() -> Result<String, String> {
     if crate::call_conversation_unusable() {
         return Err(
-            "the hook payload's conversation_id names no conversation, so this conversation holds no live sitting"
+            "the hook payload's conversation id names no conversation, so this conversation holds no live sitting"
                 .into(),
         );
     }

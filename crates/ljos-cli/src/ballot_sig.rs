@@ -803,10 +803,11 @@ fn codex_thread(parent: &str) -> Option<String> {
 }
 
 /// Remember the hook payload's session for this process, and export it for
-/// a child when the environment has not already named one.
+/// a child when the environment has not already named one. An id that
+/// names nobody ([`crate::usable_session_id`]) is no session.
 pub fn export_hook_session(id: Option<&str>) {
     crate::with_env_mutation(|| {
-        let id = id.map(str::trim).filter(|s| !s.is_empty()).map(field);
+        let id = id.and_then(crate::usable_session_id).map(field);
         HOOK_SESSION.with(|c| *c.borrow_mut() = id.clone());
         if let Some(id) = id {
             if std::env::var("LJOS_HARNESS_SESSION")

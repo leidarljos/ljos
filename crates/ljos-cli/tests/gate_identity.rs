@@ -576,3 +576,123 @@ fn a_subagent_writes_under_its_parents_sitting_and_z_does_not() {
         "a subagent's merge under an ljos process that names X",
     );
 }
+
+/// A Claude Code hook names its conversation by `session_id` and the
+/// conversation's shells by the stamp in the environment. A subagent's
+/// call carries the parent's `session_id` and an `agent_id`, and passes
+/// on the parent's sitting. A `session_id` that names nobody is refused,
+/// whatever the environment says; a payload with no session key at all
+/// is judged by the environment, as before.
+#[test]
+fn a_claude_subagent_passes_and_a_session_id_that_names_nobody_is_refused() {
+    const P: &str = "claude-sess-0001aaaa";
+    let home = Box_::new();
+    let p = [("CLAUDE_SESSION_ID", P)];
+    let sat = home
+        .command(
+            "setsid",
+            &["-w", env!("CARGO_BIN_EXE_ljos"), "claim", ISSUE],
+            &p,
+        )
+        .output()
+        .unwrap();
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(P));
+    let claude = |session: Option<serde_json::Value>| {
+        let mut payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "agent_id": "agent-0001",
+            "tool_name": "Bash",
+            "tool_input": {"command": MERGE},
+            "cwd": home.repo,
+        });
+        if let Some(session) = session {
+            payload["session_id"] = session;
+        }
+        payload.to_string()
+    };
+    allowed(
+        &home.hook_with(&claude(Some(P.into())), &p),
+        "the Claude subagent's merge",
+    );
+    allowed(
+        &home.hook_with(&claude(None), &p),
+        "a Claude merge with no session key",
+    );
+    for bad in [
+        serde_json::json!(""),
+        serde_json::json!("-"),
+        serde_json::json!(null),
+        serde_json::json!("ab"),
+    ] {
+        refused(
+            &home.hook_with(&claude(Some(bad.clone())), &p),
+            &format!("a Claude merge whose session_id is {bad}"),
+        );
+    }
+
+    // Claude Task subagent when the shell has no session id stamped:
+    // the parent sits under the runner process (comm=python3), and the
+    // subagent's merge passes through ancestry.
+    let home2 = Box_::new();
+    let python = PathBuf::from("/usr/bin/python3");
+    let claim = format!("\"$LJOS\" claim {ISSUE} >/dev/null 2>&1");
+    let hook = "\"$LJOS\" hook < \"$PAYLOAD\"";
+    let sub_payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": P,
+        "agent_id": "agent-0001",
+        "tool_name": "Bash",
+        "tool_input": {"command": MERGE},
+        "cwd": home2.repo,
+    })
+    .to_string();
+    home2.card("inky");
+    let said = home2.under(
+        &python,
+        &[("CLAUDECODE", "1")],
+        &sub_payload,
+        &[(None, &claim), (None, hook)],
+    );
+    allowed(
+        &said,
+        "a Claude Task subagent merge when the shell carries no session id",
+    );
+}
+
+/// The record a hook keeps of a shell call, for the `ljos` line it runs,
+/// is filed under the session the gate and the ballot read the call as:
+/// a call's `conversation_id`, not its `session_id`, and a Claude
+/// call's `session_id` with its `agent_id`.
+#[test]
+fn a_hooks_call_record_is_filed_under_the_calls_conversation() {
+    let home = Box_::new();
+    let calls = home.run.join("ljos/agent-calls/shell");
+    let mut cursor: serde_json::Value =
+        serde_json::from_str(&home.payload(Some(CONV_X.into()), "ljos doctor")).unwrap();
+    cursor["tool_use_id"] = "tu-00000001".into();
+    home.hook_with(&cursor.to_string(), &[]);
+    assert!(calls.join(CONV_X).is_dir(), "no record under X");
+    assert!(
+        !calls.join("cursor-sess-0002bbbb").exists(),
+        "a record under the session_id"
+    );
+
+    const P: &str = "claude-sess-0001aaaa";
+    let claude = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": P,
+        "agent_id": "agent-0001",
+        "tool_use_id": "tu-00000002",
+        "tool_name": "Bash",
+        "tool_input": {"command": "ljos doctor"},
+        "cwd": home.repo,
+    });
+    home.hook_with(&claude.to_string(), &[]);
+    let kept: String = std::fs::read_dir(calls.join(P))
+        .unwrap()
+        .flatten()
+        .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
+        .collect();
+    assert!(kept.contains("agent-0001"), "{kept}");
+}
