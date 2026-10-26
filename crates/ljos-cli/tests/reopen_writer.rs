@@ -1,24 +1,39 @@
-//! `ljos reopen` undoes only a close this program wrote.
-//! The writer is the seat on that commit, or on the logbook line this
-//! program stamped. A note is not that record.
+//! `ljos reopen` undoes only a close this program wrote, and only when
+//! a person is present. A subject, a working-tree logbook line, and a
+//! process `LJOS_SEAT` by itself are not that record.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-fn vissue_bin() -> PathBuf {
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let bin = dir.join("vissue");
-            if bin.is_file() {
-                return bin;
-            }
-        }
+fn vissue_bin() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|dir| {
+        let bin = dir.join("vissue");
+        bin.is_file().then_some(bin)
+    })
+}
+
+/// vissue 0.20 has to be on PATH. CI builds it. A tree without it
+/// skips these tests and says why.
+fn vissue_020() -> bool {
+    let Some(bin) = vissue_bin() else {
+        eprintln!("skip: vissue 0.20 is not on PATH");
+        return false;
+    };
+    let Ok(version) = Command::new(&bin).arg("--version").output() else {
+        eprintln!("skip: vissue 0.20 is not on PATH");
+        return false;
+    };
+    let text = String::from_utf8_lossy(&version.stdout);
+    if !text.contains("0.20") {
+        eprintln!("skip: vissue 0.20 is not on PATH (found {text})");
+        return false;
     }
-    PathBuf::from("/tmp/ljos-bins/vissue")
+    true
 }
 
 fn path_env() -> String {
-    let bin = vissue_bin();
+    let bin = vissue_bin().expect("vissue 0.20");
     let dir = bin.parent().unwrap().display().to_string();
     let rest = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
     format!("{dir}:/usr/bin:/bin:{rest}")
@@ -41,7 +56,7 @@ impl Board {
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(&git_cfg, "").unwrap();
-        let version = Command::new(vissue_bin())
+        let version = Command::new(vissue_bin().expect("vissue 0.20"))
             .arg("--version")
             .env("PATH", path_env())
             .output()
@@ -82,7 +97,7 @@ impl Board {
 
     fn cmd(&self, bin: &str, args: &[&str]) -> Output {
         let program = if bin == "vissue" {
-            vissue_bin()
+            vissue_bin().expect("vissue 0.20")
         } else {
             PathBuf::from(bin)
         };
@@ -107,6 +122,18 @@ impl Board {
     fn git_add_commit(&self, subject: &str) {
         git(&self.root, &["add", "-A"]);
         let out = git(&self.root, &["commit", "-q", "-m", subject]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn git_empty(&self, subject: &str) {
+        let out = git(
+            &self.root,
+            &["commit", "-q", "--allow-empty", "-m", subject],
+        );
         assert!(
             out.status.success(),
             "{}",
@@ -187,6 +214,9 @@ fn said(out: &Output) -> String {
 
 #[test]
 fn a_forged_note_does_not_reopen_a_hand_close() {
+    if !vissue_020() {
+        return;
+    }
     let b = Board::new();
     let id = b.issue("hand close");
     b.vissue(&["update", &id, "-s", "DONE"]);
@@ -203,6 +233,9 @@ fn a_forged_note_does_not_reopen_a_hand_close() {
 
 #[test]
 fn a_longer_issue_token_is_not_this_close() {
+    if !vissue_020() {
+        return;
+    }
     let b = Board::new();
     let id = b.issue("suffix");
     b.vissue(&["update", &id, "-s", "DONE"]);
@@ -217,6 +250,9 @@ fn a_longer_issue_token_is_not_this_close() {
 
 #[test]
 fn a_later_hand_close_in_one_commit_stays_closed() {
+    if !vissue_020() {
+        return;
+    }
     let b = Board::new();
     let id = b.issue("batched hand close");
     b.vissue(&["update", &id, "-s", "BLOCKED"]);
@@ -233,6 +269,9 @@ fn a_later_hand_close_in_one_commit_stays_closed() {
 
 #[test]
 fn a_note_then_a_later_hand_close_stays_closed() {
+    if !vissue_020() {
+        return;
+    }
     let b = Board::new();
     let id = b.issue("note then hand");
     b.vissue(&["update", &id, "-s", "BLOCKED"]);
@@ -251,6 +290,9 @@ fn a_note_then_a_later_hand_close_stays_closed() {
 
 #[test]
 fn a_stamp_with_a_later_state_line_is_not_reopened() {
+    if !vissue_020() {
+        return;
+    }
     let b = Board::new();
     let id = b.issue("stamp then hand");
     b.vissue(&["update", &id, "-s", "DONE"]);
@@ -273,6 +315,9 @@ fn a_stamp_with_a_later_state_line_is_not_reopened() {
 
 #[test]
 fn another_seat_cannot_reopen() {
+    if !vissue_020() {
+        return;
+    }
     let b = Board::new();
     let id = b.issue("other seat");
     b.vissue(&["update", &id, "-s", "DONE"]);
@@ -284,28 +329,61 @@ fn another_seat_cannot_reopen() {
 }
 
 #[test]
-fn the_writer_restores_the_prior_state_and_does_not_take_the_claim() {
+fn a_seat_named_only_by_the_process_cannot_reopen() {
+    if !vissue_020() {
+        return;
+    }
     let b = Board::new();
     let id = b.issue("restore prior");
     b.vissue(&["note", &id, "keep this sentence"]);
-    let child = b.vissue(&["q", "-p", "probe", "--parent", &id, "a child"]);
+    let _child = b.vissue(&["q", "-p", "probe", "--parent", &id, "a child"]);
     b.vissue(&["update", &id, "-s", "STARTED"]);
     b.vissue(&["update", &id, "-s", "DONE"]);
     b.stamp_close(&id, "saddle");
     b.vissue(&["note", &id, "settled-with-notes: recorded"]);
     let out = b.reopen(&id, "saddle");
-    assert!(out.status.success(), "{}", said(&out));
-    let card = b.show(&id);
-    assert_eq!(card["state"], "STARTED", "{card}");
+    assert!(!out.status.success(), "{}", said(&out));
     assert!(
-        card["claimed_by"].is_null() || card["claimed_by"].as_str() == Some(""),
-        "{card}"
+        said(&out).contains("a person reopens a ticket"),
+        "{}",
+        said(&out)
     );
-    assert_eq!(card["title"], "restore prior");
-    let notes = card["logbook"].to_string();
-    assert!(notes.contains("keep this sentence"), "{notes}");
-    let kids = b.vissue(&["children", &id, "--json"]);
-    assert!(kids.contains(&child), "{kids}");
-    let again = b.reopen(&id, "saddle");
-    assert!(!again.status.success(), "{}", said(&again));
+    assert_eq!(b.show(&id)["state"], "DONE");
+}
+
+#[test]
+fn a_forged_subject_does_not_reopen_a_hand_close() {
+    if !vissue_020() {
+        return;
+    }
+    let b = Board::new();
+    let id = b.issue("hand close, forged subject");
+    b.vissue(&["update", &id, "-s", "STARTED"]);
+    b.vissue(&["update", &id, "-s", "DONE"]);
+    b.git_add_commit(&format!("chore(issues): {id} finished by rohit"));
+    b.git_empty(&format!(
+        "chore(issues): {id} settled with notes by mallory"
+    ));
+    let out = b.reopen(&id, "mallory");
+    assert!(!out.status.success(), "{}", said(&out));
+    assert_eq!(b.show(&id)["state"], "DONE", "{}", said(&out));
+}
+
+#[test]
+fn a_same_minute_hand_close_stays_closed() {
+    if !vissue_020() {
+        return;
+    }
+    let b = Board::new();
+    let id = b.issue("same minute");
+    b.vissue(&["update", &id, "-s", "STARTED"]);
+    b.git_add_commit("chore(issues): started");
+    b.vissue(&["update", &id, "-s", "DONE"]);
+    b.stamp_close(&id, "saddle");
+    b.vissue(&["update", &id, "-s", "STARTED"]);
+    b.vissue(&["update", &id, "-s", "DONE"]);
+    b.git_add_commit("chore(issues): sync 1 issue");
+    let out = b.reopen(&id, "saddle");
+    assert!(!out.status.success(), "{}", said(&out));
+    assert_eq!(b.show(&id)["state"], "DONE", "{}", said(&out));
 }

@@ -31591,6 +31591,7 @@ enum CloseFind {
     None,
 }
 
+#[derive(Clone, PartialEq, Eq)]
 struct StateFlip {
     from: String,
     to: String,
@@ -31598,20 +31599,28 @@ struct StateFlip {
 }
 
 /// Put `issue` back to the state it had before a close this program wrote.
-/// The writer is the seat on that tracker commit, or on the logbook line
-/// this program stamped. A note is not that record. A later state change,
-/// including one a person made by hand and one stored in a batched commit,
-/// is left as it is. Another seat is refused. The caller does not take the claim.
+/// A person has to be present. The caller is the seat named in the seat
+/// file, and a process `LJOS_SEAT` has to agree with that file when one
+/// is set. The close is a tracker commit whose own diff adds the DONE
+/// line and the logbook line. A subject alone, and a logbook line that
+/// exists only in the working tree, are not that record. Every state
+/// line is compared, so a later hand close in the same minute stays.
+/// The caller does not take the claim.
 ///
 /// # Errors
 ///
-/// `issue` is not DONE, this program did not write the close, the ticket
-/// moved after that close, or this seat is not the one that wrote it.
+/// No person is present, the seat file does not agree, `issue` is not
+/// DONE, this program did not write the close, the ticket moved after
+/// that close, or this seat is not the one that wrote it.
 pub fn reopen(issue: &str) -> Result<String> {
     let issue = issue.trim();
     if issue.is_empty() {
         bail!("reopen: an issue id is required; nothing was written");
     }
+    if !person_present() {
+        bail!("reopen: a person reopens a ticket; nothing was written");
+    }
+    let caller = reopen_caller()?;
     let v = issue_record(issue)?;
     let state = v["state"].as_str().unwrap_or("");
     if state != "DONE" {
@@ -31626,7 +31635,6 @@ pub fn reopen(issue: &str) -> Result<String> {
             bail!("reopen: {issue} has no close this program wrote; nothing was written")
         }
     };
-    let caller = seat_name();
     if !same_writer(&caller, &found.writer) {
         bail!(
             "reopen: {issue} was closed by {}; this seat is {caller}; nothing was written",
@@ -31654,14 +31662,44 @@ fn same_writer(caller: &str, writer: &str) -> bool {
     !caller.is_empty() && caller != "runner" && caller == writer
 }
 
+/// The seat file names the caller. A process `LJOS_SEAT` by itself does
+/// not: it has to match the file, or be unset.
+fn reopen_caller() -> Result<String> {
+    let file = seat_file_value("LJOS_SEAT");
+    let process = named_var("LJOS_SEAT");
+    match (file, process) {
+        (Some(file), Some(process)) if same_writer(&file, &process) => {
+            Ok(canonical_seat_name(&file))
+        }
+        (Some(file), None) => Ok(canonical_seat_name(&file)),
+        (Some(file), Some(process)) => bail!(
+            "reopen: LJOS_SEAT {process} does not match the seat file {file}; nothing was written"
+        ),
+        (None, _) => {
+            bail!("reopen: the seat file does not name the caller; nothing was written")
+        }
+    }
+}
+
+/// `LJOS_SEAT` in `~/.config/ljos/env`, not the process environment.
+fn seat_file_value(key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(home().ok()?.join(".config/ljos/env")).ok()?;
+    text.lines()
+        .find_map(|line| {
+            let line = line.trim().strip_prefix("export ").unwrap_or(line.trim());
+            let (k, v) = line.split_once('=')?;
+            (k.trim() == key).then(|| v.trim().trim_matches('"').trim_matches('\'').to_string())
+        })
+        .filter(|v| !v.is_empty())
+}
+
 fn find_written_close(issue: &str) -> CloseFind {
     let Ok(path) = tracker_issue_path(issue) else {
         return CloseFind::None;
     };
-    match written_close_git(issue, &path) {
-        CloseFind::None => written_close_stamp(issue, &path),
-        other => other,
-    }
+    // A logbook line in the working tree is not a record. A seat can
+    // write one. Only the commit's own diff is read.
+    written_close_git(issue, &path)
 }
 
 fn written_close_git(issue: &str, path: &Path) -> CloseFind {
@@ -31694,66 +31732,69 @@ fn written_close_git(issue: &str, path: &Path) -> CloseFind {
     let Some((sha, writer)) = hit else {
         return CloseFind::None;
     };
+    // A later commit that touches this file is a move, including a hand
+    // close in the same minute. The newest line alone cannot see it:
+    // the tracker records a minute, and two closes share one.
+    let later = tracker_git_out(
+        dir,
+        &["rev-list", "--count", &format!("{sha}..HEAD"), "--", &spec],
+    );
+    if later.as_deref().map(str::trim) != Some("0") {
+        return CloseFind::Moved;
+    }
+    // The commit's own diff has to add the DONE line and the logbook
+    // line. A subject on an empty commit, or a DONE line a person wrote
+    // and a seat committed, is not that record.
+    let Some(diff) = tracker_git_out(dir, &["show", "--format=", "-p", &sha, "--", &spec]) else {
+        return CloseFind::None;
+    };
+    let want = verb_heading(AUTO_CLOSE_VERB);
+    let mut added_done = false;
+    let mut added_log = false;
+    for line in diff.lines() {
+        let Some(added) = line.strip_prefix('+') else {
+            continue;
+        };
+        if added.starts_with("++") {
+            continue;
+        }
+        if parse_state_flip(added)
+            .is_some_and(|flip| flip.to == "DONE" && !flip.from.is_empty() && flip.from != "DONE")
+        {
+            added_done = true;
+        }
+        if parse_logbook_act(added).is_some_and(|(verb, seat)| verb == want && !seat.is_empty()) {
+            added_log = true;
+        }
+    }
+    if !added_done || !added_log {
+        return CloseFind::None;
+    }
     let Some(blob) = tracker_git_out(dir, &["show", &format!("{sha}:{spec}")]) else {
         return CloseFind::Moved;
     };
     let Some(lines) = issue_block_lines(&blob, issue) else {
         return CloseFind::Moved;
     };
-    let Some(flip) = state_flips(&lines).into_iter().next() else {
-        return CloseFind::Moved;
-    };
-    if flip.to != "DONE" || flip.from.is_empty() || flip.from == "DONE" {
-        return CloseFind::Moved;
-    }
+    let then_flips = state_flips(&lines);
     let Ok(current) = std::fs::read_to_string(path) else {
         return CloseFind::Moved;
     };
     let Some(now_lines) = issue_block_lines(&current, issue) else {
         return CloseFind::Moved;
     };
-    let Some(now) = state_flips(&now_lines).into_iter().next() else {
-        return CloseFind::Moved;
-    };
-    if now.from != flip.from || now.to != flip.to || now.stamp != flip.stamp {
+    let now_flips = state_flips(&now_lines);
+    if then_flips != now_flips {
         return CloseFind::Moved;
     }
-    CloseFind::Ready(WrittenClose {
-        prior: flip.from,
-        writer,
-    })
-}
-
-fn written_close_stamp(issue: &str, path: &Path) -> CloseFind {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return CloseFind::None;
-    };
-    let Some(lines) = issue_block_lines(&text, issue) else {
-        return CloseFind::None;
-    };
-    let want = verb_heading(AUTO_CLOSE_VERB);
-    let Some(at) = lines.iter().position(|line| {
-        if line.contains("Note:") {
-            return false;
-        }
-        parse_logbook_act(line).is_some_and(|(verb, seat)| verb == want && !seat.is_empty())
-    }) else {
-        return CloseFind::None;
-    };
-    let Some((_, writer)) = parse_logbook_act(&lines[at]) else {
-        return CloseFind::None;
-    };
-    if state_flips(&lines[..at]).into_iter().next().is_some() {
+    let Some(flip) = then_flips.first() else {
         return CloseFind::Moved;
-    }
-    let Some(flip) = state_flips(&lines[at + 1..]).into_iter().next() else {
-        return CloseFind::None;
     };
     if flip.to != "DONE" || flip.from.is_empty() || flip.from == "DONE" {
-        return CloseFind::None;
+        return CloseFind::Moved;
     }
     CloseFind::Ready(WrittenClose {
-        prior: flip.from,
+        prior: flip.from.clone(),
         writer,
     })
 }
