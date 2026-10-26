@@ -3672,7 +3672,10 @@ impl ServerHandler for LjosServer {
                     }
                 } else if let Some(holder) = ljos_cli::holder_from_bare_session_record(&seat.seat) {
                     seat.holder = holder;
-                } else if name == "ljos_sitting" {
+                } else if name == "ljos_sitting" || name == "ljos_claim" {
+                    // A hold taken as the bare seat would be adoptable by
+                    // the first conversation that asks, and could take over
+                    // a live tagged conversation's hold under `same_holder`.
                     let passed_assignee = request
                         .arguments
                         .as_ref()
@@ -3688,7 +3691,7 @@ impl ServerHandler for LjosServer {
                     return Ok(attach_next(
                         &name,
                         as_tool_error(refused(anyhow::anyhow!(
-                            "ljos_sitting: no conversation could be bound for bare seat {}; \
+                            "{name}: no conversation could be bound for bare seat {}; \
                              pass _meta.conversation_id on the call or run through the runner's \
                              beforeMCPExecution hook",
                             seat.seat
