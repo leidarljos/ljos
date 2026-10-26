@@ -2439,6 +2439,8 @@ fn tmux_pane_conversation(sock: &str, pane: Option<&str>) -> Option<String> {
         .unwrap_or(chain.len());
     let mut active_texts: Vec<String> = Vec::new();
     for (pid, _) in &chain[..stop] {
+        #[cfg(not(target_os = "linux"))]
+        let _ = pid;
         #[cfg(target_os = "linux")]
         if let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) {
             let s = raw
