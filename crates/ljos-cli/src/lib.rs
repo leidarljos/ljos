@@ -39803,9 +39803,10 @@ mod tests {
             .expect("install.sh lists COMPONENTS");
         let rest = &script[start + "COMPONENTS=\"".len()..];
         let table = &rest[..rest.find('"').expect("COMPONENTS closes")];
+        // repository, crate, programs, tarball style
         let progs: Vec<&str> = table
             .lines()
-            .filter_map(|l| l.split_whitespace().nth(3))
+            .filter_map(|l| l.split_whitespace().nth(2))
             .flat_map(|p| p.split(','))
             .collect();
         for (bin, _) in SEAT_BINS {
