@@ -31387,6 +31387,241 @@ fn finish_lesson(issue: &str, text: &str) -> String {
     }
 }
 
+/// The verb [`persist_tracker`] wrote when a round count used to close a ticket.
+const AUTO_CLOSE_VERB: &str = "settled with notes";
+
+struct WrittenClose {
+    prior: String,
+    writer: String,
+}
+
+enum CloseFind {
+    Ready(WrittenClose),
+    Moved,
+    None,
+}
+
+struct StateFlip {
+    from: String,
+    to: String,
+    stamp: String,
+}
+
+/// Put `issue` back to the state it had before a close this program wrote.
+/// The writer is the seat on that tracker commit, or on the logbook line
+/// this program stamped. A note is not that record. A later state change,
+/// including one a person made by hand and one stored in a batched commit,
+/// is left as it is. Another seat is refused. The caller does not take the claim.
+///
+/// # Errors
+///
+/// `issue` is not DONE, this program did not write the close, the ticket
+/// moved after that close, or this seat is not the one that wrote it.
+pub fn reopen(issue: &str) -> Result<String> {
+    let issue = issue.trim();
+    if issue.is_empty() {
+        bail!("reopen: an issue id is required; nothing was written");
+    }
+    let v = issue_record(issue)?;
+    let state = v["state"].as_str().unwrap_or("");
+    if state != "DONE" {
+        bail!("reopen: {issue} is {state}, not DONE; nothing was written");
+    }
+    let found = match find_written_close(issue) {
+        CloseFind::Ready(found) => found,
+        CloseFind::Moved => {
+            bail!("reopen: {issue} moved after the close this program wrote; nothing was written")
+        }
+        CloseFind::None => {
+            bail!("reopen: {issue} has no close this program wrote; nothing was written")
+        }
+    };
+    let caller = seat_name();
+    if !same_writer(&caller, &found.writer) {
+        bail!(
+            "reopen: {issue} was closed by {}; this seat is {caller}; nothing was written",
+            found.writer
+        );
+    }
+    run_captured("vissue", &["update", issue, "-s", &found.prior])?;
+    if let Ok(after) = issue_record(issue) {
+        if let Some(who) = after["claimed_by"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let _ = unstamp_tracker(issue, who, false);
+        }
+    }
+    let mut out = format!("{issue} reopened as {}\n", found.prior);
+    out.push_str(&persist_tracker(issue, "reopened"));
+    Ok(out)
+}
+
+fn same_writer(caller: &str, writer: &str) -> bool {
+    let caller = canonical_seat_name(caller);
+    let writer = canonical_seat_name(writer);
+    !caller.is_empty() && caller != "runner" && caller == writer
+}
+
+fn find_written_close(issue: &str) -> CloseFind {
+    let Ok(path) = tracker_issue_path(issue) else {
+        return CloseFind::None;
+    };
+    match written_close_git(issue, &path) {
+        CloseFind::None => written_close_stamp(issue, &path),
+        other => other,
+    }
+}
+
+fn written_close_git(issue: &str, path: &Path) -> CloseFind {
+    let Some(dir) = path.parent() else {
+        return CloseFind::None;
+    };
+    let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) else {
+        return CloseFind::None;
+    };
+    let Some(prefix) = tracker_git_out(dir, &["rev-parse", "--show-prefix"]) else {
+        return CloseFind::None;
+    };
+    let spec = format!("{}{name}", prefix.trim());
+    let Some(log) = tracker_git_out(dir, &["log", "--format=%H %s"]) else {
+        return CloseFind::None;
+    };
+    let mut hit: Option<(String, String)> = None;
+    for line in log.lines() {
+        let Some((sha, subject)) = line.split_once(' ') else {
+            continue;
+        };
+        let Some(act) = parse_tracker_commit(subject) else {
+            continue;
+        };
+        if act.issue == issue && act.verb == AUTO_CLOSE_VERB {
+            hit = Some((sha.to_string(), act.seat));
+            break;
+        }
+    }
+    let Some((sha, writer)) = hit else {
+        return CloseFind::None;
+    };
+    let Some(blob) = tracker_git_out(dir, &["show", &format!("{sha}:{spec}")]) else {
+        return CloseFind::Moved;
+    };
+    let Some(lines) = issue_block_lines(&blob, issue) else {
+        return CloseFind::Moved;
+    };
+    let Some(flip) = state_flips(&lines).into_iter().next() else {
+        return CloseFind::Moved;
+    };
+    if flip.to != "DONE" || flip.from.is_empty() || flip.from == "DONE" {
+        return CloseFind::Moved;
+    }
+    let Ok(current) = std::fs::read_to_string(path) else {
+        return CloseFind::Moved;
+    };
+    let Some(now_lines) = issue_block_lines(&current, issue) else {
+        return CloseFind::Moved;
+    };
+    let Some(now) = state_flips(&now_lines).into_iter().next() else {
+        return CloseFind::Moved;
+    };
+    if now.from != flip.from || now.to != flip.to || now.stamp != flip.stamp {
+        return CloseFind::Moved;
+    }
+    CloseFind::Ready(WrittenClose {
+        prior: flip.from,
+        writer,
+    })
+}
+
+fn written_close_stamp(issue: &str, path: &Path) -> CloseFind {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return CloseFind::None;
+    };
+    let Some(lines) = issue_block_lines(&text, issue) else {
+        return CloseFind::None;
+    };
+    let want = verb_heading(AUTO_CLOSE_VERB);
+    let Some(at) = lines.iter().position(|line| {
+        if line.contains("Note:") {
+            return false;
+        }
+        parse_logbook_act(line).is_some_and(|(verb, seat)| verb == want && !seat.is_empty())
+    }) else {
+        return CloseFind::None;
+    };
+    let Some((_, writer)) = parse_logbook_act(&lines[at]) else {
+        return CloseFind::None;
+    };
+    if state_flips(&lines[..at]).into_iter().next().is_some() {
+        return CloseFind::Moved;
+    }
+    let Some(flip) = state_flips(&lines[at + 1..]).into_iter().next() else {
+        return CloseFind::None;
+    };
+    if flip.to != "DONE" || flip.from.is_empty() || flip.from == "DONE" {
+        return CloseFind::None;
+    }
+    CloseFind::Ready(WrittenClose {
+        prior: flip.from,
+        writer,
+    })
+}
+
+fn tracker_git_out(dir: &Path, args: &[&str]) -> Option<String> {
+    let out = tracker_git_at(dir)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn issue_block_lines(text: &str, issue: &str) -> Option<Vec<String>> {
+    let lines: Vec<&str> = text.lines().collect();
+    let id_at = lines
+        .iter()
+        .position(|line| line_is_issue_id(line, issue))?;
+    let start = (0..=id_at).rev().find(|i| heading_line(lines[*i]))?;
+    let end = ((id_at + 1)..lines.len())
+        .find(|i| heading_line(lines[*i]))
+        .unwrap_or(lines.len());
+    Some(lines[start..end].iter().map(|s| (*s).to_owned()).collect())
+}
+
+fn state_flips(lines: &[String]) -> Vec<StateFlip> {
+    lines
+        .iter()
+        .filter_map(|line| parse_state_flip(line))
+        .collect()
+}
+
+fn parse_state_flip(line: &str) -> Option<StateFlip> {
+    let body = line.trim().strip_prefix('-')?.trim();
+    if body.starts_with("Note:") {
+        return None;
+    }
+    let rest = body.strip_prefix("State ")?;
+    let (to_raw, from_raw) = rest.split_once(" from ")?;
+    let to = to_raw.trim().trim_matches('"').to_string();
+    let from_raw = from_raw.trim();
+    let bracket = from_raw.rfind('[')?;
+    let from = from_raw[..bracket]
+        .trim()
+        .trim_end_matches(',')
+        .trim()
+        .trim_matches('"')
+        .to_string();
+    let stamp = from_raw[bracket..].trim().to_string();
+    if from.is_empty() || to.is_empty() || stamp.is_empty() {
+        return None;
+    }
+    Some(StateFlip { from, to, stamp })
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "The public finish signature preserves its independent command options"

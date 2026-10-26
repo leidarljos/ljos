@@ -295,6 +295,10 @@ is active for this seat. The person at their own terminal is never gated.
   as a child; the same objection is not filed again. A round count does
   not close the issue. When the seats still split, the reading names the
   open objection children. The person closes with `ljos finish --close`.
+  `ljos reopen ISSUE` puts back the state from before a close this program
+  wrote, and only that close. The writer is the seat on that tracker commit,
+  or on the logbook line this program stamped. A note is not that record.
+  Another seat is refused. The caller does not take the claim.
   A tally printed later is
   who voted. On a hard question the ballot carries the private forecast
   of the others, `ljos vote ISSUE --for OPTION --expect OPTION`; `ljos predict`
