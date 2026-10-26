@@ -1448,3 +1448,44 @@ fn a_pretooluse_mcp_tool_name_reaches_user_rules() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("\"permission\":\"deny\""), "{stdout}");
 }
+
+/// Non-permission events should not wait seconds on a hung memory backend.
+#[test]
+fn ordinary_non_permission_events_do_not_stall_on_hung_pack() {
+    let hab = hab("hung-non-gate");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for conn in listener.incoming().flatten() {
+            held.push(conn);
+        }
+    });
+    let url = format!("http://127.0.0.1:{port}");
+    let events = [
+        (
+            "sessionStart",
+            r#"{"cursor_version":"2.4.0","conversation_id":"c","hook_event_name":"sessionStart"}"#,
+        ),
+        (
+            "stop",
+            r#"{"cursor_version":"2.4.0","conversation_id":"c","hook_event_name":"stop","status":"completed","loop_count":0}"#,
+        ),
+        (
+            "beforeSubmitPrompt",
+            r#"{"cursor_version":"2.4.0","conversation_id":"c","hook_event_name":"beforeSubmitPrompt","prompt":"hello"}"#,
+        ),
+        (
+            "postToolUseFailure",
+            r#"{"cursor_version":"2.4.0","conversation_id":"c","hook_event_name":"postToolUseFailure","tool_name":"Shell","tool_input":{"command":"ls"},"error_message":"exit 2"}"#,
+        ),
+    ];
+    for (name, payload) in events {
+        let mut cmd = ljos(&hab, &["hook"]);
+        cmd.env("PACKSET_URL", &url)
+            .env("PACKSET_WORKSPACE", "probe")
+            .env("LJOS_HOOKD", "off");
+        let (took, _out) = finished(feed(cmd, payload), Duration::from_secs(10), name);
+        assert!(took < Duration::from_millis(500), "{name} took {took:?}");
+    }
+}

@@ -746,11 +746,17 @@ fn sync_after_write() {
 /// Pull and push before a hook builds its line. A tracker that does not
 /// answer is ignored, and the local file is what the hook shows.
 pub fn sync_for_hook() {
-    let budget = std::time::Duration::from_millis(sync_budget_ms(1_500));
+    let started = std::time::Instant::now();
+    let mut ms = sync_budget_ms(1_500);
+    if let Some(left) = super::side_remaining_ms() {
+        ms = ms.min(left.max(1));
+    }
+    let budget = std::time::Duration::from_millis(ms);
     let host = super::sync::host();
     for root in super::sync::user_rule_trackers() {
         let _ = super::sync::exchange_user_rules(&root, &host, budget, false);
     }
+    super::charge_side_wait(started.elapsed());
 }
 
 /// One pull and push, as `ljos prefer --user --sync` runs it.

@@ -11696,6 +11696,80 @@ pub fn subagent_stop_reason(
 /// room on a loaded host.
 pub const HOOK_DEADLINE_MS: u64 = 8000;
 
+/// How long a side event may sit inside pack reads. Time spent while the
+/// pack is answering does not come out of this. A socket that accepts and
+/// stays quiet does. Startup and the calls after the budget is gone still
+/// have to fit under half a second, so this stays well short of that.
+const SIDE_BUDGET_MS: u64 = 250;
+const SIDE_UNBOUND: u64 = u64::MAX;
+
+static SIDE_BUDGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(SIDE_UNBOUND);
+
+/// Clears the pack-wait budget when the hook call returns.
+pub struct SideBound;
+
+impl Drop for SideBound {
+    fn drop(&mut self) {
+        SIDE_BUDGET.store(SIDE_UNBOUND, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Session start, a prompt, a failed tool, and a stop are not permission
+/// checks. Their pack reads share one budget, so a quiet socket cannot
+/// fill the runner's cut-off. The call still prints the answer it built.
+pub fn arm_side_bound(call: &HookCall, _input: &str) -> Option<SideBound> {
+    if !matches!(
+        call.event.as_str(),
+        "SessionStart" | "UserPromptSubmit" | "PostToolUseFailure" | "Stop"
+    ) {
+        return None;
+    }
+    SIDE_BUDGET.store(SIDE_BUDGET_MS, std::sync::atomic::Ordering::SeqCst);
+    Some(SideBound)
+}
+
+/// The hook prints its own answer. Kept so the call site has one place
+/// that decides the answer is this process's.
+pub fn take_side_answer() -> bool {
+    true
+}
+
+pub(crate) fn side_remaining_ms() -> Option<u64> {
+    let left = SIDE_BUDGET.load(std::sync::atomic::Ordering::SeqCst);
+    if left == SIDE_UNBOUND {
+        None
+    } else {
+        Some(left)
+    }
+}
+
+/// Count time a pack read actually blocked. A fast answer costs little,
+/// so a later read still has the budget. A quiet socket spends it.
+pub(crate) fn charge_side_wait(elapsed: std::time::Duration) {
+    let ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    if ms == 0 {
+        return;
+    }
+    let _ = SIDE_BUDGET.fetch_update(
+        std::sync::atomic::Ordering::SeqCst,
+        std::sync::atomic::Ordering::SeqCst,
+        |cur| {
+            if cur == SIDE_UNBOUND {
+                None
+            } else {
+                Some(cur.saturating_sub(ms))
+            }
+        },
+    );
+}
+
+pub(crate) fn cap_pack_wait(requested: std::time::Duration) -> std::time::Duration {
+    match side_remaining_ms() {
+        Some(left) => requested.min(std::time::Duration::from_millis(left)),
+        None => requested,
+    }
+}
+
 /// Run one stage of a hook call. With `LJOS_HOOK_TIMING` set, the stage and
 /// its wall time go to stderr, one line each, so a slow hook names the stage
 /// that holds it.
@@ -11796,16 +11870,19 @@ fn encoder_has_answered(status: &Value) -> bool {
 fn wait_for_encoder(bound: std::time::Duration) -> bool {
     let started = std::time::Instant::now();
     loop {
-        let answered = with_pack_timeout(200, || {
-            pack()
-                .ok()
-                .and_then(|client| client.status(None).ok())
-                .is_some_and(|status| encoder_has_answered(&status))
+        // A missing status is a pack that did not answer. Polling it for
+        // the rest of the bound would sit out a quiet socket. A status
+        // that arrived cold is still loading, so the poll continues.
+        let status = with_pack_timeout(200, || {
+            pack().ok().and_then(|client| client.status(None).ok())
         });
-        if answered {
+        let Some(status) = status else {
+            return false;
+        };
+        if encoder_has_answered(&status) {
             return true;
         }
-        if started.elapsed() >= bound {
+        if started.elapsed() >= bound || side_remaining_ms() == Some(0) {
             return false;
         }
         let pause =
@@ -12731,6 +12808,10 @@ pub(crate) fn with_env_mutation<R>(f: impl FnOnce() -> R) -> R {
 /// Run `f` with the pack client's request timeout set to `ms`, then put
 /// back whatever it was.
 fn with_pack_timeout<R>(ms: u64, f: impl FnOnce() -> R) -> R {
+    let ms = match side_remaining_ms() {
+        Some(left) => ms.min(left).max(1),
+        None => ms,
+    };
     with_env_mutation(|| {
         let before = std::env::var_os("PACKSET_TIMEOUT_MS");
         // SAFETY: the hook reads and sets this on one thread, before and after
@@ -14990,14 +15071,15 @@ const BUSY_TRIES: u32 = 3;
 /// How long one pack request may take: `PACKSET_TIMEOUT_MS`, else thirty
 /// seconds, as the pack client reads it. The status line sets 300.
 fn pack_timeout() -> std::time::Duration {
-    std::env::var("PACKSET_TIMEOUT_MS")
+    let base = std::env::var("PACKSET_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|ms| *ms > 0)
         .map_or(
             std::time::Duration::from_secs(30),
             std::time::Duration::from_millis,
-        )
+        );
+    cap_pack_wait(base).max(std::time::Duration::from_millis(1))
 }
 
 /// The longest a tool call is allowed to run. The drain after stdin ends

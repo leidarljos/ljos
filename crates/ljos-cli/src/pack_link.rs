@@ -199,12 +199,47 @@ struct Raw {
 }
 
 fn connect(addr: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
-    let stream = TcpStream::connect_timeout(&addr, timeout.max(Duration::from_millis(1)))?;
-    let wait = timeout.max(Duration::from_millis(1));
+    if side_budget_spent() {
+        return Err(budget_spent());
+    }
+    let started = Instant::now();
+    let result = connect_once(addr, timeout);
+    super::charge_side_wait(started.elapsed());
+    result
+}
+
+/// A side event's pack budget is gone. Opening a socket for a one
+/// millisecond timer still blocks, and a prompt makes several of those
+/// reads, so the call returns before the connect.
+fn side_budget_spent() -> bool {
+    super::side_remaining_ms() == Some(0)
+}
+
+fn budget_spent() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "the side event's pack budget is spent",
+    )
+}
+
+fn connect_once(addr: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
+    let wait = capped_wait(timeout);
+    let stream = TcpStream::connect_timeout(&addr, wait)?;
     stream.set_read_timeout(Some(wait))?;
     stream.set_write_timeout(Some(wait))?;
     let _ = stream.set_nodelay(true);
     Ok(stream)
+}
+
+/// A side-event bound shrinks this wait. A zero bound is one millisecond,
+/// so a later read fails at once instead of taking the default.
+fn capped_wait(timeout: Duration) -> Duration {
+    let wait = super::cap_pack_wait(timeout);
+    if wait.is_zero() {
+        Duration::from_millis(1)
+    } else {
+        wait
+    }
 }
 
 fn write_all(stream: &mut TcpStream, bytes: &[u8]) -> std::io::Result<()> {
@@ -225,7 +260,7 @@ fn write_all(stream: &mut TcpStream, bytes: &[u8]) -> std::io::Result<()> {
     stream.flush()
 }
 
-fn read_response(stream: &mut TcpStream) -> std::io::Result<Raw> {
+fn read_response(stream: &mut TcpStream, deadline: Instant) -> std::io::Result<Raw> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     let head_end = loop {
@@ -235,6 +270,7 @@ fn read_response(stream: &mut TcpStream) -> std::io::Result<Raw> {
                 "the pack's headers are too long",
             ));
         }
+        arm_read(stream, deadline)?;
         let n = read_some(stream, &mut tmp)?;
         buf.extend_from_slice(&tmp[..n]);
         if let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -270,12 +306,20 @@ fn read_response(stream: &mut TcpStream) -> std::io::Result<Raw> {
     let mut body = buf.split_off(head_end + 4);
     if let Some(length) = length {
         while body.len() < length {
+            arm_read(stream, deadline)?;
             let n = read_some(stream, &mut tmp)?;
             body.extend_from_slice(&tmp[..n]);
+            if body.len() > length.saturating_add(64 * 1024) {
+                break;
+            }
         }
         body.truncate(length);
     } else {
         loop {
+            if deadline.saturating_duration_since(Instant::now()).is_zero() {
+                break;
+            }
+            let _ = arm_read(stream, deadline);
             match stream.read(&mut tmp) {
                 Ok(0) => break,
                 Ok(n) => body.extend_from_slice(&tmp[..n]),
@@ -293,6 +337,18 @@ fn read_response(stream: &mut TcpStream) -> std::io::Result<Raw> {
         body: String::from_utf8_lossy(&body).into_owned(),
         keep: !close && !(300..400).contains(&status),
     })
+}
+
+fn arm_read(stream: &TcpStream, deadline: Instant) -> std::io::Result<()> {
+    let remain = deadline.saturating_duration_since(Instant::now());
+    if remain.is_zero() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "the pack did not answer",
+        ));
+    }
+    stream.set_read_timeout(Some(remain))?;
+    Ok(())
 }
 
 fn read_some(stream: &mut TcpStream, tmp: &mut [u8]) -> std::io::Result<usize> {
@@ -897,11 +953,27 @@ fn refused(url: &str, code: u16, body: &str) -> Error {
 }
 
 fn send(live: &mut Slot, origin: &Url, call: &Wire<'_>, timeout: Duration) -> std::io::Result<Raw> {
+    if side_budget_spent() {
+        return Err(budget_spent());
+    }
+    let started = Instant::now();
+    let result = send_once(live, origin, call, timeout);
+    super::charge_side_wait(started.elapsed());
+    result
+}
+
+fn send_once(
+    live: &mut Slot,
+    origin: &Url,
+    call: &Wire<'_>,
+    timeout: Duration,
+) -> std::io::Result<Raw> {
     let stream = live
         .stream
         .as_mut()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotConnected, "no pack socket"))?;
-    let wait = timeout.max(Duration::from_millis(1));
+    let wait = capped_wait(timeout);
+    let deadline = Instant::now() + wait;
     stream.set_read_timeout(Some(wait))?;
     stream.set_write_timeout(Some(wait))?;
     let bytes = render(
@@ -916,7 +988,7 @@ fn send(live: &mut Slot, origin: &Url, call: &Wire<'_>, timeout: Duration) -> st
         live.proven = false;
         return Err(err);
     }
-    match read_response(stream) {
+    match read_response(stream, deadline) {
         Ok(raw) => {
             if !raw.keep {
                 live.stream = None;
