@@ -16,6 +16,7 @@
 
 use crate::proc_tree::Proc;
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// How long a shell call the hook saw waits to be taken: the longest a
@@ -139,18 +140,64 @@ fn text(v: &Value, keys: &[&str]) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Whether `tool` is one of the seat's MCP tools as Claude Code names it,
-/// `mcp__SERVER__ljos_NAME`, whichever server key carries the seat.
+/// `mcp__SERVER__NAME`, split on the last `__` so `SERVER` may contain
+/// `__`. `None` when the name is not that shape.
+#[must_use]
+pub fn mcp_prefixed_tool(tool: &str) -> Option<(&str, &str)> {
+    let rest = tool.strip_prefix("mcp__")?;
+    let (server, name) = rest.rsplit_once("__")?;
+    if server.is_empty() || name.is_empty() {
+        None
+    } else {
+        Some((server, name))
+    }
+}
+
+/// Whether `tool` is one of the seat's MCP tools, `mcp__SERVER__ljos_NAME`,
+/// and `SERVER` is a key whose command is the seat's own MCP server.
+/// The name shape alone is not enough. An unknown or unreadable config
+/// is not a match.
 #[must_use]
 pub fn is_seat_mcp_tool(tool: &str) -> bool {
-    tool.strip_prefix("mcp__")
-        .and_then(|rest| rest.rsplit_once("__"))
-        .is_some_and(|(server, name)| !server.is_empty() && name.starts_with("ljos_"))
+    is_confirmed_seat_call(tool, None)
+}
+
+/// `tool` is `ljos_*` on a server key the seat's MCP config names.
+/// `field` is a payload server (`server`, `mcp_server_name`). When both
+/// the name and the field name a server, they have to be the same key.
+pub(crate) fn is_confirmed_seat_call(tool: &str, field: Option<&str>) -> bool {
+    match crate::cloud::seat_mcp_keys() {
+        crate::cloud::SeatMcpKeys::Known(keys) => seat_call_matches(tool, field, &keys),
+        crate::cloud::SeatMcpKeys::Unknown | crate::cloud::SeatMcpKeys::Ambiguous => false,
+    }
+}
+
+pub(crate) fn seat_call_matches(tool: &str, field: Option<&str>, keys: &BTreeSet<String>) -> bool {
+    if let Some((embedded, short)) = mcp_prefixed_tool(tool) {
+        if !short.starts_with("ljos_") {
+            return false;
+        }
+        if field.is_some_and(|name| name != embedded) {
+            return false;
+        }
+        return keys.contains(embedded);
+    }
+    if !tool.starts_with("ljos_") {
+        return false;
+    }
+    field.is_some_and(|name| keys.contains(name))
+}
+
+/// `mcp__SERVER__ljos_NAME`. The server key is not checked: a subagent
+/// vote binds to the agent on this call even when `SERVER` is not one
+/// the seat configured.
+fn seat_shaped_mcp_tool(tool: &str) -> bool {
+    mcp_prefixed_tool(tool).is_some_and(|(_, name)| name.starts_with("ljos_"))
 }
 
 fn is_any_seat_mcp_tool(tool: &str) -> bool {
     let tool = tool.trim();
-    is_seat_mcp_tool(tool)
+    seat_shaped_mcp_tool(tool)
         || tool.starts_with("ljos_")
         || tool
             .strip_prefix("MCP:")
@@ -159,11 +206,12 @@ fn is_any_seat_mcp_tool(tool: &str) -> bool {
 
 /// Leave what a hook payload says about its tool call. On `PreToolUse`,
 /// each `ljos` line of a shell call is kept for the process that runs it,
-/// and a call to the seat's MCP tool for the server. On `PostToolUse`
-/// what the call did not take is dropped. The payload's agent is this
-/// hook process's own. Returns whether the call is a `PreToolUse` on the
-/// seat's MCP tool: the server judges that call, so the hook has nothing
-/// more to say.
+/// and a subagent's `mcp__SERVER__ljos_NAME` call is kept for the server
+/// whether or not `SERVER` is a configured key. On `PostToolUse` what the
+/// call did not take is dropped. The payload's agent is this hook
+/// process's own. Returns whether the call is a `PreToolUse` on a
+/// confirmed seat server: the server judges that call, so the hook has
+/// nothing more to say.
 pub fn note_hook_call(input: &str, event: &str) -> bool {
     let Ok(v) = serde_json::from_str::<Value>(input.trim()) else {
         return false;
@@ -171,7 +219,13 @@ pub fn note_hook_call(input: &str, event: &str) -> bool {
     let agent = text(&v, &["agent_id", "agentId"]).map(|a| crate::ballot_sig::field(&a));
     crate::ballot_sig::hook_agent(agent.clone());
     let tool = text(&v, &["tool_name", "toolName"]).unwrap_or_default();
-    let seat_tool = event == "PreToolUse" && is_seat_mcp_tool(&tool);
+    let field = ["mcp_server_name", "mcpServerName", "server_name", "server"]
+        .iter()
+        .find_map(|key| v[*key].as_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    let shaped = event == "PreToolUse" && seat_shaped_mcp_tool(&tool);
+    let seat_tool = shaped && is_confirmed_seat_call(&tool, field);
     let any_mcp_tool = matches!(event, "PreToolUse" | "preToolUse" | "beforeMCPExecution")
         && is_any_seat_mcp_tool(&tool);
     let session = crate::hook_call_as(input, Some(event))
@@ -224,7 +278,7 @@ pub fn note_hook_call(input: &str, event: &str) -> bool {
     };
     let root = root();
     match event {
-        "PreToolUse" if seat_tool => {}
+        "PreToolUse" if shaped => {}
         "PreToolUse" => {
             let input = if v["tool_input"].is_object() {
                 &v["tool_input"]
@@ -730,11 +784,40 @@ mod tests {
     }
 
     #[test]
-    fn the_seat_mcp_tools_are_known_by_name() {
-        assert!(is_seat_mcp_tool("mcp__ljos__ljos_vote"));
-        assert!(is_seat_mcp_tool("mcp__plugin_ljos_ljos__ljos_vote"));
-        assert!(!is_seat_mcp_tool("mcp__github__add_issue_comment"));
-        assert!(!is_seat_mcp_tool("ljos_vote"));
-        assert!(!is_seat_mcp_tool("Bash"));
+    fn a_seat_shaped_name_needs_the_configured_server() {
+        let keys = BTreeSet::from(["ljos".to_string(), "my__seat".to_string()]);
+        assert!(seat_call_matches("mcp__ljos__ljos_vote", None, &keys));
+        assert!(seat_call_matches("mcp__my__seat__ljos_vote", None, &keys));
+        assert!(seat_call_matches(
+            "mcp__ljos__ljos_vote",
+            Some("ljos"),
+            &keys
+        ));
+        assert!(seat_call_matches("ljos_note", Some("ljos"), &keys));
+        assert!(!seat_call_matches(
+            "mcp__plugin_ljos_ljos__ljos_vote",
+            None,
+            &keys
+        ));
+        assert!(!seat_call_matches("mcp__github__ljos_note", None, &keys));
+        assert!(!seat_call_matches("mcp__Ljos__ljos_vote", None, &keys));
+        assert!(!seat_call_matches(
+            "mcp__ljos__ljos_vote",
+            Some("github"),
+            &keys
+        ));
+        assert!(!seat_call_matches("mcp:ljos:ljos_vote", None, &keys));
+        assert!(!seat_call_matches("ljos_vote", None, &keys));
+        assert!(!seat_call_matches(
+            "mcp__github__add_issue_comment",
+            None,
+            &keys
+        ));
+        assert!(!seat_call_matches("Bash", None, &keys));
+        assert!(!seat_call_matches(
+            "mcp__ljos__ljos_vote",
+            None,
+            &BTreeSet::new()
+        ));
     }
 }

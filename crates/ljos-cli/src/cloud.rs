@@ -592,6 +592,13 @@ fn mcp_problem() -> McpProblem {
 /// writes. One path is checked once. Claude's `mcp add` stores the command
 /// in `~/.claude.json`, which the harness table does not name.
 fn mcp_files() -> Vec<McpFile> {
+    collect_mcp_files(true)
+}
+
+/// `include_user_harness` reads `harnesses.toml`. The seat-key scan leaves
+/// it out: that file is not the MCP config, and a special file there must
+/// not stall a hook.
+fn collect_mcp_files(include_user_harness: bool) -> Vec<McpFile> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     let mut push = |path: PathBuf,
@@ -643,7 +650,7 @@ fn mcp_files() -> Vec<McpFile> {
             None,
         );
     }
-    for harness in harness_shapes() {
+    for harness in harness_shapes_for(include_user_harness) {
         let advice = format!("ljos onboard --harness {}", harness.name);
         let expand = match harness.name.as_str() {
             "codex" => Expand::Literal,
@@ -679,11 +686,15 @@ fn mcp_files() -> Vec<McpFile> {
     out
 }
 
-fn harness_shapes() -> Vec<crate::Harness> {
+fn harness_shapes_for(include_user_harness: bool) -> Vec<crate::Harness> {
     let shipped: crate::Harnesses = toml::from_str(crate::HARNESSES_EXAMPLE).unwrap_or_default();
-    let mut shapes = crate::harnesses_with_shipped(&crate::harnesses_path())
-        .map(|h| h.harness)
-        .unwrap_or_default();
+    let mut shapes = if include_user_harness {
+        crate::harnesses_with_shipped(&crate::harnesses_path())
+            .map(|h| h.harness)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     for harness in shipped.harness {
         if harness.name.starts_with("runner-with-") || harness.shell {
             continue;
@@ -694,6 +705,265 @@ fn harness_shapes() -> Vec<crate::Harness> {
     }
     shapes.retain(|h| !h.name.starts_with("runner-with-") && !h.shell);
     shapes
+}
+
+/// The most of an MCP config the seat-key scan reads. A larger file is
+/// not a config this hook will trust.
+const MCP_CONFIG_CAP: u64 = 1024 * 1024;
+
+/// Server keys whose command is this seat's MCP server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SeatMcpKeys {
+    /// No config file was there.
+    Unknown,
+    /// A file that has to parse could not be read.
+    Ambiguous,
+    /// Keys found in the files that were read.
+    Known(BTreeSet<String>),
+}
+
+/// Keys in the seat's MCP config whose command is `ljos-mcp`.
+/// An absent config is [`SeatMcpKeys::Unknown`]. A strict file that is
+/// not readable JSON is [`SeatMcpKeys::Ambiguous`]. Harness files that
+/// are not the JSON or TOML this scan expects are skipped.
+pub(crate) fn seat_mcp_keys() -> SeatMcpKeys {
+    let mut keys = BTreeSet::new();
+    let mut saw = false;
+    for file in collect_mcp_files(false) {
+        match read_seat_keys(&file) {
+            KeyRead::Absent | KeyRead::Skip => {}
+            KeyRead::Ambiguous => return SeatMcpKeys::Ambiguous,
+            KeyRead::Keys(found) => {
+                saw = true;
+                keys.extend(found);
+            }
+        }
+    }
+    if saw {
+        SeatMcpKeys::Known(keys)
+    } else {
+        SeatMcpKeys::Unknown
+    }
+}
+
+#[derive(Debug)]
+enum KeyRead {
+    Absent,
+    Skip,
+    Ambiguous,
+    Keys(BTreeSet<String>),
+}
+
+enum TextRead {
+    Absent,
+    Bad,
+    Text(String),
+}
+
+fn read_seat_keys(file: &McpFile) -> KeyRead {
+    let text = match read_config_text(&file.path) {
+        TextRead::Absent => return KeyRead::Absent,
+        TextRead::Bad => {
+            return if file.strict {
+                KeyRead::Ambiguous
+            } else {
+                KeyRead::Skip
+            };
+        }
+        TextRead::Text(text) => text,
+    };
+    if text.trim().is_empty() {
+        return KeyRead::Keys(BTreeSet::new());
+    }
+    match &file.probe {
+        McpProbe::Json(_) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(doc) => KeyRead::Keys(json_seat_keys(&doc)),
+            Err(_) => {
+                if file.strict {
+                    KeyRead::Ambiguous
+                } else {
+                    KeyRead::Skip
+                }
+            }
+        },
+        McpProbe::Text(marker) => {
+            if let Ok(doc) = toml::from_str::<toml::Value>(&text) {
+                return KeyRead::Keys(toml_seat_keys(&doc));
+            }
+            let mut keys = BTreeSet::new();
+            if let Some(key) = text_marker_key(&text, marker) {
+                keys.insert(key);
+            }
+            KeyRead::Keys(keys)
+        }
+    }
+}
+
+fn read_config_text(path: &Path) -> TextRead {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return TextRead::Absent,
+        Err(_) => return TextRead::Bad,
+    };
+    let Ok(meta) = file.metadata() else {
+        return TextRead::Bad;
+    };
+    if !meta.is_file() || meta.len() > MCP_CONFIG_CAP {
+        return TextRead::Bad;
+    }
+    let mut text = String::new();
+    match file.take(MCP_CONFIG_CAP).read_to_string(&mut text) {
+        Ok(_) => TextRead::Text(text),
+        Err(_) => TextRead::Bad,
+    }
+}
+
+fn command_launches_seat(command: &str, args: &[String]) -> bool {
+    let base = Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(command);
+    if base == crate::MCP_SERVER_COMMAND {
+        return true;
+    }
+    base == "ljos" && args.first().map(String::as_str) == Some("mcp")
+}
+
+fn entry_is_off(disabled: Option<bool>, enabled: Option<bool>) -> bool {
+    disabled == Some(true) || enabled == Some(false)
+}
+
+fn json_entry_launches(value: &serde_json::Value) -> bool {
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    if entry_is_off(
+        obj.get("disabled").and_then(serde_json::Value::as_bool),
+        obj.get("enabled").and_then(serde_json::Value::as_bool),
+    ) {
+        return false;
+    }
+    command_and_args(value).is_some_and(|spec| command_launches_seat(&spec.command, &spec.args))
+}
+
+fn json_seat_keys(value: &serde_json::Value) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    fn walk(value: &serde_json::Value, out: &mut BTreeSet<String>) {
+        if let Some(list) = value.as_array() {
+            for item in list {
+                walk(item, out);
+            }
+            return;
+        }
+        let Some(obj) = value.as_object() else {
+            return;
+        };
+        for (key, child) in obj {
+            if json_entry_launches(child) {
+                out.insert(key.clone());
+            }
+            walk(child, out);
+        }
+    }
+    walk(value, &mut out);
+    out
+}
+
+fn toml_bool(value: Option<&toml::Value>) -> Option<bool> {
+    value.and_then(toml::Value::as_bool)
+}
+
+fn toml_strings(value: Option<&toml::Value>) -> Vec<String> {
+    value
+        .and_then(toml::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn toml_entry_launches(value: &toml::Value) -> bool {
+    let Some(table) = value.as_table() else {
+        return false;
+    };
+    if entry_is_off(
+        toml_bool(table.get("disabled")),
+        toml_bool(table.get("enabled")),
+    ) {
+        return false;
+    }
+    let args = toml_strings(table.get("args"));
+    let Some(cmd) = table.get("command").or_else(|| table.get("cmd")) else {
+        return false;
+    };
+    match cmd {
+        toml::Value::String(command) => command_launches_seat(command.trim(), &args),
+        toml::Value::Array(parts) => {
+            let mut argv: Vec<String> = parts
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect();
+            if argv.is_empty() {
+                return false;
+            }
+            let command = argv.remove(0);
+            argv.extend(args);
+            command_launches_seat(command.trim(), &argv)
+        }
+        _ => false,
+    }
+}
+
+fn toml_seat_keys(value: &toml::Value) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    fn walk(value: &toml::Value, out: &mut BTreeSet<String>) {
+        let Some(table) = value.as_table() else {
+            return;
+        };
+        for (key, child) in table {
+            if toml_entry_launches(child) {
+                out.insert(key.clone());
+            }
+            walk(child, out);
+        }
+    }
+    walk(value, &mut out);
+    out
+}
+
+fn marker_server_key(marker: &str) -> Option<String> {
+    let header = marker.trim();
+    if let Some(inner) = header
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+    {
+        let name = inner.split('.').next_back()?.trim();
+        return (!name.is_empty()).then(|| name.to_string());
+    }
+    let line = header.lines().next()?.trim().trim_end_matches(':').trim();
+    if line.is_empty() || line.contains(' ') || line.contains('\t') {
+        return None;
+    }
+    Some(line.to_string())
+}
+
+fn text_marker_key(text: &str, marker: &str) -> Option<String> {
+    let window = entry_text(text, marker)?;
+    let command = keyed_value(&window, "command").or_else(|| keyed_value(&window, "cmd"))?;
+    let args = keyed_value(&window, "args").into_iter().collect::<Vec<_>>();
+    if !command_launches_seat(command.trim(), &args) {
+        return None;
+    }
+    marker_server_key(marker)
 }
 
 fn read_json_launch(path: &Path, pointer: &str) -> Result<Option<LaunchSpec>> {
@@ -3317,5 +3587,76 @@ mod tests {
             0o600,
             "a direct path is still mode 0600"
         );
+    }
+
+    #[test]
+    fn a_renamed_server_key_counts_when_its_command_is_the_seat() {
+        let doc = serde_json::json!({
+            "mcpServers": {
+                "my__seat": {"command": "/usr/local/bin/ljos-mcp", "args": []},
+                "github": {"command": "github-mcp"},
+                "off": {"command": "ljos-mcp", "disabled": true},
+                "via": {"command": "ljos", "args": ["mcp"]}
+            }
+        });
+        let keys = json_seat_keys(&doc);
+        assert!(keys.contains("my__seat"), "{keys:?}");
+        assert!(keys.contains("via"), "{keys:?}");
+        assert!(!keys.contains("github"), "{keys:?}");
+        assert!(!keys.contains("off"), "{keys:?}");
+    }
+
+    #[test]
+    fn a_toml_server_table_names_the_seat_key() {
+        let doc: toml::Value =
+            toml::from_str("[mcp_servers.ljos]\ncommand = \"ljos-mcp\"\nargs = []\n").unwrap();
+        let keys = toml_seat_keys(&doc);
+        assert!(keys.contains("ljos"), "{keys:?}");
+        let other: toml::Value =
+            toml::from_str("[mcp_servers.github]\ncommand = \"github-mcp\"\n").unwrap();
+        assert!(!toml_seat_keys(&other).contains("github"));
+    }
+
+    #[test]
+    fn a_yaml_marker_names_the_seat_when_the_command_matches() {
+        let text = "extensions:\n  ljos:\n    command: ljos-mcp\n    args: []\n";
+        assert_eq!(
+            text_marker_key(text, "  ljos:\n    command:"),
+            Some("ljos".to_string())
+        );
+        assert_eq!(text_marker_key(text, "  other:\n    command:"), None);
+    }
+
+    #[test]
+    fn a_strict_config_that_is_not_a_file_is_ambiguous() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp.json");
+        fs::create_dir(&path).unwrap();
+        let file = McpFile {
+            path: path.clone(),
+            probe: McpProbe::Json("/mcpServers/ljos".into()),
+            advice: String::new(),
+            expand: Expand::Shell,
+            launch_path: None,
+            strict: true,
+        };
+        assert!(matches!(read_seat_keys(&file), KeyRead::Ambiguous));
+        let missing = McpFile {
+            path: dir.path().join("absent.json"),
+            probe: McpProbe::Json("/mcpServers/ljos".into()),
+            advice: String::new(),
+            expand: Expand::Shell,
+            launch_path: None,
+            strict: true,
+        };
+        assert!(matches!(read_seat_keys(&missing), KeyRead::Absent));
+        fs::remove_dir(&path).unwrap();
+        fs::write(&path, "{not json").unwrap();
+        assert!(matches!(read_seat_keys(&file), KeyRead::Ambiguous));
+        let loose = McpFile {
+            strict: false,
+            ..file
+        };
+        assert!(matches!(read_seat_keys(&loose), KeyRead::Skip));
     }
 }
