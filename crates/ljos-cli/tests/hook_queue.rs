@@ -504,6 +504,33 @@ fn a_hung_pack_costs_one_short_wait_and_the_kept_rules_still_deny() {
     );
 }
 
+/// A 2 MB read still exits 0 with one allow object. The body is not parsed.
+#[test]
+fn a_large_read_answers_without_waiting_on_the_body() {
+    let hab = hab("bigread");
+    let mut payload = String::from(
+        r#"{"cursor_version":"2.4.0","conversation_id":"c-big","hook_event_name":"beforeReadFile","file_path":"/tmp/big","content":""#,
+    );
+    payload.push_str(&"x".repeat(2 * 1024 * 1024));
+    payload.push_str(r#""}"#);
+    for hookd in ["off", "on"] {
+        let mut cmd = ljos(&hab, &["hook"]);
+        if hookd == "off" {
+            cmd.env("LJOS_HOOKD", "off");
+        }
+        let label = format!("2MB read LJOS_HOOKD={hookd}");
+        let (took, out) = finished(feed(cmd, &payload), Duration::from_millis(1500), &label);
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            took < Duration::from_millis(1500),
+            "{label} took {took:?}\n{stdout}\n{stderr}"
+        );
+        assert_eq!(out.status.code(), Some(0), "{label}: {stdout}\n{stderr}");
+        assert_eq!(stdout, ALLOW, "{label}");
+    }
+}
+
 /// A pack that accepts and never answers must not delay the two events
 /// answered before the pack search. `LJOS_HOOKD=off` is the direct path.
 /// The same calls with the queue left on answer there too.

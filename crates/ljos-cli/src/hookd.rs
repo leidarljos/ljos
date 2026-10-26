@@ -91,11 +91,16 @@ pub fn admit() {
     if std::io::stdin().read_to_end(&mut bytes).is_err() {
         return;
     }
+    let event = flag_value(&args, "--event");
+    if !args.iter().any(|a| a == "--prompt") {
+        if let Some(code) = crate::answer_cursor_read_bytes(&bytes) {
+            std::process::exit(code);
+        }
+    }
     let input = String::from_utf8_lossy(&bytes).into_owned();
     *STDIN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bytes);
-    let event = flag_value(&args, "--event");
     // These two events are judged on preToolUse. Answer them before a
     // slot, so a slow server cannot turn an allow into exit 2.
     // The direct path has already loaded the seat env. A promoted rule

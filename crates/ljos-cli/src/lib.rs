@@ -13159,6 +13159,268 @@ fn output_allows(output: &str) -> bool {
     decision == Some("allow")
 }
 
+/// A Cursor `beforeReadFile` whose allow does not depend on the body.
+/// `false` when the bytes are anything else, including a payload this
+/// scan will not trust. The caller then parses as usual.
+fn cursor_read_allow_bytes(input: &[u8]) -> bool {
+    let b = trim_ascii_ws(input);
+    if b.first() != Some(&b'{') {
+        return false;
+    }
+    let mut i = 1;
+    let mut depth = 1i32;
+    let mut saw_cursor = false;
+    let mut saw_read = false;
+    let mut key = Vec::new();
+    #[derive(Clone, Copy, PartialEq)]
+    enum Want {
+        Key,
+        Colon,
+        Value,
+        Comma,
+    }
+    let mut want = Want::Key;
+    while i < b.len() {
+        let c = b[i];
+        if c == b' ' || c == b'\n' || c == b'\r' || c == b'\t' {
+            i += 1;
+            continue;
+        }
+        if depth > 1 {
+            match c {
+                b'"' => {
+                    if !skip_json_string(b, &mut i) {
+                        return false;
+                    }
+                }
+                b'{' | b'[' => {
+                    depth += 1;
+                    i += 1;
+                }
+                b'}' | b']' => {
+                    depth -= 1;
+                    i += 1;
+                    if depth == 1 {
+                        want = Want::Comma;
+                    }
+                }
+                _ => i += 1,
+            }
+            continue;
+        }
+        match want {
+            Want::Key => {
+                if c == b'}' {
+                    return saw_cursor && saw_read && trim_ascii_ws(&b[i + 1..]).is_empty();
+                }
+                if c != b'"' {
+                    return false;
+                }
+                let Some(got) = take_short_string(b, &mut i) else {
+                    return false;
+                };
+                key = got;
+                if matches!(
+                    key.as_slice(),
+                    b"conversationId"
+                        | b"toolCall"
+                        | b"stepIdx"
+                        | b"invocationNum"
+                        | b"executionNum"
+                ) {
+                    return false;
+                }
+                if key.as_slice() == b"cursor_version" {
+                    saw_cursor = true;
+                }
+                want = Want::Colon;
+            }
+            Want::Colon => {
+                if c != b':' {
+                    return false;
+                }
+                i += 1;
+                want = Want::Value;
+            }
+            Want::Value => {
+                if c == b'"' {
+                    let event = key.as_slice() == b"hook_event_name";
+                    if event {
+                        let Some(val) = take_short_string(b, &mut i) else {
+                            return false;
+                        };
+                        if val.as_slice() == b"beforeReadFile" {
+                            saw_read = true;
+                        }
+                    } else if !skip_json_string(b, &mut i) {
+                        return false;
+                    }
+                    want = Want::Comma;
+                } else if c == b'{' || c == b'[' {
+                    depth = 2;
+                    i += 1;
+                } else if is_json_literal_start(c) {
+                    if !skip_json_literal(b, &mut i) {
+                        return false;
+                    }
+                    want = Want::Comma;
+                } else {
+                    return false;
+                }
+            }
+            Want::Comma => {
+                if c == b'}' {
+                    return saw_cursor && saw_read && trim_ascii_ws(&b[i + 1..]).is_empty();
+                }
+                if c != b',' {
+                    return false;
+                }
+                i += 1;
+                want = Want::Key;
+            }
+        }
+    }
+    false
+}
+
+fn trim_ascii_ws(input: &[u8]) -> &[u8] {
+    let mut b = input;
+    while b.first().is_some_and(|c| c.is_ascii_whitespace()) {
+        b = &b[1..];
+    }
+    while b.last().is_some_and(|c| c.is_ascii_whitespace()) {
+        b = &b[..b.len() - 1];
+    }
+    b
+}
+
+/// Skip one JSON string. `i` points at the opening quote.
+fn skip_json_string(b: &[u8], i: &mut usize) -> bool {
+    take_short_string(b, i).is_some() || skip_long_string(b, i)
+}
+
+/// A short string with no escapes, for a key or an event name.
+/// `None` when the string is long, escaped, or not closed. On `None`
+/// for a long or escaped string, [`skip_long_string`] has not run: the
+/// caller uses that only after this fails at the opening quote.
+fn take_short_string(b: &[u8], i: &mut usize) -> Option<Vec<u8>> {
+    if b.get(*i) != Some(&b'"') {
+        return None;
+    }
+    let start = *i;
+    let mut j = *i + 1;
+    let mut out = Vec::new();
+    while j < b.len() {
+        match b[j] {
+            b'\\' => {
+                *i = start;
+                return None;
+            }
+            b'"' => {
+                *i = j + 1;
+                return Some(out);
+            }
+            c => {
+                if out.len() >= 64 {
+                    *i = start;
+                    return None;
+                }
+                out.push(c);
+                j += 1;
+            }
+        }
+    }
+    None
+}
+
+/// Skip a string [`take_short_string`] refused. `i` points at the quote.
+fn skip_long_string(b: &[u8], i: &mut usize) -> bool {
+    if b.get(*i) != Some(&b'"') {
+        return false;
+    }
+    let mut j = *i + 1;
+    while j < b.len() {
+        match b[j] {
+            b'\\' => {
+                j += 1;
+                if j >= b.len() {
+                    return false;
+                }
+                if b[j] == b'u' {
+                    j += 1;
+                    if j + 4 > b.len() {
+                        return false;
+                    }
+                    j += 4;
+                    continue;
+                }
+                j += 1;
+            }
+            b'"' => {
+                *i = j + 1;
+                return true;
+            }
+            _ => j += 1,
+        }
+    }
+    false
+}
+
+fn is_json_literal_start(c: u8) -> bool {
+    c == b'-' || c.is_ascii_digit() || matches!(c, b't' | b'f' | b'n')
+}
+
+fn skip_json_literal(b: &[u8], i: &mut usize) -> bool {
+    let rest = &b[*i..];
+    if rest.starts_with(b"true") {
+        *i += 4;
+        return true;
+    }
+    if rest.starts_with(b"false") {
+        *i += 5;
+        return true;
+    }
+    if rest.starts_with(b"null") {
+        *i += 4;
+        return true;
+    }
+    if !rest
+        .first()
+        .is_some_and(|c| *c == b'-' || c.is_ascii_digit())
+    {
+        return false;
+    }
+    while *i < b.len() && matches!(b[*i], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9') {
+        *i += 1;
+    }
+    true
+}
+
+/// Print the allow for a Cursor `beforeReadFile` and return 0.
+/// `None` when the bytes are not that call, or the trace marker is on
+/// so the full payload can be recorded.
+pub fn answer_cursor_read_bytes(bytes: &[u8]) -> Option<i32> {
+    if hook_trace_marker() || !cursor_read_allow_bytes(bytes) {
+        return None;
+    }
+    let output = "{\"permission\":\"allow\"}\n";
+    let mut out = std::io::stdout().lock();
+    GATE_ANSWERED.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = std::io::Write::write_all(&mut out, output.as_bytes());
+    let _ = std::io::Write::flush(&mut out);
+    drop(out);
+    hookd::note_time(
+        "hook",
+        hookd::started().elapsed(),
+        std::time::Duration::ZERO,
+    );
+    Some(0)
+}
+
+fn hook_trace_marker() -> bool {
+    runtime_dir().join("hook-trace").exists()
+}
+
 /// Exit status for one side answer. Cursor reads exit 0 as use the JSON.
 /// Exit 2 blocks by itself, and a caller that drops stdout on exit 2
 /// never shows the reason. One allow or deny object exits 0. Empty text,
@@ -13186,6 +13448,9 @@ fn side_answer_exit(output: &str) -> i32 {
 /// One allow or deny object exits 0. Exit 2 is a hook failure.
 #[must_use]
 pub fn cursor_side_answer(input: &str, event: Option<&str>) -> Option<(String, i32)> {
+    if cursor_read_allow_bytes(input.as_bytes()) {
+        return Some(("{\"permission\":\"allow\"}\n".to_string(), 0));
+    }
     let call = hook_call_as(input, event);
     if !call.shape.is_cursor()
         || !matches!(call.event.as_str(), "beforeMCPExecution" | "beforeReadFile")
@@ -13208,13 +13473,15 @@ pub fn emit_cursor_side_answer(input: &str, event: Option<&str>) -> Option<i32> 
     let _ = std::io::Write::flush(&mut out);
     drop(out);
     // The hook command's later trace never runs: this process exits.
-    // Write the row when the trace marker is present.
-    let call = hook_call_as(input, event);
-    let (subagent, _, _) = hook_subagent(input);
-    // SAFETY: single-threaded here. The flag keeps a subagent trace off
-    // the tracker walk `held_issue` does outside a hook.
-    unsafe { std::env::set_var("LJOS_IN_HOOK", "1") };
-    hook_trace(input, &call, subagent.as_deref());
+    // With the marker absent, do not parse the payload again.
+    if hook_trace_marker() {
+        let call = hook_call_as(input, event);
+        let (subagent, _, _) = hook_subagent(input);
+        // SAFETY: single-threaded here. The flag keeps a subagent trace off
+        // the tracker walk `held_issue` does outside a hook.
+        unsafe { std::env::set_var("LJOS_IN_HOOK", "1") };
+        hook_trace(input, &call, subagent.as_deref());
+    }
     hookd::note_time(
         "hook",
         hookd::started().elapsed(),
@@ -51490,6 +51757,44 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             super::side_answer_exit("{\"permission\":\"allow\"}\n{\"permission\":\"deny\"}"),
             GATE_REFUSED_EXIT
         );
+    }
+
+    /// A large read is an allow without a JSON parse of the body.
+    #[test]
+    fn a_large_cursor_read_is_an_allow_without_parsing_the_body() {
+        let small = br#"{"cursor_version":"2.4.0","conversation_id":"c","hook_event_name":"beforeReadFile","file_path":"/w/a"}"#;
+        assert!(super::cursor_read_allow_bytes(small));
+        let (out, code) = cursor_side_answer(std::str::from_utf8(small).unwrap(), None).unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(out, "{\"permission\":\"allow\"}\n");
+        let mut big = String::from(r#"{"content":"say \"hello\" "#);
+        big.push_str(&"x".repeat(2 * 1024 * 1024));
+        big.push_str(r#"","cursor_version":"2.4.0","hook_event_name":"beforeReadFile"}"#);
+        let started = std::time::Instant::now();
+        assert!(super::cursor_read_allow_bytes(big.as_bytes()));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(50),
+            "scan took {:?}",
+            started.elapsed()
+        );
+        let (out, code) = cursor_side_answer(&big, None).unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(out, "{\"permission\":\"allow\"}\n");
+        assert!(!super::cursor_read_allow_bytes(
+            br#"{"cursor_version":"2.4.0","hook_event_name":"beforeMCPExecution","tool_name":"ljos_note"}"#
+        ));
+        assert!(!super::cursor_read_allow_bytes(
+            br#"{"hook_event_name":"beforeReadFile","file_path":"/w"}"#
+        ));
+        assert!(!super::cursor_read_allow_bytes(
+            br#"{"cursor_version":"2.4.0","hook_event_name":"beforeReadFile","toolCall":{"name":"Read"}}"#
+        ));
+        assert!(!super::cursor_read_allow_bytes(
+            br#"{"cursor_version":"2.4.0","hook_event_name":"beforeReadFile"} trailing"#
+        ));
+        assert!(!super::cursor_read_allow_bytes(
+            br#"{"cursor_version":"2.4.0","tool_input":{"hook_event_name":"beforeReadFile"},"hook_event_name":"beforeMCPExecution"}"#
+        ));
     }
 
     /// A persona becomes an agent definition. Grok and Claude Code read the

@@ -2522,6 +2522,11 @@ fn run_command() -> Result<()> {
                     bytes
                 }
             };
+            if !prompt {
+                if let Some(code) = ljos_cli::answer_cursor_read_bytes(&bytes) {
+                    std::process::exit(code);
+                }
+            }
             let input = match String::from_utf8(bytes) {
                 Ok(text) => text,
                 Err(_) => {
