@@ -97,3 +97,33 @@ fn a_cursor_file_ljos_cannot_parse_does_not_hide_the_claude_seat() {
         cloud::seat_mcp_keys()
     );
 }
+
+/// Claude Code names a plugin server's tools
+/// `mcp__plugin_<plugin>_<server>__<tool>`. An install under the home
+/// `.claude` directory is the seat.
+#[test]
+fn a_claude_plugin_install_names_the_seat() {
+    let (_lock, dir) = review_env();
+    let root = dir
+        .path()
+        .join(".claude/plugins/cache/leidarljos/ljos/0.33.0");
+    put(
+        &root.join(".claude-plugin/plugin.json"),
+        include_str!("../../../.claude-plugin/plugin.json"),
+    );
+    put(
+        &dir.path().join(".claude/plugins/installed_plugins.json"),
+        &serde_json::json!({"version": 2, "plugins": {"ljos@leidarljos": [
+            {"scope": "user", "installPath": root, "version": "0.33.0"}]}})
+        .to_string(),
+    );
+    put(
+        &dir.path().join(".claude/settings.json"),
+        r#"{"enabledPlugins":{"ljos@leidarljos":true}}"#,
+    );
+    assert!(
+        subagent::is_seat_mcp_tool("mcp__plugin_ljos_ljos__ljos_note"),
+        "a plugin-installed seat lost its early answer: {:?}",
+        cloud::seat_mcp_keys()
+    );
+}

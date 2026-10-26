@@ -725,9 +725,9 @@ pub(crate) enum SeatMcpKeys {
 /// Keys in the seat's MCP config whose command is `ljos-mcp`.
 /// An absent config is [`SeatMcpKeys::Unknown`]. A strict file that is
 /// not readable JSON is [`SeatMcpKeys::Ambiguous`] only when no other
-/// file named a key. One unreadable file hides its own entries and
-/// nothing else. Harness files that are not the JSON or TOML this scan
-/// expects are skipped.
+/// file or plugin install named a key. One unreadable file hides its
+/// own entries and nothing else. Harness files that are not the JSON
+/// or TOML this scan expects are skipped.
 pub(crate) fn seat_mcp_keys() -> SeatMcpKeys {
     let mut keys = BTreeSet::new();
     let mut saw = false;
@@ -741,6 +741,11 @@ pub(crate) fn seat_mcp_keys() -> SeatMcpKeys {
                 keys.extend(found);
             }
         }
+    }
+    let plugin = plugin_seat_keys();
+    if !plugin.is_empty() {
+        saw = true;
+        keys.extend(plugin);
     }
     if saw {
         SeatMcpKeys::Known(keys)
@@ -1082,6 +1087,100 @@ fn read_json_number(inp: &mut JsonIn<'_>) -> Option<Vec<u8>> {
         out.push(inp.bump()?);
     }
     (!out.is_empty()).then_some(out)
+}
+
+/// `mcp__plugin_<plugin>_<server>__...` for an installed plugin whose
+/// server command is the seat. `enabledPlugins` must name the plugin
+/// when that object is present. No settings file means the install counts.
+fn plugin_seat_keys() -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    // A plugin install under the home directory is the seat's own.
+    // CLAUDE_CONFIG_DIR is not: that directory is chosen by the process.
+    if let Ok(home) = crate::home() {
+        plugin_keys_from(&home.join(".claude"), &mut out);
+    }
+    out
+}
+
+fn plugin_keys_from(base: &Path, out: &mut BTreeSet<String>) {
+    let enabled = enabled_plugins(&base.join("settings.json"));
+    let Some(text) = read_capped(&base.join("plugins/installed_plugins.json")) else {
+        return;
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    let Some(plugins) = doc.get("plugins").and_then(serde_json::Value::as_object) else {
+        return;
+    };
+    for (id, entries) in plugins {
+        if !plugin_allowed(&enabled, id) {
+            continue;
+        }
+        let Some(list) = entries.as_array() else {
+            continue;
+        };
+        for entry in list {
+            let Some(install) = entry
+                .get("installPath")
+                .and_then(serde_json::Value::as_str)
+                .filter(|path| !path.is_empty())
+            else {
+                continue;
+            };
+            let plugin_json = PathBuf::from(install).join(".claude-plugin/plugin.json");
+            let Some(body) = read_capped(&plugin_json) else {
+                continue;
+            };
+            let Ok(spec) = serde_json::from_str::<serde_json::Value>(&body) else {
+                continue;
+            };
+            let Some(name) = spec.get("name").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            if name.is_empty() {
+                continue;
+            }
+            let Some(servers) = spec.get("mcpServers") else {
+                continue;
+            };
+            for key in json_seat_keys(servers) {
+                remember_key(out, &format!("plugin_{name}_{key}"));
+            }
+        }
+    }
+}
+
+fn enabled_plugins(path: &Path) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let text = read_capped(path)?;
+    let doc: serde_json::Value = serde_json::from_str(&text).ok()?;
+    doc.get("enabledPlugins")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+}
+
+fn plugin_allowed(enabled: &Option<serde_json::Map<String, serde_json::Value>>, id: &str) -> bool {
+    match enabled {
+        None => true,
+        Some(map) => map.get(id).and_then(serde_json::Value::as_bool) == Some(true),
+    }
+}
+
+fn read_capped(path: &Path) -> Option<String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > MCP_CONFIG_CAP {
+        return None;
+    }
+    let mut text = String::new();
+    file.take(MCP_CONFIG_CAP).read_to_string(&mut text).ok()?;
+    Some(text)
 }
 
 fn command_launches_seat(command: &str, args: &[String]) -> bool {
