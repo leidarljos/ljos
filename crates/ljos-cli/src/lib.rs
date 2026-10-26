@@ -2093,11 +2093,294 @@ fn stamp_from_ancestors() -> Option<Vec<(String, String)>> {
             }
         }
     }
-    let outermost = outermost_shell.or(outermost_any);
+    let mut outermost = outermost_shell.or(outermost_any);
+    if chain
+        .get(stop)
+        .is_some_and(|(_, comm)| comm.starts_with("tmux"))
+    {
+        let find_key = |key: &str| {
+            active
+                .iter()
+                .filter_map(|(pid, _)| proc_tree::environ(*pid))
+                .chain(std::iter::once_with(|| std::env::vars().collect()))
+                .find_map(|env| {
+                    env.into_iter()
+                        .find(|(k, _)| k == key)
+                        .map(|(_, v)| v.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                })
+        };
+        if let Some(tmux_val) = find_key("TMUX") {
+            let sock = tmux_val.split(',').next().unwrap_or("").trim();
+            if !sock.is_empty() {
+                let pane = find_key("TMUX_PANE");
+                if let Some(id) = tmux_pane_conversation(sock, pane.as_deref()) {
+                    let mut env = outermost.unwrap_or_default();
+                    env.retain(|(k, _)| k != "CURSOR_CONVERSATION_ID");
+                    env.push(("CURSOR_CONVERSATION_ID".to_string(), id));
+                    outermost = Some(env);
+                }
+            }
+        }
+    }
     if outermost.is_none() && start > 0 && std::env::var_os("CURSOR_AGENT").is_some() {
         return Some(vec![("CURSOR_AGENT".to_string(), "1".to_string())]);
     }
     outermost
+}
+
+const TMUX_SPAWN_TTL_MS: u64 = 30_000;
+
+fn now_ms_u64() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Record the conversation that is spawning a tmux pane or window on
+/// `line`.
+pub fn note_tmux_spawn(line: &str, cwd: Option<&str>, session: &str) {
+    let Some(session) = usable_session_id(session) else {
+        return;
+    };
+    let dir = runtime_dir();
+    let _lock = CommitLock::acquire(&dir.join("tmux-sock.lock"));
+    let now = now_ms_u64();
+    for (key, target, script) in tmux_spawn_specs(line, cwd) {
+        let path = dir.join(format!("tmux-sock-{key}"));
+        let mut kept: Vec<String> = std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| {
+                let mut parts = l.splitn(4, '\t');
+                let at = parts.next().and_then(|s| s.parse::<u64>().ok());
+                at.is_some_and(|t| now.saturating_sub(t) <= TMUX_SPAWN_TTL_MS)
+            })
+            .map(str::to_string)
+            .collect();
+        let clean_script = script.replace(['\t', '\n', '\r'], " ");
+        let clean_target = target.replace(['\t', '\n', '\r'], " ");
+        kept.push(format!("{now}\t{session}\t{clean_target}\t{clean_script}"));
+        let body = if kept.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n", kept.join("\n"))
+        };
+        let _ = bookkeep::replace_whole(&path, body.as_bytes());
+    }
+}
+
+fn tmux_pane_conversation(sock: &str, pane: Option<&str>) -> Option<String> {
+    let dir = runtime_dir();
+    let _lock = CommitLock::acquire(&dir.join("tmux-sock.lock"));
+    let key = work_id(sock);
+    let path = dir.join(format!("tmux-sock-{key}"));
+    let pane_id = pane.map(str::trim).filter(|p| !p.is_empty());
+    if let Some(p) = pane_id {
+        let pane_token: String = p
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if !pane_token.is_empty() {
+            let bind_path = dir.join(format!("tmux-pane-{key}-{pane_token}"));
+            if let Ok(bound) = std::fs::read_to_string(&bind_path) {
+                if let Some(id) = usable_session_id(&bound) {
+                    return Some(id.to_string());
+                }
+            }
+        }
+    }
+    let text = std::fs::read_to_string(&path).ok()?;
+    let now = now_ms_u64();
+    let mut entries: Vec<(u64, String, String, String)> = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.splitn(4, '\t');
+        let (Some(at_s), Some(sess), Some(target), Some(script)) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let Ok(at) = at_s.parse::<u64>() else {
+            continue;
+        };
+        if now.saturating_sub(at) > TMUX_SPAWN_TTL_MS {
+            continue;
+        }
+        if let Some(id) = usable_session_id(sess) {
+            entries.push((at, id.to_string(), target.to_string(), script.to_string()));
+        }
+    }
+    if entries.is_empty() {
+        return None;
+    }
+    let chain = ancestry();
+    let stop = chain
+        .iter()
+        .position(|(pid, comm)| *pid <= 1 || is_session(comm))
+        .unwrap_or(chain.len());
+    let mut active_texts: Vec<String> = Vec::new();
+    for (pid, _) in &chain[..stop] {
+        #[cfg(target_os = "linux")]
+        if let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) {
+            let s = raw
+                .split(|b| *b == 0)
+                .filter(|w| !w.is_empty())
+                .map(|w| String::from_utf8_lossy(w).into_owned())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !s.is_empty() {
+                active_texts.push(s);
+            }
+        }
+    }
+    let mut chosen_idx = entries
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(idx, (_, _, _, script))| {
+            let s = script.trim();
+            (!s.is_empty()
+                && active_texts
+                    .iter()
+                    .any(|cmd| cmd.contains(s) || s.contains(cmd.as_str())))
+            .then_some(idx)
+        });
+    if chosen_idx.is_none() && entries.iter().all(|(_, id, _, _)| *id == entries[0].1) {
+        chosen_idx = Some(entries.len() - 1);
+    }
+    let idx = chosen_idx?;
+    let chosen = entries.remove(idx).1;
+    let body = if entries.is_empty() {
+        String::new()
+    } else {
+        let lines: Vec<String> = entries
+            .into_iter()
+            .map(|(at, id, target, script)| format!("{at}\t{id}\t{target}\t{script}"))
+            .collect();
+        format!("{}\n", lines.join("\n"))
+    };
+    let _ = bookkeep::replace_whole(&path, body.as_bytes());
+    if let Some(p) = pane_id {
+        let pane_token: String = p
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if !pane_token.is_empty() {
+            let bind_path = dir.join(format!("tmux-pane-{key}-{pane_token}"));
+            let _ = bookkeep::replace_whole(&bind_path, format!("{chosen}\n").as_bytes());
+        }
+    }
+    Some(chosen)
+}
+
+/// The `(socket_key, target, script)` entries of any `tmux` pane or
+/// window creation subcommand in `line`, resolved against `cwd`.
+fn tmux_spawn_specs(line: &str, cwd: Option<&str>) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    let base_cwd = cwd
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok());
+    for seg in nested_lines(line, 0).iter().flat_map(|l| raw_segments(l)) {
+        let words = shell_words(&seg);
+        let (at, _) = prefix_end(&words);
+        let Some(cmd) = words.get(at) else { continue };
+        if cmd.rsplit('/').next().unwrap_or(cmd) != "tmux" {
+            continue;
+        }
+        let mut sock = None;
+        let mut label = None;
+        let mut i = at + 1;
+        while let Some(w) = words.get(i).map(String::as_str) {
+            if w == "-S" {
+                sock = words.get(i + 1).cloned();
+                i += 2;
+            } else if w == "-L" {
+                label = words.get(i + 1).cloned();
+                i += 2;
+            } else if matches!(w, "-f" | "-c" | "-T") {
+                i += 2;
+            } else if w.starts_with('-') {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        let Some(sub) = words.get(i).map(String::as_str) else {
+            continue;
+        };
+        if !matches!(
+            sub,
+            "new-window"
+                | "neww"
+                | "new-session"
+                | "new"
+                | "split-window"
+                | "splitw"
+                | "respawn-pane"
+                | "respawnp"
+                | "respawn-window"
+                | "respawnw"
+                | "send-keys"
+                | "send"
+        ) {
+            continue;
+        }
+        let mut target = String::new();
+        let mut j = i + 1;
+        while let Some(w) = words.get(j).map(String::as_str) {
+            if matches!(w, "-s" | "-t") {
+                target = words.get(j + 1).cloned().unwrap_or_default();
+                j += 2;
+            } else if matches!(w, "-c" | "-e" | "-F" | "-n" | "-x" | "-y" | "-l" | "-p") {
+                j += 2;
+            } else if w == "--" {
+                j += 1;
+                break;
+            } else if w.starts_with('-') {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        let script = if j < words.len() {
+            words[j..].join(" ")
+        } else {
+            String::new()
+        };
+        let resolved = if let Some(s) = sock {
+            let p = PathBuf::from(&s);
+            let full = if p.is_absolute() {
+                p
+            } else if let Some(ref c) = base_cwd {
+                c.join(p)
+            } else {
+                p
+            };
+            std::fs::canonicalize(&full)
+                .unwrap_or(full)
+                .display()
+                .to_string()
+        } else {
+            let l = label.unwrap_or_else(|| "default".to_string());
+            format!("/tmp/tmux-{}/{l}", euid())
+        };
+        let key = work_id(&resolved);
+        out.push((key, target, script));
+    }
+    out
+}
+
+/// The socket keys of any `tmux` pane or window creation subcommand in
+/// `line`, resolved against `cwd`.
+#[must_use]
+pub fn tmux_spawn_socket_keys(line: &str, cwd: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    for (key, _, _) in tmux_spawn_specs(line, cwd) {
+        if !out.contains(&key) {
+            out.push(key);
+        }
+    }
+    out
 }
 
 /// The conversation ids this process speaks for, by key, sorted so two

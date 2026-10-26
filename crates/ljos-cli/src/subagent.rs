@@ -161,6 +161,22 @@ pub fn note_hook_call(input: &str, event: &str) -> bool {
     let call = text(&v, &["tool_use_id", "toolUseId"])
         .map(|c| token(&c))
         .filter(|c| !c.is_empty());
+    if matches!(event, "PreToolUse" | "preToolUse" | "beforeShellExecution") {
+        if let Some(ref s) = session {
+            if crate::usable_session_id(s).is_some_and(|id| !crate::subagent_id(id)) {
+                let input_obj = if v["tool_input"].is_object() {
+                    &v["tool_input"]
+                } else {
+                    &v["toolInput"]
+                };
+                let line = input_obj["command"]
+                    .as_str()
+                    .or_else(|| v["command"].as_str())
+                    .unwrap_or("");
+                crate::note_tmux_spawn(line, v["cwd"].as_str(), s);
+            }
+        }
+    }
     let (Some(session), Some(call)) = (session, call) else {
         return seat_tool;
     };

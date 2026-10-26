@@ -1299,3 +1299,306 @@ fn rv10_a_shell_that_exports_its_runtime_dir_late_keeps_its_stamp() {
         "X's shell that exported XDG_RUNTIME_DIR late lost its stamp to an inline override without BOX:\n{said}"
     );
 }
+
+/// Under a shared `tmux` server, a conversation's own commit in a new
+/// window passes and another conversation's commit in a new window is
+/// refused, whether the sitting conversation or the other started the
+/// `tmux` server.
+#[test]
+fn a_tmux_window_allows_the_sitting_conversation_and_refuses_another() {
+    let Ok(tmux) = which::which("tmux").or_else(|_| {
+        let p = PathBuf::from("/exec-daemon/tmux");
+        p.is_file().then_some(p).ok_or(())
+    }) else {
+        return;
+    };
+    for first in [CONV_X, CONV_Z] {
+        let home = Box_::new();
+        let sat = home.shell(CONV_X, &["claim", ISSUE]);
+        assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+        home.card(&holder(CONV_X));
+        let hooks = home.run.join("githooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        script(
+            &hooks.join("pre-commit"),
+            &format!(
+                "#!/bin/sh\nexec {:?} git-hook pre-commit\n",
+                env!("CARGO_BIN_EXE_ljos")
+            ),
+        );
+        let sock = home.run.join("tmux.sock");
+        let tmux_s = format!("{} -S {}", tmux.display(), sock.display());
+        let start = home.bash(
+            &[("CURSOR_CONVERSATION_ID", first)],
+            &format!("{tmux_s} new-session -d -s base 'sleep 60'"),
+        );
+        assert!(start.status.success(), "tmux start: {}", text_of(&start));
+
+        let z_done = home.run.join("z.done");
+        let z_err = home.run.join("z.err");
+        let z_cmd = format!(
+            "{tmux_s} new-window -d 'git -c core.hooksPath={} -c user.name=t -c user.email=t@e commit -q --allow-empty -m z 2>{}; echo $? > {}'",
+            hooks.display(),
+            z_err.display(),
+            z_done.display()
+        );
+        refused(
+            &home.hook(CONV_Z, &z_cmd, &[("CURSOR_CONVERSATION_ID", CONV_Z)]),
+            "Z's tmux new-window commit hook",
+        );
+        let _ = home.bash(&[("CURSOR_CONVERSATION_ID", CONV_Z)], &z_cmd);
+        let t0 = Instant::now();
+        while !z_done.exists() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let z_rc = std::fs::read_to_string(&z_done).unwrap_or_default();
+        assert_ne!(
+            z_rc.trim(),
+            "0",
+            "Z's tmux commit succeeded (server started by {first}): {}",
+            std::fs::read_to_string(&z_err).unwrap_or_default()
+        );
+
+        let x_done = home.run.join("x.done");
+        let x_err = home.run.join("x.err");
+        let x_cmd = format!(
+            "{tmux_s} new-window -d 'git -c core.hooksPath={} -c user.name=t -c user.email=t@e commit -q --allow-empty -m x 2>{}; echo $? > {}'",
+            hooks.display(),
+            x_err.display(),
+            x_done.display()
+        );
+        allowed(
+            &home.hook(CONV_X, &x_cmd, &[("CURSOR_CONVERSATION_ID", CONV_X)]),
+            "X's tmux new-window commit hook",
+        );
+        let _ = home.bash(&[("CURSOR_CONVERSATION_ID", CONV_X)], &x_cmd);
+        let t0 = Instant::now();
+        while !x_done.exists() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let x_rc = std::fs::read_to_string(&x_done).unwrap_or_default();
+        assert_eq!(
+            x_rc.trim(),
+            "0",
+            "X's tmux commit failed (server started by {first}): {}",
+            std::fs::read_to_string(&x_err).unwrap_or_default()
+        );
+
+        let _ = home.bash(
+            &[("CURSOR_CONVERSATION_ID", first)],
+            &format!("{tmux_s} kill-server"),
+        );
+    }
+}
+
+/// One tmux server serves two conversations. A pane's commit is judged
+/// as the conversation whose pane it is, not as whichever conversation's
+/// tool call last mentioned tmux. X's waiting commit must pass after Z
+/// ran an unrelated command naming tmux, and Z's waiting commit must not
+/// pass on X's sitting after X listed its windows.
+#[test]
+fn a_tmux_pane_is_not_judged_as_the_last_conversation_to_name_tmux() {
+    let Ok(tmux) = which::which("tmux").or_else(|_| {
+        let p = PathBuf::from("/exec-daemon/tmux");
+        p.is_file().then_some(p).ok_or(())
+    }) else {
+        return;
+    };
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    let hooks = home.run.join("githooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    script(
+        &hooks.join("pre-commit"),
+        &format!(
+            "#!/bin/sh\nexec {:?} git-hook pre-commit\n",
+            env!("CARGO_BIN_EXE_ljos")
+        ),
+    );
+    let sock = home.run.join("tmux.sock");
+    let tmux_s = format!("{} -S {}", tmux.display(), sock.display());
+    let x = [("CURSOR_CONVERSATION_ID", CONV_X)];
+    let z = [("CURSOR_CONVERSATION_ID", CONV_Z)];
+    let wait_then_commit = |who: &str| {
+        let go = home.run.join(format!("{who}.go"));
+        let done = home.run.join(format!("{who}.done"));
+        let body = format!(
+            "while [ ! -f {go} ]; do sleep 0.05; done\ngit -c core.hooksPath={h} -c user.name=t -c user.email=t@e commit -q --allow-empty -m {who} 2>{done}.err\necho $? > {done}\n",
+            go = go.display(),
+            h = hooks.display(),
+            done = done.display(),
+        );
+        let file = home.run.join(format!("{who}.sh"));
+        std::fs::write(&file, body).unwrap();
+        (go, done, file)
+    };
+    let wait_rc = |done: &Path| {
+        let t0 = Instant::now();
+        while !done.exists() && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::fs::read_to_string(done)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+
+    // X starts the server and a window that commits once told to.
+    let start = home.bash(&x, &format!("{tmux_s} new-session -d -s x 'sleep 60'"));
+    assert!(start.status.success(), "tmux start: {}", text_of(&start));
+    let (x_go, x_done, x_sh) = wait_then_commit("x");
+    let x_cmd = format!("{tmux_s} new-window -d 'sh {}'", x_sh.display());
+    allowed(&home.hook(CONV_X, &x_cmd, &x), "X's tmux window");
+    let _ = home.bash(&x, &x_cmd);
+    // Z reads a file whose name mentions tmux. Nothing of Z's runs in X's pane.
+    let _ = home.hook(CONV_Z, "cat ~/.tmux.conf", &z);
+    std::fs::write(&x_go, "").unwrap();
+    assert_eq!(
+        wait_rc(&x_done),
+        "0",
+        "X's own pane commit was refused after Z named tmux: {}",
+        std::fs::read_to_string(home.run.join("x.done.err")).unwrap_or_default()
+    );
+
+    // Z starts a tmux server of its own on another socket, then X lists
+    // the windows of X's server.
+    let (z_go, z_done, z_sh) = wait_then_commit("z");
+    let z_sock = home.run.join("tmux-z.sock");
+    let z_cmd = format!(
+        "{} -S {} new-session -d -s z 'sh {}'",
+        tmux.display(),
+        z_sock.display(),
+        z_sh.display()
+    );
+    let _ = home.hook(CONV_Z, &z_cmd, &z);
+    let _ = home.bash(&z, &z_cmd);
+    let _ = home.hook(CONV_X, &format!("{tmux_s} list-windows"), &x);
+    std::fs::write(&z_go, "").unwrap();
+    let z_rc = wait_rc(&z_done);
+    let z_err = std::fs::read_to_string(home.run.join("z.done.err")).unwrap_or_default();
+    assert!(
+        z_rc != "0" && z_err.contains("sitting-gate"),
+        "Z's pane on its own tmux server committed on X's sitting after X listed X's windows: rc={z_rc} {z_err}"
+    );
+    let _ = home.bash(&x, &format!("{tmux_s} kill-server"));
+    let _ = home.bash(
+        &z,
+        &format!("{} -S {} kill-server", tmux.display(), z_sock.display()),
+    );
+}
+
+fn rv_tmux() -> PathBuf {
+    which::which("tmux")
+        .or_else(|_| {
+            let p = PathBuf::from("/exec-daemon/tmux");
+            p.is_file().then_some(p).ok_or(())
+        })
+        .expect("tmux is needed")
+}
+
+fn rv_wait(done: &Path) -> String {
+    let t0 = Instant::now();
+    while !done.exists() && t0.elapsed() < Duration::from_secs(15) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::fs::read_to_string(done)
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// A pane script that waits for `WHO.go`, commits, and writes its exit
+/// status to `WHO.done`.
+fn rv_pane_script(home: &Box_, hooks: &Path, who: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let go = home.run.join(format!("{who}.go"));
+    let done = home.run.join(format!("{who}.done"));
+    let body = format!(
+        "while [ ! -f {go} ]; do sleep 0.05; done\ngit -c core.hooksPath={h} -c user.name=t -c user.email=t@e commit -q --allow-empty -m {who} 2>{done}.err\necho $? > {done}\n",
+        go = go.display(),
+        h = hooks.display(),
+        done = done.display(),
+    );
+    let file = home.run.join(format!("{who}.sh"));
+    std::fs::write(&file, body).unwrap();
+    (go, done, file)
+}
+
+fn rv_git_hooks(home: &Box_) -> PathBuf {
+    let hooks = home.run.join("githooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    script(
+        &hooks.join("pre-commit"),
+        &format!(
+            "#!/bin/sh\nexec {:?} git-hook pre-commit\n",
+            env!("CARGO_BIN_EXE_ljos")
+        ),
+    );
+    hooks
+}
+
+/// RV1. Two conversations share one tmux server, as two bots that both
+/// run `tmux new -d` on the default socket do. X's own pane commit is
+/// still X's after Z opens a session of its own on that server.
+#[test]
+fn rv1_a_pane_on_a_shared_tmux_server_stays_its_conversations() {
+    let tmux = rv_tmux();
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    let hooks = rv_git_hooks(&home);
+    let sock = home.run.join("tmux.sock");
+    let tmux_s = format!("{} -S {}", tmux.display(), sock.display());
+    let x = [("CURSOR_CONVERSATION_ID", CONV_X)];
+    let z = [("CURSOR_CONVERSATION_ID", CONV_Z)];
+    let (go, done, file) = rv_pane_script(&home, &hooks, "x");
+    let x_cmd = format!("{tmux_s} new-session -d -s x 'sh {}'", file.display());
+    allowed(&home.hook(CONV_X, &x_cmd, &x), "X's tmux session");
+    let _ = home.bash(&x, &x_cmd);
+    let z_cmd = format!("{tmux_s} new-session -d -s z 'sleep 30'");
+    allowed(&home.hook(CONV_Z, &z_cmd, &z), "Z's tmux session");
+    let _ = home.bash(&z, &z_cmd);
+    std::fs::write(&go, "").unwrap();
+    let rc = rv_wait(&done);
+    let _ = home.bash(&x, &format!("{tmux_s} kill-server"));
+    assert_eq!(
+        rc,
+        "0",
+        "X's own pane commit was refused after Z opened a session on the same server: {}",
+        std::fs::read_to_string(home.run.join("x.done.err")).unwrap_or_default()
+    );
+}
+
+/// RV2. The reverse of RV1: Z's pane on the shared server does not
+/// commit on X's sitting because X opened a window after Z's pane
+/// started.
+#[test]
+fn rv2_a_pane_on_a_shared_tmux_server_does_not_borrow_the_last_openers_sitting() {
+    let tmux = rv_tmux();
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    let hooks = rv_git_hooks(&home);
+    let sock = home.run.join("tmux.sock");
+    let tmux_s = format!("{} -S {}", tmux.display(), sock.display());
+    let x = [("CURSOR_CONVERSATION_ID", CONV_X)];
+    let z = [("CURSOR_CONVERSATION_ID", CONV_Z)];
+    let (go, done, file) = rv_pane_script(&home, &hooks, "z");
+    let z_cmd = format!("{tmux_s} new-session -d -s z 'sh {}'", file.display());
+    let _ = home.hook(CONV_Z, &z_cmd, &z);
+    let _ = home.bash(&z, &z_cmd);
+    let x_cmd = format!("{tmux_s} new-window -d -t z 'sleep 30'");
+    let _ = home.hook(CONV_X, &x_cmd, &x);
+    let _ = home.bash(&x, &x_cmd);
+    std::fs::write(&go, "").unwrap();
+    let rc = rv_wait(&done);
+    let err = std::fs::read_to_string(home.run.join("z.done.err")).unwrap_or_default();
+    let _ = home.bash(&x, &format!("{tmux_s} kill-server"));
+    assert!(
+        rc != "0" && err.contains("sitting-gate"),
+        "Z's pane committed on X's sitting after X opened a window: rc={rc} {err}"
+    );
+}
