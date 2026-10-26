@@ -20227,6 +20227,54 @@ fn shell_c_script(segment: &str) -> Option<String> {
             .filter(|w| !w.trim().is_empty())
             .cloned();
     }
+    if base == "tmux" {
+        let mut i = at + 1;
+        while let Some(w) = words.get(i).map(String::as_str) {
+            if matches!(w, "-S" | "-L" | "-f" | "-c" | "-T") {
+                i += 2;
+            } else if w.starts_with('-') {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        let sub = words.get(i).map(String::as_str)?;
+        if matches!(
+            sub,
+            "new-window"
+                | "neww"
+                | "new-session"
+                | "new"
+                | "split-window"
+                | "splitw"
+                | "respawn-pane"
+                | "respawnp"
+                | "respawn-window"
+                | "respawnw"
+        ) {
+            let mut j = i + 1;
+            while let Some(w) = words.get(j).map(String::as_str) {
+                if matches!(
+                    w,
+                    "-c" | "-e" | "-F" | "-n" | "-s" | "-t" | "-x" | "-y" | "-l" | "-p"
+                ) {
+                    j += 2;
+                } else if w == "--" {
+                    j += 1;
+                    break;
+                } else if w.starts_with('-') {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            if j < words.len() {
+                let script = words[j..].join(" ");
+                return (!script.trim().is_empty()).then_some(script);
+            }
+        }
+        return None;
+    }
     if !SHELLS.contains(&base) {
         return None;
     }
