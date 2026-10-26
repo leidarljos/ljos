@@ -4413,6 +4413,50 @@ pub fn same_seat_here(held: &str, holder: &str) -> bool {
     same_seat(held, holder, &tracker_known_seats())
 }
 
+/// Whether `held` (the tracker's `claimed_by`) and `assignee` (the
+/// record's first line) agree on the conversation tag when either names one.
+#[must_use]
+pub fn same_conversation_tag(held: &str, assignee: &str) -> bool {
+    let (_, held_tag) = holder_parts(held);
+    let (_, hold_tag) = holder_parts(assignee);
+    match (held_tag, hold_tag) {
+        (Some(a), Some(b)) => a == b,
+        (Some(_), None) => cursor_conversation().is_none(),
+        (None, _) => true,
+    }
+}
+
+/// Whether `line`, starting in `cwd`, writes a `hold-*` record inside the
+/// runtime `ljos` directory.
+pub(crate) fn writes_hold_record(line: &str, cwd: Option<&Path>) -> bool {
+    let mut cwd = cwd
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok());
+    for seg in nested_lines(line, 0).iter().flat_map(|l| raw_segments(l)) {
+        let words = shell_words(&seg);
+        let (at, _) = prefix_end(&words);
+        let words = &words[at..];
+        let Some(first) = words.first() else { continue };
+        let first = first.rsplit('/').next().unwrap_or(first);
+        if matches!(first, "cd" | "pushd") {
+            cwd = kept_prompt::after_cd(words, cwd.as_deref());
+            continue;
+        }
+        let reads = READERS.contains(&first) || first == "ljos" || kept_prompt::reads_only(first);
+        if let Some(target) = kept_prompt::reached(words, cwd.as_deref(), reads) {
+            let name = target
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or(&target);
+            if name.starts_with("hold-") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Seat names an older ljos wrote that are now another name. `ljos-bot`
 /// held claims before the seat map named the seat `ljosbot`.
 const LEGACY_SEATS: &[(&str, &str)] = &[("ljos-bot", "ljosbot")];

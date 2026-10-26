@@ -885,3 +885,55 @@ fn a_processs_own_env_does_not_outrank_its_shells_stamp() {
         "no conversation_id, X in LJOS_HARNESS_SESSION, Z's id in the env",
     );
 }
+
+/// A `hold-*` record forged with another conversation's tag does not pass
+/// when the tracker row carries the real conversation's tag, and a shell
+/// command that redirects into a `hold-*` file in the runtime directory is
+/// refused by the command check.
+#[test]
+fn a_forged_sitting_record_with_another_conversations_tag_is_refused() {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+
+    let write_cmd = format!("printf 'x' > {}/ljos/hold-zz", home.run.display());
+    let shell_payload = serde_json::json!({
+        "cursor_version": "2.4.0",
+        "hook_event_name": "beforeShellExecution",
+        "conversation_id": CONV_Z,
+        "cwd": home.repo,
+        "command": write_cmd,
+    })
+    .to_string();
+    let said = home.hook_with(&shell_payload, &[]);
+    assert!(
+        said.contains("sitting-gate") && said.contains("\"permission\":\"deny\""),
+        "a shell write to a hold-* record under XDG_RUNTIME_DIR/ljos was not refused:\n{said}"
+    );
+
+    let real = std::fs::read_dir(home.run.join("ljos"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("hold-"))
+        })
+        .unwrap();
+    let lines: Vec<String> = std::fs::read_to_string(&real)
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect();
+    let mut forged = lines;
+    forged[0] = holder(CONV_Z);
+    let forged_path = home.run.join("ljos/hold-zz");
+    std::fs::write(&forged_path, forged.join("\n") + "\n").unwrap();
+    let said = home.hook(CONV_Z, MERGE, &[]);
+    assert!(
+        said.contains("sitting-gate") && said.contains(&format!("claimed by {}", holder(CONV_X))),
+        "Z's merge after writing hold-zz with Z's tag against X's tracker claim:\n{said}"
+    );
+    let _ = std::fs::remove_file(&forged_path);
+}

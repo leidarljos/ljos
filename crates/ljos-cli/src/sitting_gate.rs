@@ -55,6 +55,11 @@ pub fn guard_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if !runner() {
         return None;
     }
+    if crate::writes_hold_record(line, cwd) {
+        return Some(refusal(
+            "a tool command under a runner may not write a sitting record",
+        ));
+    }
     let calls = match crate::gates::git_calls(line, cwd) {
         Ok(calls) => calls,
         Err(why) => {
@@ -213,7 +218,9 @@ pub fn live_sitting() -> Result<String, String> {
         return Err(format!("{issue} is {state} on the tracker, not open"));
     }
     let by = card["claimed_by"].as_str().unwrap_or("").trim();
-    if !crate::same_seat_here(by, &hold.assignee) {
+    if !crate::same_seat_here(by, &hold.assignee)
+        || !crate::same_conversation_tag(by, &hold.assignee)
+    {
         return Err(if by.is_empty() {
             format!("the tracker names no holder on {issue}")
         } else {
