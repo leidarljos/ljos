@@ -919,12 +919,7 @@ pub fn record_dissents(issue: &str) -> Vec<String> {
                     Err(e) => lines.push(format!("dissent: file refused: {e:#}")),
                 }
             }
-            Fate::Listed(objection) => lines.push(format!(
-                "listed {} from {}: {}",
-                objection.severity.word(),
-                objection.persona,
-                objection.text
-            )),
+            Fate::Listed(objection) => say_unfiled(issue, &objection, &noted, &mut lines),
         }
     }
     // A round count, a child count, or a spent budget used to mark the
@@ -946,6 +941,62 @@ pub fn record_dissents(issue: &str) -> Vec<String> {
         ));
     }
     lines
+}
+
+fn say_unfiled(
+    issue: &str,
+    objection: &Objection,
+    noted: &BTreeSet<(String, String)>,
+    lines: &mut Vec<String>,
+) {
+    if !noted.contains(&objection.key()) {
+        match note_issue(issue, &format_note(objection)) {
+            Ok(()) => lines.push(format!(
+                "noted {} from {} on {}: {}",
+                objection.severity.word(),
+                objection.persona,
+                objection.target,
+                objection.text
+            )),
+            Err(e) => lines.push(format!("dissent: note refused: {e:#}")),
+        }
+    }
+    lines.push(format!(
+        "paused for a person; {} from {} was not filed: {}",
+        objection.severity.word(),
+        objection.persona,
+        objection.text
+    ));
+}
+
+/// Issues under `issue`, not counting `issue`. A cycle counts once.
+#[must_use]
+pub fn descendant_count(issue: &str) -> usize {
+    fn walk(id: &str, seen: &mut BTreeSet<String>) -> usize {
+        let mut n = 0;
+        for child in child_ids(id) {
+            if !seen.insert(child.clone()) {
+                continue;
+            }
+            n += 1 + walk(&child, seen);
+        }
+        n
+    }
+    let mut seen = BTreeSet::new();
+    seen.insert(issue.to_string());
+    walk(issue, &mut seen)
+}
+
+fn child_ids(issue: &str) -> Vec<String> {
+    let Ok(said) = crate::run_captured("vissue", &["children", issue, "--json"]) else {
+        return Vec::new();
+    };
+    let Ok(rows) = serde_json::from_str::<Vec<Value>>(&said.stdout) else {
+        return Vec::new();
+    };
+    rows.into_iter()
+        .filter_map(|row| row["id"].as_str().map(str::to_string))
+        .collect()
 }
 
 fn format_note(objection: &Objection) -> String {

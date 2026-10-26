@@ -1,0 +1,161 @@
+//! Past the child cap, and at the descendant limit, every objection is
+//! filed or the reading pauses for a person. Nothing is only printed.
+
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::Mutex;
+
+static LOCK: Mutex<()> = Mutex::new(());
+
+fn vissue_bin() -> PathBuf {
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let bin = dir.join("vissue");
+            if bin.is_file() {
+                return bin;
+            }
+        }
+    }
+    PathBuf::from("/tmp/ljos-bins/vissue")
+}
+
+struct Tracker {
+    _dir: tempfile::TempDir,
+    _saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl Tracker {
+    fn new(config: Option<&str>) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tracker");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(home.join(".config")).unwrap();
+        std::fs::create_dir_all(home.join("run")).unwrap();
+        let version = Command::new(vissue_bin())
+            .arg("--version")
+            .output()
+            .expect("real vissue");
+        let text = String::from_utf8_lossy(&version.stdout);
+        assert!(text.contains("0.20"), "{text}");
+        let keys = [
+            "PATH",
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_RUNTIME_DIR",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "VISSUE_AGENT",
+            "LJOS_SEAT",
+            "LJOS_TRACKER_GIT",
+            "LJOS_CONFIG",
+            "PACKSET_URL",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_NOSYSTEM",
+        ];
+        let saved = keys.into_iter().map(|k| (k, std::env::var_os(k))).collect();
+        let path = {
+            let dir = vissue_bin().parent().unwrap().display().to_string();
+            let rest = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+            format!("{dir}:/usr/bin:/bin:{rest}")
+        };
+        let git_cfg = dir.path().join("gitconfig");
+        std::fs::write(&git_cfg, "").unwrap();
+        unsafe {
+            std::env::set_var("PATH", path);
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+            std::env::set_var("XDG_RUNTIME_DIR", home.join("run"));
+            std::env::set_var("VISSUE_ROOT", &root);
+            std::env::set_var("VISSUE_NO_ROUTE", "1");
+            std::env::set_var("VISSUE_AGENT", "saddle@test");
+            std::env::set_var("LJOS_SEAT", "saddle");
+            std::env::set_var("LJOS_TRACKER_GIT", "off");
+            std::env::set_var("PACKSET_URL", "off");
+            std::env::set_var("GIT_CONFIG_GLOBAL", &git_cfg);
+            std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+            if let Some(text) = config {
+                let path = dir.path().join("ljos.toml");
+                std::fs::write(&path, text).unwrap();
+                std::env::set_var("LJOS_CONFIG", &path);
+            } else {
+                std::env::remove_var("LJOS_CONFIG");
+            }
+        }
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["init", "-q"])
+            .output();
+        Self {
+            _dir: dir,
+            _saved: saved,
+        }
+    }
+
+    fn vissue(&self, args: &[&str]) -> String {
+        let out = Command::new("vissue").args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "vissue {args:?}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn show(&self, id: &str) -> serde_json::Value {
+        let out = Command::new("vissue")
+            .args(["show", id, "--json"])
+            .output()
+            .unwrap();
+        serde_json::from_slice(&out.stdout).expect("show json")
+    }
+}
+
+impl Drop for Tracker {
+    fn drop(&mut self) {
+        for (key, value) in &self._saved {
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn objections_past_the_child_cap_are_not_dropped() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let t = Tracker::new(None);
+    let parent = t.vissue(&["q", "-p", "probe", "split reading"]);
+    for n in 1..=9 {
+        t.vissue(&[
+            "note",
+            &parent,
+            &format!("finding: carol: blocking: a real failure :: distinct bug number {n}"),
+        ]);
+    }
+    let lines = ljos_cli::converge::record_dissents(&parent);
+    let text = lines.join("\n");
+    let state = t.show(&parent)["state"].as_str().unwrap().to_string();
+    assert_ne!(state, "DONE", "{text}");
+    assert_ne!(state, "CANCELLED", "{text}");
+    assert!(
+        text.contains("paused for a person"),
+        "an objection past the cap was only printed:\n{text}"
+    );
+    assert!(
+        text.contains("was not filed"),
+        "the unfiled objection text is missing:\n{text}"
+    );
+    let kids = t.vissue(&["children", &parent, "--json"]);
+    let filed = kids.matches("distinct bug").count();
+    assert_eq!(filed, 8, "filed {filed}, not the cap:\n{kids}\n{text}");
+    let card = t.show(&parent).to_string();
+    assert!(
+        card.contains("distinct bug number"),
+        "the finding is not on the ticket:\n{card}"
+    );
+}
