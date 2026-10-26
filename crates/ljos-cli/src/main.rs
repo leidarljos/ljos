@@ -1025,8 +1025,9 @@ enum Cmd {
         /// tie files nothing. A nit, a wording note or a style note is
         /// written on the issue. The same objection is not filed again.
         /// Each filing reading is one panel round, noted as `panel-round:
-        /// N` (a `panel rN` title is round N). At the panel's round limit
-        /// the issue closes as settled-with-notes.
+        /// N` (a `panel rN` title is round N). A round count does not
+        /// change the ticket. When the seats still split, the reading
+        /// names the open objection children.
         #[arg(long)]
         no_file: bool,
         /// Ballots the decision needs. Short of it the reading says so and

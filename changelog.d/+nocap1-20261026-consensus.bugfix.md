@@ -1,0 +1,1 @@
+`ljos consensus` no longer marks a ticket DONE when a round count is reached. A split reading names the open objection children and leaves the state alone. The person closes with `ljos finish --close`.

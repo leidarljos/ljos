@@ -191,12 +191,10 @@ fn text(out: &Output) -> String {
     )
 }
 
-const LIMIT: &str = "settled-with-notes: round 3 reached the limit of 3";
-
 #[test]
-fn a_panel_titled_with_its_question_closes_at_the_round_limit() {
+fn a_panel_titled_with_its_question_stays_open_past_round_three() {
     // log-sink (panel-a7o4 in the eval): keep held stderr, weigh and share
-    // chose file, and the issue was still TODO after three rounds.
+    // chose file. The round count used to mark the issue DONE.
     let id = "proj-a7o4";
     let tracker = Tracker::new(
         id,
@@ -207,36 +205,26 @@ fn a_panel_titled_with_its_question_closes_at_the_round_limit() {
     let read = tracker.consensus(&[id, "--json", "--no-file"]);
     assert!(read.status.success(), "{}", text(&read));
     assert!(tracker.rounds(id).is_empty(), "{:?}", tracker.notes(id));
-    for n in 1..=2 {
+    for n in 1..=4 {
         let out = tracker.consensus(&[id, "--json"]);
         let said = text(&out);
         assert!(out.status.success(), "{said}");
         assert_eq!(tracker.rounds(id), (1..=n).collect::<Vec<_>>(), "{said}");
         assert_eq!(tracker.state_of(id), "TODO", "{said}");
+        assert!(!said.contains("closed as"), "{said}");
+        assert!(!said.contains("settled-with-notes"), "{said}");
     }
-    let out = tracker.consensus(&[id, "--json"]);
-    let said = text(&out);
-    assert!(out.status.success(), "{said}");
-    assert_eq!(tracker.rounds(id), vec![1, 2, 3], "{said}");
-    assert_eq!(tracker.state_of(id), "DONE", "{said}");
-    assert!(said.contains(&format!("{id} closed as {LIMIT}")), "{said}");
-    let summaries = |t: &Tracker| t.notes(id).iter().filter(|n| n.starts_with(LIMIT)).count();
-    assert_eq!(summaries(&tracker), 1, "{:?}", tracker.notes(id));
     // The minority is one `Dissent holds` child, never a `fix:` child.
     let calls = std::fs::read_to_string(tracker.state.join("calls.log")).unwrap();
     assert_eq!(calls.matches("Dissent holds stderr").count(), 1, "{calls}");
     assert!(!calls.contains("fix:"), "{calls}");
-    // A closed panel sits no further round and is not closed again.
-    let after = tracker.consensus(&[id, "--json"]);
-    assert!(after.status.success(), "{}", text(&after));
-    assert_eq!(tracker.rounds(id), vec![1, 2, 3]);
-    assert_eq!(summaries(&tracker), 1, "{:?}", tracker.notes(id));
+    assert!(!calls.contains("update"), "{calls}");
 }
 
 #[test]
-fn a_panel_r3_title_is_still_round_three() {
-    // The eval's unscored check: `panel r3: cache place` closed on its
-    // first settle, and the title stays the round with no note written.
+fn a_panel_r3_title_is_still_round_three_and_stays_open() {
+    // A `panel r3` title is round 3 with no round note. It used to close
+    // on that first reading.
     let id = "proj-hrd5";
     let tracker = Tracker::new(
         id,
@@ -250,7 +238,8 @@ fn a_panel_r3_title_is_still_round_three() {
     let out = tracker.consensus(&[id, "--json"]);
     let said = text(&out);
     assert!(out.status.success(), "{said}");
-    assert_eq!(tracker.state_of(id), "DONE", "{said}");
-    assert!(said.contains(&format!("{id} closed as {LIMIT}")), "{said}");
+    assert_eq!(tracker.state_of(id), "TODO", "{said}");
+    assert!(!said.contains("closed as"), "{said}");
+    assert!(!said.contains("settled-with-notes"), "{said}");
     assert!(tracker.rounds(id).is_empty(), "{:?}", tracker.notes(id));
 }

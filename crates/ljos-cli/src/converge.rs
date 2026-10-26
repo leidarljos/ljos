@@ -851,13 +851,74 @@ pub fn sitting_round(v: &Value) -> (usize, bool) {
     (last + 1, true)
 }
 
+/// Open `Dissent holds` and `fix:` children of `issue`. A missing state
+/// counts as open: a stub that lists only the id and the title has not
+/// closed the child.
+fn open_objection_children(issue: &str) -> Vec<(String, String)> {
+    let Ok(said) = crate::run_captured("vissue", &["children", issue, "--json"]) else {
+        return Vec::new();
+    };
+    let Ok(rows) = serde_json::from_str::<Vec<Value>>(&said.stdout) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for row in rows {
+        let Some(id) = row["id"].as_str() else {
+            continue;
+        };
+        let title = row["title"].as_str().map(str::to_string).or_else(|| {
+            crate::issue_record(id)
+                .ok()
+                .and_then(|v| v["title"].as_str().map(str::to_string))
+        });
+        let Some(title) = title else {
+            continue;
+        };
+        let titled = title.trim_start();
+        if !titled.starts_with("Dissent holds") && !titled.starts_with("fix:") {
+            continue;
+        }
+        let state = row["state"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| {
+                crate::issue_record(id)
+                    .ok()
+                    .and_then(|v| v["state"].as_str().map(str::to_string))
+            })
+            .unwrap_or_default();
+        if matches!(state.as_str(), "DONE" | "CANCELLED") {
+            continue;
+        }
+        out.push((id.to_string(), title));
+    }
+    out
+}
+
+/// The line a split reading prints. The round number is a count. It does
+/// not close the ticket.
+fn split_advice(issue: &str, round: usize) -> String {
+    let open = open_objection_children(issue);
+    if open.is_empty() {
+        return format!("seats still split at round {round}; open objections: none");
+    }
+    let named = open
+        .iter()
+        .map(|(id, title)| format!("{id} {title}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("seats still split at round {round}; open objections: {named}")
+}
+
 /// File dissent children and note the rest for `issue`. A blocking
 /// objection with a reason is one `Dissent holds TEXT` child. A settled
 /// majority still files one `Dissent holds OPTION` child for each option a
 /// voter holds that is not the lead. A tie files none. Each call sits one
-/// panel round ([`sitting_round`]), and at the round limit the issue closes
-/// as settled-with-notes. A tracker that does not answer leaves the reading
-/// as it was: filing is a side effect.
+/// panel round ([`sitting_round`]). A round count does not change the
+/// ticket state. When the seats still split, the reading names the open
+/// objection children. The person closes with `ljos finish --close`.
+/// A tracker that does not answer leaves the reading as it was: filing
+/// is a side effect.
 #[must_use]
 pub fn record_dissents(issue: &str) -> Vec<String> {
     let Ok(v) = crate::issue_record(issue) else {
@@ -956,11 +1017,11 @@ pub fn record_dissents(issue: &str) -> Vec<String> {
             )),
         }
     }
-    if disposal.close && !closed {
-        match close_settled(issue, &disposal.summary) {
-            Ok(said) => lines.push(said.trim().to_string()),
-            Err(e) => lines.push(format!("dissent: close refused: {e:#}")),
-        }
+    // A round count, a child count, or a spent budget used to mark the
+    // ticket DONE here. The state stays whatever the tracker had. When
+    // the seats still split, name the open objection children.
+    if !passed && !closed {
+        lines.push(split_advice(issue, round));
     }
     // A strict majority has settled the substance. The option a voter
     // still holds, and that is not the lead, is still a dissent child.
