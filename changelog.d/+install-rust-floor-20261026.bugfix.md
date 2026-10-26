@@ -1,0 +1,1 @@
+`install.sh` checks the Rust toolchain before any source build and names the floor, 1.89 or the tree's `rust-version`, with a pointer to rustup. A distro cargo older than that failed on the first crate without saying what it needed.

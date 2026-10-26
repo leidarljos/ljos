@@ -69,6 +69,28 @@ CLOUD=0
 FORCE=0
 
 say() { printf '%s\n' "$*"; }
+
+# The oldest Rust these crates build with, from Cargo.toml's rust-version
+# when the tree is here, else the release's floor. Checked before any
+# source build, since a distro cargo older than this fails on the first
+# crate with a message that names neither the floor nor rustup.
+MIN_RUST=1.89
+rust_floor() {
+  root=$(CDPATH= cd -- "$(dirname "$0")/.." 2>/dev/null && pwd)
+  if [ -n "$root" ] && [ -f "$root/Cargo.toml" ]; then
+    v=$(sed -n 's/^rust-version *= *"\([0-9.]*\)".*/\1/p' "$root/Cargo.toml" | head -n1)
+    [ -n "$v" ] && MIN_RUST=$v
+  fi
+}
+need_rust() {
+  rust_floor
+  command -v rustc >/dev/null 2>&1 || die "no rustc to build $1; install Rust $MIN_RUST or newer from https://rustup.rs"
+  have=$(rustc --version 2>/dev/null | awk '{print $2}' | sed 's/-.*//')
+  awk -v min="$MIN_RUST" -v have="$have" 'BEGIN {
+    split(min, a, "."); split(have, b, ".");
+    exit !(b[1] + 0 > a[1] + 0 || (b[1] + 0 == a[1] + 0 && b[2] + 0 >= a[2] + 0))
+  }' || die "rustc $have is older than $MIN_RUST, the oldest these crates build with; install a current toolchain from https://rustup.rs, or use a release build for this platform"
+}
 warn() { printf '  warning: %s\n' "$*"; }
 warn_embed() {
   say "  warning: no packset-embed for $TARGET in $1; search stays lexical."
@@ -144,9 +166,9 @@ fi
 
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64) TARGET=x86_64-unknown-linux-gnu ;;
-  Linux-aarch64|Linux-arm64) TARGET=aarch64-unknown-linux-gnu ;;
+  Linux-aarch64|Linux-"arm64") TARGET=aarch64-unknown-linux-gnu ;;
   Darwin-x86_64) TARGET=x86_64-apple-darwin ;;
-  Darwin-arm64) TARGET=aarch64-apple-darwin ;;
+  Darwin-"arm64") TARGET=aarch64-apple-darwin ;;
   *) TARGET=unknown ;;
 esac
 
@@ -161,6 +183,7 @@ if [ "$CLOUD" = 1 ] && [ "$FORCE" = 0 ] && [ -z "$FROM_DIR" ]; then
   if ! { [ -x "$BIN_DIR/ljos" ] && "$BIN_DIR/ljos" cloud up --help >/dev/null 2>&1; }; then
     script_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
     if [ -f "$script_root/crates/ljos-cli/Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
+      need_rust ljos
       say "Building ljos from this tree so cloud up is available"
       cargo install --locked --force --path "$script_root/crates/ljos-cli" \
         --root "$(CDPATH= cd -- "$(dirname "$BIN_DIR")" && pwd)"
@@ -168,20 +191,21 @@ if [ "$CLOUD" = 1 ] && [ "$FORCE" = 0 ] && [ -z "$FROM_DIR" ]; then
   fi
 fi
 
-# repository, crate, tarball style, programs
-COMPONENTS="ljos ljos v ljos,ljos-mcp
-packset packset v packset,packsetd,packset-mcp
-vissue vissue-cli dist vissue
-vissue vissue-mcp dist vissue-mcp
-deedar deedar-cli v deedar
-claimdag claimdag-cli v claimdag
-ljos-policyd ljos-policyd v ljos-policyd
-consensus ljos-consensus v ljos-consensus"
+# repository, crate, programs, tarball style
+COMPONENTS="ljos ljos ljos,ljos-mcp v
+packset packset packset,packsetd,packset-mcp v
+vissue vissue-cli vissue dist
+vissue vissue-mcp vissue-mcp dist
+deedar deedar-cli deedar v
+claimdag claimdag-cli claimdag v
+ljos-policyd ljos-policyd ljos-policyd v
+consensus ljos-consensus ljos-consensus v"
 
 source_build() {
   crate=$1 ver=$2
   command -v cargo >/dev/null 2>&1 ||
-    die "no release build of $crate for $TARGET, and no cargo to build it; install Rust from https://rustup.rs"
+    die "no release build of $crate for $TARGET, and no cargo to build it; install Rust $MIN_RUST or newer from https://rustup.rs"
+  need_rust "$crate"
   if [ -n "$ver" ]; then
     say "  building $crate $ver from source (no release build for $TARGET)"
     cargo install --locked --quiet --root "$TMP/cargo" --version "=$ver" "$crate" >&2
@@ -376,7 +400,7 @@ for pin in $PINS; do
 done
 
 say "Installing ljos into $BIN_DIR ($TARGET)"
-printf '%s\n' "$COMPONENTS" | while read -r repo crate style progs; do
+printf '%s\n' "$COMPONENTS" | while read -r repo crate progs style; do
   if [ "$CLOUD" = 1 ] && [ "$FORCE" = 0 ] && [ "$repo" = ljos ] && [ -x "$BIN_DIR/ljos" ] \
     && "$BIN_DIR/ljos" cloud up --help >/dev/null 2>&1; then
     say "  ljos already provides cloud up; left in place"
