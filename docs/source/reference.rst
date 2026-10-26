@@ -272,6 +272,9 @@ User rules
 
 ``ljos prefer --user TEXT --why REASON`` writes one user rule.
 The file is ``$XDG_CONFIG_HOME/ljos/user-rules.json``, or ``~/.config/ljos/user-rules.json`` when that directory is unset.
+When that file is missing, there are no rules and a covered GitHub write is allowed.
+An empty file, a file of only whitespace, and a dangling symlink are a bad file: a covered GitHub write is refused and the message names the path.
+A file that parses as a list with no rows allows a covered write.
 Every seat on this machine reads it. The row does not decay and it is not reviewed, and the command does not also store a seat preference.
 ``--why`` is required with ``--user``.
 ``--promote ID`` copies that lesson into a user rule and leaves the lesson in the pack.
