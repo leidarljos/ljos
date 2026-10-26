@@ -20263,6 +20263,21 @@ const SEGMENT_PREFIXES: &[(&str, &[&str])] = &[
     ("chronic", &[]),
     ("unbuffer", &[]),
     (
+        "unshare",
+        &[
+            "--map-user",
+            "--map-group",
+            "--setuid",
+            "--setgid",
+            "--propagation",
+            "--root",
+            "--wd",
+            "--kill-child",
+            "--monotonic",
+            "--boottime",
+        ],
+    ),
+    (
         "ionice",
         &[
             "-c",
@@ -20312,9 +20327,10 @@ const SEGMENT_PREFIXES: &[(&str, &[&str])] = &[
 
 /// Shell words that open or continue a compound command, so the command
 /// after them is the one that runs: `if git push`, `{ git push; }`,
-/// `! git push`, `then git push`, `coproc git push`.
+/// `! git push`, `then git push`, `coproc git push`, fish's `and`/`or`/`not`/`begin`.
 const SHELL_KEYWORDS: &[&str] = &[
-    "!", "{", "if", "then", "else", "elif", "while", "until", "do", "coproc", "builtin",
+    "!", "{", "if", "then", "else", "elif", "while", "until", "do", "coproc", "builtin", "and",
+    "or", "not", "begin",
 ];
 
 /// Where the command starts in `words`: past leading `NAME=value` words and
