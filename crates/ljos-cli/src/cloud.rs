@@ -724,15 +724,18 @@ pub(crate) enum SeatMcpKeys {
 
 /// Keys in the seat's MCP config whose command is `ljos-mcp`.
 /// An absent config is [`SeatMcpKeys::Unknown`]. A strict file that is
-/// not readable JSON is [`SeatMcpKeys::Ambiguous`]. Harness files that
-/// are not the JSON or TOML this scan expects are skipped.
+/// not readable JSON is [`SeatMcpKeys::Ambiguous`] only when no other
+/// file named a key. One unreadable file hides its own entries and
+/// nothing else. Harness files that are not the JSON or TOML this scan
+/// expects are skipped.
 pub(crate) fn seat_mcp_keys() -> SeatMcpKeys {
     let mut keys = BTreeSet::new();
     let mut saw = false;
+    let mut ambiguous = false;
     for file in collect_mcp_files(false) {
         match read_seat_keys(&file) {
             KeyRead::Absent | KeyRead::Skip => {}
-            KeyRead::Ambiguous => return SeatMcpKeys::Ambiguous,
+            KeyRead::Ambiguous => ambiguous = true,
             KeyRead::Keys(found) => {
                 saw = true;
                 keys.extend(found);
@@ -741,6 +744,8 @@ pub(crate) fn seat_mcp_keys() -> SeatMcpKeys {
     }
     if saw {
         SeatMcpKeys::Known(keys)
+    } else if ambiguous {
+        SeatMcpKeys::Ambiguous
     } else {
         SeatMcpKeys::Unknown
     }

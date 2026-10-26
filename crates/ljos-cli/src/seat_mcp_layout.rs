@@ -27,6 +27,8 @@ fn put(path: &std::path::Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
+const SEAT_ENTRY: &str = r#"{"mcpServers":{"ljos":{"command":"ljos-mcp","args":[]}}}"#;
+
 /// The shipped plugin starts the seat as `ljos-plugin` with `ljos-mcp`
 /// among its arguments. That entry is the seat server.
 #[test]
@@ -75,6 +77,23 @@ fn a_large_claude_json_still_names_the_seat() {
     assert!(
         subagent::is_seat_mcp_tool("mcp__ljos__ljos_note"),
         "a large ~/.claude.json hid the seat key: {:?}",
+        cloud::seat_mcp_keys()
+    );
+}
+
+/// A Cursor file that does not parse must not hide the seat key in
+/// `~/.claude.json`.
+#[test]
+fn a_cursor_file_ljos_cannot_parse_does_not_hide_the_claude_seat() {
+    let (_lock, dir) = review_env();
+    put(&dir.path().join(".claude.json"), SEAT_ENTRY);
+    put(
+        &dir.path().join(".cursor/mcp.json"),
+        "{\n  // remote GitHub server\n  \"mcpServers\": {\"github\": {\"url\": \"https://api.githubcopilot.com/mcp/\"}}\n}\n",
+    );
+    assert!(
+        subagent::is_seat_mcp_tool("mcp__ljos__ljos_note"),
+        "{:?}",
         cloud::seat_mcp_keys()
     );
 }
