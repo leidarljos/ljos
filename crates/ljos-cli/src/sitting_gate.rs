@@ -49,7 +49,10 @@ fn runner() -> bool {
 /// push that may land on a branch [`crate::gates::consensus_push`] names
 /// while the sitting's ticket does not clear it. `None` when no runner is
 /// above this process, when the line writes no history, or when both
-/// hold.
+/// hold. An unattributed call, one whose payload and environment name
+/// no conversation, is not checked: a history write is a line in the
+/// book log and this returns `None`, including a push onto a protected
+/// branch.
 #[must_use]
 pub fn guard_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if !runner() {
@@ -59,6 +62,12 @@ pub fn guard_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         return Some(refusal(
             "a tool command under a runner may not write a sitting record",
         ));
+    }
+    if crate::call_unattributed() {
+        if history_or_unread(line, cwd) {
+            crate::bookkeep::log_line("hook: unattributed call, no conversation id");
+        }
+        return None;
     }
     let calls = match crate::gates::git_calls(line, cwd) {
         Ok(calls) => calls,
@@ -177,6 +186,15 @@ pub fn doctor_row(cwd: Option<&Path>) -> crate::Habitat {
         ),
         true,
     )
+}
+
+/// Whether the sitting check would have a decision on `line`: it writes
+/// history, or it cannot be read as a git command.
+fn history_or_unread(line: &str, cwd: Option<&Path>) -> bool {
+    match crate::gates::git_calls(line, cwd) {
+        Ok(calls) => calls.iter().any(writes_history),
+        Err(_) => true,
+    }
 }
 
 fn writes_history(call: &GitCall) -> bool {

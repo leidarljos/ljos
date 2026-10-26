@@ -1801,7 +1801,8 @@ enum CallConversation {
     /// No hook call, or one whose payload has no session key.
     Unbound,
     /// A `conversation_id` that names nobody: `-`, null, short, not a
-    /// string, or a blank string when the environment names no conversation.
+    /// string, or a blank string beside another id when the environment
+    /// names no conversation.
     Unusable,
     /// Another runner's session key that names nobody. The gate refuses;
     /// the seat is still read from the environment, as that runner's
@@ -1811,6 +1812,9 @@ enum CallConversation {
     /// A blank `conversation_id` resolved from `LJOS_SESSION_ID` alone.
     /// The holder is that id, as the CLI keeps a name chosen that way.
     Kept(String),
+    /// No conversation id in the payload and none in the hook's
+    /// environment. The sitting check does not apply to this call.
+    Unattributed,
 }
 
 static CALL_CURSOR_CONVERSATION: std::sync::Mutex<CallConversation> =
@@ -1838,7 +1842,9 @@ pub fn usable_session_id(id: &str) -> Option<&str> {
 /// does not stand in for it. Only `conversation_id` names a call's
 /// conversation here, never `session_id`. Another runner's
 /// payload leaves the environment as the source, unless it carries a
-/// session key that names nobody, which the gate refuses.
+/// session key that names nobody, which the gate refuses. A payload
+/// whose id fields are all missing or blank, with a null transcript
+/// path and an environment that names no session, is unattributed.
 pub fn bind_call_conversation(raw: &str, call: &HookCall) {
     let cursor = matches!(call.shape, HookShape::Cursor | HookShape::CursorShell);
     let v = serde_json::from_str::<Value>(raw.trim()).unwrap_or(Value::Null);
@@ -1847,6 +1853,7 @@ pub fn bind_call_conversation(raw: &str, call: &HookCall) {
         match blank_resolved() {
             Some((id, keys)) if keys == "LJOS_SESSION_ID" => CallConversation::Kept(id),
             Some((id, _)) => CallConversation::Named(id),
+            None if no_conversation_source(&v) => CallConversation::Unattributed,
             None => CallConversation::Unusable,
         }
     } else if has("conversation_id") {
@@ -1855,13 +1862,45 @@ pub fn bind_call_conversation(raw: &str, call: &HookCall) {
             None => CallConversation::Unusable,
         }
     } else if !cursor && call.session.is_none() && HOOK_SESSION_KEYS.iter().any(|key| has(key)) {
-        CallConversation::UnusableOther
+        if no_conversation_source(&v) && blank_resolved().is_none() {
+            CallConversation::Unattributed
+        } else {
+            CallConversation::UnusableOther
+        }
+    } else if no_conversation_source(&v) && blank_resolved().is_none() {
+        CallConversation::Unattributed
     } else {
         CallConversation::Unbound
     };
     *CALL_CURSOR_CONVERSATION
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = bound;
+}
+
+/// Whether `v` carries no conversation id: `conversation_id`,
+/// `session_id` and `generation_id` are missing, null, or a blank
+/// string, and `transcript_path` is missing, null, or blank. A
+/// non-empty value is a source, including one that names nobody.
+fn no_conversation_source(v: &Value) -> bool {
+    const IDS: &[&str] = &[
+        "conversation_id",
+        "session_id",
+        "sessionId",
+        "generation_id",
+        "generationId",
+    ];
+    IDS.iter().all(|key| value_blank(v.get(*key)))
+        && value_blank(v.get("transcript_path").or_else(|| v.get("transcriptPath")))
+}
+
+/// Missing, null, or a string that trims to nothing and has no control
+/// character. Anything else is present.
+fn value_blank(slot: Option<&Value>) -> bool {
+    match slot {
+        None | Some(Value::Null) => true,
+        Some(Value::String(text)) => !text.chars().any(char::is_control) && text.trim().is_empty(),
+        Some(_) => false,
+    }
 }
 
 /// A `conversation_id` string that trims to nothing and carries no
@@ -1946,6 +1985,13 @@ pub fn call_conversation_unusable() -> bool {
     )
 }
 
+/// Whether the bound call named no conversation, in the payload or in
+/// the hook's environment.
+#[must_use]
+pub fn call_unattributed() -> bool {
+    matches!(call_conversation(), CallConversation::Unattributed)
+}
+
 /// Whether this process is in a `CURSOR_AGENT` shell whose conversation
 /// id was stripped or is unusable.
 fn cursor_agent_without_id() -> bool {
@@ -1968,7 +2014,7 @@ fn cursor_agent_without_id() -> bool {
 fn cursor_conversation() -> Option<String> {
     match call_conversation() {
         CallConversation::Named(id) | CallConversation::Kept(id) => Some(id),
-        CallConversation::Unusable => None,
+        CallConversation::Unusable | CallConversation::Unattributed => None,
         CallConversation::Unbound | CallConversation::UnusableOther => {
             if call_conversation() == CallConversation::Unbound
                 && named_var("LJOS_HOLD").is_some()
@@ -2562,7 +2608,7 @@ pub(crate) fn stamped_sessions() -> Vec<(String, String)> {
     match call_conversation() {
         CallConversation::Named(id) => return vec![("CURSOR_CONVERSATION_ID".to_string(), id)],
         CallConversation::Kept(id) => return vec![("LJOS_SESSION_ID".to_string(), id)],
-        CallConversation::Unusable => return Vec::new(),
+        CallConversation::Unusable | CallConversation::Unattributed => return Vec::new(),
         CallConversation::Unbound | CallConversation::UnusableOther => {}
     }
     stamped_env_sessions()

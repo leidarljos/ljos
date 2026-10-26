@@ -601,6 +601,76 @@ fn a_blank_conversation_id_reads_the_env_and_touches_the_book() {
     );
 }
 
+/// The box's hook payload names no conversation: every id is empty, the
+/// transcript path is null, and the hook process has no session variable.
+/// A history write is allowed and the book log records the call. An
+/// `rm -rf` outside a temp directory is still refused. A payload that
+/// names a conversation, and a non-empty id that names nobody, are refused.
+#[test]
+fn a_payload_with_no_conversation_id_skips_the_sitting_check() {
+    let home = Box_::new();
+    let push = "git push origin develop";
+    let blank = |event: &str, line: &str, conv: Option<&str>| {
+        let mut payload = serde_json::json!({
+            "conversation_id": "",
+            "generation_id": "",
+            "session_id": "",
+            "model": "unknown",
+            "transcript_path": null,
+            "user_email": null,
+            "cursor_version": "1.0.0",
+            "cwd": home.repo,
+            "workspace_roots": [home.repo],
+            "tool_use_id": "11111111-2222-3333-4444-555555555555",
+            "hook_event_name": event,
+            "command": line,
+            "tool_name": "Shell",
+            "tool_input": {"command": line},
+        });
+        if let Some(conv) = conv {
+            payload["conversation_id"] = conv.into();
+        }
+        payload.to_string()
+    };
+    let on = [("LJOS_GUARD", "on")];
+    for event in ["preToolUse", "beforeShellExecution"] {
+        let said = home.hook_with(&blank(event, push, None), &on);
+        allowed(&said, &format!("{event} push with no conversation id"));
+    }
+    let log = std::fs::read_to_string(home.run.join("ljos/book.log")).unwrap_or_default();
+    assert!(
+        log.contains("unattributed"),
+        "the book log did not record the call:\n{log}"
+    );
+    let omitted = serde_json::json!({
+        "cursor_version": "1.0.0",
+        "hook_event_name": "preToolUse",
+        "cwd": home.repo,
+        "tool_name": "Shell",
+        "tool_input": {"command": push},
+    })
+    .to_string();
+    allowed(
+        &home.hook_with(&omitted, &on),
+        "a push whose payload omits every id",
+    );
+    let rm = home.hook_with(&blank("preToolUse", "rm -rf /home/x", None), &on);
+    assert!(
+        rm.contains("rm-rf-outside-tmp") && rm.contains("\"permission\":\"deny\""),
+        "rm -rf was not denied:\n{rm}"
+    );
+    refused(
+        &home.hook_with(&blank("preToolUse", push, Some(CONV_Z)), &on),
+        "a push whose conversation_id is Z and no sitting is open",
+    );
+    let bad = home.hook_with(&blank("preToolUse", push, Some("-")), &on);
+    refused(&bad, "a push whose conversation_id is -");
+    assert!(
+        bad.contains("names no conversation"),
+        "a non-empty unusable id was not refused as naming nobody:\n{bad}"
+    );
+}
+
 /// A hook call or shell that names its conversation is not judged as the
 /// holder `LJOS_HOLD` names in the environment.
 #[test]
