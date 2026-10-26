@@ -4153,25 +4153,16 @@ fn insert_known_seat(seats: &mut std::collections::BTreeSet<String>, raw: &str) 
     seats.insert(slug);
 }
 
-/// The roster [`resolve_call_seat`] checks. An empty list is filled with
-/// `slug` and a note is logged, so a start is not a refusal a weak model
-/// cannot get past. When the file cannot be written, `slug` is the roster
-/// for this call.
+/// The roster [`resolve_call_seat`] checks. A tracker that names no seats
+/// takes `slug` as the roster for this call, with a note in the book log,
+/// so a start is not a refusal a weak model cannot get past. Nothing is
+/// written: the roster is the person's decision in `vissue.toml`, and a
+/// file a tool call wrote would sit untracked in the checkout and lock
+/// every other seat out of the tracker.
 fn seat_roster(slug: &str) -> std::collections::BTreeSet<String> {
     let known = tracker_known_seats();
     if !known.is_empty() {
         return known;
-    }
-    match register_seat(slug) {
-        Ok(()) => {
-            let known = tracker_known_seats();
-            if !known.is_empty() {
-                return known;
-            }
-        }
-        Err(error) => bookkeep::log_line(&format!(
-            "note: this tracker named no seats; could not register {slug}: {error}"
-        )),
     }
     bookkeep::log_line(&format!(
         "note: this tracker named no seats; sitting {slug}"
@@ -4179,39 +4170,6 @@ fn seat_roster(slug: &str) -> std::collections::BTreeSet<String> {
     let mut known = std::collections::BTreeSet::new();
     known.insert(slug.to_string());
     known
-}
-
-/// Append `slug` to the tracker's `seats` list when that list is missing
-/// or empty.
-fn register_seat(slug: &str) -> Result<(), String> {
-    let layout = vissue_core::Layout::resolve(None, None).map_err(|e| e.to_string())?;
-    let path = layout.root().join("vissue.toml");
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut value: toml::Value = if text.trim().is_empty() {
-        toml::Value::Table(toml::map::Map::new())
-    } else {
-        toml::from_str(&text).map_err(|e| e.to_string())?
-    };
-    let table = value
-        .as_table_mut()
-        .ok_or_else(|| "vissue.toml is not a table".to_string())?;
-    if let Some(list) = table.get("seats").and_then(toml::Value::as_array) {
-        if !list.is_empty() {
-            return Ok(());
-        }
-    } else if table.get("seats").is_some() {
-        return Err("seats is not a list".to_string());
-    }
-    table.insert(
-        "seats".to_string(),
-        toml::Value::Array(vec![toml::Value::String(slug.to_string())]),
-    );
-    let rendered = toml::to_string(&value).map_err(|e| e.to_string())?;
-    std::fs::write(&path, rendered).map_err(|e| e.to_string())?;
-    bookkeep::log_line(&format!(
-        "note: this tracker named no seats; registered {slug} in vissue.toml"
-    ));
-    Ok(())
 }
 
 /// The seat for one tool call, resolved the way the hooks resolve it.
