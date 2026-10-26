@@ -120,6 +120,10 @@ you run `ljos accept ID` in your own terminal; then it shows at once too. An
 hook shows it when a prompt bears on it, and `ljos due` lists it until a
 review promotes it to standing.
 
+At session end, ljos keeps up to five cue-word sentences from the person's
+and the agent's prose as unverified agent notes the prompt hook does not
+inject, and `LJOS_EXTRACT=off` turns that off.
+
 The hooks also keep the work on the tracker once a conversation sits on an
 issue: after forty tool calls without a word to the seat, they remind it to
 record the work. With `LJOS_TRACK_WORK=on` in the environment or in
