@@ -133,10 +133,25 @@ struct HiddenRules {
     withheld: bool,
 }
 
+/// The most of a part the reducer reads. A tag with no `>` is retried
+/// from the next byte, so a part of unterminated tags costs the square
+/// of its length; past the cap the rest is unread and reported hidden.
+const HTML_CAP: usize = 1024 * 1024;
+
 #[must_use]
 pub fn visible_text(html: &str) -> Visible {
     let mut out = String::new();
     let mut dropped = false;
+    let html = if html.len() > HTML_CAP {
+        dropped = true;
+        let mut end = HTML_CAP;
+        while !html.is_char_boundary(end) {
+            end -= 1;
+        }
+        &html[..end]
+    } else {
+        html
+    };
     let mut concealed = false;
     let mut stack: Vec<Open> = Vec::new();
     let mut rules = HiddenRules::of(html);
@@ -150,7 +165,15 @@ pub fn visible_text(html: &str) -> Visible {
         text(&rest[..lt], &stack, &mut out, &mut dropped);
         rest = &rest[lt..];
         if let Some(after) = rest.strip_prefix("<!--") {
-            rest = after.find("-->").map_or("", |end| &after[end + 3..]);
+            // `<!-->` and `<!--->` are whole comments in HTML5; reading on
+            // to the next `-->` would swallow the rest of the part.
+            rest = if let Some(tail) = after.strip_prefix('>') {
+                tail
+            } else if let Some(tail) = after.strip_prefix("->") {
+                tail
+            } else {
+                after.find("-->").map_or("", |end| &after[end + 3..])
+            };
             continue;
         }
         let Some((tag, after)) = parse_tag(rest) else {
@@ -922,7 +945,13 @@ fn decode_all(s: &str) -> (String, bool) {
         out.push_str(&rest[..amp]);
         rest = &rest[amp..];
         let reference = rest[1..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '#');
-        let Some(semi) = rest[..rest.len().min(12)].find(';') else {
+        // The window ends on a character boundary: a multibyte character
+        // across byte 12 must not panic the reducer.
+        let mut window = rest.len().min(12);
+        while !rest.is_char_boundary(window) {
+            window -= 1;
+        }
+        let Some(semi) = rest[..window].find(';') else {
             unknown |= reference;
             out.push('&');
             rest = &rest[1..];

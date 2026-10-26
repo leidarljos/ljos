@@ -1,0 +1,1 @@
+The mail reducer no longer panics on an `&` followed within twelve bytes by a multibyte character, reads `<!-->` and `<!--->` as the whole comments HTML5 makes them instead of swallowing the rest of the part, and reads at most 1 MiB of a part, reporting the rest hidden, since a part of unterminated tags cost the square of its length.
