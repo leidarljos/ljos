@@ -1000,8 +1000,10 @@ pub struct PlaybookRow {
     pub body: String,
 }
 
-/// A sitting to close.
+/// A sitting to close. A `close` field is refused: this tool does not
+/// close the tracker ticket.
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FinishSittingArgs {
     /// The tracker id of the issue. Absent, the issue `ljos_start` claimed.
     #[serde(default)]
@@ -3849,6 +3851,21 @@ fn card_named(uri: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
     use rmcp::handler::server::ServerHandler;
+
+    /// `close: true` is not a field of this tool. Passing it is an error.
+    #[test]
+    fn finish_rejects_a_close_field() {
+        let text = match serde_json::from_str::<FinishSittingArgs>(
+            r#"{"issue":"probe-1","close":true}"#,
+        ) {
+            Err(err) => err.to_string(),
+            Ok(_) => panic!("close must not be ignored"),
+        };
+        assert!(
+            text.to_ascii_lowercase().contains("unknown") && text.contains("close"),
+            "{text}"
+        );
+    }
 
     /// A schema `tools/list` may send: an object, no draft identifier, and
     /// no format outside the JSON Schema draft.
