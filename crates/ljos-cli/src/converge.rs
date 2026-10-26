@@ -419,12 +419,21 @@ pub struct Disposal {
 }
 
 /// The next step of a workflow panel. Nothing here closes the parent.
-/// A pass is where the loop stops. The person closes with `ljos finish --close`.
+/// A pass is where the loop stops. A person closes the ticket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoundPlan {
-    OpenRound { n: usize },
-    FileBlocking { objections: Vec<Objection> },
-    Hold { why: String },
+    OpenRound {
+        n: usize,
+    },
+    /// `objections` is what this call may file. `left_out` is every
+    /// objection that did not fit the child cap or the descendant limit.
+    FileBlocking {
+        objections: Vec<Objection>,
+        left_out: Vec<Objection>,
+    },
+    Hold {
+        why: String,
+    },
     Passed,
 }
 
@@ -443,6 +452,14 @@ fn over_budget(state: &PanelState, limits: &ScopeBudget) -> bool {
         }
     }
     false
+}
+
+fn name_objections(objections: &[Objection]) -> String {
+    objections
+        .iter()
+        .map(|objection| objection.text.as_str())
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn clip(text: &str, n: usize) -> String {
@@ -529,14 +546,6 @@ pub fn plan_round(state: &PanelState, limits: &ScopeBudget) -> RoundPlan {
             why: "the panel has not all voted".into(),
         };
     }
-    if state.descendants >= limits.max_descendants {
-        return RoundPlan::Hold {
-            why: format!(
-                "{} descendants reached the limit of {}. A person has to act",
-                state.descendants, limits.max_descendants
-            ),
-        };
-    }
     let mut fileable = Vec::new();
     let mut seen = state.seen.iter().cloned().collect::<BTreeSet<_>>();
     for objection in &state.objections {
@@ -549,19 +558,41 @@ pub fn plan_round(state: &PanelState, limits: &ScopeBudget) -> RoundPlan {
             fileable.push(objection.clone());
         }
     }
+    if state.descendants >= limits.max_descendants && fileable.is_empty() {
+        return RoundPlan::Hold {
+            why: format!(
+                "{} descendants reached the limit of {}. A person has to act",
+                state.descendants, limits.max_descendants
+            ),
+        };
+    }
     if !fileable.is_empty() {
-        let room = limits.max_children.saturating_sub(state.children_filed);
+        let child_room = limits.max_children.saturating_sub(state.children_filed);
+        let desc_room = limits.max_descendants.saturating_sub(state.descendants);
+        let room = child_room.min(desc_room);
         if room == 0 {
-            return RoundPlan::Hold {
-                why: format!(
-                    "{} children filed, at the limit of {}",
+            let named = name_objections(&fileable);
+            let why = if state.descendants >= limits.max_descendants {
+                format!(
+                    "{} descendants reached the limit of {}. A person has to act. Not filed: {named}",
+                    state.descendants, limits.max_descendants
+                )
+            } else {
+                format!(
+                    "{} children filed, at the limit of {}. Not filed: {named}",
                     state.children_filed, limits.max_children
-                ),
+                )
             };
+            return RoundPlan::Hold { why };
         }
-        fileable.truncate(room);
+        let left_out = if fileable.len() > room {
+            fileable.split_off(room)
+        } else {
+            Vec::new()
+        };
         return RoundPlan::FileBlocking {
             objections: fileable,
+            left_out,
         };
     }
     if state.passed {
@@ -1449,7 +1480,7 @@ mod tests {
                 "anneal-z64x",
             ));
             match plan_round(&state, &limits) {
-                RoundPlan::FileBlocking { objections } => filed += objections.len(),
+                RoundPlan::FileBlocking { objections, .. } => filed += objections.len(),
                 RoundPlan::OpenRound { n } => {
                     opened += 1;
                     state.round = n;
@@ -1474,7 +1505,7 @@ mod tests {
                 .objections
                 .push(Objection::wording("cto", "heading tone", "anneal-z64x"));
             match plan_round(&state, &limits) {
-                RoundPlan::FileBlocking { objections } => filed += objections.len(),
+                RoundPlan::FileBlocking { objections, .. } => filed += objections.len(),
                 RoundPlan::OpenRound { n } => {
                     opened += 1;
                     state.round = n;
@@ -1503,7 +1534,7 @@ mod tests {
             .objections
             .push(Objection::nit("ceo", "comma in note 0", "anneal-z64x"));
         let plan = plan_round(&state, &limits);
-        let RoundPlan::FileBlocking { objections } = plan else {
+        let RoundPlan::FileBlocking { objections, .. } = plan else {
             panic!("a blocking dissent is a child: {plan:?}");
         };
         assert_eq!(objections.len(), 1);
@@ -1531,7 +1562,7 @@ mod tests {
             "anneal-child",
         ));
         match plan_round(&deeper, &limits) {
-            RoundPlan::FileBlocking { objections } => {
+            RoundPlan::FileBlocking { objections, .. } => {
                 assert_eq!(objections.len(), 1);
                 assert!(objections[0].text.contains("unchecked"));
             }
@@ -1553,7 +1584,7 @@ mod tests {
             ));
             state.open_children = 0;
             match plan_round(&state, &limits) {
-                RoundPlan::FileBlocking { objections } => {
+                RoundPlan::FileBlocking { objections, .. } => {
                     assert_eq!(objections.len(), 1, "{objections:?}");
                     let objection = &objections[0];
                     filed.push(objection.text.clone());
@@ -1585,7 +1616,7 @@ mod tests {
             "anneal-z64x",
         ));
         match plan_round(&state, &limits) {
-            RoundPlan::FileBlocking { objections } => {
+            RoundPlan::FileBlocking { objections, .. } => {
                 assert_eq!(objections.len(), 1, "{objections:?}");
                 assert!(objections[0].text.contains("exit status"));
             }

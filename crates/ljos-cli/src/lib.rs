@@ -18738,7 +18738,10 @@ pub fn workflow_round(parent: &str) -> Result<String> {
             };
             bail!("workflow: {parent} {why}{which}. Nothing was written");
         }
-        converge::RoundPlan::FileBlocking { objections } => {
+        converge::RoundPlan::FileBlocking {
+            objections,
+            left_out,
+        } => {
             let v = tracker_show_json(parent)?;
             let project = v["project"].as_str().unwrap_or("").to_string();
             let mut out = String::new();
@@ -18749,6 +18752,14 @@ pub fn workflow_round(parent: &str) -> Result<String> {
                     objection.persona, objection.text
                 ));
                 out.push_str(&persist_tracker(&id, "filed a blocking fix"));
+            }
+            for objection in &left_out {
+                out.push_str(&format!(
+                    "paused for a person; {} from {} was not filed: {}\n",
+                    objection.severity.word(),
+                    objection.persona,
+                    objection.text
+                ));
             }
             let n = objections.len();
             out.push_str(&format!(
