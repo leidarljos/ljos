@@ -1059,11 +1059,44 @@ struct Post {
     reply_values: Vec<String>,
 }
 
+/// Say a failed user-rules read once per process. Each hook is its own
+/// process, so a burst of calls does not repeat the line.
+fn note_rules_read_error(err: &anyhow::Error) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static NOTED: AtomicBool = AtomicBool::new(false);
+    if NOTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    eprintln!("ljos: {err:#}");
+}
+
+/// A GitHub write the rules cover, refused because the file could not be
+/// used. The reason names the file. The pattern keeps the MCP deny.
+fn github_write_blocked(err: &anyhow::Error) -> Rule {
+    note_rules_read_error(err);
+    Rule {
+        pattern: "user-rule:file".into(),
+        verdict: "deny".into(),
+        reason: format!("user rules could not be read ({err:#}), so this GitHub write is refused"),
+    }
+}
+
 /// The user-rule verdict for a shell line, if one fires.
 #[must_use]
 pub fn guard_line(line: &str) -> Option<Rule> {
-    let rules = load().unwrap_or_default();
-    if rules.is_empty() || line.trim().is_empty() {
+    if line.trim().is_empty() {
+        return None;
+    }
+    let rules = match load() {
+        Ok(rules) => rules,
+        Err(err) => {
+            if posts_of(line).is_empty() {
+                return None;
+            }
+            return Some(github_write_blocked(&err));
+        }
+    };
+    if rules.is_empty() {
         return None;
     }
     let (rows, argv): (Vec<&UserRule>, Vec<Rule>) = rules
@@ -1115,7 +1148,10 @@ fn guard_mcp(tool: &str, server: Option<&str>, input: &Value) -> Option<Rule> {
     if !github_write(tool, server) {
         return None;
     }
-    let rules = load().unwrap_or_default();
+    let rules = match load() {
+        Ok(rules) => rules,
+        Err(err) => return Some(github_write_blocked(&err)),
+    };
     let post = mcp_fields(input, tool);
     rules.iter().find(|rule| post_hits(rule, &post)).map(fired)
 }
@@ -1784,6 +1820,78 @@ mod tests {
             started.elapsed()
         );
         assert!(format!("{err:#}").contains("not a regular file"), "{err:#}");
+    }
+
+    /// A file that is present and cannot be used denies the GitHub writes
+    /// the rules cover, and leaves reads and other MCP calls alone.
+    #[test]
+    fn a_bad_rules_file_denies_github_writes_and_allows_other_calls() {
+        let (_lock, _dir) = isolated();
+        let benign = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"tests passed"}}"#;
+        let note = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"ljos_note","mcp_server_name":"ljos","command":"ljos-mcp","tool_input":{"text":"x"}}"#;
+        let read_tool = r#"{"tool_name":"list_issues","mcp_server_name":"github","tool_input":{"owner":"org"}}"#;
+        let other = r#"{"tool_name":"add_issue_comment","mcp_server_name":"ljos","tool_input":{"body":"cc @ocaisa"}}"#;
+        let read_event = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeReadFile","file_path":"/etc/hostname"}"#;
+        let path = rules_file();
+        let cases: &[(&str, &str)] = &[
+            ("unreadable", "{\"rules\":[]}"),
+            ("malformed", "{\"rules\":["),
+            ("wrongtype", "{\"rules\":{\"id\":1}}"),
+        ];
+        for (name, body) in cases {
+            std::fs::write(&path, body).unwrap();
+            if *name == "unreadable" {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            }
+            let hit = guard_payload(benign).unwrap_or_else(|| panic!("{name}: allowed"));
+            assert_eq!(hit.verdict, "deny", "{name}");
+            assert!(hit.pattern.starts_with("user-rule:"), "{name}: {hit:?}");
+            assert!(
+                hit.reason.contains(&path.display().to_string()),
+                "{name}: {}",
+                hit.reason
+            );
+            assert!(guard_payload(note).is_none(), "{name}: note denied");
+            assert!(guard_payload(read_tool).is_none(), "{name}: read denied");
+            assert!(guard_payload(other).is_none(), "{name}: other MCP denied");
+            let (out, code) = super::super::cursor_side_answer(benign, None).unwrap();
+            assert_eq!(code, 0, "{name}: {out}");
+            assert!(out.contains("\"permission\":\"deny\""), "{name}: {out}");
+            let (out, code) = super::super::cursor_side_answer(note, None).unwrap();
+            assert_eq!(code, 0, "{name}: {out}");
+            assert_eq!(out, "{\"permission\":\"allow\"}\n", "{name}: {out}");
+            let (out, code) = super::super::cursor_side_answer(read_event, None).unwrap();
+            assert_eq!(code, 0, "{name}: {out}");
+            assert_eq!(out, "{\"permission\":\"allow\"}\n", "{name}: {out}");
+            let shell = guard_line("gh pr comment 12 --body 'tests passed'").unwrap();
+            assert_eq!(shell.verdict, "deny", "{name}");
+            assert!(
+                shell.reason.contains(&path.display().to_string()),
+                "{name}: {}",
+                shell.reason
+            );
+            assert!(guard_line("ls").is_none(), "{name}: ls denied");
+            assert!(
+                guard_line("gh issue list").is_none(),
+                "{name}: a GitHub read denied"
+            );
+            if *name == "unreadable" {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            }
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let hit = guard_payload(benign).expect("a directory denies");
+        assert!(hit.reason.contains("not a regular file"), "{}", hit.reason);
+        assert!(guard_payload(note).is_none());
+        let _ = std::fs::remove_dir(&path);
+
+        assert!(
+            guard_payload(benign).is_none(),
+            "a missing file allows a GitHub write"
+        );
     }
 
     /// With no pack to ask, no promoted lesson is stated, the person's no

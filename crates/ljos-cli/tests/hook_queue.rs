@@ -1003,3 +1003,80 @@ fn a_slow_server_still_refuses_a_real_denial_and_a_shell_call() {
         "the shell call did not ask the server"
     );
 }
+
+/// A rules file that cannot be parsed denies the GitHub write and still
+/// allows a seat tool. A FIFO must not stall either call.
+#[test]
+fn a_bad_rules_file_denies_the_github_write_from_the_hook() {
+    let hab = hab("badrules");
+    let path = hab.home.join(".config/ljos/user-rules.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "{\"rules\":[").unwrap();
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOKD", "off");
+    let (took, out) = finished(
+        feed(cmd, &github_comment_payload()),
+        Duration::from_millis(1500),
+        "malformed rules",
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        took < Duration::from_millis(1500),
+        "{took:?}\n{stdout}\n{stderr}"
+    );
+    assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(value["permission"], "deny", "{stdout}");
+    assert!(
+        value["user_message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("user-rules.json"),
+        "{stdout}"
+    );
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOKD", "off");
+    let (took, out) = finished(
+        feed(cmd, &mcp_payload("ljos_note")),
+        Duration::from_millis(1500),
+        "note beside a bad rules file",
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), ALLOW);
+    assert!(took < Duration::from_millis(1500));
+
+    std::fs::remove_file(&path).unwrap();
+    assert!(std::process::Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .unwrap()
+        .success());
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOKD", "off");
+    let (took, out) = finished(
+        feed(cmd, &github_comment_payload()),
+        Duration::from_millis(1500),
+        "fifo rules",
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        took < Duration::from_millis(1500),
+        "fifo took {took:?}\n{stdout}"
+    );
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("\"permission\":\"deny\""), "{stdout}");
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOKD", "off");
+    let (took, out) = finished(
+        feed(cmd, &read_payload()),
+        Duration::from_millis(1500),
+        "fifo read",
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), ALLOW);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        took < Duration::from_millis(1500),
+        "fifo read took {took:?}"
+    );
+}
