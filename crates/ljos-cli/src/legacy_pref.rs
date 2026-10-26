@@ -760,18 +760,20 @@ fn our_bound(client: &crate::PacksetClient, atoms: &[Value]) -> Option<Bound> {
 }
 
 /// Write the receipt and record it here. The time is this machine's
-/// clock before the post, or the pack's own stamp on the receipt when
+/// clock before the post, or the oldest stamp the receipt carries when
 /// that is earlier: the pack answers a repeat of the text with the
-/// receipt it holds, and an older receipt is a tighter bound. Neither
-/// is later than now, so a receipt dated ahead moves nothing.
+/// receipt it holds, and an older receipt is a tighter bound. `updated`
+/// moves on every rewrite of the receipt, so it is read beside `ts`,
+/// not before it. Neither is later than now, so a receipt dated ahead
+/// moves nothing.
 fn record_local(client: &crate::PacksetClient) -> Result<Bound> {
     let now = Utc::now().fixed_offset();
     let posted = record_cutoff(client)?;
     let id = atom_id(&posted).context("prefer: the preference cutoff has no id")?;
     let at = ["updated", "ts"]
         .into_iter()
-        .find_map(|key| stamp_of(&posted, key))
-        .map_or(now, |stamp| stamp.min(now));
+        .filter_map(|key| stamp_of(&posted, key))
+        .fold(now, |earliest, stamp| earliest.min(stamp));
     Local {
         base: base_of(client),
         workspace: client.workspace(),
