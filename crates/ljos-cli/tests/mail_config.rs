@@ -42,7 +42,7 @@ fn a_later_user_file_overrides_only_the_keys_it_sets() {
     let second = layer(
         &dir,
         "second.toml",
-        "[panel]\nmax_rounds = 3\n\n[mail]\nidentity = \"other@example.test\"\nnotmuch = \"notmuch\"\n",
+        "[panel]\nmax_children = 3\n\n[mail]\nidentity = \"other@example.test\"\nnotmuch = \"notmuch\"\n",
     );
     let got = user(&[first, second]).unwrap().expect("a mail config");
     assert_eq!(
@@ -81,7 +81,7 @@ fn a_workspace_layer_that_sets_mail_is_an_error() {
             .to_string();
         assert!(err.contains("ljos.toml") && err.contains("[mail]"), "{err}");
     }
-    let other = layer(&dir, "ljos.toml", "[panel]\nmax_rounds = 3\n");
+    let other = layer(&dir, "ljos.toml", "[panel]\nmax_children = 3\n");
     assert!(load_from(&[mine], &[other]).unwrap().is_some());
 }
 

@@ -3,9 +3,9 @@
 //! A persona that wants a child marks the objection blocking and gives a
 //! reason; the default, with no mark or a mark and no reason, is a nit.
 //! The same objection is not filed twice. A dissent child does not file
-//! a grandchild unless the new objection is blocking. At the round limit,
-//! or when the budget is spent, the item closes as settled-with-notes and
-//! lists what remains. Nothing here waits on a person.
+//! a grandchild unless the new objection is blocking. A round count is a
+//! count. It is not a budget key, and it does not close the ticket. When
+//! the seats still split, the reading names the open objection children.
 //!
 //! `ljos consensus` files its children through [`record_dissents`], titled
 //! `Dissent holds TEXT` for a blocking objection and `Dissent holds OPTION`
@@ -212,11 +212,10 @@ pub fn parse_objection(line: &str, default_target: &str) -> Option<Objection> {
     Some(Objection::noted(persona, severity, &reason, text, target))
 }
 
-/// Rounds, children, and optional wall time or token estimate.
-/// Unset wall time and tokens do not bind.
+/// Children, and optional wall time or token estimate.
+/// Unset wall time and tokens do not bind. A round count is not a key here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopeBudget {
-    pub max_rounds: usize,
     pub max_children: usize,
     pub max_descendants: usize,
     pub max_wall_secs: Option<u64>,
@@ -224,11 +223,10 @@ pub struct ScopeBudget {
 }
 
 impl ScopeBudget {
-    /// A single panel: three rounds, a handful of children.
+    /// A single panel: a handful of children.
     #[must_use]
     pub fn panel() -> Self {
         Self {
-            max_rounds: 3,
             max_children: 8,
             max_descendants: 12,
             max_wall_secs: None,
@@ -240,7 +238,6 @@ impl ScopeBudget {
     #[must_use]
     pub fn workflow() -> Self {
         Self {
-            max_rounds: 3,
             max_children: 24,
             max_descendants: 48,
             max_wall_secs: None,
@@ -249,9 +246,6 @@ impl ScopeBudget {
     }
 
     fn overlay(&mut self, file: &ScopeFile) {
-        if let Some(n) = file.max_rounds {
-            self.max_rounds = n;
-        }
         if let Some(n) = file.max_children {
             self.max_children = n;
         }
@@ -294,7 +288,6 @@ struct BudgetFile {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct ScopeFile {
-    max_rounds: Option<usize>,
     max_children: Option<usize>,
     max_descendants: Option<usize>,
     max_wall_secs: Option<u64>,
@@ -302,7 +295,8 @@ struct ScopeFile {
 }
 
 /// The budget a toml document names, over the defaults. A document with
-/// neither table is the defaults. Unknown keys are ignored.
+/// neither table is the defaults. Unknown keys are ignored, and so is
+/// `max_rounds`: a round count is not a budget.
 #[must_use]
 pub fn budget_from_toml(text: &str) -> PanelBudget {
     let mut budget = PanelBudget::default();
@@ -375,8 +369,7 @@ pub struct PanelState {
     pub dissent_depth: usize,
     pub children_filed: usize,
     pub open_children: usize,
-    /// The round has not been sat: ballots are missing. This is not a pause
-    /// for a person to raise the round limit.
+    /// The round has not been sat: ballots are missing.
     pub awaiting_ballots: bool,
     pub seen: Vec<(String, String)>,
     pub wall_secs: Option<u64>,
@@ -431,12 +424,6 @@ pub enum RoundPlan {
 }
 
 fn budget_why(state: &PanelState, limits: &ScopeBudget) -> Option<String> {
-    if state.round > 0 && state.round >= limits.max_rounds {
-        return Some(format!(
-            "round {} reached the limit of {}",
-            state.round, limits.max_rounds
-        ));
-    }
     if state.children_filed >= limits.max_children {
         return Some(format!(
             "{} children filed, at the limit of {}",
@@ -1362,10 +1349,10 @@ mod tests {
         let mut state = PanelState::at_round(sitting_round(&v).0);
         state.passed = true;
         let disposal = dispose(&state, &ScopeBudget::panel());
-        assert!(disposal.close, "{disposal:?}");
-        assert_eq!(
-            disposal.summary,
-            "settled-with-notes: round 3 reached the limit of 3"
+        assert!(!disposal.close, "{disposal:?}");
+        assert!(
+            disposal.summary.is_empty(),
+            "a round count does not close: {disposal:?}"
         );
         // A closed issue sits no new round.
         v["state"] = serde_json::json!("DONE");
@@ -1673,11 +1660,15 @@ mod tests {
         let budget = budget_from_toml(
             "[panel]\nmax_rounds = 2\nmax_tokens = 1000\n[workflow]\nmax_children = 4\n",
         );
-        assert_eq!(budget.panel.max_rounds, 2);
         assert_eq!(budget.panel.max_children, ScopeBudget::panel().max_children);
         assert_eq!(budget.panel.max_tokens, Some(1000));
         assert_eq!(budget.workflow.max_children, 4);
-        assert_eq!(budget.workflow.max_rounds, 3);
+        assert_eq!(
+            budget.workflow.max_tokens,
+            ScopeBudget::workflow().max_tokens
+        );
+        let ignored = budget_from_toml("[panel]\nmax_rounds = 1\n[workflow]\nmax_rounds = 9\n");
+        assert_eq!(ignored, PanelBudget::default());
         assert_eq!(budget_from_toml("not toml"), PanelBudget::default());
     }
 

@@ -292,9 +292,10 @@ is active for this seat. The person at their own terminal is never gated.
   the mean is not a position the group reached. Once the substance has
   settled, a nit, a wording note or a style note is recorded on the issue
   and is not a child. A blocking objection with a reason is filed once,
-  as a child; the same objection is not filed again. At the round limit
-  the issue closes as settled-with-notes and lists what remains. The close
-  does not wait. A tally printed later is
+  as a child; the same objection is not filed again. A round count does
+  not close the issue. When the seats still split, the reading names the
+  open objection children. The person closes with `ljos finish --close`.
+  A tally printed later is
   who voted. On a hard question the ballot carries the private forecast
   of the others, `ljos vote ISSUE --for OPTION --expect OPTION`; `ljos predict`
   still records one on its own. With two or more forecasts
