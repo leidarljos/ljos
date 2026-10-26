@@ -43,6 +43,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "^mcp__.+__ljos_.+$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ljos} hook",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PreCompact": [

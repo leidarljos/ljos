@@ -2796,6 +2796,34 @@ fn seat_from_session_records() -> Option<Seat> {
     })
 }
 
+/// The holder recorded for `seat` by a recent MCP hook call, else the
+/// conversation id carried by an ancestor of this server inside the
+/// same runtime directory.
+#[must_use]
+pub fn holder_from_bare_session_record(seat: &str) -> Option<String> {
+    if let Some(id) = subagent::claim_recent_mcp_session() {
+        return Some(holder_for_session(seat, &id));
+    }
+    for (pid, comm) in ancestry() {
+        if pid <= 1 || is_session(&comm) {
+            break;
+        }
+        let Some(env) = proc_tree::environ(pid) else {
+            continue;
+        };
+        if !same_runtime_dir(&env) {
+            break;
+        }
+        let env = clean_shell_environ(env, false);
+        if let Some((_, val)) = env.into_iter().find(|(k, v)| {
+            runner_session_var(k, v) && usable_session_id(v).is_some_and(|id| !subagent_id(id))
+        }) {
+            return Some(holder_for_session(seat, val.trim()));
+        }
+    }
+    None
+}
+
 /// A process's parent and its own short name, from procfs.
 #[cfg(target_os = "linux")]
 fn parent_and_comm(pid: u32) -> Option<(u32, String)> {
@@ -46217,9 +46245,15 @@ mod tests {
     fn the_grok_hook_file_runs_ljos_by_absolute_path() {
         let text = super::grok_hooks_json(Path::new("/opt/seat/bin/ljos"));
         let v: Value = serde_json::from_str(&text).expect("the hook file is JSON");
-        let pre = &v["hooks"]["PreToolUse"][0]["hooks"][0];
-        assert_eq!(pre["command"], "/opt/seat/bin/ljos hook");
-        assert_eq!(pre["timeout"], 10);
+        let pre_groups = v["hooks"]["PreToolUse"].as_array().expect("PreToolUse");
+        assert_eq!(pre_groups.len(), 2);
+        assert_eq!(pre_groups[0]["matcher"], "Bash");
+        assert_eq!(pre_groups[1]["matcher"], super::SEAT_MCP_MATCHER);
+        for g in pre_groups {
+            let pre = &g["hooks"][0];
+            assert_eq!(pre["command"], "/opt/seat/bin/ljos hook");
+            assert_eq!(pre["timeout"], 10);
+        }
         let stop = &v["hooks"]["Stop"][0]["hooks"][0];
         assert_eq!(stop["command"], "/opt/seat/bin/ljos hook");
         assert!(!text.contains("{ljos}"), "{text}");
@@ -58192,7 +58226,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
         let hooks: Value = serde_json::from_str(&read("hooks/cursor.json")).unwrap();
         assert_eq!(hooks["version"], 1);
-        let left_to_pre_tool_use = ["beforeMCPExecution", "beforeReadFile"];
+        let left_to_pre_tool_use = ["beforeReadFile"];
         let mut want: Vec<(&str, u64)> = Vec::new();
         want.extend(
             super::CURSOR_HOOK_EVENTS

@@ -18,9 +18,12 @@ use crate::proc_tree::Proc;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-/// How long a call the hook saw waits to be taken: the longest a Claude
-/// Code shell command runs.
+/// How long a shell call the hook saw waits to be taken: the longest a
+/// Claude Code shell command runs.
 const CALL_TTL_MS: u64 = 600_000;
+
+/// How long an MCP hook call waits to be taken by `ljos-mcp`.
+const MCP_CALL_TTL_MS: u64 = 30_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct Call {
@@ -94,15 +97,20 @@ const TAKEN: &str = "taken";
 /// The calls under `dir` still waiting, each with its file. A call past
 /// [`CALL_TTL_MS`] is dropped.
 fn waiting(dir: &Path, now: u64) -> Vec<(PathBuf, Call)> {
-    listed(dir, now, "json")
+    listed(dir, now, "json", CALL_TTL_MS)
+}
+
+/// The MCP calls under `dir` still waiting, within [`MCP_CALL_TTL_MS`].
+fn waiting_mcp(dir: &Path, now: u64) -> Vec<(PathBuf, Call)> {
+    listed(dir, now, "json", MCP_CALL_TTL_MS)
 }
 
 /// The calls under `dir` already taken, within [`CALL_TTL_MS`].
 fn spent(dir: &Path, now: u64) -> Vec<(PathBuf, Call)> {
-    listed(dir, now, TAKEN)
+    listed(dir, now, TAKEN, CALL_TTL_MS)
 }
 
-fn listed(dir: &Path, now: u64, ext: &str) -> Vec<(PathBuf, Call)> {
+fn listed(dir: &Path, now: u64, ext: &str, ttl: u64) -> Vec<(PathBuf, Call)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -114,7 +122,7 @@ fn listed(dir: &Path, now: u64, ext: &str) -> Vec<(PathBuf, Call)> {
         let Some(call) = read(&path) else {
             continue;
         };
-        if now.saturating_sub(call.at) > CALL_TTL_MS {
+        if now.saturating_sub(call.at) > ttl {
             let _ = std::fs::remove_file(&path);
             continue;
         }
@@ -140,13 +148,22 @@ pub fn is_seat_mcp_tool(tool: &str) -> bool {
         .is_some_and(|(server, name)| !server.is_empty() && name.starts_with("ljos_"))
 }
 
+fn is_any_seat_mcp_tool(tool: &str) -> bool {
+    let tool = tool.trim();
+    is_seat_mcp_tool(tool)
+        || tool.starts_with("ljos_")
+        || tool
+            .strip_prefix("MCP:")
+            .is_some_and(|rest| rest.starts_with("ljos_"))
+}
+
 /// Leave what a hook payload says about its tool call. On `PreToolUse`,
 /// each `ljos` line of a shell call is kept for the process that runs it,
-/// and a subagent's call to the seat's MCP tool for the server. On
-/// `PostToolUse` what the call did not take is dropped. The payload's
-/// agent is this hook process's own. Returns whether the call is a
-/// `PreToolUse` on the seat's MCP tool: the server judges that call, so
-/// the hook has nothing more to say.
+/// and a call to the seat's MCP tool for the server. On `PostToolUse`
+/// what the call did not take is dropped. The payload's agent is this
+/// hook process's own. Returns whether the call is a `PreToolUse` on the
+/// seat's MCP tool: the server judges that call, so the hook has nothing
+/// more to say.
 pub fn note_hook_call(input: &str, event: &str) -> bool {
     let Ok(v) = serde_json::from_str::<Value>(input.trim()) else {
         return false;
@@ -155,12 +172,37 @@ pub fn note_hook_call(input: &str, event: &str) -> bool {
     crate::ballot_sig::hook_agent(agent.clone());
     let tool = text(&v, &["tool_name", "toolName"]).unwrap_or_default();
     let seat_tool = event == "PreToolUse" && is_seat_mcp_tool(&tool);
+    let any_mcp_tool = matches!(event, "PreToolUse" | "preToolUse" | "beforeMCPExecution")
+        && is_any_seat_mcp_tool(&tool);
     let session = crate::hook_call_as(input, Some(event))
         .session
         .map(|s| crate::ballot_sig::field(&s));
     let call = text(&v, &["tool_use_id", "toolUseId"])
         .map(|c| token(&c))
         .filter(|c| !c.is_empty());
+    if any_mcp_tool {
+        if let Some(ref s) = session {
+            if let Some(id) = crate::usable_session_id(s) {
+                let root = root();
+                let tree = crate::proc_tree::ancestors();
+                let found = Call {
+                    session: id.to_string(),
+                    agent: agent.clone().unwrap_or_default(),
+                    argv: Vec::new(),
+                    at: now_ms(),
+                    tree,
+                };
+                if let Some(ref c) = call {
+                    put(&mcp_path(&root, c), &found);
+                } else if !crate::subagent_id(id) && agent.is_none() {
+                    put(
+                        &root.join("mcp").join(format!("latest-{}.json", now_ms())),
+                        &found,
+                    );
+                }
+            }
+        }
+    }
     if matches!(event, "PreToolUse" | "preToolUse" | "beforeShellExecution") {
         if let Some(ref s) = session {
             if crate::usable_session_id(s).is_some_and(|id| !crate::subagent_id(id)) {
@@ -182,18 +224,7 @@ pub fn note_hook_call(input: &str, event: &str) -> bool {
     };
     let root = root();
     match event {
-        "PreToolUse" if seat_tool => {
-            if let Some(agent) = agent {
-                let found = Call {
-                    session,
-                    agent,
-                    argv: Vec::new(),
-                    at: now_ms(),
-                    tree: Vec::new(),
-                };
-                put(&mcp_path(&root, &call), &found);
-            }
-        }
+        "PreToolUse" if seat_tool => {}
         "PreToolUse" => {
             let input = if v["tool_input"].is_object() {
                 &v["tool_input"]
@@ -389,12 +420,38 @@ fn claim_mcp_in(root: &Path, call: &str, now: u64) -> Option<(String, String)> {
         return None;
     }
     let path = mcp_path(root, &call);
-    let found = waiting(&root.join("mcp"), now)
+    let found = waiting_mcp(&root.join("mcp"), now)
         .into_iter()
         .find(|(p, _)| *p == path)?
         .1;
     std::fs::remove_file(&path).ok()?;
-    (!found.agent.is_empty()).then_some((found.session, found.agent))
+    Some((found.session, found.agent))
+}
+
+/// The session of a recent MCP hook call when `_meta` carried no id or
+/// `toolUseId`, taken once when only one conversation's hook call is
+/// waiting in the last [`MCP_CALL_TTL_MS`].
+#[must_use]
+pub fn claim_recent_mcp_session() -> Option<String> {
+    let dir = root().join("mcp");
+    let now = now_ms();
+    let mut found: Vec<_> = waiting_mcp(&dir, now)
+        .into_iter()
+        .filter(|(p, c)| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("latest-"))
+                && c.agent.is_empty()
+                && !crate::subagent_id(&c.session)
+        })
+        .collect();
+    let first_session = found.first()?.1.session.clone();
+    if found.iter().any(|(_, c)| c.session != first_session) {
+        return None;
+    }
+    found.sort_by(|a, b| b.1.at.cmp(&a.1.at).then_with(|| b.0.cmp(&a.0)));
+    found
+        .into_iter()
+        .find_map(|(path, c)| std::fs::remove_file(&path).ok().map(|()| c.session))
 }
 
 #[cfg(test)]
@@ -667,7 +724,7 @@ mod tests {
         );
         assert_eq!(claim_mcp_in(dir.path(), "../toolu_c", 2_000), None);
         assert_eq!(
-            claim_mcp_in(dir.path(), "toolu_c", 1_000 + CALL_TTL_MS + 1),
+            claim_mcp_in(dir.path(), "toolu_c", 1_000 + MCP_CALL_TTL_MS + 1),
             None
         );
     }

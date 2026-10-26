@@ -1114,7 +1114,17 @@ fn an_mcp_sitting_covers_the_conversations_merge_with_and_without_meta() {
         (answer, child)
     };
 
-    // 1. Without _meta: sitting succeeds, X's merge is allowed, and Y's is refused.
+    // 1. Without _meta: hooked via beforeMCPExecution, sitting succeeds, X's merge is allowed, and Y's is refused.
+    let pre_x = serde_json::json!({
+        "conversation_id": CONV_X,
+        "hook_event_name": "beforeMCPExecution",
+        "cursor_version": "2.4.0",
+        "tool_name": "ljos_sitting",
+        "tool_input": "{}",
+        "workspace_roots": ["/"]
+    })
+    .to_string();
+    let _ = home.hook_with(&pre_x, &[]);
     let (no_meta, mut srv1) = mcp_call(None);
     let no_meta_str = no_meta.to_string();
     assert!(
@@ -2056,5 +2066,386 @@ fn rv11_an_unstamped_runner_in_another_conversations_shell_sits_as_the_call() {
     assert!(
         said.contains(&holder(CONV_X)) && !said.contains(&holder(RV_OUTER)),
         "X's seat and claim under a runner nested in OUTER's shell:\n{said}"
+    );
+}
+
+/// A bare `ljos-mcp` call names no conversation. It is not bound to the
+/// conversation that last ran an `ljos` command in its own shell: X
+/// only ran `ljos seat`, so a bare `ljos_sitting` from some other client
+/// must not open a sitting X's merge passes on.
+#[test]
+fn a_bare_mcp_sitting_is_not_bound_to_the_last_shell_that_ran_ljos() {
+    let home = Box_::new();
+    let org_dir = home.run.join("tracker/Software/proj");
+    std::fs::create_dir_all(&org_dir).unwrap();
+    let seed_tracker = || {
+        std::fs::write(
+            org_dir.join("issues.org"),
+            format!(
+                "#+TITLE: proj issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n* TODO [#C] the merge\n:PROPERTIES:\n:ID:         {ISSUE}\n:CREATED:    [2026-10-25 Sun]\n:END:\n"
+            ),
+        )
+        .unwrap();
+    };
+    seed_tracker();
+    let cache = home.home.join(".cache/ljos");
+    std::fs::create_dir_all(&cache).unwrap();
+    for name in [
+        "ljos",
+        "ljos-policyd",
+        "vissue-cli",
+        "vissue-mcp",
+        "deedar-cli",
+        "claimdag-cli",
+        "packset",
+        "packset-embed",
+    ] {
+        std::fs::write(cache.join(format!("crate-{name}")), "99.0.0\n").unwrap();
+    }
+    for name in ["deedar", "packset", "packsetd", "ljos-policyd"] {
+        script(
+            &home.bin.join(name),
+            &format!(
+                "#!/bin/sh\ncase \"$1\" in\n  --version|version) echo '{name} 99.0.0 (phronesis)' ;;\n  *) echo ok ;;\nesac\nexit 0\n"
+            ),
+        );
+    }
+    script(
+        &home.bin.join("claimdag"),
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'claimdag 99.0.0' ;;\n  list) echo '[]' ;;\n  claim) echo gen=2 ;;\n  *) echo ok ;;\nesac\nexit 0\n",
+    );
+    let card_path = home.card.display().to_string();
+    script(
+        &home.bin.join("vissue"),
+        &format!(
+            "#!/usr/bin/env python3\nimport json, os, pathlib, sys\n\
+             card = pathlib.Path({card_path:?})\n\
+             cmd = sys.argv[1] if len(sys.argv) > 1 else ''\n\
+             if cmd == '--version':\n\tprint('vissue 99.0.0')\n\
+             elif cmd == 'vote':\n\tprint('--used --confidence')\n\
+             elif cmd == 'identity':\n\tprint('vissue 99.0.0\\nroot=' + os.environ.get('VISSUE_ROOT','') + '\\nprefix=Software')\n\
+             elif cmd == 'claim':\n\tby = os.environ.get('VISSUE_AGENT', '')\n\tcard.write_text(json.dumps({{'id': {ISSUE:?}, 'state': 'STARTED', 'claimed_by': by}}))\n\tprint('claimed')\n\
+             elif cmd == 'show':\n\tprint(card.read_text() if card.exists() else json.dumps({{'id': {ISSUE:?}, 'title': 'the merge', 'state': 'TODO'}}))\n\
+             elif cmd == 'claims':\n\tprint('[]')\n\
+             else:\n\tprint('{{}}')\n"
+        ),
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let mut buf = [0u8; 2048];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let body =
+                r#"{"atoms":[],"island":[],"fired":0,"live":0,"embedder":{"available":false}}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = std::io::Write::write_all(&mut stream, resp.as_bytes());
+        }
+    });
+    let pack_url = format!("http://{addr}");
+
+    let mcp_call = |meta: Option<serde_json::Value>| -> (serde_json::Value, Child) {
+        let bin_dir = Path::new(env!("CARGO_BIN_EXE_ljos")).parent().unwrap();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
+        cmd.env_clear()
+            .env(
+                "PATH",
+                format!("{}:{}:/usr/bin:/bin", home.bin.display(), bin_dir.display()),
+            )
+            .env("HOME", &home.home)
+            .env("XDG_CONFIG_HOME", home.home.join(".config"))
+            .env("XDG_STATE_HOME", home.home.join(".local/state"))
+            .env("XDG_DATA_HOME", home.home.join(".local/share"))
+            .env("XDG_CACHE_HOME", home.home.join(".cache"))
+            .env("XDG_RUNTIME_DIR", &home.run)
+            .env("VISSUE_ROOT", home.run.join("tracker"))
+            .env("VISSUE_NO_ROUTE", "1")
+            .env("LJOS_SEAT", "inky")
+            .env("LJOS_PROJECT", "proj")
+            .env("LJOS_TRACKER_GIT", "off")
+            .env("PACKSET_URL", &pack_url)
+            .env("PACKSET_WORKSPACE", "seat")
+            .current_dir(&home.repo)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = cmd.spawn().unwrap();
+        let mut params = serde_json::json!({
+            "name": "ljos_sitting",
+            "arguments": {"issue": ISSUE}
+        });
+        if let Some(m) = meta {
+            params["_meta"] = m;
+        }
+        let reqs = [
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "cursor", "version": "2.4.0"}}
+            }),
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": params}),
+        ];
+        {
+            let stdin = child.stdin.as_mut().unwrap();
+            for r in &reqs {
+                writeln!(stdin, "{r}").unwrap();
+            }
+            stdin.flush().unwrap();
+        }
+        use std::io::BufRead;
+        let stdout = child.stdout.take().unwrap();
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut answer = serde_json::Value::Null;
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap() > 0 {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                if v.get("id") == Some(&serde_json::json!(2)) {
+                    answer = v;
+                    break;
+                }
+            }
+            line.clear();
+        }
+        (answer, child)
+    };
+
+    let seat = home.shell(CONV_X, &["seat"]);
+    assert!(seat.status.success(), "ljos seat: {}", text_of(&seat));
+    refused(
+        &home.hook(CONV_X, MERGE, &[]),
+        "X's merge before any sitting",
+    );
+    let (said, mut srv) = mcp_call(None);
+    let card_text = std::fs::read_to_string(&home.card).unwrap_or_default();
+    assert!(
+        !card_text.contains(&holder(CONV_X)),
+        "a bare MCP sitting was claimed as X, who only ran `ljos seat`: {card_text}\n{said}"
+    );
+    refused(
+        &home.hook(CONV_X, MERGE, &[]),
+        "X's merge after another client's bare MCP sitting",
+    );
+    let _ = srv.kill();
+    let _ = srv.wait();
+}
+
+/// A bare-MCP box: stub tracker, pack and the version cache, so
+/// `ljos-mcp` answers `ljos_sitting` without a network.
+fn rv_mcp_box(home: &Box_) -> String {
+    let org_dir = home.run.join("tracker/Software/proj");
+    std::fs::create_dir_all(&org_dir).unwrap();
+    std::fs::write(
+        org_dir.join("issues.org"),
+        format!(
+            "#+TITLE: proj issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n* TODO [#C] the merge\n:PROPERTIES:\n:ID:         {ISSUE}\n:CREATED:    [2026-10-25 Sun]\n:END:\n"
+        ),
+    )
+    .unwrap();
+    let cache = home.home.join(".cache/ljos");
+    std::fs::create_dir_all(&cache).unwrap();
+    for name in [
+        "ljos",
+        "ljos-policyd",
+        "vissue-cli",
+        "vissue-mcp",
+        "deedar-cli",
+        "claimdag-cli",
+        "packset",
+        "packset-embed",
+    ] {
+        std::fs::write(cache.join(format!("crate-{name}")), "99.0.0\n").unwrap();
+    }
+    for name in ["deedar", "packset", "packsetd", "ljos-policyd"] {
+        script(
+            &home.bin.join(name),
+            &format!(
+                "#!/bin/sh\ncase \"$1\" in\n  --version|version) echo '{name} 99.0.0 (phronesis)' ;;\n  *) echo ok ;;\nesac\nexit 0\n"
+            ),
+        );
+    }
+    script(
+        &home.bin.join("claimdag"),
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'claimdag 99.0.0' ;;\n  list) echo '[]' ;;\n  claim) echo gen=2 ;;\n  *) echo ok ;;\nesac\nexit 0\n",
+    );
+    let card_path = home.card.display().to_string();
+    script(
+        &home.bin.join("vissue"),
+        &format!(
+            "#!/usr/bin/env python3\nimport json, os, pathlib, sys\n\
+             card = pathlib.Path({card_path:?})\n\
+             cmd = sys.argv[1] if len(sys.argv) > 1 else ''\n\
+             if cmd == '--version':\n\tprint('vissue 99.0.0')\n\
+             elif cmd == 'vote':\n\tprint('--used --confidence')\n\
+             elif cmd == 'identity':\n\tprint('vissue 99.0.0\\nroot=' + os.environ.get('VISSUE_ROOT','') + '\\nprefix=Software')\n\
+             elif cmd == 'claim':\n\tby = os.environ.get('VISSUE_AGENT', '')\n\tcard.write_text(json.dumps({{'id': {ISSUE:?}, 'state': 'STARTED', 'claimed_by': by}}))\n\tprint('claimed')\n\
+             elif cmd == 'show':\n\tprint(card.read_text() if card.exists() else json.dumps({{'id': {ISSUE:?}, 'title': 'the merge', 'state': 'TODO'}}))\n\
+             elif cmd == 'claims':\n\tprint('[]')\n\
+             else:\n\tprint('{{}}')\n"
+        ),
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let mut buf = [0u8; 2048];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let body =
+                r#"{"atoms":[],"island":[],"fired":0,"live":0,"embedder":{"available":false}}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = std::io::Write::write_all(&mut stream, resp.as_bytes());
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// One `ljos_sitting` call to a fresh `ljos-mcp` started detached
+/// (`setsid -f` is not needed: nothing above it is stamped). Returns the
+/// call's answer.
+fn rv_mcp_call(home: &Box_, pack_url: &str, meta: Option<serde_json::Value>) -> serde_json::Value {
+    let bin_dir = Path::new(env!("CARGO_BIN_EXE_ljos")).parent().unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
+    cmd.env_clear()
+        .env(
+            "PATH",
+            format!("{}:{}:/usr/bin:/bin", home.bin.display(), bin_dir.display()),
+        )
+        .env("HOME", &home.home)
+        .env("XDG_CONFIG_HOME", home.home.join(".config"))
+        .env("XDG_STATE_HOME", home.home.join(".local/state"))
+        .env("XDG_DATA_HOME", home.home.join(".local/share"))
+        .env("XDG_CACHE_HOME", home.home.join(".cache"))
+        .env("XDG_RUNTIME_DIR", &home.run)
+        .env("VISSUE_ROOT", home.run.join("tracker"))
+        .env("VISSUE_NO_ROUTE", "1")
+        .env("LJOS_SEAT", "inky")
+        .env("LJOS_PROJECT", "proj")
+        .env("LJOS_TRACKER_GIT", "off")
+        .env("PACKSET_URL", pack_url)
+        .env("PACKSET_WORKSPACE", "seat")
+        .current_dir(&home.repo)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = cmd.spawn().unwrap();
+    let mut params = serde_json::json!({"name": "ljos_sitting", "arguments": {"issue": ISSUE}});
+    if let Some(m) = meta {
+        params["_meta"] = m;
+    }
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        for r in [
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "cursor", "version": "2.4.0"}}}),
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": params}),
+        ] {
+            writeln!(stdin, "{r}").unwrap();
+        }
+        stdin.flush().unwrap();
+    }
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut answer = serde_json::Value::Null;
+    let mut line = String::new();
+    while reader.read_line(&mut line).unwrap() > 0 {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+            if v.get("id") == Some(&serde_json::json!(2)) {
+                answer = v;
+                break;
+            }
+        }
+        line.clear();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    answer
+}
+
+/// RV3. Claude Code's PreToolUse on the MCP tool binds Claude's own call
+/// through `toolUseId`. It must not leave a binding behind that the next
+/// bare call from another client takes, so that client is not seated as
+/// Claude's conversation.
+#[test]
+fn rv3_a_claude_mcp_sitting_leaves_nothing_the_next_bare_call_binds_to() {
+    const P: &str = "5c1d6a0e-7b5f-4a43-9d7e-claude000001";
+    let home = Box_::new();
+    let pack = rv_mcp_box(&home);
+    let pre = serde_json::json!({
+        "session_id": P, "hook_event_name": "PreToolUse",
+        "tool_name": "mcp__ljos__ljos_sitting", "tool_input": {"issue": ISSUE},
+        "tool_use_id": "toolu_01AbCdEf", "cwd": home.repo,
+    });
+    let _ = home.hook_with(&pre.to_string(), &[]);
+    let _ = rv_mcp_call(
+        &home,
+        &pack,
+        Some(serde_json::json!({"claudecode/toolUseId": "toolu_01AbCdEf"})),
+    );
+    std::fs::remove_file(&home.card).ok();
+    let other = rv_mcp_call(&home, &pack, None);
+    let card = std::fs::read_to_string(&home.card).unwrap_or_default();
+    assert!(
+        !card.contains(&holder(P)),
+        "a bare call from another client was seated as Claude's conversation:\n{card}\n{other}"
+    );
+}
+
+/// RV4. Two Cursor conversations call `ljos_sitting` on their own
+/// `ljos-mcp` servers at nearly the same time. A's hook runs, then B's,
+/// then A's call reaches A's server. A's call is not seated as B.
+#[test]
+fn rv4_interleaved_bare_mcp_sittings_do_not_swap_conversations() {
+    let home = Box_::new();
+    let pack = rv_mcp_box(&home);
+    for conv in [CONV_X, CONV_Z] {
+        let pre = serde_json::json!({
+            "conversation_id": conv, "generation_id": "g1",
+            "hook_event_name": "beforeMCPExecution", "cursor_version": "2.4.0",
+            "tool_name": "ljos_sitting", "tool_input": "{}", "workspace_roots": [home.repo],
+        });
+        let _ = home.hook_with(&pre.to_string(), &[]);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let x_call = rv_mcp_call(&home, &pack, None);
+    let card = std::fs::read_to_string(&home.card).unwrap_or_default();
+    assert!(
+        !card.contains(&holder(CONV_Z)),
+        "X's bare call was seated as Z, whose hook ran last:\n{card}\n{x_call}"
+    );
+}
+
+/// RV3b. RV3 with the other client's bare call 35 seconds after Claude's,
+/// past the 30-second life the bundle README gives these records.
+#[test]
+fn rv3b_a_claude_mcp_binding_is_gone_after_thirty_seconds() {
+    const P: &str = "5c1d6a0e-7b5f-4a43-9d7e-claude000001";
+    let home = Box_::new();
+    let pack = rv_mcp_box(&home);
+    let pre = serde_json::json!({
+        "session_id": P, "hook_event_name": "PreToolUse",
+        "tool_name": "mcp__ljos__ljos_sitting", "tool_input": {"issue": ISSUE},
+        "tool_use_id": "toolu_01AbCdEf", "cwd": home.repo,
+    });
+    let _ = home.hook_with(&pre.to_string(), &[]);
+    let _ = rv_mcp_call(
+        &home,
+        &pack,
+        Some(serde_json::json!({"claudecode/toolUseId": "toolu_01AbCdEf"})),
+    );
+    std::fs::remove_file(&home.card).ok();
+    std::thread::sleep(Duration::from_secs(35));
+    let other = rv_mcp_call(&home, &pack, None);
+    let card = std::fs::read_to_string(&home.card).unwrap_or_default();
+    assert!(
+        !card.contains(&holder(P)),
+        "35 s later a bare call was still seated as Claude's conversation:\n{card}\n{other}"
     );
 }

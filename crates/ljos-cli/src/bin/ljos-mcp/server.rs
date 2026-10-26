@@ -1213,7 +1213,10 @@ fn call_identity(
     let hooked = named_in_meta(meta, "claudecode/toolUseId")
         .and_then(|id| ljos_cli::subagent::claim_mcp_call(&id));
     match hooked {
-        Some((parent, agent)) => (session.or(Some(parent)), Some(agent)),
+        Some((parent, agent)) => (
+            session.or(Some(parent)),
+            (!agent.is_empty()).then_some(agent),
+        ),
         None => (session, agent_in_meta(meta)),
     }
 }
@@ -3657,15 +3660,41 @@ impl ServerHandler for LjosServer {
         let thread = thread_in_meta(&context.meta.0);
         let (session, agent) = call_identity(&context.meta.0);
         let mut seat = seat;
-        if let (Some(seat), Some(id)) = (
-            seat.as_mut(),
-            session
-                .as_deref()
-                .or(thread.as_deref())
-                .and_then(ljos_cli::usable_session_id),
-        ) {
-            if seat.holder == seat.seat && !ljos_cli::subagent_id(id) {
-                seat.holder = ljos_cli::holder_for_session(&seat.seat, id);
+        if let Some(seat) = seat.as_mut() {
+            if seat.holder == seat.seat {
+                if let Some(id) = session
+                    .as_deref()
+                    .or(thread.as_deref())
+                    .and_then(ljos_cli::usable_session_id)
+                {
+                    if !ljos_cli::subagent_id(id) {
+                        seat.holder = ljos_cli::holder_for_session(&seat.seat, id);
+                    }
+                } else if let Some(holder) = ljos_cli::holder_from_bare_session_record(&seat.seat) {
+                    seat.holder = holder;
+                } else if name == "ljos_sitting" {
+                    let passed_assignee = request
+                        .arguments
+                        .as_ref()
+                        .and_then(|a| a.get("assignee"))
+                        .and_then(serde_json::Value::as_str);
+                    if let Err(e) = ljos_cli::with_call_seat(seat.clone(), async {
+                        call_assignee("sitting", passed_assignee)
+                    })
+                    .await
+                    {
+                        return Ok(attach_next(&name, as_tool_error(e)?));
+                    }
+                    return Ok(attach_next(
+                        &name,
+                        as_tool_error(refused(anyhow::anyhow!(
+                            "ljos_sitting: no conversation could be bound for bare seat {}; \
+                             pass _meta.conversation_id on the call or run through the runner's \
+                             beforeMCPExecution hook",
+                            seat.seat
+                        )))?,
+                    ));
+                }
             }
         }
         if let Some(arguments) = request.arguments.as_mut() {

@@ -21,6 +21,13 @@
         "failClosed": true
       }
     ],
+    "beforeMCPExecution": [
+      {
+        "command": "\"${CURSOR_PLUGIN_ROOT}/bin/ljos-plugin\" ljos hook",
+        "timeout": 10,
+        "failClosed": true
+      }
+    ],
     "beforeSubmitPrompt": [
       {
         "command": "\"${CURSOR_PLUGIN_ROOT}/bin/ljos-plugin\" ljos hook",
