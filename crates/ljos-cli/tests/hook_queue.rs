@@ -1449,6 +1449,38 @@ fn a_pretooluse_mcp_tool_name_reaches_user_rules() {
     assert!(stdout.contains("\"permission\":\"deny\""), "{stdout}");
 }
 
+/// A `command` key in the tool input is an argument of the tool. It does
+/// not replace `MCP:<tool>` in the cue the user rule matches.
+#[test]
+fn a_command_in_tool_input_does_not_replace_the_mcp_tool_name() {
+    let hab = hab("mcp-command");
+    let cfg = hab.home.join(".config/ljos");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(
+        cfg.join("user-rules.json"),
+        r#"{"rules":[{"id":"ur-1","text":"deny mcp tool","author":"t","reason":"r","pattern":"MCP:add_issue_comment*","verdict":"deny","deny_mention":{"handles":[],"names":[]},"deny_reply_to":{"handles":[],"names":[]},"written_at":"2026-10-26T00:00:00Z","updated_at":"2026-10-26T00:00:00Z"}]}"#,
+    )
+    .unwrap();
+
+    let payload = serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": "c-mcp-cmd",
+        "hook_event_name": "preToolUse",
+        "tool_name": "MCP:add_issue_comment",
+        "tool_input": {"command": "echo hi", "owner":"o","repo":"r","issue_number":1,"body":"hello"}
+    })
+    .to_string();
+
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOKD", "off");
+    let (_took, out) = finished(feed(cmd, &payload), Duration::from_secs(3), "mcp-cmd");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\"permission\":\"deny\""),
+        "tool_input.command replaced the MCP cue: {stdout}"
+    );
+}
+
 /// Non-permission events should not wait seconds on a hung memory backend.
 #[test]
 fn ordinary_non_permission_events_do_not_stall_on_hung_pack() {

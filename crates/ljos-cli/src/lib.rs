@@ -8541,15 +8541,22 @@ fn cue_for(v: &Value, input: &Value, event: &str) -> String {
             .join(" ")
     });
     let tool = matches!(event, "PreToolUse" | "PostToolUse" | "PostToolUseFailure");
+    let name = v["tool_name"]
+        .as_str()
+        .or_else(|| v["toolName"].as_str())
+        .filter(|n| !n.is_empty())
+        .unwrap_or("Edit");
+    // Cursor's HTTP MCP tools are `MCP:<tool>`. A `command` key in the
+    // tool input is an argument, and it must not replace this name.
+    let mcp_named = name
+        .strip_prefix("MCP:")
+        .is_some_and(|rest| !rest.is_empty());
     if tool {
-        if let Some(command) = command {
-            return command;
+        if !mcp_named {
+            if let Some(command) = command {
+                return command;
+            }
         }
-        let name = v["tool_name"]
-            .as_str()
-            .or_else(|| v["toolName"].as_str())
-            .filter(|n| !n.is_empty())
-            .unwrap_or("Edit");
         // Cursor's HTTP MCP tools are `MCP:<tool>`. The cue has to start
         // with that name so a user-rule pattern for the tool can match.
         if let Some(rest) = name.strip_prefix("MCP:") {
