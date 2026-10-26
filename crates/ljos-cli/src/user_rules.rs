@@ -13,6 +13,7 @@
 //! that receipt with no basis stays out. A hook does not write the
 //! receipt: it runs under the runner.
 
+use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
@@ -128,11 +129,104 @@ pub(crate) fn read_all() -> Result<Vec<UserRule>> {
     let Some(path) = rules_path() else {
         return Ok(Vec::new());
     };
-    let Some(text) = read_rules_text(&path)? else {
-        return Ok(Vec::new());
+    // Empty text, whitespace, and JSON that does not parse can be a
+    // rewrite caught between a truncate and the new bytes. A dangling
+    // symlink, a FIFO, and a file over the cap are the file they are,
+    // and those errors return at once.
+    // The stamp is the length, the mtime, and a prefix of the bytes.
+    // A stamp that stays the same for `RULES_STABLE` is a corrupt file,
+    // and the error stands. A stamp that changes is a rewrite still in
+    // progress: keep reading until a parse succeeds or `RULES_HARD` has
+    // passed, and then fail closed. A covered write is not allowed on
+    // that last error.
+    let started = std::time::Instant::now();
+    let mut stable_since = std::time::Instant::now();
+    let mut last_stamp: Option<RulesStamp> = None;
+    loop {
+        match read_rules_text(&path) {
+            Ok(None) => return Ok(Vec::new()),
+            Ok(Some(text)) => match parse_rules(&text) {
+                Ok(rules) => return Ok(rules),
+                Err(err) => {
+                    let err = err.context(format!(
+                        "user rules: {} is not a user-rules file",
+                        path.display()
+                    ));
+                    if rules_read_gave_up(
+                        &path,
+                        Some(text.as_bytes()),
+                        &mut last_stamp,
+                        &mut stable_since,
+                        started,
+                    ) {
+                        return Err(err);
+                    }
+                }
+            },
+            Err(err) if rules_rewrite_symptom(&err) => {
+                if rules_read_gave_up(&path, None, &mut last_stamp, &mut stable_since, started) {
+                    return Err(err);
+                }
+            }
+            Err(err) => return Err(err),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// How long an unchanged bad file is treated as corrupt.
+const RULES_STABLE: std::time::Duration = std::time::Duration::from_millis(80);
+/// How long a file whose bytes keep changing is re-read.
+const RULES_HARD: std::time::Duration = std::time::Duration::from_millis(200);
+
+#[derive(PartialEq, Eq)]
+struct RulesStamp {
+    len: u64,
+    mtime: Option<std::time::SystemTime>,
+    prefix: [u8; 64],
+    prefix_len: usize,
+}
+
+fn rules_rewrite_symptom(err: &anyhow::Error) -> bool {
+    format!("{err:#}").contains(" is empty")
+}
+
+fn rules_stamp(path: &std::path::Path, bytes: Option<&[u8]>) -> RulesStamp {
+    let meta = std::fs::symlink_metadata(path).ok();
+    let prefix_src = bytes.unwrap_or(b"");
+    let n = prefix_src.len().min(64);
+    let mut prefix = [0u8; 64];
+    prefix[..n].copy_from_slice(&prefix_src[..n]);
+    RulesStamp {
+        len: meta.as_ref().map(|m| m.len()).unwrap_or(0),
+        mtime: meta.as_ref().and_then(|m| m.modified().ok()),
+        prefix,
+        prefix_len: n,
+    }
+}
+
+/// `true` when this read should be the last: the stamp has not moved for
+/// [`RULES_STABLE`], or the hard cap has passed.
+fn rules_read_gave_up(
+    path: &std::path::Path,
+    bytes: Option<&[u8]>,
+    last: &mut Option<RulesStamp>,
+    stable_since: &mut std::time::Instant,
+    started: std::time::Instant,
+) -> bool {
+    let stamp = rules_stamp(path, bytes);
+    let same = match last {
+        Some(prev) if *prev == stamp => true,
+        _ => {
+            *last = Some(stamp);
+            *stable_since = std::time::Instant::now();
+            false
+        }
     };
-    parse_rules(&text)
-        .with_context(|| format!("user rules: {} is not a user-rules file", path.display()))
+    if started.elapsed() >= RULES_HARD {
+        return true;
+    }
+    same && stable_since.elapsed() >= RULES_STABLE
 }
 
 /// The text of the user-rules file. `Ok(None)` when no file is there.
@@ -221,17 +315,63 @@ pub(crate) fn render_rules(rules: &[UserRule]) -> Result<String> {
 fn store(rules: &[UserRule]) -> Result<()> {
     let _durable = crate::bookkeep::durable_write();
     let path = rules_path().context("user rules: no home and no XDG_CONFIG_HOME")?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("user rules: create {} failed", parent.display()))?;
-    }
+    let Some(parent) = path.parent() else {
+        anyhow::bail!("user rules: {} has no directory", path.display());
+    };
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("user rules: create {} failed", parent.display()))?;
     let body = render_rules(rules)?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &body)
-        .with_context(|| format!("user rules: write {} failed", tmp.display()))?;
-    std::fs::rename(&tmp, &path)
-        .with_context(|| format!("user rules: rename into {} failed", path.display()))?;
+    if std::fs::read(&path).is_ok_and(|have| have == body.as_bytes()) {
+        return Ok(());
+    }
+    // A unique temp in the same directory, fsync, then rename. Two stores
+    // no longer share `user-rules.json.tmp`, and a reader never sees a
+    // truncated document from this write.
+    let tmp = unique_rules_temp(parent)?;
+    let write_tmp = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .with_context(|| format!("user rules: create {} failed", tmp.display()))?;
+        file.write_all(body.as_bytes())
+            .with_context(|| format!("user rules: write {} failed", tmp.display()))?;
+        file.sync_all()
+            .with_context(|| format!("user rules: sync {} failed", tmp.display()))?;
+        Ok(())
+    })();
+    if let Err(err) = write_tmp {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    if let Err(err) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err).context(format!("user rules: rename into {} failed", path.display()));
+    }
+    if let Ok(dir) = std::fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
     Ok(())
+}
+
+fn unique_rules_temp(parent: &std::path::Path) -> Result<std::path::PathBuf> {
+    for n in 0..32u32 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = parent.join(format!(
+            ".user-rules.{}.{nanos}.{n}.tmp",
+            std::process::id()
+        ));
+        if !path.exists() {
+            return Ok(path);
+        }
+    }
+    anyhow::bail!(
+        "user rules: could not pick a temp name in {}",
+        parent.display()
+    );
 }
 
 /// Replace the local file. Used by a sync, which must not start another sync.

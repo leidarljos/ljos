@@ -1376,3 +1376,47 @@ fn a_before_mcp_server_field_is_not_taken_from_the_tool_name() {
     .to_string();
     assert_eq!(hook_stdout(&hab, &seat), ALLOW);
 }
+
+/// Truncate-then-write of user-rules must not deny covered GitHub writes.
+/// A rewrite window is not a policy decision.
+#[test]
+fn a_rules_rewrite_window_does_not_deny_github_writes() {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use std::thread;
+    use std::time::Duration;
+
+    let hab = hab("rules-race");
+    let cfg = hab.home.join(".config/ljos");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let path = cfg.join("user-rules.json");
+    std::fs::write(&path, "{\"rules\":[]}\n").unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let done = stop.clone();
+    let writer = thread::spawn(move || {
+        while !done.load(Ordering::Relaxed) {
+            std::fs::write(&path, "").unwrap();
+            thread::sleep(Duration::from_millis(5));
+            std::fs::write(&path, "{\"rules\":[]}\n").unwrap();
+            thread::sleep(Duration::from_millis(5));
+        }
+    });
+
+    let payload = github_comment_payload();
+    for i in 0..200 {
+        let mut cmd = ljos(&hab, &["hook"]);
+        cmd.env("LJOS_HOOKD", "off");
+        let (_took, out) = finished(feed(cmd, &payload), Duration::from_secs(3), "race");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("\"permission\":\"allow\""),
+            "iteration {i}: {stdout}"
+        );
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    writer.join().unwrap();
+}
