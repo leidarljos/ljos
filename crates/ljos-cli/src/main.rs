@@ -2670,7 +2670,7 @@ fn run_command() -> Result<()> {
             // the whole tracker are skipped from here on.
             // SAFETY: single-threaded here, before anything reads the environment.
             unsafe { std::env::set_var("LJOS_IN_HOOK", "1") };
-            let _side_bound = ljos_cli::arm_side_bound(&call, &input);
+            let _side_bound = ljos_cli::arm_side_bound(&call);
             ljos_cli::hook_timed("arm_gate", || ljos_cli::arm_gate(&input, event.as_deref()));
             let (subagent, stop_active, agent) = ljos_cli::hook_subagent(&input);
             ljos_cli::hook_trace(&input, &call, subagent.as_deref());
@@ -3151,9 +3151,6 @@ fn run_command() -> Result<()> {
                 }
             }
             let output = ljos_cli::approval::hook_output(&input, &call, &context, verdict);
-            if !ljos_cli::take_side_answer() {
-                std::process::exit(0);
-            }
             ljos_cli::answer_gate(&output);
             if let Some(reason) = ask {
                 ljos_cli::book_queue::enqueue_ask(&input, &call, &reason);

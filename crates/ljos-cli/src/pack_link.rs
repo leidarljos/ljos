@@ -204,7 +204,11 @@ fn connect(addr: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
     }
     let started = Instant::now();
     let result = connect_once(addr, timeout);
-    super::charge_side_wait(started.elapsed());
+    // A connect that returns a socket is the pack accepting. Time spent
+    // there is not a quiet wait. A connect that fails spends the budget.
+    if result.is_err() {
+        super::charge_side_wait(started.elapsed());
+    }
     result
 }
 
@@ -958,7 +962,11 @@ fn send(live: &mut Slot, origin: &Url, call: &Wire<'_>, timeout: Duration) -> st
     }
     let started = Instant::now();
     let result = send_once(live, origin, call, timeout);
-    super::charge_side_wait(started.elapsed());
+    // An answer is not charged. A read that ends without one is a quiet
+    // socket and spends the budget, so the next read does not open another.
+    if result.is_err() {
+        super::charge_side_wait(started.elapsed());
+    }
     result
 }
 

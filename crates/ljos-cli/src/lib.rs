@@ -11696,11 +11696,15 @@ pub fn subagent_stop_reason(
 /// room on a loaded host.
 pub const HOOK_DEADLINE_MS: u64 = 8000;
 
-/// How long a side event may sit inside pack reads. Time spent while the
+/// How much quiet pack time a side event may spend. Time spent while the
 /// pack is answering does not come out of this. A socket that accepts and
-/// stays quiet does. Startup and the calls after the budget is gone still
-/// have to fit under half a second, so this stays well short of that.
+/// stays quiet does. Once this is spent, the next read returns before it
+/// opens a socket.
 const SIDE_BUDGET_MS: u64 = 250;
+/// The longest one side-event pack read waits. A slow answer of a few
+/// hundred milliseconds still fits. A quiet socket stops at this, which
+/// leaves the event under half a second after the budget is spent.
+const SIDE_READ_CAP_MS: u64 = 400;
 const SIDE_UNBOUND: u64 = u64::MAX;
 
 static SIDE_BUDGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(SIDE_UNBOUND);
@@ -11717,7 +11721,7 @@ impl Drop for SideBound {
 /// Session start, a prompt, a failed tool, and a stop are not permission
 /// checks. Their pack reads share one budget, so a quiet socket cannot
 /// fill the runner's cut-off. The call still prints the answer it built.
-pub fn arm_side_bound(call: &HookCall, _input: &str) -> Option<SideBound> {
+pub fn arm_side_bound(call: &HookCall) -> Option<SideBound> {
     if !matches!(
         call.event.as_str(),
         "SessionStart" | "UserPromptSubmit" | "PostToolUseFailure" | "Stop"
@@ -11726,12 +11730,6 @@ pub fn arm_side_bound(call: &HookCall, _input: &str) -> Option<SideBound> {
     }
     SIDE_BUDGET.store(SIDE_BUDGET_MS, std::sync::atomic::Ordering::SeqCst);
     Some(SideBound)
-}
-
-/// The hook prints its own answer. Kept so the call site has one place
-/// that decides the answer is this process's.
-pub fn take_side_answer() -> bool {
-    true
 }
 
 pub(crate) fn side_remaining_ms() -> Option<u64> {
@@ -11765,7 +11763,11 @@ pub(crate) fn charge_side_wait(elapsed: std::time::Duration) {
 
 pub(crate) fn cap_pack_wait(requested: std::time::Duration) -> std::time::Duration {
     match side_remaining_ms() {
-        Some(left) => requested.min(std::time::Duration::from_millis(left)),
+        // A full or partly spent budget still allows one read up to the
+        // cap, so a pack that answers inside that cap is not cut off.
+        // A spent budget is one millisecond: the caller returns at once.
+        Some(0) => std::time::Duration::from_millis(1),
+        Some(_) => requested.min(std::time::Duration::from_millis(SIDE_READ_CAP_MS)),
         None => requested,
     }
 }
@@ -12809,7 +12811,8 @@ pub(crate) fn with_env_mutation<R>(f: impl FnOnce() -> R) -> R {
 /// back whatever it was.
 fn with_pack_timeout<R>(ms: u64, f: impl FnOnce() -> R) -> R {
     let ms = match side_remaining_ms() {
-        Some(left) => ms.min(left).max(1),
+        Some(0) => 1,
+        Some(_) => ms.clamp(1, SIDE_READ_CAP_MS),
         None => ms,
     };
     with_env_mutation(|| {
