@@ -1864,11 +1864,15 @@ pub fn call_cursor_conversation() -> Option<String> {
 }
 
 /// Whether `LJOS_HOLD` may name the claimant: outside a bound hook call
-/// and when no conversation id is present.
+/// and when no conversation id or `CURSOR_AGENT` mark is present.
 fn hold_env_allowed() -> bool {
     call_conversation() == CallConversation::Unbound
         && cursor_conversation().is_none()
+        && std::env::var_os("CURSOR_CONVERSATION_ID").is_none()
         && std::env::var_os("CURSOR_AGENT").is_none()
+        && !stamp_env()
+            .iter()
+            .any(|(k, _)| k == "CURSOR_AGENT" || k == "CURSOR_CONVERSATION_ID")
 }
 
 /// Whether the bound call carried a session key that names nobody.
@@ -1880,19 +1884,176 @@ pub fn call_conversation_unusable() -> bool {
     )
 }
 
+/// Whether this process is in a `CURSOR_AGENT` shell whose conversation
+/// id was stripped or is unusable.
+fn cursor_agent_without_id() -> bool {
+    let env = stamp_env();
+    let claude = std::env::var_os("CLAUDECODE").is_some()
+        || env
+            .iter()
+            .any(|(k, _)| k == "CLAUDECODE" || k.starts_with("CLAUDE_"));
+    !claude
+        && call_conversation() == CallConversation::Unbound
+        && cursor_conversation().is_none()
+        && (std::env::var_os("CURSOR_AGENT").is_some()
+            || env.iter().any(|(k, _)| k == "CURSOR_AGENT"))
+}
+
 /// The conversation this process speaks for: the bound call's,
-/// else `CURSOR_CONVERSATION_ID`. None for an unusable bound id.
+/// else `CURSOR_CONVERSATION_ID` from [`stamp_env`]. None for an unusable
+/// bound id.
 fn cursor_conversation() -> Option<String> {
     match call_conversation() {
         CallConversation::Named(id) => Some(id),
         CallConversation::Unusable => None,
-        CallConversation::Unbound | CallConversation::UnusableOther => {
-            std::env::var("CURSOR_CONVERSATION_ID")
-                .ok()
-                .map(|id| id.trim().to_string())
-                .filter(|id| !id.is_empty())
+        CallConversation::Unbound | CallConversation::UnusableOther => stamp_env()
+            .into_iter()
+            .find(|(k, _)| k == "CURSOR_CONVERSATION_ID")
+            .and_then(|(_, v)| usable_session_id(&v).map(str::to_string)),
+    }
+}
+
+static STAMP_ENV: std::sync::OnceLock<Option<Vec<(String, String)>>> = std::sync::OnceLock::new();
+
+/// Whether `pid`, named `comm`, is a cargo test runner binary under
+/// `target/.../deps/`.
+fn is_cargo_test_binary(pid: u32, comm: &str) -> bool {
+    if matches!(comm, "ljos" | "ljos-mcp" | "ljos-hud") {
+        return false;
+    }
+    std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .is_some_and(|p| p.parent().and_then(|d| d.file_name()) == Some("deps".as_ref()))
+}
+
+fn same_runtime_dir(env: &[(String, String)]) -> bool {
+    let Ok(mine) = std::env::var("XDG_RUNTIME_DIR") else {
+        return true;
+    };
+    if mine.is_empty() {
+        return true;
+    }
+    env.iter()
+        .any(|(k, v)| k == "XDG_RUNTIME_DIR" && v == &mine)
+}
+
+fn clean_shell_environ(env: Vec<(String, String)>, is_self: bool) -> Vec<(String, String)> {
+    let is_bash_cursor =
+        env.iter().any(|(k, _)| k == "SHLVL") && env.iter().any(|(k, _)| k == "CURSOR_AGENT");
+    if !is_bash_cursor {
+        return env;
+    }
+    if is_self {
+        let under = env.iter().find(|(k, _)| k == "_").map(|(_, v)| v.as_str());
+        if under.is_none_or(|u| u == "env" || u.ends_with("/env")) {
+            return env
+                .into_iter()
+                .filter(|(k, v)| !runner_session_var(k, v) && k != "LJOS_HOLD")
+                .collect();
         }
     }
+    let Some(pwd_at) = env.iter().position(|(k, _)| k == "PWD") else {
+        return env;
+    };
+    env.into_iter()
+        .enumerate()
+        .filter(|(i, (k, v))| {
+            *i >= pwd_at
+                || k == "CLAUDE_CODE_SESSION_ID"
+                || (!runner_session_var(k, v) && k != "LJOS_HOLD")
+        })
+        .map(|(_, kv)| kv)
+        .collect()
+}
+
+/// The environment a runner stamped this process's conversation into: the
+/// one the outermost process above this one was started with, read from
+/// `/proc`, so neither `VAR=id ljos`, `VAR=id git commit`, `export VAR=id`
+/// nor an intermediate program that builds its own environment changes it.
+fn stamp_env() -> Vec<(String, String)> {
+    let above = if cfg!(test) {
+        None
+    } else if ANCESTRY_FOR
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some()
+    {
+        stamp_from_ancestors()
+    } else {
+        STAMP_ENV.get_or_init(stamp_from_ancestors).clone()
+    };
+    above.unwrap_or_else(|| {
+        if cfg!(test) {
+            std::env::vars().collect()
+        } else {
+            proc_tree::environ(std::process::id())
+                .map(|e| clean_shell_environ(e, true))
+                .unwrap_or_else(|| std::env::vars().collect())
+        }
+    })
+}
+
+fn stamp_from_ancestors() -> Option<Vec<(String, String)>> {
+    let chain = ancestry();
+    let mut stop = chain.len();
+    for (i, (pid, comm)) in chain.iter().enumerate() {
+        if *pid <= 1
+            || is_session(comm)
+            || matches!(comm.as_str(), "ljos" | "ljos-mcp")
+            || is_cargo_test_binary(*pid, comm)
+        {
+            stop = i;
+            break;
+        }
+        let Some(env) = proc_tree::environ(*pid) else {
+            continue;
+        };
+        if !same_runtime_dir(&env) {
+            stop = i;
+            break;
+        }
+    }
+    let active = &chain[..stop];
+    let direct_test_git = chain
+        .get(stop)
+        .is_some_and(|(pid, comm)| is_cargo_test_binary(*pid, comm))
+        && active.last().is_some_and(|(pid, _)| {
+            proc_tree::environ(*pid).is_none_or(|env| !env.iter().any(|(k, _)| k == "SHLVL"))
+        });
+    let start = match active.iter().rposition(|(_, comm)| comm == "git") {
+        Some(git_at) if !direct_test_git || git_at + 1 < stop => git_at + 1,
+        Some(git_at) => git_at,
+        None => 0,
+    };
+    let is_shell = |comm: &str| {
+        matches!(
+            comm,
+            "sh" | "bash" | "dash" | "zsh" | "ksh" | "fish" | "csh" | "tcsh" | "nu"
+        )
+    };
+    let stamped = |pid: u32| {
+        let env = clean_shell_environ(proc_tree::environ(pid)?, false);
+        let has = env.iter().any(|(k, v)| {
+            (runner_session_var(k, v) && usable_session_id(v).is_some()) || k == "CURSOR_AGENT"
+        });
+        has.then_some(env)
+    };
+    let mut outermost_shell = None;
+    let mut outermost_any = None;
+    for (pid, comm) in &active[start..] {
+        if let Some(env) = stamped(*pid) {
+            if is_shell(comm) {
+                outermost_shell = Some(env);
+            } else {
+                outermost_any = Some(env);
+            }
+        }
+    }
+    let outermost = outermost_shell.or(outermost_any);
+    if outermost.is_none() && start > 0 && std::env::var_os("CURSOR_AGENT").is_some() {
+        return Some(vec![("CURSOR_AGENT".to_string(), "1".to_string())]);
+    }
+    outermost
 }
 
 /// The conversation ids this process speaks for, by key, sorted so two
@@ -1901,14 +2062,15 @@ fn cursor_conversation() -> Option<String> {
 /// bound hook call that is the payload's id as `CURSOR_CONVERSATION_ID`
 /// and nothing else. Otherwise it is every `*_SESSION_ID` the runner
 /// stamped into the environment but the login's.
-fn stamped_sessions() -> Vec<(String, String)> {
+pub(crate) fn stamped_sessions() -> Vec<(String, String)> {
     match call_conversation() {
         CallConversation::Named(id) => return vec![("CURSOR_CONVERSATION_ID".to_string(), id)],
         CallConversation::Unusable => return Vec::new(),
         CallConversation::Unbound | CallConversation::UnusableOther => {}
     }
-    let mut found: Vec<(String, String)> = std::env::vars()
-        .filter(|(k, v)| runner_session_var(k, v))
+    let mut found: Vec<(String, String)> = stamp_env()
+        .into_iter()
+        .filter(|(k, v)| runner_session_var(k, v) && usable_session_id(v).is_some())
         .map(|(k, v)| (k, v.trim().to_string()))
         .collect();
     found.sort();
@@ -4165,17 +4327,12 @@ fn booking_holder(seat: &str) -> String {
 /// A runner conversation id long enough to be one. Shorter values are
 /// ignored, the same rule as [`runner_session_var`].
 fn stamped_id(key: &str) -> Option<String> {
-    let id = if key == "CURSOR_CONVERSATION_ID" {
-        cursor_conversation()?
-    } else {
-        std::env::var(key).ok()?
-    };
-    let id = id.trim();
-    if id.len() >= 8 {
-        Some(id.to_string())
-    } else {
-        None
+    if key == "CURSOR_CONVERSATION_ID" {
+        return cursor_conversation();
     }
+    stamped_sessions()
+        .into_iter()
+        .find_map(|(k, v)| (k == key).then_some(v))
 }
 
 /// The opencode or agy conversation this process belongs to, when the
@@ -7685,9 +7842,9 @@ pub fn hook_call_as(input: &str, event: Option<&str>) -> HookCall {
         &v["tool_input"]
     };
     let cursor = matches!(shape, HookShape::Cursor | HookShape::CursorShell);
-    // A payload that carries `conversation_id` is named by it or by
-    // nothing: its `session_id` is not the conversation.
-    let session = if cursor && v.get("conversation_id").is_some() {
+    // A Cursor payload is named by `conversation_id` or by nothing: its
+    // `session_id` is not the conversation.
+    let session = if cursor {
         v["conversation_id"].as_str().and_then(usable_session_id)
     } else {
         HOOK_SESSION_KEYS
@@ -28038,7 +28195,7 @@ pub fn live_held_issue() -> Option<(String, Hold)> {
     // `CURSOR_CONVERSATION_ID` holds under its one name. A process above
     // it, or a runner's record, may serve every conversation of one user,
     // so it names none of them.
-    if call_conversation_unusable() {
+    if call_conversation_unusable() || cursor_agent_without_id() {
         return None;
     }
     if let Some(id) = cursor_conversation() {
@@ -28079,14 +28236,20 @@ fn conversation_ancestry() -> Vec<(u32, String)> {
     own_ancestry()
         .into_iter()
         .filter(|(pid, comm)| {
-            *pid > 1
-                && !WRAPPERS.contains(&comm.as_str())
-                && proc_tree::environ(*pid).is_some_and(|env| {
-                    env.iter().any(|(k, v)| {
-                        k == "CURSOR_CONVERSATION_ID"
-                            && usable_session_id(v).is_some_and(|id| !subagent_id(id))
-                    })
-                })
+            if *pid <= 1 || WRAPPERS.contains(&comm.as_str()) {
+                return false;
+            }
+            let Some(env) = proc_tree::environ(*pid) else {
+                return false;
+            };
+            let has_conv = same_runtime_dir(&env)
+                && env.iter().any(|(k, v)| {
+                    k == "CURSOR_CONVERSATION_ID"
+                        && usable_session_id(v).is_some_and(|id| !subagent_id(id))
+                });
+            let dedicated_runner =
+                comm == "cursor-agent" && !env.iter().any(|(k, _)| k == "CURSOR_CONVERSATION_ID");
+            has_conv || dedicated_runner
         })
         .collect()
 }

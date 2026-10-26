@@ -857,8 +857,8 @@ pub fn connection_session() -> Option<String> {
 }
 
 /// The harness session id: the MCP connection, then the MCP call, then the
-/// hook, then `LJOS_HARNESS_SESSION`, then a runner `*_SESSION_ID` / thread
-/// id, then the run ([`run_session`]).
+/// hook, then a runner-stamped `*_SESSION_ID` / thread / conversation id,
+/// then `LJOS_HARNESS_SESSION`, then the run ([`run_session`]).
 /// The connection pin is the process, not the `seat` argument.
 #[must_use]
 pub fn harness_session() -> String {
@@ -871,9 +871,7 @@ pub fn harness_session() -> String {
     if let Some(s) = HOOK_SESSION.with(|c| c.borrow().clone()) {
         return s;
     }
-    if let Some(s) = env_token("LJOS_HARNESS_SESSION") {
-        return s;
-    }
+    let stamped = crate::stamped_sessions();
     const PREFER: &[&str] = &[
         "CURSOR_SESSION_ID",
         "CLAUDE_SESSION_ID",
@@ -891,7 +889,12 @@ pub fn harness_session() -> String {
         "OPENCODE_SESSION_ID",
     ];
     for key in PREFER {
-        if let Some(s) = env_token(key) {
+        if let Some(s) = stamped
+            .iter()
+            .find(|(k, _)| k == *key)
+            .map(|(_, v)| field(v))
+            .or_else(|| env_token(key))
+        {
             // A shell runner's env file shares `NAME-shell` across every
             // conversation; it holds claims and names no session.
             if s.len() >= 8 && !(*key == "LJOS_SESSION_ID" && crate::is_shared_holder_id(&s)) {
@@ -899,10 +902,13 @@ pub fn harness_session() -> String {
             }
         }
     }
-    crate::runner_session_id()
-        .map(|s| field(&s))
-        .or_else(run_session)
-        .unwrap_or_default()
+    if let Some(s) = crate::runner_session_id().map(|s| field(&s)) {
+        return s;
+    }
+    if let Some(s) = env_token("LJOS_HARNESS_SESSION") {
+        return s;
+    }
+    run_session().unwrap_or_default()
 }
 
 #[cfg(test)]

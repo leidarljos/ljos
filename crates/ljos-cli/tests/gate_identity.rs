@@ -187,6 +187,20 @@ impl Box_ {
         text_of(&out)
     }
 
+    /// `sh -c LINE` started with `env`, as a runner starts one tool call.
+    fn sh(&self, env: &[(&str, &str)], line: &str) -> Output {
+        let mut all = vec![("LJOS", env!("CARGO_BIN_EXE_ljos"))];
+        all.extend_from_slice(env);
+        self.command("sh", &["-c", line], &all).output().unwrap()
+    }
+
+    /// `bash -c LINE` started with `env`, including `SHLVL` as bash sets it.
+    fn bash(&self, env: &[(&str, &str)], line: &str) -> Output {
+        let mut all = vec![("LJOS", env!("CARGO_BIN_EXE_ljos"))];
+        all.extend_from_slice(env);
+        self.command("bash", &["-c", line], &all).output().unwrap()
+    }
+
     fn card(&self, by: &str) {
         std::fs::write(
             &self.card,
@@ -695,4 +709,179 @@ fn a_hooks_call_record_is_filed_under_the_calls_conversation() {
         .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
         .collect();
     assert!(kept.contains("agent-0001"), "{kept}");
+}
+
+/// What `ljos seat` says this process holds under.
+fn seat_holder(said: &str) -> String {
+    said.lines()
+        .find_map(|line| line.strip_prefix("holder\t"))
+        .unwrap_or_else(|| panic!("no holder line:\n{said}"))
+        .to_string()
+}
+
+/// A process cannot speak for another conversation by setting a variable
+/// in its own environment, in an inline `bash -c` override, via `exec env`,
+/// or in an intermediate non-shell program that spawns or `os.execve`s
+/// `git commit`. `LJOS_HARNESS_SESSION` names no conversation at all.
+#[test]
+fn a_processs_own_env_does_not_outrank_its_shells_stamp() {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    let hooks = home.run.join("githooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    script(
+        &hooks.join("pre-commit"),
+        "#!/bin/sh\nexec \"$LJOS\" git-hook pre-commit\n",
+    );
+    let commit = format!(
+        "git -c core.hooksPath={} -c user.name=t -c user.email=t@e commit -q --allow-empty -m t",
+        hooks.display()
+    );
+    let x = [("CURSOR_CONVERSATION_ID", CONV_X)];
+    let z = [("CURSOR_CONVERSATION_ID", CONV_Z)];
+
+    let own = text_of(&home.sh(&x, "\"$LJOS\" doctor --all"));
+    assert!(
+        own.contains(&format!("this conversation sits on {ISSUE}")),
+        "{own}"
+    );
+    let own = home.sh(&x, &commit);
+    assert!(own.status.success(), "X's own commit: {}", text_of(&own));
+    let own_bash = home.bash(&x, "\"$LJOS\" git-hook pre-commit");
+    assert!(
+        own_bash.status.success(),
+        "X's bash git-hook: {}",
+        text_of(&own_bash)
+    );
+
+    for forge in [
+        format!("CURSOR_CONVERSATION_ID={CONV_X}"),
+        format!("export CURSOR_CONVERSATION_ID={CONV_X};"),
+        format!("LJOS_HARNESS_SESSION={CONV_X}"),
+        format!("CURSOR_CONVERSATION_ID={CONV_X} LJOS_HARNESS_SESSION={CONV_X}"),
+        "env -u CURSOR_CONVERSATION_ID".to_string(),
+        "CURSOR_CONVERSATION_ID=sand-subagent-0009zzzz".to_string(),
+    ] {
+        let said = text_of(&home.sh(&z, &format!("{forge} \"$LJOS\" doctor --all")));
+        sits_nowhere(&said, &format!("Z's doctor with {forge}"));
+        let said = text_of(&home.sh(
+            &z,
+            &format!("{forge} \"$LJOS\" policy -- git merge --ff-only FETCH_HEAD"),
+        ));
+        assert!(
+            said.contains("deny: sitting-gate"),
+            "Z's policy with {forge}:\n{said}"
+        );
+        let said = text_of(&home.sh(&z, &format!("{forge} \"$LJOS\" seat")));
+        assert_eq!(seat_holder(&said), holder(CONV_Z), "Z's seat with {forge}");
+        let out = home.sh(&z, &format!("{forge} {commit}"));
+        assert!(
+            !out.status.success() && text_of(&out).contains("sitting-gate"),
+            "Z's commit with {forge} was not refused:\n{}",
+            text_of(&out)
+        );
+        let bash_line = if forge.starts_with("export ") {
+            format!("{forge} \"$LJOS\" git-hook pre-commit; exit $?")
+        } else {
+            format!("{forge} \"$LJOS\" git-hook pre-commit")
+        };
+        let out_bash = home.bash(&z, &bash_line);
+        assert!(
+            !out_bash.status.success() && text_of(&out_bash).contains("sitting-gate"),
+            "Z's bash git-hook with {forge} was not refused:\n{}",
+            text_of(&out_bash)
+        );
+    }
+
+    let exec_env = home.bash(
+        &z,
+        &format!("exec env CURSOR_CONVERSATION_ID={CONV_X} \"$LJOS\" git-hook pre-commit"),
+    );
+    assert!(
+        !exec_env.status.success() && text_of(&exec_env).contains("sitting-gate"),
+        "Z's bash exec env git-hook was not refused:\n{}",
+        text_of(&exec_env)
+    );
+
+    // Intermediate Python wrapper under Z's shell that sets
+    // CURSOR_CONVERSATION_ID=X (or removes it, or sets sand-sub) and calls
+    // ljos git-hook, ljos policy, or git commit (both spawn and os.execve).
+    for py_env in [
+        format!("e['CURSOR_CONVERSATION_ID'] = '{CONV_X}'"),
+        "e.pop('CURSOR_CONVERSATION_ID', None)".to_string(),
+        "e['CURSOR_CONVERSATION_ID'] = 'sand-subagent-0009zzzz'".to_string(),
+    ] {
+        let py_hook = format!(
+            "/usr/bin/python3 -c \"import os, subprocess, sys; e=dict(os.environ); {py_env}; r=subprocess.run([e['LJOS'], 'git-hook', 'pre-commit'], env=e, capture_output=True, text=True); sys.stderr.write(r.stderr); sys.exit(r.returncode)\""
+        );
+        let out = home.sh(&z, &py_hook);
+        assert!(
+            !out.status.success() && text_of(&out).contains("sitting-gate"),
+            "Python wrapper git-hook pre-commit ({py_env}) was not refused:\n{}",
+            text_of(&out)
+        );
+
+        let py_pol = format!(
+            "/usr/bin/python3 -c \"import os, subprocess, sys; e=dict(os.environ); {py_env}; r=subprocess.run([e['LJOS'], 'policy', '--', 'git', 'merge', '--ff-only', 'FETCH_HEAD'], env=e, capture_output=True, text=True); sys.stdout.write(r.stdout); sys.exit(r.returncode)\""
+        );
+        let said = text_of(&home.sh(&z, &py_pol));
+        assert!(
+            said.contains("deny: sitting-gate"),
+            "Python wrapper policy ({py_env}) was not refused:\n{said}"
+        );
+
+        let py_commit_spawn = format!(
+            "exec /usr/bin/python3 -c \"import os, subprocess, sys; e=dict(os.environ); {py_env}; r=subprocess.run(['git', '-c', 'core.hooksPath={}', '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-q', '--allow-empty', '-m', 't'], env=e, capture_output=True, text=True); sys.stderr.write(r.stderr); sys.exit(r.returncode)\"",
+            hooks.display()
+        );
+        let out = home.bash(&z, &py_commit_spawn);
+        assert!(
+            !out.status.success() && text_of(&out).contains("sitting-gate"),
+            "Python spawn git commit ({py_env}) was not refused:\n{}",
+            text_of(&out)
+        );
+
+        let py_commit_exec = format!(
+            "exec /usr/bin/python3 -c \"import os; e=dict(os.environ); {py_env}; os.execvpe('git', ['git', '-c', 'core.hooksPath={}', '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-q', '--allow-empty', '-m', 't'], e)\"",
+            hooks.display()
+        );
+        let out = home.bash(&z, &py_commit_exec);
+        assert!(
+            !out.status.success() && text_of(&out).contains("sitting-gate"),
+            "Python execve git commit ({py_env}) was not refused:\n{}",
+            text_of(&out)
+        );
+    }
+
+    // X's own spawned git commit from Python is allowed.
+    let x_spawn = format!(
+        "exec /usr/bin/python3 -c \"import os, subprocess, sys; e=dict(os.environ); e['CURSOR_CONVERSATION_ID']='{CONV_X}'; r=subprocess.run(['git', '-c', 'core.hooksPath={}', '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-q', '--allow-empty', '-m', 't'], env=e, capture_output=True, text=True); sys.stderr.write(r.stderr); sys.exit(r.returncode)\"",
+        hooks.display()
+    );
+    let out = home.bash(&x, &x_spawn);
+    assert!(
+        out.status.success(),
+        "X's Python spawn git commit was refused:\n{}",
+        text_of(&out)
+    );
+
+    refused(
+        &home.hook_with(
+            &home.payload(Some("".into()), MERGE),
+            &[("LJOS_HARNESS_SESSION", CONV_X)],
+        ),
+        "an empty conversation_id, X in LJOS_HARNESS_SESSION",
+    );
+    refused(
+        &home.hook_with(
+            &home.payload(None, MERGE),
+            &[
+                ("LJOS_HARNESS_SESSION", CONV_X),
+                ("CURSOR_CONVERSATION_ID", CONV_Z),
+            ],
+        ),
+        "no conversation_id, X in LJOS_HARNESS_SESSION, Z's id in the env",
+    );
 }
