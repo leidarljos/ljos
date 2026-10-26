@@ -1453,18 +1453,18 @@ fn own_seat(name: &str) -> bool {
 /// runner stamped, one occupancy name and the keys it came from. No
 /// product list.
 fn session_actor() -> Option<(String, String)> {
-    let mut parts: Vec<(String, String)> = std::env::vars()
-        .filter(|(k, v)| runner_session_var(k, v))
-        .collect();
+    let mut parts = stamped_sessions();
     if parts.is_empty() {
         return None;
     }
-    parts.sort_by(|a, b| a.0.cmp(&b.0));
-    // Codex names the conversation on each MCP call by its thread; the
-    // shell keys on the same id alone, whatever else Codex stamps.
-    if let Some(i) = parts.iter().position(|(k, _)| k == "CODEX_THREAD_ID") {
-        let (k, v) = parts.swap_remove(i);
-        return Some(session_from_value(&k, &v));
+    // Codex names the conversation on each MCP call by its thread, and a
+    // hook payload names it by `conversation_id`; the shell keys on the
+    // same id alone, whatever else the runner stamps.
+    for alone in ["CODEX_THREAD_ID", "CURSOR_CONVERSATION_ID"] {
+        if let Some(i) = parts.iter().position(|(k, _)| k == alone) {
+            let (k, v) = parts.swap_remove(i);
+            return Some(session_from_value(&k, &v));
+        }
     }
     if parts.len() == 1 {
         return Some(session_from_value(&parts[0].0, &parts[0].1));
@@ -1789,10 +1789,61 @@ fn spawn_while_busy<T>(mut spawn: impl FnMut() -> std::io::Result<T>) -> std::io
     spawned
 }
 
-/// The conversation ids a runner stamped into this environment, by key:
-/// every `*_SESSION_ID` but the login's, sorted so two processes with the
-/// same variables agree on the first.
+/// The conversation a hook payload named, for the one call this
+/// process answers. `None` outside such a call.
+static CALL_CURSOR_CONVERSATION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Answer as the conversation `call` came from, until the next bind.
+/// A payload's `conversation_id` is the `CURSOR_CONVERSATION_ID` the
+/// runner stamps on that conversation's shells, so the hook resolves
+/// the holder `ljos sitting` resolved there. The hook's own environment
+/// may belong to another conversation and is not read for the id. Any
+/// other runner, or a payload with no id, leaves the environment as the
+/// source.
+pub fn bind_call_conversation(call: &HookCall) {
+    let id = call
+        .session
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| {
+            matches!(call.shape, HookShape::Cursor | HookShape::CursorShell) && id.len() >= 8
+        })
+        .map(str::to_string);
+    *CALL_CURSOR_CONVERSATION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = id;
+}
+
+/// The conversation id the bound call named, if any.
+#[must_use]
+pub fn call_cursor_conversation() -> Option<String> {
+    CALL_CURSOR_CONVERSATION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// The conversation this process speaks for: the bound call's,
+/// else `CURSOR_CONVERSATION_ID`.
+fn cursor_conversation() -> Option<String> {
+    call_cursor_conversation().or_else(|| {
+        std::env::var("CURSOR_CONVERSATION_ID")
+            .ok()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+    })
+}
+
+/// The conversation ids this process speaks for, by key, sorted so two
+/// processes with the same variables agree on the first. Every identity
+/// read goes through here, the command line's and the hook's alike. In a
+/// bound hook call that is the payload's id as `CURSOR_CONVERSATION_ID`
+/// and nothing else. Otherwise it is every `*_SESSION_ID` the runner
+/// stamped into the environment but the login's.
 fn stamped_sessions() -> Vec<(String, String)> {
+    if let Some(id) = call_cursor_conversation() {
+        return vec![("CURSOR_CONVERSATION_ID".to_string(), id)];
+    }
     let mut found: Vec<(String, String)> = std::env::vars()
         .filter(|(k, v)| runner_session_var(k, v))
         .map(|(k, v)| (k, v.trim().to_string()))
@@ -3794,7 +3845,7 @@ pub fn log_recall_in(dir: &Path, verb: &str, what: &str) {
 pub fn seat_name() -> String {
     hook_actor()
         .or_else(|| seated().map(|s| s.seat))
-        .unwrap_or_else(|| whoami().seat)
+        .unwrap_or_else(|| resolve_seat().seat)
 }
 
 /// The seat this process's write check named: a git hook's, a [`Seated`]
@@ -3828,7 +3879,7 @@ pub fn accepts_another_conversation(proposer: Option<&str>, holder: &str) -> boo
 pub fn holder_name() -> String {
     hook_holder()
         .or_else(|| seated().map(|s| s.holder))
-        .unwrap_or_else(|| whoami().holder)
+        .unwrap_or_else(|| resolve_seat().holder)
 }
 
 /// Resolve an `--assignee` / MCP field for a claim. Empty, a pronoun
@@ -3940,11 +3991,8 @@ pub fn resolve_seat() -> Seat {
 
 /// The seat a `CURSOR_CONVERSATION_ID` maps to, when nothing else named one.
 fn conversation_seat() -> Option<Seat> {
-    let id = std::env::var("CURSOR_CONVERSATION_ID").ok()?;
-    let id = id.trim();
-    if id.is_empty() {
-        return None;
-    }
+    let id = cursor_conversation()?;
+    let id = id.as_str();
     let (name, source) = match mapped_seat(&seats_file(), id) {
         Some(name) => (name, "seats.toml"),
         None => (fallback_seat(id)?, "CURSOR_CONVERSATION_ID"),
@@ -4051,7 +4099,11 @@ fn booking_holder(seat: &str) -> String {
 /// A runner conversation id long enough to be one. Shorter values are
 /// ignored, the same rule as [`runner_session_var`].
 fn stamped_id(key: &str) -> Option<String> {
-    let id = std::env::var(key).ok()?;
+    let id = if key == "CURSOR_CONVERSATION_ID" {
+        cursor_conversation()?
+    } else {
+        std::env::var(key).ok()?
+    };
     let id = id.trim();
     if id.len() >= 8 {
         Some(id.to_string())
@@ -4358,12 +4410,7 @@ pub fn git_hook_seat() -> Option<String> {
 /// [`format_seat_command`] prints that name alone when no seat was named.
 #[must_use]
 pub fn grokbot_seat_name() -> Option<String> {
-    let id = std::env::var("CURSOR_CONVERSATION_ID").ok()?;
-    let id = id.trim();
-    if id.is_empty() {
-        return None;
-    }
-    seat_for_agent(id)
+    seat_for_agent(&cursor_conversation()?)
 }
 
 /// Whether `CURSOR_CONVERSATION_ID` names a subagent that `seats.toml`
@@ -4382,9 +4429,7 @@ pub fn unseated_subagent() -> bool {
         // subagent. The name `grokbot-sand-sub` is not a seat.
         return set.iter().any(|name| is_raw_subagent_name(name));
     }
-    std::env::var("CURSOR_CONVERSATION_ID")
-        .ok()
-        .map(|id| id.trim().to_string())
+    cursor_conversation()
         .is_some_and(|id| subagent_id(&id) && mapped_seat(&seats_file(), &id).is_none())
 }
 
