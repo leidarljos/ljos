@@ -2403,9 +2403,24 @@ fn tmux_pane_conversation(sock: &str, pane: Option<&str>) -> Option<String> {
         if !pane_token.is_empty() {
             let bind_path = dir.join(format!("tmux-pane-{key}-{pane_token}"));
             if let Ok(bound) = std::fs::read_to_string(&bind_path) {
-                if let Some(id) = usable_session_id(&bound) {
+                // `ID\tPID\tSTART`: the pane's shell when the pin was
+                // written. A tmux server restarted at the same socket
+                // numbers its panes from `%0` again, so a pin whose shell
+                // is gone names nobody and is dropped.
+                let mut parts = bound.trim().split('\t');
+                let id = parts.next().and_then(usable_session_id);
+                let shell = parts.next().and_then(|p| p.parse::<u32>().ok());
+                let start = parts.next().and_then(|s| s.parse::<u64>().ok());
+                let alive = match (shell, start) {
+                    (Some(pid), Some(start)) => {
+                        proc_tree::of(pid).is_some_and(|proc| proc.start == start)
+                    }
+                    _ => false,
+                };
+                if let (Some(id), true) = (id, alive) {
                     return Some(id.to_string());
                 }
+                let _ = std::fs::remove_file(&bind_path);
             }
         }
     }
@@ -2460,13 +2475,17 @@ fn tmux_pane_conversation(sock: &str, pane: Option<&str>) -> Option<String> {
         .rev()
         .find_map(|(idx, (_, _, _, script))| {
             let s = script.trim();
-            (!s.is_empty()
-                && active_texts
-                    .iter()
-                    .any(|cmd| cmd.contains(s) || s.contains(cmd.as_str())))
-            .then_some(idx)
+            (!s.is_empty() && active_texts.iter().any(|cmd| cmdline_runs(cmd, s))).then_some(idx)
         });
-    if chosen_idx.is_none() && entries.iter().all(|(_, id, _, _)| *id == entries[0].1) {
+    // Spawns with no script leave nothing to match: one conversation's
+    // bare `tmux new-window` binds the next pane that calls. A scripted
+    // spawn that matched no ancestor is another pane's, and binds nothing.
+    if chosen_idx.is_none()
+        && entries.iter().all(|(_, id, _, _)| *id == entries[0].1)
+        && entries
+            .iter()
+            .all(|(_, _, _, script)| script.trim().is_empty())
+    {
         chosen_idx = Some(entries.len() - 1);
     }
     let idx = chosen_idx?;
@@ -2488,10 +2507,29 @@ fn tmux_pane_conversation(sock: &str, pane: Option<&str>) -> Option<String> {
             .collect();
         if !pane_token.is_empty() {
             let bind_path = dir.join(format!("tmux-pane-{key}-{pane_token}"));
-            let _ = bookkeep::replace_whole(&bind_path, format!("{chosen}\n").as_bytes());
+            // The pane's shell: the outermost ancestor below the session.
+            let shell = chain[..stop]
+                .last()
+                .and_then(|(pid, _)| proc_tree::of(*pid))
+                .map(|proc| format!("\t{}\t{}", proc.pid, proc.start))
+                .unwrap_or_default();
+            let _ = bookkeep::replace_whole(&bind_path, format!("{chosen}{shell}\n").as_bytes());
         }
     }
     Some(chosen)
+}
+
+/// Whether the process command line `cmd` runs `script`: it is the script,
+/// or a shell's `-c script`. A substring match bound a pane whose ancestor
+/// was any `bash` to a spawn record that said `bash run.sh`.
+fn cmdline_runs(cmd: &str, script: &str) -> bool {
+    let cmd = cmd.trim();
+    if cmd == script {
+        return true;
+    }
+    cmd.strip_suffix(script).is_some_and(|head| {
+        head.ends_with("-c ") || head.ends_with("-lc ") || head.ends_with("-ic ")
+    })
 }
 
 /// The `(socket_key, target, script)` entries of any `tmux` pane or
