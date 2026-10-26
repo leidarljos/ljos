@@ -7,16 +7,31 @@ use std::sync::Mutex;
 
 static LOCK: Mutex<()> = Mutex::new(());
 
-fn vissue_bin() -> PathBuf {
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let bin = dir.join("vissue");
-            if bin.is_file() {
-                return bin;
-            }
-        }
+fn vissue_bin() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|dir| {
+        let bin = dir.join("vissue");
+        bin.is_file().then_some(bin)
+    })
+}
+
+/// vissue 0.20 has to be on PATH. CI builds it. A tree without it
+/// skips these tests and says why.
+fn vissue_020() -> bool {
+    let Some(bin) = vissue_bin() else {
+        eprintln!("skip: vissue 0.20 is not on PATH");
+        return false;
+    };
+    let Ok(version) = Command::new(bin).arg("--version").output() else {
+        eprintln!("skip: vissue 0.20 is not on PATH");
+        return false;
+    };
+    let text = String::from_utf8_lossy(&version.stdout);
+    if !text.contains("0.20") {
+        eprintln!("skip: vissue 0.20 is not on PATH (found {text})");
+        return false;
     }
-    PathBuf::from("/tmp/ljos-bins/vissue")
+    true
 }
 
 struct Tracker {
@@ -32,7 +47,8 @@ impl Tracker {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(home.join(".config")).unwrap();
         std::fs::create_dir_all(home.join("run")).unwrap();
-        let version = Command::new(vissue_bin())
+        let bin = vissue_bin().expect("vissue 0.20");
+        let version = Command::new(&bin)
             .arg("--version")
             .output()
             .expect("real vissue");
@@ -55,7 +71,12 @@ impl Tracker {
         ];
         let saved = keys.into_iter().map(|k| (k, std::env::var_os(k))).collect();
         let path = {
-            let dir = vissue_bin().parent().unwrap().display().to_string();
+            let dir = vissue_bin()
+                .expect("vissue 0.20")
+                .parent()
+                .unwrap()
+                .display()
+                .to_string();
             let rest = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
             format!("{dir}:/usr/bin:/bin:{rest}")
         };
@@ -127,6 +148,9 @@ impl Drop for Tracker {
 
 #[test]
 fn objections_past_the_child_cap_are_not_dropped() {
+    if !vissue_020() {
+        return;
+    }
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let t = Tracker::new(None);
     let parent = t.vissue(&["q", "-p", "probe", "split reading"]);
@@ -188,5 +212,49 @@ fn the_descendant_limit_pauses_and_does_not_close() {
     assert!(
         !kids.contains("one more bug"),
         "filed past the limit:\n{kids}"
+    );
+}
+
+/// Eight dissent children, then each of those reads eight objections.
+/// The descendant limit is the whole tree.
+#[test]
+fn a_nested_split_pauses_at_the_descendant_limit() {
+    if !vissue_020() {
+        return;
+    }
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let t = Tracker::new(None);
+    let limits = ljos_cli::converge::ScopeBudget::panel();
+    let root = t.vissue(&["q", "-p", "probe", "nested split"]);
+    for n in 1..=8 {
+        t.vissue(&[
+            "note",
+            &root,
+            &format!("finding: carol: blocking: a real failure :: root bug {n}"),
+        ]);
+    }
+    let _ = ljos_cli::converge::record_dissents(&root);
+    let kids: Vec<serde_json::Value> =
+        serde_json::from_str(&t.vissue(&["children", &root, "--json"])).unwrap();
+    let ids: Vec<String> = kids
+        .iter()
+        .filter_map(|row| row["id"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(ids.len(), 8, "{ids:?}");
+    for (i, kid) in ids.iter().enumerate() {
+        for n in 1..=8 {
+            t.vissue(&[
+                "note",
+                kid,
+                &format!("finding: dave: blocking: a real failure :: child {i} bug {n}"),
+            ]);
+        }
+        let _ = ljos_cli::converge::record_dissents(kid);
+    }
+    let total = ljos_cli::converge::descendant_count(&root);
+    assert!(
+        total <= limits.max_descendants,
+        "the tree holds {total}, limit {}",
+        limits.max_descendants
     );
 }

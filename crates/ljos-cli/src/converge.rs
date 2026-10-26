@@ -929,7 +929,9 @@ pub fn record_dissents(issue: &str) -> Vec<String> {
         dissent_depth: dissent_depth(&v),
         children_filed,
         open_children: 0,
-        descendants: descendant_count(issue),
+        // The limit is the whole dissent tree, not this issue's own
+        // children. A nested split otherwise files past it.
+        descendants: descendant_count(&dissent_tree_top(issue)),
         awaiting_ballots: false,
         seen,
         wall_secs: None,
@@ -1026,6 +1028,30 @@ fn say_unfiled(
         objection.persona,
         objection.text
     ));
+}
+
+/// The issue at the top of a dissent or fix chain. A title that is not
+/// one of those is the top, including `issue` itself.
+fn dissent_tree_top(issue: &str) -> String {
+    let mut current = issue.to_string();
+    for _ in 0..64 {
+        let Ok(v) = crate::issue_record(&current) else {
+            return current;
+        };
+        let title = v["title"].as_str().unwrap_or("");
+        if !(title.starts_with("Dissent holds") || title.starts_with("fix:")) {
+            return current;
+        }
+        let Some(parent) = v["parent"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return current;
+        };
+        current = parent.to_string();
+    }
+    current
 }
 
 /// Issues under `issue`, not counting `issue`. A cycle counts once.
