@@ -1943,18 +1943,52 @@ fn clean_shell_environ(env: Vec<(String, String)>, is_self: bool) -> Vec<(String
     if !is_bash_cursor {
         return env;
     }
+    let Some(pwd_at) = env.iter().position(|(k, _)| k == "PWD") else {
+        return env;
+    };
+    // tmux and screen sort the environment they pass to a pane, placing
+    // `CURSOR_*` before `PWD` without any inline assignment. zsh keeps
+    // the inherited environment before `LOGNAME`, `SHLVL` and `PWD`.
+    // Bash's own `export_env` puts inline temporary assignments at the
+    // head before `PWD`.
+    let sorted_before_pwd = pwd_at > 1 && env[..=pwd_at].windows(2).all(|w| w[0].0 <= w[1].0);
+    let zsh_before_pwd = env
+        .iter()
+        .position(|(k, _)| k == "SHLVL")
+        .is_some_and(|s| s < pwd_at)
+        && env
+            .iter()
+            .position(|(k, _)| k == "OLDPWD")
+            .is_some_and(|o| o > pwd_at);
+    let kept_before_pwd = sorted_before_pwd || zsh_before_pwd;
     if is_self {
         let under = env.iter().find(|(k, _)| k == "_").map(|(_, v)| v.as_str());
-        if under.is_none_or(|u| u == "env" || u.ends_with("/env")) {
+        if under.is_some_and(|u| {
+            let u_base = u.rsplit('/').next().unwrap_or(u);
+            u_base == "env"
+                || u_base.starts_with("python")
+                || u_base.starts_with("perl")
+                || u_base.starts_with("ruby")
+                || env.iter().rposition(|(k, _)| k == "_") != Some(env.len() - 1)
+        }) {
             return env
                 .into_iter()
                 .filter(|(k, v)| !runner_session_var(k, v) && k != "LJOS_HOLD")
                 .collect();
         }
+        if under.is_none() && !kept_before_pwd && !env.iter().any(|(k, _)| k == "GIT_EXEC_PATH") {
+            return env
+                .into_iter()
+                .filter(|(k, v)| !runner_session_var(k, v) && k != "LJOS_HOLD")
+                .collect();
+        }
+        if env.iter().any(|(k, _)| k == "GIT_EXEC_PATH") {
+            return env;
+        }
     }
-    let Some(pwd_at) = env.iter().position(|(k, _)| k == "PWD") else {
+    if kept_before_pwd {
         return env;
-    };
+    }
     env.into_iter()
         .enumerate()
         .filter(|(i, (k, v))| {
@@ -59401,5 +59435,109 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             .unwrap_or_else(|| panic!("no digest in {paths}"));
         assert!(hex.bytes().all(|b| b.is_ascii_hexdigit()), "{hex}");
         hex.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tmux_pane_environ {
+    use super::clean_shell_environ;
+
+    /// tmux hands each pane a sorted environment, so the runner's
+    /// variables come before `PWD` without any inline assignment.
+    #[test]
+    fn a_tmux_pane_keeps_the_conversation_id_it_was_started_with() {
+        let env: Vec<(String, String)> = [
+            ("CURSOR_AGENT", "1"),
+            (
+                "CURSOR_CONVERSATION_ID",
+                "0199a1b2-c3d4-4e5f-8a6b-00000000000x",
+            ),
+            ("HOME", "/home/box"),
+            ("PATH", "/usr/bin:/bin"),
+            ("PWD", "/tmp"),
+            ("SHLVL", "2"),
+            ("TMUX", "/tmp/tmux-1000/default,4242,0"),
+            ("TMUX_PANE", "%1"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        for is_self in [false, true] {
+            let kept = clean_shell_environ(env.clone(), is_self);
+            assert!(
+                kept.iter().any(|(k, _)| k == "CURSOR_CONVERSATION_ID"),
+                "is_self={is_self}: {kept:?}"
+            );
+        }
+
+        // screen, setsid, nohup, systemd-run: sorted or inherited after PWD
+        // keeps the conversation id; `env` re-exec (`_=/usr/bin/env`) strips it
+        // on self.
+        let screen_env: Vec<(String, String)> = [
+            ("CURSOR_AGENT", "1"),
+            (
+                "CURSOR_CONVERSATION_ID",
+                "0199a1b2-c3d4-4e5f-8a6b-00000000000x",
+            ),
+            ("HOME", "/home/box"),
+            ("PATH", "/usr/bin:/bin"),
+            ("PWD", "/tmp"),
+            ("SHLVL", "2"),
+            ("STY", "1234.pts-0.box"),
+            ("WINDOW", "0"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        for is_self in [false, true] {
+            let kept = clean_shell_environ(screen_env.clone(), is_self);
+            assert!(
+                kept.iter().any(|(k, _)| k == "CURSOR_CONVERSATION_ID"),
+                "screen is_self={is_self}: {kept:?}"
+            );
+        }
+
+        let setsid_env: Vec<(String, String)> = [
+            ("PATH", "/usr/bin:/bin"),
+            ("PWD", "/tmp"),
+            ("SHLVL", "1"),
+            ("CURSOR_AGENT", "1"),
+            (
+                "CURSOR_CONVERSATION_ID",
+                "0199a1b2-c3d4-4e5f-8a6b-00000000000x",
+            ),
+            ("_", "/usr/bin/setsid"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        for is_self in [false, true] {
+            let kept = clean_shell_environ(setsid_env.clone(), is_self);
+            assert!(
+                kept.iter().any(|(k, _)| k == "CURSOR_CONVERSATION_ID"),
+                "setsid is_self={is_self}: {kept:?}"
+            );
+        }
+
+        let env_reexec: Vec<(String, String)> = [
+            ("CURSOR_AGENT", "1"),
+            (
+                "CURSOR_CONVERSATION_ID",
+                "0199a1b2-c3d4-4e5f-8a6b-00000000000x",
+            ),
+            ("HOME", "/home/box"),
+            ("PATH", "/usr/bin:/bin"),
+            ("PWD", "/tmp"),
+            ("SHLVL", "1"),
+            ("_", "/usr/bin/env"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let kept_self = clean_shell_environ(env_reexec, true);
+        assert!(
+            !kept_self.iter().any(|(k, _)| k == "CURSOR_CONVERSATION_ID"),
+            "env re-exec should strip on self: {kept_self:?}"
+        );
     }
 }
