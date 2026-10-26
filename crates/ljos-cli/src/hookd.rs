@@ -296,9 +296,23 @@ fn start_server(dir: &Path) -> Option<std::fs::File> {
     let exe = std::env::current_exe().ok()?;
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("hookd")
+        .env_clear()
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    for key in [
+        "PATH",
+        "HOME",
+        "USER",
+        "XDG_RUNTIME_DIR",
+        "TMPDIR",
+        "LJOS_HOOK_SLOTS",
+        "LJOS_HOOK_QUEUE",
+    ] {
+        if let Some(val) = std::env::var_os(key) {
+            cmd.env(key, val);
+        }
+    }
     // SAFETY: setsid is async-signal-safe and touches only the child.
     unsafe {
         cmd.pre_exec(|| {

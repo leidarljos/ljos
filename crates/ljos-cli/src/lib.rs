@@ -3215,8 +3215,10 @@ pub fn whoami() -> Seat {
         // larger set into a new name. The tests stamp ids of their own
         // into one process and must not leave records for each other.
         #[cfg(not(test))]
-        for (_, id) in stamped_sessions() {
-            write_record(&session_record_path(&id), &seat);
+        if std::env::var_os("LJOS_IN_HOOK").is_none() {
+            for (_, id) in stamped_sessions() {
+                write_record(&session_record_path(&id), &seat);
+            }
         }
         return seat;
     }
@@ -27961,6 +27963,20 @@ fn held_from_records_in(
 /// program, holds nothing here.
 #[must_use]
 pub fn live_held_issue() -> Option<(String, Hold)> {
+    // A conversation named by the hook payload or by the shell's
+    // `CURSOR_CONVERSATION_ID` holds under its one name. A process above
+    // it, or a runner's record, may serve every conversation of one user,
+    // so it names none of them.
+    if cursor_conversation().is_some() {
+        return newest_record_in(
+            &[holder_name()],
+            &runtime_dir(),
+            &[],
+            &seat_name(),
+            &claim_graph_scope(),
+            &hold_alive,
+        );
+    }
     let mut holders: Vec<String> = runner_record_holders();
     let own = holder_name();
     if !holders.contains(&own) {
