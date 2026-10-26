@@ -1852,6 +1852,14 @@ pub fn call_cursor_conversation() -> Option<String> {
     }
 }
 
+/// Whether `LJOS_HOLD` may name the claimant: outside a bound hook call
+/// and when no conversation id is present.
+fn hold_env_allowed() -> bool {
+    call_conversation() == CallConversation::Unbound
+        && cursor_conversation().is_none()
+        && std::env::var_os("CURSOR_AGENT").is_none()
+}
+
 /// Whether the bound call carried a `conversation_id` that names nobody.
 #[must_use]
 pub fn call_conversation_unusable() -> bool {
@@ -3203,9 +3211,10 @@ pub fn whoami() -> Seat {
         .or_else(|| program.as_ref().map(|p| p.seat.clone()))
         .or_else(|| agent.clone())
         .unwrap_or_else(login_user);
-    // A holder a person named wins outright. A legacy holder is stored as
-    // the seat it names, so the claim is not taken under the raw name.
-    if let Some(hold) = named_var("LJOS_HOLD") {
+    // A holder a person named wins outright outside a bound hook call
+    // or a conversation-stamped runner. A legacy holder is stored as the
+    // seat it names, so the claim is not taken under the raw name.
+    if let Some(hold) = named_var("LJOS_HOLD").filter(|_| hold_env_allowed()) {
         let holder = claim_holder(&hold).unwrap_or(hold);
         return Seat {
             seat: seat_name,
@@ -4020,7 +4029,7 @@ pub fn resolve_seat() -> Seat {
     }
     if named_var("LJOS_SEAT").is_some()
         || named_var("VISSUE_AGENT").is_some()
-        || named_var("LJOS_HOLD").is_some()
+        || (hold_env_allowed() && named_var("LJOS_HOLD").is_some())
     {
         return whoami();
     }

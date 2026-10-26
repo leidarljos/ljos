@@ -257,6 +257,31 @@ fn sit(hab: &Habitat) {
     .unwrap();
 }
 
+/// A second sitting, on `probe-0002`, held by `holder`.
+fn sit_as(hab: &Habitat, holder: &str) {
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(hab.tracker.join("Software/probe/issues.org"))
+        .unwrap()
+        .write_all(
+            format!(
+                "* STARTED [#C] probe work two\n:PROPERTIES:\n:ID:         probe-0002\n:CLAIMED_BY: {holder}\n:END:\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let comm = std::fs::read_to_string("/proc/self/comm").unwrap();
+    std::fs::write(
+        hab.run.join("ljos/hold-probe-sitting-2"),
+        format!(
+            "{holder}\nprobe-seat\n{}\n{}\n2026-01-01T00:00:00Z\nprobe-0002\n-\n",
+            std::process::id(),
+            comm.trim()
+        ),
+    )
+    .unwrap();
+}
+
 /// `ljos ARGS` in the habitat's repo. The command must succeed.
 fn ljos_cmd(
     hab: &Habitat,
@@ -820,12 +845,12 @@ fn an_ask_is_rendered_for_each_harness() {
     assert!(agy.contains("\"decision\":\"ask\""), "{agy}");
     assert!(!agy.contains("\"decision\":\"deny\""), "{agy}");
     assert!(agy.contains("git-force-push"), "{agy}");
-    // Cursor beforeShellExecution enforces permission ask.
+    // Cursor beforeShellExecution enforces permission ask. The payload
+    // names no conversation, so the habitat's `LJOS_HOLD` sits for it.
     let shell = ljos(
         &hab,
         &serde_json::json!({
             "cursor_version": "2.4.0",
-            "conversation_id": "force-cursor-shell",
             "hook_event_name": "beforeShellExecution",
             "command": "git push --force origin feature",
             "cwd": cwd,
@@ -837,7 +862,12 @@ fn an_ask_is_rendered_for_each_harness() {
     assert!(shell.contains("\"permission\":\"ask\""), "{shell}");
     assert!(!shell.contains("\"permission\":\"deny\""), "{shell}");
     assert!(shell.contains("git-force-push"), "{shell}");
-    // Cursor preToolUse accepts ask and does not enforce it.
+    // Cursor preToolUse accepts ask and does not enforce it. The payload
+    // names its conversation, which sits under its own holder.
+    sit_as(
+        &hab,
+        &format!("probe-seat@{}", ljos_cli::session_tag("force-cursor-tool")),
+    );
     let tool = ljos(
         &hab,
         &serde_json::json!({

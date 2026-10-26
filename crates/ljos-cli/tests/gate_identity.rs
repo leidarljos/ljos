@@ -362,3 +362,78 @@ fn an_unusable_conversation_id_is_refused_not_read_from_the_env() {
         "a merge with no conversation_id, X's id in the env",
     );
 }
+
+/// A hook call or shell that names its conversation is not judged as the
+/// holder `LJOS_HOLD` names in the environment.
+#[test]
+fn a_named_call_ignores_ljos_hold_in_the_hook_env() {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    let hold = holder(CONV_X);
+    let env = [("LJOS_HOLD", hold.as_str())];
+    refused(
+        &home.hook(CONV_Z, MERGE, &env),
+        "Z's merge with X's LJOS_HOLD",
+    );
+    let mut z_hold = home.command(
+        "setsid",
+        &[
+            "-w",
+            env!("CARGO_BIN_EXE_ljos"),
+            "policy",
+            "--",
+            "git",
+            "merge",
+            "--ff-only",
+            "FETCH_HEAD",
+        ],
+        &[
+            ("CURSOR_CONVERSATION_ID", CONV_Z),
+            ("LJOS_HOLD", hold.as_str()),
+        ],
+    );
+    let said = text_of(&z_hold.output().unwrap());
+    assert!(said.contains("deny: sitting-gate"), "{said}");
+    let mut z_gh = home.command(
+        "setsid",
+        &["-w", env!("CARGO_BIN_EXE_ljos"), "git-hook", "pre-commit"],
+        &[
+            ("CURSOR_CONVERSATION_ID", CONV_Z),
+            ("LJOS_HOLD", hold.as_str()),
+        ],
+    );
+    let out = z_gh.output().unwrap();
+    assert!(
+        !out.status.success() && text_of(&out).contains("sitting-gate"),
+        "{}",
+        text_of(&out)
+    );
+}
+
+/// The gate's conversation comes from `conversation_id` alone. A payload
+/// whose `session_id` or `sessionId` is X's conversation id but that has
+/// no `conversation_id` is judged by the hook's environment, here Y's.
+#[test]
+fn a_session_id_never_names_the_gates_conversation() {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    for key in ["session_id", "sessionId"] {
+        let payload = serde_json::json!({
+            "cursor_version": "2.4.0",
+            "hook_event_name": "preToolUse",
+            key: CONV_X,
+            "cwd": home.repo,
+            "tool_name": "Shell",
+            "tool_input": {"command": MERGE},
+        })
+        .to_string();
+        refused(
+            &home.hook_with(&payload, &[("CURSOR_CONVERSATION_ID", CONV_Y)]),
+            &format!("a merge whose {key} is X's id, Y's id in the env"),
+        );
+    }
+}
