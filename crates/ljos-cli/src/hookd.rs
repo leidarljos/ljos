@@ -295,6 +295,12 @@ fn ask(sock: &Path, deadline: Instant) -> Result<(Held, u64), Ask> {
     }
 }
 
+/// The inode, size and mtime of the file at `path`; `None` when it is gone.
+fn binary_stamp(path: &Path) -> Option<(u64, u64, i64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.ino(), meta.len(), meta.mtime()))
+}
+
 fn open_lock(path: &Path) -> Option<std::fs::File> {
     std::fs::OpenOptions::new()
         .create(true)
@@ -414,6 +420,12 @@ impl Gate {
         turns.running == 0 && turns.queue.is_empty() && turns.last.elapsed() > IDLE
     }
 
+    /// No call holds a slot or waits for one.
+    fn drained(&self) -> bool {
+        let turns = self.lock();
+        turns.running == 0 && turns.queue.is_empty()
+    }
+
     /// One call: queue it, hand it a slot in order, and take the slot back
     /// when the caller closes the socket, exits or holds it past [`HOLD`].
     fn serve(&self, stream: &UnixStream) {
@@ -531,6 +543,11 @@ pub fn serve() -> i32 {
     };
     let _ = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600));
     let ino = std::fs::metadata(&sock).map(|m| m.ino()).unwrap_or(0);
+    // The binary this server runs. An install replaces the file under its
+    // path; the server then exits as soon as no call holds or waits for a
+    // slot, and the next call starts one from the installed binary.
+    let exe = std::env::current_exe().ok();
+    let exe_stamp = exe.as_deref().and_then(binary_stamp);
     let gate = Arc::new(Gate {
         turns: Mutex::new(Turns {
             running: 0,
@@ -550,7 +567,10 @@ pub fn serve() -> i32 {
             if !std::fs::metadata(&sock).is_ok_and(|m| m.ino() == ino) {
                 std::process::exit(0);
             }
-            if gate.idle() {
+            let replaced = exe
+                .as_deref()
+                .is_some_and(|path| binary_stamp(path) != exe_stamp);
+            if gate.idle() || (replaced && gate.drained()) {
                 let _ = std::fs::remove_file(&sock);
                 std::process::exit(0);
             }

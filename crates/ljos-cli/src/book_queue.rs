@@ -12,7 +12,7 @@
 //! the time of the call.
 
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -253,6 +253,15 @@ fn ljos_exe() -> Option<PathBuf> {
     which::which("ljos").ok()
 }
 
+/// The inode, size and mtime of the binary this process runs, read
+/// through its path. An install replaces the file, so the stamp changes
+/// while the running process keeps the old one.
+fn binary_stamp() -> Option<(u64, u64, i64)> {
+    let exe = std::env::current_exe().ok()?;
+    let meta = std::fs::metadata(exe).ok()?;
+    Some((meta.ino(), meta.len(), meta.mtime()))
+}
+
 /// Let the jobs queued before this call apply first, for a reader that
 /// acts on the book or the claims: a finish, a start, a commit's book.
 /// Waits at most [`CATCH_UP`]; a job still queued then applies later.
@@ -315,20 +324,34 @@ pub fn drain(wait: bool) -> i32 {
         if !flock(&lock, wait) {
             return 0;
         }
-        drain_held();
+        let drained = drain_held();
         drop(lock);
+        if !drained {
+            return 1;
+        }
         if pending().is_empty() {
             return 0;
         }
     }
 }
 
-fn drain_held() {
+/// Apply jobs until the spool is empty (`true`), or stop early (`false`)
+/// when the ljos binary was replaced or a batch cannot start: the next
+/// hook's kick then starts a drainer from the binary that is installed,
+/// instead of this one dropping every job after [`TRIES`].
+fn drain_held() -> bool {
+    let stamp = binary_stamp();
     let mut stuck: Option<(PathBuf, u32)> = None;
     loop {
+        if binary_stamp() != stamp {
+            crate::bookkeep::log_line(
+                "book queue: the ljos binary changed; this drainer stops and the next job starts one",
+            );
+            return false;
+        }
         let jobs = pending();
         let Some(first) = jobs.first().cloned() else {
-            return;
+            return true;
         };
         let Some(head) = read_job(&first) else {
             crate::bookkeep::log_line(&format!(
@@ -347,7 +370,9 @@ fn drain_held() {
                 _ => break,
             }
         }
-        run_batch(&head, &batch);
+        if !run_batch(&head, &batch) {
+            return false;
+        }
         if !first.exists() {
             stuck = None;
             continue;
@@ -404,10 +429,12 @@ fn wear_call(job: &Job) {
 }
 
 /// Apply `batch` in a child that has the first job's environment and
-/// directory, as the hook call had them.
-fn run_batch(head: &Job, batch: &[PathBuf]) {
+/// directory, as the hook call had them. `false` when no child could
+/// start, which the book log names.
+fn run_batch(head: &Job, batch: &[PathBuf]) -> bool {
     let Ok(exe) = std::env::current_exe() else {
-        return;
+        crate::bookkeep::log_line("book queue: the running binary has no path; drainer stops");
+        return false;
     };
     let dir = if Path::new(&head.cwd).is_dir() {
         PathBuf::from(&head.cwd)
@@ -424,20 +451,27 @@ fn run_batch(head: &Job, batch: &[PathBuf]) {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let Ok(mut child) = cmd.spawn() else {
-        return;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            crate::bookkeep::log_line(&format!(
+                "book queue: cannot start {} to apply a batch: {e}; drainer stops",
+                exe.display()
+            ));
+            return false;
+        }
     };
     let started = Instant::now();
     loop {
         match child.try_wait() {
-            Ok(Some(_)) | Err(_) => return,
+            Ok(Some(_)) | Err(_) => return true,
             Ok(None) if started.elapsed() > BATCH_DEADLINE => {
                 let _ = child.kill();
                 let _ = child.wait();
                 crate::bookkeep::log_line(
                     "book queue: a batch ran past its deadline and was stopped",
                 );
-                return;
+                return true;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
         }
