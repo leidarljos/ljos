@@ -153,6 +153,50 @@ fn the_runner_hook_refuses_a_raw_tracker_write() {
     assert!(!said.contains("--close"), "{said}");
 }
 
+/// A runner must not reach a tracker close by naming something other than
+/// `vissue`: an interpreter, a substitution, a copied binary, or a write
+/// into `issues.org`.
+#[test]
+fn an_indirect_tracker_write_under_a_runner_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let lines = [
+        r#"python3 -c 'import subprocess; subprocess.run(["vissue","close","ljos-ab12"])'"#,
+        "perl -e 'system q(vissue close ljos-ab12)'",
+        r#"python3 -c 'open("issues.org","a").write("* x")'"#,
+        r#""$(command -v vissue)" close ljos-ab12"#,
+        "cp $(command -v vissue) /tmp/vi && /tmp/vi close ljos-ab12",
+        "sed -i 's/^\\* TODO/* DONE/' issues.org",
+        "perl -pi -e 's/^\\* TODO/* DONE/' issues.org",
+        "ljos finish ljos-ab12 --close",
+    ];
+    for line in lines {
+        let out = policy(home.path(), line);
+        let said = text(&out);
+        assert!(!out.status.success(), "{line} was allowed:\n{said}");
+        assert!(said.contains("deny:"), "{line}:\n{said}");
+        let reason = said.split("deny:").nth(1).unwrap_or("");
+        assert!(
+            !reason.contains("--close"),
+            "{line} still names the close flag:\n{said}"
+        );
+    }
+}
+
+#[test]
+fn an_ordinary_interpreter_under_a_runner_stays_allowed() {
+    let home = tempfile::tempdir().unwrap();
+    for line in [
+        r#"python3 -c 'print(1)'"#,
+        "perl -e 'print 1'",
+        "echo vissue close ljos-ab12",
+    ] {
+        let out = policy(home.path(), line);
+        let said = text(&out);
+        assert!(out.status.success(), "{line} was refused:\n{said}");
+        assert!(!said.contains("deny:"), "{line}:\n{said}");
+    }
+}
+
 /// ljos runs `vissue` itself for its own verbs, outside any runner's hook,
 /// so a runner that may not run `vissue note` still notes through ljos.
 #[test]

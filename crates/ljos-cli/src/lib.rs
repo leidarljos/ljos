@@ -23396,6 +23396,195 @@ pub fn redirect_seat_verb(rule: Option<Rule>, line: &str) -> Option<Rule> {
     Some(r)
 }
 
+/// A tracker write that does not name `vissue` as its command. An
+/// interpreter whose text runs a write or opens `issues.org`, a
+/// substitution that resolves to the `vissue` binary, a copy of that
+/// binary, and `ljos finish --close` are the same write. The direct
+/// verb is [`raw_tracker_write`]. A runner is refused. A person at a
+/// terminal is not.
+fn indirect_tracker_write(line: &str) -> Option<Rule> {
+    if !under_a_runner() {
+        return None;
+    }
+    if nested_too_deep(line) {
+        return Some(too_deep_rule().clone());
+    }
+    let mut copied = Vec::new();
+    for text in nested_lines(line, 0) {
+        for seg in raw_segments(&text) {
+            if let Some(dest) = vissue_copy_dest(&seg) {
+                copied.push(dest);
+            }
+            if segment_writes_tracker_indirectly(&seg, &copied) {
+                return Some(indirect_close_rule());
+            }
+        }
+    }
+    None
+}
+
+fn indirect_close_rule() -> Rule {
+    Rule {
+        pattern: "vissue close".into(),
+        verdict: "deny".into(),
+        reason: "a tracker write under a runner goes through ljos. A person closes a ticket. \
+                 Run `ljos finish ID` to end the sitting; it leaves the ticket open."
+            .into(),
+    }
+}
+
+const TRACKER_WRITE_VERBS: &[&str] = &[
+    "close", "cancel", "update", "create", "q", "note", "append", "refile", "claim", "release",
+];
+
+fn is_tracker_write_verb(word: &str) -> bool {
+    TRACKER_WRITE_VERBS.contains(&word)
+}
+
+fn command_base(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
+}
+
+/// `$(command -v vissue)`, `$(which vissue)`, and the backtick forms.
+fn vissue_locator(word: &str) -> bool {
+    let w = word.trim_matches(|c: char| c == '"' || c == '\'' || c == '`');
+    let body = if let Some(inner) = w.strip_prefix("$(").and_then(|s| s.strip_suffix(')')) {
+        inner.trim()
+    } else if let Some(inner) = w.strip_prefix('`').and_then(|s| s.strip_suffix('`')) {
+        inner.trim()
+    } else {
+        return false;
+    };
+    let parts: Vec<&str> = body.split_whitespace().collect();
+    matches!(
+        parts.as_slice(),
+        ["command", "-v", "vissue"]
+            | ["command", "-v", "--", "vissue"]
+            | ["which", "vissue"]
+            | ["type", "-P", "vissue"]
+            | ["type", "-p", "vissue"]
+    )
+}
+
+fn segment_has_vissue_locator(seg: &str) -> bool {
+    const MARKS: &[&str] = &[
+        "$(command -v vissue)",
+        "$(command -v -- vissue)",
+        "$(which vissue)",
+        "$(type -P vissue)",
+        "$(type -p vissue)",
+        "`command -v vissue`",
+        "`which vissue`",
+    ];
+    MARKS.iter().any(|mark| seg.contains(mark))
+}
+
+/// The last path a `cp`, `install`, `ln` or `mv` of `vissue` writes.
+fn vissue_copy_dest(seg: &str) -> Option<String> {
+    let words = shell_words(seg);
+    let (at, _) = prefix_end(&words);
+    let words = &words[at..];
+    let cmd = command_base(words.first()?);
+    if !matches!(cmd, "cp" | "install" | "ln" | "mv") || !seg.contains("vissue") {
+        return None;
+    }
+    words[1..]
+        .iter()
+        .rev()
+        .find(|w| !w.starts_with('-'))
+        .cloned()
+}
+
+/// The program text after an interpreter's `-c` or `-e`.
+fn interpreter_script(words: &[String]) -> Option<String> {
+    let cmd = command_base(words.first()?);
+    let takes_c = matches!(
+        cmd,
+        "python" | "python2" | "python3" | "perl" | "ruby" | "node" | "nodejs" | "php" | "lua"
+    );
+    if !takes_c {
+        return None;
+    }
+    for (i, w) in words.iter().enumerate().skip(1) {
+        let grouped = w.starts_with('-')
+            && !w.starts_with("--")
+            && w.chars()
+                .last()
+                .is_some_and(|c| matches!(c, 'c' | 'e' | 'E'));
+        if w == "-c" || w == "-e" || w == "-E" || grouped {
+            return words.get(i + 1).cloned();
+        }
+    }
+    None
+}
+
+fn script_writes_tracker(script: &str) -> bool {
+    let s = script.to_ascii_lowercase();
+    if s.contains("vissue") && (s.contains("close") || s.contains("cancel") || s.contains("update"))
+    {
+        return true;
+    }
+    s.contains("issues.org")
+        && (s.contains("write")
+            || s.contains("open(")
+            || s.contains("print")
+            || s.contains("system"))
+}
+
+fn edits_org_in_place(words: &[String]) -> bool {
+    let Some(first) = words.first() else {
+        return false;
+    };
+    let org = words.iter().any(|w| w.contains("issues.org"));
+    if !org {
+        return false;
+    }
+    match command_base(first) {
+        "sed" => words.iter().any(|w| w == "-i" || w.starts_with("-i")),
+        "perl" => words.iter().any(|w| {
+            w.starts_with('-') && !w.starts_with("--") && w.contains('p') && w.contains('i')
+        }),
+        _ => false,
+    }
+}
+
+fn redirects_into_org(words: &[String]) -> bool {
+    words
+        .windows(2)
+        .any(|pair| pair[0] == ">" && pair[1].contains("issues.org"))
+        || words
+            .iter()
+            .any(|w| w.contains("issues.org") && w.contains('>'))
+}
+
+fn segment_writes_tracker_indirectly(seg: &str, copied: &[String]) -> bool {
+    let words = shell_words(seg);
+    let (at, _) = prefix_end(&words);
+    let words = &words[at..];
+    if words.is_empty() {
+        return false;
+    }
+    if interpreter_script(words).is_some_and(|script| script_writes_tracker(&script)) {
+        return true;
+    }
+    if edits_org_in_place(words) || redirects_into_org(words) {
+        return true;
+    }
+    let locator = words.iter().any(|w| vissue_locator(w)) || segment_has_vissue_locator(seg);
+    if locator && words.iter().any(|w| is_tracker_write_verb(w)) {
+        return true;
+    }
+    let cmd = words[0].as_str();
+    if copied.iter().any(|dest| dest == cmd)
+        && words.iter().skip(1).any(|w| is_tracker_write_verb(w))
+    {
+        return true;
+    }
+    command_base(&words[0]) == "ljos"
+        && words.iter().any(|w| w == "finish")
+        && words.iter().any(|w| w == "--close")
+}
+
 /// A tracker verb that writes, run raw under an agent runner. ljos is the
 /// tracker's front end there: the raw verb skips the seat check, the
 /// parent's project and the tracker commit, and a ticket filed from the
@@ -34720,6 +34909,9 @@ pub fn static_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         return Some(rule);
     }
     if let Some(rule) = raw_tracker_write(line) {
+        return Some(rule);
+    }
+    if let Some(rule) = indirect_tracker_write(line) {
         return Some(rule);
     }
     if let Some(rule) = destructive_delete(line) {
