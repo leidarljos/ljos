@@ -1304,7 +1304,7 @@ pub fn guard_payload(raw: &str) -> Option<Rule> {
 }
 
 fn guard_mcp(tool: &str, server: Option<&str>, input: &Value) -> Option<Rule> {
-    if !github_write(tool, server) {
+    if !github_write(tool, server) && !cursor_http_mcp_write(tool, input) {
         return None;
     }
     let rules = match load() {
@@ -1317,6 +1317,37 @@ fn guard_mcp(tool: &str, server: Option<&str>, input: &Value) -> Option<Rule> {
 
 fn github_server(name: &str) -> bool {
     name.to_ascii_lowercase().contains("github")
+}
+
+/// Cursor names an HTTP MCP tool `MCP:<tool>` and sends no server field.
+/// A write verb with `owner` and `repo` is the same GitHub write as
+/// `mcp__github__<tool>`.
+fn cursor_http_mcp_write(tool: &str, input: &Value) -> bool {
+    let Some(short) = tool.strip_prefix("MCP:") else {
+        return false;
+    };
+    if short.is_empty() {
+        return false;
+    }
+    let short = short.to_ascii_lowercase();
+    if short.starts_with("get_")
+        || short.starts_with("list_")
+        || short.starts_with("search_")
+        || short.starts_with("read_")
+        || short.contains("_read")
+    {
+        return false;
+    }
+    if !["comment", "review", "issue", "pull"]
+        .iter()
+        .any(|kind| short.contains(kind))
+    {
+        return false;
+    }
+    let Some(obj) = input.as_object() else {
+        return false;
+    };
+    obj.contains_key("owner") && obj.contains_key("repo")
 }
 
 fn github_write(tool: &str, server: Option<&str>) -> bool {

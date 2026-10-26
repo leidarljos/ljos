@@ -8550,6 +8550,22 @@ fn cue_for(v: &Value, input: &Value, event: &str) -> String {
             .or_else(|| v["toolName"].as_str())
             .filter(|n| !n.is_empty())
             .unwrap_or("Edit");
+        // Cursor's HTTP MCP tools are `MCP:<tool>`. The cue has to start
+        // with that name so a user-rule pattern for the tool can match.
+        if let Some(rest) = name.strip_prefix("MCP:") {
+            if !rest.is_empty() {
+                if let Some(file) = file.clone() {
+                    return file;
+                }
+                if let Some(prompt) = prompt.clone() {
+                    return format!("{name} {prompt}");
+                }
+                if let Some(joined) = joined.clone().filter(|text| !text.trim().is_empty()) {
+                    return format!("{name} {joined}");
+                }
+                return name.to_string();
+            }
+        }
         let cwd = v["cwd"].as_str().map(Path::new);
         if let Some(t) = kept_prompt::written_target(name, input, cwd) {
             return format!("{name} {}", t.display());
@@ -14483,6 +14499,9 @@ pub fn tracker_holds_ballot(rows: &[Value], voter: &str, choice: &str) -> bool {
             && r["choice"].as_str().map(str::trim) == Some(choice.trim())
     })
 }
+
+#[cfg(test)]
+mod review_f4_mcp_prefix;
 
 #[cfg(test)]
 mod read_back_tests {

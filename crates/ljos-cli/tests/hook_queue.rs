@@ -1420,3 +1420,31 @@ fn a_rules_rewrite_window_does_not_deny_github_writes() {
     stop.store(true, Ordering::Relaxed);
     writer.join().unwrap();
 }
+
+/// User rules that target MCP:<tool> names must fire on preToolUse.
+#[test]
+fn a_pretooluse_mcp_tool_name_reaches_user_rules() {
+    let hab = hab("mcp-name-rule");
+    let cfg = hab.home.join(".config/ljos");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(
+        cfg.join("user-rules.json"),
+        r#"{"rules":[{"id":"ur-1","text":"deny mcp tool","author":"t","reason":"r","pattern":"MCP:add_issue_comment*","verdict":"deny","deny_mention":{"handles":[],"names":[]},"deny_reply_to":{"handles":[],"names":[]},"written_at":"2026-10-26T00:00:00Z","updated_at":"2026-10-26T00:00:00Z"}]}"#,
+    )
+    .unwrap();
+
+    let payload = serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": "c-mcp-name",
+        "hook_event_name": "preToolUse",
+        "tool_name": "MCP:add_issue_comment",
+        "tool_input": {"owner":"o","repo":"r","issue_number":1,"body":"hello"}
+    })
+    .to_string();
+
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOKD", "off");
+    let (_took, out) = finished(feed(cmd, &payload), Duration::from_secs(3), "mcp-name");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"permission\":\"deny\""), "{stdout}");
+}
