@@ -204,6 +204,16 @@ fn is_any_seat_mcp_tool(tool: &str) -> bool {
             .is_some_and(|rest| rest.starts_with("ljos_"))
 }
 
+/// An MCP tool call. Shell-only checks, such as a missing working
+/// directory, do not apply to it.
+pub fn payload_names_mcp_tool(input: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<Value>(input.trim()) else {
+        return false;
+    };
+    text(&v, &["tool_name", "toolName"])
+        .is_some_and(|name| name.starts_with("mcp__") || name.starts_with("MCP:"))
+}
+
 /// Leave what a hook payload says about its tool call. On `PreToolUse`,
 /// each `ljos` line of a shell call is kept for the process that runs it,
 /// and a subagent's `mcp__SERVER__ljos_NAME` call is kept for the server

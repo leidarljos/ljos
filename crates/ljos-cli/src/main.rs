@@ -2812,7 +2812,8 @@ fn run_command() -> Result<()> {
                     if on_tool
                         && !suspended
                         && !argv.is_empty()
-                        && !ljos_cli::guard_fail_open() =>
+                        && !ljos_cli::guard_fail_open()
+                        && !ljos_cli::subagent::payload_names_mcp_tool(&input) =>
                 {
                     Some(ljos_cli::Rule {
                         pattern: "cwd-unresolved".into(),
