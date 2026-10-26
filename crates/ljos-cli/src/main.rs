@@ -2601,6 +2601,11 @@ fn run_command() -> Result<()> {
             }
             ljos_cli::ballot_sig::export_hook_session(call.session.as_deref());
             if ljos_cli::subagent::note_hook_call(&input, &call.event) {
+                // Cursor blocks a permission hook that prints nothing.
+                // A seat tool named mcp__SERVER__ljos_NAME is that hook.
+                if call.shape.is_cursor() {
+                    print!("{}", ljos_cli::hook_output_ruled(&call, "", None));
+                }
                 return Ok(());
             }
             // A runner the seat asked for a judgment hears nothing from the

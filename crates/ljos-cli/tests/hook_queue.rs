@@ -1080,3 +1080,33 @@ fn a_bad_rules_file_denies_the_github_write_from_the_hook() {
         "fifo read took {took:?}"
     );
 }
+
+/// Cursor names a seat tool `mcp__SERVER__ljos_NAME` on preToolUse.
+/// An empty answer blocks when failClosed is set, so the hook prints allow.
+#[test]
+fn a_cursor_seat_tool_with_an_mcp_prefix_prints_allow() {
+    let hab = hab("mcpname");
+    for tool in ["mcp__ljos__ljos_note", "mcp__plugin_ljos_ljos__ljos_vote"] {
+        let mut cmd = ljos(&hab, &["hook"]);
+        cmd.env("LJOS_HOOKD", "off");
+        let payload = serde_json::json!({
+            "cursor_version": "2.4.0",
+            "conversation_id": "c-mcpname",
+            "hook_event_name": "preToolUse",
+            "tool_name": tool,
+            "tool_input": {"text": "x"},
+            "cwd": hab.repo,
+            "tool_use_id": "u-mcp",
+        })
+        .to_string();
+        let (took, out) = finished(feed(cmd, &payload), Duration::from_secs(2), tool);
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        assert_eq!(out.status.code(), Some(0), "{tool}: {stdout}\n{stderr}");
+        assert_eq!(stdout, ALLOW, "{tool}");
+        assert!(
+            took < Duration::from_millis(1500),
+            "{tool} took {took:?}\n{stderr}"
+        );
+    }
+}
