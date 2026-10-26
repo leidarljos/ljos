@@ -98,7 +98,9 @@ pub fn guard_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
 pub fn no_sitting(verb: &str, why: &str) -> String {
     format!(
         "`git {verb}` writes history, and {why}. Run `ljos sitting ID` on the open ticket \
-         this work belongs to, then run it again. The person at their own terminal is not gated"
+         this work belongs to (for a subagent when the parent holds ID, `ljos sitting ID` \
+         opens a child ticket under ID, or run `ljos file \"TITLE\" --parent ID` then \
+         `ljos sitting <child-id>`), then run it again. The person at their own terminal is not gated"
     )
 }
 

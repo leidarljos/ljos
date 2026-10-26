@@ -1926,6 +1926,8 @@ fn cursor_conversation() -> Option<String> {
 
 static STAMP_ENV: std::sync::OnceLock<Option<Vec<(String, String)>>> = std::sync::OnceLock::new();
 
+/// Whether `pid`, named `comm`, is a cargo test runner binary under
+/// `target/.../deps/`.
 fn same_runtime_dir(env: &[(String, String)]) -> bool {
     let Ok(mine) = std::env::var("XDG_RUNTIME_DIR") else {
         return true;
@@ -11504,8 +11506,9 @@ pub fn held_issue() -> Option<String> {
 
 /// What a subagent is told on its first tool result: the issue its parent
 /// holds and how its result joins it. When a shared server gives the
-/// subagent no parent process with a conversation id, the subagent opens
-/// a sitting of its own before writing git history.
+/// subagent no parent process with a conversation id, `ljos sitting` on
+/// the parent's ticket opens and claims a child ticket under it so the
+/// subagent can write git history.
 #[must_use]
 pub fn subagent_brief(kind: &str, issue: &str, decision: bool) -> String {
     let judge = if decision {
@@ -11516,9 +11519,10 @@ pub fn subagent_brief(kind: &str, issue: &str, decision: bool) -> String {
         )
     };
     format!(
-        "You are a subagent ({kind}) working under {issue}, which your parent holds. Open a sitting of \
-         your own with `ljos sitting {issue}` when you need to write git history and your parent's \
-         sitting does not cover you. Record on {issue} with `ljos vote {issue}` or `ljos note {issue}` \
+        "You are a subagent ({kind}) working under {issue}, which your parent holds. Open a child \
+         sitting with `ljos sitting {issue}` (or `ljos file \"TITLE\" --parent {issue}` then \
+         `ljos sitting <child-id>`) when you need to write git history and your parent's sitting \
+         does not cover you. Record on {issue} with `ljos vote {issue}` or `ljos note {issue}` \
          even when the task does not name {issue}. {judge} A finding or a lesson of your own is \
          `ljos note {issue} \"...\"`. ROLE is a persona from `ljos personas` when one fits \
          your task, else `{kind}`."
@@ -28066,6 +28070,161 @@ fn live_gen(id: &str, gen: Option<u64>) -> Result<u64> {
     })
 }
 
+/// Create a tracker issue, persist its inbox or project file, and
+/// record a panel candidate, returning `(id, stdout, persisted,
+/// candidate)`. Both `ljos file` and subagent child filing share this
+/// path.
+#[allow(clippy::too_many_arguments)]
+pub fn file_issue(
+    project: &str,
+    parent: Option<&str>,
+    kind: Option<&str>,
+    tags: Option<&str>,
+    priority: Option<&str>,
+    body: Option<&str>,
+    title: &str,
+    agent: &str,
+    quiet: bool,
+    quorum_deadline: Option<(usize, &str)>,
+) -> Result<(String, String, String, Result<String>)> {
+    let mut argv: Vec<String> = vec!["create".into(), "-p".into(), project.into()];
+    for (flag, value) in [
+        ("--parent", parent),
+        ("-t", kind),
+        ("--tags", tags),
+        ("--priority", priority),
+        ("--body", body),
+    ] {
+        if let Some(v) = value {
+            argv.push(flag.into());
+            argv.push(v.to_string());
+        }
+    }
+    argv.push(title.to_string());
+    if quiet {
+        argv.push("-q".into());
+    }
+    let said = run_captured_as("vissue", &argv, Some(agent))?;
+    let text = said.stdout;
+    let id = text.split_whitespace().next().unwrap_or("").to_string();
+    if let (Some((n, d)), false) = (quorum_deadline, id.is_empty()) {
+        let note = format!("{}{n} by {}", reap::QUORUM_NOTE, d.trim());
+        run_captured("vissue", &["note", &id, &note])?;
+    }
+    let inbox = text
+        .lines()
+        .find_map(|l| l.strip_prefix("inbox: "))
+        .and_then(|l| l.split(" (").next())
+        .map(std::path::PathBuf::from);
+    let persisted = match inbox {
+        Some(path) => persist_tracker_file(&path, &id, "filed"),
+        None => persist_tracker(&id, "filed"),
+    };
+    let candidate = if id.is_empty() {
+        Ok(String::new())
+    } else {
+        panel_gate::record_candidate(&id, title, parent, tags)
+    };
+    Ok((id, text, persisted, candidate))
+}
+
+/// File a child ticket under `parent` for a subagent `assignee` when the
+/// parent conversation already holds `parent`.
+fn file_subagent_child(parent: &str, assignee: &str) -> Result<String> {
+    let (_, Some(project), _) = file_placement(false, Some(parent.to_string()), None, None) else {
+        bail!("claim: cannot determine project for parent {parent}");
+    };
+    let tag = holder_parts(assignee)
+        .1
+        .unwrap_or_else(|| "subagent".into());
+    let title = format!("subtask {tag} on {parent}");
+    let (child, _, _, _) = file_issue(
+        &project,
+        Some(parent),
+        None,
+        None,
+        None,
+        None,
+        &title,
+        &seat_name(),
+        true,
+        None,
+    )?;
+    if child.is_empty() {
+        bail!("vissue create printed no id");
+    }
+    Ok(child)
+}
+
+/// Whether `parent` is the single live parent ticket held on `seat`
+/// (excluding subtasks already filed under a parent), or held by a
+/// conversation ancestor of this subagent. When two parent tickets are
+/// live on an id-less shared server, neither is guessed.
+fn is_sole_or_ancestor_parent_hold(parent: &str, seat: &str, hold_pid: u32) -> bool {
+    if conversation_ancestry()
+        .iter()
+        .any(|(pid, _)| *pid == hold_pid)
+    {
+        return true;
+    }
+    let graph = claim_graph_scope();
+    let mut subchildren = std::collections::BTreeSet::new();
+    let Ok(entries) = std::fs::read_dir(runtime_dir()) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with("subchild-") {
+            if let Ok(c) = std::fs::read_to_string(entry.path()) {
+                let c = c.trim();
+                if !c.is_empty() {
+                    subchildren.insert(c.to_string());
+                }
+            }
+        }
+    }
+    let mut live_nodes = std::collections::BTreeSet::new();
+    let Ok(entries) = std::fs::read_dir(runtime_dir()) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with("hold-") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let lines: Vec<&str> = text.lines().map(str::trim).collect();
+        let (Some(holder), Some(rec_seat), Some(pid), Some(comm), Some(at), Some(node)) = (
+            lines.first(),
+            lines.get(1),
+            lines.get(2),
+            lines.get(3),
+            lines.get(4),
+            lines.get(5),
+        ) else {
+            continue;
+        };
+        if lines.get(6).is_some_and(|g| !g.is_empty() && *g != graph) {
+            continue;
+        }
+        if *rec_seat != seat || node.is_empty() || subchildren.contains(*node) {
+            continue;
+        }
+        let hold = Hold {
+            assignee: (*holder).to_string(),
+            seat: (*rec_seat).to_string(),
+            pid: pid.parse().unwrap_or(0),
+            comm: (*comm).to_string(),
+            since: (*at).to_string(),
+        };
+        if !hold_alive(&hold) {
+            continue;
+        }
+        live_nodes.insert((*node).to_string());
+    }
+    live_nodes.len() == 1 && live_nodes.contains(parent.trim())
+}
+
 /// Refusal when another conversation holds the node: names that holder
 /// and still says `held by another`, so a concurrent sitting can match it.
 #[must_use]
@@ -28283,6 +28442,54 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                                     h.assignee, h.since, said.stdout
                                 ),
                                 node,
+                                assignee,
+                            )
+                        }
+                        Some(h)
+                            if h.seat == seat_name()
+                                && hold_alive(&h)
+                                && cursor_conversation().is_some_and(|c| subagent_id(&c))
+                                && is_sole_or_ancestor_parent_hold(node, &h.seat, h.pid) =>
+                        {
+                            let _lock = CommitLock::acquire(&runtime_dir().join("claim.lock"));
+                            let key = work_id(&format!("subchild:{assignee}:{node}"));
+                            let map_path = runtime_dir().join(format!("subchild-{key}"));
+                            let existing = std::fs::read_to_string(&map_path)
+                                .ok()
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty());
+                            let child = match existing {
+                                Some(c) => c,
+                                None => {
+                                    let c = file_subagent_child(node, assignee)?;
+                                    let _ = bookkeep::replace_whole(
+                                        &map_path,
+                                        format!("{c}\n").as_bytes(),
+                                    );
+                                    c
+                                }
+                            };
+                            let child_id = node_for(&child)?;
+                            let child_actor = work_id(&occupancy_scope(assignee, &child));
+                            let said = match run_captured(
+                                "claimdag",
+                                &["claim", &child_id, "--assignee", &child_actor],
+                            ) {
+                                Ok(s) => s.stdout,
+                                Err(_) => run_captured(
+                                    "claimdag",
+                                    &["renew", &child_id, "--actor", &child_actor],
+                                )
+                                .map(|s| s.stdout)
+                                .unwrap_or_default(),
+                            };
+                            write_hold(&child_actor, assignee, &child);
+                            with_tracker(
+                                format!(
+                                    "filed child {child} under {node} (held by {})\n{said}",
+                                    h.assignee
+                                ),
+                                &child,
                                 assignee,
                             )
                         }
@@ -30047,8 +30254,17 @@ pub fn sitting_gated(
     sections.heading(&mut out, "reclaim");
     out.push_str(&reclaim_expired(lease_secs()));
     sections.heading(&mut out, "claim");
-    out.push_str(&claim(issue, assignee)?);
-    out.push_str(&persist_tracker(issue, "claimed"));
+    let claimed = claim(issue, assignee)?;
+    let claimed_issue = claimed
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("filed child ")
+                .and_then(|r| r.split_whitespace().next())
+        })
+        .unwrap_or(issue)
+        .to_string();
+    out.push_str(&claimed);
+    out.push_str(&persist_tracker(&claimed_issue, "claimed"));
     sections.finish();
     Ok(out)
 }

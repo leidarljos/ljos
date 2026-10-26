@@ -1860,61 +1860,31 @@ fn run_command() -> Result<()> {
             let Some(project) = project else {
                 anyhow::bail!("no project: name one with -p, or a parent with --parent");
             };
-            let mut argv: Vec<String> = vec!["create".into(), "-p".into(), project];
-            for (flag, value) in [
-                ("--parent", &parent),
-                ("-t", &kind),
-                ("--tags", &tags),
-                ("--priority", &priority),
-                ("--body", &body),
-            ] {
-                if let Some(v) = value {
-                    argv.push(flag.into());
-                    argv.push(v.clone());
-                }
-            }
-            let filed_title = title.clone();
-            argv.push(title);
-            let out =
-                std::process::Command::new(which::which("vissue").context("vissue not on PATH")?)
-                    .args(&argv)
-                    .env("VISSUE_AGENT", ljos_cli::seat_name())
-                    .stdin(std::process::Stdio::null())
-                    .output()?;
-            let text = String::from_utf8_lossy(&out.stdout);
-            if !out.status.success() {
-                anyhow::bail!(
-                    "vissue create: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                );
-            }
-            let id = text.split_whitespace().next().unwrap_or("").to_string();
+            let qd = match (quorum, deadline.as_deref()) {
+                (Some(n), Some(d)) => Some((n, d)),
+                _ => None,
+            };
+            let (id, text, persisted, candidate) = ljos_cli::file_issue(
+                &project,
+                parent.as_deref(),
+                kind.as_deref(),
+                tags.as_deref(),
+                priority.as_deref(),
+                body.as_deref(),
+                &title,
+                &ljos_cli::seat_name(),
+                false,
+                qd,
+            )?;
             print!("{text}");
-            if let (Some(n), Some(d)) = (quorum, &deadline) {
+            if let (Some((n, d)), false) = (qd, id.is_empty()) {
                 let note = format!("{}{n} by {}", ljos_cli::reap::QUORUM_NOTE, d.trim());
-                ljos_cli::run_captured("vissue", &["note", &id, &note])?;
                 println!("{id}: {note}; `ljos reap --apply` lapses it past the deadline");
             }
-            // An issue for a projected board waits in its inbox until the fold.
-            let inbox = text
-                .lines()
-                .find_map(|l| l.strip_prefix("inbox: "))
-                .and_then(|l| l.split(" (").next())
-                .map(std::path::PathBuf::from);
-            match inbox {
-                Some(path) => print!("{}", ljos_cli::persist_tracker_file(&path, &id, "filed")),
-                None => print!("{}", ljos_cli::persist_tracker(&id, "filed")),
-            }
-            if !id.is_empty() {
-                match ljos_cli::panel_gate::record_candidate(
-                    &id,
-                    &filed_title,
-                    parent.as_deref(),
-                    tags.as_deref(),
-                ) {
-                    Ok(said) => print!("{said}"),
-                    Err(e) => eprintln!("ljos file: {e:#}"),
-                }
+            print!("{persisted}");
+            match candidate {
+                Ok(said) => print!("{said}"),
+                Err(e) => eprintln!("ljos file: {e:#}"),
             }
         }
         Cmd::Options { issue, options } => {

@@ -226,8 +226,9 @@ def rewrite(iid, state):
 if cmd == "create":
     proj, title, i = "agent", "agent work", 0
     while i < len(rest):
-        if rest[i] == "-p" and i + 1 < len(rest):
-            proj = rest[i + 1]
+        if rest[i] in ("-p", "--parent", "-t", "--tags", "--priority", "--body") and i + 1 < len(rest):
+            if rest[i] == "-p":
+                proj = rest[i + 1]
             i += 2
             continue
         if rest[i] == "-q":
@@ -305,10 +306,57 @@ print(f"id={ident}")
 "#,
     )
     .unwrap();
+    fs::write(
+        dir.join("claimdag"),
+        r#"#!/usr/bin/env python3
+import json, os, pathlib, sys
+root = pathlib.Path(os.environ["VISSUE_ROOT"])
+st = root / "claimdag.json"
+s = json.loads(st.read_text()) if st.exists() else {"known": [], "claims": {}}
+a = sys.argv[1:]
+def opt(n):
+    return a[a.index(n) + 1] if n in a else None
+def save():
+    st.write_text(json.dumps(s))
+cmd = a[0] if a else ""
+if cmd == "--version":
+    print("claimdag 99.0.0")
+elif cmd == "upsert":
+    s["known"].append(opt("--id"))
+    save()
+elif cmd == "get":
+    i = a[1]
+    if i in s["claims"]:
+        print(f"id={i} status=claimed assignee={s['claims'][i]} gen=2")
+    elif i in s["known"]:
+        print(f"id={i} status=ready gen=1")
+    else:
+        sys.exit(1)
+elif cmd == "claim":
+    i, who = a[1], opt("--assignee")
+    cur = s["claims"].get(i)
+    if cur and cur != who:
+        sys.stderr.write(f"claimdag: node {i} status claimed\n")
+        sys.exit(1)
+    s["claims"][i] = who
+    if i not in s["known"]:
+        s["known"].append(i)
+    save()
+    print("gen=2")
+elif cmd == "renew":
+    print("gen=2")
+elif cmd == "release":
+    s["claims"].pop(a[1], None)
+    save()
+else:
+    print("[]")
+"#,
+    )
+    .unwrap();
     fs::write(dir.join("ljos"), "").unwrap();
     fs::remove_file(dir.join("ljos")).unwrap();
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_ljos"), dir.join("ljos")).unwrap();
-    for name in ["vissue", "deedar"] {
+    for name in ["vissue", "deedar", "claimdag"] {
         fs::set_permissions(dir.join(name), fs::Permissions::from_mode(0o755)).unwrap();
     }
 }
@@ -371,16 +419,31 @@ fn sit(hab: &Hab, id: &str, holder: &str, seat: &str) {
     ));
     fs::write(&issues, text).unwrap();
     let comm = fs::read_to_string("/proc/self/comm").unwrap();
+    let node_id = ljos_cli::work_id(id);
+    let actor = ljos_cli::work_id(&format!("{holder}:{id}"));
+    let state_path = hab.tracker.join("claimdag.json");
+    let mut state: serde_json::Value = fs::read_to_string(&state_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({"known": [], "claims": {}}));
+    state["known"]
+        .as_array_mut()
+        .unwrap()
+        .push(node_id.clone().into());
+    state["claims"][&node_id] = actor.clone().into();
+    fs::write(&state_path, state.to_string()).unwrap();
     fs::create_dir_all(hab.run.join("ljos")).unwrap();
-    fs::write(
-        hab.run.join("ljos").join(format!("hold-{id}")),
-        format!(
-            "{holder}\n{seat}\n{}\n{}\n2026-01-01T00:00:00Z\n{id}\n-\n",
-            std::process::id(),
-            comm.trim()
-        ),
-    )
-    .unwrap();
+    for key in [id, actor.as_str()] {
+        fs::write(
+            hab.run.join("ljos").join(format!("hold-{key}")),
+            format!(
+                "{holder}\n{seat}\n{}\n{}\n2026-01-01T00:00:00Z\n{id}\n-\n",
+                std::process::id(),
+                comm.trim()
+            ),
+        )
+        .unwrap();
+    }
 }
 
 /// A PostToolUse that also carries `prompt` still cites the commit.
@@ -1363,6 +1426,44 @@ fn a_subagent_commit_is_not_booked_and_says_why() {
     assert!(seat_err.contains("no seat of its own"), "{seat_err}");
 }
 
+/// Re-running `ljos claim <parent>` from the same sand-sub conversation
+/// should be idempotent: once one child exists for that parent+subagent,
+/// further retries must reuse it, not create unbounded siblings.
+#[test]
+fn repeated_subagent_claim_on_parent_is_idempotent() {
+    let hab = Hab::new("repo");
+    let id = "probe-parent";
+    seed_issue(&hab, id, "STARTED");
+    // Parent conversation holds parent issue.
+    let parent = "0199a1b2-c3d4-4e5f-8a6b-00000000000x";
+    let holder = format!("grokbot@{}", ljos_cli::session_tag(parent));
+    sit(&hab, id, &holder, "grokbot");
+
+    // Same subagent retries parent claim three times.
+    for _ in 0..3 {
+        let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+            .args(["claim", id])
+            .current_dir(&hab.repo)
+            .env_clear()
+            .envs(hab.base_env())
+            .env("CURSOR_CONVERSATION_ID", "sand-subagent-0001cccc")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let log = vissue_log(&hab.tracker);
+    let creates = log.lines().filter(|l| l.starts_with("create ")).count();
+    assert_eq!(
+        creates, 1,
+        "retries created duplicate children under the same parent:\n{log}"
+    );
+}
+
 /// With `LJOS_SEAT` exported, a git hook holds under the holder `ljos seat`
 /// prints (`SEAT@TAG`), the name `ljos claim` takes in the same shell. The
 /// hook used to hold under the bare seat, so one conversation held its
@@ -1777,7 +1878,7 @@ fn a_git_hook_books_only_a_seat_the_seats_file_lists() {
     sit(
         &hab,
         "probe-51a1",
-        "grokbot-0b1c2d3e@sit",
+        &format!("grokbot-0b1c2d3e@{}", ljos_cli::session_tag(cursor)),
         "grokbot-0b1c2d3e",
     );
     sit(&hab, "probe-51a2", "antigravity@sit", "antigravity");

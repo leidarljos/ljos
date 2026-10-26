@@ -2917,3 +2917,161 @@ fn a_bare_mcp_sitting_answers_the_same_outside_a_cargo_test_runner() {
         "a bare ljos_sitting answered differently under the test runner:\ninside {inside}\noutside {outside}"
     );
 }
+
+const RV_STUB_CLAIMDAG: &str = r###"#!/usr/bin/env python3
+import json, os, sys, fcntl
+st = os.path.join(os.environ["STUB_STATE"], "claimdag.json")
+lk = open(st + ".lock", "a"); fcntl.flock(lk, fcntl.LOCK_EX)
+s = json.load(open(st)) if os.path.exists(st) else {"known": [], "claims": {}}
+a = sys.argv[1:]
+def opt(n):
+    return a[a.index(n) + 1] if n in a else None
+def save():
+    json.dump(s, open(st, "w"))
+cmd = a[0] if a else ""
+if cmd == "--version":
+    print("claimdag 99.0.0")
+elif cmd == "upsert":
+    s["known"].append(opt("--id")); save()
+elif cmd == "get":
+    i = a[1]
+    if i in s["claims"]:
+        print(f"id={i} status=claimed assignee={s['claims'][i]}")
+    elif i in s["known"]:
+        print(f"id={i} status=ready")
+    else:
+        sys.exit(1)
+elif cmd == "claim":
+    i, who = a[1], opt("--assignee")
+    cur = s["claims"].get(i)
+    if cur and cur != who:
+        sys.stderr.write(f"claimdag: node {i} status claimed\n"); sys.exit(1)
+    s["claims"][i] = who
+    if i not in s["known"]:
+        s["known"].append(i)
+    save(); print("gen=2")
+elif cmd == "release":
+    s["claims"].pop(a[1], None); save()
+elif cmd in ("list", "ready"):
+    print("[]")
+"###;
+
+const RV_STUB_VISSUE: &str = r###"#!/usr/bin/env python3
+import json, os, sys, fcntl
+st = os.path.join(os.environ["STUB_STATE"], "vissue.json")
+lk = open(st + ".lock", "a"); fcntl.flock(lk, fcntl.LOCK_EX)
+s = json.load(open(st)) if os.path.exists(st) else {"cards": {}, "n": 0, "created": []}
+a = sys.argv[1:]
+cmd = a[0] if a else ""
+pos = [x for x in a[1:] if not x.startswith("-")]
+def save():
+    json.dump(s, open(st, "w"))
+if cmd == "--version":
+    print("vissue 99.0.0")
+elif cmd == "show":
+    i = pos[0] if pos else ""
+    print(json.dumps(s["cards"].get(i, {"id": i, "title": "the work", "state": "TODO"})))
+elif cmd == "claim":
+    i = pos[0]
+    s["cards"][i] = {"id": i, "title": "the work", "state": "STARTED",
+                     "claimed_by": os.environ.get("VISSUE_AGENT", "")}
+    save(); print("claimed")
+elif cmd == "create":
+    s["n"] += 1
+    i = f"proj-c{s['n']:03d}"
+    parent = a[a.index("--parent") + 1] if "--parent" in a else None
+    s["created"].append({"id": i, "argv": a, "agent": os.environ.get("VISSUE_AGENT", "")})
+    s["cards"][i] = {"id": i, "title": a[-2] if a[-1] == "-q" else a[-1], "state": "TODO", "parent": parent}
+    save(); print(i)
+elif cmd == "claims":
+    print("[]")
+elif cmd == "identity":
+    print("vissue 99.0.0\nroot=\nprefix=Software")
+else:
+    print("{}")
+"###;
+
+/// A subagent on an id-less shared server that runs `ljos claim` on its
+/// parent's ticket three times, as an agent retries a refused write,
+/// files at most one child ticket. Each extra child is a tracker write
+/// and an orphan the parent never asked for.
+#[test]
+fn a_subagent_retrying_its_parents_ticket_files_one_child_at_most() {
+    const SUB: &str = "sand-subagent-0001cccc";
+    let home = Box_::new();
+    script(&home.bin.join("claimdag"), RV_STUB_CLAIMDAG);
+    script(&home.bin.join("vissue"), RV_STUB_VISSUE);
+    let state = home.run.join("stub");
+    std::fs::create_dir_all(&state).unwrap();
+    let python = PathBuf::from("/usr/bin/python3");
+    let claim = format!("\"$LJOS\" claim {ISSUE}");
+    let said = home.under(
+        &python,
+        &[("STUB_STATE", state.to_str().unwrap())],
+        "",
+        &[
+            (Some(CONV_X), &claim),
+            (Some(SUB), &claim),
+            (Some(SUB), &claim),
+            (Some(SUB), &claim),
+        ],
+    );
+    let filed: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(state.join("vissue.json")).unwrap_or_else(|_| "{}".into()),
+    )
+    .unwrap();
+    let created = filed["created"].as_array().map_or(0, Vec::len);
+    assert_eq!(
+        created, 1,
+        "the subagent filed {created} child tickets under {ISSUE}:\n{filed:#}\n{said}"
+    );
+    let agent = filed["created"][0]["agent"].as_str().unwrap_or("");
+    assert_eq!(
+        agent, "inky",
+        "subagent child was not filed through file_issue with seat inky (got VISSUE_AGENT={agent:?}):\n{filed:#}"
+    );
+}
+
+/// RV5. On an id-less shared server X sits on `proj-one`, then Y sits on
+/// `proj-two`. X's subagent runs `ljos claim proj-two`. Nothing on the
+/// box says whose subagent it is, so it must not be handed a child of
+/// Y's ticket just because Y sat last.
+#[test]
+fn rv5_a_subagent_is_not_filed_under_whichever_ticket_was_sat_on_last() {
+    const SUB: &str = "sand-subagent-0001cccc";
+    let home = Box_::new();
+    script(&home.bin.join("claimdag"), RV_STUB_CLAIMDAG);
+    script(&home.bin.join("vissue"), RV_STUB_VISSUE);
+    let state = home.run.join("stub");
+    std::fs::create_dir_all(&state).unwrap();
+    let python = PathBuf::from("/usr/bin/python3");
+    let said = home.under(
+        &python,
+        &[("STUB_STATE", state.to_str().unwrap())],
+        "",
+        &[
+            (Some(CONV_X), "\"$LJOS\" claim proj-one"),
+            (None, "sleep 1.2"),
+            (Some(CONV_Y), "\"$LJOS\" claim proj-two"),
+            (Some(SUB), "\"$LJOS\" claim proj-two"),
+        ],
+    );
+    let filed: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(state.join("vissue.json")).unwrap_or_else(|_| "{}".into()),
+    )
+    .unwrap();
+    let under_y = filed["created"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| {
+            c["argv"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|w| w == "proj-two"))
+        })
+        .count();
+    assert_eq!(
+        under_y, 0,
+        "X's subagent was filed under Y's ticket proj-two:\n{filed:#}\n{said}"
+    );
+}
