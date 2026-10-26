@@ -94,9 +94,10 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       # Mail reader tests build a notmuch database. Detach tests need tmux.
+      # The identity gate tests start a one-shot runner under zsh -c.
       # The hook queue test reads each call's peak RSS from GNU time.
       - name: Install age, tmux, notmuch and time
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends age tmux notmuch time
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends age tmux notmuch time zsh
       - name: Build packset from develop
         run: |
           set -euo pipefail
