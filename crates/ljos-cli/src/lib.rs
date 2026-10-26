@@ -1866,13 +1866,15 @@ pub fn call_cursor_conversation() -> Option<String> {
 /// Whether `LJOS_HOLD` may name the claimant: outside a bound hook call
 /// and when no conversation id or `CURSOR_AGENT` mark is present.
 fn hold_env_allowed() -> bool {
+    let is_hook_cli = std::env::args_os().nth(1).is_some_and(|a| a == "hook");
     call_conversation() == CallConversation::Unbound
-        && cursor_conversation().is_none()
-        && std::env::var_os("CURSOR_CONVERSATION_ID").is_none()
-        && std::env::var_os("CURSOR_AGENT").is_none()
-        && !stamp_env()
-            .iter()
-            .any(|(k, _)| k == "CURSOR_AGENT" || k == "CURSOR_CONVERSATION_ID")
+        && (is_hook_cli
+            || (cursor_conversation().is_none()
+                && std::env::var_os("CURSOR_CONVERSATION_ID").is_none()
+                && std::env::var_os("CURSOR_AGENT").is_none()
+                && !stamp_env()
+                    .iter()
+                    .any(|(k, _)| k == "CURSOR_AGENT" || k == "CURSOR_CONVERSATION_ID")))
 }
 
 /// Whether the bound call carried a session key that names nobody.
@@ -1895,6 +1897,7 @@ fn cursor_agent_without_id() -> bool {
     !claude
         && call_conversation() == CallConversation::Unbound
         && cursor_conversation().is_none()
+        && !(hold_env_allowed() && named_var("LJOS_HOLD").is_some())
         && (std::env::var_os("CURSOR_AGENT").is_some()
             || env.iter().any(|(k, _)| k == "CURSOR_AGENT"))
 }
@@ -1906,10 +1909,18 @@ fn cursor_conversation() -> Option<String> {
     match call_conversation() {
         CallConversation::Named(id) => Some(id),
         CallConversation::Unusable => None,
-        CallConversation::Unbound | CallConversation::UnusableOther => stamp_env()
-            .into_iter()
-            .find(|(k, _)| k == "CURSOR_CONVERSATION_ID")
-            .and_then(|(_, v)| usable_session_id(&v).map(str::to_string)),
+        CallConversation::Unbound | CallConversation::UnusableOther => {
+            if call_conversation() == CallConversation::Unbound
+                && named_var("LJOS_HOLD").is_some()
+                && std::env::args_os().nth(1).is_some_and(|a| a == "hook")
+            {
+                return None;
+            }
+            stamp_env()
+                .into_iter()
+                .find(|(k, _)| k == "CURSOR_CONVERSATION_ID")
+                .and_then(|(_, v)| usable_session_id(&v).map(str::to_string))
+        }
     }
 }
 

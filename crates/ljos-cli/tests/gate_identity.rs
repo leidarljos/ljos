@@ -464,6 +464,37 @@ fn a_named_call_ignores_ljos_hold_in_the_hook_env() {
     );
 }
 
+/// An unbound `ljos hook` call (a `PreToolUse` payload with no
+/// `conversation_id`, as `force_push_sample` runs) honors `LJOS_HOLD`
+/// even when the hook process inherits `CURSOR_AGENT` or
+/// `CURSOR_CONVERSATION_ID` from an outer shell.
+#[test]
+fn an_unbound_hook_call_with_ljos_hold_honors_the_configured_holder() {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    let hold = holder(CONV_X);
+    let unbound = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": MERGE},
+        "cwd": home.repo,
+    })
+    .to_string();
+    allowed(
+        &home.hook_with(
+            &unbound,
+            &[
+                ("LJOS_HOLD", hold.as_str()),
+                ("CURSOR_AGENT", "1"),
+                ("CURSOR_CONVERSATION_ID", CONV_Z),
+            ],
+        ),
+        "unbound PreToolUse hook with LJOS_HOLD=X under outer CURSOR_CONVERSATION_ID=Z",
+    );
+}
+
 /// The gate's conversation comes from `conversation_id` alone. A payload
 /// whose `session_id` or `sessionId` is X's conversation id but that has
 /// no `conversation_id` is judged by the hook's environment, here Y's.
