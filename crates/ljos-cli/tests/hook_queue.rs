@@ -314,8 +314,11 @@ fn max_rss_kb(stderr: &str) -> u64 {
 }
 
 /// Twenty tool calls at once, half of them the first write of a session.
-/// On develop each write filed its claim inside the call, under the book
-/// lock, and the calls queued behind each other for seconds.
+/// Each write used to file its claim inside the call, under the book lock,
+/// and the calls queued behind each other for seconds. Each call answers
+/// within 200 ms once it holds a slot, and within the admission budget
+/// end to end; how many run at once is the server's slot count, which
+/// follows the box's cores.
 #[test]
 fn twenty_calls_at_once_each_answer_inside_200_ms_and_30_mb() {
     assert!(
@@ -366,12 +369,32 @@ fn twenty_calls_at_once_each_answer_inside_200_ms_and_30_mb() {
     eprintln!("{}", report.join("\n"));
     for (i, took, kb) in &rows {
         assert!(
-            *took < Duration::from_millis(200),
-            "call {i} took {took:?}:\n{}",
+            *took < Duration::from_millis(ljos_cli::hookd::ADMIT_MS),
+            "call {i} took {took:?}, past the admission budget:\n{}",
             report.join("\n")
         );
         assert!(*kb < 30 * 1024, "call {i} peaked at {kb} KB");
     }
+    let times = std::fs::read_to_string(hab.run.join("ljos/hook-times.log")).unwrap();
+    let mut answered = 0;
+    for line in times.lines() {
+        let words: Vec<&str> = line.split(' ').collect();
+        if words.len() != 4 || words[0] != "hook" {
+            continue;
+        }
+        let took: u64 = words[2].parse().unwrap();
+        let waited: u64 = words[3].parse().unwrap();
+        assert!(
+            took.saturating_sub(waited) < 200,
+            "a call answered in {} ms past its {waited} ms slot wait:\n{times}",
+            took.saturating_sub(waited)
+        );
+        answered += 1;
+    }
+    assert!(
+        answered >= 21,
+        "{answered} hook timing lines for 21 calls:\n{times}"
+    );
     drain(&hab);
     assert_eq!(creates(&hab), 10, "every first write still files its claim");
     let times = std::fs::read_to_string(hab.run.join("ljos/hook-times.log")).unwrap();
