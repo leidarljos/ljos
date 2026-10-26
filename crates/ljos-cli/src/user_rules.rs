@@ -1295,6 +1295,9 @@ pub fn guard_payload(raw: &str) -> Option<Rule> {
     let server = ["mcp_server_name", "mcpServerName", "server_name", "server"]
         .iter()
         .find_map(|key| value.get(*key).and_then(Value::as_str));
+    // The MCP server binary. A `command` inside tool_input is an argument
+    // of the tool, not this field.
+    let command = value.get("command").and_then(Value::as_str);
     let input = value
         .get("tool_input")
         .or_else(|| value.get("toolInput"))
@@ -1306,11 +1309,16 @@ pub fn guard_payload(raw: &str) -> Option<Rule> {
         Some(other) => other.clone(),
         None => Value::Null,
     };
-    guard_mcp(tool, server, &parsed)
+    guard_mcp(tool, server, command, &parsed)
 }
 
-fn guard_mcp(tool: &str, server: Option<&str>, input: &Value) -> Option<Rule> {
-    if !github_write(tool, server) && !cursor_http_mcp_write(tool, input) {
+fn guard_mcp(
+    tool: &str,
+    server: Option<&str>,
+    command: Option<&str>,
+    input: &Value,
+) -> Option<Rule> {
+    if !github_write(tool, server, command) && !cursor_http_mcp_write(tool, input) {
         return None;
     }
     let rules = match load() {
@@ -1356,10 +1364,11 @@ fn cursor_http_mcp_write(tool: &str, input: &Value) -> bool {
     obj.contains_key("owner") && obj.contains_key("repo")
 }
 
-fn github_write(tool: &str, server: Option<&str>) -> bool {
+fn github_write(tool: &str, server: Option<&str>, command: Option<&str>) -> bool {
     // The seat's own tool on its configured server is not a GitHub write,
-    // even when that server key contains "github".
-    if crate::subagent::is_confirmed_seat_call(tool, server) {
+    // even when that server key contains "github". A payload command that
+    // is not the seat server is a foreign tool.
+    if crate::subagent::is_confirmed_seat_call(tool, server, command) {
         return false;
     }
     let tool_l = tool.to_ascii_lowercase();

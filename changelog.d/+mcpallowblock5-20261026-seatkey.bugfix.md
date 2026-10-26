@@ -1,0 +1,1 @@
+A seat key is read only from the seat's own config. A project MCP file, CLAUDE_CONFIG_DIR, CODEX_HOME, and a parent's --mcp-config do not name the seat. The Cursor payload command, when present, has to be the seat server.

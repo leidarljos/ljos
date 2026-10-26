@@ -159,13 +159,25 @@ pub fn mcp_prefixed_tool(tool: &str) -> Option<(&str, &str)> {
 /// is not a match.
 #[must_use]
 pub fn is_seat_mcp_tool(tool: &str) -> bool {
-    is_confirmed_seat_call(tool, None)
+    is_confirmed_seat_call(tool, None, None)
 }
 
 /// `tool` is `ljos_*` on a server key the seat's MCP config names.
 /// `field` is a payload server (`server`, `mcp_server_name`). When both
 /// the name and the field name a server, they have to be the same key.
-pub(crate) fn is_confirmed_seat_call(tool: &str, field: Option<&str>) -> bool {
+pub(crate) fn is_confirmed_seat_call(
+    tool: &str,
+    field: Option<&str>,
+    command: Option<&str>,
+) -> bool {
+    // The Cursor payload names the server binary in `command`. When that
+    // field is present it has to be the seat server. A key in a config
+    // file cannot promote a foreign binary.
+    if let Some(command) = command.map(str::trim).filter(|text| !text.is_empty()) {
+        if !crate::cloud::payload_command_is_seat(command) {
+            return false;
+        }
+    }
     match crate::cloud::seat_mcp_keys() {
         crate::cloud::SeatMcpKeys::Known(keys) => seat_call_matches(tool, field, &keys),
         crate::cloud::SeatMcpKeys::Unknown | crate::cloud::SeatMcpKeys::Ambiguous => false,
@@ -234,8 +246,9 @@ pub fn note_hook_call(input: &str, event: &str) -> bool {
         .find_map(|key| v[*key].as_str())
         .map(str::trim)
         .filter(|name| !name.is_empty());
+    let command = text(&v, &["command"]);
     let shaped = event == "PreToolUse" && seat_shaped_mcp_tool(&tool);
-    let seat_tool = shaped && is_confirmed_seat_call(&tool, field);
+    let seat_tool = shaped && is_confirmed_seat_call(&tool, field, command.as_deref());
     let any_mcp_tool = matches!(event, "PreToolUse" | "preToolUse" | "beforeMCPExecution")
         && is_any_seat_mcp_tool(&tool);
     let session = crate::hook_call_as(input, Some(event))

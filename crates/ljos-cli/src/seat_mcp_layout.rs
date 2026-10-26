@@ -127,3 +127,61 @@ fn a_claude_plugin_install_names_the_seat() {
         cloud::seat_mcp_keys()
     );
 }
+
+/// `CLAUDE_CONFIG_DIR` is chosen by the process. A `.claude.json` there
+/// does not name the seat, even when it lists `ljos-mcp`.
+#[test]
+fn claude_config_dir_does_not_name_the_seat() {
+    let (_lock, dir) = review_env();
+    let cfg = dir.path().join("claude-cfg");
+    put(&cfg.join(".claude.json"), SEAT_ENTRY);
+    unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", &cfg) };
+    assert!(
+        !subagent::is_seat_mcp_tool("mcp__ljos__ljos_note"),
+        "CLAUDE_CONFIG_DIR named the seat: {:?}",
+        cloud::seat_mcp_keys()
+    );
+}
+
+/// `CODEX_HOME` is chosen by the process. A `config.toml` there does
+/// not name the seat.
+#[test]
+fn codex_home_does_not_name_the_seat() {
+    let (_lock, dir) = review_env();
+    let cfg = dir.path().join("codex-cfg");
+    put(
+        &cfg.join("config.toml"),
+        "[mcp_servers.ljos]\ncommand = \"ljos-mcp\"\n",
+    );
+    unsafe { std::env::set_var("CODEX_HOME", &cfg) };
+    assert!(
+        !subagent::is_seat_mcp_tool("mcp__ljos__ljos_note"),
+        "CODEX_HOME named the seat: {:?}",
+        cloud::seat_mcp_keys()
+    );
+}
+
+/// The home file may name `github` as the seat server. A Cursor payload
+/// whose `command` is a different binary is still a foreign tool, and
+/// the user rule applies.
+#[test]
+fn a_payload_command_that_is_not_the_seat_is_a_foreign_tool() {
+    let (_lock, dir) = review_env();
+    put(
+        &dir.path().join(".cursor/mcp.json"),
+        r#"{"mcpServers":{"github":{"command":"ljos-mcp","args":[]}}}"#,
+    );
+    put(
+        &dir.path().join("config/ljos/user-rules.json"),
+        r#"{"rules":[{"id":"ur-ocaisa","text":"never post or reply to Alan (ocaisa)","author":"rohit","reason":"he asked not to be pinged","deny_mention":{"handles":["ocaisa"],"names":["Alan"]},"deny_reply_to":{"handles":["ocaisa"],"names":["Alan"]},"written_at":"2026-10-25T00:00:00Z","updated_at":"2026-10-25T00:00:00Z","basis":"person"}]}"#,
+    );
+    let payload = serde_json::json!({
+        "hook_event_name": "beforeMCPExecution",
+        "tool_name": "mcp__github__ljos_issue_comment",
+        "command": "github-mcp-server",
+        "tool_input": {"owner": "o", "repo": "r", "issue_number": 1, "body": "cc @ocaisa"},
+    })
+    .to_string();
+    let hit = user_rules::guard_payload(&payload).expect("foreign command skipped the rule");
+    assert_eq!(hit.verdict, "deny", "{hit:?}");
+}

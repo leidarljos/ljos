@@ -683,7 +683,71 @@ fn collect_mcp_files(include_user_harness: bool) -> Vec<McpFile> {
             }
         }
     }
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|p| !p.is_empty()) {
+        push(
+            PathBuf::from(&dir).join(".claude.json"),
+            McpProbe::Json("/mcpServers/ljos".into()),
+            false,
+            "ljos onboard --harness claude".into(),
+            Expand::Claude,
+            None,
+        );
+    }
+    if let Some(dir) = std::env::var_os("CODEX_HOME").filter(|p| !p.is_empty()) {
+        push(
+            PathBuf::from(&dir).join("config.toml"),
+            McpProbe::Text("[mcp_servers.ljos]".into()),
+            false,
+            "ljos onboard --harness codex".into(),
+            Expand::Literal,
+            None,
+        );
+    }
+    for dir in project_config_dirs() {
+        push(
+            dir.join(".mcp.json"),
+            McpProbe::Json("/mcpServers/ljos".into()),
+            false,
+            "project .mcp.json".into(),
+            Expand::Shell,
+            None,
+        );
+        push(
+            dir.join(".cursor/mcp.json"),
+            McpProbe::Json("/mcpServers/ljos".into()),
+            false,
+            "project .cursor/mcp.json".into(),
+            Expand::Cursor,
+            None,
+        );
+    }
     out
+}
+
+/// The working directory and, when it sits inside a checkout, that
+/// checkout's root. A directory that is already gone is left out: the
+/// hook must not stall on it.
+fn project_config_dirs() -> Vec<PathBuf> {
+    let Ok(cwd) = std::env::current_dir() else {
+        return Vec::new();
+    };
+    if !cwd.is_dir() {
+        return Vec::new();
+    }
+    let mut dirs = vec![cwd.clone()];
+    let mut at = cwd.clone();
+    loop {
+        if at.join(".git").exists() {
+            if at != cwd {
+                dirs.push(at);
+            }
+            break;
+        }
+        if !at.pop() {
+            break;
+        }
+    }
+    dirs
 }
 
 fn harness_shapes_for(include_user_harness: bool) -> Vec<crate::Harness> {
@@ -728,11 +792,20 @@ pub(crate) enum SeatMcpKeys {
 /// file or plugin install named a key. One unreadable file hides its
 /// own entries and nothing else. Harness files that are not the JSON
 /// or TOML this scan expects are skipped.
+///
+/// A seat key comes from the seat's own files: the home MCP configs,
+/// the harness files, `LJOS_MCP_CONFIG`, and a plugin installed under
+/// the home `.claude` directory. A project `.mcp.json` or
+/// `.cursor/mcp.json`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and a
+/// parent's `--mcp-config` argument do not add a key.
 pub(crate) fn seat_mcp_keys() -> SeatMcpKeys {
     let mut keys = BTreeSet::new();
     let mut saw = false;
     let mut ambiguous = false;
     for file in collect_mcp_files(false) {
+        if !seat_config_file(&file.path) {
+            continue;
+        }
         match read_seat_keys(&file) {
             KeyRead::Absent | KeyRead::Skip => {}
             KeyRead::Ambiguous => ambiguous = true,
@@ -754,6 +827,49 @@ pub(crate) fn seat_mcp_keys() -> SeatMcpKeys {
     } else {
         SeatMcpKeys::Unknown
     }
+}
+
+/// Whether `path` is the seat's own MCP config. Project files and a
+/// config directory named by `CLAUDE_CONFIG_DIR` or `CODEX_HOME` are
+/// left out, unless that path is the home file the harness already reads.
+fn seat_config_file(path: &Path) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str());
+    if name == Some(".mcp.json") {
+        return false;
+    }
+    if name == Some("mcp.json")
+        && path
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .and_then(|n| n.to_str())
+            == Some(".cursor")
+    {
+        let home_cursor = crate::home().ok().map(|home| home.join(".cursor/mcp.json"));
+        if home_cursor.as_deref() != Some(path) {
+            return false;
+        }
+    }
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|p| !p.is_empty()) {
+        let from_env = PathBuf::from(&dir).join(".claude.json");
+        if path == from_env {
+            let home_claude = crate::home().ok().map(|home| home.join(".claude.json"));
+            if home_claude.as_deref() != Some(path) {
+                return false;
+            }
+        }
+    }
+    if let Some(dir) = std::env::var_os("CODEX_HOME").filter(|p| !p.is_empty()) {
+        let from_env = PathBuf::from(&dir).join("config.toml");
+        if path == from_env {
+            let home_codex = crate::home()
+                .ok()
+                .map(|home| home.join(".codex/config.toml"));
+            if home_codex.as_deref() != Some(path) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 #[derive(Debug)]
@@ -1181,6 +1297,18 @@ fn read_capped(path: &Path) -> Option<String> {
     let mut text = String::new();
     file.take(MCP_CONFIG_CAP).read_to_string(&mut text).ok()?;
     Some(text)
+}
+
+/// Whether a Cursor payload `command` field launches the seat server.
+/// The field is one string, so `ljos mcp` and `ljos-plugin ljos-mcp`
+/// are split on whitespace. An empty field is not a command.
+pub(crate) fn payload_command_is_seat(command: &str) -> bool {
+    let mut parts = command.split_whitespace();
+    let Some(bin) = parts.next() else {
+        return false;
+    };
+    let args: Vec<String> = parts.map(str::to_string).collect();
+    command_launches_seat(bin, &args)
 }
 
 fn command_launches_seat(command: &str, args: &[String]) -> bool {
@@ -4047,6 +4175,17 @@ mod tests {
             ..file
         };
         assert!(matches!(read_seat_keys(&loose), KeyRead::Skip));
+    }
+
+    #[test]
+    fn a_payload_command_names_the_seat_server() {
+        assert!(payload_command_is_seat("ljos-mcp"));
+        assert!(payload_command_is_seat("/opt/ljos/bin/ljos-mcp"));
+        assert!(payload_command_is_seat("ljos-plugin ljos-mcp"));
+        assert!(payload_command_is_seat("ljos mcp"));
+        assert!(!payload_command_is_seat("github-mcp-server"));
+        assert!(!payload_command_is_seat("ljos-plugin"));
+        assert!(!payload_command_is_seat(""));
     }
 
     #[test]
