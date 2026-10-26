@@ -2350,6 +2350,11 @@ fn stamp_from_ancestors() -> Option<Vec<(String, String)>> {
 
 const TMUX_SPAWN_TTL_MS: u64 = 30_000;
 
+/// How long a shell hook waits to take `tmux-sock.lock`. The wait is also
+/// cut at the hook deadline. Past either, the pane list is skipped and the
+/// call is judged as if no pane were found.
+const TMUX_LOCK_WAIT_MS: u64 = 250;
+
 fn now_ms_u64() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2363,7 +2368,11 @@ pub fn note_tmux_spawn(line: &str, cwd: Option<&str>, session: &str) {
         return;
     };
     let dir = runtime_dir();
-    let _lock = CommitLock::acquire(&dir.join("tmux-sock.lock"));
+    // When another process still has the lock, the note is skipped.
+    // Blocking here runs past the runner's cut-off, which then refuses the call.
+    let Some(_lock) = tmux_sock_lock(&dir) else {
+        return;
+    };
     let now = now_ms_u64();
     for (key, target, script) in tmux_spawn_specs(line, cwd) {
         let path = dir.join(format!("tmux-sock-{key}"));
@@ -2389,9 +2398,20 @@ pub fn note_tmux_spawn(line: &str, cwd: Option<&str>, session: &str) {
     }
 }
 
+fn tmux_sock_lock(dir: &Path) -> Option<CommitLock> {
+    let left = hookd::left_of(CURSOR_GATE_DEADLINE_MS);
+    let wait = std::time::Duration::from_millis(TMUX_LOCK_WAIT_MS).min(left);
+    CommitLock::acquire_by(
+        &dir.join("tmux-sock.lock"),
+        std::time::Instant::now() + wait,
+    )
+}
+
 fn tmux_pane_conversation(sock: &str, pane: Option<&str>) -> Option<String> {
     let dir = runtime_dir();
-    let _lock = CommitLock::acquire(&dir.join("tmux-sock.lock"));
+    // No pane when the lock is not free in time. The caller then keeps
+    // the conversation it already had, which is the same as no pane.
+    let _lock = tmux_sock_lock(&dir)?;
     let key = work_id(sock);
     let path = dir.join(format!("tmux-sock-{key}"));
     let pane_id = pane.map(str::trim).filter(|p| !p.is_empty());

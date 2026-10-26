@@ -3333,3 +3333,38 @@ fn rv5_a_subagent_is_not_filed_under_whichever_ticket_was_sat_on_last() {
         "X's subagent was filed under Y's ticket proj-two:\n{filed:#}\n{said}"
     );
 }
+
+/// Another process holds `tmux-sock.lock`. A Cursor shell hook on an
+/// ordinary line still answers before the runner cuts the hook off.
+#[test]
+fn a_held_tmux_lock_does_not_stall_a_shell_hook() {
+    let home = Box_::new();
+    let dir = home.run.join("ljos");
+    std::fs::create_dir_all(&dir).unwrap();
+    let lock = dir.join("tmux-sock.lock");
+    let ready = home.run.join("locked");
+    let mut holder = Command::new("flock")
+        .arg(&lock)
+        .args(["sh", "-c", &format!("touch {}; sleep 25", ready.display())])
+        .spawn()
+        .unwrap();
+    let t0 = Instant::now();
+    while !ready.exists() && t0.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(ready.exists(), "flock never took the lock");
+    let t0 = Instant::now();
+    let said = home.hook(CONV_X, "git status", &[("CURSOR_CONVERSATION_ID", CONV_X)]);
+    let took = t0.elapsed();
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert!(
+        took < Duration::from_millis(9_000),
+        "a Cursor shell hook on `git status` took {took:?} while tmux-sock.lock was held \
+         (the runner cuts the hook off at 10 s):\n{said}"
+    );
+    assert!(
+        !said.contains("no verdict"),
+        "the hook refused because it ran out of time while the lock was held:\n{said}"
+    );
+}

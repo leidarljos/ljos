@@ -2605,6 +2605,11 @@ fn run_command() -> Result<()> {
             } else {
                 ljos_cli::hook_call_as(&input, event.as_deref())
             };
+            // Arm before bind or the spawn note. Both can take
+            // tmux-sock.lock, and a blocking take runs past the cut-off.
+            if !prompt {
+                ljos_cli::hook_timed("arm_gate", || ljos_cli::arm_gate(&input, event.as_deref()));
+            }
             ljos_cli::bind_call_conversation(&input, &call);
             ljos_cli::adopt_blank_conversation(&input, &mut call);
             ljos_cli::ballot_sig::export_hook_session(call.session.as_deref());
@@ -2618,7 +2623,7 @@ fn run_command() -> Result<()> {
                 return Ok(());
             }
             // The queue is off, or this process was already inside a hook.
-            // Answer before the pack search and before the deadline thread.
+            // Answer before the pack search. The deadline is already armed.
             // The seat env was loaded above. A promoted rule may ask the
             // pack once from inside that answer. The call is recorded
             // first, so a bare seat can still bind the conversation.
@@ -2642,7 +2647,7 @@ fn run_command() -> Result<()> {
             // at the same moment is answered once. A tool gate is exempt
             // from both: its verdict must not be lost to a clock. Exiting
             // at the deadline writes no deny, and the runner then allows
-            // the command; a gate's own deadline, armed below, writes one.
+            // the command; a shell hook's deadline, armed above, writes one.
             // The same holds for an event said once, such as a stop or the
             // end of a session: its twin is answered with nothing.
             if ljos_cli::hook_twin(&call, &input) {
@@ -2672,7 +2677,6 @@ fn run_command() -> Result<()> {
             // SAFETY: single-threaded here, before anything reads the environment.
             unsafe { std::env::set_var("LJOS_IN_HOOK", "1") };
             let _side_bound = ljos_cli::arm_side_bound(&call);
-            ljos_cli::hook_timed("arm_gate", || ljos_cli::arm_gate(&input, event.as_deref()));
             let (subagent, stop_active, agent) = ljos_cli::hook_subagent(&input);
             ljos_cli::hook_trace(&input, &call, subagent.as_deref());
             // A subagent about to stop is held once while its parent holds
