@@ -849,7 +849,7 @@ enum Cmd {
         /// Put the parent under this workflow (feature) and file its design child. Running it again files nothing new.
         #[arg(long, value_name = "NAME", conflicts_with = "round")]
         start: Option<String>,
-        /// File the next panel round, or one `fix:` for a blocking finding. A nit stays a note. The parent stays open until `ljos finish --close`.
+        /// File the next panel round, or one `fix:` for a blocking finding. A nit stays a note. The parent stays open. A person closes it.
         #[arg(long)]
         round: bool,
     },
@@ -1263,12 +1263,12 @@ enum Cmd {
         /// The name that holds it. Absent: this conversation's holder (`ljos seat`).
         #[arg(long)]
         assignee: Option<String>,
-        /// Also close the tracker ticket, as CANCELLED with `--status cancelled`. Only when the work is accepted or dropped, not when the sitting ends.
+        /// Close the tracker ticket. A runner is refused. CANCELLED with `--status cancelled`. Only when the work is accepted or dropped, not when the sitting ends.
         #[arg(long)]
         close: bool,
     },
     /// Put an issue back to the state it had before a close this program wrote.
-    /// A note is not that record. Another seat is refused. The caller does not take the claim.
+    /// A person has to be present. A note is not that record. The caller does not take the claim.
     Reopen {
         /// The tracker id of the issue.
         issue: String,

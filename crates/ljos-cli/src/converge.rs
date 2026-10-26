@@ -6,7 +6,7 @@
 //! a grandchild unless the new objection is blocking. A round count is a
 //! count. It is not a budget key, and it does not close the ticket. When
 //! the seats still split, the reading names the open objection children.
-//! The person closes with `ljos finish --close`.
+//! A person closes the ticket.
 //!
 //! `ljos consensus` files its children through [`record_dissents`], titled
 //! `Dissent holds TEXT` for a blocking objection and `Dissent holds OPTION`
@@ -837,7 +837,7 @@ fn split_advice(issue: &str, round: usize) -> String {
 /// voter holds that is not the lead. A tie files none. Each call sits one
 /// panel round ([`sitting_round`]). A round count does not change the
 /// ticket state. When the seats still split, the reading names the open
-/// objection children. The person closes with `ljos finish --close`.
+/// objection children. A person closes the ticket.
 /// A tracker that does not answer leaves the reading as it was: filing
 /// is a side effect.
 #[must_use]
@@ -1127,7 +1127,7 @@ struct Node {
 /// Lines for trees that have run away: more descendants than the budget,
 /// or panel rounds that grew without a new blocking objection. The top of
 /// the tree is named, not every child. `apply` names the open ticket and
-/// does not change its state. The person closes with `ljos finish --close`.
+/// does not change its state. A person closes the ticket.
 #[must_use]
 pub fn reap_runaways(apply: bool) -> String {
     let Ok(said) = crate::run_captured("vissue", &["export"]) else {
@@ -1138,9 +1138,7 @@ pub fn reap_runaways(apply: bool) -> String {
     for (id, why) in flag_runaways(&said.stdout, &budget) {
         out.push_str(&format!("runaway: {id} {why}\n"));
         if apply {
-            out.push_str(&format!(
-                "reap: {id} stays open; a person closes it with `ljos finish {id} --close`\n"
-            ));
+            out.push_str(&format!("reap: {id} stays open; a person closes it\n"));
         }
     }
     out

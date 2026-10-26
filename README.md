@@ -208,8 +208,8 @@ yours. `ljos accept`, `ljos forget` and `ljos graded` take the first eight
 characters of an id. The island fires, the session node
 completes, and a named outcome shrinks the weight of the voters it refuted. A
 lesson typed with `ljos remember` stays `user-declared`, and the same words
-satisfy the open proposal. The ticket stays open unless `--close` is given,
-and `--close` closes it only when the work is accepted. The loop runs on
+satisfy the open proposal. The ticket stays open. A person closes it
+when the work is accepted. The loop runs on
 every finish, so the seat remembers whether or not somebody asks it to.
 
 When the tracker is a git checkout, the claim and the finish each commit the
@@ -375,8 +375,8 @@ persona's name, not the opener's seat.
 ## Commands
 
 Citing a deed names it; the bytes stay in deedar. A finish does not close the
-ticket, and completing a node does not either. `finish --close` closes it,
-when the work is accepted. Without `--close`, a finish drops the claim and
+ticket, and completing a node does not either. A person closes it
+when the work is accepted. A finish drops the claim and
 puts the ticket back to the state it had before the claim, as `ljos release`
 does, so no ticket is left STARTED with nobody holding it.
 

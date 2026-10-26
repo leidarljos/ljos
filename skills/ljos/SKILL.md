@@ -123,13 +123,12 @@ sitting that gets that far.
    `ljos workflow PARENT --start feature` files its design child, and
    `ljos workflow PARENT` prints the stage and the next step. A sitting
    on the parent or a child prints the same in `== workflow`, and
-   `ljos finish PARENT --close` is refused until the panel passed.
+   A close is refused until the panel passed.
    `ljos workflow PARENT --round` files the next panel. Once the substance
    has settled, a nit, a wording note or a style note stays on the issue.
    A blocking finding with a reason is one `fix:` child. The same objection
    is not filed again. A round count does not close the parent. The loop
-   files the next round until the panel passes. `ljos finish --close` is
-   the close.
+   files the next round until the panel passes. A person closes the ticket.
 8. `== workflow`, left out when neither the issue nor its parent carries a
    workflow. The stage and the next step, the same reading as `ljos workflow`.
 9. `== panel`, left out unless the issue is a decision. One brief per persona
@@ -163,7 +162,7 @@ persona the issue speaks to under `== panel`. Each brief goes to its own
 subagent or run, which casts `ljos vote ISSUE --for OPTION --as NAME`
 itself; the seat then runs `ljos consensus ISSUE`. The seat does not cast
 `--as` for its personas: one session is one ballot, and its second `--as`
-is refused. `ljos finish ISSUE --close` refuses a decision
+is refused. A close of a decision is refused
 with fewer than two ballots. Put any choice with more than one defensible
 answer on an issue this way before building it.
 
@@ -294,11 +293,13 @@ is active for this seat. The person at their own terminal is never gated.
   and is not a child. A blocking objection with a reason is filed once,
   as a child; the same objection is not filed again. A round count does
   not close the issue. When the seats still split, the reading names the
-  open objection children. The person closes with `ljos finish --close`.
+  open objection children. A person closes the ticket.
   `ljos reopen ISSUE` puts back the state from before a close this program
-  wrote, and only that close. The writer is the seat on that tracker commit,
-  or on the logbook line this program stamped. A note is not that record.
-  Another seat is refused. The caller does not take the claim.
+  wrote, and only that close. A person has to be present. The close is a
+  tracker commit whose own diff adds the DONE line and the logbook line.
+  A subject alone is not that record, and a logbook line only in the
+  working tree is not either. A process `LJOS_SEAT` has to match the
+  seat file. The caller does not take the claim.
   A tally printed later is
   who voted. On a hard question the ballot carries the private forecast
   of the others, `ljos vote ISSUE --for OPTION --expect OPTION`; `ljos predict`
@@ -517,7 +518,7 @@ lock exists before proceeding": the next seat cannot act on that.
 One verb closes the sitting:
 
 ```
-ljos finish ISSUE --status done --lesson "..." [--outcome OPTION] [--close]
+ljos finish ISSUE --status done --lesson "..." [--outcome OPTION]
 ```
 
 An agent's lesson is a proposal at L0 (`derived`) with origin `agent-derived`
@@ -537,8 +538,7 @@ same four steps are:
    fire together and their links gain weight.
 3. `ljos complete ISSUE --status done` (`failed`, `cancelled`). Completing
    the session node does not close the ticket, nor does a plain `finish`.
-   `ljos finish ISSUE --close` does, when the work is accepted, and
-   `--status cancelled --close` closes it as CANCELLED.
+   A person closes the ticket when the work is accepted.
 4. `ljos learn ISSUE --outcome OPTION` when the world says which option was
    right. Every voter's record takes the outcome; the record moves a
    voter's weight once it sets the voter apart from the panel, which a first

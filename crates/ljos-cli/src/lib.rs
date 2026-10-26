@@ -17572,7 +17572,7 @@ A sitting on one issue. Name this recipe at open (`ljos sitting ISSUE --playbook
 2. Grade due claims (`ljos graded ID`).
 3. Do the work on this claim only. Artefacts are deeds, then `ljos deed ISSUE --add ACCESSION`. Under a runner `ljos remember` is an unreviewed note that the person reviews; keep it to two sentences.
 4. One playbook step is the whole sitting. A subagent takes this recipe and this issue; it does not resume a later phase.
-5. Close with `ljos finish ISSUE --lesson \"...\"`. Completing the node does not close the ticket. `ljos finish ISSUE --close` does, when the work is accepted.
+5. Close with `ljos finish ISSUE --lesson \"...\"`. Completing the node does not close the ticket. A person closes it when the work is accepted.
 ";
 
 const ARENA_BODY: &str = "\
@@ -17622,8 +17622,8 @@ A feature runs design, implement, review and a panel vote until the panel agrees
 2. Design: write the design as a deed and cite it on the design child. Then file one `impl: TASK` and one `review: TASK` child per task under the parent.
 3. A review cites its findings as a deed, and a holder other than the implementer does it.
 4. With every child closed, `ljos workflow PARENT --round` files the next `panel rN` decision. Each panel persona casts `ljos vote ROUND --for pass|revise --expect OPTION --as NAME`, and a revise notes its finding on the round. `finding: NAME: TEXT` is a nit. `finding: NAME: wording: TEXT` and `finding: NAME: style: TEXT` are notes. `finding: NAME: blocking: REASON :: TEXT` is blocking, and a blocking mark with no reason stays a nit.
-5. Once the substance has settled, a nit, a wording note or a style note is recorded on the issue and is not a child. A blocking objection with a reason is one `fix:` child, and the next round reviews it. The same objection is not filed again. A round count does not close the parent. The loop files the next round until the panel passes. `ljos finish PARENT --close` is the close.
-6. `ljos finish PARENT --close` is refused until the latest round passed and no child is open.
+5. Once the substance has settled, a nit, a wording note or a style note is recorded on the issue and is not a child. A blocking objection with a reason is one `fix:` child, and the next round reviews it. The same objection is not filed again. A round count does not close the parent. The loop files the next round until the panel passes. A person closes the ticket.
+6. A close is refused until the latest round passed and no child is open.
 ";
 
 /// The six shipped playbooks, bodies in full, model roles as spawn hints.
@@ -18107,7 +18107,7 @@ pub const WORKFLOW_TAG_PREFIX: &str = "workflow-";
 /// The workflow settings S1 reads: which workflow new feature work takes,
 /// the panel, who can veto, the pass share and the tie-break. A round
 /// count does not close the parent. At the descendant limit the reading
-/// pauses for a person. The person closes with `ljos finish --close`.
+/// pauses for a person. A person closes the ticket.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowConfig {
     /// The workflow new feature work binds to.
@@ -18404,10 +18404,9 @@ pub fn workflow_status_of(
         (
             "panel",
             format!(
-                "{}; each of {} casts `ljos vote {} --for pass|revise --expect OPTION --as NAME`, then `ljos finish {} --close`",
+                "{}; each of {} casts `ljos vote {} --for pass|revise --expect OPTION --as NAME`, then a person closes the round",
                 sit(c),
                 cfg.personas.join(", "),
-                c.id,
                 c.id
             ),
         )
@@ -18429,7 +18428,7 @@ pub fn workflow_status_of(
                 let verdict = panel_verdict(latest_ballots, cfg);
                 if verdict.passed {
                     passed = true;
-                    ("passed", format!("`ljos finish {parent} --close`"))
+                    ("passed", "a person closes it".to_string())
                 } else {
                     (
                         "revise",
@@ -18534,7 +18533,7 @@ pub fn workflow_status(parent: &str) -> Result<Option<WorkflowStatus>> {
     Ok(Some(status))
 }
 
-/// Why `ljos finish PARENT --close` is refused on a workflow parent, or none
+/// Why a close is refused on a workflow parent, or none
 /// when the latest round passed and no child is open.
 #[must_use]
 pub fn workflow_close_refusal(s: &WorkflowStatus) -> Option<String> {
@@ -18726,7 +18725,7 @@ pub fn workflow_round(parent: &str) -> Result<String> {
         converge::RoundPlan::Passed => {
             let _ = note_objections_below(parent, &state);
             bail!(
-                "workflow: {parent} passed round {}; `ljos finish {parent} --close` closes it",
+                "workflow: {parent} passed round {}; a person closes it",
                 status.round
             );
         }
@@ -18786,7 +18785,7 @@ pub fn workflow_round(parent: &str) -> Result<String> {
                  A blocking finding with a reason is one `fix:` child. \
                  The loop files the next round until the panel passes. \
                  A round count does not close the parent. \
-                 `ljos finish --close` is the close.",
+                 A person closes the ticket.",
                 cfg.personas.join(", "),
                 cfg.veto.join(", "),
                 cfg.quorum
@@ -30838,13 +30837,12 @@ tracker as a `playbook:` note until `finish` or `release`. Feature work runs on 
 `ljos workflow PARENT --start feature` files its design child, and\n   \
 `ljos workflow PARENT` prints the stage and the next step. A sitting\n   \
 on the parent or a child prints the same in `== workflow`, and\n   \
-`ljos finish PARENT --close` is refused until the panel passed.\n   \
+A close is refused until the panel passed.\n   \
 `ljos workflow PARENT --round` files the next panel. Once the substance\n   \
 has settled, a nit, a wording note or a style note stays on the issue.\n   \
 A blocking finding with a reason is one `fix:` child. The same objection\n   \
 is not filed again. A round count does not close the parent. The loop\n   \
-files the next round until the panel passes. `ljos finish --close` is\n   \
-the close.",
+files the next round until the panel passes. A person closes the ticket.",
     },
     SittingSection {
         name: "workflow",
@@ -31121,7 +31119,7 @@ pub fn sitting_gated(
         let dir = runtime_dir().join(format!("panel-{issue}"));
         match panel(issue, &dir) {
             Ok(said) => out.push_str(&format!(
-                "{issue} is a decision. Run the panel before the work: one subagent per brief, each casts its ballot, then `ljos consensus {issue}`. `ljos finish {issue} --close` refuses with fewer than two ballots.\n{said}"
+                "{issue} is a decision. Run the panel before the work: one subagent per brief, each casts its ballot, then `ljos consensus {issue}`. A close of a decision is refused with fewer than two ballots.\n{said}"
             )),
             Err(e) => out.push_str(&format!("{issue} is a decision, and the panel could not be written: {e:#}\n")),
         }
@@ -45259,9 +45257,7 @@ mod tests {
             feature.body
         );
         assert!(
-            feature
-                .body
-                .contains("`ljos finish PARENT --close` is the close"),
+            feature.body.contains("A person closes the ticket"),
             "{}",
             feature.body
         );
@@ -45454,7 +45450,7 @@ mod tests {
         assert_eq!((s.stage, s.round), ("passed", 2));
         assert!(s.passed);
         assert_eq!(workflow_close_refusal(&s), None);
-        assert!(s.next.contains("ljos finish p-1 --close"), "{}", s.next);
+        assert!(s.next.contains("a person closes it"), "{}", s.next);
 
         // A child opened after a pass closes the gate again.
         work.push(wf_child("p-x", "impl: late change", "TODO"));
@@ -59761,7 +59757,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let sitting = read("commands/sitting.md");
         let finish = read("commands/finish.md");
         assert!(sitting.contains("ljos sitting") && sitting.contains("$ARGUMENTS"));
-        assert!(finish.contains("ljos finish") && finish.contains("--close"));
+        assert!(finish.contains("ljos finish") && finish.contains("A person closes it"));
         let launcher = read("bin/ljos-plugin");
         assert!(launcher.contains("exec \"$name\" \"$@\""));
         assert!(launcher.starts_with("#!/bin/sh\n"));

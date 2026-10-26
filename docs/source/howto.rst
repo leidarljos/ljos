@@ -786,7 +786,7 @@ and ``ljos release`` hands it back.
    remembered the lesson (id 51778929) as agent-derived; the hook shows it from the next prompt, and `ljos memories review` prunes it
    fired the island for "Ship the fuse change?": 8 memories. Those links gained weight under the seat, not under a persona. The next walk of this title follows them.
    Learned. 6 trust rows rewritten. ... persona anchors moved. The outcome is kept: once 5 issues have one, ljos consensus discounts voters who err together. ... No stated probability, so there is no Brier score. A hard vote is not a claim of certainty.
-   the ticket proj-1a2b stays open and nobody holds it; `ljos finish proj-1a2b --close` closes it when the work is accepted
+   the ticket proj-1a2b stays open and nobody holds it; a person closes it when the work is accepted
 
 Vote with personas
 ==================

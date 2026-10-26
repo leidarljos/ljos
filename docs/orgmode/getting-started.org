@@ -141,14 +141,14 @@ completed the session node for demo-... as done
 remembered your lesson (id 1735...); the hook shows it from the next prompt
 fired the island for "Ship the fuse change?": 3 memories. Those links gained weight under the seat, not under a persona. The next walk of this title follows them.
 Learned. 6 trust rows rewritten. ... persona anchors moved. The outcome is kept: once 5 issues have one, ljos consensus discounts voters who err together. ... No stated probability, so there is no Brier score. A hard vote is not a claim of certainty.
-the ticket demo-... stays open and nobody holds it; `ljos finish demo-... --close` closes it when the work is accepted
+the ticket demo-... stays open and nobody holds it; a person closes it when the work is accepted
 tracker git: committed chore(issues): demo-... finished by alice; no remote, kept local
 #+end_src
 
 =sitting= opens in order: doctor, cards, what is due, the island the title touches, blockers, the playbook, recall, the timeline, reclaim, then the claim.
 =deed= cites what the work produced. =finish=
 writes the lesson at once when a person types it at a terminal, fires the island, completes the node,
-and the outcome reweighs the voters as in step 2. Completing the session node does not close the ticket. =ljos finish ISSUE --close= does, when the work is accepted. To stop without finishing,
+and the outcome reweighs the voters as in step 2. Completing the session node does not close the ticket. A person closes it when the work is accepted. To stop without finishing,
 =ljos release $id --assignee alice= hands the node back; until then a second
 =claim= under the same name is refused, and the refusal names this issue.
 

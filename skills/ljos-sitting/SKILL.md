@@ -38,7 +38,7 @@ ljos finish ISSUE --lesson "One or two sentences the next agent can act on."
 
 An agent's lesson is a proposal at L0 (`derived`) with origin `agent-derived`. `ljos accept` promotes it to `explicit` and writes it.
 A lesson the person types at `ljos finish` in their own terminal is written at once as `user-declared`.
-Finishing does not close the ticket. Add `--close` only when the person has
-accepted the work. To stop without finishing, `ljos release ISSUE`.
+Finishing does not close the ticket. A person closes it when the work is
+accepted. To stop without finishing, `ljos release ISSUE`.
 
 `/sitting ISSUE` and `/finish ISSUE --lesson "..."` run the same verbs.

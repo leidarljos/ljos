@@ -11,4 +11,4 @@ Close the sitting named in the arguments.
 
 Arguments: $ARGUMENTS
 
-Run `ljos finish` with those arguments. A lesson is required. Completing the claim does not close the ticket. Pass `--close` only when the work is accepted.
+Run `ljos finish` with those arguments. A lesson is required. Completing the claim does not close the ticket. A person closes it when the work is accepted.
