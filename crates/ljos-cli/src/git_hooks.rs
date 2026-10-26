@@ -747,8 +747,11 @@ fn gate(name: &str) -> Result<()> {
         return Ok(());
     }
     // In a hook the process tree names the hook's own shell. The seat a
-    // booking would take is the one the sitting was taken under; without
-    // one, the runner's seat records still name its holder.
+    // booking would take is the one the sitting was taken under. With a
+    // conversation id in the environment only that conversation's holder
+    // counts, or for a subagent its parent's records and process when
+    // that process carries a conversation id. With no id it falls back
+    // to the process match.
     let seat = crate::git_hook_seat();
     let _actor = seat.as_deref().map(crate::HookActor::enter);
     let verb = if name == "pre-push" { "push" } else { "commit" };

@@ -10697,7 +10697,7 @@ pub fn hook_trace(input: &str, call: &HookCall, subagent: Option<&str>) {
         "session": call.session,
         "subagent": subagent,
         "holder": holder_name(),
-        "tree_holder": runner_record_holders().first().cloned(),
+        "tree_holder": runner_record_holders(&own_ancestry()).first().cloned(),
         "held": subagent.and_then(|_| held_issue()),
     });
     let Ok(mut line) = serde_json::to_string(&row) else {
@@ -10716,11 +10716,11 @@ pub fn hook_trace(input: &str, call: &HookCall, subagent: Option<&str>) {
 /// hooks run under its own session id inside its parent's runner, so the
 /// parent's record always looks like another conversation's there, and it
 /// is exactly the one a subagent needs.
-fn runner_record_holders() -> Vec<String> {
+fn runner_record_holders(chain: &[(u32, String)]) -> Vec<String> {
     let mut out = Vec::new();
     // A record left for a multiplexer would hand its holder to every pane.
-    for (pid, _) in own_ancestry() {
-        let Ok(text) = std::fs::read_to_string(seat_record_path(pid)) else {
+    for (pid, _) in chain {
+        let Ok(text) = std::fs::read_to_string(seat_record_path(*pid)) else {
             continue;
         };
         if let Some(holder) = text.lines().nth(1).map(str::trim).filter(|h| !h.is_empty()) {
@@ -10791,7 +10791,7 @@ pub fn held_issue() -> Option<String> {
     // were made under. A hook's environment can carry session variables
     // the server's did not, which hash to another holder that holds
     // nothing, so the record is asked first.
-    let mut holders: Vec<String> = runner_record_holders();
+    let mut holders: Vec<String> = runner_record_holders(&own_ancestry());
     let own = holder_name();
     if !holders.contains(&own) {
         holders.push(own);
@@ -10816,9 +10816,9 @@ pub fn held_issue() -> Option<String> {
 }
 
 /// What a subagent is told on its first tool result: the issue its parent
-/// holds and how its result joins it. A subagent that is not told the
-/// issue cannot cast a ballot on it, and a sitting of its own would
-/// contend with its parent's.
+/// holds and how its result joins it. When a shared server gives the
+/// subagent no parent process with a conversation id, the subagent opens
+/// a sitting of its own before writing git history.
 #[must_use]
 pub fn subagent_brief(kind: &str, issue: &str, decision: bool) -> String {
     let judge = if decision {
@@ -10829,10 +10829,11 @@ pub fn subagent_brief(kind: &str, issue: &str, decision: bool) -> String {
         )
     };
     format!(
-        "You are a subagent ({kind}) working under {issue}, which your parent holds. Do not open a sitting \
-         on it. Record on {issue} with `ljos vote {issue}` or `ljos note {issue}` even when the task \
-         does not name {issue}. {judge} A finding or a lesson of your own is `ljos note {issue} \"...\"`. \
-         ROLE is a persona from `ljos personas` when one fits \
+        "You are a subagent ({kind}) working under {issue}, which your parent holds. Open a sitting of \
+         your own with `ljos sitting {issue}` when you need to write git history and your parent's \
+         sitting does not cover you. Record on {issue} with `ljos vote {issue}` or `ljos note {issue}` \
+         even when the task does not name {issue}. {judge} A finding or a lesson of your own is \
+         `ljos note {issue} \"...\"`. ROLE is a persona from `ljos personas` when one fits \
          your task, else `{kind}`."
     )
 }
@@ -28022,11 +28023,22 @@ pub fn live_held_issue() -> Option<(String, Hold)> {
     if call_conversation_unusable() {
         return None;
     }
-    if cursor_conversation().is_some() {
+    if let Some(id) = cursor_conversation() {
         let (dir, seat, graph) = (runtime_dir(), seat_name(), claim_graph_scope());
-        return newest_record_in(&[holder_name()], &dir, &[], &seat, &graph, &hold_alive);
+        if !subagent_id(&id) {
+            return newest_record_in(&[holder_name()], &dir, &[], &seat, &graph, &hold_alive);
+        }
+        // A subagent works under its parent's sitting: the seat records
+        // and the hold of a conversation process above it count.
+        let chain = conversation_ancestry();
+        let mut holders = runner_record_holders(&chain);
+        let own = holder_name();
+        if !holders.contains(&own) {
+            holders.push(own);
+        }
+        return newest_record_in(&holders, &dir, &chain, &seat, &graph, &hold_alive);
     }
-    let mut holders: Vec<String> = runner_record_holders();
+    let mut holders: Vec<String> = runner_record_holders(&own_ancestry());
     let own = holder_name();
     if !holders.contains(&own) {
         holders.push(own);
@@ -28039,6 +28051,26 @@ pub fn live_held_issue() -> Option<(String, Hold)> {
         &claim_graph_scope(),
         &hold_alive,
     )
+}
+
+/// The ancestors a subagent shares with the conversation that started it:
+/// [`own_ancestry`] less PID 1, wrappers (`ljos hookd` among them) and any
+/// process whose own environment names no conversation. A server that
+/// runs every conversation's shells names none, so it links nobody.
+fn conversation_ancestry() -> Vec<(u32, String)> {
+    own_ancestry()
+        .into_iter()
+        .filter(|(pid, comm)| {
+            *pid > 1
+                && !WRAPPERS.contains(&comm.as_str())
+                && proc_tree::environ(*pid).is_some_and(|env| {
+                    env.iter().any(|(k, v)| {
+                        k == "CURSOR_CONVERSATION_ID"
+                            && usable_session_id(v).is_some_and(|id| !subagent_id(id))
+                    })
+                })
+        })
+        .collect()
 }
 
 /// [`held_from_records_in`] with each record's [`Hold`], and only the
@@ -38748,7 +38780,7 @@ mod tests {
         assert_eq!(hook_subagent(r#"{"hook_event_name":"Stop"}"#).0, None);
         let brief = subagent_brief("explore", "acme-12ab", true);
         assert!(
-            brief.contains("Do not open a sitting")
+            brief.contains("ljos sitting acme-12ab")
                 && brief.contains("ljos vote acme-12ab")
                 && brief.contains("--expect"),
             "{brief}"

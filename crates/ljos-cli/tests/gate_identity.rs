@@ -160,6 +160,33 @@ impl Box_ {
         text_of(&child.wait_with_output().unwrap())
     }
 
+    /// Shells a process `runner` starts one after another, as a runner
+    /// starts each of its conversations' tool calls under itself. The
+    /// runner runs with `env`; each step's shell is started with the
+    /// conversation id the step names, or the runner's own. `$LJOS` is the
+    /// binary and `$PAYLOAD` a file holding `payload`. Says what every
+    /// shell said, and the last one's exit status as `EXIT n`.
+    fn under(
+        &self,
+        runner: &Path,
+        env: &[(&str, &str)],
+        payload: &str,
+        steps: &[(Option<&str>, &str)],
+    ) -> String {
+        let file = self.run.join("payload.json");
+        std::fs::write(&file, payload).unwrap();
+        let mut all = vec![("LJOS", env!("CARGO_BIN_EXE_ljos"))];
+        let file = file.display().to_string();
+        all.push(("PAYLOAD", &file));
+        all.extend_from_slice(env);
+        let steps = serde_json::to_string(steps).unwrap();
+        let out = self
+            .command(runner.to_str().unwrap(), &["-c", RUNNER, &steps], &all)
+            .output()
+            .unwrap();
+        text_of(&out)
+    }
+
     fn card(&self, by: &str) {
         std::fs::write(
             &self.card,
@@ -217,6 +244,17 @@ impl Drop for Hookd {
         let _ = self.0.wait();
     }
 }
+
+const RUNNER: &str = "
+import json, os, subprocess, sys
+rc = 0
+for conv, line in json.loads(sys.argv[1]):
+    env = dict(os.environ)
+    if conv is not None:
+        env['CURSOR_CONVERSATION_ID'] = conv
+    rc = subprocess.call(['sh', '-c', line], env=env)
+print('EXIT', rc)
+";
 
 fn holder(conv: &str) -> String {
     format!("inky@{}", ljos_cli::session_tag(conv))
@@ -436,4 +474,105 @@ fn a_session_id_never_names_the_gates_conversation() {
             &format!("a merge whose {key} is X's id, Y's id in the env"),
         );
     }
+}
+
+/// A subagent has its own conversation id, `sand-sub...`, and no parent
+/// in its payload. The runner starts its tools under the process that
+/// opened the parent's sitting; that process, whose own environment names
+/// X and whose pid X's hold recorded, lets it in, for the shell hook and
+/// the git hook alike. Any other id is judged by its name alone, so Z is
+/// not let in for being a child of X's process. A shared parent that
+/// names no conversation, or a wrapper such as `ljos`, links nobody, so
+/// stranger Z and Z's subagent under that shared parent are refused.
+#[test]
+fn a_subagent_writes_under_its_parents_sitting_and_z_does_not() {
+    const SUB: &str = "sand-subagent-0001cccc";
+    let home = Box_::new();
+    home.card(&holder(CONV_X));
+    let python = PathBuf::from("/usr/bin/python3");
+    let x = [("CURSOR_CONVERSATION_ID", CONV_X)];
+    let claim = format!("\"$LJOS\" claim {ISSUE} >/dev/null 2>&1");
+    let hook = "\"$LJOS\" hook < \"$PAYLOAD\"";
+    let commit = "\"$LJOS\" git-hook pre-commit";
+
+    for (shell, what) in [(CONV_X, "the parent's"), (CONV_Y, "another conversation's")] {
+        let said = home.under(
+            &python,
+            &x,
+            &home.payload(Some(SUB.into()), MERGE),
+            &[(None, &claim), (Some(shell), hook)],
+        );
+        allowed(
+            &said,
+            &format!("the subagent's merge, {what} id in the hook env"),
+        );
+    }
+    let said = home.under(&python, &x, "", &[(None, &claim), (Some(SUB), commit)]);
+    assert!(
+        said.contains("EXIT 0"),
+        "the subagent's commit was refused:\n{said}"
+    );
+    let said = home.under(&python, &x, "", &[(None, &claim), (Some(CONV_Z), commit)]);
+    assert!(
+        said.contains("sitting-gate") && said.contains("holds no live sitting"),
+        "Z's commit under X's process was not refused:\n{said}"
+    );
+    refused(
+        &home.under(
+            &python,
+            &x,
+            &home.payload(Some(CONV_Z.into()), MERGE),
+            &[(None, &claim), (None, hook)],
+        ),
+        "Z's merge under X's process",
+    );
+
+    // Shared id-less parent: X claims in its shell, then Z's subagent and Z
+    // run under the same shared parent and are both refused.
+    refused(
+        &home.under(
+            &python,
+            &[],
+            &home.payload(Some(SUB.into()), MERGE),
+            &[(Some(CONV_X), &claim), (Some(CONV_Z), hook)],
+        ),
+        "Z's subagent merge under a shared parent that names no conversation",
+    );
+    refused(
+        &home.under(
+            &python,
+            &[],
+            &home.payload(Some(CONV_Z.into()), MERGE),
+            &[(Some(CONV_X), &claim), (Some(CONV_Z), hook)],
+        ),
+        "Z's merge under a shared parent that names no conversation",
+    );
+    let said = home.under(
+        &python,
+        &[],
+        "",
+        &[(Some(CONV_X), &claim), (Some(SUB), commit)],
+    );
+    assert!(
+        said.contains("sitting-gate"),
+        "Z's subagent commit under a shared parent that names no conversation was not refused:\n{said}"
+    );
+
+    let fake = home.run.join("fake");
+    std::fs::create_dir_all(&fake).unwrap();
+    std::os::unix::fs::symlink(&python, fake.join("ljos")).unwrap();
+    let forge = format!(
+        "mkdir -p \"$XDG_RUNTIME_DIR/ljos\"; printf '%s\\n' '{}' inky \"$PPID\" ljos 2026-10-25T00:00:00Z {ISSUE} - > \"$XDG_RUNTIME_DIR/ljos/hold-fake\"",
+        holder(CONV_X)
+    );
+    let said = home.under(
+        &fake.join("ljos"),
+        &x,
+        &home.payload(Some(SUB.into()), MERGE),
+        &[(None, &forge), (None, hook)],
+    );
+    refused(
+        &said,
+        "a subagent's merge under an ljos process that names X",
+    );
 }
