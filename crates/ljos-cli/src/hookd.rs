@@ -106,14 +106,17 @@ pub fn admit() {
     // The direct path has already loaded the seat env. A promoted rule
     // may still ask the pack once. Record the call first: a bare seat
     // binds the conversation from that record after this process exits.
-    if !args.iter().any(|a| a == "--prompt")
-        && crate::cursor_side_answer(&input, event.as_deref()).is_some()
-    {
-        let call = crate::hook_call_as(&input, event.as_deref());
-        crate::bind_call_conversation(&input, &call);
-        let _ = crate::subagent::note_hook_call(&input, &call.event);
-        if let Some(code) = crate::emit_cursor_side_answer(&input, event.as_deref()) {
-            std::process::exit(code);
+    if !args.iter().any(|a| a == "--prompt") {
+        if let Some((output, code)) = crate::cursor_side_answer(&input, event.as_deref()) {
+            let call = crate::hook_call_as(&input, event.as_deref());
+            crate::bind_call_conversation(&input, &call);
+            let _ = crate::subagent::note_hook_call(&input, &call.event);
+            std::process::exit(crate::emit_side_answer(
+                &input,
+                event.as_deref(),
+                &output,
+                code,
+            ));
         }
     }
     let gate = !args.iter().any(|a| a == "--prompt")

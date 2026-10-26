@@ -13591,6 +13591,13 @@ pub fn cursor_side_answer(input: &str, event: Option<&str>) -> Option<(String, i
 /// call is not one of those events.
 pub fn emit_cursor_side_answer(input: &str, event: Option<&str>) -> Option<i32> {
     let (output, code) = cursor_side_answer(input, event)?;
+    Some(emit_side_answer(input, event, &output, code))
+}
+
+/// Write a side answer [`cursor_side_answer`] already computed and return
+/// its status, so a caller that had to look at the answer first does not
+/// compute it twice.
+pub fn emit_side_answer(input: &str, event: Option<&str>, output: &str, code: i32) -> i32 {
     let mut out = std::io::stdout().lock();
     GATE_ANSWERED.store(true, std::sync::atomic::Ordering::SeqCst);
     let _ = std::io::Write::write_all(&mut out, output.as_bytes());
@@ -13611,7 +13618,7 @@ pub fn emit_cursor_side_answer(input: &str, event: Option<&str>) -> Option<i32> 
         hookd::started().elapsed(),
         std::time::Duration::ZERO,
     );
-    Some(code)
+    code
 }
 
 /// A gate's refusal when the hook fails before it reaches a verdict: an
@@ -45542,7 +45549,7 @@ mod tests {
             ("CLAUDECODE", "1"),
         ]);
         let _url = PackUrl::set(&url);
-        let line = finish_lesson("Software-3z37", "Build the lesson on the cluster fuse.");
+        let line = finish_lesson("fuse-3z37", "Build the lesson on the cluster fuse.");
         assert!(line.contains("proposed "), "{line}");
         assert!(line.contains(" as agent-derived;"), "{line}");
         assert!(line.contains("ljos accept "), "{line}");
