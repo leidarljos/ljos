@@ -111,6 +111,19 @@ jobs:
           command -v age-keygen
           command -v packset
           command -v packsetd
+      # Tracker tests need vissue 0.20. The same build as the other tools:
+      # a tag, --locked, the binary on PATH. Absent that binary the tests
+      # say so and return; this step is why CI does not take that path.
+      - name: Build vissue 0.20.0
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v0.20.0 https://github.com/leidarljos/vissue.git "${{ runner.temp }}/vissue"
+          cargo build --locked --manifest-path "${{ runner.temp }}/vissue/Cargo.toml" -p vissue-cli --bin vissue
+          mkdir -p "${{ runner.temp }}/bin"
+          install -m 0755 "${{ runner.temp }}/vissue/target/debug/vissue" "${{ runner.temp }}/bin/vissue"
+          echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
+          export PATH="${{ runner.temp }}/bin:${PATH}"
+          vissue --version | grep -q '0.20'
       # deedar on main writes no bytes/ and no sources sidecar, so a
       # carried deed made from one this bag does not carry cannot be
       # imported. .github/deedar-pin names the commit that writes both.
