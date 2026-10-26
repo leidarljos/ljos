@@ -441,7 +441,7 @@ fn run_batch(head: &Job, batch: &[PathBuf]) -> bool {
     } else {
         PathBuf::from("/")
     };
-    let mut cmd = std::process::Command::new(exe);
+    let mut cmd = std::process::Command::new(&exe);
     cmd.arg("hook")
         .arg("--apply-book")
         .args(batch)
