@@ -504,6 +504,52 @@ fn a_hung_pack_costs_one_short_wait_and_the_kept_rules_still_deny() {
     );
 }
 
+/// A pack that accepts and never answers must not delay the two events
+/// answered before the pack search. `LJOS_HOOKD=off` is the direct path.
+/// The same calls with the queue left on answer there too.
+#[test]
+fn a_hung_pack_still_allows_mcp_and_read_with_the_queue_off() {
+    let hab = hab("hungside");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for conn in listener.incoming().flatten() {
+            held.push(conn);
+        }
+    });
+    let url = format!("http://127.0.0.1:{port}");
+    let token = "t".repeat(32);
+    for hookd in ["off", "on"] {
+        for (what, payload) in [
+            ("ljos_note", mcp_payload("ljos_note")),
+            ("read", read_payload()),
+        ] {
+            let mut cmd = ljos(&hab, &["hook"]);
+            cmd.env("PACKSET_URL", &url)
+                .env("PACKSET_TOKEN", &token)
+                .env("PACKSET_WORKSPACE", "probe");
+            if hookd == "off" {
+                cmd.env("LJOS_HOOKD", "off");
+            }
+            let label = format!("{what} LJOS_HOOKD={hookd}");
+            let (took, out) = finished(feed(cmd, &payload), Duration::from_millis(1500), &label);
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            assert!(
+                took < Duration::from_millis(1500),
+                "{label} took {took:?}\n{stdout}\n{stderr}"
+            );
+            assert_eq!(out.status.code(), Some(0), "{label}: {stdout}\n{stderr}");
+            assert_eq!(stdout, ALLOW, "{label}");
+            assert!(
+                stderr.trim().is_empty(),
+                "{label} wrote on stderr: {stderr}"
+            );
+        }
+    }
+}
+
 /// The server's queue is full: the gate is refused in the runner's JSON
 /// with the reason, and exits 2, rather than run another hook or allow.
 #[test]
