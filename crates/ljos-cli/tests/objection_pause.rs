@@ -179,13 +179,24 @@ fn objections_past_the_child_cap_are_not_dropped() {
     assert_eq!(filed, 8, "filed {filed}, not the cap:\n{kids}\n{text}");
     let card = t.show(&parent).to_string();
     assert!(
-        card.contains("distinct bug number"),
-        "the finding is not on the ticket:\n{card}"
+        card.contains("was not filed") && card.contains("distinct bug number 9"),
+        "the unfiled objection is not on the ticket:\n{card}"
+    );
+    let once = card.matches("was not filed").count();
+    let _ = ljos_cli::converge::record_dissents(&parent);
+    let again = t.show(&parent).to_string();
+    assert_eq!(
+        again.matches("was not filed").count(),
+        once,
+        "the pause was written again:\n{again}"
     );
 }
 
 #[test]
 fn the_descendant_limit_pauses_and_does_not_close() {
+    if !vissue_020() {
+        return;
+    }
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let t = Tracker::new(Some("[panel]\nmax_descendants = 1\n"));
     let parent = t.vissue(&["q", "-p", "probe", "wide tree"]);
@@ -212,6 +223,11 @@ fn the_descendant_limit_pauses_and_does_not_close() {
     assert!(
         !kids.contains("one more bug"),
         "filed past the limit:\n{kids}"
+    );
+    let card = t.show(&parent).to_string();
+    assert!(
+        card.contains("was not filed") && card.contains("one more bug"),
+        "the pause is not on the ticket:\n{card}"
     );
 }
 

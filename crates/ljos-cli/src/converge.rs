@@ -990,7 +990,11 @@ pub fn record_dissents(issue: &str) -> Vec<String> {
     // The tie never reaches here with a minority to name.
     if passed {
         if descendants >= limits.max_descendants {
-            lines.push("paused for a person; the descendant limit is reached".to_string());
+            let pause = "paused for a person; the descendant limit is reached";
+            if !ticket_mentions(issue, pause) {
+                let _ = note_issue(issue, pause);
+            }
+            lines.push(pause.to_string());
         } else {
             lines.extend(file_settled_minority(
                 issue,
@@ -1022,12 +1026,25 @@ fn say_unfiled(
             Err(e) => lines.push(format!("dissent: note refused: {e:#}")),
         }
     }
-    lines.push(format!(
+    let pause = format!(
         "paused for a person; {} from {} was not filed: {}",
         objection.severity.word(),
         objection.persona,
         objection.text
-    ));
+    );
+    if !ticket_mentions(issue, &pause) {
+        if let Err(e) = note_issue(issue, &pause) {
+            lines.push(format!("dissent: pause note refused: {e:#}"));
+        }
+    }
+    lines.push(pause);
+}
+
+/// Whether the ticket text already carries `text`, so a pause is written once.
+fn ticket_mentions(issue: &str, text: &str) -> bool {
+    crate::issue_record(issue)
+        .ok()
+        .is_some_and(|v| v.to_string().contains(text))
 }
 
 /// The issue at the top of a dissent or fix chain. A title that is not
