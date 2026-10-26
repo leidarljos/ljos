@@ -59,10 +59,10 @@ fn a_raw_tracker_write_under_a_runner_is_refused_with_the_ljos_verb() {
             r#"ljos file "TITLE" --parent ljos-gkq2"#,
         ),
         (r#"vissue q -p ljos "a ticket""#, "ljos file"),
-        ("vissue close ljos-ab12", "ljos finish ljos-ab12 --close"),
+        ("vissue close ljos-ab12", "ljos finish ljos-ab12"),
         (
             "vissue cancel ljos-ab12",
-            "ljos finish ljos-ab12 --status cancelled --close",
+            "ljos finish ljos-ab12 --status cancelled",
         ),
         ("vissue claim ljos-ab12", "ljos sitting ljos-ab12"),
         ("vissue release ljos-ab12", "ljos release ljos-ab12"),
@@ -75,7 +75,7 @@ fn a_raw_tracker_write_under_a_runner_is_refused_with_the_ljos_verb() {
         ("/usr/local/bin/vissue refile ljos-ab12 tools", "ljos file"),
         (
             "VISSUE_AGENT=saddle vissue update ljos-ab12 -s done",
-            "ljos finish ljos-ab12 --close",
+            "ljos finish ljos-ab12",
         ),
         (
             "vissue update ljos-ab12 -s STARTED",
@@ -91,6 +91,13 @@ fn a_raw_tracker_write_under_a_runner_is_refused_with_the_ljos_verb() {
             said.contains(&format!("Run `{instead}")),
             "{line} did not name {instead}:\n{said}"
         );
+        if instead.starts_with("ljos finish") {
+            assert!(
+                said.contains(&format!("Run `{instead}` instead.")),
+                "{line} still offers a close:\n{said}"
+            );
+            assert!(!said.contains("--close"), "{line}:\n{said}");
+        }
     }
 }
 
@@ -140,9 +147,10 @@ fn the_runner_hook_refuses_a_raw_tracker_write() {
     let said = text(&out);
     assert!(said.contains("deny"), "{said}");
     assert!(
-        said.contains("Run `ljos finish ljos-ab12 --close` instead."),
+        said.contains("Run `ljos finish ljos-ab12` instead."),
         "{said}"
     );
+    assert!(!said.contains("--close"), "{said}");
 }
 
 /// ljos runs `vissue` itself for its own verbs, outside any runner's hook,

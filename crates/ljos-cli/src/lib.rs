@@ -23461,14 +23461,14 @@ fn tracker_write_instead(words: &[String]) -> Option<(String, String)> {
         }
         "claim" => format!("ljos sitting {id}"),
         "release" => format!("ljos release {id}"),
-        "close" => format!("ljos finish {id} --close"),
-        "cancel" => format!("ljos finish {id} --status cancelled --close"),
+        "close" => format!("ljos finish {id}"),
+        "cancel" => format!("ljos finish {id} --status cancelled"),
         "update" => match value(&["-s", "--state"])
             .map(str::to_ascii_uppercase)
             .as_deref()
         {
-            Some("DONE") => format!("ljos finish {id} --close"),
-            Some("CANCELLED") => format!("ljos finish {id} --status cancelled --close"),
+            Some("DONE") => format!("ljos finish {id}"),
+            Some("CANCELLED") => format!("ljos finish {id} --status cancelled"),
             Some("STARTED") => format!("ljos sitting {id}"),
             _ => format!("ljos note {id} \"...\""),
         },
