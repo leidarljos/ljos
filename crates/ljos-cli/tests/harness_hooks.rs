@@ -1178,7 +1178,8 @@ fn an_agy_idle_stop_finishes_and_a_mid_loop_stop_does_not() {
         &[("LJOS_TRACK_WORK", "on")],
     );
     let done = std::fs::read_to_string(hab.tracker.join("vissue.log")).unwrap();
-    assert!(done.contains("-s DONE"), "{done}");
+    assert!(!done.contains("-s DONE"), "{done}");
+    assert!(!done.contains("-s CANCELLED"), "{done}");
 }
 
 #[test]
@@ -2036,7 +2037,8 @@ fn an_opencode_commit_no_post_cited_is_deeded_at_stop() {
         org.contains(&format!("cited deed-file-commit-{scripted}")),
         "{org}"
     );
-    assert!(org.contains("* DONE"), "{org}");
+    assert!(!org.contains("* DONE"), "{org}");
+    assert!(!org.contains("* CANCELLED"), "{org}");
 }
 
 struct Daemon(std::process::Child);

@@ -3005,12 +3005,9 @@ fn finish_rows(book: &mut Book, repos: &[String]) {
         if finished {
             continue;
         }
-        let named = book.repos.get(repo).is_some_and(|row| row.named);
-        let done = if named {
-            hand_back(&issue)
-        } else {
-            close_issue(&issue)
-        };
+        // A sitting ending is not the person accepting the work. Every
+        // path here drops the claim and leaves the ticket open.
+        let done = hand_back(&issue);
         match done {
             Ok(()) => {
                 if let Some(row) = book.repos.get_mut(repo) {
@@ -3020,23 +3017,6 @@ fn finish_rows(book: &mut Book, repos: &[String]) {
             Err(e) => log_line(&format!("finish: {e}")),
         }
     }
-}
-
-/// The ticket is done, the claim is released, the tracker commit says
-/// finished. The lesson was written just before this, from the sitting.
-fn close_issue(issue: &str) -> Result<(), String> {
-    run_timed("vissue", &["update", issue, "-s", "DONE"], &[]).map_err(|e| e.to_string())?;
-    let assignee = super::resolve_assignee(None);
-    if which::which("claimdag").is_ok() {
-        if let Err(e) = super::release(issue, &assignee) {
-            log_line(&format!("release: {e:#}"));
-        }
-    }
-    let line = super::persist_tracker(issue, "finished");
-    if line.contains("could not") || line.contains("refused") {
-        return Err(line.trim().to_string());
-    }
-    Ok(())
 }
 
 /// Release a claim the git hook took on an issue a commit named. The
@@ -3253,43 +3233,17 @@ fn empty_filed_row(row: &RepoBook, held: &str) -> bool {
         .is_ok_and(|v| v["deeds"].as_array().is_none_or(|deeds| deeds.is_empty()))
 }
 
-/// Cancel `auto`, the placeholder a hook filed, now that a commit named
-/// `named`. The claim is released first, and the tracker commit and the
-/// log say why. A claim graph's release hands the issue back to TODO, so
-/// the cancel takes STARTED or TODO and leaves any other state alone.
+/// Drop the claim on `auto`, the placeholder a hook filed, now that a
+/// commit named `named`. A sitting ending is not the person accepting
+/// the work, and this program does not mark the placeholder CANCELLED.
+/// The ticket stays open.
 fn cancel_placeholder(auto: &str, named: &str) {
-    let assignee = super::resolve_assignee(None);
-    if which::which("claimdag").is_ok() {
-        if let Err(e) = super::release(auto, &assignee) {
-            log_line(&format!("release: {e:#}"));
-        }
+    if let Err(e) = hand_back(auto) {
+        log_line(&format!("release: {e}"));
     }
-    let state = super::issue_record(auto)
-        .ok()
-        .and_then(|v| v["state"].as_str().map(str::to_string))
-        .unwrap_or_default();
-    if !matches!(state.as_str(), "STARTED" | "TODO") {
-        log_line(&format!(
-            "claim: left {auto} {state}, not a placeholder now"
-        ));
-        return;
-    }
-    match run_timed(
-        "vissue",
-        &["update", auto, "-s", "CANCELLED", "--if-state", &state],
-        &[],
-    ) {
-        Ok(_) => {
-            let line = super::persist_tracker(auto, "cancelled");
-            if line.contains("could not") || line.contains("refused") {
-                log_line(line.trim());
-            }
-            log_line(&format!(
-                "claim: cancelled {auto}, filed for this sitting with no deed; the commit named {named}"
-            ));
-        }
-        Err(e) => log_line(&format!("claim: could not cancel {auto}: {e}")),
-    }
+    log_line(&format!(
+        "claim: left {auto} open, filed for this sitting with no deed; the commit named {named}"
+    ));
 }
 
 /// Remember a guard ask on this repository. The book file is the only
@@ -7365,8 +7319,9 @@ print(f"id={ident}")
         assert_eq!(log, log_before, "a second stop does not finish again");
         assert!(log.contains("claimed"), "{log}");
         assert!(log.contains("cited a deed"), "{log}");
-        assert!(log.contains("finished"), "{log}");
-        assert_eq!(log.matches("finished").count(), 1, "{log}");
+        assert!(log.contains("released"), "{log}");
+        assert!(!log.contains("finished"), "{log}");
+        assert_eq!(log.matches("released").count(), 1, "{log}");
         let org = std::fs::read_to_string(tracker.join("Software/probe/issues.org")).unwrap();
         assert!(org.contains("Add a readme line"), "{org}");
         let sha = String::from_utf8(
@@ -8001,7 +7956,9 @@ print(f"id={ident}")
         let held = open_issue().expect("the start filed an issue");
         assert!(said.contains(&held), "{said}");
         mcp_shutdown();
-        assert!(git_log(&tracker).contains("finished"));
+        let subjects = git_log(&tracker);
+        assert!(subjects.contains("released"), "{subjects}");
+        assert!(!subjects.contains("finished"), "{subjects}");
         assert!(open_issue().is_none());
     }
 
@@ -8154,10 +8111,11 @@ print(f"id={ident}")
         let _ = observe(&stop_raw, &stop_call);
         let log = git_log(&tracker);
         assert_eq!(
-            log.matches(&format!("{started} finished")).count(),
+            log.matches(&format!("{started} released")).count(),
             1,
             "{log}"
         );
+        assert!(!log.contains("finished"), "{log}");
     }
 
     /// A STARTED row another holder keeps in the same checkout is that
@@ -9592,12 +9550,9 @@ print(f"id={ident}")
         let live = book_json(dir.path(), "live-one");
         let row = live["repos"].as_object().unwrap().values().next().unwrap();
         assert_eq!(row["finished"], false, "{live}");
-        assert_eq!(
-            git_log(&tracker).matches("finished").count(),
-            2,
-            "{}",
-            git_log(&tracker)
-        );
+        let subjects = git_log(&tracker);
+        assert!(!subjects.contains("finished"), "{subjects}");
+        assert_eq!(subjects.matches("released").count(), 2, "{subjects}");
     }
 
     /// ljos-gfiz: a cited commit that never landed is replaced by the
@@ -10123,8 +10078,7 @@ print(f"id={ident}")
 
     /// The willma w1 shape: session 2's first edit files a placeholder,
     /// then the commit names the reopened session 1 issue. The row moves to
-    /// the named issue with the sha in `deeds`, and the placeholder is
-    /// cancelled.
+    /// the named issue with the sha in `deeds`. The placeholder stays open.
     #[test]
     fn a_named_commit_takes_over_the_empty_issue_the_edit_filed() {
         let _g = lock();
@@ -10161,10 +10115,10 @@ print(f"id={ident}")
         assert!(row.elsewhere.is_empty(), "{:?}", row.elsewhere);
         assert!(row.also.is_empty(), "{:?}", row.also);
         assert!(row.named && !row.filed);
-        assert_eq!(issue_state(&tracker, &auto), "CANCELLED");
+        assert_eq!(issue_state(&tracker, &auto), "TODO");
         let log =
             std::fs::read_to_string(crate::runtime_dir().join("book.log")).unwrap_or_default();
-        assert!(log.contains(&format!("claim: cancelled {auto}")), "{log}");
+        assert!(log.contains(&format!("claim: left {auto} open")), "{log}");
         assert_eq!(creates(&tracker), 2, "the commit filed no third issue");
     }
 
@@ -10704,11 +10658,10 @@ print(f"id={ident}")
         assert_eq!(creates(&tracker), 0);
     }
 
-    /// A claim graph's release hands the placeholder back to TODO before
-    /// the cancel runs. The cancel takes it from TODO too, and leaves an
-    /// issue that is DONE by then alone.
+    /// A placeholder the hook filed, and one a person already marked DONE,
+    /// stay as they are. This program does not mark the placeholder CANCELLED.
     #[test]
-    fn a_placeholder_released_to_todo_is_still_cancelled() {
+    fn a_placeholder_is_left_open() {
         let _g = lock();
         let _saved = saved_env();
         let (dir, tracker, _repo) = scratch();
@@ -10716,7 +10669,7 @@ print(f"id={ident}")
         let released = file_by_hand("Work in repo");
         assert_eq!(issue_state(&tracker, &released), "TODO");
         cancel_placeholder(&released, "probe-named");
-        assert_eq!(issue_state(&tracker, &released), "CANCELLED");
+        assert_eq!(issue_state(&tracker, &released), "TODO");
         let done = file_by_hand("Work in repo again");
         let _ = std::process::Command::new("vissue")
             .args(["update", &done, "-s", "DONE"])
@@ -10724,6 +10677,8 @@ print(f"id={ident}")
             .unwrap();
         cancel_placeholder(&done, "probe-named");
         assert_eq!(issue_state(&tracker, &done), "DONE");
+        let org = std::fs::read_to_string(tracker.join("Software/probe/issues.org")).unwrap();
+        assert!(!org.contains("CANCELLED"), "{org}");
     }
 
     fn stamp_claimant(tracker: &Path, issue: &str, holder: &str) {
@@ -11090,12 +11045,14 @@ print(f"id={ident}")
         let dead_row = dead.repos.values().next().expect("the dead row stays");
         assert!(dead_row.finished, "a dead owner was not finished");
         assert_eq!(dead_row.issue.as_deref(), Some(dead_issue.as_str()));
-        assert_eq!(issue_state(&tracker, &dead_issue), "DONE");
+        assert_ne!(issue_state(&tracker, &dead_issue), "DONE");
+        assert_ne!(issue_state(&tracker, &dead_issue), "CANCELLED");
         assert!(
             load_book(&book_path("tha1-old")).repos.is_empty(),
             "an old row was kept"
         );
-        assert_eq!(issue_state(&tracker, &old_issue), "DONE");
+        assert_ne!(issue_state(&tracker, &old_issue), "DONE");
+        assert_ne!(issue_state(&tracker, &old_issue), "CANCELLED");
         let live = hook_row("tha1-live", &repo);
         assert!(!live.finished);
         assert_eq!(live.issue.as_deref(), Some(live_issue.as_str()));
@@ -11103,14 +11060,156 @@ print(f"id={ident}")
         let reused = load_book(&book_path("tha1-reused"));
         let reused_row = reused.repos.values().next().expect("the reused row stays");
         assert!(reused_row.finished, "a reused owner pid was taken as live");
-        assert_eq!(issue_state(&tracker, &reused_issue), "DONE");
-        assert_eq!(
-            git_log(&tracker).matches("finished").count(),
-            3,
-            "{}",
-            git_log(&tracker)
-        );
+        assert_ne!(issue_state(&tracker, &reused_issue), "DONE");
+        assert_ne!(issue_state(&tracker, &reused_issue), "CANCELLED");
+        let subjects = git_log(&tracker);
+        assert!(!subjects.contains("finished"), "{subjects}");
+        assert_eq!(subjects.matches("released").count(), 3, "{subjects}");
         assert_eq!(creates(&tracker), 4);
+    }
+
+    /// Claiming a ticket that already exists, then ending the sitting,
+    /// leaves that ticket open. The same path serves an idle sweep and a
+    /// dead owner. A placeholder this program filed and never worked is
+    /// not marked CANCELLED either.
+    #[test]
+    fn a_claimed_ticket_stays_open_when_the_sitting_ends() {
+        let _g = lock();
+        let _saved = Restore::new(&[
+            "PATH",
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_RUNTIME_DIR",
+            "VISSUE_ROOT",
+            "VISSUE_NO_ROUTE",
+            "VISSUE_AGENT",
+            "LJOS_TRACKER_GIT",
+            "LJOS_PROJECT",
+            "LJOS_SEAT",
+            "LJOS_SESSION_ID",
+            "LJOS_HOLD",
+            "LJOS_IN_HOOK",
+            "PACKSET_URL",
+            "ISSUE_ROOT",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_NOSYSTEM",
+        ]);
+        let vissue = std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).any(|dir| dir.join("vissue").is_file()))
+            .unwrap_or(false);
+        if !vissue && std::path::Path::new("/tmp/ljos-bins/vissue").is_file() {
+            let path = std::env::var("PATH").unwrap_or_default();
+            unsafe { std::env::set_var("PATH", format!("/tmp/ljos-bins:{path}")) };
+        }
+        let version = std::process::Command::new("vissue")
+            .arg("--version")
+            .output()
+            .expect("real vissue on PATH");
+        let version = String::from_utf8_lossy(&version.stdout);
+        assert!(
+            version.contains("0.20"),
+            "this test needs vissue 0.20, got {version}"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let tracker = dir.path().join("tracker");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&tracker).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |root: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{args:?} {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "seat@example.invalid"]);
+        git(&repo, &["config", "user.name", "seat"]);
+        git(&repo, &["config", "commit.gpgsign", "false"]);
+        git(&repo, &["config", "core.hooksPath", "/dev/null"]);
+        std::fs::write(repo.join("README.md"), "seed\n").unwrap();
+        git(&repo, &["add", "README.md"]);
+        git(&repo, &["commit", "-q", "-m", "seed"]);
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+            std::env::set_var("XDG_DATA_HOME", home.join(".local/share"));
+            std::env::set_var("XDG_STATE_HOME", home.join(".state"));
+            std::env::set_var("XDG_RUNTIME_DIR", home.join("run"));
+            std::env::set_var("VISSUE_ROOT", &tracker);
+            std::env::set_var("VISSUE_NO_ROUTE", "1");
+            std::env::set_var("VISSUE_AGENT", "saddle@test");
+            std::env::set_var("LJOS_TRACKER_GIT", "commit");
+            std::env::set_var("LJOS_PROJECT", "probe");
+            std::env::set_var("LJOS_SEAT", "saddle");
+            std::env::remove_var("LJOS_SESSION_ID");
+            std::env::remove_var("LJOS_HOLD");
+            std::env::remove_var("LJOS_IN_HOOK");
+            std::env::set_var("PACKSET_URL", "off");
+            std::env::remove_var("ISSUE_ROOT");
+            std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+        }
+        std::fs::create_dir_all(home.join("run")).unwrap();
+        let id = std::process::Command::new("vissue")
+            .args(["q", "-p", "probe", "already filed"])
+            .output()
+            .unwrap();
+        assert!(
+            id.status.success(),
+            "{}",
+            String::from_utf8_lossy(&id.stderr)
+        );
+        let id = String::from_utf8(id.stdout).unwrap().trim().to_string();
+        let said = start_work(
+            Some(&id),
+            Some(repo.to_str().unwrap()),
+            "Keep the ticket open",
+        )
+        .unwrap();
+        assert!(said.contains(&id), "{said}");
+        let path = book_path(&sitting_key());
+        let mut book = load_book(&path);
+        finish_open(&mut book);
+        let show = std::process::Command::new("vissue")
+            .args(["show", &id, "--json"])
+            .output()
+            .unwrap();
+        let card: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+        let state = card["state"].as_str().unwrap_or("");
+        assert_ne!(state, "DONE", "{card}");
+        assert_ne!(state, "CANCELLED", "{card}");
+        let placeholder = std::process::Command::new("vissue")
+            .args(["q", "-p", "probe", "placeholder"])
+            .output()
+            .unwrap();
+        let placeholder = String::from_utf8(placeholder.stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        let _ = std::process::Command::new("vissue")
+            .args(["claim", &placeholder])
+            .output()
+            .unwrap();
+        cancel_placeholder(&placeholder, &id);
+        let show = std::process::Command::new("vissue")
+            .args(["show", &placeholder, "--json"])
+            .output()
+            .unwrap();
+        let card: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
+        let state = card["state"].as_str().unwrap_or("");
+        assert_ne!(state, "DONE", "{card}");
+        assert_ne!(state, "CANCELLED", "{card}");
     }
 }
 

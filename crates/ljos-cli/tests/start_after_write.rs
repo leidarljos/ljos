@@ -403,7 +403,8 @@ fn a_session_above_the_hooks_shell_does_not_own_its_sitting() {
         let said = mcp_start(&hab, "add a slug helper");
         let log = std::fs::read_to_string(hab.run.join("ljos/book.log")).unwrap_or_default();
         let context = format!("{name}: {said}\nbook.log:\n{log}");
-        assert_eq!(state_of(&hab, "probe-0001"), "DONE", "{context}");
+        assert_ne!(state_of(&hab, "probe-0001"), "DONE", "{context}");
+        assert_ne!(state_of(&hab, "probe-0001"), "CANCELLED", "{context}");
         assert_eq!(said.lines().next(), Some("claimed probe-0002"), "{context}");
         stop(session);
     }

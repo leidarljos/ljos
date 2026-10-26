@@ -606,7 +606,8 @@ fn an_idle_sitting_is_finished_and_loses_its_prompt() {
     );
     hab.ljos_in(&hab.repo, &["hook"], Some(&post), &[]);
     let log = vissue_log(&hab.tracker);
-    assert!(log.contains("DONE"), "{log}");
+    assert!(!log.contains("-s DONE"), "{log}");
+    assert!(!log.contains("-s CANCELLED"), "{log}");
     let book: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&books[0]).unwrap()).unwrap();
     let prompt = book["prompt"].as_str().unwrap_or("");
@@ -713,14 +714,12 @@ fn a_commit_in_one_repo_finishes_an_idle_row_in_another() {
     install(&hab);
     commit_file(&hab, "fresh.txt", "record the second reading");
     let org = fs::read_to_string(hab.tracker.join("Software/probe/issues.org")).unwrap();
-    assert!(
-        org.contains("* DONE [#C] notes: add a second line\n"),
-        "repo A's row was still open:\n{org}"
-    );
+    assert!(!org.contains("* DONE"), "repo A's row was closed:\n{org}");
+    assert!(!org.contains("* CANCELLED"), "{org}");
     let log = vissue_log(&hab.tracker);
     assert!(
-        log.contains("update probe-a11e -s DONE"),
-        "repo A was not finished:\n{log}"
+        !log.contains("update probe-a11e -s DONE"),
+        "repo A was closed:\n{log}"
     );
     let saved: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&book_path).unwrap()).unwrap();
