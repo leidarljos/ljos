@@ -896,6 +896,7 @@ fn a_silent_server_does_not_outrun_the_hook_budget() {
 }
 
 /// A user-rule denial still refuses the MCP call when the server is slow.
+/// The deny is one JSON object and exits 0, so the runner shows the reason.
 /// A shell call that gets no slot is still refused.
 #[test]
 fn a_slow_server_still_refuses_a_real_denial_and_a_shell_call() {
@@ -917,7 +918,7 @@ fn a_slow_server_still_refuses_a_real_denial_and_a_shell_call() {
         took < Duration::from_millis(1500),
         "denial took {took:?}\n{stdout}\n{stderr}"
     );
-    assert_eq!(out.status.code(), Some(2), "{stdout}\n{stderr}");
+    assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
     let value: serde_json::Value =
         serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
     assert_eq!(value["permission"], "deny", "{stdout}");

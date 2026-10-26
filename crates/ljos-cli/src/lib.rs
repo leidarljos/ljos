@@ -13159,11 +13159,27 @@ fn output_allows(output: &str) -> bool {
     decision == Some("allow")
 }
 
+/// Exit status for one side answer. Cursor reads exit 0 as use the JSON.
+/// Exit 2 blocks by itself, and a caller that drops stdout on exit 2
+/// never shows the reason. One allow or deny object exits 0. Empty text,
+/// any other value, or a second JSON value exits [`GATE_REFUSED_EXIT`].
+/// A hook failure keeps [`gate_exit`].
+fn side_answer_exit(output: &str) -> i32 {
+    let Ok(value) = serde_json::from_str::<Value>(output.trim()) else {
+        return GATE_REFUSED_EXIT;
+    };
+    match value.get("permission").and_then(Value::as_str) {
+        Some("allow" | "deny") => 0,
+        _ => GATE_REFUSED_EXIT,
+    }
+}
+
 /// `beforeMCPExecution` and `beforeReadFile` are judged on `preToolUse`.
 /// They still answer, because a permission hook that prints nothing is
 /// refused when `failClosed` is set. The answer is allow, or the
 /// user-rule denial when one matches. `None` for every other call.
 /// The seat and the pack are not read.
+/// One allow or deny object exits 0. Exit 2 is a hook failure.
 #[must_use]
 pub fn cursor_side_answer(input: &str, event: Option<&str>) -> Option<(String, i32)> {
     let call = hook_call_as(input, event);
@@ -13174,7 +13190,7 @@ pub fn cursor_side_answer(input: &str, event: Option<&str>) -> Option<(String, i
     }
     let ruled = user_rules::guard_payload(input);
     let output = hook_output_ruled(&call, "", ruled.as_ref());
-    let code = gate_exit(&output);
+    let code = side_answer_exit(&output);
     Some((output, code))
 }
 
@@ -51448,6 +51464,18 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(gate_exit(""), GATE_REFUSED_EXIT);
         assert_eq!(
             gate_exit("{\"permission\":\"allow\"}\n{\"permission\":\"deny\"}"),
+            GATE_REFUSED_EXIT
+        );
+        assert_eq!(super::side_answer_exit("{\"permission\":\"allow\"}\n"), 0);
+        assert_eq!(super::side_answer_exit("{\"permission\":\"deny\"}\n"), 0);
+        assert_eq!(
+            super::side_answer_exit("{\"permission\":\"ask\"}\n"),
+            GATE_REFUSED_EXIT
+        );
+        assert_eq!(super::side_answer_exit("{}"), GATE_REFUSED_EXIT);
+        assert_eq!(super::side_answer_exit(""), GATE_REFUSED_EXIT);
+        assert_eq!(
+            super::side_answer_exit("{\"permission\":\"allow\"}\n{\"permission\":\"deny\"}"),
             GATE_REFUSED_EXIT
         );
     }

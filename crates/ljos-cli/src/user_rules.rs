@@ -1687,6 +1687,11 @@ mod tests {
         .unwrap();
         let out = super::super::hook_output_ruled(&cursor, "", Some(&verdict));
         assert!(out.contains("\"permission\":\"deny\""), "{out}");
+        let payload = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"please ask @ocaisa"}}"#;
+        let (out, code) = super::super::cursor_side_answer(payload, None).unwrap();
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("\"permission\":\"deny\""), "{out}");
+        assert!(out.contains("ocaisa") || out.contains("Alan"), "{out}");
     }
 
     /// With no pack to ask, no promoted lesson is stated, the person's no
