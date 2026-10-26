@@ -159,3 +159,34 @@ fn objections_past_the_child_cap_are_not_dropped() {
         "the finding is not on the ticket:\n{card}"
     );
 }
+
+#[test]
+fn the_descendant_limit_pauses_and_does_not_close() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let t = Tracker::new(Some("[panel]\nmax_descendants = 1\n"));
+    let parent = t.vissue(&["q", "-p", "probe", "wide tree"]);
+    let child = t.vissue(&["q", "-p", "probe", "--parent", &parent, "already filed"]);
+    let before = t.vissue(&["children", &parent, "--json"]);
+    assert!(before.contains(&child), "{before}");
+    t.vissue(&[
+        "note",
+        &parent,
+        "finding: carol: blocking: a real failure :: one more bug",
+    ]);
+    let lines = ljos_cli::converge::record_dissents(&parent);
+    let text = lines.join("\n");
+    assert!(
+        text.contains("paused for a person"),
+        "the limit did not pause:\n{text}"
+    );
+    assert!(text.contains("one more bug"), "{text}");
+    let state = t.show(&parent)["state"].as_str().unwrap().to_string();
+    assert_ne!(state, "DONE", "{text}");
+    assert_ne!(state, "CANCELLED", "{text}");
+    let kids = t.vissue(&["children", &parent, "--json"]);
+    assert!(kids.contains(&child), "{kids}");
+    assert!(
+        !kids.contains("one more bug"),
+        "filed past the limit:\n{kids}"
+    );
+}

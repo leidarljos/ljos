@@ -370,6 +370,8 @@ pub struct PanelState {
     pub dissent_depth: usize,
     pub children_filed: usize,
     pub open_children: usize,
+    /// Issues under this one, not counting it. 0 when the caller has not counted.
+    pub descendants: usize,
     /// The round has not been sat: ballots are missing.
     pub awaiting_ballots: bool,
     pub seen: Vec<(String, String)>,
@@ -387,6 +389,7 @@ impl PanelState {
             dissent_depth: 0,
             children_filed: 0,
             open_children: 0,
+            descendants: 0,
             awaiting_ballots: false,
             seen: Vec::new(),
             wall_secs: None,
@@ -524,6 +527,14 @@ pub fn plan_round(state: &PanelState, limits: &ScopeBudget) -> RoundPlan {
     if state.awaiting_ballots {
         return RoundPlan::Hold {
             why: "the panel has not all voted".into(),
+        };
+    }
+    if state.descendants >= limits.max_descendants {
+        return RoundPlan::Hold {
+            why: format!(
+                "{} descendants reached the limit of {}. A person has to act",
+                state.descendants, limits.max_descendants
+            ),
         };
     }
     let mut fileable = Vec::new();
@@ -887,6 +898,7 @@ pub fn record_dissents(issue: &str) -> Vec<String> {
         dissent_depth: dissent_depth(&v),
         children_filed,
         open_children: 0,
+        descendants: descendant_count(issue),
         awaiting_ballots: false,
         seen,
         wall_secs: None,
@@ -894,6 +906,8 @@ pub fn record_dissents(issue: &str) -> Vec<String> {
         objections,
     };
     let limits = load_budget().panel;
+    let mut descendants = state.descendants;
+    let mut filed_now = 0usize;
     let disposal = dispose(&state, &limits);
     let mut lines = round_lines;
     let project = project_of(&v, issue);
@@ -913,10 +927,20 @@ pub fn record_dissents(issue: &str) -> Vec<String> {
                 Err(e) => lines.push(format!("dissent: note refused: {e:#}")),
             },
             Fate::File(objection) => {
-                let title = dissent_title(&objection);
-                match file_child(issue, &project, &title, depth + 1) {
-                    Ok(id) => lines.push(format!("filed {id}  TODO  [#C]  {title}")),
-                    Err(e) => lines.push(format!("dissent: file refused: {e:#}")),
+                let over_children = state.children_filed + filed_now >= limits.max_children;
+                let over_descendants = descendants >= limits.max_descendants;
+                if over_children || over_descendants {
+                    say_unfiled(issue, &objection, &noted, &mut lines);
+                } else {
+                    let title = dissent_title(&objection);
+                    match file_child(issue, &project, &title, depth + 1) {
+                        Ok(id) => {
+                            filed_now += 1;
+                            descendants += 1;
+                            lines.push(format!("filed {id}  TODO  [#C]  {title}"));
+                        }
+                        Err(e) => lines.push(format!("dissent: file refused: {e:#}")),
+                    }
                 }
             }
             Fate::Listed(objection) => say_unfiled(issue, &objection, &noted, &mut lines),
@@ -932,13 +956,17 @@ pub fn record_dissents(issue: &str) -> Vec<String> {
     // still holds, and that is not the lead, is still a dissent child.
     // The tie never reaches here with a minority to name.
     if passed {
-        lines.extend(file_settled_minority(
-            issue,
-            &project,
-            &choices,
-            &children,
-            depth + 1,
-        ));
+        if descendants >= limits.max_descendants {
+            lines.push("paused for a person; the descendant limit is reached".to_string());
+        } else {
+            lines.extend(file_settled_minority(
+                issue,
+                &project,
+                &choices,
+                &children,
+                depth + 1,
+            ));
+        }
     }
     lines
 }
@@ -1565,6 +1593,26 @@ mod tests {
             }
             other => panic!("a spent wall budget does not close the parent: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_descendant_limit_pauses_for_a_person() {
+        let limits = ScopeBudget::panel();
+        let mut state = PanelState::at_round(2);
+        state.descendants = limits.max_descendants;
+        match plan_round(&state, &limits) {
+            RoundPlan::Hold { why } => {
+                assert!(why.contains("person has to act"), "{why}");
+                assert!(why.contains("descendants"), "{why}");
+            }
+            other => panic!("the descendant limit does not close the parent: {other:?}"),
+        }
+        state.descendants = limits.max_descendants - 1;
+        state.passed = false;
+        assert!(matches!(
+            plan_round(&state, &limits),
+            RoundPlan::OpenRound { .. }
+        ));
     }
 
     #[test]

@@ -18105,9 +18105,9 @@ pub const WORKFLOW_NOTE_PREFIX: &str = "workflow:";
 pub const WORKFLOW_TAG_PREFIX: &str = "workflow-";
 
 /// The workflow settings S1 reads: which workflow new feature work takes,
-/// the panel, who can veto, the pass share and the tie-break. The round
-/// limit lives on the panel budget. The loop closes itself, and nothing
-/// here waits on the person.
+/// the panel, who can veto, the pass share and the tie-break. A round
+/// count does not close the parent. At the descendant limit the reading
+/// pauses for a person. The person closes with `ljos finish --close`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowConfig {
     /// The workflow new feature work binds to.
@@ -18667,6 +18667,7 @@ fn panel_state_for(parent: &str, status: &WorkflowStatus) -> Result<converge::Pa
         dissent_depth: converge::dissent_depth(&parent_issue),
         children_filed,
         open_children: status.open.len(),
+        descendants: converge::descendant_count(parent),
         awaiting_ballots,
         seen,
         wall_secs: None,
