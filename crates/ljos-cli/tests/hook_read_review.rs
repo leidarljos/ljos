@@ -241,3 +241,30 @@ fn a_second_event_key_still_meets_the_seat_guard() {
         }
     }
 }
+
+/// Cursor registers beforeMCPExecution with failClosed, so exit 1 with no
+/// output blocks the call. The queue path answers invalid UTF-8 from a
+/// lossy copy; the direct path must answer too.
+#[test]
+fn a_non_utf8_mcp_call_still_answers_on_the_direct_path() {
+    let hab = hab("utf8");
+    let text = cursor(
+        "beforeMCPExecution",
+        serde_json::json!({"tool_name": "ljos_note", "mcp_server_name": "ljos", "tool_input": "@BAD@"}),
+    );
+    let at = text.find("@BAD@").unwrap();
+    let mut payload = text.as_bytes()[..at].to_vec();
+    payload.push(0xff);
+    payload.extend_from_slice(&text.as_bytes()[at + 5..]);
+    for queue in [false, true] {
+        let label = format!("non-utf8 ljos_note queue={queue}");
+        let (_, out, _) = call(hook(&hab, queue), &payload, Duration::from_secs(10));
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{label}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout), ALLOW, "{label}");
+    }
+}

@@ -2529,7 +2529,19 @@ fn run_command() -> Result<()> {
             }
             let input = match String::from_utf8(bytes) {
                 Ok(text) => text,
-                Err(_) => {
+                Err(err) => {
+                    // The queue path judges a side event from a lossy copy.
+                    // Do the same here, so invalid UTF-8 still prints an
+                    // answer instead of exiting with an empty stdout.
+                    let raw = err.into_bytes();
+                    let lossy = String::from_utf8_lossy(&raw);
+                    if !prompt {
+                        if let Some(code) =
+                            ljos_cli::emit_cursor_side_answer(&lossy, event.as_deref())
+                        {
+                            std::process::exit(code);
+                        }
+                    }
                     // The relay reads stdin before the gate's panic hook is
                     // armed. Invalid text used to exit 1 with no output,
                     // which nine runners read as an allow.
