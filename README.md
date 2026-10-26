@@ -1,5 +1,7 @@
 # ljos
 
+![From the install line to the first recall](docs/demo/install-to-recall.gif)
+
 Tell your coding agent a rule once. It comes back on every prompt it bears
 on, and the hook refuses the command that breaks it.
 
