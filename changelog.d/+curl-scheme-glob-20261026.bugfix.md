@@ -1,0 +1,1 @@
+A curl URL whose glob spans the scheme, `{https://api.github.com,https://example.com}/...` or `http{s://a,s://b}/...`, may reach GitHub, so a write to one is refused unless `-g` is given. The authority split read the host after the first `://`, which the braces hid.

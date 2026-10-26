@@ -4669,6 +4669,15 @@ fn curl_url_github(url: &str, globoff: bool) -> bool {
     let url = url
         .trim()
         .trim_matches(|c| c == '"' || c == '\'' || c == '<' || c == '>');
+    // A glob that spans the scheme, `{https://a,https://b}/...` or
+    // `http{s://a,s://b}/...`, expands into URLs whose hosts the authority
+    // split below never sees.
+    if !globoff {
+        let scheme = url.split_once("://").map_or("", |(scheme, _)| scheme);
+        if scheme.contains(['{', '}', '[', ']']) {
+            return true;
+        }
+    }
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     let auth = rest.split(['/', '?', '#']).next().unwrap_or("");
     if unreadable_token(auth) || auth.contains("{{") {
@@ -4758,7 +4767,31 @@ fn wget_shape(words: &[String], env: &[(String, String)], cwd: Option<&Path>) ->
     // the system wgetrc and the user file apply, and either can set
     // the method. The command line is read after an opaque file too.
     let opaque = wget_files(words, env, cwd, &mut tune).is_some();
-    for (name, value, _) in wget_args(words) {
+    let args = wget_args(words);
+    // Wget requests every operand on the line. One the shell has not
+    // expanded yet, `"$URL"`, may name GitHub whatever the visible
+    // operands name.
+    let held: std::collections::HashSet<usize> = args.iter().map(|(_, _, at)| *at).collect();
+    let mut after_dashes = false;
+    for (at, word) in words.iter().enumerate().skip(1) {
+        if after_dashes {
+            if unreadable_token(word) && literal_http_host(word).is_none() {
+                tune.github = true;
+            }
+            continue;
+        }
+        if word == "--" {
+            after_dashes = true;
+            continue;
+        }
+        if word.starts_with('-') || held.contains(&at) {
+            continue;
+        }
+        if unreadable_token(word) && literal_http_host(word).is_none() {
+            tune.github = true;
+        }
+    }
+    for (name, value, _) in args {
         match name {
             "method" => tune.method = Some(value.to_ascii_uppercase()),
             "execute" => note_wget_exec(&value, &mut tune),

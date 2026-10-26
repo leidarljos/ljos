@@ -1,0 +1,1 @@
+A wget line with a visible non-GitHub URL and a second operand the shell has not expanded, `"$URL"`, may reach GitHub: wget requests every operand on its line. The hidden operand was dropped once any other host was visible.
