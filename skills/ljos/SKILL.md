@@ -127,8 +127,9 @@ sitting that gets that far.
    `ljos workflow PARENT --round` files the next panel. Once the substance
    has settled, a nit, a wording note or a style note stays on the issue.
    A blocking finding with a reason is one `fix:` child. The same objection
-   is not filed again. At the round limit the parent closes as
-   settled-with-notes and does not wait.
+   is not filed again. A round count does not close the parent. The loop
+   files the next round until the panel passes. `ljos finish --close` is
+   the close.
 8. `== workflow`, left out when neither the issue nor its parent carries a
    workflow. The stage and the next step, the same reading as `ljos workflow`.
 9. `== panel`, left out unless the issue is a decision. One brief per persona

@@ -842,14 +842,14 @@ enum Cmd {
     },
     /// The playbooks the pack holds: the closed set sit, arena, land, company-panel, overnight, feature.
     Playbooks,
-    /// A parent issue's workflow: where it stands and the next step. `--start` puts the parent under a workflow and files its design child; `--round` files the next panel round, a blocking fix, or closes as settled-with-notes.
+    /// A parent issue's workflow: where it stands and the next step. `--start` puts the parent under a workflow and files its design child; `--round` files the next panel round or a blocking fix. A round count does not close the parent.
     Workflow {
         /// The tracker id of the parent issue.
         issue: String,
         /// Put the parent under this workflow (feature) and file its design child. Running it again files nothing new.
         #[arg(long, value_name = "NAME", conflicts_with = "round")]
         start: Option<String>,
-        /// File the next panel round, one `fix:` for a blocking finding, or close as settled-with-notes. A nit stays a note. The close does not wait.
+        /// File the next panel round, or one `fix:` for a blocking finding. A nit stays a note. The parent stays open until `ljos finish --close`.
         #[arg(long)]
         round: bool,
     },

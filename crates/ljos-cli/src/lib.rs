@@ -17622,7 +17622,7 @@ A feature runs design, implement, review and a panel vote until the panel agrees
 2. Design: write the design as a deed and cite it on the design child. Then file one `impl: TASK` and one `review: TASK` child per task under the parent.
 3. A review cites its findings as a deed, and a holder other than the implementer does it.
 4. With every child closed, `ljos workflow PARENT --round` files the next `panel rN` decision. Each panel persona casts `ljos vote ROUND --for pass|revise --expect OPTION --as NAME`, and a revise notes its finding on the round. `finding: NAME: TEXT` is a nit. `finding: NAME: wording: TEXT` and `finding: NAME: style: TEXT` are notes. `finding: NAME: blocking: REASON :: TEXT` is blocking, and a blocking mark with no reason stays a nit.
-5. Once the substance has settled, a nit, a wording note or a style note is recorded on the issue and is not a child. A blocking objection with a reason is one `fix:` child, and the next round reviews it. The same objection is not filed again. At the round limit (three by default) the parent closes as settled-with-notes and lists what remains. That close is automatic, and the loop does not wait.
+5. Once the substance has settled, a nit, a wording note or a style note is recorded on the issue and is not a child. A blocking objection with a reason is one `fix:` child, and the next round reviews it. The same objection is not filed again. A round count does not close the parent. The loop files the next round until the panel passes. `ljos finish PARENT --close` is the close.
 6. `ljos finish PARENT --close` is refused until the latest round passed and no child is open.
 ";
 
@@ -18434,7 +18434,7 @@ pub fn workflow_status_of(
                     (
                         "revise",
                         format!(
-                            "round {round} did not pass ({}); `ljos workflow {parent} --round` files a `fix:` child only for a blocking finding with a reason, records a nit, wording or style finding as a note, and closes as settled-with-notes at the round limit. It does not wait",
+                            "round {round} did not pass ({}); `ljos workflow {parent} --round` files a `fix:` child only for a blocking finding with a reason, records a nit, wording or style finding as a note, and files the next panel round. A round count does not close the parent",
                             verdict.reasons.join("; ")
                         ),
                     )
@@ -18700,10 +18700,9 @@ fn note_objections_below(issue: &str, state: &converge::PanelState) -> Result<()
 }
 
 /// File the next panel round, or one `fix:` child for a blocking finding.
-/// A round of nits, or a round past the limit, closes the parent as
-/// settled-with-notes. That close is the step. Refused while a child is
-/// open, while the panel has not voted, or once a round has passed with
-/// nothing blocking left.
+/// A round that has not passed opens the next round. A round count does
+/// not close the parent. Refused while a child is open, while the panel
+/// has not voted, or once a round has passed with nothing blocking left.
 ///
 /// # Errors
 ///
@@ -18738,13 +18737,6 @@ pub fn workflow_round(parent: &str) -> Result<String> {
                 format!(" ({})", ids.join(", "))
             };
             bail!("workflow: {parent} {why}{which}. Nothing was written");
-        }
-        converge::RoundPlan::Settle { summary } => {
-            let mut out = converge::close_settled(parent, &summary)?;
-            if let Some(s) = workflow_status(parent)? {
-                out.push_str(&format_workflow_status(&s));
-            }
-            Ok(out)
         }
         converge::RoundPlan::FileBlocking { objections } => {
             let v = tracker_show_json(parent)?;
@@ -18791,7 +18783,9 @@ pub fn workflow_round(parent: &str) -> Result<String> {
                  `finding: NAME: blocking: REASON :: TEXT`.\n\
                  A nit, a wording note or a style note stays on the issue. \
                  A blocking finding with a reason is one `fix:` child. \
-                 At the round limit the parent closes as settled-with-notes and does not wait.",
+                 The loop files the next round until the panel passes. \
+                 A round count does not close the parent. \
+                 `ljos finish --close` is the close.",
                 cfg.personas.join(", "),
                 cfg.veto.join(", "),
                 cfg.quorum
@@ -30658,8 +30652,9 @@ on the parent or a child prints the same in `== workflow`, and\n   \
 `ljos workflow PARENT --round` files the next panel. Once the substance\n   \
 has settled, a nit, a wording note or a style note stays on the issue.\n   \
 A blocking finding with a reason is one `fix:` child. The same objection\n   \
-is not filed again. At the round limit the parent closes as\n   \
-settled-with-notes and does not wait.",
+is not filed again. A round count does not close the parent. The loop\n   \
+files the next round until the panel passes. `ljos finish --close` is\n   \
+the close.",
     },
     SittingSection {
         name: "workflow",
@@ -44778,11 +44773,24 @@ mod tests {
             feature.body
         );
         assert!(
-            feature.body.contains("settled-with-notes"),
+            feature
+                .body
+                .contains("A round count does not close the parent"),
             "{}",
             feature.body
         );
-        assert!(feature.body.contains("does not wait"), "{}", feature.body);
+        assert!(
+            feature
+                .body
+                .contains("`ljos finish PARENT --close` is the close"),
+            "{}",
+            feature.body
+        );
+        assert!(
+            !feature.body.contains("settled-with-notes"),
+            "{}",
+            feature.body
+        );
         assert!(playbook_atom(&feature, "ws").is_ok());
     }
 
@@ -44986,11 +44994,11 @@ mod tests {
         );
     }
 
-    /// The anneal loop on a tracker: nit findings after a revise close the
-    /// parent, a blocking finding files one fix, and round 3 lists a new
-    /// blocking finding instead of filing it.
+    /// The anneal loop on a tracker: nit findings after a revise open the
+    /// next panel round, a blocking finding files one fix, and a later
+    /// round files a new blocking finding too. The parent stays STARTED.
     #[test]
-    fn a_round_of_nits_closes_and_a_blocking_finding_files_one_fix() {
+    fn a_round_of_nits_opens_the_next_round_and_a_blocking_finding_files_one_fix() {
         let _env = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("tracker");
@@ -45092,13 +45100,23 @@ mod tests {
         std::env::set_var("BALLOTS", &ballots);
 
         let out = workflow_round("proj-1a2b").unwrap();
-        assert!(out.contains("settled-with-notes"), "{out}");
-        assert!(out.contains("comma in note 0"), "{out}");
-        assert_eq!(out.matches("heading tone").count(), 1, "{out}");
+        assert!(out.contains("filed panel round"), "{out}");
+        assert!(!out.contains("settled-with-notes"), "{out}");
+        assert!(!out.contains("closed as"), "{out}");
         let said = std::fs::read_to_string(&log).unwrap();
         assert!(
-            said.lines().all(|line| !line.starts_with("q ")),
-            "nits filed a child: {said}"
+            said.lines()
+                .any(|line| line.starts_with("q ") && line.contains("panel r")),
+            "nits open the next panel round: {said}"
+        );
+        assert!(
+            said.lines().all(|line| !line.contains("-s DONE")),
+            "nits closed the parent: {said}"
+        );
+        let board_now = std::fs::read_to_string(&issues).unwrap();
+        assert!(
+            board_now.contains("* STARTED [#C] anneal the notes"),
+            "{board_now}"
         );
 
         std::fs::write(&log, "").unwrap();
@@ -45130,13 +45148,24 @@ mod tests {
         std::fs::write(&issues, board("", later)).unwrap();
         std::fs::write(&children, ids(&["anneal-r2", "anneal-r3"])).unwrap();
         let out = workflow_round("proj-1a2b").unwrap();
-        assert!(out.contains("settled-with-notes"), "{out}");
-        assert!(out.contains("round 3"), "{out}");
+        assert!(out.contains("filed fix"), "{out}");
         assert!(out.contains("the wait is unchecked"), "{out}");
+        assert!(!out.contains("settled-with-notes"), "{out}");
+        assert!(!out.contains("closed as"), "{out}");
         let said = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            said.lines().filter(|line| line.starts_with("q ")).count(),
+            1,
+            "{said}"
+        );
         assert!(
-            said.lines().all(|line| !line.starts_with("q ")),
-            "round 3 filed another child: {said}"
+            said.lines().all(|line| !line.contains("-s DONE")),
+            "round 3 closed the parent: {said}"
+        );
+        let board_now = std::fs::read_to_string(&issues).unwrap();
+        assert!(
+            board_now.contains("* STARTED [#C] anneal the notes"),
+            "{board_now}"
         );
 
         for (key, value) in keys.iter().zip(saved) {

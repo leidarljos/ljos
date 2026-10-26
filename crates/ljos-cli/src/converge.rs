@@ -420,13 +420,12 @@ pub struct Disposal {
     pub summary: String,
 }
 
-/// The next step of a workflow panel. A close is the step, not an error
-/// and not a wait.
+/// The next step of a workflow panel. Nothing here closes the parent.
+/// A pass is where the loop stops. The person closes with `ljos finish --close`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoundPlan {
     OpenRound { n: usize },
     FileBlocking { objections: Vec<Objection> },
-    Settle { summary: String },
     Hold { why: String },
     Passed,
 }
@@ -455,20 +454,6 @@ fn budget_why(state: &PanelState, limits: &ScopeBudget) -> Option<String> {
         }
     }
     None
-}
-
-fn fresh(state: &PanelState) -> Vec<Objection> {
-    let mut batch = state.seen.iter().cloned().collect::<BTreeSet<_>>();
-    let mut out = Vec::new();
-    for objection in &state.objections {
-        let key = objection.key();
-        if batch.contains(&key) {
-            continue;
-        }
-        batch.insert(key);
-        out.push(objection.clone());
-    }
-    out
 }
 
 fn summary_of(why: &str, listed: &[Objection]) -> String {
@@ -565,9 +550,9 @@ pub fn dispose(state: &PanelState, limits: &ScopeBudget) -> Disposal {
 /// The next workflow step. Open children and uncast ballots hold. A
 /// blocking objection files one child, including after the substance has
 /// passed, and the next round waits until that child is closed. A pass
-/// with nothing blocking left is a pass. A round of nits closes. At the
-/// round limit a blocking objection is listed, and a pass with nothing
-/// left to file stays a pass.
+/// with nothing blocking left is a pass. A round that has not passed
+/// opens the next one. A round count, a wall budget, and a full child
+/// list do not close the parent.
 #[must_use]
 pub fn plan_round(state: &PanelState, limits: &ScopeBudget) -> RoundPlan {
     if state.open_children > 0 {
@@ -590,13 +575,9 @@ pub fn plan_round(state: &PanelState, limits: &ScopeBudget) -> RoundPlan {
     }
     let mut fileable = Vec::new();
     let mut seen = state.seen.iter().cloned().collect::<BTreeSet<_>>();
-    let mut addressed = 0;
     for objection in &state.objections {
         let key = objection.key();
         if seen.contains(&key) {
-            if objection.files_as_child() {
-                addressed += 1;
-            }
             continue;
         }
         seen.insert(key);
@@ -604,24 +585,13 @@ pub fn plan_round(state: &PanelState, limits: &ScopeBudget) -> RoundPlan {
             fileable.push(objection.clone());
         }
     }
-    if let Some(why) = budget_why(state, limits) {
-        if state.passed && fileable.is_empty() {
-            return RoundPlan::Passed;
-        }
-        return RoundPlan::Settle {
-            summary: summary_of(&why, &fresh(state)),
-        };
-    }
     if !fileable.is_empty() {
         let room = limits.max_children.saturating_sub(state.children_filed);
         if room == 0 {
-            return RoundPlan::Settle {
-                summary: summary_of(
-                    &format!(
-                        "{} children filed, at the limit of {}",
-                        state.children_filed, limits.max_children
-                    ),
-                    &fileable,
+            return RoundPlan::Hold {
+                why: format!(
+                    "{} children filed, at the limit of {}",
+                    state.children_filed, limits.max_children
                 ),
             };
         }
@@ -633,21 +603,8 @@ pub fn plan_round(state: &PanelState, limits: &ScopeBudget) -> RoundPlan {
     if state.passed {
         return RoundPlan::Passed;
     }
-    if state.round == 0 {
-        return RoundPlan::OpenRound { n: 1 };
-    }
-    if addressed > 0 && state.round < limits.max_rounds {
-        return RoundPlan::OpenRound { n: state.round + 1 };
-    }
-    let listed = fresh(state);
-    let why = if listed.is_empty() {
-        "no blocking objection remains".to_string()
-    } else {
-        "the objections are below blocking".to_string()
-    };
-    RoundPlan::Settle {
-        summary: summary_of(&why, &listed),
-    }
+    let n = if state.round == 0 { 1 } else { state.round + 1 };
+    RoundPlan::OpenRound { n }
 }
 
 /// Whether `pass` is the unique strict majority, or, on any other ballot,
@@ -1463,6 +1420,7 @@ mod tests {
         state.passed = true;
         let mut filed = 0;
         let mut opened = 0;
+        let mut passed = 0;
         for n in 0..10 {
             state.objections.push(nit(n));
             state
@@ -1479,24 +1437,20 @@ mod tests {
                     opened += 1;
                     state.round = n;
                 }
-                RoundPlan::Settle { summary } => {
-                    panic!("a pass does not need a close to stop: {summary}");
-                }
-                RoundPlan::Passed => {}
+                RoundPlan::Passed => passed += 1,
                 RoundPlan::Hold { why } => panic!("a pass does not hold: {why}"),
             }
         }
         assert_eq!(filed, 0, "nits after a pass are notes");
         assert_eq!(opened, 0, "a pass does not open another round");
-        assert!(state.round <= limits.max_rounds);
+        assert_eq!(passed, 10);
+        assert_eq!(state.round, 1);
 
-        // The anneal as it actually ran: revise votes on wording, so the
-        // round does not read as passed, and the agent asks for another.
+        // Revise votes on wording, so the round has not passed. The loop
+        // opens the next round. A round count does not close it.
         let mut state = PanelState::at_round(1);
         let mut filed = 0;
         let mut opened = 0;
-        let mut settled = 0;
-        let mut last = String::new();
         for n in 0..10 {
             state.objections.push(nit(n));
             state
@@ -1508,22 +1462,13 @@ mod tests {
                     opened += 1;
                     state.round = n;
                 }
-                RoundPlan::Settle { summary } => {
-                    settled += 1;
-                    last = summary;
-                }
-                RoundPlan::Passed | RoundPlan::Hold { .. } => {}
+                RoundPlan::Passed => panic!("wording alone is not a pass"),
+                RoundPlan::Hold { why } => panic!("nits do not hold the round: {why}"),
             }
         }
         assert_eq!(filed, 0);
-        assert_eq!(opened, 0);
-        assert!(settled >= 1);
-        assert!(state.round <= limits.max_rounds);
-        assert!(last.contains("settled-with-notes"), "{last}");
-        assert!(last.contains("comma in note 0"), "{last}");
-        assert!(last.contains("heading tone"), "{last}");
-        // The repeated wording is one objection, not one per round.
-        assert_eq!(last.matches("heading tone").count(), 1, "{last}");
+        assert_eq!(opened, 10);
+        assert!(state.round > 3, "round {}", state.round);
     }
 
     #[test]
@@ -1557,7 +1502,7 @@ mod tests {
             .objections
             .push(Objection::wording("cto", "heading tone", "anneal-child"));
         match plan_round(&child, &limits) {
-            RoundPlan::Passed | RoundPlan::Settle { .. } => {}
+            RoundPlan::Passed => {}
             other => panic!("a dissent child does not file a nit grandchild: {other:?}"),
         }
         let mut deeper = child.clone();
@@ -1578,7 +1523,7 @@ mod tests {
     }
 
     #[test]
-    fn new_blocking_objections_stop_at_the_round_limit() {
+    fn new_blocking_objections_keep_filing_past_round_three() {
         let limits = ScopeBudget::panel();
         let mut state = PanelState::at_round(1);
         let mut filed = Vec::new();
@@ -1599,32 +1544,19 @@ mod tests {
                     state.children_filed += 1;
                     match plan_round(&state, &limits) {
                         RoundPlan::OpenRound { n } => state.round = n,
-                        RoundPlan::Settle { summary } => {
-                            assert!(summary.contains("settled-with-notes"), "{summary}");
-                            break;
-                        }
-                        other => panic!("after the fix closed: {other:?}"),
+                        other => panic!("after the fix the next round opens: {other:?}"),
                     }
-                }
-                RoundPlan::Settle { summary } => {
-                    assert!(summary.contains("settled-with-notes"), "{summary}");
-                    assert!(summary.contains("bug"), "{summary}");
-                    break;
                 }
                 other => panic!("step {n}: {other:?}"),
             }
         }
-        assert!(state.round <= limits.max_rounds, "round {}", state.round);
-        assert!(filed.len() < 6, "filed without a cap: {filed:?}");
-        assert!(filed.iter().any(|text| text.contains("bug 0")), "{filed:?}");
-        assert!(
-            !filed.iter().any(|text| text.contains("bug 5")),
-            "the later bugs are listed, not filed: {filed:?}"
-        );
+        assert!(state.round > 3, "round {}", state.round);
+        assert_eq!(filed.len(), 6, "{filed:?}");
+        assert!(filed.iter().any(|text| text.contains("bug 5")), "{filed:?}");
     }
 
     #[test]
-    fn a_wall_budget_closes_without_filing() {
+    fn a_wall_budget_does_not_skip_a_blocking_fix() {
         let mut limits = ScopeBudget::panel();
         limits.max_wall_secs = Some(60);
         let mut state = PanelState::at_round(1);
@@ -1636,11 +1568,28 @@ mod tests {
             "anneal-z64x",
         ));
         match plan_round(&state, &limits) {
-            RoundPlan::Settle { summary } => {
-                assert!(summary.contains("wall time"), "{summary}");
-                assert!(summary.contains("exit status"), "{summary}");
+            RoundPlan::FileBlocking { objections } => {
+                assert_eq!(objections.len(), 1, "{objections:?}");
+                assert!(objections[0].text.contains("exit status"));
             }
-            other => panic!("over the wall budget the objection is listed: {other:?}"),
+            other => panic!("a spent wall budget does not close the parent: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_full_child_list_holds_and_leaves_the_parent_open() {
+        let limits = ScopeBudget::panel();
+        let mut state = PanelState::at_round(4);
+        state.children_filed = limits.max_children;
+        state.objections.push(Objection::blocking(
+            "tester",
+            "a real failure",
+            "one more bug",
+            "anneal-z64x",
+        ));
+        match plan_round(&state, &limits) {
+            RoundPlan::Hold { why } => assert!(why.contains("children filed"), "{why}"),
+            other => panic!("a full child list does not close the parent: {other:?}"),
         }
     }
 
