@@ -4706,7 +4706,8 @@ pub const SUBAGENT_NO_SEAT: &str =
 
 /// A subagent conversation id. Every one starts `sand-sub`, so its first
 /// eight characters named every subagent `grokbot-sand-sub`.
-fn subagent_id(id: &str) -> bool {
+#[must_use]
+pub fn subagent_id(id: &str) -> bool {
     id.starts_with("sand-sub")
 }
 
@@ -28245,7 +28246,29 @@ pub fn live_held_issue() -> Option<(String, Hold)> {
     if let Some(id) = cursor_conversation() {
         let (dir, seat, graph) = (runtime_dir(), seat_name(), claim_graph_scope());
         if !subagent_id(&id) {
-            return newest_record_in(&[holder_name()], &dir, &[], &seat, &graph, &hold_alive);
+            let own = holder_name();
+            let found = newest_record_in(
+                &[own.clone(), seat.clone()],
+                &dir,
+                &[],
+                &seat,
+                &graph,
+                &hold_alive,
+            );
+            if let Some((ref node, ref hold)) = found {
+                if hold.assignee == seat && own != seat {
+                    let path = hold_record_path(&work_id(&occupancy_scope(&seat, node)));
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        if let Some(rest) = text.strip_prefix(&format!("{seat}\n")) {
+                            let _ = std::fs::write(&path, format!("{own}\n{rest}"));
+                        }
+                    }
+                    let mut adopted = hold.clone();
+                    adopted.assignee = own;
+                    return Some((node.clone(), adopted));
+                }
+            }
+            return found;
         }
         // A subagent works under its parent's sitting: the seat records
         // and the hold of a conversation process above it count.

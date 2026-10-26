@@ -3656,6 +3656,18 @@ impl ServerHandler for LjosServer {
         let mut request = request;
         let thread = thread_in_meta(&context.meta.0);
         let (session, agent) = call_identity(&context.meta.0);
+        let mut seat = seat;
+        if let (Some(seat), Some(id)) = (
+            seat.as_mut(),
+            session
+                .as_deref()
+                .or(thread.as_deref())
+                .and_then(ljos_cli::usable_session_id),
+        ) {
+            if seat.holder == seat.seat && !ljos_cli::subagent_id(id) {
+                seat.holder = ljos_cli::holder_for_session(&seat.seat, id);
+            }
+        }
         if let Some(arguments) = request.arguments.as_mut() {
             supply_issue(arguments, session.as_deref());
             arguments.remove("seat");

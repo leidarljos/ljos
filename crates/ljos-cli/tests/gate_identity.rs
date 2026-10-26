@@ -937,3 +937,200 @@ fn a_forged_sitting_record_with_another_conversations_tag_is_refused() {
     );
     let _ = std::fs::remove_file(&forged_path);
 }
+
+/// When `ljos-mcp` runs without a conversation id in its environment,
+/// `ljos_sitting` claims as `SEAT@TAG` when `_meta` names the
+/// conversation and as the bare seat when `_meta` does not; in both
+/// cases, the conversation's own merge is allowed and another
+/// conversation's merge is refused.
+#[test]
+fn an_mcp_sitting_covers_the_conversations_merge_with_and_without_meta() {
+    let home = Box_::new();
+    let org_dir = home.run.join("tracker/Software/proj");
+    std::fs::create_dir_all(&org_dir).unwrap();
+    let seed_tracker = || {
+        std::fs::write(
+            org_dir.join("issues.org"),
+            format!(
+                "#+TITLE: proj issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n* TODO [#C] the merge\n:PROPERTIES:\n:ID:         {ISSUE}\n:CREATED:    [2026-10-25 Sun]\n:END:\n"
+            ),
+        )
+        .unwrap();
+    };
+    seed_tracker();
+    let cache = home.home.join(".cache/ljos");
+    std::fs::create_dir_all(&cache).unwrap();
+    for name in [
+        "ljos",
+        "ljos-policyd",
+        "vissue-cli",
+        "vissue-mcp",
+        "deedar-cli",
+        "claimdag-cli",
+        "packset",
+        "packset-embed",
+    ] {
+        std::fs::write(cache.join(format!("crate-{name}")), "99.0.0\n").unwrap();
+    }
+    for name in ["deedar", "packset", "packsetd", "ljos-policyd"] {
+        script(
+            &home.bin.join(name),
+            &format!(
+                "#!/bin/sh\ncase \"$1\" in\n  --version|version) echo '{name} 99.0.0 (phronesis)' ;;\n  *) echo ok ;;\nesac\nexit 0\n"
+            ),
+        );
+    }
+    script(
+        &home.bin.join("claimdag"),
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'claimdag 99.0.0' ;;\n  list) echo '[]' ;;\n  claim) echo gen=2 ;;\n  *) echo ok ;;\nesac\nexit 0\n",
+    );
+    let card_path = home.card.display().to_string();
+    script(
+        &home.bin.join("vissue"),
+        &format!(
+            "#!/usr/bin/env python3\nimport json, os, pathlib, sys\n\
+             card = pathlib.Path({card_path:?})\n\
+             cmd = sys.argv[1] if len(sys.argv) > 1 else ''\n\
+             if cmd == '--version':\n\tprint('vissue 99.0.0')\n\
+             elif cmd == 'vote':\n\tprint('--used --confidence')\n\
+             elif cmd == 'identity':\n\tprint('vissue 99.0.0\\nroot=' + os.environ.get('VISSUE_ROOT','') + '\\nprefix=Software')\n\
+             elif cmd == 'claim':\n\tby = os.environ.get('VISSUE_AGENT', '')\n\tcard.write_text(json.dumps({{'id': {ISSUE:?}, 'state': 'STARTED', 'claimed_by': by}}))\n\tprint('claimed')\n\
+             elif cmd == 'show':\n\tprint(card.read_text() if card.exists() else json.dumps({{'id': {ISSUE:?}, 'title': 'the merge', 'state': 'TODO'}}))\n\
+             elif cmd == 'claims':\n\tprint('[]')\n\
+             else:\n\tprint('{{}}')\n"
+        ),
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let mut buf = [0u8; 2048];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let body =
+                r#"{"atoms":[],"island":[],"fired":0,"live":0,"embedder":{"available":false}}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = std::io::Write::write_all(&mut stream, resp.as_bytes());
+        }
+    });
+    let pack_url = format!("http://{addr}");
+
+    let mcp_call = |meta: Option<serde_json::Value>| -> (serde_json::Value, Child) {
+        let bin_dir = Path::new(env!("CARGO_BIN_EXE_ljos")).parent().unwrap();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
+        cmd.env_clear()
+            .env(
+                "PATH",
+                format!("{}:{}:/usr/bin:/bin", home.bin.display(), bin_dir.display()),
+            )
+            .env("HOME", &home.home)
+            .env("XDG_CONFIG_HOME", home.home.join(".config"))
+            .env("XDG_STATE_HOME", home.home.join(".local/state"))
+            .env("XDG_DATA_HOME", home.home.join(".local/share"))
+            .env("XDG_CACHE_HOME", home.home.join(".cache"))
+            .env("XDG_RUNTIME_DIR", &home.run)
+            .env("VISSUE_ROOT", home.run.join("tracker"))
+            .env("VISSUE_NO_ROUTE", "1")
+            .env("LJOS_SEAT", "inky")
+            .env("LJOS_PROJECT", "proj")
+            .env("LJOS_TRACKER_GIT", "off")
+            .env("PACKSET_URL", &pack_url)
+            .env("PACKSET_WORKSPACE", "seat")
+            .current_dir(&home.repo)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = cmd.spawn().unwrap();
+        let mut params = serde_json::json!({
+            "name": "ljos_sitting",
+            "arguments": {"issue": ISSUE}
+        });
+        if let Some(m) = meta {
+            params["_meta"] = m;
+        }
+        let reqs = [
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "cursor", "version": "2.4.0"}}
+            }),
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": params}),
+        ];
+        {
+            let stdin = child.stdin.as_mut().unwrap();
+            for r in &reqs {
+                writeln!(stdin, "{r}").unwrap();
+            }
+            stdin.flush().unwrap();
+        }
+        use std::io::BufRead;
+        let stdout = child.stdout.take().unwrap();
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut answer = serde_json::Value::Null;
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap() > 0 {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                if v.get("id") == Some(&serde_json::json!(2)) {
+                    answer = v;
+                    break;
+                }
+            }
+            line.clear();
+        }
+        (answer, child)
+    };
+
+    // 1. Without _meta: sitting succeeds, X's merge is allowed, and Y's is refused.
+    let (no_meta, mut srv1) = mcp_call(None);
+    let no_meta_str = no_meta.to_string();
+    assert!(
+        no_meta["result"]["isError"] != true && no_meta.get("error").is_none(),
+        "expected success without _meta: {no_meta_str}"
+    );
+    allowed(
+        &home.hook(CONV_X, MERGE, &[]),
+        "X's merge after MCP sitting without _meta",
+    );
+    refused(
+        &home.hook(CONV_Y, MERGE, &[]),
+        "Y's merge after X's MCP sitting without _meta",
+    );
+    let _ = srv1.kill();
+    let _ = srv1.wait();
+
+    // Clean hold-* records and re-seed before testing _meta.
+    for entry in std::fs::read_dir(home.run.join("ljos")).unwrap().flatten() {
+        if entry.file_name().to_string_lossy().starts_with("hold-") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    let _ = std::fs::remove_file(&home.card);
+    seed_tracker();
+
+    // 2. With _meta.conversation_id = CONV_X: claims as inky@tag(CONV_X), hook allows X and refuses Y.
+    let (with_meta, mut srv2) = mcp_call(Some(serde_json::json!({"conversation_id": CONV_X})));
+    let with_meta_str = with_meta.to_string();
+    assert!(
+        with_meta["result"]["isError"] != true && with_meta.get("error").is_none(),
+        "expected success with _meta conversation_id: {with_meta_str}"
+    );
+    let card_text = std::fs::read_to_string(&home.card).unwrap();
+    assert!(
+        card_text.contains(&holder(CONV_X)),
+        "expected CLAIMED_BY {}: {card_text}",
+        holder(CONV_X)
+    );
+    allowed(
+        &home.hook(CONV_X, MERGE, &[]),
+        "X's merge after MCP sitting with _meta.conversation_id",
+    );
+    refused(
+        &home.hook(CONV_Y, MERGE, &[]),
+        "Y's merge after X's MCP sitting with _meta.conversation_id",
+    );
+    let _ = srv2.kill();
+    let _ = srv2.wait();
+}
