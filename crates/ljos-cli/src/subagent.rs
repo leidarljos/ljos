@@ -510,6 +510,17 @@ fn claim_mcp_in(root: &Path, call: &str, now: u64) -> Option<(String, String)> {
 /// waiting in the last [`MCP_CALL_TTL_MS`].
 #[must_use]
 pub fn claim_recent_mcp_session() -> Option<String> {
+    recent_mcp_session(true)
+}
+
+/// [`claim_recent_mcp_session`] without taking the record, for a caller
+/// that only wants to know whether the record names it.
+#[must_use]
+pub fn peek_recent_mcp_session() -> Option<String> {
+    recent_mcp_session(false)
+}
+
+fn recent_mcp_session(consume: bool) -> Option<String> {
     let dir = root().join("mcp");
     let now = now_ms();
     let mut found: Vec<_> = waiting_mcp(&dir, now)
@@ -526,6 +537,9 @@ pub fn claim_recent_mcp_session() -> Option<String> {
         return None;
     }
     found.sort_by(|a, b| b.1.at.cmp(&a.1.at).then_with(|| b.0.cmp(&a.0)));
+    if !consume {
+        return Some(first_session);
+    }
     found
         .into_iter()
         .find_map(|(path, c)| std::fs::remove_file(&path).ok().map(|()| c.session))

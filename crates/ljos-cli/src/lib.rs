@@ -2923,7 +2923,24 @@ fn seat_from_session_records() -> Option<Seat> {
 /// same runtime directory.
 #[must_use]
 pub fn holder_from_bare_session_record(seat: &str) -> Option<String> {
-    if let Some(id) = subagent::claim_recent_mcp_session() {
+    bare_session_holder(seat, true)
+}
+
+/// [`holder_from_bare_session_record`] that leaves a waiting MCP record
+/// in place, so a hook check of one conversation does not take the
+/// record another conversation's server is about to read.
+#[must_use]
+pub fn peek_bare_session_holder(seat: &str) -> Option<String> {
+    bare_session_holder(seat, false)
+}
+
+fn bare_session_holder(seat: &str, consume: bool) -> Option<String> {
+    let recent = if consume {
+        subagent::claim_recent_mcp_session()
+    } else {
+        subagent::peek_recent_mcp_session()
+    };
+    if let Some(id) = recent {
         return Some(holder_for_session(seat, &id));
     }
     for (pid, comm) in ancestry() {
@@ -29630,10 +29647,12 @@ fn adopt_bare_seat_hold(dir: &Path, seat: &str, own: &str, graph: &str) {
     else {
         return;
     };
-    if let Some(expected) = holder_from_bare_session_record(seat) {
+    if let Some(expected) = peek_bare_session_holder(seat) {
         if expected != own {
             return;
         }
+        // The record names this conversation: take it now.
+        let _ = holder_from_bare_session_record(seat);
     } else if hold.comm != "ljos-mcp" || dir.join("first-hook-conv").exists() {
         return;
     }
