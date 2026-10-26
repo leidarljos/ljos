@@ -1,4 +1,4 @@
-//! A panel closes itself. Once the substance has passed, a nit, a wording
+//! Once the substance has passed, a nit, a wording
 //! note or a style note is written on the issue and never becomes a child.
 //! A persona that wants a child marks the objection blocking and gives a
 //! reason; the default, with no mark or a mark and no reason, is a nit.
@@ -6,6 +6,7 @@
 //! a grandchild unless the new objection is blocking. A round count is a
 //! count. It is not a budget key, and it does not close the ticket. When
 //! the seats still split, the reading names the open objection children.
+//! The person closes with `ljos finish --close`.
 //!
 //! `ljos consensus` files its children through [`record_dissents`], titled
 //! `Dissent holds TEXT` for a blocking objection and `Dissent holds OPTION`
@@ -401,7 +402,8 @@ pub enum Fate {
     Note(Objection),
     File(Objection),
     Duplicate(Objection),
-    /// Would have been a child, and the budget closed the item instead.
+    /// Would have been a child. The child list or the budget is already
+    /// full, and the parent stays open.
     Listed(Objection),
 }
 
@@ -423,45 +425,21 @@ pub enum RoundPlan {
     Passed,
 }
 
-fn budget_why(state: &PanelState, limits: &ScopeBudget) -> Option<String> {
+fn over_budget(state: &PanelState, limits: &ScopeBudget) -> bool {
     if state.children_filed >= limits.max_children {
-        return Some(format!(
-            "{} children filed, at the limit of {}",
-            state.children_filed, limits.max_children
-        ));
+        return true;
     }
     if let (Some(used), Some(max)) = (state.wall_secs, limits.max_wall_secs) {
         if used >= max {
-            return Some(format!("wall time {used}s reached the limit of {max}s"));
+            return true;
         }
     }
     if let (Some(used), Some(max)) = (state.tokens, limits.max_tokens) {
         if used >= max {
-            return Some(format!("token estimate {used} reached the limit of {max}"));
+            return true;
         }
     }
-    None
-}
-
-fn summary_of(why: &str, listed: &[Objection]) -> String {
-    let mut out = format!("settled-with-notes: {why}");
-    if listed.is_empty() {
-        return out;
-    }
-    out.push_str(". remaining:");
-    for (i, objection) in listed.iter().take(12).enumerate() {
-        out.push_str(&format!(
-            " ({}) {} {}: {}",
-            i + 1,
-            objection.persona,
-            objection.severity.word(),
-            clip(&objection.text, 80)
-        ));
-    }
-    if listed.len() > 12 {
-        out.push_str(&format!(" and {} more", listed.len() - 12));
-    }
-    out
+    false
 }
 
 fn clip(text: &str, n: usize) -> String {
@@ -473,7 +451,8 @@ fn clip(text: &str, n: usize) -> String {
 }
 
 /// Sort the objections on one issue: notes, one child each for what may
-/// be filed, duplicates dropped, and a close when the budget is spent.
+/// be filed, duplicates dropped. A full list or a spent budget lists the
+/// rest. It does not close the issue.
 #[must_use]
 pub fn dispose(state: &PanelState, limits: &ScopeBudget) -> Disposal {
     let mut fates = Vec::new();
@@ -492,14 +471,14 @@ pub fn dispose(state: &PanelState, limits: &ScopeBudget) -> Disposal {
             fates.push(Fate::Note(objection.clone()));
         }
     }
-    if let Some(why) = budget_why(state, limits) {
+    if over_budget(state, limits) {
         for objection in &fileable {
             fates.push(Fate::Listed(objection.clone()));
         }
         return Disposal {
             fates,
-            close: true,
-            summary: summary_of(&why, &fileable),
+            close: false,
+            summary: String::new(),
         };
     }
     let room = limits.max_children.saturating_sub(state.children_filed);
@@ -511,26 +490,13 @@ pub fn dispose(state: &PanelState, limits: &ScopeBudget) -> Disposal {
             listed.push(objection);
         }
     }
-    let close = !listed.is_empty();
-    let summary = if close {
-        summary_of(
-            &format!(
-                "{} children filed, at the limit of {}",
-                state.children_filed + room,
-                limits.max_children
-            ),
-            &listed,
-        )
-    } else {
-        String::new()
-    };
     for objection in listed {
         fates.push(Fate::Listed(objection));
     }
     Disposal {
         fates,
-        close,
-        summary,
+        close: false,
+        summary: String::new(),
     }
 }
 
@@ -1653,6 +1619,33 @@ mod tests {
                 .count();
         }
         assert_eq!(filed, 1);
+    }
+
+    #[test]
+    fn a_spent_budget_lists_and_does_not_ask_to_close() {
+        let mut limits = ScopeBudget::panel();
+        limits.max_wall_secs = Some(60);
+        limits.max_tokens = Some(10);
+        let mut state = PanelState::at_round(4);
+        state.wall_secs = Some(120);
+        state.tokens = Some(40);
+        state.children_filed = limits.max_children;
+        state.objections.push(Objection::blocking(
+            "tester",
+            "a real failure",
+            "the exit status is ignored",
+            "anneal-z64x",
+        ));
+        let disposal = dispose(&state, &limits);
+        assert!(!disposal.close, "{disposal:?}");
+        assert!(disposal.summary.is_empty(), "{disposal:?}");
+        assert!(
+            disposal
+                .fates
+                .iter()
+                .any(|fate| matches!(fate, Fate::Listed(_))),
+            "{disposal:?}"
+        );
     }
 
     #[test]
