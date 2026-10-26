@@ -1156,12 +1156,23 @@ fn guard_mcp(tool: &str, server: Option<&str>, input: &Value) -> Option<Rule> {
     rules.iter().find(|rule| post_hits(rule, &post)).map(fired)
 }
 
+fn github_server(name: &str) -> bool {
+    name.to_ascii_lowercase().contains("github")
+}
+
 fn github_write(tool: &str, server: Option<&str>) -> bool {
+    // The seat's own tool on its configured server is not a GitHub write,
+    // even when that server key contains "github".
+    if crate::subagent::is_confirmed_seat_call(tool, server) {
+        return false;
+    }
     let tool_l = tool.to_ascii_lowercase();
+    let embedded = crate::subagent::mcp_prefixed_tool(&tool_l).map(|(name, _)| name.to_string());
     let short = tool_l.rsplit("__").next().unwrap_or(&tool_l);
     let short = short.rsplit('/').next().unwrap_or(short);
-    let githubish = server.is_some_and(|name| name.to_ascii_lowercase().contains("github"))
-        || tool_l.contains("github");
+    let server_github =
+        server.is_some_and(github_server) || embedded.as_deref().is_some_and(github_server);
+    let githubish = server_github || tool_l.contains("github");
     if !githubish {
         return false;
     }
@@ -1172,6 +1183,10 @@ fn github_write(tool: &str, server: Option<&str>) -> bool {
         || short.contains("_read")
     {
         return false;
+    }
+    // mcp__github__ljos_NAME is a GitHub server wearing the seat's prefix.
+    if server_github && short.starts_with("ljos_") {
+        return true;
     }
     ["comment", "review", "issue", "pull"]
         .iter()

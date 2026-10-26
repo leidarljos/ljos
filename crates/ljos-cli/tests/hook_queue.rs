@@ -812,6 +812,66 @@ fn the_drainer_books_each_queued_call_as_its_payloads_conversation() {
     );
 }
 
+/// A seat-tool shortcut must not trust only the tool name prefix.
+/// Another server can mint `mcp__SERVER__ljos_NAME` too.
+#[test]
+fn a_spoofed_mcp_seat_tool_name_from_github_is_not_auto_allowed() {
+    let hab = hab("spoof");
+    let cfg = hab.home.join(".config/ljos");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(cfg.join("user-rules.json"), "{bad json").unwrap();
+    let payload = serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": "spoof-1",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "mcp__github__ljos_note",
+        "tool_input": {"body": "cc @ocaisa"},
+        "session_id": "s-1",
+        "tool_use_id": "t-1"
+    })
+    .to_string();
+    let out = within(
+        feed(ljos(&hab, &["hook"]), &payload),
+        Duration::from_secs(5),
+        "spoofed seat tool",
+    );
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.contains("\"permission\":\"deny\""),
+        "a spoofed seat tool name was auto-allowed: {said}"
+    );
+}
+
+/// A fast allow on `beforeReadFile` must not break a writer with SIGPIPE.
+#[test]
+fn a_large_cursor_read_does_not_break_the_writer_pipe() {
+    let hab = hab("sigpipe");
+    let shell = format!(
+        concat!(
+            "python3 - <<'PY' | {bin} hook >/dev/null\n",
+            "import sys\n",
+            "sys.stdout.write('{{\\\"cursor_version\\\":\\\"2.4.0\\\",\\\"hook_event_name\\\":\\\"beforeReadFile\\\",\\\"file_path\\\":\\\"/tmp/big\\\",\\\"content\\\":\\\"')\n",
+            "sys.stdout.write('a'*(8*1024*1024))\n",
+            "sys.stdout.write('\\\\\"}}')\n",
+            "PY\n",
+            "echo writer:${{PIPESTATUS[0]}} hook:${{PIPESTATUS[1]}}\n",
+        ),
+        bin = env!("CARGO_BIN_EXE_ljos")
+    );
+    let out = Command::new("bash")
+        .arg("-lc")
+        .arg(shell)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &hab.home)
+        .env("XDG_CONFIG_HOME", hab.home.join(".config"))
+        .env("PACKSET_URL", "off")
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(said.contains("writer:0"), "writer was broken: {said}");
+}
+
 const ALLOW: &str = "{\"permission\":\"allow\"}\n";
 
 /// A server that accepts and then waits `delay` before it answers.
@@ -1188,4 +1248,131 @@ fn mcp_and_read_answers_are_traced_when_the_marker_is_present() {
             .count();
         assert!(rows >= 2, "{event} rows {rows} in {text}");
     }
+}
+
+fn bad_rules(hab: &Hab) {
+    let cfg = hab.home.join(".config/ljos");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(cfg.join("user-rules.json"), "{bad json").unwrap();
+}
+
+fn write_cursor_mcp(hab: &Hab, body: &str) {
+    let path = hab.home.join(".cursor/mcp.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, body).unwrap();
+}
+
+fn pre_tool(tool: &str, server: Option<&str>) -> String {
+    let mut value = serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": "c-seat",
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool,
+        "tool_input": {"body": "cc @ocaisa"},
+        "session_id": "s-seat",
+        "tool_use_id": "t-seat",
+    });
+    if let Some(server) = server {
+        value["server"] = serde_json::json!(server);
+    }
+    value.to_string()
+}
+
+fn hook_stdout(hab: &Hab, payload: &str) -> String {
+    let mut cmd = ljos(hab, &["hook"]);
+    cmd.env("LJOS_HOOKD", "off");
+    let (took, out) = finished(feed(cmd, payload), Duration::from_secs(5), "seat tool");
+    assert!(
+        took < Duration::from_secs(5),
+        "took {took:?}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The configured server key is allowed. A different key, a different
+/// case, and a server field that disagrees are not.
+#[test]
+fn only_the_configured_seat_server_skips_the_rules_file() {
+    let hab = hab("seatkey");
+    bad_rules(&hab);
+    write_cursor_mcp(
+        &hab,
+        r#"{"mcpServers":{"ljos":{"command":"ljos-mcp"},"my__seat":{"command":"/bin/ljos-mcp"}}}"#,
+    );
+    let allow = hook_stdout(&hab, &pre_tool("mcp__ljos__ljos_note", None));
+    assert_eq!(allow, ALLOW, "{allow}");
+    let renamed = hook_stdout(&hab, &pre_tool("mcp__my__seat__ljos_note", None));
+    assert_eq!(renamed, ALLOW, "{renamed}");
+    let spoof = hook_stdout(&hab, &pre_tool("mcp__github__ljos_note", None));
+    assert!(spoof.contains("\"permission\":\"deny\""), "{spoof}");
+    let case = hook_stdout(&hab, &pre_tool("mcp__Ljos__ljos_note", None));
+    assert!(
+        !case.contains("\"permission\":\"deny\""),
+        "a case mismatch was treated as GitHub: {case}"
+    );
+    assert!(case.contains("\"permission\":\"allow\""), "{case}");
+    let disagree = hook_stdout(&hab, &pre_tool("mcp__ljos__ljos_note", Some("github")));
+    assert!(disagree.contains("\"permission\":\"deny\""), "{disagree}");
+    let plugin = hook_stdout(&hab, &pre_tool("mcp__plugin_ljos_ljos__ljos_vote", None));
+    assert!(plugin.contains("\"permission\":\"allow\""), "{plugin}");
+}
+
+/// A server key that is itself `github` and launches the seat is the seat.
+#[test]
+fn a_seat_server_named_github_is_not_a_foreign_write() {
+    let hab = hab("seatgh");
+    bad_rules(&hab);
+    write_cursor_mcp(
+        &hab,
+        r#"{"mcpServers":{"github":{"command":"ljos-mcp","args":[]}}}"#,
+    );
+    let said = hook_stdout(&hab, &pre_tool("mcp__github__ljos_note", Some("github")));
+    assert_eq!(said, ALLOW, "{said}");
+    let real = hook_stdout(
+        &hab,
+        &serde_json::json!({
+            "cursor_version": "2.4.0",
+            "conversation_id": "c-real",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "mcp__github__add_issue_comment",
+            "mcp_server_name": "github",
+            "tool_input": {"body": "hello"},
+            "session_id": "s-real",
+            "tool_use_id": "t-real",
+        })
+        .to_string(),
+    );
+    assert!(real.contains("\"permission\":\"deny\""), "{real}");
+}
+
+/// `beforeMCPExecution` names the server in a field. A GitHub field on a
+/// seat-shaped tool is still a GitHub write when the rules file cannot
+/// be read. The seat's own server is not.
+#[test]
+fn a_before_mcp_server_field_is_not_taken_from_the_tool_name() {
+    let hab = hab("mcpfield");
+    bad_rules(&hab);
+    let github = serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": "c-field",
+        "hook_event_name": "beforeMCPExecution",
+        "tool_name": "ljos_note",
+        "server": "github",
+        "tool_input": {"text": "x"},
+    })
+    .to_string();
+    let said = hook_stdout(&hab, &github);
+    assert!(said.contains("\"permission\":\"deny\""), "{said}");
+    let seat = serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": "c-field",
+        "hook_event_name": "beforeMCPExecution",
+        "tool_name": "ljos_note",
+        "server": "ljos",
+        "command": "ljos-mcp",
+        "tool_input": {"text": "x"},
+    })
+    .to_string();
+    assert_eq!(hook_stdout(&hab, &seat), ALLOW);
 }
