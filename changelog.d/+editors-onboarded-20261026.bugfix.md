@@ -1,0 +1,1 @@
+The MCP server's orphan check knows every client the installer onboards: copilot, qwen, droid, crush, kiro, hermes, omp and cline. A session under one of those left idle past the orphan timer lost its server while the client still held the pipe.

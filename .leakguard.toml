@@ -13,4 +13,7 @@ allow = [
     "~/.codex/",
     "~/.claude/",
     "agent-memory",
+    # The npm package scopes the process tree recognises a runner by.
+    "anthropic",
+    "openai",
 ]
