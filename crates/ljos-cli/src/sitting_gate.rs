@@ -89,6 +89,7 @@ pub fn guard_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
                 Err(why) => return Some(refusal(&unread_settings(&why))),
             };
             if let Some(dest) = crate::gates::protected_push(push, line, &cfg.branches) {
+                let dest = format!("may land on {dest}");
                 return Some(refusal(&unattributed_push(&dest, &cfg.branches)));
             }
         }
@@ -145,10 +146,10 @@ pub fn unattributed_push(dest: &str, branches: &[String]) -> String {
     let named: Vec<String> = branches.iter().map(|b| format!("`{b}`")).collect();
     format!(
         "`git push` {dest}, and a runner's push onto {} waits for the seats on the ticket \
-         it sits on, but this call names no conversation, so it sits on no ticket. Pass the \
-         conversation id in the hook payload or the session environment, open a sitting with \
-         `ljos sitting ID`, and run it again. A push onto a topic branch is not held. \
-         The person at their own terminal is not gated",
+         it sits on, but this call names no conversation, so it holds no live sitting and \
+         sits on no ticket. Pass the conversation id in the hook payload or the session \
+         environment, open a sitting with `ljos sitting ID`, and run it again. A push onto a \
+         topic branch is not held. The person at their own terminal is not gated",
         named.join(", ")
     )
 }
