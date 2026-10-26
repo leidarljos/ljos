@@ -3465,10 +3465,31 @@ fn at_terminal_with_responsible(
 #[cfg(any(test, target_os = "linux", target_os = "macos"))]
 fn login_holder(comm: &str) -> bool {
     const ENDS: &[&str] = &[
-        "sshd", "login", "tmux", "screen", "zellij", "Terminal", "iTerm2", "iTerm", "Warp",
+        "sshd",
+        "sshd-session",
+        "login",
+        "tmux",
+        "screen",
+        "zellij",
+        "Terminal",
+        "iTerm2",
+        "iTerm",
+        "Warp",
     ];
-    ENDS.iter().any(|name| comm.eq_ignore_ascii_case(name))
+    // A tmux server's comm is `tmux: server`, and a client's `tmux: client`.
+    let base = comm.split(':').next().unwrap_or(comm).trim();
+    ENDS.iter().any(|name| base.eq_ignore_ascii_case(name))
         || TERMINALS.iter().any(|name| comm.eq_ignore_ascii_case(name))
+}
+
+/// A multiplexer server daemonises, so pid 1 (or a subreaper) is its
+/// parent by design: that is not a process adopted after its parent died.
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+fn multiplexer(comm: &str) -> bool {
+    let base = comm.split(':').next().unwrap_or(comm).trim();
+    ["tmux", "screen", "zellij"]
+        .iter()
+        .any(|name| base.eq_ignore_ascii_case(name))
 }
 
 /// The session's tty belongs to an interactive login: the process that
@@ -3588,7 +3609,7 @@ fn host_at_terminal() -> bool {
     let Some(holder) = chain.get(leader + 1) else {
         return false;
     };
-    let adopted = holder.ppid <= 1;
+    let adopted = holder.ppid <= 1 && !multiplexer(&holder.comm);
     let programmed = chain
         .iter()
         .take(leader + 1)
