@@ -1024,10 +1024,6 @@ pub struct FinishSittingArgs {
     /// The name that holds it. Absent: the runner's seat name.
     #[serde(default)]
     pub assignee: Option<String>,
-    /// Also close the tracker ticket. Only when the work is accepted; a
-    /// sitting ending is not that, and a blocker on the ticket must hold.
-    #[serde(default)]
-    pub close: bool,
 }
 
 /// A project whose history calibrates the voters.
@@ -2062,7 +2058,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when the task is done. Pass the lesson. It completes the session node, files the lesson, releases the claim, syncs, and pushes the tracker unless LJOS_TRACKER_GIT is commit or off. Pass the issue ljos_start claimed; absent, that issue is the one this sitting holds. Pass close only when the work is accepted and a blocker on the ticket may drop.",
+        description = "Call this when the task is done. Pass the lesson. It completes the session node, files the lesson, releases the claim, syncs, and pushes the tracker unless LJOS_TRACKER_GIT is commit or off. Pass the issue ljos_start claimed; absent, that issue is the one this sitting holds. This tool does not close the tracker ticket.",
         annotations(
             title = "Close a sitting",
             read_only_hint = false,
@@ -2090,7 +2086,7 @@ impl LjosServer {
             LEARN_BETA,
             &call_assignee("finish", args.assignee.as_deref())?,
             args.gen,
-            args.close,
+            false,
         )
         .map_err(refused)?;
         ljos_cli::bookkeep::note_finished(&issue);
@@ -2998,9 +2994,8 @@ impl LjosServer {
             "Begin a sitting on {work}.\n\
              \n\
              Prefer `ljos_sitting` for the whole opening and `ljos_finish` for\n\
-             the close. Neither completing a session node nor `ljos_finish`\n\
-             closes a ticket; `ljos_finish` with close does, when the work is\n\
-             accepted.\n\
+             the end of the sitting. Neither completing a session node nor\n\
+             `ljos_finish` closes a ticket.\n\
              \n\
              By hand, in order:\n\
              \n\
