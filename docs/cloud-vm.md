@@ -4,7 +4,7 @@
 
 `sh scripts/install.sh --cloud` is the same bootstrap. When the binaries are already installed and `ljos cloud up` answers, that command is all that runs. `--force` downloads again. From this repository, if the installed `ljos` has no `cloud up`, the script builds this tree's `ljos` and `ljos-mcp` and leaves them in place.
 
-`ljos cloud up` and `install.sh --cloud` arrive in the next release; the latest release has neither. Until then they work from `develop`: run `sh scripts/install.sh --cloud` in a checkout of it.
+`ljos cloud up` and `install.sh --cloud` ship in v0.33.0. The latest release has both.
 
 ## Environment
 
@@ -61,7 +61,7 @@ A GitHub Actions job, including a self-hosted ephemeral runner, uses the same bo
     ljos note ISSUE "the job result"
 ```
 
-The step fetches the latest release's script, which takes `--cloud` from the next release on. Until then, check out `develop` of this repository and run `sh scripts/install.sh --cloud` from it. On this repository the install line is `sh scripts/install.sh --cloud`. The tracker URL stays in the job environment. The runner's git credentials have to be able to clone it.
+The step fetches the latest release's script. v0.33.0 and later take `--cloud`. On this repository the install line is `sh scripts/install.sh --cloud`. The tracker URL stays in the job environment. The runner's git credentials have to be able to clone it.
 
 ## Cloud agent environment
 
@@ -77,7 +77,7 @@ This repository:
 }
 ```
 
-Another repository, once a release contains `cloud up`:
+Another repository:
 
 ```json
 {
@@ -87,7 +87,7 @@ Another repository, once a release contains `cloud up`:
 }
 ```
 
-Set `LJOS_TRACKER_REMOTE` in the environment. The tracker repository has to be one the git credentials on the machine can clone. The URL stays out of `environment.json`. Set `LJOS_CLOUD_AGE_SECRET` to the name of the secret that holds the age identity for scope `cloud`. The identity stays out of `environment.json` too. Until a release contains `cloud up`, use `scripts/install.sh` from this tree.
+Set `LJOS_TRACKER_REMOTE` in the environment. The tracker repository has to be one the git credentials on the machine can clone. The URL stays out of `environment.json`. Set `LJOS_CLOUD_AGE_SECRET` to the name of the secret that holds the age identity for scope `cloud`. The identity stays out of `environment.json` too.
 
 `cloud up` rewrites the harness MCP command to `ljos-mcp` when PATH already runs this install, and to the absolute path when another copy or none would run. A claim, a note and a vote then push to the tracker, and another clone sees them after a fetch. A `STARTED` claim whose program has exited returns to `TODO` after `LJOS_LEASE_SECS`. A claim whose program is still running stays. The tracker URL has to be one the machine's git credentials can clone.
 
