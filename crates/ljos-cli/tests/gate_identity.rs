@@ -1190,3 +1190,112 @@ fn a_tool_command_may_not_write_the_records_that_bind_a_conversation() {
         );
     }
 }
+
+const RV_RUNNER_ANY: &str = "
+import json, os, subprocess, sys
+rc = 0
+shell = os.environ['RV_SHELL'].split()
+for extra, line in json.loads(sys.argv[1]):
+    env = dict(os.environ)
+    env.update(extra)
+    rc = subprocess.call(shell + [line], env=env)
+print('EXIT', rc)
+";
+
+impl Box_ {
+    /// `bash_runner` with the shell the runner starts each step in named
+    /// by `shell` (`bash -c`, `sh -c`, `zsh -f -c`).
+    fn rv_runner(
+        &self,
+        comm: &str,
+        shell: &str,
+        unset: &[&str],
+        env: &[(&str, &str)],
+        steps: &[(Vec<(&str, &str)>, &str)],
+    ) -> String {
+        let link = self.bin.join(comm);
+        if !link.exists() {
+            std::os::unix::fs::symlink("/usr/bin/python3", &link).unwrap();
+        }
+        let steps: Vec<(std::collections::BTreeMap<&str, &str>, &str)> = steps
+            .iter()
+            .map(|(e, l)| (e.iter().copied().collect(), *l))
+            .collect();
+        let steps = serde_json::to_string(&steps).unwrap();
+        let mut args: Vec<String> = Vec::new();
+        for u in unset {
+            args.push("-u".into());
+            args.push((*u).into());
+        }
+        let link = link.display().to_string();
+        args.extend([link, "-c".into(), RV_RUNNER_ANY.into(), steps]);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let mut all = vec![("LJOS", env!("CARGO_BIN_EXE_ljos")), ("RV_SHELL", shell)];
+        all.extend_from_slice(env);
+        text_of(&self.command("env", &args, &all).output().unwrap())
+    }
+}
+
+fn rv_sat_x() -> (Box_, String) {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    let commit = pre_commit_hooks(&home);
+    (home, commit)
+}
+
+fn pre_commit_hooks(home: &Box_) -> String {
+    let hooks = home.run.join("githooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    script(
+        &hooks.join("pre-commit"),
+        "#!/bin/sh\nexec \"$LJOS\" git-hook pre-commit\n",
+    );
+    format!(
+        "git -c core.hooksPath={} -c user.name=t -c user.email=t@e commit -q --allow-empty -m t",
+        hooks.display()
+    )
+}
+
+/// RV10. A shell started without `XDG_RUNTIME_DIR` exports it later (a
+/// container with no `/run/user/UID`). Its own commits go through. No
+/// variable of the review corpus (`BOX`) is in its environment.
+#[test]
+fn rv10_a_shell_that_exports_its_runtime_dir_late_keeps_its_stamp() {
+    let (home, commit) = rv_sat_x();
+    let run = home.run.display().to_string();
+    let x = vec![("CURSOR_AGENT", "1"), ("CURSOR_CONVERSATION_ID", CONV_X)];
+    for line in [
+        format!("export XDG_RUNTIME_DIR={run}; {commit}; true"),
+        format!("export XDG_RUNTIME_DIR={run}; ( {commit} ); true"),
+        format!("export XDG_RUNTIME_DIR={run}; timeout 60 {commit}; true"),
+        format!("export XDG_RUNTIME_DIR={run}; bash -c '{commit}'; true"),
+        format!("export XDG_RUNTIME_DIR={run}; env A=1 {commit}; true"),
+    ] {
+        let said = home.rv_runner(
+            "node",
+            "bash -c",
+            &["CURSOR_AGENT", "XDG_RUNTIME_DIR"],
+            &[],
+            &[(x.clone(), &line)],
+        );
+        assert!(
+            said.contains("EXIT 0") && !said.contains("sitting-gate"),
+            "X's own `{line}` was refused:\n{said}"
+        );
+    }
+    let override_line =
+        format!("export XDG_RUNTIME_DIR={run}; CURSOR_CONVERSATION_ID={CONV_Z} {commit}; true");
+    let said = home.rv_runner(
+        "node",
+        "bash -c",
+        &["CURSOR_AGENT", "XDG_RUNTIME_DIR"],
+        &[],
+        &[(x, &override_line)],
+    );
+    assert!(
+        said.contains("EXIT 0") && !said.contains("sitting-gate"),
+        "X's shell that exported XDG_RUNTIME_DIR late lost its stamp to an inline override without BOX:\n{said}"
+    );
+}

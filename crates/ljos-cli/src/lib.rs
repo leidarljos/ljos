@@ -1933,8 +1933,18 @@ fn same_runtime_dir(env: &[(String, String)]) -> bool {
     if mine.is_empty() {
         return true;
     }
-    env.iter()
-        .any(|(k, v)| k == "XDG_RUNTIME_DIR" && v == &mine)
+    match env.iter().find(|(k, _)| k == "XDG_RUNTIME_DIR") {
+        Some((_, v)) if !v.is_empty() => v == &mine,
+        _ => {
+            if std::env::var_os("LJOS_HOLD").is_some()
+                && std::env::var_os("CURSOR_CONVERSATION_ID").is_none()
+            {
+                return false;
+            }
+            let my_home = std::env::var("HOME").unwrap_or_default();
+            !my_home.is_empty() && env.iter().any(|(k, v)| k == "HOME" && v == &my_home)
+        }
+    }
 }
 
 fn clean_shell_environ(env: Vec<(String, String)>, is_self: bool) -> Vec<(String, String)> {
