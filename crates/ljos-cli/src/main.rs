@@ -2592,6 +2592,8 @@ fn run_command() -> Result<()> {
             ljos_cli::adopt_blank_conversation(&input, &mut call);
             // The queue is off, or this process was already inside a hook.
             // Answer before the pack search and before the deadline thread.
+            // The seat env was loaded above. A promoted rule may ask the
+            // pack once from inside that answer.
             if !prompt {
                 if let Some(code) = ljos_cli::emit_cursor_side_answer(&input, event.as_deref()) {
                     std::process::exit(code);

@@ -96,9 +96,10 @@ pub fn admit() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bytes);
     let event = flag_value(&args, "--event");
-    // These two events are judged on preToolUse. Answer them before the
-    // queue, so a slow server cannot turn an allow into exit 2 and the
-    // call does not load the seat or the pack.
+    // These two events are judged on preToolUse. Answer them before a
+    // slot, so a slow server cannot turn an allow into exit 2.
+    // The direct path has already loaded the seat env. A promoted rule
+    // may still ask the pack once.
     if !args.iter().any(|a| a == "--prompt") {
         if let Some(code) = crate::emit_cursor_side_answer(&input, event.as_deref()) {
             std::process::exit(code);

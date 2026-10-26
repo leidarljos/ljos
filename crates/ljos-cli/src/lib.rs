@@ -13178,7 +13178,11 @@ fn side_answer_exit(output: &str) -> i32 {
 /// They still answer, because a permission hook that prints nothing is
 /// refused when `failClosed` is set. The answer is allow, or the
 /// user-rule denial when one matches. `None` for every other call.
-/// The seat and the pack are not read.
+///
+/// This does not wait for a slot and does not search the pack for a
+/// sitting. On the direct path `run_command` has already loaded the seat
+/// env file. A promoted rule, one with `from` and `lesson_hash`, still
+/// asks the pack once and waits up to 400 ms.
 /// One allow or deny object exits 0. Exit 2 is a hook failure.
 #[must_use]
 pub fn cursor_side_answer(input: &str, event: Option<&str>) -> Option<(String, i32)> {
