@@ -1915,17 +1915,6 @@ fn cursor_conversation() -> Option<String> {
 
 static STAMP_ENV: std::sync::OnceLock<Option<Vec<(String, String)>>> = std::sync::OnceLock::new();
 
-/// Whether `pid`, named `comm`, is a cargo test runner binary under
-/// `target/.../deps/`.
-fn is_cargo_test_binary(pid: u32, comm: &str) -> bool {
-    if matches!(comm, "ljos" | "ljos-mcp" | "ljos-hud") {
-        return false;
-    }
-    std::fs::read_link(format!("/proc/{pid}/exe"))
-        .ok()
-        .is_some_and(|p| p.parent().and_then(|d| d.file_name()) == Some("deps".as_ref()))
-}
-
 fn same_runtime_dir(env: &[(String, String)]) -> bool {
     let Ok(mine) = std::env::var("XDG_RUNTIME_DIR") else {
         return true;
@@ -2041,11 +2030,7 @@ fn stamp_from_ancestors() -> Option<Vec<(String, String)>> {
     let chain = ancestry();
     let mut stop = chain.len();
     for (i, (pid, comm)) in chain.iter().enumerate() {
-        if *pid <= 1
-            || is_session(comm)
-            || matches!(comm.as_str(), "ljos" | "ljos-mcp")
-            || is_cargo_test_binary(*pid, comm)
-        {
+        if *pid <= 1 || is_session(comm) || matches!(comm.as_str(), "ljos" | "ljos-mcp") {
             stop = i;
             break;
         }
@@ -2058,42 +2043,118 @@ fn stamp_from_ancestors() -> Option<Vec<(String, String)>> {
         }
     }
     let active = &chain[..stop];
-    let direct_test_git = chain
-        .get(stop)
-        .is_some_and(|(pid, comm)| is_cargo_test_binary(*pid, comm))
-        && active.last().is_some_and(|(pid, _)| {
-            proc_tree::environ(*pid).is_none_or(|env| !env.iter().any(|(k, _)| k == "SHLVL"))
-        });
-    let start = match active.iter().rposition(|(_, comm)| comm == "git") {
-        Some(git_at) if !direct_test_git || git_at + 1 < stop => git_at + 1,
-        Some(git_at) => git_at,
-        None => 0,
-    };
     let is_shell = |comm: &str| {
         matches!(
             comm,
             "sh" | "bash" | "dash" | "zsh" | "ksh" | "fish" | "csh" | "tcsh" | "nu"
         )
     };
-    let stamped = |pid: u32| {
+    let stamped_id = |pid: u32| {
         let env = clean_shell_environ(proc_tree::environ(pid)?, false);
-        let has = env.iter().any(|(k, v)| {
-            (runner_session_var(k, v) && usable_session_id(v).is_some()) || k == "CURSOR_AGENT"
-        });
+        let has = env
+            .iter()
+            .any(|(k, v)| runner_session_var(k, v) && usable_session_id(v).is_some());
         has.then_some(env)
     };
-    let mut outermost_shell = None;
-    let mut outermost_any = None;
-    for (pid, comm) in &active[start..] {
-        if let Some(env) = stamped(*pid) {
-            if is_shell(comm) {
-                outermost_shell = Some(env);
+    let stamped_mark = |pid: u32| {
+        let env = clean_shell_environ(proc_tree::environ(pid)?, false);
+        let has = env.iter().any(|(k, _)| k == "CURSOR_AGENT");
+        has.then_some(env)
+    };
+    let (start, git_exec_ok, start_is_git) = match active
+        .iter()
+        .rposition(|(_, comm)| comm == "git")
+    {
+        Some(git_at) => {
+            let above_has_id = active[git_at + 1..]
+                .iter()
+                .take_while(|(pid, comm)| !is_harness_process(*pid, comm) && comm != "node")
+                .any(|(pid, _)| stamped_id(*pid).is_some());
+            let git_env = proc_tree::environ(active[git_at].0);
+            // When `bash -c '<cmd>'` or `zsh -c '<cmd>'` execs `<cmd>`
+            // directly, the shell leaves `_=<path-to-cmd>` after `SHLVL`
+            // (or `/bin/sh` leaves no `_`). In contrast, `python3 -c
+            // 'os.execvpe(...)'` inherits `_=/usr/bin/python3` from the
+            // shell that started python, and any dict mutation in python
+            // appends keys after `_`.
+            let bash_execed_git = git_env.as_ref().is_some_and(|env| {
+                let under_at = env.iter().rposition(|(k, _)| k == "_");
+                let shlvl_at = env.iter().rposition(|(k, _)| k == "SHLVL");
+                let pwd_at = env.iter().rposition(|(k, _)| k == "PWD");
+                let conv_at = env.iter().rposition(|(k, _)| k == "CURSOR_CONVERSATION_ID");
+                match (under_at, shlvl_at, pwd_at) {
+                    (Some(u), Some(_), Some(p)) if u > p => {
+                        let u_val = env[u].1.rsplit('/').next().unwrap_or(&env[u].1);
+                        let valid_u = matches!(
+                            u_val,
+                            "git"
+                                | "sh"
+                                | "bash"
+                                | "dash"
+                                | "zsh"
+                                | "env"
+                                | "nice"
+                                | "setsid"
+                                | "timeout"
+                                | "nohup"
+                                | "stdbuf"
+                                | "ionice"
+                                | "flock"
+                        );
+                        valid_u && !env[u + 1..].iter().any(|(k, _)| k == "LC_CTYPE")
+                    }
+                    (Some(u), Some(s), Some(p)) if s < p => {
+                        let u_val = env[u].1.rsplit('/').next().unwrap_or(&env[u].1);
+                        matches!(u_val, "sh" | "dash") && conv_at.is_none_or(|c| c > p)
+                    }
+                    (None, None, _) => true,
+                    _ => false,
+                }
+            });
+            let direct_under_unstamped_runner = !above_has_id
+                && bash_execed_git
+                && (git_at + 1 == stop
+                    || active[git_at + 1..]
+                        .iter()
+                        .take_while(|(pid, comm)| !is_harness_process(*pid, comm) && comm != "node")
+                        .all(|(_, comm)| !is_shell(comm) && WRAPPERS.contains(&comm.as_str())));
+            if !direct_under_unstamped_runner {
+                (git_at + 1, !above_has_id && bash_execed_git, false)
             } else {
-                outermost_any = Some(env);
+                (git_at, true, true)
             }
         }
+        None => (0, true, false),
+    };
+    let self_clean = proc_tree::environ(std::process::id()).map(|e| clean_shell_environ(e, true));
+    let self_has_id = git_exec_ok
+        && self_clean.as_ref().is_some_and(|env| {
+            env.iter()
+                .any(|(k, v)| runner_session_var(k, v) && usable_session_id(v).is_some())
+        });
+    let mut best_shell = None;
+    let mut best_any = None;
+    let mut mark_only = None;
+    for (i, (pid, comm)) in active[start..].iter().enumerate() {
+        let env_opt = if i == 0 && start_is_git {
+            proc_tree::environ(*pid).filter(|env| {
+                env.iter()
+                    .any(|(k, v)| runner_session_var(k, v) && usable_session_id(v).is_some())
+            })
+        } else {
+            stamped_id(*pid)
+        };
+        if let Some(env) = env_opt {
+            if is_shell(comm) {
+                best_shell = Some(env);
+            } else {
+                best_any = Some(env);
+            }
+        } else if mark_only.is_none() {
+            mark_only = stamped_mark(*pid);
+        }
     }
-    let mut outermost = outermost_shell.or(outermost_any);
+    let mut outermost = best_shell.or(best_any);
     if chain
         .get(stop)
         .is_some_and(|(_, comm)| comm.starts_with("tmux"))
@@ -2123,10 +2184,31 @@ fn stamp_from_ancestors() -> Option<Vec<(String, String)>> {
             }
         }
     }
-    if outermost.is_none() && start > 0 && std::env::var_os("CURSOR_AGENT").is_some() {
+    if outermost.is_some() {
+        return outermost;
+    }
+    if self_has_id
+        && active[start..]
+            .iter()
+            .take_while(|(pid, comm)| !is_harness_process(*pid, comm) && comm != "node")
+            .all(|(_, comm)| !is_shell(comm) && WRAPPERS.contains(&comm.as_str()))
+    {
+        return None;
+    }
+    if let Some(env) = mark_only {
+        return Some(env);
+    }
+    if self_clean
+        .as_ref()
+        .is_some_and(|env| env.iter().any(|(k, _)| k == "CURSOR_AGENT"))
+        && !self_has_id
+    {
         return Some(vec![("CURSOR_AGENT".to_string(), "1".to_string())]);
     }
-    outermost
+    if start > 0 && std::env::var_os("CURSOR_AGENT").is_some() {
+        return Some(vec![("CURSOR_AGENT".to_string(), "1".to_string())]);
+    }
+    None
 }
 
 const TMUX_SPAWN_TTL_MS: u64 = 30_000;

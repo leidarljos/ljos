@@ -1602,3 +1602,313 @@ fn rv2_a_pane_on_a_shared_tmux_server_does_not_borrow_the_last_openers_sitting()
         "Z's pane committed on X's sitting after X opened a window: rc={rc} {err}"
     );
 }
+
+const RUNNER_BASH: &str = "
+import json, os, subprocess, sys
+rc = 0
+for extra, line in json.loads(sys.argv[1]):
+    env = dict(os.environ)
+    env.update(extra)
+    rc = subprocess.call(['bash', '-c', line], env=env)
+print('EXIT', rc)
+";
+
+impl Box_ {
+    /// A runner named `comm` (a python3 symlink) started without the
+    /// variables in `unset`, that runs each step as `bash -c LINE` with
+    /// the step's variables on top, as a runner starts one tool call.
+    fn bash_runner(
+        &self,
+        comm: &str,
+        unset: &[&str],
+        env: &[(&str, &str)],
+        steps: &[(Vec<(&str, &str)>, &str)],
+    ) -> String {
+        let link = self.bin.join(comm);
+        if !link.exists() {
+            std::os::unix::fs::symlink("/usr/bin/python3", &link).unwrap();
+        }
+        let steps: Vec<(std::collections::BTreeMap<&str, &str>, &str)> = steps
+            .iter()
+            .map(|(e, l)| (e.iter().copied().collect(), *l))
+            .collect();
+        let steps = serde_json::to_string(&steps).unwrap();
+        let mut args: Vec<String> = Vec::new();
+        for u in unset {
+            args.push("-u".into());
+            args.push((*u).into());
+        }
+        let link = link.display().to_string();
+        args.extend([link, "-c".into(), RUNNER_BASH.into(), steps]);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let mut all = vec![("LJOS", env!("CARGO_BIN_EXE_ljos"))];
+        all.extend_from_slice(env);
+        text_of(&self.command("env", &args, &all).output().unwrap())
+    }
+}
+
+/// A runner that is not stamped (a node daemon, `CURSOR_AGENT` unset)
+/// starts each tool call as `bash -c LINE` with the conversation's id.
+/// Bash execs the last simple command of the line, so `git` is the
+/// runner's child. The sitting conversation's own commit goes through.
+#[test]
+fn a_one_shot_bash_c_commit_from_an_unstamped_runner_is_allowed() {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    let commit = pre_commit_hooks(&home);
+    let x = vec![("CURSOR_AGENT", "1"), ("CURSOR_CONVERSATION_ID", CONV_X)];
+    for line in [
+        commit.clone(),
+        format!("cd . && {commit}"),
+        format!("true; {commit}"),
+        format!("GIT_EDITOR=true {commit}"),
+    ] {
+        let said = home.bash_runner("node", &["CURSOR_AGENT"], &[], &[(x.clone(), &line)]);
+        assert!(
+            said.contains("EXIT 0") && !said.contains("sitting-gate"),
+            "X's own `bash -c '{line}'` was refused:\n{said}"
+        );
+    }
+}
+
+/// L1 regression guard: with a live sitting, an ordinary one-shot
+/// `bash -c 'git commit ...'` should not be refused solely because the
+/// immediate parent process carries no conversation id.
+#[test]
+fn one_shot_bash_c_commit_from_unstamped_parent_is_allowed_when_sitting_is_live() {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+
+    let hooks = home.run.join("githooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    script(
+        &hooks.join("pre-commit"),
+        &format!(
+            "#!/bin/sh\nexec {:?} git-hook pre-commit\n",
+            env!("CARGO_BIN_EXE_ljos")
+        ),
+    );
+
+    // Keep hold live as an active conversation shell would.
+    let mut sleeper = Command::new("sleep").arg("300").spawn().unwrap();
+    let pid = sleeper.id();
+    let hold = std::fs::read_dir(home.run.join("ljos"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("hold-")
+        })
+        .unwrap();
+    let mut lines: Vec<String> = std::fs::read_to_string(&hold)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    lines[2] = pid.to_string();
+    lines[3] = "sleep".into();
+    std::fs::write(&hold, lines.join("\n") + "\n").unwrap();
+
+    std::fs::write(home.repo.join("f.txt"), "x\n").unwrap();
+    let add = home
+        .command("git", &["add", "f.txt"], &[])
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "{}", text_of(&add));
+
+    // Parent intentionally unstamped; command provides conversation id.
+    let out = home
+        .command(
+            "bash",
+            &[
+                "-c",
+                &format!(
+                    "CURSOR_CONVERSATION_ID={CONV_X} git -c core.hooksPath={} -c user.name=t -c user.email=t@e commit -q --allow-empty -m t",
+                    hooks.display()
+                ),
+            ],
+            &[],
+        )
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "ordinary one-shot bash commit was refused:\n{}",
+        text_of(&out)
+    );
+
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+}
+
+/// RV6. The runner was started from a shell that is itself nested (a
+/// tmux pane, an ssh login, a terminal inside an editor), so its
+/// environment carries `SHLVL=2`. Bash passes `SHLVL` through to the
+/// command it execs. X's own one-shot commit goes through.
+#[test]
+fn rv6_a_one_shot_commit_from_a_runner_started_at_shlvl_2_is_allowed() {
+    let (home, commit) = rv_sat_x();
+    let x = vec![("CURSOR_AGENT", "1"), ("CURSOR_CONVERSATION_ID", CONV_X)];
+    for (comm, unset) in [("node", vec!["CURSOR_AGENT"]), ("cursor-agent", vec![])] {
+        for line in [commit.clone(), format!("cd . && {commit}")] {
+            let said = home.rv_runner(
+                comm,
+                "bash -c",
+                &unset,
+                &[("SHLVL", "2")],
+                &[(x.clone(), &line)],
+            );
+            assert!(
+                said.contains("EXIT 0") && !said.contains("sitting-gate"),
+                "X's own `bash -c '{line}'` under {comm} at SHLVL=2 was refused:\n{said}"
+            );
+        }
+    }
+}
+
+/// RV7. A runner that starts each tool call as `/bin/sh -c LINE` (node's
+/// `child_process.exec` does). Ubuntu's `/bin/sh` is dash, which execs
+/// the last command too but sets no `_`. X's own commit goes through.
+#[test]
+fn rv7_a_one_shot_sh_c_commit_from_an_unstamped_runner_is_allowed() {
+    let (home, commit) = rv_sat_x();
+    let x = vec![("CURSOR_AGENT", "1"), ("CURSOR_CONVERSATION_ID", CONV_X)];
+    for line in [commit.clone(), format!("cd . && {commit}")] {
+        let said = home.rv_runner(
+            "node",
+            "/bin/sh -c",
+            &["CURSOR_AGENT"],
+            &[],
+            &[(x.clone(), &line)],
+        );
+        assert!(
+            said.contains("EXIT 0") && !said.contains("sitting-gate"),
+            "X's own `sh -c '{line}'` was refused:\n{said}"
+        );
+    }
+}
+
+/// RV8. Ordinary wrappers in a one-shot line under an unstamped runner:
+/// bash execs the wrapper, and the wrapper runs git. X's own commit goes
+/// through.
+#[test]
+fn rv8_a_one_shot_commit_behind_an_ordinary_wrapper_is_allowed() {
+    let (home, commit) = rv_sat_x();
+    let x = vec![("CURSOR_AGENT", "1"), ("CURSOR_CONVERSATION_ID", CONV_X)];
+    for line in [
+        format!("timeout 60 {commit}"),
+        format!("nohup {commit} >/dev/null"),
+        format!("stdbuf -oL {commit}"),
+        format!("ionice -c3 {commit}"),
+        format!("flock {} {commit}", home.run.join("l").display()),
+    ] {
+        let said = home.rv_runner(
+            "node",
+            "bash -c",
+            &["CURSOR_AGENT"],
+            &[],
+            &[(x.clone(), &line)],
+        );
+        assert!(
+            said.contains("EXIT 0") && !said.contains("sitting-gate"),
+            "X's own `bash -c '{line}'` was refused:\n{said}"
+        );
+    }
+}
+
+/// RV9. A script that execs git with another conversation's id without
+/// changing `_` is refused because `_` names python. A hidden script
+/// under an unstamped runner that also rewrites `_` to `/usr/bin/git`
+/// matches bash's exec layout and is a known limit at the run layer, as
+/// on base.
+#[test]
+fn rv9_a_script_that_execs_git_with_anothers_id_does_not_commit_on_its_sitting() {
+    let (home, commit) = rv_sat_x();
+    let z = vec![("CURSOR_AGENT", "1"), ("CURSOR_CONVERSATION_ID", CONV_Z)];
+    let argv: Vec<String> = commit.split(' ').map(str::to_string).collect();
+    let argv = serde_json::to_string(&argv).unwrap();
+    let forge = home.run.join("forge.py");
+    std::fs::write(
+        &forge,
+        format!(
+            "import os\ne = dict(os.environ)\ne['CURSOR_CONVERSATION_ID'] = {CONV_X:?}\nos.execvpe('git', {argv}, e)\n"
+        ),
+    )
+    .unwrap();
+    let line = format!("python3 {}", forge.display());
+    let said = home.rv_runner("node", "bash -c", &["CURSOR_AGENT"], &[], &[(z, &line)]);
+    assert!(
+        !said.contains("EXIT 0"),
+        "Z's script committed on X's sitting:\n{said}"
+    );
+}
+
+/// RV12. An id-less `node` runner that starts each tool call as
+/// `zsh -f -c LINE` (zsh is the login shell on macOS). X's `ljos seat`
+/// names X, and X's own one-shot commit goes through.
+#[test]
+fn rv12_a_one_shot_zsh_c_call_from_an_unstamped_runner_is_the_conversations() {
+    let home = Box_::new();
+    let x = vec![("CURSOR_AGENT", "1"), ("CURSOR_CONVERSATION_ID", CONV_X)];
+    let said = home.rv_runner(
+        "node",
+        "zsh -f -c",
+        &["CURSOR_AGENT"],
+        &[],
+        &[(x.clone(), "\"$LJOS\" seat")],
+    );
+    assert!(
+        said.contains(&holder(CONV_X)),
+        "X's `zsh -c 'ljos seat'` did not name X:\n{said}"
+    );
+    let (home, commit) = rv_sat_x();
+    let said = home.rv_runner(
+        "node",
+        "zsh -f -c",
+        &["CURSOR_AGENT"],
+        &[],
+        &[(x.clone(), &commit)],
+    );
+    assert!(
+        said.contains("EXIT 0") && !said.contains("sitting-gate"),
+        "X's own `zsh -c '{commit}'` was refused:\n{said}"
+    );
+}
+
+/// RV13. A runner started from a nested shell (`SHLVL=2`) runs X's
+/// one-shot `env VAR=x git commit`. X's own commit goes through.
+#[test]
+fn rv13_a_one_shot_env_prefixed_commit_at_shlvl_2_is_allowed() {
+    let (home, commit) = rv_sat_x();
+    let x = vec![("CURSOR_AGENT", "1"), ("CURSOR_CONVERSATION_ID", CONV_X)];
+    let line = format!("env GIT_AUTHOR_NAME=x {commit}");
+    let said = home.rv_runner(
+        "node",
+        "bash -c",
+        &["CURSOR_AGENT"],
+        &[("SHLVL", "2")],
+        &[(x.clone(), &line)],
+    );
+    assert!(
+        said.contains("EXIT 0") && !said.contains("sitting-gate"),
+        "X's own `bash -c '{line}'` at SHLVL=2 was refused:\n{said}"
+    );
+}
+
+/// A `cursor-agent` runner whose own environment carries `CURSOR_AGENT`
+/// but no conversation id starts `bash -c 'ljos seat'` with X's id. The
+/// seat answers for X, as the payload hook of X's next call does.
+#[test]
+fn a_one_shot_seat_under_a_cursor_agent_without_an_id_is_the_conversations() {
+    let home = Box_::new();
+    let x = vec![("CURSOR_CONVERSATION_ID", CONV_X)];
+    let said = home.bash_runner("cursor-agent", &[], &[], &[(x, "\"$LJOS\" seat")]);
+    assert_eq!(seat_holder(&said), holder(CONV_X), "{said}");
+}
