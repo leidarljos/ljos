@@ -42,3 +42,19 @@ fn the_plugin_launcher_entry_is_a_seat_server() {
         cloud::seat_mcp_keys()
     );
 }
+
+/// Claude Code names a tool after the server key with every character
+/// outside `[A-Za-z0-9_-]` replaced by `_`.
+#[test]
+fn a_punctuated_seat_key_matches_its_normalised_tool_name() {
+    let (_lock, dir) = review_env();
+    put(
+        &dir.path().join(".claude.json"),
+        r#"{"mcpServers":{"ljos.seat":{"command":"ljos-mcp","args":[]}}}"#,
+    );
+    assert!(
+        subagent::is_seat_mcp_tool("mcp__ljos_seat__ljos_note"),
+        "{:?}",
+        cloud::seat_mcp_keys()
+    );
+}

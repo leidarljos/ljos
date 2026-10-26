@@ -792,7 +792,7 @@ fn read_seat_keys(file: &McpFile) -> KeyRead {
             }
             let mut keys = BTreeSet::new();
             if let Some(key) = text_marker_key(&text, marker) {
-                keys.insert(key);
+                remember_key(&mut keys, &key);
             }
             KeyRead::Keys(keys)
         }
@@ -839,6 +839,32 @@ fn command_launches_seat(command: &str, args: &[String]) -> bool {
     base == "ljos" && args.first().map(String::as_str) == Some("mcp")
 }
 
+/// Claude Code's tool segment keeps `[A-Za-z0-9_-]` and turns every other
+/// character into `_`. `ljos.seat` is the tool `mcp__ljos_seat__...`.
+/// The raw key is kept as well. Case is not folded.
+fn claude_tool_segment(key: &str) -> String {
+    key.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn remember_key(out: &mut BTreeSet<String>, key: &str) {
+    if key.is_empty() {
+        return;
+    }
+    let norm = claude_tool_segment(key);
+    if norm != key {
+        out.insert(norm);
+    }
+    out.insert(key.to_string());
+}
+
 fn entry_is_off(disabled: Option<bool>, enabled: Option<bool>) -> bool {
     disabled == Some(true) || enabled == Some(false)
 }
@@ -870,7 +896,7 @@ fn json_seat_keys(value: &serde_json::Value) -> BTreeSet<String> {
         };
         for (key, child) in obj {
             if json_entry_launches(child) {
-                out.insert(key.clone());
+                remember_key(out, key);
             }
             walk(child, out);
         }
@@ -935,7 +961,7 @@ fn toml_seat_keys(value: &toml::Value) -> BTreeSet<String> {
         };
         for (key, child) in table {
             if toml_entry_launches(child) {
-                out.insert(key.clone());
+                remember_key(out, key);
             }
             walk(child, out);
         }
