@@ -63,6 +63,8 @@ pub mod user_rules;
 pub mod wake;
 
 #[cfg(test)]
+mod mcpallowblock_review_tests;
+#[cfg(test)]
 #[path = "../tests/common/seat_root.rs"]
 mod test_seat_root;
 
@@ -13161,8 +13163,9 @@ fn output_allows(output: &str) -> bool {
 
 /// A Cursor `beforeReadFile` whose allow does not depend on the body.
 /// `false` when the bytes are anything else, including a payload this
-/// scan will not trust. The caller then parses as usual.
-fn cursor_read_allow_bytes(input: &[u8]) -> bool {
+/// scan will not trust. A second `hook_event_name` or `cursor_version`
+/// at the top level is `false` too, and the caller parses that payload.
+pub(crate) fn cursor_read_allow_bytes(input: &[u8]) -> bool {
     let b = trim_ascii_ws(input);
     if b.first() != Some(&b'{') {
         return false;
@@ -13170,6 +13173,7 @@ fn cursor_read_allow_bytes(input: &[u8]) -> bool {
     let mut i = 1;
     let mut depth = 1i32;
     let mut saw_cursor = false;
+    let mut saw_event = false;
     let mut saw_read = false;
     let mut key = Vec::new();
     #[derive(Clone, Copy, PartialEq)]
@@ -13231,7 +13235,16 @@ fn cursor_read_allow_bytes(input: &[u8]) -> bool {
                     return false;
                 }
                 if key.as_slice() == b"cursor_version" {
+                    if saw_cursor {
+                        return false;
+                    }
                     saw_cursor = true;
+                }
+                if key.as_slice() == b"hook_event_name" {
+                    if saw_event {
+                        return false;
+                    }
+                    saw_event = true;
                 }
                 want = Want::Colon;
             }
@@ -13251,6 +13264,8 @@ fn cursor_read_allow_bytes(input: &[u8]) -> bool {
                         };
                         if val.as_slice() == b"beforeReadFile" {
                             saw_read = true;
+                        } else {
+                            return false;
                         }
                     } else if !skip_json_string(b, &mut i) {
                         return false;
