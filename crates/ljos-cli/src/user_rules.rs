@@ -101,12 +101,16 @@ pub fn rules_path() -> Option<PathBuf> {
     Some(super::config_base()?.join("ljos").join("user-rules.json"))
 }
 
+/// The most a user-rules file may hold. A larger file is not read.
+pub const RULES_FILE_CAP: u64 = 1024 * 1024;
+
 /// The rows on disk that are still in force. An absent file is an empty
 /// list. Tombstones are left out.
 ///
 /// # Errors
 ///
-/// The file is not readable, or it is not the JSON this module writes.
+/// The file is not a regular file of at most [`RULES_FILE_CAP`] bytes,
+/// it is not readable, or it is not the JSON this module writes.
 pub fn load() -> Result<Vec<UserRule>> {
     Ok(read_all()?
         .into_iter()
@@ -118,18 +122,57 @@ pub fn load() -> Result<Vec<UserRule>> {
 ///
 /// # Errors
 ///
-/// The file is not readable, or it is not the JSON this module writes.
+/// The file is not a regular file of at most [`RULES_FILE_CAP`] bytes,
+/// it is not readable, or it is not the JSON this module writes.
 pub(crate) fn read_all() -> Result<Vec<UserRule>> {
     let Some(path) = rules_path() else {
         return Ok(Vec::new());
     };
-    if !path.exists() {
+    let Some(text) = read_rules_text(&path)? else {
         return Ok(Vec::new());
-    }
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("user rules: read {} failed", path.display()))?;
+    };
     parse_rules(&text)
         .with_context(|| format!("user rules: {} is not a user-rules file", path.display()))
+}
+
+/// The text of the user-rules file. `Ok(None)` when the file is absent.
+/// The open does not block: a FIFO, a directory, or any other non-regular
+/// file is an error, and a regular file over [`RULES_FILE_CAP`] is not read.
+fn read_rules_text(path: &std::path::Path) -> Result<Option<String>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(anyhow::Error::from(err)
+                .context(format!("user rules: read {} failed", path.display())));
+        }
+    };
+    // Stat the opened descriptor. The type and the size are this inode.
+    let meta = file
+        .metadata()
+        .with_context(|| format!("user rules: stat {} failed", path.display()))?;
+    if !meta.is_file() {
+        bail!("user rules: {} is not a regular file", path.display());
+    }
+    if meta.len() > RULES_FILE_CAP {
+        bail!(
+            "user rules: {} is {} bytes, over the {} byte cap",
+            path.display(),
+            meta.len(),
+            RULES_FILE_CAP
+        );
+    }
+    let mut text = String::new();
+    file.take(RULES_FILE_CAP)
+        .read_to_string(&mut text)
+        .with_context(|| format!("user rules: read {} failed", path.display()))?;
+    Ok(Some(text))
 }
 
 /// Parse one user-rules document. An empty body is an empty list.
@@ -1692,6 +1735,55 @@ mod tests {
         assert_eq!(code, 0, "{out}");
         assert!(out.contains("\"permission\":\"deny\""), "{out}");
         assert!(out.contains("ocaisa") || out.contains("Alan"), "{out}");
+    }
+
+    fn rules_file() -> std::path::PathBuf {
+        let path = rules_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&path);
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    /// A missing file is an empty list. A FIFO, a directory, and a file
+    /// over the cap fail at once, without reading the bytes.
+    #[test]
+    fn a_rules_file_must_be_a_small_regular_file() {
+        let (_lock, _dir) = isolated();
+        let path = rules_file();
+        let _ = std::fs::remove_file(&path);
+        assert!(load().unwrap().is_empty(), "a missing file is no rules");
+
+        std::fs::create_dir(&path).unwrap();
+        let err = load().unwrap_err();
+        assert!(format!("{err:#}").contains("not a regular file"), "{err:#}");
+        let _ = std::fs::remove_dir(&path);
+
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(RULES_FILE_CAP + 1).unwrap();
+        drop(file);
+        let err = load().unwrap_err();
+        assert!(format!("{err:#}").contains("byte cap"), "{err:#}");
+        std::fs::remove_file(&path).unwrap();
+
+        let c_path = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        // SAFETY: mkfifo creates a FIFO at this temp path with the given mode.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) }, 0);
+        let started = std::time::Instant::now();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(load().map(|_| ()));
+        });
+        let err = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("load blocked on a FIFO")
+            .expect_err("a FIFO is not a rules file");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "load took {:?}",
+            started.elapsed()
+        );
+        assert!(format!("{err:#}").contains("not a regular file"), "{err:#}");
     }
 
     /// With no pack to ask, no promoted lesson is stated, the person's no
