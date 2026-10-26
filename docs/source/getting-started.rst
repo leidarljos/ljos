@@ -47,8 +47,10 @@ so git needs an identity (``git config --global user.email``).
    2.0000  1/3 lesson  1fe4b916d956798196df680ade594ac5    today   The lexical default is BM25+. It beat BM25 by two points on turns.
    1.0000  1/3 preference  85dde12b553372dafb3d50e3b4b63fec    today   CombMNZ over RRF for fusing two ballots.
 
-A claim is two sentences at most, stored as written. The pack never mines a
-transcript. A lesson you type takes effect at once, like the preference, so the
+A claim is two sentences at most, stored as written. At ``SessionEnd`` the
+hook keeps up to five cue-word sentences from the person's and the agent's
+prose as unverified agent notes. The prompt hook never injects them.
+``LJOS_EXTRACT=off`` turns that off. A lesson you type takes effect at once, like the preference, so the
 hook shows both from the next prompt they bear on. Tomorrow, ``ljos due`` lists both claims; read each and grade it:
 
 .. code:: console

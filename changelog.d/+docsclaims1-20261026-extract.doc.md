@@ -1,0 +1,1 @@
+Session end keeps up to five cue-word sentences from the person's and the agent's prose as unverified agent notes. The prompt hook does not inject them, and LJOS_EXTRACT=off turns the read off. The explanation, the getting started page and the integration table say so.

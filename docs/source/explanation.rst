@@ -104,9 +104,12 @@ The contracts
    state it had before the claim, as ``ljos release`` does, so no ticket is left STARTED with nobody holding it.
 -  Cards are read-only. The seat writes to the pack; a person writes the
    cards.
--  The pack is written only by ``remember``, ``prefer``, ``trust``, ``learn``,
-   ``graded``, ``forget`` and an imported handover. Nothing is extracted from a
-   transcript.
+-  The pack is written by ``remember``, ``prefer``, ``trust``, ``learn``,
+   ``graded``, ``forget``, an imported handover, and a session-end read.
+   At ``SessionEnd`` that read keeps up to five cue-word sentences from
+   the person's and the agent's prose. Each is stored as an unverified
+   agent note. The prompt hook never injects one. ``LJOS_EXTRACT=off``
+   turns the read off.
 -  A tool that fails is a habitat refusing or down, and says which. It is
    never an empty answer.
 
@@ -267,10 +270,12 @@ Ebbinghaus curve refreshed by recall; Generative Agents
 (doi:10.48550/arXiv.2304.03442) rank by recency, importance and relevance
 and reflect. All of them put a model in the write path.
 
-The seat does not. What is remembered is what was said with ``Remember`` or
-``Prefer``, stored as written, so a transcript never becomes a belief by
-being read; that is the privacy-of-write, and it is the one design choice
-here that the others do not make. Forgetting is by review rather than by
+The seat does not. What is kept as a belief is what was said with ``Remember``
+or ``Prefer``, stored as written. At ``SessionEnd`` the hook may keep up to five
+cue-word sentences from the person's and the agent's prose as unverified
+agent notes, and the prompt hook never injects them, so a transcript does
+not become a belief by being read. That is the privacy-of-write, and it is
+the one design choice here that the others do not make. Forgetting is by review rather than by
 age: retrievability from the clock of what was recalled and when, the
 same schedule spaced repetition runs, where MemoryBank ages by time and
 Generative Agents by recency. Time is data, as in Zep: a claim carries the
@@ -381,7 +386,7 @@ agent runner it refuses. An import from ``receive`` or ``sync`` is origin
 ``peer``. None of these paths reads a runner's own memory, so the seat
 and that memory sit side by side without either writing the other.
 
-What the others have that the seat does not: extraction. A model reading
+What the others have that the seat does not: a model extracting claims. A model reading
 a transcript finds facts nobody said ``Remember`` to, and on a benchmark of
 chat logs that coverage is most of the score. The pack has a proposals
 path for that, held so a proposal becomes a claim only on an explicit
