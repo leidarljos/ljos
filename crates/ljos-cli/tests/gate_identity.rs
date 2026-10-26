@@ -123,16 +123,27 @@ impl Box_ {
     /// The `ljos hook` answer to a `preToolUse` of `line` whose
     /// payload names `payload_conv`, in a hook process with `env`.
     fn hook(&self, payload_conv: &str, line: &str, env: &[(&str, &str)]) -> String {
-        let payload = serde_json::json!({
+        self.hook_with(&self.payload(Some(payload_conv.into()), line), env)
+    }
+
+    /// A `preToolUse` of `line` whose `conversation_id` is `conv`,
+    /// or that has no such field when `conv` is `None`.
+    fn payload(&self, conv: Option<serde_json::Value>, line: &str) -> String {
+        let mut payload = serde_json::json!({
             "cursor_version": "2.4.0",
             "hook_event_name": "preToolUse",
-            "conversation_id": payload_conv,
             "session_id": "cursor-sess-0002bbbb",
             "cwd": self.repo,
             "tool_name": "Shell",
             "tool_input": {"command": line},
-        })
-        .to_string();
+        });
+        if let Some(conv) = conv {
+            payload["conversation_id"] = conv;
+        }
+        payload.to_string()
+    }
+
+    fn hook_with(&self, payload: &str, env: &[(&str, &str)]) -> String {
         let mut cmd = self.command("setsid", &["-w", env!("CARGO_BIN_EXE_ljos"), "hook"], env);
         let mut child = cmd
             .stdin(Stdio::piped())
@@ -321,4 +332,33 @@ fn the_diag_repro_allows_a_without_its_id_in_the_hook_env() {
 
     let _ = sleeper.kill();
     let _ = sleeper.wait();
+}
+
+/// A `conversation_id` that names nobody is refused, whatever id the
+/// hook's own environment carries. Only a payload without the field
+/// falls back to the environment.
+#[test]
+fn an_unusable_conversation_id_is_refused_not_read_from_the_env() {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    let env = [("CURSOR_CONVERSATION_ID", CONV_X)];
+    for bad in [
+        serde_json::json!(""),
+        serde_json::json!("   "),
+        serde_json::json!("-"),
+        serde_json::json!(null),
+        serde_json::json!("null"),
+        serde_json::json!("ab"),
+        serde_json::json!(format!("{CONV_X}\n")),
+        serde_json::json!(7),
+    ] {
+        let said = home.hook_with(&home.payload(Some(bad.clone()), MERGE), &env);
+        refused(&said, &format!("a merge whose conversation_id is {bad}"));
+    }
+    allowed(
+        &home.hook_with(&home.payload(None, MERGE), &env),
+        "a merge with no conversation_id, X's id in the env",
+    );
 }

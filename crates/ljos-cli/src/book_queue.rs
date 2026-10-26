@@ -400,7 +400,7 @@ fn wear_call(job: &Job) {
         }
     });
     crate::ballot_sig::export_hook_session(job.payload_session.as_deref());
-    crate::bind_call_conversation(&crate::hook_call_as(&job.raw, Some(&job.event)));
+    crate::bind_call_conversation(&job.raw, &crate::hook_call_as(&job.raw, Some(&job.event)));
 }
 
 /// Apply `batch` in a child that has the first job's environment and

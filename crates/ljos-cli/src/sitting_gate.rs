@@ -191,6 +191,12 @@ fn writes_history(call: &GitCall) -> bool {
 ///
 /// Why there is no live sitting, in words that follow "and".
 pub fn live_sitting() -> Result<String, String> {
+    if crate::call_conversation_unusable() {
+        return Err(
+            "the hook payload's conversation_id names no conversation, so this conversation holds no live sitting"
+                .into(),
+        );
+    }
     let Some((issue, hold)) = crate::live_held_issue() else {
         return Err("this conversation holds no live sitting".into());
     };

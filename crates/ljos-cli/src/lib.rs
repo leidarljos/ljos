@@ -1789,49 +1789,86 @@ fn spawn_while_busy<T>(mut spawn: impl FnMut() -> std::io::Result<T>) -> std::io
     spawned
 }
 
-/// The conversation a hook payload named, for the one call this
-/// process answers. `None` outside such a call.
-static CALL_CURSOR_CONVERSATION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// What the call this process answers said of its conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CallConversation {
+    /// No hook call, or one whose payload has no `conversation_id`.
+    Unbound,
+    /// A `conversation_id` that names nobody: empty, `-`, null, short.
+    Unusable,
+    Named(String),
+}
+
+static CALL_CURSOR_CONVERSATION: std::sync::Mutex<CallConversation> =
+    std::sync::Mutex::new(CallConversation::Unbound);
+
+/// A payload id that can name a conversation: eight characters or more
+/// once trimmed, not `-` or `null`, no control characters.
+#[must_use]
+pub fn usable_session_id(id: &str) -> Option<&str> {
+    if id.chars().any(char::is_control) {
+        return None;
+    }
+    let id = id.trim();
+    (id.len() >= 8 && id != "-" && !id.eq_ignore_ascii_case("null")).then_some(id)
+}
 
 /// Answer as the conversation `call` came from, until the next bind.
 /// A payload's `conversation_id` is the `CURSOR_CONVERSATION_ID` the
 /// runner stamps on that conversation's shells, so the hook resolves
 /// the holder `ljos sitting` resolved there. The hook's own environment
-/// may belong to another conversation and is not read for the id. Any
-/// other runner, or a payload with no id, leaves the environment as the
-/// source.
-pub fn bind_call_conversation(call: &HookCall) {
-    let id = call
-        .session
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| {
-            matches!(call.shape, HookShape::Cursor | HookShape::CursorShell) && id.len() >= 8
-        })
-        .map(str::to_string);
+/// may belong to another conversation and is not read for the id. A
+/// `conversation_id` that is there but unusable names nobody, and the
+/// environment does not stand in for it. Any other runner, or a payload
+/// without the field, leaves the environment as the source.
+pub fn bind_call_conversation(raw: &str, call: &HookCall) {
+    let v = serde_json::from_str::<Value>(raw.trim()).unwrap_or(Value::Null);
+    let bound = match v.get("conversation_id") {
+        Some(val) => match val.as_str().and_then(usable_session_id) {
+            Some(id) => CallConversation::Named(id.to_string()),
+            None => CallConversation::Unusable,
+        },
+        None => CallConversation::Unbound,
+    };
+    let _ = call;
     *CALL_CURSOR_CONVERSATION
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = id;
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = bound;
 }
 
-/// The conversation id the bound call named, if any.
-#[must_use]
-pub fn call_cursor_conversation() -> Option<String> {
+fn call_conversation() -> CallConversation {
     CALL_CURSOR_CONVERSATION
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
 }
 
+/// The conversation id the bound call named, if any.
+#[must_use]
+pub fn call_cursor_conversation() -> Option<String> {
+    match call_conversation() {
+        CallConversation::Named(id) => Some(id),
+        _ => None,
+    }
+}
+
+/// Whether the bound call carried a `conversation_id` that names nobody.
+#[must_use]
+pub fn call_conversation_unusable() -> bool {
+    call_conversation() == CallConversation::Unusable
+}
+
 /// The conversation this process speaks for: the bound call's,
-/// else `CURSOR_CONVERSATION_ID`.
+/// else `CURSOR_CONVERSATION_ID`. None for an unusable bound id.
 fn cursor_conversation() -> Option<String> {
-    call_cursor_conversation().or_else(|| {
-        std::env::var("CURSOR_CONVERSATION_ID")
+    match call_conversation() {
+        CallConversation::Named(id) => Some(id),
+        CallConversation::Unusable => None,
+        CallConversation::Unbound => std::env::var("CURSOR_CONVERSATION_ID")
             .ok()
             .map(|id| id.trim().to_string())
-            .filter(|id| !id.is_empty())
-    })
+            .filter(|id| !id.is_empty()),
+    }
 }
 
 /// The conversation ids this process speaks for, by key, sorted so two
@@ -1841,8 +1878,10 @@ fn cursor_conversation() -> Option<String> {
 /// and nothing else. Otherwise it is every `*_SESSION_ID` the runner
 /// stamped into the environment but the login's.
 fn stamped_sessions() -> Vec<(String, String)> {
-    if let Some(id) = call_cursor_conversation() {
-        return vec![("CURSOR_CONVERSATION_ID".to_string(), id)];
+    match call_conversation() {
+        CallConversation::Named(id) => return vec![("CURSOR_CONVERSATION_ID".to_string(), id)],
+        CallConversation::Unusable => return Vec::new(),
+        CallConversation::Unbound => {}
     }
     let mut found: Vec<(String, String)> = std::env::vars()
         .filter(|(k, v)| runner_session_var(k, v))
@@ -7617,14 +7656,18 @@ pub fn hook_call_as(input: &str, event: Option<&str>) -> HookCall {
         &v["tool_input"]
     };
     let cursor = matches!(shape, HookShape::Cursor | HookShape::CursorShell);
-    let session = v["conversation_id"]
-        .as_str()
-        .filter(|_| cursor)
-        .or_else(|| v["session_id"].as_str())
-        .or_else(|| v["sessionId"].as_str())
-        .or_else(|| v["conversation_id"].as_str())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+    // A payload that carries `conversation_id` is named by it or by
+    // nothing: its `session_id` is not the conversation.
+    let session = if cursor && v.get("conversation_id").is_some() {
+        v["conversation_id"].as_str().and_then(usable_session_id)
+    } else {
+        v["session_id"]
+            .as_str()
+            .or_else(|| v["sessionId"].as_str())
+            .or_else(|| v["conversation_id"].as_str())
+            .filter(|s| !s.is_empty())
+    }
+    .map(str::to_string);
     let from_payload = v["hook_event_name"]
         .as_str()
         .or_else(|| v["hookEventName"].as_str())
@@ -27967,15 +28010,12 @@ pub fn live_held_issue() -> Option<(String, Hold)> {
     // `CURSOR_CONVERSATION_ID` holds under its one name. A process above
     // it, or a runner's record, may serve every conversation of one user,
     // so it names none of them.
+    if call_conversation_unusable() {
+        return None;
+    }
     if cursor_conversation().is_some() {
-        return newest_record_in(
-            &[holder_name()],
-            &runtime_dir(),
-            &[],
-            &seat_name(),
-            &claim_graph_scope(),
-            &hold_alive,
-        );
+        let (dir, seat, graph) = (runtime_dir(), seat_name(), claim_graph_scope());
+        return newest_record_in(&[holder_name()], &dir, &[], &seat, &graph, &hold_alive);
     }
     let mut holders: Vec<String> = runner_record_holders();
     let own = holder_name();
@@ -49879,12 +49919,12 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     #[test]
     fn cursor_is_read_off_its_payload_and_answered_in_its_contract() {
         let shell = hook_call(
-            r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeShellExecution","command":"git status","cwd":"/w"}"#,
+            r#"{"cursor_version":"2.4.0","conversation_id":"cursor-conv-0001","hook_event_name":"beforeShellExecution","command":"git status","cwd":"/w"}"#,
         );
         assert_eq!(shell.shape, HookShape::CursorShell);
         assert_eq!(shell.event, "PreToolUse");
         assert_eq!(shell.cue, "git status");
-        assert_eq!(shell.session.as_deref(), Some("c-1"));
+        assert_eq!(shell.session.as_deref(), Some("cursor-conv-0001"));
         assert_eq!(
             hook_output_ruled(&shell, "", None),
             "{\"permission\":\"allow\"}\n"
@@ -49896,7 +49936,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         };
         assert!(hook_output_ruled(&shell, "", Some(&ask)).contains("\"permission\":\"ask\""));
         let tool = hook_call(
-            r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"preToolUse","tool_name":"Shell","tool_input":{"command":"git push"}}"#,
+            r#"{"cursor_version":"2.4.0","conversation_id":"cursor-conv-0001","hook_event_name":"preToolUse","tool_name":"Shell","tool_input":{"command":"git push"}}"#,
         );
         assert_eq!(tool.shape, HookShape::Cursor);
         let said = hook_output_ruled(&tool, "", Some(&ask));
@@ -49905,20 +49945,20 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "{said}"
         );
         let prompt = hook_call(
-            r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeSubmitPrompt","prompt":"tag a release"}"#,
+            r#"{"cursor_version":"2.4.0","conversation_id":"cursor-conv-0001","hook_event_name":"beforeSubmitPrompt","prompt":"tag a release"}"#,
         );
         assert_eq!(prompt.event, "UserPromptSubmit");
         assert!(prompt.shape.holds_prompt_note());
         let post = hook_call(
-            r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"postToolUse","tool_name":"Shell","tool_input":{"command":"ls"}}"#,
+            r#"{"cursor_version":"2.4.0","conversation_id":"cursor-conv-0001","hook_event_name":"postToolUse","tool_name":"Shell","tool_input":{"command":"ls"}}"#,
         );
         assert_eq!(
             hook_output_ruled(&post, "a note", None),
             "{\"additional_context\":\"a note\"}\n"
         );
         for gate in [
-            r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeReadFile","file_path":"/w/README.md","content":"x"}"#,
-            r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"ljos_search","tool_input":"{}","mcp_server_name":"ljos","command":"ljos-mcp"}"#,
+            r#"{"cursor_version":"2.4.0","conversation_id":"cursor-conv-0001","hook_event_name":"beforeReadFile","file_path":"/w/README.md","content":"x"}"#,
+            r#"{"cursor_version":"2.4.0","conversation_id":"cursor-conv-0001","hook_event_name":"beforeMCPExecution","tool_name":"ljos_search","tool_input":"{}","mcp_server_name":"ljos","command":"ljos-mcp"}"#,
         ] {
             // Registered with failClosed, so an empty answer would block
             // every file read and MCP call.

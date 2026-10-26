@@ -2618,7 +2618,7 @@ fn run_command() -> Result<()> {
             } else {
                 ljos_cli::hook_call_as(&input, event.as_deref())
             };
-            ljos_cli::bind_call_conversation(&call);
+            ljos_cli::bind_call_conversation(&input, &call);
             ljos_cli::ballot_sig::export_hook_session(call.session.as_deref());
             if ljos_cli::subagent::note_hook_call(&input, &call.event) {
                 return Ok(());
