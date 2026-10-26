@@ -2607,15 +2607,6 @@ fn run_command() -> Result<()> {
             };
             ljos_cli::bind_call_conversation(&input, &call);
             ljos_cli::adopt_blank_conversation(&input, &mut call);
-            // The queue is off, or this process was already inside a hook.
-            // Answer before the pack search and before the deadline thread.
-            // The seat env was loaded above. A promoted rule may ask the
-            // pack once from inside that answer.
-            if !prompt {
-                if let Some(code) = ljos_cli::emit_cursor_side_answer(&input, event.as_deref()) {
-                    std::process::exit(code);
-                }
-            }
             ljos_cli::ballot_sig::export_hook_session(call.session.as_deref());
             if ljos_cli::subagent::note_hook_call(&input, &call.event) {
                 // Cursor blocks a permission hook that prints nothing.
@@ -2625,6 +2616,16 @@ fn run_command() -> Result<()> {
                     print!("{}", ljos_cli::hook_output_ruled(&call, "", None));
                 }
                 return Ok(());
+            }
+            // The queue is off, or this process was already inside a hook.
+            // Answer before the pack search and before the deadline thread.
+            // The seat env was loaded above. A promoted rule may ask the
+            // pack once from inside that answer. The call is recorded
+            // first, so a bare seat can still bind the conversation.
+            if !prompt {
+                if let Some(code) = ljos_cli::emit_cursor_side_answer(&input, event.as_deref()) {
+                    std::process::exit(code);
+                }
             }
             // A runner the seat asked for a judgment hears nothing from the
             // seat, so the judgment cannot open sittings or judge again;
