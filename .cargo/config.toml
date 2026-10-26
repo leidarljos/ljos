@@ -1,0 +1,8 @@
+# Cargo 1.89 does not expand variables in this file, so a
+# ${PWD} flag would not match the checkout. Export
+# CARGO_BUILD_RUSTFLAGS with two remap-path-prefix flags: the
+# checkout directory mapped to /src, and CARGO_HOME mapped to
+# /cargo. Pin CARGO_HOME to /usr/local/cargo. Take
+# SOURCE_DATE_EPOCH from the commit and leave incremental
+# compilation off. RUSTFLAGS replaces that list, so repeat
+# both remaps when RUSTFLAGS is set.

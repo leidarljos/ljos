@@ -74,6 +74,23 @@ jobs:
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
             export CARGO_PROFILE_RELEASE_OPT_LEVEL=2
           fi
+          # Cargo 1.89 does not expand ${PWD} in .cargo/config.toml.
+          # A local release build exports the same two remaps: the
+          # checkout mapped to /src, and CARGO_HOME mapped to /cargo.
+          # CARGO_HOME is pinned so the registry path matches a build
+          # on another machine. RUSTFLAGS replaces this list.
+          if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+            SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+            export SOURCE_DATE_EPOCH
+          fi
+          export CARGO_INCREMENTAL=0
+          export CARGO_HOME=/usr/local/cargo
+          if [ ! -w "$CARGO_HOME" ]; then
+            sudo mkdir -p "$CARGO_HOME"
+            sudo chown "$(id -u):$(id -g)" "$CARGO_HOME"
+          fi
+          mkdir -p "$CARGO_HOME"
+          export CARGO_BUILD_RUSTFLAGS="--remap-path-prefix=${GITHUB_WORKSPACE}=/src --remap-path-prefix=${CARGO_HOME}=/cargo"
           cargo build --locked --release --target "${{ matrix.target }}" -p ljos -p ljos-hud
       - run: |
           set -eu
