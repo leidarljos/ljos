@@ -1110,3 +1110,55 @@ fn a_cursor_seat_tool_with_an_mcp_prefix_prints_allow() {
         );
     }
 }
+
+/// The two early answers show up in the trace when the marker is present,
+/// and nowhere when it is absent.
+#[test]
+fn mcp_and_read_answers_are_traced_when_the_marker_is_present() {
+    let hab = hab("trace");
+    let log = hab.run.join("ljos/hook-trace.jsonl");
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOKD", "off");
+    let (_took, out) = finished(
+        feed(cmd, &mcp_payload("ljos_note")),
+        Duration::from_secs(2),
+        "untraced",
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert!(!log.exists(), "a trace row was written with no marker");
+    let dir = hab.run.join("ljos");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("hook-trace"), "").unwrap();
+    for hookd in ["off", "on"] {
+        for (what, payload) in [
+            ("beforeMCPExecution", mcp_payload("ljos_note")),
+            ("beforeReadFile", read_payload()),
+        ] {
+            let mut cmd = ljos(&hab, &["hook"]);
+            if hookd == "off" {
+                cmd.env("LJOS_HOOKD", "off");
+            }
+            let label = format!("{what} {hookd}");
+            let (took, out) = finished(feed(cmd, &payload), Duration::from_secs(2), &label);
+            assert_eq!(
+                out.status.code(),
+                Some(0),
+                "{label}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(took < Duration::from_millis(1500), "{label} took {took:?}");
+        }
+    }
+    let text = std::fs::read_to_string(&log).unwrap_or_else(|err| panic!("{err}"));
+    for event in ["beforeMCPExecution", "beforeReadFile"] {
+        let rows = text
+            .lines()
+            .filter(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .ok()
+                    .is_some_and(|value| value["event"] == event)
+            })
+            .count();
+        assert!(rows >= 2, "{event} rows {rows} in {text}");
+    }
+}

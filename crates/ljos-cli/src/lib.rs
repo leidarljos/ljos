@@ -13207,6 +13207,14 @@ pub fn emit_cursor_side_answer(input: &str, event: Option<&str>) -> Option<i32> 
     let _ = std::io::Write::write_all(&mut out, output.as_bytes());
     let _ = std::io::Write::flush(&mut out);
     drop(out);
+    // The hook command's later trace never runs: this process exits.
+    // Write the row when the trace marker is present.
+    let call = hook_call_as(input, event);
+    let (subagent, _, _) = hook_subagent(input);
+    // SAFETY: single-threaded here. The flag keeps a subagent trace off
+    // the tracker walk `held_issue` does outside a hook.
+    unsafe { std::env::set_var("LJOS_IN_HOOK", "1") };
+    hook_trace(input, &call, subagent.as_deref());
     hookd::note_time(
         "hook",
         hookd::started().elapsed(),
