@@ -4426,8 +4426,8 @@ pub fn same_conversation_tag(held: &str, assignee: &str) -> bool {
     }
 }
 
-/// Whether `line`, starting in `cwd`, writes a `hold-*` record inside the
-/// runtime `ljos` directory.
+/// Whether `line`, starting in `cwd`, writes a sitting or conversation
+/// binding record inside the runtime `ljos` directory.
 pub(crate) fn writes_hold_record(line: &str, cwd: Option<&Path>) -> bool {
     let mut cwd = cwd
         .map(Path::to_path_buf)
@@ -4444,12 +4444,17 @@ pub(crate) fn writes_hold_record(line: &str, cwd: Option<&Path>) -> bool {
         }
         let reads = READERS.contains(&first) || first == "ljos" || kept_prompt::reads_only(first);
         if let Some(target) = kept_prompt::reached(words, cwd.as_deref(), reads) {
-            let name = target
-                .trim_end_matches('/')
-                .rsplit('/')
-                .next()
-                .unwrap_or(&target);
-            if name.starts_with("hold-") {
+            let trimmed = target.trim_end_matches('/');
+            let name = trimmed.rsplit('/').next().unwrap_or(trimmed);
+            if name.starts_with("hold-")
+                || name.starts_with("session-")
+                || name.starts_with("seat-")
+                || name.starts_with("subchild-")
+                || name.starts_with("tmux-sock-")
+                || name.starts_with("tmux-pane-")
+                || matches!(name, "tmux-hook-conv" | "first-hook-conv" | "agent-calls")
+                || trimmed.contains("/agent-calls/")
+            {
                 return true;
             }
         }

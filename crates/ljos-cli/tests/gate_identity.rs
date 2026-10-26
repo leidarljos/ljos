@@ -1154,3 +1154,39 @@ fn a_shell_with_a_codex_thread_holds_under_the_thread() {
         "X's merge after a sitting under the Codex thread",
     );
 }
+
+/// A tool command under a runner may not write a sitting record. The
+/// records that bind a conversation for the paths that have no payload,
+/// `session-bare-SEAT`, `tmux-hook-conv` and `first-hook-conv`, decide
+/// whose sitting a call is judged by, so a shell line that writes one is
+/// refused like a line that writes `hold-*`.
+#[test]
+fn a_tool_command_may_not_write_the_records_that_bind_a_conversation() {
+    let home = Box_::new();
+    for name in [
+        "session-bare-inky",
+        "tmux-hook-conv",
+        "tmux-sock-abc",
+        "tmux-pane-abc-1",
+        "first-hook-conv",
+    ] {
+        let cmd = format!(
+            "printf '%s\\n' inky {} > {}/ljos/{name}",
+            holder(CONV_X),
+            home.run.display()
+        );
+        let payload = serde_json::json!({
+            "cursor_version": "2.4.0",
+            "hook_event_name": "beforeShellExecution",
+            "conversation_id": CONV_Z,
+            "cwd": home.repo,
+            "command": cmd,
+        })
+        .to_string();
+        let said = home.hook_with(&payload, &[]);
+        assert!(
+            said.contains("\"permission\":\"deny\""),
+            "a shell write to {name} was not refused:\n{said}"
+        );
+    }
+}
