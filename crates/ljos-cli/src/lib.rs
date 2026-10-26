@@ -50,6 +50,8 @@ pub mod record;
 pub mod runner_env;
 pub mod runner_hooks;
 pub mod runner_skills;
+#[cfg(test)]
+mod seat_mcp_layout;
 pub mod sitting_gate;
 pub mod slot;
 pub mod subagent;

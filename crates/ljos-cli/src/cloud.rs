@@ -832,6 +832,10 @@ fn command_launches_seat(command: &str, args: &[String]) -> bool {
     if base == crate::MCP_SERVER_COMMAND {
         return true;
     }
+    // The shipped plugin starts the seat as `ljos-plugin ljos-mcp`.
+    if base == "ljos-plugin" && args.iter().any(|arg| arg == crate::MCP_SERVER_COMMAND) {
+        return true;
+    }
     base == "ljos" && args.first().map(String::as_str) == Some("mcp")
 }
 

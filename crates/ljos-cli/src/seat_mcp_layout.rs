@@ -1,0 +1,44 @@
+//! Seat keys from the seat's own MCP config.
+
+use super::*;
+
+fn review_env() -> (EnvLock, tempfile::TempDir) {
+    let lock = test_env_lock();
+    let dir = tempfile::TempDir::new().unwrap();
+    unsafe {
+        std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
+        std::env::set_var("HOME", dir.path());
+        std::env::set_var("LJOS_GUARD", "on");
+        std::env::set_var("LJOS_HOLD", "rohit");
+        std::env::set_var("LJOS_SEAT", "claude");
+        std::env::set_var("PACKSET_URL", "off");
+        std::env::set_var("PACKSET_WORKSPACE", "seat-a");
+        std::env::set_var("LJOS_USER_RULES_SYNC", "off");
+        for key in ["LJOS_MCP_CONFIG", "CLAUDE_CONFIG_DIR", "CODEX_HOME"] {
+            std::env::remove_var(key);
+        }
+    }
+    PERSON_AT_TERMINAL.with(|p| p.set(true));
+    (lock, dir)
+}
+
+fn put(path: &std::path::Path, text: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+/// The shipped plugin starts the seat as `ljos-plugin` with `ljos-mcp`
+/// among its arguments. That entry is the seat server.
+#[test]
+fn the_plugin_launcher_entry_is_a_seat_server() {
+    let (_lock, dir) = review_env();
+    put(
+        &dir.path().join(".cursor/mcp.json"),
+        r#"{"mcpServers":{"ljos":{"command":"/opt/ljos/bin/ljos-plugin","args":["ljos-mcp"]}}}"#,
+    );
+    assert!(
+        subagent::is_seat_mcp_tool("mcp__ljos__ljos_note"),
+        "the plugin launcher entry is not a seat key: {:?}",
+        cloud::seat_mcp_keys()
+    );
+}
