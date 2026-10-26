@@ -806,10 +806,18 @@ fn protected_ref(refs: &str, branches: &[String]) -> Option<String> {
     None
 }
 
-/// Whether `repo` is a tracker checkout: it holds `vissue.toml` or
-/// `Software/`, as `vissue` reads a tracker root.
+/// Whether `repo` is a tracker checkout: it holds `vissue.toml`, or a
+/// `Software/<project>/issues.org` as `vissue` reads a tracker root. A
+/// bare `Software/` directory is any repository's.
 fn holds_tracker(repo: &Path) -> bool {
-    repo.join("vissue.toml").is_file() || repo.join("Software").is_dir()
+    if repo.join("vissue.toml").is_file() {
+        return true;
+    }
+    std::fs::read_dir(repo.join("Software")).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|entry| entry.path().join("issues.org").is_file())
+    })
 }
 
 fn book_commit(hook: &str) -> Result<()> {
@@ -1110,12 +1118,9 @@ fn canonical_or(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// Whether `repo` is a deed or claim store ljos writes itself, read from
+/// the store settings; a path that merely contains `claimdag` is not one.
 fn is_store(repo: &Path) -> bool {
-    let text = repo.to_string_lossy();
-    if text.contains("/deedar/store") || text.contains("/claimdag/") || text.ends_with("/claimdag")
-    {
-        return true;
-    }
     store_dirs()
         .iter()
         .any(|root| same_dir(repo, root) || repo_starts(repo, root))
