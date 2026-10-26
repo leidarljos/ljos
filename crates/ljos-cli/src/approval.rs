@@ -50,13 +50,18 @@ fn valid_reference(reference: &str) -> bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Scope {
+    /// The conversation that asked. Empty when the hook named none.
+    /// An empty value matches only another empty value, and only on the
+    /// command and directory, so the request is not attached to a
+    /// conversation that happens to be open.
     session: String,
     /// The seat that raised the request. The approval tool matches this
     /// plus the directory plus the request id, so a different conversation
     /// string from the same session still grants. It is not part of the
-    /// hook retry's equality: that retry stays bound to the command,
-    /// directory, conversation, tool and rule, and a seat rename between
-    /// the ask and the retry does not drop the grant.
+    /// hook retry's equality. A named conversation stays bound to the
+    /// command, directory, conversation, tool and rule. A request with no
+    /// conversation stays bound to the command and directory. A seat rename
+    /// between the ask and the retry does not drop the grant.
     #[serde(default)]
     seat: String,
     shape: String,
@@ -69,6 +74,15 @@ struct Scope {
 
 impl PartialEq for Scope {
     fn eq(&self, other: &Self) -> bool {
+        // No conversation was stored. The same command and directory
+        // match from any later caller that also names no conversation.
+        // A caller that names one does not match.
+        if self.session.is_empty() || other.session.is_empty() {
+            return self.session.is_empty()
+                && other.session.is_empty()
+                && self.cwd == other.cwd
+                && self.command == other.command;
+        }
         self.session == other.session
             && self.shape == other.shape
             && self.tool == other.tool
@@ -84,11 +98,13 @@ impl Eq for Scope {}
 impl Scope {
     fn from_hook(input: &str, call: &HookCall, rule: &Rule) -> Result<Self> {
         let value: Value = serde_json::from_str(input)?;
+        // A missing conversation id still records the request. The empty
+        // session is not filled from another conversation.
         let session = call
             .session
             .as_deref()
             .filter(|s| !s.is_empty())
-            .context("approval needs a conversation id")?;
+            .unwrap_or("");
         let tool = value["tool_name"]
             .as_str()
             .or_else(|| value["toolName"].as_str())
@@ -286,11 +302,14 @@ impl Store {
     /// request id are the match.
     fn pending_for(&self, id: &str, session: &str, seat: &str, cwd: &Path) -> Result<Request> {
         let request = &self.requests[self.request_index(id)?];
+        // A request with no conversation stays that way. The consent form
+        // may show it. The caller's conversation is not written onto it.
+        let no_conversation = request.scope.session.is_empty();
         let conversation_ok =
             request.scope.session == session || same_conversation(&request.scope.session, session);
         let place_ok =
             !seat.is_empty() && request.scope.seat == seat && same_dir(&request.scope.cwd, cwd);
-        if !conversation_ok && !place_ok {
+        if !no_conversation && !conversation_ok && !place_ok {
             bail!("approval belongs to a different conversation");
         }
         if request.approved {
@@ -331,9 +350,12 @@ impl Store {
     /// nothing.
     fn approve_in(&mut self, id: &str, sessions: &[String]) -> Result<String> {
         let request = &self.requests[self.request_index(id)?];
-        if !sessions
-            .iter()
-            .any(|session| same_conversation(&request.scope.session, session))
+        // Chat text never grants a request that was not asked in a
+        // conversation, even when the session list contains an empty id.
+        if request.scope.session.is_empty()
+            || !sessions
+                .iter()
+                .any(|session| same_conversation(&request.scope.session, session))
         {
             bail!("approval {id} was not asked in this conversation");
         }
@@ -615,10 +637,14 @@ fn hook_output_at(
     if call.event != "PreToolUse" || call.shape.asks() {
         return hook_output_ruled(call, context, verdict);
     }
-    let result = (|| {
+    let result = (|| -> Result<Option<(bool, String)>> {
         let scope = Scope::from_hook(input, call, rule)?;
+        let no_conversation = scope.session.is_empty();
         let now = now?;
-        Store::open(root, now)?.request_or_consume(scope, now)
+        match Store::open(root, now)?.request_or_consume(scope, now)? {
+            None => Ok(None),
+            Some(id) => Ok(Some((no_conversation, id))),
+        }
     })();
     match result {
         Ok(None) => {
@@ -628,9 +654,13 @@ fn hook_output_at(
         result => {
             let mut pending = rule.clone();
             let detail = match result {
-                Ok(Some(id)) => {
+                Ok(Some((no_conversation, id))) => {
                     let tag = request_tag(&id).unwrap_or(id);
-                    format!("Reply `approve {tag}` in this conversation, call the ljos_request_approval MCP tool with id {tag} for a consent form, or run `ljos approve {tag}` in your own terminal. Retry only after consent is recorded. The grant is for one attempt of this command in this directory and expires fifteen minutes after the request.")
+                    if no_conversation {
+                        format!("Call the ljos_request_approval MCP tool with id {tag} for a consent form, or run `ljos approve {tag}` in your own terminal. Retry only after consent is recorded. The grant is for one attempt of this command in this directory and expires fifteen minutes after the request.")
+                    } else {
+                        format!("Reply `approve {tag}` in this conversation, call the ljos_request_approval MCP tool with id {tag} for a consent form, or run `ljos approve {tag}` in your own terminal. Retry only after consent is recorded. The grant is for one attempt of this command in this directory and expires fifteen minutes after the request.")
+                    }
                 }
                 Err(error) => format!(
                     "Approval could not be recorded: {error:#}. The command remains blocked."
@@ -1090,13 +1120,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("approvals");
         let original = input(temp.path());
-        for key in ["session_id", "cwd", "tool_name"] {
+        for key in ["cwd", "tool_name"] {
             let mut value: Value = serde_json::from_str(&original).unwrap();
             value.as_object_mut().unwrap().remove(key);
             let response: Value =
                 serde_json::from_str(&output(&value.to_string(), &ask(), &root, 100)).unwrap();
             assert_eq!(response["hookSpecificOutput"]["permissionDecision"], "deny");
-            assert!(!root.exists());
+            assert!(!root.exists(), "{key}");
         }
         request_id(&output(&original, &ask(), &root, 101));
         fs::write(root.join("requests.json"), "not json").unwrap();
@@ -1245,5 +1275,187 @@ mod tests {
             request_id(&output(&input, &ask(), &root, 200 + TTL_SECONDS)),
             id
         );
+    }
+
+    /// An ask whose payload names no conversation still records one request
+    /// for that command and directory. Chat text and the hook payload do
+    /// not grant it. The consent form can, from any conversation, and the
+    /// stored conversation stays empty. Any later caller with no
+    /// conversation then runs that command once.
+    #[test]
+    fn an_ask_with_no_conversation_is_one_use_for_that_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("approvals");
+        let cwd = temp.path();
+        let command = "git push --force origin topic";
+        let rule = Rule {
+            pattern: "git-force-push".into(),
+            verdict: "ask".into(),
+            reason: crate::policyd_reason("git-force-push"),
+        };
+        let cursor = serde_json::json!({
+            "conversation_id": "",
+            "generation_id": "",
+            "session_id": "",
+            "transcript_path": null,
+            "cursor_version": "1.0.0",
+            "cwd": cwd,
+            "hook_event_name": "preToolUse",
+            "command": command,
+            "tool_name": "Shell",
+            "tool_input": {"command": command},
+        })
+        .to_string();
+        let first = output(&cursor, &rule, &root, 100);
+        let value: Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(value["permission"], "deny", "{first}");
+        let reason = value["user_message"].as_str().unwrap().to_string();
+        assert!(
+            !reason.contains("approval needs a conversation id"),
+            "{reason}"
+        );
+        assert!(!reason.contains("leave it for them"), "{reason}");
+        let tag = reason
+            .split("ljos approve ")
+            .nth(1)
+            .and_then(|rest| rest.split('`').next())
+            .unwrap()
+            .to_string();
+        assert!(
+            reason.contains(&format!("ljos_request_approval MCP tool with id {tag}")),
+            "{reason}"
+        );
+        let store = Store::open(&root, 101).unwrap();
+        assert_eq!(store.requests.len(), 1);
+        assert_eq!(store.requests[0].scope.session, "");
+        assert_eq!(store.requests[0].scope.command, command);
+        assert_eq!(store.requests[0].scope.cwd, fs::canonicalize(cwd).unwrap());
+        assert!(!store.requests[0].approved);
+        let full = store.requests[0].id.clone();
+        drop(store);
+
+        // A different runner, still with no conversation, is the same request.
+        let codex = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "turn_id": "turn-other",
+            "cwd": cwd,
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+        })
+        .to_string();
+        let second = output(&codex, &rule, &root, 102);
+        let second_v: Value = serde_json::from_str(&second).unwrap();
+        let second_reason = second_v["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap();
+        assert!(second_reason.contains(&tag), "{second_reason}");
+        assert_eq!(Store::open(&root, 103).unwrap().requests.len(), 1);
+
+        let chat = approve_from_prompt_at(
+            &format!("approve {tag}"),
+            &["conversation-1".into(), String::new()],
+            &root,
+            Ok(104),
+        )
+        .unwrap();
+        assert!(chat.contains("not asked in this conversation"), "{chat}");
+        assert!(!Store::open(&root, 105).unwrap().requests[0].approved);
+
+        let mut hooked: Value = serde_json::from_str(&cursor).unwrap();
+        hooked["tool_input"]["approve"] = Value::Bool(true);
+        hooked["prompt"] = Value::String(format!("approve {full}"));
+        let still = output(&hooked.to_string(), &rule, &root, 106);
+        assert!(still.contains(&tag), "{still}");
+        assert!(!Store::open(&root, 107).unwrap().requests[0].approved);
+
+        let elsewhere = tempfile::tempdir().unwrap();
+        let pending = Store::open(&root, 108)
+            .unwrap()
+            .pending_for(&tag, "conversation-9", "other-seat", elsewhere.path())
+            .unwrap();
+        assert_eq!(pending.scope.session, "");
+        let said = Store::open(&root, 109).unwrap().confirm(&pending).unwrap();
+        assert!(said.contains("Approved once"), "{said}");
+        let granted = Store::open(&root, 110).unwrap();
+        assert!(granted.requests[0].approved);
+        assert_eq!(granted.requests[0].scope.session, "");
+        drop(granted);
+
+        let named = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "turn_id": "turn-1",
+            "session_id": "conversation-1",
+            "cwd": cwd,
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+        })
+        .to_string();
+        let named_out = output(&named, &rule, &root, 111);
+        assert!(named_out.contains("ljos approve "), "{named_out}");
+        let named_store = Store::open(&root, 112).unwrap();
+        assert!(named_store
+            .requests
+            .iter()
+            .any(|request| request.scope.session.is_empty() && request.approved));
+        assert!(named_store
+            .requests
+            .iter()
+            .any(|request| { request.scope.session == "conversation-1" && !request.approved }));
+        drop(named_store);
+
+        let other_dir = tempfile::tempdir().unwrap();
+        let mut other_cwd: Value = serde_json::from_str(&cursor).unwrap();
+        other_cwd["cwd"] = other_dir.path().to_str().unwrap().into();
+        let other_place = output(&other_cwd.to_string(), &rule, &root, 113);
+        assert!(
+            other_place.contains("\"permission\":\"deny\""),
+            "{other_place}"
+        );
+        assert!(Store::open(&root, 114)
+            .unwrap()
+            .requests
+            .iter()
+            .any(|request| {
+                request.scope.session.is_empty()
+                    && request.approved
+                    && request.scope.command == command
+                    && request.scope.cwd == fs::canonicalize(cwd).unwrap()
+            }));
+
+        let mut other_cmd: Value = serde_json::from_str(&cursor).unwrap();
+        other_cmd["command"] = "git push --force origin other".into();
+        other_cmd["tool_input"]["command"] = "git push --force origin other".into();
+        let other_line = output(&other_cmd.to_string(), &rule, &root, 115);
+        assert!(
+            other_line.contains("\"permission\":\"deny\""),
+            "{other_line}"
+        );
+        assert!(Store::open(&root, 116)
+            .unwrap()
+            .requests
+            .iter()
+            .any(|request| {
+                request.scope.session.is_empty()
+                    && request.approved
+                    && request.scope.command == command
+            }));
+
+        assert!(
+            output(&codex, &rule, &root, 117).is_empty(),
+            "the other unattributed caller did not spend the grant"
+        );
+        let again = output(&cursor, &rule, &root, 118);
+        assert!(again.contains("\"permission\":\"deny\""), "{again}");
+        let again_v: Value = serde_json::from_str(&again).unwrap();
+        let again_tag = again_v["user_message"]
+            .as_str()
+            .unwrap()
+            .split("ljos approve ")
+            .nth(1)
+            .unwrap()
+            .split('`')
+            .next()
+            .unwrap();
+        assert_ne!(again_tag, tag);
     }
 }
