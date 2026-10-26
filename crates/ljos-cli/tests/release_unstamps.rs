@@ -222,7 +222,33 @@ fn finish_without_close_reopens_and_finish_with_close_does_not() {
         "--gen",
         "2",
     ]);
-    let closed = ljos(&[
+    let refuse = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+            .args(args)
+            .env_clear()
+            .env("PATH", &path)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_STATE_HOME", home.join(".state"))
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .env("VISSUE_ROOT", &tracker)
+            .env("LJOS_SEAT", "saddle")
+            .env("LJOS_TRACKER_GIT", "off")
+            .env("PACKSET_URL", "off")
+            .env("CURSOR_AGENT", "1")
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "ljos {args:?} closed with no person: {out:?}"
+        );
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+    let closed = refuse(&[
         "finish",
         "proj-ffff",
         "--assignee",
@@ -231,7 +257,7 @@ fn finish_without_close_reopens_and_finish_with_close_does_not() {
         "2",
         "--close",
     ]);
-    let cancelled = ljos(&[
+    let cancelled = refuse(&[
         "finish",
         "proj-kkkk",
         "--status",
@@ -243,33 +269,41 @@ fn finish_without_close_reopens_and_finish_with_close_does_not() {
         "--close",
     ]);
     let org = std::fs::read_to_string(&file).unwrap();
-    for id in ["proj-eeee", "proj-ffff", "proj-kkkk"] {
-        assert!(
-            !heading(&org, id).contains(":CLAIMED_BY:"),
-            "{id} still claimed:\n{org}"
-        );
-    }
+    assert!(
+        !heading(&org, "proj-eeee").contains(":CLAIMED_BY:"),
+        "proj-eeee still claimed:\n{org}"
+    );
+    assert!(
+        heading(&org, "proj-ffff").contains(":CLAIMED_BY:"),
+        "a refused close still wrote:\n{org}"
+    );
+    assert!(
+        heading(&org, "proj-kkkk").contains(":CLAIMED_BY:"),
+        "a refused cancel still wrote:\n{org}"
+    );
     assert!(
         heading(&org, "proj-eeee").starts_with("\n* TODO"),
-        "a finish without --close hands the issue back:\n{org}"
+        "a finish without a close hands the issue back:\n{org}"
     );
     assert!(
         open.contains("no longer claimed by saddle@main; back to TODO"),
         "{open}"
     );
     assert!(open.contains("stays open and nobody holds it"), "{open}");
+    assert!(!open.contains("--close"), "{open}");
+    assert!(closed.contains("a person closes a ticket"), "{closed}");
+    assert!(closed.contains("Nothing was written"), "{closed}");
     assert!(
-        closed.contains("no longer claimed by saddle@main; its state stays"),
-        "{closed}"
-    );
-    assert!(
-        cancelled.contains("closed the ticket proj-kkkk as CANCELLED"),
+        cancelled.contains("a person closes a ticket"),
         "{cancelled}"
     );
     let calls = std::fs::read_to_string(&log).unwrap();
-    assert!(calls.contains("vissue update proj-ffff -s DONE"), "{calls}");
     assert!(
-        calls.contains("vissue update proj-kkkk -s CANCELLED"),
+        !calls.contains("vissue update proj-ffff -s DONE"),
+        "{calls}"
+    );
+    assert!(
+        !calls.contains("vissue update proj-kkkk -s CANCELLED"),
         "{calls}"
     );
 }

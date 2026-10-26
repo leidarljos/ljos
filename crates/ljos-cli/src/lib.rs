@@ -31868,6 +31868,11 @@ pub fn finish(
     gen: Option<u64>,
     close: bool,
 ) -> Result<String> {
+    // A close asks whether a person is present, before any write. A
+    // runner with no terminal is refused. The sitting can still end.
+    if close && !person_present() {
+        bail!("finish: a person closes a ticket. Nothing was written");
+    }
     // A decision closes on ballots, not on the say of the seat that sat on
     // it; refused before anything is written, so nothing half-happens.
     if close && tracker_show_json(issue).is_ok_and(|v| is_decision(&v)) {
@@ -31876,7 +31881,8 @@ pub fn finish(
             bail!(
                 "finish: {issue} is a decision and holds {ballots} ballot{}; run the panel \
                  (`ljos panel {issue}`), have each persona cast `ljos vote {issue} --for OPTION --expect OPTION --as NAME`, \
-                 settle with `ljos consensus {issue}`, then --close. Nothing was written",
+                 then `ljos consensus {issue}`. A person closes it after the panel passes. \
+                 Nothing was written",
                 if ballots == 1 { "" } else { "s" }
             );
         }
@@ -32002,9 +32008,13 @@ pub fn finish(
         run_as("vissue", &["update", issue, "-s", state], None)
             .with_context(|| format!("finish: could not close the ticket {issue}"))?;
         out.push_str(&format!("closed the ticket {issue} as {state}\n"));
-    } else {
+    } else if person_present() {
         out.push_str(&format!(
             "the ticket {issue} stays open and nobody holds it; `ljos finish {issue} --close` closes it when the work is accepted\n"
+        ));
+    } else {
+        out.push_str(&format!(
+            "the ticket {issue} stays open and nobody holds it; a person closes it when the work is accepted\n"
         ));
     }
     // A cloud seat's deeds leave with the tracker. A box writes nothing.
@@ -45686,6 +45696,8 @@ mod tests {
         std::env::remove_var("ISSUE_ROOT");
         std::env::set_var("LJOS_TRACKER_GIT", "off");
 
+        super::PERSON_AT_TERMINAL.with(|p| p.set(true));
+        let present = super::person_present();
         assert_eq!(workflow_on("probe-p001").as_deref(), Some("feature"));
         assert_eq!(
             workflow_on("probe-i001"),
@@ -45705,11 +45717,16 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("runs the feature workflow"), "{err}");
-        assert!(
-            err.contains("probe-v001"),
-            "the next step names the open review: {err}"
-        );
+        super::PERSON_AT_TERMINAL.with(|p| p.set(false));
+        if present {
+            assert!(err.contains("runs the feature workflow"), "{err}");
+            assert!(
+                err.contains("probe-v001"),
+                "the next step names the open review: {err}"
+            );
+        } else {
+            assert!(err.contains("a person closes a ticket"), "{err}");
+        }
         assert!(err.contains("Nothing was written"), "{err}");
         let block = workflow_sitting_block("probe-v001");
         assert!(
