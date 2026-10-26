@@ -54,6 +54,8 @@ if cmd == "create":
         fh.write(f"* TODO [#C] {title}\n:PROPERTIES:\n:ID:         {iid}\n:END:\n")
     print(iid)
 elif cmd == "claim":
+    with (root / "claims.log").open("a") as fh:
+        fh.write(rest[0] + " " + os.environ.get("VISSUE_AGENT", "") + "\n")
     print("claimed")
 elif cmd == "claims":
     print("[]")
@@ -664,4 +666,73 @@ fn doctor_reports_hook_p95_and_lock_waits() {
     assert!(line.contains("over 3 gate calls"), "{line}");
     assert!(line.contains("queue wait p95"), "{line}");
     assert!(line.contains("book lock wait p95"), "{line}");
+}
+
+/// One drainer applies queued calls of two conversations, each as the
+/// conversation its payload names: each claim is booked under its own
+/// holder, though both hook processes, and so the drainer, carry a third
+/// conversation's id.
+#[test]
+fn the_drainer_books_each_queued_call_as_its_payloads_conversation() {
+    const X: &str = "0199a1b2-c3d4-4e5f-8a6b-00000000000x";
+    const Y: &str = "0199a1b2-c3d4-4e5f-8a6b-00000000000y";
+    const W: &str = "0199a1b2-c3d4-4e5f-8a6b-00000000000w";
+    let hab = hab("perjob");
+    let draining = lock_file(&hab.run.join("ljos/bookq.lock"));
+    for conv in [X, Y] {
+        let payload = serde_json::json!({
+            "cursor_version": "2.4.0",
+            "conversation_id": conv,
+            "session_id": "cursor-sess-0002bbbb",
+            "hook_event_name": "preToolUse",
+            "tool_name": "Write",
+            "tool_input": {"file_path": hab.repo.join("README.md"), "content": "grown"},
+            "cwd": hab.repo,
+        })
+        .to_string();
+        let mut cmd = ljos(&hab, &["hook"]);
+        cmd.env("CURSOR_CONVERSATION_ID", W);
+        let out = within(
+            feed(cmd, &payload),
+            Duration::from_secs(5),
+            "a queued write",
+        );
+        assert!(out.status.success());
+    }
+    drop(draining);
+    drain(&hab);
+    assert_eq!(creates(&hab), 2);
+    let book = |conv: &str| {
+        let tag = ljos_cli::session_tag(conv);
+        std::fs::read_to_string(hab.run.join(format!("ljos/book-{tag}.json"))).unwrap_or_default()
+    };
+    assert!(
+        book(X).contains("\"issue\":\"probe-0001\""),
+        "X's book: {}",
+        book(X)
+    );
+    assert!(
+        book(Y).contains("\"issue\":\"probe-0002\""),
+        "Y's book: {}",
+        book(Y)
+    );
+    assert!(
+        book(W).is_empty(),
+        "the env's conversation booked: {}",
+        book(W)
+    );
+    let mut claims: Vec<String> = std::fs::read_to_string(hab.tracker.join("claims.log"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    claims.sort();
+    assert_eq!(
+        claims,
+        [
+            format!("probe-0001 probe-seat@{}", ljos_cli::session_tag(X)),
+            format!("probe-0002 probe-seat@{}", ljos_cli::session_tag(Y)),
+        ],
+        "the holders the drainer claimed as"
+    );
 }

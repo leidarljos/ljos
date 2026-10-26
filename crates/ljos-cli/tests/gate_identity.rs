@@ -1134,3 +1134,23 @@ fn an_mcp_sitting_covers_the_conversations_merge_with_and_without_meta() {
     let _ = srv2.kill();
     let _ = srv2.wait();
 }
+
+/// A shell that carries both `CODEX_THREAD_ID` and
+/// `CURSOR_CONVERSATION_ID` holds under the Codex thread: a Codex thread
+/// names its conversation first. A hook bound to the other id therefore
+/// does not see that sitting.
+#[test]
+fn a_shell_with_a_codex_thread_holds_under_the_thread() {
+    const T: &str = "codex-thread-00001111";
+    let home = Box_::new();
+    let both = [("CURSOR_CONVERSATION_ID", CONV_X), ("CODEX_THREAD_ID", T)];
+    let said = text_of(&home.sh(&both, "\"$LJOS\" seat"));
+    assert_eq!(seat_holder(&said), holder(T));
+    let sat = home.sh(&both, &format!("\"$LJOS\" claim {ISSUE}"));
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(T));
+    refused(
+        &home.hook(CONV_X, MERGE, &[]),
+        "X's merge after a sitting under the Codex thread",
+    );
+}
