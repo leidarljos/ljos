@@ -16,7 +16,7 @@
 //! filed, else the `panel-round: N` note each filing `ljos consensus`
 //! writes.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1018,16 +1018,6 @@ fn note_issue(id: &str, text: &str) -> Result<()> {
     Ok(())
 }
 
-/// Note the summary and mark the issue done. The close is the whole step.
-pub fn close_settled(id: &str, summary: &str) -> Result<String> {
-    note_issue(id, summary).with_context(|| format!("note {id}"))?;
-    crate::run_captured("vissue", &["update", id, "-s", "DONE"])
-        .with_context(|| format!("close {id}"))?;
-    let mut out = format!("{id} closed as {summary}\n");
-    out.push_str(&crate::persist_tracker(id, "settled with notes"));
-    Ok(out)
-}
-
 /// File one `fix:` child for a blocking objection, for `ljos workflow
 /// --round`. The review of it is the next panel round, not a second child.
 /// `ljos consensus` does not call this: it files `Dissent holds TEXT`
@@ -1057,8 +1047,8 @@ struct Node {
 
 /// Lines for trees that have run away: more descendants than the budget,
 /// or panel rounds that grew without a new blocking objection. The top of
-/// the tree is named, not every child. `apply` closes each flagged issue
-/// as settled-with-notes.
+/// the tree is named, not every child. `apply` names the open ticket and
+/// does not change its state. The person closes with `ljos finish --close`.
 #[must_use]
 pub fn reap_runaways(apply: bool) -> String {
     let Ok(said) = crate::run_captured("vissue", &["export"]) else {
@@ -1068,13 +1058,10 @@ pub fn reap_runaways(apply: bool) -> String {
     let mut out = String::new();
     for (id, why) in flag_runaways(&said.stdout, &budget) {
         out.push_str(&format!("runaway: {id} {why}\n"));
-        if !apply {
-            continue;
-        }
-        let summary = format!("settled-with-notes: runaway, {why}");
-        match close_settled(&id, &summary) {
-            Ok(said) => out.push_str(&said),
-            Err(e) => out.push_str(&format!("reap: {id}: close refused: {e:#}\n")),
+        if apply {
+            out.push_str(&format!(
+                "reap: {id} stays open; a person closes it with `ljos finish {id} --close`\n"
+            ));
         }
     }
     out
