@@ -7877,8 +7877,11 @@ print(f"id={ident}")
         );
     }
 
+    /// A tracker that names no seats sits the seat the call named and
+    /// writes nothing: a `seats` list a tool call wrote would sit untracked
+    /// in the checkout and lock every other seat out of the tracker.
     #[test]
-    fn a_tracker_with_no_seats_registers_the_harness_seat() {
+    fn a_tracker_with_no_seats_sits_the_named_seat_and_writes_nothing() {
         let _g = lock();
         let _saved = Restore::new(&[
             "VISSUE_ROOT",
@@ -7905,11 +7908,12 @@ print(f"id={ident}")
         let seat = crate::resolve_call_seat(Some("ljosbot")).unwrap();
         assert_eq!(seat.seat, "ljosbot");
         let text = std::fs::read_to_string(dir.path().join("vissue.toml")).unwrap();
-        assert!(text.contains("ljosbot"), "{text}");
-        assert!(text.contains("seats"), "{text}");
-        assert!(text.contains("Software"), "{text}");
+        assert_eq!(
+            text, "prefix = \"Software\"\n",
+            "the tracker's file was rewritten"
+        );
         let log = std::fs::read_to_string(run.join("ljos/book.log")).unwrap();
-        assert!(log.contains("registered"), "{log}");
+        assert!(log.contains("named no seats"), "{log}");
         assert!(log.contains("ljosbot"), "{log}");
     }
 
