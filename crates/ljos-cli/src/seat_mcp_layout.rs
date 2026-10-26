@@ -58,3 +58,23 @@ fn a_punctuated_seat_key_matches_its_normalised_tool_name() {
         cloud::seat_mcp_keys()
     );
 }
+
+/// `~/.claude.json` stores per-project history and grows past the read
+/// cap. The seat key in it still counts.
+#[test]
+fn a_large_claude_json_still_names_the_seat() {
+    let (_lock, dir) = review_env();
+    let history: Vec<_> = (0..1500)
+        .map(|i| serde_json::json!({"display": format!("{i} {}", "x".repeat(1000))}))
+        .collect();
+    let doc = serde_json::json!({
+        "mcpServers": {"ljos": {"command": "ljos-mcp", "args": []}},
+        "projects": {"/w": {"history": history}},
+    });
+    put(&dir.path().join(".claude.json"), &doc.to_string());
+    assert!(
+        subagent::is_seat_mcp_tool("mcp__ljos__ljos_note"),
+        "a large ~/.claude.json hid the seat key: {:?}",
+        cloud::seat_mcp_keys()
+    );
+}

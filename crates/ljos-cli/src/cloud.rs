@@ -802,6 +802,13 @@ fn read_seat_keys(file: &McpFile) -> KeyRead {
 fn read_config_text(path: &Path) -> TextRead {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
+    // `~/.claude.json` stores per-project history and grows past the
+    // cap. The seat key is the top-level `mcpServers` value. Read that
+    // and stop, so the history is not pulled in and the cap does not hide
+    // the key.
+    if path.file_name().and_then(|name| name.to_str()) == Some(".claude.json") {
+        return read_claude_config(path);
+    }
     let file = match std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
@@ -822,6 +829,254 @@ fn read_config_text(path: &Path) -> TextRead {
         Ok(_) => TextRead::Text(text),
         Err(_) => TextRead::Bad,
     }
+}
+
+fn read_claude_config(path: &Path) -> TextRead {
+    use std::io::BufReader;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return TextRead::Absent,
+        Err(_) => return TextRead::Bad,
+    };
+    let Ok(meta) = file.metadata() else {
+        return TextRead::Bad;
+    };
+    if !meta.is_file() {
+        return TextRead::Bad;
+    }
+    if meta.len() == 0 {
+        return TextRead::Text(String::new());
+    }
+    let mut reader = BufReader::with_capacity(8192, file);
+    match claude_mcp_servers_value(&mut reader) {
+        ClaudeRead::Servers(body) => TextRead::Text(body),
+        ClaudeRead::NoServers => TextRead::Text("{}".into()),
+        ClaudeRead::Bad => TextRead::Bad,
+    }
+}
+
+enum ClaudeRead {
+    Servers(String),
+    NoServers,
+    Bad,
+}
+
+/// The raw JSON of the top-level `mcpServers` value. Reading stops once
+/// that value is in hand, so a history array after it is not consumed.
+fn claude_mcp_servers_value(reader: &mut impl std::io::Read) -> ClaudeRead {
+    let mut inp = JsonIn {
+        reader,
+        unread: None,
+    };
+    skip_ws(&mut inp);
+    if inp.peek() != Some(b'{') {
+        return ClaudeRead::Bad;
+    }
+    let _ = inp.bump();
+    loop {
+        skip_ws(&mut inp);
+        match inp.peek() {
+            None => return ClaudeRead::Bad,
+            Some(b'}') => return ClaudeRead::NoServers,
+            Some(b'"') => {}
+            Some(_) => return ClaudeRead::Bad,
+        }
+        let Some(key) = read_json_string(&mut inp) else {
+            return ClaudeRead::Bad;
+        };
+        skip_ws(&mut inp);
+        if inp.bump() != Some(b':') {
+            return ClaudeRead::Bad;
+        }
+        skip_ws(&mut inp);
+        if key == "mcpServers" {
+            let Some(raw) = read_json_value(&mut inp) else {
+                return ClaudeRead::Bad;
+            };
+            let Ok(text) = String::from_utf8(raw) else {
+                return ClaudeRead::Bad;
+            };
+            return ClaudeRead::Servers(format!("{{\"mcpServers\":{text}}}"));
+        }
+        if read_json_value(&mut inp).is_none() {
+            return ClaudeRead::Bad;
+        }
+        skip_ws(&mut inp);
+        match inp.peek() {
+            Some(b',') => {
+                let _ = inp.bump();
+            }
+            Some(b'}') => return ClaudeRead::NoServers,
+            _ => return ClaudeRead::Bad,
+        }
+    }
+}
+
+struct JsonIn<'a> {
+    reader: &'a mut dyn std::io::Read,
+    unread: Option<u8>,
+}
+
+impl JsonIn<'_> {
+    fn bump(&mut self) -> Option<u8> {
+        if let Some(byte) = self.unread.take() {
+            return Some(byte);
+        }
+        let mut buf = [0u8; 1];
+        match self.reader.read(&mut buf) {
+            Ok(1) => Some(buf[0]),
+            _ => None,
+        }
+    }
+
+    fn peek(&mut self) -> Option<u8> {
+        if let Some(byte) = self.unread {
+            return Some(byte);
+        }
+        let byte = self.bump()?;
+        self.unread = Some(byte);
+        Some(byte)
+    }
+}
+
+fn skip_ws(inp: &mut JsonIn<'_>) {
+    while inp.peek().is_some_and(|byte| byte.is_ascii_whitespace()) {
+        let _ = inp.bump();
+    }
+}
+
+fn read_json_string(inp: &mut JsonIn<'_>) -> Option<String> {
+    if inp.bump() != Some(b'"') {
+        return None;
+    }
+    let mut out = Vec::new();
+    loop {
+        let byte = inp.bump()?;
+        if byte == b'\\' {
+            let esc = inp.bump()?;
+            let decoded = match esc {
+                b'"' | b'\\' | b'/' => esc,
+                b'b' => 0x08,
+                b'f' => 0x0c,
+                b'n' => b'\n',
+                b'r' => b'\r',
+                b't' => b'\t',
+                b'u' => {
+                    let mut hex = [0u8; 4];
+                    for slot in &mut hex {
+                        *slot = inp.bump()?;
+                    }
+                    let text = std::str::from_utf8(&hex).ok()?;
+                    let code = u32::from_str_radix(text, 16).ok()?;
+                    let ch = char::from_u32(code)?;
+                    let mut buf = [0u8; 4];
+                    out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                    continue;
+                }
+                _ => return None,
+            };
+            out.push(decoded);
+            continue;
+        }
+        if byte == b'"' {
+            break;
+        }
+        out.push(byte);
+    }
+    String::from_utf8(out).ok()
+}
+
+fn read_json_value(inp: &mut JsonIn<'_>) -> Option<Vec<u8>> {
+    match inp.peek()? {
+        b'{' => read_json_container(inp, b'{', b'}'),
+        b'[' => read_json_container(inp, b'[', b']'),
+        b'"' => read_json_string_raw(inp),
+        b't' => read_json_lit(inp, b"true"),
+        b'f' => read_json_lit(inp, b"false"),
+        b'n' => read_json_lit(inp, b"null"),
+        b'-' | b'0'..=b'9' => read_json_number(inp),
+        _ => None,
+    }
+}
+
+fn read_json_container(inp: &mut JsonIn<'_>, open: u8, close: u8) -> Option<Vec<u8>> {
+    let first = inp.bump()?;
+    if first != open {
+        return None;
+    }
+    let mut out = vec![first];
+    let mut depth = 1u32;
+    let mut in_str = false;
+    let mut escaped = false;
+    while depth > 0 {
+        let byte = inp.bump()?;
+        out.push(byte);
+        if in_str {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if byte == b'\\' {
+                escaped = true;
+                continue;
+            }
+            if byte == b'"' {
+                in_str = false;
+            }
+            continue;
+        }
+        if byte == b'"' {
+            in_str = true;
+        } else if byte == open {
+            depth += 1;
+        } else if byte == close {
+            depth -= 1;
+        }
+    }
+    Some(out)
+}
+
+fn read_json_string_raw(inp: &mut JsonIn<'_>) -> Option<Vec<u8>> {
+    if inp.bump() != Some(b'"') {
+        return None;
+    }
+    let mut out = vec![b'"'];
+    loop {
+        let byte = inp.bump()?;
+        out.push(byte);
+        if byte == b'\\' {
+            out.push(inp.bump()?);
+            continue;
+        }
+        if byte == b'"' {
+            break;
+        }
+    }
+    Some(out)
+}
+
+fn read_json_lit(inp: &mut JsonIn<'_>, lit: &[u8]) -> Option<Vec<u8>> {
+    for expected in lit {
+        if inp.bump()? != *expected {
+            return None;
+        }
+    }
+    Some(lit.to_vec())
+}
+
+fn read_json_number(inp: &mut JsonIn<'_>) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    while inp.peek().is_some_and(|byte| {
+        byte.is_ascii_digit() || matches!(byte, b'-' | b'+' | b'.' | b'e' | b'E')
+    }) {
+        out.push(inp.bump()?);
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 fn command_launches_seat(command: &str, args: &[String]) -> bool {
@@ -3688,5 +3943,26 @@ mod tests {
             ..file
         };
         assert!(matches!(read_seat_keys(&loose), KeyRead::Skip));
+    }
+
+    #[test]
+    fn a_large_claude_document_yields_only_mcp_servers() {
+        let history = "x".repeat(1000);
+        let mut body = String::from(
+            r#"{"mcpServers":{"ljos.seat":{"command":"ljos-mcp","args":[]}},"projects":{"/w":{"history":["#,
+        );
+        body.push('"');
+        body.push_str(&history);
+        body.push_str(r#""]}}}"#);
+        let found = claude_mcp_servers_value(&mut body.as_bytes());
+        let ClaudeRead::Servers(text) = found else {
+            panic!("mcpServers was not read");
+        };
+        assert!(text.contains("ljos.seat"), "{text}");
+        assert!(!text.contains(&history[..32]), "history was kept: {text}");
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let keys = json_seat_keys(&doc);
+        assert!(keys.contains("ljos.seat"), "{keys:?}");
+        assert!(keys.contains("ljos_seat"), "{keys:?}");
     }
 }
