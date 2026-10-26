@@ -146,6 +146,21 @@ impl Seat {
         self.hook_with(line, &[])
     }
 
+    /// A Codex-shaped hook: `turn_id` means an ask is written down, because
+    /// that runner does not stop for one.
+    fn hook_turn(&self, line: &str, env: &[(&str, &str)]) -> String {
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": SESSION,
+            "turn_id": "turn-cloud",
+            "cwd": self.repo,
+            "tool_name": "Bash",
+            "tool_input": {"command": line},
+        })
+        .to_string();
+        self.hook_payload(&payload, env)
+    }
+
     fn hook_with(&self, line: &str, env: &[(&str, &str)]) -> String {
         let payload = serde_json::json!({
             "hook_event_name": "PreToolUse",
@@ -155,6 +170,10 @@ impl Seat {
             "tool_input": {"command": line},
         })
         .to_string();
+        self.hook_payload(&payload, env)
+    }
+
+    fn hook_payload(&self, payload: &str, env: &[(&str, &str)]) -> String {
         let mut cmd = self.command("setsid", &["-w", env!("CARGO_BIN_EXE_ljos"), "hook"]);
         cmd.envs(env.iter().copied());
         let mut child = cmd
@@ -170,7 +189,7 @@ impl Seat {
             .write_all(payload.as_bytes())
             .unwrap();
         let out = child.wait_with_output().unwrap();
-        assert!(out.status.success(), "{line}\n{}", text_of(&out));
+        assert!(out.status.success(), "{payload}\n{}", text_of(&out));
         text_of(&out)
     }
 
@@ -395,6 +414,139 @@ fn the_doctor_says_whether_the_gate_holds_this_seat() {
     let line = gate_row(&out);
     assert!(line.starts_with("info\t"), "{line}");
     assert!(line.contains("not active here"), "{line}");
+}
+
+fn cloud_mark(seat: &Seat) {
+    let dir = seat.home.join(".config/ljos");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("cloud-guard-rules.json"),
+        r#"[["cloud-cursor-push","deny","cloud seat rule: outside the seat allowlist, or the pre-push hook would not run"],["cloud-gh-pr-create","deny","cloud seat rule: never open pull requests from this machine"],["cloud-gh-pr-merge","deny","cloud seat rule: never merge pull requests from this machine"]]"#,
+    )
+    .unwrap();
+}
+
+fn allow_key(path: &Path) -> String {
+    let canon = path.canonicalize().unwrap();
+    let text = canon.to_string_lossy().to_string();
+    let text = text.trim_end_matches('/');
+    text.strip_suffix(".git").unwrap_or(text).to_string()
+}
+
+fn write_allow(seat: &Seat, origin: &Path) {
+    let path = seat.home.join(".config/ljos/push-allow");
+    let body = format!(
+        "# ljos cloud push allowlist\ncode\t{}\nbranch\tdevelop\nbranch\tmain\n",
+        allow_key(origin)
+    );
+    std::fs::write(path, body).unwrap();
+}
+
+fn git_ok(repo: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}\n{}", text_of(&out));
+}
+
+/// A cloud seat cannot collect another seat's ballot: the tracker is
+/// private to the run. A protected push that is missing only that ballot,
+/// with the sitting live and the allowlist already accepting the
+/// repository and the branch, asks for that one command. A force, a
+/// delete, a cursor ref, another repository, and a push with no sitting
+/// stay refused.
+#[test]
+fn a_cloud_seat_asks_for_one_protected_push_when_no_seat_has_voted() {
+    let seat = Seat::new();
+    let origin = seat._dir.path().join("origin.git");
+    let other = seat._dir.path().join("other.git");
+    git_ok(
+        seat._dir.path(),
+        &["init", "--bare", "-q", origin.to_str().unwrap()],
+    );
+    git_ok(
+        seat._dir.path(),
+        &["init", "--bare", "-q", other.to_str().unwrap()],
+    );
+    let origin = origin.canonicalize().unwrap();
+    let other = other.canonicalize().unwrap();
+    git_ok(
+        &seat.repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git_ok(
+        &seat.repo,
+        &["remote", "add", "other", other.to_str().unwrap()],
+    );
+    cloud_mark(&seat);
+    write_allow(&seat, &origin);
+    let pack = empty_pack();
+    let env = [
+        ("PACKSET_URL", pack.as_str()),
+        ("LJOS_UNSIGNED_BALLOTS", "allow"),
+        // A temporary HOME would leave the cloud rules unread. This seat
+        // is a cloud seat, so those rules have to run.
+        ("LJOS_GUARD", "on"),
+    ];
+    let develop = "git push origin develop";
+
+    let idle = seat.policy(develop, &env);
+    refused(&idle, develop);
+    assert!(idle.contains("holds no live sitting"), "{idle}");
+    assert!(!idle.contains("\nask:"), "{idle}");
+
+    seat.sit();
+    let said = seat.policy(develop, &env);
+    assert!(said.contains("\nask:"), "{said}");
+    assert!(!said.contains("\ndeny:"), "{said}");
+    assert!(said.contains("no seat voted"), "{said}");
+
+    let hooked = seat.hook_turn(develop, &env);
+    assert!(hooked.contains("ljos approve "), "{hooked}");
+    assert!(hooked.contains("ljos_request_approval"), "{hooked}");
+    assert!(hooked.contains("Reply `approve "), "{hooked}");
+    assert!(
+        hooked.contains("\"permissionDecision\":\"deny\""),
+        "{hooked}"
+    );
+    let store = std::fs::read_to_string(seat.run.join("ljos/approvals/requests.json"))
+        .expect("the hook wrote a one-use request");
+    let command = serde_json::to_string(develop).unwrap();
+    assert!(store.contains(&command), "{store}");
+    assert_eq!(store.matches("\"approved\":false").count(), 1, "{store}");
+
+    for line in [
+        "git push --force origin develop",
+        "git push --force-with-lease origin develop",
+        "git push origin :develop",
+        "git push origin --delete develop",
+        "git push origin HEAD:cursor/topic",
+        "git push origin main",
+        "git push other develop",
+    ] {
+        let said = seat.policy(line, &env);
+        assert!(!said.contains("\nask:"), "{line}\n{said}");
+        assert!(
+            said.contains("\ndeny:") || said.contains("deny:"),
+            "{line}\n{said}"
+        );
+    }
+
+    let seats = seat.home.join(".config/ljos/seats/inky");
+    std::fs::create_dir_all(&seats).unwrap();
+    std::fs::write(seats.join("ljos.toml"), "[cloud]\nbranches = [\"main\"]\n").unwrap();
+    let main = seat.policy("git push origin main", &env);
+    assert!(main.contains("\nask:"), "{main}");
+    assert!(main.contains("no seat voted"), "{main}");
+    assert!(!main.contains("\ndeny:"), "{main}");
+
+    seat.vote(&[("inky", "revise"), ("flint", "revise")]);
+    let back = seat.policy(develop, &env);
+    assert!(back.contains("\ndeny:"), "{back}");
+    assert!(back.contains("sends the work back"), "{back}");
+    assert!(!back.contains("\nask:"), "{back}");
 }
 
 #[test]

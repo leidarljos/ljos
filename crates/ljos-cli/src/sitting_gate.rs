@@ -1,8 +1,10 @@
 //! Under an agent runner, the git verbs that write history wait for a
 //! sitting: a live claim this seat holds on an open tracker ticket. A push
 //! onto a protected branch also waits for that ticket's seats to agree
-//! ([`crate::protected_push_stands`]). The person at their own terminal is
-//! never asked. No variable switches the gate off: `LJOS_OFF` and a
+//! ([`crate::protected_push_stands`]). On a cloud seat, when the only miss
+//! is that ballot and the allowlist already accepts the push, the answer
+//! asks for that one command. The person at their own terminal is never
+//! asked. No variable switches the gate off: `LJOS_OFF` and a
 //! temporary `HOME` keep the rest of the guard out, not this.
 
 use std::path::Path;
@@ -47,12 +49,16 @@ fn runner() -> bool {
 /// The refusal for `line` run from `cwd` under a runner: a git call that
 /// writes history while this conversation holds no live sitting, or a
 /// push that may land on a branch [`crate::gates::consensus_push`] names
-/// while the sitting's ticket does not clear it. `None` when no runner is
+/// while the sitting's ticket does not clear it. A cloud seat whose push
+/// the allowlist already accepts, and that is not a force or a delete,
+/// asks instead when the only miss is a seat ballot: the hook then writes
+/// a one-use request for that exact command. `None` when no runner is
 /// above this process, when the line writes no history, or when both
 /// hold. An unattributed call, one whose payload and environment name
-/// no conversation, is not checked: a history write is a line in the
-/// book log and this returns `None`, including a push onto a protected
-/// branch.
+/// no conversation, is not checked for a commit, a merge, or a push onto
+/// a topic branch: that write is a line in the book log. A push onto a
+/// protected branch from such a call is refused, since no ticket's seats
+/// can clear it.
 #[must_use]
 pub fn guard_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if !runner() {
@@ -121,8 +127,18 @@ pub fn guard_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
             continue;
         };
         if let Err(why) = crate::protected_push_stands(&issue, cfg.quorum) {
-            let dest = format!("may land on {dest}");
-            return Some(refusal(&seats_wait(&dest, &cfg.branches, &issue, &why)));
+            let shown = format!("may land on {dest}");
+            let detail = seats_wait(&shown, &cfg.branches, &issue, &why);
+            // A cloud tracker's ballots never arrive from another seat. The
+            // person can grant this one command. Anything else stays a refusal.
+            // A call that names no conversation has already returned above.
+            if only_missing_seat_vote(&why)
+                && plain_branch(&dest)
+                    .is_some_and(|branch| cloud_push_clear(line, cwd, push, branch))
+            {
+                return Some(asked(&detail));
+            }
+            return Some(refusal(&detail));
         }
     }
     None
@@ -311,6 +327,150 @@ fn refusal(detail: &str) -> Rule {
         pattern: "sitting-gate".into(),
         verdict: "deny".into(),
         reason: format!("sitting-gate: {detail}"),
+    }
+}
+
+fn asked(detail: &str) -> Rule {
+    Rule {
+        pattern: "sitting-gate".into(),
+        verdict: "ask".into(),
+        reason: format!("sitting-gate: {detail}"),
+    }
+}
+
+/// The cite has no seat ballot. A split, a short quorum, a revise, or an
+/// unreadable roster is a different miss and stays a refusal.
+fn only_missing_seat_vote(why: &str) -> bool {
+    why.contains("no seat voted on ")
+}
+
+/// `dest` from [`crate::gates::protected_push`] when it names one branch.
+fn plain_branch(dest: &str) -> Option<&str> {
+    let name = dest.strip_prefix('`')?.strip_suffix('`')?;
+    (!name.is_empty() && !name.contains([' ', '\t', '\n', '`'])).then_some(name)
+}
+
+/// The cloud rules would let this push through. The seat is a cloud seat,
+/// the line forces nothing, deletes nothing, and updates no ref outside
+/// the seat's branches, and the push allowlist names this repository and,
+/// for a code repository, this branch.
+fn cloud_push_clear(line: &str, cwd: Option<&Path>, push: &GitCall, branch: &str) -> bool {
+    if !crate::cloud::cloud_seat() {
+        return false;
+    }
+    if crate::cloud_guard::cursor_push(line, cwd).is_some() {
+        return false;
+    }
+    let Some(url) = remote_url(push) else {
+        return false;
+    };
+    allowlist_has(&url, branch)
+}
+
+fn remote_url(call: &GitCall) -> Option<String> {
+    let name = remote_word(&call.args).unwrap_or_else(|| "origin".to_string());
+    if explicit_repo(&name) {
+        return Some(name);
+    }
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&call.cwd)
+        .args(["remote", "get-url", &name])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let url = String::from_utf8(out.stdout).ok()?;
+    let url = url.trim();
+    (!url.is_empty()).then(|| url.to_string())
+}
+
+/// A repository written where a remote name would be: a URL, a path, or
+/// an scp form. A short name is a remote in the checkout.
+fn explicit_repo(name: &str) -> bool {
+    name.contains("://")
+        || name.starts_with('/')
+        || name.starts_with('.')
+        || name.starts_with('~')
+        || name.contains(':')
+}
+
+/// The first refspec's remote, skipping options that take a value.
+/// `None` is a bare push; the caller reads `origin`.
+fn remote_word(args: &[String]) -> Option<String> {
+    const VALUED: &[&str] = &[
+        "-o",
+        "--push-option",
+        "--receive-pack",
+        "--exec",
+        "--repo",
+        "--recurse-submodules",
+    ];
+    let mut i = 0;
+    while i < args.len() {
+        let word = args[i].as_str();
+        if word == "--" {
+            return args.get(i + 1).cloned();
+        }
+        if let Some(flags) = word.strip_prefix('-') {
+            if !flags.is_empty()
+                && !flags.starts_with('-')
+                && flags.ends_with('o')
+                && flags.chars().all(|c| c.is_ascii_alphabetic())
+            {
+                i += 2;
+                continue;
+            }
+        }
+        if VALUED.contains(&word) {
+            i += 2;
+            continue;
+        }
+        if word.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        return Some(word.to_string());
+    }
+    None
+}
+
+/// Whether the push allowlist names `url` and, when that repository is
+/// code, `branch`. A tracker repository may update any branch. A missing
+/// or unreadable file accepts nothing.
+fn allowlist_has(url: &str, branch: &str) -> bool {
+    let key = crate::cloud_hook::push_repo_key(url);
+    if key.is_empty() {
+        return false;
+    }
+    let Some(path) = crate::cloud_hook::allow_path() else {
+        return false;
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let mut kind = "";
+    let mut listed = false;
+    let mut closed = false;
+    for line in text.lines() {
+        let Some((tag, val)) = line.split_once('\t') else {
+            continue;
+        };
+        match tag {
+            "code" if val == key => kind = "code",
+            "tracker" if val == key && kind != "code" => kind = "tracker",
+            "branch" if val == branch => listed = true,
+            "closed" => closed = true,
+            _ => {}
+        }
+    }
+    match kind {
+        "tracker" => true,
+        "code" => !closed && listed,
+        _ => false,
     }
 }
 
