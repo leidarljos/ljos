@@ -1,0 +1,1 @@
+`ljos findings --remember` or `--issue` and `ljos panel --jev` check the seat before they write the tracker, as every other tracker write does. They ran with no checked seat, so the citation and the note were recorded under whatever seat the tracker derived.

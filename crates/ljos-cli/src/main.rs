@@ -3698,6 +3698,10 @@ fn tracker_write(cmd: &Cmd) -> Option<&'static str> {
         } if choice.is_some() || *jev || *withdraw => "vote",
         Cmd::Predict { .. } => "predict",
         Cmd::Slot { .. } => "slot",
+        Cmd::Findings {
+            remember, issue, ..
+        } if *remember || issue.is_some() => "findings",
+        Cmd::Panel { jev: true, .. } => "panel",
         Cmd::OpenPanel { .. } => "open-panel",
         Cmd::BumpPlan { dry_run: false, .. } => "bump-plan",
         _ => return None,
