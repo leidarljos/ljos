@@ -1912,3 +1912,118 @@ fn a_one_shot_seat_under_a_cursor_agent_without_an_id_is_the_conversations() {
     let said = home.bash_runner("cursor-agent", &[], &[], &[(x, "\"$LJOS\" seat")]);
     assert_eq!(seat_holder(&said), holder(CONV_X), "{said}");
 }
+
+/// A runner started from another conversation's shell (a bot that runs
+/// a second agent) does not sit as the outer conversation, and the outer
+/// conversation does not lend it its holder.
+#[test]
+fn a_runner_nested_in_another_conversations_shell_sits_as_its_own() {
+    let home = Box_::new();
+    let link = home.bin.join("cursor-agent");
+    std::os::unix::fs::symlink("/usr/bin/python3", &link).unwrap();
+    let steps = serde_json::to_string(&[(None::<&str>, "\"$LJOS\" seat; true")]).unwrap();
+    let inner = home.command(
+        "sh",
+        &[
+            "-c",
+            &format!(
+                "CURSOR_CONVERSATION_ID={CONV_X} {} -c {} {}; true",
+                link.display(),
+                shell_words(RUNNER),
+                shell_words(&steps)
+            ),
+        ],
+        &[
+            ("LJOS", env!("CARGO_BIN_EXE_ljos")),
+            (
+                "CURSOR_CONVERSATION_ID",
+                "0199a1b2-c3d4-4e5f-8a6b-0000000000ou",
+            ),
+        ],
+    );
+    let said = text_of(&{ inner }.output().unwrap());
+    assert_eq!(seat_holder(&said), holder(CONV_X), "{said}");
+}
+
+fn shell_words(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+const RV_OUTER: &str = "0199a1b2-c3d4-4e5f-8a6b-0000000000ee";
+
+impl Box_ {
+    /// `rv_runner` started from conversation `RV_OUTER`'s shell, the way
+    /// a bot launches a second runner (`node`, an MCP host, a CI script)
+    /// from its own terminal. The runner's environment is the box's with
+    /// no conversation id.
+    fn rv_runner_nested(
+        &self,
+        comm: &str,
+        shell: &str,
+        steps: &[(Vec<(&str, &str)>, &str)],
+    ) -> String {
+        let link = self.bin.join(comm);
+        if !link.exists() {
+            std::os::unix::fs::symlink("/usr/bin/python3", &link).unwrap();
+        }
+        let steps: Vec<(std::collections::BTreeMap<&str, &str>, &str)> = steps
+            .iter()
+            .map(|(e, l)| (e.iter().copied().collect(), *l))
+            .collect();
+        let steps = serde_json::to_string(&steps).unwrap();
+        let inner = self.command(
+            "true",
+            &[],
+            &[("LJOS", env!("CARGO_BIN_EXE_ljos")), ("RV_SHELL", shell)],
+        );
+        let mut args: Vec<String> = vec![
+            "-c".into(),
+            "\"$@\"; true".into(),
+            "bash".into(),
+            "env".into(),
+            "-i".into(),
+        ];
+        for (k, v) in inner.get_envs() {
+            let (Some(k), Some(v)) = (k.to_str(), v.and_then(|v| v.to_str())) else {
+                continue;
+            };
+            if k != "CURSOR_AGENT" {
+                args.push(format!("{k}={v}"));
+            }
+        }
+        args.extend([
+            link.display().to_string(),
+            "-c".into(),
+            RV_RUNNER_ANY.into(),
+            steps,
+        ]);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        text_of(
+            &self
+                .command("bash", &args, &[("CURSOR_CONVERSATION_ID", RV_OUTER)])
+                .output()
+                .unwrap(),
+        )
+    }
+}
+
+/// RV11. An id-less `node` runner started from conversation OUTER's
+/// shell runs X's tool calls as `bash -c`, each with X's id. X's
+/// `ljos seat` and `ljos claim` are X's, not OUTER's.
+#[test]
+fn rv11_an_unstamped_runner_in_another_conversations_shell_sits_as_the_call() {
+    let home = Box_::new();
+    let x = vec![("CURSOR_CONVERSATION_ID", CONV_X)];
+    let said = home.rv_runner_nested(
+        "node",
+        "bash -c",
+        &[
+            (x.clone(), "\"$LJOS\" seat"),
+            (x.clone(), &format!("\"$LJOS\" claim {ISSUE}")),
+        ],
+    );
+    assert!(
+        said.contains(&holder(CONV_X)) && !said.contains(&holder(RV_OUTER)),
+        "X's seat and claim under a runner nested in OUTER's shell:\n{said}"
+    );
+}

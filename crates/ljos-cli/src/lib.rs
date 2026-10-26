@@ -2153,6 +2153,20 @@ fn stamp_from_ancestors() -> Option<Vec<(String, String)>> {
         } else if mark_only.is_none() {
             mark_only = stamped_mark(*pid);
         }
+        // Do not walk above a runner or non-wrapper daemon: an outer
+        // conversation's shell that spawned a nested runner does not
+        // overwrite the inner runner's or call's conversation id.
+        if ((best_shell.is_some() || best_any.is_some())
+            && (!WRAPPERS.contains(&comm.as_str()) || is_harness_process(*pid, comm)))
+            || ((is_harness_process(*pid, comm) || comm == "node")
+                && (self_has_id
+                    || active[start..]
+                        .first()
+                        .and_then(|(p, _)| stamped_id(*p))
+                        .is_some()))
+        {
+            break;
+        }
     }
     let mut outermost = best_shell.or(best_any);
     if chain
