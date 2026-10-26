@@ -109,8 +109,8 @@ pub const RULES_FILE_CAP: u64 = 1024 * 1024;
 ///
 /// # Errors
 ///
-/// The file is not a regular file of at most [`RULES_FILE_CAP`] bytes,
-/// it is not readable, or it is not the JSON this module writes.
+/// The file is empty, a dangling symlink, not a regular file of at most
+/// [`RULES_FILE_CAP`] bytes, not readable, or not the JSON this module writes.
 pub fn load() -> Result<Vec<UserRule>> {
     Ok(read_all()?
         .into_iter()
@@ -122,8 +122,8 @@ pub fn load() -> Result<Vec<UserRule>> {
 ///
 /// # Errors
 ///
-/// The file is not a regular file of at most [`RULES_FILE_CAP`] bytes,
-/// it is not readable, or it is not the JSON this module writes.
+/// The file is empty, a dangling symlink, not a regular file of at most
+/// [`RULES_FILE_CAP`] bytes, not readable, or not the JSON this module writes.
 pub(crate) fn read_all() -> Result<Vec<UserRule>> {
     let Some(path) = rules_path() else {
         return Ok(Vec::new());
@@ -135,9 +135,11 @@ pub(crate) fn read_all() -> Result<Vec<UserRule>> {
         .with_context(|| format!("user rules: {} is not a user-rules file", path.display()))
 }
 
-/// The text of the user-rules file. `Ok(None)` when the file is absent.
-/// The open does not block: a FIFO, a directory, or any other non-regular
-/// file is an error, and a regular file over [`RULES_FILE_CAP`] is not read.
+/// The text of the user-rules file. `Ok(None)` when no file is there.
+/// A zero-byte file, a file of only whitespace, and a dangling symlink
+/// are errors. The open does not block: a FIFO, a directory, or any
+/// other non-regular file is an error, and a regular file over
+/// [`RULES_FILE_CAP`] is not read.
 fn read_rules_text(path: &std::path::Path) -> Result<Option<String>> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
@@ -147,7 +149,18 @@ fn read_rules_text(path: &std::path::Path) -> Result<Option<String>> {
         .open(path)
     {
         Ok(file) => file,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return match std::fs::symlink_metadata(path) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    bail!("user rules: {} is a dangling symlink", path.display());
+                }
+                Ok(_) => Err(anyhow::Error::from(err)
+                    .context(format!("user rules: read {} failed", path.display()))),
+                Err(stat) if stat.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(stat) => Err(anyhow::Error::from(stat)
+                    .context(format!("user rules: stat {} failed", path.display()))),
+            };
+        }
         Err(err) => {
             return Err(anyhow::Error::from(err)
                 .context(format!("user rules: read {} failed", path.display())));
@@ -159,6 +172,9 @@ fn read_rules_text(path: &std::path::Path) -> Result<Option<String>> {
         .with_context(|| format!("user rules: stat {} failed", path.display()))?;
     if !meta.is_file() {
         bail!("user rules: {} is not a regular file", path.display());
+    }
+    if meta.len() == 0 {
+        bail!("user rules: {} is empty", path.display());
     }
     if meta.len() > RULES_FILE_CAP {
         bail!(
@@ -172,6 +188,9 @@ fn read_rules_text(path: &std::path::Path) -> Result<Option<String>> {
     file.take(RULES_FILE_CAP)
         .read_to_string(&mut text)
         .with_context(|| format!("user rules: read {} failed", path.display()))?;
+    if text.trim().is_empty() {
+        bail!("user rules: {} is empty", path.display());
+    }
     Ok(Some(text))
 }
 
@@ -1835,6 +1854,65 @@ mod tests {
             started.elapsed()
         );
         assert!(format!("{err:#}").contains("not a regular file"), "{err:#}");
+    }
+
+    /// A zero-byte file, a blank file, and a dangling symlink are not an
+    /// empty rule list. A covered GitHub write is refused and the reason
+    /// names the path. A missing file and a real empty list do not.
+    #[test]
+    fn an_empty_rules_file_and_a_dangling_link_deny_a_github_write() {
+        let (_lock, _dir) = isolated();
+        let benign = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"tests passed"}}"#;
+        let read_tool = r#"{"tool_name":"list_issues","mcp_server_name":"github","tool_input":{"owner":"org"}}"#;
+        let path = rules_file();
+        std::fs::write(&path, "").unwrap();
+        let hit = guard_payload(benign).expect("empty file allowed a write");
+        assert_eq!(hit.verdict, "deny");
+        assert!(
+            hit.reason.contains(&path.display().to_string()),
+            "{}",
+            hit.reason
+        );
+        assert!(guard_payload(read_tool).is_none(), "a read was denied");
+        let shell = guard_line("gh pr comment 12 --body 'tests passed'").unwrap();
+        assert!(
+            shell.reason.contains(&path.display().to_string()),
+            "{}",
+            shell.reason
+        );
+        assert!(guard_line("gh issue list").is_none(), "a read was denied");
+        std::fs::write(&path, " \n").unwrap();
+        let hit = guard_payload(benign).expect("blank file allowed a write");
+        assert!(
+            hit.reason.contains(&path.display().to_string()),
+            "{}",
+            hit.reason
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(path.with_file_name("no-such-rules.json"), &path).unwrap();
+        let hit = guard_payload(benign).expect("dangling link allowed a write");
+        assert_eq!(hit.verdict, "deny");
+        assert!(
+            hit.reason.contains(&path.display().to_string()),
+            "{}",
+            hit.reason
+        );
+        let err = load().unwrap_err();
+        assert!(format!("{err:#}").contains("dangling"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains(&path.display().to_string()),
+            "{err:#}"
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            guard_payload(benign).is_none(),
+            "a missing file denied a write"
+        );
+        std::fs::write(&path, "{\"rules\":[]}\n").unwrap();
+        assert!(
+            guard_payload(benign).is_none(),
+            "an empty rule list denied a write"
+        );
     }
 
     /// A file that is present and cannot be used denies the GitHub writes
