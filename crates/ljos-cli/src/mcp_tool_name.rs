@@ -1,5 +1,4 @@
-//! Review finding 4 (open issue 8): `MCP:<tool>` reaches no user rule.
-//! Fails on 508a7c54.
+//! A user rule for an `MCP:<tool>` name applies on preToolUse.
 
 use super::*;
 
@@ -34,7 +33,7 @@ fn alan() {
     put(&user_rules::rules_path().unwrap(), ALAN);
 }
 
-/// Finding 4 (open issue 8). Cursor names an HTTP MCP tool `MCP:<tool>`
+/// Cursor names an HTTP MCP tool `MCP:<tool>`
 /// on preToolUse and sends no server field. A GitHub comment that names
 /// @ocaisa is the same write as `mcp__github__add_issue_comment`.
 #[test]

@@ -1,10 +1,9 @@
-//! Review finding 3 (open issue 7): side events wait out a hung pack.
-//! Fails on 508a7c54. Runs the built `ljos` binary.
+//! A cloud agent's GitHub write meets the user rule.
+//! Runs the built `ljos` binary.
 #![cfg(target_os = "linux")]
 
 use std::io::Write;
-use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -54,6 +53,11 @@ fn hab(name: &str) -> Hab {
     hab
 }
 
+fn put(path: &Path, text: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
 fn hook(hab: &Hab, pack: Option<u16>) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("hook")
@@ -99,62 +103,47 @@ fn call(mut cmd: Command, payload: &str, limit: Duration) -> (Duration, Output) 
     (took, child.wait_with_output().unwrap())
 }
 
-/// A pack that accepts and never answers.
-fn hung_pack() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || {
-        let mut held = Vec::new();
-        for conn in listener.incoming().flatten() {
-            held.push(conn);
-        }
-    });
-    port
+const ALAN: &str = r#"{"rules":[{"id":"ur-ocaisa","text":"never post or reply to Alan (ocaisa)","author":"rohit","reason":"he asked not to be pinged","deny_mention":{"handles":["ocaisa"],"names":["Alan"]},"deny_reply_to":{"handles":["ocaisa"],"names":["Alan"]},"written_at":"2026-10-25T00:00:00Z","updated_at":"2026-10-25T00:00:00Z","basis":"person"}]}"#;
+
+fn rules_path(hab: &Hab) -> PathBuf {
+    hab.home.join(".config/ljos/user-rules.json")
 }
 
-/// Finding 3 (open issue 7). Events that decide nothing must not hold a
-/// bot's turn while the pack hangs. Each one answers inside 3 s, well
-/// under the shortest timeout onboard registers for them (5 s).
+/// A Cursor cloud agent's GitHub comment
+/// arrives as preToolUse `MCP:add_issue_comment` with no server field.
+/// The rule that denies `mcp__github__add_issue_comment` applies to it.
 #[test]
-fn side_events_do_not_wait_out_a_hung_pack() {
-    let port = hung_pack();
-    let events = [
-        ("sessionStart", serde_json::json!({"session_id": "c-side"})),
-        ("beforeSubmitPrompt", serde_json::json!({"prompt": "hi"})),
-        (
-            "postToolUseFailure",
-            serde_json::json!({"tool_name": "Shell", "tool_input": {"command": "false"},
-                "error_message": "e", "failure_type": "error", "tool_use_id": "t-side"}),
-        ),
-        (
-            "stop",
-            serde_json::json!({"status": "completed", "loop_count": 0}),
-        ),
-        ("preCompact", serde_json::json!({"trigger": "auto"})),
-        ("sessionEnd", serde_json::json!({"reason": "x"})),
-    ];
-    let mut slow = Vec::new();
-    for (event, extra) in events {
-        let hab = hab("side");
-        let mut v = serde_json::json!({
+fn a_cloud_agent_github_write_meets_the_user_rule() {
+    let hab = hab("cloudmcp");
+    put(&rules_path(&hab), ALAN);
+    let payload = |tool: &str| {
+        serde_json::json!({
             "cursor_version": "2.4.0",
-            "conversation_id": "c-side",
-            "hook_event_name": event,
-        });
-        for (k, x) in extra.as_object().unwrap() {
-            v[k] = x.clone();
-        }
-        let (took, out) = call(
-            hook(&hab, Some(port)),
-            &v.to_string(),
-            Duration::from_secs(20),
-        );
-        if took > Duration::from_secs(3) || out.status.code() != Some(0) {
-            slow.push(format!("{event}: {took:?} rc={:?}", out.status.code()));
-        }
-    }
+            "conversation_id": "c-cloud",
+            "hook_event_name": "preToolUse",
+            "tool_name": tool,
+            "tool_input": {"owner": "org", "repo": "repo", "issue_number": 7,
+                "body": "please ask @ocaisa"},
+            "cwd": hab.repo,
+            "tool_use_id": "t-cloud",
+        })
+        .to_string()
+    };
+    let (_, named) = call(
+        hook(&hab, None),
+        &payload("mcp__github__add_issue_comment"),
+        Duration::from_secs(5),
+    );
+    let named = String::from_utf8_lossy(&named.stdout).to_string();
+    assert!(named.contains("\"deny\""), "control: {named}");
+    let (_, cloud) = call(
+        hook(&hab, None),
+        &payload("MCP:add_issue_comment"),
+        Duration::from_secs(5),
+    );
+    let cloud = String::from_utf8_lossy(&cloud.stdout).to_string();
     assert!(
-        slow.is_empty(),
-        "side events waited on a hung pack: {slow:?}"
+        cloud.contains("\"deny\""),
+        "MCP:add_issue_comment passed the rule: {cloud}"
     );
 }

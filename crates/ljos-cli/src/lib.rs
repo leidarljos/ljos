@@ -65,7 +65,7 @@ pub mod user_rules;
 pub mod wake;
 
 #[cfg(test)]
-mod mcpallowblock_review_tests;
+mod cursor_event_scan;
 #[cfg(test)]
 #[path = "../tests/common/seat_root.rs"]
 mod test_seat_root;
@@ -14592,7 +14592,7 @@ pub fn tracker_holds_ballot(rows: &[Value], voter: &str, choice: &str) -> bool {
 }
 
 #[cfg(test)]
-mod review_f4_mcp_prefix;
+mod mcp_tool_name;
 
 #[cfg(test)]
 mod read_back_tests {
@@ -61003,4 +61003,4 @@ mod tmux_pane_environ {
 }
 
 #[cfg(test)]
-mod review_f2_rules_race;
+mod rules_rewrite;

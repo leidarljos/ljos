@@ -1,9 +1,9 @@
-//! Review finding 2: a rules file rewritten in place denies benign writes.
-//! Fails on 508a7c54. Runs the built `ljos` binary.
+//! Side events answer while the pack hangs. Runs the built `ljos` binary.
 #![cfg(target_os = "linux")]
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::net::TcpListener;
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -53,11 +53,6 @@ fn hab(name: &str) -> Hab {
     hab
 }
 
-fn put(path: &Path, text: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, text).unwrap();
-}
-
 fn hook(hab: &Hab, pack: Option<u16>) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
     cmd.arg("hook")
@@ -103,57 +98,61 @@ fn call(mut cmd: Command, payload: &str, limit: Duration) -> (Duration, Output) 
     (took, child.wait_with_output().unwrap())
 }
 
-const ALAN: &str = r#"{"rules":[{"id":"ur-ocaisa","text":"never post or reply to Alan (ocaisa)","author":"rohit","reason":"he asked not to be pinged","deny_mention":{"handles":["ocaisa"],"names":["Alan"]},"deny_reply_to":{"handles":["ocaisa"],"names":["Alan"]},"written_at":"2026-10-25T00:00:00Z","updated_at":"2026-10-25T00:00:00Z","basis":"person"}]}"#;
-
-fn rules_path(hab: &Hab) -> PathBuf {
-    hab.home.join(".config/ljos/user-rules.json")
+/// A pack that accepts and never answers.
+fn hung_pack() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for conn in listener.incoming().flatten() {
+            held.push(conn);
+        }
+    });
+    port
 }
 
-/// Finding 2. A rules file rewritten in place is empty between the
-/// truncate and the write. A GitHub comment the rules do not cover must
-/// not be refused in that window.
+/// Events that decide nothing answer inside 3 s while the pack hangs,
+/// under the shortest timeout onboard registers for them (5 s).
 #[test]
-fn a_rules_file_rewritten_in_place_does_not_deny_a_benign_write() {
-    let hab = hab("rewrite");
-    let path = rules_path(&hab);
-    put(&path, ALAN);
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let writer = {
-        let stop = std::sync::Arc::clone(&stop);
-        let path = path.clone();
-        std::thread::spawn(move || {
-            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                let mut file = std::fs::File::create(&path).unwrap();
-                std::thread::sleep(Duration::from_millis(2));
-                file.write_all(ALAN.as_bytes()).unwrap();
-                drop(file);
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        })
-    };
-    let benign = serde_json::json!({
-        "cursor_version": "2.4.0",
-        "conversation_id": "c-rw",
-        "hook_event_name": "beforeMCPExecution",
-        "tool_name": "add_issue_comment",
-        "mcp_server_name": "github",
-        "tool_input": "{\"body\":\"tests passed\"}",
-    })
-    .to_string();
-    let mut denied = Vec::new();
-    for _ in 0..150 {
-        let (_, out) = call(hook(&hab, None), &benign, Duration::from_secs(5));
-        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-        if stdout.contains("\"deny\"") {
-            denied.push(stdout);
+fn side_events_do_not_wait_out_a_hung_pack() {
+    let port = hung_pack();
+    let events = [
+        ("sessionStart", serde_json::json!({"session_id": "c-side"})),
+        ("beforeSubmitPrompt", serde_json::json!({"prompt": "hi"})),
+        (
+            "postToolUseFailure",
+            serde_json::json!({"tool_name": "Shell", "tool_input": {"command": "false"},
+                "error_message": "e", "failure_type": "error", "tool_use_id": "t-side"}),
+        ),
+        (
+            "stop",
+            serde_json::json!({"status": "completed", "loop_count": 0}),
+        ),
+        ("preCompact", serde_json::json!({"trigger": "auto"})),
+        ("sessionEnd", serde_json::json!({"reason": "x"})),
+    ];
+    let mut slow = Vec::new();
+    for (event, extra) in events {
+        let hab = hab("side");
+        let mut v = serde_json::json!({
+            "cursor_version": "2.4.0",
+            "conversation_id": "c-side",
+            "hook_event_name": event,
+        });
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        let (took, out) = call(
+            hook(&hab, Some(port)),
+            &v.to_string(),
+            Duration::from_secs(20),
+        );
+        if took > Duration::from_secs(3) || out.status.code() != Some(0) {
+            slow.push(format!("{event}: {took:?} rc={:?}", out.status.code()));
         }
     }
-    stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    writer.join().unwrap();
     assert!(
-        denied.is_empty(),
-        "{} of 150 benign comments denied mid-rewrite: {}",
-        denied.len(),
-        denied[0]
+        slow.is_empty(),
+        "side events waited on a hung pack: {slow:?}"
     );
 }

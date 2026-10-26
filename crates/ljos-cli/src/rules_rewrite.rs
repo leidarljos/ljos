@@ -1,5 +1,4 @@
-//! Review finding 2: an empty rules file mid-rewrite denies benign writes.
-//! Fails on 508a7c54.
+//! A rules file rewritten in place does not deny a benign GitHub write.
 
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -36,10 +35,8 @@ fn alan() {
     put(&user_rules::rules_path().unwrap(), ALAN);
 }
 
-/// Finding 2. Bots on one box share `user-rules.json`, and every
-/// sessionStart can store it through the one `user-rules.json.tmp`. Two
-/// stores at once rename a truncated temp file into place. A benign
-/// GitHub comment must not be denied while that happens.
+/// Two stores of `user-rules.json` at once rename a truncated temp file
+/// into place. A benign GitHub comment is not denied while that happens.
 #[test]
 fn concurrent_rule_stores_never_deny_a_benign_github_write() {
     let (_lock, _dir) = review_env();

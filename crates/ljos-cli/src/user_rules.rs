@@ -135,7 +135,7 @@ pub(crate) fn read_all() -> Result<Vec<UserRule>> {
     // and those errors return at once.
     // The stamp is the length, the mtime, and a prefix of the bytes.
     // A stamp that stays the same for `RULES_STABLE` is a corrupt file,
-    // and the error stands. A stamp that changes is a rewrite still in
+    // and that error is returned. A stamp that changes is a rewrite still in
     // progress: keep reading until a parse succeeds or `RULES_HARD` has
     // passed, and then fail closed. A covered write is not allowed on
     // that last error.
