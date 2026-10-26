@@ -1,0 +1,1 @@
+A hook call that names no conversation may not push onto a protected branch. Such a call skipped the sitting gate whole, so any runner whose payload carried blank ids could push `develop` or `main` with no sitting and no vote. A commit, a merge and a push onto a topic branch from such a call are still allowed and logged as unattributed.

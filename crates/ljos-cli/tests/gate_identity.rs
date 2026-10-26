@@ -603,13 +603,16 @@ fn a_blank_conversation_id_reads_the_env_and_touches_the_book() {
 
 /// The box's hook payload names no conversation: every id is empty, the
 /// transcript path is null, and the hook process has no session variable.
-/// A history write is allowed and the book log records the call. An
-/// `rm -rf` outside a temp directory is still refused. A payload that
-/// names a conversation, and a non-empty id that names nobody, are refused.
+/// A commit is allowed and the book log records the call, and so is a push
+/// onto a topic branch; a push onto `develop` is refused, since no ticket's
+/// seats can clear a call that sits on none. An `rm -rf` outside a temp
+/// directory is still refused. A payload that names a conversation, and a
+/// non-empty id that names nobody, are refused.
 #[test]
 fn a_payload_with_no_conversation_id_skips_the_sitting_check() {
     let home = Box_::new();
     let push = "git push origin develop";
+    let topic = "git push origin topic";
     let blank = |event: &str, line: &str, conv: Option<&str>| {
         let mut payload = serde_json::json!({
             "conversation_id": "",
@@ -634,8 +637,22 @@ fn a_payload_with_no_conversation_id_skips_the_sitting_check() {
     };
     let on = [("LJOS_GUARD", "on")];
     for event in ["preToolUse", "beforeShellExecution"] {
+        let said = home.hook_with(&blank(event, topic, None), &on);
+        allowed(
+            &said,
+            &format!("{event} topic push with no conversation id"),
+        );
+        let said = home.hook_with(&blank(event, MERGE, None), &on);
+        allowed(&said, &format!("{event} merge with no conversation id"));
         let said = home.hook_with(&blank(event, push, None), &on);
-        allowed(&said, &format!("{event} push with no conversation id"));
+        refused(
+            &said,
+            &format!("{event} develop push with no conversation id"),
+        );
+        assert!(
+            said.contains("names no conversation"),
+            "the refusal did not say the call names no conversation:\n{said}"
+        );
     }
     let log = std::fs::read_to_string(home.run.join("ljos/book.log")).unwrap_or_default();
     assert!(
@@ -650,9 +667,9 @@ fn a_payload_with_no_conversation_id_skips_the_sitting_check() {
         "tool_input": {"command": push},
     })
     .to_string();
-    allowed(
+    refused(
         &home.hook_with(&omitted, &on),
-        "a push whose payload omits every id",
+        "a develop push whose payload omits every id",
     );
     let rm = home.hook_with(&blank("preToolUse", "rm -rf /home/x", None), &on);
     assert!(

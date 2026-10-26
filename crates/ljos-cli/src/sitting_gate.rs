@@ -67,6 +67,31 @@ pub fn guard_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         if history_or_unread(line, cwd) {
             crate::bookkeep::log_line("hook: unattributed call, no conversation id");
         }
+        // No conversation names no sitting to judge a commit by. A push
+        // onto a protected branch still waits for the seats on a ticket,
+        // and a call that names nobody sits on none, so that push is
+        // refused rather than let through unvoted.
+        let calls = match crate::gates::git_calls(line, cwd) {
+            Ok(calls) => calls,
+            Err(why) => {
+                return Some(refusal(&format!(
+                    "{why}, so the sitting gate cannot tell what this line writes. \
+                     Run the git command directly"
+                )))
+            }
+        };
+        for push in calls
+            .iter()
+            .filter(|c| c.sub == "push" && writes_history(c))
+        {
+            let cfg = match crate::gates::consensus_push(Some(&push.cwd)) {
+                Ok(cfg) => cfg,
+                Err(why) => return Some(refusal(&unread_settings(&why))),
+            };
+            if let Some(dest) = crate::gates::protected_push(push, line, &cfg.branches) {
+                return Some(refusal(&unattributed_push(&dest, &cfg.branches)));
+            }
+        }
         return None;
     }
     let calls = match crate::gates::git_calls(line, cwd) {
@@ -110,6 +135,21 @@ pub fn no_sitting(verb: &str, why: &str) -> String {
          this work belongs to (for a subagent when the parent holds ID, `ljos sitting ID` \
          opens a child ticket under ID, or run `ljos file \"TITLE\" --parent ID` then \
          `ljos sitting <child-id>`), then run it again. The person at their own terminal is not gated"
+    )
+}
+
+/// Why a push that `dest` (`may land on BRANCH`) is refused for a call
+/// that names no conversation: no ticket's seats can clear it.
+#[must_use]
+pub fn unattributed_push(dest: &str, branches: &[String]) -> String {
+    let named: Vec<String> = branches.iter().map(|b| format!("`{b}`")).collect();
+    format!(
+        "`git push` {dest}, and a runner's push onto {} waits for the seats on the ticket \
+         it sits on, but this call names no conversation, so it sits on no ticket. Pass the \
+         conversation id in the hook payload or the session environment, open a sitting with \
+         `ljos sitting ID`, and run it again. A push onto a topic branch is not held. \
+         The person at their own terminal is not gated",
+        named.join(", ")
     )
 }
 
