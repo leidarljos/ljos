@@ -524,7 +524,7 @@ fn chunk_header_names(first: &str, host: &str, scope_name: &str, base: &str, n: 
 
 /// The directory beside `log_rel` that holds its chunks: `<stem>.chunks`
 /// for `<stem>.jsonl.age`. Chunk `n` is `n.age` in it, from 1.
-fn chunk_dir_rel(log_rel: &str) -> String {
+pub(crate) fn chunk_dir_rel(log_rel: &str) -> String {
     let stem = log_rel.strip_suffix(".jsonl.age").unwrap_or(log_rel);
     format!("{stem}.chunks")
 }
@@ -1433,7 +1433,7 @@ fn plan_log_write(
 /// such as the temp file of a write that was cut off, goes with them, so
 /// the commit that stages the directory carries chunks alone. A file or
 /// symlink where the directory belongs is removed.
-fn remove_chunks(root: &Path, log_rel: &str, keep: u32) -> Result<()> {
+pub(crate) fn remove_chunks(root: &Path, log_rel: &str, keep: u32) -> Result<()> {
     let dir = chunk_dir_rel(log_rel);
     let names = match list_beneath(root, &dir) {
         Ok(names) => names,

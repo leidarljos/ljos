@@ -440,18 +440,24 @@ fn resolve_unmerged(dir: &Path) -> Result<(), String> {
     if files.is_empty() {
         return Ok(());
     }
+    let mut logs = Vec::new();
     for file in &files {
         if file.ends_with(".org") {
             resolve_org(dir, file)?;
         } else if file == ".gitattributes" {
             resolve_attributes(dir)?;
-        } else if is_this_host_atoms(file) {
-            resolve_atoms(dir, file)?;
+        } else if let Some(log) = this_host_log(file) {
+            if !logs.contains(&log) {
+                logs.push(log);
+            }
         } else {
             return Err(format!(
                 "rebase stopped on {file}, which is not an issue org file"
             ));
         }
+    }
+    for log in &logs {
+        resolve_log(dir, log)?;
     }
     Ok(())
 }
@@ -537,6 +543,38 @@ fn resolve_attributes(dir: &Path) -> Result<(), String> {
         }
     }
     write_resolved(dir, ".gitattributes", merged.as_bytes())
+}
+
+/// Resolve a conflict on any file of this host's log at `log_rel`: its
+/// base, its digest or one of its chunks. Chunks do not merge, so the
+/// log is sealed whole from the pack, its digest names no sealed file,
+/// and its chunk directory leaves the index and the work tree.
+fn resolve_log(dir: &Path, log_rel: &str) -> Result<(), String> {
+    let stem = log_rel.strip_suffix(".jsonl.age").unwrap_or(log_rel);
+    let digest_rel = format!("{stem}.digest");
+    for file in [log_rel, digest_rel.as_str()] {
+        resolve_atoms(dir, file)?;
+    }
+    let chunks = crate::sync::chunk_dir_rel(log_rel);
+    let dropped = git(
+        dir,
+        &[
+            "rm",
+            "-r",
+            "-q",
+            "--cached",
+            "--ignore-unmatch",
+            "--",
+            &chunks,
+        ],
+    );
+    if !dropped.status.success() {
+        return Err(format!(
+            "could not drop {chunks}: {}",
+            first_line(&output_text(&dropped))
+        ));
+    }
+    crate::sync::remove_chunks(dir, log_rel, 0).map_err(|e| format!("atoms merge: {e}"))
 }
 
 fn resolve_atoms(dir: &Path, file: &str) -> Result<(), String> {
@@ -1073,6 +1111,21 @@ fn is_this_host_atoms(rel: &str) -> bool {
         return false;
     };
     !rest.is_empty() && (rest.ends_with(".jsonl.age") || rest.ends_with(".digest"))
+}
+
+/// The log of this host that `rel` belongs to: the log itself, its
+/// digest, or a file in its chunk directory.
+fn this_host_log(rel: &str) -> Option<String> {
+    let rel = rel.trim();
+    let log = if let Some(stem) = rel.strip_suffix(".digest") {
+        format!("{stem}.jsonl.age")
+    } else if rel.ends_with(".jsonl.age") {
+        rel.to_string()
+    } else {
+        let (chunks, _) = rel.rsplit_once('/')?;
+        format!("{}.jsonl.age", chunks.strip_suffix(".chunks")?)
+    };
+    is_this_host_atoms(&log).then_some(log)
 }
 
 fn scope_for_this_host_atoms(rel: &str, scope: &crate::sync::Scope) -> Option<String> {
@@ -2027,6 +2080,107 @@ body b
             calls.trim().parse::<u32>().unwrap_or(0) >= 2,
             "driver calls: {calls}"
         );
+    }
+
+    /// Two sides that each wrote chunk 1 of this host's log stop the
+    /// replay on it, and chunks do not merge. The log is sealed whole from
+    /// the pack, its chunk directory leaves the index and the work tree,
+    /// and its digest names no sealed file.
+    #[test]
+    fn a_conflicted_chunk_seals_this_hosts_log_whole() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("HOME", dir.path());
+            std::env::set_var("XDG_CONFIG_HOME", dir.path().join("config"));
+            std::env::set_var("XDG_STATE_HOME", dir.path().join("state"));
+        }
+        let key = crate::sync::identity_path();
+        std::fs::create_dir_all(key.parent().unwrap()).unwrap();
+        let made = std::process::Command::new("age-keygen")
+            .arg("-o")
+            .arg(&key)
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        let public = std::process::Command::new("age-keygen")
+            .arg("-y")
+            .arg(&key)
+            .output()
+            .unwrap();
+        let public = String::from_utf8_lossy(&public.stdout).trim().to_string();
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        unsafe {
+            std::env::set_var("PACKSET_URL", &url);
+            std::env::set_var("PACKSET_WORKSPACE", "seat");
+            std::env::set_var("PACKSET_TIMEOUT_MS", "5000");
+        }
+        *store.lock().unwrap() = vec![serde_json::json!({
+            "id": "a1", "text": "kept in the pack", "kind": "lesson",
+            "entities": [], "embedding": [0.1, 0.2]
+        })];
+        let root = dir.path().join("tracker");
+        std::fs::create_dir_all(root.join(".ljos/atoms")).unwrap();
+        let run = |args: &[&str]| {
+            let out = git(&root, args);
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["init", "-q", "-b", "main"]);
+        for (key, value) in [
+            ("user.email", "seat@example.invalid"),
+            ("user.name", "seat"),
+            ("core.hooksPath", "/dev/null"),
+            ("commit.gpgsign", "false"),
+        ] {
+            run(&["config", key, value]);
+        }
+        let host = crate::sync::host();
+        let log = format!(".ljos/atoms/{host}.jsonl.age");
+        let digest = format!(".ljos/atoms/{host}.digest");
+        let chunks = format!(".ljos/atoms/{host}.chunks");
+        let chunk = format!("{chunks}/1.age");
+        std::fs::write(
+            root.join(".ljos/sync.toml"),
+            format!("name = \"grokbot\"\nrecipients = [\"{public}\"]\n"),
+        )
+        .unwrap();
+        std::fs::write(root.join(&log), "base\n").unwrap();
+        std::fs::write(root.join(&digest), "base\n").unwrap();
+        run(&["add", ".ljos"]);
+        run(&["commit", "-q", "-m", "seed"]);
+        std::fs::create_dir_all(root.join(&chunks)).unwrap();
+        run(&["checkout", "-q", "-b", "theirs"]);
+        std::fs::write(root.join(&chunk), "theirs\n").unwrap();
+        run(&["add", ".ljos"]);
+        run(&["commit", "-q", "-m", "theirs"]);
+        run(&["checkout", "-q", "main"]);
+        std::fs::create_dir_all(root.join(&chunks)).unwrap();
+        std::fs::write(root.join(&chunk), "ours\n").unwrap();
+        run(&["add", ".ljos"]);
+        run(&["commit", "-q", "-m", "ours"]);
+        let merged = git(&root, &["merge", "-q", "--no-edit", "theirs"]);
+        assert!(!merged.status.success(), "the chunks merged");
+        assert_eq!(unmerged(&root), vec![chunk.clone()]);
+
+        resolve_unmerged(&root).unwrap();
+        assert!(unmerged(&root).is_empty(), "{:?}", unmerged(&root));
+        let listed = git(&root, &["ls-files", "--", &chunks]);
+        assert_eq!(String::from_utf8_lossy(&listed.stdout), "");
+        assert!(!root.join(&chunks).exists(), "the chunk directory stayed");
+        let opened = std::process::Command::new("age")
+            .args(["-d", "-i"])
+            .arg(&key)
+            .arg(root.join(&log))
+            .output()
+            .unwrap();
+        let plain = String::from_utf8_lossy(&opened.stdout);
+        assert!(plain.contains("kept in the pack"), "{plain}");
+        let digest = std::fs::read_to_string(root.join(&digest)).unwrap();
+        assert!(digest.ends_with(" merged\n"), "{digest}");
     }
 
     /// The built `ljos`. `cargo test` compiles the bin next to this harness.
