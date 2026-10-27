@@ -503,7 +503,8 @@ const CHUNK_HEADER: &str = "ljos_chunk";
 const CHUNK_DROP: &str = "ljos_drop";
 
 /// The most chunks a log is read with. Export seals a log whole before
-/// it would write one past this.
+/// it would write one past this, or once its chunks would come to more
+/// plaintext bytes than its base.
 const MAX_CHUNKS: u32 = 64;
 
 fn chunk_header(host: &str, scope_name: &str, base: &str, n: u32) -> String {
@@ -577,6 +578,8 @@ struct LogView {
     body: String,
     /// Chunks 1 through `applied` were read.
     applied: u32,
+    /// The plaintext bytes of those chunks, headers included.
+    chunk_bytes: usize,
     /// Why the chunk after `applied` was left unread, when one is there.
     stopped: Option<String>,
 }
@@ -615,6 +618,7 @@ fn read_chunks(
     let base = blob_digest(base);
     let mut lines: Option<BTreeMap<String, String>> = None;
     let mut applied = 0;
+    let mut chunk_bytes = 0;
     let stopped = loop {
         let n = applied + 1;
         let sealed = match fetch(n) {
@@ -666,6 +670,7 @@ fn read_chunks(
             }
         }
         applied = n;
+        chunk_bytes += plain.len();
     };
     let body = match lines {
         Some(map) => map.values().map(|line| format!("{line}\n")).collect(),
@@ -674,6 +679,7 @@ fn read_chunks(
     LogView {
         body,
         applied,
+        chunk_bytes,
         stopped,
     }
 }
@@ -1365,6 +1371,13 @@ enum LogWrite {
 /// and a base replaced by a key this machine does not hold. The atoms
 /// are diffed against the log as a reader sees it, so a chunk left
 /// unread is carried again in the new one.
+///
+/// The log is also sealed whole when the new chunk would be number 65,
+/// or when the plaintext of the chunks read and the new one would pass
+/// the plaintext of the base. Both are counted from the files alone, so
+/// any machine that writes the same atoms over the same log compacts on
+/// the same sync. A reader then opens the base and at most 64 chunks
+/// that come to no more bytes than it.
 fn plan_log_write(
     root: &Path,
     log_rel: &str,
@@ -1418,14 +1431,11 @@ fn plan_log_write(
         };
     }
     let n = view.applied + 1;
-    if n > MAX_CHUNKS {
+    let plain = chunk_header(host, scope_name, &blob_digest(&base), n) + &lines;
+    if n > MAX_CHUNKS || view.chunk_bytes + plain.len() > opened.len() {
         return LogWrite::Whole;
     }
-    LogWrite::Chunk {
-        n,
-        plain: chunk_header(host, scope_name, &blob_digest(&base), n) + &lines,
-        changes,
-    }
+    LogWrite::Chunk { n, plain, changes }
 }
 
 /// Remove the chunk files of `log_rel` past the first `keep`, and with
@@ -8180,6 +8190,96 @@ mod tests {
         );
         assert_eq!(out, "");
         assert_eq!(fix.base_blob(), base);
+    }
+
+    /// Sixty-four syncs that each add a note write chunks 1 to 64 over one
+    /// base. The sync after them seals the log whole: the one new base of
+    /// the run, no chunks beside it, and a peer reads it as the atoms the
+    /// single file would carry.
+    #[test]
+    fn the_sixty_fifth_chunk_seals_the_log_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let fix = Growth::new(dir.path());
+        let mut atoms: Vec<Value> = (0..300).map(note).collect();
+        fix.sync(&atoms);
+        let mut bases = vec![fix.base_blob()];
+        for n in 1..=MAX_CHUNKS as usize {
+            atoms.push(note(300 + n));
+            fix.sync(&atoms);
+            assert_eq!(fix.base_blob(), bases[0], "sync {n} sealed the log whole");
+            assert!(fix.chunk(n as u32).is_file(), "sync {n} wrote no chunk");
+        }
+        let (view, out) = fix.peer_view();
+        assert_eq!(
+            view,
+            log_lines(&atoms, "grokbot", "grokbot", false),
+            "{out}"
+        );
+
+        atoms.push(note(400));
+        fix.sync(&atoms);
+        bases.push(fix.base_blob());
+        assert_ne!(bases[1], bases[0], "the 65th sync wrote a chunk");
+        assert!(!fix.chunk(1).exists(), "the whole seal left chunks");
+        let (view, out) = fix.peer_view();
+        assert_eq!(
+            view,
+            log_lines(&atoms, "grokbot", "grokbot", false),
+            "{out}"
+        );
+
+        atoms.push(note(401));
+        fix.sync(&atoms);
+        assert_eq!(fix.base_blob(), bases[1], "the sync after compaction");
+        assert!(fix.chunk(1).is_file());
+    }
+
+    /// A change whose chunk would carry more plaintext than the base, with
+    /// the chunks before it, seals the log whole instead. The next small
+    /// change is a chunk over that new base.
+    #[test]
+    fn chunks_past_the_size_of_the_base_seal_the_log_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let fix = Growth::new(dir.path());
+        let mut atoms: Vec<Value> = (0..20).map(note).collect();
+        fix.sync(&atoms);
+        let first = fix.base_blob();
+        atoms[0] = atom("a00000", "note 0, changed", &[]);
+        fix.sync(&atoms);
+        assert_eq!(
+            fix.base_blob(),
+            first,
+            "one changed note sealed the log whole"
+        );
+        assert!(fix.chunk(1).is_file());
+
+        for (n, slot) in atoms.iter_mut().enumerate() {
+            let text = format!("note {n}, rewritten: {}", "y".repeat(400));
+            *slot = atom(&format!("a{n:05}"), &text, &[]);
+        }
+        fix.sync(&atoms);
+        let second = fix.base_blob();
+        assert_ne!(second, first, "a chunk the size of the base was written");
+        assert!(!fix.chunk(1).exists(), "the whole seal left chunks");
+        let (view, out) = fix.peer_view();
+        assert_eq!(
+            view,
+            log_lines(&atoms, "grokbot", "grokbot", false),
+            "{out}"
+        );
+
+        atoms.push(note(20));
+        fix.sync(&atoms);
+        assert_eq!(fix.base_blob(), second);
+        assert!(fix.chunk(1).is_file());
+        let (view, out) = fix.peer_view();
+        assert_eq!(
+            view,
+            log_lines(&atoms, "grokbot", "grokbot", false),
+            "{out}"
+        );
     }
 
     /// A peer's log reads as its base with each chunk applied in order. The
