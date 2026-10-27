@@ -69,6 +69,41 @@ pub fn fails_path() -> Option<PathBuf> {
     key_dir().map(|dir| dir.join(FAILS_NAME))
 }
 
+/// Whether `word`, read from `cwd` the way the shell would, names the key,
+/// the failure count, or the directory that holds them. `~` and `$HOME`
+/// are read as the passwd home, where the key is.
+pub(crate) fn names_key(word: &str, cwd: Option<&Path>) -> bool {
+    let (Some(dir), Some(key), Some(fails)) = (key_dir(), key_path(), fails_path()) else {
+        return false;
+    };
+    let word = word.trim_matches(|c| c == '"' || c == '\'');
+    let home = crate::proc_tree::own_home();
+    let under_home = ["~/", "$HOME/", "${HOME}/"]
+        .iter()
+        .find_map(|prefix| word.strip_prefix(prefix));
+    let path = if let Some(rest) = under_home {
+        let Some(home) = home else { return false };
+        home.join(rest)
+    } else if Path::new(word).is_absolute() {
+        PathBuf::from(word)
+    } else if let Some(cwd) = cwd {
+        cwd.join(word)
+    } else {
+        return false;
+    };
+    let mut plain = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                plain.pop();
+            }
+            other => plain.push(other),
+        }
+    }
+    [dir, key, fails].contains(&plain)
+}
+
 /// Ask the person at the controlling terminal for the passphrase, to run
 /// `what` (`git push`) as them once. `marks` are the runner variables
 /// set, by name. Nothing is kept on a right answer but a cleared failure

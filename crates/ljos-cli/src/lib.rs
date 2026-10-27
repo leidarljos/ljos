@@ -23304,7 +23304,11 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         if w.chars().any(char::is_whitespace) {
             return false;
         }
-        let hit = |path: &str| is_seat_path(path) || crate::cloud_hook::in_git_hooks_dir(path, dir);
+        let hit = |path: &str| {
+            is_seat_path(path)
+                || crate::cloud_hook::in_git_hooks_dir(path, dir)
+                || person_key::names_key(path, dir)
+        };
         hit(w) || w.split_once('=').is_some_and(|(_, rest)| hit(rest))
     };
     if nested_too_deep(line) {
@@ -52064,6 +52068,45 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(approval::approve("0".repeat(32).as_str()).is_err());
         unsafe { std::env::remove_var("ACMEAGENT_CONVERSATION_ID") };
         assert!(seat_guard("rm -rf /run/user/1000/ljos/approvals").is_some());
+    }
+
+    /// A runner that could rewrite the person key could choose the
+    /// passphrase, and one that could clear the failure count could guess
+    /// without a lockout. A write to either, or into their directory, is
+    /// refused however the path is spelled. Reading them is not.
+    #[test]
+    fn the_person_key_and_its_failure_count_are_guarded() {
+        let _g = env_guard();
+        let dir = person_key::key_dir().expect("a passwd home");
+        let key = dir.join("person-key");
+        let fails = dir.join("person-key.failures");
+        let (dir, key, fails) = (dir.display(), key.display(), fails.display());
+        for line in [
+            format!("echo x > {key}"),
+            format!("rm {key}"),
+            format!("mv /tmp/k {key}"),
+            format!("cp /tmp/person-key {dir}"),
+            format!("Write {key}"),
+            format!("truncate -s 0 {fails}"),
+            "cp /tmp/person-key ~/.config/ljos".to_string(),
+            "tee ~/.config/ljos/person-key".to_string(),
+            "sed -i s/a/b/ $HOME/.config/ljos/person-key".to_string(),
+            "rm -f ~/.config/ljos/person-key.failures".to_string(),
+            "cp /tmp/k ~/.config/./ljos/../ljos/person-key".to_string(),
+            format!("cd {dir} && mv /tmp/k person-key"),
+            format!("cd {dir} && rm -f person-key.failures"),
+            format!("cd {dir}/.. && cp /tmp/k ljos/person-key"),
+        ] {
+            assert!(seat_guard(&line).is_some(), "{line:?} was allowed");
+        }
+        for line in [
+            format!("cat {key}"),
+            format!("ls {dir}"),
+            "ljos person-key status".to_string(),
+            "echo person-key".to_string(),
+        ] {
+            assert!(seat_guard(&line).is_none(), "{line:?} was refused");
+        }
     }
 
     /// The kept prompt makes a sentence the person's, so no tool call may
