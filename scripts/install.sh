@@ -70,6 +70,16 @@ FORCE=0
 
 say() { printf '%s\n' "$*"; }
 
+# Put a program in place by rename. A copy over a program that is running
+# fails with "Text file busy"; a rename replaces the directory entry and
+# the running process keeps the old file until it exits.
+place() {
+  tmp="$2.new.$$"
+  cp "$1" "$tmp"
+  chmod 755 "$tmp"
+  mv -f "$tmp" "$2"
+}
+
 # The oldest Rust these crates build with, from Cargo.toml's rust-version
 # when the tree is here, else the release's floor. Checked before any
 # source build, since a distro cargo older than this fails on the first
@@ -213,7 +223,9 @@ source_build() {
     say "  building $crate from source (no release build for $TARGET)"
     cargo install --locked --quiet --root "$TMP/cargo" "$crate" >&2
   fi
-  cp "$TMP"/cargo/bin/* "$BIN_DIR"/
+  for built in "$TMP"/cargo/bin/*; do
+    place "$built" "$BIN_DIR/$(basename "$built")"
+  done
 }
 
 # What can check a build attestation here. gh gained `attestation` in
@@ -341,7 +353,7 @@ install_one() {
         continue
       fi
       [ -x "$FROM_DIR/$p" ] || die "$FROM_DIR/$p is missing"
-      cp "$FROM_DIR/$p" "$BIN_DIR/$p"
+      place "$FROM_DIR/$p" "$BIN_DIR/$p"
     done
     printf '%s\n' "$repo" >> "$TMP/copied"
     return
@@ -385,8 +397,7 @@ install_one() {
       continue
     fi
     [ -n "$found" ] || die "$asset holds no $p"
-    cp "$found" "$BIN_DIR/$p"
-    chmod 755 "$BIN_DIR/$p"
+    place "$found" "$BIN_DIR/$p"
   done
   label=$repo
   case $crate in *-mcp) label=$crate ;; esac
