@@ -1810,9 +1810,9 @@ fn sender_entity_for_scope(host: &str, scope: &Scope, scope_name: &str) -> Strin
     }
 }
 
-/// Host files `<host>+<scope>.jsonl.age` and their digests for scopes this
-/// repository no longer configures. Other machines' files stay: each host
-/// deletes its own on export.
+/// Host files `<host>+<scope>.jsonl.age`, their digests and their chunk
+/// directories for scopes this repository no longer configures. Other
+/// machines' files stay: each host deletes its own on export.
 fn stale_scope_rels(root: &Path, scope: &Scope) -> Vec<String> {
     let me = host();
     let mut rels = Vec::new();
@@ -1829,8 +1829,8 @@ fn stale_scope_rels(root: &Path, scope: &Scope) -> Vec<String> {
     if let Ok(out) = git(root, &["ls-files", "--", ".ljos/atoms"]) {
         if out.status.success() {
             for line in String::from_utf8_lossy(&out.stdout).lines() {
-                if let Some(name) = Path::new(line).file_name().and_then(|n| n.to_str()) {
-                    push(name);
+                if let Some(rest) = line.strip_prefix(".ljos/atoms/") {
+                    push(rest.split('/').next().unwrap_or(rest));
                 }
             }
         }
@@ -1844,13 +1844,17 @@ fn extra_scope_of_host_file(name: &str, host: &str) -> Option<String> {
     let rest = name.strip_prefix(&format!("{host}+"))?;
     let scope_name = rest
         .strip_suffix(".jsonl.age")
-        .or_else(|| rest.strip_suffix(".digest"))?;
+        .or_else(|| rest.strip_suffix(".digest"))
+        .or_else(|| rest.strip_suffix(".chunks"))?;
     (!scope_name.is_empty() && !scope_name.contains('+')).then(|| scope_name.to_string())
 }
 
 fn drop_stale_scope_files(root: &Path, scope: &Scope) {
     for rel in stale_scope_rels(root, scope) {
-        let _ = remove_beneath(root, &rel);
+        let _ = match rel.strip_suffix(".chunks") {
+            Some(stem) => remove_chunks(root, &format!("{stem}.jsonl.age"), 0),
+            None => remove_beneath(root, &rel),
+        };
     }
 }
 
@@ -9518,6 +9522,40 @@ mod tests {
         );
         assert!(tracked.contains(&format!("{me}+cloud.digest")), "{tracked}");
         assert!(!tracked.contains("notes"), "{tracked}\n{said}");
+    }
+
+    /// A scope this repository no longer names takes this host's chunks of
+    /// it along with its log and digest, on disk and in the commit.
+    #[test]
+    fn a_removed_scope_takes_its_chunks_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let root = tracker(dir.path());
+        let me = host();
+        let chunks = format!(".ljos/atoms/{me}+notes.chunks");
+        let notes = [
+            format!(".ljos/atoms/{me}+notes.jsonl.age"),
+            format!(".ljos/atoms/{me}+notes.digest"),
+            format!("{chunks}/1.age"),
+            format!("{chunks}/2.age"),
+        ];
+        std::fs::create_dir_all(root.join(&chunks)).unwrap();
+        for rel in &notes {
+            std::fs::write(root.join(rel), "old\n").unwrap();
+        }
+        let rels: Vec<&str> = notes.iter().map(String::as_str).collect();
+        commit_dated(&root, &rels, "notes", None);
+        for rel in host_log_rels(&me) {
+            std::fs::write(root.join(&rel), "sealed\n").unwrap();
+        }
+        let scope: Scope =
+            toml::from_str("name = \"grokbot\"\nrecipients = [\"age1box\"]\n").unwrap();
+        let said = commit_logs(&root, &scope, false);
+        assert!(said.contains("committed"), "{said}");
+        let tracked = git(&root, &["ls-files"]).unwrap();
+        let tracked = String::from_utf8_lossy(&tracked.stdout);
+        assert!(!tracked.contains("notes"), "{tracked}\n{said}");
+        assert!(!root.join(&chunks).exists(), "{said}");
     }
 
     #[test]
