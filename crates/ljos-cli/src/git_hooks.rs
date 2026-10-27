@@ -823,11 +823,28 @@ fn dropped_refusal(name: &str) -> Option<String> {
 /// and `pre-push` also needs that ticket to clear each ref it sends onto
 /// a branch [`crate::gates::consensus_push`] names. A store or a tracker
 /// checkout, which ljos writes itself, is not gated, and nor is the
-/// person.
+/// person. When a runner variable is the only cause, and the call would
+/// be refused, the person is asked for their passphrase on the
+/// controlling terminal; a right answer lets this one call through.
 fn gate(name: &str) -> Result<()> {
-    if !crate::under_a_runner() {
+    let Some(cause) = crate::runner_cause() else {
         return Ok(());
+    };
+    let refused = match gate_runner(name) {
+        Ok(()) => return Ok(()),
+        Err(refused) => refused,
+    };
+    if cause == crate::RunnerCause::Hard {
+        return Err(refused);
     }
+    let verb = if name == "pre-push" { "push" } else { "commit" };
+    match crate::person_key::ask_person(&crate::runner_marks(), &format!("git {verb}")) {
+        Ok(()) => Ok(()),
+        Err(why) => Err(anyhow!("{refused:#}\nsitting-gate: {why}")),
+    }
+}
+
+fn gate_runner(name: &str) -> Result<()> {
     let repo = git_line(&["rev-parse", "--show-toplevel"])
         .map(PathBuf::from)
         .or_else(git_dir);

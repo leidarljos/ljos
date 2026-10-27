@@ -46,6 +46,17 @@ fn runner() -> bool {
     RUNNER.with(std::cell::Cell::get)
 }
 
+#[cfg(not(test))]
+fn cause() -> Option<crate::RunnerCause> {
+    crate::runner_cause()
+}
+
+/// A posed runner is a hard one, so a unit test never prompts.
+#[cfg(test)]
+fn cause() -> Option<crate::RunnerCause> {
+    runner().then_some(crate::RunnerCause::Hard)
+}
+
 /// The refusal for `line` run from `cwd` under a runner: a git call that
 /// writes history while this conversation holds no live sitting, or a
 /// push that may land on a branch [`crate::gates::consensus_push`] names
@@ -58,9 +69,29 @@ fn runner() -> bool {
 /// no conversation, is not checked for a commit, a merge, or a push onto
 /// a topic branch: that write is a line in the book log. A push onto a
 /// protected branch from such a call is refused, since no ticket's seats
-/// can clear it.
+/// can clear it. When a runner variable is the only cause and the line
+/// is refused, the person is asked for their passphrase on the
+/// controlling terminal; a right answer lets this one line through.
 #[must_use]
 pub fn guard_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
+    let rule = judge_line(line, cwd)?;
+    if rule.verdict != "deny" || cause() != Some(crate::RunnerCause::MarkOnly) {
+        return Some(rule);
+    }
+    let what = crate::gates::git_calls(line, cwd)
+        .ok()
+        .and_then(|calls| calls.into_iter().find(writes_history))
+        .map_or_else(|| "command".to_string(), |call| format!("git {}", call.sub));
+    match crate::person_key::ask_person(&crate::runner_marks(), &what) {
+        Ok(()) => None,
+        Err(why) => Some(refusal(&format!(
+            "{}. {why}",
+            rule.reason.trim_start_matches("sitting-gate: ")
+        ))),
+    }
+}
+
+fn judge_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if !runner() {
         return None;
     }

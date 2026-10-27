@@ -6,6 +6,7 @@ ljos_test_boot::harness!();
 
 use std::process::{Command, Stdio};
 
+#[allow(dead_code)]
 #[path = "common/pty.rs"]
 mod pty;
 #[path = "common/runner.rs"]
@@ -65,7 +66,7 @@ fn a_mark_on_a_terminal_may_not_set_or_clear_the_key() {
     let before = kept();
     let home = tempfile::tempdir().unwrap();
     for verb in ["set", "clear"] {
-        let mut term = pty::Pty::open();
+        let term = pty::Pty::open();
         let child = term.spawn(
             ljos(
                 Command::new(env!("CARGO_BIN_EXE_ljos")).args(["person-key", verb]),

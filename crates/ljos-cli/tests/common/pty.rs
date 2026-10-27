@@ -3,7 +3,7 @@
 //! test host has a terminal. The test writes what the person types to
 //! the master side and reads what the child shows there.
 
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::os::unix::process::CommandExt as _;
 use std::process::{Child, Command};
@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 
 pub struct Pty {
     master: std::fs::File,
-    slave: Option<OwnedFd>,
+    /// Held open here so the master never reads EIO while the child is
+    /// between closing its copy and opening `/dev/tty`.
+    slave: OwnedFd,
     shown: Arc<Mutex<Vec<u8>>>,
 }
 
@@ -42,7 +44,7 @@ impl Pty {
         };
         Self {
             master,
-            slave: Some(slave),
+            slave,
             shown: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -50,9 +52,8 @@ impl Pty {
     /// Start `cmd` in a new session whose controlling terminal is this
     /// pty. Its stdin, stdout and stderr are whatever `cmd` sets; the
     /// slave side is not one of them unless the test asks.
-    pub fn spawn(&mut self, cmd: &mut Command) -> Child {
-        let slave = self.slave.take().expect("one child per pty");
-        let fd = slave.as_raw_fd();
+    pub fn spawn(&self, cmd: &mut Command) -> Child {
+        let fd = self.slave.as_raw_fd();
         // SAFETY: setsid, ioctl and close are async-signal-safe and touch
         // only this child.
         unsafe {
@@ -65,7 +66,6 @@ impl Pty {
             });
         }
         let child = cmd.spawn().expect("spawn on a pty");
-        drop(slave);
         let mut master = self.master.try_clone().unwrap();
         let shown = Arc::clone(&self.shown);
         std::thread::spawn(move || {
@@ -84,6 +84,50 @@ impl Pty {
     #[must_use]
     pub fn shown(&self) -> String {
         String::from_utf8_lossy(&self.shown.lock().unwrap()).into_owned()
+    }
+
+    /// Wait until the terminal shows `text`. False after `secs` seconds.
+    #[must_use]
+    pub fn wait_for(&self, text: &str, secs: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while Instant::now() < deadline {
+            if self.shown().contains(text) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    /// Type `text` on the terminal, as the person would.
+    pub fn type_line(&mut self, text: &str) {
+        self.master.write_all(text.as_bytes()).unwrap();
+        self.master.write_all(b"\n").unwrap();
+        self.master.flush().unwrap();
+    }
+
+    /// End input with the terminal's end-of-file key on an empty line.
+    pub fn send_eof(&mut self) {
+        self.master.write_all(b"\x04").unwrap();
+        self.master.flush().unwrap();
+    }
+
+    /// Press the terminal's interrupt key, which signals the foreground group.
+    pub fn interrupt(&mut self) {
+        self.master.write_all(b"\x03").unwrap();
+        self.master.flush().unwrap();
+    }
+
+    /// Whether the terminal echoes what is typed. The master side reads
+    /// the settings the child set on its side.
+    #[must_use]
+    pub fn echo_on(&self) -> bool {
+        // SAFETY: termios is plain data, filled in from the pty master.
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(self.master.as_raw_fd(), &mut t), 0);
+            t.c_lflag & libc::ECHO != 0
+        }
     }
 }
 
