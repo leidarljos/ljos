@@ -745,7 +745,9 @@ fn seal(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
 }
 
 /// `plain` sealed to the recipients. age writes to a pipe, so the caller
-/// decides where the ciphertext lands.
+/// decides where the ciphertext lands. age exits before it reads when it
+/// refuses a recipient, and the writer blocks SIGPIPE so that error is
+/// the one returned.
 fn seal_bytes(plain: &str, recipients: &[String]) -> Result<Vec<u8>> {
     if recipients.is_empty() {
         bail!("sync: the scope names no recipients; add this machine's `ljos sync --key` to .ljos/sync.toml");
@@ -766,6 +768,7 @@ fn seal_bytes(plain: &str, recipients: &[String]) -> Result<Vec<u8>> {
     // both sides if stdin were written before stdout is drained.
     let writer = std::thread::spawn(move || {
         use std::io::Write;
+        block_sigpipe_here();
         stdin.write_all(&plain)
     });
     let done = child.wait_with_output()?;
