@@ -2150,9 +2150,28 @@ fn head_blob(root: &Path, rel: &str) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
+/// Block SIGPIPE on the calling thread. `main` restores the default
+/// action, so a write to an `age` that already exited would end the
+/// process. Blocked, the write returns EPIPE and age's status is read.
+fn block_sigpipe_here() {
+    // SAFETY: sigemptyset initializes the set before it is read, and
+    // pthread_sigmask changes only this thread's mask.
+    unsafe {
+        let mut set = std::mem::zeroed::<libc::sigset_t>();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGPIPE);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+    }
+}
+
 /// Decrypt `bytes` with `identities`. The ciphertext is written to `age`
 /// on stdin. A path under the system temp directory would be predictable
 /// and, when the log was a symlink, would hold the followed file.
+///
+/// age writes plaintext while it reads, so the ciphertext goes in from a
+/// thread while stdout drains: a log past the pipe buffers stalled both
+/// sides. age stops reading after the header when no identity matches,
+/// and that thread blocks SIGPIPE so the miss is reported.
 fn open_sealed_bytes(bytes: &[u8], identities: &[PathBuf]) -> Result<Option<String>> {
     if identities.is_empty() {
         return Ok(None);
@@ -2168,13 +2187,17 @@ fn open_sealed_bytes(bytes: &[u8], identities: &[PathBuf]) -> Result<Option<Stri
         .stderr(Stdio::piped())
         .spawn()
         .context("age not on PATH; install age")?;
-    use std::io::Write;
-    let wrote = child
-        .stdin
-        .take()
-        .context("age: no stdin")?
-        .write_all(bytes);
+    let mut stdin = child.stdin.take().context("age: no stdin")?;
+    let sealed = bytes.to_vec();
+    let writer = std::thread::spawn(move || {
+        use std::io::Write;
+        block_sigpipe_here();
+        stdin.write_all(&sealed)
+    });
     let out = child.wait_with_output().context("age -d")?;
+    let wrote = writer
+        .join()
+        .map_err(|_| anyhow::anyhow!("age: stdin writer"))?;
     if wrote.is_err() && out.status.success() {
         wrote?;
     }
@@ -7438,6 +7461,24 @@ mod tests {
             !said.contains("bad host:"),
             "this host's log under its raw name was imported: {said}"
         );
+    }
+
+    /// A log larger than the pipe buffers opens. age writes plaintext as it
+    /// reads, so its stdin is fed while its stdout drains.
+    #[test]
+    fn a_log_past_the_pipe_buffers_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let public = make_key();
+        let plain = format!("{}\n", "lesson ".repeat(600_000));
+        let sealed = seal_bytes(&plain, &[public]).unwrap();
+        let identity = identity_path();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(open_sealed_bytes(&sealed, &[identity]).unwrap()));
+        let opened = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("age -d stalled on a full pipe");
+        assert_eq!(opened.as_deref(), Some(plain.as_str()));
     }
 
     #[test]
