@@ -20,9 +20,34 @@ pub const MIN_LEN: usize = 12;
 
 const KEY_NAME: &str = "person-key";
 
+/// Wrong answers, one Unix time per line, beside the key.
+const FAILS_NAME: &str = "person-key.failures";
+
+/// Wrong answers within this many seconds count toward a lockout.
+const WINDOW_SECS: u64 = 15 * 60;
+
+/// This many wrong answers in the window and ljos stops asking.
+const LOCK_AFTER: usize = 5;
+
+/// The longest wait after a wrong answer, in seconds.
+const MAX_PAUSE_SECS: u64 = 60;
+
+static DIR_FOR_PROCESS: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Keep the key in `dir` for the rest of this process. A test harness
+/// that links this library calls it; the ljos binaries never do, so no
+/// variable, argument or file moves the key.
+#[doc(hidden)]
+pub fn keep_in_for_this_process(dir: PathBuf) {
+    let _ = DIR_FOR_PROCESS.set(dir);
+}
+
 /// The ljos config directory of the passwd entry's home.
 #[must_use]
 pub fn key_dir() -> Option<PathBuf> {
+    if let Some(dir) = DIR_FOR_PROCESS.get() {
+        return Some(dir.clone());
+    }
     crate::proc_tree::own_home().map(|home| home.join(".config").join("ljos"))
 }
 
@@ -30,6 +55,138 @@ pub fn key_dir() -> Option<PathBuf> {
 #[must_use]
 pub fn key_path() -> Option<PathBuf> {
     key_dir().map(|dir| dir.join(KEY_NAME))
+}
+
+/// Where wrong answers are counted.
+#[must_use]
+pub fn fails_path() -> Option<PathBuf> {
+    key_dir().map(|dir| dir.join(FAILS_NAME))
+}
+
+/// Ask the person at the controlling terminal for the passphrase, to run
+/// `what` (`git push`) as them once. `marks` are the runner variables
+/// set, by name. Nothing is kept on a right answer but a cleared failure
+/// count: no token, no variable, no cache.
+///
+/// # Errors
+///
+/// Why the person was not asked, or was asked and not answered: no key,
+/// a lockout, no controlling terminal, nothing typed, a wrong answer.
+pub fn ask_person(marks: &[String], what: &str) -> std::result::Result<(), String> {
+    let (Some(key), Some(fails)) = (key_path(), fails_path()) else {
+        return Err("this user's passwd entry names no home, so no passphrase is kept".into());
+    };
+    let tty = crate::person_tty::open().ok();
+    ask_with(&key, &fails, tty, marks, what, now_secs, std::thread::sleep)
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// [`ask_person`] with the key and failure paths, the terminal, the
+/// clock and the pause given.
+fn ask_with(
+    key: &Path,
+    fails: &Path,
+    tty: Option<std::fs::File>,
+    marks: &[String],
+    what: &str,
+    now: impl Fn() -> u64,
+    pause: impl Fn(std::time::Duration),
+) -> std::result::Result<(), String> {
+    let phc = match read(key) {
+        Ok(Some(phc)) => phc,
+        Ok(None) => return Err("no person passphrase is set".into()),
+        Err(e) => return Err(format!("{e:#}")),
+    };
+    let recent = recent_failures(fails, now())?;
+    if recent.len() >= LOCK_AFTER {
+        let until = recent[recent.len() - LOCK_AFTER] + WINDOW_SECS;
+        return Err(format!(
+            "{LOCK_AFTER} wrong passphrases in {} minutes, so ljos does not ask again until {}",
+            WINDOW_SECS / 60,
+            utc(until)
+        ));
+    }
+    let Some(mut tty) = tty else {
+        return Err("this process has no controlling terminal to ask on".into());
+    };
+    let (noun, names) = if marks.len() == 1 {
+        ("a runner variable", marks[0].clone())
+    } else {
+        ("runner variables", marks.join(", "))
+    };
+    let prompt = format!(
+        "ljos: this shell carries {noun} ({names}). Type your person passphrase to run this \
+         {what} as you: "
+    );
+    let answer = match crate::person_tty::ask(&mut tty, &prompt) {
+        Ok(Some(line)) if !line.bytes().is_empty() => line,
+        Ok(_) => return Err("nothing was typed at the passphrase prompt".into()),
+        Err(e) => return Err(format!("the passphrase prompt failed: {e:#}")),
+    };
+    if verify(answer.bytes(), &phc) {
+        let _ = std::fs::remove_file(fails);
+        return Ok(());
+    }
+    let count = record_failure(fails, now())
+        .map(|()| recent.len() + 1)
+        .unwrap_or(LOCK_AFTER);
+    pause(std::time::Duration::from_secs(pause_secs(count)));
+    Err("the passphrase did not match".into())
+}
+
+/// The wait after the `count`th wrong answer in the window: 2 seconds,
+/// doubling each time, at most [`MAX_PAUSE_SECS`].
+fn pause_secs(count: usize) -> u64 {
+    let doublings = u32::try_from(count.saturating_sub(1))
+        .unwrap_or(u32::MAX)
+        .min(6);
+    (2u64 << doublings).min(MAX_PAUSE_SECS)
+}
+
+/// The wrong answers in the window ending `now`, oldest first. A line
+/// that does not read as a time counts as a wrong answer now.
+fn recent_failures(fails: &Path, now: u64) -> std::result::Result<Vec<u64>, String> {
+    let text = match std::fs::read_to_string(fails) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(format!(
+                "the failure count at {} does not read: {e}",
+                fails.display()
+            ))
+        }
+    };
+    let mut times: Vec<u64> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.trim().parse().unwrap_or(now))
+        .filter(|&t| t + WINDOW_SECS > now)
+        .collect();
+    times.sort_unstable();
+    Ok(times)
+}
+
+fn record_failure(fails: &Path, now: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .open(fails)?;
+    writeln!(file, "{now}")?;
+    file.sync_all()
+}
+
+fn utc(secs: u64) -> String {
+    i64::try_from(secs)
+        .ok()
+        .and_then(|s| chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0))
+        .map_or_else(|| secs.to_string(), |t| t.format("%H:%M UTC").to_string())
 }
 
 /// The PHC string of `pass` under a fresh salt from the OS.
@@ -206,6 +363,7 @@ fn set_from(path: &Path, tty: &mut std::fs::File) -> Result<()> {
 
 fn clear_at(path: &Path) -> Result<()> {
     person_only("clear")?;
+    let _ = std::fs::remove_file(path.with_file_name(FAILS_NAME));
     match std::fs::remove_file(path) {
         Ok(()) => println!("person-key: cleared {}", path.display()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -414,6 +572,150 @@ mod tests {
             shown.join().unwrap();
         }
         assert!(!path.exists());
+    }
+
+    const PROMPT: &str = "Type your person passphrase to run this git push as you: ";
+
+    struct Asked {
+        out: std::result::Result<(), String>,
+        shown: String,
+        pauses: Vec<u64>,
+    }
+
+    /// [`ask_with`] on a pty that types `typed` at the prompt (or the
+    /// end-of-file key for `None`), at time `now`, with the pauses kept.
+    fn ask_at(dir: &Path, typed: Option<&'static str>, now: u64) -> Asked {
+        let (master, slave) = pty_pair();
+        let answer = typed.unwrap_or("\u{4}");
+        let shown = typist(master, vec![(PROMPT, answer)]);
+        let pauses = std::cell::RefCell::new(Vec::new());
+        let out = ask_with(
+            &dir.join(KEY_NAME),
+            &dir.join(FAILS_NAME),
+            Some(slave),
+            &["CURSOR_AGENT".to_string()],
+            "git push",
+            || now,
+            |d| pauses.borrow_mut().push(d.as_secs()),
+        );
+        Asked {
+            out,
+            shown: shown.join().unwrap(),
+            pauses: pauses.into_inner(),
+        }
+    }
+
+    fn keyed() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        store(
+            &dir.path().join(KEY_NAME),
+            &hash(b"correct horse battery").unwrap(),
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_right_passphrase_answers_once_and_clears_the_count() {
+        let dir = keyed();
+        std::fs::write(dir.path().join(FAILS_NAME), "1000\n").unwrap();
+        let asked = ask_at(dir.path(), Some("correct horse battery"), 1100);
+        assert_eq!(asked.out, Ok(()));
+        assert!(
+            asked
+                .shown
+                .contains("this shell carries a runner variable (CURSOR_AGENT)"),
+            "{}",
+            asked.shown
+        );
+        assert!(!asked.shown.contains("horse"), "{}", asked.shown);
+        assert!(asked.pauses.is_empty());
+        assert!(!dir.path().join(FAILS_NAME).exists());
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(
+            names,
+            vec![std::ffi::OsString::from(KEY_NAME)],
+            "a token was kept"
+        );
+    }
+
+    #[test]
+    fn a_wrong_passphrase_waits_and_is_counted() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = keyed();
+        let asked = ask_at(dir.path(), Some("correct horse batterz"), 1000);
+        assert_eq!(asked.out, Err("the passphrase did not match".into()));
+        assert_eq!(asked.pauses, vec![2]);
+        let fails = dir.path().join(FAILS_NAME);
+        assert_eq!(std::fs::read_to_string(&fails).unwrap(), "1000\n");
+        let mode = std::fs::metadata(&fails).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let asked = ask_at(dir.path(), Some("correct horse batterz"), 1010);
+        assert_eq!(asked.pauses, vec![4]);
+        assert_eq!(
+            (1..=7).map(pause_secs).collect::<Vec<_>>(),
+            vec![2, 4, 8, 16, 32, 60, 60]
+        );
+    }
+
+    #[test]
+    fn five_wrong_in_the_window_lock_out_without_a_prompt() {
+        let dir = keyed();
+        let mut pauses = Vec::new();
+        for i in 0..5 {
+            let asked = ask_at(dir.path(), Some("not the passphrase"), 1000 + i);
+            assert!(asked.out.is_err());
+            pauses.extend(asked.pauses);
+        }
+        assert_eq!(pauses, vec![2, 4, 8, 16, 32]);
+        let (master, slave) = pty_pair();
+        let shown = typist(master, vec![]);
+        let out = ask_with(
+            &dir.path().join(KEY_NAME),
+            &dir.path().join(FAILS_NAME),
+            Some(slave),
+            &["CURSOR_AGENT".to_string()],
+            "git push",
+            || 1010,
+            |_| panic!("a lockout waited"),
+        );
+        let why = out.unwrap_err();
+        assert!(why.contains("does not ask again until"), "{why}");
+        assert!(shown.join().unwrap().is_empty(), "the lockout prompted");
+        let after = ask_at(
+            dir.path(),
+            Some("correct horse battery"),
+            1004 + WINDOW_SECS,
+        );
+        assert_eq!(after.out, Ok(()), "the window passed and still locked");
+    }
+
+    /// No key, no terminal, or nothing typed: refused, and nothing typed
+    /// is not counted as a wrong answer.
+    #[test]
+    fn no_key_no_terminal_or_no_answer_refuses() {
+        let empty = tempfile::tempdir().unwrap();
+        let asked = ask_at(empty.path(), Some("correct horse battery"), 1000);
+        assert_eq!(asked.out, Err("no person passphrase is set".into()));
+        assert!(asked.shown.is_empty(), "{}", asked.shown);
+        let dir = keyed();
+        let out = ask_with(
+            &dir.path().join(KEY_NAME),
+            &dir.path().join(FAILS_NAME),
+            None,
+            &["CURSOR_AGENT".to_string()],
+            "git push",
+            || 1000,
+            |_| {},
+        );
+        assert!(out.unwrap_err().contains("no controlling terminal"));
+        let asked = ask_at(dir.path(), None, 1000);
+        assert!(asked.out.unwrap_err().contains("nothing was typed"));
+        assert!(!dir.path().join(FAILS_NAME).exists());
     }
 
     #[test]
