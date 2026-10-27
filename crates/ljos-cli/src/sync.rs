@@ -490,6 +490,194 @@ fn split_header(plain: &str) -> Option<(String, String, &str)> {
     Some((field("host")?, field("scope")?, body))
 }
 
+/// The key of a chunk's first line. A chunk holds the atoms a log added,
+/// changed or dropped since its base, and the line names the writing
+/// host, the scope, the digest of the base's ciphertext and the chunk's
+/// number. [`split_header`] does not read this key, so a chunk sealed
+/// under a log's name is not read as a base.
+const CHUNK_HEADER: &str = "ljos_chunk";
+
+/// The key of a drop line in a chunk. A drop line is an object whose only
+/// key is this one, naming the id of an atom the chunk removes. An atom
+/// that carries the key beside others is an atom.
+const CHUNK_DROP: &str = "ljos_drop";
+
+/// The most chunks a log is read with. Export seals a log whole before
+/// it would write one past this.
+const MAX_CHUNKS: u32 = 64;
+
+fn chunk_header(host: &str, scope_name: &str, base: &str, n: u32) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({ CHUNK_HEADER: n, "host": host, "scope": scope_name, "base": base })
+    )
+}
+
+/// Whether `first`, a chunk's first line, is the header of chunk `n` of
+/// `host`'s `scope_name` log over the base whose ciphertext digest is
+/// `base`.
+fn chunk_header_names(first: &str, host: &str, scope_name: &str, base: &str, n: u32) -> bool {
+    let want = serde_json::from_str::<Value>(&chunk_header(host, scope_name, base, n));
+    let have = serde_json::from_str::<Value>(first);
+    matches!((have, want), (Ok(have), Ok(want)) if have == want)
+}
+
+/// The directory beside `log_rel` that holds its chunks: `<stem>.chunks`
+/// for `<stem>.jsonl.age`. Chunk `n` is `n.age` in it, from 1.
+fn chunk_dir_rel(log_rel: &str) -> String {
+    let stem = log_rel.strip_suffix(".jsonl.age").unwrap_or(log_rel);
+    format!("{stem}.chunks")
+}
+
+fn chunk_rel(log_rel: &str, n: u32) -> String {
+    format!("{}/{n}.age", chunk_dir_rel(log_rel))
+}
+
+/// `body`'s lines by atom id. None when a line has no string id or two
+/// lines share one. Chunks name atoms by id, so such a body takes none.
+fn lines_by_id(body: &str) -> Option<BTreeMap<String, String>> {
+    let mut lines = BTreeMap::new();
+    for line in body.lines() {
+        let atom: Value = serde_json::from_str(line).ok()?;
+        let id = atom.get("id")?.as_str()?.to_string();
+        if lines.insert(id, line.to_string()).is_some() {
+            return None;
+        }
+    }
+    Some(lines)
+}
+
+/// One line of a chunk: an atom put under its id, or an id dropped.
+enum ChunkLine {
+    Put(String, String),
+    Drop(String),
+}
+
+/// A chunk's lines after its header. None when one is neither an atom
+/// with a string id nor a drop line.
+fn chunk_lines(body: &str) -> Option<Vec<ChunkLine>> {
+    body.lines()
+        .map(|line| {
+            let value: Value = serde_json::from_str(line).ok()?;
+            let map = value.as_object()?;
+            if map.len() == 1 {
+                if let Some(id) = map.get(CHUNK_DROP) {
+                    return Some(ChunkLine::Drop(id.as_str()?.to_string()));
+                }
+            }
+            let id = map.get("id")?.as_str()?.to_string();
+            Some(ChunkLine::Put(id, line.to_string()))
+        })
+        .collect()
+}
+
+/// A log read as its base and the chunks sealed after it.
+struct LogView {
+    /// The atoms, one line each, in the order [`log_lines`] writes them.
+    body: String,
+    /// Chunks 1 through `applied` were read.
+    applied: u32,
+    /// Why the chunk after `applied` was left unread, when one is there.
+    stopped: Option<String>,
+}
+
+impl LogView {
+    /// What import and adopt print about a chunk left unread at `label`.
+    fn stopped_line(&self, label: &str) -> String {
+        let Some(why) = &self.stopped else {
+            return String::new();
+        };
+        let n = self.applied;
+        let chunks = if n == 1 { "chunk" } else { "chunks" };
+        format!("sync: {label}: {why}, so it reads as its base and {n} {chunks}\n")
+    }
+}
+
+/// `base_body`, the atoms of `host`'s `scope_name` log sealed in `base`,
+/// with chunks 1, 2, and so on applied in order: an atom line puts that
+/// id's line, the last one wins, and a drop line removes the id. `fetch`
+/// is the ciphertext of chunk `n`, None past the last one.
+///
+/// A chunk counts whole or not at all. One that does not open, names
+/// another host, scope, base or number, or holds a line that is neither
+/// an atom nor a drop ends the read, and the view is the base with the
+/// chunks before it. Export diffs against the same view, so its next
+/// chunk carries what the unread one held. With no chunk applied the body
+/// is `base_body` as sealed, byte for byte.
+fn read_chunks(
+    base_body: &str,
+    base: &[u8],
+    host: &str,
+    scope_name: &str,
+    identities: &[PathBuf],
+    mut fetch: impl FnMut(u32) -> Result<Option<Vec<u8>>>,
+) -> LogView {
+    let base = blob_digest(base);
+    let mut lines: Option<BTreeMap<String, String>> = None;
+    let mut applied = 0;
+    let stopped = loop {
+        let n = applied + 1;
+        let sealed = match fetch(n) {
+            Ok(Some(sealed)) => sealed,
+            Ok(None) => break None,
+            Err(err) => {
+                let why = err.to_string().replace('\n', " ");
+                break Some(format!("chunk {n} could not be read ({why})"));
+            }
+        };
+        if n > MAX_CHUNKS {
+            break Some(format!(
+                "chunk {n} is past the {MAX_CHUNKS} a log is read with"
+            ));
+        }
+        let plain = match open_sealed_bytes(&sealed, identities) {
+            Ok(Some(plain)) => plain,
+            Ok(None) => break Some(format!("chunk {n} is not sealed to this machine")),
+            Err(err) => {
+                let why = err.to_string().replace('\n', " ");
+                break Some(format!("chunk {n} did not open ({why})"));
+            }
+        };
+        let (first, body) = plain.split_once('\n').unwrap_or((plain.as_str(), ""));
+        if !chunk_header_names(first, host, scope_name, &base, n) {
+            break Some(format!("chunk {n} names another log, base or number"));
+        }
+        let Some(changes) = chunk_lines(body) else {
+            break Some(format!(
+                "chunk {n} holds a line that is neither an atom nor a drop"
+            ));
+        };
+        let map = match lines.take().or_else(|| lines_by_id(base_body)) {
+            Some(map) => lines.insert(map),
+            None => {
+                break Some(format!(
+                    "chunk {n} names atoms by id, and the base does not"
+                ))
+            }
+        };
+        for change in changes {
+            match change {
+                ChunkLine::Put(id, line) => {
+                    map.insert(id, line);
+                }
+                ChunkLine::Drop(id) => {
+                    map.remove(&id);
+                }
+            }
+        }
+        applied = n;
+    };
+    let body = match lines {
+        Some(map) => map.values().map(|line| format!("{line}\n")).collect(),
+        None => base_body.to_string(),
+    };
+    LogView {
+        body,
+        applied,
+        stopped,
+    }
+}
+
 fn belongs_to_scope(atom: &Value, scope: &str, default: &str, explicit_only: bool) -> bool {
     if !is_own(atom) {
         return false;
@@ -1666,11 +1854,22 @@ fn import_jobs(root: &Path, scope: &Scope, me: &str) -> Result<(Vec<ImportJob>, 
             continue;
         };
         match open_log(root, &bytes, &log.host, &log.scope_name, &log.rel)? {
-            Opened::Atoms(plain) => jobs.push(ImportJob {
-                host: log.host,
-                scope_name: log.scope_name,
-                plain,
-            }),
+            Opened::Atoms(base_body) => {
+                let view = read_chunks(
+                    &base_body,
+                    &bytes,
+                    &log.host,
+                    &log.scope_name,
+                    &identities,
+                    |n| read_beneath(root, &chunk_rel(&log.rel, n)),
+                );
+                out.push_str(&view.stopped_line(&log.rel));
+                jobs.push(ImportJob {
+                    host: log.host,
+                    scope_name: log.scope_name,
+                    plain: view.body,
+                });
+            }
             Opened::Refused(line) | Opened::Hidden { line, .. } => out.push_str(&line),
             Opened::Miss => {
                 // The log's own recipients. A cloud log lists different
@@ -2968,15 +3167,25 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
     let mut skipped_scopes = Vec::new();
     for log in &present {
         let result = sealed_bytes(root, &log.age).and_then(|bytes| match bytes {
-            Some(bytes) => open_log(root, &bytes, &gone, &log.scope_name, &log.age),
-            None => Ok(Opened::Miss),
+            Some(bytes) => open_log(root, &bytes, &gone, &log.scope_name, &log.age)
+                .map(|opened| (opened, bytes)),
+            None => Ok((Opened::Miss, Vec::new())),
         });
         match result {
-            Ok(Opened::Atoms(plain)) => {
-                opened.push((log, plain));
+            Ok((Opened::Atoms(base_body), bytes)) => {
+                let view = read_chunks(
+                    &base_body,
+                    &bytes,
+                    &gone,
+                    &log.scope_name,
+                    &identities_for_open(&log.scope_name),
+                    |n| sealed_bytes(root, &chunk_rel(&log.age, n)),
+                );
+                out.push_str(&view.stopped_line(&log.age));
+                opened.push((log, view.body));
             }
-            Ok(Opened::Refused(line) | Opened::Hidden { line, .. }) => out.push_str(&line),
-            Ok(Opened::Miss) => {
+            Ok((Opened::Refused(line) | Opened::Hidden { line, .. }, _)) => out.push_str(&line),
+            Ok((Opened::Miss, _)) => {
                 skipped_scopes.push(log.scope_name.clone());
                 out.push_str(&format!(
                     "sync: {gone}'s {} log is not sealed to this machine\n",
@@ -7507,6 +7716,73 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(30))
             .expect("age -d stalled on a full pipe");
         assert_eq!(opened.as_deref(), Some(plain.as_str()));
+    }
+
+    /// A peer's log reads as its base with each chunk applied in order. The
+    /// last line for an id wins and a drop line removes it, and the view is
+    /// the single file those atoms seal into, byte for byte. A chunk that
+    /// is cut short or names another base is left unread, with every chunk
+    /// after it, and a gap ends the chunks.
+    #[test]
+    fn a_log_reads_as_its_base_and_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let public = make_key();
+        let scope: Scope = toml::from_str(&format!(
+            "name = \"grokbot\"\nrecipients = [\"{public}\"]\n"
+        ))
+        .unwrap();
+        let root = tracker(dir.path());
+        let sealed = |plain: &str| seal_bytes(plain, std::slice::from_ref(&public)).unwrap();
+        let lines = |atoms: &[Value]| log_lines(atoms, "grokbot", "grokbot", false);
+        let rel = ".ljos/atoms/peer.jsonl.age";
+        let base_atoms = [
+            atom("a", "first", &[]),
+            atom("b", "second", &[]),
+            atom("c", "third", &[]),
+        ];
+        let base_plain = log_header("peer", "grokbot") + &lines(&base_atoms);
+        write_beneath(&root, rel, &sealed(&base_plain)).unwrap();
+        let base = blob_digest(&std::fs::read(root.join(rel)).unwrap());
+        let chunk = |n: u32, over: &str, body: &str| {
+            let plain = chunk_header("peer", "grokbot", over, n) + body;
+            write_beneath(&root, &chunk_rel(rel, n), &sealed(&plain)).unwrap();
+        };
+        let changed = atom("b", "second, changed", &[]);
+        let added = atom("d", "fourth", &[]);
+        chunk(1, &base, &lines(&[changed.clone(), added.clone()]));
+        chunk(2, &base, "{\"ljos_drop\":\"a\"}\n");
+        let view = || {
+            let (jobs, out) = import_jobs(&root, &scope, "me").unwrap();
+            assert_eq!(jobs.len(), 1, "{out}");
+            (jobs[0].plain.clone(), out)
+        };
+        let want = lines(&[changed, atom("c", "third", &[]), added]);
+        let (got, out) = view();
+        assert_eq!(got, want, "{out}");
+        assert_eq!(out, "");
+
+        let late = lines(&[atom("e", "fifth", &[])]);
+        let cut = sealed(&(chunk_header("peer", "grokbot", &base, 3) + &late));
+        write_beneath(&root, &chunk_rel(rel, 3), &cut[..cut.len() / 2]).unwrap();
+        chunk(4, &base, &lines(&[atom("f", "sixth", &[])]));
+        let (got, out) = view();
+        assert_eq!(got, want, "a cut chunk changed the view: {out}");
+        assert!(out.contains("chunk 3 did not open"), "{out}");
+        assert!(out.contains("reads as its base and 2 chunks"), "{out}");
+
+        chunk(3, "sha256:another", &late);
+        let (got, out) = view();
+        assert_eq!(got, want, "{out}");
+        assert!(
+            out.contains("chunk 3 names another log, base or number"),
+            "{out}"
+        );
+
+        std::fs::remove_file(root.join(chunk_rel(rel, 1))).unwrap();
+        let (got, out) = view();
+        assert_eq!(got, lines(&base_atoms), "{out}");
+        assert_eq!(out, "");
     }
 
     #[test]
