@@ -56191,13 +56191,18 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     #[test]
     fn a_busy_writer_is_asked_again_for_the_lean_listing() {
         let _env = env_guard();
-        // A seat token turns each try into a probe. While the writer stays
-        // busy the probe is the try, but the first 200 is a probe that
-        // fails the proof and the listing is a second request.
+        // A token in the default pack home, or in a home another variable
+        // names, turns the first 200 into a rejected bearer check and then
+        // a second request for the listing. An empty home has no token, so
+        // each try is the listing itself. Dropping PACKSET_HOME alone still
+        // finds a token file left under the login's pack home.
+        let pack_home = tempfile::tempdir().unwrap();
         unsafe {
             std::env::remove_var("PACKSET_TOKEN");
             std::env::remove_var("PACKSET_TOKEN_FILE");
-            std::env::remove_var("PACKSET_HOME");
+            std::env::remove_var("GROKINSIDE_HOME");
+            std::env::remove_var("GROK_INSIDE_MEMORY_HOME");
+            std::env::set_var("PACKSET_HOME", pack_home.path());
         }
         let (url, seen) = serve_busy_then(2, r#"{"atoms":[{"id":"a","kind":"rule"}]}"#);
         let atoms = atoms_lean(&PacksetClient::new(&url), "ws").unwrap();
