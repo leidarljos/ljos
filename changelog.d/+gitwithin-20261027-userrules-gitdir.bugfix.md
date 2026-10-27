@@ -1,0 +1,1 @@
+Sharing user rules from inside a git hook, or with `GIT_DIR` exported, no longer stages, commits or pushes in the caller's repository. The fetch, merge, commit and push now run in the tracker checkout.

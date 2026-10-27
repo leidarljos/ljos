@@ -3968,10 +3968,9 @@ fn git_within(
             args.first().copied().unwrap_or("")
         );
     }
-    let mut cmd = Command::new("git");
-    cmd.arg("-C")
-        .arg(root)
-        .args(args)
+    // A hook or a worktree script exports GIT_DIR, which outranks `-C`.
+    let mut cmd = crate::git_at(root);
+    cmd.args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
