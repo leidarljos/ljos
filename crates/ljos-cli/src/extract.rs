@@ -3,12 +3,14 @@
 //! [`MAX_PER_SESSION`] sentences that state something durable: a rule
 //! ("always", "never", "must"), a cause ("root cause", "because", "turns
 //! out"), or a fix. Each is written at once as a `note` whose
-//! `source.basis` is `agent`, carrying `via:session-end` and the session.
-//! The read side goes by that stored basis: recall, search and the island
-//! label it an unverified agent note, and no prompt hook hands it on as a
-//! fact or a rule. No model runs: the extraction is a bounded,
-//! deterministic read. A sentence already kept (by its normalized form)
-//! is not written again. `LJOS_EXTRACT=off` turns it off.
+//! `source.basis` is `agent`, carrying `via:session-end`, the session,
+//! and the open sitting's issue. The read side goes by that stored basis:
+//! recall, search and the island label it an unverified agent note, and
+//! no prompt hook hands it on as a fact or a rule. With no sitting,
+//! packset has no place for a note, and the write is skipped. No model
+//! runs: the extraction is a bounded, deterministic read. A sentence
+//! already kept (by its normalized form) is not written again.
+//! `LJOS_EXTRACT=off` turns it off.
 
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -183,11 +185,30 @@ pub fn kept() -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
+/// The pack's reason with the HTTP status left off, so a debug line does
+/// not repeat `400:`.
+fn plain_failure(err: &anyhow::Error) -> String {
+    let text = format!("{err:#}");
+    let parts: Vec<&str> = text.split(": ").collect();
+    for (i, part) in parts.iter().enumerate() {
+        let status = part.trim().parse::<u16>();
+        if status.is_ok_and(|code| (400..=599).contains(&code)) {
+            let rest = parts[i + 1..].join(": ");
+            if !rest.is_empty() {
+                return rest;
+            }
+        }
+    }
+    text
+}
+
 /// Read the session's transcript (the hook payload's `transcript_path`),
-/// write each new sentence as an unverified agent note, and return how many
-/// were written. Assistant prose is the agent's own reading, so it is kept
-/// as a note the hook never shows as a fact, not a lesson. Quiet on every
-/// failure: a hook must not stop a runner ending.
+/// write each new sentence as an unverified agent note on the open
+/// sitting, and return how many were written. Assistant prose is the
+/// agent's own reading, so it is kept as a note the hook never shows as a
+/// fact, not a lesson. With no sitting the write is skipped: packset keeps
+/// a note only on a ticket. Quiet on every other failure: a hook must not
+/// stop a runner ending.
 pub fn at_session_end(input: &str, session: Option<&str>) -> usize {
     if std::env::var("LJOS_EXTRACT").is_ok_and(|v| v == "off") {
         return 0;
@@ -207,8 +228,19 @@ pub fn at_session_end(input: &str, session: Option<&str>) -> usize {
     let tail = &bytes[bytes.len().saturating_sub(MAX_TRANSCRIPT_BYTES)..];
     let text = String::from_utf8_lossy(tail);
     let found = facts(&text, &kept());
-    if std::env::var_os("LJOS_EXTRACT_DEBUG").is_some() {
+    let debug = std::env::var_os("LJOS_EXTRACT_DEBUG").is_some();
+    if debug {
         eprintln!("ljos extract: {} facts from {path}", found.len());
+    }
+    if found.is_empty() {
+        return 0;
+    }
+    // Packset keeps a note only on a ticket, and has no form for one that
+    // names none. Skip before the post, one line, rather than collect a
+    // refusal per fact.
+    if crate::live_held_issue().is_none() {
+        eprintln!("ljos extract: {}", crate::NOTE_WITHOUT_TICKET);
+        return 0;
     }
     let mut written = 0;
     let mut keys = Vec::new();
@@ -223,11 +255,14 @@ pub fn at_session_end(input: &str, session: Option<&str>) -> usize {
                 keys.push(normal(&f));
             }
             Err(e) => {
-                if std::env::var_os("LJOS_EXTRACT_DEBUG").is_some() {
-                    eprintln!("ljos extract: {f:?} not written: {e:#}");
+                if debug {
+                    eprintln!("ljos extract: {f:?} not written: {}", plain_failure(&e));
                 }
             }
         }
+    }
+    if debug {
+        eprintln!("ljos extract: wrote {written}");
     }
     if let (Some(p), false) = (ledger(), keys.is_empty()) {
         if let Some(dir) = p.parent() {

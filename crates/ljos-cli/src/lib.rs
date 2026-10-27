@@ -16699,20 +16699,32 @@ pub fn packset_write_agent_tagged(label: &str, text: &str, tags: &[String]) -> R
     store_agent_atom(&client, atom, &prefix)
 }
 
+/// Why a session-end note is not posted when this conversation has no
+/// sitting. Packset keeps a `note` only on a ticket. It has no form for
+/// an unverified note that names none, so the write is not attempted.
+pub(crate) const NOTE_WITHOUT_TICKET: &str =
+    "this conversation holds no sitting, and packset keeps a note only on a ticket";
+
 /// Write an agent-derived working note with provenance tags. Unlike
 /// [`packset_write_agent_tagged`], the atom is a `note`, not a lesson, so
 /// session-end extraction of assistant prose cannot become a fact the hook
 /// shows on later prompts. The note carries `source.basis` `agent` and the
 /// `note-basis:`/`note-source:` entities that keep it out of prompt facts.
+/// A live sitting stamps that sitting's issue, which is the ticket whose
+/// logbook the note copies.
 ///
 /// # Errors
 ///
-/// An empty text, or the pack does not accept the write.
+/// An empty text, no live sitting ([`NOTE_WITHOUT_TICKET`]), or the pack
+/// does not accept the write.
 pub fn packset_write_agent_note_tagged(text: &str, tags: &[String]) -> Result<Value> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         bail!("Remember: empty text is not a note");
     }
+    let Some((issue, _)) = live_held_issue() else {
+        bail!(NOTE_WITHOUT_TICKET);
+    };
     let client = pack()?;
     let workspace = client.workspace();
     let mut atom = atom_body(packset_core::record::NOTE_KIND, trimmed, &workspace);
@@ -16726,7 +16738,9 @@ pub fn packset_write_agent_note_tagged(text: &str, tags: &[String]) -> Result<Va
     let mut all = tags.to_vec();
     all.push(format!("{NOTE_BASIS_ENTITY}agent"));
     all.push(format!("{NOTE_SOURCE_ENTITY}session-end-extract"));
+    all.push(format!("issue:{issue}"));
     add_entities(&mut atom, all);
+    stamp_issue(&mut atom, &issue);
     post_note_kind(&client, atom)
 }
 
