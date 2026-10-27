@@ -1775,6 +1775,7 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success(), "the hook let it through: {err}");
         assert!(err.contains("sitting-gate"), "{err}");
+        assert!(!err.contains("predates this gate"), "{err}");
         assert!(!sent(branch), "{branch} reached the remote: {err}");
     };
     let hooks_row = || {
@@ -1815,6 +1816,14 @@ fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("sitting-gate"), "{err}");
     assert!(out.status.success() && sent("stale"), "{err}");
+    let hint = format!(
+        "{} predates this gate and drops its refusal, so git will push anyway; ljos git-hooks install",
+        path.display()
+    );
+    assert!(
+        err.contains(&hint),
+        "the refusal hid that git pushed: {err}"
+    );
     let row = hooks_row();
     assert!(!row.starts_with("ok\t"), "{row}");
     assert!(row.contains("pre-push stub predates"), "{row}");

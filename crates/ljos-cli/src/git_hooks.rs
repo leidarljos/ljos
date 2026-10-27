@@ -790,10 +790,32 @@ pub fn run_named(name: &str) -> Result<()> {
     if books_commit(name) {
         run_git_commit(name)
     } else if gates_git(name) {
-        gate(name)
+        gate(name).map_err(|err| match dropped_refusal(name) {
+            Some(why) => anyhow!("{err:#}\n{why}"),
+            None => err,
+        })
     } else {
         Ok(())
     }
+}
+
+/// Why git goes on after the gate refuses, when the hook file it is
+/// running carries an ljos block older than this build's. Such a block
+/// can end in `|| true`, and this process cannot change the exit status
+/// the hook returns. A hook that calls `ljos git-hook` with no block is
+/// the user's own and is not judged.
+fn dropped_refusal(name: &str) -> Option<String> {
+    let raw = git_line(&["rev-parse", "--git-path", &format!("hooks/{name}")])?;
+    let path = std::env::current_dir().ok()?.join(raw);
+    let text = fs::read_to_string(&path).ok()?;
+    if !text.contains(BLOCK_BEGIN) || carries_block(&text, name) {
+        return None;
+    }
+    let verb = if name == "pre-push" { "push" } else { "commit" };
+    Some(format!(
+        "sitting-gate: {} predates this gate and drops its refusal, so git will {verb} anyway; {HOOKS_FIX} replaces it",
+        path.display()
+    ))
 }
 
 /// The guard's sitting gate for a commit or push it did not see, such as
