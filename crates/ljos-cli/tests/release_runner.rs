@@ -10,6 +10,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 const BYPASS_NEEDLES: &[&[u8]] = &[
@@ -35,13 +36,60 @@ fn release_dir() -> PathBuf {
 }
 
 fn release_bin(name: &str) -> PathBuf {
-    let bin = release_dir().join(name);
+    let primary = release_dir().join(name);
+    if primary.is_file() {
+        return primary;
+    }
+    let bin = side_release_dir().join(name);
     assert!(
         bin.is_file(),
-        "release binary {} is missing; build it with cargo build --release --locked -p ljos --bins",
+        "release binary {} is missing after the side build",
         bin.display()
     );
     bin
+}
+
+/// cargo test leaves the release profile unbuilt. A second cargo into
+/// the same target directory waits on the lock this test is under, so
+/// the bins are built once in their own directory.
+fn side_release_dir() -> PathBuf {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT.get_or_init(build_side_release).clone()
+}
+
+fn build_side_release() -> PathBuf {
+    let side = workspace_root().join("target").join("release-runner");
+    let out = side.join("release");
+    let ljos = out.join("ljos");
+    let mcp = out.join("ljos-mcp");
+    if ljos.is_file() && mcp.is_file() {
+        return out;
+    }
+    let manifest = workspace_root().join("Cargo.toml");
+    let built = Command::new("cargo")
+        .args(["build", "--release", "--locked", "--manifest-path"])
+        .arg(&manifest)
+        .args(["-p", "ljos", "--bins", "--target-dir"])
+        .arg(&side)
+        .current_dir(workspace_root())
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_MAKEFLAGS")
+        .env_remove("MAKEFLAGS")
+        .env_remove("MFLAGS")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .unwrap_or_else(|err| panic!("cargo build release bins: {err}"));
+    let stderr = String::from_utf8_lossy(&built.stderr);
+    let stdout = String::from_utf8_lossy(&built.stdout);
+    assert!(
+        built.status.success(),
+        "cargo build release bins\n{stderr}{stdout}"
+    );
+    assert!(ljos.is_file(), "release build wrote no {}", ljos.display());
+    assert!(mcp.is_file(), "release build wrote no {}", mcp.display());
+    out
 }
 
 fn contains_needle(hay: &[u8], needle: &[u8]) -> bool {
