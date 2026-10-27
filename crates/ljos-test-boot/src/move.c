@@ -1,8 +1,8 @@
 /* Linked only into test binaries that depend on ljos-test-boot.
  *
  * A test models the identity it builds. The host cgroup is not that
- * identity: a cloud workload whose path contains the word cursor is the
- * runner cursor, and a transient run-*.scope is not a login. This file
+ * identity: a cloud runner's named workload cgroup is that runner,
+ * and a transient run-*.scope is not a login. This file
  * moves the test process into a cgroup that names neither, before main,
  * and drops runner variables the host left behind. Children inherit the
  * cgroup. There is no executable-path check. The product binary does

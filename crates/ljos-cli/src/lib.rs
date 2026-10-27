@@ -51689,9 +51689,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     /// The suite's own process is not a runner workload. A host cgroup
-    /// such as `cursor-agent/workload` still names cursor for the product;
-    /// the test harness moves out of that cgroup before a test models a
-    /// person.
+    /// that is a cloud runner's named workload cgroup still names that
+    /// runner for the product. The test harness moves out of it before
+    /// a test models a person.
     #[test]
     fn a_test_process_is_not_left_in_a_runner_cgroup() {
         let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
