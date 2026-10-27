@@ -1,1 +1,0 @@
-The git hooks' sitting gate exempts a tracker checkout only when it holds `vissue.toml` or a `Software/<project>/issues.org`, and a store only when the store settings name it. A bare `Software/` directory, or a checkout path that merely contained `claimdag`, skipped the gate.

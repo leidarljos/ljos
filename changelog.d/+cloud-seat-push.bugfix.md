@@ -1,1 +1,0 @@
-A cloud seat whose protected push is missing only a seat ballot now asks, and the hook records a one-use request for that exact command. The push still needs a live sitting. A force, a delete, a cursor ref, and a repository the allowlist does not name stay refused. A call that names no conversation is still refused on a protected branch.

@@ -1,1 +1,0 @@
-tokio 1.54.1, which clears RUSTSEC-2026-0386: the `AsyncFd` constructors took any `AsRawFd` without proof the descriptor was owned. ljos uses none of them, but the lockfile now resolves past the advisory and `cargo deny check` passes again.

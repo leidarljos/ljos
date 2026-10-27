@@ -1,1 +1,0 @@
-The preference cutoff recorded from a receipt the pack already held is the oldest stamp on that receipt. `updated` was read first, and it moves on every rewrite of the receipt, so a re-recorded cutoff could land after a seat-token post and promote it.

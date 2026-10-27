@@ -1,1 +1,0 @@
-The search-origin test now puts other words on the hit than the listing holds, and the open-listener test's fixture refuses some reads without a token while never checking the bearer, so each fails on the checks they were written for.

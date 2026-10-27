@@ -1,1 +1,0 @@
-The pack proof cannot tell packsetd from a process of this user that can read the token file. That process can answer the two probes and then read the token, or skip the probes and answer as the pack. A writer that signs its answers, or that runs as another user, would tell them apart.

@@ -1,1 +1,0 @@
-User rules written before a basis was kept stay in the preface, marked not confirmed, until `ljos prefer --user --review --keep` stamps them as the person's. A row written after that cutoff with no basis stays out. `ljos doctor` reports how many are held and still exits 0.

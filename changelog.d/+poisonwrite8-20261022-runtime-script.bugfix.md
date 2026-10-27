@@ -1,1 +1,0 @@
-`ljos hook` and `prefer --user` believe a runtime's script only when the runtime is an installed `node`, `nodejs`, `bun` or `deno` of exactly that name, kept as a runner file is and the file the process runs; a program in `/tmp` named `node`, or one whose name only starts with `node`, no longer makes the script its arguments name the runner.

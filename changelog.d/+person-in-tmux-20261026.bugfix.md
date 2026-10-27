@@ -1,1 +1,0 @@
-The person at a terminal inside tmux, screen or zellij, or logged in through OpenSSH 9.8 or later, is the person again. The login check compared the holder's process name whole, so `tmux: server` and `sshd-session` matched nothing, and a daemonised multiplexer counted as an adopted process; `ljos prefer`, `ljos approve` and the sitting gate then treated the owner as a runner.

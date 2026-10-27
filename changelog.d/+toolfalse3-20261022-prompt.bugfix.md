@@ -1,1 +1,0 @@
-A prompt longer than 8000 characters was kept truncated, so it no longer matched the runner's transcript as a whole entry and the person's words were treated as the agent's. The bind now also stores a hash of the full prompt. Agreement requires that hash and the kept prefix, so a short clause substituted for the prefix still does not match.

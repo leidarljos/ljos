@@ -1,1 +1,0 @@
-The user-rule tests type a command as the person. A CI job sets `GITHUB_ACTIONS`, which marks the process as not the person, so the rule was stored as the agent's and the next seat did not see it. The simulated command does not carry that variable.

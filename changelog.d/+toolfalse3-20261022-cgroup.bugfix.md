@@ -1,1 +1,0 @@
-A tool call could `setsid -f python3` (or node, or perl) so the process above `ljos prefer` was not a shell, and the runner's cgroup was never read. The cgroup is read whatever the ancestors are. An unreadable `/proc/self/cgroup` counts as a runner, so a hidden scope does not become the person.

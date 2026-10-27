@@ -1,1 +1,0 @@
-The timeline adds an island row only when the activate call carried this seat's token. A listener that answers anyone can put a sentence on the island, and the row would otherwise be that sentence, dated as a memory.

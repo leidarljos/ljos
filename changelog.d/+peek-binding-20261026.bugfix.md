@@ -1,1 +1,0 @@
-A hook check of one conversation no longer takes the MCP binding record another conversation's server is about to read. Adopting a bare-seat hold read the newest record by consuming it, so a shell call from conversation B could delete the record conversation A had just written, and A's next bare `ljos_sitting` was refused.

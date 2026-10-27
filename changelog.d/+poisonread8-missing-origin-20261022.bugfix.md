@@ -1,1 +1,0 @@
-A listing row with no origin, a null one or an empty one now overwrites a person recorded earlier in the process with an agent. The cold prompt, issue recall and `ljos recall` no longer hand a preference over as the person's when an older packsetd lists it without its origin.

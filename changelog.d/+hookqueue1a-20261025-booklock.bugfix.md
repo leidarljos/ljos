@@ -1,1 +1,0 @@
-A hook call waits at most 1 s for `book.lock`, which every seat on the host shares. When another process keeps it longer, the call keeps no book and the book log says so, instead of waiting behind a holder that is filing a claim or committing the tracker.

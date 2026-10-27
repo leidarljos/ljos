@@ -1,1 +1,0 @@
-A command is the person's only when they are at the terminal and the process is not under a runner. The runner check now includes a cgroup that still names one and a transient `run-*.scope`, which is what `systemd-run --user --scope` and a D-Bus scope leave after the environment has been cleared, so a detached runner with a terminal is not the person.

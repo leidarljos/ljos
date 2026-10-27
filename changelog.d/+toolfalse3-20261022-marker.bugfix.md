@@ -1,1 +1,0 @@
-A runner variable left in an interactive terminal hid the person even when no runner was in the process tree or the scope, so a command typed there was stored as the agent's. The variable now hides the person only together with that evidence, or when there is no terminal.

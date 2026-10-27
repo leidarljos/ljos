@@ -1,1 +1,0 @@
-A preference or lesson in the old terminal shape is not promoted when its harness or session word names a runner, compared without case against the list runner detection uses, so harness `claude` with session `claude` stays unverified.

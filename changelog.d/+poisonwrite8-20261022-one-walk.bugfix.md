@@ -1,1 +1,0 @@
-`ljos hook` and `prefer --user` resolve a runner file's path once and judge the file their descriptor walk ends on only when it is the file the caller expects by device and inode, so a directory swapped for another after the path resolved is refused rather than judged in its place.

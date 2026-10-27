@@ -1,1 +1,0 @@
-A Cursor hook whose `conversation_id` is a blank string now reads the conversation from the same environment order the CLI uses, with `CURSOR_CONVERSATION_ID` in that place. The hook call's session becomes that id, so the sitting book is touched the way a payload that carries the id touches it. A non-empty id that names nobody is still refused.

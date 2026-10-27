@@ -1,1 +1,0 @@
-`systemd-run --user --scope` answers on some hosts that then reject `--pty` on a scope. The transient-scope test probes the command it actually runs, and uses the `run-*.scope` cgroup directly when that probe fails.

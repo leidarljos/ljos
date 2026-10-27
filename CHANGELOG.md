@@ -5,6 +5,375 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.34.0 (2026-10-27)
+
+### Features
+
+- A runner's push onto `develop` or `main` also waits for the seats on
+  the ticket it sits on: a quorum of seat ballots, two seats by default,
+  from two model families, deciding an option that does not send the
+  work back. The refusal names `ljos consensus ID --no-file`, whose new
+  `protected push:` line says whether the ticket clears the push. A push
+  onto the seat's own topic branch needs only the sitting.
+- The `pre-commit` and `pre-push` hooks `ljos git-hooks install` writes
+  run the sitting gate too, so a commit or push a script makes under a
+  runner is refused the same way, and `pre-push` reads where each ref
+  lands from what git sends it.
+- Under an agent runner, the guard refuses `git commit`, `merge`,
+  `rebase`, `cherry-pick`, `revert`, `am`, `pull` and `push` until the
+  conversation holds a live sitting on an open ticket, and the refusal
+  names `ljos sitting ID`. The person at their own terminal is not
+  gated, and no variable turns the gate off.
+- `ljos doctor --all` has a hook latency row: the 95th percentile of gate calls and of their wait for a slot, how many calls the queue refused, and the 95th percentile wait for `book.lock` over the book jobs. The hooks write these to `hook-times.log` in the runtime directory, cut back past 256 KB.
+- `ljos doctor` has a `sitting gate` row: under a runner it names the
+  seat, the sitting it finds and the quorum, and warns when the settings
+  do not read; on the person's machine it is `info` and fails nothing.
+- `quorum` and `consensus_branches`, under `[gates]` or at the top of the
+  user or seat `ljos.toml`, set how many seats a protected push needs and
+  which branches are protected. The repository's `ljos.toml`,
+  `LJOS_CONFIG` and `.ljos/gates.toml` may only raise the quorum and add
+  branches.
+
+### Fixes
+
+- A 400 refuses `rank=relevance` only when the body names that parameter
+  or carries a JSON field of that name. A sentence that merely uses the
+  word no longer makes the writer look like it refused the rank.
+- A Claude plugin installed under the home .claude directory names the seat when its server command is the seat.
+- A Cursor `beforeReadFile` whose body is large answers allow before that body is parsed. The trace marker still keeps the full payload.
+- A Cursor `preToolUse` for a seat tool named `mcp__SERVER__ljos_NAME` prints allow instead of an empty answer.
+- A Cursor hook whose `conversation_id` is a blank string now reads the conversation from the same environment order the CLI uses, with `CURSOR_CONVERSATION_ID` in that place. The hook call's session becomes that id, so the sitting book is touched the way a payload that carries the id touches it. A non-empty id that names nobody is still refused.
+- A Cursor hook whose payload and environment both name no conversation no longer waits for a sitting. Empty or missing conversation, session and generation ids, with a null transcript path, are recorded as unattributed in the book log, and a history write, including a push onto develop or main, is allowed. The command checks still refuse `rm -rf` outside a temp directory and the other dangerous commands. A payload that names a conversation is judged as before, and a non-empty id that names nobody is still refused.
+- A PreToolUse allow for `mcp__SERVER__ljos_NAME` requires `SERVER` to be a key whose command is the seat MCP server. The call is still recorded for the subagent when that key is not configured.
+- A `beforeMCPExecution` whose stdin is not UTF-8 prints an answer on the direct path as well as the queue path.
+- A bare seat whose conversation could not be bound may not take a hold through `ljos_claim` either; only `ljos_sitting` was refused. The bare hold was adoptable by the first conversation to ask, and could take over a live tagged conversation's hold on the same ticket.
+- A cloud seat whose protected push is missing only a seat ballot now asks, and the hook records a one-use request for that exact command. The push still needs a live sitting. A force, a delete, a cursor ref, and a repository the allowlist does not name stay refused. A call that names no conversation is still refused on a protected branch.
+- A command is the person's only when they are at the terminal and the process is not under a runner. The runner check now includes a cgroup that still names one and a transient `run-*.scope`, which is what `systemd-run --user --scope` and a D-Bus scope leave after the environment has been cleared, so a detached runner with a terminal is not the person.
+- A command key in tool input does not replace the MCP: tool name, so a user-rule pattern for that tool still matches.
+- A controlling terminal was enough, once no runner mark was set. `systemd-run --scope`, a container with a cleared environment, and a CI runner (`GITHUB_ACTIONS`, `Runner.Worker`) could all open a pty and be stored as the person. The person is present only when that tty belongs to an interactive login session: a terminal, a multiplexer or a login holds it. A transient scope, a container and a CI runner are not that session.
+- A curl URL whose glob spans the scheme, `{https://api.github.com,https://example.com}/...` or `http{s://a,s://b}/...`, may reach GitHub, so a write to one is refused unless `-g` is given. The authority split read the host after the first `://`, which the braces hid.
+- A curl or wget to an IP address, in any form the clients take, was
+  judged by the address, which is not a GitHub name, so a POST with a
+  `Host: api.github.com` header was allowed. An address host may be
+  GitHub now.
+- A curlrc holding only an ordinary option such as `tlsv1.2`,
+  `http1.0`, or `continue-at` refused every curl, a GET to GitHub and
+  a POST to another host included, because any option the guard did
+  not know was opaque. The TLS, HTTP version, auth, retry, range,
+  trace, and output options are known and harmless now, on the command
+  line and in a curlrc. The options that move the target stay parsed.
+- A hook call no longer keeps the book inside the call, under the `book.lock` every seat on the host shares. It leaves a job in the runtime directory and answers, and one drainer per user, `ljos hook --drain`, applies the jobs in the order they came. A session start or prompt hook still names the claimed issue, read from the book without its lock. `ljos sitting`, `claim`, `slot`, `finish`, `release` and `complete`, the MCP server and the git commit hook first let the jobs queued before them apply, for at most 5 s.
+- A hook call that names no conversation may not push onto a protected branch. Such a call skipped the sitting gate whole, so any runner whose payload carried blank ids could push `develop` or `main` with no sitting and no vote. A commit, a merge and a push onto a topic branch from such a call are still allowed and logged as unattributed.
+- A hook call waits at most 1 s for `book.lock`, which every seat on the host shares. When another process keeps it longer, the call keeps no book and the book log says so, instead of waiting behind a holder that is filing a claim or committing the tracker.
+- A hook check of one conversation no longer takes the MCP binding record another conversation's server is about to read. Adopting a bare-seat hold read the newest record by consuming it, so a shell call from conversation B could delete the record conversation A had just written, and A's next bare `ljos_sitting` was refused.
+- A large ~/.claude.json still names the seat. The hook reads the top-level mcpServers value and stops.
+- A listing row with no origin, a null one or an empty one now overwrites a person recorded earlier in the process with an agent. The cold prompt, issue recall and `ljos recall` no longer hand a preference over as the person's when an older packsetd lists it without its origin.
+- A ljos_ tool on a GitHub server is a GitHub write, so a rules file that cannot be read denies it.
+- A missing working directory does not deny an MCP tool call.
+- A plugin launcher whose argument is ljos-mcp is the seat server, so that entry answers early.
+- A pre-tool hook reads the pack's rules and preferences by kind, each within 400 ms. When the pack does not answer in time the call decides from the rules kept on disk, without memory recall, and the hooks of the next 30 s do the same without asking, so a hung `packsetd` costs one short wait instead of one per tool call.
+- A preToolUse tool name of the form MCP:<tool> is the line a user rule pattern matches.
+  A write that carries owner and repo is checked as a GitHub write.
+- A preference migration replays a pending successor noted on the cutoff receipt only when this machine journaled that note, id and body, by hash in its local cutoff record.
+  A note written onto the receipt by any other process neither closes the atom it names nor posts its body.
+- A preference or lesson in the old terminal shape is not promoted when its harness or session word names a runner, compared without case against the list runner detection uses, so harness `claude` with session `claude` stays unverified.
+- A preference whose `valid_to` has passed, or a tombstone, is no longer shown as the person's while its review is still due. The session preface, the cold prompt, issue recall and the search labels read it as not held, as the pack's by-id read does.
+- A prompt longer than 8000 characters was kept truncated, so it no longer matched the runner's transcript as a whole entry and the person's words were treated as the agent's. The bind now also stores a hash of the full prompt. Agreement requires that hash and the kept prefix, so a short clause substituted for the prefix still does not match.
+- A queued write files its claim with `book.lock` let go. Filing reads the tracker, and every other bookkeeper on the host used to wait for it.
+- A request already written to `ljos-mcp` is parsed before stdin is
+  treated as closed. The client watch no longer polls that fd itself:
+  tokio reads it on another thread, so a hangup there can show up
+  after the bytes have left the pipe and before they are a message.
+- A rewrite of user-rules.json does not deny a benign GitHub write.
+  An unchanged bad file for 80 ms is corrupt.
+  A file whose bytes keep changing is re-read until it parses or 200 ms pass, and then the read fails closed.
+- A runner variable left in an interactive terminal hid the person even when no runner was in the process tree or the scope, so a command typed there was stored as the agent's. The variable now hides the person only together with that evidence, or when there is no terminal.
+- A search hit, an island row or an activate row that puts the person's id on other words is no longer labelled the person's. Each origin is kept with the kind and text of the record it was read from, and a row whose kind or text differs is an unverified agent note in the prompt, `ljos search`, `ljos island`, the timeline and MCP.
+- A search that keeps answering 401 or 403 still falls back to stored
+  memories, and the hook now says so on stderr at most once a minute,
+  naming `ljos doctor`. Doctor reports the refusal as a warning, and a
+  seat whose search answers is unchanged.
+- A search whose listener asks for a token, met by a seat that has none or
+  cannot read its token file, no longer reads that listener without a
+  token. The recall is the stored atoms alone, and the miss is said.
+- A seat key is read only from the seat's own config. A project MCP file, CLAUDE_CONFIG_DIR, CODEX_HOME, and a parent's --mcp-config do not name the seat. The Cursor payload command, when present, has to be the seat server.
+- A second top-level `hook_event_name` or `cursor_version` is not answered as a file read.
+- A server key is kept in Claude Code's tool-name form, with every other character replaced by `_`, beside the raw key.
+- A shell hook arms its eight second deadline before it takes tmux-sock.lock.
+  The take is a try-lock that retries for a short budget, and that budget stays inside the deadline.
+  When the lock is not free in time, the pane lookup is skipped and the call is judged as if no pane were found.
+- A side event stops waiting on a quiet pack and keeps the note it already has. A spent budget returns before the next socket is opened.
+- A symlinked `~/.curlrc`, `~/.wgetrc`, or `wget --config` file was
+  treated as unreadable, and an unreadable default config was ignored
+  when the command line showed a host that is not GitHub. Curl and wget
+  follow the link, so a `url` or `input` in the target reached GitHub.
+  The guard now follows the link and judges the file when this user or
+  root owns it. Any config the client may load that the guard cannot
+  read, and a wgetrc line it cannot parse, leave the target unknown.
+- A terminal-shaped preference or lesson is promoted only when both its `ts` and the pack's own `updated` stamp are before the migration cutoff, so one posted after the cutoff with a backdated `ts` stays unverified and is listed for review.
+- A tmux pane is bound to the conversation that spawned it only when an ancestor of the call runs the spawn's script as given; a substring match bound a pane whose ancestor was any `bash` to a record that said `bash run.sh`. A scripted spawn that matches no ancestor binds nothing, where every record naming one id was taken as the pane's. A pane pin names the pane's shell by pid and start time, so a tmux server restarted at the same socket, whose panes count from `%0` again, does not inherit the old pins.
+- A tool call could `setsid -f python3` (or node, or perl) so the process above `ljos prefer` was not a shell, and the runner's cgroup was never read. The cgroup is read whatever the ancestors are. An unreadable `/proc/self/cgroup` counts as a runner, so a hidden scope does not become the person.
+- A tool call on a tracker that names no seats no longer writes a `seats` list into `vissue.toml`. That write left an untracked file in the checkout, re-serialised a file the person wrote, and listed only the first seat to connect, which refused every other seat afterwards. The call sits as the seat it named, with a note in the book log; the roster stays the person's decision in `vissue.toml`.
+- A tracker write now carries only the seat its check named: `file` and `open-panel` create their issue as that seat even when `VISSUE_AGENT` names another, `predict` and `slot` sign as it, and a conversation id `seats.toml` maps votes as that seat instead of being refused.
+  `--as` on a ballot, a withdrawal or a forecast may name only that seat; another seat is refused on the command line and over MCP, and each decision-panel member is seated as its persona.
+  `open-panel` and `bump-plan` (without `--dry-run`) go through the seat check, so an unnamed or unlisted seat opens no panel and files no module issues.
+  The seats file is read only from the ljos config directory: `LJOS_SEATS` no longer points the check at another file, and a seats file that links to nothing refuses every write.
+  A commit made in the tracker's own checkout gets the seat check too: the git hook says, and logs, when that seat may not write, and ljos's own tracker commits run as the seat that wrote.
+  Under an agent runner the guard (`ljos hook`, `ljos policy`) refuses a raw `vissue` write (`create`, `q`, `refile`, `note`, `append`, a ballot `vote`, `claim`, `release`, `close`, `cancel`, `update`) and names the ljos verb to run instead; reads, the person at a terminal and the `vissue` ljos runs itself are not refused.
+  `ljos file --parent P` files the child in P's project even when `-p` names another, and `ljos finish --status cancelled --close` closes the ticket as CANCELLED.
+  `ljos doctor` warns on the tracker row when issue files in the tracker checkout hold uncommitted edits.
+- A user-rule deny on `beforeMCPExecution` exits 0 with the deny JSON. Exit 2 stays on a hook failure, so the runner still shows the reason.
+- A wget line with a visible non-GitHub URL and a second operand the shell has not expanded, `"$URL"`, may reach GitHub: wget requests every operand on its line. The hidden operand was dropped once any other host was visible.
+- An MCP call is recorded before the early answer, so a bare seat can bind the conversation that invoked ljos_sitting.
+- An `ljos-mcp` whose client has gone, and whose stdin a launcher still
+  holds open, exits once it has been quiet and no editor or agent is
+  still above it. `LJOS_MCP_ORPHAN_IDLE`, or `[mcp] orphan_idle` in
+  `ljos.toml`, sets that quiet window. A bare number is seconds. The
+  default is six hours. `0` or `off` leaves the server until the client
+  or stdin ends it.
+- An ask whose hook payload names no conversation now records a one-use request for that command and directory, and the refusal prints its id.
+  The request is stored with no conversation, so a chat reply cannot grant it and it is not attached to another conversation.
+  The person grants it with the ljos_request_approval form or `ljos approve ID`, and the same command then passes once from any caller that also names no conversation.
+- An empty user-rules file and a dangling symlink deny a covered GitHub write and name the path.
+- Curl and wget percent-decode a URL host before they connect, so a
+  write to `https://api%2egithub%2ecom/user` reached GitHub while the
+  guard read a name that is not GitHub's. The guard now decodes the
+  host until nothing changes before the GitHub check, on the command
+  line, after `--url`, and in a curlrc `url` line. An encoded `@` or
+  `:` splits the userinfo or the port, and a trailing dot is the same
+  host.
+- Curl expands `{a,b}` and `[1-3]` in a URL, so a POST to
+  `https://git{hub,xxx}.com/` went to `github.com` while the guard read
+  one host that is not GitHub. A glob in a URL host on the command line
+  or in a curlrc now leaves the target unknown, unless `-g` is given.
+- Curl options on the command line that send a request somewhere the
+  URL does not say were skipped: `--resolve`, `--connect-to`, a proxy,
+  a `Host:` header, a DoH URL, a unix socket, and any option the guard
+  did not know. A POST to another host could reach GitHub. The command
+  line and a curlrc now read options through one table, abbreviations
+  and `--no-` included, and each of those leaves the target unknown.
+- Every IPv4 and IPv6 literal counted as a possible GitHub peer, so
+  `curl -X POST http://127.0.0.1:8761/x` and `curl -X POST
+  'http://[::1]:8761/x'` were refused while the same write to
+  `localhost` passed. A curl or wget write straight to `::1` or to
+  `127.0.0.0/8`, in any form the clients take, passes now. A proxy,
+  `--resolve`, `--connect-to`, `-x`, a `Host:` header, or a redirect
+  still refuses it, and wget needs `--max-redirect=0`, as it does for
+  `localhost`. A `[` that opens an IPv6 address is no longer read as a
+  curl glob. HTTPie keeps loopback refused, and every other address
+  stays refused.
+- Every tracker write now records the seat it checked: runner hooks and git-hook bookings, `workflow`, `consensus`, `playbook`, `reap --apply`, `vote` (including `--withdraw` and `--jev`), `predict` and `slot`, on the command line and over MCP, go through the same seat check as `note` and `claim`. An `--assignee` naming another seat is refused, except `release --assignee`, which must name a listed seat. The seat is resolved as `ljos seat` resolves it, so a conversation id `seats.toml` maps writes as that seat, and doctor's `seat source` row agrees with its `seat` row. A seats file that lists no seat refuses every write instead of allowing all, and `seats = [...]` is read as the list.
+- HTTPie with no method sends POST when `--raw` gives a body or stdin is
+  not a terminal, but the guard judged `http --raw '{}' URL` and
+  `echo '{}' | http URL` as GETs and let them reach GitHub. A `--raw`
+  in any unique prefix, a pipe into `http`, and a `<` redirect,
+  here-document, or here-string now make the request a write unless
+  `-I` or `--ignore-stdin` is given. A request item is a body only when
+  its first separator is `=`, `:=`, `=@`, `:=@`, or `@`, so a `==` query
+  or a `:` header no longer is.
+- On macOS a typed command is the person's when the terminal is the controlling one and the process the kernel holds responsible is not a runner. If that process cannot be named, the check fails closed. On any other host that is not Linux there is still no check, and `ljos doctor` says attribution is absent without failing the seat.
+- On macOS the parent walk and the responsible-process lookup ran `ps` from `PATH`, so a caller could name that program. Both use `/bin/ps`. Harness names match without regard to case, so `Cursor` is `cursor`. A missing responsibility symbol or a pid of 1 is not proof that no runner is there. A process `launchctl submit` handed to launchd, with no terminal, is not the person.
+- One MCP file that cannot be read hides only its own keys.
+- Session start syncs user rules on the tracker budget, so a slow fetch still brings a rule written on another machine and the pack is still asked.
+- The MCP server's orphan check knows every client the installer onboards: copilot, qwen, droid, crush, kiro, hermes, omp and cline. A session under one of those left idle past the orphan timer lost its server while the client still held the pipe.
+- The book drainer and the hook slot server exit once the ljos binary under their path is replaced, so an install takes effect on the next hook call. A drainer that outlived an install spawned the old path for every batch, failed, and dropped each queued claim, note and finish after twenty tries; a slot server kept whatever limits and protocol it started with until the host was idle for fifteen minutes. A batch that cannot start is now named in the book log and stops the drainer instead of being retried against the same error.
+- The book drainer commits the tracker once per tracker file for each batch of jobs, naming every write in the message, instead of once per claim.
+- The command guard refuses `ljos prefer --review --keep` from an agent's
+  tool call, as it refuses `ljos approve`.
+
+  The upgrade refuses a raise, and closes nothing, when another live
+  record makes the same claim and would answer for the person's copy.
+  Only a record with the original's entities and timestamps, born with a
+  person basis, counts as the copy.
+- The git hooks' sitting gate exempts a tracker checkout only when it holds `vissue.toml` or a `Software/<project>/issues.org`, and a store only when the store settings name it. A bare `Software/` directory, or a checkout path that merely contained `claimdag`, skipped the gate.
+- The guard read `$XDG_CONFIG_HOME/curlrc`, which curl never loads, and
+  skipped the files curl 8 does load: `$XDG_CONFIG_HOME/.curlrc`, and
+  with `XDG_CONFIG_HOME` unset, `~/.config/curlrc`. A `request = DELETE`
+  there left a curl to GitHub allowed, and a write to `~/.config/curlrc`
+  was not refused. The guard now walks curl 8's order, lets a missing
+  `$CURL_HOME/.curlrc` fall through as curl does, reads no Windows file
+  on Linux, and refuses a write to any file in that order.
+- The guard reads a curl or wget config before the client opens it
+  again, and a write to `SYSTEM_WGETRC` or to a config named with
+  `-K` or `--config` was not refused, so the same line could change
+  the file in between. Those writes are refused now, and a curl or
+  wget that only reads a protected config is no longer taken for a
+  write to it. A process already running can still change a file
+  between the two reads.
+- The guard reads a wgetrc before wget does, and a `WGETRC` or
+  `SYSTEM_WGETRC` set on the line was not a protected write target, so
+  `printf 'input = https://api.github.com/user\n' > f && SYSTEM_WGETRC=f
+  wget ...` was judged from the file as it was before the line ran. A
+  path the line sets in either variable, as a prefix, an `env` or
+  `export` argument, or a bare assignment, is protected now, so a write
+  to it on that line is refused. A relative `SYSTEM_WGETRC` is read
+  from the command's directory, and a missing one still means
+  `/etc/wgetrc`, as wget reads it.
+- The guard's fault budget is eight times a measured policyd spawn, and at least two seconds. A fixed 200 ms was shorter than a slow CI spawn, so an allow was read as a timeout. A policyd that sleeps past the budget is still a fault.
+- The macOS build of the client watch compiles. The argument count
+  read from the kernel is an `Option`, and the kqueue timeout is not
+  mutated.
+- The mail checks fold away, and export refuses, every Unicode
+  Default_Ignorable_Code_Point character rather than a hand-kept list, so a
+  denied term split by a variation selector (U+FE00-FE0F, U+E0100-E01EF) or
+  a tag character (U+E0000-E007F) is caught. Shown mail replaces them with
+  U+FFFD.
+- The mail reader drops more concealed HTML: entity-encoded or
+  comment-split styles, a `/` before an attribute, percentage opacity,
+  sub-pixel fonts, zero alpha and off-screen boxes. It withholds a part
+  whose stylesheet colour can meet a background, and reads `@media` and
+  `@supports` rules instead of withholding them. A `multipart/alternative`
+  whose plain and HTML text differ shows both, labeled, with
+  `alternatives_differ` set. The checks scan a draft body as written and
+  as a client would render it, so `<https://...>` passes. Drafts must be
+  7bit ASCII with lines of at most 998 octets, and export refuses every
+  `Resent-*` header. The user mail config, `deny_file` and
+  `notmuch_config` are opened `O_NOFOLLOW` and refused when any directory
+  above them is open to other users. Invisible format characters and the
+  line and paragraph separators are refused in drafts and replaced in
+  shown mail.
+- The mail reducer no longer panics on an `&` followed within twelve bytes by a multibyte character, reads `<!-->` and `<!--->` as the whole comments HTML5 makes them instead of swallowing the rest of the part, and reads at most 1 MiB of a part, reporting the rest hidden, since a part of unterminated tags cost the square of its length.
+- The pack token stays in one client and is written only after the address the writer's URL resolved to has refused an unknown atom twice. The request uses that socket, ignores a proxy and does not follow a redirect. packsetd closes the socket, so the next call proves again instead of trusting a proof remembered for the process.
+- The pack's listener is proven once per process and origin before any read that names the person carries the token. The proof asks for an atom no pack holds with no token and with a bogus one, which both have to be refused, then with this seat's. The session preface, the cold prompt, the guard's preferences, issue recall, `ljos search`, MCP `ljos_search` and the search fallback listing all wait for it.
+  A listener that refuses only some URLs, or does not check the bearer, gets no token and supplies only an agent's memory.
+- The person at a terminal inside tmux, screen or zellij, or logged in through OpenSSH 9.8 or later, is the person again. The login check compared the holder's process name whole, so `tmux: server` and `sshd-session` matched nothing, and a daemonised multiplexer counted as an adopted process; `ljos prefer`, `ljos approve` and the sitting gate then treated the owner as a runner.
+- The person check no longer passes with a program between the terminal
+  and ljos (`python`, `node`, `make`, `expect`), or on a terminal whose
+  holder init adopted, the shape a double fork and a second `setsid`
+  leave. Both let an agent's tool call keep an older preference as the
+  person's. A multiplexer server started over ssh is adopted the same
+  way, so type the command in the login shell there.
+
+  The preference upgrade writes its cutoff and promotes older preferences
+  only for the person at a terminal of their own, the check
+  `ljos prefer --review --keep` makes. `ljos doctor`, `ljos prefer` and
+  `ljos prefer --review` run any other way, such as with stdin closed,
+  only report, and the review says where to run it.
+
+  Two upgrades at once, such as `ljos doctor` beside `ljos prefer`, no
+  longer lose an older preference. They take turns on a lock file in the
+  state directory while one notes, copies and retires a preference. When
+  the pack refuses the copy and then misses the reopen, the note stays
+  and the preference is not marked refused, so the next run reopens it.
+
+  The seat guard refuses typing `ljos prefer` or `ljos remember` into a
+  pane, not only an approval: `tmux send-keys`, `screen -X stuff`,
+  `xdotool`, `wtype`, `ydotool`, `ttyecho`, `writevt`,
+  `kitty @ send-text`, `wezterm cli send-text`, herdr and zellij. Typed
+  into the person's pane they ran at the person's terminal and stored an
+  agent's words as theirs. A typer fed from stdin or a file, and a
+  program that pushes keys with `TIOCSTI`, are refused outright.
+
+  An older preference stored without `valid_from` is promoted once. The
+  pack fills `valid_from` on the person's copy, and the upgrade took that
+  copy for another record, reopened the original beside it and marked it
+  refused.
+- The preference cutoff recorded from a receipt the pack already held is the oldest stamp on that receipt. `updated` was read first, and it moves on every rewrite of the receipt, so a re-recorded cutoff could land after a seat-token post and promote it.
+- The preference migration cutoff is recorded in the person's state directory when a person-side run first migrates, and only the pack receipt that record names is a cutoff.
+  A cutoff receipt posted by any other process with the seat token is ignored, and with no local record nothing is promoted or listed as older.
+- The seat book and the claim index are replaced whole: the new bytes
+  are written to a temp file in the same directory, synced, and renamed
+  over the old name. A cut during that write leaves the previous file
+  or the new one. A note queue, a ballot and a sync export already
+  landed by rename.
+- The timeline adds an island row only when the activate call carried this seat's token. A listener that answers anyone can put a sentence on the island, and the row would otherwise be that sentence, dated as a memory.
+- The tracker history check followed an exported `GIT_DIR`, so a shallow tracker read as complete when that variable named a complete repository; history reads and the deepen fetch now drop the repository variables. Two checks of one tracker no longer fetch at once: the second waits for the first, then reads the checkout again. A deepen whose fetch failed now reads the checkout again before it reports incomplete history, and a checkout that is not shallow but still misses objects, as a partial clone does, names `git fetch --refetch --no-filter` instead of `git fetch --unshallow`.
+- The user-rules file must be a regular file of at most 1 MiB. A FIFO, a directory, or a larger file is not read.
+- Time a pack spends answering is not charged to a side event. One read waits at most 400 ms, so a slow answer still shows the memories.
+- User rules written before a basis was kept stay in the preface, marked not confirmed, until `ljos prefer --user --review --keep` stamps them as the person's. A row written after that cutoff with no basis stays out. `ljos doctor` reports how many are held and still exits 0.
+- Wget reads a `-e` or `--execute` command as a wgetrc line, with the
+  name in any case and every `-` and `_` dropped, so `-e post-data=x`
+  sends a POST. The guard matched only the underscore spellings, judged
+  the request a GET, and let it reach GitHub or follow a redirect there.
+  Every spelling of `post-data`, `post-file`, `body-data`, `body-file`,
+  `method`, and `max-redirect` in `-e` is read now.
+- When the user-rules file is present but cannot be read or parsed, GitHub writes those rules cover are denied and the reason names the file. Reads and other MCP calls stay allowed.
+- Whether a writer takes `rank=relevance` is remembered per auth mode.
+  An unauthenticated status no longer answers a later read that carries
+  the token, and a refusal clears only the mode that was refused.
+- `beforeMCPExecution` and `beforeReadFile` answer from the local user-rule file before they wait for a hook slot. The direct path has already loaded the seat env file. A promoted rule may still ask the pack once, for up to 400 ms. An allow or a user-rule deny exits 0. Exit 2 is a hook failure. A slow server leaves that allow on exit 0, and the call answers without searching the pack for a sitting.
+- `beforeMCPExecution` and `beforeReadFile` are written to `hook-trace.jsonl` when the trace marker is present.
+- `curl -L` and plain `wget` follow a redirect, and a 307 or 308 keeps
+  the method, so a POST to another host could end at GitHub. Curl's
+  `-L`, `--location`, and `--location-trusted`, and wget unless
+  `max_redirect` is 0, now leave the target of a write unknown.
+- `curl -g --no-globoff` turns URL globbing back on, and the guard
+  still read the URL as literal. The later option now wins.
+- `install.sh` checks the Rust toolchain before any source build and names the floor, 1.89 or the tree's `rust-version`, with a pointer to rustup. A distro cargo older than that failed on the first crate without saying what it needed.
+- `ljos findings --remember` or `--issue` and `ljos panel --jev` check the seat before they write the tracker, as every other tracker write does. They ran with no checked seat, so the citation and the note were recorded under whatever seat the tracker derived.
+- `ljos hook` and `prefer --user` believe a runtime's script only when the runtime is an installed `node`, `nodejs`, `bun` or `deno` of exactly that name, kept as a runner file is and the file the process runs; a program in `/tmp` named `node`, or one whose name only starts with `node`, no longer makes the script its arguments name the runner.
+- `ljos hook` and `prefer --user` read the person's primary group from `/etc/group` itself, and only when `nsswitch.conf` sends group to that file alone; a second line with the same gid, another source, or a line that cannot be read means the group is not the person's alone.
+- `ljos hook` and `prefer --user` read who else has the person's primary group from `/etc/passwd` itself, and only when `nsswitch.conf` sends passwd to that file alone; a source such as `systemd`, `sss` or `ldap`, or a line that cannot be read, now means the group is not the person's alone, where a short enumeration used to read as no one else.
+- `ljos hook` and `prefer --user` refuse a process whose executable cannot be stat'ed through `/proc/<pid>/exe`, where they used to judge the path that link names without checking it is the file the process runs.
+- `ljos hook` and `prefer --user` resolve a runner file's path once and judge the file their descriptor walk ends on only when it is the file the caller expects by device and inode, so a directory swapped for another after the path resolved is refused rather than judged in its place.
+- `ljos hook` now waits for one of a fixed number of slots from `ljos hookd`, one server per user on a unix socket, before it loads the seat, the tracker or the pack. A burst of tool calls queues in the order it came instead of starting a full hook process each. A pre-tool call that gets no slot within 3 s, or finds 64 calls already waiting, is refused with the reason, and the wait counts toward the runner's deadline. `LJOS_HOOK_SLOTS`, `LJOS_HOOK_QUEUE` and `LJOS_HOOK_ADMIT_MS` change the defaults, and `LJOS_HOOKD=off` skips the queue.
+- `ljos-mcp` holds the end of stdin until the longest configured call
+  can finish. The wait used to be a fixed 35 s, so a pack call allowed
+  more than that by `PACKSET_TIMEOUT_MS` was cut off and its answer
+  dropped. The drain is now that timeout, a listing, the guard and a
+  durable row lock, whichever is longest, plus a few seconds. The
+  runtime's short shutdown cap stays in place for a dead stdin read, and
+  grows to the same drain while a write is still in progress.
+- `ljos-mcp` no longer drops a tool call when the client writes it and closes stdin at once: the call counts as in flight from the moment its line is read, so the end of input waits for its answer even when rmcp has not yet started the handler.
+- `ljos-mcp` stops when the client that started it is gone, even if a
+  shell, `npx`, or `sudo -n` is still sitting in front of it. The nearest
+  ancestor that is not one of those launchers is recorded by pid and
+  start time, so a reused pid is not taken for it. Stdin hanging up ends
+  the server the same way. On Linux a failed `PR_SET_PDEATHSIG` is logged
+  once; the signal itself is not the decision.
+- `session_actor` and `stamped_sessions` now read `conversation_id` from the hook payload instead of consulting the process environment, and refuse when `conversation_id` or another runner's session key is present with an unusable value. For a `sand-sub` id, the parent's seat records and process match only through an ancestor whose own environment carries a usable `CURSOR_CONVERSATION_ID`, and `ljos sitting` on a ticket already held by the parent on the same seat files and claims a single child ticket under that parent through `file_issue`. Unbound calls read the conversation id from the outermost shell or caller within the current runner without rejecting one-shot `bash -c`, `/bin/sh -c`, or `zsh -c` exec chains, `clean_shell_environ` preserves `CURSOR_CONVERSATION_ID` in sorted `tmux` and `screen` pane environments and in `zsh`, `live_sitting` compares the conversation tag on the tracker, and `ljos_sitting` over MCP binds the calling conversation through `_meta`, per-call hook records, or the server's ancestor environment; an MCP client with no `_meta` id, no hook, and no stamped ancestor can no longer sit as the bare seat.
+- `wget -i FILE` fetched every URL in the file and `wget --base=URL`
+  resolved a relative one against GitHub, while the guard judged only
+  the URL on the command line. An input file, a base, and a `Host:`
+  header on the wget command line now leave the target unknown, split
+  or attached, in a short cluster, or abbreviated, and the command line
+  is read after a wgetrc the guard found opaque.
+- curl, wget, and httpie send through a proxy named in `http_proxy`,
+  `https_proxy`, or `all_proxy`, and the guard never read them, so a
+  forwarding proxy could carry a POST to GitHub. A set proxy variable,
+  from the process, an `export` on the line, or a prefix, now leaves
+  the target of a write unknown. `NO_PROXY` does not exempt one.
+- tokio 1.54.1, which clears RUSTSEC-2026-0386: the `AsyncFd` constructors took any `AsRawFd` without proof the descriptor was owned. ljos uses none of them, but the lockfile now resolves past the advisory and `cargo deny check` passes again.
+
+### Documentation
+
+- A missing user-rules file is no rules. An empty file, a whitespace file, and a dangling symlink refuse a covered GitHub write and name the path.
+- Session end keeps up to five cue-word sentences from the person's and the agent's prose as unverified agent notes. The prompt hook does not inject them, and LJOS_EXTRACT=off turns the read off. The explanation, the getting started page and the integration table say so.
+- The MCP and read answer may already have loaded the seat env file. A promoted user rule can still make one pack round trip of up to 400 ms.
+- The README and the cloud VM page say that ljos cloud up and the cloud install script ship in v0.33.0.
+- The README says that session end keeps up to five cue-word sentences as unverified agent notes the prompt hook does not inject.
+- The README says the installer adds the bin directory to the shell profiles when it is not on PATH, and that this ships in v0.33.0.
+- The README shows the install-to-recall recording under the title.
+- The explanation says plainly that the home install roots and a single-user Nix store are trusted because the person owns them, and that a tool call running with the person's uid can write them too.
+- The explanation says that finding the runner is Linux only: on macOS and other systems no process counts as an installed runner, so `ljos hook` keeps no prompt as the person's and `prefer --user` refuses.
+- The pack proof cannot tell packsetd from a process of this user that can read the token file. That process can answer the two probes and then read the token, or skip the probes and answer as the pack. A writer that signs its answers, or that runs as another user, would tell them apart.
+- `docs/cloud-vm.md` names `nc` beside `python3` urllib, dulwich, and
+  `openssl s_client` as clients the shell guard allows because it does
+  not read the request they send, and says a server-side ruleset is
+  what stops one.
+- `scripts/mcp-rss.py` refuses to report when `PACKSET_URL` is unset,
+  empty, `off`, or not answering. A measurement against a dead pack is
+  not a memory number.
+
+### Miscellaneous
+
+- A pack that accepts and never answers is covered with the queue off, for `beforeMCPExecution` and `beforeReadFile`.
+- A runner variable refuses `ljos prefer --user --review --keep` when no terminal is attached. The test for that stands in that state, since a variable at a terminal is the person's shell.
+- CI runs the mcp lifetime tests on `macos-latest`. That is the
+  kqueue path for a client dying behind a launcher. The release workflow
+  already builds on that runner.
+- Seat, rules, and hook tests are named for the behaviour they cover.
+- The curl command line is read into options and URLs by one function,
+  so the guard's other checks can ask which words a curl reads as a
+  config.
+- The migration tests open a pty from Python and then keep a held lesson. Python is not a login session, so the keep now runs with the pty held by a terminal emulator, which is what a person at a terminal looks like.
+- The release workflow pins CARGO_HOME to /usr/local/cargo and remaps the checkout to /src and that cargo home to /cargo.
+- The remember and forget tests keep the POST when a seat token makes the writer prove first.
+- The search-origin test now puts other words on the hit than the listing holds, and the open-listener test's fixture refuses some reads without a token while never checking the bearer, so each fails on the checks they were written for.
+- The user-rule tests type a command as the person. A CI job sets `GITHUB_ACTIONS`, which marks the process as not the person, so the rule was stored as the agent's and the next seat did not see it. The simulated command does not carry that variable.
+- `systemd-run --user --scope` answers on some hosts that then reject `--pty` on a scope. The transient-scope test probes the command it actually runs, and uses the `run-*.scope` cgroup directly when that probe fails.
+
+
 ## 0.33.0 (2026-10-22)
 
 ### Features

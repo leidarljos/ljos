@@ -1,1 +1,0 @@
-A bare seat whose conversation could not be bound may not take a hold through `ljos_claim` either; only `ljos_sitting` was refused. The bare hold was adoptable by the first conversation to ask, and could take over a live tagged conversation's hold on the same ticket.

@@ -1,2 +1,0 @@
-The pack's listener is proven once per process and origin before any read that names the person carries the token. The proof asks for an atom no pack holds with no token and with a bogus one, which both have to be refused, then with this seat's. The session preface, the cold prompt, the guard's preferences, issue recall, `ljos search`, MCP `ljos_search` and the search fallback listing all wait for it.
-A listener that refuses only some URLs, or does not check the bearer, gets no token and supplies only an agent's memory.
