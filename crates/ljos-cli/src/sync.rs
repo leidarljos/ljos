@@ -1198,14 +1198,39 @@ pub fn export(root: &Path, scope: &Scope, atoms: &[Value]) -> Result<String> {
     export_for_scope(root, scope, &scope.name, atoms, &default)
 }
 
-pub(crate) fn export_named(
-    root: &Path,
-    scope: &Scope,
-    scope_name: &str,
-    atoms: &[Value],
-) -> Result<String> {
+#[cfg(test)]
+fn export_named(root: &Path, scope: &Scope, scope_name: &str, atoms: &[Value]) -> Result<String> {
     let default = configured_default(scope)?;
     export_for_scope(root, scope, scope_name, atoms, &default)
+}
+
+/// This machine's file at `rel`, its log of `scope_name` or that log's
+/// digest, as a whole seal of `atoms` writes it. Nothing is written:
+/// git's merge driver hands back the one file it was given, and a file
+/// written beside it in the work tree stops a rebase. The digest names
+/// no sealed file, so the export after the merge seals over what git
+/// kept.
+pub(crate) fn whole_export(
+    scope: &Scope,
+    scope_name: &str,
+    rel: &str,
+    atoms: &[Value],
+) -> Result<Vec<u8>> {
+    let default = configured_default(scope)?;
+    let Some(recipients) = scope.recipients_for(scope_name) else {
+        bail!("sync: scope `{scope_name}` is not named in .ljos/sync.toml");
+    };
+    let body = log_lines(atoms, scope_name, &default, scope_name != scope.name);
+    let plain = log_header(&host(), scope_name) + &body;
+    if rel.ends_with(".digest") {
+        let digest = format!(
+            "{} {} merged\n",
+            crate::work_id(&plain),
+            crate::work_id(&recipients.join(","))
+        );
+        return Ok(digest.into_bytes());
+    }
+    seal_bytes(&plain, recipients)
 }
 
 fn export_for_scope(
@@ -7718,6 +7743,48 @@ mod tests {
         assert_eq!(opened.as_deref(), Some(plain.as_str()));
     }
 
+    /// git's atoms driver seals this host's log in memory and writes only
+    /// the file git handed it. A re-export into the work tree beside it
+    /// stopped a rebase on "Your local changes would be overwritten".
+    #[test]
+    fn the_atoms_driver_writes_only_the_file_git_hands_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let public = make_key();
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        *store.lock().unwrap() = vec![atom("a1", "kept in the pack", &[])];
+        let root = tracker(dir.path());
+        std::fs::write(
+            root.join(".ljos/sync.toml"),
+            format!("name = \"grokbot\"\nrecipients = [\"{public}\"]\n"),
+        )
+        .unwrap();
+        let [log_rel, digest_rel] = host_log_rels_for_scope(&host(), "grokbot", "grokbot");
+        std::fs::write(root.join(&log_rel), "ours\n").unwrap();
+        std::fs::write(root.join(&digest_rel), "ours\n").unwrap();
+        let current = root.join(".merge_file_probe");
+        let mut merged = Vec::new();
+        for rel in [&log_rel, &digest_rel] {
+            std::fs::write(&current, "ours\n").unwrap();
+            crate::tracker_push::merge_atoms_driver(&current, rel).unwrap();
+            merged.push(std::fs::read(&current).unwrap());
+        }
+        for rel in [&log_rel, &digest_rel] {
+            let left = std::fs::read_to_string(root.join(rel)).unwrap();
+            assert_eq!(left, "ours\n", "the driver wrote {rel}");
+        }
+        let opened = open_sealed_bytes(&merged[0], &[identity_path()])
+            .unwrap()
+            .unwrap();
+        assert!(opened.contains("kept in the pack"), "{opened}");
+        let digest = String::from_utf8(merged[1].clone()).unwrap();
+        assert!(
+            digest.starts_with(&crate::work_id(&opened)),
+            "{digest} does not name {opened}"
+        );
+    }
+
     /// A peer's log reads as its base with each chunk applied in order. The
     /// last line for an id wins and a drop line removes it, and the view is
     /// the single file those atoms seal into, byte for byte. A chunk that
@@ -9804,7 +9871,8 @@ mod tests {
     /// A peer commits this host's log as a symlink to a file outside the
     /// tracker. Export finds its digest current and writes nothing, and the
     /// merge driver read the link and handed its target to git as the
-    /// merge result.
+    /// merge result. The driver now seals the log from the pack and reads
+    /// no file in the work tree.
     #[test]
     fn the_merge_driver_does_not_copy_a_symlinked_log_into_the_merge() {
         let dir = tempfile::tempdir().unwrap();
@@ -9842,11 +9910,15 @@ mod tests {
             .is_symlink());
         let current = fix.root.join(".merge_file_ours");
         std::fs::write(&current, "ours\n").unwrap();
-        let driven = crate::tracker_push::merge_atoms_driver(&current, &rel);
-        let merged = std::fs::read_to_string(&current).unwrap();
-        assert!(!merged.contains("CANARY"), "{driven:?}: {merged}");
-        let err = driven.unwrap_err();
-        assert!(err.contains("not a regular file"), "{err}");
+        crate::tracker_push::merge_atoms_driver(&current, &rel).unwrap();
+        let merged = std::fs::read(&current).unwrap();
+        assert!(!String::from_utf8_lossy(&merged).contains("CANARY"));
+        let opened = open_sealed_bytes(&merged, &identities_for_open("grokbot"))
+            .unwrap()
+            .unwrap();
+        assert!(opened.contains("This host's own note."), "{opened}");
+        let canary_left = std::fs::read_to_string(&canary).unwrap();
+        assert_eq!(canary_left, "CANARY outside the tracker\n");
     }
 
     /// A gone box sealed its cloud log before the header, to this host's

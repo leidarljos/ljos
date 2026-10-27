@@ -1029,11 +1029,10 @@ fn toplevel(start: &Path) -> Result<PathBuf, String> {
     Ok(PathBuf::from(path))
 }
 
-/// A fresh export of this machine's log at `rel`. Another machine's file
-/// is refused: re-exporting it would publish our atoms under their name.
-/// No scope returns before the pack is asked. An unchanged export writes
-/// nothing, so the file is read with no symlink at any component: the
-/// tracker can hold a link there to a file outside it.
+/// This machine's file at `rel`, its log or that log's digest, sealed
+/// whole from the pack in memory. Another machine's file is refused:
+/// re-exporting it would publish our atoms under their name. No scope
+/// returns before the pack is asked.
 fn reexport_local(root: &Path, rel: &str) -> Result<Vec<u8>, String> {
     if !is_this_host_atoms(rel) {
         return Err(format!(
@@ -1052,13 +1051,8 @@ fn reexport_local(root: &Path, rel: &str) -> Result<Vec<u8>, String> {
     };
     let client = crate::pack().map_err(|e| e.to_string())?;
     let atoms = crate::atoms_lean(&client, &client.workspace()).map_err(|e| e.to_string())?;
-    crate::sync::export_named(root, &scope, &scope_name, &atoms).map_err(|e| e.to_string())?;
-    let name =
-        atoms_file_name(rel).ok_or_else(|| format!("atoms merge: {rel} has no file name"))?;
-    let fresh = format!(".ljos/atoms/{name}");
-    crate::sync::read_beneath(root, &fresh)
-        .map_err(|e| format!("atoms merge: {e}"))?
-        .ok_or_else(|| format!("atoms merge: {fresh} was not written"))
+    crate::sync::whole_export(&scope, &scope_name, rel, &atoms)
+        .map_err(|e| format!("atoms merge: {e}"))
 }
 
 fn atoms_file_name(rel: &str) -> Option<&str> {
