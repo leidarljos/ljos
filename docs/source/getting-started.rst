@@ -50,7 +50,10 @@ so git needs an identity (``git config --global user.email``).
 A claim is two sentences at most, stored as written. At ``SessionEnd`` the
 hook keeps up to five cue-word sentences from the person's and the agent's
 prose as unverified agent notes. The prompt hook never injects them.
-``LJOS_EXTRACT=off`` turns that off. A lesson you type takes effect at once, like the preference, so the
+``LJOS_EXTRACT=off`` turns that off. The read is on by default, and a note
+is written only when the conversation has an open sitting. With no sitting
+the hook prints one line and writes nothing, because packset keeps only
+notes that belong to a ticket. A lesson you type takes effect at once, like the preference, so the
 hook shows both from the next prompt they bear on. Tomorrow, ``ljos due`` lists both claims; read each and grade it:
 
 .. code:: console

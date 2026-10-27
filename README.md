@@ -128,7 +128,10 @@ review promotes it to standing.
 
 At session end, ljos keeps up to five cue-word sentences from the person's
 and the agent's prose as unverified agent notes the prompt hook does not
-inject, and `LJOS_EXTRACT=off` turns that off.
+inject, and `LJOS_EXTRACT=off` turns that off. The read is on by default,
+and a note is written only when the conversation has an open sitting.
+With no sitting the hook prints one line and writes nothing, because
+packset keeps only notes that belong to a ticket.
 
 The hooks also keep the work on the tracker once a conversation sits on an
 issue: after forty tool calls without a word to the seat, they remind it to

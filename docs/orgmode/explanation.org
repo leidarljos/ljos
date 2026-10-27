@@ -101,7 +101,7 @@ without running it.
   cards.
 - The pack is written by =remember=, =prefer=, =trust=, =learn=,
   =graded=, =forget=, an imported handover, and a session-end read
-  when the conversation holds a live sitting. That read is on by
+  when the conversation has an open sitting. That read is on by
   default. At =SessionEnd= it keeps up to five cue-word sentences
   from the person's and the agent's prose and writes each as an
   unverified agent note on that sitting's ticket. With no sitting
@@ -282,8 +282,8 @@ Ebbinghaus curve refreshed by recall; Generative Agents
 and reflect. All of them put a model in the write path.
 
 The seat does not. What is kept as a belief is what was said with =Remember=
-or =Prefer=, stored as written. At =SessionEnd=, when the conversation holds
-a live sitting, the hook may keep up to five cue-word sentences from the
+or =Prefer=, stored as written. At =SessionEnd=, when the conversation has
+an open sitting, the hook may keep up to five cue-word sentences from the
 person's and the agent's prose as unverified agent notes on that sitting's
 ticket, and it keeps none when there is no sitting. The prompt hook never
 injects them, so a transcript does not become a belief by being read. That
