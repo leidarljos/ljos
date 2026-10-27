@@ -663,18 +663,20 @@ pub(crate) fn with_line_configs<T>(named: Vec<PathBuf>, judge: impl FnOnce() -> 
     out
 }
 
-/// The hook directory, the hook file, the allowlist, and the gitconfig
-/// files that can name `core.hooksPath`. A write to one of these disarms
-/// the hook. The recorded seat's `.git/config` is included. Any other
-/// `.git/config` or `.gitconfig` is matched by name in `names_protected`.
-/// The curl and wget configs are included too, with any a curl or wget on
-/// the line names: a write to one changes a file the guard already read.
+/// The hook directory, the hook file, the allowlist, the git hooks
+/// directory ljos installs as `core.hooksPath`, and the gitconfig files
+/// that can name that key. A write to one of these disarms the hook. The
+/// recorded seat's `.git/config` is included. Any other `.git/config` or
+/// `.gitconfig` is matched by name in `names_protected`. The curl and wget
+/// configs are included too, with any a curl or wget on the line names: a
+/// write to one changes a file the guard already read.
 pub(crate) fn protected_write_targets() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(dir) = hooks_dir() {
         out.push(dir.join("pre-push"));
         out.push(dir);
     }
+    out.extend(git_hooks_dirs());
     if let Some(path) = allow_path() {
         out.push(path);
     }
@@ -752,6 +754,146 @@ pub(crate) fn names_protected(target: &str, cwd: Option<&Path>) -> bool {
         }
     }
     false
+}
+
+/// Directories a write can replace the git hooks ljos installs.
+///
+/// `LJOS_GIT_HOOKS` is one of them when it is set. So is
+/// `$XDG_DATA_HOME/ljos/git-hooks` when that variable is set, and
+/// `~/.local/share/ljos/git-hooks`. The home path stays on the list when
+/// `XDG_DATA_HOME` names another directory, because a line can still write
+/// the home one. A global `core.hooksPath` is added when it names a
+/// `ljos/git-hooks` directory. A path such as `/tmp` or `/dev/null` is not
+/// a hooks directory and is left off the list.
+pub(crate) fn git_hooks_dirs() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut push_dir = |path: PathBuf| {
+        if path.as_os_str().is_empty() {
+            return;
+        }
+        if out.iter().any(|have| paths_same(have, &path)) {
+            return;
+        }
+        out.push(path);
+    };
+    if let Some(dir) = std::env::var_os("LJOS_GIT_HOOKS").filter(|value| !value.is_empty()) {
+        push_dir(PathBuf::from(dir));
+    }
+    if let Some(base) = crate::data_base() {
+        push_dir(base.join("ljos").join("git-hooks"));
+    }
+    if let Ok(home) = crate::home() {
+        push_dir(home.join(".local/share/ljos/git-hooks"));
+    }
+    if let Some(dir) = configured_hooks_dir() {
+        if ljos_git_hooks_dir(&dir) {
+            push_dir(dir);
+        }
+    }
+    out
+}
+
+/// Whether `target` is a git hooks directory from [`git_hooks_dirs`], or a
+/// path inside one. `~`, `$HOME`, `$XDG_DATA_HOME` and `$LJOS_GIT_HOOKS`
+/// are filled in. A different `$` substitution is not a match.
+pub(crate) fn in_git_hooks_dir(target: &str, cwd: Option<&Path>) -> bool {
+    let Some(expanded) = expand_target(target) else {
+        return false;
+    };
+    path_in_git_hooks(&expanded, cwd)
+}
+
+fn path_in_git_hooks(expanded: &str, cwd: Option<&Path>) -> bool {
+    let mut candidates = vec![PathBuf::from(expanded)];
+    if let Some(cwd) = cwd {
+        if !Path::new(expanded).is_absolute() {
+            candidates.push(cwd.join(expanded));
+        }
+    }
+    let dirs = git_hooks_dirs();
+    candidates.iter().any(|cand| {
+        dirs.iter()
+            .any(|dir| paths_same(cand, dir) || path_under(cand, dir))
+    })
+}
+
+fn ljos_git_hooks_dir(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name == "git-hooks")
+        && path.components().any(|part| part.as_os_str() == "ljos")
+}
+
+/// Global gitconfig files, highest precedence first. `GIT_CONFIG_GLOBAL`
+/// replaces the others.
+fn global_gitconfig_files() -> Vec<PathBuf> {
+    if let Some(path) = std::env::var_os("GIT_CONFIG_GLOBAL").filter(|value| !value.is_empty()) {
+        return vec![PathBuf::from(path)];
+    }
+    let mut out = Vec::new();
+    if let Ok(home) = crate::home() {
+        out.push(home.join(".gitconfig"));
+        out.push(home.join(".config/git/config"));
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+        let path = PathBuf::from(xdg).join("git/config");
+        if !out.iter().any(|have| have == &path) {
+            out.push(path);
+        }
+    }
+    out
+}
+
+fn configured_hooks_dir() -> Option<PathBuf> {
+    for file in global_gitconfig_files() {
+        let Ok(text) = fs::read_to_string(&file) else {
+            continue;
+        };
+        if let Some(value) = hooks_path_assignment(&text) {
+            return expand_hooks_assignment(&value);
+        }
+    }
+    None
+}
+
+fn hooks_path_assignment(text: &str) -> Option<String> {
+    let mut in_core = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(inner) = line
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
+            in_core = inner.trim().eq_ignore_ascii_case("core");
+            continue;
+        }
+        if !in_core {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if !key.trim().eq_ignore_ascii_case("hooksPath") {
+            continue;
+        }
+        let value = value.split('#').next().unwrap_or(value).trim();
+        let value = value.trim_matches(|c| c == '"' || c == '\'');
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn expand_hooks_assignment(value: &str) -> Option<PathBuf> {
+    if value.contains(['$', '`']) {
+        return None;
+    }
+    if let Some(rest) = value.strip_prefix("~/") {
+        return Some(crate::home().ok()?.join(rest));
+    }
+    Path::new(value).is_absolute().then(|| PathBuf::from(value))
 }
 
 /// A word that names a protected file, including a path inside a quoted
@@ -853,6 +995,16 @@ fn expand_target(path: &str) -> Option<String> {
     } else if let Some(rest) = strip_xdg_prefix(path) {
         let xdg = std::env::var_os("XDG_CONFIG_HOME")?;
         PathBuf::from(xdg).join(rest).display().to_string()
+    } else if let Some(rest) = strip_data_prefix(path) {
+        let xdg = std::env::var_os("XDG_DATA_HOME")?;
+        PathBuf::from(xdg).join(rest).display().to_string()
+    } else if let Some(rest) = strip_hooks_prefix(path) {
+        let base = std::env::var_os("LJOS_GIT_HOOKS")?;
+        if rest.is_empty() {
+            PathBuf::from(base).display().to_string()
+        } else {
+            PathBuf::from(base).join(rest).display().to_string()
+        }
     } else if path.contains('$') {
         return None;
     } else {
@@ -873,6 +1025,19 @@ fn strip_home_prefix(path: &str) -> Option<&str> {
 fn strip_xdg_prefix(path: &str) -> Option<&str> {
     path.strip_prefix("$XDG_CONFIG_HOME/")
         .or_else(|| path.strip_prefix("${XDG_CONFIG_HOME}/"))
+}
+
+fn strip_data_prefix(path: &str) -> Option<&str> {
+    path.strip_prefix("$XDG_DATA_HOME/")
+        .or_else(|| path.strip_prefix("${XDG_DATA_HOME}/"))
+}
+
+fn strip_hooks_prefix(path: &str) -> Option<&str> {
+    if path == "$LJOS_GIT_HOOKS" || path == "${LJOS_GIT_HOOKS}" {
+        return Some("");
+    }
+    path.strip_prefix("$LJOS_GIT_HOOKS/")
+        .or_else(|| path.strip_prefix("${LJOS_GIT_HOOKS}/"))
 }
 
 /// The repository key the hook compares. `https`, `ssh`, and `git@host:`
@@ -1028,6 +1193,24 @@ mod tests {
             push_repo_key(url),
             push_repo_key("/home/ubuntu/seat/seat.git")
         );
+    }
+
+    #[test]
+    fn a_core_hooks_path_assignment_is_read_from_that_section() {
+        let text = "\
+[user]
+    name = someone
+[core]
+    hooksPath = ~/ljos/git-hooks # kept
+[core \"other\"]
+    hooksPath = /tmp/no
+";
+        assert_eq!(
+            hooks_path_assignment(text).as_deref(),
+            Some("~/ljos/git-hooks")
+        );
+        assert!(hooks_path_assignment("[core \"ssh\"]\nhooksPath = /tmp/no\n").is_none());
+        assert!(hooks_path_assignment("[user]\nname = x\n").is_none());
     }
 
     #[test]

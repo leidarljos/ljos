@@ -504,7 +504,11 @@ fn shell_guard_refuses_disarming_the_hook() {
         "git --config-env core.hooksPath=HOOK push origin develop",
         "git clone --config core.hooksPath=/dev/null https://example.invalid/a.git",
         "git config --global --unset core.hooksPath",
+        "git config --global core.hooksPath /tmp/x",
         "git config --global --replace-all core.hooksPath /dev/null",
+        "git -c core.hooksPath=/tmp/x status",
+        "cp /tmp/x ~/.gitconfig",
+        "printf x > ~/.gitconfig",
         "git config --global include.path /tmp/evil-hooks.cfg",
         "git config --global --remove-section core",
         "export GIT_CONFIG_GLOBAL=/tmp/other-gitconfig",
@@ -542,7 +546,11 @@ fn shell_guard_refuses_disarming_the_hook() {
     allowed("git -C /tmp config core.hooksPath /dev/null", &repo);
     allowed("git config --list", &repo);
     allowed("git config user.email seat@example.invalid", &repo);
+    allowed("git config user.name seat", &repo);
     allowed("git config --global user.name seat", &repo);
+    allowed("cat ~/.gitconfig", &repo);
+    allowed("ls ~/.local/share/ljos/git-hooks", &repo);
+    allowed("ls ~/.local/share/ljos/git-hooks/pre-push", &repo);
     allowed("echo kept >> /tmp/not-the-hook", &repo);
     allowed("git fetch origin", &repo);
     allowed("git pull --ff-only", &repo);
@@ -564,6 +572,152 @@ fn shell_guard_refuses_disarming_the_hook() {
         "{}",
         counted.reason
     );
+}
+
+/// Writes inside the git hooks directory are the same refusal as a write
+/// to a runner hook file. Reads of that directory stay allowed. The
+/// directory follows `XDG_DATA_HOME`, `LJOS_GIT_HOOKS`, and a global
+/// `core.hooksPath` that names `ljos/git-hooks`.
+#[test]
+fn the_git_hooks_directory_is_refused_like_a_runner_hook() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _xdg) = seat_env(root.path());
+    clear_ids();
+    let hooks = home.join(".local/share/ljos/git-hooks");
+    let pre = hooks.join("pre-push");
+    let inside = hooks.join("x");
+
+    let deny = |line: &str| {
+        let hit = ljos_cli::seat_guard(line).unwrap_or_else(|| panic!("allowed: {line}"));
+        assert_eq!(hit.verdict, "deny", "{line}: {hit:?}");
+        assert_eq!(hit.pattern, "seat-guard", "{line}: {hit:?}");
+        let via = ljos_cli::static_guard(line).unwrap_or_else(|| panic!("static allowed: {line}"));
+        assert_eq!(via.pattern, "seat-guard", "static {line}: {via:?}");
+    };
+    let allow = |line: &str| {
+        assert!(
+            ljos_cli::seat_guard(line).is_none(),
+            "refused: {line}: {:?}",
+            ljos_cli::seat_guard(line)
+        );
+        assert!(
+            ljos_cli::static_guard(line).is_none(),
+            "static refused: {line}: {:?}",
+            ljos_cli::static_guard(line)
+        );
+    };
+
+    for line in [
+        "touch ~/.cursor/hooks.json",
+        "echo x > ~/.cursor/hooks.json",
+        "touch ~/.claude/settings.json",
+        "echo x > ~/.claude/settings.json",
+        "ln -sf /tmp/x ~/.local/share/ljos/git-hooks/pre-push",
+        "mkdir -p ~/.local/share/ljos/git-hooks/x",
+        "touch ~/.local/share/ljos/git-hooks/pre-push",
+        "rm -f ~/.local/share/ljos/git-hooks/pre-push",
+        "cp /tmp/x ~/.local/share/ljos/git-hooks/pre-push",
+        "mv /tmp/x ~/.local/share/ljos/git-hooks/pre-push",
+        "printf x > ~/.local/share/ljos/git-hooks/pre-push",
+        &format!("touch {}", pre.display()),
+        &format!("mkdir -p {}", inside.display()),
+        &format!("ln -sf /tmp/x {}", pre.display()),
+        &format!("rm -rf {}", hooks.display()),
+        "dd of=~/.local/share/ljos/git-hooks/pre-push",
+        "cd ~/.local/share/ljos && touch git-hooks/pre-push",
+        "cd ~/.local/share/ljos/git-hooks && touch pre-push",
+    ] {
+        deny(line);
+    }
+    for line in [
+        "cat ~/.cursor/hooks.json",
+        "cat ~/.claude/settings.json",
+        "ls ~/.local/share/ljos/git-hooks",
+        "ls ~/.local/share/ljos/git-hooks/pre-push",
+        "cat ~/.local/share/ljos/git-hooks/pre-push",
+        "cat ~/.gitconfig",
+        "git config --get core.hooksPath",
+        "git config user.name seat",
+        "mkdir -p ~/.local/share/ljos/other",
+        "touch /tmp/not-a-hook",
+        &format!("ls {}", hooks.display()),
+        &format!("cat {}", pre.display()),
+        &format!(
+            "mkdir -p {}",
+            home.join(".local/share/ljos/other").display()
+        ),
+    ] {
+        allow(line);
+    }
+
+    let data = root.path().join("data");
+    std::env::set_var("XDG_DATA_HOME", &data);
+    deny("touch $XDG_DATA_HOME/ljos/git-hooks/pre-push");
+    deny("mkdir -p ${XDG_DATA_HOME}/ljos/git-hooks/x");
+    deny(&format!(
+        "touch {}",
+        data.join("ljos/git-hooks/pre-push").display()
+    ));
+    allow("touch $XDG_DATA_HOME/ljos/other");
+    allow("touch ~/.local/share/ljos/other");
+    deny("touch ~/.local/share/ljos/git-hooks/pre-push");
+    std::env::remove_var("XDG_DATA_HOME");
+
+    let custom = root.path().join("custom-hooks");
+    std::env::set_var("LJOS_GIT_HOOKS", &custom);
+    deny("touch $LJOS_GIT_HOOKS/pre-push");
+    deny(&format!("mkdir -p {}", custom.join("x").display()));
+    allow("touch /tmp/other-hooks/pre-push");
+    std::env::remove_var("LJOS_GIT_HOOKS");
+
+    let cfg = root.path().join("gitconfig");
+    fs::write(&cfg, "[core]\n\thooksPath = /tmp/not-the-ljos-hooks\n").unwrap();
+    allow("touch /tmp/not-the-ljos-hooks/pre-push");
+    allow("mkdir -p /tmp/not-the-ljos-hooks/x");
+    let booked = root.path().join("booked/ljos/git-hooks");
+    fs::write(
+        &cfg,
+        format!("[core]\n\thooksPath = {}\n", booked.display()),
+    )
+    .unwrap();
+    deny(&format!("touch {}", booked.join("pre-push").display()));
+    deny(&format!("mkdir -p {}", booked.join("x").display()));
+    allow("touch /tmp/not-the-ljos-hooks/pre-push");
+    fs::write(&cfg, "").unwrap();
+
+    std::env::set_var("LJOS_SEAT", "probe");
+    ljos_cli::cloud::up(false).unwrap();
+    let cloud_deny = |line: &str| {
+        let hit = ljos_cli::static_guard(line).unwrap_or_else(|| panic!("allowed: {line}"));
+        assert_eq!(hit.verdict, "deny", "{line}: {hit:?}");
+        assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {hit:?}");
+        assert!(
+            hit.reason.contains("pre-push hook")
+                || hit.reason.contains("core.hooksPath")
+                || hit.reason.contains("GIT_CONFIG"),
+            "{line}: {}",
+            hit.reason
+        );
+    };
+    for line in [
+        "printf x > ~/.gitconfig",
+        "cp /tmp/x ~/.gitconfig",
+        "git config --global core.hooksPath /tmp/x",
+        "git config --global --unset core.hooksPath",
+        "git -c core.hooksPath=/tmp/x status",
+        "git -c core.hooksPath=/dev/null status",
+    ] {
+        cloud_deny(line);
+    }
+    for line in [
+        "cat ~/.gitconfig",
+        "git config --get core.hooksPath",
+        "git config user.name seat",
+        "ls ~/.local/share/ljos/git-hooks",
+    ] {
+        allow(line);
+    }
 }
 
 #[test]

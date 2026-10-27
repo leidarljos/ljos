@@ -23134,7 +23134,13 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         ),
     }
     };
-    let is_path_word = |w: &str| !w.chars().any(char::is_whitespace) && is_seat_path(w);
+    let is_path_word = |w: &str, dir: Option<&Path>| {
+        if w.chars().any(char::is_whitespace) {
+            return false;
+        }
+        let hit = |path: &str| is_seat_path(path) || crate::cloud_hook::in_git_hooks_dir(path, dir);
+        hit(w) || w.split_once('=').is_some_and(|(_, rest)| hit(rest))
+    };
     if nested_too_deep(line) {
         return Some(too_deep_rule().clone());
     }
@@ -23302,7 +23308,7 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         }
         let redirect_target = words
             .windows(2)
-            .find(|w| w[0] == ">" && is_path_word(&w[1]))
+            .find(|w| w[0] == ">" && is_path_word(&w[1], cwd.as_deref()))
             .map(|w| w[1].clone());
         if let Some(t) = redirect_target {
             return Some(refuse(&t));
@@ -23310,7 +23316,11 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         if READERS.contains(&first) {
             continue;
         }
-        if let Some(t) = words.iter().skip(1).find(|w| is_path_word(w)) {
+        if let Some(t) = words
+            .iter()
+            .skip(1)
+            .find(|w| is_path_word(w, cwd.as_deref()))
+        {
             return Some(refuse(t));
         }
     }
