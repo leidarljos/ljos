@@ -21,6 +21,7 @@ mod runner;
 
 const PASS: &str = "correct horse battery";
 const PROMPT: &str = "Type your person passphrase to run this git push as you: ";
+const NOT_GATED: &str = "The person at their own terminal is not gated";
 
 /// The child's key directory. Read by this test binary only.
 const CHILD_DIR: &str = "PERSON_GATE_CHILD_DIR";
@@ -179,6 +180,14 @@ fn a_wrong_passphrase_is_refused_and_counted() {
     let err = refused(&out);
     assert!(err.contains("the passphrase did not match"), "{err}");
     assert_eq!(case.failures(), 1);
+    for part in [
+        "This shell carries CURSOR_AGENT, which a runner leaves on what it starts",
+        "type your person passphrase when asked",
+        "or run the push from your own machine",
+    ] {
+        assert!(err.contains(part), "{part:?} missing: {err}");
+    }
+    assert!(!err.contains(NOT_GATED), "{err}");
 }
 
 /// Five wrong answers, each waiting longer, and the sixth call is
@@ -237,6 +246,7 @@ fn a_hard_runner_is_never_asked() {
         "a hard runner was asked: {shown}"
     );
     assert!(!err.contains("passphrase"), "{err}");
+    assert!(err.contains(NOT_GATED), "{err}");
 }
 
 /// The right passphrase on a piped stdin is not an answer: with no
@@ -314,7 +324,13 @@ fn no_key_is_refused_without_a_prompt() {
     );
     let err = refused(&out);
     assert!(!shown.contains(PROMPT), "{shown}");
-    assert!(err.contains("no person passphrase is set"), "{err}");
+    assert!(err.contains("No person passphrase is set"), "{err}");
+    assert!(
+        err.contains("`ljos person-key set` from your own machine"),
+        "{err}"
+    );
+    assert!(err.contains("This shell carries CURSOR_AGENT"), "{err}");
+    assert!(!err.contains(NOT_GATED), "{err}");
 }
 
 /// The interrupt key at the prompt ends the hook, and echo is back on.

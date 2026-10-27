@@ -57,6 +57,12 @@ pub fn key_path() -> Option<PathBuf> {
     key_dir().map(|dir| dir.join(KEY_NAME))
 }
 
+/// Whether a person passphrase is kept.
+#[must_use]
+pub fn is_set() -> bool {
+    key_path().is_some_and(|path| matches!(read(&path), Ok(Some(_))))
+}
+
 /// Where wrong answers are counted.
 #[must_use]
 pub fn fails_path() -> Option<PathBuf> {

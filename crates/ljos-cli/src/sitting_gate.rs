@@ -78,15 +78,24 @@ pub fn guard_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if rule.verdict != "deny" || cause() != Some(crate::RunnerCause::MarkOnly) {
         return Some(rule);
     }
-    let what = crate::gates::git_calls(line, cwd)
+    let verb = crate::gates::git_calls(line, cwd)
         .ok()
         .and_then(|calls| calls.into_iter().find(writes_history))
-        .map_or_else(|| "command".to_string(), |call| format!("git {}", call.sub));
-    match crate::person_key::ask_person(&crate::runner_marks(), &what) {
+        .map_or_else(|| "command".to_string(), |call| call.sub);
+    let what = if verb == "command" {
+        verb.clone()
+    } else {
+        format!("git {verb}")
+    };
+    let marks = crate::runner_marks();
+    match crate::person_key::ask_person(&marks, &what) {
         Ok(()) => None,
-        Err(why) => Some(refusal(&format!(
-            "{}. {why}",
-            rule.reason.trim_start_matches("sitting-gate: ")
+        Err(why) => Some(refusal(&for_marks(
+            rule.reason.trim_start_matches("sitting-gate: "),
+            &marks,
+            &verb,
+            crate::person_key::is_set(),
+            &why,
         ))),
     }
 }
@@ -182,7 +191,7 @@ pub fn no_sitting(verb: &str, why: &str) -> String {
         "`git {verb}` writes history, and {why}. Run `ljos sitting ID` on the open ticket \
          this work belongs to (for a subagent when the parent holds ID, `ljos sitting ID` \
          opens a child ticket under ID, or run `ljos file \"TITLE\" --parent ID` then \
-         `ljos sitting <child-id>`), then run it again. The person at their own terminal is not gated"
+         `ljos sitting <child-id>`), then run it again. {NOT_GATED}"
     )
 }
 
@@ -196,9 +205,41 @@ pub fn unattributed_push(dest: &str, branches: &[String]) -> String {
          it sits on, but this call names no conversation, so it holds no live sitting and \
          sits on no ticket. Pass the conversation id in the hook payload or the session \
          environment, open a sitting with `ljos sitting ID`, and run it again. A push onto a \
-         topic branch is not held. The person at their own terminal is not gated",
+         topic branch is not held. {NOT_GATED}",
         named.join(", ")
     )
+}
+
+/// How a refusal under a runner in the tree or the scope ends.
+const NOT_GATED: &str = "The person at their own terminal is not gated";
+
+/// `detail`, a refusal from this module, for a call a runner variable
+/// alone refused: the closing sentence names the variables in `marks`
+/// and the two ways out. `has_key` is whether a person passphrase is
+/// kept, and `why` is what the prompt said when one was.
+#[must_use]
+pub fn for_marks(detail: &str, marks: &[String], verb: &str, has_key: bool, why: &str) -> String {
+    let base = detail.trim_end();
+    let base = base.strip_suffix(NOT_GATED).unwrap_or(base).trim_end();
+    let names = marks.join(", ");
+    let cause = format!(
+        "This shell carries {names}, which a runner leaves on what it starts, and nothing \
+         above it shows a terminal ljos can attribute to you."
+    );
+    let out = if has_key {
+        format!(
+            "If this is you: type your person passphrase when asked (set one with \
+             `ljos person-key set` from your own machine), or run the {verb} from your own \
+             machine. The prompt did not let it through: {why}."
+        )
+    } else {
+        format!(
+            "No person passphrase is set, so ljos did not ask for one. If this is you: set \
+             one with `ljos person-key set` from your own machine and run it again, or run \
+             the {verb} from your own machine."
+        )
+    };
+    format!("{base} {cause} {out}")
 }
 
 /// Why a push waits when [`crate::gates::consensus_push`] does not read.
@@ -216,7 +257,7 @@ pub fn seats_wait(dest: &str, branches: &[String], issue: &str, why: &str) -> St
         "`git push` {dest}, and a runner's push onto {} waits for the seats on the ticket \
          it sits on: {why}. Run `ljos consensus {issue} --no-file` to see where they stand, \
          then run it again once they clear it. A push onto this seat's own topic branch \
-         needs only the sitting. The person at their own terminal is not gated",
+         needs only the sitting. {NOT_GATED}",
         named.join(", ")
     )
 }
@@ -522,6 +563,47 @@ mod tests {
         fn drop(&mut self) {
             RUNNER.with(|r| r.set(false));
         }
+    }
+
+    /// A refusal a runner variable alone caused names the variable and
+    /// both ways out, and drops the closing sentence a hard runner gets.
+    #[test]
+    fn a_mark_only_refusal_names_the_variable_and_the_ways_out() {
+        let hard = no_sitting("push", "this conversation holds no live sitting");
+        assert!(hard.ends_with(NOT_GATED), "{hard}");
+        let marks = vec!["CURSOR_AGENT".to_string()];
+        let keyed = for_marks(&hard, &marks, "push", true, "the passphrase did not match");
+        assert!(!keyed.contains(NOT_GATED), "{keyed}");
+        assert!(keyed.starts_with("`git push` writes history"), "{keyed}");
+        for part in [
+            "This shell carries CURSOR_AGENT, which a runner leaves on what it starts",
+            "type your person passphrase when asked",
+            "`ljos person-key set` from your own machine",
+            "or run the push from your own machine",
+            "The prompt did not let it through: the passphrase did not match.",
+        ] {
+            assert!(keyed.contains(part), "{part:?} missing: {keyed}");
+        }
+        let unkeyed = for_marks(&hard, &marks, "push", false, "no person passphrase is set");
+        assert!(!unkeyed.contains(NOT_GATED), "{unkeyed}");
+        for part in [
+            "No person passphrase is set, so ljos did not ask for one",
+            "set one with `ljos person-key set` from your own machine",
+        ] {
+            assert!(unkeyed.contains(part), "{part:?} missing: {unkeyed}");
+        }
+        let two = vec!["CLAUDECODE".to_string(), "CURSOR_AGENT".to_string()];
+        let both = for_marks(
+            &seats_wait("may land on `main`", &[], "x-1", "no seat voted on x-1"),
+            &two,
+            "push",
+            true,
+            "nothing was typed at the passphrase prompt",
+        );
+        assert!(
+            both.contains("This shell carries CLAUDECODE, CURSOR_AGENT,"),
+            "{both}"
+        );
     }
 
     #[test]

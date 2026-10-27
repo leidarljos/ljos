@@ -838,9 +838,21 @@ fn gate(name: &str) -> Result<()> {
         return Err(refused);
     }
     let verb = if name == "pre-push" { "push" } else { "commit" };
-    match crate::person_key::ask_person(&crate::runner_marks(), &format!("git {verb}")) {
+    let marks = crate::runner_marks();
+    match crate::person_key::ask_person(&marks, &format!("git {verb}")) {
         Ok(()) => Ok(()),
-        Err(why) => Err(anyhow!("{refused:#}\nsitting-gate: {why}")),
+        Err(why) => {
+            let detail = format!("{refused:#}");
+            let detail = detail.strip_prefix("sitting-gate: ").unwrap_or(&detail);
+            let text = crate::sitting_gate::for_marks(
+                detail,
+                &marks,
+                verb,
+                crate::person_key::is_set(),
+                &why,
+            );
+            Err(anyhow!("sitting-gate: {text}"))
+        }
     }
 }
 
