@@ -574,7 +574,7 @@ Sync files
 File                                            Contents
 =============================================== ==================================================================================================================
 ``.ljos/sync.toml`` (in the tracker repository) the repository's scope and its age recipients; a ``[projects]`` table sends one project's lessons to another scope
-``.ljos/atoms/``                                one sealed log per machine
+``.ljos/atoms/``                                one sealed log per machine: a base ``<host>.jsonl.age``, the chunks sealed after it in ``<host>.chunks/``, and a ``<host>.digest``
 ``.ljos/user-rules/``                           one file of user rules per machine, sealed to the scope's recipients (``<host>.json.age``); a plaintext ``<host>.json`` is from before the seal
 =============================================== ==================================================================================================================
 
