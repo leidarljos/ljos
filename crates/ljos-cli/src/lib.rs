@@ -45,6 +45,7 @@ pub mod pack_copy;
 pub mod pack_link;
 pub mod panel_cloud;
 pub mod panel_gate;
+pub mod person_key;
 pub mod persona_session;
 pub mod plugin;
 pub mod proc_tree;
