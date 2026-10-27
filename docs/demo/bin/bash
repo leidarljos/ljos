@@ -1,0 +1,14 @@
+#!/bin/bash
+# The bash the tapes record. A long line breaks on a space.
+# The shell itself stays on the recorded terminal.
+here=$(dirname "$(readlink -f "$0")")
+if [ -n "${LJOS_DEMO_WRAP:-}" ]; then
+  exec /bin/bash "$@"
+fi
+export LJOS_DEMO_WRAP=1
+export LJOS_DEMO_DIR="$here"
+if [ -t 0 ]; then
+  # A login shell skips --rcfile, so this one is not a login shell.
+  exec /bin/bash --noprofile --rcfile "$here/wrap.bash" +o history
+fi
+exec /bin/bash "$@"

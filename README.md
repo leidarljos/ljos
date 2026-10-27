@@ -1,6 +1,8 @@
 # ljos
 
-![From the install line to the first recall](docs/demo/install-to-recall.gif)
+![ljos recall](docs/demo/04-sitting.gif)
+
+A typed lesson comes back on the recall, and the logbook note stays under its own heading.
 
 Tell your coding agent a rule once. It comes back on every prompt it bears
 on, and the hook refuses the command that breaks it.
