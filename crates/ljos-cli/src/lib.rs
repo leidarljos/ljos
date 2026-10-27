@@ -32352,15 +32352,13 @@ fn tracker_git_at(dir: &Path) -> std::process::Command {
 /// `git status` by the repository's `info/exclude`. Not in `.git`, where a
 /// hand clearing `*.lock` after a crash would unlink it under a live holder
 /// and the next seat would lock a new file beside it. `None` outside a git
-/// checkout.
+/// checkout. An exported `GIT_DIR` does not choose the checkout, in a hook
+/// or out of one.
 fn tracker_lock_path(dir: &Path) -> Option<PathBuf> {
-    let mut cmd = std::process::Command::new("git");
-    cmd.arg("-C")
-        .arg(dir)
-        .args(["rev-parse", "--show-toplevel", "--git-common-dir"])
+    let mut cmd = git_at(dir);
+    cmd.args(["rev-parse", "--show-toplevel", "--git-common-dir"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    apply_git_command_env(&mut cmd);
     git_hooks::hook_child_env(&mut cmd);
     let out = cmd.output().ok().filter(|o| o.status.success())?;
     let text = String::from_utf8_lossy(&out.stdout);
@@ -38840,8 +38838,9 @@ mod tests {
         );
     }
 
-    /// A bare `GIT_DIR` plus `GIT_WORK_TREE` checkout keeps its lock and push
-    /// semantics. `git -C` in that worktree must still see the configured repo.
+    /// A bare `GIT_DIR` plus `GIT_WORK_TREE` checkout still commits and
+    /// lease-pushes. Its work tree has no `.git` of its own, so it takes no
+    /// tracker lock: the exported variables do not make it a checkout.
     /// The variables ride on the git commands. The process environment is one
     /// for every test thread, and a thread that does not hold it would
     /// otherwise run git in this checkout.
@@ -38902,10 +38901,10 @@ mod tests {
             ("GIT_DIR", bare.as_os_str()),
             ("GIT_WORK_TREE", home.as_os_str()),
         ]);
-        let lock_path = super::tracker_lock_path(&home).expect("GIT_DIR checkout stays visible");
-        assert_eq!(lock_path, home.join(TRACKER_LOCK));
+        assert_eq!(super::tracker_lock_path(&home), None);
         let held = tracker_commit_lock(&home);
-        assert!(held.0.is_some(), "dotfiles checkout still locks");
+        assert!(held.0.is_none(), "the work tree took a lock from GIT_DIR");
+        assert!(!home.join(TRACKER_LOCK).exists());
         assert_eq!(
             commit_paths(&home, &[".vimrc"], "dot update"),
             PathCommit::Made
@@ -38957,6 +38956,43 @@ mod tests {
         );
         assert_eq!(std::env::var_os("GIT_DIR"), before_dir);
         assert_eq!(std::env::var_os("GIT_WORK_TREE"), before_tree);
+    }
+
+    /// Outside a hook, an exported `GIT_DIR` still does not choose the
+    /// lock. The lock file and its exclude line stay in the tracker.
+    #[test]
+    fn an_exported_git_dir_does_not_steer_the_lock() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        let decoy = dir.path().join("decoy");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&decoy).unwrap();
+        seeded_tracker(&real);
+        seeded_tracker(&decoy);
+        let exclude = |root: &Path| {
+            std::fs::read_to_string(root.join(".git/info/exclude")).unwrap_or_default()
+        };
+        let decoy_exclude = exclude(&decoy);
+        let _decoy = super::GitCommandEnv::set([
+            ("GIT_DIR", decoy.join(".git").as_os_str()),
+            ("GIT_WORK_TREE", decoy.as_os_str()),
+        ]);
+        assert_eq!(
+            super::tracker_lock_path(&real),
+            Some(real.join(TRACKER_LOCK))
+        );
+        let held = tracker_commit_lock(&real);
+        assert!(held.0.is_some(), "the tracker took no lock");
+        assert!(real.join(TRACKER_LOCK).is_file());
+        assert!(!decoy.join(TRACKER_LOCK).exists(), "the decoy was locked");
+        assert_eq!(exclude(&decoy), decoy_exclude, "the decoy exclude changed");
+        let line = format!("/{TRACKER_LOCK}");
+        assert!(
+            exclude(&real).lines().any(|l| l.trim() == line),
+            "{}",
+            exclude(&real)
+        );
     }
 
     /// A hook-child tracker write must check pin ignores in that tracker,
