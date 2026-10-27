@@ -1726,6 +1726,108 @@ fn the_installed_hooks_hold_a_runner_to_its_sitting() {
     );
 }
 
+/// A stub from a build before 64e489f5 ends its `ljos git-hook pre-push`
+/// call in `|| true`: the refusal prints and the push still goes out.
+/// Doctor and `ljos git-hooks status` name that stub, and a reinstall
+/// makes the refusal stop the push again.
+#[test]
+fn a_stale_pre_push_stub_is_named_and_reinstall_stops_the_push() {
+    let hab = Hab::new("repo");
+    install(&hab);
+    let bare = hab.root.join("bare.git");
+    fs::create_dir_all(&bare).unwrap();
+    git_bare(&bare, &["init", "--bare", "-q"]);
+    hab.git(
+        &hab.repo,
+        &["remote", "add", "origin", bare.to_str().unwrap()],
+    );
+    let runner = [("GROK_SESSION_ID", "5b0c2a71-9d1e-4f3a-8c6b-2e7f1a0d9c43")];
+    let push = |dest: &str| {
+        Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(&hab.repo)
+            .args(["push", "-q", "origin", dest])
+            .current_dir(&hab.repo)
+            .env_clear()
+            .envs(commit_env(&hab, &runner, false))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let sent = |branch: &str| {
+        Command::new("/usr/bin/git")
+            .arg("--git-dir")
+            .arg(&bare)
+            .args([
+                "rev-parse",
+                "-q",
+                "--verify",
+                &format!("refs/heads/{branch}"),
+            ])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    let refused = |out: &Output, branch: &str| {
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "the hook let it through: {err}");
+        assert!(err.contains("sitting-gate"), "{err}");
+        assert!(!sent(branch), "{branch} reached the remote: {err}");
+    };
+    let hooks_row = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_ljos"))
+            .args(["doctor", "--all"])
+            .current_dir(&hab.repo)
+            .env_clear()
+            .envs(hab.base_env())
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).to_string();
+        said.lines()
+            .find(|line| line.contains("\tgit hooks\t"))
+            .unwrap_or_else(|| panic!("no git hooks row:\n{said}"))
+            .to_string()
+    };
+    refused(&push("HEAD:fresh"), "fresh");
+    assert!(hooks_row().starts_with("ok\t"), "{}", hooks_row());
+
+    let path = hab.share.join("ljos/git-hooks/pre-push");
+    let stub = fs::read_to_string(&path).unwrap();
+    let begin = stub.find("# ljos:begin git-hook").unwrap();
+    let end_mark = "# ljos:end git-hook\n";
+    let end = stub.find(end_mark).unwrap() + end_mark.len();
+    let bin = shellish(Path::new(env!("CARGO_BIN_EXE_ljos")));
+    let old = format!(
+        "# ljos:begin git-hook\n\
+         if command -v ljos >/dev/null 2>&1; then\n\
+         \tljos git-hook pre-push \"$@\" >&2 || true\n\
+         else\n\
+         \t{bin} git-hook pre-push \"$@\" >&2 || true\n\
+         fi\n\
+         {end_mark}"
+    );
+    fs::write(&path, format!("{}{old}{}", &stub[..begin], &stub[end..])).unwrap();
+
+    let out = push("HEAD:stale");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("sitting-gate"), "{err}");
+    assert!(out.status.success() && sent("stale"), "{err}");
+    let row = hooks_row();
+    assert!(!row.starts_with("ok\t"), "{row}");
+    assert!(row.contains("pre-push stub predates"), "{row}");
+    assert!(row.contains("ljos git-hooks install"), "{row}");
+    let status = String::from_utf8(hab.ljos(&["git-hooks", "status"]).stdout).unwrap();
+    assert!(!status.contains("ljos hooks run\n"), "{status}");
+    assert!(status.contains("pre-push stub predates"), "{status}");
+
+    install(&hab);
+    refused(&push("HEAD:again"), "again");
+    assert!(hooks_row().starts_with("ok\t"), "{}", hooks_row());
+}
+
 /// A path listed in `[git_hooks] skip` is not booked, and reinstall leaves
 /// that file alone.
 #[test]

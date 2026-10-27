@@ -187,17 +187,22 @@ pub fn status() -> String {
     let dir = hooks_dir();
     let configured_path = global_hooks_path(&[]);
     let configured = configured_path.clone().unwrap_or_else(|| "(unset)".into());
-    let reachable = nonempty(configured_path.as_deref())
-        .is_some_and(|path| hooks_reachable(Path::new(path), &dir));
-    let hooks = if reachable {
+    let present = nonempty(configured_path.as_deref())
+        .is_some_and(|path| hooks_present(Path::new(path), &dir));
+    let stale = nonempty(configured_path.as_deref())
+        .filter(|_| present)
+        .and_then(|path| stale_note(Path::new(path), &dir));
+    let hooks = if present {
         configured.clone()
     } else if owned_installed(&dir) {
         dir.display().to_string()
     } else {
         "not installed".into()
     };
-    let reach = if reachable {
+    let reach = if present && stale.is_none() {
         "ljos hooks run".to_string()
+    } else if let Some(note) = stale {
+        format!("ljos hooks run, but {note}; {HOOKS_FIX}")
     } else {
         format!("ljos hooks do not run; {HOOKS_FIX}")
     };
@@ -214,7 +219,9 @@ pub const HOOKS_FIX: &str = "ljos git-hooks install";
 
 /// The doctor's `git hooks` row. It passes when `ljos git-hook` runs from
 /// the directory `core.hooksPath` names: ljos's own stubs, or a block in
-/// each hook of a directory the user already set. It does not ask to take
+/// each hook of a directory the user already set. The `pre-commit` and
+/// `pre-push` there must carry this build's block, so that a refusal
+/// fails the hook; the other hooks only book. It does not ask to take
 /// that path over. An env file that sets `LJOS_GIT_HOOKS` to another
 /// directory fails the row.
 #[must_use]
@@ -367,7 +374,14 @@ pub fn hooks_state(ours: &Path, configured: Option<&str>) -> (bool, String) {
         };
         return (true, state);
     }
-    let state = if same_dir(dir, ours) {
+    let stale = if hooks_present(dir, ours) {
+        stale_note(dir, ours)
+    } else {
+        None
+    };
+    let state = if let Some(note) = stale {
+        format!("core.hooksPath is {path}, but {note}; {HOOKS_FIX}")
+    } else if same_dir(dir, ours) {
         format!("core.hooksPath is {path}, but some hook stubs are missing there; {HOOKS_FIX}")
     } else {
         format!("core.hooksPath is {path}, and ljos is not chained there; {HOOKS_FIX}")
@@ -413,7 +427,11 @@ fn ljos_executable() -> String {
 /// has not, so this block and a chained hook can both read the shas and
 /// refs.
 fn hook_block(name: &str) -> String {
-    let bin = shell_quote(&ljos_executable());
+    hook_block_for(name, &shell_quote(&ljos_executable()))
+}
+
+/// [`hook_block`] with `bin`, already quoted, as the fallback binary.
+fn hook_block_for(name: &str, bin: &str) -> String {
     let (otherwise, fail) = if gates_git(name) {
         (format!("elif [ -x {bin} ]; then"), "exit 1")
     } else {
@@ -457,6 +475,26 @@ fn hook_block(name: &str) -> String {
 
 fn has_block(text: &str, name: &str) -> bool {
     text.contains(&hook_block(name))
+}
+
+/// Whether `text` holds the block this build writes for `name`, whatever
+/// binary it falls back to. Another `ljos` on the box wrote a different
+/// path into the same block. A block from an older build, such as one
+/// whose gated call ends in `|| true`, does not count.
+fn carries_block(text: &str, name: &str) -> bool {
+    // A path cannot hold NUL, so it marks where the fallback goes.
+    let template = hook_block_for(name, "\0");
+    let mut parts = template.split('\0');
+    let (Some(head), Some(next)) = (parts.next(), parts.next()) else {
+        return text.contains(&template);
+    };
+    text.match_indices(head).any(|(at, _)| {
+        let rest = &text[at + head.len()..];
+        let line = rest.find('\n').unwrap_or(rest.len());
+        rest.match_indices(next)
+            .take_while(|(end, _)| *end <= line)
+            .any(|(end, _)| rest.starts_with(&template.replace('\0', &rest[..end])[head.len()..]))
+    })
 }
 
 fn strip_block(text: &str) -> String {
@@ -558,12 +596,43 @@ fn user_chained(dir: &Path) -> bool {
     })
 }
 
-fn hooks_reachable(configured: &Path, ours: &Path) -> bool {
+fn hooks_present(configured: &Path, ours: &Path) -> bool {
     if same_dir(configured, ours) {
         owned_installed(configured)
     } else {
         user_chained(configured)
     }
+}
+
+/// The first `pre-commit` or `pre-push` in `dir` without this build's
+/// block. Git ignores the gate's refusal when that hook drops its exit
+/// status.
+fn stale_gate(dir: &Path) -> Option<&'static str> {
+    HOOK_NAMES
+        .iter()
+        .copied()
+        .filter(|name| gates_git(name))
+        .find(|name| {
+            !fs::read_to_string(dir.join(name)).is_ok_and(|text| carries_block(&text, name))
+        })
+}
+
+/// Why the gated hooks in `configured` let a refusal through, or `None`.
+fn stale_note(configured: &Path, ours: &Path) -> Option<String> {
+    let name = stale_gate(configured)?;
+    let verb = if name == "pre-push" { "push" } else { "commit" };
+    let what = if same_dir(configured, ours) {
+        "stub"
+    } else {
+        "hook's ljos block"
+    };
+    Some(format!(
+        "the {name} {what} predates the current gate and lets a refused {verb} through"
+    ))
+}
+
+fn hooks_reachable(configured: &Path, ours: &Path) -> bool {
+    hooks_present(configured, ours) && stale_gate(configured).is_none()
 }
 
 fn write_owned_hooks(dir: &Path) -> Result<()> {
@@ -1423,6 +1492,61 @@ mod tests {
         let (ok, state) = super::hooks_state(&ours, Some(&ours_s));
         assert!(!ok, "{state}");
         assert!(state.contains(super::HOOKS_FIX), "{state}");
+    }
+
+    /// The `pre-push` block a build before 64e489f5 wrote. `|| true`
+    /// drops the gate's refusal, so git pushes anyway.
+    const OLD_PRE_PUSH: &str = "# ljos:begin git-hook\n\
+        if command -v ljos >/dev/null 2>&1; then\n\
+        \tljos git-hook pre-push \"$@\" >&2 || true\n\
+        else\n\
+        \t'/usr/local/bin/ljos' git-hook pre-push \"$@\" >&2 || true\n\
+        fi\n\
+        # ljos:end git-hook\n";
+
+    #[test]
+    fn the_doctor_fails_a_pre_push_stub_that_drops_a_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let ours = dir.path().join("git-hooks");
+        let ours_s = ours.display().to_string();
+        let config = dir.path().join("config");
+        super::write_owned_hooks(&ours).unwrap();
+        let (ok, state) = super::doctor_state(&ours, Some(&ours_s), &config);
+        assert!(ok, "{state}");
+
+        let fresh = super::hook_body("pre-push");
+        let stale = fresh.replace(&super::hook_block("pre-push"), OLD_PRE_PUSH);
+        assert_ne!(stale, fresh);
+        std::fs::write(ours.join("pre-push"), &stale).unwrap();
+        let (ok, state) = super::doctor_state(&ours, Some(&ours_s), &config);
+        assert!(!ok, "a stale pre-push stub passed: {state}");
+        assert!(state.contains("pre-push stub predates"), "{state}");
+        assert_eq!(state.matches(super::HOOKS_FIX).count(), 1, "{state}");
+
+        let moved = fresh.replace(
+            &super::shell_quote(&super::ljos_executable()),
+            "'/opt/other/ljos'",
+        );
+        assert_ne!(moved, fresh);
+        std::fs::write(ours.join("pre-push"), moved).unwrap();
+        let (ok, state) = super::doctor_state(&ours, Some(&ours_s), &config);
+        assert!(ok, "another fallback path failed the row: {state}");
+
+        let user = dir.path().join("user-hooks");
+        super::chain_user_hooks(&user).unwrap();
+        let user_s = user.display().to_string();
+        let prior = format!("#!/bin/sh\necho mine\n{OLD_PRE_PUSH}");
+        std::fs::write(user.join("pre-push"), &prior).unwrap();
+        let (ok, state) = super::hooks_state(&ours, Some(&user_s));
+        assert!(!ok, "a stale user block passed: {state}");
+        assert!(state.contains("pre-push hook's ljos block"), "{state}");
+        super::chain_user_hooks(&user).unwrap();
+        let (ok, state) = super::hooks_state(&ours, Some(&user_s));
+        assert!(ok, "install left the stale block: {state}");
+        let hooked = std::fs::read_to_string(user.join("pre-push")).unwrap();
+        assert!(hooked.starts_with("#!/bin/sh\necho mine\n"), "{hooked}");
+        assert_eq!(hooked.matches("# ljos:begin git-hook").count(), 1);
+        assert!(!hooked.contains("\"$@\" >&2 || true"), "{hooked}");
     }
 
     #[test]
