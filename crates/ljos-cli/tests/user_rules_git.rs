@@ -325,6 +325,35 @@ fn the_cloud_pre_push_still_checks_a_user_rules_push() {
     );
 }
 
+/// A caller that exports an author, a committer or `EMAIL` does not sign
+/// the user-rules commit. It names the tracker checkout's `user.name` and
+/// `user.email`.
+#[test]
+fn the_user_rules_commit_takes_no_identity_from_the_environment() {
+    let s = Scratch::new();
+    let (remote, tracker) = s.tracker();
+    let name = Path::new("caller");
+    let email = Path::new("caller@example.invalid");
+    let out = s.exchange(
+        &tracker,
+        &[
+            ("GIT_AUTHOR_NAME", name),
+            ("GIT_AUTHOR_EMAIL", email),
+            ("GIT_COMMITTER_NAME", name),
+            ("GIT_COMMITTER_EMAIL", email),
+            ("EMAIL", email),
+        ],
+    );
+    let text = said(&out);
+    assert!(out.status.success(), "{text}");
+    assert_tracker_shared(&s, &tracker, &remote, &text);
+    assert_eq!(
+        s.must(&tracker, &["log", "-1", "--format=%an <%ae> | %cn <%ce>"]),
+        "seat <seat@example.invalid> | seat <seat@example.invalid>",
+        "{text}"
+    );
+}
+
 /// A hook exports `GIT_DIR`, and a worktree script may also export
 /// `GIT_WORK_TREE`. Either way the caller's repository gains no commit,
 /// no staged file, no lock line and no push, and the tracker gets the

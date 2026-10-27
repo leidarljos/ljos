@@ -3955,6 +3955,17 @@ fn repo_rows(root: &Path) -> Result<Vec<crate::user_rules::UserRule>> {
 /// How long a git past its budget has to clean up after SIGTERM.
 const TERM_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Variables git reads before `user.name` and `user.email`. The
+/// user-rules commit names the tracker checkout's git config, not
+/// whatever the caller exported.
+const IDENTITY_ENV: &[&str] = &[
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+    "EMAIL",
+];
+
 /// The `core.hooksPath` user-rules git runs with. The login's hooks and
 /// ljos's sitting gate run on none of these calls. A push still runs the
 /// destination check `ljos cloud up` installs, when it is there, since
@@ -3992,6 +4003,9 @@ fn git_within(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for key in IDENTITY_ENV {
+        cmd.env_remove(key);
+    }
     // SAFETY: the closure runs in the forked child before exec. setpgid
     // makes that child a group leader so a timed-out fetch can be killed
     // with the helpers it started. The child has no other threads.

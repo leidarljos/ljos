@@ -1,0 +1,1 @@
+The user-rules commit is authored and committed as the tracker checkout's `user.name` and `user.email`. An exported `GIT_AUTHOR_*`, `GIT_COMMITTER_*` or `EMAIL`, such as a hook or a script sets for its own commits, no longer signs it.
