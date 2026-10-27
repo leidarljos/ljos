@@ -232,3 +232,188 @@ fn the_vissue_children_ljos_runs_are_not_refused() {
         "{calls}\n{said}"
     );
 }
+
+fn hook_payload(home: &Path, payload: serde_json::Value) -> Output {
+    let mut hook = as_agent(home, &["hook"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    hook.wait_with_output().unwrap()
+}
+
+/// The seat hook's matcher names vissue write tools, so the runner
+/// sends those calls to the hook.
+#[test]
+fn the_seat_hook_matches_a_vissue_write_tool() {
+    let hooks = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks/hooks.json");
+    let text = std::fs::read_to_string(&hooks).unwrap();
+    assert!(
+        text.contains(
+            "vissue_(close|cancel|update|create|q|note|append|refile|claim|release|vote)"
+        ),
+        "{text}"
+    );
+    let grok = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/grok/ljos.json");
+    let grok_text = std::fs::read_to_string(&grok).unwrap();
+    assert!(
+        grok_text.contains(
+            "vissue_(close|cancel|update|create|q|note|append|refile|claim|release|vote)"
+        ),
+        "{}",
+        grok.display()
+    );
+}
+
+/// A vissue MCP write under a runner is the same refusal as the shell
+/// verb. A DONE state names `ljos finish` and does not name a close flag.
+#[test]
+fn a_vissue_mcp_write_under_a_runner_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let cases = [
+        (
+            serde_json::json!({"id": "ljos-ab12", "state": "DONE"}),
+            "mcp__vissue__vissue_update",
+            "ljos finish ljos-ab12",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12"}),
+            "mcp__plugin_vissue_vissue__vissue_close",
+            "ljos finish ljos-ab12",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12"}),
+            "mcp__vissue__vissue_cancel",
+            "ljos finish ljos-ab12 --status cancelled",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12"}),
+            "mcp__vissue__vissue_claim",
+            "ljos sitting ljos-ab12",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12", "text": "halfway"}),
+            "mcp__vissue__vissue_note",
+            "ljos note ljos-ab12",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12", "for": "yes"}),
+            "mcp__vissue__vissue_vote",
+            "ljos vote ljos-ab12",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12", "parent": "ljos-gkq2"}),
+            "mcp__vissue__vissue_refile",
+            "ljos file",
+        ),
+        (
+            serde_json::json!({"parent": "ljos-gkq2", "title": "a child"}),
+            "mcp__vissue__vissue_create",
+            "ljos file",
+        ),
+    ];
+    for (input, tool, instead) in cases {
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "vissue-mcp-write-0001",
+            "cwd": home.path(),
+            "tool_name": tool,
+            "tool_input": input,
+        });
+        let out = hook_payload(home.path(), payload);
+        let said = text(&out);
+        assert!(said.contains("deny"), "{tool} was allowed:\n{said}");
+        assert!(
+            said.contains(instead),
+            "{tool} did not name {instead}:\n{said}"
+        );
+        if instead.starts_with("ljos finish") {
+            assert!(!said.contains("--close"), "{tool}:\n{said}");
+        }
+    }
+    let cursor = serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": "c-vissue",
+        "hook_event_name": "beforeMCPExecution",
+        "tool_name": "vissue_update",
+        "mcp_server_name": "vissue",
+        "tool_input": {"id": "ljos-ab12", "state": "DONE"},
+    });
+    let out = hook_payload(home.path(), cursor);
+    let said = text(&out);
+    assert!(said.contains("deny"), "cursor update was allowed:\n{said}");
+    assert!(said.contains("ljos finish ljos-ab12"), "{said}");
+    assert!(!said.contains("--close"), "{said}");
+}
+
+/// A vissue read, and a vote that only asks for the tally, stay allowed.
+#[test]
+fn a_vissue_mcp_read_under_a_runner_stays_allowed() {
+    let home = tempfile::tempdir().unwrap();
+    for (tool, input) in [
+        (
+            "mcp__vissue__vissue_show",
+            serde_json::json!({"id": "ljos-ab12"}),
+        ),
+        (
+            "mcp__vissue__vissue_vote",
+            serde_json::json!({"id": "ljos-ab12"}),
+        ),
+    ] {
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "vissue-mcp-read-0001",
+            "cwd": home.path(),
+            "tool_name": tool,
+            "tool_input": input,
+        });
+        let out = hook_payload(home.path(), payload);
+        let said = text(&out);
+        assert!(!said.contains("deny"), "{tool} was refused:\n{said}");
+    }
+}
+
+/// A Write or Edit of issues.org is a tracker write. Another file is not.
+#[test]
+fn a_file_tool_write_of_issues_org_under_a_runner_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    for (tool, path) in [
+        ("Write", "/tmp/tracker/Software/ljos/issues.org"),
+        ("Edit", "issues.org"),
+        ("MultiEdit", "/tmp/tracker/issues.org"),
+        ("apply_patch", "/tmp/tracker/issues.org"),
+    ] {
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "org-write-0001",
+            "cwd": home.path(),
+            "tool_name": tool,
+            "tool_input": {
+                "file_path": path,
+                "content": "* DONE x",
+                "new_string": "* DONE x",
+            },
+        });
+        let out = hook_payload(home.path(), payload);
+        let said = text(&out);
+        assert!(said.contains("deny"), "{tool} {path} was allowed:\n{said}");
+        assert!(said.contains("ljos finish"), "{tool}:\n{said}");
+        assert!(!said.contains("--close"), "{tool}:\n{said}");
+    }
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "org-write-0002",
+        "cwd": home.path(),
+        "tool_name": "Write",
+        "tool_input": {"file_path": "/tmp/tracker/README.md", "content": "hello"},
+    });
+    let out = hook_payload(home.path(), payload);
+    let said = text(&out);
+    assert!(!said.contains("deny"), "README was refused:\n{said}");
+}

@@ -350,7 +350,8 @@ file of the shape
 =onboard= merges =ljos hook= into it on the prompt and session-end events
 (matcher =*=) by default, or on the events the table's =hook_events= lists
 (=PreToolUse= takes the matcher =Bash|Edit|Write|MultiEdit|NotebookEdit|apply_patch=,
-and a second group =^mcp__.+__ljos_.+$= for the seat's MCP tools),
+and a second group =^mcp__.+__ljos_.+$= for the seat's MCP tools, and a
+third group for a vissue write tool),
 once each, and drops it from events no longer listed. On the events
 =hook_fail_closed= lists, the hook carries ="onFailure": "block"=, so the
 runner stops the action when the hook fails, times out or cannot start;
@@ -372,7 +373,7 @@ stdin is an argv line and answered in plain lines.
 | =PostToolUseFailure= | searches the pack on the failed command and its error and answers with up to three standing claims that two scorers named and that share at least two content words with the cue, each once between compactions |
 | =PreCompact= | fires up to eight of the memories injected so far, drops all of them from the session's record so a later prompt can bring them back, and keeps a note naming the issue the conversation still has claimed, for the next delivery |
 | =SessionStart= | after a compaction (=source= =compact=), on a runner that takes its context, answers with that note; a fresh session hears one line: that ljos is on, the memory and due counts, the command guard, and up to three preferences |
-| =PreToolUse= | applies the TCB and pack rules to the command (matcher =Bash|Edit|Write|MultiEdit|NotebookEdit|apply_patch=); a deny blocks. It keeps the call's =agent_id= for each =ljos= line, and on a seat MCP tool (=^mcp__.+__ljos_.+$=) only notes a subagent's call, so the ballot binds the session plus that agent |
+| =PreToolUse= | applies the TCB and pack rules to the command (matcher =Bash|Edit|Write|MultiEdit|NotebookEdit|apply_patch=); a deny blocks. It keeps the call's =agent_id= for each =ljos= line, and on a seat MCP tool (=^mcp__.+__ljos_.+$=) only notes a subagent's call, so the ballot binds the session plus that agent. A vissue write tool is refused by the same tracker guard and the refusal names =ljos finish= |
 | =Stop= | speaks only when the turn ran no tool; blocks one turn that was asked for a decision and cast no ballot; with no issue held, blocks one turn that used tools and never touched the seat; with Jev on, audits the turn once from the runner's transcript; then holds one turn for unread interrupt mail (=decision: block=, or =followup_message= in Cursor) and receipts it |
 | =SubagentStop= | names the issue the subagent's conversation has claimed and asks for the ballot on a decision; with Jev on, audits the turn once |
 

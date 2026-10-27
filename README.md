@@ -443,6 +443,15 @@ ljos read <id>                                 # the receipt the sender sees
 ljos reply <id> "looking"                      # back to the sender, on the same issue
 ```
 
+## A tracker write the hook sees
+
+The seat hook matches `mcp__*__ljos_*` and a vissue write tool
+(`vissue_update`, `vissue_close`, `vissue_cancel`, `vissue_claim`,
+`vissue_note`, `vissue_vote`, `vissue_refile`, `vissue_create`, and
+the same verbs with `q`, `append`, and `release`). A call that sets
+`state` to `DONE` is refused and names `ljos finish`. A `Write` or
+`Edit` of `issues.org` is the same refusal. A read is not.
+
 ## MCP
 
 `ljos-mcp` serves the same verbs over stdio, and so does `ljos mcp`, which runs

@@ -7245,10 +7245,16 @@ fn hook_matcher(event: &str) -> &'static str {
 /// So it is a `PreToolUse` group of its own.
 pub const SEAT_MCP_MATCHER: &str = "^mcp__.+__ljos_.+$";
 
+/// vissue MCP write tools, named the same way as the seat's tools.
+/// `mcp__vissue__vissue_update` is one. The hook judges the call with
+/// the same tracker guard as a shell `vissue` write.
+pub const VISSUE_MCP_MATCHER: &str =
+    "^mcp__.+__vissue_(close|cancel|update|create|q|note|append|refile|claim|release|vote)$";
+
 /// The matchers of the seat's further groups on `event`.
 fn extra_hook_matchers(event: &str) -> &'static [&'static str] {
     if event == "PreToolUse" {
-        &[SEAT_MCP_MATCHER]
+        &[SEAT_MCP_MATCHER, VISSUE_MCP_MATCHER]
     } else {
         &[]
     }
@@ -8562,7 +8568,102 @@ pub fn hook_call_as(input: &str, event: Option<&str>) -> HookCall {
 /// that also sends `prompt` on `PostToolUse` would otherwise hide
 /// `tool_input.command`, and a commit would be recorded as the baseline
 /// instead of a deed. A prompt event still reads the prompt.
+const VISSUE_MCP_VERBS: &[&str] = &[
+    "close", "cancel", "update", "create", "q", "note", "append", "refile", "claim", "release",
+    "vote",
+];
+
+/// The write verb in a vissue MCP tool name, if it is one.
+fn vissue_mcp_verb(tool: &str) -> Option<&str> {
+    if tool.is_empty() {
+        return None;
+    }
+    let short = tool.rsplit([':', '/']).next().unwrap_or(tool);
+    let short = short.rsplit("__").next().unwrap_or(short);
+    let verb = short.strip_prefix("vissue_")?;
+    VISSUE_MCP_VERBS.iter().copied().find(|name| *name == verb)
+}
+
+fn mcp_atom(raw: &str) -> String {
+    let s: String = raw
+        .chars()
+        .filter(|c| !c.is_whitespace() && !c.is_control())
+        .take(64)
+        .collect();
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        s
+    } else {
+        "ID".into()
+    }
+}
+
+/// A shell line the tracker guard already judges, built from a vissue
+/// MCP write. `None` for a tool that is not one of those writes.
+fn vissue_mcp_line(tool: &str, input: &Value) -> Option<String> {
+    let verb = vissue_mcp_verb(tool)?;
+    let parsed;
+    let value = if let Value::String(text) = input {
+        parsed = serde_json::from_str::<Value>(text).ok()?;
+        &parsed
+    } else {
+        input
+    };
+    let obj = value.as_object()?;
+    let text = |keys: &[&str]| -> Option<String> {
+        keys.iter().find_map(|key| {
+            let raw = obj.get(*key)?;
+            let s = raw
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .or_else(|| raw.as_i64().map(|n| n.to_string()))
+                .or_else(|| raw.as_bool().filter(|b| *b).map(|_| "1".to_string()))?;
+            Some(mcp_atom(&s))
+        })
+    };
+    let id = text(&["id", "issue", "key"]).unwrap_or_else(|| "ID".into());
+    let line = match verb {
+        "update" => match text(&["state", "status"]) {
+            Some(state) => format!("vissue update {id} --state {state}"),
+            None => format!("vissue update {id}"),
+        },
+        "vote" => {
+            let withdraw = obj.get("withdraw").and_then(Value::as_bool) == Some(true)
+                || text(&["withdraw"]).is_some();
+            if withdraw {
+                format!("vissue vote {id} --withdraw")
+            } else if let Some(side) = text(&["for", "side", "ballot", "choice"]) {
+                format!("vissue vote {id} --for {side}")
+            } else {
+                format!("vissue vote {id}")
+            }
+        }
+        "create" | "q" => match text(&["parent"]) {
+            Some(parent) => format!("vissue {verb} --parent {parent}"),
+            None => format!("vissue {verb}"),
+        },
+        "refile" => match text(&["parent"]) {
+            Some(parent) => format!("vissue refile {id} --parent {parent}"),
+            None => format!("vissue refile {id}"),
+        },
+        "note" | "append" => format!("vissue {verb} {id} note"),
+        _ => format!("vissue {verb} {id}"),
+    };
+    Some(line)
+}
+
 fn cue_for(v: &Value, input: &Value, event: &str) -> String {
+    let early = v["tool_name"]
+        .as_str()
+        .or_else(|| v["toolName"].as_str())
+        .unwrap_or("");
+    if let Some(line) = vissue_mcp_line(early, input) {
+        return line;
+    }
     let text = |value: Option<&str>| {
         value
             .map(str::trim)
@@ -13640,7 +13741,11 @@ pub fn cursor_side_answer(input: &str, event: Option<&str>) -> Option<(String, i
     {
         return None;
     }
-    let ruled = user_rules::guard_payload(input);
+    let ruled = user_rules::guard_payload(input).or_else(|| {
+        let first = call.cue.split_whitespace().next().unwrap_or("");
+        let bin = first.rsplit('/').next().unwrap_or(first);
+        (bin == "vissue").then(|| static_guard(&call.cue)).flatten()
+    });
     let output = hook_output_ruled(&call, "", ruled.as_ref());
     let code = side_answer_exit(&output);
     Some((output, code))
@@ -13932,7 +14037,9 @@ fn cursor_output(call: &HookCall, context: &str, verdict: Option<&Rule>) -> Stri
     let mut out = serde_json::Map::new();
     match call.event.as_str() {
         "beforeMCPExecution" => {
-            if let Some(r) = verdict.filter(|r| user_rules::mcp_event_denies(&call.event, r)) {
+            if let Some(r) = verdict.filter(|r| {
+                user_rules::mcp_event_denies(&call.event, r) || r.pattern.starts_with("vissue ")
+            }) {
                 let reason = format!("{} (ljos rule `{}`)", r.reason, r.pattern);
                 out.insert("permission".into(), Value::String("deny".into()));
                 out.insert("user_message".into(), Value::String(reason.clone()));
@@ -23431,6 +23538,30 @@ fn indirect_tracker_write(line: &str) -> Option<Rule> {
         }
     }
     None
+}
+
+/// A `Write` or `Edit` of `issues.org`. The hook already sees those
+/// tools. The file is the tracker, so the call takes the same refusal
+/// as a shell write of that file.
+fn org_tool_write(line: &str) -> Option<Rule> {
+    if !under_a_runner() {
+        return None;
+    }
+    let mut words = line.split_whitespace();
+    let tool = words.next()?;
+    let name = tool.rsplit('/').next().unwrap_or(tool);
+    const TOOLS: &[&str] = &["Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch"];
+    if !TOOLS.iter().any(|t| name.eq_ignore_ascii_case(t)) {
+        return None;
+    }
+    let hits = words.any(|word| {
+        let word = word.trim_matches(|c: char| c == '"' || c == '\'');
+        Path::new(word)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case("issues.org"))
+    });
+    hits.then(indirect_close_rule)
 }
 
 fn indirect_close_rule() -> Rule {
@@ -34974,6 +35105,9 @@ pub fn static_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if let Some(rule) = indirect_tracker_write(line) {
         return Some(rule);
     }
+    if let Some(rule) = org_tool_write(line) {
+        return Some(rule);
+    }
     if let Some(rule) = destructive_delete(line) {
         return Some(rule);
     }
@@ -37762,7 +37896,8 @@ mod tests {
             "Bash|Edit|Write|MultiEdit|NotebookEdit|apply_patch"
         );
         assert_eq!(v["hooks"]["PreToolUse"][1]["matcher"], SEAT_MCP_MATCHER);
-        assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
+        assert_eq!(v["hooks"]["PreToolUse"][2]["matcher"], VISSUE_MCP_MATCHER);
+        assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 3);
         let again = hook_step(&file, &events, &[], false);
         assert!(
             again.detail.contains("carries the memory hook"),
@@ -44465,8 +44600,8 @@ mod tests {
         assert_eq!(v["theme"], "dark", "the rest of the file is kept");
         assert_eq!(
             v["hooks"]["PreToolUse"].as_array().unwrap().len(),
-            3,
-            "the other hook stays beside the tool group and the MCP group"
+            4,
+            "the other hook stays beside the tool group and the MCP groups"
         );
         assert_eq!(v["hooks"]["UserPromptSubmit"].as_array().unwrap().len(), 1);
         // Narrowing to the default drops the seat's tool-call group and
@@ -44527,7 +44662,11 @@ mod tests {
             v["hooks"]["PreToolUse"][2]["hooks"][0]["onFailure"],
             "block"
         );
-        assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            v["hooks"]["PreToolUse"][3]["hooks"][0]["onFailure"],
+            "block"
+        );
+        assert_eq!(v["hooks"]["PreToolUse"].as_array().unwrap().len(), 4);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -47760,9 +47899,10 @@ mod tests {
         let text = super::grok_hooks_json(Path::new("/opt/seat/bin/ljos"));
         let v: Value = serde_json::from_str(&text).expect("the hook file is JSON");
         let pre_groups = v["hooks"]["PreToolUse"].as_array().expect("PreToolUse");
-        assert_eq!(pre_groups.len(), 2);
+        assert_eq!(pre_groups.len(), 3);
         assert_eq!(pre_groups[0]["matcher"], "Bash");
         assert_eq!(pre_groups[1]["matcher"], super::SEAT_MCP_MATCHER);
+        assert_eq!(pre_groups[2]["matcher"], super::VISSUE_MCP_MATCHER);
         for g in pre_groups {
             let pre = &g["hooks"][0];
             assert_eq!(pre["command"], "/opt/seat/bin/ljos hook");

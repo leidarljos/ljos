@@ -68,6 +68,16 @@
             "timeout": 20
           }
         ]
+      },
+      {
+        "matcher": "^mcp__.+__vissue_(close|cancel|update|create|q|note|append|refile|claim|release|vote)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/ljos-plugin\" ljos hook",
+            "timeout": 20
+          }
+        ]
       }
     ],
     "SubagentStop": [

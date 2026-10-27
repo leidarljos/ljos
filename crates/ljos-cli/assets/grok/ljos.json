@@ -53,6 +53,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "^mcp__.+__vissue_(close|cancel|update|create|q|note|append|refile|claim|release|vote)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{ljos} hook",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PreCompact": [
