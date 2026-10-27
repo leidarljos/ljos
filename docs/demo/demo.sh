@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
-# The README recording: a fresh HOME, from the install line to the first
-# recall. Each command is typed, then run; nothing prints a canned result,
-# and nothing runs that the cast does not show.
-#
-#   asciinema rec --cols 100 --rows 30 --idle-time-limit 1.5 \
-#     -c docs/demo/demo.sh docs/demo/install-to-recall.cast
+# A fresh HOME, from the install line to the first recall and a policy
+# check. Each command is typed, then run; nothing prints a canned result,
+# and nothing runs that the script does not show. The README pictures are
+# docs/demo/01-install.gif, docs/demo/02-memory.gif, docs/demo/03-policy.gif
+# and docs/demo/04-sitting.gif.
 #
 # DEMO_ROOT is where the fresh HOME is made (default: the caller's HOME). It
 # must not be a temporary directory: ljos treats a HOME under /tmp as a test
 # sandbox and keeps its guard and memory writer off there.
 # DEMO_INSTALL is the install line typed first (default: the README's). A
-# recording made before a release names its local build here, such as
-# `sh /opt/ljos-build/install.sh --from-dir /opt/ljos-build`, so the cast
+# run made before a release names its local build here, such as
+# `sh /opt/ljos-build/install.sh --from-dir /opt/ljos-build`, so the script
 # shows where the programs came from.
 [ -z "${DEMO_CLEAN:-}" ] && exec env -i DEMO_CLEAN=1 TERM=xterm-256color PATH=/usr/bin:/bin \
   DEMO_ROOT="${DEMO_ROOT:-$HOME}" DEMO_INSTALL="${DEMO_INSTALL:-}" bash "$0" "$@"

@@ -5,6 +5,12 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## Unreleased
+
+### Documentation
+
+- The README shows the sitting picture under the title (`docs/demo/04-sitting.gif`). The demo pictures are `docs/demo/01-install.gif`, `docs/demo/02-memory.gif`, `docs/demo/03-policy.gif` and `docs/demo/04-sitting.gif`.
+
 ## 0.34.1 (2026-10-27)
 
 ### Fixes
