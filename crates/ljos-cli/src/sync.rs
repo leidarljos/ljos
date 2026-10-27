@@ -3955,6 +3955,19 @@ fn repo_rows(root: &Path) -> Result<Vec<crate::user_rules::UserRule>> {
 /// How long a git past its budget has to clean up after SIGTERM.
 const TERM_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// The `core.hooksPath` user-rules git runs with. The login's hooks and
+/// ljos's sitting gate run on none of these calls. A push still runs the
+/// destination check `ljos cloud up` installs, when it is there, since
+/// that hook is what keeps a cloud seat's pushes on its allowlist.
+fn user_rules_hooks(args: &[&str]) -> PathBuf {
+    let cloud = crate::cloud_hook::hooks_dir()
+        .filter(|dir| std::fs::symlink_metadata(dir.join("pre-push")).is_ok());
+    match cloud {
+        Some(dir) if args.first() == Some(&"push") => dir,
+        _ => PathBuf::from("/dev/null"),
+    }
+}
+
 fn git_within(
     root: &Path,
     args: &[&str],
@@ -3970,7 +3983,11 @@ fn git_within(
     }
     // A hook or a worktree script exports GIT_DIR, which outranks `-C`.
     let mut cmd = crate::git_at(root);
-    cmd.args(args)
+    let mut hooks = std::ffi::OsString::from("core.hooksPath=");
+    hooks.push(user_rules_hooks(args));
+    cmd.arg("-c")
+        .arg(hooks)
+        .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -4604,6 +4621,11 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&fake_age, std::fs::Permissions::from_mode(0o755)).unwrap();
+        with_path_dir(dir, body)
+    }
+
+    /// Run `body` with `dir` first on PATH. The caller holds [`crate::test_env_lock`].
+    fn with_path_dir<T>(dir: &Path, body: impl FnOnce() -> T) -> T {
         struct PathGuard(Option<std::ffi::OsString>);
         impl Drop for PathGuard {
             fn drop(&mut self) {
@@ -4634,8 +4656,7 @@ mod tests {
             "entities": entities, "embedding": [0.1, 0.2]})
     }
 
-    fn hooked_repo(root: &Path, pre_commit: &str) -> String {
-        use std::os::unix::fs::PermissionsExt as _;
+    fn rules_repo(root: &Path) -> String {
         let git = |args: &[&str]| {
             let out = Command::new("git")
                 .arg("-C")
@@ -4651,31 +4672,46 @@ mod tests {
         std::fs::write(root.join("seed"), "seed\n").unwrap();
         git(&["add", "seed"]);
         git(&["commit", "-q", "-m", "seed"]);
-        let hooks = root.join(".git/test-hooks");
-        std::fs::create_dir_all(&hooks).unwrap();
-        let hook = hooks.join("pre-commit");
-        std::fs::write(&hook, pre_commit).unwrap();
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-        git(&["config", "core.hooksPath", &hooks.display().to_string()]);
         let rel = sealed_rules_rel("probe-host");
         std::fs::create_dir_all(root.join(".ljos/user-rules")).unwrap();
         std::fs::write(root.join(&rel), "sealed\n").unwrap();
         rel
     }
 
-    /// A commit cut off by the hook's budget leaves no index.lock: git is
-    /// terminated, and cleans up, before anything kills it.
+    /// A commit cut off by the budget leaves no index.lock: git is
+    /// terminated, and cleans up, before anything kills it. No hook runs on
+    /// that commit, so the stall is a git first on PATH that takes the
+    /// index lock and drops it on SIGTERM, as git does.
     #[test]
     fn a_commit_past_its_budget_leaves_no_index_lock() {
+        use std::os::unix::fs::PermissionsExt as _;
         // git comes from PATH. A parallel test points PATH at a directory
         // with no git while this one is running.
         let _env = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let rel = hooked_repo(root, "#!/bin/sh\nsleep 30\n");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let rel = rules_repo(&root);
+        let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|dir| dir.join("git"))
+            .find(|git| git.is_file())
+            .expect("git on PATH");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(
+            bin.join("git"),
+            format!(
+                "#!/bin/sh\ncase \" $* \" in\n  *' commit '*)\n    lock='{}'\n    : > \"$lock\"\n    trap 'rm -f \"$lock\"; exit 1' TERM\n    sleep 30 &\n    wait\n    ;;\nesac\nexec '{}' \"$@\"\n",
+                root.join(".git/index.lock").display(),
+                real.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let started = std::time::Instant::now();
         let deadline = started + std::time::Duration::from_millis(1500);
-        let cut = commit_host(root, &[rel], "probe-host", deadline).unwrap_err();
+        let cut =
+            with_path_dir(&bin, || commit_host(&root, &[rel], "probe-host", deadline)).unwrap_err();
         assert!(format!("{cut:#}").contains("did not answer"), "{cut:#}");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(10),
@@ -4698,7 +4734,7 @@ mod tests {
         let _env = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let rel = hooked_repo(root, "#!/bin/sh\nexit 0\n");
+        let rel = rules_repo(root);
         let held = crate::tracker_commit_lock(root);
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
         let waited =

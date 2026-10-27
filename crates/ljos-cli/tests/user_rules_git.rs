@@ -100,6 +100,9 @@ impl Scratch {
             self.dir.path(),
             &["init", "-q", "--bare", "-b", "main", dest.to_str().unwrap()],
         );
+        // A push runs the remote's own hooks, which belong to the server
+        // and not to the login whose global file this test writes.
+        self.must(&dest, &["config", "core.hooksPath", "/dev/null"]);
         dest
     }
 
@@ -219,6 +222,106 @@ fn assert_tracker_shared(s: &Scratch, tracker: &Path, remote: &Path, text: &str)
         s.must(remote, &["rev-parse", "main"]),
         s.must(tracker, &["rev-parse", "HEAD"]),
         "the user rules were not pushed\n{text}"
+    );
+}
+
+/// Hooks a fetch, a merge, a commit or a push would run.
+const HOOKS: &[&str] = &[
+    "pre-commit",
+    "prepare-commit-msg",
+    "commit-msg",
+    "post-commit",
+    "pre-merge-commit",
+    "post-merge",
+    "pre-push",
+    "reference-transaction",
+    "post-index-change",
+];
+
+/// Hooks in `dir` that append `who NAME` to `marks` and refuse.
+fn refusing_hooks(dir: &Path, marks: &Path, who: &str, names: &[&str]) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::create_dir_all(dir).unwrap();
+    for name in names {
+        let hook = dir.join(name);
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\necho '{who} {name}' >> '{}'\nexit 1\n",
+                marks.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+/// The login's global `core.hooksPath` names hooks that refuse and leave
+/// a mark, as a fail-closed sitting gate does. Sharing user rules fetches,
+/// merges, commits and pushes without running any of them.
+#[test]
+fn the_login_hooks_do_not_run_on_user_rules_git() {
+    let s = Scratch::new();
+    let (remote, tracker) = s.tracker();
+    let marks = s.path("marks");
+    let hooks = s.path("login-hooks");
+    refusing_hooks(&hooks, &marks, "login", HOOKS);
+    s.must(
+        s.dir.path(),
+        &[
+            "config",
+            "--global",
+            "core.hooksPath",
+            hooks.to_str().unwrap(),
+        ],
+    );
+    let out = s.exchange(&tracker, &[]);
+    let text = said(&out);
+    let ran = std::fs::read_to_string(&marks).unwrap_or_default();
+    assert!(ran.is_empty(), "a login hook ran:\n{ran}{text}");
+    assert!(out.status.success(), "{text}");
+    assert_tracker_shared(&s, &tracker, &remote, &text);
+}
+
+/// The pre-push `ljos cloud up` installs keeps a cloud seat's pushes on
+/// its allowlist. A user-rules push still runs that hook, and no other.
+#[test]
+fn the_cloud_pre_push_still_checks_a_user_rules_push() {
+    let s = Scratch::new();
+    let (remote, tracker) = s.tracker();
+    let marks = s.path("marks");
+    let hooks = s.path("login-hooks");
+    refusing_hooks(&hooks, &marks, "login", HOOKS);
+    s.must(
+        s.dir.path(),
+        &[
+            "config",
+            "--global",
+            "core.hooksPath",
+            hooks.to_str().unwrap(),
+        ],
+    );
+    refusing_hooks(
+        &s.path("home/.config/ljos/hooks"),
+        &marks,
+        "cloud",
+        &["pre-push"],
+    );
+    let out = s.exchange(&tracker, &[]);
+    let text = said(&out);
+    let ran = std::fs::read_to_string(&marks).unwrap_or_default();
+    assert!(
+        !ran.is_empty() && ran.lines().all(|line| line == "cloud pre-push"),
+        "{ran}{text}"
+    );
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("push refused"), "{text}");
+    let subjects = s.must(&tracker, &["log", "--format=%s"]);
+    assert_eq!(subjects.lines().next(), Some(SUBJECT), "{subjects}\n{text}");
+    assert_ne!(
+        s.must(&remote, &["rev-parse", "main"]),
+        s.must(&tracker, &["rev-parse", "HEAD"]),
+        "the refused push reached the remote\n{text}"
     );
 }
 
