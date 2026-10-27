@@ -128,9 +128,306 @@ pub fn read(path: &Path) -> Result<Option<String>> {
     Ok(Some(text.trim().to_string()))
 }
 
+/// Run `ljos person-key ACTION`: `set`, `status` or `clear`.
+///
+/// # Errors
+///
+/// An unknown action, a refusal, or a key that cannot be written.
+pub fn run(action: &str) -> Result<()> {
+    let path = key_path().context("person-key: this user's passwd entry names no home")?;
+    match action {
+        "set" => set_at(&path),
+        "clear" => clear_at(&path),
+        "status" => {
+            println!("{}", status_at(&path));
+            Ok(())
+        }
+        other => bail!("person-key: no action `{other}`; use set, status or clear"),
+    }
+}
+
+/// Why `set` or `clear` is not the person's, from the runner cause, the
+/// terminal check and the runner variables set. `None` when it is.
+fn not_the_person(
+    cause: Option<crate::RunnerCause>,
+    present: bool,
+    marks: &[String],
+) -> Option<String> {
+    if cause == Some(crate::RunnerCause::Hard) {
+        return Some("a runner is in this process tree or its scope".into());
+    }
+    if !marks.is_empty() {
+        return Some(format!(
+            "this shell carries {}, which a runner leaves on what it starts",
+            marks.join(", ")
+        ));
+    }
+    if cause.is_some() || !present {
+        return Some("ljos cannot attribute this terminal to you".into());
+    }
+    None
+}
+
+fn person_only(verb: &str) -> Result<()> {
+    let marks = crate::runner_marks();
+    match not_the_person(crate::runner_cause(), crate::person_present(), &marks) {
+        Some(why) => bail!(
+            "person-key: `ljos person-key {verb}` is the person's, from a terminal of their \
+             own with no runner variable set, and {why}. Run it on your own machine"
+        ),
+        None => Ok(()),
+    }
+}
+
+fn set_at(path: &Path) -> Result<()> {
+    person_only("set")?;
+    let mut tty = crate::person_tty::open().context("person-key")?;
+    set_from(path, &mut tty)
+}
+
+/// Read the new passphrase twice from `tty` and keep its hash at `path`.
+fn set_from(path: &Path, tty: &mut std::fs::File) -> Result<()> {
+    let Some(first) = crate::person_tty::ask(tty, "New person passphrase: ")? else {
+        bail!("person-key: the terminal closed; the key is unchanged");
+    };
+    if first.bytes().len() < MIN_LEN {
+        bail!("person-key: a passphrase needs at least {MIN_LEN} bytes; the key is unchanged");
+    }
+    let Some(second) = crate::person_tty::ask(tty, "The same again: ")? else {
+        bail!("person-key: the terminal closed; the key is unchanged");
+    };
+    if first.bytes() != second.bytes() {
+        bail!("person-key: the two entries differ; the key is unchanged");
+    }
+    store(path, &hash(first.bytes())?)?;
+    println!("person-key: set in {}", path.display());
+    Ok(())
+}
+
+fn clear_at(path: &Path) -> Result<()> {
+    person_only("clear")?;
+    match std::fs::remove_file(path) {
+        Ok(()) => println!("person-key: cleared {}", path.display()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("person-key: no key at {}", path.display());
+        }
+        Err(e) => return Err(e).with_context(|| format!("person-key: {}", path.display())),
+    }
+    Ok(())
+}
+
+/// Whether a key is kept at `path`, and when it was written. Never the hash.
+fn status_at(path: &Path) -> String {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            let when = meta
+                .modified()
+                .map(|t| {
+                    chrono::DateTime::<chrono::Utc>::from(t)
+                        .format("%Y-%m-%d %H:%M:%S UTC")
+                        .to_string()
+                })
+                .unwrap_or_else(|_| "an unknown time".into());
+            format!("person-key: set, written {when} ({})", path.display())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => format!(
+            "person-key: not set ({}); run `ljos person-key set` from your own terminal",
+            path.display()
+        ),
+        Err(e) => format!("person-key: {} does not read: {e}", path.display()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hard runner, any runner variable, or no terminal refuses. Only
+    /// the person at a terminal with no variable set may change the key.
+    #[test]
+    fn only_the_person_without_a_mark_may_change_the_key() {
+        use crate::RunnerCause::{Hard, MarkOnly};
+        let mark = vec!["CURSOR_AGENT".to_string()];
+        for (cause, present, marks) in [
+            (Some(Hard), false, vec![]),
+            (Some(Hard), false, mark.clone()),
+            (Some(MarkOnly), false, mark.clone()),
+            (None, true, mark.clone()),
+            (None, false, vec![]),
+        ] {
+            assert!(
+                not_the_person(cause, present, &marks).is_some(),
+                "{cause:?} {present} {marks:?}"
+            );
+        }
+        assert!(not_the_person(None, true, &[]).is_none());
+        let why = not_the_person(None, true, &mark).unwrap();
+        assert!(why.contains("CURSOR_AGENT"), "{why}");
+    }
+
+    /// `set` and `clear` with a runner variable set refuse before they
+    /// read the terminal, with or without a key, and leave the key as it
+    /// was. The test stands in for the person at a terminal.
+    #[test]
+    fn a_mark_refuses_set_and_clear_with_or_without_a_key() {
+        let _g = crate::tests::env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let none = dir.path().join("none").join(KEY_NAME);
+        let kept = dir.path().join("kept").join(KEY_NAME);
+        let phc = hash(b"correct horse battery").unwrap();
+        store(&kept, &phc).unwrap();
+        let saved = std::env::var_os("CURSOR_AGENT");
+        // SAFETY: under env_guard, and restored below.
+        unsafe { std::env::set_var("CURSOR_AGENT", "1") };
+        let mut said = Vec::new();
+        for at_terminal in [true, false] {
+            crate::PERSON_AT_TERMINAL.with(|p| p.set(at_terminal));
+            for path in [&none, &kept] {
+                said.push(set_at(path).unwrap_err().to_string());
+                said.push(clear_at(path).unwrap_err().to_string());
+            }
+        }
+        crate::PERSON_AT_TERMINAL.with(|p| p.set(false));
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("CURSOR_AGENT", value),
+                None => std::env::remove_var("CURSOR_AGENT"),
+            }
+        }
+        for why in &said {
+            assert!(why.contains("is the person's"), "{why}");
+            assert!(!why.contains("terminal closed"), "{why}");
+        }
+        assert!(!none.exists());
+        assert_eq!(read(&kept).unwrap().as_deref(), Some(phc.as_str()));
+    }
+
+    /// A pty pair: what the test types goes to the master, and the slave
+    /// is the terminal the code reads.
+    fn pty_pair() -> (std::fs::File, std::fs::File) {
+        use std::os::fd::FromRawFd as _;
+        let (mut master, mut slave) = (-1, -1);
+        // SAFETY: openpty writes two fresh descriptors into the locals.
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(rc, 0);
+        // SAFETY: both descriptors are owned here alone. Close-on-exec keeps
+        // them out of what other tests start meanwhile.
+        unsafe {
+            libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(slave, libc::F_SETFD, libc::FD_CLOEXEC);
+            (
+                std::fs::File::from_raw_fd(master),
+                std::fs::File::from_raw_fd(slave),
+            )
+        }
+    }
+
+    fn echo_on(tty: &std::fs::File) -> bool {
+        use std::os::fd::AsRawFd as _;
+        // SAFETY: termios is plain data, filled in from a tty descriptor.
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(tty.as_raw_fd(), &mut t), 0);
+            t.c_lflag & libc::ECHO != 0
+        }
+    }
+
+    /// Types each line on `master` once the terminal shows its prompt,
+    /// the way a person answers, and returns all the terminal showed.
+    /// Echo off drops type-ahead, so nothing is typed sooner.
+    fn typist(
+        mut master: std::fs::File,
+        answers: Vec<(&'static str, &'static str)>,
+    ) -> std::thread::JoinHandle<String> {
+        use std::io::{Read as _, Write as _};
+        std::thread::spawn(move || {
+            let mut shown = Vec::new();
+            let mut since = 0;
+            let mut answers = answers.into_iter().peekable();
+            let mut buf = [0u8; 256];
+            while let Ok(n) = master.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                shown.extend_from_slice(&buf[..n]);
+                if let Some((prompt, line)) = answers.peek() {
+                    if String::from_utf8_lossy(&shown[since..]).contains(prompt) {
+                        master.write_all(format!("{line}\n").as_bytes()).unwrap();
+                        since = shown.len();
+                        answers.next();
+                    }
+                }
+            }
+            String::from_utf8_lossy(&shown).into_owned()
+        })
+    }
+
+    /// Typed twice on the terminal, a long enough passphrase is kept and
+    /// verifies; echo is back on after, and the terminal never showed it.
+    #[test]
+    fn set_keeps_a_passphrase_typed_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(KEY_NAME);
+        let (master, mut slave) = pty_pair();
+        assert!(echo_on(&slave));
+        let shown = typist(
+            master,
+            vec![
+                ("New person passphrase: ", "correct horse battery"),
+                ("The same again: ", "correct horse battery"),
+            ],
+        );
+        set_from(&path, &mut slave).unwrap();
+        assert!(echo_on(&slave), "echo stayed off");
+        drop(slave);
+        let shown = shown.join().unwrap();
+        assert!(shown.contains("The same again: "), "{shown}");
+        assert!(!shown.contains("horse"), "{shown}");
+        let phc = read(&path).unwrap().expect("a key");
+        assert!(verify(b"correct horse battery", &phc));
+    }
+
+    #[test]
+    fn set_refuses_a_short_or_mismatched_passphrase() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(KEY_NAME);
+        for answers in [
+            vec![("New person passphrase: ", "short one")],
+            vec![
+                ("New person passphrase: ", "correct horse battery"),
+                ("The same again: ", "correct horse batterz"),
+            ],
+        ] {
+            let (master, mut slave) = pty_pair();
+            let shown = typist(master, answers);
+            assert!(set_from(&path, &mut slave).is_err());
+            assert!(echo_on(&slave));
+            drop(slave);
+            shown.join().unwrap();
+        }
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn status_names_the_key_but_not_its_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(KEY_NAME);
+        assert!(status_at(&path).contains("not set"));
+        let phc = hash(b"correct horse battery").unwrap();
+        store(&path, &phc).unwrap();
+        let said = status_at(&path);
+        assert!(said.contains("person-key: set, written "), "{said}");
+        assert!(!said.contains("argon2"), "{said}");
+        assert!(!said.contains(phc.rsplit('$').next().unwrap()), "{said}");
+    }
 
     #[test]
     fn a_hash_matches_its_passphrase_only() {

@@ -1003,6 +1003,12 @@ enum Cmd {
         /// `install`, `uninstall`, or `status`.
         action: String,
     },
+    /// Set, clear, or show the person's passphrase. `set` and `clear` read
+    /// from the terminal and are the person's, with no runner variable set.
+    PersonKey {
+        /// `set`, `clear`, or `status`.
+        action: String,
+    },
     /// What the push gate decides on the issue, from seat ballots alone,
     /// then the weighted settle over every ballot as advice: shares, who
     /// leads, influence, and what each anchor did.
@@ -2488,6 +2494,7 @@ fn run_command() -> Result<()> {
         }
         Cmd::GitHook { name, .. } => ljos_cli::git_hooks::run_named(&name)?,
         Cmd::GitHooks { action } => ljos_cli::git_hooks::run(&action)?,
+        Cmd::PersonKey { action } => ljos_cli::person_key::run(&action)?,
         Cmd::Hook {
             limit,
             event,
