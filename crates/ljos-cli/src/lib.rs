@@ -3366,13 +3366,25 @@ fn responsible_comm() -> Option<String> {
 /// it is the responsible process. A cleared environment does not leave either.
 fn runner_scope_or_tree() -> bool {
     let runners = runner_names();
-    if own_ancestry().iter().any(|(pid, comm)| {
-        seat_record_path(*pid).exists()
-            || runners.iter().any(|name| name.eq_ignore_ascii_case(comm))
-    }) {
+    if tree_names_runner(&ancestry(), &runners, |pid| seat_record_path(pid).exists()) {
         return true;
     }
     scope_names_runner(&runners) || transient_scope()
+}
+
+/// A runner by name, or a process `recorded` holds a seat record for, in
+/// `chain` below its first session process ([`own_ancestry`]).
+fn tree_names_runner(
+    chain: &[(u32, String)],
+    runners: &[String],
+    recorded: impl Fn(u32) -> bool,
+) -> bool {
+    chain
+        .iter()
+        .take_while(|(_, comm)| !is_session(comm))
+        .any(|(pid, comm)| {
+            recorded(*pid) || runners.iter().any(|name| name.eq_ignore_ascii_case(comm))
+        })
 }
 
 /// Linux: this process sits in a transient `run-*.scope`. An unreadable
@@ -3404,15 +3416,55 @@ fn transient_scope() -> bool {
 /// count. One left over from a runner that started the shell is not a
 /// runner. The same variable with that evidence does count. Consent is
 /// the person's, so the verbs that grant it refuse when this is true.
+/// [`runner_cause`] says which of the two it was.
 #[must_use]
 pub fn under_a_runner() -> bool {
-    if runner_scope_or_tree() {
-        return true;
+    runner_cause().is_some()
+}
+
+/// Why [`under_a_runner`] holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunnerCause {
+    /// A runner in the process tree, or the scope this process sits in.
+    /// Nothing the person types changes this.
+    Hard,
+    /// A runner variable alone, on a process ljos cannot attribute to a
+    /// terminal. The tree and the scope show no runner.
+    MarkOnly,
+}
+
+/// What puts this process under a runner, or `None` when nothing does.
+#[must_use]
+pub fn runner_cause() -> Option<RunnerCause> {
+    cause_of(runner_scope_or_tree(), person_at_terminal, runner_mark_set)
+}
+
+/// The cause from what the tree and scope show (`hard`), then, only
+/// when they show nothing, the terminal and the runner variables.
+fn cause_of(
+    hard: bool,
+    at_terminal: impl FnOnce() -> bool,
+    mark: impl FnOnce() -> bool,
+) -> Option<RunnerCause> {
+    if hard {
+        return Some(RunnerCause::Hard);
     }
-    if person_at_terminal() {
-        return false;
+    if at_terminal() {
+        return None;
     }
-    runner_mark_set()
+    mark().then_some(RunnerCause::MarkOnly)
+}
+
+/// The names of the runner variables set here, sorted. Never their values.
+#[must_use]
+pub fn runner_marks() -> Vec<String> {
+    let mut names: Vec<String> = std::env::vars()
+        .filter(|(k, v)| runner_session_var(k, v) || RUNNER_MARKS.contains(&k.as_str()))
+        .map(|(k, _)| k)
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// Variables a runner, or the hook it spawned, leaves on what it starts.
@@ -3426,7 +3478,7 @@ const RUNNER_MARKS: &[&str] = &[
 
 /// A runner's variable, or one [`RUNNER_MARKS`] names.
 fn runner_mark_set() -> bool {
-    std::env::vars().any(|(k, v)| runner_session_var(&k, &v) || RUNNER_MARKS.contains(&k.as_str()))
+    !runner_marks().is_empty()
 }
 
 /// Whether the person is at this process, on positive evidence.
@@ -51892,6 +51944,96 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             no_terminal.0 && !no_terminal.1,
             "a variable with no terminal was not a runner: {no_terminal:?}"
         );
+    }
+
+    /// The cause [`super::runner_cause`] gives for a process tree, a
+    /// cgroup read, the terminal check and the runner variables.
+    fn fixture_cause(
+        chain: &[&str],
+        cgroup: Result<&str, ()>,
+        at_terminal: bool,
+        mark: bool,
+    ) -> Option<super::RunnerCause> {
+        let runners = super::runner_names();
+        let chain: Vec<(u32, String)> = chain
+            .iter()
+            .zip((1..=100u32).rev())
+            .map(|(comm, pid)| (pid, (*comm).to_string()))
+            .collect();
+        let hard = super::tree_names_runner(&chain, &runners, |_| false)
+            || super::cgroup_read_is_runner(cgroup, &runners);
+        super::cause_of(hard, || at_terminal, || mark)
+    }
+
+    /// A runner in the tree or the scope is a hard runner whatever the
+    /// terminal and the variables say. A variable with nothing else, on a
+    /// process with no terminal, is a mark only. That includes a hook
+    /// under a terminal a dock started, on a cgroup that names no runner.
+    #[test]
+    fn a_hard_runner_and_a_mark_only_are_told_apart() {
+        use super::RunnerCause::{Hard, MarkOnly};
+        let hook = [
+            "sh",
+            "git",
+            "bash",
+            "xfce4-terminal",
+            "sand-exit-watch",
+            "pod-daemon",
+        ];
+        let jobs = Ok("0::/work/jobs\n");
+        assert_eq!(fixture_cause(&hook, jobs, false, true), Some(MarkOnly));
+        assert_eq!(fixture_cause(&hook, jobs, false, false), None);
+        assert_eq!(fixture_cause(&hook, jobs, true, true), None);
+        let ran = ["sh", "git", "bash", "claude", "xfce4-terminal"];
+        for (at_terminal, mark) in [(false, true), (true, true), (false, false), (true, false)] {
+            assert_eq!(
+                fixture_cause(&ran, jobs, at_terminal, mark),
+                Some(Hard),
+                "a runner in the tree, terminal {at_terminal}, mark {mark}"
+            );
+        }
+        for cgroup in [
+            Ok("0::/system.slice/pod-1/cursor-agent/workload\n"),
+            Ok("0::/user.slice/user-1000.slice/user@1000.service/app.slice/run-r1a2b3.scope\n"),
+            Err(()),
+        ] {
+            for at_terminal in [false, true] {
+                assert_eq!(
+                    fixture_cause(&hook, cgroup, at_terminal, true),
+                    Some(Hard),
+                    "{cgroup:?}, terminal {at_terminal}"
+                );
+            }
+        }
+    }
+
+    /// The variables are named, sorted, and their values never appear.
+    #[test]
+    fn runner_marks_name_the_variables_only() {
+        let _g = env_guard();
+        let saved = std::env::var_os("CURSOR_AGENT");
+        // SAFETY: under env_guard, and restored below.
+        unsafe {
+            std::env::set_var("CURSOR_AGENT", "a-value-to-keep-out");
+            std::env::set_var("ACMEAGENT_SESSION_ID", "0199a1b2-c3d4-e5f6");
+        }
+        let marks = super::runner_marks();
+        unsafe {
+            std::env::remove_var("ACMEAGENT_SESSION_ID");
+            match saved {
+                Some(value) => std::env::set_var("CURSOR_AGENT", value),
+                None => std::env::remove_var("CURSOR_AGENT"),
+            }
+        }
+        assert!(marks.contains(&"CURSOR_AGENT".to_string()), "{marks:?}");
+        assert!(
+            marks.contains(&"ACMEAGENT_SESSION_ID".to_string()),
+            "{marks:?}"
+        );
+        assert!(marks.windows(2).all(|w| w[0] < w[1]), "{marks:?}");
+        assert!(!marks
+            .iter()
+            .any(|m| m.contains("value") || m.contains("0199")));
     }
 
     /// The cgroup is consulted whatever sits above this process. When it
