@@ -2,6 +2,7 @@
 //! Nine runners treat that as an allow. A tool call is denied in the
 //! runner's own contract. A prompt still exits 1.
 
+ljos_test_boot::harness!();
 use std::io::Write;
 use std::process::{Command, Stdio};
 

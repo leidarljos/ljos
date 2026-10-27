@@ -1,6 +1,7 @@
 //! The five real-harness fixes, each driven through `ljos hook` (the ballot
 //! case through `ljos vote`, which is the process that casts and tallies).
 
+ljos_test_boot::harness!();
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

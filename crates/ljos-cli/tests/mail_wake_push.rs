@@ -9,6 +9,7 @@
 //! lands after `inbox --sync` started is still read. A checkout with no
 //! remote only lists.
 
+ljos_test_boot::harness!();
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

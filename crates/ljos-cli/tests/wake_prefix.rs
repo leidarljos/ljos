@@ -1,3 +1,4 @@
+ljos_test_boot::harness!();
 use std::sync::{Mutex, MutexGuard};
 
 static ENV: Mutex<()> = Mutex::new(());

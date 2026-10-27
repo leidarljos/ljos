@@ -4,6 +4,7 @@
 //! home directory, and it carries the approval file layout the exporter
 //! writes.
 
+ljos_test_boot::harness!();
 use std::path::Path;
 
 fn doc() -> String {

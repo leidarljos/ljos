@@ -1,6 +1,7 @@
 //! A fresh machine shares one tracker. Two clones of a local bare remote
 //! stand in for two cloud VMs. Nothing here talks to GitHub.
 
+ljos_test_boot::harness!();
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;

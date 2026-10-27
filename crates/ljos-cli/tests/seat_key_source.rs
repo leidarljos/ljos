@@ -3,6 +3,7 @@
 //! mark a server as the seat. Runs the built `ljos` binary.
 #![cfg(target_os = "linux")]
 
+ljos_test_boot::harness!();
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};

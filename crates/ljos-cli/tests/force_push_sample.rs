@@ -3,6 +3,7 @@
 //! rules, no `ljos-policyd` and the ask pack switched off. The hook is a
 //! runner's, so it runs in a sitting, from a checkout on a topic branch.
 
+ljos_test_boot::harness!();
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};

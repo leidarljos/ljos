@@ -3,6 +3,7 @@
 //! name fell through to the conversation's holder, so the tracker named a
 //! session id and a board filtered by seat missed the claim.
 
+ljos_test_boot::harness!();
 use std::path::Path;
 use std::process::Command;
 

@@ -1,0 +1,11 @@
+[package]
+name = "ljos-test-boot"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.89"
+license = "MIT"
+publish = false
+description = "Test-only cgroup and environment setup for the ljos suite."
+
+[lib]
+path = "src/lib.rs"

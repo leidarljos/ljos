@@ -4,6 +4,7 @@
 //! server still lists every tool. A call that needs a seat returns that
 //! error and the process stays up.
 
+ljos_test_boot::harness!();
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 use std::time::Duration;

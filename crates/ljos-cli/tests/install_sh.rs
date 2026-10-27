@@ -1,5 +1,6 @@
 //! `scripts/install.sh` on a fresh home, from a directory of programs.
 
+ljos_test_boot::harness!();
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

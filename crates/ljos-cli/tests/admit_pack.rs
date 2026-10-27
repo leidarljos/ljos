@@ -4,6 +4,7 @@
 //! records the acceptance, and a second filing is the same open proposal.
 //! `remember` of the same text leaves one live atom and no open proposal.
 
+ljos_test_boot::harness!();
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;

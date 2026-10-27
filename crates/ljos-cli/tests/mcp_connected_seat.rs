@@ -4,6 +4,7 @@
 //! write on the announced connection keeps that seat. A name the call
 //! made up is still refused on a writer, in one short line.
 
+ljos_test_boot::harness!();
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 

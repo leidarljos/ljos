@@ -5,6 +5,7 @@
 //! that ticket, and that refusal names `ljos consensus ID --no-file`. The
 //! person at their own terminal is never refused.
 
+ljos_test_boot::harness!();
 #[path = "common/terminal.rs"]
 mod terminal;
 

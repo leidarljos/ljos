@@ -65,3 +65,4 @@ vissue-core.workspace = true
 # shim, and this floor keeps the lock off a 1.0 release that still trusts
 # the emSign root RUSTSEC-2026-0381 names. tests/tls_roots.rs checks it.
 webpki-roots = "1.0.10"
+ljos-test-boot = { path = "../ljos-test-boot" }

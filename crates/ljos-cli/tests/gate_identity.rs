@@ -5,6 +5,7 @@
 //! lets that conversation's history writes through, and no other's.
 #![cfg(target_os = "linux")]
 
+ljos_test_boot::harness!();
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};

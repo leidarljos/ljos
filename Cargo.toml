@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ljos-cli", "crates/ljos-hud"]
+members = ["crates/ljos-cli", "crates/ljos-hud", "crates/ljos-test-boot"]
 
 [workspace.package]
 version = "0.34.1"

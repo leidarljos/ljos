@@ -2,6 +2,7 @@
 //! minted N seats and cast every ballot, and a run where each seat is its
 //! own session.
 
+ljos_test_boot::harness!();
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

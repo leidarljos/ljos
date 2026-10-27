@@ -2727,6 +2727,7 @@ dependencies = [
  "hex",
  "icu_properties",
  "libc",
+ "ljos-test-boot",
  "packset-client",
  "packset-core",
  "regex-automata",
@@ -2764,6 +2765,10 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
 ]
+
+[[package]]
+name = "ljos-test-boot"
+version = "0.0.0"
 
 [[package]]
 name = "lock_api"

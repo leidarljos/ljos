@@ -1,0 +1,1 @@
+A test harness leaves a host cgroup that names a runner, and drops runner variables the host left on it. The product still treats a path component such as cursor-agent as the runner cursor. The release binary does not link that move.

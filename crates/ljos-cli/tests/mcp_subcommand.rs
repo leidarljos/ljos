@@ -2,6 +2,7 @@
 //! starts a server by its crate's name, and the list opens with the guard
 //! and memory tools.
 
+ljos_test_boot::harness!();
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 

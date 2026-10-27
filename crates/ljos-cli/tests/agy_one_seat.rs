@@ -5,6 +5,7 @@
 //! finish ran as `antigravity`: "the tracker lists no seat antigravity",
 //! "not assignee", and the issue left STARTED.
 
+ljos_test_boot::harness!();
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

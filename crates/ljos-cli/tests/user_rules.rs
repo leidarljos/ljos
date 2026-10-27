@@ -1,6 +1,7 @@
 //! `ljos prefer --user` and `ljos prefer --user --promote` against a fixture
 //! lesson, and the guard on the commands those rules name.
 
+ljos_test_boot::harness!();
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::{Command, Stdio};

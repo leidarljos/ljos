@@ -4,6 +4,7 @@
 //! machine that wrote it (`/home/box/.cargo/bin/ljos-mcp`) is not there,
 //! so the client discovers no tools.
 
+ljos_test_boot::harness!();
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -3,6 +3,7 @@
 //! the pin file, a ballot that does not stand is named with its line,
 //! and every run leaves the checkout and HOME as it found them.
 
+ljos_test_boot::harness!();
 use ed25519_dalek::SigningKey;
 use ljos_cli::ballot_sig;
 use std::path::{Path, PathBuf};

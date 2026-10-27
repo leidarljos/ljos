@@ -3,6 +3,7 @@
 //! A down writer used to be handed back as `packset ensure` for the agent
 //! to run. Doctor already starts it. These two do too.
 
+ljos_test_boot::harness!();
 use std::io::Write;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};

@@ -1,6 +1,7 @@
 //! `ljos onboard` with no runner prints the MCP entry to paste, and that
 //! output has to parse as JSON as it stands.
 
+ljos_test_boot::harness!();
 use std::process::Command;
 
 #[test]

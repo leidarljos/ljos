@@ -6,6 +6,7 @@
 //! for that reason. This test is what makes the ignore safe: the root set
 //! in the build is the one without the emSign root the advisory names.
 
+ljos_test_boot::harness!();
 #[test]
 fn the_distrusted_emsign_root_is_not_trusted() {
     let name: &[u8] = b"emSign ECC Root CA - G3";

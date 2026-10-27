@@ -5,6 +5,7 @@
 //! that shape are stamped `person`. A lesson whose session names a runner
 //! stays unverified, and `ljos prefer --review` counts and keeps it.
 
+ljos_test_boot::harness!();
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};

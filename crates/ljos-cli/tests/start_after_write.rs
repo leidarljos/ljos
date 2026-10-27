@@ -4,6 +4,7 @@
 //! through `sh -c`, and that shell exits with the hook, so the hook's
 //! parent is gone before the server's first call.
 
+ljos_test_boot::harness!();
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};

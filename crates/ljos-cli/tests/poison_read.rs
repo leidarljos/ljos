@@ -1,6 +1,7 @@
 //! Read-side regressions. What an agent wrote must not reach a prompt, a
 //! recall or a brief as a rule, a fact or the person's words.
 
+ljos_test_boot::harness!();
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::{Command, Stdio};

@@ -2,6 +2,7 @@
 //! eval on 7e21d3c, where twelve panels titled with their question read as
 //! round 0 and stayed TODO after three rounds.
 
+ljos_test_boot::harness!();
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

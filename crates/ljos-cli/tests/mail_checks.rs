@@ -1,5 +1,6 @@
 //! Identity, term and attribution checks only ever refuse.
 
+ljos_test_boot::harness!();
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 

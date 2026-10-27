@@ -5,6 +5,7 @@
 //! stays. Keeping a preference and stamping a person basis from any of
 //! those must fail the same way a live `claude` parent fails.
 
+ljos_test_boot::harness!();
 #[path = "common/terminal.rs"]
 mod terminal;
 

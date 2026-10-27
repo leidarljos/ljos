@@ -2,6 +2,7 @@
 //! Subagent shells with no `LJOS_SEAT` wrote 314 notes as `exec-daemon`
 //! and 74 as `cursor`, the programs above them.
 
+ljos_test_boot::harness!();
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

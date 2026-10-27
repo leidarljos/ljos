@@ -3,6 +3,7 @@
 //! still read afterwards. Runs the built `ljos` binary.
 #![cfg(target_os = "linux")]
 
+ljos_test_boot::harness!();
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};

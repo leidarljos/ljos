@@ -4,6 +4,7 @@
 //! on a free port: `ljos remember`, then a matching prompt through the
 //! `UserPromptSubmit` command onboard put in `settings.json`.
 
+ljos_test_boot::harness!();
 #[path = "common/runner.rs"]
 mod runner;
 #[path = "common/terminal.rs"]

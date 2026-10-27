@@ -6,6 +6,7 @@
 //! Here `ljos note` takes a second before it stores the note, and the client
 //! sends the recall without waiting for the note's answer.
 
+ljos_test_boot::harness!();
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};

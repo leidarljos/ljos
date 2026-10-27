@@ -1,5 +1,6 @@
 //! The notmuch reader over a synthetic mailbox.
 
+ljos_test_boot::harness!();
 #[path = "common/maildir.rs"]
 mod maildir;
 

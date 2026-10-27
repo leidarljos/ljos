@@ -5,6 +5,7 @@
 //! onto later prompts as a standing claim. Extraction now writes a `note`
 //! atom with agent provenance, so it stays out of prompt facts.
 
+ljos_test_boot::harness!();
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::{Command, Stdio};

@@ -4,6 +4,7 @@
 //! under a runner is refused. An edit from outside a runner keeps that
 //! missing basis, and an edit of a memory that already has a basis keeps it.
 
+ljos_test_boot::harness!();
 #[path = "common/terminal.rs"]
 mod terminal;
 

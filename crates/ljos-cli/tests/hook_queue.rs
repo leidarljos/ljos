@@ -4,6 +4,7 @@
 //! applied after the answer by one drainer.
 #![cfg(target_os = "linux")]
 
+ljos_test_boot::harness!();
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};

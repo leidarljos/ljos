@@ -1,6 +1,7 @@
 //! Grok Bot commits are booked by git hooks, without a prompt hook.
 //! The directory is outside the temp roots, not /tmp: ljos skips a temp seat.
 
+ljos_test_boot::harness!();
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

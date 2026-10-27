@@ -1,5 +1,6 @@
 #![cfg(target_os = "linux")]
 
+ljos_test_boot::harness!();
 use std::path::PathBuf;
 use std::process::Command;
 

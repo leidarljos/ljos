@@ -1,5 +1,6 @@
 //! `ljos doctor` on a fresh machine starts the default writer.
 
+ljos_test_boot::harness!();
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;

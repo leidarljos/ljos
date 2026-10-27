@@ -4,6 +4,7 @@
 //! branch push, a tag push and a lease push onto a feature branch stay
 //! allowed. A push whose `LJOS_CITE` does not stand is denied.
 
+ljos_test_boot::harness!();
 use std::process::Command;
 
 fn policy(line: &str) -> std::process::Output {

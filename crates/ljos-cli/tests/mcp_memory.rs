@@ -1,6 +1,7 @@
 //! An MCP remember lands in the pack `ljos memories list` reads, and a
 //! search increments the use count that list prints.
 
+ljos_test_boot::harness!();
 #[path = "common/runner.rs"]
 mod runner;
 

@@ -5,6 +5,7 @@
 //! memory falls back near where it started within a few seconds.
 #![cfg(all(target_os = "linux", target_env = "gnu"))]
 
+ljos_test_boot::harness!();
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::process::{Command, Stdio};

@@ -1,6 +1,7 @@
 //! A draft exported as an approval file: a statement block, a blank
 //! line, the exact message bytes, and `H` = sha256 of those bytes.
 
+ljos_test_boot::harness!();
 use chrono::{Duration, TimeZone as _, Utc};
 use ljos_cli::mailbox::config::MailConfig;
 use ljos_cli::mailbox::export::{Approval, Draft};

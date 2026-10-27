@@ -3,6 +3,7 @@
 //! the pack refuses is not left queued. A copy that could not be sent
 //! waits as the fitted text and goes on the next note.
 
+ljos_test_boot::harness!();
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;

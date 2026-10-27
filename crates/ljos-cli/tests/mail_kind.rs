@@ -5,6 +5,7 @@
 //! kind: message` for any other body is an old pack with no version. The
 //! inbox must name the refusal. It must not print an empty inbox.
 
+ljos_test_boot::harness!();
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::{Command, Output, Stdio};

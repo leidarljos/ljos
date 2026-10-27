@@ -1,6 +1,7 @@
 //! `ljos_mail_search` and `ljos_mail_show` are opt-in, read the mailbox
 //! the `[mail]` table names, and refuse on a cloud seat.
 
+ljos_test_boot::harness!();
 #[path = "common/maildir.rs"]
 mod maildir;
 

@@ -3,6 +3,7 @@
 //! a remote URL git rewrote. These tests push to a local bare origin and
 //! require the hook's own refusal.
 
+ljos_test_boot::harness!();
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

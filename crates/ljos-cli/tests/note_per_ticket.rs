@@ -1,6 +1,7 @@
 //! The same sentence noted on different tickets is a different memory.
 //! Recall on a ticket finds the note written there.
 
+ljos_test_boot::harness!();
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;

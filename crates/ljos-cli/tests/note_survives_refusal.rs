@@ -3,6 +3,7 @@
 //! past its word limit; a weak model writes such notes, and the note must
 //! not be lost. The refusal is a warning and the command succeeds.
 
+ljos_test_boot::harness!();
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;

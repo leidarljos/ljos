@@ -5,6 +5,7 @@
 //! on a free port. Lessons are posted with the stamp they were written at,
 //! so the pack's fused score decays the old ones as it would in use.
 
+ljos_test_boot::harness!();
 use std::io::Write;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};

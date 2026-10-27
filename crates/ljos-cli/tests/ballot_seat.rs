@@ -2,6 +2,7 @@
 //! cast 25 forecasts under `exec-daemon`, the program above its shell,
 //! and nothing said so (Software-o9bu).
 
+ljos_test_boot::harness!();
 use std::path::Path;
 use std::process::Command;
 

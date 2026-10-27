@@ -1,5 +1,6 @@
 //! Write-side regressions. A planted sentence must not become the person's words.
 
+ljos_test_boot::harness!();
 #[path = "common/runner.rs"]
 mod runner;
 #[path = "common/terminal.rs"]

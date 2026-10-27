@@ -5,6 +5,7 @@
 //! binary run as a shim over vissue-core, the tracker is a git checkout,
 //! and `LJOS_TRACKER_GIT=commit` commits each write.
 
+ljos_test_boot::harness!();
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 

@@ -2,6 +2,7 @@
 //! hand edit is not. An env file ljos did not write is left alone. A global
 //! hooks path the user already set is covered in `git_hooks.rs`.
 
+ljos_test_boot::harness!();
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};

@@ -4,6 +4,7 @@
 //! `PACKSET_URL=off` is that same unread roster. A document whose cite
 //! stands is read against a pack that answers with no personas.
 
+ljos_test_boot::harness!();
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

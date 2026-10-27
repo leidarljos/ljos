@@ -1,5 +1,6 @@
 //! `ljos panel ISSUE --cloud` is a flag on the panel command.
 
+ljos_test_boot::harness!();
 use std::process::Command;
 
 fn ljos(args: &[&str]) -> std::process::Output {

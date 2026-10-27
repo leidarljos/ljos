@@ -3,6 +3,7 @@
 //! `disk-saver`, `ljos-bot` as `ljosbot`). `grokbot-sand-sub` is not a seat,
 //! and nothing is written.
 
+ljos_test_boot::harness!();
 use std::path::Path;
 use std::process::Command;
 

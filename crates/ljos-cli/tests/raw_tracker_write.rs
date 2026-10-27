@@ -3,6 +3,7 @@
 //! seat check, the parent's project and the tracker commit. Reads stay
 //! allowed, and the `vissue` children ljos runs itself are not refused.
 
+ljos_test_boot::harness!();
 use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::Path;

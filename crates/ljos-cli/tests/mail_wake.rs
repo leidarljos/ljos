@@ -8,6 +8,7 @@
 //! exchange: group, send, inbox, read, reply, interrupt, and the receipt
 //! `ljos hook --prompt` writes.
 
+ljos_test_boot::harness!();
 use std::io::Write;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};

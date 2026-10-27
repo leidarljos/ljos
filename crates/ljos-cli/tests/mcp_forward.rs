@@ -1,6 +1,7 @@
 //! A stale `ljos-mcp` forwards a tool call to the installed binary through
 //! `mcp_forward`; this drives that exchange against the built binary.
 
+ljos_test_boot::harness!();
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;

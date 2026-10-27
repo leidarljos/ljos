@@ -4,6 +4,9 @@
 //! on write. Consensus is a different crate, then the tracker verb. Policyd
 //! is argv law: this process does not reload a pack as a check.
 
+#[cfg(test)]
+ljos_test_boot::harness!();
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -51011,6 +51014,21 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             Ok("0::/user.slice/user-1000.slice/session-3.scope\n"),
             &runners
         ));
+    }
+
+    /// The suite's own process is not a runner workload. A host cgroup
+    /// such as `cursor-agent/workload` still names cursor for the product;
+    /// the test harness moves out of that cgroup before a test models a
+    /// person.
+    #[test]
+    fn a_test_process_is_not_left_in_a_runner_cgroup() {
+        let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+        let runners = super::runner_names();
+        assert!(
+            !super::cgroup_text_names_runner(&text, &runners)
+                && !super::cgroup_text_is_transient(&text),
+            "test process cgroup names a runner: {text}"
+        );
     }
 
     /// macOS asks whether the controlling terminal's responsible process

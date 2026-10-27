@@ -2,6 +2,7 @@
 //! writer's pipe, or read a call as a different event than the parser.
 #![cfg(target_os = "linux")]
 
+ljos_test_boot::harness!();
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};

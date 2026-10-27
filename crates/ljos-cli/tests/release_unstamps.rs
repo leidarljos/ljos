@@ -6,6 +6,7 @@
 //! again; a completion keeps the state. A claim a git hook took under the
 //! bare seat is the same holder as `SEAT@TAG`.
 
+ljos_test_boot::harness!();
 use std::path::Path;
 use std::process::Command;
 

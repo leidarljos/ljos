@@ -7,6 +7,7 @@
 //! input ends. The client closes stdin as soon as the search is in
 //! flight; the answer still arrives and the server exits cleanly.
 
+ljos_test_boot::harness!();
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::{Command, Stdio};

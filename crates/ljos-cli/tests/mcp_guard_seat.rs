@@ -7,6 +7,7 @@
 //! missing seat must not stop it. A tool that acts under the seat still
 //! refuses a name the call made up, in one short line with named seats.
 
+ljos_test_boot::harness!();
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::time::Duration;

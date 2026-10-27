@@ -1,6 +1,7 @@
 //! `ljos doctor` on the guard bypass log and the note queue: it reads
 //! both and leaves them as it found them.
 
+ljos_test_boot::harness!();
 use std::io::Read;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};

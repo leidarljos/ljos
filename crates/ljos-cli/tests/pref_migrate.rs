@@ -6,6 +6,7 @@
 //! `via:prompt` stays unverified. A preference posted after the cutoff is
 //! neither stamped nor counted.
 
+ljos_test_boot::harness!();
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};

@@ -1,6 +1,7 @@
 //! A tracker write through the server is refused for a seat the seats
 //! file does not list, once there is a seats file. Reads stay open.
 
+ljos_test_boot::harness!();
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;

@@ -3,6 +3,7 @@
 //! Software with a Software- id; a `-p` that names another project than
 //! the parent's must not do the same through ljos.
 
+ljos_test_boot::harness!();
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 

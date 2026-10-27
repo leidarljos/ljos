@@ -1,5 +1,6 @@
 //! The `[mail]` table comes only from the user's own config files.
 
+ljos_test_boot::harness!();
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;

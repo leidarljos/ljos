@@ -2,6 +2,7 @@
 //! commit has. Raw `vissue` closes sat uncommitted on the box for days,
 //! and every row stayed green while no other host saw them.
 
+ljos_test_boot::harness!();
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;

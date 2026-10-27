@@ -2,6 +2,7 @@
 //! tracker commit. `persist_tracker_file` adds that one file and commits it;
 //! a sibling untracked file stays out of the commit.
 
+ljos_test_boot::harness!();
 use std::path::Path;
 use std::process::Command;
 
