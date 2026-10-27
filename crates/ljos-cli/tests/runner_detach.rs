@@ -11,7 +11,6 @@ mod terminal;
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -157,68 +156,50 @@ fn basis(atom: &Value) -> Option<&str> {
         .filter(|b| !b.is_empty())
 }
 
-/// The suite may already sit in a runner scope (`cursor-agent`). Otherwise
-/// move this process into a child cgroup whose name is a runner, so a
-/// detached child inherits a scope the check can see.
+/// One move of this process at a time. The cgroup is process-wide, and
+/// these tests disagree about which scope the children must inherit.
+fn scope_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Move this process into `dir`. A fresh top-level directory is required
+/// when the cgroup is the namespace root (`0::/`): joining that path with
+/// `claude` selects `/sys/fs/cgroup/claude/cgroup.procs`, and a root that
+/// cannot populate a reused child rejects the write.
+fn move_into(dir: &str, before: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        let result = ljos_test_boot::enter(dir);
+        let moved = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+        if let Err(err) = result {
+            panic!(
+                "could not move into {dir}/cgroup.procs; cgroup was {before} now {moved}: {err}"
+            );
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (dir, before);
+        panic!("a runner cgroup is a linux cgroup");
+    }
+}
+
+/// The suite may already sit in a runner scope. Otherwise move this
+/// process into a fresh cgroup whose name is a runner, so a detached
+/// child inherits a scope the check can see.
 fn ensure_runner_scope() {
     let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
     if cgroup_names_runner(&text) {
         return;
     }
-    let path = text
-        .lines()
-        .find_map(|line| line.rsplit_once(':').map(|(_, path)| path))
-        .filter(|path| !path.is_empty())
-        .unwrap_or("/");
-    let dir = PathBuf::from("/sys/fs/cgroup")
-        .join(path.trim_start_matches('/'))
-        .join("claude");
-    // A hosted runner keeps this process in a service cgroup the test
-    // user cannot extend. Root creates the child scope and moves the
-    // process; detached children inherit that scope.
-    if std::fs::create_dir_all(&dir).is_err() {
-        let made = Command::new("sudo")
-            .args(["-n", "mkdir", "-p"])
-            .arg(&dir)
-            .output()
-            .unwrap_or_else(|err| panic!("sudo mkdir {dir:?} failed to start: {err}"));
-        assert!(
-            made.status.success(),
-            "could not create {dir:?} for the detach test\n{}",
-            text_of(&made)
-        );
-    }
-    let procs = dir.join("cgroup.procs");
-    let pid = std::process::id().to_string();
-    if std::fs::write(&procs, &pid).is_err() {
-        let mut tee = Command::new("sudo");
-        tee.args(["-n", "tee"])
-            .arg(&procs)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        let mut child = tee
-            .spawn()
-            .unwrap_or_else(|err| panic!("sudo tee {procs:?} failed to start: {err}"));
-        child
-            .stdin
-            .take()
-            .expect("tee stdin")
-            .write_all(pid.as_bytes())
-            .unwrap_or_else(|err| panic!("could not write {pid} into {procs:?}: {err}"));
-        let done = child
-            .wait_with_output()
-            .unwrap_or_else(|err| panic!("sudo tee {procs:?} failed: {err}"));
-        assert!(
-            done.status.success(),
-            "could not move into {procs:?}; cgroup was {text}\n{}",
-            String::from_utf8_lossy(&done.stderr)
-        );
-    }
+    let dir = format!("/sys/fs/cgroup/claude-{}", std::process::id());
+    move_into(&dir, &text);
     let moved = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
     assert!(
         cgroup_names_runner(&moved),
-        "cgroup {moved:?} still names no runner after moving into {dir:?}"
+        "cgroup {moved:?} still names no runner after moving into {dir}"
     );
 }
 
@@ -473,6 +454,7 @@ fn forged_hook(seat: &Seat) -> std::process::Output {
 /// Detaching does not make a keep, a prefer, or a prompt hook the person's.
 #[test]
 fn detaching_does_not_make_this_process_the_person() {
+    let _scope = scope_lock();
     ensure_runner_scope();
     let daemon = Daemon::start();
     let seat = Seat::on(daemon.url.clone());
@@ -540,6 +522,7 @@ fn detaching_does_not_make_this_process_the_person() {
 /// cgroup, so the command is still the runner's.
 #[test]
 fn tmux_send_keys_into_an_existing_session_is_not_the_person() {
+    let _scope = scope_lock();
     ensure_runner_scope();
     let daemon = Daemon::start();
     let seat = Seat::on(daemon.url.clone());
@@ -606,6 +589,7 @@ fn tmux_send_keys_into_an_existing_session_is_not_the_person() {
 /// including when the environment is otherwise the seat's.
 #[test]
 fn a_ci_shaped_environment_is_not_the_person() {
+    let _scope = scope_lock();
     let daemon = Daemon::start();
     let seat = Seat::on(daemon.url.clone());
     let shaped = terminal::shape(
@@ -627,6 +611,7 @@ fn a_ci_shaped_environment_is_not_the_person() {
 /// was cleared.
 #[test]
 fn a_transient_scope_is_not_the_person() {
+    let _scope = scope_lock();
     let daemon = Daemon::start();
     let seat = Seat::on(daemon.url.clone());
     let out = if user_bus_answers() {
@@ -678,26 +663,17 @@ fn systemd_run_prefer(seat: &Seat, text: &str) -> std::process::Output {
 /// on the pty `script` opens. The cgroup name is what `systemd-run
 /// --scope` uses, and it does not contain a runner's name.
 fn scope_prefer(seat: &Seat, text: &str) -> std::process::Output {
-    let cg = PathBuf::from("/sys/fs/cgroup/system.slice/run-u1000-ljostest.scope");
-    if !cg.is_dir() {
-        let made = Command::new("sudo")
-            .args(["-n", "mkdir", "-p"])
-            .arg(&cg)
-            .output()
-            .unwrap_or_else(|err| panic!("sudo mkdir {cg:?}: {err}"));
-        assert!(
-            made.status.success(),
-            "could not create {cg:?}\n{}",
-            text_of(&made)
-        );
-    }
+    // The segment `run-*.scope` is what a transient unit is called. It
+    // does not have to sit under system.slice: that parent is absent when
+    // the cgroup namespace root is `/`, and the procs write then fails.
+    let cg = "/sys/fs/cgroup/run-u1000-ljostest.scope";
+    let before = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+    move_into(cg, &before);
     let log = seat.home.path().join("scope-script.log");
     let bin = ljos();
-    let procs = cg.join("cgroup.procs");
     let body = format!(
-        "echo $$ | sudo -n tee '{procs}' >/dev/null && script -q -e -c \"{bin} prefer '{text}'\" '{log}'",
-        procs = procs.display(),
-        log = log.display(),
+        "script -q -e -c \"{bin} prefer '{text}'\" '{}'",
+        log.display()
     );
     let mut out = detached(seat, "scope", &body);
     if let Ok(logged) = std::fs::read(&log) {

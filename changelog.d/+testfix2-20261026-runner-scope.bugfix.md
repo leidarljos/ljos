@@ -1,0 +1,1 @@
+A detach test enters a fresh cgroup whose name is a runner. Joining the namespace root with claude selects /sys/fs/cgroup/claude/cgroup.procs, and that write is rejected when the directory is already populated or the child is not a domain that can take a process. A transient scope is created by the same move, under its own run-*.scope name.
