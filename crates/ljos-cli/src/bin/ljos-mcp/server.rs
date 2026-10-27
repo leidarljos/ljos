@@ -3358,6 +3358,8 @@ async fn acquire_call_order(order: Order, id: &RequestId) -> OrderPermit {
 /// One JSON-RPC line from the client. Every tool call counts as in flight
 /// from here, and one that reads or writes the seat's notes joins the
 /// queue, on the task that reads stdin, before rmcp spawns the call.
+/// Only a line rmcp reads as `ClientRequest::CallToolRequest` counts:
+/// any other line is answered before the handler and cannot release a slot.
 fn register_inbound_line(line: &[u8]) {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
         return;
@@ -3369,22 +3371,16 @@ fn register_inbound_line(line: &[u8]) {
     if method != Some("tools/call") {
         return;
     }
-    let Some(name) = value
-        .get("params")
-        .and_then(|params| params.get("name"))
-        .and_then(|name| name.as_str())
-    else {
-        return;
-    };
-    let Some(id) = value
-        .get("id")
-        .cloned()
-        .and_then(|id| serde_json::from_value::<RequestId>(id).ok())
+    let Ok(JsonRpcMessage::Request(JsonRpcRequest {
+        id,
+        request: ClientRequest::CallToolRequest(call),
+        ..
+    })) = serde_json::from_slice::<ClientJsonRpcMessage>(line)
     else {
         return;
     };
     crate::lifetime::call_read(&id);
-    let order = call_order(name);
+    let order = call_order(&call.params.name);
     if order != Order::Free {
         ensure_queued(&id, order);
     }
@@ -3527,6 +3523,43 @@ async fn forward_call(
         .map_err(|e| fail(&e))
 }
 
+/// The rmcp service for ljos. A tool call claims its lifetime slot and
+/// queue place here, before rmcp applies request checks that may refuse
+/// the call before it reaches `call_tool`.
+pub struct LjosService(pub LjosServer);
+
+impl rmcp::Service<rmcp::RoleServer> for LjosService {
+    async fn handle_request(
+        &self,
+        request: ClientRequest,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<ServerResult, McpError> {
+        let order = match &request {
+            ClientRequest::CallToolRequest(call) => call_order(&call.params.name),
+            _ => return rmcp::Service::handle_request(&self.0, request, context).await,
+        };
+        let _in_flight = crate::lifetime::call_in_flight(&context.id);
+        let _order = acquire_call_order(order, &context.id).await;
+        rmcp::Service::handle_request(&self.0, request, context).await
+    }
+
+    async fn handle_notification(
+        &self,
+        notification: ClientNotification,
+        context: rmcp::service::NotificationContext<rmcp::RoleServer>,
+    ) -> Result<(), McpError> {
+        rmcp::Service::handle_notification(&self.0, notification, context).await
+    }
+
+    fn get_info(&self) -> ServerInfo {
+        rmcp::Service::<rmcp::RoleServer>::get_info(&self.0)
+    }
+
+    fn supported_protocol_versions(&self) -> std::borrow::Cow<'static, [ProtocolVersion]> {
+        rmcp::Service::<rmcp::RoleServer>::supported_protocol_versions(&self.0)
+    }
+}
+
 #[tool_handler]
 #[prompt_handler(router = Self::prompt_router())]
 impl ServerHandler for LjosServer {
@@ -3551,11 +3584,6 @@ impl ServerHandler for LjosServer {
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, McpError> {
-        let _in_flight = crate::lifetime::call_in_flight(&context.id);
-        // Queued when the line was read. This waits for the ordered calls
-        // ahead of it and holds the place until the answer is built. A free
-        // tool, the guard and approval included, waits for nothing.
-        let _order = acquire_call_order(call_order(&request.name), &context.id).await;
         if let Some(fresh) = replaced_binary() {
             let init = context
                 .peer
@@ -4327,6 +4355,35 @@ mod tests {
             drop(call);
             assert_eq!(read().expect("the end").expect("read"), 0);
         });
+        clear_call_queue();
+        crate::lifetime::forget_calls();
+    }
+
+    /// A line that rmcp does not read as a tool call never takes a slot
+    /// and never takes a queue place.
+    #[test]
+    fn a_tool_call_rmcp_does_not_accept_is_not_in_flight() {
+        let _guard = CALL_QUEUE_TEST
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        clear_call_queue();
+        crate::lifetime::forget_calls();
+        let mut inbound = InboundOrder::new(tokio::io::empty());
+        for line in [
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ljos_note","arguments":"bad"}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call"}"#,
+            r#"{"jsonrpc":"1.0","id":4,"method":"tools/call","params":{"name":"ljos_note","arguments":{}}}"#,
+        ] {
+            inbound.push_bytes(format!("{line}\n").as_bytes());
+            assert!(crate::lifetime::settled(), "in flight: {line}");
+            assert!(call_queue().is_empty(), "queued: {line}");
+        }
+        inbound.push_bytes(tool_line(2, "ljos_note").as_bytes());
+        assert!(
+            !crate::lifetime::settled(),
+            "a valid call was not in flight"
+        );
+        assert_eq!(queued_ids(), vec![RequestId::Number(2)]);
         clear_call_queue();
         crate::lifetime::forget_calls();
     }

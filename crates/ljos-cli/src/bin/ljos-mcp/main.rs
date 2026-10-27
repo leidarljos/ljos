@@ -65,7 +65,7 @@ async fn serve() -> anyhow::Result<()> {
     // The order is the order the lines are read. rmcp then runs each call on
     // its own task, which the runtime may poll newest first.
     let (read, write) = stdio();
-    let running = server::LjosServer::from_env()
+    let running = server::LjosService(server::LjosServer::from_env())
         .serve((server::InboundOrder::new(read), write))
         .await?;
     let ended = running.waiting().await;

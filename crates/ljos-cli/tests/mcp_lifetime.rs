@@ -117,6 +117,128 @@ fn stdin_eof_answers_the_call_in_flight_then_exits() {
     );
 }
 
+#[cfg(unix)]
+fn run_case(lines: &[serde_json::Value]) -> (bool, std::process::Output, String) {
+    let home = tempfile::tempdir().unwrap();
+    let mut child = server(home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let mut stdin = child.stdin.take().unwrap();
+    for line in initialize().iter().chain(lines) {
+        writeln!(stdin, "{line}").unwrap();
+    }
+    drop(stdin);
+    let ended = ended_within(pid, Duration::from_secs(10));
+    if !ended {
+        stop(pid);
+    }
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    (ended, out, stdout)
+}
+
+#[cfg(unix)]
+fn response_ids(stdout: &str) -> Vec<i64> {
+    stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|value| value.get("id").and_then(serde_json::Value::as_i64))
+        .collect()
+}
+
+/// A malformed guard check does not block ordered calls that follow it,
+/// even when one reuses the malformed call's id.
+#[test]
+#[cfg(unix)]
+fn malformed_call_then_reused_id_ordered_calls_still_answer() {
+    let lines = vec![
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"ljos_guard_check","arguments":"bad"}}),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"ljos_note","arguments":{"text":"reuse"}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+            "params":{"name":"ljos_note","arguments":{"text":"fresh"}}}),
+    ];
+    let (ended, out, stdout) = run_case(&lines);
+    assert!(ended, "still running 10 s after stdin closed\n{stdout}");
+    assert!(out.status.success(), "{:?}\n{stdout}", out.status);
+    let ids = response_ids(&stdout);
+    assert!(ids.contains(&2), "no response for id 2\n{stdout}");
+    assert!(ids.contains(&3), "no response for id 3\n{stdout}");
+}
+
+/// Unknown and invalid tool calls do not hold later ordered writes.
+#[test]
+#[cfg(unix)]
+fn unknown_or_invalid_tool_call_does_not_hold_later_ordered_write() {
+    let cases = [
+        (
+            "unknown tool",
+            vec![
+                serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+                    "params":{"name":"ljos_no_such_tool","arguments":{}}}),
+                serde_json::json!({"jsonrpc":"2.0","id":5,"method":"tools/call",
+                    "params":{"name":"ljos_note","arguments":{"text":"after unknown"}}}),
+            ],
+            5,
+        ),
+        (
+            "missing arguments",
+            vec![
+                serde_json::json!({"jsonrpc":"2.0","id":6,"method":"tools/call",
+                    "params":{"name":"ljos_note"}}),
+                serde_json::json!({"jsonrpc":"2.0","id":7,"method":"tools/call",
+                    "params":{"name":"ljos_note","arguments":{"text":"after missing"}}}),
+            ],
+            7,
+        ),
+    ];
+    for (case, lines, must_answer) in cases {
+        let (ended, out, stdout) = run_case(&lines);
+        assert!(
+            ended,
+            "{case}: still running 10 s after stdin closed\n{stdout}"
+        );
+        assert!(out.status.success(), "{case}: {:?}\n{stdout}", out.status);
+        let ids = response_ids(&stdout);
+        assert!(
+            ids.contains(&must_answer),
+            "{case}: no response for id {must_answer}\n{stdout}"
+        );
+    }
+}
+
+/// One malformed ordered write must not hold later ordered writes forever.
+#[test]
+#[cfg(unix)]
+fn malformed_ordered_write_does_not_block_following_writes() {
+    let lines = vec![
+        serde_json::json!({"jsonrpc":"2.0","id":8,"method":"tools/call",
+            "params":{"name":"ljos_note","arguments":"bad"}}),
+        serde_json::json!({"jsonrpc":"2.0","id":9,"method":"tools/call",
+            "params":{"name":"ljos_note","arguments":{"text":"first"}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":10,"method":"tools/call",
+            "params":{"name":"ljos_note","arguments":{"text":"second"}}}),
+    ];
+    let (ended, out, stdout) = run_case(&lines);
+    assert!(ended, "still running 10 s after stdin closed\n{stdout}");
+    assert!(out.status.success(), "{:?}\n{stdout}", out.status);
+    let ids = response_ids(&stdout);
+    let first = ids
+        .iter()
+        .position(|id| *id == 9)
+        .unwrap_or_else(|| panic!("no response for id 9\n{stdout}"));
+    let second = ids
+        .iter()
+        .position(|id| *id == 10)
+        .unwrap_or_else(|| panic!("no response for id 10\n{stdout}"));
+    assert!(first < second, "id 9 answered after id 10\n{stdout}");
+}
+
 /// A search slower than the old fixed 35 s drain. The pack is allowed 45 s,
 /// so the server has to hold the end of stdin until the answer is written.
 #[test]
