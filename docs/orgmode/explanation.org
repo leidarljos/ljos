@@ -100,11 +100,14 @@ without running it.
 - Cards are read-only. The seat writes to the pack; a person writes the
   cards.
 - The pack is written by =remember=, =prefer=, =trust=, =learn=,
-  =graded=, =forget=, an imported handover, and a session-end read.
-  At =SessionEnd= that read keeps up to five cue-word sentences from
-  the person's and the agent's prose. Each is stored as an unverified
-  agent note. The prompt hook never injects one. ~LJOS_EXTRACT=off~
-  turns the read off.
+  =graded=, =forget=, an imported handover, and a session-end read
+  when the conversation holds a live sitting. That read is on by
+  default. At =SessionEnd= it keeps up to five cue-word sentences
+  from the person's and the agent's prose and writes each as an
+  unverified agent note on that sitting's ticket. With no sitting
+  it posts nothing and prints one line, because packset keeps a
+  note only on a ticket. The prompt hook never injects one.
+  ~LJOS_EXTRACT=off~ turns the read off.
 - A tool that fails is a habitat refusing or down, and says which. It is
   never an empty answer.
 
@@ -279,11 +282,13 @@ Ebbinghaus curve refreshed by recall; Generative Agents
 and reflect. All of them put a model in the write path.
 
 The seat does not. What is kept as a belief is what was said with =Remember=
-or =Prefer=, stored as written. At =SessionEnd= the hook may keep up to five
-cue-word sentences from the person's and the agent's prose as unverified
-agent notes, and the prompt hook never injects them, so a transcript does
-not become a belief by being read. That is the privacy-of-write, and it is
-the one design choice here that the others do not make. Forgetting is by review rather than by
+or =Prefer=, stored as written. At =SessionEnd=, when the conversation holds
+a live sitting, the hook may keep up to five cue-word sentences from the
+person's and the agent's prose as unverified agent notes on that sitting's
+ticket, and it keeps none when there is no sitting. The prompt hook never
+injects them, so a transcript does not become a belief by being read. That
+is the privacy-of-write, and it is the one design choice here that the
+others do not make. Forgetting is by review rather than by
 age: retrievability from the clock of what was recalled and when, the
 same schedule spaced repetition runs, where MemoryBank ages by time and
 Generative Agents by recency. Time is data, as in Zep: a claim carries the

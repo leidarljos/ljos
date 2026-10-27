@@ -1,0 +1,1 @@
+The explanation says a session-end read writes an unverified note only when the conversation holds a live sitting. With no sitting it posts nothing and prints one line, because packset keeps a note only on a ticket. The read stays on unless LJOS_EXTRACT=off, and the prompt hook never injects the note.
