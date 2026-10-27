@@ -59664,10 +59664,15 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "{header}\n{}",
             sync::log_plaintext(std::slice::from_ref(&atom), "surf", "surf")
         );
-        let digest = format!("{} {}\n", work_id(&plain), work_id("age1test"));
         let atoms = root.join(".ljos/atoms");
         std::fs::create_dir_all(&atoms).unwrap();
         std::fs::write(atoms.join(format!("{host}.jsonl.age")), "sealed\n").unwrap();
+        let digest = sync::export_digest(
+            &root,
+            &format!(".ljos/atoms/{host}.jsonl.age"),
+            &plain,
+            &["age1test".into()],
+        );
         std::fs::write(atoms.join(format!("{host}.digest")), digest).unwrap();
         git(&root, &["init", "-q", "-b", "main"]);
         git(&root, &["config", "user.email", "seat@example.invalid"]);

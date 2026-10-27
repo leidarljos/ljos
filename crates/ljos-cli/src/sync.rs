@@ -1047,11 +1047,7 @@ fn export_named_scope(
     let count = body.lines().count();
     let plain = log_header(&host, scope_name) + &body;
     let [log_rel, digest_rel] = host_log_rels_for_scope(&host, primary_scope, scope_name);
-    let digest = format!(
-        "{} {}\n",
-        crate::work_id(&plain),
-        crate::work_id(&recipients.join(","))
-    );
+    let digest = export_digest(root, &log_rel, &plain, recipients);
     if read_beneath(root, &digest_rel)?.is_some_and(|d| d == digest.as_bytes()) {
         return Ok(format!(
             "sync: {count} {} atoms unchanged since the last export\n",
@@ -1067,6 +1063,7 @@ fn export_named_scope(
         Err(err) => return Err(err),
     };
     write_beneath(root, &log_rel, &sealed)?;
+    let digest = export_digest(root, &log_rel, &plain, recipients);
     write_beneath(root, &digest_rel, digest.as_bytes())?;
     Ok(format!(
         "sync: exported {count} {} atoms to {log_rel}, sealed to {} recipient{}\n",
@@ -1074,6 +1071,37 @@ fn export_named_scope(
         recipients.len(),
         if recipients.len() == 1 { "" } else { "s" }
     ))
+}
+
+/// The `.digest` an export writes once `plain` is sealed to `recipients`
+/// in `log_rel`: the plaintext, the recipients, and the sealed files as
+/// they are in `root`. The next export writes nothing while all three
+/// match. A log that a merge or a checkout replaced under the same atoms
+/// no longer matches, and is sealed again instead of left as found.
+pub(crate) fn export_digest(
+    root: &Path,
+    log_rel: &str,
+    plain: &str,
+    recipients: &[String],
+) -> String {
+    format!(
+        "{} {} {}\n",
+        crate::work_id(plain),
+        crate::work_id(&recipients.join(",")),
+        sealed_files_digest(root, log_rel)
+    )
+}
+
+/// One digest over the ciphertext of `log_rel` in `root`. A missing file
+/// and one that cannot be read are named apart, and neither matches a
+/// file an export wrote.
+fn sealed_files_digest(root: &Path, log_rel: &str) -> String {
+    let file = match read_beneath(root, log_rel) {
+        Ok(Some(bytes)) => blob_digest(&bytes),
+        Ok(None) => "missing".into(),
+        Err(_) => "unread".into(),
+    };
+    blob_digest(format!("{file}\n").as_bytes())
 }
 
 fn export_all(root: &Path, scope: &Scope, atoms: &[Value]) -> Result<String> {
@@ -8417,6 +8445,41 @@ mod tests {
         assert!(primary.contains("named box"), "{primary}");
         assert!(primary.contains("lesson on the primary"), "{primary}");
         assert!(!primary.contains("cloud only"), "{primary}");
+    }
+
+    /// The digest names the sealed file as well as the atoms. A log that a
+    /// merge replaced under the same atoms is sealed again, and a digest
+    /// with the two fields an older ljos wrote is sealed over once.
+    #[test]
+    fn a_log_replaced_under_the_same_atoms_is_sealed_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = hold_env(dir.path());
+        let scope: Scope =
+            toml::from_str("name = \"grokbot\"\nrecipients = [\"age1box\"]\n").unwrap();
+        let atoms = vec![atom("a", "kept", &[])];
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let [log_rel, digest_rel] = host_log_rels_for_scope(&host(), "grokbot", "grokbot");
+        let run = || with_fake_age(dir.path(), || export(&root, &scope, &atoms)).unwrap();
+        let said = run();
+        assert!(said.contains("sync: exported 1 grokbot atoms"), "{said}");
+        let sealed = std::fs::read(root.join(&log_rel)).unwrap();
+        let said = run();
+        assert!(said.contains("unchanged since the last export"), "{said}");
+        std::fs::write(root.join(&log_rel), "another seal\n").unwrap();
+        let said = run();
+        assert!(
+            said.contains("sync: exported 1 grokbot atoms"),
+            "a replaced log was left as found: {said}"
+        );
+        assert_eq!(std::fs::read(root.join(&log_rel)).unwrap(), sealed);
+        let plain = String::from_utf8(sealed).unwrap();
+        let older = format!("{} {}\n", crate::work_id(&plain), crate::work_id("age1box"));
+        std::fs::write(root.join(&digest_rel), older).unwrap();
+        let said = run();
+        assert!(said.contains("sync: exported 1 grokbot atoms"), "{said}");
+        let said = run();
+        assert!(said.contains("unchanged since the last export"), "{said}");
     }
 
     #[test]
