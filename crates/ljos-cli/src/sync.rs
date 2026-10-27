@@ -1012,6 +1012,25 @@ fn remove_beneath(root: &Path, rel: &str) -> Result<()> {
     Ok(())
 }
 
+/// Remove the empty directory `rel` below `root`, with no symlink at any
+/// directory. A missing one is not an error.
+fn remove_dir_beneath(root: &Path, rel: &str) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    let (parent, name) = split_rel(rel);
+    let Some(dir) = open_dir_beneath(root, parent, false)? else {
+        return Ok(());
+    };
+    let cname = c_name(name)?;
+    // SAFETY: dir is an open directory fd and cname is NUL-terminated.
+    if unsafe { libc::unlinkat(dir.as_raw_fd(), cname.as_ptr(), libc::AT_REMOVEDIR) } < 0
+        && last_errno() != Some(libc::ENOENT)
+    {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("sync: {}", root.join(rel).display()));
+    }
+    Ok(())
+}
+
 /// The public key written above an age identity (`# public key: age1...`).
 /// Absent on a key that was copied without that comment.
 fn commented_public_key(identity: &Path) -> Option<String> {
@@ -1261,29 +1280,173 @@ fn export_named_scope(
     let plain = log_header(&host, scope_name) + &body;
     let [log_rel, digest_rel] = host_log_rels_for_scope(&host, primary_scope, scope_name);
     let digest = export_digest(root, &log_rel, &plain, recipients);
-    if read_beneath(root, &digest_rel)?.is_some_and(|d| d == digest.as_bytes()) {
-        return Ok(format!(
-            "sync: {count} {} atoms unchanged since the last export\n",
-            scope_name
-        ));
+    let previous = read_beneath(root, &digest_rel)?;
+    let unchanged = format!("sync: {count} {scope_name} atoms unchanged since the last export\n");
+    if previous.as_deref() == Some(digest.as_bytes()) {
+        return Ok(unchanged);
     }
     if !age_on_path() {
         return Ok(age_missing_line());
     }
-    let sealed = match seal_bytes(&plain, recipients) {
-        Ok(sealed) => sealed,
-        Err(err) if age_missing(&err) => return Ok(age_missing_line()),
-        Err(err) => return Err(err),
-    };
-    write_beneath(root, &log_rel, &sealed)?;
-    let digest = export_digest(root, &log_rel, &plain, recipients);
-    write_beneath(root, &digest_rel, digest.as_bytes())?;
-    Ok(format!(
-        "sync: exported {count} {} atoms to {log_rel}, sealed to {} recipient{}\n",
-        scope_name,
+    let recipients_said = format!(
+        "sealed to {} recipient{}",
         recipients.len(),
         if recipients.len() == 1 { "" } else { "s" }
-    ))
+    );
+    let plan = plan_log_write(
+        root,
+        &log_rel,
+        &host,
+        scope_name,
+        &body,
+        recipients,
+        previous.as_deref(),
+    );
+    let said = match plan {
+        LogWrite::Clean { applied } => {
+            remove_chunks(root, &log_rel, applied)?;
+            unchanged
+        }
+        LogWrite::Chunk {
+            n,
+            plain: chunk,
+            changes,
+        } => {
+            let sealed = match seal_bytes(&chunk, recipients) {
+                Ok(sealed) => sealed,
+                Err(err) if age_missing(&err) => return Ok(age_missing_line()),
+                Err(err) => return Err(err),
+            };
+            remove_chunks(root, &log_rel, n - 1)?;
+            let rel = chunk_rel(&log_rel, n);
+            write_beneath(root, &rel, &sealed)?;
+            format!("sync: exported {count} {scope_name} atoms, {changes} changed, to {rel}, {recipients_said}\n")
+        }
+        LogWrite::Whole => {
+            let sealed = match seal_bytes(&plain, recipients) {
+                Ok(sealed) => sealed,
+                Err(err) if age_missing(&err) => return Ok(age_missing_line()),
+                Err(err) => return Err(err),
+            };
+            write_beneath(root, &log_rel, &sealed)?;
+            remove_chunks(root, &log_rel, 0)?;
+            format!("sync: exported {count} {scope_name} atoms to {log_rel}, {recipients_said}\n")
+        }
+    };
+    let digest = export_digest(root, &log_rel, &plain, recipients);
+    write_beneath(root, &digest_rel, digest.as_bytes())?;
+    Ok(said)
+}
+
+/// How an export writes a log whose digest no longer matches.
+enum LogWrite {
+    /// Seal the whole log as a new base and remove its chunks.
+    Whole,
+    /// Seal `plain`, the atoms that changed, as chunk `n` over the base.
+    /// Chunk files from `n` on are removed first.
+    Chunk {
+        n: u32,
+        plain: String,
+        changes: usize,
+    },
+    /// The log already reads as these atoms. Chunk files past `applied`,
+    /// which the read left unread, are removed.
+    Clean { applied: u32 },
+}
+
+/// How to write `body`, this host's atoms of `scope_name`, into the log
+/// at `log_rel`. `previous` is the digest the last export left.
+///
+/// A chunk is written only over a log this ljos wrote to the same
+/// recipients and this machine can open: a digest with three fields
+/// whose recipients match, and a base whose header names this host and
+/// scope. Anything else is sealed whole. That covers the first sync
+/// after upgrading from a single-file ljos, a changed recipient list,
+/// and a base replaced by a key this machine does not hold. The atoms
+/// are diffed against the log as a reader sees it, so a chunk left
+/// unread is carried again in the new one.
+fn plan_log_write(
+    root: &Path,
+    log_rel: &str,
+    host: &str,
+    scope_name: &str,
+    body: &str,
+    recipients: &[String],
+    previous: Option<&[u8]>,
+) -> LogWrite {
+    let previous = previous.and_then(|bytes| std::str::from_utf8(bytes).ok());
+    let fields: Vec<&str> = previous.unwrap_or("").split_whitespace().collect();
+    if fields.len() != 3 || fields[1] != crate::work_id(&recipients.join(",")) {
+        return LogWrite::Whole;
+    }
+    let Ok(Some(base)) = read_beneath(root, log_rel) else {
+        return LogWrite::Whole;
+    };
+    let identities = identities_for_open(scope_name);
+    let Ok(Some(opened)) = open_sealed_bytes(&base, &identities) else {
+        return LogWrite::Whole;
+    };
+    let Some((named_host, named_scope, base_body)) = split_header(&opened) else {
+        return LogWrite::Whole;
+    };
+    if named_host != host || named_scope != scope_name {
+        return LogWrite::Whole;
+    }
+    let view = read_chunks(base_body, &base, host, scope_name, &identities, |n| {
+        read_beneath(root, &chunk_rel(log_rel, n))
+    });
+    let (Some(had), Some(has)) = (lines_by_id(&view.body), lines_by_id(body)) else {
+        return LogWrite::Whole;
+    };
+    let mut lines = String::new();
+    let mut changes = 0;
+    for (id, line) in &has {
+        if had.get(id) != Some(line) {
+            lines.push_str(line);
+            lines.push('\n');
+            changes += 1;
+        }
+    }
+    for id in had.keys().filter(|id| !has.contains_key(*id)) {
+        lines.push_str(&serde_json::json!({ CHUNK_DROP: id }).to_string());
+        lines.push('\n');
+        changes += 1;
+    }
+    if changes == 0 {
+        return LogWrite::Clean {
+            applied: view.applied,
+        };
+    }
+    let n = view.applied + 1;
+    if n > MAX_CHUNKS {
+        return LogWrite::Whole;
+    }
+    LogWrite::Chunk {
+        n,
+        plain: chunk_header(host, scope_name, &blob_digest(&base), n) + &lines,
+        changes,
+    }
+}
+
+/// Remove the chunk files of `log_rel` past the first `keep`, and with
+/// `keep` 0 the chunk directory too. Any other name in the directory,
+/// such as the temp file of a write that was cut off, goes with them, so
+/// the commit that stages the directory carries chunks alone. A file or
+/// symlink where the directory belongs is removed.
+fn remove_chunks(root: &Path, log_rel: &str, keep: u32) -> Result<()> {
+    let dir = chunk_dir_rel(log_rel);
+    let names = match list_beneath(root, &dir) {
+        Ok(names) => names,
+        Err(_) => return remove_beneath(root, &dir),
+    };
+    let kept = |name: &str| (1..=keep).any(|n| name == format!("{n}.age"));
+    for name in names.iter().filter(|name| !kept(name)) {
+        remove_beneath(root, &format!("{dir}/{name}"))?;
+    }
+    if keep == 0 {
+        remove_dir_beneath(root, &dir)?;
+    }
+    Ok(())
 }
 
 /// The `.digest` an export writes once `plain` is sealed to `recipients`
@@ -1305,16 +1468,26 @@ pub(crate) fn export_digest(
     )
 }
 
-/// One digest over the ciphertext of `log_rel` in `root`. A missing file
-/// and one that cannot be read are named apart, and neither matches a
-/// file an export wrote.
+/// One digest over the ciphertext of `log_rel` in `root` and of each of
+/// its chunk files in turn, up to the first that is missing. A missing
+/// base and a file that cannot be read are named apart, and neither
+/// matches a file an export wrote. A chunk cut short or added after the
+/// export changes it, so the next export repairs the log.
 fn sealed_files_digest(root: &Path, log_rel: &str) -> String {
-    let file = match read_beneath(root, log_rel) {
-        Ok(Some(bytes)) => blob_digest(&bytes),
-        Ok(None) => "missing".into(),
-        Err(_) => "unread".into(),
+    let file = |rel: &str| match read_beneath(root, rel) {
+        Ok(Some(bytes)) => Some(blob_digest(&bytes)),
+        Ok(None) => None,
+        Err(_) => Some("unread".to_string()),
     };
-    blob_digest(format!("{file}\n").as_bytes())
+    let mut files = file(log_rel).unwrap_or_else(|| "missing".into()) + "\n";
+    for n in 1..=MAX_CHUNKS + 1 {
+        let Some(chunk) = file(&chunk_rel(log_rel, n)) else {
+            break;
+        };
+        files.push_str(&chunk);
+        files.push('\n');
+    }
+    blob_digest(files.as_bytes())
 }
 
 fn export_all(root: &Path, scope: &Scope, atoms: &[Value]) -> Result<String> {
@@ -3315,12 +3488,14 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
         }
         let mut stage = drop_rels;
         let mine: Vec<String> = if scope.scopes.is_empty() {
-            host_log_rels(&me).to_vec()
+            let [log, digest] = host_log_rels(&me);
+            let chunks = chunk_dir_rel(&log);
+            vec![log, digest, chunks]
         } else {
             scope
                 .all_scopes()
                 .into_iter()
-                .flat_map(|named| host_log_rels_for_scope(&me, &scope.name, named.name))
+                .flat_map(|named| host_log_paths(&me, &scope.name, named.name))
                 .collect()
         };
         for rel in mine {
@@ -3492,12 +3667,23 @@ fn commits_to_push(root: &Path) -> bool {
 /// not even a commit already waiting.
 fn commit_log(root: &Path, scope: &str, push: bool) -> String {
     let host = host();
-    let files = [
-        format!(".ljos/atoms/{host}.jsonl.age"),
-        format!(".ljos/atoms/{host}.digest"),
-    ];
+    let log = format!(".ljos/atoms/{host}.jsonl.age");
+    let mut files = vec![log.clone(), format!(".ljos/atoms/{host}.digest")];
+    let chunks = chunk_dir_rel(&log);
+    if stageable_path(root, &chunks) {
+        files.push(chunks);
+    }
+    let files: Vec<&str> = files.iter().map(String::as_str).collect();
     let message = format!("chore(sync): {host} {scope} atoms");
-    commit_files(root, &[&files[0], &files[1]], &message, push)
+    commit_files(root, &files, &message, push)
+}
+
+/// The paths a commit of `host`'s log of `scope_name` stages: the sealed
+/// base, its digest, and its chunk directory.
+fn host_log_paths(host: &str, primary_scope: &str, scope_name: &str) -> [String; 3] {
+    let [log, digest] = host_log_rels_for_scope(host, primary_scope, scope_name);
+    let chunks = chunk_dir_rel(&log);
+    [log, digest, chunks]
 }
 
 fn commit_logs(root: &Path, scope: &Scope, push: bool) -> String {
@@ -3506,7 +3692,7 @@ fn commit_logs(root: &Path, scope: &Scope, push: bool) -> String {
     let mut refs: Vec<String> = scope
         .all_scopes()
         .into_iter()
-        .flat_map(|named_scope| host_log_rels_for_scope(&me, &scope.name, named_scope.name))
+        .flat_map(|named_scope| host_log_paths(&me, &scope.name, named_scope.name))
         .filter(|rel| stageable_path(root, rel))
         .collect();
     for rel in stale_scope_rels(root, scope) {
@@ -7783,6 +7969,217 @@ mod tests {
             digest.starts_with(&crate::work_id(&opened)),
             "{digest} does not name {opened}"
         );
+    }
+
+    /// A note of about 450 bytes for the growth tests.
+    fn note(n: usize) -> Value {
+        let text = format!("note {n}: {}", "x".repeat(400));
+        atom(&format!("a{n:05}"), &text, &[])
+    }
+
+    /// A tracker, its scope sealed to a key this machine holds, and a
+    /// sync that exports this host's log and commits it without a push.
+    struct Growth {
+        root: PathBuf,
+        scope: Scope,
+        public: String,
+        log_rel: String,
+    }
+
+    impl Growth {
+        fn new(dir: &Path) -> Self {
+            let public = make_key();
+            let scope: Scope = toml::from_str(&format!(
+                "name = \"grokbot\"\nrecipients = [\"{public}\"]\n"
+            ))
+            .unwrap();
+            let [log_rel, _] = host_log_rels_for_scope(&host(), "grokbot", "grokbot");
+            Growth {
+                root: tracker(dir),
+                scope,
+                public,
+                log_rel,
+            }
+        }
+
+        fn sync(&self, atoms: &[Value]) -> String {
+            let said = export(&self.root, &self.scope, atoms).unwrap();
+            commit_log(&self.root, "grokbot", false);
+            said
+        }
+
+        fn git(&self, args: &[&str]) -> String {
+            let out = git(&self.root, args).unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+
+        fn base_blob(&self) -> String {
+            self.git(&["rev-parse", &format!("HEAD:{}", self.log_rel)])
+        }
+
+        /// Bytes of every blob reachable from HEAD and not from `since`.
+        fn blob_bytes_since(&self, since: &str) -> u64 {
+            let listed = self.git(&["rev-list", "--objects", &format!("{since}..HEAD")]);
+            let mut total = 0;
+            for oid in listed.lines().filter_map(|line| line.split(' ').next()) {
+                if self.git(&["cat-file", "-t", oid]) == "blob" {
+                    total += self.git(&["cat-file", "-s", oid]).parse::<u64>().unwrap();
+                }
+            }
+            total
+        }
+
+        /// This host's atoms as a peer reads them, and what import said.
+        fn peer_view(&self) -> (String, String) {
+            let (jobs, out) = import_jobs(&self.root, &self.scope, "peer").unwrap();
+            let job = jobs.iter().find(|job| job.host == host());
+            let job = job.unwrap_or_else(|| panic!("no job for this host: {out}"));
+            (job.plain.clone(), out)
+        }
+
+        fn chunk(&self, n: u32) -> PathBuf {
+            let stem = self.log_rel.strip_suffix(".jsonl.age").unwrap();
+            self.root.join(format!("{stem}.chunks/{n}.age"))
+        }
+    }
+
+    /// Twenty syncs that each add one note to a log of 1500 leave its base
+    /// blob as it was. Each writes one small chunk, every blob the twenty
+    /// commits add comes to less than a tenth of the base, and a peer
+    /// reads the same atoms the single file would carry.
+    #[test]
+    fn twenty_syncs_leave_the_base_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let fix = Growth::new(dir.path());
+        let mut atoms: Vec<Value> = (0..1500).map(note).collect();
+        fix.sync(&atoms);
+        let start = fix.git(&["rev-parse", "HEAD"]);
+        let base = fix.base_blob();
+        let base_bytes: u64 = fix.git(&["cat-file", "-s", &base]).parse().unwrap();
+        let mut rewrites = 0;
+        let mut last = base.clone();
+        for n in 0..20 {
+            atoms.push(note(1500 + n));
+            fix.sync(&atoms);
+            let now = fix.base_blob();
+            if now != last {
+                rewrites += 1;
+                last = now;
+            }
+        }
+        let added = fix.blob_bytes_since(&start);
+        assert_eq!(rewrites, 0, "20 syncs rewrote the base {rewrites} times");
+        assert!(
+            added * 10 < base_bytes,
+            "20 syncs added {added} blob bytes over a {base_bytes} byte base"
+        );
+        let (view, out) = fix.peer_view();
+        assert_eq!(
+            view,
+            log_lines(&atoms, "grokbot", "grokbot", false),
+            "{out}"
+        );
+    }
+
+    /// A log an older ljos wrote, one sealed file and a digest of two
+    /// fields, reads as it did. The first sync after upgrading seals it
+    /// whole once, and the sync after that writes a chunk over it.
+    #[test]
+    fn a_single_file_log_moves_to_chunks_on_its_first_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let fix = Growth::new(dir.path());
+        let mut atoms: Vec<Value> = (0..200).map(note).collect();
+        let [log_rel, digest_rel] = host_log_rels_for_scope(&host(), "grokbot", "grokbot");
+        let plain =
+            log_header(&host(), "grokbot") + &log_lines(&atoms, "grokbot", "grokbot", false);
+        let sealed = seal_bytes(&plain, std::slice::from_ref(&fix.public)).unwrap();
+        write_beneath(&fix.root, &log_rel, &sealed).unwrap();
+        let older = format!(
+            "{} {}\n",
+            crate::work_id(&plain),
+            crate::work_id(&fix.public)
+        );
+        write_beneath(&fix.root, &digest_rel, older.as_bytes()).unwrap();
+        commit_log(&fix.root, "grokbot", false);
+        let single = fix.base_blob();
+        let (view, out) = fix.peer_view();
+        assert_eq!(
+            view,
+            log_lines(&atoms, "grokbot", "grokbot", false),
+            "{out}"
+        );
+
+        atoms.push(note(200));
+        fix.sync(&atoms);
+        let migrated = fix.base_blob();
+        assert_ne!(
+            migrated, single,
+            "the first write did not seal the log whole"
+        );
+        assert!(!fix.chunk(1).exists(), "the first write left a chunk");
+
+        atoms.push(note(201));
+        fix.sync(&atoms);
+        assert_eq!(
+            fix.base_blob(),
+            migrated,
+            "the second write sealed the log whole"
+        );
+        assert!(fix.chunk(1).is_file(), "the second write left no chunk");
+        let (view, out) = fix.peer_view();
+        assert_eq!(
+            view,
+            log_lines(&atoms, "grokbot", "grokbot", false),
+            "{out}"
+        );
+    }
+
+    /// A chunk cut short after it was written, as by a torn write or a
+    /// checkout that stopped, never reaches the view: a peer reads the base
+    /// and the chunks before it. The next export finds the files changed
+    /// under its digest and seals that chunk again.
+    #[test]
+    fn a_cut_chunk_is_left_unread_and_sealed_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let fix = Growth::new(dir.path());
+        let mut atoms: Vec<Value> = (0..200).map(note).collect();
+        fix.sync(&atoms);
+        let base = fix.base_blob();
+        atoms.push(note(200));
+        fix.sync(&atoms);
+        let before = atoms.clone();
+        atoms.push(note(201));
+        fix.sync(&atoms);
+        let cut = fix.chunk(2);
+        assert!(cut.is_file(), "no chunk was written");
+        let bytes = std::fs::read(&cut).unwrap();
+        std::fs::write(&cut, &bytes[..bytes.len() / 2]).unwrap();
+        let (view, out) = fix.peer_view();
+        assert_eq!(
+            view,
+            log_lines(&before, "grokbot", "grokbot", false),
+            "{out}"
+        );
+        assert!(out.contains("chunk 2 did not open"), "{out}");
+
+        let said = fix.sync(&atoms);
+        assert!(said.contains("chunks/2.age"), "{said}");
+        let (view, out) = fix.peer_view();
+        assert_eq!(
+            view,
+            log_lines(&atoms, "grokbot", "grokbot", false),
+            "{out}"
+        );
+        assert_eq!(out, "");
+        assert_eq!(fix.base_blob(), base);
     }
 
     /// A peer's log reads as its base with each chunk applied in order. The
