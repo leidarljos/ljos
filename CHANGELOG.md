@@ -5,6 +5,13 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.34.1 (2026-10-27)
+
+### Fixes
+
+- `install.sh` puts each program in place by rename. A copy over a program that was running, such as `ljos-mcp` under a live session or `packsetd`, failed with "Text file busy" and left the old program installed; a rename replaces the entry and the running process keeps the old file until it exits.
+
+
 ## 0.34.0 (2026-10-27)
 
 ### Features

@@ -1,1 +1,0 @@
-`install.sh` puts each program in place by rename. A copy over a program that was running, such as `ljos-mcp` under a live session or `packsetd`, failed with "Text file busy" and left the old program installed; a rename replaces the entry and the running process keeps the old file until it exits.
