@@ -2365,6 +2365,33 @@ enum GoneLog {
     Refused,
 }
 
+/// The files of `log_rel`'s chunk directory, on disk or in HEAD.
+fn chunk_files(root: &Path, log_rel: &str) -> Vec<String> {
+    let dir = chunk_dir_rel(log_rel);
+    let mut rels: Vec<String> = list_beneath(root, &dir)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|name| format!("{dir}/{name}"))
+        .collect();
+    if let Ok(out) = git(
+        root,
+        &["ls-tree", "-r", "-z", "--name-only", "HEAD", "--", &dir],
+    ) {
+        if out.status.success() {
+            let listed = String::from_utf8_lossy(&out.stdout);
+            rels.extend(
+                listed
+                    .split('\0')
+                    .filter(|rel| !rel.is_empty())
+                    .map(str::to_string),
+            );
+        }
+    }
+    rels.sort();
+    rels.dedup();
+    rels
+}
+
 fn in_head(root: &Path, rel: &str) -> bool {
     let spec = format!("HEAD:{rel}");
     git(root, &["cat-file", "-e", &spec]).is_ok_and(|out| out.status.success())
@@ -3331,6 +3358,23 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
                     ),
                     _ => {}
                 }
+                for rel in chunk_files(root, &log.age) {
+                    match gone_log_state(root, &rel) {
+                        GoneLog::Untracked => bail!(
+                            "sync: {gone}'s {} chunk {rel} is not committed; the log was left in place",
+                            log.scope_name
+                        ),
+                        GoneLog::Dirty => bail!(
+                            "sync: {gone}'s {} chunk {rel} differs from the committed file; the log was left in place",
+                            log.scope_name
+                        ),
+                        GoneLog::Refused => bail!(
+                            "sync: {gone}'s {} chunk {rel} is not a regular file; the log was left in place",
+                            log.scope_name
+                        ),
+                        _ => {}
+                    }
+                }
                 present.push(log);
             }
         }
@@ -3487,6 +3531,11 @@ fn adopt_in_repo(root: &Path, scope: &Scope, gone: &str, opts: AdoptOpts) -> Res
         ) {
             drop_rels.push(log.digest.clone());
         }
+        drop_rels.extend(
+            chunk_files(root, &log.age)
+                .into_iter()
+                .filter(|rel| in_head(root, rel)),
+        );
     }
     // One subject for every scope file. Import matches the host, the
     // first word, and reads a `host+scope` path in this commit as that
@@ -7923,6 +7972,65 @@ mod tests {
             !said.contains("bad host:"),
             "this host's log under its raw name was imported: {said}"
         );
+    }
+
+    /// A gone host's chunks are read into the adopt and deleted with its
+    /// log, so the adopt commit leaves no file of that host behind.
+    #[test]
+    fn an_adopt_drops_the_gone_hosts_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let public = make_key();
+        let root = tracker(dir.path());
+        std::fs::write(
+            root.join(".ljos/sync.toml"),
+            format!("name = \"cloud\"\nrecipients = [\"{public}\"]\n"),
+        )
+        .unwrap();
+        let age = ".ljos/atoms/gone.jsonl.age";
+        let digest = ".ljos/atoms/gone.digest";
+        let chunks = ".ljos/atoms/gone.chunks";
+        let chunk = ".ljos/atoms/gone.chunks/1.age";
+        let line = |id: &str, text: &str| serde_json::json!({"id": id, "text": text, "kind": "lesson", "entities": []});
+        let base = framed(
+            "gone",
+            "cloud",
+            &format!("{}\n", line("g1", "from the base")),
+        );
+        seal(&base, std::slice::from_ref(&public), &root.join(age)).unwrap();
+        let over = blob_digest(&std::fs::read(root.join(age)).unwrap());
+        let header =
+            serde_json::json!({"ljos_chunk": 1, "host": "gone", "scope": "cloud", "base": over});
+        let plain = format!("{header}\n{}\n", line("g2", "from a chunk"));
+        std::fs::create_dir_all(root.join(chunks)).unwrap();
+        seal(&plain, std::slice::from_ref(&public), &root.join(chunk)).unwrap();
+        std::fs::write(root.join(digest), "digest\n").unwrap();
+        commit_dated(
+            &root,
+            &[age, digest, chunk, ".ljos/sync.toml"],
+            "log",
+            Some(OLD_COMMIT),
+        );
+        let (url, store) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        point_pack(&url);
+        let said = adopt_in_repo(&root, &scope_of(&public), "gone", opts(false, false)).unwrap();
+        let texts: Vec<String> = store
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|atom| atom["text"].as_str().map(str::to_string))
+            .collect();
+        assert!(
+            texts.contains(&"from the base".to_string()),
+            "{texts:?}\n{said}"
+        );
+        assert!(
+            texts.contains(&"from a chunk".to_string()),
+            "{texts:?}\n{said}"
+        );
+        assert!(!in_head(&root, age), "{said}");
+        assert!(!in_head(&root, chunk), "the adopt kept the chunk\n{said}");
+        assert!(!root.join(chunks).exists(), "{said}");
     }
 
     /// A log larger than the pipe buffers opens. age writes plaintext as it
