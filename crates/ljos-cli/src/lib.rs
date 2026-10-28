@@ -23357,6 +23357,7 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
             .or_else(|| kept_prompt::code_reaches(&words, line))
             .or_else(|| person_key::reached(&words, cwd.as_deref(), reads))
             .or_else(|| person_key::uproots(&words, cwd.as_deref()))
+            .or_else(|| person_key::code_uproots(&words, line, cwd.as_deref()))
         {
             return Some(refuse(&t));
         }
@@ -52212,6 +52213,49 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             }
         }
         assert!(moved.iter().all(Option::is_some), "{moved:?}");
+    }
+
+    /// Code an interpreter runs can remove the tree above the key without
+    /// a shell word naming it. A call that removes or moves a tree is read
+    /// for the path its first argument builds. A call on a tree elsewhere
+    /// under the home still passes.
+    #[test]
+    fn code_that_removes_a_tree_above_the_person_key_is_refused() {
+        let _g = env_guard();
+        let dir = person_key::key_dir().expect("a passwd home");
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.parent().unwrap().display().to_string();
+        let refused = [
+            r#"python3 -c "import shutil,os; shutil.rmtree(os.path.expanduser('~'))""#.to_string(),
+            r#"python3 -c "import shutil; from pathlib import Path; shutil.rmtree(Path.home())""#
+                .to_string(),
+            r#"python3 -c "import os,shutil; shutil.rmtree(os.environ['HOME'] + '/.config')""#
+                .to_string(),
+            r#"python3 -c "import os,shutil; d = os.path.expanduser('~/.config'); shutil.rmtree(d)""#
+                .to_string(),
+            format!(r#"python3 -c "import shutil; shutil.move('{cfg}', '/tmp/x')""#),
+            "python3 - <<'EOF'\nimport os, shutil\nhome = os.path.expanduser('~')\n\
+             shutil.rmtree(os.path.join(home, '.config'))\nEOF"
+                .to_string(),
+            r#"python3 -c "import shutil; p = some(); shutil.rmtree(p); print('~')""#.to_string(),
+            "perl -e 'use File::Path; rmtree($ENV{HOME})'".to_string(),
+            r#"ruby -e 'require "fileutils"; FileUtils.rm_rf(Dir.home)'"#.to_string(),
+            r#"node -e "require('fs').rmSync(require('os').homedir(), {recursive: true})""#
+                .to_string(),
+        ];
+        for line in &refused {
+            assert!(seat_guard(line).is_some(), "{line:?} was allowed");
+        }
+        for line in [
+            r#"python3 -c "import shutil,os; shutil.rmtree(os.path.expanduser('~/proj/build'))""#,
+            r#"python3 -c "import shutil,os; shutil.rmtree(os.path.join(os.path.expanduser('~'), 'proj'))""#,
+            r#"python3 -c "import os; print(os.path.expanduser('~'))""#,
+            r#"python3 -c "import shutil; p = some(); shutil.rmtree(p)""#,
+            r#"node -e "require('fs').rmSync('build', {recursive: true})""#,
+            "perl -e 'use File::Path; rmtree(\"$ENV{HOME}/proj\")'",
+        ] {
+            assert!(seat_guard(line).is_none(), "{line:?} was refused");
+        }
     }
 
     /// Removing, moving, relinking or opening up a directory above the key

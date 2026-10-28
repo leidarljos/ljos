@@ -273,6 +273,202 @@ pub(crate) fn uproots(words: &[String], cwd: Option<&Path>) -> Option<String> {
     })
 }
 
+/// Calls in Python, Perl, Ruby and Node code that remove or move the
+/// tree their first argument names.
+const TREE_CALLS: &str = "rmtree removedirs remove_tree rm_rf rm_r rm rmSync rmdir rmdirSync \
+                          move mv rename renames renameSync";
+
+/// Calls whose arguments build the path they return.
+const PATH_CALLS: &str = "join expanduser expand_path abspath realpath normpath resolve Path \
+                          PurePath str fspath catdir catfile";
+
+/// Ways code names the home, each read as `'~'`.
+const HOME_CALLS: &[&str] = &[
+    "Path.home()",
+    "homedir()",
+    "Dir.home",
+    "getenv('HOME')",
+    "getenv(\"HOME\")",
+    "environ['HOME']",
+    "environ[\"HOME\"]",
+    "environ.get('HOME')",
+    "environ.get(\"HOME\")",
+    "ENV['HOME']",
+    "ENV[\"HOME\"]",
+    "$ENV{HOME}",
+    "$ENV{'HOME'}",
+    "process.env.HOME",
+];
+
+fn ident(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '$'
+}
+
+fn listed(list: &str, name: &str) -> bool {
+    list.split_whitespace().any(|n| n == name)
+}
+
+/// `code` with each of [`HOME_CALLS`] read as `'~'`.
+fn homes_quoted(code: &str) -> Vec<char> {
+    let mut code = code.to_string();
+    for call in HOME_CALLS {
+        code = code.replace(call, "'~'");
+    }
+    code.chars().collect()
+}
+
+/// The text of the string that opens at `chars[at]`, and where it ends.
+fn quoted(chars: &[char], at: usize) -> (String, usize) {
+    let mut i = at + 1;
+    while i < chars.len() && chars[i] != chars[at] {
+        i += usize::from(chars[i] == '\\') + 1;
+    }
+    let end = i.min(chars.len());
+    (
+        chars[at + 1..end].iter().collect(),
+        (end + 1).min(chars.len()),
+    )
+}
+
+/// Where the bracket that opens at `chars[at]` closes, or, with
+/// `comma`, where the first comma inside it is.
+fn bracket_end(chars: &[char], at: usize, comma: bool) -> usize {
+    let mut depth = 0;
+    let mut i = at;
+    while i < chars.len() {
+        match chars[i] {
+            '\'' | '"' | '`' => i = quoted(chars, i).1 - 1,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth == 1 => return i,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if comma && depth == 1 => return i,
+            _ => {}
+        }
+        i += 1;
+    }
+    chars.len()
+}
+
+/// The path an expression of code builds: its string literals, homes,
+/// the arguments of [`PATH_CALLS`] and the variables `vars` knows, in
+/// order and joined by `/`. `None` for a variable not known, a string
+/// with interpolation, or no part at all.
+fn built(expr: &str, vars: &std::collections::HashMap<String, String>) -> Option<String> {
+    let chars = homes_quoted(expr);
+    let mut parts: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if matches!(c, '\'' | '"' | '`') {
+            let (text, end) = quoted(&chars, i);
+            let formatted = i > 0 && matches!(chars[i - 1], 'f' | 'F');
+            if (formatted && text.contains('{')) || text.contains("${") {
+                return None;
+            }
+            parts.push(text);
+            i = end;
+        } else if ident(c) && (i == 0 || !ident(chars[i - 1])) {
+            let start = i;
+            while i < chars.len() && ident(chars[i]) {
+                i += 1;
+            }
+            let name: String = chars[start..i].iter().collect();
+            let after = i + chars[i..].iter().take_while(|c| c.is_whitespace()).count();
+            let next = chars.get(after).copied();
+            if next == Some('(') && !listed(PATH_CALLS, &name) {
+                i = bracket_end(&chars, after, false) + 1;
+            } else if next.is_none_or(|n| !matches!(n, '(' | '.' | '\'' | '"'))
+                && (start == 0 || chars[start - 1] != '.')
+                && !name.starts_with(|c: char| c.is_ascii_digit())
+                && !matches!(name.as_str(), "True" | "False" | "None" | "true" | "false")
+            {
+                parts.push(vars.get(&name)?.clone());
+            }
+        } else {
+            i += 1;
+        }
+    }
+    let mut out = parts.first()?.clone();
+    for part in &parts[1..] {
+        if !out.ends_with('/') && !part.starts_with('/') {
+            out.push('/');
+        }
+        out.push_str(part);
+    }
+    Some(out)
+}
+
+/// The call in the code one command runs, as
+/// [`crate::kept_prompt::code_of`] finds it, that removes or moves the
+/// key directory or a directory above it, such as
+/// `shutil.rmtree(os.path.expanduser('~'))`. The first argument of each
+/// of [`TREE_CALLS`] is read as [`built`] reads it, with the variables
+/// earlier statements set. When it cannot be read, a string or home
+/// anywhere in the code that alone names such a directory counts.
+pub(crate) fn code_uproots(words: &[String], line: &str, cwd: Option<&Path>) -> Option<String> {
+    let (inside, _) = guarded()?;
+    let (code, _) = crate::kept_prompt::code_of(words, line)?;
+    let hits = |word: &str| {
+        paths_of(word, cwd)
+            .into_iter()
+            .flatten()
+            .any(|p| inside.iter().any(|d| crate::kept_prompt::encloses(&p, d)))
+    };
+    let mut vars = std::collections::HashMap::new();
+    for stmt in code.split(['\n', ';']) {
+        let stmt = stmt.trim();
+        let stmt = ["const ", "let ", "var ", "my "]
+            .iter()
+            .find_map(|k| stmt.strip_prefix(k))
+            .unwrap_or(stmt);
+        let Some((name, value)) = stmt.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if !name.is_empty() && name.chars().all(ident) && !value.starts_with(['=', '>']) {
+            match built(value, &vars) {
+                Some(path) => vars.insert(name.to_string(), path),
+                None => vars.remove(name),
+            };
+        }
+    }
+    let named_anywhere = || {
+        let chars = homes_quoted(code);
+        let mut i = 0;
+        while i < chars.len() {
+            if matches!(chars[i], '\'' | '"') {
+                let (text, end) = quoted(&chars, i);
+                if hits(&text) {
+                    return true;
+                }
+                i = end;
+            } else {
+                i += 1;
+            }
+        }
+        false
+    };
+    let chars: Vec<char> = code.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let start = i;
+        while i < chars.len() && ident(chars[i]) {
+            i += 1;
+        }
+        let name: String = chars[start..i].iter().collect();
+        if i == start || chars.get(i) != Some(&'(') || !listed(TREE_CALLS, &name) {
+            i += 1;
+            continue;
+        }
+        let end = bracket_end(&chars, i, true).max(i + 1);
+        let arg: String = chars[i + 1..end].iter().collect();
+        if built(&arg, &vars).map_or_else(named_anywhere, |path| hits(&path)) {
+            return Some(format!("{name}({})", arg.trim()));
+        }
+    }
+    None
+}
+
 /// Ask the person at the controlling terminal for the passphrase, to run
 /// `what` (`git push`) as them once. `marks` are the runner variables
 /// set, by name. Nothing is kept on a right answer but a cleared failure
