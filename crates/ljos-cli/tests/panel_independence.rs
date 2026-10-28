@@ -1397,6 +1397,7 @@ fn a_persona_cast_then_withdraw_leaves_the_tally_at_zero() {
         &["vote", issue, "--withdraw", "--as", "reviewer"],
     );
     assert_withdraw_forecast_error(&withdrawn, issue, "reviewer");
+    let said = text(&withdrawn);
     assert!(!said.contains("unexpected vissue"), "{said}");
     let notes = std::fs::read_to_string(world.state.join("notes.json")).unwrap();
     assert!(notes.contains("ballot-withdrawn: reviewer"), "{notes}");
