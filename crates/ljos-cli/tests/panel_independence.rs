@@ -974,6 +974,82 @@ fn one_session_casts_once_per_sibling_over_mcp() {
 }
 
 #[test]
+fn a_family_only_ballot_blocks_a_second_cli_vote() {
+    let world = siblings();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[21; 32]);
+    let note = ljos_cli::ballot_sig::sign_bound(
+        &key,
+        "child-a",
+        "saddle",
+        "ship",
+        "sess-saddle-0001",
+        "n-saddle",
+    );
+    std::fs::write(
+        world.state.join("notes.json"),
+        serde_json::to_string(&serde_json::json!({
+            "parent-1": [{"note": note}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let again = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-a", "--for", "hold", "--used", "none"],
+    );
+    let said = text(&again);
+    assert!(!again.status.success(), "{said}");
+    assert!(
+        said.contains("already cast a ballot on child-a (sess-saddle-0001)"),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_family_only_ballot_blocks_a_second_mcp_vote() {
+    let world = siblings();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[22; 32]);
+    let note = ljos_cli::ballot_sig::sign_bound(
+        &key,
+        "child-a",
+        "saddle",
+        "ship",
+        "sess-mcp-0001",
+        "n-saddle",
+    );
+    std::fs::write(
+        world.state.join("notes.json"),
+        serde_json::to_string(&serde_json::json!({
+            "parent-1": [{"note": note}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let call = serde_json::json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {
+        "name": "ljos_vote",
+        "arguments": {"issue": "child-a", "choice": "hold", "used": "none"}}});
+    let answers = world.mcp(
+        "saddle",
+        &[("CLAUDE_CODE_SESSION_ID", "sess-mcp-0001")],
+        &[call],
+    );
+    let found = answers
+        .iter()
+        .find(|a| a["id"] == 9)
+        .unwrap_or_else(|| panic!("no answer: {answers:?}"));
+    let said = found["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(found["result"]["isError"] == true, "{said}");
+    assert!(
+        said.contains("already cast a ballot on child-a (sess-mcp-0001)"),
+        "{said}"
+    );
+}
+
+#[test]
 fn a_persona_cast_then_withdraw_leaves_the_tally_at_zero() {
     let world = World::new();
     let issue = "demo-wd";
