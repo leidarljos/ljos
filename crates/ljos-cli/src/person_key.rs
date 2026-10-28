@@ -439,14 +439,28 @@ fn uprooted(words: &[String]) -> Vec<String> {
 /// The word of one command that removes or moves, with all it holds, the
 /// key directory or a directory above it: `rm -rf ~`, `find ~ -delete`,
 /// `mv ~/.config x`. Each word is resolved as [`reached`] resolves it.
+/// A word the guard cannot expand, such as `~user/.config`, counts when
+/// its file name, a leading `~` off, is that of the key directory or a
+/// directory above it.
 pub(crate) fn uproots(words: &[String], cwd: Option<&Path>) -> Option<String> {
     let (inside, _) = guarded()?;
+    let names: Vec<_> = inside
+        .iter()
+        .flat_map(|d| d.ancestors())
+        .filter_map(Path::file_name)
+        .collect();
     uprooted(words).into_iter().find_map(|word| {
         let bare = word.trim_matches(|c| c == '"' || c == '\'');
         paths_of(bare, cwd)
             .into_iter()
-            .flatten()
-            .any(|p| inside.iter().any(|d| crate::kept_prompt::encloses(&p, d)))
+            .any(|path| match path {
+                Some(p) => inside.iter().any(|d| crate::kept_prompt::encloses(&p, d)),
+                None => {
+                    let name = bare.trim_end_matches('/').rsplit('/').next();
+                    let name = name.unwrap_or(bare).trim_start_matches('~');
+                    names.iter().any(|n| *n == name)
+                }
+            })
             .then(|| word.clone())
     })
 }

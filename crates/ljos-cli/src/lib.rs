@@ -52327,6 +52327,24 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         ]);
     }
 
+    /// The guard does not read the passwd entry a `~user` names, so the
+    /// word counts by its file name, as the key's own files do.
+    #[test]
+    fn a_tilde_user_path_uproots_above_the_person_key() {
+        let home = person_key::key_dir()
+            .and_then(|d| d.parent()?.parent().map(Path::to_path_buf))
+            .expect("a passwd home");
+        let user = home.file_name().unwrap().to_string_lossy().into_owned();
+        assert_uprooted(&[
+            format!("rm -rf ~{user}"),
+            format!("rm -rf ~{user}/"),
+            format!("rm -rf ~{user}/.config"),
+            format!("rm -rf ~{user}/.config/ljos"),
+            format!("mv ~{user}/.config /tmp/x"),
+            format!("find ~{user} -delete"),
+        ]);
+    }
+
     /// A `find` that runs `rm` or `mv` through a wrapper still removes
     /// or moves what it finds.
     #[test]
@@ -52364,6 +52382,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "find ~/scratch/x -delete",
             "find ~/scratch/x -exec env rm -rf {} +",
             "find ~ -name x -exec env cat {} +",
+            "rm -rf ~other/proj",
             "rm -rf {~,/tmp}/x",
             "rm -rf ~/scratch/{x,y}",
             "rm -rf \"${HOME}/scratch/x\"",

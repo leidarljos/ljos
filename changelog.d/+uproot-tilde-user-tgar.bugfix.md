@@ -1,0 +1,1 @@
+The seat guard does not expand a `~user` path, and judges it by its file name instead. A recursive delete or move of `~user` or `~user/.config` is now refused when that name is on the way down to the person key.
