@@ -91,39 +91,84 @@ pub fn fails_path() -> Option<PathBuf> {
     key_dir().map(|dir| dir.join(FAILS_NAME))
 }
 
-/// Whether `word`, read from `cwd` the way the shell would, names the key,
-/// the failure count, or the directory that holds them. `~` and `$HOME`
-/// are read as the passwd home, where the key is.
-pub(crate) fn names_key(word: &str, cwd: Option<&Path>) -> bool {
-    let (Some(dir), Some(key), Some(fails)) = (key_dir(), key_path(), fails_path()) else {
-        return false;
+/// The directories a tool call may not write into, move, link over or
+/// change the mode of, each resolved and as spelled: the key directory
+/// with all it holds, and the config directory above it, itself only.
+fn guarded() -> Option<(Vec<PathBuf>, Vec<PathBuf>)> {
+    let dir = key_dir()?;
+    let both = |p: PathBuf| {
+        let real = crate::kept_prompt::resolve(&p);
+        if real == p {
+            vec![p]
+        } else {
+            vec![real, p]
+        }
     };
-    let word = word.trim_matches(|c| c == '"' || c == '\'');
-    let home = crate::proc_tree::own_home();
-    let under_home = ["~/", "$HOME/", "${HOME}/"]
-        .iter()
-        .find_map(|prefix| word.strip_prefix(prefix));
-    let path = if let Some(rest) = under_home {
-        let Some(home) = home else { return false };
-        home.join(rest)
-    } else if Path::new(word).is_absolute() {
-        PathBuf::from(word)
-    } else if let Some(cwd) = cwd {
-        cwd.join(word)
-    } else {
-        return false;
-    };
-    let mut plain = PathBuf::new();
-    for part in path.components() {
-        match part {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                plain.pop();
+    let above = dir.parent().map(|p| both(p.to_path_buf()));
+    Some((both(dir), above.unwrap_or_default()))
+}
+
+/// The paths `word` names from `cwd`: as the shell expands it, and with
+/// `~` and `$HOME` read as the passwd home, where the key is. `None` for
+/// a word the guard cannot expand.
+fn paths_of(word: &str, cwd: Option<&Path>) -> Vec<Option<PathBuf>> {
+    let mut out = vec![crate::kept_prompt::path_of(word, cwd)];
+    if let Some(home) = crate::proc_tree::own_home() {
+        for prefix in ["~", "$HOME", "${HOME}"] {
+            if let Some(rest) = word
+                .strip_prefix(prefix)
+                .filter(|r| r.is_empty() || r.starts_with('/'))
+            {
+                let word = format!("{}{rest}", home.display());
+                out.push(crate::kept_prompt::path_of(&word, cwd));
             }
-            other => plain.push(other),
         }
     }
-    [dir, key, fails].contains(&plain)
+    out
+}
+
+/// The word of one command, its wrappers off, that would write, move,
+/// link over or change the mode of the key, its pepper, its failure
+/// count, their directory, or the config directory above it. Each word
+/// is resolved first: `~`, `$HOME` and the directory the shell stands in
+/// expanded, `.`, `..` and `//` taken out, and the symlinks of the part
+/// that exists followed. A redirection counts for any command, and an
+/// operand for anything but a reader. A word the guard cannot expand
+/// counts when its file name is one of the key's files.
+pub(crate) fn reached(words: &[String], cwd: Option<&Path>, reader: bool) -> Option<String> {
+    let (inside, above) = guarded()?;
+    let hits = |word: &str| {
+        let word = word.trim_matches(|c| c == '"' || c == '\'');
+        paths_of(word, cwd).into_iter().any(|path| match path {
+            Some(p) => {
+                inside.iter().any(|d| crate::kept_prompt::within(&p, d))
+                    || above.iter().any(|d| crate::kept_prompt::names_dir(&p, d))
+            }
+            None => [KEY_NAME, FAILS_NAME, PEPPER_NAME].contains(
+                &word
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(word),
+            ),
+        })
+    };
+    let mut it = words.iter().skip(1);
+    while let Some(w) = it.next() {
+        if w == ">" {
+            match it.next() {
+                Some(t) if hits(t) => return Some(t.clone()),
+                _ => continue,
+            }
+        }
+        if reader || w.contains(char::is_whitespace) || w.contains("://") {
+            continue;
+        }
+        if hits(w) || w.split_once('=').is_some_and(|(_, v)| hits(v)) {
+            return Some(w.clone());
+        }
+    }
+    None
 }
 
 /// Ask the person at the controlling terminal for the passphrase, to run

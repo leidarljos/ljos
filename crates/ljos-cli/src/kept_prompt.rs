@@ -146,7 +146,7 @@ fn expand(word: &str) -> Option<String> {
 
 /// `path` as the filesystem reaches it: the longest part that exists with
 /// its symlinks followed, and the rest with `.` and `..` taken out.
-fn resolve(path: &Path) -> PathBuf {
+pub(crate) fn resolve(path: &Path) -> PathBuf {
     for top in path.ancestors() {
         if let Ok(real) = std::fs::canonicalize(top) {
             let rest = path.strip_prefix(top).unwrap_or(Path::new(""));
@@ -218,13 +218,21 @@ fn same_parts(pat: &[Component<'_>], real: &[Component<'_>]) -> bool {
         })
 }
 
+/// Whether `path`, a path or a pattern, is `dir` or inside it.
+pub(crate) fn within(path: &Path, dir: &Path) -> bool {
+    let p: Vec<Component<'_>> = path.components().collect();
+    let d: Vec<Component<'_>> = dir.components().collect();
+    p.len() >= d.len() && same_parts(&p[..d.len()], &d)
+}
+
+/// Whether `path`, a path or a pattern, is `dir` itself.
+pub(crate) fn names_dir(path: &Path, dir: &Path) -> bool {
+    path.components().count() == dir.components().count() && within(path, dir)
+}
+
 /// Whether `path` is a runtime ljos directory or inside one.
 pub(crate) fn inside(path: &Path) -> bool {
-    let p: Vec<Component<'_>> = path.components().collect();
-    dirs().iter().any(|d| {
-        let d: Vec<Component<'_>> = d.components().collect();
-        p.len() >= d.len() && same_parts(&p[..d.len()], &d)
-    })
+    dirs().iter().any(|d| within(path, d))
 }
 
 /// The name right below `path` on the way down to a runtime ljos

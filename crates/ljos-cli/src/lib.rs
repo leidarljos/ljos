@@ -23304,11 +23304,7 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         if w.chars().any(char::is_whitespace) {
             return false;
         }
-        let hit = |path: &str| {
-            is_seat_path(path)
-                || crate::cloud_hook::in_git_hooks_dir(path, dir)
-                || person_key::names_key(path, dir)
-        };
+        let hit = |path: &str| is_seat_path(path) || crate::cloud_hook::in_git_hooks_dir(path, dir);
         hit(w) || w.split_once('=').is_some_and(|(_, rest)| hit(rest))
     };
     if nested_too_deep(line) {
@@ -23359,6 +23355,7 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         let reads = READERS.contains(&first) || first == "ljos" || kept_prompt::reads_only(first);
         if let Some(t) = kept_prompt::reached(&words, cwd.as_deref(), reads)
             .or_else(|| kept_prompt::code_reaches(&words, line))
+            .or_else(|| person_key::reached(&words, cwd.as_deref(), reads))
         {
             return Some(refuse(&t));
         }
@@ -52136,6 +52133,88 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         ] {
             assert!(seat_guard(&line).is_none(), "{line:?} was refused");
         }
+    }
+
+    /// Removing, moving, relinking or opening up a directory above the key
+    /// replaces the key as surely as writing it. Every route to the key
+    /// directory and the config directory above it is refused once the
+    /// path is resolved: `~`, `$HOME`, `..`, `//`, a glob, a directory a
+    /// `cd` reached, a symlink to either, and the passwd home when `HOME`
+    /// names another. Reading them and writing beside them still pass.
+    #[test]
+    fn every_route_to_the_person_key_directory_is_guarded() {
+        let _g = env_guard();
+        let dir = person_key::key_dir().expect("a passwd home");
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.parent().unwrap().to_path_buf();
+        let links = tempfile::tempdir().unwrap();
+        let l = links.path().join("l");
+        let c = links.path().join("c");
+        std::os::unix::fs::symlink(&dir, &l).unwrap();
+        std::os::unix::fs::symlink(&config, &c).unwrap();
+        let (l, c, cfg) = (l.display(), c.display(), config.display());
+        let refused = [
+            "mv ~/.config ~/.config.old".to_string(),
+            "rm -rf ~/.config".to_string(),
+            "rmdir ~/.config/ljos".to_string(),
+            "chmod 000 ~/.config/ljos".to_string(),
+            "chmod -R a+w ~/.config".to_string(),
+            "ln -sfn /tmp/evil ~/.config/ljos".to_string(),
+            "ln -sf /tmp/evil $HOME/.config".to_string(),
+            "mv ${HOME}/.config/ljos /tmp/x".to_string(),
+            format!("mv {cfg} /tmp/x"),
+            "cd ~ && mv .config /tmp/x".to_string(),
+            "cd ~/.config/ljos && rm -rf .".to_string(),
+            "cd ~/.config/ljos && mv ../ljos /tmp/x".to_string(),
+            "cd /tmp && rm -rf ../tmp/../$HOME/.config".to_string(),
+            "rm -rf ~//.config//ljos".to_string(),
+            "rm -f ~//.config//ljos//person-key.pepper".to_string(),
+            "rm -rf ~/.conf*".to_string(),
+            "rsync -a --delete /tmp/empty/ ~/.config/".to_string(),
+            "find ~/.config -delete".to_string(),
+            "mv --target-directory=/tmp ~/.config".to_string(),
+            "cp -t ~/.config/ljos /tmp/person-key".to_string(),
+            "cat /tmp/k >> ~/.config/ljos/person-key.pepper".to_string(),
+            format!("rm -rf {l}/"),
+            format!("mv {l}/person-key /tmp/x"),
+            format!("rm {l}/../ljos/person-key.pepper"),
+            format!("chmod 000 {c}"),
+            format!("cd {c} && mv ljos /tmp/x"),
+        ];
+        for line in &refused {
+            assert!(seat_guard(line).is_some(), "{line:?} was allowed");
+        }
+        for line in [
+            "cat ~/.config/ljos/person-key".to_string(),
+            "ls -la ~/.config".to_string(),
+            "stat ~/.config/ljos".to_string(),
+            "mkdir -p ~/.config/other".to_string(),
+            "cp /tmp/x ~/.config/other/y".to_string(),
+            format!("cd {cfg} && touch other.toml"),
+            "rm -rf /tmp/scratch".to_string(),
+        ] {
+            assert!(seat_guard(&line).is_none(), "{line:?} was refused");
+        }
+        let elsewhere = tempfile::tempdir().unwrap();
+        let saved: Vec<_> = ["HOME", "LJOS_GUARD"]
+            .iter()
+            .map(|k| (*k, std::env::var_os(k)))
+            .collect();
+        // SAFETY: under env_guard, and restored below.
+        unsafe {
+            std::env::set_var("HOME", elsewhere.path());
+            std::env::set_var("LJOS_GUARD", "1");
+        }
+        let moved = ["rm -rf ~/.config", "chmod 000 $HOME/.config/ljos"].map(seat_guard);
+        unsafe {
+            for (k, v) in saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+        assert!(moved.iter().all(Option::is_some), "{moved:?}");
     }
 
     /// The kept prompt makes a sentence the person's, so no tool call may
