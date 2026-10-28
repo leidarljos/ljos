@@ -119,8 +119,8 @@ pub fn parse_note(note: &str) -> Option<SigNote> {
 /// The session a ballot note binds, as [`crate::panel_gate::session_key`]
 /// reads it. A note that does not parse but has six or more fields still
 /// names its session in the last two. The cast gate does not use that
-/// fallback: it requires [`parse_note`] and [`verifies`] on the issue's own
-/// logbook. `None` when the note is not a ballot signature.
+/// fallback: it requires [`parse_note`] and [`verifies`] for the issue
+/// being cast on. `None` when the note is not a ballot signature.
 #[must_use]
 pub fn note_session(note: &str) -> Option<(String, String)> {
     if let Some(sig) = parse_note(note) {

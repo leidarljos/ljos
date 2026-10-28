@@ -310,7 +310,9 @@ pub fn replace_hint(issue: &str, voter: &str) -> String {
 
 /// Why this connection must not cast on `issue`. `own` is that issue's
 /// logbook. `family` is the parent and the design children. A signature
-/// counts only from `own`, and only when it verifies for `issue`. A
+/// counts from either, but only when it verifies for `issue`: a ballot on
+/// a sibling is another question. A withdrawal is read from `own` alone,
+/// so a signature for `issue` left on the family still stands. A
 /// candidate counts from either. The session key is the connection. The
 /// voter name is not it.
 #[must_use]
@@ -328,7 +330,12 @@ pub fn session_cast_refusal(
         ));
     }
     let cuts = withdrawal_cuts(own);
-    for (at, note) in own.iter().enumerate() {
+    let elsewhere = family
+        .iter()
+        .filter(|note| !own.contains(note))
+        .map(|note| (None, note));
+    let signed = own.iter().enumerate().map(|(at, note)| (Some(at), note));
+    for (at, note) in signed.chain(elsewhere) {
         let Some(sig) = ballot_sig::parse_note(note) else {
             continue;
         };
@@ -351,7 +358,7 @@ pub fn session_cast_refusal(
             key.to_string()
         };
         let mine = same_voter(&sig.voter, voter);
-        if withdrawn_at(&cuts, &sig.voter).is_some_and(|cut| cut < at) {
+        if at.is_some_and(|at| withdrawn_at(&cuts, &sig.voter).is_some_and(|cut| cut < at)) {
             // The voter that took this ballot back casts again as itself:
             // the ballot is replaced, and the session is still one voice.
             if mine {
@@ -1414,6 +1421,24 @@ mod tests {
         std::env::remove_var("VISSUE_ROOT");
         std::env::remove_var("LJOS_HARNESS_SESSION");
         std::env::remove_var("LJOS_PROCESS_NONCE");
+    }
+
+    #[test]
+    fn a_signature_for_this_issue_on_its_family_still_counts() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[4; 32]);
+        let on_b = ballot_sig::sign_bound(&key, "demo-b", "saddle", "ship", "sess-one", "-");
+        let stray = std::slice::from_ref(&on_b);
+        let through = session_cast_refusal("demo-b", "sess-one", "bea", &[], stray).unwrap();
+        assert!(
+            through.contains("already cast a ballot on demo-b"),
+            "{through}"
+        );
+        let withdrawn = ballot_sig::withdrawn_line("saddle", "sess-one", "-");
+        let own = [withdrawn, on_b.clone()];
+        assert!(
+            session_cast_refusal("demo-b", "sess-one", "saddle", &own, &own).is_none(),
+            "the issue's own copy in the family is read once, with its withdrawal"
+        );
     }
 
     #[test]
