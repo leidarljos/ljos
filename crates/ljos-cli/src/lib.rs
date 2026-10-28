@@ -21568,7 +21568,8 @@ fn shell_c_script(segment: &str) -> Option<String> {
             if w == "--" {
                 continue;
             }
-            return Some(w.to_string());
+            let handed: Vec<&str> = it.take_while(|a| !a.starts_with(['>', '<'])).collect();
+            return Some(with_positionals(w, &handed));
         }
         let flag = (w.starts_with('-') || w.starts_with('+')) && w.len() > 1;
         if !flag {
@@ -21585,6 +21586,48 @@ fn shell_c_script(segment: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// `script` with `$0` to `$9`, `${N}`, `$@` and `$*` replaced by the
+/// words `sh -c SCRIPT` is handed after it, `handed[0]` being `$0`. A
+/// parameter with no word stays as written.
+fn with_positionals(script: &str, handed: &[&str]) -> String {
+    if handed.is_empty() {
+        return script.to_string();
+    }
+    let mut out = String::new();
+    let mut rest = script;
+    while let Some(at) = rest.find('$') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at + 1..];
+        let braced = rest
+            .strip_prefix('{')
+            .and_then(|r| r.split_once('}'))
+            .filter(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        let (name, after) = match braced {
+            Some((n, after)) => (n, after),
+            None => rest.split_at(rest.chars().next().map_or(0, char::len_utf8)),
+        };
+        let quoted = out.ends_with('"') && after.starts_with('"');
+        let value = match name {
+            "@" if handed.len() > 1 && quoted => Some(handed[1..].join("\" \"")),
+            "@" | "*" if handed.len() > 1 => Some(handed[1..].join(" ")),
+            n => n
+                .parse::<usize>()
+                .ok()
+                .and_then(|i| handed.get(i))
+                .map(|w| (*w).to_string()),
+        };
+        match value {
+            Some(v) => {
+                out.push_str(&v);
+                rest = after;
+            }
+            None => out.push('$'),
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Commands that hand the word after one of their flags to a shell:
@@ -52366,6 +52409,25 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         ]);
     }
 
+    /// An inline program can take the tree it removes as a word after its
+    /// code, so the code itself names no home.
+    #[test]
+    fn a_word_handed_to_inline_code_uproots_above_the_person_key() {
+        assert_uprooted(&[
+            "python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1])' ~".into(),
+            "python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1])' ~/.config 2>/dev/null"
+                .into(),
+            "perl -MFile::Path -e 'rmtree($ARGV[0])' $HOME".into(),
+            "ruby -rfileutils -e 'FileUtils.rm_rf(ARGV[0])' ~".into(),
+            "node -e \"require('fs').rmSync(process.argv[1], {recursive: true})\" ~".into(),
+            "python3 - ~ <<'EOF'\nimport shutil, sys\nshutil.rmtree(sys.argv[1])\nEOF".into(),
+            "sh -c 'rm -rf \"$1\"' _ ~".into(),
+            "bash -c 'rm -rf \"${1}\"' bash ~/.config".into(),
+            "sh -c 'rm -rf \"$@\"' sh /tmp/x ~".into(),
+            "sh -c 'find \"$1\" -delete' _ ~".into(),
+        ]);
+    }
+
     /// A `find` that runs `rm` or `mv` through a wrapper still removes
     /// or moves what it finds.
     #[test]
@@ -52404,6 +52466,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "find ~/scratch/x -exec env rm -rf {} +",
             "find ~ -name x -exec env cat {} +",
             "rm -rf ~other/proj",
+            "sh -c 'rm -rf \"$1\"' _ ~/scratch/x",
+            "sh -c 'rm -rf \"$1\"' _ build",
+            "python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1])' /tmp/x",
+            "python3 -c 'import sys; print(sys.argv[1])' ~",
             "rm -rf build/*",
             "rm -rf ~/scratch/*",
             "rm -rf {~,/tmp}/x",

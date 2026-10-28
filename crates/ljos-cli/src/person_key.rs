@@ -603,10 +603,24 @@ fn built(expr: &str, vars: &std::collections::HashMap<String, String>) -> Option
 /// `shutil.rmtree(os.path.expanduser('~'))`. The first argument of each
 /// of [`TREE_CALLS`] is read as [`built`] reads it, with the variables
 /// earlier statements set. When it cannot be read, a string or home
-/// anywhere in the code that alone names such a directory counts.
+/// anywhere in the code that alone names such a directory counts, as
+/// does a word the program is handed, such as the `~` of
+/// `python3 -c 'shutil.rmtree(sys.argv[1])' ~`.
 pub(crate) fn code_uproots(words: &[String], line: &str, cwd: Option<&Path>) -> Option<String> {
     let (inside, _) = guarded()?;
-    let (code, _) = crate::kept_prompt::code_of(words, line)?;
+    let (code, fed) = crate::kept_prompt::code_of(words, line)?;
+    let handed: Vec<&String> = if fed {
+        words[1..]
+            .iter()
+            .filter(|w| !w.starts_with(['-', '<', '>']))
+            .collect()
+    } else {
+        let at = words.iter().position(|w| w.ends_with(code));
+        words[at.map_or(words.len(), |i| i + 1)..]
+            .iter()
+            .take_while(|w| !w.starts_with(['<', '>']))
+            .collect()
+    };
     let hits = |word: &str| {
         paths_of(word, cwd)
             .into_iter()
@@ -632,6 +646,9 @@ pub(crate) fn code_uproots(words: &[String], line: &str, cwd: Option<&Path>) -> 
         }
     }
     let named_anywhere = || {
+        if handed.iter().any(|w| hits(w)) {
+            return true;
+        }
         let chars = homes_quoted(code);
         let mut i = 0;
         while i < chars.len() {
