@@ -487,7 +487,12 @@ pub fn session_cast_refusal(
     own: &[String],
     family: &[(String, String)],
 ) -> Option<String> {
-    session_cast_refusal_on(issue, key, voter, own, family)
+    let family: Vec<(String, String)> = family
+        .iter()
+        .filter(|(_, note)| !own.contains(note))
+        .cloned()
+        .collect();
+    session_cast_refusal_on(issue, key, voter, own, &family)
 }
 
 /// The issue in this issue family where `voter` still has this session's
@@ -1563,7 +1568,7 @@ mod tests {
             &key, issue, "bea", "ship", "sess-bea", "-",
         )];
         let sig = ballot_sig::sign_bound(&key, issue, "saddle", "ship", "sess-saddle", "-");
-        let cut = ballot_sig::withdrawn_line("saddle", "sess-saddle", "-");
+        let cut = ballot_sig::withdrawn_line_on("saddle", "sess-saddle", "-", Some(issue));
         let family = [(parent.to_string(), cut), (parent.to_string(), sig)];
         assert_eq!(
             session_cast_refusal(issue, "sess-saddle", "saddle", &own, &family),
