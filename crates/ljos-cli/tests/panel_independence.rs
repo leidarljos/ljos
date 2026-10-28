@@ -1050,6 +1050,199 @@ fn a_family_only_ballot_blocks_a_second_mcp_vote() {
 }
 
 #[test]
+fn a_family_ballot_names_where_to_withdraw_over_cli() {
+    let world = siblings();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[23; 32]);
+    let note = ljos_cli::ballot_sig::sign_bound(
+        &key,
+        "child-a",
+        "saddle",
+        "ship",
+        "sess-saddle-0001",
+        "n-saddle",
+    );
+    std::fs::write(
+        world.state.join("notes.json"),
+        serde_json::to_string(&serde_json::json!({
+            "parent-1": [{"note": note}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let refused = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-a", "--for", "hold", "--used", "none"],
+    );
+    let said = text(&refused);
+    assert!(!refused.status.success(), "{said}");
+    assert!(
+        said.contains("`ljos vote parent-1 --withdraw --as saddle`"),
+        "{said}"
+    );
+    let withdrawn = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "parent-1", "--withdraw"],
+    );
+    let said = text(&withdrawn);
+    assert!(
+        withdrawn.status.success() || said.contains("forecast"),
+        "{said}"
+    );
+    let recast = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-a", "--for", "hold", "--used", "none"],
+    );
+    assert!(recast.status.success(), "{}", text(&recast));
+}
+
+#[test]
+fn a_family_ballot_names_where_to_withdraw_over_mcp() {
+    let world = siblings();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[24; 32]);
+    let note = ljos_cli::ballot_sig::sign_bound(
+        &key,
+        "child-a",
+        "saddle",
+        "ship",
+        "sess-mcp-0001",
+        "n-saddle",
+    );
+    std::fs::write(
+        world.state.join("notes.json"),
+        serde_json::to_string(&serde_json::json!({
+            "parent-1": [{"note": note}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let refuse = serde_json::json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {
+        "name": "ljos_vote",
+        "arguments": {"issue": "child-a", "choice": "hold", "used": "none"}}});
+    let answers = world.mcp(
+        "saddle",
+        &[("CLAUDE_CODE_SESSION_ID", "sess-mcp-0001")],
+        &[refuse],
+    );
+    let found = answers
+        .iter()
+        .find(|a| a["id"] == 9)
+        .unwrap_or_else(|| panic!("no answer: {answers:?}"));
+    let said = found["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(found["result"]["isError"] == true, "{said}");
+    assert!(
+        said.contains("`ljos vote parent-1 --withdraw --as saddle`"),
+        "{said}"
+    );
+    let withdraw = serde_json::json!({"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {
+        "name": "ljos_vote",
+        "arguments": {"issue": "parent-1", "withdraw": true}}});
+    let answers = world.mcp(
+        "saddle",
+        &[("CLAUDE_CODE_SESSION_ID", "sess-mcp-0001")],
+        &[withdraw],
+    );
+    let done = answers
+        .iter()
+        .find(|a| a["id"] == 10)
+        .unwrap_or_else(|| panic!("no answer: {answers:?}"));
+    let said = done["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        done["result"]["isError"] != true
+            || said.contains("forecast")
+            || said.contains("packset url missing"),
+        "{done:?}"
+    );
+    let pass = serde_json::json!({"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {
+        "name": "ljos_vote",
+        "arguments": {"issue": "child-a", "choice": "hold", "used": "none"}}});
+    let answers = world.mcp(
+        "saddle",
+        &[("CLAUDE_CODE_SESSION_ID", "sess-mcp-0001")],
+        &[pass],
+    );
+    let final_vote = answers
+        .iter()
+        .find(|a| a["id"] == 11)
+        .unwrap_or_else(|| panic!("no answer: {answers:?}"));
+    assert!(final_vote["result"]["isError"] != true, "{final_vote:?}");
+}
+
+#[test]
+fn a_withdrawal_on_another_issue_does_not_clear_a_family_ballot() {
+    let world = siblings();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[25; 32]);
+    let note = ljos_cli::ballot_sig::sign_bound(
+        &key,
+        "child-a",
+        "saddle",
+        "ship",
+        "sess-saddle-0001",
+        "n-saddle",
+    );
+    std::fs::write(
+        world.state.join("notes.json"),
+        serde_json::to_string(&serde_json::json!({
+            "parent-1": [{"note": note}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let unrelated = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "other-9", "--withdraw"],
+    );
+    assert!(!unrelated.status.success(), "{}", text(&unrelated));
+    let again = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-a", "--for", "hold", "--used", "none"],
+    );
+    let said = text(&again);
+    assert!(!again.status.success(), "{said}");
+    assert!(
+        said.contains("already cast a ballot on child-a (sess-saddle-0001)"),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_child_logbook_withdrawal_still_clears_its_own_ballot() {
+    let world = siblings();
+    let cast = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-a", "--for", "ship", "--used", "none"],
+    );
+    assert!(cast.status.success(), "{}", text(&cast));
+    let withdrawn = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-a", "--withdraw"],
+    );
+    let said = text(&withdrawn);
+    assert!(
+        withdrawn.status.success() || said.contains("forecast"),
+        "{said}"
+    );
+    let recast = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-a", "--for", "hold", "--used", "none"],
+    );
+    assert!(recast.status.success(), "{}", text(&recast));
+}
+
+#[test]
 fn a_persona_cast_then_withdraw_leaves_the_tally_at_zero() {
     let world = World::new();
     let issue = "demo-wd";

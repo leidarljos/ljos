@@ -251,10 +251,7 @@ fn children_of(issue: &str) -> Vec<String> {
         .collect()
 }
 
-/// Notes that carry candidate bindings for `issue`: its own, its parent's,
-/// and each design child's.
-fn candidate_notes(issue: &str) -> Vec<String> {
-    let mut notes = Vec::new();
+fn family_issue_ids(issue: &str) -> Vec<String> {
     let mut ids = vec![issue.to_string()];
     if let Ok(v) = crate::issue_record(issue) {
         if let Some(p) = parent_of(&v) {
@@ -268,12 +265,35 @@ fn candidate_notes(issue: &str) -> Vec<String> {
     ids.extend(extra);
     ids.sort();
     ids.dedup();
-    for id in ids {
-        if let Ok(v) = crate::issue_record(&id) {
-            notes.extend(ballot_sig::notes_of(&v));
-        }
+    ids
+}
+
+fn notes_on(issue: &str) -> Vec<String> {
+    crate::issue_record(issue)
+        .map(|v| ballot_sig::notes_of(&v))
+        .unwrap_or_default()
+}
+
+/// Notes that carry candidate bindings for `issue`: its own, its parent's,
+/// and each design child's.
+fn candidate_notes(issue: &str) -> Vec<String> {
+    let mut notes = Vec::new();
+    for id in family_issue_ids(issue) {
+        notes.extend(notes_on(&id));
     }
     notes
+}
+
+fn family_notes(issue: &str) -> Vec<(String, String)> {
+    family_issue_ids(issue)
+        .into_iter()
+        .filter(|id| id != issue)
+        .flat_map(|id| {
+            notes_on(&id)
+                .into_iter()
+                .map(move |note| (id.clone(), note))
+        })
+        .collect()
 }
 
 /// Per voter, where in `notes` (newest first) its newest
@@ -299,29 +319,69 @@ fn same_voter(signed: &str, voter: &str) -> bool {
     signed == voter.trim() || signed == ballot_sig::field(voter)
 }
 
+fn matching_ballot_issue(
+    issue: &str,
+    key: &str,
+    voter: &str,
+    own: &[String],
+    family: &[(String, String)],
+) -> Option<String> {
+    let key = key.trim();
+    if key.is_empty() {
+        return None;
+    }
+    let mut by_issue: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (id, note) in family {
+        by_issue.entry(id.clone()).or_default().push(note.clone());
+    }
+    for (home, notes) in std::iter::once((issue.to_string(), own.to_vec())).chain(by_issue) {
+        let cuts = withdrawal_cuts(&notes);
+        for (at, note) in notes.iter().enumerate() {
+            let Some(sig) = ballot_sig::parse_note(note) else {
+                continue;
+            };
+            if !ballot_sig::verifies(issue, &sig) {
+                continue;
+            }
+            let other = session_key(
+                sig.harness.as_deref().unwrap_or(""),
+                sig.nonce.as_deref().unwrap_or(""),
+            );
+            if other != key || !same_voter(&sig.voter, voter) {
+                continue;
+            }
+            if withdrawn_at(&cuts, &sig.voter).is_some_and(|cut| cut < at) {
+                continue;
+            }
+            return Some(home);
+        }
+    }
+    None
+}
+
 /// How `voter` replaces the ballot it holds on `issue`.
 #[must_use]
-pub fn replace_hint(issue: &str, voter: &str) -> String {
+pub fn replace_hint(issue: &str, ballot_issue: &str, voter: &str) -> String {
     let voter = ballot_sig::field(voter);
     format!(
-        "To replace it, withdraw it and cast again: `ljos vote {issue} --withdraw --as {voter}` (ljos_vote with withdraw), then `ljos vote {issue} --for OPTION --used ... --as {voter}`."
+        "To replace it, withdraw it where it was cast: `ljos vote {ballot_issue} --withdraw --as {voter}` (ljos_vote with withdraw), then `ljos vote {issue} --for OPTION --used ... --as {voter}`."
     )
 }
 
 /// Why this connection must not cast on `issue`. `own` is that issue's
 /// logbook. `family` is the parent and the design children. A signature
 /// counts from either, but only when it verifies for `issue`: a ballot on
-/// a sibling is another question. A withdrawal is read from `own` alone,
-/// so a signature for `issue` left on the family still stands. A
+/// a sibling is another question. A withdrawal is read from whichever
+/// logbook carries that signature.
 /// candidate counts from either. The session key is the connection. The
 /// voter name is not it.
 #[must_use]
-pub fn session_cast_refusal(
+fn session_cast_refusal_on(
     issue: &str,
     key: &str,
     voter: &str,
     own: &[String],
-    family: &[String],
+    family: &[(String, String)],
 ) -> Option<String> {
     let key = key.trim();
     if key.is_empty() {
@@ -329,13 +389,24 @@ pub fn session_cast_refusal(
             "a ballot on {issue} needs this connection's session. Nothing was cast"
         ));
     }
-    let cuts = withdrawal_cuts(own);
-    let elsewhere = family
+    let mut family_by_issue: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (id, note) in family {
+        family_by_issue
+            .entry(id.clone())
+            .or_default()
+            .push(note.clone());
+    }
+    let signed = own
         .iter()
-        .filter(|note| !own.contains(note))
-        .map(|note| (None, note));
-    let signed = own.iter().enumerate().map(|(at, note)| (Some(at), note));
-    for (at, note) in signed.chain(elsewhere) {
+        .enumerate()
+        .map(|(at, note)| (issue, Some(at), note));
+    let elsewhere = family_by_issue.iter().flat_map(|(home, notes)| {
+        notes
+            .iter()
+            .enumerate()
+            .map(move |(at, note)| (home.as_str(), Some(at), note))
+    });
+    for (home, at, note) in signed.chain(elsewhere) {
         let Some(sig) = ballot_sig::parse_note(note) else {
             continue;
         };
@@ -357,6 +428,12 @@ pub fn session_cast_refusal(
         } else {
             key.to_string()
         };
+        let cuts = if home == issue {
+            withdrawal_cuts(own)
+        } else {
+            let notes = family_by_issue.get(home).cloned().unwrap_or_default();
+            withdrawal_cuts(&notes)
+        };
         let mine = same_voter(&sig.voter, voter);
         if at.is_some_and(|at| withdrawn_at(&cuts, &sig.voter).is_some_and(|cut| cut < at)) {
             // The voter that took this ballot back casts again as itself:
@@ -373,14 +450,14 @@ pub fn session_cast_refusal(
                 "this session already cast a ballot on {issue} ({session}): {}'s, for {}. Nothing was cast. {} {OWN_BALLOT}",
                 sig.voter,
                 sig.choice,
-                replace_hint(issue, voter)
+                replace_hint(issue, home, voter)
             ));
         }
         return Some(format!(
             "this session already cast a ballot on {issue} ({session}). A seat argument does not make another voice. Nothing was cast. {OWN_BALLOT}"
         ));
     }
-    for note in own.iter().chain(family) {
+    for note in own.iter().chain(family.iter().map(|(_, note)| note)) {
         let Some(candidate) = ballot_sig::parse_candidate(note) else {
             continue;
         };
@@ -393,6 +470,35 @@ pub fn session_cast_refusal(
         }
     }
     None
+}
+
+/// Why this connection must not cast on `issue`. `own` is that issue's
+/// logbook. `family` is the parent and the design children.
+#[must_use]
+pub fn session_cast_refusal(
+    issue: &str,
+    key: &str,
+    voter: &str,
+    own: &[String],
+    family: &[String],
+) -> Option<String> {
+    let family: Vec<(String, String)> = family
+        .iter()
+        .filter(|note| !own.contains(note))
+        .map(|note| (issue.to_string(), note.clone()))
+        .collect();
+    session_cast_refusal_on(issue, key, voter, own, &family)
+}
+
+/// The issue in this issue family where `voter` still has this session's
+/// ballot on `issue`, if any.
+#[must_use]
+pub fn standing_ballot_issue(issue: &str, voter: &str) -> Option<String> {
+    let id = ballot_sig::identity();
+    let key = session_key(&id.harness, &id.nonce);
+    let own = notes_on(issue);
+    let family = family_notes(issue);
+    matching_ballot_issue(issue, &key, voter, &own, &family)
 }
 
 static CAST: std::sync::Mutex<std::collections::BTreeSet<String>> =
@@ -630,11 +736,9 @@ fn held_choice(issue: &str, voter: &str) -> Option<String> {
 pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
     let id = ballot_sig::identity();
     let key = session_key(&id.harness, &id.nonce);
-    let own = crate::issue_record(issue)
-        .map(|v| ballot_sig::notes_of(&v))
-        .unwrap_or_default();
-    let family = candidate_notes(issue);
-    if let Some(why) = session_cast_refusal(issue, &key, voter, &own, &family) {
+    let own = notes_on(issue);
+    let family = family_notes(issue);
+    if let Some(why) = session_cast_refusal_on(issue, &key, voter, &own, &family) {
         bail!("{why}");
     }
     // A second cast from another session would only overwrite the drawer:
@@ -642,7 +746,7 @@ pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
     if let Some(choice) = held_choice(issue, voter) {
         bail!(
             "{voter} already holds a ballot on {issue} for {choice}. Nothing was cast. {}",
-            replace_hint(issue, voter)
+            replace_hint(issue, issue, voter)
         );
     }
     let mark = format!("{}\n{key}", issue.trim());

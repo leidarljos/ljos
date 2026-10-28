@@ -1905,11 +1905,24 @@ impl LjosServer {
             None if args.withdraw => {
                 let who =
                     ljos_cli::ballot_voter("vote", args.as_persona.as_deref()).map_err(refused)?;
-                let mut said =
-                    habitat_as("vissue", &["vote", &args.issue, "--withdraw"], Some(&who))?;
-                match ljos_cli::ballot_sig::note_withdrawn(&args.issue, &who) {
-                    Ok(_) => {}
-                    Err(e) => said.0.text.push_str(&format!("ljos vote: {e:#}\n")),
+                let ballot_issue = ljos_cli::panel_gate::standing_ballot_issue(&args.issue, &who)
+                    .unwrap_or_else(|| args.issue.clone());
+                let mut said = match habitat_as(
+                    "vissue",
+                    &["vote", &ballot_issue, "--withdraw"],
+                    Some(&who),
+                ) {
+                    Ok(said) => said,
+                    Err(e) if format!("{e:#}").contains("holds no ballot") => {
+                        let text = format!(
+                            "{ballot_issue}: {who} holds no ballot; withdrawing the forecast\n"
+                        );
+                        Json(Said { text, aside: None })
+                    }
+                    Err(e) => return Err(e),
+                };
+                if let Err(e) = ljos_cli::ballot_sig::note_withdrawn(&ballot_issue, &who) {
+                    said.0.text.push_str(&format!("ljos vote: {e:#}\n"));
                 }
                 let n = ljos_cli::withdraw_prediction(&args.issue, &who).map_err(refused)?;
                 said.0
