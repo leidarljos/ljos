@@ -174,12 +174,140 @@ pub(crate) fn reached(words: &[String], cwd: Option<&Path>, reader: bool) -> Opt
 /// Programs a `find -exec` runs that remove or move what it finds.
 const UPROOTERS: &[&str] = &["rm", "rmdir", "unlink", "mv", "shred", "trash", "trash-put"];
 
+/// A program's long options, and the long option each short letter is.
+type Options = (
+    &'static str,
+    &'static [&'static str],
+    &'static [(char, &'static str)],
+);
+
+/// The long options of `rm` and `mv` as GNU names them, those that take
+/// a value ending in `=`, and the long option each short letter is.
+const OPTIONS: &[Options] = &[
+    (
+        "rm",
+        &[
+            "dir",
+            "force",
+            "interactive",
+            "no-preserve-root",
+            "one-file-system",
+            "preserve-root",
+            "recursive",
+            "verbose",
+            "help",
+            "version",
+        ],
+        &[
+            ('d', "dir"),
+            ('f', "force"),
+            ('i', "interactive"),
+            ('I', "interactive"),
+            ('r', "recursive"),
+            ('R', "recursive"),
+            ('v', "verbose"),
+        ],
+    ),
+    (
+        "mv",
+        &[
+            "backup",
+            "context",
+            "debug",
+            "exchange",
+            "force",
+            "interactive",
+            "no-clobber",
+            "no-copy",
+            "no-target-directory",
+            "strip-trailing-slashes",
+            "suffix=",
+            "target-directory=",
+            "update",
+            "verbose",
+            "help",
+            "version",
+        ],
+        &[
+            ('b', "backup"),
+            ('f', "force"),
+            ('i', "interactive"),
+            ('n', "no-clobber"),
+            ('S', "suffix="),
+            ('t', "target-directory="),
+            ('T', "no-target-directory"),
+            ('u', "update"),
+            ('v', "verbose"),
+            ('Z', "context"),
+        ],
+    ),
+];
+
+/// The words of one command as the program reads them. For `rm` and
+/// `mv` each option is spelled out whole, as `--name` or `--name=value`:
+/// a long option by the one name it is a prefix of, and each letter of
+/// a short group by its long name, a value taken from the rest of the
+/// group or the next word.
+fn as_run(words: &[String]) -> Vec<String> {
+    let cmd = words
+        .first()
+        .map_or("", |w| w.rsplit('/').next().unwrap_or(w));
+    let Some((_, long, short)) = OPTIONS.iter().find(|(n, _, _)| *n == cmd) else {
+        return words.to_vec();
+    };
+    let mut out = words[..1].to_vec();
+    let mut it = words.iter().skip(1);
+    while let Some(w) = it.next() {
+        let mut take = |name: &str, value: Option<&str>| match name.strip_suffix('=') {
+            Some(name) => {
+                let value = value.map(str::to_string).or_else(|| it.next().cloned());
+                out.push(format!("--{name}={}", value.unwrap_or_default()));
+            }
+            None => {
+                out.push(value.map_or_else(|| format!("--{name}"), |v| format!("--{name}={v}")))
+            }
+        };
+        if w == "--" {
+            out.push(w.clone());
+            out.extend(it.cloned());
+            break;
+        } else if let Some(given) = w.strip_prefix("--") {
+            let (given, value) = given
+                .split_once('=')
+                .map_or((given, None), |(n, v)| (n, Some(v)));
+            let exact = long.iter().find(|n| n.trim_end_matches('=') == given);
+            let mut prefixed = long.iter().filter(|n| n.starts_with(given));
+            match exact.or_else(|| prefixed.next().filter(|_| prefixed.next().is_none())) {
+                Some(name) => take(name, value),
+                None => out.push(w.clone()),
+            }
+        } else if w.len() > 1 && w.starts_with('-') {
+            for (i, c) in w.char_indices().skip(1) {
+                let Some((_, name)) = short.iter().find(|(s, _)| *s == c) else {
+                    continue;
+                };
+                if name.ends_with('=') {
+                    let rest = &w[i + c.len_utf8()..];
+                    take(name, Some(rest).filter(|r| !r.is_empty()));
+                    break;
+                }
+                take(name, None);
+            }
+        } else {
+            out.push(w.clone());
+        }
+    }
+    out
+}
+
 /// The operands one command, its wrappers off, removes or moves with all
 /// they hold: those of `rm -r`, the sources of `mv`, `trash` and
 /// `gio trash`, the destination of `rsync --delete` and the sources of
 /// `rsync --remove-source-files`, and the starting points of a `find`
-/// that deletes or runs one of [`UPROOTERS`].
-fn uprooted(words: &[String]) -> Vec<&str> {
+/// that deletes or runs one of [`UPROOTERS`]. Options are read as
+/// [`as_run`] spells them.
+fn uprooted(words: &[String]) -> Vec<String> {
+    let words = as_run(words);
     let cmd = words
         .first()
         .map_or("", |w| w.rsplit('/').next().unwrap_or(w));
@@ -195,18 +323,14 @@ fn uprooted(words: &[String]) -> Vec<&str> {
             args.push(w);
         } else if w == "--" {
             ended = true;
-        } else if cmd == "mv" && (w == "-t" || w == "--target-directory") {
-            target = it.next();
         } else if let Some(dir) = w.strip_prefix("--target-directory=") {
             target = Some(dir);
         } else {
             flags.push(w);
         }
     }
-    let recursive = flags
-        .iter()
-        .any(|f| *f == "--recursive" || (!f.starts_with("--") && f.contains(['r', 'R'])));
-    match cmd {
+    let recursive = flags.contains(&"--recursive");
+    let picked: Vec<&str> = match cmd {
         "rm" if recursive => args,
         "mv" if target.is_some() => args,
         "mv" => args
@@ -255,7 +379,8 @@ fn uprooted(words: &[String]) -> Vec<&str> {
             }
         }
         _ => Vec::new(),
-    }
+    };
+    picked.into_iter().map(str::to_string).collect()
 }
 
 /// The word of one command that removes or moves, with all it holds, the
@@ -269,7 +394,7 @@ pub(crate) fn uproots(words: &[String], cwd: Option<&Path>) -> Option<String> {
             .into_iter()
             .flatten()
             .any(|p| inside.iter().any(|d| crate::kept_prompt::encloses(&p, d)))
-            .then(|| word.to_string())
+            .then(|| word.clone())
     })
 }
 

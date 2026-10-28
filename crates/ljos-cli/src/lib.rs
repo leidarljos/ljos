@@ -52259,6 +52259,93 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
     }
 
+    /// The word the person key's tree guards alone refuse on `line`, each
+    /// command read as [`seat_guard_in`] reads it, with no directory.
+    fn uprooted_by(line: &str) -> Option<String> {
+        nested_lines(line, 0)
+            .iter()
+            .flat_map(|l| raw_segments(l))
+            .find_map(|seg| {
+                let words = shell_words(&seg);
+                let words = &words[prefix_end(&words).0..];
+                person_key::uproots(words, None)
+                    .or_else(|| person_key::code_uproots(words, line, None))
+            })
+    }
+
+    /// Each line is refused by the person key's tree guards and by the
+    /// seat guard.
+    fn assert_uprooted(lines: &[String]) {
+        let _g = env_guard();
+        std::fs::create_dir_all(person_key::key_dir().expect("a passwd home")).unwrap();
+        for line in lines {
+            assert!(
+                uprooted_by(line).is_some(),
+                "{line:?} was not read as uprooting"
+            );
+            assert!(seat_guard(line).is_some(), "{line:?} was allowed");
+        }
+    }
+
+    /// GNU takes a long option by any prefix that names one option.
+    #[test]
+    fn an_abbreviated_option_uproots_above_the_person_key() {
+        assert_uprooted(&[
+            "rm --recur ~".into(),
+            "rm --recursive ~".into(),
+            "rm --rec -f ~".into(),
+            "rm -f --r ~/.config".into(),
+            "mv --target=/tmp ~".into(),
+            "mv --targ /tmp ~".into(),
+            "mv --target-directory /tmp ~".into(),
+        ]);
+    }
+
+    /// A short option's value may follow its letter in one word, and
+    /// letters group behind one dash.
+    #[test]
+    fn a_grouped_short_option_uproots_above_the_person_key() {
+        assert_uprooted(&[
+            "mv -t/tmp ~".into(),
+            "mv -ft /tmp ~".into(),
+            "mv -ft/tmp ~".into(),
+            "mv -vft /tmp ~".into(),
+            "rm -vfR ~".into(),
+        ]);
+    }
+
+    /// Removing an ordinary project directory, a path under `/tmp` or
+    /// one under the home beside the key still passes, however its
+    /// options are spelled.
+    #[test]
+    fn removing_a_tree_beside_the_person_key_still_passes() {
+        let _g = env_guard();
+        std::fs::create_dir_all(person_key::key_dir().expect("a passwd home")).unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("build")).unwrap();
+        for line in [
+            "rm -rf build",
+            "rm --recur --force build",
+            "mv -ft /tmp/x build",
+            "rm -rf /tmp/x",
+            "rm --rec /tmp/x",
+            "mv --targ ~/scratch /tmp/x",
+            "rm -rf ~/scratch/x",
+            "rm --recursive ~/scratch/x",
+            "mv -t/tmp ~/scratch/x",
+            "find ~/scratch/x -delete",
+        ] {
+            assert!(
+                uprooted_by(line).is_none(),
+                "{line:?} was read as uprooting"
+            );
+            assert!(
+                seat_guard_in(line, Some(project.path())).is_none(),
+                "{line:?} was refused"
+            );
+        }
+    }
+
     /// Removing, moving, relinking or opening up a directory above the key
     /// replaces the key as surely as writing it. Every route to the key
     /// directory and the config directory above it is refused once the
