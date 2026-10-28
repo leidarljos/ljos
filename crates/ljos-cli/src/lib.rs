@@ -52345,6 +52345,27 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         ]);
     }
 
+    /// A glob that matches a symlink to the home reaches the home, though
+    /// the pattern as written names another directory.
+    #[test]
+    fn a_glob_over_a_symlink_uproots_above_the_person_key() {
+        let home = person_key::key_dir()
+            .and_then(|d| d.parent()?.parent().map(Path::to_path_buf))
+            .expect("a passwd home");
+        let links = tempfile::tempdir().unwrap();
+        std::fs::create_dir(links.path().join("d")).unwrap();
+        std::os::unix::fs::symlink(&home, links.path().join("d").join("h")).unwrap();
+        let l = links.path().display();
+        assert_uprooted(&[
+            format!("rm -rf {l}/d/h*"),
+            format!("rm -rf {l}/d/?/"),
+            format!("rm -rf {l}/d/[h]/.config"),
+            format!("rm -rf {l}/*/h"),
+            format!("mv {l}/d/* /tmp/x"),
+            format!("find {l}/d/h* -delete"),
+        ]);
+    }
+
     /// A `find` that runs `rm` or `mv` through a wrapper still removes
     /// or moves what it finds.
     #[test]
@@ -52383,6 +52404,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "find ~/scratch/x -exec env rm -rf {} +",
             "find ~ -name x -exec env cat {} +",
             "rm -rf ~other/proj",
+            "rm -rf build/*",
+            "rm -rf ~/scratch/*",
             "rm -rf {~,/tmp}/x",
             "rm -rf ~/scratch/{x,y}",
             "rm -rf \"${HOME}/scratch/x\"",

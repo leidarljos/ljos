@@ -109,8 +109,9 @@ fn guarded() -> Option<(Vec<PathBuf>, Vec<PathBuf>)> {
 }
 
 /// The paths `word` names from `cwd`: as the shell expands it, and with
-/// `~` and `$HOME` read as the passwd home, where the key is. `None` for
-/// a word the guard cannot expand.
+/// `~` and `$HOME` read as the passwd home, where the key is. A pattern
+/// also names each path on disk it matches. `None` for a word the guard
+/// cannot expand.
 fn paths_of(word: &str, cwd: Option<&Path>) -> Vec<Option<PathBuf>> {
     let mut out = vec![crate::kept_prompt::path_of(word, cwd)];
     if let Some(home) = crate::proc_tree::own_home() {
@@ -124,6 +125,12 @@ fn paths_of(word: &str, cwd: Option<&Path>) -> Vec<Option<PathBuf>> {
             }
         }
     }
+    let matched: Vec<PathBuf> = out
+        .iter()
+        .flatten()
+        .flat_map(|p| crate::kept_prompt::globbed(p))
+        .collect();
+    out.extend(matched.into_iter().map(Some));
     out
 }
 

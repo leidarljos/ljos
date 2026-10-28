@@ -204,6 +204,42 @@ fn glob(pat: &[char], name: &[char]) -> bool {
     }
 }
 
+/// The most paths [`globbed`] reads one pattern as.
+const MAX_GLOBBED: usize = 256;
+
+/// The paths on disk the pattern `path` matches, each resolved, so a
+/// match that is a symlink counts as where it leads. Empty for a path
+/// with no pattern in it.
+pub(crate) fn globbed(path: &Path) -> Vec<PathBuf> {
+    let is_pattern = |s: &str| s.contains(['*', '?', '[']);
+    if !is_pattern(&path.to_string_lossy()) {
+        return Vec::new();
+    }
+    let mut found = vec![PathBuf::new()];
+    for part in path.components() {
+        let name = part.as_os_str().to_string_lossy();
+        if !matches!(part, Component::Normal(_)) || !is_pattern(&name) {
+            found.iter_mut().for_each(|f| f.push(part));
+            continue;
+        }
+        let pat: Vec<char> = name.chars().collect();
+        let mut next = Vec::new();
+        for dir in &found {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let entry_name: Vec<char> = entry.file_name().to_string_lossy().chars().collect();
+                if glob(&pat, &entry_name) && next.len() < MAX_GLOBBED {
+                    next.push(dir.join(entry.file_name()));
+                }
+            }
+        }
+        found = next;
+    }
+    found.iter().map(|p| resolve(p)).collect()
+}
+
 /// Whether each component of `pat`, a pattern or a name, matches the one
 /// beside it in `real`.
 fn same_parts(pat: &[Component<'_>], real: &[Component<'_>]) -> bool {
