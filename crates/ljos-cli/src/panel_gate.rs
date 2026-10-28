@@ -296,23 +296,34 @@ fn family_notes(issue: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Per voter, where in `notes` (newest first) its newest
-/// `ballot-withdrawn:` note sits. A signature further down came before it
-/// and was taken back; one further up is a ballot cast since.
-fn withdrawal_cuts(notes: &[String]) -> BTreeMap<String, usize> {
+/// Per `(issue, voter)`, where in `notes` (newest first) its newest
+/// `ballot-withdrawn:` note sits. A note with no issue keeps the legacy
+/// meaning: it applies to the issue whose logbook holds it (`home`).
+fn withdrawal_cuts(notes: &[String], home: &str) -> BTreeMap<(String, String), usize> {
     let mut cuts = BTreeMap::new();
     for (at, note) in notes.iter().enumerate() {
         if let Some(w) = ballot_sig::parse_withdrawn(note) {
-            cuts.entry(w.voter).or_insert(at);
+            let issue = w.issue.unwrap_or_else(|| home.to_string());
+            cuts.entry((issue, w.voter)).or_insert(at);
         }
     }
     cuts
 }
 
-fn withdrawn_at(cuts: &BTreeMap<String, usize>, voter: &str) -> Option<usize> {
-    cuts.get(voter)
-        .or_else(|| cuts.get(&ballot_sig::field(voter)))
-        .copied()
+fn withdrawn_at(
+    cuts: &BTreeMap<(String, String), usize>,
+    issue: &str,
+    voter: &str,
+) -> Option<usize> {
+    if issue.is_empty() {
+        let field = ballot_sig::field(voter);
+        return cuts
+            .iter()
+            .find_map(|((_issue, v), at)| (v == voter || v == &field).then_some(*at));
+    }
+    let named = (issue.to_string(), voter.to_string());
+    let field = (issue.to_string(), ballot_sig::field(voter));
+    cuts.get(&named).or_else(|| cuts.get(&field)).copied()
 }
 
 fn same_voter(signed: &str, voter: &str) -> bool {
@@ -333,7 +344,7 @@ fn matching_ballot_issue(
         by_issue.entry(id.clone()).or_default().push(note.clone());
     }
     for (home, notes) in std::iter::once((issue.to_string(), own.to_vec())).chain(by_issue) {
-        let cuts = withdrawal_cuts(&notes);
+        let cuts = withdrawal_cuts(&notes, &home);
         for (at, note) in notes.iter().enumerate() {
             let Some(sig) = ballot_sig::parse_note(note) else {
                 continue;
@@ -344,7 +355,7 @@ fn matching_ballot_issue(
             if !same_voter(&sig.voter, voter) {
                 continue;
             }
-            if withdrawn_at(&cuts, &sig.voter).is_some_and(|cut| cut < at) {
+            if withdrawn_at(&cuts, issue, &sig.voter).is_some_and(|cut| cut < at) {
                 continue;
             }
             return Some(home);
@@ -423,13 +434,13 @@ fn session_cast_refusal_on(
             key.to_string()
         };
         let cuts = if home == issue {
-            withdrawal_cuts(own)
+            withdrawal_cuts(own, issue)
         } else {
             let notes = family_by_issue.get(home).cloned().unwrap_or_default();
-            withdrawal_cuts(&notes)
+            withdrawal_cuts(&notes, home)
         };
         let mine = same_voter(&sig.voter, voter);
-        if at.is_some_and(|at| withdrawn_at(&cuts, &sig.voter).is_some_and(|cut| cut < at)) {
+        if at.is_some_and(|at| withdrawn_at(&cuts, issue, &sig.voter).is_some_and(|cut| cut < at)) {
             // The voter that took this ballot back casts again as itself:
             // the ballot is replaced, and the session is still one voice.
             if mine {
@@ -474,14 +485,9 @@ pub fn session_cast_refusal(
     key: &str,
     voter: &str,
     own: &[String],
-    family: &[String],
+    family: &[(String, String)],
 ) -> Option<String> {
-    let family: Vec<(String, String)> = family
-        .iter()
-        .filter(|note| !own.contains(note))
-        .map(|note| (issue.to_string(), note.clone()))
-        .collect();
-    session_cast_refusal_on(issue, key, voter, own, &family)
+    session_cast_refusal_on(issue, key, voter, own, family)
 }
 
 /// The issue in this issue family where `voter` still has this session's
@@ -820,17 +826,18 @@ pub struct IgnoredBallot {
 /// binding is kept: a tracker from before binding.
 #[must_use]
 pub fn tally_of(
+    issue: &str,
     rows: &[Value],
     notes: &[String],
     authors: &std::collections::BTreeSet<String>,
 ) -> (Vec<Value>, Vec<IgnoredBallot>) {
-    let cuts = withdrawal_cuts(notes);
+    let cuts = withdrawal_cuts(notes, issue);
     let sigs: Vec<(bool, ballot_sig::SigNote)> = notes
         .iter()
         .enumerate()
         .filter_map(|(at, n)| {
             let sig = ballot_sig::parse_note(n)?;
-            let standing = withdrawn_at(&cuts, &sig.voter).is_none_or(|cut| at < cut);
+            let standing = withdrawn_at(&cuts, issue, &sig.voter).is_none_or(|cut| at < cut);
             Some((standing, sig))
         })
         .collect();
@@ -901,7 +908,7 @@ pub fn tally_of(
         let stands = sigs
             .iter()
             .any(|(standing, sig)| *standing && same_voter(&sig.voter, voter));
-        if withdrawn_at(&cuts, voter).is_some() && !stands {
+        if withdrawn_at(&cuts, issue, voter).is_some() && !stands {
             seen.insert(voter.to_string());
             continue;
         }
@@ -931,7 +938,7 @@ pub fn counted_ballots(issue: &str, rows: &[Value]) -> Vec<Value> {
     let notes = crate::issue_record(issue)
         .map(|v| ballot_sig::notes_of(&v))
         .unwrap_or_default();
-    tally_of(rows, &notes, &author_sessions(issue)).0
+    tally_of(issue, rows, &notes, &author_sessions(issue)).0
 }
 
 /// The seat of each voter whose first bound ballot only that seat named
@@ -965,7 +972,7 @@ pub fn tally_report(issue: &str) -> Result<String> {
     let notes = crate::issue_record(issue)
         .map(|v| ballot_sig::notes_of(&v))
         .unwrap_or_default();
-    let (counted, ignored) = tally_of(&raw, &notes, &author_sessions(issue));
+    let (counted, ignored) = tally_of(issue, &raw, &notes, &author_sessions(issue));
     let seat_only = seat_only_voters(&notes);
     let mut unverified = std::collections::BTreeSet::new();
     let mut out = String::new();
@@ -1484,8 +1491,10 @@ mod tests {
             "n-alice",
         );
         let own = [ballot];
-        let family =
-            ["candidate-sig: demo-d001 alice sess-author-0001 n-author - ab cd".to_string()];
+        let family = [(
+            "demo-vote".to_string(),
+            "candidate-sig: demo-d001 alice sess-author-0001 n-author - ab cd".to_string(),
+        )];
         let again =
             session_cast_refusal("demo-ind1", "sess-shared-0001", "bea", &own, &family).unwrap();
         assert!(
@@ -1501,8 +1510,16 @@ mod tests {
         let author =
             session_cast_refusal("demo-vote", "sess-author-0001", "alice", &[], &family).unwrap();
         assert!(author.contains("authored candidate demo-d001"), "{author}");
-        let on_own =
-            session_cast_refusal("demo-vote", "sess-author-0001", "alice", &family, &[]).unwrap();
+        let own_candidate =
+            ["candidate-sig: demo-d001 alice sess-author-0001 n-author - ab cd".to_string()];
+        let on_own = session_cast_refusal(
+            "demo-vote",
+            "sess-author-0001",
+            "alice",
+            &own_candidate,
+            &[],
+        )
+        .unwrap();
         assert!(on_own.contains("authored candidate demo-d001"), "{on_own}");
         assert!(session_cast_refusal("demo-ind1", "sess-bob-0001", "bob", &own, &family).is_none());
         let _g = crate::test_env_lock();
@@ -1523,8 +1540,8 @@ mod tests {
     fn a_signature_for_this_issue_on_its_family_still_counts() {
         let key = ed25519_dalek::SigningKey::from_bytes(&[4; 32]);
         let on_b = ballot_sig::sign_bound(&key, "demo-b", "saddle", "ship", "sess-one", "-");
-        let stray = std::slice::from_ref(&on_b);
-        let through = session_cast_refusal("demo-b", "sess-one", "bea", &[], stray).unwrap();
+        let stray = [("parent-b".to_string(), on_b.clone())];
+        let through = session_cast_refusal("demo-b", "sess-one", "bea", &[], &stray).unwrap();
         assert!(
             through.contains("already cast a ballot on demo-b"),
             "{through}"
@@ -1532,8 +1549,26 @@ mod tests {
         let withdrawn = ballot_sig::withdrawn_line("saddle", "sess-one", "-");
         let own = [withdrawn, on_b.clone()];
         assert!(
-            session_cast_refusal("demo-b", "sess-one", "saddle", &own, &own).is_none(),
+            session_cast_refusal("demo-b", "sess-one", "saddle", &own, &stray).is_none(),
             "the issue's own copy in the family is read once, with its withdrawal"
+        );
+    }
+
+    #[test]
+    fn a_parent_cut_for_a_child_issue_is_read_on_the_parent_index() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[6; 32]);
+        let issue = "child-a";
+        let parent = "parent-1";
+        let own = [ballot_sig::sign_bound(
+            &key, issue, "bea", "ship", "sess-bea", "-",
+        )];
+        let sig = ballot_sig::sign_bound(&key, issue, "saddle", "ship", "sess-saddle", "-");
+        let cut = ballot_sig::withdrawn_line("saddle", "sess-saddle", "-");
+        let family = [(parent.to_string(), cut), (parent.to_string(), sig)];
+        assert_eq!(
+            session_cast_refusal(issue, "sess-saddle", "saddle", &own, &family),
+            None,
+            "a parent cut for child-a must not be indexed against child-a's own notes"
         );
     }
 
@@ -1568,7 +1603,12 @@ mod tests {
         // ballot counts and the later one is not a second voice.
         let later = ballot_sig::sign_bound(&k, "panel-spcd", "seat-a", "xdg home", "spaced-1", "-");
         let rows = [serde_json::json!({"agent": "seat-a", "choice": "xdg home"})];
-        let (counted, _) = tally_of(&rows, &[later, first], &std::collections::BTreeSet::new());
+        let (counted, _) = tally_of(
+            "panel-spcd",
+            &rows,
+            &[later, first],
+            &std::collections::BTreeSet::new(),
+        );
         assert_eq!(counted.len(), 1, "{counted:?}");
         assert_eq!(counted[0]["choice"], "beside binary");
         // A note that does not parse, and does not verify, does not bind.
@@ -1597,7 +1637,12 @@ mod tests {
             .iter()
             .map(|persona| serde_json::json!({"agent": persona, "choice": "bus"}))
             .collect();
-        let (counted, ignored) = tally_of(&rows, &notes, &std::collections::BTreeSet::new());
+        let (counted, ignored) = tally_of(
+            "travel-rx1d",
+            &rows,
+            &notes,
+            &std::collections::BTreeSet::new(),
+        );
         assert_eq!(counted.len(), 1, "{counted:?}");
         assert_eq!(counted[0]["agent"], "academic");
         assert_eq!(counted[0]["choice"], "rail");
@@ -1611,7 +1656,7 @@ mod tests {
             .all(|item| item.session == session && item.why == "same session"));
         let mut authors = std::collections::BTreeSet::new();
         authors.insert(session.to_string());
-        let (none, dropped) = tally_of(&rows, &notes, &authors);
+        let (none, dropped) = tally_of("travel-rx1d", &rows, &notes, &authors);
         assert!(none.is_empty(), "{none:?}");
         assert_eq!(dropped.len(), 5, "{dropped:?}");
         assert!(dropped
@@ -1786,7 +1831,7 @@ mod tests {
             "sess-saddle",
             "saddle",
             &[],
-            std::slice::from_ref(&sibling),
+            &[("rgpot-9ot3".to_string(), sibling.clone())],
         )
         .is_none());
         assert!(
@@ -1820,12 +1865,12 @@ mod tests {
         let key = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
         let sig = ballot_sig::sign_bound(&key, "demo-w", "reviewer", "ship", "sess-r", "-");
         let authors = std::collections::BTreeSet::new();
-        let (gone, _) = tally_of(&[], std::slice::from_ref(&sig), &authors);
+        let (gone, _) = tally_of("demo-w", &[], std::slice::from_ref(&sig), &authors);
         assert!(gone.is_empty(), "{gone:?}");
         let rows = [serde_json::json!({"agent": "reviewer", "choice": "ship"})];
         let note = ballot_sig::withdrawn_line("reviewer", "sess-r", "-");
         let taken_back = [note.clone(), sig.clone()];
-        let (counted, ignored) = tally_of(&rows, &taken_back, &authors);
+        let (counted, ignored) = tally_of("demo-w", &rows, &taken_back, &authors);
         assert!(counted.is_empty(), "{counted:?}");
         assert!(ignored.is_empty(), "{ignored:?}");
         // Another name from the session is still a second voice.
@@ -1845,7 +1890,7 @@ mod tests {
         let recast = ballot_sig::sign_bound(&key, "demo-w", "reviewer", "hold", "sess-r", "-");
         let notes = [recast, note, sig];
         let rows = [serde_json::json!({"agent": "reviewer", "choice": "hold"})];
-        let (counted, _) = tally_of(&rows, &notes, &authors);
+        let (counted, _) = tally_of("demo-w", &rows, &notes, &authors);
         assert_eq!(counted.len(), 1, "{counted:?}");
         assert_eq!(counted[0]["choice"], "hold");
         // A third cast with no withdrawal says how to replace the ballot.
@@ -1870,7 +1915,7 @@ mod tests {
         ];
         let notes = vec![withdrawn, hold, ship];
         let authors = std::collections::BTreeSet::new();
-        let (counted, _) = tally_of(&rows, &notes, &authors);
+        let (counted, _) = tally_of("cite-1", &rows, &notes, &authors);
         assert_eq!(counted.len(), 1, "{counted:?}");
         assert_eq!(counted[0]["agent"], "seat-b");
         assert_eq!(counted[0]["choice"], "hold");
@@ -1885,7 +1930,7 @@ mod tests {
         assert!(words.contains("decides hold"), "{words}");
         assert!(!words.contains("split"), "{words}");
         assert_eq!(json["push_cite"]["stands"].as_bool(), Some(true), "{json}");
-        let (only, _) = tally_of(&rows[..1], &notes, &authors);
+        let (only, _) = tally_of("cite-1", &rows[..1], &notes, &authors);
         assert!(only.is_empty(), "{only:?}");
         let (words, json) = crate::push_cite_reading_signed(
             "cite-1",
