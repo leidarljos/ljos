@@ -1,0 +1,1 @@
+The person key directory is opened once, refusing a symlink in its place, and the key, its pepper and its failure count are read, written, renamed and removed through that descriptor with `O_NOFOLLOW`. A directory or file swapped for a symlink between a check and its use is no longer followed, and a link in place of any of them is refused.

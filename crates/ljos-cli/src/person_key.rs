@@ -479,11 +479,11 @@ pub(crate) fn code_uproots(words: &[String], line: &str, cwd: Option<&Path>) -> 
 /// Why the person was not asked, or was asked and not answered: no key,
 /// a lockout, no controlling terminal, nothing typed, a wrong answer.
 pub fn ask_person(marks: &[String], what: &str) -> std::result::Result<(), String> {
-    let (Some(key), Some(fails)) = (key_path(), fails_path()) else {
+    let Some(dir) = key_dir() else {
         return Err("this user's passwd entry names no home, so no passphrase is kept".into());
     };
     let tty = crate::person_tty::open().ok();
-    ask_with(&key, &fails, tty, marks, what, now_secs, std::thread::sleep)
+    ask_with(&dir, tty, marks, what, now_secs, std::thread::sleep)
 }
 
 fn now_secs() -> u64 {
@@ -492,24 +492,29 @@ fn now_secs() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// [`ask_person`] with the key and failure paths, the terminal, the
-/// clock and the pause given.
+/// [`ask_person`] with the key directory, the terminal, the clock and
+/// the pause given. The directory is opened once, and the key, pepper
+/// and failure count are all reached through it.
 fn ask_with(
-    key: &Path,
-    fails: &Path,
+    dir: &Path,
     tty: Option<std::fs::File>,
     marks: &[String],
     what: &str,
     now: impl Fn() -> u64,
     pause: impl Fn(std::time::Duration),
 ) -> std::result::Result<(), String> {
-    let phc = match read(key) {
+    let at = match KeyDir::open(dir, false) {
+        Ok(Some(at)) => at,
+        Ok(None) => return Err("no person passphrase is set".into()),
+        Err(e) => return Err(format!("{e:#}")),
+    };
+    let phc = match key_in(&at, KEY_NAME) {
         Ok(Some(phc)) => phc,
         Ok(None) => return Err("no person passphrase is set".into()),
         Err(e) => return Err(format!("{e:#}")),
     };
-    let pepper = read_pepper(&key.with_file_name(PEPPER_NAME)).map_err(|e| format!("{e:#}"))?;
-    let recent = recent_failures(fails, now())?;
+    let pepper = pepper_in(&at).map_err(|e| format!("{e:#}"))?;
+    let recent = recent_failures(&at, now())?;
     if recent.len() >= LOCK_AFTER {
         let until = recent[recent.len() - LOCK_AFTER] + WINDOW_SECS;
         return Err(format!(
@@ -536,10 +541,10 @@ fn ask_with(
         Err(e) => return Err(format!("the passphrase prompt failed: {e:#}")),
     };
     if verify(answer.bytes(), &phc, &pepper) {
-        let _ = std::fs::remove_file(fails);
+        let _ = at.remove(FAILS_NAME);
         return Ok(());
     }
-    let count = record_failure(fails, now())
+    let count = record_failure(&at, now())
         .map(|()| recent.len() + 1)
         .unwrap_or(LOCK_AFTER);
     pause(std::time::Duration::from_secs(pause_secs(count)));
@@ -557,16 +562,11 @@ fn pause_secs(count: usize) -> u64 {
 
 /// The wrong answers in the window ending `now`, oldest first. A line
 /// that does not read as a time counts as a wrong answer now.
-fn recent_failures(fails: &Path, now: u64) -> std::result::Result<Vec<u64>, String> {
-    let text = match std::fs::read_to_string(fails) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => {
-            return Err(format!(
-                "the failure count at {} does not read: {e}",
-                fails.display()
-            ))
-        }
+fn recent_failures(at: &KeyDir, now: u64) -> std::result::Result<Vec<u64>, String> {
+    let text = match at.read(FAILS_NAME) {
+        Ok(Some(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
+        Ok(None) => return Ok(Vec::new()),
+        Err(e) => return Err(format!("the failure count does not read: {e:#}")),
     };
     let mut times: Vec<u64> = text
         .lines()
@@ -578,13 +578,8 @@ fn recent_failures(fails: &Path, now: u64) -> std::result::Result<Vec<u64>, Stri
     Ok(times)
 }
 
-fn record_failure(fails: &Path, now: u64) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .mode(0o600)
-        .open(fails)?;
+fn record_failure(at: &KeyDir, now: u64) -> std::io::Result<()> {
+    let mut file = at.open_at(FAILS_NAME, libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT)?;
     writeln!(file, "{now}")?;
     file.sync_all()
 }
@@ -625,21 +620,30 @@ pub fn new_pepper() -> Result<Zeroizing<Vec<u8>>> {
 ///
 /// The pepper is missing, not a regular file, or not [`PEPPER_LEN`] bytes.
 pub fn read_pepper(path: &Path) -> Result<Zeroizing<Vec<u8>>> {
-    let gone = || {
-        format!(
-            "person-key: the pepper at {} is gone; run `ljos person-key set` again",
-            path.display()
-        )
-    };
-    let meta = std::fs::symlink_metadata(path).with_context(gone)?;
-    if !meta.is_file() {
-        bail!("person-key: {} is not a regular file", path.display());
+    let (dir, name) = split(path)?;
+    match KeyDir::open(dir, false)? {
+        Some(at) => pepper_named(&at, name),
+        None => bail!("{}", pepper_gone(path)),
     }
-    let pepper = Zeroizing::new(std::fs::read(path).with_context(gone)?);
-    if pepper.len() != PEPPER_LEN {
-        bail!("{}", gone());
+}
+
+fn pepper_gone(path: &Path) -> String {
+    format!(
+        "person-key: the pepper at {} is gone; run `ljos person-key set` again",
+        path.display()
+    )
+}
+
+fn pepper_in(at: &KeyDir) -> Result<Zeroizing<Vec<u8>>> {
+    pepper_named(at, PEPPER_NAME)
+}
+
+fn pepper_named(at: &KeyDir, name: &str) -> Result<Zeroizing<Vec<u8>>> {
+    let gone = || pepper_gone(&at.path.join(name));
+    match at.read(name)? {
+        Some(pepper) if pepper.len() == PEPPER_LEN => Ok(pepper),
+        _ => bail!("{}", gone()),
     }
-    Ok(pepper)
 }
 
 /// The PHC string of `pass` under a fresh salt from the OS, with
@@ -734,10 +738,12 @@ pub fn verify(pass: &[u8], phc: &str, pepper: &[u8]) -> bool {
 ///
 /// No random bytes, the hash failed, or a file cannot be written.
 pub fn keep(path: &Path, pass: &[u8]) -> Result<()> {
+    let (dir, name) = split(path)?;
     let pepper = new_pepper()?;
     let phc = hash(pass, &pepper)?;
-    write_private(&path.with_file_name(PEPPER_NAME), &pepper)?;
-    store(path, &phc)
+    let at = KeyDir::create(dir)?;
+    at.write(PEPPER_NAME, &pepper)?;
+    at.write(name, format!("{phc}\n").as_bytes())
 }
 
 /// Write `phc` to `path`, mode 0600. The text goes to a new file beside
@@ -747,40 +753,164 @@ pub fn keep(path: &Path, pass: &[u8]) -> Result<()> {
 ///
 /// The directory or the file cannot be written.
 pub fn store(path: &Path, phc: &str) -> Result<()> {
-    write_private(path, format!("{phc}\n").as_bytes())
+    let (dir, name) = split(path)?;
+    KeyDir::create(dir)?.write(name, format!("{phc}\n").as_bytes())
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let dir = path
-        .parent()
-        .context("person-key: the key path has no directory")?;
-    let name = path
-        .file_name()
-        .context("person-key: the key path has no file name")?;
-    std::fs::create_dir_all(dir).with_context(|| format!("person-key: {}", dir.display()))?;
-    let tmp = dir.join(format!(
-        ".{}.{}.tmp",
-        name.to_string_lossy(),
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&tmp);
-    let written = (|| -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        std::fs::rename(&tmp, path)?;
-        std::fs::File::open(dir)?.sync_all()
-    })();
-    if let Err(e) = written {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e).with_context(|| format!("person-key: {}", path.display()));
+/// The directory and file name of `path`.
+fn split(path: &Path) -> Result<(&Path, &str)> {
+    match (path.parent(), path.file_name().and_then(|n| n.to_str())) {
+        (Some(dir), Some(name)) => Ok((dir, name)),
+        _ => bail!(
+            "person-key: {} names no file in a directory",
+            path.display()
+        ),
     }
-    Ok(())
+}
+
+/// The key directory, opened once. Each file in it is reached through
+/// this descriptor and never by its path again, and none through a
+/// link, so a file or the directory swapped for a symlink after the
+/// open is not followed. The directories above it are followed.
+struct KeyDir {
+    fd: std::os::fd::OwnedFd,
+    path: PathBuf,
+}
+
+fn c_name(name: &str) -> std::io::Result<std::ffi::CString> {
+    std::ffi::CString::new(name).map_err(|_| std::io::ErrorKind::InvalidInput.into())
+}
+
+fn os_result(rc: libc::c_int) -> std::io::Result<libc::c_int> {
+    if rc < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(rc)
+    }
+}
+
+impl KeyDir {
+    /// `dir`, or `None` when it does not exist. A symlink or anything
+    /// but a directory in its place is an error.
+    fn open(dir: &Path, create: bool) -> Result<Option<Self>> {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        let ctx = || format!("person-key: {}", dir.display());
+        let (parent, name) = split(dir)?;
+        let up = match std::fs::File::open(parent) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !create => return Ok(None),
+            up => up.with_context(ctx)?,
+        };
+        let name = c_name(name)?;
+        if create {
+            // SAFETY: a directory descriptor and a NUL-terminated name.
+            let made = os_result(unsafe { libc::mkdirat(up.as_raw_fd(), name.as_ptr(), 0o700) });
+            if let Err(e) = made {
+                if e.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(e).with_context(ctx);
+                }
+            }
+        }
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        // SAFETY: as above; the flags refuse a link in place of the directory.
+        match os_result(unsafe { libc::openat(up.as_raw_fd(), name.as_ptr(), flags) }) {
+            // SAFETY: a fresh descriptor, owned here alone.
+            Ok(fd) => Ok(Some(Self {
+                fd: unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) },
+                path: dir.to_path_buf(),
+            })),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !create => Ok(None),
+            Err(e) if matches!(e.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) => {
+                bail!("person-key: {} is a link or not a directory", dir.display())
+            }
+            Err(e) => Err(e).with_context(ctx),
+        }
+    }
+
+    /// `dir` opened, made mode 0700 first when missing, with the
+    /// directories above it.
+    fn create(dir: &Path) -> Result<Self> {
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("person-key: {}", parent.display()))?;
+        }
+        Self::open(dir, true)?.context("person-key: the key directory was not made")
+    }
+
+    /// `name` in the directory opened with `flags`, never through a link.
+    /// A file it makes is mode 0600.
+    fn open_at(&self, name: &str, flags: libc::c_int) -> std::io::Result<std::fs::File> {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        let name = c_name(name)?;
+        let flags = flags | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        // SAFETY: a directory descriptor, a NUL-terminated name, and a mode.
+        let fd = os_result(unsafe {
+            libc::openat(
+                self.fd.as_raw_fd(),
+                name.as_ptr(),
+                flags,
+                0o600 as libc::c_uint,
+            )
+        })?;
+        // SAFETY: a fresh descriptor, owned here alone.
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+    }
+
+    /// The bytes of `name`, or `None` when it is missing. A link, or
+    /// anything but a regular file, is an error.
+    fn read(&self, name: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        use std::io::Read as _;
+        let at = self.path.join(name);
+        let not_file = || anyhow::anyhow!("person-key: {} is not a regular file", at.display());
+        let mut file = match self.open_at(name, libc::O_RDONLY | libc::O_NONBLOCK) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Err(not_file()),
+            Err(e) => return Err(e).with_context(|| format!("person-key: {}", at.display())),
+        };
+        let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Err(not_file());
+        }
+        let len = usize::try_from(meta.len()).unwrap_or(0);
+        let mut bytes = Zeroizing::new(Vec::with_capacity(len + 1));
+        file.read_to_end(&mut bytes)
+            .with_context(|| format!("person-key: {}", at.display()))?;
+        Ok(Some(bytes))
+    }
+
+    /// Write `bytes` to `name`, mode 0600. They go to a new file that is
+    /// renamed over the old one, so a reader sees either.
+    fn write(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        use std::os::fd::AsRawFd as _;
+        let tmp = format!(".{name}.{}.tmp", std::process::id());
+        let _ = self.remove(&tmp);
+        let written = (|| -> std::io::Result<()> {
+            let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL;
+            let mut file = self.open_at(&tmp, flags)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            let (from, to) = (c_name(&tmp)?, c_name(name)?);
+            let fd = self.fd.as_raw_fd();
+            // SAFETY: one directory descriptor and two NUL-terminated names.
+            os_result(unsafe { libc::renameat(fd, from.as_ptr(), fd, to.as_ptr()) })?;
+            // SAFETY: the directory descriptor this owns.
+            os_result(unsafe { libc::fsync(fd) }).map(drop)
+        })();
+        if let Err(e) = written {
+            let _ = self.remove(&tmp);
+            return Err(e)
+                .with_context(|| format!("person-key: {}", self.path.join(name).display()));
+        }
+        Ok(())
+    }
+
+    /// Remove `name`, a link itself and never what it names.
+    fn remove(&self, name: &str) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+        let name = c_name(name)?;
+        // SAFETY: a directory descriptor and a NUL-terminated name.
+        os_result(unsafe { libc::unlinkat(self.fd.as_raw_fd(), name.as_ptr(), 0) }).map(drop)
+    }
 }
 
 /// The hash kept at `path`. `Ok(None)` is no key. A file that is not a
@@ -790,17 +920,21 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 ///
 /// The file cannot be read or does not hold a key.
 pub fn read(path: &Path) -> Result<Option<String>> {
-    match std::fs::symlink_metadata(path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("person-key: {}", path.display())),
-        Ok(meta) if !meta.is_file() => {
-            bail!("person-key: {} is not a regular file", path.display())
-        }
-        Ok(_) => {}
+    let (dir, name) = split(path)?;
+    match KeyDir::open(dir, false)? {
+        Some(at) => key_in(&at, name),
+        None => Ok(None),
     }
-    let text =
-        std::fs::read_to_string(path).with_context(|| format!("person-key: {}", path.display()))?;
-    parse(&text).with_context(|| format!("person-key: {}", path.display()))?;
+}
+
+fn key_in(at: &KeyDir, name: &str) -> Result<Option<String>> {
+    let path = at.path.join(name);
+    let Some(bytes) = at.read(name)? else {
+        return Ok(None);
+    };
+    let text = std::str::from_utf8(&bytes)
+        .with_context(|| format!("person-key: {} is not text", path.display()))?;
+    parse(text).with_context(|| format!("person-key: {}", path.display()))?;
     Ok(Some(text.trim().to_string()))
 }
 
@@ -882,8 +1016,13 @@ fn set_from(path: &Path, tty: &mut std::fs::File) -> Result<()> {
 
 fn clear_at(path: &Path) -> Result<()> {
     person_only("clear")?;
-    let _ = std::fs::remove_file(path.with_file_name(FAILS_NAME));
-    match std::fs::remove_file(path) {
+    let (dir, name) = split(path)?;
+    let Some(at) = KeyDir::open(dir, false)? else {
+        println!("person-key: no key at {}", path.display());
+        return Ok(());
+    };
+    let _ = at.remove(FAILS_NAME);
+    match at.remove(name) {
         Ok(()) => println!("person-key: cleared {}", path.display()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             println!("person-key: no key at {}", path.display());
@@ -895,8 +1034,16 @@ fn clear_at(path: &Path) -> Result<()> {
 
 /// Whether a key is kept at `path`, and when it was written. Never the hash.
 fn status_at(path: &Path) -> String {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) => {
+    let meta = split(path).and_then(|(dir, name)| {
+        let opened = KeyDir::open(dir, false)?.map(|at| {
+            at.open_at(name, libc::O_RDONLY | libc::O_NONBLOCK)
+                .and_then(|file| file.metadata())
+        });
+        Ok(opened.unwrap_or_else(|| Err(std::io::ErrorKind::NotFound.into())))
+    });
+    match meta {
+        Err(e) => format!("person-key: {} does not read: {e:#}", path.display()),
+        Ok(Ok(meta)) => {
             let when = meta
                 .modified()
                 .map(|t| {
@@ -907,11 +1054,11 @@ fn status_at(path: &Path) -> String {
                 .unwrap_or_else(|_| "an unknown time".into());
             format!("person-key: set, written {when} ({})", path.display())
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => format!(
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => format!(
             "person-key: not set ({}); run `ljos person-key set` from your own terminal",
             path.display()
         ),
-        Err(e) => format!("person-key: {} does not read: {e}", path.display()),
+        Ok(Err(e)) => format!("person-key: {} does not read: {e}", path.display()),
     }
 }
 
@@ -1113,8 +1260,7 @@ mod tests {
         let shown = typist(master, vec![(PROMPT, answer)]);
         let pauses = std::cell::RefCell::new(Vec::new());
         let out = ask_with(
-            &dir.join(KEY_NAME),
-            &dir.join(FAILS_NAME),
+            dir,
             Some(slave),
             &["CURSOR_AGENT".to_string()],
             "git push",
@@ -1191,8 +1337,7 @@ mod tests {
         let (master, slave) = pty_pair();
         let shown = typist(master, vec![]);
         let out = ask_with(
-            &dir.path().join(KEY_NAME),
-            &dir.path().join(FAILS_NAME),
+            dir.path(),
             Some(slave),
             &["CURSOR_AGENT".to_string()],
             "git push",
@@ -1220,8 +1365,7 @@ mod tests {
         assert!(asked.shown.is_empty(), "{}", asked.shown);
         let dir = keyed();
         let out = ask_with(
-            &dir.path().join(KEY_NAME),
-            &dir.path().join(FAILS_NAME),
+            dir.path(),
             None,
             &["CURSOR_AGENT".to_string()],
             "git push",
@@ -1406,6 +1550,77 @@ mod tests {
         let path = dir.path().join(KEY_NAME);
         std::os::unix::fs::symlink(&real, &path).unwrap();
         assert!(read(&path).is_err());
+    }
+
+    /// The key directory is opened once. Swapped for a symlink to another
+    /// key after that, it is not followed: the key and pepper read, and
+    /// the failure count read and written, are the ones the open found.
+    /// Opened again, the link is refused, and so is a pepper swapped for
+    /// a link.
+    #[test]
+    fn a_link_swapped_in_after_the_open_is_not_followed() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("ljos");
+        let evil = root.path().join("evil");
+        let moved = root.path().join("moved");
+        keep(&dir.join(KEY_NAME), b"correct horse battery").unwrap();
+        keep(&evil.join(KEY_NAME), b"a runner's own phrase").unwrap();
+        let phc = read(&dir.join(KEY_NAME)).unwrap().unwrap();
+        let swap = || {
+            std::fs::rename(&dir, &moved).unwrap();
+            std::os::unix::fs::symlink(&evil, &dir).unwrap();
+        };
+        let unswap = || {
+            std::fs::remove_file(&dir).unwrap();
+            std::fs::rename(&moved, &dir).unwrap();
+        };
+
+        let at = KeyDir::open(&dir, false).unwrap().unwrap();
+        swap();
+        assert_eq!(
+            key_in(&at, KEY_NAME).unwrap().as_deref(),
+            Some(phc.as_str())
+        );
+        let pepper = pepper_in(&at).unwrap();
+        assert!(verify(b"correct horse battery", &phc, &pepper));
+        let why = format!("{:#}", KeyDir::open(&dir, false).err().unwrap());
+        assert!(why.contains("is a link"), "{why}");
+        assert!(read(&dir.join(KEY_NAME)).is_err());
+        assert!(read_pepper(&dir.join(PEPPER_NAME)).is_err());
+        let refused = ask_at(&dir, Some("a runner's own phrase"), 1000);
+        assert!(refused.out.unwrap_err().contains("is a link"));
+        assert!(refused.shown.is_empty(), "{}", refused.shown);
+        unswap();
+
+        let (master, slave) = pty_pair();
+        let shown = typist(master, vec![(PROMPT, "a runner's own phrase")]);
+        let swapped = std::cell::Cell::new(false);
+        let out = ask_with(
+            &dir,
+            Some(slave),
+            &["CURSOR_AGENT".to_string()],
+            "git push",
+            || {
+                if !swapped.replace(true) {
+                    swap();
+                }
+                1000
+            },
+            |_| {},
+        );
+        shown.join().unwrap();
+        assert_eq!(out, Err("the passphrase did not match".into()));
+        assert_eq!(
+            std::fs::read_to_string(moved.join(FAILS_NAME)).unwrap(),
+            "1000\n"
+        );
+        assert!(!evil.join(FAILS_NAME).exists(), "the link was followed");
+        unswap();
+
+        std::fs::remove_file(dir.join(PEPPER_NAME)).unwrap();
+        std::os::unix::fs::symlink(evil.join(PEPPER_NAME), dir.join(PEPPER_NAME)).unwrap();
+        let why = format!("{:#}", read_pepper(&dir.join(PEPPER_NAME)).unwrap_err());
+        assert!(why.contains("not a regular file"), "{why}");
     }
 
     /// `HOME` and `XDG_CONFIG_HOME` point at a temporary directory, and
