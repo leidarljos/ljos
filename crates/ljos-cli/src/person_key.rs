@@ -17,7 +17,15 @@ use argon2::{Algorithm, Argon2, Block, Params, Version};
 use zeroize::Zeroizing;
 
 /// The shortest passphrase `ljos person-key set` takes, in bytes.
-pub const MIN_LEN: usize = 12;
+pub const MIN_LEN: usize = 16;
+
+/// The argon2id cost of a new hash: 64 MiB, three passes, four lanes.
+/// RFC 9106 recommends it where 2 GiB is too much. OWASP's floor is
+/// 19 MiB and two passes, or 46 MiB and one. A hash below it on any
+/// count is not a key.
+const M_COST_KIB: u32 = 64 * 1024;
+const T_COST: u32 = 3;
+const P_COST: u32 = 4;
 
 const KEY_NAME: &str = "person-key";
 
@@ -255,7 +263,9 @@ pub fn hash(pass: &[u8]) -> Result<String> {
     getrandom::fill(&mut bytes)
         .map_err(|e| anyhow::anyhow!("person-key: no salt from the OS: {e}"))?;
     let salt = SaltString::encode_b64(&bytes).map_err(err)?;
-    let argon = Argon2::default();
+    let params = Params::new(M_COST_KIB, T_COST, P_COST, None)
+        .map_err(|e| anyhow::anyhow!("person-key: {e}"))?;
+    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut out = Zeroizing::new([0u8; Params::DEFAULT_OUTPUT_LEN]);
     derive(&argon, pass, &bytes, &mut out[..])?;
     let phc = PasswordHash {
@@ -268,13 +278,13 @@ pub fn hash(pass: &[u8]) -> Result<String> {
     Ok(phc.to_string())
 }
 
-/// `phc` read as an argon2id hash with its salt and output. Any other
-/// algorithm is not a key.
+/// `phc` read as an argon2id hash with its salt and output, at no less
+/// than the cost a new hash gets. Any other algorithm is not a key.
 ///
 /// # Errors
 ///
-/// The text is not a PHC string, names another algorithm, or lacks a
-/// salt or an output.
+/// The text is not a PHC string, names another algorithm, lacks a salt
+/// or an output, or was made at a lower cost.
 pub fn parse(phc: &str) -> Result<PasswordHash<'_>> {
     let parsed = PasswordHash::new(phc.trim()).map_err(|e| anyhow::anyhow!("person-key: {e}"))?;
     if parsed.algorithm != argon2::Algorithm::Argon2id.ident() {
@@ -282,6 +292,16 @@ pub fn parse(phc: &str) -> Result<PasswordHash<'_>> {
     }
     if parsed.salt.is_none() || parsed.hash.is_none() {
         bail!("person-key: the PHC string has no salt or no hash");
+    }
+    let params = Params::try_from(&parsed).map_err(|e| anyhow::anyhow!("person-key: {e}"))?;
+    if params.m_cost() < M_COST_KIB || params.t_cost() < T_COST || params.p_cost() < P_COST {
+        bail!(
+            "person-key: the hash was made at m={},t={},p={}, below the m={M_COST_KIB},\
+             t={T_COST},p={P_COST} this ljos takes; run `ljos person-key set` again",
+            params.m_cost(),
+            params.t_cost(),
+            params.p_cost()
+        );
     }
     Ok(parsed)
 }
@@ -640,6 +660,7 @@ mod tests {
         let path = dir.path().join(KEY_NAME);
         for answers in [
             vec![("New person passphrase: ", "short one")],
+            vec![("New person passphrase: ", "fifteen bytes!!")],
             vec![
                 ("New person passphrase: ", "correct horse battery"),
                 ("The same again: ", "correct horse batterz"),
@@ -829,12 +850,39 @@ mod tests {
     fn a_hash_from_the_hash_crate_verifies() {
         use argon2::password_hash::PasswordHasher as _;
         let salt = SaltString::encode_b64(&[7u8; 16]).unwrap();
-        let theirs = Argon2::default()
+        let params = Params::new(M_COST_KIB, T_COST, P_COST, None).unwrap();
+        let theirs = Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
             .hash_password(b"correct horse battery", &salt)
             .unwrap()
             .to_string();
         assert!(verify(b"correct horse battery", &theirs));
         assert!(!verify(b"correct horse batterz", &theirs));
+    }
+
+    /// A new hash names the full cost. One made at the hash crate's
+    /// default, which an earlier ljos kept, is not a key, and the error
+    /// says to set the passphrase again.
+    #[test]
+    fn a_hash_below_the_cost_is_not_a_key() {
+        use argon2::password_hash::PasswordHasher as _;
+        let phc = hash(b"correct horse battery").unwrap();
+        let params = Params::try_from(&parse(&phc).unwrap()).unwrap();
+        assert_eq!(
+            (params.m_cost(), params.t_cost(), params.p_cost()),
+            (64 * 1024, 3, 4)
+        );
+        let salt = SaltString::encode_b64(&[7u8; 16]).unwrap();
+        let old = Argon2::default()
+            .hash_password(b"correct horse battery", &salt)
+            .unwrap()
+            .to_string();
+        let why = format!("{:#}", parse(&old).unwrap_err());
+        assert!(why.contains("run `ljos person-key set` again"), "{why}");
+        assert!(!verify(b"correct horse battery", &old));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(KEY_NAME);
+        std::fs::write(&path, format!("{old}\n")).unwrap();
+        assert!(read(&path).is_err());
     }
 
     /// A line as long as the terminal reader takes is read into the
