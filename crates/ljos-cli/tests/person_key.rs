@@ -99,7 +99,7 @@ fn only_a_test_build_has_the_hook_that_moves_the_key() {
     let features = |edges: &str| {
         let out = Command::new(env!("CARGO"))
             .args(["tree", "--locked", "--offline", "-p", "ljos", "-i", "ljos"])
-            .args(["-e", edges, "--target", "all"])
+            .args(["-e", edges])
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .output()
             .unwrap();
