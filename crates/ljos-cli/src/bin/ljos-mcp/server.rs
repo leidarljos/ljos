@@ -1905,24 +1905,23 @@ impl LjosServer {
             None if args.withdraw => {
                 let who =
                     ljos_cli::ballot_voter("vote", args.as_persona.as_deref()).map_err(refused)?;
-                let ballot_issue = ljos_cli::panel_gate::standing_ballot_issue(&args.issue, &who)
-                    .unwrap_or_else(|| args.issue.clone());
-                let mut said = match habitat_as(
-                    "vissue",
-                    &["vote", &ballot_issue, "--withdraw"],
-                    Some(&who),
-                ) {
-                    Ok(said) => said,
-                    Err(e) if format!("{e:#}").contains("holds no ballot") => {
-                        let text = format!(
-                            "{ballot_issue}: {who} holds no ballot; withdrawing the forecast\n"
-                        );
-                        Json(Said { text, aside: None })
+                let ballot_issue = ljos_cli::panel_gate::standing_ballot_issue(&args.issue, &who);
+                let mut said =
+                    match habitat_as("vissue", &["vote", &args.issue, "--withdraw"], Some(&who)) {
+                        Ok(said) => said,
+                        Err(e) if format!("{e:#}").contains("holds no ballot") => {
+                            let text = format!(
+                                "{}: {who} holds no ballot; withdrawing the forecast\n",
+                                args.issue
+                            );
+                            Json(Said { text, aside: None })
+                        }
+                        Err(e) => return Err(e),
+                    };
+                if let Some(ballot_issue) = ballot_issue.as_deref() {
+                    if let Err(e) = ljos_cli::ballot_sig::note_withdrawn(ballot_issue, &who) {
+                        said.0.text.push_str(&format!("ljos vote: {e:#}\n"));
                     }
-                    Err(e) => return Err(e),
-                };
-                if let Err(e) = ljos_cli::ballot_sig::note_withdrawn(&ballot_issue, &who) {
-                    said.0.text.push_str(&format!("ljos vote: {e:#}\n"));
                 }
                 let n = ljos_cli::withdraw_prediction(&args.issue, &who).map_err(refused)?;
                 said.0

@@ -321,13 +321,11 @@ fn same_voter(signed: &str, voter: &str) -> bool {
 
 fn matching_ballot_issue(
     issue: &str,
-    key: &str,
     voter: &str,
     own: &[String],
     family: &[(String, String)],
 ) -> Option<String> {
-    let key = key.trim();
-    if key.is_empty() {
+    if voter.trim().is_empty() {
         return None;
     }
     let mut by_issue: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -343,11 +341,7 @@ fn matching_ballot_issue(
             if !ballot_sig::verifies(issue, &sig) {
                 continue;
             }
-            let other = session_key(
-                sig.harness.as_deref().unwrap_or(""),
-                sig.nonce.as_deref().unwrap_or(""),
-            );
-            if other != key || !same_voter(&sig.voter, voter) {
+            if !same_voter(&sig.voter, voter) {
                 continue;
             }
             if withdrawn_at(&cuts, &sig.voter).is_some_and(|cut| cut < at) {
@@ -361,10 +355,10 @@ fn matching_ballot_issue(
 
 /// How `voter` replaces the ballot it holds on `issue`.
 #[must_use]
-pub fn replace_hint(issue: &str, ballot_issue: &str, voter: &str) -> String {
+pub fn replace_hint(issue: &str, voter: &str) -> String {
     let voter = ballot_sig::field(voter);
     format!(
-        "To replace it, withdraw it where it was cast: `ljos vote {ballot_issue} --withdraw --as {voter}` (ljos_vote with withdraw), then `ljos vote {issue} --for OPTION --used ... --as {voter}`."
+        "To replace it, withdraw it and cast again: `ljos vote {issue} --withdraw --as {voter}` (ljos_vote with withdraw), then `ljos vote {issue} --for OPTION --used ... --as {voter}`."
     )
 }
 
@@ -450,7 +444,7 @@ fn session_cast_refusal_on(
                 "this session already cast a ballot on {issue} ({session}): {}'s, for {}. Nothing was cast. {} {OWN_BALLOT}",
                 sig.voter,
                 sig.choice,
-                replace_hint(issue, home, voter)
+                replace_hint(issue, voter)
             ));
         }
         return Some(format!(
@@ -494,11 +488,9 @@ pub fn session_cast_refusal(
 /// ballot on `issue`, if any.
 #[must_use]
 pub fn standing_ballot_issue(issue: &str, voter: &str) -> Option<String> {
-    let id = ballot_sig::identity();
-    let key = session_key(&id.harness, &id.nonce);
     let own = notes_on(issue);
     let family = family_notes(issue);
-    matching_ballot_issue(issue, &key, voter, &own, &family)
+    matching_ballot_issue(issue, voter, &own, &family)
 }
 
 static CAST: std::sync::Mutex<std::collections::BTreeSet<String>> =
@@ -746,7 +738,7 @@ pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
     if let Some(choice) = held_choice(issue, voter) {
         bail!(
             "{voter} already holds a ballot on {issue} for {choice}. Nothing was cast. {}",
-            replace_hint(issue, issue, voter)
+            replace_hint(issue, voter)
         );
     }
     let mark = format!("{}\n{key}", issue.trim());

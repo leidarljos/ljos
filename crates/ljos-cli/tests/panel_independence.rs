@@ -303,6 +303,24 @@ fn text(out: &Output) -> String {
     )
 }
 
+fn assert_withdraw_forecast_error(out: &Output, issue: &str, voter: &str) {
+    let said = text(out);
+    assert!(!out.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("withdrawn")
+            || stdout.contains(&format!("{issue}: {voter} holds no ballot")),
+        "{said}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "ballot withdrawn; the forecast for {voter} was not"
+        )),
+        "{said}"
+    );
+}
+
 /// A writer that answers `GET /v1/atoms` with an empty roster. An empty
 /// answer means these seats are not personas. `PACKSET_URL=off` is not
 /// that answer, and a push cite refuses it before anyone is counted.
@@ -1077,19 +1095,15 @@ fn a_family_ballot_names_where_to_withdraw_over_cli() {
     let said = text(&refused);
     assert!(!refused.status.success(), "{said}");
     assert!(
-        said.contains("`ljos vote parent-1 --withdraw --as saddle`"),
+        said.contains("`ljos vote child-a --withdraw --as saddle`"),
         "{said}"
     );
     let withdrawn = world.ljos(
         "saddle",
         "sess-saddle-0001",
-        &["vote", "parent-1", "--withdraw"],
+        &["vote", "child-a", "--withdraw"],
     );
-    let said = text(&withdrawn);
-    assert!(
-        withdrawn.status.success() || said.contains("forecast"),
-        "{said}"
-    );
+    assert_withdraw_forecast_error(&withdrawn, "child-a", "saddle");
     let recast = world.ljos(
         "saddle",
         "sess-saddle-0001",
@@ -1136,12 +1150,12 @@ fn a_family_ballot_names_where_to_withdraw_over_mcp() {
         .to_string();
     assert!(found["result"]["isError"] == true, "{said}");
     assert!(
-        said.contains("`ljos vote parent-1 --withdraw --as saddle`"),
+        said.contains("`ljos vote child-a --withdraw --as saddle`"),
         "{said}"
     );
     let withdraw = serde_json::json!({"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {
         "name": "ljos_vote",
-        "arguments": {"issue": "parent-1", "withdraw": true}}});
+        "arguments": {"issue": "child-a", "withdraw": true}}});
     let answers = world.mcp(
         "saddle",
         &[("CLAUDE_CODE_SESSION_ID", "sess-mcp-0001")],
@@ -1155,12 +1169,8 @@ fn a_family_ballot_names_where_to_withdraw_over_mcp() {
         .as_str()
         .unwrap_or_default()
         .to_string();
-    assert!(
-        done["result"]["isError"] != true
-            || said.contains("forecast")
-            || said.contains("packset url missing"),
-        "{done:?}"
-    );
+    assert!(done["result"]["isError"] == true, "{done:?}");
+    assert!(said.contains("packset url missing"), "{done:?}");
     let pass = serde_json::json!({"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {
         "name": "ljos_vote",
         "arguments": {"issue": "child-a", "choice": "hold", "used": "none"}}});
@@ -1199,7 +1209,7 @@ fn a_withdrawal_on_another_issue_does_not_clear_a_family_ballot() {
     let unrelated = world.ljos(
         "saddle",
         "sess-saddle-0001",
-        &["vote", "other-9", "--withdraw"],
+        &["vote", "child-b", "--withdraw"],
     );
     assert!(!unrelated.status.success(), "{}", text(&unrelated));
     let again = world.ljos(
@@ -1216,6 +1226,129 @@ fn a_withdrawal_on_another_issue_does_not_clear_a_family_ballot() {
 }
 
 #[test]
+fn a_withdraw_on_child_keeps_parents_row_over_cli() {
+    let world = siblings();
+    let parent = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "parent-1", "--for", "ship", "--used", "none"],
+    );
+    assert!(parent.status.success(), "{}", text(&parent));
+    let child = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-a", "--for", "ship", "--used", "none"],
+    );
+    assert!(child.status.success(), "{}", text(&child));
+    let key = ed25519_dalek::SigningKey::from_bytes(&[26; 32]);
+    let note = ljos_cli::ballot_sig::sign_bound(
+        &key,
+        "child-a",
+        "saddle",
+        "ship",
+        "sess-saddle-0001",
+        "n-saddle",
+    );
+    let notes = serde_json::json!({"parent-1": [{"note": note}]});
+    std::fs::write(
+        world.state.join("notes.json"),
+        serde_json::to_string(&notes).unwrap(),
+    )
+    .unwrap();
+    let withdrawn = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-a", "--withdraw"],
+    );
+    assert_withdraw_forecast_error(&withdrawn, "child-a", "saddle");
+    let ballots: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(world.state.join("ballots.json")).unwrap())
+            .unwrap();
+    let child_rows = ballots["child-a"].as_array().cloned().unwrap_or_default();
+    let parent_rows = ballots["parent-1"].as_array().cloned().unwrap_or_default();
+    assert!(child_rows.is_empty(), "{ballots}");
+    assert_eq!(parent_rows.len(), 1, "{ballots}");
+}
+
+#[test]
+fn a_withdraw_on_child_keeps_parents_row_over_mcp() {
+    let world = siblings();
+    let parent = world.ljos(
+        "saddle",
+        "sess-mcp-0001",
+        &["vote", "parent-1", "--for", "ship", "--used", "none"],
+    );
+    assert!(parent.status.success(), "{}", text(&parent));
+    let child = world.ljos(
+        "saddle",
+        "sess-mcp-0001",
+        &["vote", "child-a", "--for", "ship", "--used", "none"],
+    );
+    assert!(child.status.success(), "{}", text(&child));
+    let key = ed25519_dalek::SigningKey::from_bytes(&[27; 32]);
+    let note = ljos_cli::ballot_sig::sign_bound(
+        &key,
+        "child-a",
+        "saddle",
+        "ship",
+        "sess-mcp-0001",
+        "n-saddle",
+    );
+    let notes = serde_json::json!({"parent-1": [{"note": note}]});
+    std::fs::write(
+        world.state.join("notes.json"),
+        serde_json::to_string(&notes).unwrap(),
+    )
+    .unwrap();
+    let withdraw = serde_json::json!({"jsonrpc": "2.0", "id": 17, "method": "tools/call", "params": {
+        "name": "ljos_vote",
+        "arguments": {"issue": "child-a", "withdraw": true}}});
+    let answers = world.mcp(
+        "saddle",
+        &[("CLAUDE_CODE_SESSION_ID", "sess-mcp-0001")],
+        &[withdraw],
+    );
+    let found = answers
+        .iter()
+        .find(|a| a["id"] == 17)
+        .unwrap_or_else(|| panic!("no answer: {answers:?}"));
+    let said = found["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(found["result"]["isError"] == true, "{said}");
+    assert!(said.contains("packset url missing"), "{said}");
+    let ballots: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(world.state.join("ballots.json")).unwrap())
+            .unwrap();
+    let child_rows = ballots["child-a"].as_array().cloned().unwrap_or_default();
+    let parent_rows = ballots["parent-1"].as_array().cloned().unwrap_or_default();
+    assert!(child_rows.is_empty(), "{ballots}");
+    assert_eq!(parent_rows.len(), 1, "{ballots}");
+}
+
+#[test]
+fn an_issue_with_no_signature_gets_no_withdraw_note() {
+    let world = siblings();
+    std::fs::write(
+        world.state.join("ballots.json"),
+        serde_json::to_string(&serde_json::json!({
+            "child-a": [{"agent": "saddle", "choice": "ship"}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let withdrawn = world.ljos(
+        "saddle",
+        "sess-saddle-0001",
+        &["vote", "child-a", "--withdraw"],
+    );
+    assert_withdraw_forecast_error(&withdrawn, "child-a", "saddle");
+    let notes = std::fs::read_to_string(world.state.join("notes.json")).unwrap_or_default();
+    assert!(!notes.contains("ballot-withdrawn: saddle"), "{notes}");
+}
+
+#[test]
 fn a_child_logbook_withdrawal_still_clears_its_own_ballot() {
     let world = siblings();
     let cast = world.ljos(
@@ -1229,11 +1362,7 @@ fn a_child_logbook_withdrawal_still_clears_its_own_ballot() {
         "sess-saddle-0001",
         &["vote", "child-a", "--withdraw"],
     );
-    let said = text(&withdrawn);
-    assert!(
-        withdrawn.status.success() || said.contains("forecast"),
-        "{said}"
-    );
+    assert_withdraw_forecast_error(&withdrawn, "child-a", "saddle");
     let recast = world.ljos(
         "saddle",
         "sess-saddle-0001",
@@ -1267,11 +1396,7 @@ fn a_persona_cast_then_withdraw_leaves_the_tally_at_zero() {
         session,
         &["vote", issue, "--withdraw", "--as", "reviewer"],
     );
-    let said = text(&withdrawn);
-    assert!(
-        withdrawn.status.success() || said.contains("forecast"),
-        "{said}"
-    );
+    assert_withdraw_forecast_error(&withdrawn, issue, "reviewer");
     assert!(!said.contains("unexpected vissue"), "{said}");
     let notes = std::fs::read_to_string(world.state.join("notes.json")).unwrap();
     assert!(notes.contains("ballot-withdrawn: reviewer"), "{notes}");
@@ -1333,11 +1458,7 @@ fn a_withdrawn_voter_recasting_the_same_option_counts_once() {
         session,
         &["vote", issue, "--withdraw", "--as", "reviewer"],
     );
-    let said = text(&withdrawn);
-    assert!(
-        withdrawn.status.success() || said.contains("forecast"),
-        "{said}"
-    );
+    assert_withdraw_forecast_error(&withdrawn, issue, "reviewer");
     let recast = world.ljos(
         "reviewer",
         session,
@@ -1393,11 +1514,7 @@ fn a_voter_holding_a_ballot_is_told_to_withdraw_then_cast() {
         "sess-review-2",
         &["vote", issue, "--withdraw", "--as", "reviewer"],
     );
-    let said = text(&withdrawn);
-    assert!(
-        withdrawn.status.success() || said.contains("forecast"),
-        "{said}"
-    );
+    assert_withdraw_forecast_error(&withdrawn, issue, "reviewer");
     let recast = world.ljos(
         "reviewer",
         "sess-review-2",

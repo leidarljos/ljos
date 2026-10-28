@@ -2076,25 +2076,30 @@ fn run_command() -> Result<()> {
         } => match choice {
             None if withdraw => {
                 let who = ljos_cli::ballot_voter("vote", as_persona.as_deref())?;
-                let ballot_issue = ljos_cli::panel_gate::standing_ballot_issue(&issue, &who)
-                    .unwrap_or_else(|| issue.clone());
+                let ballot_issue = ljos_cli::panel_gate::standing_ballot_issue(&issue, &who);
                 // A ballot already taken back still leaves its forecast to
                 // take back, so a second withdraw finishes the first.
                 match ljos_cli::run_captured_as(
                     "vissue",
-                    &["vote", &ballot_issue, "--withdraw"],
+                    &["vote", &issue, "--withdraw"],
                     Some(&who),
                 ) {
                     Ok(said) => {
                         print!("{}", said.stdout);
-                        if let Err(e) = ljos_cli::ballot_sig::note_withdrawn(&ballot_issue, &who) {
-                            eprintln!("ljos vote: {e:#}");
+                        if let Some(ballot_issue) = ballot_issue.as_deref() {
+                            if let Err(e) = ljos_cli::ballot_sig::note_withdrawn(ballot_issue, &who)
+                            {
+                                eprintln!("ljos vote: {e:#}");
+                            }
                         }
                     }
                     Err(e) if format!("{e:#}").contains("holds no ballot") => {
-                        println!("{ballot_issue}: {who} holds no ballot; withdrawing the forecast");
-                        if let Err(e) = ljos_cli::ballot_sig::note_withdrawn(&ballot_issue, &who) {
-                            eprintln!("ljos vote: {e:#}");
+                        println!("{issue}: {who} holds no ballot; withdrawing the forecast");
+                        if let Some(ballot_issue) = ballot_issue.as_deref() {
+                            if let Err(e) = ljos_cli::ballot_sig::note_withdrawn(ballot_issue, &who)
+                            {
+                                eprintln!("ljos vote: {e:#}");
+                            }
                         }
                     }
                     Err(e) => return Err(e),
