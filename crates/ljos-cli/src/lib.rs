@@ -48860,7 +48860,7 @@ mod tests {
         let _g = env_guard();
         for (reading, expected) in [
             ("allow", "allow"),
-            ("ask\\tmanual-review", "ask"),
+            ("deny\\tgit-force-push", "ask"),
             ("deny\\tblocked-command", "deny"),
         ] {
             let dir = tempfile::tempdir().unwrap();

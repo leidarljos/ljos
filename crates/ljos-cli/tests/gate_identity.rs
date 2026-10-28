@@ -218,6 +218,47 @@ impl Box_ {
     }
 }
 
+impl Box_ {
+    /// Keep the shell that receives the runner's stamp alive while its command
+    /// changes its own environment or replaces itself with another executable.
+    fn retained_shell(&self, shell: &str, env: &[(&str, &str)], line: &str) -> Output {
+        let mut all = vec![("LJOS", env!("CARGO_BIN_EXE_ljos"))];
+        all.extend_from_slice(env);
+        self.command(
+            shell,
+            &[
+                "-c",
+                "\"$0\" -c \"$1\"; result=$?; exit \"$result\"",
+                shell,
+                line,
+            ],
+            &all,
+        )
+        .output()
+        .unwrap()
+    }
+
+    /// Keep each step's shell available as provenance for its declared
+    /// conversation instead of replacing that shell with the final command.
+    fn under_retaining_shell(
+        &self,
+        runner: &Path,
+        env: &[(&str, &str)],
+        payload: &str,
+        steps: &[(Option<&str>, &str)],
+    ) -> String {
+        let retained: Vec<_> = steps
+            .iter()
+            .map(|(conv, line)| (*conv, format!("{line}\nresult=$?\nexit \"$result\"")))
+            .collect();
+        let borrowed: Vec<_> = retained
+            .iter()
+            .map(|(conv, line)| (*conv, line.as_str()))
+            .collect();
+        self.under(runner, env, payload, &borrowed)
+    }
+}
+
 /// `child`'s comm once it has exec'd `want`. `spawn` returns when the
 /// exec's close-on-exec pipe closes, a moment before the kernel renames
 /// the process, so the first read can still give the parent's thread name.
@@ -814,7 +855,7 @@ fn a_subagent_writes_under_its_parents_sitting_and_z_does_not() {
     let commit = "\"$LJOS\" git-hook pre-commit";
 
     for (shell, what) in [(CONV_X, "the parent's"), (CONV_Y, "another conversation's")] {
-        let said = home.under(
+        let said = home.under_retaining_shell(
             &python,
             &x,
             &home.payload(Some(SUB.into()), MERGE),
@@ -825,18 +866,19 @@ fn a_subagent_writes_under_its_parents_sitting_and_z_does_not() {
             &format!("the subagent's merge, {what} id in the hook env"),
         );
     }
-    let said = home.under(&python, &x, "", &[(None, &claim), (Some(SUB), commit)]);
+    let said = home.under_retaining_shell(&python, &x, "", &[(None, &claim), (Some(SUB), commit)]);
     assert!(
         said.contains("EXIT 0"),
         "the subagent's commit was refused:\n{said}"
     );
-    let said = home.under(&python, &x, "", &[(None, &claim), (Some(CONV_Z), commit)]);
+    let said =
+        home.under_retaining_shell(&python, &x, "", &[(None, &claim), (Some(CONV_Z), commit)]);
     assert!(
         said.contains("sitting-gate") && said.contains("holds no live sitting"),
         "Z's commit under X's process was not refused:\n{said}"
     );
     refused(
-        &home.under(
+        &home.under_retaining_shell(
             &python,
             &x,
             &home.payload(Some(CONV_Z.into()), MERGE),
@@ -848,7 +890,7 @@ fn a_subagent_writes_under_its_parents_sitting_and_z_does_not() {
     // Shared id-less parent: X claims in its shell, then Z's subagent and Z
     // run under the same shared parent and are both refused.
     refused(
-        &home.under(
+        &home.under_retaining_shell(
             &python,
             &[],
             &home.payload(Some(SUB.into()), MERGE),
@@ -857,7 +899,7 @@ fn a_subagent_writes_under_its_parents_sitting_and_z_does_not() {
         "Z's subagent merge under a shared parent that names no conversation",
     );
     refused(
-        &home.under(
+        &home.under_retaining_shell(
             &python,
             &[],
             &home.payload(Some(CONV_Z.into()), MERGE),
@@ -865,7 +907,7 @@ fn a_subagent_writes_under_its_parents_sitting_and_z_does_not() {
         ),
         "Z's merge under a shared parent that names no conversation",
     );
-    let said = home.under(
+    let said = home.under_retaining_shell(
         &python,
         &[],
         "",
@@ -883,7 +925,7 @@ fn a_subagent_writes_under_its_parents_sitting_and_z_does_not() {
         "mkdir -p \"$XDG_RUNTIME_DIR/ljos\"; printf '%s\\n' '{}' inky \"$PPID\" ljos 2026-10-25T00:00:00Z {ISSUE} - > \"$XDG_RUNTIME_DIR/ljos/hold-fake\"",
         holder(CONV_X)
     );
-    let said = home.under(
+    let said = home.under_retaining_shell(
         &fake.join("ljos"),
         &x,
         &home.payload(Some(SUB.into()), MERGE),
@@ -1046,14 +1088,14 @@ fn a_processs_own_env_does_not_outrank_its_shells_stamp() {
     let x = [("CURSOR_CONVERSATION_ID", CONV_X)];
     let z = [("CURSOR_CONVERSATION_ID", CONV_Z)];
 
-    let own = text_of(&home.sh(&x, "\"$LJOS\" doctor --all"));
+    let own = text_of(&home.retained_shell("sh", &x, "\"$LJOS\" doctor --all"));
     assert!(
         own.contains(&format!("this conversation sits on {ISSUE}")),
         "{own}"
     );
-    let own = home.sh(&x, &commit);
+    let own = home.retained_shell("sh", &x, &commit);
     assert!(own.status.success(), "X's own commit: {}", text_of(&own));
-    let own_bash = home.bash(&x, "\"$LJOS\" git-hook pre-commit");
+    let own_bash = home.retained_shell("bash", &x, "\"$LJOS\" git-hook pre-commit");
     assert!(
         own_bash.status.success(),
         "X's bash git-hook: {}",
@@ -1068,9 +1110,11 @@ fn a_processs_own_env_does_not_outrank_its_shells_stamp() {
         "env -u CURSOR_CONVERSATION_ID".to_string(),
         "CURSOR_CONVERSATION_ID=sand-subagent-0009zzzz".to_string(),
     ] {
-        let said = text_of(&home.sh(&z, &format!("{forge} \"$LJOS\" doctor --all")));
+        let said =
+            text_of(&home.retained_shell("sh", &z, &format!("{forge} \"$LJOS\" doctor --all")));
         sits_nowhere(&said, &format!("Z's doctor with {forge}"));
-        let said = text_of(&home.sh(
+        let said = text_of(&home.retained_shell(
+            "sh",
             &z,
             &format!("{forge} \"$LJOS\" policy -- git merge --ff-only FETCH_HEAD"),
         ));
@@ -1078,9 +1122,9 @@ fn a_processs_own_env_does_not_outrank_its_shells_stamp() {
             said.contains("deny: sitting-gate"),
             "Z's policy with {forge}:\n{said}"
         );
-        let said = text_of(&home.sh(&z, &format!("{forge} \"$LJOS\" seat")));
+        let said = text_of(&home.retained_shell("sh", &z, &format!("{forge} \"$LJOS\" seat")));
         assert_eq!(seat_holder(&said), holder(CONV_Z), "Z's seat with {forge}");
-        let out = home.sh(&z, &format!("{forge} {commit}"));
+        let out = home.retained_shell("sh", &z, &format!("{forge} {commit}"));
         assert!(
             !out.status.success() && text_of(&out).contains("sitting-gate"),
             "Z's commit with {forge} was not refused:\n{}",
@@ -1091,7 +1135,7 @@ fn a_processs_own_env_does_not_outrank_its_shells_stamp() {
         } else {
             format!("{forge} \"$LJOS\" git-hook pre-commit")
         };
-        let out_bash = home.bash(&z, &bash_line);
+        let out_bash = home.retained_shell("bash", &z, &bash_line);
         assert!(
             !out_bash.status.success() && text_of(&out_bash).contains("sitting-gate"),
             "Z's bash git-hook with {forge} was not refused:\n{}",
@@ -1099,7 +1143,8 @@ fn a_processs_own_env_does_not_outrank_its_shells_stamp() {
         );
     }
 
-    let exec_env = home.bash(
+    let exec_env = home.retained_shell(
+        "bash",
         &z,
         &format!("exec env CURSOR_CONVERSATION_ID={CONV_X} \"$LJOS\" git-hook pre-commit"),
     );
@@ -1120,7 +1165,7 @@ fn a_processs_own_env_does_not_outrank_its_shells_stamp() {
         let py_hook = format!(
             "/usr/bin/python3 -c \"import os, subprocess, sys; e=dict(os.environ); {py_env}; r=subprocess.run([e['LJOS'], 'git-hook', 'pre-commit'], env=e, capture_output=True, text=True); sys.stderr.write(r.stderr); sys.exit(r.returncode)\""
         );
-        let out = home.sh(&z, &py_hook);
+        let out = home.retained_shell("sh", &z, &py_hook);
         assert!(
             !out.status.success() && text_of(&out).contains("sitting-gate"),
             "Python wrapper git-hook pre-commit ({py_env}) was not refused:\n{}",
@@ -1130,7 +1175,7 @@ fn a_processs_own_env_does_not_outrank_its_shells_stamp() {
         let py_pol = format!(
             "/usr/bin/python3 -c \"import os, subprocess, sys; e=dict(os.environ); {py_env}; r=subprocess.run([e['LJOS'], 'policy', '--', 'git', 'merge', '--ff-only', 'FETCH_HEAD'], env=e, capture_output=True, text=True); sys.stdout.write(r.stdout); sys.exit(r.returncode)\""
         );
-        let said = text_of(&home.sh(&z, &py_pol));
+        let said = text_of(&home.retained_shell("sh", &z, &py_pol));
         assert!(
             said.contains("deny: sitting-gate"),
             "Python wrapper policy ({py_env}) was not refused:\n{said}"
@@ -1140,7 +1185,7 @@ fn a_processs_own_env_does_not_outrank_its_shells_stamp() {
             "exec /usr/bin/python3 -c \"import os, subprocess, sys; e=dict(os.environ); {py_env}; r=subprocess.run(['git', '-c', 'core.hooksPath={}', '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-q', '--allow-empty', '-m', 't'], env=e, capture_output=True, text=True); sys.stderr.write(r.stderr); sys.exit(r.returncode)\"",
             hooks.display()
         );
-        let out = home.bash(&z, &py_commit_spawn);
+        let out = home.retained_shell("bash", &z, &py_commit_spawn);
         assert!(
             !out.status.success() && text_of(&out).contains("sitting-gate"),
             "Python spawn git commit ({py_env}) was not refused:\n{}",
@@ -1151,7 +1196,7 @@ fn a_processs_own_env_does_not_outrank_its_shells_stamp() {
             "exec /usr/bin/python3 -c \"import os; e=dict(os.environ); {py_env}; os.execvpe('git', ['git', '-c', 'core.hooksPath={}', '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-q', '--allow-empty', '-m', 't'], e)\"",
             hooks.display()
         );
-        let out = home.bash(&z, &py_commit_exec);
+        let out = home.retained_shell("bash", &z, &py_commit_exec);
         assert!(
             !out.status.success() && text_of(&out).contains("sitting-gate"),
             "Python execve git commit ({py_env}) was not refused:\n{}",
@@ -1164,7 +1209,7 @@ fn a_processs_own_env_does_not_outrank_its_shells_stamp() {
         "exec /usr/bin/python3 -c \"import os, subprocess, sys; e=dict(os.environ); e['CURSOR_CONVERSATION_ID']='{CONV_X}'; r=subprocess.run(['git', '-c', 'core.hooksPath={}', '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-q', '--allow-empty', '-m', 't'], env=e, capture_output=True, text=True); sys.stderr.write(r.stderr); sys.exit(r.returncode)\"",
         hooks.display()
     );
-    let out = home.bash(&x, &x_spawn);
+    let out = home.retained_shell("bash", &x, &x_spawn);
     assert!(
         out.status.success(),
         "X's Python spawn git commit was refused:\n{}",
@@ -3392,7 +3437,7 @@ fn a_subagent_retrying_its_parents_ticket_files_one_child_at_most() {
     std::fs::create_dir_all(&state).unwrap();
     let python = PathBuf::from("/usr/bin/python3");
     let claim = format!("\"$LJOS\" claim {ISSUE}");
-    let said = home.under(
+    let said = home.under_retaining_shell(
         &python,
         &[("STUB_STATE", state.to_str().unwrap())],
         "",
