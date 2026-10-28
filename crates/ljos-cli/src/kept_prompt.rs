@@ -367,11 +367,18 @@ fn interpreter(cmd: &str) -> Option<&'static str> {
     CODE_FLAGS.iter().map(|(n, _)| *n).find(|n| *n == cmd)
 }
 
-/// The code of one command, its wrappers off, that names the kept prompt:
-/// the argument of an interpreter's code flag or an awk program, or, for
-/// an interpreter, `git apply`, `git am` or `patch` given no file to read,
-/// the whole `line` that feeds it its stdin.
+/// The code of one command, its wrappers off, that names the kept prompt.
 pub(crate) fn code_reaches(words: &[String], line: &str) -> Option<String> {
+    let (code, fed) = code_of(words, line)?;
+    let cmd = words.first()?.rsplit('/').next().unwrap_or("");
+    names_it(code).then(|| if fed { cmd } else { code }.to_string())
+}
+
+/// The code one command, its wrappers off, runs: the argument of an
+/// interpreter's code flag or an awk program, or, for an interpreter,
+/// `git apply`, `git am` or `patch` given no file to read, the whole
+/// `line` that feeds it its stdin, marked `true`.
+pub(crate) fn code_of<'a>(words: &'a [String], line: &'a str) -> Option<(&'a str, bool)> {
     let cmd = words.first()?.rsplit('/').next().unwrap_or("");
     let args = &words[1..];
     if AWKS.contains(&cmd) {
@@ -380,7 +387,7 @@ pub(crate) fn code_reaches(words: &[String], line: &str) -> Option<String> {
             if matches!(w.as_str(), "-F" | "-v" | "-f") {
                 it.next();
             } else if !w.starts_with('-') {
-                return names_it(w).then(|| w.clone());
+                return Some((w, false));
             }
         }
         return None;
@@ -416,7 +423,7 @@ pub(crate) fn code_reaches(words: &[String], line: &str) -> Option<String> {
                 })
             };
             if let Some(code) = code {
-                return names_it(code).then(|| code.to_string());
+                return Some((code, false));
             }
         }
         no_file(args)
@@ -424,7 +431,7 @@ pub(crate) fn code_reaches(words: &[String], line: &str) -> Option<String> {
         let git = cmd == "git" && matches!(args.first().map(String::as_str), Some("apply" | "am"));
         (cmd == "patch" && no_file(args)) || (git && no_file(&args[1..]))
     };
-    (reads_stdin && names_it(line)).then(|| cmd.to_string())
+    reads_stdin.then_some((line, true))
 }
 
 /// File tools that only read what they are given, by the name after an
