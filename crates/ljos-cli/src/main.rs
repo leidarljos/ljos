@@ -2786,8 +2786,10 @@ fn run_command() -> Result<()> {
                 Err(_) => ljos_cli::fallback_directory(input.trim()),
             };
             let posted = matches!(call.event.as_str(), "PreToolUse" | "beforeMCPExecution")
-                .then(|| ljos_cli::native_patch_guard(&input)
-                    .or_else(|| ljos_cli::user_rules::guard_payload(&input)))
+                .then(|| {
+                    ljos_cli::native_patch_guard(&input)
+                        .or_else(|| ljos_cli::user_rules::guard_payload(&input))
+                })
                 .flatten();
             // The static guard includes the commit, push, and merge gates,
             // in the directory the tool would run in.

@@ -458,12 +458,17 @@ pub(crate) fn patch_commands(
     if args.get("input").is_some() && args.get("patch").is_some() {
         return Err("multiple patch text fields");
     }
-    let text = args.as_str()
+    let text = args
+        .as_str()
         .or_else(|| args["input"].as_str())
         .or_else(|| args["patch"].as_str());
     let Some(text) = text else {
-        if args.get("input").is_none() && args.get("patch").is_none()
-            && args["file_path"].as_str().is_some_and(|path| !path.trim().is_empty()) {
+        if args.get("input").is_none()
+            && args.get("patch").is_none()
+            && args["file_path"]
+                .as_str()
+                .is_some_and(|path| !path.trim().is_empty())
+        {
             return Ok(None);
         }
         return Err("missing patch text");
@@ -483,9 +488,9 @@ pub(crate) fn patch_commands(
             ("Update File", "*** Update File: "),
             ("Delete File", "*** Delete File: "),
             ("Move to", "*** Move to: "),
-        ].iter().find_map(|(kind, prefix)| {
-            line.strip_prefix(*prefix).map(|path| (*kind, path))
-        });
+        ]
+        .iter()
+        .find_map(|(kind, prefix)| line.strip_prefix(*prefix).map(|path| (*kind, path)));
         if let Some((operation, path)) = header {
             if path.is_empty() || path.trim() != path || path.chars().any(char::is_control) {
                 return Err("invalid target path");
@@ -505,7 +510,12 @@ pub(crate) fn patch_commands(
                 source = (operation == "Update File").then(|| path.to_string());
                 move_allowed = source.is_some();
                 hunk = false;
-                let mut command = vec![if operation == "Delete File" { "rm" } else { "apply_patch" }.into()];
+                let mut command = vec![if operation == "Delete File" {
+                    "rm"
+                } else {
+                    "apply_patch"
+                }
+                .into()];
                 if operation == "Delete File" {
                     command.push("--".into());
                 }
@@ -518,7 +528,11 @@ pub(crate) fn patch_commands(
         match kind {
             "Add File" if line.starts_with('+') => {}
             "Update File" if *line == "@@" || line.starts_with("@@ ") => hunk = true,
-            "Update File" if hunk && (*line == "*** End of File" || line.is_empty() || line.starts_with([' ', '+', '-'])) => {}
+            "Update File"
+                if hunk
+                    && (*line == "*** End of File"
+                        || line.is_empty()
+                        || line.starts_with([' ', '+', '-'])) => {}
             _ => return Err("unexpected patch header or body line"),
         }
     }
@@ -568,8 +582,12 @@ pub(crate) fn written_target(
         return None;
     }
     if let Ok(Some(commands)) = patch_commands(name, args) {
-        if let Some(path) = commands.iter().flat_map(|c| c.iter().skip(1))
-            .filter_map(|p| path_of(p, cwd)).find(|p| inside(p)) {
+        if let Some(path) = commands
+            .iter()
+            .flat_map(|c| c.iter().skip(1))
+            .filter_map(|p| path_of(p, cwd))
+            .find(|p| inside(p))
+        {
             return Some(path);
         }
     }
