@@ -48866,10 +48866,14 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let bin = dir.path().join("ljos-policyd");
             let calls = dir.path().join("calls");
-            std::fs::write(&bin, format!(
-                "#!/bin/sh\nprintf 'called\\n' >> '{}'\nprintf '{reading}\\n'\n",
-                calls.display()
-            )).unwrap();
+            std::fs::write(
+                &bin,
+                format!(
+                    "#!/bin/sh\nprintf 'called\\n' >> '{}'\nprintf '{reading}\\n'\n",
+                    calls.display()
+                ),
+            )
+            .unwrap();
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
             let home = SeatDir::new("one-policy-reading");
@@ -48885,7 +48889,10 @@ mod tests {
                         assert!(error.to_string().contains("blocked-command"), "{error}");
                     }
                 }
-                assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), index + 1);
+                assert_eq!(
+                    std::fs::read_to_string(&calls).unwrap().lines().count(),
+                    index + 1
+                );
             }
         }
     }
