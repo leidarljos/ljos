@@ -124,7 +124,10 @@ impl Scope {
             && self.command == retry.command
             && self.pattern == retry.pattern
             && self.reason == retry.reason
-            && matches!(retry.tool.as_str(), "Bash" | "Shell" | "exec_command" | "functions.exec_command")
+            && matches!(
+                retry.tool.as_str(),
+                "Bash" | "Shell" | "exec_command" | "functions.exec_command"
+            )
     }
 
     fn from_hook(input: &str, call: &HookCall, rule: &Rule) -> Result<Self> {
@@ -289,7 +292,11 @@ impl Store {
     }
 
     fn consume_approved(&mut self, scope: &Scope) -> Result<bool> {
-        let Some(index) = self.requests.iter().position(|request| request.approved && request.scope.permits(scope)) else {
+        let Some(index) = self
+            .requests
+            .iter()
+            .position(|request| request.approved && request.scope.permits(scope))
+        else {
             return Ok(false);
         };
         self.requests.remove(index);
@@ -571,7 +578,11 @@ pub fn approve(id: &str) -> Result<String> {
 
 /// A command check exposes its pending request without spending an accepted grant.
 /// The shell hook consumes the grant only for the command's actual execution.
-pub(crate) fn checked_report(line: &str, cwd: &Path, rule: &Rule) -> Result<Option<crate::GuardReport>> {
+pub(crate) fn checked_report(
+    line: &str,
+    cwd: &Path,
+    rule: &Rule,
+) -> Result<Option<crate::GuardReport>> {
     let Some(session) = crate::conversation_id().filter(|id| !id.is_empty()) else {
         return Ok(None);
     };
@@ -727,7 +738,8 @@ fn hook_output_at(
             }
             let scope = Scope::from_hook(input, call, rule)?;
             Store::open(root, now?)?.consume_approved(&scope)
-        })().unwrap_or(false);
+        })()
+        .unwrap_or(false);
         if consumed {
             *granted = true;
             return hook_output_ruled(call, context, None);
@@ -815,14 +827,23 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("approvals");
         let line = "git push origin main";
-        let report = checked_report_at(line, temp.path(), "conversation-1", &ask(), &root, 100).unwrap();
+        let report =
+            checked_report_at(line, temp.path(), "conversation-1", &ask(), &root, 100).unwrap();
         assert_eq!(report.verdict, "ask");
         let id = Store::open(&root, 101).unwrap().requests[0].id.clone();
         assert!(report.text.contains(&request_tag(&id).unwrap()));
-        let consent = approve_from_prompt_at(&format!("approve {id}"), &one("conversation-1"), &root, Ok(102)).unwrap();
+        let consent = approve_from_prompt_at(
+            &format!("approve {id}"),
+            &one("conversation-1"),
+            &root,
+            Ok(102),
+        )
+        .unwrap();
         assert!(consent.contains("Approved once"));
         for time in [103, 104] {
-            let report = checked_report_at(line, temp.path(), "conversation-1", &ask(), &root, time).unwrap();
+            let report =
+                checked_report_at(line, temp.path(), "conversation-1", &ask(), &root, time)
+                    .unwrap();
             assert_eq!(report.verdict, "allow");
             let store = Store::open(&root, time).unwrap();
             assert_eq!(store.requests.len(), 1);
@@ -830,7 +851,8 @@ mod tests {
         }
         assert!(output(&input(temp.path()), &ask(), &root, 105).is_empty());
         assert!(Store::open(&root, 106).unwrap().requests.is_empty());
-        let report = checked_report_at(line, temp.path(), "conversation-1", &ask(), &root, 107).unwrap();
+        let report =
+            checked_report_at(line, temp.path(), "conversation-1", &ask(), &root, 107).unwrap();
         assert_eq!(report.verdict, "ask");
         assert_ne!(Store::open(&root, 108).unwrap().requests[0].id, id);
     }
@@ -852,10 +874,25 @@ mod tests {
         ] {
             let mut changed: Value = serde_json::from_str(&input(temp.path())).unwrap();
             *changed.pointer_mut(pointer).unwrap() = replacement.into();
-            assert_ne!(request_id(&output(&changed.to_string(), &ask(), &root, 103)), request_tag(&id).unwrap());
+            assert_ne!(
+                request_id(&output(&changed.to_string(), &ask(), &root, 103)),
+                request_tag(&id).unwrap()
+            );
         }
-        for rule in [Rule {pattern: "git *".into(), ..ask()}, Rule {reason: "Another requirement.".into(), ..ask()}] {
-            assert_ne!(request_id(&output(&input(temp.path()), &rule, &root, 104)), request_tag(&id).unwrap());
+        for rule in [
+            Rule {
+                pattern: "git *".into(),
+                ..ask()
+            },
+            Rule {
+                reason: "Another requirement.".into(),
+                ..ask()
+            },
+        ] {
+            assert_ne!(
+                request_id(&output(&input(temp.path()), &rule, &root, 104)),
+                request_tag(&id).unwrap()
+            );
         }
         assert!(output(&input(temp.path()), &ask(), &root, 105).is_empty());
     }
@@ -868,14 +905,28 @@ mod tests {
         checked_report_at(line, temp.path(), "conversation-1", &ask(), &root, 100).unwrap();
         let id = Store::open(&root, 101).unwrap().requests[0].id.clone();
         Store::open(&root, 102).unwrap().approve(&id).unwrap();
-        let deny = Rule {verdict: "deny".into(), ..ask()};
+        let deny = Rule {
+            verdict: "deny".into(),
+            ..ask()
+        };
         assert!(checked_report_at(line, temp.path(), "conversation-1", &deny, &root, 103).is_err());
         assert!(checked_report_at(line, temp.path(), "", &ask(), &root, 104).is_err());
         assert!(!output(&input(temp.path()), &deny, &root, 105).is_empty());
         assert!(Store::open(&root, 106).unwrap().requests[0].approved);
-        let expired = checked_report_at(line, temp.path(), "conversation-1", &ask(), &root, 100 + TTL_SECONDS).unwrap();
+        let expired = checked_report_at(
+            line,
+            temp.path(),
+            "conversation-1",
+            &ask(),
+            &root,
+            100 + TTL_SECONDS,
+        )
+        .unwrap();
         assert_eq!(expired.verdict, "ask");
-        assert_ne!(Store::open(&root, 100 + TTL_SECONDS).unwrap().requests[0].id, id);
+        assert_ne!(
+            Store::open(&root, 100 + TTL_SECONDS).unwrap().requests[0].id,
+            id
+        );
         assert!(!output(&input(temp.path()), &ask(), &root, 101 + TTL_SECONDS).is_empty());
     }
 
@@ -889,8 +940,23 @@ mod tests {
         let root = temp.path().join("approvals");
         let body = input(temp.path());
         request_id(&output(&body, &ask(), &root, 100));
-        checked_report_at("git push origin main", temp.path(), "conversation-1", &ask(), &root, 101).unwrap();
-        let id = Store::open(&root, 102).unwrap().requests.iter().find(|request| request.scope.shape == "CheckedCommand").unwrap().id.clone();
+        checked_report_at(
+            "git push origin main",
+            temp.path(),
+            "conversation-1",
+            &ask(),
+            &root,
+            101,
+        )
+        .unwrap();
+        let id = Store::open(&root, 102)
+            .unwrap()
+            .requests
+            .iter()
+            .find(|request| request.scope.shape == "CheckedCommand")
+            .unwrap()
+            .id
+            .clone();
         Store::open(&root, 103).unwrap().approve(&id).unwrap();
         assert!(output(&body, &ask(), &root, 104).is_empty());
         let store = Store::open(&root, 105).unwrap();
@@ -904,14 +970,23 @@ mod tests {
     fn checked_command_consent_is_consumed_by_a_native_ask_hook() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("approvals");
-        checked_report_at("git push origin main", temp.path(), "conversation-1", &ask(), &root, 100).unwrap();
+        checked_report_at(
+            "git push origin main",
+            temp.path(),
+            "conversation-1",
+            &ask(),
+            &root,
+            100,
+        )
+        .unwrap();
         let id = Store::open(&root, 101).unwrap().requests[0].id.clone();
         Store::open(&root, 102).unwrap().approve(&id).unwrap();
         let mut body: Value = serde_json::from_str(&input(temp.path())).unwrap();
         body.as_object_mut().unwrap().remove("turn_id");
         assert!(output(&body.to_string(), &ask(), &root, 103).is_empty());
         assert!(Store::open(&root, 104).unwrap().requests.is_empty());
-        let retry: Value = serde_json::from_str(&output(&body.to_string(), &ask(), &root, 105)).unwrap();
+        let retry: Value =
+            serde_json::from_str(&output(&body.to_string(), &ask(), &root, 105)).unwrap();
         assert_eq!(retry["hookSpecificOutput"]["permissionDecision"], "ask");
         assert!(Store::open(&root, 106).unwrap().requests.is_empty());
     }
