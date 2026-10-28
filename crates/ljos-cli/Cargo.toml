@@ -32,6 +32,11 @@ path = "src/main.rs"
 name = "ljos-mcp"
 path = "src/bin/ljos-mcp/main.rs"
 
+[features]
+# For this package's own tests only, through the dev-dependency below. A
+# release build leaves it off, so no ljos binary can move the person key.
+test-hooks = []
+
 [dependencies]
 libc = "0.2"
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
@@ -68,3 +73,4 @@ vissue-core.workspace = true
 # the emSign root RUSTSEC-2026-0381 names. tests/tls_roots.rs checks it.
 webpki-roots = "1.0.10"
 ljos-test-boot = { path = "../ljos-test-boot" }
+ljos = { path = ".", features = ["test-hooks"] }

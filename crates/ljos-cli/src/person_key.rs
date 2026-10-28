@@ -32,11 +32,13 @@ const LOCK_AFTER: usize = 5;
 /// The longest wait after a wrong answer, in seconds.
 const MAX_PAUSE_SECS: u64 = 60;
 
+#[cfg(any(test, feature = "test-hooks"))]
 static DIR_FOR_PROCESS: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
-/// Keep the key in `dir` for the rest of this process. A test harness
-/// that links this library calls it; the ljos binaries never do, so no
-/// variable, argument or file moves the key.
+/// Keep the key in `dir` for the rest of this process. Only a test build
+/// has it: the `test-hooks` feature is on for this package's tests and
+/// off in a release, so no variable, argument or file moves the key.
+#[cfg(any(test, feature = "test-hooks"))]
 #[doc(hidden)]
 pub fn keep_in_for_this_process(dir: PathBuf) {
     let _ = DIR_FOR_PROCESS.set(dir);
@@ -45,6 +47,7 @@ pub fn keep_in_for_this_process(dir: PathBuf) {
 /// The ljos config directory of the passwd entry's home.
 #[must_use]
 pub fn key_dir() -> Option<PathBuf> {
+    #[cfg(any(test, feature = "test-hooks"))]
     if let Some(dir) = DIR_FOR_PROCESS.get() {
         return Some(dir.clone());
     }
