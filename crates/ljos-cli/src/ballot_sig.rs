@@ -145,11 +145,29 @@ pub struct WithdrawnNote {
     pub voter: String,
     pub harness: String,
     pub nonce: String,
+    pub issue: Option<String>,
 }
 
 /// One token per field, so the note stays three words.
 #[must_use]
 pub fn withdrawn_line(voter: &str, harness: &str, nonce: &str) -> String {
+    withdrawn_line_on(voter, harness, nonce, None)
+}
+
+/// A withdrawn ballot that names the issue it applies to:
+/// `ballot-withdrawn: VOTER HARNESS NONCE ISSUE`.
+#[must_use]
+pub fn withdrawn_line_on(voter: &str, harness: &str, nonce: &str, issue: Option<&str>) -> String {
+    let issue = issue.map(field).filter(|id| id != "-");
+    if let Some(issue) = issue {
+        return format!(
+            "{WITHDRAWN_NOTE}{} {} {} {}",
+            field(voter),
+            field(harness),
+            field(nonce),
+            issue
+        );
+    }
     format!(
         "{WITHDRAWN_NOTE}{} {} {}",
         field(voter),
@@ -158,19 +176,22 @@ pub fn withdrawn_line(voter: &str, harness: &str, nonce: &str) -> String {
     )
 }
 
-/// `ballot-withdrawn: VOTER HARNESS NONCE`, or `None` when the note is not
-/// that shape.
+/// `ballot-withdrawn: VOTER HARNESS NONCE` (legacy), or
+/// `ballot-withdrawn: VOTER HARNESS NONCE ISSUE`.
 #[must_use]
 pub fn parse_withdrawn(note: &str) -> Option<WithdrawnNote> {
     let rest = note.trim().strip_prefix(WITHDRAWN_NOTE)?;
     let parts: Vec<&str> = rest.split_whitespace().collect();
-    let [voter, harness, nonce] = parts.as_slice() else {
-        return None;
+    let (voter, harness, nonce, issue) = match parts.as_slice() {
+        [voter, harness, nonce] => (*voter, *harness, *nonce, None),
+        [voter, harness, nonce, issue] => (*voter, *harness, *nonce, Some((*issue).to_string())),
+        _ => return None,
     };
     Some(WithdrawnNote {
-        voter: (*voter).to_string(),
-        harness: (*harness).to_string(),
-        nonce: (*nonce).to_string(),
+        voter: voter.to_string(),
+        harness: harness.to_string(),
+        nonce: nonce.to_string(),
+        issue,
     })
 }
 
@@ -1247,10 +1268,25 @@ pub fn own_voter() -> Option<String> {
 ///
 /// The tracker did not take the note.
 pub fn note_withdrawn(issue: &str, voter: &str) -> Result<String> {
+    note_withdrawn_on(issue, voter, issue)
+}
+
+/// Leave `ballot-withdrawn: VOTER HARNESS NONCE ISSUE` on `logbook_issue`
+/// for this session.
+///
+/// # Errors
+///
+/// The tracker did not take the note.
+pub fn note_withdrawn_on(
+    logbook_issue: &str,
+    voter: &str,
+    withdrawn_issue: &str,
+) -> Result<String> {
     let id = identity();
-    let note = withdrawn_line(voter, &id.harness, &id.nonce);
-    crate::run_captured("vissue", &["note", issue, &note])
-        .with_context(|| format!("ballot withdrawn; the note on {issue} was not written"))?;
+    let note = withdrawn_line_on(voter, &id.harness, &id.nonce, Some(withdrawn_issue));
+    crate::run_captured("vissue", &["note", logbook_issue, &note]).with_context(|| {
+        format!("ballot withdrawn; the note on {logbook_issue} was not written")
+    })?;
     Ok(note)
 }
 
@@ -1639,6 +1675,11 @@ mod tests {
         assert_eq!(parsed.voter, "seat_a");
         assert_eq!(parsed.harness, "sess-1");
         assert_eq!(parsed.nonce, "-");
+        assert_eq!(parsed.issue, None);
+        let on = withdrawn_line_on("seat a", "sess-1", "-", Some("child-a"));
+        assert_eq!(on, "ballot-withdrawn: seat_a sess-1 - child-a");
+        let parsed = parse_withdrawn(&on).unwrap();
+        assert_eq!(parsed.issue.as_deref(), Some("child-a"));
         assert!(parse_withdrawn("ballot-withdrawn: only-one").is_none());
         assert!(parse_withdrawn("ballot-sig: seat-a ship").is_none());
     }

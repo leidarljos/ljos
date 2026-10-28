@@ -1919,7 +1919,9 @@ impl LjosServer {
                         Err(e) => return Err(e),
                     };
                 if let Some(ballot_issue) = ballot_issue.as_deref() {
-                    if let Err(e) = ljos_cli::ballot_sig::note_withdrawn(ballot_issue, &who) {
+                    if let Err(e) =
+                        ljos_cli::ballot_sig::note_withdrawn_on(ballot_issue, &who, &args.issue)
+                    {
                         said.0.text.push_str(&format!("ljos vote: {e:#}\n"));
                     }
                 }

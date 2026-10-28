@@ -1240,21 +1240,25 @@ fn a_withdraw_on_child_keeps_parents_row_over_cli() {
         &["vote", "child-a", "--for", "ship", "--used", "none"],
     );
     assert!(child.status.success(), "{}", text(&child));
-    let key = ed25519_dalek::SigningKey::from_bytes(&[26; 32]);
-    let note = ljos_cli::ballot_sig::sign_bound(
-        &key,
-        "child-a",
-        "saddle",
-        "ship",
-        "sess-saddle-0001",
-        "n-saddle",
-    );
-    let notes = serde_json::json!({"parent-1": [{"note": note}]});
-    std::fs::write(
-        world.state.join("notes.json"),
-        serde_json::to_string(&notes).unwrap(),
-    )
-    .unwrap();
+    let mut notes: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(world.state.join("notes.json")).unwrap())
+            .unwrap();
+    let parent_note = notes["parent-1"][0]["note"]
+        .as_str()
+        .expect("parent signature note")
+        .to_string();
+    let child_note = notes["child-a"][0]["note"]
+        .as_str()
+        .expect("child signature note")
+        .to_string();
+    notes["parent-1"] = serde_json::json!([
+        {"note": child_note},
+        {"note": parent_note}
+    ]);
+    if let Some(obj) = notes.as_object_mut() {
+        obj.remove("child-a");
+    }
+    std::fs::write(world.state.join("notes.json"), notes.to_string()).unwrap();
     let withdrawn = world.ljos(
         "saddle",
         "sess-saddle-0001",
@@ -1268,6 +1272,12 @@ fn a_withdraw_on_child_keeps_parents_row_over_cli() {
     let parent_rows = ballots["parent-1"].as_array().cloned().unwrap_or_default();
     assert!(child_rows.is_empty(), "{ballots}");
     assert_eq!(parent_rows.len(), 1, "{ballots}");
+    let tally = world.ljos("saddle", "sess-saddle-0001", &["vote", "parent-1"]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("1 ballot counts"), "{said}");
+    assert!(stdout.contains("saddle  ship"), "{said}");
 }
 
 #[test]
@@ -1285,21 +1295,25 @@ fn a_withdraw_on_child_keeps_parents_row_over_mcp() {
         &["vote", "child-a", "--for", "ship", "--used", "none"],
     );
     assert!(child.status.success(), "{}", text(&child));
-    let key = ed25519_dalek::SigningKey::from_bytes(&[27; 32]);
-    let note = ljos_cli::ballot_sig::sign_bound(
-        &key,
-        "child-a",
-        "saddle",
-        "ship",
-        "sess-mcp-0001",
-        "n-saddle",
-    );
-    let notes = serde_json::json!({"parent-1": [{"note": note}]});
-    std::fs::write(
-        world.state.join("notes.json"),
-        serde_json::to_string(&notes).unwrap(),
-    )
-    .unwrap();
+    let mut notes: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(world.state.join("notes.json")).unwrap())
+            .unwrap();
+    let parent_note = notes["parent-1"][0]["note"]
+        .as_str()
+        .expect("parent signature note")
+        .to_string();
+    let child_note = notes["child-a"][0]["note"]
+        .as_str()
+        .expect("child signature note")
+        .to_string();
+    notes["parent-1"] = serde_json::json!([
+        {"note": child_note},
+        {"note": parent_note}
+    ]);
+    if let Some(obj) = notes.as_object_mut() {
+        obj.remove("child-a");
+    }
+    std::fs::write(world.state.join("notes.json"), notes.to_string()).unwrap();
     let withdraw = serde_json::json!({"jsonrpc": "2.0", "id": 17, "method": "tools/call", "params": {
         "name": "ljos_vote",
         "arguments": {"issue": "child-a", "withdraw": true}}});
@@ -1325,6 +1339,12 @@ fn a_withdraw_on_child_keeps_parents_row_over_mcp() {
     let parent_rows = ballots["parent-1"].as_array().cloned().unwrap_or_default();
     assert!(child_rows.is_empty(), "{ballots}");
     assert_eq!(parent_rows.len(), 1, "{ballots}");
+    let tally = world.ljos("saddle", "sess-reader-0001", &["vote", "parent-1"]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("1 ballot counts"), "{said}");
+    assert!(stdout.contains("saddle  ship"), "{said}");
 }
 
 #[test]

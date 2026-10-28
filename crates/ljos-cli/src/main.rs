@@ -2087,7 +2087,8 @@ fn run_command() -> Result<()> {
                     Ok(said) => {
                         print!("{}", said.stdout);
                         if let Some(ballot_issue) = ballot_issue.as_deref() {
-                            if let Err(e) = ljos_cli::ballot_sig::note_withdrawn(ballot_issue, &who)
+                            if let Err(e) =
+                                ljos_cli::ballot_sig::note_withdrawn_on(ballot_issue, &who, &issue)
                             {
                                 eprintln!("ljos vote: {e:#}");
                             }
@@ -2096,7 +2097,8 @@ fn run_command() -> Result<()> {
                     Err(e) if format!("{e:#}").contains("holds no ballot") => {
                         println!("{issue}: {who} holds no ballot; withdrawing the forecast");
                         if let Some(ballot_issue) = ballot_issue.as_deref() {
-                            if let Err(e) = ljos_cli::ballot_sig::note_withdrawn(ballot_issue, &who)
+                            if let Err(e) =
+                                ljos_cli::ballot_sig::note_withdrawn_on(ballot_issue, &who, &issue)
                             {
                                 eprintln!("ljos vote: {e:#}");
                             }
