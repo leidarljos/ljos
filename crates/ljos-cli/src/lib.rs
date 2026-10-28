@@ -34068,14 +34068,14 @@ fn tcb_verdict_using(
     {
         return static_rule;
     }
-    match tcb_policy_verdict(policy()) {
+    match tcb_policy_verdict(line, policy()) {
         Some(rule) if rule.verdict == "deny" => Some(rule),
         policy => static_rule.or(policy),
     }
 }
 
 /// The external law can refuse a command even when a local rule asks for consent.
-fn tcb_policy_verdict(reading: Option<String>) -> Option<Rule> {
+fn tcb_policy_verdict(line: &str, reading: Option<String>) -> Option<Rule> {
     let Some(t) = reading else {
         return policyd_required().then(|| Rule {
             pattern: "ljos-policyd".into(),
