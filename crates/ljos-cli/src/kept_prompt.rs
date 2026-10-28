@@ -230,6 +230,13 @@ pub(crate) fn names_dir(path: &Path, dir: &Path) -> bool {
     path.components().count() == dir.components().count() && within(path, dir)
 }
 
+/// Whether `path`, a path or a pattern, is `dir` or a directory above it.
+pub(crate) fn encloses(path: &Path, dir: &Path) -> bool {
+    let p: Vec<Component<'_>> = path.components().collect();
+    let d: Vec<Component<'_>> = dir.components().collect();
+    p.len() <= d.len() && same_parts(&p, &d[..p.len()])
+}
+
 /// Whether `path` is a runtime ljos directory or inside one.
 pub(crate) fn inside(path: &Path) -> bool {
     dirs().iter().any(|d| within(path, d))

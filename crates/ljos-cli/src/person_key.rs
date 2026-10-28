@@ -171,6 +171,108 @@ pub(crate) fn reached(words: &[String], cwd: Option<&Path>, reader: bool) -> Opt
     None
 }
 
+/// Programs a `find -exec` runs that remove or move what it finds.
+const UPROOTERS: &[&str] = &["rm", "rmdir", "unlink", "mv", "shred", "trash", "trash-put"];
+
+/// The operands one command, its wrappers off, removes or moves with all
+/// they hold: those of `rm -r`, the sources of `mv`, `trash` and
+/// `gio trash`, the destination of `rsync --delete` and the sources of
+/// `rsync --remove-source-files`, and the starting points of a `find`
+/// that deletes or runs one of [`UPROOTERS`].
+fn uprooted(words: &[String]) -> Vec<&str> {
+    let cmd = words
+        .first()
+        .map_or("", |w| w.rsplit('/').next().unwrap_or(w));
+    let mut args: Vec<&str> = Vec::new();
+    let mut flags: Vec<&str> = Vec::new();
+    let mut target = None;
+    let mut it = words.iter().skip(1).map(String::as_str);
+    let mut ended = false;
+    while let Some(w) = it.next() {
+        if w == ">" || w == ">>" {
+            it.next();
+        } else if ended || !w.starts_with('-') || w == "-" {
+            args.push(w);
+        } else if w == "--" {
+            ended = true;
+        } else if cmd == "mv" && (w == "-t" || w == "--target-directory") {
+            target = it.next();
+        } else if let Some(dir) = w.strip_prefix("--target-directory=") {
+            target = Some(dir);
+        } else {
+            flags.push(w);
+        }
+    }
+    let recursive = flags
+        .iter()
+        .any(|f| *f == "--recursive" || (!f.starts_with("--") && f.contains(['r', 'R'])));
+    match cmd {
+        "rm" if recursive => args,
+        "mv" if target.is_some() => args,
+        "mv" => args
+            .split_last()
+            .map(|(_, s)| s.to_vec())
+            .unwrap_or_default(),
+        "trash" | "trash-put" => args,
+        "gio" if args.first() == Some(&"trash") => args[1..].to_vec(),
+        "rsync" => {
+            let mut out = Vec::new();
+            if let Some((last, sources)) = args.split_last() {
+                if flags.iter().any(|f| f.starts_with("--del")) {
+                    out.push(*last);
+                }
+                if flags.contains(&"--remove-source-files") {
+                    out.extend(sources);
+                }
+            }
+            out
+        }
+        "find" => {
+            let rest: Vec<&str> = words.iter().skip(1).map(String::as_str).collect();
+            let deletes = rest.iter().enumerate().any(|(i, w)| {
+                *w == "-delete"
+                    || (matches!(*w, "-exec" | "-execdir" | "-ok" | "-okdir")
+                        && rest.get(i + 1).is_some_and(|p| {
+                            UPROOTERS.contains(&p.rsplit('/').next().unwrap_or(p))
+                        }))
+            });
+            let mut starts = Vec::new();
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i] {
+                    "-H" | "-L" | "-P" => {}
+                    "-D" => i += 1,
+                    w if w.starts_with("-O") => {}
+                    w if w.starts_with('-') || w == "(" || w == "!" || w == "," => break,
+                    w => starts.push(w),
+                }
+                i += 1;
+            }
+            if deletes {
+                starts
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The word of one command that removes or moves, with all it holds, the
+/// key directory or a directory above it: `rm -rf ~`, `find ~ -delete`,
+/// `mv ~/.config x`. Each word is resolved as [`reached`] resolves it.
+pub(crate) fn uproots(words: &[String], cwd: Option<&Path>) -> Option<String> {
+    let (inside, _) = guarded()?;
+    uprooted(words).into_iter().find_map(|word| {
+        let bare = word.trim_matches(|c| c == '"' || c == '\'');
+        paths_of(bare, cwd)
+            .into_iter()
+            .flatten()
+            .any(|p| inside.iter().any(|d| crate::kept_prompt::encloses(&p, d)))
+            .then(|| word.to_string())
+    })
+}
+
 /// Ask the person at the controlling terminal for the passphrase, to run
 /// `what` (`git push`) as them once. `marks` are the runner variables
 /// set, by name. Nothing is kept on a right answer but a cleared failure

@@ -23356,6 +23356,7 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         if let Some(t) = kept_prompt::reached(&words, cwd.as_deref(), reads)
             .or_else(|| kept_prompt::code_reaches(&words, line))
             .or_else(|| person_key::reached(&words, cwd.as_deref(), reads))
+            .or_else(|| person_key::uproots(&words, cwd.as_deref()))
         {
             return Some(refuse(&t));
         }
@@ -52135,6 +52136,84 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
     }
 
+    /// Removing or moving a tree that holds the key directory takes the
+    /// key with it, however far above it the tree starts. A recursive
+    /// delete or move elsewhere under the home still passes.
+    #[test]
+    fn a_tree_above_the_person_key_is_not_removed_or_moved() {
+        let _g = env_guard();
+        let dir = person_key::key_dir().expect("a passwd home");
+        std::fs::create_dir_all(&dir).unwrap();
+        let home = dir.parent().unwrap().parent().unwrap().to_path_buf();
+        let links = tempfile::tempdir().unwrap();
+        let h = links.path().join("h");
+        std::os::unix::fs::symlink(&home, &h).unwrap();
+        let up = home.parent().unwrap().display().to_string();
+        let name = home.file_name().unwrap().to_string_lossy().into_owned();
+        let (h, home_s) = (h.display(), home.display());
+        let refused = [
+            "rm -rf ~".to_string(),
+            "rm -r ~/".to_string(),
+            "rm -rf $HOME".to_string(),
+            "rm -rf \"${HOME}\"".to_string(),
+            "rm -r ~/.config".to_string(),
+            "rm --recursive --force ~/..".to_string(),
+            format!("rm -Rf {home_s}"),
+            format!("rm -rf {up}"),
+            format!("cd {up} && rm -rf {name}"),
+            "cd ~ && rm -rf .".to_string(),
+            format!("rm -rf {h}/"),
+            "find ~ -delete".to_string(),
+            "find -L ~ -name person-key -delete".to_string(),
+            "find ~ -name 'person-key*' -exec rm {} +".to_string(),
+            "mv ~/.config elsewhere".to_string(),
+            "mv ~ /tmp/x".to_string(),
+            "mv -t /tmp ~".to_string(),
+            "rsync -a --delete /tmp/empty/ ~/".to_string(),
+            "rsync -a --remove-source-files ~ /tmp/backup".to_string(),
+            "trash ~/.config".to_string(),
+            "gio trash ~".to_string(),
+        ];
+        for line in &refused {
+            assert!(seat_guard(line).is_some(), "{line:?} was allowed");
+        }
+        for line in [
+            "rm -rf ~/proj/build",
+            "rm -r ~/.cache",
+            "rm -rf ~/.config/other",
+            "cd ~ && rm -rf proj",
+            "find ~/proj -delete",
+            "find ~ -name '*.pyc'",
+            "find ~ -name x -exec cat {} +",
+            "mv ~/a.txt ~/b.txt",
+            "mv /tmp/x ~",
+            "rsync -a ~/proj/ /tmp/backup/",
+            "rsync -a --delete /tmp/src/ ~/proj/",
+        ] {
+            assert!(seat_guard(line).is_none(), "{line:?} was refused");
+        }
+        let elsewhere = tempfile::tempdir().unwrap();
+        let saved: Vec<_> = ["HOME", "LJOS_GUARD"]
+            .iter()
+            .map(|k| (*k, std::env::var_os(k)))
+            .collect();
+        // SAFETY: under env_guard, and restored below.
+        unsafe {
+            std::env::set_var("HOME", elsewhere.path());
+            std::env::set_var("LJOS_GUARD", "1");
+        }
+        let moved = ["rm -rf ~", "find $HOME -delete"].map(seat_guard);
+        unsafe {
+            for (k, v) in saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+        assert!(moved.iter().all(Option::is_some), "{moved:?}");
+    }
+
     /// Removing, moving, relinking or opening up a directory above the key
     /// replaces the key as surely as writing it. Every route to the key
     /// directory and the config directory above it is refused once the
@@ -54585,6 +54664,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     /// directory and a cleanup of regenerable files go inside the tree, as
     /// ljos-policyd does. The home, the root, `.git`, a climb out, a glob,
     /// a variable and a line that can `cd` away first are still refused.
+    /// The seat guard refuses a tree above the person key first.
     #[test]
     fn a_stock_seat_lets_a_build_dir_delete_run_inside_the_tree() {
         let _g = env_guard();
@@ -54616,9 +54696,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             assert!(static_guard(line).is_none(), "{line}");
         }
         for (line, rule) in [
-            ("rm -rf /", "rm-rf-outside-tmp"),
-            ("rm -rf ~", "rm-rf-outside-tmp"),
-            ("rm -rf $HOME", "rm-rf-outside-tmp"),
+            ("rm -rf /", "seat-guard"),
+            ("rm -rf ~", "seat-guard"),
+            ("rm -rf $HOME", "seat-guard"),
             ("rm -rf .", "rm-rf-outside-tmp"),
             ("rm -rf ./", "rm-rf-outside-tmp"),
             ("rm -rf .git", "rm-rf-outside-tmp"),
@@ -54638,7 +54718,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ("find . -delete", "find-delete-outside-tmp"),
             ("find . -name '*.rs' -delete", "find-delete-outside-tmp"),
             ("find . -name '*' -delete", "find-delete-outside-tmp"),
-            ("find ~ -name '*.pyc' -delete", "find-delete-outside-tmp"),
+            ("find ~ -name '*.pyc' -delete", "seat-guard"),
             ("find .. -name '*.pyc' -delete", "find-delete-outside-tmp"),
             (
                 "find .git -name '*.orig' -delete",
@@ -54646,10 +54726,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ),
             ("find . ! -name '*.pyc' -delete", "find-delete-outside-tmp"),
             ("find . -name '*.pyc' -o -delete", "find-delete-outside-tmp"),
-            (
-                "cd / && find . -name '*.pyc' -delete",
-                "find-delete-outside-tmp",
-            ),
+            ("cd / && find . -name '*.pyc' -delete", "seat-guard"),
         ] {
             let got = static_guard(line).unwrap_or_else(|| panic!("{line} ran"));
             assert_eq!(got.verdict, "deny", "{line}");
