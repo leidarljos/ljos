@@ -4323,9 +4323,8 @@ mod tests {
         crate::lifetime::forget_calls();
     }
 
-    /// A tool that runs with no seat only reads, or is the consent form
-    /// for a command the guard held. A claim, a sitting, mail and every
-    /// writer still need the seat.
+    /// Seat-free tools only read or manage consent for a held command.
+    /// Claims, sittings, mail and other seat-owned writes require a seat.
     #[test]
     fn only_readers_and_the_guard_run_without_a_seat() {
         let tools = LjosServer::tool_router().list_all();
@@ -4340,7 +4339,7 @@ mod tests {
                 .and_then(|hints| hints.read_only_hint)
                 == Some(true);
             assert!(
-                read_only || *name == "ljos_request_approval",
+                read_only || matches!(*name, "ljos_guard_check" | "ljos_request_approval"),
                 "{name} writes and runs without a seat"
             );
             assert!(!ljos_cli::bookkeep::mcp_tool_writes(name), "{name}");
@@ -4412,6 +4411,7 @@ mod tests {
                 "ljos_forget",
                 "ljos_graded",
                 "ljos_group",
+                "ljos_guard_check",
                 "ljos_habit",
                 "ljos_handover",
                 "ljos_island",
