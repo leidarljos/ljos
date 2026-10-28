@@ -1540,6 +1540,135 @@ fn a_shell_with_a_codex_thread_holds_under_the_thread() {
     );
 }
 
+/// Root threads served by one process each read only their own hold.
+/// An explicitly identified child thread can read its parent's sitting.
+#[test]
+fn named_threads_keep_their_sittings_separate_on_one_runner() {
+    let home = Box_::new();
+    let runtime = home.run.join("ljos");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let pid = std::process::id();
+    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap();
+    std::fs::write(
+        runtime.join("hold-shared-runner"),
+        format!(
+            "{}\ninky\n{pid}\n{}\n2026-10-28T00:00:00Z\n{ISSUE}\n-\n",
+            holder(CONV_X),
+            comm.trim()
+        ),
+    )
+    .unwrap();
+    home.card(&holder(CONV_X));
+
+    let row = |thread: &str, session: &str| {
+        let out = home
+            .command(
+                env!("CARGO_BIN_EXE_ljos"),
+                &["doctor", "--all"],
+                &[("CODEX_THREAD_ID", thread), ("CODEX_SESSION_ID", session)],
+            )
+            .env_remove("CURSOR_AGENT")
+            .output()
+            .unwrap();
+        let said = text_of(&out);
+        said.lines()
+            .find(|line| line.contains("\tsitting gate\t"))
+            .unwrap_or_else(|| panic!("no sitting gate row:\n{said}"))
+            .to_string()
+    };
+    assert!(
+        row(CONV_X, CONV_X).contains(&format!("this conversation sits on {ISSUE}")),
+        "the owning thread did not find its sitting"
+    );
+    let other = row(CONV_Y, CONV_Y);
+    assert!(
+        other.contains("holds no live sitting"),
+        "another root thread borrowed the shared process's sitting:\n{other}"
+    );
+    let child = row(CONV_Y, CONV_X);
+    assert!(
+        child.contains(&format!("this conversation sits on {ISSUE}")),
+        "the named child did not find its parent's sitting:\n{child}"
+    );
+}
+
+/// Metadata binds the claiming call even when the server carries another
+/// tagged holder, and a child thread keeps its own occupancy under the root.
+#[test]
+fn a_call_claims_as_its_named_thread_over_the_servers_process_holder() {
+    use std::io::BufRead;
+
+    for (thread, session) in [(CONV_X, CONV_X), (CONV_Y, CONV_X)] {
+        let home = Box_::new();
+        home.card(&holder(thread));
+        let mut cmd = home.command(
+            env!("CARGO_BIN_EXE_ljos-mcp"),
+            &[],
+            &[
+                ("CODEX_THREAD_ID", CONV_Z),
+                ("CODEX_SESSION_ID", CONV_Z),
+                ("LJOS_MCP_TOOLS", "all"),
+            ],
+        );
+        let mut child = cmd
+            .env_remove("CURSOR_AGENT")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        for request in [
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18", "capabilities": {},
+                    "clientInfo": {"name": "test-runner", "version": "1"}
+                }
+            }),
+            serde_json::json!({
+                "jsonrpc": "2.0", "method": "notifications/initialized"
+            }),
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {
+                    "name": "ljos_claim", "arguments": {"node": ISSUE},
+                    "_meta": {"thread_id": thread, "session_id": session}
+                }
+            }),
+        ] {
+            writeln!(child.stdin.as_mut().unwrap(), "{request}").unwrap();
+        }
+        child.stdin.as_mut().unwrap().flush().unwrap();
+        let mut answer = None;
+        for line in std::io::BufReader::new(child.stdout.take().unwrap()).lines() {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line.unwrap()) else {
+                continue;
+            };
+            if value["id"] == 2 {
+                answer = Some(value);
+                break;
+            }
+        }
+        let answer = answer.expect("the claim call answered");
+        let held: Vec<_> = std::fs::read_dir(home.run.join("ljos"))
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("hold-"))
+            .map(|entry| std::fs::read_to_string(entry.path()).unwrap())
+            .collect();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_ne!(answer["result"]["isError"], true, "{answer}");
+        assert!(answer.get("error").is_none(), "{answer}");
+        assert_eq!(held.len(), 1, "{held:?}");
+        assert_eq!(
+            held[0].lines().next(),
+            Some(holder(thread).as_str()),
+            "the call claimed under the server's holder or the root's holder"
+        );
+    }
+}
+
 /// A tool command under a runner may not write a sitting record. The
 /// records that bind a conversation for the paths that have no payload,
 /// `session-bare-SEAT`, `tmux-hook-conv` and `first-hook-conv`, decide

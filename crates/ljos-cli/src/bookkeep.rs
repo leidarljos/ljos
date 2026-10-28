@@ -1271,8 +1271,10 @@ pub fn start_work(issue: Option<&str>, repo: Option<&str>, task: &str) -> Result
 fn claim_existing(issue: &str) -> Result<(), String> {
     let assignee =
         super::claim_holder(&super::resolve_assignee(None)).map_err(|e| e.to_string())?;
-    if which::which("claimdag").is_ok() && super::claim(issue, &assignee).is_ok() {
-        return Ok(());
+    if which::which("claimdag").is_ok() {
+        return super::claim(issue, &assignee)
+            .map(|_| ())
+            .map_err(|e| format!("{e:#}"));
     }
     let first = run_timed(
         "vissue",
@@ -2163,15 +2165,7 @@ fn file_and_claim(project: &str, title: &str) -> Result<String, String> {
     let issue = parse_issue_id(&said.stdout)
         .ok_or_else(|| format!("vissue create printed no issue id: {}", said.stdout.trim()))?;
     if which::which("claimdag").is_ok() {
-        if let Err(e) = super::claim(&issue, &assignee) {
-            log_line(&format!("claim graph: {e:#}"));
-            run_timed(
-                "vissue",
-                &["claim", &issue],
-                &[("VISSUE_AGENT", assignee.as_str())],
-            )
-            .map_err(|e| e.to_string())?;
-        }
+        super::claim(&issue, &assignee).map_err(|e| format!("{e:#}"))?;
     } else {
         run_timed(
             "vissue",
@@ -7968,6 +7962,62 @@ print(f"id={ident}")
             line.contains(&format!("This session's issue is {issue}.")),
             "{line}"
         );
+    }
+
+    fn start_refuses_claim_graph_error(named: bool) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _g = lock();
+        let _saved = saved_env();
+        let (dir, tracker, repo) = scratch();
+        let _bins = arm(dir.path(), &tracker);
+        let graph = dir.path().join("bin/claimdag");
+        std::fs::write(
+            &graph,
+            "#!/bin/sh\ncase \"$1\" in\n  claim) echo 'claim: graph unavailable' >&2; exit 17 ;;\nesac\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&graph, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if named {
+            let project = tracker.join("Software/probe");
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::write(
+                project.join("issues.org"),
+                "* TODO [#C] Named task\n:PROPERTIES:\n:ID:         probe-00aa\n:END:\n",
+            )
+            .unwrap();
+        }
+
+        let error = start_work(
+            named.then_some("probe-00aa"),
+            Some(repo.to_str().unwrap()),
+            "Keep the tracker and graph claim together",
+        )
+        .expect_err("a refused graph claim must refuse the start");
+        assert!(error.contains("graph unavailable"), "{error}");
+        let log = std::fs::read_to_string(tracker.join("vissue.log")).unwrap_or_default();
+        assert!(
+            log.lines()
+                .all(|line| line.split_whitespace().next() != Some("claim")),
+            "the tracker was claimed after the graph refused: {log}"
+        );
+        let board = std::fs::read_to_string(tracker.join("Software/probe/issues.org")).unwrap();
+        assert!(board.contains("* TODO "), "{board}");
+        assert!(!board.contains("* STARTED "), "{board}");
+        assert!(
+            book_files().is_empty(),
+            "the refused start wrote a sitting book"
+        );
+    }
+
+    #[test]
+    fn a_named_start_preserves_the_claim_graph_refusal() {
+        start_refuses_claim_graph_error(true);
+    }
+
+    #[test]
+    fn a_filed_start_preserves_the_claim_graph_refusal() {
+        start_refuses_claim_graph_error(false);
     }
 
     #[test]

@@ -11707,8 +11707,12 @@ pub fn held_issue() -> Option<String> {
     // were made under. A hook's environment can carry session variables
     // the server's did not, which hash to another holder that holds
     // nothing, so the record is asked first.
-    let mut holders: Vec<String> = runner_record_holders(&own_ancestry());
     let own = holder_name();
+    let mut holders = if independent_thread() {
+        Vec::new()
+    } else {
+        runner_record_holders(&own_ancestry())
+    };
     if !holders.contains(&own) {
         holders.push(own);
     }
@@ -29650,7 +29654,12 @@ fn graph_scope_of(dir: Option<&str>) -> String {
 fn held_from_records(holders: &[String]) -> Option<String> {
     let seat = seat_name();
     let graph = claim_graph_scope();
-    held_from_records_in(holders, &runtime_dir(), &own_ancestry(), &seat, &graph)
+    let chain = if independent_thread() {
+        Vec::new()
+    } else {
+        own_ancestry()
+    };
+    held_from_records_in(holders, &runtime_dir(), &chain, &seat, &graph)
 }
 
 /// [`held_from_records`] over one directory and one chain of ancestors. A
@@ -29672,12 +29681,47 @@ fn held_from_records_in(
     newest_record_in(holders, dir, chain, seat, graph, &|_| true).map(|(node, _)| node)
 }
 
+/// Whether an explicit thread names its own conversation. A child thread
+/// belongs to its named parent session and may inherit that parent's sitting.
+fn independent_thread() -> bool {
+    let bound = CALL_CONVERSATION.try_with(Clone::clone).ok();
+    let stamped = stamped_sessions();
+    let thread = bound.clone().or_else(|| {
+        stamped
+            .iter()
+            .find(|(key, _)| key == "CODEX_THREAD_ID")
+            .map(|(_, id)| id.clone())
+    });
+    let Some(thread) = thread.filter(|id| !subagent_id(id)) else {
+        return false;
+    };
+    let parent = if bound.is_some() {
+        ballot_sig::call_session()
+    } else {
+        stamped
+            .iter()
+            .find(|(key, _)| key == "CODEX_SESSION_ID")
+            .map(|(_, id)| id.clone())
+    };
+    parent.is_none_or(|parent| parent == thread)
+}
+
 /// The candidates this conversation holds, newest first, only while the
 /// conversation that took each still runs ([`hold_alive`]).
 #[must_use]
 pub fn live_held_issues() -> Vec<(String, Hold)> {
     if call_conversation_unusable() || cursor_agent_without_id() {
         return Vec::new();
+    }
+    if independent_thread() {
+        return records_in(
+            &[holder_name()],
+            &runtime_dir(),
+            &[],
+            &seat_name(),
+            &claim_graph_scope(),
+            &hold_alive,
+        );
     }
     if let Some(id) = cursor_conversation() {
         let (dir, seat, graph) = (runtime_dir(), seat_name(), claim_graph_scope());
