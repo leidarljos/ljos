@@ -1,0 +1,1 @@
+`ljos person-key set` writes 32 random bytes to `person-key.pepper` beside the hash, mode 0600, and argon2id takes them as its secret. A copy of the hash alone can no longer be guessed. A process of the same Unix user can still read both files and guess offline. A key kept without a pepper does not verify: run `ljos person-key set` again.

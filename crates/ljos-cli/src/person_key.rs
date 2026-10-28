@@ -7,6 +7,12 @@
 //! `person-key` under the ljos config directory of the home the passwd
 //! entry names. `HOME` and `XDG_CONFIG_HOME` do not move it: a runner
 //! sets both for what it starts.
+//!
+//! The hash is made with a pepper, 32 random bytes in
+//! `person-key.pepper` beside it, which only `ljos person-key set`
+//! writes. The pepper keeps a copy of the hash alone from being guessed.
+//! It does not stop a process of the same Unix user, which can read both
+//! files and guess offline; the cost of each guess is all that slows it.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -28,6 +34,10 @@ const T_COST: u32 = 3;
 const P_COST: u32 = 4;
 
 const KEY_NAME: &str = "person-key";
+
+/// The pepper argon2id takes as its secret, beside the key.
+const PEPPER_NAME: &str = "person-key.pepper";
+const PEPPER_LEN: usize = 32;
 
 /// Wrong answers, one Unix time per line, beside the key.
 const FAILS_NAME: &str = "person-key.failures";
@@ -155,6 +165,7 @@ fn ask_with(
         Ok(None) => return Err("no person passphrase is set".into()),
         Err(e) => return Err(format!("{e:#}")),
     };
+    let pepper = read_pepper(&key.with_file_name(PEPPER_NAME)).map_err(|e| format!("{e:#}"))?;
     let recent = recent_failures(fails, now())?;
     if recent.len() >= LOCK_AFTER {
         let until = recent[recent.len() - LOCK_AFTER] + WINDOW_SECS;
@@ -181,7 +192,7 @@ fn ask_with(
         Ok(_) => return Err("nothing was typed at the passphrase prompt".into()),
         Err(e) => return Err(format!("the passphrase prompt failed: {e:#}")),
     };
-    if verify(answer.bytes(), &phc) {
+    if verify(answer.bytes(), &phc, &pepper) {
         let _ = std::fs::remove_file(fails);
         return Ok(());
     }
@@ -252,12 +263,49 @@ fn derive(argon: &Argon2<'_>, pass: &[u8], salt: &[u8], out: &mut [u8]) -> Resul
         .map_err(|e| anyhow::anyhow!("person-key: {e}"))
 }
 
-/// The PHC string of `pass` under a fresh salt from the OS.
+/// Fresh pepper from the OS.
+///
+/// # Errors
+///
+/// The OS gave no random bytes.
+pub fn new_pepper() -> Result<Zeroizing<Vec<u8>>> {
+    let mut pepper = Zeroizing::new(vec![0u8; PEPPER_LEN]);
+    getrandom::fill(&mut pepper)
+        .map_err(|e| anyhow::anyhow!("person-key: no pepper from the OS: {e}"))?;
+    Ok(pepper)
+}
+
+/// The pepper kept at `path`. A missing file, a link, or a file of
+/// another length is an error: the key does not verify without it.
+///
+/// # Errors
+///
+/// The pepper is missing, not a regular file, or not [`PEPPER_LEN`] bytes.
+pub fn read_pepper(path: &Path) -> Result<Zeroizing<Vec<u8>>> {
+    let gone = || {
+        format!(
+            "person-key: the pepper at {} is gone; run `ljos person-key set` again",
+            path.display()
+        )
+    };
+    let meta = std::fs::symlink_metadata(path).with_context(gone)?;
+    if !meta.is_file() {
+        bail!("person-key: {} is not a regular file", path.display());
+    }
+    let pepper = Zeroizing::new(std::fs::read(path).with_context(gone)?);
+    if pepper.len() != PEPPER_LEN {
+        bail!("{}", gone());
+    }
+    Ok(pepper)
+}
+
+/// The PHC string of `pass` under a fresh salt from the OS, with
+/// `pepper` as the argon2id secret.
 ///
 /// # Errors
 ///
 /// The OS gave no random bytes, or the hash failed.
-pub fn hash(pass: &[u8]) -> Result<String> {
+pub fn hash(pass: &[u8], pepper: &[u8]) -> Result<String> {
     let err = |e: argon2::password_hash::Error| anyhow::anyhow!("person-key: {e}");
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes)
@@ -265,7 +313,8 @@ pub fn hash(pass: &[u8]) -> Result<String> {
     let salt = SaltString::encode_b64(&bytes).map_err(err)?;
     let params = Params::new(M_COST_KIB, T_COST, P_COST, None)
         .map_err(|e| anyhow::anyhow!("person-key: {e}"))?;
-    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let argon = Argon2::new_with_secret(pepper, Algorithm::Argon2id, Version::V0x13, params)
+        .map_err(|e| anyhow::anyhow!("person-key: {e}"))?;
     let mut out = Zeroizing::new([0u8; Params::DEFAULT_OUTPUT_LEN]);
     derive(&argon, pass, &bytes, &mut out[..])?;
     let phc = PasswordHash {
@@ -306,11 +355,11 @@ pub fn parse(phc: &str) -> Result<PasswordHash<'_>> {
     Ok(parsed)
 }
 
-/// Whether `pass` is the passphrase `phc` was made from. The comparison
-/// is the hash crate's, in constant time. A hash that does not parse
-/// matches nothing.
+/// Whether `pass` is the passphrase `phc` was made from with `pepper`.
+/// The comparison is the hash crate's, in constant time. A hash that does
+/// not parse matches nothing.
 #[must_use]
-pub fn verify(pass: &[u8], phc: &str) -> bool {
+pub fn verify(pass: &[u8], phc: &str, pepper: &[u8]) -> bool {
     let Ok(parsed) = parse(phc) else {
         return false;
     };
@@ -327,9 +376,25 @@ pub fn verify(pass: &[u8], phc: &str) -> bool {
     let Ok(salt) = salt.decode_b64(&mut salt_bytes) else {
         return false;
     };
-    let argon = Argon2::new(Algorithm::Argon2id, version, params);
+    let Ok(argon) = Argon2::new_with_secret(pepper, Algorithm::Argon2id, version, params) else {
+        return false;
+    };
     let mut out = Zeroizing::new(vec![0u8; want.len()]);
     derive(&argon, pass, salt, &mut out).is_ok() && Output::new(&out).is_ok_and(|got| got == want)
+}
+
+/// Keep the hash of `pass` at `path`, under a fresh pepper written
+/// beside it first. A crash between the two leaves a key that does not
+/// verify, and `set` run again mends it.
+///
+/// # Errors
+///
+/// No random bytes, the hash failed, or a file cannot be written.
+pub fn keep(path: &Path, pass: &[u8]) -> Result<()> {
+    let pepper = new_pepper()?;
+    let phc = hash(pass, &pepper)?;
+    write_private(&path.with_file_name(PEPPER_NAME), &pepper)?;
+    store(path, &phc)
 }
 
 /// Write `phc` to `path`, mode 0600. The text goes to a new file beside
@@ -339,12 +404,23 @@ pub fn verify(pass: &[u8], phc: &str) -> bool {
 ///
 /// The directory or the file cannot be written.
 pub fn store(path: &Path, phc: &str) -> Result<()> {
+    write_private(path, format!("{phc}\n").as_bytes())
+}
+
+fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt as _;
     let dir = path
         .parent()
         .context("person-key: the key path has no directory")?;
+    let name = path
+        .file_name()
+        .context("person-key: the key path has no file name")?;
     std::fs::create_dir_all(dir).with_context(|| format!("person-key: {}", dir.display()))?;
-    let tmp = dir.join(format!(".{KEY_NAME}.{}.tmp", std::process::id()));
+    let tmp = dir.join(format!(
+        ".{}.{}.tmp",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&tmp);
     let written = (|| -> std::io::Result<()> {
         let mut file = std::fs::OpenOptions::new()
@@ -352,8 +428,7 @@ pub fn store(path: &Path, phc: &str) -> Result<()> {
             .create_new(true)
             .mode(0o600)
             .open(&tmp)?;
-        file.write_all(phc.as_bytes())?;
-        file.write_all(b"\n")?;
+        file.write_all(bytes)?;
         file.sync_all()?;
         std::fs::rename(&tmp, path)?;
         std::fs::File::open(dir)?.sync_all()
@@ -457,7 +532,7 @@ fn set_from(path: &Path, tty: &mut std::fs::File) -> Result<()> {
     if first.bytes() != second.bytes() {
         bail!("person-key: the two entries differ; the key is unchanged");
     }
-    store(path, &hash(first.bytes())?)?;
+    keep(path, first.bytes())?;
     println!("person-key: set in {}", path.display());
     Ok(())
 }
@@ -501,6 +576,8 @@ fn status_at(path: &Path) -> String {
 mod tests {
     use super::*;
 
+    const PEPPER: &[u8] = &[9u8; PEPPER_LEN];
+
     /// A hard runner, any runner variable, or no terminal refuses. Only
     /// the person at a terminal with no variable set may change the key.
     #[test]
@@ -533,8 +610,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let none = dir.path().join("none").join(KEY_NAME);
         let kept = dir.path().join("kept").join(KEY_NAME);
-        let phc = hash(b"correct horse battery").unwrap();
-        store(&kept, &phc).unwrap();
+        keep(&kept, b"correct horse battery").unwrap();
+        let phc = read(&kept).unwrap().unwrap();
         let saved = std::env::var_os("CURSOR_AGENT");
         // SAFETY: under env_guard, and restored below.
         unsafe { std::env::set_var("CURSOR_AGENT", "1") };
@@ -651,7 +728,8 @@ mod tests {
         assert!(shown.contains("The same again: "), "{shown}");
         assert!(!shown.contains("horse"), "{shown}");
         let phc = read(&path).unwrap().expect("a key");
-        assert!(verify(b"correct horse battery", &phc));
+        let pepper = read_pepper(&path.with_file_name(PEPPER_NAME)).unwrap();
+        assert!(verify(b"correct horse battery", &phc, &pepper));
     }
 
     #[test]
@@ -709,11 +787,7 @@ mod tests {
 
     fn keyed() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        store(
-            &dir.path().join(KEY_NAME),
-            &hash(b"correct horse battery").unwrap(),
-        )
-        .unwrap();
+        keep(&dir.path().join(KEY_NAME), b"correct horse battery").unwrap();
         dir
     }
 
@@ -733,16 +807,13 @@ mod tests {
         assert!(!asked.shown.contains("horse"), "{}", asked.shown);
         assert!(asked.pauses.is_empty());
         assert!(!dir.path().join(FAILS_NAME).exists());
-        let names: Vec<_> = std::fs::read_dir(dir.path())
+        let mut names: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .flatten()
             .map(|e| e.file_name())
             .collect();
-        assert_eq!(
-            names,
-            vec![std::ffi::OsString::from(KEY_NAME)],
-            "a token was kept"
-        );
+        names.sort();
+        assert_eq!(names, [KEY_NAME, PEPPER_NAME], "a token was kept");
     }
 
     #[test]
@@ -825,8 +896,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(KEY_NAME);
         assert!(status_at(&path).contains("not set"));
-        let phc = hash(b"correct horse battery").unwrap();
-        store(&path, &phc).unwrap();
+        keep(&path, b"correct horse battery").unwrap();
+        let phc = read(&path).unwrap().unwrap();
         let said = status_at(&path);
         assert!(said.contains("person-key: set, written "), "{said}");
         assert!(!said.contains("argon2"), "{said}");
@@ -834,14 +905,42 @@ mod tests {
     }
 
     #[test]
-    fn a_hash_matches_its_passphrase_only() {
-        let phc = hash(b"correct horse battery").unwrap();
+    fn a_hash_matches_its_passphrase_and_pepper_only() {
+        let phc = hash(b"correct horse battery", PEPPER).unwrap();
         assert!(phc.starts_with("$argon2id$"), "{phc}");
-        assert!(verify(b"correct horse battery", &phc));
-        assert!(!verify(b"correct horse batterz", &phc));
-        assert!(!verify(b"", &phc));
-        let again = hash(b"correct horse battery").unwrap();
+        assert!(verify(b"correct horse battery", &phc, PEPPER));
+        assert!(!verify(b"correct horse batterz", &phc, PEPPER));
+        assert!(!verify(b"", &phc, PEPPER));
+        assert!(!verify(b"correct horse battery", &phc, &[8u8; PEPPER_LEN]));
+        assert!(!verify(b"correct horse battery", &phc, &[]));
+        let again = hash(b"correct horse battery", PEPPER).unwrap();
         assert_ne!(phc, again, "two hashes shared a salt");
+    }
+
+    /// `keep` writes a fresh pepper beside the key, mode 0600, and each
+    /// call writes another. Without the pepper the key is refused before
+    /// the prompt, and that is not counted as a wrong answer.
+    #[test]
+    fn the_pepper_is_kept_beside_the_key_and_needed() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = keyed();
+        let at = dir.path().join(PEPPER_NAME);
+        let first = read_pepper(&at).unwrap();
+        assert_eq!(first.len(), PEPPER_LEN);
+        let mode = std::fs::metadata(&at).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let phc = read(&dir.path().join(KEY_NAME)).unwrap().unwrap();
+        assert!(verify(b"correct horse battery", &phc, &first));
+        keep(&dir.path().join(KEY_NAME), b"correct horse battery").unwrap();
+        assert_ne!(read_pepper(&at).unwrap(), first, "the pepper was reused");
+        std::fs::remove_file(&at).unwrap();
+        let asked = ask_at(dir.path(), Some("correct horse battery"), 1000);
+        let why = asked.out.unwrap_err();
+        assert!(why.contains("run `ljos person-key set` again"), "{why}");
+        assert!(asked.shown.is_empty(), "{}", asked.shown);
+        assert!(!dir.path().join(FAILS_NAME).exists());
+        std::fs::write(&at, [1u8; PEPPER_LEN - 1]).unwrap();
+        assert!(read_pepper(&at).is_err());
     }
 
     /// The hash made in zeroed memory is the one the hash crate makes, so
@@ -851,12 +950,13 @@ mod tests {
         use argon2::password_hash::PasswordHasher as _;
         let salt = SaltString::encode_b64(&[7u8; 16]).unwrap();
         let params = Params::new(M_COST_KIB, T_COST, P_COST, None).unwrap();
-        let theirs = Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+        let theirs = Argon2::new_with_secret(PEPPER, Algorithm::Argon2id, Version::V0x13, params)
+            .unwrap()
             .hash_password(b"correct horse battery", &salt)
             .unwrap()
             .to_string();
-        assert!(verify(b"correct horse battery", &theirs));
-        assert!(!verify(b"correct horse batterz", &theirs));
+        assert!(verify(b"correct horse battery", &theirs, PEPPER));
+        assert!(!verify(b"correct horse batterz", &theirs, PEPPER));
     }
 
     /// A new hash names the full cost. One made at the hash crate's
@@ -865,7 +965,7 @@ mod tests {
     #[test]
     fn a_hash_below_the_cost_is_not_a_key() {
         use argon2::password_hash::PasswordHasher as _;
-        let phc = hash(b"correct horse battery").unwrap();
+        let phc = hash(b"correct horse battery", PEPPER).unwrap();
         let params = Params::try_from(&parse(&phc).unwrap()).unwrap();
         assert_eq!(
             (params.m_cost(), params.t_cost(), params.p_cost()),
@@ -878,7 +978,7 @@ mod tests {
             .to_string();
         let why = format!("{:#}", parse(&old).unwrap_err());
         assert!(why.contains("run `ljos person-key set` again"), "{why}");
-        assert!(!verify(b"correct horse battery", &old));
+        assert!(!verify(b"correct horse battery", &old, PEPPER));
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(KEY_NAME);
         std::fs::write(&path, format!("{old}\n")).unwrap();
@@ -913,13 +1013,13 @@ mod tests {
 
     #[test]
     fn only_an_argon2id_phc_string_parses() {
-        let phc = hash(b"correct horse battery").unwrap();
+        let phc = hash(b"correct horse battery", PEPPER).unwrap();
         let parsed = parse(&phc).unwrap();
         assert_eq!(parsed.algorithm.as_str(), "argon2id");
         assert!(parsed.salt.is_some());
         let argon2i = phc.replacen("$argon2id$", "$argon2i$", 1);
         assert!(parse(&argon2i).is_err());
-        assert!(!verify(b"correct horse battery", &argon2i));
+        assert!(!verify(b"correct horse battery", &argon2i, PEPPER));
         for junk in [
             "",
             "correct horse battery",
@@ -927,7 +1027,7 @@ mod tests {
             "$argon2id$v=19$m=1",
         ] {
             assert!(parse(junk).is_err(), "{junk:?}");
-            assert!(!verify(b"correct horse battery", junk));
+            assert!(!verify(b"correct horse battery", junk, PEPPER));
         }
     }
 
@@ -937,12 +1037,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ljos").join(KEY_NAME);
         assert!(read(&path).unwrap().is_none());
-        let phc = hash(b"correct horse battery").unwrap();
+        let phc = hash(b"correct horse battery", PEPPER).unwrap();
         store(&path, &phc).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         assert_eq!(read(&path).unwrap().as_deref(), Some(phc.as_str()));
-        let next = hash(b"another long phrase").unwrap();
+        let next = hash(b"another long phrase", PEPPER).unwrap();
         store(&path, &next).unwrap();
         assert_eq!(read(&path).unwrap().as_deref(), Some(next.as_str()));
         let left: Vec<_> = std::fs::read_dir(path.parent().unwrap())
@@ -959,7 +1059,7 @@ mod tests {
     fn a_link_in_place_of_the_key_is_not_read() {
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().join("elsewhere");
-        store(&real, &hash(b"correct horse battery").unwrap()).unwrap();
+        store(&real, &hash(b"correct horse battery", PEPPER).unwrap()).unwrap();
         let path = dir.path().join(KEY_NAME);
         std::os::unix::fs::symlink(&real, &path).unwrap();
         assert!(read(&path).is_err());

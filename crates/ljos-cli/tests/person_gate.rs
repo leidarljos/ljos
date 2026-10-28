@@ -67,8 +67,7 @@ impl Case {
         let keys = home.path().join("keys");
         std::fs::create_dir_all(&keys).unwrap();
         if keyed {
-            let phc = ljos_cli::person_key::hash(PASS.as_bytes()).unwrap();
-            ljos_cli::person_key::store(&keys.join("person-key"), &phc).unwrap();
+            ljos_cli::person_key::keep(&keys.join("person-key"), PASS.as_bytes()).unwrap();
         }
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
