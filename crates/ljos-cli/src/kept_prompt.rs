@@ -440,6 +440,97 @@ pub(crate) fn reads_only(name: &str) -> bool {
     READ_TOOLS.contains(&base) || READ_PREFIXES.iter().any(|p| base.starts_with(p))
 }
 
+pub(crate) fn patch_tool(name: &str) -> bool {
+    let base = name.rsplit(['/', '\\', '.']).next().unwrap_or(name);
+    base.eq_ignore_ascii_case("apply_patch") || base.eq_ignore_ascii_case("ApplyPatch")
+}
+
+/// Native patch operations as policy argv. Source lines are data; only
+/// file headers supply operands. These commands describe writes and are
+/// never executed.
+pub(crate) fn patch_commands(
+    name: &str,
+    args: &serde_json::Value,
+) -> Result<Option<Vec<Vec<String>>>, &'static str> {
+    if !patch_tool(name) {
+        return Ok(None);
+    }
+    if args.get("input").is_some() && args.get("patch").is_some() {
+        return Err("multiple patch text fields");
+    }
+    let text = args.as_str()
+        .or_else(|| args["input"].as_str())
+        .or_else(|| args["patch"].as_str());
+    let Some(text) = text else {
+        if args.get("input").is_none() && args.get("patch").is_none()
+            && args["file_path"].as_str().is_some_and(|path| !path.trim().is_empty()) {
+            return Ok(None);
+        }
+        return Err("missing patch text");
+    };
+    let lines: Vec<&str> = text.trim().lines().collect();
+    if lines.first() != Some(&"*** Begin Patch") || lines.last() != Some(&"*** End Patch") {
+        return Err("expected Begin Patch and End Patch markers");
+    }
+    let mut commands = Vec::new();
+    let mut kind = "";
+    let mut source = None;
+    let mut move_allowed = false;
+    let mut hunk = false;
+    for line in &lines[1..lines.len() - 1] {
+        let header = [
+            ("Add File", "*** Add File: "),
+            ("Update File", "*** Update File: "),
+            ("Delete File", "*** Delete File: "),
+            ("Move to", "*** Move to: "),
+        ].iter().find_map(|(kind, prefix)| {
+            line.strip_prefix(*prefix).map(|path| (*kind, path))
+        });
+        if let Some((operation, path)) = header {
+            if path.is_empty() || path.trim() != path || path.chars().any(char::is_control) {
+                return Err("invalid target path");
+            }
+            if operation == "Move to" {
+                if !move_allowed {
+                    return Err("Move to must follow an Update File header");
+                }
+                let from = source.take().ok_or("move source is missing")?;
+                commands.push(vec!["mv".into(), "--".into(), from, path.into()]);
+                move_allowed = false;
+            } else {
+                if kind == "Update File" && !hunk {
+                    return Err("Update File requires a hunk");
+                }
+                kind = operation;
+                source = (operation == "Update File").then(|| path.to_string());
+                move_allowed = source.is_some();
+                hunk = false;
+                let mut command = vec![if operation == "Delete File" { "rm" } else { "apply_patch" }.into()];
+                if operation == "Delete File" {
+                    command.push("--".into());
+                }
+                command.push(path.into());
+                commands.push(command);
+            }
+            continue;
+        }
+        move_allowed = false;
+        match kind {
+            "Add File" if line.starts_with('+') => {}
+            "Update File" if *line == "@@" || line.starts_with("@@ ") => hunk = true,
+            "Update File" if hunk && (*line == "*** End of File" || line.is_empty() || line.starts_with([' ', '+', '-'])) => {}
+            _ => return Err("unexpected patch header or body line"),
+        }
+    }
+    if kind == "Update File" && !hunk {
+        return Err("Update File requires a hunk");
+    }
+    if commands.is_empty() {
+        return Err("patch has no file operations");
+    }
+    Ok(Some(commands))
+}
+
 /// The path, resolved, of the first string in a file tool's `args` that
 /// reaches into a runtime ljos directory, when tool `name` does not only
 /// read. Every key counts, however deep, and a string that is itself JSON
@@ -475,6 +566,12 @@ pub(crate) fn written_target(
     }
     if reads_only(name) {
         return None;
+    }
+    if let Ok(Some(commands)) = patch_commands(name, args) {
+        if let Some(path) = commands.iter().flat_map(|c| c.iter().skip(1))
+            .filter_map(|p| path_of(p, cwd)).find(|p| inside(p)) {
+            return Some(path);
+        }
     }
     walk(args, cwd, 0)
 }

@@ -8608,6 +8608,21 @@ fn cue_for(v: &Value, input: &Value, event: &str) -> String {
         .strip_prefix("MCP:")
         .is_some_and(|rest| !rest.is_empty());
     if tool {
+        if kept_prompt::patch_tool(name) {
+            if let Some(target) = kept_prompt::written_target(name, input, v["cwd"].as_str().map(Path::new)) {
+                return format!("{name} {}", target.display());
+            }
+            match kept_prompt::patch_commands(name, input) {
+                Ok(Some(commands)) => return commands.iter().map(|words| {
+                    let operands = words.iter().skip(1)
+                    .map(|path| format!("'{}'", path.replace('\'', "'\\''")))
+                        .collect::<Vec<_>>().join(" ");
+                    format!("{} {operands}", words[0])
+                }).collect::<Vec<_>>().join("\n"),
+                Err(_) => return "apply_patch".into(),
+                Ok(None) => return file.unwrap_or_else(|| "apply_patch".into()),
+            }
+        }
         if !mcp_named {
             if let Some(command) = command {
                 return command;
@@ -8647,6 +8662,21 @@ fn cue_for(v: &Value, input: &Value, event: &str) -> String {
         return file;
     }
     joined.unwrap_or_default()
+}
+
+/// A malformed native patch cannot become an empty or shell-shaped cue.
+/// Native tool identity determines how its arguments are read.
+#[must_use]
+pub fn native_patch_guard(raw: &str) -> Option<Rule> {
+    let v: Value = serde_json::from_str(raw).ok()?;
+    let name = v["tool_name"].as_str().or_else(|| v["toolName"].as_str())?;
+    let input = if v["tool_input"].is_null() { &v["toolInput"] } else { &v["tool_input"] };
+    let Err(reason) = kept_prompt::patch_commands(name, input) else { return None };
+    Some(Rule {
+        pattern: "native-patch-invalid".into(),
+        verdict: "deny".into(),
+        reason: format!("native-patch-invalid: {reason}"),
+    })
 }
 
 /// Where the ids already injected in a session are kept: the runtime
@@ -50709,6 +50739,66 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             seat_guard(&doc.cue).is_none(),
             "a doc naming the path is not the path"
         );
+    }
+
+    #[test]
+    fn native_patch_source_is_data_and_operations_keep_their_paths() {
+        let _g = env_guard();
+        let patch = "*** Begin Patch\n*** Add File: src/a.cpp\n+const auto values = std::vector<int>{1, 2, 3};\n+// sudo and git push -f are text.\n+*** Delete File: docs/quoted-marker.cpp\n*** Update File: src/b.cpp\n*** Move to: src/c.cpp\n@@\n-old\n+new\n*** Delete File: src/d.cpp\n*** End Patch";
+        for input in [Value::String(patch.into()), serde_json::json!({"input": patch}), serde_json::json!({"patch": patch}), serde_json::json!({"input": patch, "command": "true"})] {
+            let raw = serde_json::json!({"hook_event_name": "PreToolUse", "tool_name": "apply_patch", "tool_input": input}).to_string();
+            let call = hook_call(&raw);
+            let lines: Vec<_> = call.cue.lines().map(shell_words).collect();
+            assert_eq!(lines, vec![vec!["apply_patch", "src/a.cpp"], vec!["apply_patch", "src/b.cpp"], vec!["mv", "--", "src/b.cpp", "src/c.cpp"], vec!["rm", "--", "src/d.cpp"]]);
+            assert!(native_patch_guard(&raw).is_none());
+        }
+    }
+
+    #[test]
+    fn native_patch_later_protected_paths_and_moves_are_denied() {
+        let _g = env_guard();
+        let _hold = HoldEnv::set(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
+        let target = runtime_dir().join("latest-prompt");
+        let target = target.display();
+        for operation in [
+            format!("*** Update File: {target}\n@@\n-x\n+y"),
+            format!("*** Delete File: {target}"),
+            format!("*** Update File: src/a.cpp\n*** Move to: {target}\n@@\n-x\n+y"),
+            format!("*** Update File: {target}\n*** Move to: src/a.cpp\n@@\n-x\n+y"),
+            format!("*** Add File: {target}\n+x"),
+        ] {
+            let patch = format!("*** Begin Patch\n*** Add File: src/safe.cpp\n+x\n{operation}\n*** End Patch");
+            for command in [None, Some("true")] {
+                let mut input = serde_json::json!({"input": patch.clone()});
+                if let Some(command) = command {
+                    input["command"] = Value::String(command.into());
+                }
+                let raw = serde_json::json!({"hook_event_name":"PreToolUse", "tool_name":"apply_patch", "tool_input":input}).to_string();
+                let call = hook_call(&raw);
+                assert!(seat_guard(&call.cue).is_some(), "allowed: {}", call.cue);
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_native_patches_are_refused_and_shell_commands_are_unchanged() {
+        for patch in ["", "*** Begin Patch\n*** End Patch", "*** Begin Patch\n*** Move to: a\n*** End Patch", "*** Begin Patch\n*** Unknown File: a\n*** End Patch"] {
+            let raw = serde_json::json!({"hook_event_name":"PreToolUse", "tool_name":"apply_patch", "tool_input":{"input":patch}}).to_string();
+            let rule = native_patch_guard(&raw).expect("malformed native patch allowed");
+            assert_eq!(rule.pattern, "native-patch-invalid");
+            assert_eq!(rule.verdict, "deny");
+            assert!(rule.reason.starts_with("native-patch-invalid: "));
+        }
+        let ambiguous = serde_json::json!({"tool_name":"apply_patch", "tool_input":{"input":"one patch", "patch":"another patch"}}).to_string();
+        assert!(native_patch_guard(&ambiguous).unwrap().reason.contains("multiple patch text fields"));
+        let legacy = serde_json::json!({"hook_event_name":"PreToolUse", "tool_name":"apply_patch", "tool_input":{"file_path":"README.md", "command":"true"}}).to_string();
+        assert_eq!(hook_call(&legacy).cue, "apply_patch README.md");
+        assert!(native_patch_guard(&legacy).is_none());
+        for name in ["Bash", "exec_command"] {
+            let raw = serde_json::json!({"hook_event_name":"PreToolUse", "tool_name":name, "tool_input":{"command":"git push -f", "input":"invalid patch"}}).to_string();
+            assert_eq!(hook_call(&raw).cue, "git push -f");
+            assert!(native_patch_guard(&raw).is_none());
+        }
     }
 
     #[test]
