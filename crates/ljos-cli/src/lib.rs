@@ -34714,7 +34714,8 @@ fn tcb_argvs(line: &str) -> Vec<Vec<String>> {
 /// inside single quotes or `$'...'`, in a comment, or after an escaped
 /// backslash; ljos-policyd's lexer would read the newline as part of the
 /// next word. Each here-document's body, which it would read as commands,
-/// stands as [`heredoc_reading`] says.
+/// stands as [`heredoc_reading`] says, and one an interpreter reads as its
+/// program ([`feeds_program`]) is data here.
 fn tcb_script(line: &str) -> String {
     let chars: Vec<char> = line.chars().collect();
     tcb_text(&chars, Some(heredocs_are_data(line)))
@@ -34727,8 +34728,11 @@ fn tcb_text(chars: &[char], data: Option<bool>) -> String {
     let mut out = String::with_capacity(chars.len());
     let mut double = false;
     // Each here-document waiting for its line to end: where `<<WORD` sits
-    // in `out`, the word, and whether it was quoted.
-    let mut pending: Vec<(std::ops::Range<usize>, String, bool)> = Vec::new();
+    // in `out`, the word, whether it was quoted, and whether its command
+    // reads it as an interpreter's program.
+    let mut pending: Vec<(std::ops::Range<usize>, String, bool, bool)> = Vec::new();
+    // Where the command now being read starts in `chars`.
+    let mut command = 0;
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
@@ -34801,9 +34805,15 @@ fn tcb_text(chars: &[char], data: Option<bool>) -> String {
                             })
                     }) {
                         Some((word, after, quoted)) => {
+                            let eol = chars[i..]
+                                .iter()
+                                .position(|&q| q == '\n')
+                                .map_or(chars.len(), |p| i + p);
+                            let owner: String = chars[command..eol].iter().collect();
+                            let program = feeds_program(&owner.replace("\\\n", ""));
                             let at = out.len();
                             out.extend(&chars[i..after]);
-                            pending.push((at..out.len(), word, quoted));
+                            pending.push((at..out.len(), word, quoted, program));
                             i = after;
                             continue;
                         }
@@ -34817,7 +34827,7 @@ fn tcb_text(chars: &[char], data: Option<bool>) -> String {
                 out.push('\n');
                 let mut j = i + 1;
                 let mut read = Vec::new();
-                for (span, word, quoted) in std::mem::take(&mut pending) {
+                for (span, word, quoted, program) in std::mem::take(&mut pending) {
                     let mut body = String::new();
                     while j < chars.len() {
                         let end = chars[j..]
@@ -34832,16 +34842,24 @@ fn tcb_text(chars: &[char], data: Option<bool>) -> String {
                         body.push_str(&text);
                         body.push('\n');
                     }
-                    read.push((span, heredoc_reading(&body, quoted, data == Some(true))));
+                    read.push((
+                        span,
+                        heredoc_reading(&body, quoted, program || data == Some(true)),
+                    ));
                 }
                 for (span, text) in read.into_iter().rev() {
                     out.replace_range(span, &text);
                 }
                 i = j;
+                command = j;
                 continue;
             }
             _ => {
                 double ^= c == '"';
+                let redirect = (i > 0 && chars[i - 1] == '>') || next == Some('>');
+                if !double && (matches!(c, ';' | '|' | '\n') || (c == '&' && !redirect)) {
+                    command = i + 1;
+                }
                 i + 1
             }
         };
@@ -34911,9 +34929,20 @@ fn heredocs_are_data(line: &str) -> bool {
     })
 }
 
+/// Whether the command that starts `line` reads a here-document as an
+/// interpreter's program, as `python3 - <<EOF` does, with no pipe on to
+/// another command. [`stdin_programs`] sends that body as the program;
+/// read as a shell script, `import os` would be ImageMagick's `import`.
+fn feeds_program(line: &str) -> bool {
+    let pipes = pipelines(line);
+    raw_segments(line)
+        .first()
+        .is_some_and(|s| reads_program_on_stdin(s).is_some() && pipes.first() == Some(s))
+}
+
 /// What stands in place of a here-document whose body is `body`: the body
-/// as a script a subshell runs, unless the line's bodies are `data`; then
-/// the substitutions an unquoted body expands, each run so, or nothing.
+/// as a script a subshell runs, unless the body is `data`; then the
+/// substitutions an unquoted body expands, each run so, or nothing.
 fn heredoc_reading(body: &str, quoted: bool, data: bool) -> String {
     let run = |script: &str| {
         format!(
@@ -54004,6 +54033,64 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         ] {
             let rule = tcb_verdict_in(line, Some(root.path()));
             assert!(rule.is_none(), "{line:?}: {rule:?}");
+        }
+    }
+
+    /// A body an interpreter reads as its program is not in the shell
+    /// script, though another command on its line runs shell. A body fed
+    /// to a shell, or piped on to one, and the substitutions of an
+    /// unquoted body, still are.
+    #[test]
+    fn a_program_heredoc_is_no_shell_script() {
+        let script = |line: &str| tcb_argvs(line)[0][2].clone();
+        let sourced = "set -a && . ./env && set +a && python3 - <<'EOF'\nimport os,json\nEOF";
+        assert!(!script(sourced).contains("import"), "{}", script(sourced));
+        assert_eq!(stdin_programs(sourced)[0][2], "import os,json\n");
+        for line in [
+            "set -a && . ./env && bash <<'EOF'\nimport x\nEOF",
+            "cd x && sh -s <<EOF\nimport x\nEOF",
+            "cd x && cat <<'EOF' | bash\nimport x\nEOF",
+            "cd x && python3 - <<'EOF' | bash\nimport x\nEOF",
+            "cd x && python3 gen.py <<'EOF'\nimport x\nEOF",
+        ] {
+            assert!(script(line).contains("<(bash -c 'import x"), "{line:?}");
+        }
+        let unquoted = script("cd x && python3 - 2>&1 <<EOF\nimport os\n$(make all)\nEOF");
+        assert!(!unquoted.contains("import"), "{unquoted}");
+        assert!(unquoted.contains("<(bash -c 'make all')"), "{unquoted}");
+    }
+
+    /// A python body is judged as python, not as shell: `import` there
+    /// is no ImageMagick call. A shell body, the substitutions of an
+    /// unquoted body, and a python body that deletes a tree are still
+    /// refused.
+    #[test]
+    fn a_python_heredoc_is_judged_as_python() {
+        let _g = env_guard();
+        let (root, _home, _env) = policyd_tree("policyd-program");
+        let at = Some(root.path());
+        std::fs::write(root.path().join("env"), "MODE=test\n").unwrap();
+        let line = "set -a && . ./env && set +a && python3 - <<'EOF'\n\
+                    import os,json,urllib.request\n\
+                    with open('run.log', 'a') as f:\n    \
+                    f.write(json.dumps({'mode': os.environ.get('MODE')}) + '\\n')\n\
+                    EOF";
+        let rule = tcb_verdict_in(line, at);
+        assert!(rule.is_none(), "{rule:?}");
+        for line in [
+            "bash <<'EOF'\necho $(rm -rf /)\nEOF",
+            "python3 - <<EOF\nprint('''$(rm -rf ~)''')\nEOF",
+        ] {
+            let rule = tcb_verdict_in(line, at).unwrap_or_else(|| panic!("{line:?} was allowed"));
+            assert_eq!(rule.verdict, "deny", "{line:?}: {}", rule.reason);
+        }
+        for line in [
+            "python3 - <<'EOF'\nimport subprocess\nsubprocess.run('rm -rf /srv/data', shell=True)\nEOF",
+            "python3 - <<'EOF'\nimport os, shutil\nshutil.rmtree(os.path.expanduser('~'))\nEOF",
+        ] {
+            assert!(!tcb_argvs(line)[0][2].contains("import"), "{line:?}");
+            let said = tcb_line_in(line, at).unwrap_or_default();
+            assert!(said.starts_with("deny"), "{line:?}: {said:?}");
         }
     }
 
