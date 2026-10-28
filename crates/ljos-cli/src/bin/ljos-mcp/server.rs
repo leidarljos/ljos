@@ -2000,7 +2000,7 @@ impl LjosServer {
         description = "Call this before a destructive shell command, a git commit, a git push, or a merge. Pass the command line, and pass cwd when the command runs outside the server's start directory. It returns verdict allow or ask. Run the command only when verdict is allow. An ask names the command and waits for the person; it is not a deny. A commit, push, or merge the gates refuse is an error that names what makes the line pass.",
         annotations(
             title = "Check a command",
-            read_only_hint = true,
+            read_only_hint = false,
             open_world_hint = false
         )
     )]

@@ -33843,7 +33843,7 @@ pub struct GuardReport {
 ///
 /// The command is empty, or the rules deny it.
 pub fn guard_report(line: &str) -> Result<GuardReport> {
-    guard_report_in(line, None)
+    command_report_in(line, None, false)
 }
 
 fn expand_guard_cwd(path: &Path) -> Result<PathBuf> {
@@ -33890,6 +33890,10 @@ fn guard_start_directory(cwd: Option<&Path>) -> Result<PathBuf> {
 ///
 /// The command is empty, or the rules deny it.
 pub fn guard_report_in(line: &str, cwd: Option<&Path>) -> Result<GuardReport> {
+    command_report_in(line, cwd, true)
+}
+
+fn command_report_in(line: &str, cwd: Option<&Path>, preflight: bool) -> Result<GuardReport> {
     let line = line.trim();
     if line.is_empty() {
         bail!("guard: pass the command to check");
@@ -33898,7 +33902,7 @@ pub fn guard_report_in(line: &str, cwd: Option<&Path>) -> Result<GuardReport> {
     let cwd = Some(start.as_path());
     // Judge the line as written. Splitting it into argv and joining the
     // words again drops the quotes a commit message needs.
-    if let Some(rule) = static_guard_in(line, cwd) {
+    if let Some(rule) = tcb_verdict_in(line, cwd) {
         // The push ran into an ask or a deny. Drop the evidence warning so
         // the next allowed command does not inherit it.
         let _ = gates::take_push_warning();
@@ -33908,6 +33912,11 @@ pub fn guard_report_in(line: &str, cwd: Option<&Path>) -> Result<GuardReport> {
         );
         if rule.verdict == "deny" {
             bail!("{text}");
+        }
+        if preflight && rule.verdict == "ask" {
+            if let Some(report) = approval::checked_report(line, &start, &rule)? {
+                return Ok(report);
+            }
         }
         return Ok(GuardReport {
             text,
@@ -34042,9 +34051,21 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         }
     };
     let cwd = Some(start.as_path());
-    if let Some(rule) = static_guard_in(line, cwd) {
-        return Some(rule);
+    let static_rule = static_guard_in(line, cwd);
+    if static_rule
+        .as_ref()
+        .is_some_and(|rule| rule.verdict == "deny")
+    {
+        return static_rule;
     }
+    match tcb_policy_verdict_in(line, cwd) {
+        Some(rule) if rule.verdict == "deny" => Some(rule),
+        policy => static_rule.or(policy),
+    }
+}
+
+/// The external law can refuse a command even when a local rule asks for consent.
+fn tcb_policy_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     let Some(t) = tcb_line_in(line, cwd) else {
         return policyd_required().then(|| Rule {
             pattern: "ljos-policyd".into(),
@@ -34543,48 +34564,48 @@ pub fn static_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if line.is_empty() {
         return None;
     }
-    if let Some(rule) = sitting_gate::guard_line(line, cwd) {
-        return Some(rule);
+    let mut ask = None;
+    macro_rules! judge {
+        ($rule:expr) => {
+            if let Some(rule) = $rule {
+                if rule.verdict == "deny" {
+                    return Some(rule);
+                }
+                if ask.is_none() {
+                    ask = Some(rule);
+                }
+            }
+        };
     }
+    judge!(sitting_gate::guard_line(line, cwd));
     if bookkeep::guard_suspended() {
-        return None;
+        return ask;
     }
-    if let Some(rule) = seat_guard_in(line, cwd) {
-        return Some(rule);
-    }
-    if let Some(rule) = raw_tracker_write(line) {
-        return Some(rule);
-    }
-    if let Some(rule) = destructive_delete(line) {
-        return Some(rule);
-    }
-    if let Some(rule) = cloud::guard_line(line, cwd) {
-        return Some(rule);
-    }
-    if let Some(rule) = user_rules::guard_line(line) {
-        return Some(rule);
-    }
+    judge!(seat_guard_in(line, cwd));
+    judge!(raw_tracker_write(line));
+    judge!(destructive_delete(line));
+    judge!(cloud::guard_line(line, cwd));
+    judge!(user_rules::guard_line(line));
     let denies: Vec<Rule> = rules_cache_path()
         .map(|path| kept_rules(&path))
         .unwrap_or_default()
         .into_iter()
         .filter(|rule| rule.verdict == "deny")
         .collect();
-    if let Some(rule) = verdict_for(&denies, line) {
-        return Some(rule.clone());
-    }
-    if let Some(rule) = gates::command_gate(line, cwd) {
-        return Some(rule);
-    }
+    judge!(verdict_for(&denies, line).cloned());
+    judge!(gates::command_gate(line, cwd));
     // The push gate reads the checkout, the working directory when no
     // `cwd` is given as `command_gate` does, so a bare lease push is
     // judged by the branch it would replace.
     let here = cwd
         .map(Path::to_path_buf)
         .or_else(|| std::env::current_dir().ok());
-    gate_push(None, line, here.as_deref().and_then(Path::to_str))
-        .filter(|rule| matches!(rule.verdict.as_str(), "ask" | "deny"))
-        .map(as_static_rule)
+    judge!(
+        gate_push(None, line, here.as_deref().and_then(Path::to_str))
+            .filter(|rule| matches!(rule.verdict.as_str(), "ask" | "deny"))
+            .map(as_static_rule)
+    );
+    ask
 }
 
 /// `rm -rf` or `find -delete` aimed outside a temp directory. A build

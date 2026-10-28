@@ -560,3 +560,138 @@ fn the_person_at_a_terminal_is_not_refused() {
         not_refused(&text_of(&out), line);
     }
 }
+
+/// A local protected push can request the person's consent without an
+/// invented ballot; every request still names one command and remains unapproved.
+#[test]
+fn a_local_seat_records_consent_requests_only_for_ordinary_single_branch_pushes() {
+    let seat = Seat::new();
+    let pack = empty_pack();
+    let env = [
+        ("PACKSET_URL", pack.as_str()),
+        ("LJOS_UNSIGNED_BALLOTS", "allow"),
+    ];
+    let line = "git push origin ff433e7:main";
+    let idle = seat.policy(line, &env);
+    assert!(idle.contains("deny:"), "{idle}");
+    assert!(!idle.contains("ask:"), "{idle}");
+    assert!(idle.contains("holds no live sitting"), "{idle}");
+    seat.sit();
+    for line in [
+        line,
+        "git push origin main",
+        "git push origin HEAD:refs/heads/main",
+        "git push -u origin develop",
+    ] {
+        let said = seat.policy(line, &env);
+        assert!(said.contains("\nask:"), "{line}\n{said}");
+        assert!(!said.contains("\ndeny:"), "{line}\n{said}");
+        assert!(said.contains("no seat voted"), "{line}\n{said}");
+    }
+    let hooked = seat.hook_turn(line, &env);
+    assert!(hooked.contains("ljos approve "), "{hooked}");
+    assert!(hooked.contains("ljos_request_approval"), "{hooked}");
+    assert!(
+        hooked.contains("\"permissionDecision\":\"deny\""),
+        "{hooked}"
+    );
+    let requests: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(seat.run.join("ljos/approvals/requests.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(requests.as_array().unwrap().len(), 1);
+    assert_eq!(requests[0]["scope"]["command"], line);
+    assert_eq!(requests[0]["scope"]["session"], SESSION);
+    assert_eq!(requests[0]["approved"], false);
+    for line in [
+        "git push --force origin main",
+        "git push --force-with-lease origin main",
+        "git push origin +HEAD:main",
+        "git push origin :main",
+        "git push --delete origin main",
+        "git push --all origin",
+        "git push --mirror origin",
+        "git push origin main topic",
+        "git push origin main && git push --force origin develop",
+        "git commit -m x && git push origin main",
+        "git push origin refs/heads/*:refs/heads/*",
+    ] {
+        let said = seat.policy(line, &env);
+        assert!(said.contains("deny:"), "{line}\n{said}");
+        assert!(!said.contains("\nask:"), "{line}\n{said}");
+    }
+    seat.vote(&[("flint", "approve")]);
+    let short = seat.policy(line, &env);
+    assert!(short.contains("deny:"), "{short}");
+    assert!(short.contains("1 of the 2 seats"), "{short}");
+    seat.vote(&[("inky", "revise"), ("flint", "revise")]);
+    let revise = seat.policy(line, &env);
+    assert!(revise.contains("deny:"), "{revise}");
+    assert!(revise.contains("sends the work back"), "{revise}");
+    let unread = seat.policy(line, &[("LJOS_UNSIGNED_BALLOTS", "allow")]);
+    assert!(unread.contains("deny:"), "{unread}");
+    assert!(unread.contains("the roster is not readable"), "{unread}");
+}
+
+#[test]
+fn a_local_push_consent_request_never_masks_a_user_denial() {
+    let seat = Seat::new();
+    seat.sit();
+    let pack = empty_pack();
+    let env = [
+        ("PACKSET_URL", pack.as_str()),
+        ("LJOS_UNSIGNED_BALLOTS", "allow"),
+        ("LJOS_GUARD", "on"),
+    ];
+    let config = seat.home.join(".config/ljos");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("user-rules.json"),
+        serde_json::json!({"rules": [{
+            "id": "ur-deny-protected-push", "text": "A protected push is denied.",
+            "author": "owner", "reason": "The repository is read only.",
+            "pattern": "git push*", "verdict": "deny", "basis": "person",
+            "written_at": "2026-10-28T00:00:00Z"
+        }]})
+        .to_string(),
+    )
+    .unwrap();
+    let line = "git push origin main";
+    let said = seat.policy(line, &env);
+    assert!(said.contains("deny:"), "{said}");
+    assert!(said.contains("The repository is read only."), "{said}");
+    assert!(!said.contains("\nask:"), "{said}");
+    let hooked = seat.hook_turn(line, &env);
+    assert!(
+        hooked.contains("\"permissionDecision\":\"deny\""),
+        "{hooked}"
+    );
+    assert!(!hooked.contains("ljos approve "), "{hooked}");
+    assert!(!seat.run.join("ljos/approvals/requests.json").exists());
+}
+
+#[test]
+fn a_local_push_consent_request_never_masks_the_external_law() {
+    let seat = Seat::new();
+    seat.sit();
+    let pack = empty_pack();
+    let policy = seat.bin.join("ljos-policyd");
+    script(
+        &policy,
+        "#!/bin/sh\nprintf 'deny\tpolicy-denies-this-command\n'\nexit 2\n",
+    );
+    let env = [
+        ("PACKSET_URL", pack.as_str()),
+        ("LJOS_UNSIGNED_BALLOTS", "allow"),
+        ("LJOS_GUARD", "on"),
+    ];
+    let line = "git push origin main";
+    let hooked = seat.hook_turn(line, &env);
+    assert!(
+        hooked.contains("\"permissionDecision\":\"deny\""),
+        "{hooked}"
+    );
+    assert!(hooked.contains("policy-denies-this-command"), "{hooked}");
+    assert!(!hooked.contains("ljos approve "), "{hooked}");
+    assert!(!seat.run.join("ljos/approvals/requests.json").exists());
+}

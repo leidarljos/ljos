@@ -49,10 +49,10 @@ fn runner() -> bool {
 /// The refusal for `line` run from `cwd` under a runner: a git call that
 /// writes history while this conversation holds no live sitting, or a
 /// push that may land on a branch [`crate::gates::consensus_push`] names
-/// while the sitting's ticket does not clear it. A cloud seat whose push
-/// the allowlist already accepts, and that is not a force or a delete,
-/// asks instead when the only miss is a seat ballot: the hook then writes
-/// a one-use request for that exact command. `None` when no runner is
+/// while the sitting's ticket does not clear it. An ordinary local push
+/// to one explicit branch asks when the only miss is a seat ballot. A cloud
+/// push also requires the allowlist to accept its repository and branch.
+/// The hook writes a one-use request for that exact command. `None` when no runner is
 /// above this process, when the line writes no history, or when both
 /// hold. An unattributed call, one whose payload and environment name
 /// no conversation, is not checked for a commit, a merge, or a push onto
@@ -129,12 +129,17 @@ pub fn guard_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         if let Err(why) = crate::protected_push_stands(&issue, cfg.quorum) {
             let shown = format!("may land on {dest}");
             let detail = seats_wait(&shown, &cfg.branches, &issue, &why);
-            // A cloud tracker's ballots never arrive from another seat. The
-            // person can grant this one command. Anything else stays a refusal.
+            // The person can consent to an ordinary push whose only missing
+            // evidence is a seat ballot. A cloud push also obeys its allowlist.
             // A call that names no conversation has already returned above.
             if only_missing_seat_vote(&why)
-                && plain_branch(&dest)
-                    .is_some_and(|branch| cloud_push_clear(line, cwd, push, branch))
+                && plain_branch(&dest).is_some_and(|branch| {
+                    if crate::cloud::cloud_seat() {
+                        cloud_push_clear(line, cwd, push, branch)
+                    } else {
+                        calls.len() == 1 && local_push_clear(push, branch)
+                    }
+                })
             {
                 return Some(asked(&detail));
             }
@@ -348,6 +353,47 @@ fn only_missing_seat_vote(why: &str) -> bool {
 fn plain_branch(dest: &str) -> Option<&str> {
     let name = dest.strip_prefix('`')?.strip_suffix('`')?;
     (!name.is_empty() && !name.contains([' ', '\t', '\n', '`'])).then_some(name)
+}
+
+/// An ordinary push with one explicit destination. Options that change
+/// ref selection, hooks or force semantics do not qualify for this consent path.
+fn local_push_clear(push: &GitCall, branch: &str) -> bool {
+    let mut positional = Vec::new();
+    for arg in &push.args {
+        if arg.starts_with('-') {
+            if !matches!(
+                arg.as_str(),
+                "-u" | "--set-upstream"
+                    | "-v"
+                    | "--verbose"
+                    | "-q"
+                    | "--quiet"
+                    | "--porcelain"
+                    | "--progress"
+                    | "--atomic"
+            ) {
+                return false;
+            }
+        } else {
+            positional.push(arg.as_str());
+        }
+    }
+    let [_, spec] = positional.as_slice() else {
+        return false;
+    };
+    if spec.starts_with('+') || spec.contains('*') {
+        return false;
+    }
+    let destination = match spec.split_once(':') {
+        Some((source, destination)) if !source.is_empty() => destination,
+        Some(_) => return false,
+        None => spec,
+    };
+    destination
+        .strip_prefix("refs/heads/")
+        .or_else(|| destination.strip_prefix("heads/"))
+        .unwrap_or(destination)
+        == branch
 }
 
 /// The cloud rules would let this push through. The seat is a cloud seat,

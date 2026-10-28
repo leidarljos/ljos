@@ -96,6 +96,37 @@ impl PartialEq for Scope {
 impl Eq for Scope {}
 
 impl Scope {
+    fn checked_command(line: &str, cwd: &Path, session: &str, rule: &Rule) -> Result<Self> {
+        if session.is_empty() {
+            bail!("command approval needs a conversation id");
+        }
+        Ok(Self {
+            session: session.into(),
+            seat: crate::seat_name(),
+            shape: "CheckedCommand".into(),
+            tool: "shell-command".into(),
+            cwd: fs::canonicalize(cwd)?,
+            command: line.into(),
+            pattern: rule.pattern.clone(),
+            reason: rule.reason.clone(),
+        })
+    }
+
+    fn permits(&self, retry: &Self) -> bool {
+        if self == retry {
+            return true;
+        }
+        self.shape == "CheckedCommand"
+            && self.tool == "shell-command"
+            && !self.session.is_empty()
+            && self.session == retry.session
+            && self.cwd == retry.cwd
+            && self.command == retry.command
+            && self.pattern == retry.pattern
+            && self.reason == retry.reason
+            && matches!(retry.tool.as_str(), "Bash" | "Shell" | "exec_command" | "functions.exec_command")
+    }
+
     fn from_hook(input: &str, call: &HookCall, rule: &Rule) -> Result<Self> {
         let value: Value = serde_json::from_str(input)?;
         // A missing conversation id still records the request. The empty
@@ -233,16 +264,14 @@ impl Store {
     }
 
     fn request_or_consume(&mut self, scope: Scope, now: u64) -> Result<Option<String>> {
+        if self.consume_approved(&scope)? {
+            return Ok(None);
+        }
         if let Some(index) = self
             .requests
             .iter()
-            .position(|request| request.scope == scope)
+            .position(|request| request.scope.permits(&scope))
         {
-            if self.requests[index].approved {
-                self.requests.remove(index);
-                self.save()?;
-                return Ok(None);
-            }
             return Ok(Some(self.requests[index].id.clone()));
         }
         if self.requests.len() >= MAX_REQUESTS {
@@ -257,6 +286,22 @@ impl Store {
         });
         self.save()?;
         Ok(Some(id))
+    }
+
+    fn consume_approved(&mut self, scope: &Scope) -> Result<bool> {
+        let Some(index) = self.requests.iter().position(|request| request.approved && request.scope.permits(scope)) else {
+            return Ok(false);
+        };
+        self.requests.remove(index);
+        self.save()?;
+        Ok(true)
+    }
+
+    fn request_or_peek(&mut self, scope: Scope, now: u64) -> Result<Option<String>> {
+        if let Some(request) = self.requests.iter().find(|request| request.scope == scope) {
+            return Ok((!request.approved).then(|| request.id.clone()));
+        }
+        self.request_or_consume(scope, now)
     }
 
     fn allocate_id(&self, random: &mut impl Read) -> Result<String> {
@@ -524,6 +569,44 @@ pub fn approve(id: &str) -> Result<String> {
     Store::open(&root(), now()?)?.approve(id)
 }
 
+/// A command check exposes its pending request without spending an accepted grant.
+/// The shell hook consumes the grant only for the command's actual execution.
+pub(crate) fn checked_report(line: &str, cwd: &Path, rule: &Rule) -> Result<Option<crate::GuardReport>> {
+    let Some(session) = crate::conversation_id().filter(|id| !id.is_empty()) else {
+        return Ok(None);
+    };
+    checked_report_at(line, cwd, &session, rule, &root(), now()?).map(Some)
+}
+
+fn checked_report_at(
+    line: &str,
+    cwd: &Path,
+    session: &str,
+    rule: &Rule,
+    root: &Path,
+    now: u64,
+) -> Result<crate::GuardReport> {
+    if rule.verdict != "ask" {
+        bail!("only an ask verdict accepts command consent");
+    }
+    let scope = Scope::checked_command(line, cwd, session, rule)?;
+    let pending = Store::open(root, now)?.request_or_peek(scope, now)?;
+    let Some(id) = pending else {
+        return Ok(crate::GuardReport {
+            text: format!("{line}\nallow: consent recorded for one matching shell attempt\n"),
+            verdict: "allow".into(),
+        });
+    };
+    let tag = request_tag(&id).unwrap_or(id);
+    Ok(crate::GuardReport {
+        text: format!(
+            "{line}\nask: {} (rule: {})\nCall ljos_request_approval with id {tag}, or reply `approve {tag}` in this conversation. Directory: {}. The grant permits one matching shell attempt and expires fifteen minutes after the request.\n",
+            rule.reason, rule.pattern, cwd.display()
+        ),
+        verdict: "ask".into(),
+    })
+}
+
 /// Ask the connected client's user to consent to an existing request.
 /// Tool arguments identify the request; only the client's form response grants it.
 pub async fn request_approval(id: &str, peer: &rmcp::Peer<rmcp::RoleServer>) -> Result<String> {
@@ -634,7 +717,21 @@ fn hook_output_at(
     // A runner that shows a prompt keeps the ask. Codex and Cursor
     // `preToolUse` do not: an ask is a failed hook there and the tool
     // runs, so the grant below is rendered as a deny.
-    if call.event != "PreToolUse" || call.shape.asks() {
+    if call.event != "PreToolUse" {
+        return hook_output_ruled(call, context, verdict);
+    }
+    if call.shape.asks() {
+        let consumed = (|| -> Result<bool> {
+            if !root.exists() {
+                return Ok(false);
+            }
+            let scope = Scope::from_hook(input, call, rule)?;
+            Store::open(root, now?)?.consume_approved(&scope)
+        })().unwrap_or(false);
+        if consumed {
+            *granted = true;
+            return hook_output_ruled(call, context, None);
+        }
         return hook_output_ruled(call, context, verdict);
     }
     let result = (|| -> Result<Option<(bool, String)>> {
@@ -713,8 +810,110 @@ mod tests {
         }
     }
 
+    #[test]
+    fn checked_command_peeks_without_spending_the_execution_grant() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("approvals");
+        let line = "git push origin main";
+        let report = checked_report_at(line, temp.path(), "conversation-1", &ask(), &root, 100).unwrap();
+        assert_eq!(report.verdict, "ask");
+        let id = Store::open(&root, 101).unwrap().requests[0].id.clone();
+        assert!(report.text.contains(&request_tag(&id).unwrap()));
+        let consent = approve_from_prompt_at(&format!("approve {id}"), &one("conversation-1"), &root, Ok(102)).unwrap();
+        assert!(consent.contains("Approved once"));
+        for time in [103, 104] {
+            let report = checked_report_at(line, temp.path(), "conversation-1", &ask(), &root, time).unwrap();
+            assert_eq!(report.verdict, "allow");
+            let store = Store::open(&root, time).unwrap();
+            assert_eq!(store.requests.len(), 1);
+            assert!(store.requests[0].approved);
+        }
+        assert!(output(&input(temp.path()), &ask(), &root, 105).is_empty());
+        assert!(Store::open(&root, 106).unwrap().requests.is_empty());
+        let report = checked_report_at(line, temp.path(), "conversation-1", &ask(), &root, 107).unwrap();
+        assert_eq!(report.verdict, "ask");
+        assert_ne!(Store::open(&root, 108).unwrap().requests[0].id, id);
+    }
+
+    #[test]
+    fn checked_command_grants_match_only_the_named_shell_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("approvals");
+        let other = tempfile::tempdir().unwrap();
+        let line = "git push origin main";
+        checked_report_at(line, temp.path(), "conversation-1", &ask(), &root, 100).unwrap();
+        let id = Store::open(&root, 101).unwrap().requests[0].id.clone();
+        Store::open(&root, 102).unwrap().approve(&id).unwrap();
+        for (pointer, replacement) in [
+            ("/tool_input/command", "git push fork main"),
+            ("/cwd", other.path().to_str().unwrap()),
+            ("/session_id", "conversation-2"),
+            ("/tool_name", "terminal"),
+        ] {
+            let mut changed: Value = serde_json::from_str(&input(temp.path())).unwrap();
+            *changed.pointer_mut(pointer).unwrap() = replacement.into();
+            assert_ne!(request_id(&output(&changed.to_string(), &ask(), &root, 103)), request_tag(&id).unwrap());
+        }
+        for rule in [Rule {pattern: "git *".into(), ..ask()}, Rule {reason: "Another requirement.".into(), ..ask()}] {
+            assert_ne!(request_id(&output(&input(temp.path()), &rule, &root, 104)), request_tag(&id).unwrap());
+        }
+        assert!(output(&input(temp.path()), &ask(), &root, 105).is_empty());
+    }
+
+    #[test]
+    fn checked_command_deny_expiry_and_missing_identity_stay_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("approvals");
+        let line = "git push origin main";
+        checked_report_at(line, temp.path(), "conversation-1", &ask(), &root, 100).unwrap();
+        let id = Store::open(&root, 101).unwrap().requests[0].id.clone();
+        Store::open(&root, 102).unwrap().approve(&id).unwrap();
+        let deny = Rule {verdict: "deny".into(), ..ask()};
+        assert!(checked_report_at(line, temp.path(), "conversation-1", &deny, &root, 103).is_err());
+        assert!(checked_report_at(line, temp.path(), "", &ask(), &root, 104).is_err());
+        assert!(!output(&input(temp.path()), &deny, &root, 105).is_empty());
+        assert!(Store::open(&root, 106).unwrap().requests[0].approved);
+        let expired = checked_report_at(line, temp.path(), "conversation-1", &ask(), &root, 100 + TTL_SECONDS).unwrap();
+        assert_eq!(expired.verdict, "ask");
+        assert_ne!(Store::open(&root, 100 + TTL_SECONDS).unwrap().requests[0].id, id);
+        assert!(!output(&input(temp.path()), &ask(), &root, 101 + TTL_SECONDS).is_empty());
+    }
+
     fn one(id: &str) -> Vec<String> {
         vec![id.to_string()]
+    }
+
+    #[test]
+    fn checked_command_grant_is_not_hidden_by_an_unapproved_hook_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("approvals");
+        let body = input(temp.path());
+        request_id(&output(&body, &ask(), &root, 100));
+        checked_report_at("git push origin main", temp.path(), "conversation-1", &ask(), &root, 101).unwrap();
+        let id = Store::open(&root, 102).unwrap().requests.iter().find(|request| request.scope.shape == "CheckedCommand").unwrap().id.clone();
+        Store::open(&root, 103).unwrap().approve(&id).unwrap();
+        assert!(output(&body, &ask(), &root, 104).is_empty());
+        let store = Store::open(&root, 105).unwrap();
+        assert_eq!(store.requests.len(), 1);
+        assert!(!store.requests[0].approved);
+        drop(store);
+        assert!(!output(&body, &ask(), &root, 106).is_empty());
+    }
+
+    #[test]
+    fn checked_command_consent_is_consumed_by_a_native_ask_hook() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("approvals");
+        checked_report_at("git push origin main", temp.path(), "conversation-1", &ask(), &root, 100).unwrap();
+        let id = Store::open(&root, 101).unwrap().requests[0].id.clone();
+        Store::open(&root, 102).unwrap().approve(&id).unwrap();
+        let mut body: Value = serde_json::from_str(&input(temp.path())).unwrap();
+        body.as_object_mut().unwrap().remove("turn_id");
+        assert!(output(&body.to_string(), &ask(), &root, 103).is_empty());
+        assert!(Store::open(&root, 104).unwrap().requests.is_empty());
+        let retry: Value = serde_json::from_str(&output(&body.to_string(), &ask(), &root, 105)).unwrap();
+        assert_eq!(retry["hookSpecificOutput"]["permissionDecision"], "ask");
+        assert!(Store::open(&root, 106).unwrap().requests.is_empty());
     }
 
     fn input(cwd: &Path) -> String {

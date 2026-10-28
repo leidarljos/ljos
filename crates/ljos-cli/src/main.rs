@@ -2838,7 +2838,7 @@ fn run_command() -> Result<()> {
             };
             let tcb_rule = if unresolved.is_some() {
                 unresolved
-            } else if let Some(rule) = fast {
+            } else if let Some(rule) = fast.filter(|rule| rule.verdict == "deny") {
                 Some(rule)
             } else if on_tool && !argv.is_empty() {
                 ljos_cli::tcb_verdict_in(&call.cue, dir)
