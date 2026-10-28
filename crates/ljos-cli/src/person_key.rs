@@ -291,13 +291,17 @@ fn braces(word: &str) -> Vec<String> {
     vec![word.to_string()]
 }
 
-/// The words of one command as the program reads them, each brace
-/// expansion made. For `rm` and `mv` each option is spelled out whole,
-/// as `--name` or `--name=value`: a long option by the one name it is a
-/// prefix of, and each letter of a short group by its long name, a
-/// value taken from the rest of the group or the next word.
+/// The words of one command as the program reads them: wrappers such as
+/// `env`, `nice`, `timeout` and `xargs` off, and each brace expansion
+/// made. For `rm` and `mv` each option is spelled out whole, as `--name`
+/// or `--name=value`: a long option by the one name it is a prefix of,
+/// and each letter of a short group by its long name, a value taken
+/// from the rest of the group or the next word.
 fn as_run(words: &[String]) -> Vec<String> {
-    let words: Vec<String> = words.iter().flat_map(|w| braces(w)).collect();
+    let words: Vec<String> = words[crate::prefix_end(words).0..]
+        .iter()
+        .flat_map(|w| braces(w))
+        .collect();
     let cmd = words
         .first()
         .map_or("", |w| w.rsplit('/').next().unwrap_or(w));
@@ -405,7 +409,7 @@ fn uprooted(words: &[String]) -> Vec<String> {
             let deletes = rest.iter().enumerate().any(|(i, w)| {
                 *w == "-delete"
                     || (matches!(*w, "-exec" | "-execdir" | "-ok" | "-okdir")
-                        && rest.get(i + 1).is_some_and(|p| {
+                        && as_run(&words[i + 2..]).first().is_some_and(|p| {
                             UPROOTERS.contains(&p.rsplit('/').next().unwrap_or(p))
                         }))
             });

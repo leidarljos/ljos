@@ -52327,6 +52327,21 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         ]);
     }
 
+    /// A `find` that runs `rm` or `mv` through a wrapper still removes
+    /// or moves what it finds.
+    #[test]
+    fn a_wrapped_find_exec_uproots_above_the_person_key() {
+        assert_uprooted(&[
+            "find ~ -exec env rm -rf {} +".into(),
+            "find ~ -exec env -i rm -rf {} +".into(),
+            "find ~ -exec nice -n 5 rm -rf {} +".into(),
+            "find ~ -exec nohup rm -rf {} +".into(),
+            "find ~ -exec timeout 5 rm -rf {} +".into(),
+            "find ~ -exec xargs -0 rm -rf {} +".into(),
+            "find ~ -execdir env nice /bin/mv {} /tmp/x ;".into(),
+        ]);
+    }
+
     /// Removing an ordinary project directory, a path under `/tmp` or
     /// one under the home beside the key still passes, however its
     /// options are spelled.
@@ -52347,6 +52362,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "rm --recursive ~/scratch/x",
             "mv -t/tmp ~/scratch/x",
             "find ~/scratch/x -delete",
+            "find ~/scratch/x -exec env rm -rf {} +",
+            "find ~ -name x -exec env cat {} +",
             "rm -rf {~,/tmp}/x",
             "rm -rf ~/scratch/{x,y}",
             "rm -rf \"${HOME}/scratch/x\"",

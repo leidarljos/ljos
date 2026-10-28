@@ -1,0 +1,1 @@
+The seat guard takes wrappers such as `env`, `nice`, `nohup`, `timeout` and `xargs` off the command a `find -exec` runs. A `find ~ -exec env rm -rf {} +` is now refused like the same `find` that runs `rm` directly.
