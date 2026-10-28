@@ -243,17 +243,66 @@ const OPTIONS: &[Options] = &[
     ),
 ];
 
-/// The words of one command as the program reads them. For `rm` and
-/// `mv` each option is spelled out whole, as `--name` or `--name=value`:
-/// a long option by the one name it is a prefix of, and each letter of
-/// a short group by its long name, a value taken from the rest of the
-/// group or the next word.
+/// The most words [`braces`] makes of one.
+const MAX_BRACED: usize = 64;
+
+/// `word` with its brace expansions made, as the shell makes them before
+/// any other: `~/{.config,x}` is `~/.config` and `~/x`. A `${` is a
+/// variable, and a word with a blank in it was quoted, so both stay.
+fn braces(word: &str) -> Vec<String> {
+    let chars: Vec<char> = word.chars().collect();
+    if word.contains(char::is_whitespace) {
+        return vec![word.to_string()];
+    }
+    for open in (0..chars.len()).filter(|&i| chars[i] == '{' && (i == 0 || chars[i - 1] != '$')) {
+        let mut depth = 0;
+        let mut cuts = vec![open];
+        for (j, c) in chars.iter().enumerate().skip(open) {
+            match c {
+                '{' => depth += 1,
+                ',' if depth == 1 => cuts.push(j),
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        cuts.push(j);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let close = cuts[cuts.len() - 1];
+        if depth != 0 || cuts.len() < 3 {
+            continue;
+        }
+        let pre: String = chars[..open].iter().collect();
+        let post: String = chars[close + 1..].iter().collect();
+        let mut out = Vec::new();
+        for pair in cuts.windows(2) {
+            let alt: String = chars[pair[0] + 1..pair[1]].iter().collect();
+            out.extend(braces(&format!("{pre}{alt}{post}")));
+            if out.len() >= MAX_BRACED {
+                out.truncate(MAX_BRACED);
+                break;
+            }
+        }
+        return out;
+    }
+    vec![word.to_string()]
+}
+
+/// The words of one command as the program reads them, each brace
+/// expansion made. For `rm` and `mv` each option is spelled out whole,
+/// as `--name` or `--name=value`: a long option by the one name it is a
+/// prefix of, and each letter of a short group by its long name, a
+/// value taken from the rest of the group or the next word.
 fn as_run(words: &[String]) -> Vec<String> {
+    let words: Vec<String> = words.iter().flat_map(|w| braces(w)).collect();
     let cmd = words
         .first()
         .map_or("", |w| w.rsplit('/').next().unwrap_or(w));
     let Some((_, long, short)) = OPTIONS.iter().find(|(n, _, _)| *n == cmd) else {
-        return words.to_vec();
+        return words;
     };
     let mut out = words[..1].to_vec();
     let mut it = words.iter().skip(1);

@@ -52314,6 +52314,19 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         ]);
     }
 
+    /// The shell makes brace expansions before the tilde and the rest.
+    #[test]
+    fn a_brace_expansion_uproots_above_the_person_key() {
+        assert_uprooted(&[
+            "rm -rf ~/{.config,x}".into(),
+            "rm -rf ~/{x,{y,.config}}".into(),
+            "rm -rf {~,/tmp}/".into(),
+            "rm -rf {~,/tmp}/.config".into(),
+            "mv {~,/tmp/y} /tmp/x".into(),
+            "find {/tmp/x,~} -delete".into(),
+        ]);
+    }
+
     /// Removing an ordinary project directory, a path under `/tmp` or
     /// one under the home beside the key still passes, however its
     /// options are spelled.
@@ -52334,6 +52347,9 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "rm --recursive ~/scratch/x",
             "mv -t/tmp ~/scratch/x",
             "find ~/scratch/x -delete",
+            "rm -rf {~,/tmp}/x",
+            "rm -rf ~/scratch/{x,y}",
+            "rm -rf \"${HOME}/scratch/x\"",
         ] {
             assert!(
                 uprooted_by(line).is_none(),
