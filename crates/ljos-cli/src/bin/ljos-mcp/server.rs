@@ -3599,6 +3599,7 @@ impl ServerHandler for LjosServer {
                 ));
             }
         };
+        let seat_was_named = seat_text.is_some();
         let client = context
             .peer
             .peer_info()
@@ -3609,11 +3610,15 @@ impl ServerHandler for LjosServer {
         })
         .await
         .map_err(|e| McpError::internal_error(format!("seat: {e}"), None))?;
-        // The guard, the approval form and the reading tools act under no
-        // seat, so a seat this tracker does not know never stops them.
+        // An unseated person can use the approval form. An explicit seat
+        // must resolve before the form is shown; its refusal is not anonymous access.
+        // The guard and reading tools retain their seat-free fallback.
         let seat = match resolved {
             Ok(seat) => Some(seat),
-            Err(e) if runs_without_seat(&name) => {
+            Err(e)
+                if runs_without_seat(&name)
+                    && (name != "ljos_request_approval" || !seat_was_named) =>
+            {
                 ljos_cli::bookkeep::log_line(&format!("{name}: ran without a seat: {e}"));
                 None
             }
