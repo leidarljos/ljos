@@ -1,0 +1,1 @@
+The seat guard reads a tree call written without parentheses, such as Ruby's `FileUtils.rm_rf Dir.home` or Perl's `rmtree $ENV{HOME}`. It also reads one with a blank before them, such as `rmtree ($ENV{HOME})`. It follows the names code gives a tree call, as in `from shutil import rmtree as r` or `r = shutil.rmtree`. These calls on a tree above the person key were allowed before.

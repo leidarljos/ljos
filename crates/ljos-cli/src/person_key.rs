@@ -664,6 +664,7 @@ pub(crate) fn code_uproots(words: &[String], line: &str, cwd: Option<&Path>) -> 
         }
         false
     };
+    let calls = tree_call_names(code);
     let chars: Vec<char> = code.chars().collect();
     let mut i = 0;
     while i < chars.len() {
@@ -671,18 +672,101 @@ pub(crate) fn code_uproots(words: &[String], line: &str, cwd: Option<&Path>) -> 
         while i < chars.len() && ident(chars[i]) {
             i += 1;
         }
-        let name: String = chars[start..i].iter().collect();
-        if i == start || chars.get(i) != Some(&'(') || !listed(TREE_CALLS, &name) {
+        if i == start {
             i += 1;
             continue;
         }
-        let end = bracket_end(&chars, i, true).max(i + 1);
-        let arg: String = chars[i + 1..end].iter().collect();
+        let name: String = chars[start..i].iter().collect();
+        let Some((from, end)) = calls
+            .contains(&name)
+            .then(|| call_arg(&chars, start, i))
+            .flatten()
+        else {
+            continue;
+        };
+        let arg: String = chars[from..end].iter().collect();
         if built(&arg, &vars).map_or_else(named_anywhere, |path| hits(&path)) {
             return Some(format!("{name}({})", arg.trim()));
         }
     }
     None
+}
+
+/// [`TREE_CALLS`] and the names code gives them:
+/// `from shutil import rmtree as r`, `const { rmSync: r } = require('fs')`
+/// and `r = shutil.rmtree`.
+fn tree_call_names(code: &str) -> Vec<String> {
+    let mut names: Vec<String> = TREE_CALLS.split_whitespace().map(str::to_string).collect();
+    for stmt in code.split(['\n', ';']) {
+        let mut tokens: Vec<String> = Vec::new();
+        let mut joins = false;
+        for c in stmt.chars() {
+            match tokens.last_mut() {
+                _ if c.is_whitespace() => {}
+                Some(t) if joins && ident(c) => t.push(c),
+                _ => tokens.push(c.to_string()),
+            }
+            joins = ident(c);
+        }
+        let is_name = |t: &str| t.chars().all(ident);
+        let mut found: Vec<String> = tokens
+            .windows(3)
+            .filter(|t| names.contains(&t[0]) && (t[1] == "as" || t[1] == ":") && is_name(&t[2]))
+            .map(|t| t[2].clone())
+            .collect();
+        let bare = match tokens.first().map(String::as_str) {
+            Some("const" | "let" | "var" | "my" | "our") => &tokens[1..],
+            _ => &tokens[..],
+        };
+        if let [alias, eq, .., last] = bare {
+            if eq == "=" && is_name(alias) && names.contains(last) && !stmt.contains('(') {
+                found.push(alias.clone());
+            }
+        }
+        names.extend(found);
+    }
+    names
+}
+
+/// Where the first argument of a call to the name at `chars[start..at]`
+/// starts and ends. It is inside the call's parentheses, with blanks
+/// before them allowed. A call without them, as Ruby and Perl allow,
+/// runs to the first comma or the end of the statement. Only a name that
+/// opens a statement or follows a `.` or `::` is read as such a call.
+fn call_arg(chars: &[char], start: usize, at: usize) -> Option<(usize, usize)> {
+    let blank = |c: &char| *c == ' ' || *c == '\t';
+    let from = at + chars[at..].iter().take_while(|c| blank(c)).count();
+    if chars.get(from) == Some(&'(') {
+        return Some((from + 1, bracket_end(chars, from, true).max(from + 1)));
+    }
+    let before = chars[..start].iter().rev().find(|c| !blank(c));
+    let opens = before.is_none_or(|c| matches!(c, ';' | '\n' | '{' | '}' | '.' | ':' | '&' | '|'));
+    let first = *chars.get(from)?;
+    let word: String = chars[from..].iter().take_while(|c| ident(**c)).collect();
+    if !opens
+        || from == at
+        || word == "as"
+        || !(ident(first) || matches!(first, '\'' | '"' | '@' | '~' | '['))
+    {
+        return None;
+    }
+    let mut depth = 0;
+    let mut i = from;
+    while i < chars.len() {
+        match chars[i] {
+            '\'' | '"' | '`' => {
+                i = quoted(chars, i).1;
+                continue;
+            }
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth == 0 => break,
+            ')' | ']' | '}' => depth -= 1,
+            ',' | ';' | '\n' if depth == 0 => break,
+            _ => {}
+        }
+        i += 1;
+    }
+    Some((from, i))
 }
 
 /// Ask the person at the controlling terminal for the passphrase, to run

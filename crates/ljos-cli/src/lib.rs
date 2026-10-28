@@ -52428,6 +52428,28 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         ]);
     }
 
+    /// Ruby and Perl call a function without parentheses, any language
+    /// allows a blank before them, and an import can rename the call.
+    #[test]
+    fn a_tree_call_in_another_spelling_uproots_above_the_person_key() {
+        assert_uprooted(&[
+            r#"ruby -e 'require "fileutils"; FileUtils.rm_rf Dir.home'"#.into(),
+            r#"ruby -rfileutils -e 'FileUtils.rm_r ENV["HOME"], force: true'"#.into(),
+            "perl -e 'use File::Path; rmtree $ENV{HOME}'".into(),
+            "perl -MFile::Path=remove_tree -e 'remove_tree $ENV{HOME} or die'".into(),
+            "perl -e 'use File::Path; rmtree ($ENV{HOME})'".into(),
+            "python3 -c 'import shutil, os; shutil.rmtree (os.path.expanduser(\"~\"))'".into(),
+            "python3 -c 'from shutil import rmtree as r; import os; r(os.path.expanduser(\"~\"))'"
+                .into(),
+            "python3 -c 'import shutil as s, os; s.rmtree(os.path.expanduser(\"~\"))'".into(),
+            "python3 -c 'import shutil, os; r = shutil.rmtree; r(os.environ[\"HOME\"])'".into(),
+            "perl -e 'use File::Path qw(remove_tree); remove_tree $ENV{HOME}'".into(),
+            "node -e \"const { rmSync: r } = require('fs'); r(require('os').homedir(), \
+             {recursive: true})\""
+                .into(),
+        ]);
+    }
+
     /// A `find` that runs `rm` or `mv` through a wrapper still removes
     /// or moves what it finds.
     #[test]
@@ -52470,6 +52492,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "sh -c 'rm -rf \"$1\"' _ build",
             "python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1])' /tmp/x",
             "python3 -c 'import sys; print(sys.argv[1])' ~",
+            r#"ruby -e 'require "fileutils"; FileUtils.rm_rf "build"'"#,
+            "perl -e 'use File::Path; rmtree \"$ENV{HOME}/scratch/x\"'",
+            "python3 -c 'from shutil import rmtree as r; r(\"/tmp/x\")'",
+            "python3 -c 'import os; print(\"move\", os.path.expanduser(\"~\"))'",
             "rm -rf build/*",
             "rm -rf ~/scratch/*",
             "rm -rf {~,/tmp}/x",
