@@ -10,7 +10,6 @@ use std::os::fd::AsRawFd as _;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use anyhow::{bail, Context, Result};
-use zeroize::Zeroizing;
 
 /// The longest line read, in bytes. A longer one is refused.
 pub(crate) const MAX_LINE: usize = 1024;
@@ -23,13 +22,14 @@ const FATAL: &[libc::c_int] = &[libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc:
 /// the prompt is down.
 const STOPS: &[libc::c_int] = &[libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU];
 
-/// Bytes zeroed when dropped. The buffer is [`MAX_LINE`] long from the
-/// start, so a long line never moves it and leaves a copy behind.
-pub struct Secret(Zeroizing<Vec<u8>>);
+/// Bytes locked in memory, and zeroed when dropped. The buffer is
+/// [`MAX_LINE`] long from the start, so a long line never moves it and
+/// leaves a copy behind.
+pub struct Secret(crate::memlock::Locked);
 
 impl Secret {
     fn new() -> Self {
-        Self(Zeroizing::new(Vec::with_capacity(MAX_LINE)))
+        Self(crate::memlock::Locked::with_capacity(MAX_LINE))
     }
 
     #[must_use]
@@ -98,10 +98,9 @@ fn read_line(fd: libc::c_int) -> Result<Option<Secret>> {
         if byte == b'\n' || byte == b'\r' {
             return Ok(Some(line));
         }
-        if line.0.len() >= MAX_LINE {
+        if !line.0.push(byte) {
             bail!("the line is longer than {MAX_LINE} bytes");
         }
-        line.0.push(byte);
     }
 }
 

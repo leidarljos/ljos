@@ -39,6 +39,7 @@ mod kept_prompt;
 pub mod legacy_pref;
 pub mod mail;
 pub mod mailbox;
+mod memlock;
 pub mod memories;
 pub mod note_queue;
 pub mod pack_copy;

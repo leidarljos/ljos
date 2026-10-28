@@ -662,8 +662,8 @@ pub fn hash(pass: &[u8], pepper: &[u8]) -> Result<String> {
         .map_err(|e| anyhow::anyhow!("person-key: {e}"))?;
     let argon = Argon2::new_with_secret(pepper, Algorithm::Argon2id, Version::V0x13, params)
         .map_err(|e| anyhow::anyhow!("person-key: {e}"))?;
-    let mut out = Zeroizing::new([0u8; Params::DEFAULT_OUTPUT_LEN]);
-    derive(&argon, pass, &bytes, &mut out[..])?;
+    let mut out = crate::memlock::Locked::zeroed(Params::DEFAULT_OUTPUT_LEN);
+    derive(&argon, pass, &bytes, &mut out)?;
     let phc = PasswordHash {
         algorithm: Algorithm::Argon2id.ident(),
         version: Some(Version::V0x13.into()),
@@ -703,8 +703,8 @@ pub fn parse(phc: &str) -> Result<PasswordHash<'_>> {
 }
 
 /// Whether `pass` is the passphrase `phc` was made from with `pepper`.
-/// The comparison is the hash crate's, in constant time. A hash that does
-/// not parse matches nothing.
+/// The output is derived into locked memory and compared there, in
+/// constant time. A hash that does not parse matches nothing.
 #[must_use]
 pub fn verify(pass: &[u8], phc: &str, pepper: &[u8]) -> bool {
     let Ok(parsed) = parse(phc) else {
@@ -726,8 +726,16 @@ pub fn verify(pass: &[u8], phc: &str, pepper: &[u8]) -> bool {
     let Ok(argon) = Argon2::new_with_secret(pepper, Algorithm::Argon2id, version, params) else {
         return false;
     };
-    let mut out = Zeroizing::new(vec![0u8; want.len()]);
-    derive(&argon, pass, salt, &mut out).is_ok() && Output::new(&out).is_ok_and(|got| got == want)
+    let mut out = crate::memlock::Locked::zeroed(want.len());
+    derive(&argon, pass, salt, &mut out).is_ok() && same(&out, want.as_bytes())
+}
+
+/// Whether `a` and `b` are equal, in time that depends on their length
+/// alone. `Output` would copy the derived bytes into memory that is
+/// neither locked nor zeroed.
+fn same(a: &[u8], b: &[u8]) -> bool {
+    let diff = a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y));
+    a.len() == b.len() && std::hint::black_box(diff) == 0
 }
 
 /// Keep the hash of `pass` at `path`, under a fresh pepper written
