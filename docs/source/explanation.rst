@@ -391,10 +391,17 @@ help against code running as the same Unix user, a runner included:
 that code can read both files and guess offline, slowed only by the
 cost of each argon2id call and the length of the passphrase. The seat
 guard refuses a tool call that writes, moves or changes the mode of
-either file, their directory or ``~/.config``, but it does not refuse
-reading them, and it does not see a program that never goes through a
-tool call. A hash from an earlier ljos is below that cost and no longer
-reads as a key; run ``ljos person-key set`` again.
+either file, their directory or ``~/.config``. It also refuses a
+recursive delete or move of any directory above them, such as
+``rm -rf ~``, ``find ~ -delete`` or ``shutil.rmtree`` of the home in
+Python, Perl, Ruby or Node code it is shown. It does not refuse reading
+them, and it does not see a program that never goes through a tool
+call. ljos opens the key directory once and reaches the three files
+through that descriptor, refusing a symlink in place of the directory
+or a file. The passphrase and the argon2id output are locked in memory
+while they live, where ``ulimit -l`` allows it, and zeroed before they
+are unlocked. A hash from an earlier ljos is below that cost and no
+longer reads as a key; run ``ljos person-key set`` again.
 A prompt event is not always the person: Codex sends one inside a
 subagent with the parent agent's brief as the prompt. A prompt whose
 payload names a subagent (``agent_id``), or a Codex thread other than the
