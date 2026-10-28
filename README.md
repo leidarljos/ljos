@@ -30,6 +30,25 @@ ljos prefer "Push a tag with git push origin TAG; --follow-tags skips lightweigh
 ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the release runbook."
 ```
 
+Manual installation is also available:
+
+```
+cargo binstall ljos packset                 # or: cargo install ljos packset
+ljos remember "Nothing is mined from chat."
+ljos search mined
+```
+
+Those three lines are the ones on the front page. The hit names the
+lesson and the same sentence. The next step hands that store to a runner
+you already use.
+
+```
+cargo binstall vissue-cli
+ljos onboard --harness claude               # MCP server, hooks and skill for Claude Code
+ljos prefer "Tag a release with git push origin TAG; --follow-tags leaves v-tags behind."
+ljos rule '*--force*' --verdict deny --why "Never force push."
+```
+
 The programs land in `~/.local/bin`, and the `export` line puts it on PATH
 in the shell you pasted into. When `~/.local/bin` is not on PATH, the
 installer also adds that line to `~/.profile` and `~/.bashrc`, and to
