@@ -902,6 +902,77 @@ fn a_session_that_cast_on_one_child_can_cast_on_its_sibling() {
     assert!(stdout.contains("saddle  hold"), "{said}");
 }
 
+/// A world holding parent-1 and its children child-a and child-b.
+fn siblings() -> World {
+    let world = World::new();
+    std::fs::write(
+        world.state.join("issues.json"),
+        r#"{"parent-1":{"id":"parent-1","title":"parent","body":""},"child-a":{"id":"child-a","title":"child a","body":"","parent":"parent-1"},"child-b":{"id":"child-b","title":"child b","body":"","parent":"parent-1"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        world.state.join("children.json"),
+        r#"{"parent-1":[{"id":"child-a"},{"id":"child-b"}]}"#,
+    )
+    .unwrap();
+    world
+}
+
+#[test]
+fn one_session_casts_once_per_sibling_on_the_command_line() {
+    let world = siblings();
+    let cast = |issue: &str, choice: &str| {
+        world.ljos(
+            "saddle",
+            "sess-saddle-0001",
+            &["vote", issue, "--for", choice, "--used", "none"],
+        )
+    };
+    let first = cast("child-a", "ship");
+    assert!(first.status.success(), "{}", text(&first));
+    let sibling = cast("child-b", "hold");
+    assert!(sibling.status.success(), "{}", text(&sibling));
+    let again = cast("child-a", "hold");
+    let said = text(&again);
+    assert!(!again.status.success(), "{said}");
+    assert!(
+        said.contains("already cast a ballot on child-a (sess-saddle-0001)"),
+        "{said}"
+    );
+}
+
+#[test]
+fn one_session_casts_once_per_sibling_over_mcp() {
+    let world = siblings();
+    let env: &[(&str, &str)] = &[("CLAUDE_CODE_SESSION_ID", "sess-mcp-0001")];
+    // One call per server, so the casts land in this order.
+    let cast = |issue: &str, choice: &str| {
+        let call = serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "ljos_vote",
+            "arguments": {"issue": issue, "choice": choice, "used": "none"}}});
+        let answers = world.mcp("saddle", env, &[call]);
+        let found = answers
+            .iter()
+            .find(|a| a["id"] == 3)
+            .unwrap_or_else(|| panic!("no answer: {answers:?}"));
+        let said = found["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        (found["result"]["isError"] == true, said)
+    };
+    let (error, said) = cast("child-a", "ship");
+    assert!(!error, "{said}");
+    let (error, said) = cast("child-b", "hold");
+    assert!(!error, "a ballot on a sibling is another question: {said}");
+    let (error, said) = cast("child-a", "hold");
+    assert!(error, "{said}");
+    assert!(
+        said.contains("already cast a ballot on child-a (sess-mcp-0001)"),
+        "{said}"
+    );
+}
+
 #[test]
 fn a_persona_cast_then_withdraw_leaves_the_tally_at_zero() {
     let world = World::new();
