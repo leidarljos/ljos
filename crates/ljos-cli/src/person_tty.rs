@@ -10,9 +10,10 @@ use std::os::fd::AsRawFd as _;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use anyhow::{bail, Context, Result};
+use zeroize::Zeroizing;
 
 /// The longest line read, in bytes. A longer one is refused.
-const MAX_LINE: usize = 1024;
+pub(crate) const MAX_LINE: usize = 1024;
 
 /// Signals that end the process while the prompt is up. Each restores the
 /// terminal first, then takes its default action.
@@ -22,22 +23,23 @@ const FATAL: &[libc::c_int] = &[libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc:
 /// the prompt is down.
 const STOPS: &[libc::c_int] = &[libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU];
 
-/// Bytes zeroed when dropped.
-pub struct Secret(Vec<u8>);
+/// Bytes zeroed when dropped. The buffer is [`MAX_LINE`] long from the
+/// start, so a long line never moves it and leaves a copy behind.
+pub struct Secret(Zeroizing<Vec<u8>>);
 
 impl Secret {
+    fn new() -> Self {
+        Self(Zeroizing::new(Vec::with_capacity(MAX_LINE)))
+    }
+
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.0
     }
-}
 
-impl Drop for Secret {
-    fn drop(&mut self) {
-        for byte in &mut self.0 {
-            // SAFETY: a valid, aligned byte this vector owns.
-            unsafe { std::ptr::write_volatile(byte, 0) };
-        }
+    #[cfg(test)]
+    pub(crate) fn capacity(&self) -> usize {
+        self.0.capacity()
     }
 }
 
@@ -74,7 +76,7 @@ pub fn ask(tty: &mut std::fs::File, prompt: &str) -> Result<Option<Secret>> {
 }
 
 fn read_line(fd: libc::c_int) -> Result<Option<Secret>> {
-    let mut line = Secret(Vec::with_capacity(64));
+    let mut line = Secret::new();
     loop {
         let mut byte = 0u8;
         // SAFETY: one byte into a local the call may write.

@@ -12,8 +12,9 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use argon2::password_hash::{PasswordHash, PasswordHasher as _, PasswordVerifier as _, SaltString};
-use argon2::Argon2;
+use argon2::password_hash::{Output, ParamsString, PasswordHash, SaltString};
+use argon2::{Algorithm, Argon2, Block, Params, Version};
+use zeroize::Zeroizing;
 
 /// The shortest passphrase `ljos person-key set` takes, in bytes.
 pub const MIN_LEN: usize = 12;
@@ -233,20 +234,38 @@ fn utc(secs: u64) -> String {
         .map_or_else(|| secs.to_string(), |t| t.format("%H:%M UTC").to_string())
 }
 
+/// Fill `out` with the hash of `pass` under `salt`. The working memory,
+/// every block of it derived from `pass`, is zeroed before it is freed,
+/// on an error too. The hash crate's own `hash_password` frees it as is.
+fn derive(argon: &Argon2<'_>, pass: &[u8], salt: &[u8], out: &mut [u8]) -> Result<()> {
+    let mut blocks = Zeroizing::new(vec![Block::default(); argon.params().block_count()]);
+    argon
+        .hash_password_into_with_memory(pass, salt, out, &mut blocks[..])
+        .map_err(|e| anyhow::anyhow!("person-key: {e}"))
+}
+
 /// The PHC string of `pass` under a fresh salt from the OS.
 ///
 /// # Errors
 ///
 /// The OS gave no random bytes, or the hash failed.
 pub fn hash(pass: &[u8]) -> Result<String> {
+    let err = |e: argon2::password_hash::Error| anyhow::anyhow!("person-key: {e}");
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes)
         .map_err(|e| anyhow::anyhow!("person-key: no salt from the OS: {e}"))?;
-    let salt = SaltString::encode_b64(&bytes).map_err(|e| anyhow::anyhow!("person-key: {e}"))?;
-    Argon2::default()
-        .hash_password(pass, &salt)
-        .map(|phc| phc.to_string())
-        .map_err(|e| anyhow::anyhow!("person-key: {e}"))
+    let salt = SaltString::encode_b64(&bytes).map_err(err)?;
+    let argon = Argon2::default();
+    let mut out = Zeroizing::new([0u8; Params::DEFAULT_OUTPUT_LEN]);
+    derive(&argon, pass, &bytes, &mut out[..])?;
+    let phc = PasswordHash {
+        algorithm: Algorithm::Argon2id.ident(),
+        version: Some(Version::V0x13.into()),
+        params: ParamsString::try_from(argon.params()).map_err(err)?,
+        salt: Some(salt.as_salt()),
+        hash: Some(Output::new(&out[..]).map_err(err)?),
+    };
+    Ok(phc.to_string())
 }
 
 /// `phc` read as an argon2id hash with its salt and output. Any other
@@ -272,7 +291,25 @@ pub fn parse(phc: &str) -> Result<PasswordHash<'_>> {
 /// matches nothing.
 #[must_use]
 pub fn verify(pass: &[u8], phc: &str) -> bool {
-    parse(phc).is_ok_and(|parsed| Argon2::default().verify_password(pass, &parsed).is_ok())
+    let Ok(parsed) = parse(phc) else {
+        return false;
+    };
+    let (Some(salt), Some(want)) = (parsed.salt, parsed.hash) else {
+        return false;
+    };
+    let version = parsed
+        .version
+        .map_or(Ok(Version::default()), Version::try_from);
+    let (Ok(params), Ok(version)) = (Params::try_from(&parsed), version) else {
+        return false;
+    };
+    let mut salt_bytes = [0u8; 64];
+    let Ok(salt) = salt.decode_b64(&mut salt_bytes) else {
+        return false;
+    };
+    let argon = Argon2::new(Algorithm::Argon2id, version, params);
+    let mut out = Zeroizing::new(vec![0u8; want.len()]);
+    derive(&argon, pass, salt, &mut out).is_ok() && Output::new(&out).is_ok_and(|got| got == want)
 }
 
 /// Write `phc` to `path`, mode 0600. The text goes to a new file beside
@@ -784,6 +821,46 @@ mod tests {
         assert!(!verify(b"", &phc));
         let again = hash(b"correct horse battery").unwrap();
         assert_ne!(phc, again, "two hashes shared a salt");
+    }
+
+    /// The hash made in zeroed memory is the one the hash crate makes, so
+    /// a key kept before verifies the same way.
+    #[test]
+    fn a_hash_from_the_hash_crate_verifies() {
+        use argon2::password_hash::PasswordHasher as _;
+        let salt = SaltString::encode_b64(&[7u8; 16]).unwrap();
+        let theirs = Argon2::default()
+            .hash_password(b"correct horse battery", &salt)
+            .unwrap()
+            .to_string();
+        assert!(verify(b"correct horse battery", &theirs));
+        assert!(!verify(b"correct horse batterz", &theirs));
+    }
+
+    /// A line as long as the terminal reader takes is read into the
+    /// buffer it started in, so no moved copy of it is left unzeroed. A
+    /// longer line is refused, and its buffer dropped and zeroed.
+    #[test]
+    fn a_long_line_stays_in_the_buffer_it_started_in() {
+        use crate::person_tty::MAX_LINE;
+        let long: &'static str = "a".repeat(MAX_LINE).leak();
+        for typed in ["x", long] {
+            let (master, mut slave) = pty_pair();
+            let shown = typist(master, vec![("Line: ", typed)]);
+            let line = crate::person_tty::ask(&mut slave, "Line: ")
+                .unwrap()
+                .unwrap();
+            assert_eq!(line.bytes(), typed.as_bytes());
+            assert_eq!(line.capacity(), MAX_LINE, "{} bytes", typed.len());
+            drop(slave);
+            shown.join().unwrap();
+        }
+        let longer: &'static str = "a".repeat(MAX_LINE + 1).leak();
+        let (master, mut slave) = pty_pair();
+        let shown = typist(master, vec![("Line: ", longer)]);
+        assert!(crate::person_tty::ask(&mut slave, "Line: ").is_err());
+        drop(slave);
+        shown.join().unwrap();
     }
 
     #[test]

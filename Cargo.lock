@@ -208,6 +208,7 @@ dependencies = [
  "blake2",
  "cpufeatures 0.2.17",
  "password-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -2770,6 +2771,7 @@ dependencies = [
  "vissue-core",
  "webpki-roots 1.0.10",
  "which",
+ "zeroize",
 ]
 
 [[package]]
