@@ -33902,7 +33902,9 @@ fn command_report_in(line: &str, cwd: Option<&Path>, preflight: bool) -> Result<
     let cwd = Some(start.as_path());
     // Judge the line as written. Splitting it into argv and joining the
     // words again drops the quotes a commit message needs.
-    if let Some(rule) = tcb_verdict_in(line, cwd) {
+    let raw_policy = std::cell::OnceCell::new();
+    let policy = || raw_policy.get_or_init(|| tcb_line_in(line, cwd)).clone();
+    if let Some(rule) = tcb_verdict_using(line, cwd, policy) {
         // The push ran into an ask or a deny. Drop the evidence warning so
         // the next allowed command does not inherit it.
         let _ = gates::take_push_warning();
@@ -33928,7 +33930,7 @@ fn command_report_in(line: &str, cwd: Option<&Path>, preflight: bool) -> Result<
         bail!("guard: pass the command to check");
     }
     let warning = gates::take_push_warning();
-    let mut text = policy_reading_in(&argv, cwd, || tcb_line_in(line, cwd))?;
+    let mut text = policy_reading_in(&argv, cwd, policy)?;
     let verdict = policy_verdict(&text);
     if verdict == "deny" {
         bail!("{text}");
@@ -34036,6 +34038,14 @@ pub fn tcb_verdict(line: &str) -> Option<Rule> {
 /// `ljos-policyd` is started there once that path resolves.
 #[must_use]
 pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
+    tcb_verdict_using(line, cwd, || tcb_line_in(line, cwd))
+}
+
+fn tcb_verdict_using(
+    line: &str,
+    cwd: Option<&Path>,
+    policy: impl FnOnce() -> Option<String>,
+) -> Option<Rule> {
     clear_guard_note();
     if bookkeep::guard_suspended() {
         return sitting_gate::guard_line(line, cwd);
@@ -34058,15 +34068,15 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     {
         return static_rule;
     }
-    match tcb_policy_verdict_in(line, cwd) {
+    match tcb_policy_verdict(policy()) {
         Some(rule) if rule.verdict == "deny" => Some(rule),
         policy => static_rule.or(policy),
     }
 }
 
 /// The external law can refuse a command even when a local rule asks for consent.
-fn tcb_policy_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
-    let Some(t) = tcb_line_in(line, cwd) else {
+fn tcb_policy_verdict(reading: Option<String>) -> Option<Rule> {
+    let Some(t) = reading else {
         return policyd_required().then(|| Rule {
             pattern: "ljos-policyd".into(),
             verdict: "deny".into(),
@@ -48843,6 +48853,41 @@ mod tests {
             static_guard_in("git push --force origin main", Some(repo.path())).expect("ask");
         assert_eq!(asked.verdict, "ask");
         assert!(asked.reason.contains("git-force-push"), "{}", asked.reason);
+    }
+
+    #[test]
+    fn command_checks_read_external_policy_once_per_call() {
+        let _g = env_guard();
+        for (reading, expected) in [
+            ("allow", "allow"),
+            ("ask\\tmanual-review", "ask"),
+            ("deny\\tblocked-command", "deny"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let bin = dir.path().join("ljos-policyd");
+            let calls = dir.path().join("calls");
+            std::fs::write(&bin, format!(
+                "#!/bin/sh\nprintf 'called\\n' >> '{}'\nprintf '{reading}\\n'\n",
+                calls.display()
+            )).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let home = SeatDir::new("one-policy-reading");
+            let _env = HoldEnv::set(&[
+                ("POLICYD_BIN", bin.to_str().unwrap()),
+                ("HOME", home.path().to_str().unwrap()),
+            ]);
+            for (index, line) in ["git status", "git diff --stat"].iter().enumerate() {
+                match guard_report(line) {
+                    Ok(report) => assert_eq!(report.verdict, expected, "{}", report.text),
+                    Err(error) => {
+                        assert_eq!(expected, "deny", "{error}");
+                        assert!(error.to_string().contains("blocked-command"), "{error}");
+                    }
+                }
+                assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), index + 1);
+            }
+        }
     }
 
     fn habitat_row(name: &'static str, state: &str, ok: bool) -> Habitat {
