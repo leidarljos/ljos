@@ -20,8 +20,6 @@ mod seat_root;
 /// tracker large enough that reading it takes a while.
 const TRACKER_READ: &str = "0.15";
 
-const TIME: &str = "/usr/bin/time";
-
 const VISSUE: &str = r#"#!/usr/bin/env python3
 import os, sys, time, pathlib, fcntl
 root = pathlib.Path(os.environ["VISSUE_ROOT"])
@@ -196,6 +194,36 @@ fn feed(mut cmd: Command, payload: &str) -> std::process::Child {
     child
 }
 
+fn feed_measured(
+    mut cmd: Command,
+    payload: &str,
+) -> (std::process::Child, std::thread::JoinHandle<u64>) {
+    let mut child = cmd.spawn().unwrap();
+    let pid = child.id();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    let peak = std::thread::spawn(move || {
+        let path = format!("/proc/{pid}/status");
+        let mut peak = 0;
+        while let Ok(status) = std::fs::read_to_string(&path) {
+            if let Some(kb) = status.lines().find_map(|line| {
+                line.strip_prefix("VmHWM:")
+                    .and_then(|value| value.split_whitespace().next())
+                    .and_then(|value| value.parse::<u64>().ok())
+            }) {
+                peak = peak.max(kb);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        peak
+    });
+    (child, peak)
+}
+
 /// The child's output, or a panic naming `what` when it runs past `limit`.
 fn within(mut child: std::process::Child, limit: Duration, what: &str) -> Output {
     let started = Instant::now();
@@ -289,18 +317,6 @@ fn wait_for(path: &Path) {
     }
 }
 
-/// Peak resident set size in kilobytes, from `/usr/bin/time -v`.
-fn max_rss_kb(stderr: &str) -> u64 {
-    stderr
-        .lines()
-        .find_map(|l| {
-            l.trim()
-                .strip_prefix("Maximum resident set size (kbytes):")
-                .and_then(|v| v.trim().parse().ok())
-        })
-        .unwrap_or_else(|| panic!("no rss line from {TIME} -v:\n{stderr}"))
-}
-
 /// Twenty tool calls at once, half of them the first write of a session.
 /// Each write used to file its claim inside the call, under the book lock,
 /// and the calls queued behind each other for seconds. Each call answers
@@ -309,14 +325,10 @@ fn max_rss_kb(stderr: &str) -> u64 {
 /// follows the box's cores.
 #[test]
 fn twenty_calls_at_once_each_answer_inside_200_ms_and_30_mb() {
-    if !ljos_cli::tool_installed("/usr/bin/time") {
-        eprintln!("skipped: /usr/bin/time is not installed");
+    if !Path::new("/proc/self/status").is_file() {
+        eprintln!("skipped: /proc/self/status is not available");
         return;
     }
-    assert!(
-        Path::new(TIME).is_file(),
-        "{TIME} is needed to measure each call; install GNU time"
-    );
     let hab = hab("twenty");
     let warm = within(
         feed(ljos(&hab, &["hook"]), &cursor_shell(&hab, "warm", "ls")),
@@ -334,12 +346,12 @@ fn twenty_calls_at_once_each_answer_inside_200_ms_and_30_mb() {
                 cursor_shell(&hab, &format!("burst-{i}"), "ls -la")
             };
             let started = Instant::now();
-            let child = feed(ljos_under(&hab, Some(&[TIME, "-v"]), &["hook"]), &payload);
-            (i, started, child)
+            let (child, peak) = feed_measured(ljos(&hab, &["hook"]), &payload);
+            (i, started, child, peak)
         })
         .collect();
     let mut rows = Vec::new();
-    for (i, started, child) in calls {
+    for (i, started, child, peak) in calls {
         let out = within(child, Duration::from_secs(10), "a burst call");
         let took = started.elapsed();
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -352,7 +364,7 @@ fn twenty_calls_at_once_each_answer_inside_200_ms_and_30_mb() {
                 "call {i}: {stdout}"
             );
         }
-        rows.push((i, took, max_rss_kb(&stderr)));
+        rows.push((i, took, peak.join().unwrap()));
     }
     let report: Vec<String> = rows
         .iter()
