@@ -344,6 +344,8 @@ enum Cmd {
     },
     /// Write one agent proposal into the pack as a standing lesson. Under an agent runner, only a proposal another conversation filed, such as a worker's.
     Accept { id: String },
+    /// Retire the note memories an older `ljos note` wrote. Runs once per seat; the tracker copies stay.
+    RetireNotes,
     /// Retire one memory by id. The record stays, marked retired.
     Forget {
         id: String,
@@ -543,7 +545,9 @@ enum Cmd {
         #[arg(long)]
         session: Option<String>,
     },
-    /// Note progress on an issue, dated, and commit the tracker.
+    /// Note progress on an issue, dated, and commit the tracker. The note
+    /// stays on the logbook; it is not written into memory, so recall on a
+    /// later task does not hand it back as something the seat knows.
     Note {
         issue: String,
         /// The note; several words are one note.
@@ -1723,6 +1727,7 @@ fn run_command() -> Result<()> {
             print!("{}", ljos_cli::admit::accept(&id)?);
         }
         Cmd::Memories { cmd } => memories_cmd(cmd)?,
+        Cmd::RetireNotes => print!("{}", ljos_cli::note_retire::sweep()?),
         Cmd::Forget { id, why, json } => {
             let body = packset_forget(&id, why.as_deref())?;
             println!("{}", ljos_cli::atom_out(&body, json)?);
@@ -1949,32 +1954,6 @@ fn run_command() -> Result<()> {
         Cmd::Note { issue, text } => {
             let text = text.join(" ");
             run("vissue", &["note", &issue, &text])?;
-            match ljos_cli::packset_write_note(&issue, &text) {
-                Ok(mem) => {
-                    if let Some(body) = mem.body.as_ref() {
-                        let id = body["id"].as_str().unwrap_or("?");
-                        let short: String = id.chars().take(8).collect();
-                        println!("noted in memory (id {short})");
-                    }
-                    if let Some(e) = mem.error.as_ref() {
-                        print!("{}", ljos_cli::note_memory_warning(&issue, e));
-                    }
-                    match mem.queued {
-                        Some(true) => println!(
-                            "memory: queued the copy; the next note or finish that reaches the pack, or a session start, sends it"
-                        ),
-                        Some(false) => println!("memory: the same note is already queued"),
-                        None => {}
-                    }
-                    if mem.body.is_some() {
-                        match ljos_cli::flush_note_queue() {
-                            Ok(done) => print!("{}", ljos_cli::note_queue::drained_lines(&done)),
-                            Err(e) => eprintln!("ljos note: note queue: {e:#}"),
-                        }
-                    }
-                }
-                Err(e) => print!("{}", ljos_cli::note_memory_warning(&issue, &e)),
-            }
             if let Some(line) = ljos_cli::assist_note_line(&issue) {
                 print!("{line}");
             }
@@ -2939,8 +2918,8 @@ fn run_command() -> Result<()> {
             // on the next call.
             let mut seen_later: Vec<String> = Vec::new();
             let mut ack_nudge = false;
-            // A lesson or a note queued while the pack was down is sent
-            // before this session reads memory, so the next prompt can recall it.
+            // A lesson queued while the pack was down is sent before this
+            // session reads memory, so the next prompt can recall it.
             if matches!(call.event.as_str(), "SessionStart" | "UserPromptSubmit") {
                 let _ = ljos_cli::flush_note_queue();
             }

@@ -247,7 +247,7 @@ claim's window. The record that it was held stays.
 read when the conversation has an open sitting. At =SessionEnd=, the hook keeps up to five sentences
 that carry a cue word, from the person's and the agent's prose. It writes each as an unverified note
 on that sitting's ticket. With no sitting, it writes nothing. The prompt hook never injects those
-notes. =LJOS_EXTRACT=off= turns the read off.
+notes. The read is off unless =LJOS_EXTRACT=on= is set.
 
 A lesson an agent proposes at =finish= is a proposal. =ljos accept= writes it as a standing lesson,
 and the person runs =accept= in a terminal of their own. A standing choice the person states in a

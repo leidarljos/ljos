@@ -10,7 +10,10 @@
 //! packset has no place for a note, and the write is skipped. No model
 //! runs: the extraction is a bounded, deterministic read. A sentence
 //! already kept (by its normalized form) is not written again.
-//! `LJOS_EXTRACT=off` turns it off.
+//!
+//! It is off unless `LJOS_EXTRACT=on`. Memory is written on purpose: a
+//! transcript the seat mined is nobody's claim, and a session that ends
+//! should leave the pack as it found it.
 
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -202,6 +205,19 @@ fn plain_failure(err: &anyhow::Error) -> String {
     text
 }
 
+/// Whether the person asked for session-end extraction: `LJOS_EXTRACT=on`.
+/// Anything else, the variable unset included, leaves it off.
+#[must_use]
+pub fn asked_for() -> bool {
+    asked_by(std::env::var("LJOS_EXTRACT").ok().as_deref())
+}
+
+/// [`asked_for`] over the variable's value, so a test names it.
+#[must_use]
+pub fn asked_by(set: Option<&str>) -> bool {
+    set.is_some_and(|v| v.trim() == "on")
+}
+
 /// Read the session's transcript (the hook payload's `transcript_path`),
 /// write each new sentence as an unverified agent note on the open
 /// sitting, and return how many were written. Assistant prose is the
@@ -210,7 +226,7 @@ fn plain_failure(err: &anyhow::Error) -> String {
 /// a note only on a ticket. Quiet on every other failure: a hook must not
 /// stop a runner ending.
 pub fn at_session_end(input: &str, session: Option<&str>) -> usize {
-    if std::env::var("LJOS_EXTRACT").is_ok_and(|v| v == "off") {
+    if !asked_for() {
         return 0;
     }
     let Ok(v) = serde_json::from_str::<Value>(input) else {
@@ -311,6 +327,18 @@ mod tests {
         let got = facts(&many, &BTreeSet::new());
         assert_eq!(got.len(), MAX_PER_SESSION);
         assert!(got.last().unwrap().contains("19"), "the newest are kept");
+    }
+
+    /// ljos-9c12: memory is written on purpose, so a seat that said
+    /// nothing mines no transcript.
+    #[test]
+    fn extraction_waits_to_be_asked_for() {
+        assert!(!asked_by(None));
+        assert!(!asked_by(Some("")));
+        assert!(!asked_by(Some("off")));
+        assert!(!asked_by(Some("1")));
+        assert!(asked_by(Some("on")));
+        assert!(asked_by(Some(" on ")));
     }
 
     #[test]

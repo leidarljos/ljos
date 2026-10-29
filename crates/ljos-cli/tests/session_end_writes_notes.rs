@@ -2,8 +2,9 @@
 //!
 //! A sentence an agent wrote in its own reply is the agent's reading of the
 //! work, not a fact the person stated. Writing it as a lesson let it ride
-//! onto later prompts as a standing claim. Extraction now writes a `note`
-//! atom with agent provenance, so it stays out of prompt facts.
+//! onto later prompts as a standing claim. Extraction, which a seat asks
+//! for with `LJOS_EXTRACT=on`, writes a `note` atom with agent
+//! provenance, so it stays out of prompt facts.
 
 ljos_test_boot::harness!();
 use std::io::{Read, Write};
@@ -128,6 +129,7 @@ fn session_end_extraction_writes_notes_not_lessons() {
         .env("PACKSET_TIMEOUT_MS", "2000")
         .env("LJOS_SEAT", "probe-seat")
         .env("LJOS_HOLD", "book-holder")
+        .env("LJOS_EXTRACT", "on")
         .env("LJOS_USER_RULES_SYNC", "off")
         .env("VISSUE_NO_ROUTE", "1")
         .current_dir(home.path())

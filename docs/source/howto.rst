@@ -1070,5 +1070,5 @@ seats pushing to two remotes each read only their own writes. A sitting's own tr
 every remote that carries the branch. A missing
 claim graph is reported and is not a failure: the first claim creates it.
 A seat nobody named is a derived seat, and a derived seat is a seat. The ``seat source`` row says where the name came from.
-A damaged note queue is a ``no`` row and fails: it holds memory copies the pack has not taken.
+A damaged note queue is a ``no`` row and fails: it holds lessons the pack has not taken.
 An empty or missing log of either is whole.

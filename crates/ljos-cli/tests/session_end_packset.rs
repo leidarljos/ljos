@@ -1,9 +1,10 @@
-//! Session end stores facts in a real pack.
+//! Session end stores facts in a real pack when it is asked to.
 //!
 //! `ljos hook` takes a SessionEnd payload. packsetd, from PATH, is the
 //! pack, in its own home. A live sitting is a hold whose process is this
-//! test. The stored note names that issue, stays an agent note, and a
-//! later prompt does not repeat the sentence.
+//! test. Extraction is off unless `LJOS_EXTRACT=on`; when it is on, the
+//! stored note names that issue, stays an agent note, and a later prompt
+//! does not repeat the sentence.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -15,6 +16,8 @@ use serde_json::Value;
 
 const FACT: &str = "The root cause was a shared temp directory between the two test processes.";
 const ISSUE: &str = "probe-0001";
+/// What a seat that asked for session-end extraction sets.
+const ASKED: &[(&str, &str)] = &[("LJOS_EXTRACT", "on")];
 
 struct Daemon {
     child: std::process::Child,
@@ -230,7 +233,7 @@ fn session_end_stores_facts_on_the_open_sitting() {
     let pack = Daemon::start();
     let seat = Seat::new();
     seat.sit();
-    let out = session_end(&seat, &pack.url, &[]);
+    let out = session_end(&seat, &pack.url, ASKED);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "hook failed\n{}", text_of(&out));
     no_http_refusal(&stderr);
@@ -291,7 +294,7 @@ fn session_end_without_a_sitting_does_not_post() {
     }
     let pack = Daemon::start();
     let seat = Seat::new();
-    let out = session_end(&seat, &pack.url, &[]);
+    let out = session_end(&seat, &pack.url, ASKED);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "hook failed\n{}", text_of(&out));
     assert!(
@@ -329,6 +332,27 @@ fn session_end_extract_off_stores_nothing() {
     assert!(
         !stderr.contains("holds no sitting"),
         "extract off still talked about a sitting:\n{stderr}"
+    );
+    no_http_refusal(&stderr);
+}
+
+/// ljos-9c12: memory is written on purpose. A seat that never asked for
+/// extraction ends its session with the pack as it found it.
+#[test]
+fn session_end_stores_nothing_when_nobody_asked() {
+    let pack = Daemon::start();
+    let seat = Seat::new();
+    seat.sit();
+    let out = session_end(&seat, &pack.url, &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "hook failed\n{}", text_of(&out));
+    assert!(
+        fact_atom(&atoms(&pack.url)).is_none(),
+        "an unasked session end stored a note\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("facts from"),
+        "the transcript was read with nobody asking:\n{stderr}"
     );
     no_http_refusal(&stderr);
 }

@@ -1790,7 +1790,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this for your own working notes on an issue: progress, a finding, or a claim you read in a file, a tool's output or a web page. A dated line on its logbook, with the tracker committed, and a note in memory. Recall fences the logbook as unverified tracker text; recall, search and the island label the memory an unverified agent note by its stored origin, and prompt hooks never inject it as a fact. The note goes on the issue you name, else the one this seat holds; it never files an issue.",
+        description = "Call this for your own working notes on an issue: progress, a finding, or a claim you read in a file, a tool's output or a web page. A dated line on its logbook, with the tracker committed. The note stays on the ticket and is not written into memory, so it is never recalled and never falls due for review. Recall fences the logbook as unverified tracker text. The note goes on the issue you name, else the one this seat holds; it never files an issue.",
         annotations(
             title = "Note progress",
             read_only_hint = false,
@@ -1833,7 +1833,7 @@ impl LjosServer {
     ) -> Result<Json<Said>, McpError> {
         ljos_cli::log_recall("recall", &args.issue);
         // The same answer as `ljos recall`: the tracker's working set, then
-        // the memories on the issue, notes included.
+        // the memories on the issue.
         let mut said = ljos_cli::tracker_recall(&args.issue)
             .map(said)
             .map_err(refused)?;

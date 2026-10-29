@@ -1055,7 +1055,7 @@ fn the_note_tool_text_matches_the_read_side() {
         .and_then(|t| t["description"].as_str())
         .unwrap_or_default();
     assert!(note.contains("unverified tracker text"), "{note}");
-    assert!(note.contains("note in memory"), "{note}");
+    assert!(note.contains("not written into memory"), "{note}");
     let header: String = include_str!("../src/extract.rs")
         .lines()
         .take_while(|l| l.starts_with("//!"))

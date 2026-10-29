@@ -431,27 +431,20 @@ fn sit(hab: &Hab, id: &str, holder: &str, seat: &str) {
     }
 }
 
-/// A note written while the pack is off keeps its memory copy in the
-/// queue, once however often the same note is written.
+/// A note with the pack off is still a note: the tracker takes it and
+/// the seat keeps nothing waiting for memory.
 #[test]
-fn a_note_with_the_pack_off_waits_in_the_queue_once() {
+fn a_note_with_the_pack_off_leaves_nothing_waiting() {
     let hab = Hab::new("repo");
-    let said: Vec<String> = (0..2)
-        .map(|_| {
-            let out = hab.ljos_in(
-                &hab.repo,
-                &["note", "probe-32fx", "the pack was off for this note"],
-                None,
-                &[],
-            );
-            String::from_utf8_lossy(&out.stdout).into_owned()
-        })
-        .collect();
-    assert!(said[0].contains("memory: queued the copy"), "{}", said[0]);
-    assert!(said[1].contains("already queued"), "{}", said[1]);
-    let queue = fs::read_to_string(hab.root.join("state/ljos/note-queue.jsonl")).unwrap();
-    assert_eq!(queue.lines().count(), 1, "{queue}");
-    assert!(queue.contains("\"issue\":\"probe-32fx\""), "{queue}");
+    let out = hab.ljos_in(
+        &hab.repo,
+        &["note", "probe-32fx", "the pack was off for this note"],
+        None,
+        &[],
+    );
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(!said.contains("memory"), "{said}");
+    assert!(!hab.root.join("state/ljos/note-queue.jsonl").exists());
 }
 
 #[test]
