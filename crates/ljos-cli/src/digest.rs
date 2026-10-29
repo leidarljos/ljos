@@ -19,6 +19,8 @@ struct Row {
     kind: &'static str,
     text: String,
     issue: String,
+    source: &'static str,
+    identity: Option<String>,
     /// A git ballot line, dropped when a timed votes drawer already shows it.
     drop_if_vote: bool,
     /// An org stamp with a clock and no seconds. `last` keeps that minute.
@@ -42,10 +44,32 @@ impl Row {
             kind,
             text,
             issue: issue.into(),
+            source: "org",
+            identity: None,
             drop_if_vote,
             minute: false,
             date_only: false,
         }
+    }
+
+    fn from(mut self, source: &'static str) -> Self {
+        self.source = source;
+        self
+    }
+
+    fn with_identity(mut self, at: i64, identity: &str) -> Self {
+        self.identity = Some(format!("{at}\t{identity}"));
+        self
+    }
+
+    fn key(&self) -> String {
+        if let Some(identity) = &self.identity {
+            return format!("{}\t{identity}", self.source);
+        }
+        format!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            self.source, self.at, self.seat, self.kind, self.issue, self.text
+        )
     }
 }
 
@@ -54,6 +78,8 @@ impl Row {
 struct Window {
     start: Option<i64>,
     exclusive: bool,
+    seen: BTreeSet<String>,
+    head: Option<String>,
 }
 
 impl Window {
@@ -66,6 +92,10 @@ impl Window {
             Some(start) if self.exclusive => at > start,
             Some(start) => at >= start,
         }
+    }
+
+    fn keeps_row(&self, row: &Row) -> bool {
+        self.keeps(row.at, row.minute) && (!self.exclusive || !self.seen.contains(&row.key()))
     }
 }
 
@@ -139,7 +169,7 @@ fn show(since: Option<&str>, json: bool, mark: bool, guard_commands: bool) -> Re
     collect_memory(&window, &mut rows);
     dedup(&mut rows);
     if mark {
-        store_marker(started)?;
+        store_marker(started, &root, &rows)?;
     }
     let banner = crate::tracker_sync::tracker_sync_line();
     if json {
@@ -160,6 +190,8 @@ fn parse_since(since: Option<&str>) -> Result<(Window, Option<String>, String)> 
             Window {
                 start: None,
                 exclusive: false,
+                seen: BTreeSet::new(),
+                head: None,
             },
             None,
             String::new(),
@@ -167,6 +199,7 @@ fn parse_since(since: Option<&str>) -> Result<(Window, Option<String>, String)> 
     };
     if raw == "last" {
         let marker = read_marker();
+        let state = marker_state();
         let prelude = if marker.is_none() {
             "no earlier digest; showing everything\n".to_string()
         } else {
@@ -176,6 +209,8 @@ fn parse_since(since: Option<&str>) -> Result<(Window, Option<String>, String)> 
             Window {
                 start: marker,
                 exclusive: marker.is_some(),
+                seen: state.seen.into_iter().collect(),
+                head: state.head,
             },
             Some("last".to_string()),
             prelude,
@@ -188,6 +223,8 @@ fn parse_since(since: Option<&str>) -> Result<(Window, Option<String>, String)> 
         Window {
             start: Some(start),
             exclusive: false,
+            seen: BTreeSet::new(),
+            head: None,
         },
         Some(raw.to_string()),
         String::new(),
@@ -211,8 +248,9 @@ fn collect_git(
     filed: &mut BTreeSet<String>,
     claims: &mut BTreeSet<(String, String, &'static str)>,
 ) {
+    let new_commits = commits_since_marker(root, window);
     let mut cmd = crate::git_at(root);
-    cmd.args(["log", "--format=%at%x09%s"]);
+    cmd.args(["log", "--format=%H%x09%at%x09%ct%x09%s"]);
     cmd.stdin(std::process::Stdio::null());
     crate::git_hooks::hook_child_env(&mut cmd);
     let Ok(out) = cmd.output() else {
@@ -222,10 +260,16 @@ fn collect_git(
         return;
     }
     for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let Some((stamp, subject)) = line.split_once('\t') else {
+        let mut fields = line.splitn(4, '\t');
+        let (Some(commit), Some(authored), Some(committed), Some(subject)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
             continue;
         };
-        let Ok(at) = stamp.trim().parse::<i64>() else {
+        let (Ok(authored), Ok(at)) = (
+            authored.trim().parse::<i64>(),
+            committed.trim().parse::<i64>(),
+        ) else {
             continue;
         };
         let Some(act) = crate::parse_tracker_commit(subject) else {
@@ -243,12 +287,24 @@ fn collect_git(
         } else if text.starts_with("released ") {
             claims.insert((act.issue.clone(), seat.clone(), "released"));
         }
-        if !window.keeps(at, false) {
-            continue;
-        }
-        rows.push(Row::new(at, seat, kind, text, act.issue, drop_if_vote));
+        let row = Row::new(at, seat, kind, text, act.issue, drop_if_vote)
+            .from("git")
+            .with_identity(authored, subject);
+        push_git(
+            rows,
+            window,
+            row,
+            new_commits.as_ref().is_some_and(|new| new.contains(commit)),
+        );
     }
-    collect_introduced(root, window, rows, filed);
+    collect_introduced(root, window, &new_commits, rows, filed);
+}
+
+fn commits_since_marker(root: &Path, window: &Window) -> Option<BTreeSet<String>> {
+    let head = window.head.as_deref()?;
+    let range = format!("{head}..HEAD");
+    let commits = crate::git_ok_stdout(root, &["rev-list", &range])?;
+    Some(commits.lines().map(str::to_string).collect())
 }
 
 /// An issue id added by a commit that is not itself `filed ID`. The seat
@@ -257,6 +313,7 @@ fn collect_git(
 fn collect_introduced(
     root: &Path,
     window: &Window,
+    new_commits: &Option<BTreeSet<String>>,
     rows: &mut Vec<Row>,
     filed: &mut BTreeSet<String>,
 ) {
@@ -266,7 +323,7 @@ fn collect_introduced(
         "--reverse",
         "-p",
         "--unified=0",
-        "--format=%x1e%at%x09%s",
+        "--format=%x1e%H%x09%at%x09%ct%x09%s",
     ]);
     cmd.stdin(std::process::Stdio::null());
     crate::git_hooks::hook_child_env(&mut cmd);
@@ -276,16 +333,25 @@ fn collect_introduced(
     if !out.status.success() {
         return;
     }
+    let mut authored = 0_i64;
     let mut at = 0_i64;
+    let mut commit = String::new();
     let mut seat = String::new();
+    let mut subject = String::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         if let Some(rest) = line.strip_prefix('\u{1e}') {
-            let Some((stamp, subject)) = rest.split_once('\t') else {
+            let mut fields = rest.splitn(4, '\t');
+            let (Some(commit_hash), Some(author_stamp), Some(commit_stamp), Some(commit_subject)) =
+                (fields.next(), fields.next(), fields.next(), fields.next())
+            else {
                 seat.clear();
                 continue;
             };
-            at = stamp.trim().parse().unwrap_or(0);
-            seat = crate::parse_tracker_commit(subject)
+            commit = commit_hash.to_string();
+            authored = author_stamp.trim().parse().unwrap_or(0);
+            at = commit_stamp.trim().parse().unwrap_or(0);
+            subject = commit_subject.to_string();
+            seat = crate::parse_tracker_commit(commit_subject)
                 .map(|act| fold_seat(&act.seat))
                 .unwrap_or_default();
             continue;
@@ -299,17 +365,16 @@ fn collect_introduced(
         if !filed.insert(id.to_string()) {
             continue;
         }
-        if !window.keeps(at, false) {
-            continue;
-        }
-        rows.push(Row::new(
-            at,
-            seat.clone(),
-            "ticket",
-            format!("filed {id}"),
-            id,
-            false,
-        ));
+        push_git(
+            rows,
+            window,
+            Row::new(at, seat.clone(), "ticket", format!("filed {id}"), id, false)
+                .from("git")
+                .with_identity(authored, &subject),
+            new_commits
+                .as_ref()
+                .is_some_and(|new| new.contains(&commit)),
+        );
     }
 }
 
@@ -630,12 +695,27 @@ fn vote_lines(heading: &vissue_core::IssueHeading) -> Vec<DrawerVote> {
             if line.is_empty() || line.eq_ignore_ascii_case(":END:") {
                 continue;
             }
-            if let Some(vote) = parse_vote(line) {
+            if let Some(mut vote) = parse_vote(line) {
+                if vote.stamp.date_only {
+                    if let Some(stamp) = ballot_note_stamp(heading, &vote) {
+                        vote.stamp = stamp;
+                    }
+                }
                 out.push(vote);
             }
         }
     }
     out
+}
+
+fn ballot_note_stamp(heading: &vissue_core::IssueHeading, vote: &DrawerVote) -> Option<Stamp> {
+    heading.logbook.iter().find_map(|entry| {
+        let sig = crate::ballot_sig::parse_note(entry.note.as_deref()?)?;
+        if fold_seat(&sig.voter) != vote.agent || sig.choice != vote.choice {
+            return None;
+        }
+        read_stamp(&entry.timestamp)
+    })
 }
 
 fn parse_vote(line: &str) -> Option<DrawerVote> {
@@ -734,30 +814,25 @@ fn collect_memory(window: &Window, rows: &mut Vec<Row>) {
     let Ok(client) = crate::pack() else {
         return;
     };
-    let Ok(atoms) = crate::atoms_lean(&client, &client.workspace()) else {
+    let Ok(atoms) = crate::atoms_lean_recent(&client, &client.workspace(), MEMORY_CAP) else {
         return;
     };
     push_memory(&atoms, window, rows);
 }
 
 fn push_memory(atoms: &[serde_json::Value], window: &Window, rows: &mut Vec<Row>) {
-    let mut kept = 0_usize;
-    for atom in atoms {
-        if kept >= MEMORY_CAP {
-            break;
-        }
-        let Some(mem) = crate::memories::Memory::of(atom) else {
-            continue;
-        };
-        let Some(at) = stamp_unix(&mem.at) else {
-            continue;
-        };
+    let mut memories: Vec<(i64, crate::memories::Memory)> = atoms
+        .iter()
+        .filter_map(crate::memories::Memory::of)
+        .filter_map(|memory| stamp_unix(&memory.at).map(|at| (at, memory)))
+        .collect();
+    memories.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
+    for (at, mem) in memories.into_iter().take(MEMORY_CAP) {
         let seat = if mem.seat.trim().is_empty() {
             "seat".into()
         } else {
             mem.seat
         };
-        let before = rows.len();
         push(
             rows,
             window,
@@ -768,11 +843,10 @@ fn push_memory(atoms: &[serde_json::Value], window: &Window, rows: &mut Vec<Row>
                 format!("memory: {}", crate::capture::excerpt_of(&mem.text)),
                 "",
                 false,
-            ),
+            )
+            .from("memory")
+            .with_identity(at, &mem.id),
         );
-        if rows.len() > before {
-            kept += 1;
-        }
     }
 }
 
@@ -820,11 +894,21 @@ fn collect_guard(window: &Window, rows: &mut Vec<Row>, commands: bool) {
 }
 
 fn push(rows: &mut Vec<Row>, window: &Window, mut row: Row) {
-    if !window.keeps(row.at, row.minute) {
+    row.seat = fold_seat(&row.seat);
+    if !window.keeps_row(&row) {
         return;
     }
-    row.seat = fold_seat(&row.seat);
     rows.push(row);
+}
+
+fn push_git(rows: &mut Vec<Row>, window: &Window, mut row: Row, new_commit: bool) {
+    row.seat = fold_seat(&row.seat);
+    if window.exclusive && window.seen.contains(&row.key()) {
+        return;
+    }
+    if new_commit || window.keeps(row.at, row.minute) {
+        rows.push(row);
+    }
 }
 
 /// `seat@holder` is one seat. An address, which has a dot after `@`, stays.
@@ -843,9 +927,10 @@ fn fold_seat(seat: &str) -> String {
 
 fn dedup(rows: &mut Vec<Row>) {
     let mut seen = BTreeSet::new();
-    rows.retain(|row| seen.insert((row.at, row.seat.clone(), row.kind, row.text.clone())));
+    rows.retain(|row| seen.insert(row.key()));
     // A date-only or minute stamp and the git author time of the same
-    // act land within a minute of each other. Keep the later instant.
+    // act land within a minute of each other. Keep the later instant only
+    // when the rows came from different records of that event.
     rows.sort_by(|a, b| {
         a.seat
             .cmp(&b.seat)
@@ -857,7 +942,7 @@ fn dedup(rows: &mut Vec<Row>) {
     for row in rows.drain(..) {
         if let Some(prev) = kept.last() {
             let same = prev.seat == row.seat && prev.kind == row.kind && prev.text == row.text;
-            if same && prev.at.saturating_sub(row.at) < 60 {
+            if same && prev.source != row.source && prev.at.saturating_sub(row.at) < 60 {
                 continue;
             }
         }
@@ -1065,18 +1150,51 @@ fn marker_path() -> PathBuf {
     crate::note_queue::state_dir().join("digest-last")
 }
 
+fn marker_state_path() -> PathBuf {
+    crate::note_queue::state_dir().join("digest-last-state.json")
+}
+
+#[derive(Default, serde::Deserialize, serde::Serialize)]
+struct MarkerState {
+    head: Option<String>,
+    seen: Vec<String>,
+}
+
+fn marker_state() -> MarkerState {
+    std::fs::read_to_string(marker_state_path())
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
 fn read_marker() -> Option<i64> {
     std::fs::read_to_string(marker_path())
         .ok()
         .and_then(|text| text.trim().parse().ok())
 }
 
-fn store_marker(at: i64) -> Result<()> {
+fn store_marker(at: i64, root: &Path, rows: &[Row]) -> Result<()> {
     let path = marker_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     std::fs::write(path, format!("{at}\n"))?;
+    let mut state = marker_state();
+    let mut held: BTreeSet<String> = state.seen.iter().cloned().collect();
+    for row in rows {
+        let key = row.key();
+        if held.insert(key.clone()) {
+            state.seen.push(key);
+        }
+    }
+    const SEEN_CAP: usize = 4096;
+    if state.seen.len() > SEEN_CAP {
+        state.seen.drain(..state.seen.len() - SEEN_CAP);
+    }
+    state.head = crate::git_ok_stdout(root, &["rev-parse", "HEAD"])
+        .map(|head| head.trim().to_string())
+        .filter(|head| !head.is_empty());
+    std::fs::write(marker_state_path(), serde_json::to_vec(&state)?)?;
     Ok(())
 }
 
@@ -1120,135 +1238,191 @@ pub fn note_guard(kind: &str, seat: &str, text: &str) {
     };
     line.push('\n');
     let _ = path.parent().map(std::fs::create_dir_all);
-    let _ = crate::append_locked_row(&path, line.as_bytes(), crate::Durability::BestEffort);
-    rotate_guard(&path);
-}
-
-fn rotate_guard(path: &Path) {
-    let Ok(meta) = std::fs::metadata(path) else {
-        return;
-    };
-    if meta.len() <= GUARD_CAP {
-        return;
-    }
-    let Ok(bytes) = std::fs::read(path) else {
-        return;
-    };
-    let start = bytes.len().saturating_sub((GUARD_CAP / 2) as usize);
-    let tail = &bytes[start..];
-    let tail = match tail.iter().position(|b| *b == b'\n') {
-        Some(i) => &tail[i + 1..],
-        None => tail,
-    };
-    let _ = std::fs::write(path, tail);
+    let _ = crate::append_locked_row_capped(
+        &path,
+        line.as_bytes(),
+        crate::Durability::BestEffort,
+        GUARD_CAP,
+    );
 }
 
 /// Tokens and secret assignments are replaced before a row is stored.
 fn redact_secrets(text: &str) -> String {
     let lower = text.to_ascii_lowercase();
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0;
-    while i < text.len() {
-        if let Some(n) = secret_span(&lower, i) {
-            out.push_str("[redacted]");
-            i += n;
+    let mut ranges = Vec::new();
+    for (i, _) in text.char_indices() {
+        let rest = &lower[i..];
+        if identifier_boundary(&lower, i) {
+            for prefix in ["github_pat_", "ghp_", "gho_", "ghs_", "xoxb-"] {
+                if rest.starts_with(prefix) {
+                    let end = i + secret_token_len(&text[i..]);
+                    ranges.push((i, end));
+                }
+            }
+            if let Some((value, end)) = assigned_secret(text, &lower, i) {
+                ranges.push((value, end));
+            }
+        }
+    }
+    for flag in ["--password", "--user", "-u"] {
+        flag_secret_ranges(text, &lower, flag, &mut ranges);
+    }
+    url_secret_ranges(text, &lower, &mut ranges);
+    ranges.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in ranges {
+        if start >= end {
             continue;
         }
-        let ch = text[i..].chars().next().unwrap_or('\u{fffd}');
-        out.push(ch);
-        i += ch.len_utf8();
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1 {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
     }
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for (start, end) in merged {
+        out.push_str(&text[at..start]);
+        out.push_str("[redacted]");
+        at = end;
+    }
+    out.push_str(&text[at..]);
     out
 }
 
-fn secret_span(lower: &str, i: usize) -> Option<usize> {
-    if i > 0 && lower.as_bytes()[i - 1].is_ascii_alphanumeric() {
+fn identifier_boundary(text: &str, at: usize) -> bool {
+    at == 0
+        || !text.as_bytes()[at - 1].is_ascii_alphanumeric()
+            && !matches!(text.as_bytes()[at - 1], b'_' | b'-')
+}
+
+fn assigned_secret(text: &str, lower: &str, at: usize) -> Option<(usize, usize)> {
+    let bytes = lower.as_bytes();
+    let mut name_end = at;
+    while bytes
+        .get(name_end)
+        .is_some_and(|b| b.is_ascii_alphanumeric() || matches!(*b, b'_' | b'-'))
+    {
+        name_end += 1;
+    }
+    let name = &lower[at..name_end];
+    let secret_name = name == "authorization"
+        || name.contains("password")
+        || name == "token"
+        || name.ends_with("_token")
+        || name.ends_with("-token")
+        || name == "secret"
+        || name.ends_with("_secret")
+        || name.ends_with("-secret")
+        || name == "api_key"
+        || name == "api-key"
+        || name.ends_with("_key")
+        || name.ends_with("-key");
+    if !secret_name {
         return None;
     }
-    let rest = &lower[i..];
-    if let Some(n) = assignment_span(rest) {
-        return Some(n);
+    let mut value = name_end;
+    while bytes.get(value).is_some_and(|b| matches!(*b, b' ' | b'\t')) {
+        value += 1;
     }
-    if rest.starts_with("ghp_") || rest.starts_with("gho_") {
-        let n = rest
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .map(char::len_utf8)
-            .sum();
-        return Some(n);
+    if !bytes.get(value).is_some_and(|b| matches!(*b, b'=' | b':')) {
+        return None;
     }
-    if rest.starts_with("authorization:") {
-        return Some(header_span(rest));
+    value += 1;
+    while bytes.get(value).is_some_and(|b| matches!(*b, b' ' | b'\t')) {
+        value += 1;
     }
-    if rest.starts_with("bearer") && rest["bearer".len()..].starts_with([' ', '\t']) {
-        let after = rest["bearer".len()..].trim_start();
-        if after.is_empty() {
-            return None;
+    if name == "authorization" && lower[value..].starts_with("bearer") {
+        let after = value + "bearer".len();
+        if bytes.get(after).is_some_and(|b| matches!(*b, b' ' | b'\t')) {
+            value = after;
+            while bytes.get(value).is_some_and(|b| matches!(*b, b' ' | b'\t')) {
+                value += 1;
+            }
         }
-        let mut n = rest.len() - after.len();
-        n += token_len(after);
-        n += quote_tail(rest, n);
-        return Some(n);
     }
-    None
+    let end = value + secret_token_len(&text[value..]);
+    (end > value).then_some((value, end))
 }
 
-fn assignment_span(rest: &str) -> Option<usize> {
-    for key in ["api_key", "api-key", "token", "password", "secret"] {
-        if !rest.starts_with(key) {
+fn flag_secret_ranges(text: &str, lower: &str, flag: &str, ranges: &mut Vec<(usize, usize)>) {
+    let mut from = 0;
+    while let Some(offset) = lower[from..].find(flag) {
+        let at = from + offset;
+        let after = at + flag.len();
+        let before_ok = at == 0
+            || lower.as_bytes()[at - 1].is_ascii_whitespace()
+            || matches!(lower.as_bytes()[at - 1], b'\'' | b'"');
+        let after_ok = lower
+            .as_bytes()
+            .get(after)
+            .is_some_and(|b| b.is_ascii_whitespace() || *b == b'=');
+        if !before_ok || !after_ok {
+            from = after;
             continue;
         }
-        let mut n = key.len();
-        let bytes = rest.as_bytes();
-        while bytes.get(n).is_some_and(|b| *b == b' ' || *b == b'\t') {
-            n += 1;
+        let mut value = after;
+        while lower
+            .as_bytes()
+            .get(value)
+            .is_some_and(|b| b.is_ascii_whitespace() || *b == b'=')
+        {
+            value += 1;
         }
-        if bytes.get(n) != Some(&b'=') && bytes.get(n) != Some(&b':') {
-            continue;
+        if lower
+            .as_bytes()
+            .get(value)
+            .is_some_and(|b| matches!(*b, b'\'' | b'"'))
+        {
+            value += 1;
         }
-        n += 1;
-        while bytes.get(n).is_some_and(|b| *b == b' ' || *b == b'\t') {
-            n += 1;
+        let end = value + secret_token_len(&text[value..]);
+        if end > value {
+            let start = if flag == "-u" || flag == "--user" {
+                text[value..end]
+                    .find(':')
+                    .map_or(value, |colon| value + colon + 1)
+            } else {
+                value
+            };
+            ranges.push((start, end));
         }
-        let value = token_len(&rest[n..]);
-        if value == 0 {
-            continue;
-        }
-        return Some(n + value);
+        from = after;
     }
-    None
 }
 
-fn header_span(rest: &str) -> usize {
-    let Some(after_name) = rest.strip_prefix("authorization:") else {
-        return 0;
-    };
-    let value = after_name.trim_start();
-    let mut n = rest.len() - value.len();
-    if let Some(after_bearer) = value.strip_prefix("bearer") {
-        if after_bearer.starts_with([' ', '\t']) {
-            let token = after_bearer.trim_start();
-            n = rest.len() - token.len();
-            n += token_len(token);
-            return n + quote_tail(rest, n);
+fn url_secret_ranges(text: &str, lower: &str, ranges: &mut Vec<(usize, usize)>) {
+    let mut from = 0;
+    while let Some(offset) = lower[from..].find("://") {
+        let authority = from + offset + 3;
+        let end = text[authority..]
+            .char_indices()
+            .find_map(|(i, c)| {
+                (c.is_whitespace() || matches!(c, '/' | '\'' | '"')).then_some(authority + i)
+            })
+            .unwrap_or(text.len());
+        if let Some(user_end) = text[authority..end].find('@').map(|i| authority + i) {
+            if let Some(password) = text[authority..user_end]
+                .find(':')
+                .map(|i| authority + i + 1)
+            {
+                if password < user_end {
+                    ranges.push((password, user_end));
+                }
+            }
         }
+        from = authority;
     }
-    n += token_len(value);
-    n + quote_tail(rest, n)
 }
 
-fn token_len(text: &str) -> usize {
+fn secret_token_len(text: &str) -> usize {
     text.chars()
-        .take_while(|c| !c.is_whitespace() && *c != '\'' && *c != '"')
+        .take_while(|c| !c.is_whitespace() && !matches!(*c, '\'' | '"' | '/' | '@'))
         .map(char::len_utf8)
         .sum()
-}
-
-fn quote_tail(text: &str, n: usize) -> usize {
-    match text.as_bytes().get(n) {
-        Some(b'\'') | Some(b'"') => 1,
-        _ => 0,
-    }
 }
 
 /// A policyd allow that rewrites the line. The new line is the row.
@@ -1564,6 +1738,47 @@ mod tests {
     }
 
     #[test]
+    fn guard_rotation_stays_inside_the_append_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = std::sync::Arc::new(dir.path().join("guard.jsonl"));
+        let mut writers = Vec::new();
+        for writer in 0..8 {
+            let path = path.clone();
+            writers.push(std::thread::spawn(move || {
+                for row in 0..50 {
+                    let line = format!("{{\"writer\":{writer},\"row\":{row}}}\n");
+                    crate::append_locked_row_capped(
+                        &path,
+                        line.as_bytes(),
+                        crate::Durability::Durable,
+                        512,
+                    )
+                    .unwrap();
+                }
+            }));
+        }
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let text = std::fs::read_to_string(&*path).unwrap();
+        assert!(text.len() <= 512, "guard log is {} bytes", text.len());
+        assert!(
+            text.lines()
+                .all(|line| serde_json::from_str::<serde_json::Value>(line).is_ok()),
+            "{text}"
+        );
+        crate::append_locked_row_capped(
+            &path,
+            b"{\"sentinel\":true}\n",
+            crate::Durability::Durable,
+            512,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&*path).unwrap();
+        assert!(text.contains("\"sentinel\":true"), "{text}");
+    }
+
+    #[test]
     fn digest_answers_a_thousand_tickets_within_two_seconds() {
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
@@ -1608,9 +1823,9 @@ mod tests {
                 "id": format!("mem{i}"),
                 "kind": "fact",
                 "text": format!("bench memory {i}"),
-                "ts": "2026-10-28T18:00:00Z",
+                "ts": format!("2026-10-28T18:{i:02}:00Z"),
                 "origin": "user-declared",
-                "source": {"seat": "ada", "at": "2026-10-28T18:00:00Z"}
+                "source": {"seat": "ada", "at": format!("2026-10-28T18:{i:02}:00Z")}
             }));
         }
         let path = format!("{}:/usr/bin:/bin", bin.display());
@@ -1631,6 +1846,8 @@ mod tests {
         let memories = text.lines().filter(|line| line.contains("memory:")).count();
         assert!(memories <= 32, "memory rows {memories}\n{text}");
         assert!(memories >= 1, "{text}");
+        assert!(text.contains("memory: bench memory 39"), "{text}");
+        assert!(!text.contains("memory: bench memory 0"), "{text}");
         assert!(text.contains("deeds: cutoff at 800 ms"), "{text}");
         assert!(text.contains("accessions left"), "{text}");
     }
@@ -1744,6 +1961,18 @@ mod tests {
 [2020-06-04 Thu] opus: REVISE used=none
 :END:
 
+* TODO [#C] Signed vote
+:PROPERTIES:
+:ID:         signed-vote
+:CREATED:    [2020-06-01 Mon]
+:END:
+:LOGBOOK:
+- Note: \"ballot-sig: grok REVISE key sig\" [2020-06-04 Thu 10:09]
+:END:
+:VOTES:
+[2020-06-04 Thu] grok: REVISE used=none
+:END:
+
 * TODO [#C] Flow
 :PROPERTIES:
 :ID:         flow-d
@@ -1819,6 +2048,11 @@ mod tests {
                 .timestamp(),
         );
         assert!(opus.contains(&clock), "{opus}");
+        let grok = seat_block(&text, "grok");
+        assert!(grok.contains("voted signed-vote for REVISE"), "{grok}");
+        let signed_clock = wall(stamp_unix("[2020-06-04 Thu 10:09]").unwrap());
+        assert!(grok.contains(&signed_clock), "{grok}");
+        assert!(!grok.contains("00:00"), "{grok}");
     }
 
     #[test]
@@ -1886,5 +2120,183 @@ mod tests {
         assert!(!marker.exists(), "the tool wrote {}", marker.display());
         let text = digest(Some("last"), false).unwrap();
         assert!(text.contains("filed probe-b"), "{text}");
+    }
+
+    #[test]
+    fn review2_a_second_last_repeats_an_event_in_the_marker_minute() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let (root, home) = review_filed_tracker(dir.path());
+        let now = chrono::Local::now();
+        let stamp = now.format("[%Y-%m-%d %a %H:%M]").to_string();
+        let org = format!(
+            "* DONE [#C] One\n:PROPERTIES:\n:ID:         probe-b\n:END:\n:LOGBOOK:\n- State \"DONE\" from \"TODO\" {stamp}\n- Finished by alice {stamp}\n:END:\n"
+        );
+        std::fs::write(root.join("Software/probe/issues.org"), org).unwrap();
+        let minute = stamp_unix(&stamp).unwrap();
+        std::fs::create_dir_all(home.join("state/ljos")).unwrap();
+        std::fs::write(
+            home.join("state/ljos/digest-last"),
+            format!("{}\n", minute + 1),
+        )
+        .unwrap();
+        let first = digest(Some("last"), false).unwrap();
+        assert!(first.contains("closed probe-b"), "{first}");
+        std::fs::write(
+            home.join("state/ljos/digest-last"),
+            format!("{}\n", minute + 30),
+        )
+        .unwrap();
+        let second = digest(Some("last"), false).unwrap();
+        eprintln!("REVIEW2 second:\n{second}");
+        assert!(!second.contains("closed probe-b"), "shown twice:\n{second}");
+    }
+
+    #[test]
+    fn review2_a_commit_authored_before_the_marker_never_shows_in_last() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let (root, home) = review_filed_tracker(dir.path());
+        let shown = digest(Some("last"), false).unwrap();
+        assert!(shown.contains("filed probe-b"), "{shown}");
+        let marker: i64 = std::fs::read_to_string(home.join("state/ljos/digest-last"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        std::fs::write(
+            root.join("Software/probe/issues.org"),
+            "* TODO [#C] One\n:PROPERTIES:\n:ID:         probe-b\n:END:\n* TODO [#C] Two\n:PROPERTIES:\n:ID:         probe-c\n:END:\n",
+        )
+        .unwrap();
+        let authored = chrono::DateTime::from_timestamp(marker - 600, 0)
+            .unwrap()
+            .to_rfc3339();
+        let landed = chrono::DateTime::from_timestamp(marker + 5, 0)
+            .unwrap()
+            .to_rfc3339();
+        for args in [
+            vec!["add", "."],
+            vec![
+                "commit",
+                "-q",
+                "-m",
+                "chore(issues): probe-c filed by carol",
+            ],
+        ] {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(&args)
+                .env("GIT_AUTHOR_DATE", &authored)
+                .env("GIT_COMMITTER_DATE", &landed)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let next = digest(Some("last"), false).unwrap();
+        eprintln!("REVIEW2 next:\n{next}");
+        assert!(
+            next.contains("probe-c"),
+            "a commit that landed after the marker is missing:\n{next}"
+        );
+    }
+
+    #[test]
+    fn last_uses_reachability_when_a_late_commit_has_old_dates() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let (root, home) = review_filed_tracker(dir.path());
+        let _ = digest(Some("last"), false).unwrap();
+        let marker: i64 = std::fs::read_to_string(home.join("state/ljos/digest-last"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        std::fs::write(
+            root.join("Software/probe/issues.org"),
+            "* TODO [#C] One\n:PROPERTIES:\n:ID:         probe-b\n:END:\n* TODO [#C] Two\n:PROPERTIES:\n:ID:         probe-old\n:END:\n",
+        )
+        .unwrap();
+        let old = chrono::DateTime::from_timestamp(marker - 600, 0)
+            .unwrap()
+            .to_rfc3339();
+        git(&root, &["add", "."], &old);
+        git(
+            &root,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "chore(issues): probe-old filed by carol",
+            ],
+            &old,
+        );
+        let next = digest(Some("last"), false).unwrap();
+        assert!(next.contains("probe-old"), "{next}");
+    }
+
+    #[test]
+    fn review2_redaction_misses_common_secret_shapes() {
+        let cases = [
+            "curl -u alice:hunter2 https://api.example.com",
+            "git clone https://alice:hunter2@github.com/acme/x",
+            "mysql --password hunter2 db",
+            "export GH=github_pat_11ABCDEFG0123456789",
+            "export GH=ghs_abcdefghijklmnop0123",
+            "aws s3 ls --profile x AWS_SECRET_ACCESS_KEY=abc123def",
+            "curl -H 'X-Api-Key: sk-live-abc123' https://x",
+            "slack xoxb-1234-5678-abcdef",
+        ];
+        let mut leaked = Vec::new();
+        for case in cases {
+            let got = redact_secrets(case);
+            eprintln!("REVIEW2 {case:?} -> {got:?}");
+            for secret in [
+                "hunter2",
+                "github_pat_11",
+                "ghs_abc",
+                "abc123def",
+                "sk-live",
+                "xoxb-1234",
+            ] {
+                if case.contains(secret) && got.contains(secret) {
+                    leaked.push(format!("{case} -> {got}"));
+                }
+            }
+        }
+        assert!(leaked.is_empty(), "{}", leaked.join("\n"));
+        assert_eq!(
+            redact_secrets("curl -H 'X-Api-Key: sk-live-abc123' https://x"),
+            "curl -H 'X-Api-Key: [redacted]' https://x"
+        );
+    }
+
+    #[test]
+    fn identical_acts_are_kept_when_they_are_separate_events() {
+        let mut rows = vec![
+            Row::new(
+                10,
+                "alice".into(),
+                "vote",
+                "voted probe-a".into(),
+                "probe-a",
+                false,
+            ),
+            Row::new(
+                20,
+                "alice".into(),
+                "vote",
+                "voted probe-a".into(),
+                "probe-a",
+                false,
+            ),
+        ];
+        dedup(&mut rows);
+        assert_eq!(rows.len(), 2);
     }
 }

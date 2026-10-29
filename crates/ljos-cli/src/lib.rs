@@ -15267,6 +15267,15 @@ pub fn atoms_lean(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>>
     Ok(atoms_listed(client, workspace, true)?.0)
 }
 
+/// The newest lean atoms, capped by the writer before it builds the answer.
+pub(crate) fn atoms_lean_recent(
+    client: &PacksetClient,
+    workspace: &str,
+    limit: usize,
+) -> Result<Vec<Value>> {
+    Ok(atoms_listed_of(client, workspace, true, None, Some(limit), true)?.0)
+}
+
 /// The listing for a reader that names the person. The token rides only
 /// when the proof on this connection held; otherwise every atom is an
 /// agent's.
@@ -15286,7 +15295,7 @@ fn atoms_with_trust_of(
     workspace: &str,
     kind: Option<&str>,
 ) -> Result<(Vec<Value>, bool)> {
-    let (atoms, trusted) = atoms_listed_of(client, workspace, true, kind)?;
+    let (atoms, trusted) = atoms_listed_of(client, workspace, true, kind, None, false)?;
     if trusted {
         return Ok((atoms, true));
     }
@@ -15300,7 +15309,7 @@ fn atoms_listed(
     workspace: &str,
     token: bool,
 ) -> Result<(Vec<Value>, bool)> {
-    atoms_listed_of(client, workspace, token, None)
+    atoms_listed_of(client, workspace, token, None, None, false)
 }
 
 /// [`atoms_listed`] narrowed to one `kind` when given: the writer filters
@@ -15310,11 +15319,20 @@ fn atoms_listed_of(
     workspace: &str,
     token: bool,
     kind: Option<&str>,
+    limit: Option<usize>,
+    newest: bool,
 ) -> Result<(Vec<Value>, bool)> {
     let url = format!("{}/v1/atoms", client.base());
     let mut query = vec![("workspace", workspace), ("embedding", "omit")];
+    let limit = limit.map(|limit| limit.to_string());
     if let Some(kind) = kind {
         query.push(("kind", kind));
+    }
+    if let Some(limit) = limit.as_deref() {
+        query.push(("limit", limit));
+    }
+    if newest {
+        query.push(("order", "newest"));
     }
     // A runner kills PreToolUse at 10s and then ignores the hook, which
     // drops a deny. Inside a hook the listing stops at 2s so the local
@@ -25884,7 +25902,46 @@ pub(crate) fn append_locked_row(
     bytes: &[u8],
     durability: Durability,
 ) -> std::io::Result<()> {
-    use std::io::Write;
+    with_locked_row_file(path, durability, |file| {
+        use std::io::Write;
+        cap_torn_tail(file).and_then(|()| file.write_all(bytes))
+    })
+}
+
+/// Append one row and keep only the newest complete rows once `cap` is
+/// exceeded. The append and truncation share the same lock.
+pub(crate) fn append_locked_row_capped(
+    path: &Path,
+    bytes: &[u8],
+    durability: Durability,
+    cap: u64,
+) -> std::io::Result<()> {
+    with_locked_row_file(path, durability, |file| {
+        use std::io::{Read, Seek, Write};
+        cap_torn_tail(file)?;
+        file.write_all(bytes)?;
+        if file.metadata()?.len() <= cap {
+            return Ok(());
+        }
+        file.seek(std::io::SeekFrom::Start(0))?;
+        let mut held = Vec::new();
+        file.read_to_end(&mut held)?;
+        let start = held.len().saturating_sub((cap / 2) as usize);
+        let tail = &held[start..];
+        let tail = match tail.iter().position(|b| *b == b'\n') {
+            Some(i) => &tail[i + 1..],
+            None => tail,
+        };
+        file.set_len(0)?;
+        file.write_all(tail)
+    })
+}
+
+fn with_locked_row_file(
+    path: &Path,
+    durability: Durability,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::io::AsRawFd;
     let (dir, name) = open_state_dir(path)?;
@@ -25923,10 +25980,7 @@ pub(crate) fn append_locked_row(
             _ => return Err(err),
         }
     }
-    // A write that tore left the last row without its newline. Appending
-    // now would glue this row onto that one, and both would fail to parse,
-    // so a good write would vanish. Cap the torn tail first, under the lock.
-    let wrote = cap_torn_tail(&mut file).and_then(|()| file.write_all(bytes));
+    let wrote = write(&mut file);
     // SAFETY: the same descriptor, still open. Close would drop the lock
     // as well; unlock first so the next writer can take it.
     unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
@@ -61239,6 +61293,22 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 .any(|req| req.contains("GET /v1/atoms?") || req.contains("GET /v1/atoms ")),
             "{reqs:?}"
         );
+    }
+
+    #[test]
+    fn a_recent_atom_listing_is_capped_before_the_response() {
+        let _env = env_guard();
+        let (url, seen) = serve_headers(false);
+        let client = PacksetClient::new(&url).with_workspace("seat");
+        let atoms = atoms_lean_recent(&client, "seat", 32).unwrap();
+        assert!(atoms.is_empty());
+        let reqs = seen.lock().unwrap().clone();
+        let request = reqs
+            .iter()
+            .find(|req| req.contains("GET /v1/atoms?"))
+            .expect("an atoms request");
+        assert!(request.contains("limit=32"), "{request}");
+        assert!(request.contains("order=newest"), "{request}");
     }
 
     /// A listener that passed the proof and then went away. The next
