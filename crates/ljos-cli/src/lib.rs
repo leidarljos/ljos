@@ -11144,6 +11144,26 @@ fn confirm_members(running: &mut [std::process::Child]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod panel_open_tests {
+    #[test]
+    fn opening_one_of_forty_four_is_not_success() {
+        let err = super::roster_open(1, 44).unwrap_err().to_string();
+        assert!(err.contains("opened 1 of 44"), "{err}");
+        let full = super::roster_open(44, 44).unwrap();
+        assert!(full.contains("opened 44 of 44"), "{full}");
+    }
+
+    #[test]
+    fn a_member_that_exits_at_once_is_not_opened() {
+        let mut child = std::process::Command::new("false").spawn().unwrap();
+        let err = super::confirm_members(std::slice::from_mut(&mut child))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("exited"), "{err}");
+    }
+}
+
 /// File a yes-or-no decision for `prompt` when nothing open is already one,
 /// sit it, write the briefs, and start one headless member per persona.
 /// The opener's own log is `log`.
@@ -11191,18 +11211,29 @@ pub fn open_decision_panel(prompt: &str, cwd: Option<&str>, log: &Path) -> Resul
         members.push((persona, member_log, argv));
     }
     let n = members.len();
-    if n == 0 {
-        bail!("opened 0 members on {issue}");
-    }
+    let (roster, _) = panel_roster(&issue)?;
+    let line = roster_open(n, roster)?;
     let at_once = match panel_concurrency() {
         0 => usize::MAX,
         bound => bound,
     };
     let mut running = start_members(&members, at_once)?;
     confirm_members(&mut running)?;
-    let line = format!("opened {n} members on {issue}\n");
     append_log(log, &line);
     Ok(line)
+}
+
+/// `started` members of a roster of `roster`. Fewer than the roster is an
+/// error, so "opened 1 of 44" is not a success.
+///
+/// # Errors
+///
+/// No member started, or fewer started than the roster holds.
+pub fn roster_open(started: usize, roster: usize) -> Result<String> {
+    if roster == 0 || started < roster {
+        bail!("opened {started} of {roster} members");
+    }
+    Ok(format!("opened {started} of {roster} members\n"))
 }
 
 fn append_log(log: &Path, text: &str) {
