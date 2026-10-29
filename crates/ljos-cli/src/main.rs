@@ -1790,19 +1790,11 @@ fn run_command() -> Result<()> {
             print!("{}", format_hits(&hits, explain));
         }
         Cmd::Evidence { args } => {
-            if args.first().map(String::as_str) == Some("record") {
-                let mut cmd = args[1..].to_vec();
-                if cmd.first().map(String::as_str) == Some("--") {
-                    cmd.remove(0);
-                }
-                println!("{}", ljos_cli::gates::record_evidence(&cmd)?);
-            } else if args.len() == 1 {
+            if args.len() == 1 {
                 let said = run_captured("deedar", &["evidence", &args[0]])?;
                 print!("{}", ljos_cli::evidence_here(&said.stdout));
             } else {
-                bail!(
-                    "evidence: pass one deed accession, or `ljos evidence record -- <test command>`"
-                );
+                bail!("evidence: pass one deed accession");
             }
         }
         Cmd::Record { cmd } => match cmd {
