@@ -6,6 +6,7 @@
 
 ljos_test_boot::harness!();
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -1237,48 +1238,75 @@ fn a_before_mcp_server_field_is_not_taken_from_the_tool_name() {
     assert_eq!(hook_stdout(&hab, &seat), ALLOW);
 }
 
+/// A watch for the close that follows a read of `path`.
+fn watch_rules_read(path: &Path) -> i32 {
+    // SAFETY: a new inotify descriptor, or -1. Nothing else is touched.
+    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+    assert!(fd >= 0, "inotify: {}", std::io::Error::last_os_error());
+    let mut name = path.as_os_str().as_bytes().to_vec();
+    name.push(0);
+    // SAFETY: `name` is NUL-terminated and lives until the call returns.
+    let wd = unsafe { libc::inotify_add_watch(fd, name.as_ptr().cast(), libc::IN_CLOSE_NOWRITE) };
+    assert!(
+        wd >= 0,
+        "inotify watch: {}",
+        std::io::Error::last_os_error()
+    );
+    fd
+}
+
+/// Block until the watch from [`watch_rules_read`] sees a read close.
+fn wait_rules_read(fd: i32) {
+    let mut buf = [0u8; 4096];
+    loop {
+        // SAFETY: `buf` is ours and `fd` is the inotify descriptor.
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if n > 0 {
+            break;
+        }
+        let err = std::io::Error::last_os_error();
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::Interrupted,
+            "inotify read: {err}"
+        );
+    }
+    // SAFETY: `fd` is the descriptor this test opened.
+    unsafe { libc::close(fd) };
+}
+
 /// Truncate-then-write of user-rules must not deny covered GitHub writes.
-/// A rewrite window is not a policy decision.
+/// A rewrite window is not a policy decision. The hook is restored once
+/// it has read the empty file, so the window is the state it saw.
 #[test]
 fn a_rules_rewrite_window_does_not_deny_github_writes() {
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    };
-    use std::thread;
-    use std::time::Duration;
-
     let hab = hab("rules-race");
     let cfg = hab.home.join(".config/ljos");
     std::fs::create_dir_all(&cfg).unwrap();
     let path = cfg.join("user-rules.json");
-    std::fs::write(&path, "{\"rules\":[]}\n").unwrap();
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let done = stop.clone();
-    let writer = thread::spawn(move || {
-        while !done.load(Ordering::Relaxed) {
-            std::fs::write(&path, "").unwrap();
-            thread::sleep(Duration::from_millis(5));
-            std::fs::write(&path, "{\"rules\":[]}\n").unwrap();
-            thread::sleep(Duration::from_millis(5));
-        }
-    });
+    let rules = "{\"rules\":[]}\n";
+    std::fs::write(&path, rules).unwrap();
+    let watch = watch_rules_read(&path);
+    std::fs::write(&path, "").unwrap();
 
     let payload = github_comment_payload();
-    for i in 0..200 {
-        let mut cmd = ljos(&hab, &["hook"]);
-        cmd.env("LJOS_HOOKD", "off");
-        let (_took, out) = finished(feed(cmd, &payload), Duration::from_secs(3), "race");
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            stdout.contains("\"permission\":\"allow\""),
-            "iteration {i}: {stdout}"
-        );
-    }
-
-    stop.store(true, Ordering::Relaxed);
-    writer.join().unwrap();
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOKD", "off");
+    let child = feed(cmd, &payload);
+    wait_rules_read(watch);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        b"",
+        "the hook did not read the empty rules file"
+    );
+    std::fs::write(&path, rules).unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\"permission\":\"allow\""),
+        "rewrite window denied the write: {stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// User rules that target MCP:<tool> names must fire on preToolUse.

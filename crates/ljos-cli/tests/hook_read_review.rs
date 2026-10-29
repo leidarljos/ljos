@@ -112,6 +112,21 @@ fn call(
     (took, out, writer.join().unwrap())
 }
 
+/// Feed `payload` and wait until the hook exits. The wait is the process.
+fn call_wait(mut cmd: Command, payload: &[u8]) -> (Duration, Output, std::io::Result<()>) {
+    let started = Instant::now();
+    let mut child = cmd.spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let body = payload.to_vec();
+    let writer = std::thread::spawn(move || {
+        let wrote = stdin.write_all(&body);
+        drop(stdin);
+        wrote
+    });
+    let out = child.wait_with_output().unwrap();
+    (started.elapsed(), out, writer.join().unwrap())
+}
+
 fn cursor(event: &str, extra: serde_json::Value) -> String {
     let mut v = serde_json::json!({
         "cursor_version": "2.4.0",
@@ -132,9 +147,10 @@ fn permission(out: &Output) -> String {
         .unwrap_or_else(|| format!("no permission in {text:?}"))
 }
 
-/// The early read scan runs after each 4 KiB chunk over the whole buffer.
-/// A large payload that is not a read then costs time quadratic in its
-/// size: on d52ee79b an 8 MB call parses in well under a second.
+/// The early read scan used to run after each 4 KiB chunk over the whole
+/// buffer. A large payload that is not a read then costs time quadratic
+/// in its size. The queue is off, so admission cannot spend this budget.
+/// The process is waited on, and three seconds is the one-pass bound.
 #[test]
 fn a_large_tool_payload_is_read_in_one_pass() {
     let hab = hab("onepass");
@@ -165,21 +181,20 @@ fn a_large_tool_payload_is_read_in_one_pass() {
             ),
         ),
     ];
-    for queue in [false, true] {
-        for (what, payload) in &cases {
-            let label = format!("{what} queue={queue}");
-            let (took, out, _) = call(
-                hook(&hab, queue),
-                payload.as_bytes(),
-                Duration::from_secs(20),
-            );
-            assert!(
-                took < Duration::from_secs(3),
-                "{label} took {took:?}\n{}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            assert_eq!(out.status.code(), Some(0), "{label}");
-        }
+    for (what, payload) in &cases {
+        let (took, out, wrote) = call_wait(hook(&hab, false), payload.as_bytes());
+        assert!(wrote.is_ok(), "{what}: the writer saw {wrote:?}");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{what}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            took < Duration::from_secs(3),
+            "{what} took {took:?}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 }
 
