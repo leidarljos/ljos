@@ -690,6 +690,13 @@ closes the ticket and notes the grant. With no grant, a person closes
 the ticket. A grant written into the file by hand is ignored. `--via`
 is a seat other than SEAT.
 
+`ljos seat grant SEAT close=ID[,ID...] --quote TEXT --at TIME --via SEAT`
+records a quoted yes that SEAT may close those tickets and no others.
+`--ids-file PATH` reads the ids, one per line, and the row stores them.
+The same commit, quote, time and recording seat checks apply, so a row
+written by hand still does not count. `ljos finish ID --close` from that
+seat closes a named ticket and notes the grant the same way.
+
 ## One-command consent
 
 The `request_approval` verb is served as the MCP tool `ljos_request_approval`.

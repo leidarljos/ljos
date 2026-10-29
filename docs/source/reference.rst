@@ -214,6 +214,9 @@ They are removed after every recorded runner is offboarded.
 The row keeps the quote, the time, the seat that wrote it down, and the tracker commit.
 ``ljos finish ID --close`` from that seat closes the ticket and notes the grant.
 With no grant, a person closes the ticket. A grant written into the file by hand is ignored.
+``ljos seat grant SEAT close=ID[,ID...] --quote TEXT --at TIME --via SEAT`` records a quoted yes that SEAT may close those tickets.
+``--ids-file PATH`` reads the ids, one per line, and the row stores them.
+The same checks apply, and a ticket the list does not name is refused.
 
 ``ljos file "TITLE" --options A,B`` writes ``Options: A, B`` as the first body line.
 ``ljos options ISSUE A,B`` appends that line and refuses fewer than two.

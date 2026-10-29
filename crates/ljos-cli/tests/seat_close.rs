@@ -56,6 +56,14 @@ const ORG: &str = "\
 :CLAIMED_BY: clerk
 :CLAIMED_AT: [2026-10-11 Sun 05:00]
 :END:
+
+* STARTED [#C] scribe holds this
+:PROPERTIES:
+:ID:         proj-scribe
+:CREATED:    [2026-10-11 Sun]
+:CLAIMED_BY: scribe
+:CLAIMED_AT: [2026-10-11 Sun 05:00]
+:END:
 ";
 
 struct World {
@@ -148,6 +156,21 @@ fn text(out: &std::process::Output) -> String {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     )
+}
+
+fn finish_close(w: &World, seat: &str, issue: &str) -> std::process::Output {
+    w.ljos(
+        seat,
+        &["finish", issue, "--close", "--gen", "2", "--assignee", seat],
+        true,
+    )
+}
+
+fn log_updates(w: &World, issue: &str) -> usize {
+    std::fs::read_to_string(&w.log)
+        .unwrap()
+        .matches(&format!("vissue update {issue} "))
+        .count()
 }
 
 #[test]
@@ -359,4 +382,197 @@ fn a_quoted_grant_closes_own_tickets_and_a_hand_edit_does_not() {
     let said = text(&self_grant);
     assert!(!self_grant.status.success(), "self grant: {said}");
     assert!(said.contains("cannot grant itself"), "{said}");
+}
+
+/// A grant that names tickets closes those and refuses the rest.
+/// A row typed into the file does not count. `close=own` still does.
+#[test]
+fn a_named_list_closes_those_tickets_and_a_hand_edit_does_not() {
+    let w = World::new();
+    for name in ["clerk", "papers", "reachbook", "inky", "scribe"] {
+        let out = w.ljos("clerk", &["seat", "add", name], false);
+        assert!(out.status.success(), "add {name}: {}", text(&out));
+    }
+    let quote = "yes papers may close the named tickets";
+    let at = "2026-10-29T00:00:00Z";
+    let granted = w.ljos(
+        "clerk",
+        &[
+            "seat",
+            "grant",
+            "papers",
+            "close=proj-else,proj-filed",
+            "--quote",
+            quote,
+            "--at",
+            at,
+            "--via",
+            "clerk",
+        ],
+        false,
+    );
+    assert!(granted.status.success(), "grant: {}", text(&granted));
+    let roster = std::fs::read_to_string(w.tracker.join("vissue.toml")).unwrap();
+    let doc: toml::Value = toml::from_str(&roster).unwrap();
+    let row = &doc["seats"]["papers"];
+    assert_eq!(
+        row["close"].as_str(),
+        Some("proj-else,proj-filed"),
+        "{roster}"
+    );
+    assert_eq!(row["quote"].as_str(), Some(quote));
+    assert_eq!(row["at"].as_str(), Some(at));
+    assert_eq!(row["via"].as_str(), Some("clerk"));
+    let commit = row["commit"].as_str().unwrap().to_string();
+    assert_eq!(commit.len(), 40, "{commit}");
+
+    let listed = finish_close(&w, "papers", "proj-else");
+    let said = text(&listed);
+    assert!(listed.status.success(), "listed close: {said}");
+    assert!(said.contains("standing grant allowed this close"), "{said}");
+    assert!(said.contains(quote), "{said}");
+    assert!(said.contains(at), "{said}");
+    assert!(said.contains("via: clerk"), "{said}");
+    assert!(said.contains(&commit), "{said}");
+    let calls = std::fs::read_to_string(&w.log).unwrap();
+    assert!(
+        calls.contains("vissue note proj-else standing grant allowed this close"),
+        "{calls}"
+    );
+    assert!(calls.contains(quote) && calls.contains(&commit), "{calls}");
+    assert!(calls.contains("vissue update proj-else -s DONE"), "{calls}");
+
+    let also = finish_close(&w, "papers", "proj-filed");
+    assert!(also.status.success(), "second listed id: {}", text(&also));
+    assert_eq!(log_updates(&w, "proj-filed"), 1);
+
+    let unlisted = finish_close(&w, "papers", "proj-own");
+    let said = text(&unlisted);
+    assert!(!unlisted.status.success(), "unlisted closed: {said}");
+    assert!(
+        said.contains("not papers's to close") || said.contains("not papers"),
+        "{said}"
+    );
+    assert_eq!(log_updates(&w, "proj-own"), 0, "an unlisted id was written");
+
+    let own = w.ljos(
+        "papers",
+        &[
+            "seat",
+            "grant",
+            "clerk",
+            "close=own",
+            "--quote",
+            "yes clerk may close its own",
+            "--at",
+            at,
+            "--via",
+            "papers",
+        ],
+        false,
+    );
+    assert!(own.status.success(), "close=own: {}", text(&own));
+    let roster = std::fs::read_to_string(w.tracker.join("vissue.toml")).unwrap();
+    let doc: toml::Value = toml::from_str(&roster).unwrap();
+    assert_eq!(doc["seats"]["clerk"]["close"].as_str(), Some("own"));
+    let clerk_close = finish_close(&w, "clerk", "proj-clerk");
+    let said = text(&clerk_close);
+    assert!(clerk_close.status.success(), "own close: {said}");
+    assert!(said.contains("standing grant allowed this close"), "{said}");
+    assert!(said.contains("yes clerk may close its own"), "{said}");
+    assert_eq!(log_updates(&w, "proj-clerk"), 1);
+
+    let ids = w.root.join("ids.txt");
+    std::fs::write(&ids, "proj-hand\n\nproj-inky\n").unwrap();
+    let from_file = w.ljos(
+        "clerk",
+        &[
+            "seat",
+            "grant",
+            "reachbook",
+            "--ids-file",
+            ids.to_str().unwrap(),
+            "--quote",
+            "yes reachbook may close the file",
+            "--at",
+            at,
+            "--via",
+            "clerk",
+        ],
+        false,
+    );
+    assert!(from_file.status.success(), "ids file: {}", text(&from_file));
+    let roster = std::fs::read_to_string(w.tracker.join("vissue.toml")).unwrap();
+    let doc: toml::Value = toml::from_str(&roster).unwrap();
+    assert_eq!(
+        doc["seats"]["reachbook"]["close"].as_str(),
+        Some("proj-hand,proj-inky"),
+        "{roster}"
+    );
+    let file_commit = doc["seats"]["reachbook"]["commit"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let named = finish_close(&w, "reachbook", "proj-hand");
+    let said = text(&named);
+    assert!(named.status.success(), "file id: {said}");
+    assert!(said.contains("yes reachbook may close the file"), "{said}");
+    assert!(said.contains(&file_commit), "{said}");
+    assert_eq!(log_updates(&w, "proj-hand"), 1);
+    let other = finish_close(&w, "reachbook", "proj-own");
+    let said = text(&other);
+    assert!(
+        !other.status.success(),
+        "file grant closed another id: {said}"
+    );
+    assert_eq!(log_updates(&w, "proj-own"), 0);
+
+    let mut doc: toml::Value =
+        toml::from_str(&std::fs::read_to_string(w.tracker.join("vissue.toml")).unwrap()).unwrap();
+    let seats = doc.get_mut("seats").unwrap().as_table_mut().unwrap();
+    let mut row = toml::map::Map::new();
+    row.insert("close".into(), toml::Value::String("proj-scribe".into()));
+    row.insert(
+        "quote".into(),
+        toml::Value::String("typed in by hand".into()),
+    );
+    row.insert(
+        "at".into(),
+        toml::Value::String("2026-10-29T01:00:00Z".into()),
+    );
+    row.insert("via".into(), toml::Value::String("clerk".into()));
+    row.insert("commit".into(), toml::Value::String(commit));
+    seats.insert("scribe".into(), toml::Value::Table(row));
+    let papers = seats.get_mut("papers").unwrap().as_table_mut().unwrap();
+    papers.insert(
+        "close".into(),
+        toml::Value::String("proj-else,proj-own".into()),
+    );
+    std::fs::write(
+        w.tracker.join("vissue.toml"),
+        toml::to_string_pretty(&doc).unwrap(),
+    )
+    .unwrap();
+    let handed = finish_close(&w, "scribe", "proj-scribe");
+    let said = text(&handed);
+    assert!(!handed.status.success(), "hand edit closed: {said}");
+    assert!(said.contains("ljos seat grant"), "{said}");
+    assert_eq!(
+        log_updates(&w, "proj-scribe"),
+        0,
+        "a hand-written row closed"
+    );
+    let edited = finish_close(&w, "papers", "proj-own");
+    let said = text(&edited);
+    assert!(!edited.status.success(), "edited list closed: {said}");
+    assert!(said.contains("ljos seat grant"), "{said}");
+    assert_eq!(log_updates(&w, "proj-own"), 0, "a hand-edited list closed");
+    let before = log_updates(&w, "proj-else");
+    let again = finish_close(&w, "papers", "proj-else");
+    assert!(
+        !again.status.success(),
+        "edited grant still closed: {}",
+        text(&again)
+    );
+    assert_eq!(log_updates(&w, "proj-else"), before);
 }

@@ -146,10 +146,14 @@ That name is `LJOS_SEAT` when it is set. Otherwise ljos derives one from the
 runner, and a derived name counts as a seat.
 
 **Grants.** Coming in 0.35.0. A grant with `close=own` lets one named seat close the tickets it filed or has claimed.
+A grant with `close=ID[,ID...]` lets that seat close those tickets and no others.
+`--ids-file PATH` reads the ids, one per line.
 Without a grant, `ljos finish` leaves the ticket open for the person to close.
 
 ```
 ljos seat grant SEAT close=own --quote "the person's words" --at ISO_TIME --via RECORDER
+ljos seat grant SEAT close=ID[,ID...] --quote "the person's words" --at ISO_TIME --via RECORDER
+ljos seat grant SEAT --ids-file PATH --quote "the person's words" --at ISO_TIME --via RECORDER
 ```
 
 The row lives in `vissue.toml`. It holds the quote, the time, the recorder named by `--via`,
@@ -290,6 +294,7 @@ ljos digest                   # coming in 0.35.0
 ljos seat                     # who is sitting
 ljos seat add NAME            # coming in 0.35.0
 ljos seat grant SEAT close=own --quote "..." --at ISO_TIME --via RECORDER   # coming in 0.35.0
+ljos seat grant SEAT close=ID[,ID...] [--ids-file PATH] --quote "..." --at ISO_TIME --via RECORDER
 ljos offboard [--runner NAME] [--dry-run]   # coming in 0.35.0
 ljos remember "the default fuse is CombMNZ"
 ljos prefer "CombMNZ over RRF"

@@ -1,10 +1,12 @@
 //! The tracker's `vissue.toml` seat list, and a close grant recorded there.
 //!
 //! `ljos seat add` writes a seat into that list. `ljos seat grant` records
-//! the owner's quoted yes that a seat may close tickets it filed or holds.
-//! A grant written into the file by hand does not count: the commit named
-//! in the row has to be the one this command made, and the quote, the time
-//! and the recording seat have to match that commit.
+//! the owner's quoted yes that a seat may close tickets it filed or holds,
+//! or a named list of tickets. A grant written into the file by hand does
+//! not count: the commit named in the row has to be the one this command
+//! made, and the quote, the time and the recording seat have to match that
+//! commit. The ids of a named list are the `close` value, so that same
+//! check covers them.
 
 use std::path::{Path, PathBuf};
 
@@ -61,9 +63,10 @@ pub fn add(name: &str) -> Result<String> {
     }
 }
 
-/// Record a `close=own` grant for `seat`.
+/// Record a close grant for `seat`.
 ///
-/// `spec` is `close=own`. `quote` is the owner's words, `at` is when they
+/// `spec` is `close=own` or `close=ID[,ID...]`. `ids_file`, when set, lists
+/// more ids, one per line. `quote` is the owner's words, `at` is when they
 /// were said, and `via` is the seat writing them down. That seat is this
 /// process, and it is not `seat`.
 ///
@@ -71,10 +74,15 @@ pub fn add(name: &str) -> Result<String> {
 ///
 /// The arguments do not name that grant, this seat is the one being
 /// granted, the tracker is not a git checkout, or the file cannot be written.
-pub fn grant(seat: &str, spec: &str, quote: &str, at: &str, via: &str) -> Result<String> {
-    if spec.trim() != "close=own" {
-        bail!("seat grant: the only grant is close=own. Nothing was written");
-    }
+pub fn grant(
+    seat: &str,
+    spec: &str,
+    quote: &str,
+    at: &str,
+    via: &str,
+    ids_file: Option<&Path>,
+) -> Result<String> {
+    let close = close_value(spec, ids_file)?;
     let quote = quote.trim();
     if quote.is_empty() {
         bail!("seat grant: pass the owner's words with --quote. Nothing was written");
@@ -109,16 +117,35 @@ pub fn grant(seat: &str, spec: &str, quote: &str, at: &str, via: &str) -> Result
             "seat grant: the tracker is not a git checkout, so the grant has no commit. Nothing was written"
         );
     }
-    set_grant(&mut doc, &target, quote, at.trim(), &via, None);
+    let verb = if close == "own" {
+        "grant close own"
+    } else {
+        "grant close named"
+    };
+    set_grant(&mut doc, &target, &close, quote, at.trim(), &via, None);
     write_doc(&path, &doc).context("seat grant")?;
-    commit_if_repo(&path, &commit_subject("grant close own", &target))?;
+    commit_if_repo(&path, &commit_subject(verb, &target))?;
     let sha = head_sha(root).context("seat grant")?;
-    set_grant(&mut doc, &target, quote, at.trim(), &via, Some(&sha));
+    set_grant(
+        &mut doc,
+        &target,
+        &close,
+        quote,
+        at.trim(),
+        &via,
+        Some(&sha),
+    );
     write_doc(&path, &doc).context("seat grant")?;
     commit_if_repo(&path, "seat: record grant commit")?;
-    Ok(format!(
-        "granted {target} close of its own tickets, commit {sha}, recorded by {via}\n"
-    ))
+    if close == "own" {
+        Ok(format!(
+            "granted {target} close of its own tickets, commit {sha}, recorded by {via}\n"
+        ))
+    } else {
+        Ok(format!(
+            "granted {target} close of {close}, commit {sha}, recorded by {via}\n"
+        ))
+    }
 }
 
 /// The note a granted close should write, or `None` when a person is here
@@ -141,7 +168,7 @@ pub fn close_note(issue: &str) -> Result<Option<String>> {
              Nothing was written"
         );
     };
-    if !owns_issue(issue, &seat)? {
+    if !covers(&grant, issue, &seat)? {
         bail!(
             "finish: {issue} is not {seat}'s to close. A grant of own covers a ticket this seat filed or holds. Nothing was written"
         );
@@ -154,6 +181,7 @@ struct Grant {
     at: String,
     via: String,
     commit: String,
+    close: String,
 }
 
 impl Grant {
@@ -170,7 +198,11 @@ fn honored_grant(seat: &str) -> Option<Grant> {
     let doc = load_doc(&path).ok()?;
     let slug = crate::canonical_seat_name(seat);
     let row = grant_row(&doc, &slug)?;
-    if row.close != "own" || row.quote.is_empty() || row.at.is_empty() || row.via.is_empty() {
+    if !grant_close_ok(&row.close)
+        || row.quote.is_empty()
+        || row.at.is_empty()
+        || row.via.is_empty()
+    {
         return None;
     }
     if row.commit.is_empty() || row.via == slug {
@@ -198,7 +230,140 @@ fn honored_grant(seat: &str) -> Option<Grant> {
         at: row.at,
         via: row.via,
         commit: row.commit,
+        close: row.close,
     })
+}
+
+/// `own`, or a comma separated list of ticket ids. Anything else was not
+/// written by this command.
+fn grant_close_ok(close: &str) -> bool {
+    close == "own" || listed_ids(close).is_some()
+}
+
+fn listed_ids(close: &str) -> Option<Vec<String>> {
+    if close.is_empty() || close == "own" {
+        return None;
+    }
+    let mut ids = Vec::new();
+    for part in close.split(',') {
+        let id = part.trim();
+        if !ticket_id(id) || ids.iter().any(|have| have == id) {
+            return None;
+        }
+        ids.push(id.to_string());
+    }
+    if ids.is_empty() {
+        None
+    } else {
+        Some(ids)
+    }
+}
+
+fn covers(grant: &Grant, issue: &str, seat: &str) -> Result<bool> {
+    if grant.close == "own" {
+        return owns_issue(issue, seat);
+    }
+    let issue = issue.trim();
+    Ok(listed_ids(&grant.close).is_some_and(|ids| ids.iter().any(|id| id == issue)))
+}
+
+/// The `close` value to store: `own`, or the ids joined by commas.
+fn close_value(spec: &str, ids_file: Option<&Path>) -> Result<String> {
+    let spec = spec.trim();
+    if spec == "close=own" {
+        if ids_file.is_some() {
+            bail!("seat grant: close=own names no ticket list. Nothing was written");
+        }
+        return Ok("own".to_string());
+    }
+    let mut ids = Vec::new();
+    if spec.is_empty() || spec == "close" {
+        if ids_file.is_none() {
+            bail!("seat grant: the grant is close=own or close=ID[,ID...]. Nothing was written");
+        }
+    } else if let Some(rest) = spec.strip_prefix("close=") {
+        add_spec_ids(&mut ids, rest)?;
+    } else {
+        bail!("seat grant: the grant is close=own or close=ID[,ID...]. Nothing was written");
+    }
+    if let Some(path) = ids_file {
+        add_file_ids(&mut ids, path)?;
+    }
+    if ids.is_empty() {
+        bail!("seat grant: name at least one ticket. Nothing was written");
+    }
+    Ok(ids.join(","))
+}
+
+fn add_spec_ids(ids: &mut Vec<String>, rest: &str) -> Result<()> {
+    if rest.trim().is_empty() {
+        return Ok(());
+    }
+    for part in rest.split(',') {
+        add_id(ids, part)?;
+    }
+    Ok(())
+}
+
+fn add_file_ids(ids: &mut Vec<String>, path: &Path) -> Result<()> {
+    let text = std::fs::read_to_string(path).with_context(|| {
+        format!(
+            "seat grant: cannot read {}. Nothing was written",
+            path.display()
+        )
+    })?;
+    for (n, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.contains(',') || line.contains(char::is_whitespace) {
+            bail!(
+                "seat grant: line {} of {} must be one ticket id. Nothing was written",
+                n + 1,
+                path.display()
+            );
+        }
+        add_id(ids, line)?;
+    }
+    Ok(())
+}
+
+fn add_id(ids: &mut Vec<String>, raw: &str) -> Result<()> {
+    let id = raw.trim();
+    if !ticket_id(id) {
+        bail!("seat grant: {id:?} is not a ticket id. Nothing was written");
+    }
+    if ids.iter().any(|have| have == id) {
+        bail!("seat grant: {id} is listed twice. Nothing was written");
+    }
+    ids.push(id.to_string());
+    Ok(())
+}
+
+/// A tracker id: a letter, then letters or digits, with at least one hyphen.
+fn ticket_id(id: &str) -> bool {
+    if id.len() > 80 || !id.contains('-') {
+        return false;
+    }
+    let mut chars = id.chars();
+    if !chars.next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    let mut prev_hyphen = false;
+    for c in chars {
+        if c == '-' {
+            if prev_hyphen {
+                return false;
+            }
+            prev_hyphen = true;
+        } else if c.is_ascii_alphanumeric() {
+            prev_hyphen = false;
+        } else {
+            return false;
+        }
+    }
+    !prev_hyphen
 }
 
 struct GrantRow {
@@ -391,6 +556,7 @@ fn seat_known(doc: &toml::Value, slug: &str) -> bool {
 fn set_grant(
     doc: &mut toml::Value,
     slug: &str,
+    close: &str,
     quote: &str,
     at: &str,
     via: &str,
@@ -406,7 +572,7 @@ fn set_grant(
     let Some(row) = row.as_table_mut() else {
         return;
     };
-    row.insert("close".into(), toml::Value::String("own".into()));
+    row.insert("close".into(), toml::Value::String(close.to_string()));
     row.insert("quote".into(), toml::Value::String(quote.to_string()));
     row.insert("at".into(), toml::Value::String(at.to_string()));
     row.insert("via".into(), toml::Value::String(via.to_string()));

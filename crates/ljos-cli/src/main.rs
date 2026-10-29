@@ -244,12 +244,16 @@ enum SeatAction {
         /// The seat to add.
         name: String,
     },
-    /// Record the owner's yes that a seat may close tickets it filed or holds.
+    /// Record the owner's yes that a seat may close tickets it filed or holds, or the tickets named here.
     Grant {
         /// The seat the grant names.
         seat: String,
-        /// The grant, written close=own.
-        spec: String,
+        /// The grant, written close=own or close=ID[,ID...].
+        #[arg(required_unless_present = "ids_file")]
+        spec: Option<String>,
+        /// Tickets this grant covers, one id per line.
+        #[arg(long, value_name = "PATH")]
+        ids_file: Option<PathBuf>,
         /// The owner's words.
         #[arg(long)]
         quote: String,
@@ -3433,12 +3437,20 @@ fn run_command() -> Result<()> {
             Some(SeatAction::Grant {
                 seat,
                 spec,
+                ids_file,
                 quote,
                 at,
                 via,
             }) => print!(
                 "{}",
-                ljos_cli::seat_roster::grant(&seat, &spec, &quote, &at, &via)?
+                ljos_cli::seat_roster::grant(
+                    &seat,
+                    spec.as_deref().unwrap_or(""),
+                    &quote,
+                    &at,
+                    &via,
+                    ids_file.as_deref(),
+                )?
             ),
         },
         Cmd::Mcp { args } => return Err(ljos_cli::exec_server(&args)),
