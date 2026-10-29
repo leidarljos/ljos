@@ -2,9 +2,9 @@
 //!
 //! ljos-policyd answers `allow\trewrite\tLINE` when the line should run as
 //! LINE. The guard judges LINE again. A runner whose `PreToolUse` hook can
-//! replace the tool input gets LINE back as that input, and a runner
-//! without that field gets a note. A LINE the guard does not accept as it
-//! stands refuses the call, and the original line does not run.
+//! replace the tool input gets LINE back as that input. A runner without
+//! that field is refused with LINE named. A LINE the guard does not accept
+//! as it stands refuses the call. The original line never runs.
 //!
 //! The local table names a fix in a policyd refusal it knows. That call
 //! stays a deny, so a runner that drops an updated input still refuses it.
@@ -50,6 +50,10 @@ pub enum Outcome {
 
 /// The new line in a policyd rewrite answer, `allow\trewrite\tLINE`.
 /// This is the one place that format is read.
+///
+/// ljos asks about `bash -c SCRIPT`, and policyd 0.6.0 answers with that
+/// argv rewritten and quoted: `bash -c 'uv run x.py'`. That one wrapper
+/// is ljos's own and is taken off. A LINE in any other shape is the line.
 #[must_use]
 pub fn from_policyd(text: &str) -> Option<String> {
     let mut parts = text.trim().lines().next()?.splitn(3, '\t');
@@ -57,7 +61,30 @@ pub fn from_policyd(text: &str) -> Option<String> {
         return None;
     }
     let line = parts.next()?.trim();
-    (!line.is_empty()).then(|| line.to_string())
+    let line = match crate::shell_words(line).as_slice() {
+        [shell, flag, script] if shell == "bash" && flag == "-c" => script.trim().to_string(),
+        _ => line.to_string(),
+    };
+    (!line.is_empty()).then_some(line)
+}
+
+/// Hold policyd's rewrite of `line`, which it judged as `script`. The
+/// script can differ from the line: a here-document body is taken out, or
+/// a continuation is joined. Then the rewrite is inexact, so the call is
+/// refused and neither line runs.
+pub(crate) fn hold_exact(line: &str, script: &str, command: String) -> Option<Rule> {
+    if script.trim() == line.trim() {
+        hold(line, command);
+        return None;
+    }
+    Some(Rule {
+        pattern: "ljos-policyd".into(),
+        verdict: "deny".into(),
+        reason: format!(
+            "{POLICYD_REASON} to `{command}`, but it judged a copy with its here-documents \
+             or continuations changed, so the new line is not exact. Neither line runs"
+        ),
+    })
 }
 
 thread_local! {
@@ -204,7 +231,9 @@ pub fn answer(
 }
 
 /// [`answer`] for a known outcome. A refusal is the runner's deny. A line
-/// to run is the updated input where the runner takes one, else a note.
+/// to run is the updated input where the runner takes one. A runner that
+/// cannot take one is refused with the new line named, so the original
+/// line never runs.
 #[must_use]
 pub fn answer_with(
     input: &str,
@@ -213,12 +242,26 @@ pub fn answer_with(
     outcome: &Outcome,
     relayed: bool,
 ) -> String {
+    let refuse = |rule: &Rule| crate::approval::hook_output(input, call, context, Some(rule));
     match outcome {
-        Outcome::Refuse(rule) => crate::approval::hook_output(input, call, context, Some(rule)),
+        Outcome::Refuse(rule) => refuse(rule),
         Outcome::Run(fix) => (!relayed)
             .then(|| updated_input(input, call, context, fix))
             .flatten()
-            .unwrap_or_else(|| note(call, context, fix)),
+            .unwrap_or_else(|| refuse(&unchangeable(fix))),
+    }
+}
+
+/// The deny for a runner whose hook cannot replace the command.
+fn unchangeable(fix: &Rewrite) -> Rule {
+    Rule {
+        pattern: "ljos-policyd".into(),
+        verdict: "deny".into(),
+        reason: format!(
+            "{}. Run `{}` instead. This runner cannot take a new command, so the original \
+             line does not run",
+            fix.reason, fix.command
+        ),
     }
 }
 
@@ -289,19 +332,6 @@ fn updated_input(input: &str, call: &HookCall, context: &str, fix: &Rewrite) -> 
     Some(out.to_string() + "\n")
 }
 
-/// The answer for a runner that cannot take a new line, on a line policyd
-/// allowed: it runs as written, and the model reads the new line.
-fn note(call: &HookCall, context: &str, fix: &Rewrite) -> String {
-    let said = format!(
-        "{}: this runner cannot take a new command, so it ran as written. Run `{}` next time",
-        fix.reason, fix.command
-    );
-    if call.shape.is_cursor() {
-        return json!({ "permission": "allow", "agent_message": said }).to_string() + "\n";
-    }
-    crate::hook_output_ruled(call, &joined(context, &said), None)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,7 +399,28 @@ mod tests {
             from_policyd("allow\trewrite\tuv run x.py --n 3").as_deref(),
             Some("uv run x.py --n 3")
         );
+        // policyd 0.6.0 answers with the `bash -c` argv ljos sent, quoted.
+        for (text, line) in [
+            ("allow\trewrite\tbash -c 'uv run x.py'\n", "uv run x.py"),
+            (
+                "allow\trewrite\tbash -c 'uv run x.py --n 3'",
+                "uv run x.py --n 3",
+            ),
+            (
+                "allow\trewrite\tbash -c 'uv run '\\''a b.py'\\'''",
+                "uv run 'a b.py'",
+            ),
+            (
+                "allow\trewrite\tbash -c \"uv run x.py > out\"",
+                "uv run x.py > out",
+            ),
+            ("allow\trewrite\tbash -c 'x' extra", "bash -c 'x' extra"),
+            ("allow\trewrite\tsh -c 'uv run x.py'", "sh -c 'uv run x.py'"),
+        ] {
+            assert_eq!(from_policyd(text).as_deref(), Some(line), "{text:?}");
+        }
         for text in [
+            "allow\trewrite\tbash -c ''",
             "allow",
             "allow\trewrite\t",
             "allow\trewrite",
@@ -479,31 +530,49 @@ mod tests {
             r#""toolInputTruncated":true"#,
         );
         let v = policyd_run(&cut, false);
+        assert_eq!(decision(&v), "deny", "{v}");
         assert!(v["hookSpecificOutput"].get("updatedInput").is_none());
-        assert!(v["hookSpecificOutput"].get("permissionDecision").is_none());
-        let said = v["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap();
-        assert!(said.contains("Run `uv run x.py --n 3` next time"), "{said}");
+        assert!(
+            v.to_string().contains("Run `uv run x.py --n 3` instead"),
+            "{v}"
+        );
     }
 
+    /// A runner that cannot take a new command is refused with the new
+    /// line named, so the original line never runs: Cursor's
+    /// `beforeShellExecution`, and every runner behind the relay.
     #[test]
-    fn an_accepted_rewrite_is_a_note_where_input_cannot_change() {
-        let v = policyd_run(CLAUDE, true);
-        let specific = &v["hookSpecificOutput"];
-        assert!(specific.get("permissionDecision").is_none());
-        assert!(specific.get("updatedInput").is_none());
-        let said = specific["additionalContext"].as_str().unwrap();
-        assert!(said.starts_with(POLICYD_REASON), "{said}");
-        assert!(said.contains("Run `uv run x.py --n 3` next time"), "{said}");
+    fn an_accepted_rewrite_is_a_deny_where_input_cannot_change() {
+        let cases = [
+            (CURSOR_SHELL, false),
+            (CLAUDE, true),
+            (CODEX, true),
+            (GROK, true),
+            (CURSOR_TOOL, true),
+        ];
+        for (input, relayed) in cases {
+            let v = policyd_run(input, relayed);
+            assert_eq!(decision(&v), "deny", "{input} relayed={relayed}\n{v}");
+            assert!(v["hookSpecificOutput"].get("updatedInput").is_none(), "{v}");
+            assert!(v.get("updated_input").is_none(), "{v}");
+            let said = v.to_string();
+            assert!(said.contains("Run `uv run x.py --n 3` instead"), "{said}");
+            assert!(said.contains("the original line does not run"), "{said}");
+        }
+    }
 
-        let v = policyd_run(CURSOR_SHELL, false);
-        assert_eq!(v["permission"], "allow");
-        assert!(v.get("updated_input").is_none());
-        assert!(v["agent_message"]
-            .as_str()
-            .unwrap()
-            .contains("uv run x.py --n 3"));
+    /// A rewrite of a copy that is not the line cannot be applied exactly,
+    /// so the call is refused and nothing is held.
+    #[test]
+    fn a_rewrite_of_a_changed_copy_refuses_the_call() {
+        let line = "python x.py <<EOF\nbody\nEOF";
+        let rule = hold_exact(line, "python x.py <<EOF\nEOF", "uv run x.py".into())
+            .expect("a changed copy refuses");
+        assert_eq!(rule.verdict, "deny");
+        assert!(rule.reason.contains("Neither line runs"), "{}", rule.reason);
+        assert!(take_held(line).is_none());
+        assert!(hold_exact("python x.py", "python x.py", "uv run x.py".into()).is_none());
+        assert_eq!(take_held("python x.py").as_deref(), Some("uv run x.py"));
     }
 
     /// Review repro: a denial sent as allow plus updatedInput runs the
@@ -640,19 +709,19 @@ mod tests {
         assert!(matches!(outcome, Outcome::Run(_)), "{outcome:?}");
         let v = answer_json(READ, &outcome, false);
         assert!(v["hookSpecificOutput"].get("updatedInput").is_none(), "{v}");
-        assert_ne!(decision(&v), "allow", "{v}");
+        assert_eq!(decision(&v), "deny", "{v}");
     }
 
-    /// The fake policyd: `python a.py` is rewritten to an accepted line,
-    /// `python b.py` to a refused one, and `python c.py` to one that is
-    /// rewritten again.
+    /// The fake policyd, answering in 0.6.0's `bash -c` form: `python a.py`
+    /// is rewritten to an accepted line, `python b.py` to a refused one,
+    /// and `python c.py` to one that is rewritten again.
     const FAKE_POLICYD: &str = r#"#!/bin/sh
 case "$5" in
-  "python a.py") printf 'allow\trewrite\tuv run a.py\n' ;;
-  "python b.py") printf 'allow\trewrite\tuv run b.py\n' ;;
-  "python c.py") printf 'allow\trewrite\tuv run c.py\n' ;;
+  "python a.py") printf "allow\trewrite\tbash -c 'uv run a.py'\n" ;;
+  "python b.py") printf "allow\trewrite\tbash -c 'uv run b.py'\n" ;;
+  "python c.py") printf "allow\trewrite\tbash -c 'uv run c.py'\n" ;;
   "uv run b.py") printf 'deny\tpython-requires-uv\n'; exit 2 ;;
-  "uv run c.py") printf 'allow\trewrite\techo c\n' ;;
+  "uv run c.py") printf "allow\trewrite\tbash -c 'echo c'\n" ;;
   *) echo allow ;;
 esac
 "#;

@@ -34621,8 +34621,7 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     };
     if !t.starts_with("deny") {
         if let Some(command) = rewrite::from_policyd(&t) {
-            rewrite::hold(line, command);
-            return None;
+            return rewrite::hold_exact(line, &tcb_script(line), command);
         }
         // Only the fail-open marker is a fault the switch let through. An
         // unready token is an allow with a note and is not a bypass.
