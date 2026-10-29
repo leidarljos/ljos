@@ -567,9 +567,12 @@ enum Cmd {
         /// A day (`YYYY-MM-DD`), a time, or `last` (since the previous digest).
         #[arg(long)]
         since: Option<String>,
-        /// Print one JSON document.
+        /// Print one JSON document. JSON does not move the marker.
         #[arg(long)]
         json: bool,
+        /// Move the marker. A plain digest does this. JSON does not, unless this is set.
+        #[arg(long)]
+        mark: bool,
     },
     /// Write to one seat (`SEAT TEXT...`), or to a group with `--group NAME`.
     Send {
@@ -1987,8 +1990,11 @@ fn run_command() -> Result<()> {
         }
         Cmd::Log { seat } => print!("{}", ljos_cli::tracker_log(Some(&seat))?),
         Cmd::Usage { since } => print!("{}", ljos_cli::tracker_usage(&since)?),
-        Cmd::Digest { since, json } => {
-            print!("{}", ljos_cli::digest::digest(since.as_deref(), json)?);
+        Cmd::Digest { since, json, mark } => {
+            print!(
+                "{}",
+                ljos_cli::digest::digest_cli(since.as_deref(), json, mark)?
+            );
         }
         Cmd::Send {
             words,

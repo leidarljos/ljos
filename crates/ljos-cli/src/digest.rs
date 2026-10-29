@@ -1,8 +1,9 @@
 //! One view of what the seats did.
 //!
 //! Rows come from the tracker git log, the issue files, `deedar evidence`,
-//! the pack, and the guard log. Nothing here is a new store. The only file
-//! this writes is the marker `last` reads, under the state directory.
+//! the pack, and the guard log. Nothing here is a new store. The marker
+//! `last` reads is written only when a plain digest asks for it, or when
+//! the mark flag is set. The MCP tool never writes it.
 
 use anyhow::{bail, Result};
 use chrono::TimeZone;
@@ -18,8 +19,12 @@ struct Row {
     kind: &'static str,
     text: String,
     issue: String,
-    /// A git ballot line, dropped when the votes drawer already shows it.
+    /// A git ballot line, dropped when a timed votes drawer already shows it.
     drop_if_vote: bool,
+    /// An org stamp with a clock and no seconds. `last` keeps that minute.
+    minute: bool,
+    /// An org stamp with no clock. A timed git row replaces it.
+    date_only: bool,
 }
 
 impl Row {
@@ -38,6 +43,8 @@ impl Row {
             text,
             issue: issue.into(),
             drop_if_vote,
+            minute: false,
+            date_only: false,
         }
     }
 }
@@ -50,20 +57,30 @@ struct Window {
 }
 
 impl Window {
-    fn keeps(&self, at: i64) -> bool {
+    fn keeps(&self, at: i64, minute: bool) -> bool {
         match self.start {
             None => true,
+            // A minute stamp names the whole minute. The marker sits
+            // somewhere in it, so the event still belongs in `last`.
+            Some(start) if self.exclusive && minute => at + 59 > start,
             Some(start) if self.exclusive => at > start,
             Some(start) => at >= start,
         }
     }
 }
 
+/// How many memory rows one digest prints. The rest of the pack stays put.
+const MEMORY_CAP: usize = 32;
+
+/// `guard.jsonl` is rotated once it passes this size.
+const GUARD_CAP: u64 = 64 * 1024;
+
 /// What every seat did, newest first within the seat, seats newest first.
 ///
 /// `since` is a day (`YYYY-MM-DD`), an RFC 3339 time, `YYYY-MM-DDTHH:MM`,
 /// or `last`. `last` starts after the previous digest and says so when
 /// there was none. A missing deed store or pack leaves those rows out.
+/// A plain call stores the marker. JSON does not, unless `mark` is set.
 /// The marker is the time this call started, so a write during the call
 /// shows up next time.
 ///
@@ -72,6 +89,30 @@ impl Window {
 /// `since` is not a day, a time, or `last`. The tracker cannot be read.
 /// The marker cannot be stored.
 pub fn digest(since: Option<&str>, json: bool) -> Result<String> {
+    digest_cli(since, json, !json)
+}
+
+/// The shell. `mark` forces the marker. A plain digest (no JSON) marks
+/// even when `mark` is false.
+///
+/// # Errors
+///
+/// As [`digest`].
+pub fn digest_cli(since: Option<&str>, json: bool, mark: bool) -> Result<String> {
+    show(since, json, mark || !json, true)
+}
+
+/// The MCP tool. It never moves the marker, and a refused command is not
+/// repeated: the row says that a command was refused.
+///
+/// # Errors
+///
+/// As [`digest`].
+pub fn digest_for_tool(since: Option<&str>, json: bool) -> Result<String> {
+    show(since, json, false, false)
+}
+
+fn show(since: Option<&str>, json: bool, mark: bool, guard_commands: bool) -> Result<String> {
     let started = unix_now();
     let (window, since_label, prelude) = parse_since(since)?;
     let layout = vissue_core::Layout::resolve(None, None).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -93,20 +134,23 @@ pub fn digest(since: Option<&str>, json: bool) -> Result<String> {
         );
     }
     drop_shadowed_votes(&mut rows);
-    collect_deeds(&accessions, &window, &mut rows);
-    collect_guard(&window, &mut rows);
+    let cutoff = collect_deeds(&accessions, &window, &mut rows);
+    collect_guard(&window, &mut rows, guard_commands);
     collect_memory(&window, &mut rows);
     dedup(&mut rows);
-    store_marker(started)?;
+    if mark {
+        store_marker(started)?;
+    }
     let banner = crate::tracker_sync::tracker_sync_line();
     if json {
         Ok(render_json(
             since_label.as_deref(),
             banner.as_deref(),
+            &cutoff,
             &rows,
         ))
     } else {
-        Ok(render_human(banner.as_deref(), &prelude, &rows))
+        Ok(render_human(banner.as_deref(), &prelude, &cutoff, &rows))
     }
 }
 
@@ -168,7 +212,7 @@ fn collect_git(
     claims: &mut BTreeSet<(String, String, &'static str)>,
 ) {
     let mut cmd = crate::git_at(root);
-    cmd.args(["log", "--format=%ct%x09%s"]);
+    cmd.args(["log", "--format=%at%x09%s"]);
     cmd.stdin(std::process::Stdio::null());
     crate::git_hooks::hook_child_env(&mut cmd);
     let Ok(out) = cmd.output() else {
@@ -190,19 +234,92 @@ fn collect_git(
         let Some((kind, text, drop_if_vote)) = classify(&act) else {
             continue;
         };
+        let seat = fold_seat(&act.seat);
         let verb = act.verb.to_ascii_lowercase();
         if verb.starts_with("filed") {
             filed.insert(act.issue.clone());
         } else if text.starts_with("took ") {
-            claims.insert((act.issue.clone(), act.seat.clone(), "took"));
+            claims.insert((act.issue.clone(), seat.clone(), "took"));
         } else if text.starts_with("released ") {
-            claims.insert((act.issue.clone(), act.seat.clone(), "released"));
+            claims.insert((act.issue.clone(), seat.clone(), "released"));
         }
-        if !window.keeps(at) {
+        if !window.keeps(at, false) {
             continue;
         }
-        rows.push(Row::new(at, act.seat, kind, text, act.issue, drop_if_vote));
+        rows.push(Row::new(at, seat, kind, text, act.issue, drop_if_vote));
     }
+    collect_introduced(root, window, rows, filed);
+}
+
+/// An issue id added by a commit that is not itself `filed ID`. The seat
+/// on that commit is who filed it, and the author time replaces a
+/// date-only `CREATED` stamp.
+fn collect_introduced(
+    root: &Path,
+    window: &Window,
+    rows: &mut Vec<Row>,
+    filed: &mut BTreeSet<String>,
+) {
+    let mut cmd = crate::git_at(root);
+    cmd.args([
+        "log",
+        "--reverse",
+        "-p",
+        "--unified=0",
+        "--format=%x1e%at%x09%s",
+    ]);
+    cmd.stdin(std::process::Stdio::null());
+    crate::git_hooks::hook_child_env(&mut cmd);
+    let Ok(out) = cmd.output() else {
+        return;
+    };
+    if !out.status.success() {
+        return;
+    }
+    let mut at = 0_i64;
+    let mut seat = String::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if let Some(rest) = line.strip_prefix('\u{1e}') {
+            let Some((stamp, subject)) = rest.split_once('\t') else {
+                seat.clear();
+                continue;
+            };
+            at = stamp.trim().parse().unwrap_or(0);
+            seat = crate::parse_tracker_commit(subject)
+                .map(|act| fold_seat(&act.seat))
+                .unwrap_or_default();
+            continue;
+        }
+        if seat.is_empty() {
+            continue;
+        }
+        let Some(id) = added_issue_id(line) else {
+            continue;
+        };
+        if !filed.insert(id.to_string()) {
+            continue;
+        }
+        if !window.keeps(at, false) {
+            continue;
+        }
+        rows.push(Row::new(
+            at,
+            seat.clone(),
+            "ticket",
+            format!("filed {id}"),
+            id,
+            false,
+        ));
+    }
+}
+
+fn added_issue_id(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix('+')?.trim();
+    let rest = rest.strip_prefix(":ID:")?.trim();
+    if rest.is_empty() || rest.contains(char::is_whitespace) {
+        return None;
+    }
+    Some(rest)
 }
 
 fn classify(act: &TrackerAct) -> Option<(&'static str, String, bool)> {
@@ -247,6 +364,12 @@ fn classify(act: &TrackerAct) -> Option<(&'static str, String, bool)> {
         };
         return Some(("deed", text, false));
     }
+    if verb.contains("settled with notes") {
+        return Some(("consensus", format!("settled with notes on {issue}"), false));
+    }
+    if verb.contains("started a workflow") {
+        return Some(("ticket", format!("started a workflow on {issue}"), false));
+    }
     None
 }
 
@@ -260,11 +383,11 @@ fn collect_heading(
 ) {
     let id = heading.id.as_str();
     for entry in &heading.logbook {
-        let Some(at) = stamp_unix(&entry.timestamp) else {
+        let Some(stamp) = read_stamp(&entry.timestamp) else {
             continue;
         };
         if let Some(note) = entry.note.as_deref() {
-            if note_row(id, note, at, window, filed, claims, rows) {
+            if note_row(id, note, &stamp, window, filed, claims, rows) {
                 continue;
             }
         }
@@ -275,59 +398,59 @@ fn collect_heading(
                 push(
                     rows,
                     window,
-                    Row::new(at, seat, "ticket", format!("closed {id}"), id, false),
+                    stamped(stamp, seat, "ticket", format!("closed {id}"), id, false),
                 );
             }
         }
     }
     if !filed.contains(id) {
-        if let Some(stamp) = heading.properties.get("CREATED") {
-            if let Some(at) = stamp_unix(stamp) {
-                filed.insert(id.to_string());
-                push(
-                    rows,
-                    window,
-                    Row::new(
-                        at,
-                        "tracker".into(),
-                        "ticket",
-                        format!("filed {id}"),
-                        id,
-                        false,
-                    ),
-                );
+        if let Some(raw) = heading.properties.get("CREATED") {
+            if let Some(stamp) = read_stamp(raw) {
+                // A date-only CREATED row has no seat. A git `filed` row
+                // already took this id. What remains is credited only when
+                // the stamp itself names a clock; a bare day stays out
+                // rather than appearing at midnight under "tracker".
+                if !stamp.date_only {
+                    filed.insert(id.to_string());
+                    push(
+                        rows,
+                        window,
+                        stamped(
+                            stamp,
+                            "tracker".into(),
+                            "ticket",
+                            format!("filed {id}"),
+                            id,
+                            false,
+                        ),
+                    );
+                }
             }
         }
     }
-    for (at, agent, choice) in vote_lines(heading) {
+    for vote in vote_lines(heading) {
         push(
             rows,
             window,
-            Row::new(
-                at,
-                agent,
+            stamped(
+                vote.stamp,
+                vote.agent,
                 "vote",
-                format!("voted {id} for {choice}"),
+                format!("voted {id} for {}", vote.choice),
                 id,
                 false,
             ),
         );
     }
     if let (Some(who), Some(when)) = (heading.claimed_by(), heading.claimed_at()) {
-        if let Some(at) = stamp_unix(when) {
-            let key = (id.to_string(), who.to_string(), "took");
+        if let Some(stamp) = read_stamp(when) {
+            let who = fold_seat(who);
+            let key = (id.to_string(), who.clone(), "took");
             if claims.insert(key) {
                 push(
                     rows,
                     window,
-                    Row::new(
-                        at,
-                        who.to_string(),
-                        "claim",
-                        format!("took {id}"),
-                        id,
-                        false,
-                    ),
+                    stamped(stamp, who, "claim", format!("took {id}"), id, false),
                 );
             }
         }
@@ -340,7 +463,7 @@ fn collect_heading(
 fn note_row(
     id: &str,
     note: &str,
-    at: i64,
+    stamp: &Stamp,
     window: &Window,
     filed: &mut BTreeSet<String>,
     claims: &mut BTreeSet<(String, String, &'static str)>,
@@ -349,27 +472,72 @@ fn note_row(
     let lower = note.trim().to_ascii_lowercase();
     if lower.starts_with("consensus") {
         let seat = act_of(note)
-            .map(|(_, seat)| seat)
+            .map(|(_, seat)| fold_seat(&seat))
             .unwrap_or_else(|| "tracker".into());
         push(
             rows,
             window,
-            Row::new(at, seat, "consensus", consensus_text(id, note), id, false),
+            stamped(
+                stamp.clone(),
+                seat,
+                "consensus",
+                consensus_text(id, note),
+                id,
+                false,
+            ),
         );
         return true;
     }
     let Some((verb, seat)) = act_of(note) else {
         return false;
     };
+    let seat = fold_seat(&seat);
     let verb = verb.to_ascii_lowercase();
     if verb.starts_with("filed") {
         if filed.insert(id.to_string()) {
             push(
                 rows,
                 window,
-                Row::new(at, seat, "ticket", format!("filed {id}"), id, false),
+                stamped(
+                    stamp.clone(),
+                    seat,
+                    "ticket",
+                    format!("filed {id}"),
+                    id,
+                    false,
+                ),
             );
         }
+        return true;
+    }
+    if verb.contains("settled with notes") {
+        push(
+            rows,
+            window,
+            stamped(
+                stamp.clone(),
+                seat,
+                "consensus",
+                format!("settled with notes on {id}"),
+                id,
+                false,
+            ),
+        );
+        return true;
+    }
+    if verb.contains("started a workflow") {
+        push(
+            rows,
+            window,
+            stamped(
+                stamp.clone(),
+                seat,
+                "ticket",
+                format!("started a workflow on {id}"),
+                id,
+                false,
+            ),
+        );
         return true;
     }
     if verb.starts_with("claimed") {
@@ -378,7 +546,14 @@ fn note_row(
             push(
                 rows,
                 window,
-                Row::new(at, seat, "claim", format!("took {id}"), id, false),
+                stamped(
+                    stamp.clone(),
+                    seat,
+                    "claim",
+                    format!("took {id}"),
+                    id,
+                    false,
+                ),
             );
         }
         return true;
@@ -389,7 +564,14 @@ fn note_row(
             push(
                 rows,
                 window,
-                Row::new(at, seat, "claim", format!("released {id}"), id, false),
+                stamped(
+                    stamp.clone(),
+                    seat,
+                    "claim",
+                    format!("released {id}"),
+                    id,
+                    false,
+                ),
             );
         }
         return true;
@@ -427,7 +609,13 @@ fn seat_of_stamp(heading: &vissue_core::IssueHeading, stamp: &str) -> Option<Str
     })
 }
 
-fn vote_lines(heading: &vissue_core::IssueHeading) -> Vec<(i64, String, String)> {
+struct DrawerVote {
+    stamp: Stamp,
+    agent: String,
+    choice: String,
+}
+
+fn vote_lines(heading: &vissue_core::IssueHeading) -> Vec<DrawerVote> {
     let mut out = Vec::new();
     for drawer in &heading.extra_drawers {
         let mut lines = drawer.lines();
@@ -450,7 +638,7 @@ fn vote_lines(heading: &vissue_core::IssueHeading) -> Vec<(i64, String, String)>
     out
 }
 
-fn parse_vote(line: &str) -> Option<(i64, String, String)> {
+fn parse_vote(line: &str) -> Option<DrawerVote> {
     let (stamp, rest) = line.strip_prefix('[')?.split_once("] ")?;
     let (agent, choice) = rest.split_once(": ")?;
     let agent = agent.trim();
@@ -462,28 +650,47 @@ fn parse_vote(line: &str) -> Option<(i64, String, String)> {
     if choice.is_empty() {
         return None;
     }
-    let at = stamp_unix(&format!("[{stamp}]"))?;
-    Some((at, agent.to_string(), choice.to_string()))
+    let stamp = read_stamp(&format!("[{stamp}]"))?;
+    Some(DrawerVote {
+        stamp,
+        agent: fold_seat(agent),
+        choice: choice.to_string(),
+    })
 }
 
 fn drop_shadowed_votes(rows: &mut Vec<Row>) {
-    let shown: BTreeSet<(String, String)> = rows
+    let timed_drawer: BTreeSet<(String, String)> = rows
         .iter()
-        .filter(|row| row.kind == "vote" && !row.drop_if_vote)
+        .filter(|row| row.kind == "vote" && row.minute && !row.date_only)
         .map(|row| (row.issue.clone(), row.seat.clone()))
         .collect();
-    rows.retain(|row| !row.drop_if_vote || !shown.contains(&(row.issue.clone(), row.seat.clone())));
+    let git_vote: BTreeSet<(String, String)> = rows
+        .iter()
+        .filter(|row| row.kind == "vote" && row.drop_if_vote)
+        .map(|row| (row.issue.clone(), row.seat.clone()))
+        .collect();
+    rows.retain(|row| {
+        let key = (row.issue.clone(), row.seat.clone());
+        if row.drop_if_vote && timed_drawer.contains(&key) {
+            return false;
+        }
+        if row.kind == "vote" && !row.drop_if_vote && row.date_only && git_vote.contains(&key) {
+            return false;
+        }
+        true
+    });
 }
 
-fn collect_deeds(accessions: &[String], window: &Window, rows: &mut Vec<Row>) {
+fn collect_deeds(accessions: &[String], window: &Window, rows: &mut Vec<Row>) -> String {
     if accessions.is_empty() || which::which("deedar").is_err() {
-        return;
+        return String::new();
     }
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
     let mut seen = BTreeSet::new();
-    for accession in accessions {
+    for (i, accession) in accessions.iter().enumerate() {
         if std::time::Instant::now() >= deadline {
-            break;
+            let left = accessions.len() - i;
+            return format!("deeds: cutoff at 800 ms, {left} accessions left\n");
         }
         if !seen.insert(accession.clone()) {
             continue;
@@ -520,6 +727,7 @@ fn collect_deeds(accessions: &[String], window: &Window, rows: &mut Vec<Row>) {
         };
         push(rows, window, Row::new(at, seat, "deed", ev.text, "", false));
     }
+    String::new()
 }
 
 fn collect_memory(window: &Window, rows: &mut Vec<Row>) {
@@ -533,7 +741,11 @@ fn collect_memory(window: &Window, rows: &mut Vec<Row>) {
 }
 
 fn push_memory(atoms: &[serde_json::Value], window: &Window, rows: &mut Vec<Row>) {
+    let mut kept = 0_usize;
     for atom in atoms {
+        if kept >= MEMORY_CAP {
+            break;
+        }
         let Some(mem) = crate::memories::Memory::of(atom) else {
             continue;
         };
@@ -545,6 +757,7 @@ fn push_memory(atoms: &[serde_json::Value], window: &Window, rows: &mut Vec<Row>
         } else {
             mem.seat
         };
+        let before = rows.len();
         push(
             rows,
             window,
@@ -557,10 +770,13 @@ fn push_memory(atoms: &[serde_json::Value], window: &Window, rows: &mut Vec<Row>
                 false,
             ),
         );
+        if rows.len() > before {
+            kept += 1;
+        }
     }
 }
 
-fn collect_guard(window: &Window, rows: &mut Vec<Row>) {
+fn collect_guard(window: &Window, rows: &mut Vec<Row>, commands: bool) {
     let Some(path) = guard_path() else {
         return;
     };
@@ -584,11 +800,17 @@ fn collect_guard(window: &Window, rows: &mut Vec<Row>) {
         } else {
             seat.to_string()
         };
-        let body = value["text"].as_str().unwrap_or("").trim();
+        let body = redact_secrets(value["text"].as_str().unwrap_or("").trim());
         if body.is_empty() {
             continue;
         }
-        let text = if recorded == "rewrite" {
+        let text = if !commands {
+            if recorded == "rewrite" {
+                "rewrote a command".to_string()
+            } else {
+                "refused a command".to_string()
+            }
+        } else if recorded == "rewrite" {
             format!("rewrote {body}")
         } else {
             format!("refused {body}")
@@ -598,24 +820,53 @@ fn collect_guard(window: &Window, rows: &mut Vec<Row>) {
 }
 
 fn push(rows: &mut Vec<Row>, window: &Window, mut row: Row) {
-    if !window.keeps(row.at) {
+    if !window.keeps(row.at, row.minute) {
         return;
     }
-    let seat = row.seat.trim();
-    row.seat = if seat.is_empty() {
-        "seat".to_string()
-    } else {
-        seat.to_string()
-    };
+    row.seat = fold_seat(&row.seat);
     rows.push(row);
+}
+
+/// `seat@holder` is one seat. An address, which has a dot after `@`, stays.
+fn fold_seat(seat: &str) -> String {
+    let seat = seat.trim();
+    if seat.is_empty() {
+        return "seat".to_string();
+    }
+    if let Some((name, rest)) = seat.split_once('@') {
+        if !name.is_empty() && !rest.is_empty() && !rest.contains('.') {
+            return name.to_string();
+        }
+    }
+    seat.to_string()
 }
 
 fn dedup(rows: &mut Vec<Row>) {
     let mut seen = BTreeSet::new();
     rows.retain(|row| seen.insert((row.at, row.seat.clone(), row.kind, row.text.clone())));
+    // A date-only or minute stamp and the git author time of the same
+    // act land within a minute of each other. Keep the later instant.
+    rows.sort_by(|a, b| {
+        a.seat
+            .cmp(&b.seat)
+            .then(a.kind.cmp(b.kind))
+            .then(a.text.cmp(&b.text))
+            .then(b.at.cmp(&a.at))
+    });
+    let mut kept: Vec<Row> = Vec::with_capacity(rows.len());
+    for row in rows.drain(..) {
+        if let Some(prev) = kept.last() {
+            let same = prev.seat == row.seat && prev.kind == row.kind && prev.text == row.text;
+            if same && prev.at.saturating_sub(row.at) < 60 {
+                continue;
+            }
+        }
+        kept.push(row);
+    }
+    *rows = kept;
 }
 
-fn render_human(banner: Option<&str>, prelude: &str, rows: &[Row]) -> String {
+fn render_human(banner: Option<&str>, prelude: &str, cutoff: &str, rows: &[Row]) -> String {
     let mut out = String::new();
     if let Some(banner) = banner {
         out.push_str(banner);
@@ -627,6 +878,13 @@ fn render_human(banner: Option<&str>, prelude: &str, rows: &[Row]) -> String {
     if !prelude.is_empty() {
         out.push_str(prelude);
         if !prelude.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    if !cutoff.is_empty() {
+        out.push_str(cutoff);
+        if !cutoff.ends_with('\n') {
             out.push('\n');
         }
         out.push('\n');
@@ -645,7 +903,7 @@ fn render_human(banner: Option<&str>, prelude: &str, rows: &[Row]) -> String {
     out
 }
 
-fn render_json(since: Option<&str>, banner: Option<&str>, rows: &[Row]) -> String {
+fn render_json(since: Option<&str>, banner: Option<&str>, cutoff: &str, rows: &[Row]) -> String {
     let seats: Vec<serde_json::Value> = grouped(rows)
         .into_iter()
         .map(|(seat, events)| {
@@ -665,6 +923,7 @@ fn render_json(since: Option<&str>, banner: Option<&str>, rows: &[Row]) -> Strin
     let value = serde_json::json!({
         "since": since,
         "sync": banner.map(str::trim_end),
+        "cutoff": if cutoff.is_empty() { serde_json::Value::Null } else { serde_json::json!(cutoff.trim()) },
         "seats": seats,
     });
     format!("{value}\n")
@@ -703,6 +962,64 @@ fn rfc3339(secs: i64) -> String {
     chrono::DateTime::from_timestamp(secs, 0)
         .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
         .unwrap_or_default()
+}
+
+#[derive(Clone)]
+struct Stamp {
+    at: i64,
+    minute: bool,
+    date_only: bool,
+}
+
+fn read_stamp(stamp: &str) -> Option<Stamp> {
+    let at = stamp_unix(stamp)?;
+    let s = stamp
+        .trim()
+        .trim_start_matches(['[', '<'])
+        .trim_end_matches([']', '>']);
+    let date_only = !has_clock(s);
+    Some(Stamp {
+        at,
+        minute: !date_only && !has_seconds(s),
+        date_only,
+    })
+}
+
+fn has_clock(stamp: &str) -> bool {
+    stamp.as_bytes().windows(5).any(|w| {
+        w[0].is_ascii_digit()
+            && w[1].is_ascii_digit()
+            && w[2] == b':'
+            && w[3].is_ascii_digit()
+            && w[4].is_ascii_digit()
+    })
+}
+
+fn has_seconds(stamp: &str) -> bool {
+    stamp.as_bytes().windows(8).any(|w| {
+        w[0].is_ascii_digit()
+            && w[1].is_ascii_digit()
+            && w[2] == b':'
+            && w[3].is_ascii_digit()
+            && w[4].is_ascii_digit()
+            && w[5] == b':'
+            && w[6].is_ascii_digit()
+            && w[7].is_ascii_digit()
+    })
+}
+
+fn stamped(
+    stamp: Stamp,
+    seat: String,
+    kind: &'static str,
+    text: String,
+    issue: impl Into<String>,
+    drop_if_vote: bool,
+) -> Row {
+    let mut row = Row::new(stamp.at, seat, kind, text, issue, drop_if_vote);
+    row.minute = stamp.minute;
+    row.date_only = stamp.date_only;
+    row
 }
 
 fn stamp_unix(stamp: &str) -> Option<i64> {
@@ -786,7 +1103,7 @@ pub fn note_guard(kind: &str, seat: &str, text: &str) {
     let Some(path) = guard_path() else {
         return;
     };
-    let text = one_line(text);
+    let text = redact_secrets(&one_line(text));
     if text.is_empty() {
         return;
     }
@@ -804,6 +1121,134 @@ pub fn note_guard(kind: &str, seat: &str, text: &str) {
     line.push('\n');
     let _ = path.parent().map(std::fs::create_dir_all);
     let _ = crate::append_locked_row(&path, line.as_bytes(), crate::Durability::BestEffort);
+    rotate_guard(&path);
+}
+
+fn rotate_guard(path: &Path) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if meta.len() <= GUARD_CAP {
+        return;
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return;
+    };
+    let start = bytes.len().saturating_sub((GUARD_CAP / 2) as usize);
+    let tail = &bytes[start..];
+    let tail = match tail.iter().position(|b| *b == b'\n') {
+        Some(i) => &tail[i + 1..],
+        None => tail,
+    };
+    let _ = std::fs::write(path, tail);
+}
+
+/// Tokens and secret assignments are replaced before a row is stored.
+fn redact_secrets(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        if let Some(n) = secret_span(&lower, i) {
+            out.push_str("[redacted]");
+            i += n;
+            continue;
+        }
+        let ch = text[i..].chars().next().unwrap_or('\u{fffd}');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn secret_span(lower: &str, i: usize) -> Option<usize> {
+    if i > 0 && lower.as_bytes()[i - 1].is_ascii_alphanumeric() {
+        return None;
+    }
+    let rest = &lower[i..];
+    if let Some(n) = assignment_span(rest) {
+        return Some(n);
+    }
+    if rest.starts_with("ghp_") || rest.starts_with("gho_") {
+        let n = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .map(char::len_utf8)
+            .sum();
+        return Some(n);
+    }
+    if rest.starts_with("authorization:") {
+        return Some(header_span(rest));
+    }
+    if rest.starts_with("bearer") && rest["bearer".len()..].starts_with([' ', '\t']) {
+        let after = rest["bearer".len()..].trim_start();
+        if after.is_empty() {
+            return None;
+        }
+        let mut n = rest.len() - after.len();
+        n += token_len(after);
+        n += quote_tail(rest, n);
+        return Some(n);
+    }
+    None
+}
+
+fn assignment_span(rest: &str) -> Option<usize> {
+    for key in ["api_key", "api-key", "token", "password", "secret"] {
+        if !rest.starts_with(key) {
+            continue;
+        }
+        let mut n = key.len();
+        let bytes = rest.as_bytes();
+        while bytes.get(n).is_some_and(|b| *b == b' ' || *b == b'\t') {
+            n += 1;
+        }
+        if bytes.get(n) != Some(&b'=') && bytes.get(n) != Some(&b':') {
+            continue;
+        }
+        n += 1;
+        while bytes.get(n).is_some_and(|b| *b == b' ' || *b == b'\t') {
+            n += 1;
+        }
+        let value = token_len(&rest[n..]);
+        if value == 0 {
+            continue;
+        }
+        return Some(n + value);
+    }
+    None
+}
+
+fn header_span(rest: &str) -> usize {
+    let Some(after_name) = rest.strip_prefix("authorization:") else {
+        return 0;
+    };
+    let value = after_name.trim_start();
+    let mut n = rest.len() - value.len();
+    if let Some(after_bearer) = value.strip_prefix("bearer") {
+        if after_bearer.starts_with([' ', '\t']) {
+            let token = after_bearer.trim_start();
+            n = rest.len() - token.len();
+            n += token_len(token);
+            return n + quote_tail(rest, n);
+        }
+    }
+    n += token_len(value);
+    n + quote_tail(rest, n)
+}
+
+fn token_len(text: &str) -> usize {
+    text.chars()
+        .take_while(|c| !c.is_whitespace() && *c != '\'' && *c != '"')
+        .map(char::len_utf8)
+        .sum()
+}
+
+fn quote_tail(text: &str, n: usize) -> usize {
+    match text.as_bytes().get(n) {
+        Some(b'\'') | Some(b'"') => 1,
+        _ => 0,
+    }
 }
 
 /// A policyd allow that rewrites the line. The new line is the row.
@@ -1126,9 +1571,15 @@ mod tests {
         let home = dir.path().join("home");
         let mut org = String::from("#+TITLE: bench\n#+TODO: TODO | DONE\n\n");
         for i in 0..1100 {
-            org.push_str(&format!(
-                "* TODO [#C] Ticket {i}\n:PROPERTIES:\n:ID:         bench-{i:04}\n:END:\n\n"
-            ));
+            if i == 0 {
+                org.push_str(
+                    "* TODO [#C] Ticket 0\n:PROPERTIES:\n:ID:         bench-0000\n:DEEDS:      deed-a deed-b deed-c deed-d\n:END:\n\n",
+                );
+            } else {
+                org.push_str(&format!(
+                    "* TODO [#C] Ticket {i}\n:PROPERTIES:\n:ID:         bench-{i:04}\n:END:\n\n"
+                ));
+            }
         }
         std::fs::write(root.join("Software/probe/issues.org"), org).unwrap();
         git(&root, &["add", "."], "2020-01-01T00:00:00Z");
@@ -1142,8 +1593,29 @@ mod tests {
             ],
             "2020-01-01T00:00:00Z",
         );
-        isolate(&root, &home, "/usr/bin:/bin");
-        unsafe { std::env::set_var("PACKSET_URL", "off") };
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let stub = bin.join("deedar");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\nsleep 0.45\nprintf 'time=1760000000\\nproducedBy=ada\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (url, stored) = crate::serve_sync_pack(crate::SyncPack::Keep);
+        for i in 0..40 {
+            stored.lock().unwrap().push(serde_json::json!({
+                "id": format!("mem{i}"),
+                "kind": "fact",
+                "text": format!("bench memory {i}"),
+                "ts": "2026-10-28T18:00:00Z",
+                "origin": "user-declared",
+                "source": {"seat": "ada", "at": "2026-10-28T18:00:00Z"}
+            }));
+        }
+        let path = format!("{}:/usr/bin:/bin", bin.display());
+        isolate(&root, &home, &path);
+        unsafe { std::env::set_var("PACKSET_URL", &url) };
         let started = std::time::Instant::now();
         let text = digest(None, false).unwrap();
         let took = started.elapsed();
@@ -1156,5 +1628,263 @@ mod tests {
             text.contains("ada\n") || text.starts_with("ada\n"),
             "{text}"
         );
+        let memories = text.lines().filter(|line| line.contains("memory:")).count();
+        assert!(memories <= 32, "memory rows {memories}\n{text}");
+        assert!(memories >= 1, "{text}");
+        assert!(text.contains("deeds: cutoff at 800 ms"), "{text}");
+        assert!(text.contains("accessions left"), "{text}");
+    }
+
+    fn review_filed_tracker(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let root = tracker(dir);
+        let home = dir.join("home");
+        std::fs::write(
+            root.join("Software/probe/issues.org"),
+            "* TODO [#C] One\n:PROPERTIES:\n:ID:         probe-b\n:END:\n",
+        )
+        .unwrap();
+        git(&root, &["add", "."], "2020-01-01T00:00:00Z");
+        git(
+            &root,
+            &["commit", "-q", "-m", "chore(issues): probe-b filed by bob"],
+            "2020-01-01T00:00:00Z",
+        );
+        isolate(&root, &home, "/usr/bin:/bin");
+        unsafe { std::env::set_var("PACKSET_URL", "off") };
+        (root, home)
+    }
+
+    #[test]
+    fn review_repro_a_plain_or_json_digest_moves_the_last_marker() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let _ = review_filed_tracker(dir.path());
+        let _ = digest(None, true).unwrap();
+        let text = digest(Some("last"), false).unwrap();
+        assert!(text.contains("filed probe-b"), "{text}");
+    }
+
+    #[test]
+    fn review_repro_a_rebased_commit_comes_back_in_last() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let (root, _) = review_filed_tracker(dir.path());
+        let first = digest(Some("last"), false).unwrap();
+        assert!(first.contains("filed probe-b"), "{first}");
+        let later = chrono::Utc::now() + chrono::Duration::seconds(5);
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["commit", "-q", "--amend", "--no-edit"])
+            .env("GIT_COMMITTER_DATE", later.to_rfc3339())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let second = digest(Some("last"), false).unwrap();
+        assert!(!second.contains("filed probe-b"), "{second}");
+    }
+
+    #[test]
+    fn review_repro_last_drops_an_org_event_in_the_marker_minute() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let (root, home) = review_filed_tracker(dir.path());
+        let now = chrono::Local::now();
+        let stamp = now.format("[%Y-%m-%d %a %H:%M]").to_string();
+        let org = format!(
+            "* DONE [#C] One\n:PROPERTIES:\n:ID:         probe-b\n:END:\n:LOGBOOK:\n- State \"DONE\" from \"TODO\" {stamp}\n- Finished by alice {stamp}\n:END:\n"
+        );
+        std::fs::write(root.join("Software/probe/issues.org"), org).unwrap();
+        let minute = stamp_unix(&stamp).unwrap();
+        std::fs::create_dir_all(home.join("state/ljos")).unwrap();
+        std::fs::write(
+            home.join("state/ljos/digest-last"),
+            format!("{}\n", minute + 30),
+        )
+        .unwrap();
+        let text = digest(Some("last"), false).unwrap();
+        assert!(text.contains("closed probe-b"), "{text}");
+    }
+
+    #[test]
+    fn review_repro_history_keeps_git_time_one_seat_and_the_filer() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let root = tracker(dir.path());
+        let home = dir.path().join("home");
+        let org = "\
+* TODO [#C] Side
+:PROPERTIES:
+:ID:         side-b
+:CREATED:    [2020-06-01 Mon]
+:END:
+
+* STARTED [#C] Held
+:PROPERTIES:
+:ID:         held-c
+:CREATED:    [2020-06-01 Mon]
+:CLAIMED_BY: bounty-driftwatch@1id5b6d0rr
+:CLAIMED_AT: [2020-06-02 Tue 09:33]
+:END:
+
+* DONE [#C] Settled
+:PROPERTIES:
+:ID:         w1sl
+:CREATED:    [2020-06-01 Mon]
+:END:
+:LOGBOOK:
+- Note: \"Settled with notes by bounty-driftwatch\" [2020-06-03 Wed 10:09]
+- State \"DONE\" from \"TODO\" [2020-06-03 Wed 10:09]
+:END:
+:VOTES:
+[2020-06-04 Thu] opus: REVISE used=none
+:END:
+
+* TODO [#C] Flow
+:PROPERTIES:
+:ID:         flow-d
+:CREATED:    [2020-06-01 Mon]
+:END:
+:LOGBOOK:
+- Note: \"Started a workflow by bounty-driftwatch\" [2020-06-05 Fri 08:36]
+:END:
+";
+        std::fs::write(root.join("Software/probe/issues.org"), org).unwrap();
+        git(&root, &["add", "."], "2020-06-01T11:00:00Z");
+        git(
+            &root,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "chore(issues): other noted by bounty-driftwatch",
+            ],
+            "2020-06-01T11:00:00Z",
+        );
+        for (date, message) in [
+            (
+                "2020-06-02T09:33:10Z",
+                "chore(issues): held-c claimed by bounty-driftwatch",
+            ),
+            (
+                "2020-06-03T10:09:12Z",
+                "chore(issues): w1sl settled with notes by bounty-driftwatch",
+            ),
+            (
+                "2020-06-04T11:25:27Z",
+                "chore(issues): w1sl ballot withdrawn by opus",
+            ),
+            (
+                "2020-06-04T11:25:34Z",
+                "chore(issues): w1sl ballot cast by opus",
+            ),
+            (
+                "2020-06-05T08:36:43Z",
+                "chore(issues): flow-d started a workflow by bounty-driftwatch",
+            ),
+        ] {
+            git(
+                &root,
+                &["commit", "-q", "--allow-empty", "-m", message],
+                date,
+            );
+        }
+        isolate(&root, &home, "/usr/bin:/bin");
+        unsafe { std::env::set_var("PACKSET_URL", "off") };
+        let text = digest(None, false).unwrap();
+        let bounty = seat_block(&text, "bounty-driftwatch");
+        assert!(bounty.contains("filed side-b"), "{text}");
+        assert!(!text.contains("\ntracker\n"), "{text}");
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.contains("took held-c"))
+                .count(),
+            1,
+            "{text}"
+        );
+        assert!(bounty.contains("settled with notes on w1sl"), "{text}");
+        assert!(bounty.contains("started a workflow on flow-d"), "{text}");
+        let opus = seat_block(&text, "opus");
+        let voted = opus.find("voted w1sl").expect(&text);
+        let withdrew = opus.find("withdrew a ballot on w1sl").expect(&text);
+        assert!(voted < withdrew, "{opus}");
+        assert!(!opus.contains("voted w1sl for REVISE"), "{opus}");
+        let clock = wall(
+            chrono::DateTime::parse_from_rfc3339("2020-06-04T11:25:34Z")
+                .unwrap()
+                .timestamp(),
+        );
+        assert!(opus.contains(&clock), "{opus}");
+    }
+
+    #[test]
+    fn review_repro_guard_redacts_tokens_rotates_and_hides_the_command() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let root = tracker(dir.path());
+        let home = dir.path().join("home");
+        std::fs::write(
+            root.join("Software/probe/issues.org"),
+            "* TODO [#C] One\n:PROPERTIES:\n:ID:         probe-b\n:END:\n",
+        )
+        .unwrap();
+        git(&root, &["add", "."], "2020-01-01T00:00:00Z");
+        git(
+            &root,
+            &["commit", "-q", "-m", "chore(issues): probe-b filed by bob"],
+            "2020-01-01T00:00:00Z",
+        );
+        isolate(&root, &home, "/usr/bin:/bin");
+        unsafe {
+            std::env::set_var("PACKSET_URL", "off");
+            std::env::set_var("LJOS_SEAT", "erin");
+        }
+        note_guard(
+            "refusal",
+            "erin",
+            "curl -H 'Authorization: Bearer xyz' https://example.invalid",
+        );
+        note_guard(
+            "refusal",
+            "erin",
+            "curl https://example.invalid token=abc ghp_secret123",
+        );
+        let stored = std::fs::read_to_string(home.join("data/ljos/guard.jsonl")).unwrap();
+        assert!(!stored.contains("xyz"), "{stored}");
+        assert!(!stored.contains("ghp_secret123"), "{stored}");
+        assert!(!stored.contains("token=abc"), "{stored}");
+        let shown = digest(None, true).unwrap();
+        assert!(!shown.contains("xyz"), "{shown}");
+        assert!(!shown.contains("ghp_secret123"), "{shown}");
+        assert!(shown.contains("curl"), "{shown}");
+        let tool = digest_for_tool(None, true).unwrap();
+        assert!(!tool.contains("curl"), "{tool}");
+        assert!(!tool.contains("xyz"), "{tool}");
+        assert!(tool.contains("refused a command"), "{tool}");
+        let filler = "x".repeat(200);
+        for i in 0..400 {
+            note_guard("refusal", "erin", &format!("cmd {i} {filler}"));
+        }
+        let grown = std::fs::metadata(home.join("data/ljos/guard.jsonl"))
+            .unwrap()
+            .len();
+        assert!(grown <= 64 * 1024, "guard.jsonl grew to {grown}");
+    }
+
+    #[test]
+    fn review_repro_the_tool_does_not_move_the_marker() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let (_, home) = review_filed_tracker(dir.path());
+        let marker = home.join("state/ljos/digest-last");
+        let _ = digest_for_tool(None, false).unwrap();
+        let _ = digest_for_tool(Some("last"), true).unwrap();
+        assert!(!marker.exists(), "the tool wrote {}", marker.display());
+        let text = digest(Some("last"), false).unwrap();
+        assert!(text.contains("filed probe-b"), "{text}");
     }
 }

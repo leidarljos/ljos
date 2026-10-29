@@ -1877,7 +1877,8 @@ impl LjosServer {
             .as_deref()
             .map(str::trim)
             .filter(|since| !since.is_empty());
-        let text = ljos_cli::digest::digest(since, args.json.unwrap_or(false)).map_err(refused)?;
+        let text = ljos_cli::digest::digest_for_tool(since, args.json.unwrap_or(false))
+            .map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
     }
 
