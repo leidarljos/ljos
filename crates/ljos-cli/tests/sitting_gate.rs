@@ -670,6 +670,192 @@ fn a_local_push_consent_request_never_masks_a_user_denial() {
     assert!(!seat.run.join("ljos/approvals/requests.json").exists());
 }
 
+fn cited_tracker(seat: &Seat) -> PathBuf {
+    let root = seat._dir.path().join("tracker");
+    std::fs::create_dir_all(root.join("Software/proj")).unwrap();
+    std::fs::write(root.join("vissue.toml"), "seats = [\"inky\", \"flint\"]\n").unwrap();
+    std::fs::write(
+        root.join("Software/proj/issues.org"),
+        format!(
+            "* STARTED [#C] held work\n:PROPERTIES:\n:ID: {ISSUE}\n:CLAIMED_BY: inky@{}\n:END:\n",
+            ljos_cli::session_tag(SESSION)
+        ),
+    )
+    .unwrap();
+    root
+}
+
+#[test]
+fn an_explicit_zero_ballot_citation_requests_and_consumes_one_command_consent() {
+    let seat = Seat::new();
+    seat.sit();
+    let tracker = cited_tracker(&seat);
+    let tracker = tracker.to_str().unwrap();
+    let pack = empty_pack();
+    let env = [
+        ("VISSUE_ROOT", tracker),
+        ("ISSUE_ROOT", tracker),
+        ("VISSUE_NO_ROUTE", "1"),
+        ("PACKSET_URL", pack.as_str()),
+        ("LJOS_UNSIGNED_BALLOTS", "allow"),
+        ("LJOS_GUARD", "on"),
+    ];
+    let line = format!("LJOS_CITE={ISSUE} git push origin main");
+    let policy = seat.policy(&line, &env);
+    assert!(policy.contains("\nask:"), "{policy}");
+    assert!(!policy.contains("\ndeny:"), "{policy}");
+    let hooked = seat.hook_turn(&line, &env);
+    assert!(hooked.contains("ljos_request_approval"), "{hooked}");
+    let path = seat.run.join("ljos/approvals/requests.json");
+    let mut rows: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["scope"]["command"], line);
+    assert_eq!(rows[0]["scope"]["session"], SESSION);
+    assert_eq!(rows[0]["approved"], false);
+    let id = rows[0]["id"].clone();
+    // This isolated store fixture represents the accepted client confirmation.
+    rows[0]["approved"] = serde_json::Value::Bool(true);
+    std::fs::write(&path, serde_json::to_vec(&rows).unwrap()).unwrap();
+    let accepted = seat.hook_turn(&line, &env);
+    assert!(
+        !accepted.contains("\"permissionDecision\":\"deny\""),
+        "{accepted}"
+    );
+    assert!(
+        !accepted.contains("\"permissionDecision\":\"ask\""),
+        "{accepted}"
+    );
+    let consumed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(consumed, serde_json::json!([]));
+    let retry = seat.hook_turn(&line, &env);
+    assert!(retry.contains("\"permissionDecision\":\"deny\""), "{retry}");
+    let renewed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(renewed.as_array().unwrap().len(), 1);
+    assert_eq!(renewed[0]["approved"], false);
+    assert_ne!(renewed[0]["id"], id);
+}
+
+#[test]
+fn explicit_citation_consent_preserves_refusals_for_other_pushes_and_ballot_failures() {
+    let seat = Seat::new();
+    seat.sit();
+    let tracker = cited_tracker(&seat);
+    let tracker = tracker.to_str().unwrap();
+    let pack = empty_pack();
+    let env = [
+        ("VISSUE_ROOT", tracker),
+        ("ISSUE_ROOT", tracker),
+        ("VISSUE_NO_ROUTE", "1"),
+        ("PACKSET_URL", pack.as_str()),
+        ("LJOS_UNSIGNED_BALLOTS", "allow"),
+        ("LJOS_GUARD", "on"),
+    ];
+    for push in [
+        "git push --force origin main",
+        "git push --force-with-lease origin main",
+        "git push origin +HEAD:main",
+        "git push origin :main",
+        "git push --delete origin main",
+        "git push --mirror origin",
+        "git push origin main topic",
+        "git push origin refs/heads/*:refs/heads/*",
+        "git push origin main && git push origin develop",
+    ] {
+        let line = format!("LJOS_CITE={ISSUE} {push}");
+        let hooked = seat.hook_turn(&line, &env);
+        assert!(
+            hooked.contains("\"permissionDecision\":\"deny\""),
+            "{line}\n{hooked}"
+        );
+        assert!(!hooked.contains("ljos_request_approval"), "{hooked}");
+    }
+    let missing = seat.hook_turn("LJOS_CITE=proj-missing git push origin main", &env);
+    assert!(missing.contains("does not stand"), "{missing}");
+    assert!(!missing.contains("ljos_request_approval"), "{missing}");
+    let line = format!("LJOS_CITE={ISSUE} git push origin main");
+    for ballots in [
+        vec![("flint", "approve")],
+        vec![("inky", "approve"), ("flint", "revise")],
+        vec![("inky", "revise"), ("flint", "revise")],
+    ] {
+        seat.vote(&ballots);
+        let hooked = seat.hook_turn(&line, &env);
+        assert!(
+            hooked.contains("\"permissionDecision\":\"deny\""),
+            "{hooked}"
+        );
+        assert!(!hooked.contains("ljos_request_approval"), "{hooked}");
+    }
+    seat.vote(&[]);
+    let unread_env: Vec<_> = env
+        .iter()
+        .copied()
+        .filter(|(key, _)| *key != "PACKSET_URL")
+        .collect();
+    let unread = seat.hook_turn(&line, &unread_env);
+    assert!(unread.contains("roster is not readable"), "{unread}");
+    assert!(!unread.contains("ljos_request_approval"), "{unread}");
+    seat.vote(&[("flint", "approve")]);
+    let signed_env: Vec<_> = env
+        .iter()
+        .copied()
+        .filter(|(key, _)| *key != "LJOS_UNSIGNED_BALLOTS")
+        .collect();
+    let unsigned = seat.hook_turn(&line, &signed_env);
+    assert!(
+        unsigned.contains("\"permissionDecision\":\"deny\""),
+        "{unsigned}"
+    );
+    assert!(!unsigned.contains("ljos_request_approval"), "{unsigned}");
+    assert!(!seat.run.join("ljos/approvals/requests.json").exists());
+}
+
+#[test]
+fn explicit_citation_consent_preserves_static_and_external_denials() {
+    let seat = Seat::new();
+    seat.sit();
+    let tracker = cited_tracker(&seat);
+    let tracker = tracker.to_str().unwrap();
+    let pack = empty_pack();
+    let env = [
+        ("VISSUE_ROOT", tracker),
+        ("ISSUE_ROOT", tracker),
+        ("VISSUE_NO_ROUTE", "1"),
+        ("PACKSET_URL", pack.as_str()),
+        ("LJOS_UNSIGNED_BALLOTS", "allow"),
+        ("LJOS_GUARD", "on"),
+    ];
+    let line = format!("LJOS_CITE={ISSUE} git push origin main");
+    let config = seat.home.join(".config/ljos");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("user-rules.json"),
+        serde_json::json!({"rules":[{
+            "id":"ur-deny-cited-push", "text":"This push is denied.", "author":"owner",
+            "reason":"The repository is read only.", "pattern":"git push*", "verdict":"deny",
+            "basis":"person", "written_at":"2026-10-28T00:00:00Z"
+        }]})
+        .to_string(),
+    )
+    .unwrap();
+    let denied = seat.hook_turn(&line, &env);
+    assert!(denied.contains("The repository is read only."), "{denied}");
+    assert!(!denied.contains("ljos_request_approval"), "{denied}");
+    let policy = seat.bin.join("ljos-policyd");
+    script(
+        &policy,
+        "#!/bin/sh\nprintf 'deny\tpolicy-denies-cited-push\n'\nexit 2\n",
+    );
+    std::fs::write(config.join("user-rules.json"), "{\"rules\":[]}").unwrap();
+    let external = seat.hook_turn(&line, &env);
+    assert!(external.contains("policy-denies-cited-push"), "{external}");
+    assert!(!external.contains("ljos_request_approval"), "{external}");
+    assert!(!seat.run.join("ljos/approvals/requests.json").exists());
+}
+
 #[test]
 fn a_local_push_consent_request_never_masks_the_external_law() {
     let seat = Seat::new();

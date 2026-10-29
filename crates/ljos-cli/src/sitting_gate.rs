@@ -346,7 +346,35 @@ fn asked(detail: &str) -> Rule {
 /// The cite has no seat ballot. A split, a short quorum, a revise, or an
 /// unreadable roster is a different miss and stays a refusal.
 fn only_missing_seat_vote(why: &str) -> bool {
-    why.contains("no seat voted on ")
+    why.starts_with("no seat voted on ") && !why.contains("; left out:")
+}
+
+/// A valid zero-ballot citation can request the person's consent only
+/// while its caller holds a live sitting and sends one ordinary protected branch.
+pub(crate) fn cited_push_consent(line: &str, cwd: Option<&Path>, why: &str) -> bool {
+    if !only_missing_seat_vote(why) || live_sitting().is_err() {
+        return false;
+    }
+    let Ok(calls) = crate::gates::git_calls(line, cwd) else {
+        return false;
+    };
+    let [push] = calls.as_slice() else {
+        return false;
+    };
+    if push.sub != "push" || !writes_history(push) {
+        return false;
+    }
+    let Ok(cfg) = crate::gates::consensus_push(Some(&push.cwd)) else {
+        return false;
+    };
+    let Some(dest) = crate::gates::protected_push(push, line, &cfg.branches) else {
+        return false;
+    };
+    let Some(branch) = plain_branch(&dest) else {
+        return false;
+    };
+    local_push_clear(push, branch)
+        && (!crate::cloud::cloud_seat() || cloud_push_clear(line, cwd, push, branch))
 }
 
 /// `dest` from [`crate::gates::protected_push`] when it names one branch.

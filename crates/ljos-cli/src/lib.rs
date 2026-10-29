@@ -23515,7 +23515,8 @@ fn tracker_write_instead(words: &[String]) -> Option<(String, String)> {
 /// dangerous push still denies it. A rule about some other command on the
 /// same line is left as it is when the push itself is ordinary. A push
 /// that carries `LJOS_CITE` is denied when the cite does not stand
-/// ([`cite_stands`]).
+/// ([`cite_stands`]). A valid citation with no seat ballot can ask for
+/// one-command consent on an ordinary protected push from a live sitting.
 #[must_use]
 pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<Rule> {
     // A temporary HOME and LJOS_OFF switch the whole guard off, the push
@@ -23528,9 +23529,11 @@ pub fn gate_push(rule: Option<&Rule>, line: &str, cwd: Option<&str>) -> Option<R
     };
     if let Some(cite) = &call.cite {
         if let Err(why) = cite_stands(cite) {
+            let consent = !rule.is_some_and(|rule| rule.verdict == "deny")
+                && sitting_gate::cited_push_consent(line, cwd.map(Path::new), &why);
             return Some(Rule {
                 pattern: "built-in push cite".into(),
-                verdict: "deny".into(),
+                verdict: if consent { "ask" } else { "deny" }.into(),
                 reason: format!("LJOS_CITE={cite} does not stand: {why}"),
             });
         }

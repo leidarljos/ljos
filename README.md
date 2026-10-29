@@ -311,6 +311,11 @@ nothing. The tool takes no approval flag as an argument. Each different
 command, directory, conversation or rule needs its own consent, and deny
 rules still apply.
 
+An explicit `LJOS_CITE` follows the same consent path when it names a valid
+issue with no seat ballot and the command sends one ordinary protected branch
+from a live sitting. Unknown citations, unreadable ballots, signature failures,
+and decisions that refuse the push remain denials.
+
 For clients without form elicitation, reply `approve REQUEST_ID` in this
 conversation, or run `ljos approve REQUEST_ID` in your own terminal. The
 terminal command refuses to run under a coding runner, and the seat's guard
