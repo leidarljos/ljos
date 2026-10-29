@@ -110,12 +110,7 @@ impl Scope {
             .or_else(|| value["toolName"].as_str())
             .filter(|s| !s.is_empty())
             .context("approval needs a tool name")?;
-        let base = value["cwd"]
-            .as_str()
-            .context("approval needs the working directory")?;
-        if !Path::new(base).is_absolute() {
-            bail!("approval needs an absolute working directory");
-        }
+        let base = hook_directory(&value)?;
         let args = value
             .get("tool_input")
             .filter(|v| !v.is_null())
@@ -124,8 +119,8 @@ impl Scope {
             .and_then(|args| args.get("workdir").or_else(|| args.get("cwd")))
             .filter(|v| !v.is_null());
         let cwd = match directory {
-            Some(v) => Path::new(base).join(v.as_str().context("invalid tool working directory")?),
-            None => PathBuf::from(base),
+            Some(v) => base.join(v.as_str().context("invalid tool working directory")?),
+            None => base,
         };
         let cwd = fs::canonicalize(cwd).context("approval working directory is unavailable")?;
         if !cwd.is_dir() || call.cue.is_empty() {
@@ -141,6 +136,36 @@ impl Scope {
             pattern: rule.pattern.clone(),
             reason: rule.reason.clone(),
         })
+    }
+}
+
+/// The directory the hook named. A missing, empty or relative `cwd` is
+/// resolved against the first absolute `workspace_roots` entry, or else
+/// this process's current directory. Another session does not supply it.
+fn hook_directory(value: &Value) -> Result<PathBuf> {
+    let raw = value["cwd"].as_str().unwrap_or("");
+    let given = Path::new(raw);
+    if !raw.is_empty() && given.is_absolute() {
+        return Ok(given.to_path_buf());
+    }
+    let anchor = value
+        .get("workspace_roots")
+        .and_then(Value::as_array)
+        .and_then(|roots| {
+            roots.iter().find_map(|entry| {
+                let text = entry.as_str().filter(|text| !text.is_empty())?;
+                let path = Path::new(text);
+                path.is_absolute().then(|| path.to_path_buf())
+            })
+        })
+        .or_else(|| std::env::current_dir().ok());
+    let Some(anchor) = anchor else {
+        bail!("approval needs an absolute working directory");
+    };
+    if raw.is_empty() {
+        Ok(anchor)
+    } else {
+        Ok(anchor.join(given))
     }
 }
 
@@ -1129,18 +1154,79 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("approvals");
         let original = input(temp.path());
-        for key in ["cwd", "tool_name"] {
-            let mut value: Value = serde_json::from_str(&original).unwrap();
-            value.as_object_mut().unwrap().remove(key);
-            let response: Value =
-                serde_json::from_str(&output(&value.to_string(), &ask(), &root, 100)).unwrap();
-            assert_eq!(response["hookSpecificOutput"]["permissionDecision"], "deny");
-            assert!(!root.exists(), "{key}");
-        }
+        let mut value: Value = serde_json::from_str(&original).unwrap();
+        value.as_object_mut().unwrap().remove("tool_name");
+        let response: Value =
+            serde_json::from_str(&output(&value.to_string(), &ask(), &root, 100)).unwrap();
+        assert_eq!(response["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(!root.exists());
         request_id(&output(&original, &ask(), &root, 101));
         fs::write(root.join("requests.json"), "not json").unwrap();
         let response: Value = serde_json::from_str(&output(&original, &ask(), &root, 102)).unwrap();
         assert_eq!(response["hookSpecificOutput"]["permissionDecision"], "deny");
+    }
+
+    /// A relative `cwd`, and a payload with no `cwd`, each record one
+    /// request for the directory they resolve to.
+    #[test]
+    fn a_relative_or_missing_cwd_records_the_resolved_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let work = temp.path().join("work");
+        let sub = work.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        let work = fs::canonicalize(&work).unwrap();
+        let sub = fs::canonicalize(&sub).unwrap();
+        let command = ": > map.tsv";
+        let payload = |cwd: Option<&str>, roots: Option<Vec<&Path>>| {
+            let mut value = serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "turn_id": "turn-1",
+                "session_id": "conversation-1",
+                "tool_name": "Bash",
+                "tool_input": {"command": command}
+            });
+            if let Some(cwd) = cwd {
+                value["cwd"] = cwd.into();
+            }
+            if let Some(roots) = roots {
+                value["workspace_roots"] = roots
+                    .iter()
+                    .map(|path| Value::String(path.display().to_string()))
+                    .collect();
+            }
+            value.to_string()
+        };
+        let recorded = |input: &str, dir: &Path| {
+            let root = dir.join("approvals");
+            request_id(&output(input, &ask(), &root, 100));
+            let store = Store::open(&root, 101).unwrap();
+            assert_eq!(store.requests.len(), 1);
+            assert_eq!(store.requests[0].scope.command, command);
+            assert_eq!(store.requests[0].scope.session, "conversation-1");
+            store.requests[0].scope.cwd.clone()
+        };
+        let relative = payload(
+            Some("sub"),
+            Some(vec![Path::new("not/absolute"), work.as_path()]),
+        );
+        assert_eq!(
+            recorded(&relative, &temp.path().join("relative")),
+            sub,
+            "relative cwd"
+        );
+        let missing = payload(None, Some(vec![work.as_path()]));
+        assert_eq!(
+            recorded(&missing, &temp.path().join("missing")),
+            work,
+            "missing cwd"
+        );
+        let here = fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        let fallback = payload(None, None);
+        assert_eq!(
+            recorded(&fallback, &temp.path().join("fallback")),
+            here,
+            "missing cwd uses this process"
+        );
     }
 
     #[test]
