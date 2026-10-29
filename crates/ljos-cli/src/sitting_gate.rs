@@ -109,38 +109,6 @@ fn judge_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
             "a tool command under a runner may not write a sitting record",
         ));
     }
-    if crate::call_unattributed() {
-        if history_or_unread(line, cwd) {
-            crate::bookkeep::log_line("hook: unattributed call, no conversation id");
-        }
-        // No conversation names no sitting to judge a commit by. A push
-        // onto a protected branch still waits for the seats on a ticket,
-        // and a call that names nobody sits on none, so that push is
-        // refused rather than let through unvoted.
-        let calls = match crate::gates::git_calls(line, cwd) {
-            Ok(calls) => calls,
-            Err(why) => {
-                return Some(refusal(&format!(
-                    "{why}, so the sitting gate cannot tell what this line writes. \
-                     Run the git command directly"
-                )))
-            }
-        };
-        for push in calls
-            .iter()
-            .filter(|c| c.sub == "push" && writes_history(c))
-        {
-            let cfg = match crate::gates::consensus_push(Some(&push.cwd)) {
-                Ok(cfg) => cfg,
-                Err(why) => return Some(refusal(&unread_settings(&why))),
-            };
-            if let Some(dest) = crate::gates::protected_push(push, line, &cfg.branches) {
-                let dest = format!("may land on {dest}");
-                return Some(refusal(&unattributed_push(&dest, &cfg.branches)));
-            }
-        }
-        return None;
-    }
     let calls = match crate::gates::git_calls(line, cwd) {
         Ok(calls) => calls,
         Err(why) => {
@@ -150,38 +118,84 @@ fn judge_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
             )))
         }
     };
-    let first = calls.iter().find(|call| writes_history(call))?;
-    let issue = match live_sitting() {
-        Ok(issue) => issue,
-        Err(why) => return Some(refusal(&no_sitting(&first.sub, &why))),
-    };
-    let pushes = calls
+    if let Some(rule) = protected_branch_ask(&calls, line) {
+        return Some(rule);
+    }
+    if crate::call_unattributed() {
+        if history_or_unread(line, cwd) {
+            crate::bookkeep::log_line("hook: unattributed call, no conversation id");
+        }
+        return None;
+    }
+    let first = calls
         .iter()
-        .filter(|c| c.sub == "push" && writes_history(c));
-    for push in pushes {
+        .find(|call| writes_history(call) && !protected_history_push(call, line))?;
+    if let Err(why) = live_sitting() {
+        return Some(refusal(&no_sitting(&first.sub, &why)));
+    }
+    None
+}
+
+/// A force, a delete, or a mirror push is not this check. Later rules
+/// still judge those.
+fn plain_protected_push(args: &[String]) -> bool {
+    !args.iter().any(|arg| {
+        arg == "--force"
+            || arg == "--force-with-lease"
+            || arg.starts_with("--force")
+            || arg == "--delete"
+            || arg == "--mirror"
+            || arg.starts_with(':')
+    })
+}
+
+fn protected_history_push(call: &GitCall, line: &str) -> bool {
+    if call.sub != "push" || !writes_history(call) {
+        return false;
+    }
+    let Ok(cfg) = crate::gates::consensus_push(Some(&call.cwd)) else {
+        return false;
+    };
+    crate::gates::protected_push(call, line, &cfg.branches).is_some()
+}
+
+/// A push onto a protected branch asks when the sitting has no settled
+/// consensus. One active seat settles on its own vote. Two or more use
+/// the ordinary quorum. A conversation id is not read here.
+fn protected_branch_ask(calls: &[GitCall], line: &str) -> Option<Rule> {
+    for push in calls
+        .iter()
+        .filter(|call| call.sub == "push" && writes_history(call))
+        .filter(|call| plain_protected_push(&call.args))
+    {
         let cfg = match crate::gates::consensus_push(Some(&push.cwd)) {
             Ok(cfg) => cfg,
-            Err(why) => return Some(refusal(&unread_settings(&why))),
+            Err(why) => return Some(asked(&unread_settings(&why))),
         };
         let Some(dest) = crate::gates::protected_push(push, line, &cfg.branches) else {
             continue;
         };
-        if let Err(why) = crate::protected_push_stands(&issue, cfg.quorum) {
-            let shown = format!("may land on {dest}");
-            let detail = seats_wait(&shown, &cfg.branches, &issue, &why);
-            // A cloud tracker's ballots never arrive from another seat. The
-            // person can grant this one command. Anything else stays a refusal.
-            // A call that names no conversation has already returned above.
-            if only_missing_seat_vote(&why)
-                && plain_branch(&dest)
-                    .is_some_and(|branch| cloud_push_clear(line, cwd, push, branch))
-            {
-                return Some(asked(&detail));
-            }
-            return Some(refusal(&detail));
+        let Some(issue) = crate::seat_held_issue() else {
+            return Some(asked(&protected_ask(&dest, &cfg.branches)));
+        };
+        if !crate::protected_push_cleared(&issue, &crate::seat_name(), cfg.quorum) {
+            return Some(asked(&protected_ask(&dest, &cfg.branches)));
         }
     }
     None
+}
+
+fn protected_ask(dest: &str, branches: &[String]) -> String {
+    let named: Vec<String> = branches
+        .iter()
+        .map(|branch| format!("`{branch}`"))
+        .collect();
+    format!(
+        "`git push` may land on {dest}, and a push onto {} asks until the sitting's ticket \
+         has a settled consensus. One active seat settles on its own vote. Two or more seats \
+         use the ordinary quorum. Run `ljos consensus` on the ticket, then push again",
+        named.join(", ")
+    )
 }
 
 /// Why `git VERB` waits for a sitting, from [`live_sitting`]'s `why`.
@@ -642,5 +656,60 @@ mod tests {
             let calls = crate::gates::git_calls(line, None).unwrap();
             assert!(calls.iter().any(writes_history), "{line}");
         }
+    }
+
+    fn row(agent: &str, choice: &str) -> serde_json::Value {
+        serde_json::json!({"agent": agent, "choice": choice})
+    }
+
+    /// One active seat: that seat's own vote settles, so a protected push
+    /// is not asked. Two seats: the ordinary quorum still has to be met.
+    #[test]
+    fn one_active_seat_settles_on_its_own_vote() {
+        let one = vec!["ada".to_string()];
+        let voted = vec![row("ada", "ship")];
+        let none = std::collections::BTreeSet::new();
+        let own = |agent: &str| Some(agent.to_string());
+        assert!(crate::protected_push_settled(
+            &one, &voted, &none, "ada", 2, &own
+        ));
+        assert!(crate::solo_vote_settles("ada", &voted));
+        let quiet = vec![row("ada", "")];
+        assert!(!crate::protected_push_settled(
+            &one, &quiet, &none, "ada", 2, &own
+        ));
+        assert!(!crate::protected_push_settled(&one, &[], &none, "ada", 2, &own));
+    }
+
+    #[test]
+    fn two_active_seats_keep_the_quorum() {
+        let two = vec!["ada".to_string(), "bea".to_string()];
+        let only_ada = vec![row("ada", "ship")];
+        let none = std::collections::BTreeSet::new();
+        let own = |agent: &str| Some(agent.to_string());
+        let same = |_: &str| Some("one-model".to_string());
+        assert!(
+            !crate::protected_push_settled(&two, &only_ada, &none, "ada", 2, &own),
+            "one vote of two seats is not a quorum"
+        );
+        let both = vec![row("ada", "ship"), row("bea", "ship")];
+        assert!(crate::protected_push_settled(
+            &two, &both, &none, "ada", 2, &own
+        ));
+        assert!(
+            !crate::protected_push_settled(&two, &both, &none, "ada", 2, &same),
+            "two seats in one model family do not settle a protected push"
+        );
+        let mut personas = std::collections::BTreeSet::new();
+        personas.insert("persona-1".to_string());
+        let posed = vec![row("ada", "ship"), row("persona-1", "ship")];
+        assert!(
+            !crate::protected_push_settled(&two, &posed, &personas, "ada", 2, &own),
+            "a persona ballot is not a second seat"
+        );
+        let split = vec![row("ada", "ship"), row("bea", "hold")];
+        assert!(!crate::protected_push_settled(
+            &two, &split, &none, "ada", 2, &own
+        ));
     }
 }

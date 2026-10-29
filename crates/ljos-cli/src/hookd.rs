@@ -2,8 +2,8 @@
 //! start a full hook process at once, so a burst of thirty calls from six
 //! seats was thirty processes contending for the same CPUs and memory.
 //! `ljos hookd`, one per user, hands out a fixed number of slots over a
-//! unix socket, in the order the calls asked. A gate call that gets no
-//! slot in time is refused: a gate that cannot judge must not allow.
+//! unix socket, in the order the calls asked. A gate that gets no slot
+//! is judged in this process: the queue allows, it does not deny.
 //!
 //! The judging stays in the calling process. The guard reads that
 //! process's parent, session and cgroup to tell the runner's call from a
@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 /// The longest a call waits for a slot. The runner's gate deadline counts
 /// from the call's start, so the wait and the work share that budget.
 pub const ADMIT_MS: u64 = 3_000;
-/// Calls waiting at once before the next one is refused outright.
+/// Calls waiting at once before the next one is judged here instead.
 pub const QUEUE_CAP: usize = 64;
 /// A slot held this long is taken back, so a stopped call cannot keep it.
 const HOLD: Duration = Duration::from_secs(10);
@@ -76,8 +76,8 @@ pub fn take_stdin() -> Option<Vec<u8>> {
 
 /// Wait for this hook call's turn before any heavy start-up. Returns at
 /// once for anything but a plain `ljos hook`. A gate that gets no turn
-/// within [`ADMIT_MS`] is refused in the runner's JSON and the process
-/// exits; any other event exits quietly, since it has nothing to stop.
+/// within [`ADMIT_MS`], or finds no server, is judged in this process.
+/// That path calls policyd directly. It does not deny for the queue.
 pub fn admit() {
     let _ = started();
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -129,24 +129,9 @@ pub fn admit() {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(held);
         }
         Err(why) => {
-            note_time("refused", started().elapsed(), Duration::ZERO);
-            let why = format!("hook queue: {why}");
-            if gate {
-                if let Some(text) = crate::hook_failure_output(&input, event.as_deref(), &why) {
-                    let code = crate::gate_exit(&text);
-                    let mut out = std::io::stdout().lock();
-                    let _ = out.write_all(text.as_bytes());
-                    let _ = out.flush();
-                    if code != 0 {
-                        eprintln!("ljos hook: {why}; the call is refused");
-                    }
-                    std::process::exit(code);
-                }
-                eprintln!("ljos hook: {why}; the call is refused");
-                std::process::exit(crate::GATE_REFUSED_EXIT);
-            }
-            eprintln!("ljos hook: {why}; this event is skipped");
-            std::process::exit(0);
+            note_time("allowed", started().elapsed(), Duration::ZERO);
+            eprintln!("ljos hook: hook queue: {why}; the call is judged in this process");
+            let _ = (gate, input, event);
         }
     }
 }

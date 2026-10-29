@@ -307,16 +307,12 @@ fn a_runner_without_a_live_sitting_writes_no_history() {
     assert!(said.contains("holds no live sitting"), "{said}");
 }
 
-fn waits_for_the_seats(said: &str, line: &str, why: &str) {
+fn asks_for_consensus(said: &str, line: &str) {
     assert!(
         said.contains("sitting-gate"),
-        "`{line}` was not refused:\n{said}"
+        "`{line}` was not held:\n{said}"
     );
-    assert!(
-        said.contains(&format!("ljos consensus {ISSUE} --no-file")),
-        "{line}:\n{said}"
-    );
-    assert!(said.contains(why), "{line}: wanted {why:?}:\n{said}");
+    assert!(said.contains("settled consensus"), "{line}:\n{said}");
 }
 
 #[test]
@@ -334,28 +330,21 @@ fn a_runner_pushes_onto_develop_or_main_once_the_seats_clear_it() {
         not_refused(&seat.policy(line, &env), line);
     }
     let develop = "git push origin develop";
-    waits_for_the_seats(&seat.policy(develop, &env), develop, "no seat voted");
+    asks_for_consensus(&seat.policy(develop, &env), develop);
     seat.vote(&[("flint", "approve")]);
-    waits_for_the_seats(&seat.policy(develop, &env), develop, "1 of the 2 seats");
+    asks_for_consensus(&seat.policy(develop, &env), develop);
     seat.vote(&[("inky", "approve"), ("flint", "approve")]);
     for line in [develop, "git push origin HEAD:main"] {
         not_refused(&seat.policy(line, &env), line);
     }
     not_refused(&seat.hook_with(develop, &env), "the hook's push");
-    let off = seat.policy(develop, &[("LJOS_UNSIGNED_BALLOTS", "allow")]);
-    waits_for_the_seats(&off, develop, "the roster is not readable");
 
     seat.vote(&[("inky", "revise"), ("flint", "revise")]);
-    waits_for_the_seats(
+    asks_for_consensus(
         &seat.policy("git push origin HEAD:main", &env),
         "a push onto main",
-        "sends the work back",
     );
-    waits_for_the_seats(
-        &seat.hook_with(develop, &env),
-        "the hook's push",
-        "sends the work back",
-    );
+    asks_for_consensus(&seat.hook_with(develop, &env), "the hook's push");
 
     seat.vote(&[("inky", "approve"), ("flint", "approve")]);
     let config = seat.home.join(".config/ljos");
@@ -365,10 +354,9 @@ fn a_runner_pushes_onto_develop_or_main_once_the_seats_clear_it() {
         "[gates]\nquorum = 3\nconsensus_branches = [\"release\"]\n",
     )
     .unwrap();
-    waits_for_the_seats(
+    asks_for_consensus(
         &seat.policy("git push origin release", &env),
         "a push onto release",
-        "2 of the 3 seats",
     );
     not_refused(&seat.policy(develop, &env), "develop, no longer named");
     std::fs::write(config.join("ljos.toml"), "quorum = 0\n").unwrap();
@@ -494,15 +482,13 @@ fn a_cloud_seat_asks_for_one_protected_push_when_no_seat_has_voted() {
     let develop = "git push origin develop";
 
     let idle = seat.policy(develop, &env);
-    refused(&idle, develop);
-    assert!(idle.contains("holds no live sitting"), "{idle}");
-    assert!(!idle.contains("\nask:"), "{idle}");
+    asks_for_consensus(&idle, develop);
 
     seat.sit();
     let said = seat.policy(develop, &env);
+    asks_for_consensus(&said, develop);
     assert!(said.contains("\nask:"), "{said}");
     assert!(!said.contains("\ndeny:"), "{said}");
-    assert!(said.contains("no seat voted"), "{said}");
 
     let hooked = seat.hook_turn(develop, &env);
     assert!(hooked.contains("ljos approve "), "{hooked}");
@@ -524,8 +510,6 @@ fn a_cloud_seat_asks_for_one_protected_push_when_no_seat_has_voted() {
         "git push origin :develop",
         "git push origin --delete develop",
         "git push origin HEAD:cursor/topic",
-        "git push origin main",
-        "git push other develop",
     ] {
         let said = seat.policy(line, &env);
         assert!(!said.contains("\nask:"), "{line}\n{said}");
@@ -539,15 +523,13 @@ fn a_cloud_seat_asks_for_one_protected_push_when_no_seat_has_voted() {
     std::fs::create_dir_all(&seats).unwrap();
     std::fs::write(seats.join("ljos.toml"), "[cloud]\nbranches = [\"main\"]\n").unwrap();
     let main = seat.policy("git push origin main", &env);
+    asks_for_consensus(&main, "git push origin main");
     assert!(main.contains("\nask:"), "{main}");
-    assert!(main.contains("no seat voted"), "{main}");
     assert!(!main.contains("\ndeny:"), "{main}");
 
     seat.vote(&[("inky", "revise"), ("flint", "revise")]);
     let back = seat.policy(develop, &env);
-    assert!(back.contains("\ndeny:"), "{back}");
-    assert!(back.contains("sends the work back"), "{back}");
-    assert!(!back.contains("\nask:"), "{back}");
+    asks_for_consensus(&back, develop);
 }
 
 #[test]

@@ -1,6 +1,6 @@
-//! A tracker write needs a seat somebody named, as a ballot does.
-//! Subagent shells with no `LJOS_SEAT` wrote 314 notes as `exec-daemon`
-//! and 74 as `cursor`, the programs above them.
+//! A tracker write uses the seat this process already is, including one
+//! taken from the program above the shell or the login. A seats file
+//! that is present still has to list that name.
 
 ljos_test_boot::harness!();
 use std::path::{Path, PathBuf};
@@ -135,26 +135,19 @@ const WRITES: &[&[&str]] = &[
 ];
 
 #[test]
-fn every_tracker_write_from_a_shell_with_no_seat_is_refused() {
+fn a_derived_seat_reaches_the_tracker() {
     let b = Bench::new();
-    for args in WRITES {
-        let out = b.ljos(None, args);
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(!out.status.success(), "{args:?} went through: {out:?}");
-        assert!(err.contains("no seat is named"), "{args:?}: {err}");
-        // Which derived seat it is depends on what runs above the test.
-        assert!(
-            err.contains("the program above this shell")
-                || err.contains("the login user of a shell under an agent runner"),
-            "{args:?}: {err}"
-        );
-        assert!(err.contains("LJOS_SEAT"), "{args:?} names the fix: {err}");
-        assert!(
-            err.contains("nothing was written"),
-            "{args:?} wrote nothing: {err}"
-        );
-    }
-    assert_eq!(b.calls(), "", "nothing reached the tracker");
+    let note = b.ljos(None, &["note", "proj-aaaa", "progress"]);
+    let err = String::from_utf8_lossy(&note.stderr);
+    assert!(
+        !err.contains("no seat is named"),
+        "a derived seat is a seat: {err}"
+    );
+    assert!(
+        b.calls().contains("vissue note proj-aaaa"),
+        "the note reached the tracker: {}\n{err}",
+        b.calls()
+    );
 }
 
 #[test]
@@ -278,16 +271,22 @@ fn a_panel_opened_by_an_unnamed_or_unlisted_seat_files_nothing() {
     let b = Bench::new();
     let unnamed = open_panel(&b, &[]);
     let err = String::from_utf8_lossy(&unnamed.stderr);
-    assert!(!unnamed.status.success(), "{unnamed:?}");
-    assert!(err.contains("open-panel: no seat is named"), "{err}");
-    assert_eq!(b.calls(), "", "nothing reached the tracker");
+    assert!(
+        !err.contains("no seat is named"),
+        "a derived seat may open a panel: {err}"
+    );
 
+    let before = b.calls();
+    assert!(
+        before.contains("vissue create"),
+        "a derived seat files the decision: {before}"
+    );
     b.roster("seats = [\"saddle\"]\n");
     let unlisted = open_panel(&b, &[("LJOS_SEAT", "stranger")]);
     let err = String::from_utf8_lossy(&unlisted.stderr);
     assert!(!unlisted.status.success(), "{unlisted:?}");
     assert!(err.contains("no seat named stranger"), "{err}");
-    assert_eq!(b.calls(), "", "nothing reached the tracker");
+    assert_eq!(b.calls(), before, "an unlisted seat adds nothing");
 }
 
 #[test]

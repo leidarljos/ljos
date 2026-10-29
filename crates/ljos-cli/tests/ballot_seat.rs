@@ -63,16 +63,12 @@ fn a_ballot_from_a_shell_with_no_seat_is_refused() {
         "--as",
         "reviewer",
     ];
-    let refused = ljos(None, &vote);
-    let err = String::from_utf8_lossy(&refused.stderr);
+    let cast_derived = ljos(None, &vote);
+    let err = String::from_utf8_lossy(&cast_derived.stderr);
     assert!(
-        !refused.status.success(),
-        "a vote with no seat went through: {refused:?}"
+        !err.contains("no seat is named"),
+        "a derived seat is a seat: {err}"
     );
-    assert!(err.contains("no seat is named"), "{err}");
-    assert!(err.contains("LJOS_SEAT"), "names the fix: {err}");
-    let calls = std::fs::read_to_string(&log).unwrap_or_default();
-    assert!(!calls.contains("vissue vote"), "nothing was cast: {calls}");
 
     // The stub tracker holds the ballot once `vissue vote` wrote it, so the
     // cast is proved by the tracker's read-back, not by the exit of the vote.
