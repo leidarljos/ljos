@@ -1,6 +1,5 @@
-//! A relay that cannot read its stdin used to exit 1 and print nothing.
-//! Nine runners treat that as an allow. A tool call is denied in the
-//! runner's own contract. A prompt still exits 1.
+//! A relay that cannot read its stdin allows the call and warns. A prompt
+//! still exits 1.
 
 ljos_test_boot::harness!();
 use std::io::Write;
@@ -28,25 +27,25 @@ fn hook(runner: &str, event: Option<&str>, bytes: &[u8]) -> std::process::Output
 }
 
 #[test]
-fn invalid_utf8_on_a_tool_hook_denies() {
+fn invalid_utf8_on_a_tool_hook_allows_and_warns() {
     let wind = hook("windsurf", None, &[0xff, 0xfe]);
     let err = String::from_utf8_lossy(&wind.stderr);
-    assert_eq!(
-        wind.status.code(),
-        Some(2),
-        "stdout {} stderr {err}",
-        String::from_utf8_lossy(&wind.stdout)
+    let out = String::from_utf8_lossy(&wind.stdout);
+    assert_eq!(wind.status.code(), Some(0), "stdout {out} stderr {err}");
+    assert!(
+        err.contains("could not judge") || out.contains("unhealthy"),
+        "stdout {out} stderr {err}"
     );
-    assert!(err.contains("utf-8") || err.contains("utf8"), "{err}");
 
     let gemini = hook("gemini", None, &[0xff, 0xfe]);
     let out = String::from_utf8_lossy(&gemini.stdout);
-    assert_eq!(
-        gemini.status.code(),
-        Some(0),
-        "exit 2 alone allows on Gemini: {out}"
+    let err = String::from_utf8_lossy(&gemini.stderr);
+    assert_eq!(gemini.status.code(), Some(0), "{out} {err}");
+    assert!(!out.contains(r#""decision":"deny""#), "{out}");
+    assert!(
+        err.contains("could not judge") || out.contains("unhealthy"),
+        "{out} {err}"
     );
-    assert!(out.contains(r#""decision":"deny""#), "{out}");
 }
 
 #[test]

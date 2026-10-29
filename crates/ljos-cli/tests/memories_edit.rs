@@ -193,6 +193,10 @@ fn id_of(atom: &Value) -> String {
 /// A runner cannot edit or merge, and an edit does not invent a person basis.
 #[test]
 fn review_edit_keeps_the_basis_the_memory_already_had() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let packset = tool("packset");
     let daemon = Daemon::start();
     let seat = Seat::on(daemon.url.clone());

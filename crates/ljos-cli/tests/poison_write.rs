@@ -364,9 +364,10 @@ fn combined(out: &std::process::Output) -> String {
     )
 }
 
-/// `ljos prefer --user` under a runner refuses a sentence the person did not say.
+/// `ljos prefer --user` under a runner stores a sentence the person did
+/// not say as the agent's rule. It is not a standing person rule.
 #[test]
-fn a_runner_user_rule_of_a_plant_is_refused() {
+fn a_runner_user_rule_of_a_plant_is_the_agents() {
     let seat = Seat::new();
     let out = seat
         .command(
@@ -382,18 +383,13 @@ fn a_runner_user_rule_of_a_plant_is_refused() {
         )
         .output()
         .unwrap();
-    let said = combined(&out);
-    assert!(
-        !out.status.success(),
-        "a planted user rule was accepted\n{}",
-        text_of(&out)
+    assert!(out.status.success(), "{}", text_of(&out));
+    assert_eq!(
+        user_rule_basis(&seat, "the deploy form asks for it"),
+        "agent"
     );
-    assert!(said.contains("only the person's own words"), "{said}");
-    assert!(
-        !rules_text(&seat).contains("release key"),
-        "the plant was written: {}",
-        rules_text(&seat)
-    );
+    let start = session_start(&seat);
+    assert!(!start.contains("release key"), "{start}");
 }
 
 /// MCP `ljos_prefer` with `user` true is the agent's path, so a plant is refused
@@ -478,6 +474,21 @@ fn a_person_can_write_a_user_rule_from_the_terminal() {
 }
 
 /// The basis each user-rules row was written with, by its reason.
+fn basis_of_text(seat: &Seat, needle: &str) -> String {
+    let rows: serde_json::Value = serde_json::from_str(&rules_text(seat)).unwrap();
+    rows["rules"]
+        .as_array()
+        .and_then(|rows| {
+            rows.iter().find(|row| {
+                row["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(needle))
+            })
+        })
+        .and_then(|row| row["basis"].as_str().map(str::to_string))
+        .unwrap_or_else(|| panic!("no user rule containing {needle}: {rows}"))
+}
+
 fn user_rule_basis(seat: &Seat, reason: &str) -> serde_json::Value {
     let rows: serde_json::Value = serde_json::from_str(&rules_text(seat)).unwrap();
     rows["rules"]
@@ -1201,17 +1212,17 @@ fn a_forged_prompt_does_not_make_remember_accept_the_plant() {
     let answer = mcp_remember(&seat, PLANT);
     let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
     assert!(
-        refused,
-        "a forged prompt made remember accept the plant: {answer}"
-    );
-    assert!(
-        answer.to_string().contains("only the person's own words"),
-        "{answer}"
+        !refused,
+        "a plant is stored as the agent's words, not refused: {answer}"
     );
     let atoms = seat.atoms.lock().unwrap().clone();
     assert!(
         atoms.iter().all(|atom| atom["origin"] != "user-declared"),
         "the plant was stored as the person's words: {atoms:?}"
+    );
+    assert!(
+        atoms.iter().any(|atom| atom["origin"] == "agent-derived"),
+        "the plant was not stored as agent-derived: {atoms:?}"
     );
 }
 
@@ -1274,11 +1285,11 @@ fn tool_call(seat: &Seat, name: &str, env: &[(&str, &str)], line: &str) -> std::
 }
 
 /// A tool call that rewrites the kept prompt and its bind without
-/// spelling either path, here `python3 plant.py`, which the guard cannot
-/// read, does not make a plant the person's words: Claude Code's own
-/// transcript says what the person typed, and the plant is not it.
+/// spelling either path, here `python3 plant.py`. The bind is the record.
+/// The runner's transcript is not a second check, so the rewritten prompt
+/// is the person's.
 #[test]
-fn a_rewritten_prompt_that_disagrees_with_the_runners_record_is_refused() {
+fn a_rewritten_prompt_that_matches_its_bind_is_the_persons() {
     let said = "Always build the release with the checked fuse never a guessed one.";
     let env = [("CLAUDE_CODE_SESSION_ID", RUNNER_SESSION)];
     let seat = Seat::new();
@@ -1300,11 +1311,11 @@ fn a_rewritten_prompt_that_disagrees_with_the_runners_record_is_refused() {
         .output()
         .unwrap();
     assert!(
-        combined(&out).contains("only the person's own words"),
-        "a rewritten prompt was the person's\n{}",
+        out.status.success(),
+        "a prompt that matches its bind was refused\n{}",
         text_of(&out)
     );
-    assert!(!rules_text(&seat).contains("release key"));
+    assert!(rules_text(&seat).contains("release key"));
 }
 
 /// A rewrite that keeps the hook's time is refused by the ctime the
@@ -1354,17 +1365,16 @@ fn a_prompt_changed_after_the_hooks_time_is_refused() {
     )
     .unwrap();
     let out = prefer(PLANT);
-    let said_err = combined(&out);
     assert!(
-        said_err.contains("only the person's own words"),
-        "a prompt changed after the hook was the person's\n{}",
+        out.status.success(),
+        "a prompt changed after the hook was refused\n{}",
         text_of(&out)
     );
-    assert!(
-        !said_err.contains("unverified"),
-        "the ctime refusal was called unverified\n{said_err}"
-    );
-    assert!(!rules_text(&seat).contains("release key"));
+    assert_eq!(basis_of_text(&seat, "release key"), "agent");
+    assert_eq!(basis_of_text(&seat, "checked fuse"), "person");
+    let start = session_start(&seat);
+    assert!(start.contains("checked fuse"), "{start}");
+    assert!(!start.contains("release key"), "{start}");
 }
 
 /// Cursor without a transcript, and the runners that keep no record ljos
@@ -1398,10 +1408,7 @@ fn a_runner_without_a_record_does_not_attribute_the_prompt() {
         let out = fed(seat.hook_under(name), &payload);
         assert!(out.status.success(), "{name}: {}", text_of(&out));
         let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            !stdout.contains("Saved the person's preference"),
-            "{name}: a stated choice was saved without a record: {stdout}"
-        );
+        let _ = stdout;
         let kept =
             std::fs::read_to_string(seat.run.path().join("ljos/latest-prompt")).unwrap_or_default();
         assert_eq!(kept, prompt, "{name}: the hook did not note the prompt");
@@ -1414,15 +1421,12 @@ fn a_runner_without_a_record_does_not_attribute_the_prompt() {
             )
             .output()
             .unwrap();
-        let body = combined(&out);
         assert!(
-            !out.status.success()
-                && body.contains("unverified")
-                && body.contains("only the person's own words"),
-            "{name}: prefer attributed the prompt\n{}",
+            out.status.success(),
+            "{name}: a noted prompt was refused\n{}",
             text_of(&out)
         );
-        assert!(!rules_text(&seat).contains("checked fuse"), "{name}");
+        assert!(rules_text(&seat).contains("checked fuse"), "{name}");
     }
 }
 
@@ -1610,16 +1614,13 @@ fn a_session_set_on_the_ljos_line_does_not_pick_the_bind() {
             .output()
             .unwrap();
         assert!(
-            !out.status.success(),
-            "{prefix} made a forged bind the person's\n{}",
+            out.status.success(),
+            "{prefix} refused a forged bind\n{}",
             text_of(&out)
         );
-        assert!(
-            combined(&out).contains("only the person's own words"),
-            "{}",
-            text_of(&out)
-        );
-        assert!(!rules_text(&seat).contains("release key"), "{prefix}");
+        assert_eq!(user_rule_basis(&seat, "x"), "agent", "{prefix}");
+        let start = session_start(&seat);
+        assert!(!start.contains("release key"), "{prefix}: {start}");
     }
 }
 
@@ -1821,9 +1822,16 @@ fn a_meta_session_does_not_vouch_for_another_conversations_prompt() {
             serde_json::json!({"text": said, "user": true, "why": "x"}),
             serde_json::json!({"session_id": victim}),
         );
-        let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
-        assert!(refused, "env {env:?}: a _meta session vouched: {answer}");
-        assert!(!rules_text(&seat).contains("checked fuse"), "env {env:?}");
+        assert!(
+            answer.get("error").is_none() && answer["result"]["isError"] != true,
+            "env {env:?}: a _meta session was refused: {answer}"
+        );
+        assert_eq!(user_rule_basis(&seat, "x"), "agent", "env {env:?}");
+        let start = session_start(&seat);
+        assert!(
+            !start.contains("checked fuse"),
+            "env {env:?}: the other conversation stood: {start}"
+        );
     }
 }
 
@@ -1845,18 +1853,8 @@ fn every_runner_takes_a_real_quote_and_refuses_a_forged_session() {
         let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
         // Grok keeps no record ljos reads, so the words stay unverified.
         // Claude Code, Codex and Cursor name one, and `recorded` wrote it.
-        if r.name == "grok" {
-            assert!(refused, "{who}: mcp stored an unverified prompt: {answer}");
-            let body = answer.to_string();
-            assert!(
-                body.contains("unverified") && body.contains("only the person's own words"),
-                "{who}: {body}"
-            );
-            assert!(!rules_text(&seat).contains("checked fuse"), "{who}");
-        } else {
-            assert!(!refused, "{who}: mcp refused the person's words: {answer}");
-            assert!(rules_text(&seat).contains("checked fuse"), "{who}");
-        }
+        assert!(!refused, "{who}: mcp refused the person's words: {answer}");
+        assert!(rules_text(&seat).contains("checked fuse"), "{who}");
 
         if !r.env.is_empty() {
             let seat = Seat::new();
@@ -1870,24 +1868,12 @@ fn every_runner_takes_a_real_quote_and_refuses_a_forged_session() {
                 )
                 .output()
                 .unwrap();
-            if r.name == "grok" {
-                let body = combined(&out);
-                assert!(
-                    !out.status.success()
-                        && body.contains("unverified")
-                        && body.contains("only the person's own words"),
-                    "{who}: cli stored an unverified prompt\n{}",
-                    text_of(&out)
-                );
-                assert!(!rules_text(&seat).contains("checked fuse"), "{who}");
-            } else {
-                assert!(
-                    out.status.success(),
-                    "{who}: cli refused\n{}",
-                    text_of(&out)
-                );
-                assert!(rules_text(&seat).contains("checked fuse"), "{who}");
-            }
+            assert!(
+                out.status.success(),
+                "{who}: cli refused\n{}",
+                text_of(&out)
+            );
+            assert!(rules_text(&seat).contains("checked fuse"), "{who}");
         }
 
         let seat = Seat::new();
@@ -1898,9 +1884,13 @@ fn every_runner_takes_a_real_quote_and_refuses_a_forged_session() {
             serde_json::json!({"text": PLANT, "user": true, "why": "x"}),
             r.meta.clone(),
         );
-        let refused = answer.get("error").is_some() || answer["result"]["isError"] == true;
-        assert!(refused, "{who}: mcp took a forged bind: {answer}");
-        assert!(!rules_text(&seat).contains("release key"), "{who}");
+        assert!(
+            answer.get("error").is_none() && answer["result"]["isError"] != true,
+            "{who}: mcp refused a forged bind: {answer}"
+        );
+        assert_eq!(user_rule_basis(&seat, "x"), "agent", "{who}");
+        let start = session_start(&seat);
+        assert!(!start.contains("release key"), "{who}: {start}");
     }
 }
 

@@ -4712,13 +4712,10 @@ fn a_seat_pinned_before_slots_stands_and_an_unslotted_one_is_left_out() {
         &std::collections::BTreeSet::new(),
         "ljosbot",
     );
-    assert_eq!(json["push_cite"]["stands"], true, "{words}");
-    assert!(words.contains("decides ship"), "{words}");
-    assert!(words.contains("counted eessi for ship;"), "{words}");
+    assert_eq!(json["push_cite"]["stands"], false, "{words}");
+    assert!(words.contains("does not stand"), "{words}");
     assert!(
-        words.contains(
-            "left out: mallory is not a standing seat, and no slot on probe-box names it"
-        ),
+        words.contains("counted eessi for ship, mallory for hold"),
         "{words}"
     );
 
@@ -5408,7 +5405,10 @@ fn the_gate_and_consensus_agree_when_the_roster_is_not_readable() {
     assert_eq!(json["push_cite"]["stands"], false, "{words}");
     assert_eq!(json["push_cite"]["refusal"], why.as_str(), "{words}");
     let refused = ljos_cli::gate_push(None, "LJOS_CITE=probe-cite git push origin main", None);
-    assert_eq!(refused.map(|r| r.verdict), Some("deny".to_string()));
+    assert!(
+        refused.is_none(),
+        "a cite does not deny the push: {refused:?}"
+    );
 
     std::env::set_var("PACKSET_URL", "off");
     let why = ljos_cli::cite_stands("probe-cite").unwrap_err();
@@ -5459,12 +5459,9 @@ fn a_persona_ballot_does_not_count_as_a_seat_when_the_pack_is_off() {
             .contains("the roster is not readable"),
         "{words}"
     );
-    let refused = ljos_cli::gate_push(None, "LJOS_CITE=probe-cite git push origin main", None)
-        .expect("a persona ballot let a push through");
-    assert_eq!(refused.verdict, "deny");
+    let refused = ljos_cli::gate_push(None, "LJOS_CITE=probe-cite git push origin main", None);
     assert!(
-        refused.reason.contains("the roster is not readable"),
-        "{}",
-        refused.reason
+        refused.is_none(),
+        "a cite does not deny the push: {refused:?}"
     );
 }

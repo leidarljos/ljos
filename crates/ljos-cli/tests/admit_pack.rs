@@ -242,6 +242,10 @@ impl Drop for SeatEnv {
 
 #[test]
 fn accept_makes_a_held_lesson_live_and_remember_closes_the_same_text() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let _lock = env_lock();
     let daemon = Daemon::start();
     let state = tempfile::tempdir().expect("state");

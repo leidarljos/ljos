@@ -601,6 +601,10 @@ fn touch_script(home: &Path) -> PathBuf {
 
 #[test]
 fn a_send_and_a_reply_push_the_log_before_the_wake() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let (world, _daemon) = world(true, false);
     let joined = world.sender(RECIPIENT, &["group", "crew", "--add", RECIPIENT]);
     assert!(joined.status.success(), "{}", text(&joined));
@@ -711,6 +715,10 @@ fn a_send_and_a_reply_push_the_log_before_the_wake() {
 
 #[test]
 fn a_refused_push_still_wakes_and_is_logged() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let (world, _daemon) = world(false, true);
     let joined = world.sender(RECIPIENT, &["group", "crew", "--add", RECIPIENT]);
     assert!(joined.status.success(), "{}", text(&joined));
@@ -764,6 +772,10 @@ fn a_refused_push_still_wakes_and_is_logged() {
 
 #[test]
 fn a_recipients_inbox_sync_reads_the_pushed_letter() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let (world, _daemon) = world(false, false);
     let joined = world.sender(RECIPIENT, &["group", "crew", "--add", RECIPIENT]);
     assert!(joined.status.success(), "{}", text(&joined));
@@ -911,6 +923,10 @@ fn a_recipients_inbox_sync_reads_the_pushed_letter() {
 /// recipient is already fetching is still read.
 #[test]
 fn inbox_sync_waits_for_a_push_that_lands_late() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let (world, _daemon) = world(false, true);
     let joined = world.sender(RECIPIENT, &["group", "crew", "--add", RECIPIENT]);
     assert!(joined.status.success(), "{}", text(&joined));
@@ -967,6 +983,10 @@ fn inbox_sync_waits_for_a_push_that_lands_late() {
 
 #[test]
 fn inbox_sync_with_no_remote_only_lists() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let (world, _daemon) = world(false, false);
     let local = world.root.path().join("local-repo");
     std::fs::create_dir_all(local.join(".ljos")).expect("ljos");

@@ -223,6 +223,10 @@ fn no_http_refusal(stderr: &str) {
 
 #[test]
 fn session_end_stores_facts_on_the_open_sitting() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let pack = Daemon::start();
     let seat = Seat::new();
     seat.sit();
@@ -281,6 +285,10 @@ fn session_end_stores_facts_on_the_open_sitting() {
 
 #[test]
 fn session_end_without_a_sitting_does_not_post() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let pack = Daemon::start();
     let seat = Seat::new();
     let out = session_end(&seat, &pack.url, &[]);
@@ -304,6 +312,10 @@ fn session_end_without_a_sitting_does_not_post() {
 
 #[test]
 fn session_end_extract_off_stores_nothing() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let pack = Daemon::start();
     let seat = Seat::new();
     seat.sit();

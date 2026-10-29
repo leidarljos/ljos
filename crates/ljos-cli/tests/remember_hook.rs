@@ -224,6 +224,10 @@ fn prompt_through(home: &Home, hook: &str, session: &str, prompt: &str) -> Strin
 
 #[test]
 fn a_remembered_lesson_reaches_the_prompt_hook_onboard_writes() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let (home, _daemon, hook) = seat();
     let remembered = home.on_a_terminal(&["remember", LESSON]);
     assert!(remembered.status.success(), "{}", text(&remembered));
@@ -256,6 +260,10 @@ fn a_remembered_lesson_reaches_the_prompt_hook_onboard_writes() {
 /// prompt about yarn gets it back.
 #[test]
 fn a_choice_said_in_chat_is_saved_and_comes_back() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let (home, _daemon, hook) = seat();
     // The first write loads the pack's encoder; a session warms it first.
     let warm = home.ljos(&["prefer", "Run cargo clippy before every commit"], None);

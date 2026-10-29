@@ -454,6 +454,10 @@ fn forged_hook(seat: &Seat) -> std::process::Output {
 /// Detaching does not make a keep, a prefer, or a prompt hook the person's.
 #[test]
 fn detaching_does_not_make_this_process_the_person() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let _scope = scope_lock();
     ensure_runner_scope();
     let daemon = Daemon::start();
@@ -522,6 +526,10 @@ fn detaching_does_not_make_this_process_the_person() {
 /// cgroup, so the command is still the runner's.
 #[test]
 fn tmux_send_keys_into_an_existing_session_is_not_the_person() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let _scope = scope_lock();
     ensure_runner_scope();
     let daemon = Daemon::start();
@@ -589,6 +597,10 @@ fn tmux_send_keys_into_an_existing_session_is_not_the_person() {
 /// including when the environment is otherwise the seat's.
 #[test]
 fn a_ci_shaped_environment_is_not_the_person() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let _scope = scope_lock();
     let daemon = Daemon::start();
     let seat = Seat::on(daemon.url.clone());
@@ -611,6 +623,10 @@ fn a_ci_shaped_environment_is_not_the_person() {
 /// was cleared.
 #[test]
 fn a_transient_scope_is_not_the_person() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let _scope = scope_lock();
     let daemon = Daemon::start();
     let seat = Seat::on(daemon.url.clone());

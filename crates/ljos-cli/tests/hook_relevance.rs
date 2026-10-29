@@ -252,6 +252,10 @@ fn seat() -> Seat {
 /// the age-decayed fused score cut that lesson behind three fresh ones.
 #[test]
 fn the_lesson_that_covers_the_prompt_beats_fresher_lookalikes() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let seat = seat();
     seat.lesson(CI_SECRET, JANUARY);
     for lookalike in [
@@ -273,6 +277,10 @@ fn the_lesson_that_covers_the_prompt_beats_fresher_lookalikes() {
 /// A prompt that says `always` is not about every rule that says it.
 #[test]
 fn always_does_not_bring_in_a_rule_about_something_else() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let seat = seat();
     seat.lesson("Always squash commits before merging to main.", FRESH);
     seat.lesson(
@@ -364,6 +372,10 @@ fn days_ago(days: u64) -> String {
 /// hook both hand the lesson over.
 #[test]
 fn an_old_lesson_one_ballot_kept_in_a_full_window_still_arrives() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let seat = seat();
     let status = seat.get("/v1/status", &[]);
     let ranks = status["search"]["ranks"].as_array();

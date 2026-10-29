@@ -2199,6 +2199,10 @@ body b
     /// an absolute path errors, and catch-up's merge aborts on the conflict.
     #[test]
     fn a_real_merge_reexports_a_conflicted_log_from_a_relative_temp() {
+        if !crate::tool_installed("packsetd") {
+            eprintln!("skipped: packsetd is not installed");
+            return;
+        }
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");

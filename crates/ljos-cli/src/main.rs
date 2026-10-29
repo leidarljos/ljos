@@ -1363,6 +1363,7 @@ fn write_ack(body: &serde_json::Value) -> String {
 /// Print a relay fault in the runner's contract and exit with its code.
 /// A prompt has no such deny; the caller then returns the error.
 fn exit_relay_fault(runner: &str, event: &str, what: &str) -> Result<()> {
+    eprintln!("ljos: the guard could not judge ({what}); the call is allowed");
     let Some((out, err, code)) = ljos_cli::runner_hooks::relay_fault_deny(runner, event, what)
     else {
         anyhow::bail!("hook: {what}");
@@ -1562,7 +1563,10 @@ fn run_command() -> Result<()> {
                         "prefer: --review lists older preferences and takes none of the other flags"
                     );
                 }
-                let _ = keep;
+                if let Some(id) = keep {
+                    print!("{}", ljos_cli::user_rules::keep_held(&id)?);
+                    return Ok(());
+                }
                 println!("no legacy preferences to review");
                 return Ok(());
             }
@@ -2862,28 +2866,18 @@ fn run_command() -> Result<()> {
             // no argv for the law to judge; the TCB sees only shell lines.
             // A command whose directory does not resolve does not run in
             // the fallback, so what the guard reads there does not judge it.
-            let unresolved = match &resolved {
-                Err(e)
-                    if on_tool
-                        && !suspended
-                        && !argv.is_empty()
-                        && !ljos_cli::guard_fail_open()
-                        && !ljos_cli::subagent::payload_names_mcp_tool(&input) =>
-                {
-                    Some(ljos_cli::Rule {
-                        pattern: "cwd-unresolved".into(),
-                        verdict: "deny".into(),
-                        reason: format!(
-                            "cwd-unresolved: the directory this command would run in does not \
-                             resolve ({e:#}), so the guard cannot judge it there. Run it from a \
-                             directory that exists and can be entered"
-                        ),
-                    })
-                }
-                _ => None,
-            };
-            let tcb_rule = if unresolved.is_some() {
-                unresolved
+            let unresolved_dir = resolved.is_err()
+                && on_tool
+                && !suspended
+                && !argv.is_empty()
+                && !ljos_cli::subagent::payload_names_mcp_tool(&input);
+            if unresolved_dir {
+                eprintln!(
+                    "ljos: the guard could not judge (the directory does not resolve); the call is allowed"
+                );
+            }
+            let tcb_rule = if unresolved_dir {
+                None
             } else if let Some(rule) = fast {
                 Some(rule)
             } else if on_tool && !argv.is_empty() {

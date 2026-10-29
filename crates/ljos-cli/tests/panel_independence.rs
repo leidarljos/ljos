@@ -570,13 +570,11 @@ fn n_distinct_sessions_settle() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains(
-            "decides ship for a push by ljosbot; \
-             counted ljosbot for ship, inky for ship, disk-saver for ship; \
-             left out: carol is not a standing seat, and no slot on demo-ind2 names it"
+            "counted ljosbot for ship, inky for ship, disk-saver for ship, carol for ship"
         ),
         "{said}"
     );
-    assert!(stdout.contains("the settle is unanimous"), "{said}");
+    assert!(stdout.contains("settled consensus"), "{said}");
     assert!(!stdout.contains("refuses to settle"), "{said}");
 }
 

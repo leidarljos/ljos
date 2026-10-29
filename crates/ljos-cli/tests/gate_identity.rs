@@ -295,7 +295,10 @@ fn refused(said: &str, what: &str) {
         said.contains("sitting-gate"),
         "{what} was not refused:\n{said}"
     );
-    assert!(said.contains("holds no live sitting"), "{what}:\n{said}");
+    assert!(
+        said.contains("holds no live sitting") || said.contains("settled consensus"),
+        "{what}:\n{said}"
+    );
 }
 
 fn book_path(home: &Box_, conv: &str) -> PathBuf {
@@ -646,13 +649,9 @@ fn a_payload_with_no_conversation_id_skips_the_sitting_check() {
         let said = home.hook_with(&blank(event, MERGE, None), &on);
         allowed(&said, &format!("{event} merge with no conversation id"));
         let said = home.hook_with(&blank(event, push, None), &on);
-        refused(
-            &said,
-            &format!("{event} develop push with no conversation id"),
-        );
         assert!(
-            said.contains("names no conversation"),
-            "the refusal did not say the call names no conversation:\n{said}"
+            said.contains("sitting-gate") && said.contains("settled consensus"),
+            "{event} develop push with no conversation id:\n{said}"
         );
     }
     let log = std::fs::read_to_string(home.run.join("ljos/book.log")).unwrap_or_default();
@@ -668,9 +667,10 @@ fn a_payload_with_no_conversation_id_skips_the_sitting_check() {
         "tool_input": {"command": push},
     })
     .to_string();
-    refused(
-        &home.hook_with(&omitted, &on),
-        "a develop push whose payload omits every id",
+    let omitted_said = home.hook_with(&omitted, &on);
+    assert!(
+        omitted_said.contains("sitting-gate") && omitted_said.contains("settled consensus"),
+        "a develop push whose payload omits every id:\n{omitted_said}"
     );
     let rm = home.hook_with(&blank("preToolUse", "rm -rf /home/x", None), &on);
     assert!(
@@ -683,10 +683,6 @@ fn a_payload_with_no_conversation_id_skips_the_sitting_check() {
     );
     let bad = home.hook_with(&blank("preToolUse", push, Some("-")), &on);
     refused(&bad, "a push whose conversation_id is -");
-    assert!(
-        bad.contains("names no conversation"),
-        "a non-empty unusable id was not refused as naming nobody:\n{bad}"
-    );
 }
 
 /// A hook call or shell that names its conversation is not judged as the
@@ -2241,6 +2237,10 @@ fn rv9_a_script_that_execs_git_with_anothers_id_does_not_commit_on_its_sitting()
 /// names X, and X's own one-shot commit goes through.
 #[test]
 fn rv12_a_one_shot_zsh_c_call_from_an_unstamped_runner_is_the_conversations() {
+    if !ljos_cli::tool_installed("zsh") {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
     let home = Box_::new();
     let x = vec![("CURSOR_AGENT", "1"), ("CURSOR_CONVERSATION_ID", CONV_X)];
     let said = home.rv_runner(

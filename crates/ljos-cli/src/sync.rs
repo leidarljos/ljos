@@ -9694,6 +9694,10 @@ mod tests {
 
     #[test]
     fn an_import_retires_atoms_when_the_extra_scope_is_gone() {
+        if !crate::tool_installed("packsetd") {
+            eprintln!("skipped: packsetd is not installed");
+            return;
+        }
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
@@ -9866,6 +9870,10 @@ mod tests {
     /// scope afterwards deleted that claim.
     #[test]
     fn a_text_moved_between_scopes_is_kept() {
+        if !crate::tool_installed("packsetd") {
+            eprintln!("skipped: packsetd is not installed");
+            return;
+        }
         let _g = crate::test_env_lock();
         assert_ne!(
             host(),
@@ -9975,6 +9983,10 @@ mod tests {
     /// primary sender.
     #[test]
     fn an_extra_scope_log_is_imported_under_its_sender() {
+        if !crate::tool_installed("packsetd") {
+            eprintln!("skipped: packsetd is not installed");
+            return;
+        }
         let _g = crate::test_env_lock();
         assert_ne!(host(), "peer");
         let dir = tempfile::tempdir().unwrap();
@@ -10036,6 +10048,10 @@ mod tests {
     /// is taken. The primary log, sealed to someone else, is not.
     #[test]
     fn a_vm_import_with_only_the_cloud_key_takes_the_cloud_log() {
+        if !crate::tool_installed("packsetd") {
+            eprintln!("skipped: packsetd is not installed");
+            return;
+        }
         let _g = crate::test_env_lock();
         assert_ne!(host(), "peer");
         let dir = tempfile::tempdir().unwrap();
@@ -10107,6 +10123,10 @@ mod tests {
     /// `scope:` entity is cloud. A grokbot atom and an unscoped atom stay out.
     #[test]
     fn the_merge_driver_reexports_an_extra_scope_without_primary_atoms() {
+        if !crate::tool_installed("packsetd") {
+            eprintln!("skipped: packsetd is not installed");
+            return;
+        }
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
@@ -10349,6 +10369,10 @@ mod tests {
     /// another host's name is refused, and the host it names keeps it.
     #[test]
     fn a_headerless_cloud_log_is_not_taken_under_any_name() {
+        if !crate::tool_installed("packsetd") {
+            eprintln!("skipped: packsetd is not installed");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let fix = Shared::new(dir.path());
         let both = [fix.machine.as_str(), fix.cloud.as_str()];
@@ -10404,6 +10428,10 @@ mod tests {
     /// removed scope is not a command.
     #[test]
     fn adopt_legacy_ignores_hostile_names_and_binds_the_host_with_equals() {
+        if !crate::tool_installed("packsetd") {
+            eprintln!("skipped: packsetd is not installed");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let fix = Shared::new(dir.path());
         let cloud = [fix.cloud.as_str()];
@@ -10457,6 +10485,10 @@ mod tests {
     /// the cloud identity, and retired what the headed log had added.
     #[test]
     fn a_headed_log_put_back_to_its_headerless_blob_retires_nothing() {
+        if !crate::tool_installed("packsetd") {
+            eprintln!("skipped: packsetd is not installed");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let fix = Shared::new(dir.path());
         let first = lesson_line("The deploy key rotates on Mondays.", "cloud");
@@ -10487,6 +10519,10 @@ mod tests {
     /// name, retired what the current log holds and shrank the taken set.
     #[test]
     fn a_primary_log_under_its_plus_alias_retires_nothing() {
+        if !crate::tool_installed("packsetd") {
+            eprintln!("skipped: packsetd is not installed");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let fix = Shared::new(dir.path());
         let first = lesson_line("Dave pins the toolchain.", "grokbot");
@@ -10521,6 +10557,10 @@ mod tests {
     /// no file in the work tree.
     #[test]
     fn the_merge_driver_does_not_copy_a_symlinked_log_into_the_merge() {
+        if !crate::tool_installed("packsetd") {
+            eprintln!("skipped: packsetd is not installed");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let fix = Shared::new(dir.path());
         fix.pull();
@@ -10574,6 +10614,10 @@ mod tests {
     /// pinned blob once the box has written a headed log are all refused.
     #[test]
     fn a_legacy_log_is_read_only_as_the_blob_the_reader_pinned() {
+        if !crate::tool_installed("packsetd") {
+            eprintln!("skipped: packsetd is not installed");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let fix = Shared::new(dir.path());
         std::fs::remove_file(cloud_identity_path()).unwrap();
@@ -10644,6 +10688,10 @@ mod tests {
     /// history and must not offer adoption of a headerless replacement.
     #[test]
     fn a_second_clone_does_not_adopt_a_host_whose_committed_log_was_headed() {
+        if !crate::tool_installed("packsetd") {
+            eprintln!("skipped: packsetd is not installed");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let fix = Shared::new(dir.path());
         let cloud = [fix.cloud.as_str()];
@@ -10705,6 +10753,10 @@ mod tests {
     /// clone sees that commit, and so does the shallow one once deepened.
     #[test]
     fn a_clone_missing_history_neither_offers_nor_pins_adopt_legacy() {
+        if !crate::tool_installed("packsetd") {
+            eprintln!("skipped: packsetd is not installed");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let fix = Shared::new(dir.path());
         let cloud = [fix.cloud.as_str()];
@@ -10803,6 +10855,10 @@ mod tests {
     /// the `?` branch treats the gap as a whole history and pins the tip.
     #[test]
     fn a_promisor_clone_does_not_fetch_or_adopt_a_missing_headed_blob() {
+        if !crate::tool_installed("packsetd") {
+            eprintln!("skipped: packsetd is not installed");
+            return;
+        }
         fn git_text(cwd: &Path, args: &[&str]) -> String {
             let out = Command::new("git")
                 .arg("-C")
@@ -10947,6 +11003,10 @@ mod tests {
     /// to adopt the forged blob.
     #[test]
     fn a_headed_log_behind_an_ours_merge_still_counts() {
+        if !crate::tool_installed("packsetd") {
+            eprintln!("skipped: packsetd is not installed");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let fix = Shared::new(dir.path());
         let cloud = [fix.cloud.as_str()];
@@ -10983,6 +11043,10 @@ mod tests {
     /// the headed mark, and a scope dropped from the config was still named.
     #[test]
     fn doctor_does_not_record_a_headed_log_or_name_a_removed_scope() {
+        if !crate::tool_installed("packsetd") {
+            eprintln!("skipped: packsetd is not installed");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let fix = Shared::new(dir.path());
         fix.pull();
@@ -11033,6 +11097,10 @@ mod tests {
     /// reached through a symlinked parent, and a git worktree.
     #[test]
     fn honest_logs_import_through_linked_homes_parents_and_worktrees() {
+        if !crate::tool_installed("packsetd") {
+            eprintln!("skipped: packsetd is not installed");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let fix = Shared::new(dir.path());
         let primary = fix.sealed(

@@ -281,6 +281,10 @@ impl Drop for Machine {
 /// a demo issue then opens and claims it with no variable naming a store.
 #[test]
 fn install_with_no_coding_tool_leaves_a_seat_a_sitting_opens_on() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let packsetd = on_path("packsetd")
         .unwrap_or_else(|| panic!("packsetd is not on PATH; CI builds it from packset develop"));
     let packset = on_path("packset")

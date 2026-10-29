@@ -230,6 +230,10 @@ const RECIPIENT: &str = "claude-review";
 
 #[test]
 fn a_send_wakes_the_recipient_and_an_interrupt_holds_its_stop() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let (home, _daemon) = home();
     // The recipient is known once it has written to the pack.
     let joined = home.ljos(RECIPIENT, &["group", "crew", "--add", RECIPIENT], None);
@@ -376,6 +380,10 @@ fn a_send_wakes_the_recipient_and_an_interrupt_holds_its_stop() {
 
 #[test]
 fn a_prefix_wake_runs_for_a_slugged_run_seat_and_skips_a_hostile_name() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let (home, _daemon) = home();
     let (port, rx) = serve_one();
     let webhook = format!("http://127.0.0.1:{port}/hook");
@@ -491,6 +499,10 @@ fn receipt_for<'a>(pack: &'a Value, msg: &str) -> Vec<&'a Value> {
 /// tool result delivers the note, or on Stop when the turn ran no tool.
 #[test]
 fn two_seats_exchange_mail_and_the_prompt_writes_a_receipt() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let (home, _daemon) = home();
     const ALICE: &str = "alice";
     const BOB: &str = "bob";

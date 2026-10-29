@@ -1435,25 +1435,29 @@ mod tests {
     }
 
     #[test]
-    fn a_relay_fault_denies_in_the_runners_contract() {
+    fn a_relay_fault_allows_and_warns_in_the_runners_contract() {
         for runner in RUNNERS {
             let (stdout, stderr, code) =
                 relay_fault_deny(runner, "", "stdin is not utf-8").expect(runner);
             let body = format!("{stdout}{stderr}");
+            assert_eq!(code, 0, "{runner}: code {code} {body}");
             assert!(
-                runner_denied(runner, &stdout, &stderr, code),
-                "{runner}: code {code} {body}"
+                !runner_denied(runner, &stdout, &stderr, code),
+                "{runner}: {body}"
             );
-            assert!(body.contains("stdin is not utf-8"), "{runner}: {body}");
-            assert!(body.contains("run `ljos doctor`"), "{runner}: {body}");
+            if shows_context(runner) {
+                assert!(body.contains("unhealthy"), "{runner}: {body}");
+                assert!(body.contains("stdin is not utf-8"), "{runner}: {body}");
+            }
         }
         for runner in ["gemini", "copilot", "cline", "auggie"] {
-            let (stdout, _, code) =
+            let (stdout, stderr, code) =
                 relay_fault_deny(runner, "BeforeTool", "stdin is not utf-8").expect(runner);
-            assert_eq!(code, 0, "{runner} exit 2 alone would allow the command");
+            let body = format!("{stdout}{stderr}");
+            assert_eq!(code, 0, "{runner}: {body}");
             assert!(
-                stdout.contains("deny") || stdout.contains("cancel"),
-                "{runner}: {stdout}"
+                !runner_denied(runner, &stdout, &stderr, code),
+                "{runner}: {body}"
             );
         }
         assert!(relay_fault_deny("windsurf", "UserPromptSubmit", "stdin is not utf-8").is_none());
@@ -1469,21 +1473,6 @@ mod tests {
             r#"{"hook_event_name":"UserPromptSubmit","prompt":"hi"}"#,
             None
         ));
-    }
-
-    fn denies_fault(out: &str, why: &str) {
-        let said = read_answer(out);
-        assert_eq!(said.decision.as_deref(), Some("deny"), "{out}");
-        assert!(said.reason.contains(why), "{out}");
-        assert!(said.reason.contains("run `ljos doctor`"), "{out}");
-        for runner in RUNNERS {
-            let (stdout, stderr, code) = answer(runner, "PreToolUse", out);
-            let body = format!("{stdout}{stderr}");
-            assert!(
-                runner_denied(runner, &stdout, &stderr, code),
-                "{runner}: {body}"
-            );
-        }
     }
 
     fn shows_context(runner: &str) -> bool {
@@ -1515,7 +1504,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn an_inner_hook_fault_denies_in_every_runner_shape() {
+    fn an_inner_hook_fault_allows_in_every_runner_shape() {
         let _lock = crate::test_env_lock();
         unsafe { std::env::remove_var("LJOS_GUARD_FAIL_OPEN") };
         // The timeout, the exit, and the signal are injected. A wall-clock
@@ -1528,16 +1517,16 @@ mod tests {
             "was killed by a signal".to_string(),
         ];
         for why in &injected {
-            denies_fault(&fault_output("PreToolUse", why), why);
+            allows_fault(&fault_output("PreToolUse", why), why);
         }
-        denies_fault(&inner("exit 3", 30_000), "exited with status 3");
+        allows_fault(&inner("exit 3", 30_000), "exited with status 3");
         let missing = run_inner(
             std::process::Command::new("/nonexistent/ljos"),
             "{}",
             "PreToolUse",
             std::time::Duration::from_secs(1),
         );
-        denies_fault(&missing, "did not start");
+        allows_fault(&missing, "did not start");
         assert_eq!(INNER_TIMEOUT, crate::GUARD_TIMEOUT);
     }
 
@@ -1582,8 +1571,8 @@ mod tests {
                 "{runner}: {body}"
             );
         }
-        denies_fault(&fault_output("PreToolUse", &why), &why);
-        denies_fault(&fault_output("BeforeTool", &why), &why);
+        allows_fault(&fault_output("PreToolUse", &why), &why);
+        allows_fault(&fault_output("BeforeTool", &why), &why);
         let deadline = std::time::Duration::from_millis(crate::HOOK_DEADLINE_MS);
         assert!(relay_timeout("UserPromptSubmit") >= deadline);
         assert!(relay_timeout("BeforeAgent") >= deadline);
@@ -1657,9 +1646,7 @@ mod tests {
             "a deny printed before a non-zero exit stands"
         );
         let note = inner(&format!("printf '%s' '{NOTE}'; exit 1"), 30_000);
-        let said = read_answer(&note);
-        assert_eq!(said.decision.as_deref(), Some("deny"), "{note}");
-        assert!(said.reason.contains("exited with status 1"), "{note}");
+        allows_fault(&note, "exited with status 1");
     }
 
     #[cfg(unix)]

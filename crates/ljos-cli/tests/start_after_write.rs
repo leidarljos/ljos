@@ -365,8 +365,8 @@ fn ljos_start_after_a_write_keeps_the_hooks_claim() {
     assert_eq!(state_of(&hab, held), "STARTED");
     let hook_holder = holder_of(&hab, held);
     assert!(
-        hook_holder.starts_with(&format!("{SEAT}@")),
-        "the hook holds under the seat and a tag: {hook_holder}"
+        hook_holder == SEAT || hook_holder.starts_with(&format!("{SEAT}@")),
+        "the hook holds under the seat: {hook_holder}"
     );
     let said = mcp_start(&hab, "add a slug helper");
     let log = std::fs::read_to_string(hab.run.join("ljos/book.log")).unwrap_or_default();

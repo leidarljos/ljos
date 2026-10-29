@@ -702,6 +702,10 @@ fn a_lesson_read_without_an_origin_does_not_state_the_rule() {
 /// either.
 #[test]
 fn a_pack_that_does_not_ask_for_the_token_confirms_no_rule() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     const ID: &str = "lessonid0000000000000000000006";
     let lesson = persons_lesson(ID, RELEASE_KEY);
     for asks in [true, false] {
@@ -1227,6 +1231,10 @@ impl Drop for Mcp {
 /// the origin the server read before.
 #[test]
 fn a_long_lived_search_reads_the_origin_the_pack_holds_now() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let daemon = Daemon::start();
     let seat = Seat::on(daemon.url.clone());
     let stored: serde_json::Value = ureq::post(&format!("{}/v1/atoms", daemon.url))
@@ -1353,6 +1361,10 @@ fn try_post(
 /// tombstoned id refuses the post with 409, and the rule stays unstated.
 #[test]
 fn a_lesson_id_posted_again_is_another_lesson() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     const ID: &str = "lessonid0000000000000000000001";
     let daemon = Daemon::start();
     let seat = Seat::on(daemon.url.clone());
@@ -1404,6 +1416,10 @@ fn a_lesson_id_posted_again_is_another_lesson() {
 /// with 400, and the rule stays unstated.
 #[test]
 fn a_lesson_laundered_to_the_person_is_not_their_rule() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     const ID: &str = "lessonid0000000000000000000002";
     let daemon = Daemon::start();
     let seat = Seat::on(daemon.url.clone());
@@ -1485,6 +1501,10 @@ const KEEP_SHORT: &str = "Keep the deploy form short.";
 /// and the person's own preference still reaches every one.
 #[test]
 fn an_agents_soft_prefer_is_never_the_persons() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let daemon = Daemon::start();
     let seat = Seat::on(daemon.url.clone());
     let _ = seat

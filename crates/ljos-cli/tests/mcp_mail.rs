@@ -145,6 +145,10 @@ fn the_mail_tools_are_listed_only_when_asked_for() {
 
 #[test]
 fn search_and_show_read_the_configured_mailbox() {
+    if !ljos_cli::tool_installed("notmuch") {
+        eprintln!("skipped: notmuch is not installed");
+        return;
+    }
     let home = tempfile::tempdir().unwrap();
     let mailbox = maildir::mailbox();
     configure(home.path(), &mailbox);
@@ -196,6 +200,10 @@ fn no_mail_table_is_a_refusal() {
 
 #[test]
 fn an_empty_mail_table_does_not_open_the_default_database() {
+    if !ljos_cli::tool_installed("notmuch") {
+        eprintln!("skipped: notmuch is not installed");
+        return;
+    }
     let home = tempfile::tempdir().unwrap();
     let mailbox = maildir::mailbox();
     std::fs::write(
@@ -218,6 +226,10 @@ fn an_empty_mail_table_does_not_open_the_default_database() {
 
 #[test]
 fn a_workspace_ljos_toml_cannot_set_the_mail_table() {
+    if !ljos_cli::tool_installed("notmuch") {
+        eprintln!("skipped: notmuch is not installed");
+        return;
+    }
     let home = tempfile::tempdir().unwrap();
     let mailbox = maildir::mailbox();
     configure(home.path(), &mailbox);
@@ -238,6 +250,10 @@ fn a_workspace_ljos_toml_cannot_set_the_mail_table() {
 
 #[test]
 fn a_cloud_seat_is_refused_even_with_a_mailbox() {
+    if !ljos_cli::tool_installed("notmuch") {
+        eprintln!("skipped: notmuch is not installed");
+        return;
+    }
     let home = tempfile::tempdir().unwrap();
     let mailbox = maildir::mailbox();
     configure(home.path(), &mailbox);
@@ -272,6 +288,10 @@ fn a_cloud_seat_is_refused_even_with_a_mailbox() {
 
 #[test]
 fn any_cloud_marker_refuses_the_mail_tools() {
+    if !ljos_cli::tool_installed("notmuch") {
+        eprintln!("skipped: notmuch is not installed");
+        return;
+    }
     let mailbox = maildir::mailbox();
     let extra = serde_json::to_string(&json!([
         ["cloud-cursor-push", "deny", "r"],
@@ -305,6 +325,10 @@ fn any_cloud_marker_refuses_the_mail_tools() {
 
 #[test]
 fn calling_a_mail_tool_that_was_not_asked_for_is_refused() {
+    if !ljos_cli::tool_installed("notmuch") {
+        eprintln!("skipped: notmuch is not installed");
+        return;
+    }
     let home = tempfile::tempdir().unwrap();
     let mailbox = maildir::mailbox();
     configure(home.path(), &mailbox);

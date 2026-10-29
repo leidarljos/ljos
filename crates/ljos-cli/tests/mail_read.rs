@@ -31,6 +31,10 @@ fn wrapped(text: &str, nonce: &str) -> bool {
 
 #[test]
 fn search_wraps_subject_and_authors_and_leaves_out_spam() {
+    if !ljos_cli::tool_installed("notmuch") {
+        eprintln!("skipped: notmuch is not installed");
+        return;
+    }
     let mailbox = maildir::mailbox();
     let found = reader(&mailbox).search("lunch", None).unwrap();
     let n = nonce(&found.untrusted);
@@ -51,6 +55,10 @@ fn search_wraps_subject_and_authors_and_leaves_out_spam() {
 
 #[test]
 fn search_refuses_bad_limits_and_queries_and_treats_dashes_as_a_query() {
+    if !ljos_cli::tool_installed("notmuch") {
+        eprintln!("skipped: notmuch is not installed");
+        return;
+    }
     let mailbox = maildir::mailbox();
     let reader = reader(&mailbox);
     for limit in [0, 51, 500] {
@@ -67,6 +75,10 @@ fn search_refuses_bad_limits_and_queries_and_treats_dashes_as_a_query() {
 
 #[test]
 fn show_drops_hidden_html_lists_attachments_and_shows_links_as_text() {
+    if !ljos_cli::tool_installed("notmuch") {
+        eprintln!("skipped: notmuch is not installed");
+        return;
+    }
     let mailbox = maildir::mailbox();
     let thread = mailbox.thread_of("hidden-html-1@shop.example.test");
     let shown = reader(&mailbox).show(&thread).unwrap();
@@ -108,6 +120,10 @@ fn show_drops_hidden_html_lists_attachments_and_shows_links_as_text() {
 
 #[test]
 fn a_spoofed_owner_approval_is_only_wrapped_text() {
+    if !ljos_cli::tool_installed("notmuch") {
+        eprintln!("skipped: notmuch is not installed");
+        return;
+    }
     let mailbox = maildir::mailbox();
     let thread = mailbox.thread_of("spoofed-approval-1@relay.example.test");
     let first = reader(&mailbox).show(&thread).unwrap();
@@ -133,6 +149,10 @@ fn a_spoofed_owner_approval_is_only_wrapped_text() {
 
 #[test]
 fn show_refuses_anything_but_a_thread_id() {
+    if !ljos_cli::tool_installed("notmuch") {
+        eprintln!("skipped: notmuch is not installed");
+        return;
+    }
     let mailbox = maildir::mailbox();
     let reader = reader(&mailbox);
     for bad in [
@@ -160,6 +180,10 @@ fn no_notmuch_config_is_a_refusal_not_the_default_database() {
 
 #[test]
 fn a_notmuch_config_others_could_change_is_refused() {
+    if !ljos_cli::tool_installed("notmuch") {
+        eprintln!("skipped: notmuch is not installed");
+        return;
+    }
     let mailbox = maildir::mailbox();
     let link = mailbox.dir.path().join("linked-config");
     std::os::unix::fs::symlink(&mailbox.config, &link).unwrap();
@@ -209,6 +233,10 @@ fn a_notmuch_that_hangs_is_stopped_at_the_deadline() {
 
 #[test]
 fn an_attachment_over_the_cap_is_listed_without_a_hash() {
+    if !ljos_cli::tool_installed("notmuch") {
+        eprintln!("skipped: notmuch is not installed");
+        return;
+    }
     let mailbox = maildir::mailbox();
     let thread = mailbox.thread_of("hidden-html-1@shop.example.test");
     let shown = reader(&mailbox)
@@ -250,6 +278,10 @@ fn an_endless_attachment_does_not_stall_show() {
 
 #[test]
 fn a_stylesheet_the_reader_cannot_follow_withholds_the_html_text() {
+    if !ljos_cli::tool_installed("notmuch") {
+        eprintln!("skipped: notmuch is not installed");
+        return;
+    }
     let mailbox = maildir::mailbox();
     let thread = mailbox.thread_of("element-style-1@shop.example.test");
     let shown = reader(&mailbox).show(&thread).unwrap();
@@ -263,6 +295,10 @@ fn a_stylesheet_the_reader_cannot_follow_withholds_the_html_text() {
 
 #[test]
 fn show_leaves_out_spam_and_deleted_messages_in_the_thread() {
+    if !ljos_cli::tool_installed("notmuch") {
+        eprintln!("skipped: notmuch is not installed");
+        return;
+    }
     let mailbox = maildir::mailbox();
     let thread = mailbox.thread_of("spoofed-approval-1@relay.example.test");
     let reply = "id:spam-reply-1@spam.example.test";
@@ -278,6 +314,10 @@ fn show_leaves_out_spam_and_deleted_messages_in_the_thread() {
 
 #[test]
 fn an_attachment_of_a_message_whose_id_has_quotes_is_hashed() {
+    if !ljos_cli::tool_installed("notmuch") {
+        eprintln!("skipped: notmuch is not installed");
+        return;
+    }
     let mailbox = maildir::mailbox();
     let thread = mailbox
         .notmuch(&["search", "--output=threads", "--", "subject:quoted"])
@@ -295,6 +335,10 @@ fn an_attachment_of_a_message_whose_id_has_quotes_is_hashed() {
 
 #[test]
 fn a_message_file_that_is_a_symlink_or_outside_the_root_is_not_shown() {
+    if !ljos_cli::tool_installed("notmuch") {
+        eprintln!("skipped: notmuch is not installed");
+        return;
+    }
     let mailbox = maildir::mailbox();
     let outside = mailbox.dir.path().join("outside");
     std::fs::create_dir_all(&outside).unwrap();
