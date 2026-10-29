@@ -31342,16 +31342,18 @@ pub fn expired_claims(rows: &[Value], now: u64, lease: u64) -> Vec<Expired> {
 ///
 /// A claim whose hold record on this host names a runner that is still
 /// alive is kept: ljos does not renew a lease while a conversation works,
-/// so quiet is not the same as gone. A claim whose runner is gone, or that
-/// no record on this host names, goes back to ready under its holder's own
-/// actor, which moves the generation and fences a holder that comes back.
+/// so quiet is not the same as gone. A claim-graph node whose runner is
+/// gone, or that no record on this host names, goes back to ready under
+/// its holder's own actor, which moves the generation and fences a holder
+/// that comes back. A shared tracker claim that no record on this host
+/// names belongs to another machine and stays.
 /// The report is one line per node; a graph that does not answer is said
 /// and never stops the sitting.
 fn reclaim_expired(lease: u64) -> String {
     if lease == 0 {
         return "off (LJOS_LEASE_SECS=0)\n".to_string();
     }
-    let mut out = cloud::reap_gone_owners(lease);
+    let mut out = cloud::reap_gone_owners(None, lease);
     let listed = match run_captured("claimdag", &["list", "--json"]) {
         Ok(said) => said.stdout,
         Err(e) => {

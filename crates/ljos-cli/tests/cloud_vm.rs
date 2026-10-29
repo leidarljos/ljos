@@ -2832,7 +2832,7 @@ fn a_refused_push_stays_queued_until_the_next_drain() {
 }
 
 #[test]
-fn a_gone_vm_does_not_keep_a_started_claim() {
+fn a_claim_from_another_machine_stays_claimed() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     isolate_git(root.path());
@@ -2845,15 +2845,30 @@ fn a_gone_vm_does_not_keep_a_started_claim() {
     let old = ":CLAIMED_BY: vm-dead\n:CLAIMED_AT: [2020-01-01 Wed 00:00]\n";
     let now = format!(":CLAIMED_BY: vm-live\n:CLAIMED_AT: {fresh}\n");
     let kept = ":CLAIMED_BY: vm-kept\n:CLAIMED_AT: [2020-01-01 Wed 00:00]\n";
-    seed(
-        root.path(),
-        &origin,
-        &board(&[
-            issue_block("probe-old1", "STARTED", old, &[]),
-            issue_block("probe-new1", "STARTED", &now, &[]),
-            issue_block("probe-kept", "STARTED", kept, &[]),
-        ]),
-    );
+    let mine = ":CLAIMED_BY: vm-mine\n:CLAIMED_AT: [2020-01-01 Wed 00:00]\n";
+    let mut blocks = vec![
+        issue_block("probe-old1", "STARTED", old, &[]),
+        issue_block("probe-new1", "STARTED", &now, &[]),
+        issue_block("probe-kept", "STARTED", kept, &[]),
+        issue_block("probe-mine", "STARTED", mine, &[]),
+        issue_block(
+            "probe-them",
+            "STARTED",
+            ":CLAIMED_BY: vm-them\n:CLAIMED_AT: [2020-01-01 Wed 00:00]\n",
+            &[],
+        ),
+    ];
+    // The box's other claims: old, and no record of them on this machine.
+    for n in 0..20 {
+        let holder = format!(":CLAIMED_BY: ljosbot@box{n}\n:CLAIMED_AT: [2020-01-01 Wed 00:00]\n");
+        blocks.push(issue_block(
+            &format!("probe-box{n}"),
+            "STARTED",
+            &holder,
+            &[],
+        ));
+    }
+    seed(root.path(), &origin, &board(&blocks));
     let vm = clone_of(root.path(), &origin, "vm");
     let runtime = root.path().join("run");
     fs::create_dir_all(runtime.join("ljos")).unwrap();
@@ -2869,19 +2884,36 @@ fn a_gone_vm_does_not_keep_a_started_claim() {
         ),
     )
     .unwrap();
+    fs::write(
+        runtime.join("ljos").join("hold-vm-mine"),
+        "vm-mine\nseat\n4194303\nno-such-runner\n2020-01-01T00:00:00Z\nprobe-mine\n-\n",
+    )
+    .unwrap();
+    fs::write(
+        runtime.join("ljos").join("hold-vm-them"),
+        "vm-them\nseat\n4194303\nno-such-runner\n2020-01-01T00:00:00Z\nprobe-them\n-\n",
+    )
+    .unwrap();
     std::env::set_var("HOME", root.path().join("home"));
     std::env::set_var("XDG_RUNTIME_DIR", &runtime);
     std::env::set_var("LJOS_TRACKER_GIT", "push");
     std::env::set_var("VISSUE_ROOT", &vm);
     std::env::set_var("ISSUE_ROOT", &vm);
-    let said = ljos_cli::cloud::reap_gone_owners(900);
-    assert!(said.contains("probe-old1"), "{said}");
+    let said = ljos_cli::cloud::reap_gone_owners(Some("vm-mine"), 900);
+    assert!(said.contains("probe-mine"), "{said}");
+    assert_eq!(said.matches("no longer claimed").count(), 1, "{said}");
     let local = fs::read_to_string(vm.join("Software/probe/issues.org")).unwrap();
-    assert_eq!(state_of(&local, "probe-old1"), "TODO", "{local}");
+    assert_eq!(state_of(&local, "probe-mine"), "TODO", "{local}");
+    assert_eq!(state_of(&local, "probe-them"), "STARTED", "{local}");
+    assert_eq!(state_of(&local, "probe-old1"), "STARTED", "{local}");
     assert_eq!(state_of(&local, "probe-new1"), "STARTED", "{local}");
     assert_eq!(state_of(&local, "probe-kept"), "STARTED", "{local}");
+    for n in 0..20 {
+        assert_eq!(state_of(&local, &format!("probe-box{n}")), "STARTED");
+    }
     let remote = show(&origin, "Software/probe/issues.org");
-    assert_eq!(state_of(&remote, "probe-old1"), "TODO", "{remote}");
+    assert_eq!(state_of(&remote, "probe-mine"), "TODO", "{remote}");
+    assert_eq!(state_of(&remote, "probe-old1"), "STARTED", "{remote}");
 }
 
 #[test]
@@ -2935,13 +2967,13 @@ fn a_live_hold_keeps_its_issue_and_a_dead_process_is_released() {
     std::env::set_var("LJOS_TRACKER_GIT", "push");
     std::env::set_var("VISSUE_ROOT", &vm);
     std::env::set_var("ISSUE_ROOT", &vm);
-    let said = ljos_cli::cloud::reap_gone_owners(5);
+    let said = ljos_cli::cloud::reap_gone_owners(None, 5);
     assert!(said.contains("probe-dead"), "{said}");
-    assert!(said.contains("probe-other"), "{said}");
+    assert!(!said.contains("probe-other"), "{said}");
     assert!(!said.contains("probe-live"), "{said}");
     let local = fs::read_to_string(vm.join("Software/probe/issues.org")).unwrap();
     assert_eq!(state_of(&local, "probe-live"), "STARTED", "{local}");
-    assert_eq!(state_of(&local, "probe-other"), "TODO", "{local}");
+    assert_eq!(state_of(&local, "probe-other"), "STARTED", "{local}");
     assert_eq!(state_of(&local, "probe-dead"), "TODO", "{local}");
     let remote = show(&origin, "Software/probe/issues.org");
     assert_eq!(state_of(&remote, "probe-live"), "STARTED", "{remote}");

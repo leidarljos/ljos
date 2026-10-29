@@ -165,7 +165,7 @@ pub fn up_at(force: bool, repoint: bool) -> Result<String> {
     // `LJOS_WAKE_<SEAT>_URL` cannot leave a stale URL that still sees a new key.
     lines.extend(ensure_wakes()?);
     lines.push(ensure_cloud_age()?);
-    let reaped = reap_gone_owners(crate::lease_secs());
+    let reaped = reap_gone_owners(Some(&seat), crate::lease_secs());
     if !reaped.trim().is_empty() {
         lines.push(reaped.trim_end().to_string());
     }
@@ -387,11 +387,14 @@ pub fn merge_org_cli(base: &Path, ours: &Path, theirs: &Path) -> Result<()> {
     crate::tracker_push::merge_org_files(base, ours, theirs).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// Hand back `STARTED` claims whose owner is gone and whose claim is older
-/// than `lease` seconds. No-op unless `LJOS_TRACKER_GIT=push`. The release
+/// Hand back `STARTED` claims this machine made whose owner is gone and
+/// whose claim is older than `lease` seconds. A claim is this machine's
+/// when a hold record here names it. Another machine's claim has no record
+/// here, so it is never released from here. `seat` narrows the release to
+/// that seat's claims. No-op unless `LJOS_TRACKER_GIT=push`. The release
 /// is committed and pushed like any other tracker write.
 #[must_use]
-pub fn reap_gone_owners(lease: u64) -> String {
+pub fn reap_gone_owners(seat: Option<&str>, lease: u64) -> String {
     crate::load_seat_env();
     if std::env::var("LJOS_TRACKER_GIT").ok().as_deref() != Some("push") {
         return String::new();
@@ -413,7 +416,12 @@ pub fn reap_gone_owners(lease: u64) -> String {
         let Some(who) = heading.claimed_by().map(str::to_string) else {
             continue;
         };
-        if holder_running(&who, &heading.id) {
+        if seat.is_some_and(|seat| {
+            crate::canonical_seat_name(&who) != crate::canonical_seat_name(seat)
+        }) {
+            continue;
+        }
+        if local_hold(&who, &heading.id) != Some(false) {
             continue;
         }
         let idle = match heading.claimed_at().and_then(crate::reap::org_ts) {
@@ -3295,10 +3303,13 @@ fn release_started(id: &str, holder: &str) -> Result<Option<String>, String> {
     .map_err(|e| e.to_string())
 }
 
-fn holder_running(assignee: &str, issue: &str) -> bool {
-    let Ok(entries) = fs::read_dir(crate::runtime_dir()) else {
-        return false;
-    };
+/// Whether a hold record on this machine names the claim: `Some(true)`
+/// when one of them names a runner that is alive, `Some(false)` when every
+/// one names a runner that is gone, and `None` when none names it. `None`
+/// is a claim another machine made.
+fn local_hold(assignee: &str, issue: &str) -> Option<bool> {
+    let entries = fs::read_dir(crate::runtime_dir()).ok()?;
+    let mut found = None;
     for ent in entries.flatten() {
         let name = ent.file_name().to_string_lossy().into_owned();
         let Some(actor) = name.strip_prefix("hold-") else {
@@ -3307,13 +3318,15 @@ fn holder_running(assignee: &str, issue: &str) -> bool {
         if !hold_names_claim(actor, assignee, issue) {
             continue;
         }
-        if let Some(hold) = crate::read_hold(actor) {
-            if crate::hold_alive(&hold) {
-                return true;
-            }
+        let Some(hold) = crate::read_hold(actor) else {
+            continue;
+        };
+        if crate::hold_alive(&hold) {
+            return Some(true);
         }
+        found = Some(false);
     }
-    false
+    found
 }
 
 /// Whether this hold record is the one `ljos claim` wrote for `issue`.
