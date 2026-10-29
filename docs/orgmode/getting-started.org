@@ -1,8 +1,7 @@
 #+title: Getting started
 #+options: toc:nil num:nil
 
-This page takes about ten minutes. It describes ljos 0.35.0. Items marked
-"coming in 0.35.0" are not in 0.34.1.
+This page takes about ten minutes. It describes ljos 0.35.0.
 
 By the end you will have remembered a lesson and put two seats on one ticket.
 They will have voted, noted and settled the vote. You will have asked
@@ -120,7 +119,7 @@ Memory
 =ljos recall= prints the working set for a ticket: the plan, the deeds it cites, and the notes.
 Notes are unverified text written by whoever wrote them. Read them as data.
 
-To see what happened across the seats, use =ljos digest=. It is coming in 0.35.0.
+To see what happened across the seats, use =ljos digest=.
 
 #+begin_src console
 $ ljos digest
@@ -179,7 +178,7 @@ close the ticket. A person does, when the work is accepted.
 
 * 3. Seats and grants
 
-Coming in 0.35.0. The tracker's =vissue.toml= lists the seats. Add one with:
+The tracker's =vissue.toml= lists the seats. Add one with:
 
 #+begin_src console
 $ ljos seat add carol
@@ -190,7 +189,7 @@ $ ljos seat add carol
 where the name came from. The name is =LJOS_SEAT= when it is set. Otherwise ljos derives
 one from the runner, and a derived name counts as a seat.
 
-A grant with ~close=own~ lets one named seat close the tickets it filed or has claimed. It is coming in 0.35.0. Without a grant,
+A grant with ~close=own~ lets one named seat close the tickets it filed or has claimed. Without a grant,
 =ljos finish= leaves the ticket open for a person to close.
 
 #+begin_src console
@@ -203,7 +202,7 @@ Every close cites the grant record.
 
 ** Solo mode
 
-Coming in 0.35.0. When =vissue.toml= lists one active seat, that seat's own vote settles
+When =vissue.toml= lists one active seat, that seat's own vote settles
 consensus for the push check. With two or more seats, the normal quorum applies.
 
 * 4. Ask policyd
@@ -258,8 +257,6 @@ A scratch seat has no host key, so its bag goes out unsigned, and =--import= ref
 unsigned bag. =ljos onboard= writes the key.
 
 * 6. Take it off
-
-Coming in 0.35.0:
 
 #+begin_src console
 $ ljos offboard

@@ -1,7 +1,7 @@
 #+title: Explanation
 #+options: toc:nil num:nil
 
-This page describes ljos 0.35.0. Items marked "coming in 0.35.0" are not in 0.34.1.
+This page describes ljos 0.35.0.
 
 * One seat over the habitats
 
@@ -80,7 +80,7 @@ protected branch asks.
 
 ** The rewrite
 
-Coming in 0.35.0. Some commands are not dangerous. They are wrong for this project. Refusing
+Some commands are not dangerous. They are wrong for this project. Refusing
 them costs a round trip, and the agent often retries the same line.
 
 So policyd can answer with the fixed command. The answer is one line: =allow=, then =rewrite=, then
@@ -135,10 +135,10 @@ On a fresh tracker with no seat list, any seat may write. An unset seat writes u
 seat with a warning. Once the tracker's =vissue.toml= lists seats, a tracker write from a seat it
 does not list is refused.
 
-- =ljos seat add NAME= writes the seat's row in =vissue.toml=. Coming in 0.35.0.
+- =ljos seat add NAME= writes the seat's row in =vissue.toml=.
 - Solo mode: when =vissue.toml= lists one active seat, that seat's own vote settles consensus for
-  the push check. With two or more seats, the normal quorum applies. Coming in 0.35.0.
-- A grant with ~close=own~ lets one named seat close the tickets it filed or has claimed. Coming in 0.35.0.
+  the push check. With two or more seats, the normal quorum applies.
+- A grant with ~close=own~ lets one named seat close the tickets it filed or has claimed.
 - Without a grant, =ljos finish= leaves the ticket open, and a person closes it.
 
 A grant is made with ~ljos seat grant SEAT close=own --quote "..." --at ISO --via RECORDER~. The
@@ -151,13 +151,13 @@ A shell-only agent has no MCP client and no hook. =ljos onboard= for such a runn
 and an env file. Source the file, and =LJOS_SEAT= is the name.
 
 Nothing else needs a variable. =ljos onboard= makes the deed store and the tracker, and starts the
-pack writer. =ljos offboard= removes what onboard wrote. It is coming in 0.35.0.
+pack writer. =ljos offboard= removes what onboard wrote.
 
 * What happened
 
 Several seats write to one tracker, so the question "what happened while I was away" needs
 one answer. Today it takes several: =ljos timeline ID=, =ljos claims= and =ljos log --seat NAME=.
-=ljos digest= is coming in 0.35.0. It reads the tracker and reports, for each seat, what it
+=ljos digest= reads the tracker and reports, for each seat, what it
 filed, claimed, voted on, noted and finished. It writes nothing.
 
 * Agreement that learns

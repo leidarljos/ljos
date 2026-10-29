@@ -4,8 +4,7 @@ One seat over the habitats. Agents that work on the same project file
 tickets, claim them, vote, and settle what to do. `ljos-policyd` is the safety
 layer under all of it.
 
-This page describes ljos 0.35.0. Items marked "coming in 0.35.0" are not in
-0.34.1.
+This page describes ljos 0.35.0.
 
 A seat is one agent, or one person, working a tracker. ljos is the one command
 and the one MCP server over five habitats. It owns none of them.
@@ -76,8 +75,6 @@ ljos hook after `ljos onboard`, and again after an upgrade.
 
 ## Take it off
 
-Coming in 0.35.0:
-
 ```
 ljos offboard --dry-run
 ljos offboard
@@ -122,7 +119,7 @@ ljos vote demo-xxxx --for keep --used none                          # as bob
 ljos consensus demo-xxxx                                            # how the votes settle
 ljos note demo-xxxx "the patch is one file"
 ljos recall demo-xxxx                                               # the notes, the deeds, the plan
-ljos digest                                                         # coming in 0.35.0
+ljos digest
 ```
 
 A second claim on a held ticket is refused, and the refusal names the holder.
@@ -134,7 +131,7 @@ moves the rows toward the voters who turned out right.
 
 ### Seats
 
-The tracker's `vissue.toml` lists the seats. Coming in 0.35.0:
+The tracker's `vissue.toml` lists the seats.
 
 ```
 ljos seat add carol
@@ -145,7 +142,7 @@ ljos seat add carol
 That name is `LJOS_SEAT` when it is set. Otherwise ljos derives one from the
 runner, and a derived name counts as a seat.
 
-**Grants.** Coming in 0.35.0. A grant with `close=own` lets one named seat close the tickets it filed or has claimed.
+**Grants.** A grant with `close=own` lets one named seat close the tickets it filed or has claimed.
 A grant with `close=ID[,ID...]` lets that seat close those tickets and no others.
 `--ids-file PATH` reads the ids, one per line.
 Without a grant, `ljos finish` leaves the ticket open for the person to close.
@@ -163,12 +160,12 @@ and the tracker commit. Three rules apply:
 - A seat cannot grant itself.
 - Every close cites the grant record.
 
-**Solo mode.** Coming in 0.35.0. When `vissue.toml` lists one active seat, that seat's own vote
+**Solo mode.** When `vissue.toml` lists one active seat, that seat's own vote
 settles consensus for the push check. With two or more seats, the normal quorum applies.
 
 ### What happened
 
-Coming in 0.35.0, `ljos digest` reads the tracker and says what the seats did:
+`ljos digest` reads the tracker and says what the seats did:
 what each filed, claimed, voted on, noted and finished. Today you read the same
 facts one at a time with `ljos timeline ISSUE`, `ljos claims` and `ljos log --seat NAME`.
 
@@ -186,7 +183,7 @@ policyd gives one of four answers.
 | allow | The command runs. |
 | ask | The runner shows its own permission prompt, and you answer. |
 | deny | The command does not run, and the reason names the rule. |
-| rewrite | policyd returns a corrected command, and that one runs. Coming in 0.35.0. |
+| rewrite | policyd returns a corrected command, and that one runs. |
 
 It reads the command as a shell does. It looks through `sh -c`, `env`, `timeout`,
 `xargs` and `nohup`, through `$cmd` and pipes, and through quotes. It does not run a
@@ -214,7 +211,7 @@ For `git push --force origin main`, the hook hands the runner this answer, and t
 
 ### The rewrite
 
-Coming in 0.35.0. Some commands are not dangerous, only wrong for this project.
+Some commands are not dangerous, only wrong for this project.
 policyd can answer with a fixed command. Its first rewrite runs the command through
 `uv run`. The answer is one line of text: `allow`, then `rewrite`, then the new
 command, separated by tabs.
@@ -290,12 +287,12 @@ ljos finish ISSUE --lesson "..." [--outcome OPTION]
 ljos recall ISSUE
 ljos timeline ISSUE
 ljos claims
-ljos digest                   # coming in 0.35.0
+ljos digest
 ljos seat                     # who is sitting
-ljos seat add NAME            # coming in 0.35.0
-ljos seat grant SEAT close=own --quote "..." --at ISO_TIME --via RECORDER   # coming in 0.35.0
+ljos seat add NAME
+ljos seat grant SEAT close=own --quote "..." --at ISO_TIME --via RECORDER
 ljos seat grant SEAT close=ID[,ID...] [--ids-file PATH] --quote "..." --at ISO_TIME --via RECORDER
-ljos offboard [--runner NAME] [--dry-run]   # coming in 0.35.0
+ljos offboard [--runner NAME] [--dry-run]
 ljos remember "the default fuse is CombMNZ"
 ljos prefer "CombMNZ over RRF"
 ljos search fuse
