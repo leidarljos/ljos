@@ -1,6 +1,6 @@
-//! A tracker write uses the seat this process already is, including one
-//! taken from the program above the shell or the login. A seats file
-//! that is present still has to list that name.
+//! A tracker write uses the seat this process already is, including the
+//! login when nobody named a seat. The process tree does not name one.
+//! The tracker's roster, when it lists seats, still has to name it.
 
 ljos_test_boot::harness!();
 use std::path::{Path, PathBuf};

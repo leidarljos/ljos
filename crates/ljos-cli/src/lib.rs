@@ -2769,20 +2769,16 @@ fn record_for(text: &str, mine: &[String], source: String) -> Option<Seat> {
 const LIBRARY_CLIENT_NAMES: &[&str] = &["mcp", "mcp-client", "client", "runner"];
 
 /// The seat a connecting client names: its own name, unless that is a
-/// library's default; then the program above this server, else `runner`.
+/// library's default, which is `runner`. The process tree is not a seat.
 fn seat_for_client(client: &str) -> String {
     let name = seat_slug(client);
     if let Some(runner) = runner_for_client(&harnesses_path(), &name) {
         return runner;
     }
-    if !LIBRARY_CLIENT_NAMES.contains(&name.as_str()) {
-        return name;
+    if LIBRARY_CLIENT_NAMES.contains(&name.as_str()) {
+        return "runner".to_string();
     }
-    ancestry()
-        .into_iter()
-        .find(|(_, comm)| !WRAPPERS.contains(&comm.as_str()))
-        .map(|(pid, comm)| program_seat(&program_name(pid, &comm)))
-        .unwrap_or(name)
+    name
 }
 
 /// The harness a client name belongs to, by its `clients` list in the
@@ -2996,27 +2992,7 @@ fn bare_session_holder(seat: &str, consume: bool) -> Option<String> {
     } else {
         subagent::peek_recent_mcp_session()
     };
-    if let Some(id) = recent {
-        return Some(holder_for_session(seat, &id));
-    }
-    for (pid, comm) in ancestry() {
-        if pid <= 1 || is_session(&comm) {
-            break;
-        }
-        let Some(env) = proc_tree::environ(pid) else {
-            continue;
-        };
-        if !same_runtime_dir(&env) {
-            break;
-        }
-        let env = clean_shell_environ(env, false);
-        if let Some((_, val)) = env.into_iter().find(|(k, v)| {
-            runner_session_var(k, v) && usable_session_id(v).is_some_and(|id| !subagent_id(id))
-        }) {
-            return Some(holder_for_session(seat, val.trim()));
-        }
-    }
-    None
+    recent.map(|id| holder_for_session(seat, &id))
 }
 
 /// A process's parent and its own short name, from procfs.
@@ -4002,72 +3978,6 @@ fn is_harness_process(pid: u32, comm: &str) -> bool {
     is_harness_program(comm, &program_name(pid, comm), &[])
 }
 
-/// The ancestor to name a seat after, in a chain already cut at the
-/// session: the nearest harness when one is there, so a harness run under
-/// a desktop app's shell is the seat and not the app; else the nearest
-/// program that is not a wrapper. Takes (pid, kernel name, program name).
-fn pick_program<'a>(
-    chain: &'a [(u32, String, String)],
-    harnesses: &[String],
-) -> Option<&'a (u32, String, String)> {
-    let programs = || {
-        chain
-            .iter()
-            .filter(|(_, comm, _)| !WRAPPERS.contains(&comm.as_str()))
-    };
-    programs()
-        .find(|(_, comm, program)| is_harness_program(comm, program, harnesses))
-        .or_else(|| programs().next())
-}
-
-/// The seat from the process tree: the record a server left for the runner
-/// above this shell, else the nearest ancestor that is neither a shell nor
-/// a wrapper, named from how it was started and tagged with its pid. None
-/// when the tree ends in the session itself, which is a person at a
-/// terminal.
-fn seat_from_tree() -> Option<Seat> {
-    if let Some(seat) = seat_from_tree_records() {
-        return Some(seat);
-    }
-    program_above()
-}
-
-/// The nearest ancestor that is neither a shell nor a wrapper, as a seat
-/// named after the program. No record is read: this is the name a seat
-/// falls back to when nothing named one.
-fn program_above() -> Option<Seat> {
-    let chain: Vec<(u32, String, String)> = ancestry()
-        .into_iter()
-        .take_while(|(_, comm)| !is_session(comm))
-        .map(|(pid, comm)| {
-            let program = program_name(pid, &comm);
-            (pid, comm, program)
-        })
-        .collect();
-    let harnesses: Vec<String> = harnesses_with_shipped(&harnesses_path())
-        .map(|all| all.harness.into_iter().map(|h| h.name).collect())
-        .unwrap_or_default();
-    let (pid, _, program) = pick_program(&chain, &harnesses)?;
-    let seat = program_seat(program);
-    Some(Seat::tagged(
-        seat.clone(),
-        &conversation_tag(*pid),
-        format!("the process tree, {seat} {pid}"),
-    ))
-}
-
-/// The record a server left for the nearest runner above this shell. It
-/// names the runner that opened the shell, which a conversation id in the
-/// environment does not when one runner started another.
-fn seat_from_tree_records() -> Option<Seat> {
-    ancestry().into_iter().find_map(|(pid, _)| {
-        read_record(
-            &seat_record_path(pid),
-            format!("the server the runner opened, process {pid}"),
-        )
-    })
-}
-
 fn named_var(key: &str) -> Option<String> {
     std::env::var(key)
         .ok()
@@ -4077,41 +3987,31 @@ fn named_var(key: &str) -> Option<String> {
 
 /// Who is sitting, with nothing set. The seat: `LJOS_SEAT` or the
 /// tracker's `VISSUE_AGENT` when someone set one; else what the MCP client
-/// said at initialize; else the process tree above this shell, which is
-/// the runner that opened it or the server that runner opened; else the
-/// login user, who is the seat when no program is. The holder is the seat
-/// and a short tag for any `*_SESSION_ID` the runner stamped
-/// ([`holder_for_session`]), ahead of the process tag, so MCP
-/// sitting and CLI sitting of one conversation are one occupancy name;
-/// else the seat tagged with the conversation's process.
+/// said at initialize; else a runner variable that names its own seat;
+/// else the login user. The process tree does not name a seat. The holder
+/// is the seat and a short tag for any `*_SESSION_ID` the runner stamped
+/// ([`holder_for_session`]), so MCP sitting and CLI sitting of one
+/// conversation are one occupancy name.
 #[must_use]
 pub fn whoami() -> Seat {
     if let Ok(seat) = CALL_SEAT.try_with(Clone::clone) {
         return seat;
     }
     // Both variables are a person naming the seat: the seat's own, and the
-    // tracker's name for the same thing. Either beats what the tree says.
-    // A legacy holder is the seat it names (`inky-n9o` is `inky`). A
-    // subagent name is left as written so a claim under it is refused
-    // rather than given the client's harness.
+    // tracker's name for the same thing. A legacy holder is the seat it
+    // names (`inky-n9o` is `inky`). A subagent name is left as written so
+    // a claim under it is refused rather than given the client's harness.
     let named = named_var("LJOS_SEAT")
         .map(|n| (seat_for_env(&n), "LJOS_SEAT"))
         .or_else(|| named_var("VISSUE_AGENT").map(|n| (seat_for_env(&n), "VISSUE_AGENT")));
-    // The record filed under a conversation id this shell carries, unless
-    // the nearest runner above left one for another seat: a runner started
-    // from another runner's shell inherits the other's ids, and its own
-    // record is the one above it.
-    let record = seat_from_session_records().map(|by_id| {
-        seat_from_tree_records()
-            .filter(|above| above.seat != by_id.seat)
-            .unwrap_or(by_id)
-    });
+    // A record filed under a conversation id this shell carries. The
+    // process tree is not consulted for a seat.
+    let record = seat_from_session_records();
     let program = ANNOUNCED
         .get()
         .cloned()
         .or_else(|| record.clone())
-        .or_else(seat_from_runner_env)
-        .or_else(seat_from_tree);
+        .or_else(seat_from_runner_env);
     let agent = named_var("VISSUE_AGENT");
     let seat_name = named
         .as_ref()
@@ -4516,32 +4416,26 @@ fn login_user() -> String {
 /// Where a seat nobody named came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Derived {
-    /// The program above this shell.
-    ProcessTree,
     /// The login user of a shell under an agent runner.
     LoginUser,
 }
 
 impl std::fmt::Display for Derived {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::ProcessTree => "the program above this shell",
-            Self::LoginUser => "the login user of a shell under an agent runner",
-        })
+        f.write_str("the login user of a shell under an agent runner")
     }
 }
 
 /// Whether `who` is a seat nobody named: `LJOS_SEAT`, `VISSUE_AGENT`, an
 /// MCP client's name, a tool call's seat or a runner's record would each
 /// have named it. A person at a terminal with no runner above is their
-/// login user, and that is named enough.
+/// login user, and that is named enough. The process tree is not a seat.
 #[must_use]
 pub fn derived_seat(who: &Seat) -> Option<Derived> {
     let named = CALL_SEAT.try_with(|_| ()).is_ok()
         || ANNOUNCED.get().is_some()
         || named_var("LJOS_SEAT").is_some()
         || named_var("VISSUE_AGENT").is_some()
-        || seat_from_tree_records().is_some()
         || seat_from_runner_env().is_some();
     if named {
         return None;
@@ -4549,14 +4443,11 @@ pub fn derived_seat(who: &Seat) -> Option<Derived> {
     if who.seat == login_user() && under_a_runner() {
         return Some(Derived::LoginUser);
     }
-    if program_above().is_some_and(|p| p.seat == who.seat) {
-        return Some(Derived::ProcessTree);
-    }
     None
 }
 
 /// The seat a tracker write (note, claim, sitting, finish, file, deed) is
-/// made under. A seat taken from the process or the login is that seat.
+/// made under. A seat taken from the login is that seat.
 /// The tracker's roster, when it lists seats, still has to name it.
 ///
 /// The seat is [`resolve_seat`]'s, the one `ljos seat` prints.
@@ -15715,9 +15606,7 @@ mod validity_tests {
 pub fn atom_source() -> Value {
     let seat = whoami();
     // The runner that connected, when the seat was renamed over it.
-    let harness = seat_from_runner_env()
-        .or_else(seat_from_tree)
-        .map_or_else(|| seat.seat.clone(), |s| s.seat);
+    let harness = seat_from_runner_env().map_or_else(|| seat.seat.clone(), |s| s.seat);
     let mut source = serde_json::json!({
         "harness": harness,
         "seat": seat.seat,
@@ -40773,36 +40662,6 @@ mod tests {
     }
 
     #[test]
-    fn a_harness_in_the_chain_beats_the_desktop_app_above_it() {
-        let row =
-            |pid: u32, comm: &str, program: &str| (pid, comm.to_string(), program.to_string());
-        let chain = vec![
-            row(10, "bash", "bash"),
-            row(11, "node", "codex"),
-            row(12, "zsh", "zsh"),
-            row(13, "grok-bot", "grok-bot"),
-        ];
-        assert_eq!(pick_program(&chain, &[]).map(|r| r.0), Some(11));
-        // The harness wins even when the app is nearer.
-        let chain = vec![
-            row(10, "bash", "bash"),
-            row(13, "grok-bot", "grok-bot"),
-            row(14, "claude", "claude"),
-        ];
-        assert_eq!(pick_program(&chain, &[]).map(|r| r.0), Some(14));
-        // A runners-file harness counts too.
-        let chain = vec![row(13, "electron", "acme-app"), row(15, "node", "acme-cli")];
-        assert_eq!(
-            pick_program(&chain, &["Acme CLI".to_string()]).map(|r| r.0),
-            Some(15)
-        );
-        // No harness: the nearest program, as before.
-        let chain = vec![row(10, "sh", "sh"), row(13, "grok-bot", "grok-bot")];
-        assert_eq!(pick_program(&chain, &[]).map(|r| r.0), Some(13));
-        assert!(pick_program(&[row(10, "bash", "bash")], &[]).is_none());
-    }
-
-    #[test]
     fn a_harness_id_finds_the_seat_named_after_its_command() {
         let known = |seats: &[&str]| {
             seats
@@ -40943,11 +40802,7 @@ mod tests {
     fn a_library_default_client_name_is_not_a_seat() {
         assert_eq!(seat_for_client("Acme CLI"), "acme-cli");
         for library in ["mcp", "MCP", "mcp-client"] {
-            let seat = seat_for_client(library);
-            assert!(
-                !LIBRARY_CLIENT_NAMES.contains(&seat.as_str()) || ancestry().is_empty(),
-                "{library} named the seat {seat}"
-            );
+            assert_eq!(seat_for_client(library), "runner", "{library}");
         }
     }
 
