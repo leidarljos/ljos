@@ -666,18 +666,23 @@ its seat and says, in the book log too, when that seat may not write.
 Every write records the seat that was checked. An `--assignee` (or MCP
 `assignee`) that names another seat is refused; only `ljos release HEX
 --assignee NAME` hands an issue to another seat, and NAME must itself be
-a seat the seats file lists.
+a seat the tracker's `vissue.toml` lists.
 
-The seats file is `seats.toml` in the ljos config directory,
-`$XDG_CONFIG_HOME/ljos/seats.toml` when that is absolute, else
-`~/.config/ljos/seats.toml`; no variable names another file. Its
-seats are every string value at the top level, `"CONVERSATION-ID" =
-"NAME"` lines, and the strings of a `seats = ["NAME", ...]` array. With
-no file, any named seat writes. A file that lists no seat refuses every
-write, and a file that is not TOML refuses every write until it is
-fixed. So does a seats file that cannot be read, or a link to a file
-that is not there. Reads need no seat. `ljos doctor` shows the `seat source` row, a
-warning, never a failure, when the seat is derived.
+Who may write is the `seats` list in that file. `ljos seat add NAME`
+adds a seat. With no list, any named seat writes. A list that names no
+seat refuses every write. A file that is not TOML, or that cannot be
+read, refuses every write until it is fixed. A seat the list does not
+name is refused, and the line names `vissue.toml`. Reads need no seat.
+`ljos doctor` shows the `seat source` row, a warning, never a failure,
+when the seat is derived.
+
+`ljos seat grant SEAT close=own --quote TEXT --at TIME --via SEAT`
+records the owner's yes that SEAT may close tickets it filed or holds.
+The row keeps the quote, the time, the seat that wrote it down, and the
+tracker commit of that write. `ljos finish ID --close` from that seat
+closes the ticket and notes the grant. With no grant, a person closes
+the ticket. A grant written into the file by hand is ignored. `--via`
+is a seat other than SEAT.
 
 ## One-command consent
 

@@ -17,7 +17,7 @@ fn the_connected_seat_reaches_policy_without_borrowing_a_historical_holder() {
     std::fs::create_dir(&tracker).unwrap();
     std::fs::write(
         tracker.join("vissue.toml"),
-        "seats = [\"connected-runner-other\", \"reviewer\"]\n",
+        "seats = [\"connected-runner\", \"connected-runner-other\", \"reviewer\"]\n",
     )
     .unwrap();
     let quote = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
@@ -115,14 +115,16 @@ fn the_connected_seat_reaches_policy_without_borrowing_a_historical_holder() {
         "{missed_write}"
     );
     assert!(
-        said.contains("Seats here: connected-runner-other, reviewer."),
+        said.contains("Did you mean connected-runner?"),
         "{missed_write}"
     );
+    assert!(said.contains("connected-runner-other"), "{missed_write}");
+    assert!(said.contains("reviewer"), "{missed_write}");
     assert!(said.contains("LJOS_SEAT"), "{missed_write}");
     assert!(!said.contains("01a0dab3"), "{missed_write}");
 
     assert_eq!(
         std::fs::read_to_string(tracker.join("vissue.toml")).unwrap(),
-        "seats = [\"connected-runner-other\", \"reviewer\"]\n"
+        "seats = [\"connected-runner\", \"connected-runner-other\", \"reviewer\"]\n"
     );
 }

@@ -1,5 +1,5 @@
-//! A tracker write through the server is refused for a seat the seats
-//! file does not list, once there is a seats file. Reads stay open.
+//! A tracker write through the server is refused for a seat vissue.toml
+//! does not list, once that file lists seats. Reads stay open.
 
 ljos_test_boot::harness!();
 use std::io::Write;
@@ -10,11 +10,7 @@ use std::path::Path;
 fn server(root: &Path) -> impl Fn(&str, serde_json::Value) -> String {
     let tracker = root.join("tracker");
     std::fs::create_dir(&tracker).unwrap();
-    std::fs::write(
-        tracker.join("vissue.toml"),
-        "seats = [\"saddle\", \"stranger\"]\n",
-    )
-    .unwrap();
+    std::fs::write(tracker.join("vissue.toml"), "seats = [\"saddle\"]\n").unwrap();
     let quote = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
     let server = root.join("server");
     let mut server_file = std::fs::File::create(&server).unwrap();
@@ -49,7 +45,7 @@ fn server(root: &Path) -> impl Fn(&str, serde_json::Value) -> String {
 }
 
 #[test]
-fn a_seats_file_keeps_unlisted_seats_off_the_tracker() {
+fn vissue_toml_keeps_unlisted_seats_off_the_tracker() {
     let root = tempfile::tempdir().unwrap();
     let call = server(root.path());
     let note = |seat: &str| {
@@ -59,31 +55,23 @@ fn a_seats_file_keeps_unlisted_seats_off_the_tracker() {
         )
     };
 
-    let open = note("stranger");
-    assert!(!open.contains("no seat named"), "no seats file: {open}");
-
-    let seats = root.path().join("config/ljos/seats.toml");
-    std::fs::create_dir_all(seats.parent().unwrap()).unwrap();
-    std::fs::write(
-        &seats,
-        "\"0b1c2d3e-0000-4000-8000-000000000000\" = \"saddle\"\n",
-    )
-    .unwrap();
-
     let refused = note("stranger");
     assert!(refused.contains("\"isError\":true"), "{refused}");
-    assert!(refused.contains("no seat named stranger in"), "{refused}");
-    assert!(refused.contains("seats.toml"), "{refused}");
+    assert!(refused.contains("no seat named stranger"), "{refused}");
+    assert!(
+        refused.contains("vissue.toml") || refused.contains("saddle"),
+        "{refused}"
+    );
     let claim = call(
         "ljos_claim",
         serde_json::json!({"seat": "stranger", "node": "proj-aaaa"}),
     );
-    assert!(claim.contains("no seat named stranger in"), "{claim}");
+    assert!(claim.contains("no seat named stranger"), "{claim}");
     let bound = call(
         "ljos_playbook",
         serde_json::json!({"seat": "stranger", "issue": "proj-aaaa", "name": "sit"}),
     );
-    assert!(bound.contains("no seat named stranger in"), "{bound}");
+    assert!(bound.contains("no seat named stranger"), "{bound}");
     for (tool, args) in [
         (
             "ljos_vote",
@@ -103,11 +91,11 @@ fn a_seats_file_keeps_unlisted_seats_off_the_tracker() {
         ),
     ] {
         let said = call(tool, args);
-        assert!(said.contains("no seat named stranger in"), "{tool}: {said}");
+        assert!(said.contains("no seat named stranger"), "{tool}: {said}");
     }
     let tally = call(
         "ljos_vote",
-        serde_json::json!({"seat": "stranger", "issue": "proj-aaaa"}),
+        serde_json::json!({"seat": "saddle", "issue": "proj-aaaa"}),
     );
     assert!(
         !tally.contains("no seat named"),
@@ -115,7 +103,7 @@ fn a_seats_file_keeps_unlisted_seats_off_the_tracker() {
     );
     let dry = call(
         "ljos_bump_plan",
-        serde_json::json!({"seat": "stranger", "bundle": "bundle", "project": "proj", "parent": "proj-aaaa", "dry_run": true}),
+        serde_json::json!({"seat": "saddle", "bundle": "bundle", "project": "proj", "parent": "proj-aaaa", "dry_run": true}),
     );
     assert!(!dry.contains("no seat named"), "a dry run is a read: {dry}");
 
@@ -123,7 +111,7 @@ fn a_seats_file_keeps_unlisted_seats_off_the_tracker() {
     assert!(!listed.contains("no seat named"), "{listed}");
     let read = call(
         "ljos_deed",
-        serde_json::json!({"seat": "stranger", "issue": "proj-aaaa"}),
+        serde_json::json!({"seat": "saddle", "issue": "proj-aaaa"}),
     );
     assert!(!read.contains("no seat named"), "listing is a read: {read}");
 }

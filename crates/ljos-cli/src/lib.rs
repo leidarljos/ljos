@@ -58,6 +58,7 @@ pub mod runner_hooks;
 pub mod runner_skills;
 #[cfg(test)]
 mod seat_mcp_layout;
+pub mod seat_roster;
 pub mod sitting_gate;
 pub mod slot;
 pub mod subagent;
@@ -4236,13 +4237,20 @@ fn collect_configured_seats(root: &Path, seats: &mut std::collections::BTreeSet<
     let Ok(value) = toml::from_str::<toml::Value>(&text) else {
         return;
     };
-    let Some(list) = value.get("seats").and_then(toml::Value::as_array) else {
-        return;
-    };
-    for item in list {
-        if let Some(name) = item.as_str() {
-            insert_known_seat(seats, name);
+    match value.get("seats") {
+        Some(toml::Value::Array(list)) => {
+            for item in list {
+                if let Some(name) = item.as_str() {
+                    insert_known_seat(seats, name);
+                }
+            }
         }
+        Some(toml::Value::Table(table)) => {
+            for name in table.keys() {
+                insert_known_seat(seats, name);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -4571,9 +4579,8 @@ pub fn write_seat(verb: &str) -> Result<Seat> {
     if let Some(from) = derived_seat(&who) {
         bail!(
             "{verb}: no seat is named, so this write would be made as {}, {from}. \
-             Export LJOS_SEAT=NAME with your seat's name (the seats file is {}) and run it again; nothing was written",
-            who.seat,
-            seats_file().display()
+             Export LJOS_SEAT=NAME and run it again; nothing was written",
+            who.seat
         );
     }
     registered_seat(&who.seat)?;
@@ -4613,13 +4620,13 @@ fn seated() -> Option<Seat> {
 /// The name a write under `checked` records for an assignee a caller
 /// passed, already resolved to `assignee`. This seat's own name or holder
 /// is kept. Another name is refused, unless the verb hands work to
-/// another name (`delegates`), and then it has to be a seat the seats
-/// file lists.
+/// another name (`delegates`), and then it has to be a seat the tracker's
+/// `vissue.toml` lists.
 ///
 /// # Errors
 ///
-/// `assignee` is another seat and the verb does not delegate, or the
-/// seats file does not list it.
+/// `assignee` is another seat and the verb does not delegate, or
+/// `vissue.toml` does not list it.
 pub fn write_assignee(
     verb: &str,
     checked: &Seat,
@@ -4663,70 +4670,38 @@ pub fn ballot_voter(verb: &str, named: Option<&str>) -> Result<String> {
     Ok(seat)
 }
 
-/// Refuse a tracker write from a seat the seats file does not list. A
-/// missing file, as on a fresh single-user install, refuses nothing; a
-/// file that is there and lists no seat refuses every write.
+/// Refuse a tracker write from a seat the tracker's `vissue.toml` does not
+/// list. No `seats` key, as on a fresh tracker, refuses nothing. A list
+/// that names no seat refuses every write.
 ///
 /// # Errors
 ///
-/// The seats file is there and `seat` is not one it lists, or the file
-/// cannot be read as TOML.
+/// `vissue.toml` lists seats and `seat` is not one of them, or the file
+/// does not read.
 pub fn registered_seat(seat: &str) -> Result<()> {
-    let path = seats_file();
-    let Some(listed) = listed_seats(&path)? else {
-        return Ok(());
-    };
     let slug = canonical_seat_name(seat);
-    if listed.contains(&slug) {
-        return Ok(());
-    }
-    if listed.is_empty() {
-        bail!(
-            "the seats file {} lists no seat, so no seat may write. \
-             Add `seats = [\"{slug}\"]` or a `\"CONVERSATION-ID\" = \"{slug}\"` line to it; nothing was written",
-            path.display()
-        );
-    }
-    bail!(
-        "no seat named {slug} in {}, which lists {}. \
-         Set LJOS_SEAT to a seat it lists, or add yours to it; nothing was written",
-        path.display(),
-        listed.into_iter().collect::<Vec<_>>().join(", ")
-    )
-}
-
-/// The seats `path` lists, slugged: every name it maps a conversation to
-/// (`"ID" = "NAME"`) and every name in a `seats = [...]` array. `None`
-/// only when nothing is at the path; a link to nothing is an error.
-fn listed_seats(path: &Path) -> Result<Option<std::collections::BTreeSet<String>>> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if std::fs::symlink_metadata(path).is_ok() {
+    match seat_roster::seat_list() {
+        seat_roster::SeatList::Absent => Ok(()),
+        seat_roster::SeatList::Broken { why } => {
+            bail!("{why}, so no seat may write. Nothing was written")
+        }
+        seat_roster::SeatList::Listed { path, seats } => {
+            if seats.contains(&slug) {
+                return Ok(());
+            }
+            if seats.is_empty() {
                 bail!(
-                    "the seats file {} links to a file that is not there, so no seat may write; nothing was written",
+                    "{} lists no seat, so no seat may write. Nothing was written",
                     path.display()
                 );
             }
-            return Ok(None);
+            bail!(
+                "no seat named {slug} in {}, which lists {}. Nothing was written",
+                path.display(),
+                seats.into_iter().collect::<Vec<_>>().join(", ")
+            )
         }
-        Err(e) => bail!("cannot read the seats file {}: {e}", path.display()),
-    };
-    let table: toml::Table = toml::from_str(&text)
-        .map_err(|e| anyhow::anyhow!("the seats file {} is not TOML: {e}", path.display()))?;
-    let roster = table
-        .get("seats")
-        .and_then(toml::Value::as_array)
-        .into_iter()
-        .flatten();
-    let listed = table
-        .values()
-        .chain(roster)
-        .filter_map(toml::Value::as_str)
-        .map(canonical_seat_name)
-        .filter(|slug| !slug.is_empty())
-        .collect();
-    Ok(Some(listed))
+    }
 }
 
 /// Append one line, `ts seat verb what`, to the state dir's recall.log, so
@@ -32110,10 +32085,13 @@ pub fn finish(
     close: bool,
 ) -> Result<String> {
     // A close asks whether a person is present, before any write. A
-    // runner with no terminal is refused. The sitting can still end.
-    if close && !person_present() {
-        bail!("finish: a person closes a ticket. Nothing was written");
-    }
+    // runner with no terminal is refused unless a standing grant covers
+    // this seat and this ticket. The sitting can still end.
+    let close_note = if close {
+        seat_roster::close_note(issue)?
+    } else {
+        None
+    };
     // A decision closes on ballots, not on the say of the seat that sat on
     // it; refused before anything is written, so nothing half-happens.
     if close && tracker_show_json(issue).is_ok_and(|v| is_decision(&v)) {
@@ -32246,9 +32224,18 @@ pub fn finish(
     // posted and still be open, a build can be green and still unmerged.
     // The ticket closes only when asked, so a blocker on it stays a blocker.
     if let Some(state) = closed_as {
+        if let Some(note) = &close_note {
+            run_as("vissue", &["note", issue, note], None).with_context(|| {
+                format!("finish: could not note the grant on the ticket {issue}")
+            })?;
+        }
         run_as("vissue", &["update", issue, "-s", state], None)
             .with_context(|| format!("finish: could not close the ticket {issue}"))?;
         out.push_str(&format!("closed the ticket {issue} as {state}\n"));
+        if let Some(note) = &close_note {
+            out.push_str(note);
+            out.push('\n');
+        }
     } else if person_present() {
         out.push_str(&format!(
             "the ticket {issue} stays open and nobody holds it; `ljos finish {issue} --close` closes it when the work is accepted\n"

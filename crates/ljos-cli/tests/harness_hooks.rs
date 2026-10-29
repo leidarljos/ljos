@@ -552,7 +552,7 @@ fn the_hook_claims_on_the_first_write_and_on_a_redirect() {
 }
 
 #[test]
-fn a_hook_books_nothing_for_a_seat_nobody_named_or_the_seats_file_omits() {
+fn a_hook_books_nothing_for_a_seat_nobody_named_or_vissue_toml_omits() {
     let (_dir, hab) = habitat();
     let write = |session: &str, extra: &[(&str, &str)]| {
         let payload = claude(
@@ -577,13 +577,12 @@ fn a_hook_books_nothing_for_a_seat_nobody_named_or_the_seats_file_omits() {
     );
     assert!(!log().contains("create"), "{}", log());
 
-    let seats = hab.home.join(".config/ljos/seats.toml");
-    std::fs::create_dir_all(seats.parent().unwrap()).unwrap();
-    std::fs::write(&seats, "seats = [\"saddle\"]\n").unwrap();
+    let roster = hab.tracker.join("vissue.toml");
+    std::fs::write(&roster, "seats = [\"saddle\"]\n").unwrap();
     write("unlisted", &[]);
     assert!(!log().contains("create"), "{}", log());
 
-    std::fs::write(&seats, "seats = [\"probe-seat\"]\n").unwrap();
+    std::fs::write(&roster, "seats = [\"probe-seat\"]\n").unwrap();
     write("listed", &[]);
     assert!(log().contains("create"), "a listed seat claims: {}", log());
 }

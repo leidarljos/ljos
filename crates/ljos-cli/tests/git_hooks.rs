@@ -1973,17 +1973,16 @@ fn a_claude_session_is_not_booked_by_the_git_hook() {
     );
 }
 
-/// With a seats file, the hook books a commit only for a seat it lists:
-/// an unlisted `LJOS_SEAT`, the `grokbot-<id8>` of an unmapped
+/// With a vissue.toml seat list, the hook books a commit only for a seat
+/// it lists: an unlisted `LJOS_SEAT`, the `grokbot-<id8>` of an unmapped
 /// conversation and an agy conversation book nothing, a commit that names
 /// an open issue included.
 #[test]
-fn a_git_hook_books_only_a_seat_the_seats_file_lists() {
+fn a_git_hook_books_only_a_seat_vissue_toml_lists() {
     let hab = Hab::new("repo");
     seed_issue(&hab, "probe-32fx", "TODO");
     install(&hab);
-    fs::create_dir_all(hab.config.join("ljos")).unwrap();
-    fs::write(hab.config.join("ljos/seats.toml"), "seats = [\"saddle\"]\n").unwrap();
+    fs::write(hab.tracker.join("vissue.toml"), "seats = [\"saddle\"]\n").unwrap();
     let cursor = "0b1c2d3e-0000-4000-8000-000000000000";
     let agy = "agy-conv-0003-deed";
     sit(
@@ -2027,14 +2026,13 @@ fn book_log(hab: &Hab) -> String {
 }
 
 /// A commit made by hand in the tracker's own checkout is a tracker write.
-/// It is never booked, and a seat the seats file does not list, or no seat
+/// It is never booked, and a seat vissue.toml does not list, or no seat
 /// at all, is told so and kept in the book log.
 #[test]
 fn a_tracker_commit_is_checked_as_a_tracker_write() {
     let hab = Hab::new("repo");
     install(&hab);
-    fs::create_dir_all(hab.config.join("ljos")).unwrap();
-    fs::write(hab.config.join("ljos/seats.toml"), "seats = [\"saddle\"]\n").unwrap();
+    fs::write(hab.tracker.join("vissue.toml"), "seats = [\"saddle\"]\n").unwrap();
     let commit = |name: &str, seat: Option<&str>| -> String {
         fs::write(hab.tracker.join(name), "x\n").unwrap();
         let env: Vec<(String, String)> = env_without_seat(&hab)

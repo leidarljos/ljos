@@ -238,6 +238,31 @@ enum RecordCmd {
 }
 
 #[derive(Subcommand)]
+enum SeatAction {
+    /// Add NAME to the seat list in the tracker's vissue.toml.
+    Add {
+        /// The seat to add.
+        name: String,
+    },
+    /// Record the owner's yes that a seat may close tickets it filed or holds.
+    Grant {
+        /// The seat the grant names.
+        seat: String,
+        /// The grant, written close=own.
+        spec: String,
+        /// The owner's words.
+        #[arg(long)]
+        quote: String,
+        /// When the owner said it, as RFC 3339.
+        #[arg(long)]
+        at: String,
+        /// The seat writing the grant down. Not the seat the grant names.
+        #[arg(long)]
+        via: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     /// Remember one lesson. Typed by the person it takes effect at once.
     /// Under a runner, words from the person's latest prompt are theirs.
@@ -1109,7 +1134,11 @@ enum Cmd {
     /// Print the sitting protocol: which store answers what, and the order of verbs.
     Protocol,
     /// The name this agent works under, the name its claims go under, and where each came from.
-    Seat,
+    /// `add` writes a seat into the tracker's vissue.toml. `grant` records a quoted yes to close.
+    Seat {
+        #[command(subcommand)]
+        action: Option<SeatAction>,
+    },
     /// Serve MCP over stdio: run the `ljos-mcp` installed beside this `ljos`, with these arguments. For a client that starts a server by its crate's name.
     Mcp {
         /// Arguments passed to `ljos-mcp` as they stand.
@@ -1390,7 +1419,7 @@ fn run_command() -> Result<()> {
     // The commands that name a holder refuse instead.
     if matches!(
         cmd,
-        Cmd::Seat
+        Cmd::Seat { .. }
             | Cmd::Sitting { .. }
             | Cmd::Claim { .. }
             | Cmd::Note { .. }
@@ -3407,7 +3436,20 @@ fn run_command() -> Result<()> {
             }));
         }
         Cmd::Protocol => print!("{}", protocol_text()),
-        Cmd::Seat => print!("{}", format_seat_command()),
+        Cmd::Seat { action } => match action {
+            None => print!("{}", format_seat_command()),
+            Some(SeatAction::Add { name }) => print!("{}", ljos_cli::seat_roster::add(&name)?),
+            Some(SeatAction::Grant {
+                seat,
+                spec,
+                quote,
+                at,
+                via,
+            }) => print!(
+                "{}",
+                ljos_cli::seat_roster::grant(&seat, &spec, &quote, &at, &via)?
+            ),
+        },
         Cmd::Mcp { args } => return Err(ljos_cli::exec_server(&args)),
         Cmd::Onboard {
             harness,
