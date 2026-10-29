@@ -1168,51 +1168,27 @@ pub fn record_candidate(
     Ok(out)
 }
 
-/// `cursor-agent -p` or `claude -p`, or `NAME -p` for another harness.
+/// Headless argv for `harness` on `prompt`.
 #[must_use]
 pub fn harness_argv(harness: &str, prompt: &str) -> Vec<String> {
-    match harness.trim() {
-        "claude" => vec![
-            "claude".into(),
-            "-p".into(),
-            prompt.into(),
-            "--max-turns".into(),
-            "6".into(),
-            "--allowedTools".into(),
-            "Bash(ljos:*)".into(),
-            "Bash(vissue:*)".into(),
-        ],
-        "cursor" | "cursor-agent" | "" => {
-            vec!["cursor-agent".into(), "-p".into(), prompt.into()]
-        }
-        other => vec![other.into(), "-p".into(), prompt.into()],
+    let trimmed = harness.trim();
+    if trimmed.is_empty() || trimmed == "cursor" || trimmed == "cursor-agent" {
+        return vec!["cursor-agent".into(), "-p".into(), prompt.into()];
     }
-}
-
-fn harness_name(passed: Option<&str>) -> String {
-    passed
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            std::env::var("LJOS_PANEL_HARNESS")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or_else(|| "cursor-agent".into())
+    if let Some(template) = crate::panel_runner::template_for_runner(trimmed, false, false) {
+        let vars = crate::tools::Vars::default()
+            .with("prompt", prompt)
+            .with("cwd", ".")
+            .with("persona", "member");
+        return crate::tools::fill(&template, &vars);
+    }
+    vec![trimmed.into(), "-p".into(), prompt.into()]
 }
 
 /// What one spawned member runs. `LJOS_MEMBER_BIN` is the test stand-in.
 #[must_use]
 pub fn member_argv(harness: &str, prompt: &str) -> Vec<String> {
-    if let Some(bin) = std::env::var("LJOS_MEMBER_BIN")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-    {
-        return vec![bin, "-p".into(), prompt.to_string()];
-    }
-    harness_argv(harness, prompt)
+    crate::panel_runner::run_argv_for(harness, prompt, "member")
 }
 
 /// The only text a designer is given: this issue, not the other candidates.
@@ -1297,7 +1273,7 @@ fn plan(issue: &str, harness: &str, designers: usize, personas: &[String]) -> Ve
         let prompt = designer_prompt(issue, n, designers, &brief);
         jobs.push(Job {
             session: fresh_session(issue, &role),
-            argv: member_argv(harness, &prompt),
+            argv: crate::panel_runner::run_argv_for(harness, &prompt, &role),
             role,
             prompt,
         });
@@ -1313,7 +1289,7 @@ fn plan(issue: &str, harness: &str, designers: usize, personas: &[String]) -> Ve
         };
         jobs.push(Job {
             session: fresh_session(issue, name),
-            argv: member_argv(harness, &prompt),
+            argv: crate::panel_runner::run_argv_for(harness, &prompt, name),
             role: name.clone(),
             prompt,
         });
@@ -1347,9 +1323,9 @@ fn format_plan(issue: &str, harness: &str, jobs: &[Job], dry_run: bool) -> Strin
     out
 }
 
-fn run_job(job: &Job) -> String {
+fn run_job(job: &Job) -> Result<String> {
     if job.argv.is_empty() {
-        return format!("{} did not start: no argv\n", job.role);
+        anyhow::bail!("{} did not start: no argv", job.role);
     }
     let mut cmd = Command::new(&job.argv[0]);
     cmd.args(&job.argv[1..])
@@ -1366,20 +1342,29 @@ fn run_job(job: &Job) -> String {
     match cmd.output() {
         Ok(out) => {
             let code = out.status.code().unwrap_or(1);
-            format!("{} session {} exited {code}\n", job.role, job.session)
+            Ok(format!(
+                "{} session {} exited {code}\n",
+                job.role, job.session
+            ))
         }
-        Err(e) => format!("{} session {} did not start: {e}\n", job.role, job.session),
+        Err(e) => anyhow::bail!(
+            "{} session {} did not start ({}): {e}",
+            job.role,
+            job.session,
+            job.argv[0]
+        ),
     }
 }
 
 /// Spawn each designer and each persona as its own harness session.
 /// Designers receive only the brief. `dry_run` prints the plan and starts
-/// nothing. The harness is `cursor-agent` or `claude` (`--harness`, or
-/// `LJOS_PANEL_HARNESS`, default `cursor-agent`).
+/// nothing. Picks from the runner CLIs installed on `PATH`, or uses a
+/// configured command template (`--harness`, `LJOS_PANEL_HARNESS`,
+/// `LJOS_PANEL_COMMAND`, `harnesses.toml`, or `ljos.toml`).
 ///
 /// # Errors
 ///
-/// There is nobody to spawn.
+/// There is nobody to spawn, or no runner CLI is available.
 pub fn panel_run(
     issue: &str,
     harness: Option<&str>,
@@ -1391,13 +1376,14 @@ pub fn panel_run(
             "panel run: {issue} is already inside a panel member; nothing spawned\n"
         ));
     }
-    let harness = harness_name(harness);
     let personas = persona_names(issue);
     if designers == 0 && personas.is_empty() {
         anyhow::bail!(
             "panel run: {issue} has no designers and no personas; pass --designers N or seat a persona"
         );
     }
+    let harness =
+        crate::panel_runner::resolve_panel_run_harness_with(harness, dry_run, &crate::on_path)?;
     let jobs = plan(issue, &harness, designers, &personas);
     let mut out = format_plan(issue, &harness, &jobs, dry_run);
     if dry_run {
@@ -1413,8 +1399,9 @@ pub fn panel_run(
         }
         for handle in handles {
             match handle.join() {
-                Ok(line) => out.push_str(&line),
-                Err(_) => out.push_str("a panel member thread stopped\n"),
+                Ok(Ok(line)) => out.push_str(&line),
+                Ok(Err(err)) => return Err(err),
+                Err(_) => anyhow::bail!("a panel member thread stopped"),
             }
         }
     }

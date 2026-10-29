@@ -46,6 +46,7 @@ pub mod pack_copy;
 pub mod pack_link;
 pub mod panel_cloud;
 pub mod panel_gate;
+pub mod panel_runner;
 pub mod person_key;
 mod person_tty;
 pub mod persona_session;
@@ -10791,88 +10792,50 @@ pub fn start_decision_panel(
 }
 
 /// Start `bin` with `args` in its own session, writing stdout and stderr to
-/// `log`. `setsid --fork` when it is on `PATH`, otherwise a spawned child.
+/// `log`. A second fork in `pre_exec` detaches the opener from this process
+/// and starts a new session with `setsid` before `exec`.
 pub(crate) fn detach(bin: &str, args: &[String], log: &Path) -> Result<()> {
+    use std::os::unix::process::CommandExt as _;
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(log)
         .with_context(|| format!("log {}", log.display()))?;
     let err = file.try_clone()?;
-    if which::which("setsid").is_ok() {
-        let mut cmd = std::process::Command::new("setsid");
-        cmd.arg("--fork").arg(bin).args(args);
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(file)
-            .stderr(err);
-        cmd.spawn()
-            .with_context(|| format!("setsid --fork {bin}"))?;
-        return Ok(());
-    }
     let mut cmd = std::process::Command::new(bin);
     cmd.args(args)
         .stdin(std::process::Stdio::null())
         .stdout(file)
         .stderr(err);
-    cmd.spawn().with_context(|| format!("spawn {bin}"))?;
+    // SAFETY: fork, _exit and setsid are async-signal-safe and run in the
+    // forked child before exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            let pid = libc::fork();
+            if pid < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if pid > 0 {
+                libc::_exit(0);
+            }
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().with_context(|| format!("spawn {bin}"))?;
+    let _ = child.wait();
     Ok(())
 }
 
-/// The argv of one headless panel member, from the `headless` template of
-/// the runner the panel names (`LJOS_PANEL_RUNNER`) or else of the seat's
-/// own runner. A panel opened under Claude Code runs Claude; a runner with
-/// no template runs `grok` with the seat's fallback flags.
+/// The argv of one headless panel member, from a configured command
+/// template, the `headless` template of the runner the panel names
+/// (`LJOS_PANEL_RUNNER`), or an installed runner CLI on `PATH`.
 /// `LJOS_MEMBER_BIN` is the test stand-in.
 #[must_use]
 pub fn panel_member_argv(prompt_file: &Path, cwd: Option<&str>, persona: &str) -> Vec<String> {
-    let stand_in = std::env::var("LJOS_MEMBER_BIN").ok();
-    if stand_in.is_none() {
-        let runner = std::env::var("LJOS_PANEL_RUNNER")
-            .ok()
-            .filter(|r| !r.is_empty())
-            .unwrap_or_else(|| whoami().seat);
-        let template = harnesses_with_shipped(&harnesses_path())
-            .ok()
-            .and_then(|all| all.harness.into_iter().find(|h| h.name == runner))
-            .or_else(|| {
-                toml::from_str::<Harnesses>(HARNESSES_EXAMPLE)
-                    .ok()?
-                    .harness
-                    .into_iter()
-                    .find(|h| h.name == runner)
-            })
-            .map(|h| h.headless)
-            .filter(|t| !t.is_empty());
-        if let Some(template) = template {
-            let vars = tools::Vars::default()
-                .with("prompt_file", prompt_file.display().to_string())
-                .with(
-                    "prompt",
-                    std::fs::read_to_string(prompt_file).unwrap_or_default(),
-                )
-                .with("cwd", cwd.filter(|c| !c.is_empty()).unwrap_or("."))
-                .with("persona", persona);
-            return tools::fill(&template, &vars);
-        }
-    }
-    let bin = stand_in.unwrap_or_else(|| "grok".into());
-    let mut args = vec![
-        bin,
-        "--prompt-file".into(),
-        prompt_file.display().to_string(),
-        "--yolo".into(),
-        "--max-turns".into(),
-        "6".into(),
-        "--effort".into(),
-        "low".into(),
-        "--disallowed-tools".into(),
-        "Agent".into(),
-    ];
-    if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
-        args.push("--cwd".into());
-        args.push(cwd.to_string());
-    }
-    args
+    panel_runner::member_argv_or_fallback(prompt_file, cwd, persona, &on_path)
 }
 
 /// Maximum concurrent panel member processes to avoid CPU starvation, memory
@@ -10960,6 +10923,10 @@ pub fn open_decision_panel(prompt: &str, cwd: Option<&str>, log: &Path) -> Resul
     let _ = std::fs::create_dir_all(log.parent().unwrap_or(log));
     let issue = decision_issue_for(prompt)?;
     append_log(log, &format!("issue {issue}\n"));
+    if let Err(err) = panel_runner::resolve_panel_run_harness_with(None, false, &on_path) {
+        append_log(log, &format!("error: {err:#}\n"));
+        return Err(err);
+    }
     let cards = std::path::PathBuf::from(".");
     let sat = sitting_gated(
         &issue,
@@ -10990,7 +10957,7 @@ pub fn open_decision_panel(prompt: &str, cwd: Option<&str>, log: &Path) -> Resul
         let task = decision_member_task(&brief, &persona, &issue);
         let task_file = briefs.join(format!("{persona}.prompt"));
         std::fs::write(&task_file, task)?;
-        let argv = panel_member_argv(&task_file, cwd, &persona);
+        let argv = panel_runner::resolve_member_argv(&task_file, cwd, &persona)?;
         let member_log = briefs.join(format!("{persona}.log"));
         members.push((persona, member_log, argv));
     }
@@ -11094,37 +11061,42 @@ fn file_yes_no(parent: Option<&str>, prompt: &str) -> Result<String> {
     Ok(id)
 }
 
-/// One member, seated as its persona, in a session of its own where
-/// `setsid` is on `PATH`. The opener's seat is not inherited: a member's
-/// ballot is its own seat's.
-/// `setsid` forks only when it starts as a process group leader, which a
-/// spawned child is not, so the handle returned is the member's own.
+/// One member, seated as its persona, in a session of its own. The
+/// opener's seat is not inherited: a member's ballot is its own seat's.
 fn spawn_member(persona: &str, argv: &[String], log: &Path) -> Result<std::process::Child> {
+    use std::os::unix::process::CommandExt as _;
     if argv.is_empty() {
         bail!("panel member has no argv");
+    }
+    if !panel_runner::binary_available(&argv[0], &on_path) {
+        bail!(
+            "panel member {persona}: runner {:?} is not installed on PATH",
+            argv[0]
+        );
     }
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(log)?;
     let err = file.try_clone()?;
-    let mut cmd = if which::which("setsid").is_ok() {
-        let mut c = std::process::Command::new("setsid");
-        c.args(argv);
-        c
-    } else {
-        let mut c = std::process::Command::new(&argv[0]);
-        c.args(&argv[1..]);
-        c
-    };
-    cmd.env("LJOS_PANEL_CHILD", "1")
+    let mut cmd = std::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..])
+        .env("LJOS_PANEL_CHILD", "1")
         .env("LJOS_SEAT", persona)
         .env("VISSUE_AGENT", persona)
         .stdin(std::process::Stdio::null())
         .stdout(file)
-        .stderr(err)
-        .spawn()
-        .with_context(|| format!("start {}", argv[0]))
+        .stderr(err);
+    // SAFETY: setsid is async-signal-safe and touches only the child.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    cmd.spawn().with_context(|| format!("start {}", argv[0]))
 }
 
 fn note_ballot(turn: &mut StopTurn, text: &str) {
@@ -46960,6 +46932,74 @@ mod tests {
         unsafe { std::env::remove_var("LJOS_TEST_ARGV") };
         unsafe { std::env::remove_var("LJOS_IN_HOOK") };
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+    }
+
+    #[test]
+    fn detach_starts_a_new_session_without_gnu_setsid() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let setsid_called = dir.path().join("setsid-called");
+        let fake_setsid = dir.path().join("setsid");
+        std::fs::write(
+            &fake_setsid,
+            format!("#!/bin/sh\ntouch '{}'\nexit 2\n", setsid_called.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_setsid, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let probe_out = dir.path().join("probe.txt");
+        let probe_bin = dir.path().join("probe.sh");
+        std::fs::write(
+            &probe_bin,
+            "#!/usr/bin/env python3\nimport os, sys\nwith open(sys.argv[1], 'w') as f:\n    f.write(f'{os.getpid()} {os.getsid(0)}\\n')\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&probe_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let old_path = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    dir.path().display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            );
+        }
+        let log = dir.path().join("detach.log");
+        let res = detach(
+            probe_bin.to_str().unwrap(),
+            &[probe_out.display().to_string()],
+            &log,
+        );
+        unsafe {
+            match old_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        res.expect("detach succeeds despite non-GNU setsid on PATH");
+        let text = (0..40)
+            .find_map(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                std::fs::read_to_string(&probe_out).ok()
+            })
+            .expect("detached process wrote its pid and sid");
+        assert!(!setsid_called.exists(), "setsid on PATH must not be called");
+        let mut parts = text.split_whitespace();
+        let child_pid: i32 = parts.next().unwrap().parse().unwrap();
+        let child_sid: i32 = parts.next().unwrap().parse().unwrap();
+        let my_sid = unsafe { libc::getsid(0) };
+        assert_eq!(
+            child_sid, child_pid,
+            "detached opener is its own session leader"
+        );
+        assert_ne!(
+            child_sid, my_sid,
+            "detached opener left the caller's session"
+        );
     }
 
     #[test]
