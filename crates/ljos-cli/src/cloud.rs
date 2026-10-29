@@ -112,8 +112,23 @@ pub fn up_at(force: bool, repoint: bool) -> Result<String> {
         hex::encode(public.to_bytes())
     ));
 
-    let remote = nonempty_var("LJOS_TRACKER_REMOTE");
-    let tracker = remote.as_ref().map(|_| tracker_dir(&home));
+    let dest = tracker_dir(&home);
+    let found = crate::tracker_attach::find(nonempty_var("LJOS_TRACKER_REMOTE").as_deref(), &dest);
+    let attached = match &found {
+        Some(remote) => {
+            let (line, ok) = ensure_tracker(remote, &dest, &seat, &home)?;
+            lines.push(line);
+            ok
+        }
+        None => {
+            lines.push(
+                "tracker: LJOS_TRACKER_REMOTE is unset and no tracker checkout is in the workspace, so this machine has no shared tracker".into(),
+            );
+            false
+        }
+    };
+    let remote = found.as_ref().filter(|_| attached).map(|r| r.shown.clone());
+    let tracker = remote.as_ref().map(|_| dest.clone());
     lines.push(ensure_profile(&home, &bin_dir)?);
     lines.push(write_mcp(
         &home,
@@ -140,15 +155,10 @@ pub fn up_at(force: bool, repoint: bool) -> Result<String> {
         pairs.push(("DEEDAR_HOST_SIGNING_KEY", key.display().to_string()));
     }
     if let (Some(remote), Some(dest)) = (remote.as_deref(), tracker.as_deref()) {
-        lines.push(ensure_tracker(remote, dest, &seat)?);
         pairs.push(("LJOS_TRACKER_GIT", "push".into()));
         pairs.push(("LJOS_TRACKER_REMOTE", remote.to_string()));
         pairs.push(("VISSUE_ROOT", dest.display().to_string()));
         pairs.push(("ISSUE_ROOT", dest.display().to_string()));
-    } else {
-        lines.push(
-            "tracker: LJOS_TRACKER_REMOTE is unset, so this machine has no shared tracker".into(),
-        );
     }
     write_env(&home.join(".config/ljos/env"), &pairs)?;
     crate::with_env_mutation(|| {
@@ -2368,17 +2378,36 @@ fn installer_script() -> Result<PathBuf> {
     Ok(path)
 }
 
-fn ensure_tracker(remote: &str, dest: &Path, seat: &str) -> Result<String> {
+/// Clone or update the tracker at `dest`. The flag is false when no clone
+/// is there afterwards, and the line then says what to set.
+fn ensure_tracker(
+    remote: &crate::tracker_attach::Remote,
+    dest: &Path,
+    seat: &str,
+    home: &Path,
+) -> Result<(String, bool)> {
+    let token = match crate::tracker_attach::token() {
+        Some(token) => crate::tracker_attach::token_url(&remote.fetch)
+            .map(|url| crate::tracker_attach::store_token(home, &token).map(|helper| (helper, url)))
+            .transpose()?,
+        None => None,
+    };
     if is_work_tree(dest) {
         ensure_identity(dest, seat)?;
-        match crate::tracker_push::publish(dest) {
-            Ok(()) => Ok(format!("tracker: updated {}", dest.display())),
-            Err(e) => Ok(format!(
-                "tracker: {} kept local; push queued: {e}",
-                dest.display()
-            )),
+        if let Some((helper, url)) = &token {
+            crate::tracker_attach::configure(dest, helper, url)?;
         }
-    } else if dest.exists() {
+        let line = match crate::tracker_push::publish(dest) {
+            Ok(()) => format!("tracker: updated {}", dest.display()),
+            Err(e) => format!(
+                "tracker: {} kept local; push queued: {}",
+                dest.display(),
+                hide(&e, remote)
+            ),
+        };
+        return Ok((line, true));
+    }
+    if dest.exists() {
         let empty = fs::read_dir(dest)
             .map(|mut d| d.next().is_none())
             .unwrap_or(false);
@@ -2389,13 +2418,34 @@ fn ensure_tracker(remote: &str, dest: &Path, seat: &str) -> Result<String> {
             );
         }
         fs::remove_dir(dest)?;
-        clone_tracker(remote, dest, seat)
-    } else {
-        clone_tracker(remote, dest, seat)
     }
+    Ok(match clone_tracker(remote, dest, seat, token.as_ref()) {
+        Ok(line) => (line, true),
+        Err(e) => (
+            format!(
+                "{}. This machine has no shared tracker. Set {} to a token that can push to {}, or add that repository to this environment",
+                hide(&format!("{e:#}"), remote),
+                crate::tracker_attach::TOKEN_VAR,
+                remote.shown
+            ),
+            false,
+        ),
+    })
 }
 
-fn clone_tracker(remote: &str, dest: &Path, seat: &str) -> Result<String> {
+/// `text` with the fetch URL, which may carry a token, shown without it.
+fn hide(text: &str, remote: &crate::tracker_attach::Remote) -> String {
+    text.replace(&remote.fetch, &remote.shown)
+}
+
+/// Clone `remote` to `dest`. `token` is the credential helper and the URL
+/// it answers for.
+fn clone_tracker(
+    remote: &crate::tracker_attach::Remote,
+    dest: &Path,
+    seat: &str,
+    token: Option<&(String, String)>,
+) -> Result<String> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -2405,23 +2455,40 @@ fn clone_tracker(remote: &str, dest: &Path, seat: &str) -> Result<String> {
         .context("tracker path has no name")?
         .to_string_lossy()
         .to_string();
-    let out = Command::new("git")
-        .current_dir(parent)
-        .args(["clone", "--quiet", remote, &name])
+    let mut cmd = Command::new("git");
+    cmd.current_dir(parent);
+    let url = match token {
+        Some((helper, url)) => {
+            cmd.args(crate::tracker_attach::clone_config(helper));
+            url.as_str()
+        }
+        None => remote.fetch.as_str(),
+    };
+    let out = cmd
+        .args(["clone", "--quiet", url, &name])
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(std::process::Stdio::null())
         .output()
         .context("git clone")?;
+    let shown = &remote.shown;
     if !out.status.success() {
         let said = String::from_utf8_lossy(&out.stderr);
-        bail!("tracker: clone of {remote} failed: {}", said.trim());
+        bail!("tracker: clone of {shown} failed: {}", said.trim());
+    }
+    if let Some((helper, url)) = token {
+        crate::tracker_attach::configure(dest, helper, url)?;
     }
     ensure_identity(dest, seat)?;
+    let from = &remote.from;
     match crate::tracker_push::publish(dest) {
-        Ok(()) => Ok(format!("tracker: cloned {remote} to {}", dest.display())),
-        Err(e) => Ok(format!(
-            "tracker: cloned {remote} to {}; push queued: {e}",
+        Ok(()) => Ok(format!(
+            "tracker: cloned {shown} to {} (from {from})",
             dest.display()
+        )),
+        Err(e) => Ok(format!(
+            "tracker: cloned {shown} to {} (from {from}); push queued: {}",
+            dest.display(),
+            hide(&e, remote)
         )),
     }
 }

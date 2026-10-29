@@ -761,6 +761,190 @@ fn cloud_up_installs_points_the_harness_and_clones() {
     assert!(second.contains("tracker:"), "{second}");
 }
 
+/// A fresh cloud machine with release binaries, a seeded bare tracker and
+/// no tracker variables set.
+fn tracker_vm(root: &Path) -> (PathBuf, PathBuf) {
+    isolate_git(root);
+    let origin = init_bare(root);
+    seed(
+        root,
+        &origin,
+        &board(&[issue_block("probe-seed", "TODO", "", &[])]),
+    );
+    let home = root.join("home");
+    let rel = root.join("rel");
+    fs::create_dir_all(&rel).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    let names = ["ljos", "ljos-mcp", "ljos-policyd"];
+    for name in names {
+        executable(&rel.join(name), "#!/bin/sh\necho ok\n");
+    }
+    fs::write(rel.join("SHA256SUMS"), sums(&rel, &names)).unwrap();
+    let runtime = root.join("run");
+    fs::create_dir_all(&runtime).unwrap();
+    std::env::set_var("HOME", &home);
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+    std::env::set_var("LJOS_RELEASE_DIR", &rel);
+    std::env::set_var("DEEDAR_HOST_SIGNING_KEY", "off");
+    std::env::set_var("LJOS_TRACKER_SEARCH", root.join("workspace"));
+    for key in [
+        "LJOS_BIN_DIR",
+        "LJOS_TRACKER_DIR",
+        "LJOS_TRACKER_REMOTE",
+        "LJOS_TRACKER_TOKEN",
+        "LJOS_TRACKER_GIT",
+        "LJOS_SEAT",
+        "VISSUE_ROOT",
+        "ISSUE_ROOT",
+    ] {
+        std::env::remove_var(key);
+    }
+    clear_agent_ids();
+    std::env::set_var("CURSOR_AGENT_ID", "bc-tracker-run");
+    (home, origin)
+}
+
+#[test]
+fn cloud_up_clones_the_tracker_a_workspace_checkout_holds() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, origin) = tracker_vm(root.path());
+    fs::create_dir_all(root.path().join("workspace")).unwrap();
+    let product = root.path().join("workspace/product");
+    git(root.path(), &["init", "-q", product.to_str().unwrap()]);
+    git(
+        &product,
+        &["remote", "add", "origin", "/elsewhere/product.git"],
+    );
+    let checkout = clone_of(root.path(), &origin, "workspace/tracker");
+    let said = ljos_cli::cloud::up(false).unwrap();
+    let tracker = home.join(".local/share/ljos/tracker");
+    assert!(said.contains("tracker: cloned"), "{said}");
+    assert!(said.contains(&checkout.display().to_string()), "{said}");
+    assert!(
+        tracker.join("Software/probe/issues.org").is_file(),
+        "{said}"
+    );
+    let env = fs::read_to_string(home.join(".config/ljos/env")).unwrap();
+    assert!(env.contains("LJOS_TRACKER_GIT=push\n"), "{env}");
+    assert!(
+        env.contains(&format!("VISSUE_ROOT={}\n", tracker.display())),
+        "{env}"
+    );
+    assert!(
+        env.contains(&format!("LJOS_TRACKER_REMOTE={}\n", origin.display())),
+        "{env}"
+    );
+    let mcp = fs::read_to_string(home.join(".cursor/mcp.json")).unwrap();
+    assert!(mcp.contains("\"LJOS_TRACKER_GIT\": \"push\""), "{mcp}");
+
+    std::env::remove_var("LJOS_TRACKER_SEARCH");
+    let again = ljos_cli::cloud::up(false).unwrap();
+    assert!(again.contains("tracker: updated"), "{again}");
+}
+
+#[test]
+fn a_tracker_token_stays_private_and_answers_for_the_clone() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, origin) = tracker_vm(root.path());
+    let hosted = "https://github.com/example/tracker";
+    let cfg = root.path().join("gitconfig");
+    fs::write(
+        &cfg,
+        format!(
+            "[url \"{}\"]\n\tinsteadOf = https://x-access-token@github.com/example/tracker\n\
+             [url \"https://x-access-token:machine-token@github.com/\"]\n\tinsteadOf = https://github.com/\n",
+            origin.display()
+        ),
+    )
+    .unwrap();
+    std::env::set_var("LJOS_TRACKER_REMOTE", hosted);
+    std::env::set_var("LJOS_TRACKER_TOKEN", "tracker-secret");
+    let said = ljos_cli::cloud::up(false).unwrap();
+    assert!(said.contains("tracker: cloned"), "{said}");
+    assert!(!said.contains("tracker-secret"), "{said}");
+
+    let file = home.join(".config/ljos/tracker.token");
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    assert_eq!(fs::read_to_string(&file).unwrap().trim(), "tracker-secret");
+    for written in [home.join(".config/ljos/env"), home.join(".cursor/mcp.json")] {
+        let text = fs::read_to_string(&written).unwrap();
+        assert!(!text.contains("tracker-secret"), "{}", written.display());
+        assert!(text.contains(hosted), "{text}");
+    }
+
+    let tracker = home.join(".local/share/ljos/tracker");
+    assert_eq!(
+        git(&tracker, &["config", "--get", "remote.origin.url"]).trim(),
+        "https://x-access-token@github.com/example/tracker"
+    );
+    let mut fill = Command::new("git")
+        .arg("-C")
+        .arg(&tracker)
+        .args(["credential", "fill"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    fill.stdin
+        .take()
+        .unwrap()
+        .write_all(b"protocol=https\nhost=github.com\nusername=x-access-token\n\n")
+        .unwrap();
+    let out = fill.wait_with_output().unwrap();
+    let answer = String::from_utf8_lossy(&out.stdout);
+    assert!(answer.contains("password=tracker-secret\n"), "{answer}");
+
+    fs::write(&file, "rotated\n").unwrap();
+    let mut fill = Command::new("git")
+        .arg("-C")
+        .arg(&tracker)
+        .args(["credential", "fill"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    fill.stdin
+        .take()
+        .unwrap()
+        .write_all(b"protocol=https\nhost=github.com\nusername=x-access-token\n\n")
+        .unwrap();
+    let out = fill.wait_with_output().unwrap();
+    let answer = String::from_utf8_lossy(&out.stdout);
+    assert!(answer.contains("password=rotated\n"), "{answer}");
+}
+
+#[test]
+fn a_tracker_clone_that_fails_names_the_fix_and_finishes_cloud_up() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _origin) = tracker_vm(root.path());
+    std::env::set_var(
+        "LJOS_TRACKER_REMOTE",
+        "https://x-access-token:leaked-token@127.0.0.1:1/example/tracker",
+    );
+    let said = ljos_cli::cloud::up(false).unwrap();
+    assert!(said.contains("tracker: clone of"), "{said}");
+    assert!(said.contains("LJOS_TRACKER_TOKEN"), "{said}");
+    assert!(said.contains("no shared tracker"), "{said}");
+    assert!(!said.contains("leaked-token"), "{said}");
+    assert!(
+        said.contains("\nguard: "),
+        "the later steps still ran: {said}"
+    );
+    let env = fs::read_to_string(home.join(".config/ljos/env")).unwrap();
+    assert!(!env.contains("LJOS_TRACKER_GIT=push"), "{env}");
+    assert!(!env.contains("leaked-token"), "{env}");
+    let mcp = fs::read_to_string(home.join(".cursor/mcp.json")).unwrap();
+    assert!(!mcp.contains("LJOS_TRACKER_GIT"), "{mcp}");
+}
+
 #[test]
 fn cloud_up_puts_ljos_mcp_on_path_before_the_config() {
     let _g = Guard::new();

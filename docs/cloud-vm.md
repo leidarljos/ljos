@@ -67,6 +67,8 @@ The step fetches the latest release's script. v0.33.0 and later take `--cloud`. 
 
 `install` runs once, on the image build. `start` runs on every boot. The harness can sync an MCP config from another machine over the file `install` wrote, and the tracker clone has to be fetched again, so `start` runs `ljos cloud up` as well. Nothing waits on `start`.
 
+The harness can list the plugin's tools before `install` or `start` has run. It starts `bin/ljos-plugin` with only `HOME`, `PATH`, `SHELL`, `TERM`, `USER` and `LOGNAME` set. The launcher looks on PATH, then in `~/.local/bin` and `~/.cargo/bin`. On a cloud VM it then fetches `ljos` and `ljos-mcp` from the release that matches the plugin's version. It checks the tarball's SHA-256 before it installs anything into `~/.local/bin`. A second launcher waits for the first to finish. `LJOS_PLUGIN_FETCH=0` turns the fetch off, and `LJOS_PLUGIN_FETCH=1` turns it on away from a cloud VM. `LJOS_RELEASE_DIR` reads the tarball from a directory instead of GitHub. `LJOS_BIN_DIR` moves the install.
+
 This repository:
 
 ```json
@@ -87,7 +89,13 @@ Another repository:
 }
 ```
 
-Set `LJOS_TRACKER_REMOTE` in the environment. The tracker repository has to be one the git credentials on the machine can clone. The URL stays out of `environment.json`. Set `LJOS_CLOUD_AGE_SECRET` to the name of the secret that holds the age identity for scope `cloud`. The identity stays out of `environment.json` too.
+Set `LJOS_TRACKER_REMOTE` in the environment. The tracker repository has to be one the git credentials on the machine can clone. The URL stays out of `environment.json`.
+
+The machine's own git token often reaches only the workspace repository. Set `LJOS_TRACKER_TOKEN` to a token that can push to the tracker. `cloud up` keeps it in `~/.config/ljos/tracker.token`, mode 0600. The clone fetches and pushes through `https://x-access-token@HOST/PATH`, and its only credential helper reads that file. A global URL rewrite for the workspace token does not match that URL. Writing a new token to the file is enough, and the next push uses it.
+
+Without `LJOS_TRACKER_REMOTE`, the clone an earlier boot made names the remote. Failing that, a checkout of a tracker in `/workspace` or directly inside it does. A tracker checkout holds `vissue.toml` or a `Software/<project>/issues.org`. A checkout whose origin is the named remote lends its fetch URL, so the clone gets the credentials the environment gave it. `LJOS_TRACKER_SEARCH` replaces `/workspace` with a list of directories.
+
+A clone that fails does not stop `cloud up`. The line names the remote without its token and says what to set. The machine then runs with no shared tracker, and the MCP entry does not claim push mode. Set `LJOS_CLOUD_AGE_SECRET` to the name of the secret that holds the age identity for scope `cloud`. The identity stays out of `environment.json` too.
 
 `cloud up` rewrites the harness MCP command to `ljos-mcp` when PATH already runs this install, and to the absolute path when another copy or none would run. A claim, a note and a vote then push to the tracker, and another clone sees them after a fetch. A `STARTED` claim this seat made on this machine whose program has exited returns to `TODO` after `LJOS_LEASE_SECS`. A claim whose program is still running stays, and so does every claim another machine holds. The tracker URL has to be one the machine's git credentials can clone.
 

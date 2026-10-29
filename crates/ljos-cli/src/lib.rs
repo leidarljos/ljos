@@ -64,6 +64,7 @@ pub mod slot;
 pub mod subagent;
 pub mod sync;
 pub mod tools;
+mod tracker_attach;
 mod tracker_push;
 pub mod tree_cleanup;
 pub mod turn_record;
