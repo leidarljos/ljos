@@ -73,6 +73,7 @@ pub mod swap_log;
 pub mod sync;
 pub mod tools;
 mod tracker_attach;
+pub mod tracker_place;
 mod tracker_push;
 pub mod tracker_sync;
 pub mod tree_cleanup;
@@ -14401,10 +14402,21 @@ fn tracker_step(dry: bool) -> Step {
         detail,
         ok,
     };
+    // A tracker is never made or named inside a checkout of something
+    // else. Its files are not that project's files, and the first
+    // `git add -A` there would commit them. A path the checkout already
+    // ignores is nobody's files and may stay.
+    let misplaced = |root: &Path| -> Option<String> {
+        let repo = tracker_place::product_repo(root)?;
+        (!tracker_place::kept_out(&repo, root)).then(|| tracker_place::refusal(root, &repo))
+    };
     for key in ["ISSUE_ROOT", "VISSUE_ROOT"] {
         if let Some(root) = named_env(key) {
             let detail = format!("{key}={root} names the tracker");
             let path = PathBuf::from(&root);
+            if let Some(why) = misplaced(&path) {
+                return step(format!("{detail}, and {why}"), false);
+            }
             if !dry && path.is_dir() {
                 if let Err(e) = tracker_push::prepare_tracker(&path, true, false) {
                     return step(format!("{detail}; merge setup: {e}"), false);
@@ -14432,6 +14444,9 @@ fn tracker_step(dry: bool) -> Step {
         .find(|l| l.split('=').next().is_some_and(|k| k.trim() == "root"))
     {
         let detail = format!("{} sets {}", cfg.display(), line.trim());
+        if let Some(why) = path_from_root_line(line).and_then(|path| misplaced(&path)) {
+            return step(format!("{detail}, and {why}"), false);
+        }
         if !dry {
             if let Some(path) = path_from_root_line(line) {
                 if path.is_dir() {
@@ -14442,6 +14457,9 @@ fn tracker_step(dry: bool) -> Step {
             }
         }
         return step(detail, true);
+    }
+    if let Some(why) = misplaced(&root) {
+        return step(why, false);
     }
     if dry {
         return step(
@@ -36307,6 +36325,10 @@ pub fn identity_or_seat(identity: Option<&str>) -> Option<String> {
 /// with the same session, a subagent's included. The seat argument is not
 /// copied onto the session.
 pub fn bind_connection_env(cmd: &mut std::process::Command) {
+    // The tracker goes with the connection: a habitat started from a
+    // product checkout must write to the seat's tracker, not to the
+    // directory it happened to stand in. See [`tracker_place::bind_root`].
+    tracker_place::bind_root(cmd);
     cmd.env("LJOS_PROCESS_NONCE", ballot_sig::process_nonce());
     let id = ballot_sig::identity();
     if id.harness != "-" && !id.seat_only() {

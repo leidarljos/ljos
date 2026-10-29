@@ -67,6 +67,10 @@ ljos doctor
 finds. `ljos onboard --dry-run` shows what it would write. `ljos onboard --example`
 lists the runners ljos knows. `ljos doctor` says which part does not answer.
 
+Onboard never makes a tracker inside a checkout of another project, since that
+project's next `git add -A` would commit it. It names the checkout and asks for a
+`VISSUE_ROOT` outside it. A path the checkout already ignores is fine.
+
 Codex runs a hook only after you trust it. Open `/hooks` in Codex and trust each
 ljos hook after `ljos onboard`, and again after an upgrade.
 
