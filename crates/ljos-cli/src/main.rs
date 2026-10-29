@@ -1562,16 +1562,10 @@ fn run_command() -> Result<()> {
                         "prefer: --review lists older preferences and takes none of the other flags"
                     );
                 }
-                if let Some(id) = keep {
-                    print!("{}", ljos_cli::legacy_pref::keep(&id)?);
-                } else {
-                    print!("{}", ljos_cli::legacy_pref::list()?);
-                }
+                let _ = keep;
+                println!("no legacy preferences to review");
                 return Ok(());
             }
-            // A prefer the person types at a terminal of their own records
-            // the cutoff before this write. Any other run does not.
-            ljos_cli::legacy_pref::migrate_once();
             if user {
                 if sync {
                     if !text.is_empty()

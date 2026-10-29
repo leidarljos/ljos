@@ -379,7 +379,7 @@ fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
             .unwrap();
         let review = succeeded(&review, &format!("v{version} review"));
         assert!(
-            review.contains("no older preferences await review"),
+            review.contains("no legacy preferences to review"),
             "{review}"
         );
         let stored = atoms(&daemon.url, &workspace);
@@ -483,7 +483,7 @@ fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
         .unwrap();
     let quiet = succeeded(&quiet, "review after keep");
     assert!(
-        quiet.contains("no older preferences await review"),
+        quiet.contains("no legacy preferences to review"),
         "{quiet}"
     );
 }

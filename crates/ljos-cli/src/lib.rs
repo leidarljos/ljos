@@ -36,7 +36,6 @@ pub mod hud;
 pub mod idle_drop;
 pub mod jev;
 mod kept_prompt;
-pub mod legacy_pref;
 pub mod mail;
 pub mod mailbox;
 mod memlock;
@@ -378,14 +377,6 @@ pub fn session_start_for(session: Option<&str>) -> String {
     if let Some(issue) = bookkeep::session_issue(session) {
         if !line.contains(&issue) {
             line.push_str(&format!(" This session's issue is {issue}."));
-        }
-    }
-    if let Ok(got) = &atoms {
-        let held = legacy_pref::awaiting(got);
-        if !held.is_empty() {
-            line.push(' ');
-            line.push_str(&legacy_pref::review_sentence(&held));
-            line.push('.');
         }
     }
     let held_rules = user_rules::held_count();
@@ -20412,30 +20403,21 @@ pub fn preferences_line(enforced: usize, could: usize, total: usize) -> String {
 fn preferences_row() -> Habitat {
     // The doctor records the cutoff only with the person at a terminal of
     // their own. Without them the call does nothing and the row reports.
-    legacy_pref::migrate_once();
     let listed = pack().and_then(|client| {
         atoms_lean(&client, &client.workspace()).context("preferences: GET /v1/atoms failed")
     });
-    let (state, held) = match listed {
+    let state = match listed {
         Ok(atoms) => {
-            let held_rows = legacy_pref::awaiting(&atoms);
-            let held = held_rows.len();
             let (enforced, could, total) =
                 preferences_enforced(&preferences_of(&atoms), &rules_of(&atoms, true));
-            let mut line = preferences_line(enforced, could, total);
-            if held > 0 {
-                line.push_str(&format!("; {}", legacy_pref::review_sentence(&held_rows)));
-            }
-            (line, held)
+            preferences_line(enforced, could, total)
         }
-        Err(e) => (format!("not counted: {e:#}"), 0),
+        Err(e) => format!("not counted: {e:#}"),
     };
     Habitat {
         name: "preferences",
         state,
-        // Held-back preferences are a warning the short doctor shows.
-        // They do not mean the seat failed to start.
-        ok: held == 0,
+        ok: true,
     }
 }
 
