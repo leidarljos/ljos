@@ -224,8 +224,8 @@ There are four answers. =allow= runs the command. =ask= shows the runner's permi
 prompt, and you answer it. =deny= stops the command and names the rule. =rewrite= is coming
 in 0.35.0. It replaces the command with a fixed one and lets that one run.
 The answer is =allow=, =rewrite= and the new command, separated by tabs.
-A log of rewrites is coming in 0.35.0. So is a per-repository switch: =rewrite = false= turns
-rewriting off for that repository.
+Each rewrite leaves a note and a row in =$XDG_DATA_HOME/ljos/rewrite.jsonl=. A repository's
+=rewrite = false= turns rewriting off there.
 
 A force push to =main=, =master=, =develop= or a protected branch asks. An ordinary push of a
 branch runs. A push onto a protected branch also asks when the ticket of your sitting has no

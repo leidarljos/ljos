@@ -218,10 +218,10 @@ command, separated by tabs.
 The new command runs only when the guard also allows it. Claude Code, Codex, Grok Build
 and Cursor's `preToolUse` take it back from the hook and run it. A runner that has no
 field for this gets a refusal that names the new command, so the old line never runs.
+Each swap also shows a note naming both commands and leaves a row in
+`$XDG_DATA_HOME/ljos/rewrite.jsonl`. Set `rewrite = false` in a repository's
+`ljos.toml` to run its lines as written. The log keeps a row for a swap it declined too.
 policyd keeps a log of what it denies.
-
-Coming in 0.35.0: a log of rewrites, and a per-repository switch. Setting `rewrite = false`
-turns rewriting off for that repository.
 
 ### The two checks ljos keeps
 

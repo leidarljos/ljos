@@ -304,8 +304,9 @@ Cursor's =preToolUse= take it through the hook's updated input. Other runners ge
 that names the new command, so the old line never runs. =ljos policy -- COMMAND=
 prints the answer without running anything, so you can see a rewrite before an agent meets it.
 
-Two parts of the rewrite are coming in 0.35.0 as well. One is a log of rewrites. The other is a switch
-for one repository: set =rewrite = false= there, and policyd stops fixing commands in it.
+Each swap also shows a note naming both commands and leaves a row in
+=$XDG_DATA_HOME/ljos/rewrite.jsonl=. Set =rewrite = false= in a repository's
+=ljos.toml= to run its lines as written. The log keeps a row for a swap it declined too.
 
 * Choose which branches the push check covers
 

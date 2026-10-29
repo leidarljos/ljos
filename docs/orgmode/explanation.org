@@ -91,8 +91,8 @@ Cursor's =preToolUse= accept an updated command from the hook, and ljos hands th
 through that field. A runner without that field gets a refusal that names the new command, so the
 old line never runs. policyd writes a log of what it denies.
 
-Two more parts are coming in 0.35.0. One is a log of rewrites. The other is a per-repository
-switch: =rewrite = false= turns rewriting off for that repository.
+Each swap also shows a note naming both commands and keeps a row in
+=$XDG_DATA_HOME/ljos/rewrite.jsonl=. A repository's =rewrite = false= runs its lines as written.
 
 ** The two checks ljos keeps
 

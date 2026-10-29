@@ -14,6 +14,7 @@
 | =prefer TEXT [--deny PATTERN] [--ask PATTERN] [--user --why REASON]= | pack, user config | one standing preference, origin =user-declared=; each =--deny= or =--ask= also writes that rule with the preference as its reason, so the hook enforces it. =--user= writes a user rule instead, shared by every seat on this machine, never reviewed, and not also stored as a seat preference; =--why= is required with it. See [[*User rules][User rules]] |
 | =accept ID [--quote WORDS --at TIME --via SEAT]= | pack | promote one open proposal from L0 (=derived=) to =explicit= and write it into the pack; the origin stays; under an agent runner, only a proposal another conversation filed, or one the person said yes to in their own words; =--quote= takes those words, =--at= when they were said, RFC 3339, and =--via= the seat that carried them, all three together, and the acceptance keeps them; a proposal the same text already wrote with =remember= or =prefer= is not written again |
 | =forget ID [--why DEED]= | pack | tombstone a claim, naming the deed that withdrew it |
+| =retire-notes= | pack | tombstone the note memories an older =ljos note= wrote; runs once per seat, and the tracker copies stay |
 | =search QUERY [-n N] [--rerank] [--as-of TIME] [--explain]= | pack | ranked claims with how many scorers named each and its age; =--rerank= scores the top hits with the writer's cross-encoder; =--as-of= asks the pack as it stood then; =--explain= opens with what the score and the fraction mean |
 | =timeline ISSUE [-n N]= | tracker, deed store, pack | the logbook, the cited deeds and the activated memories as one dated list, oldest first, each line with its age and the gap since the one before |
 | =consolidate [--apply]= | pack | the pairs where a later claim rewrites an earlier one; =--apply= closes the earlier ones' windows |
@@ -44,6 +45,8 @@
 | =record check DIR= / =record check --tracker ROOT= | none / tracker | =DIR= holds schema-v1 question and ballot entries; =--tracker= holds every ballot under =ROOT=, a persona's and a judge's included, to one test: the voter's newest =ballot-sig:= note names the choice, verifies, and is under the key =.ljos-seat-keys= pins for that voter and no other seat. One =FILE:LINE: ISSUE: REASON= line per ballot that does not stand, and exit 1. An unsigned ballot committed before signing began is legacy. It only reads, so CI can run it |
 | =file TITLE [--parent ID\vert --top] [-p PROJECT] [-t TYPE] [--tags T] [--priority P] [--body TEXT]= | tracker | file work found while sitting: a child of the held issue unless =--parent= names another or =--top= none, in the parent's project; a projected board takes it into its inbox under the printed id; the tracker file is committed |
 | =note ID TEXT...= | tracker | a dated progress note on the issue, committed; on an issue another seat holds it says so: the note is an assist, and =ljos send= reaches the holder; the note stays on the ticket and is never written into memory |
+| =withdraw ID [--note TEXT] [--as NAME]= | tracker | take back this seat's own ballot, or with =--note= a note it wrote; nothing is deleted, and the withdrawal is a dated note beside it; =--as= names the persona a ballot was cast under |
+| =reopen ID= | tracker | put a finished or cancelled issue back to the state the close took it from, whoever closed it; a person has to be present; the close stays on the logbook with the reopen under it, and the caller does not take the claim |
 | =log --seat SEAT= | tracker | tracker commits by one seat. The subject is =chore(issues): ID VERB by SEAT= |
 | =usage --since YYYY-MM-DD= | tracker | how many tracker commits each seat made from that day on |
 | =digest [since TIME or last] [--json]= | tracker, deed, pack | one view of what each seat did, newest first: tickets filed, claimed and closed, votes, consensus, deeds, claims, guard refusals and rewrites, and memory. last continues from the previous run |
@@ -427,7 +430,10 @@ On the wire, a rewrite is one line of three tab-separated fields: =allow=, =rewr
 The new line runs only when the guard also allows it. The hook hands it back as the updated input for
 Claude Code, Codex, Grok Build and Cursor's =preToolUse=. A runner without that field gets a refusal that
 names the new command, so the old line never runs. The first rewrite runs the command through =uv run=.
-A log of rewrites and a per-repository switch, =rewrite = false=, are coming in 0.35.0 too.
+
+Each swap also shows a note naming both commands and leaves a row in
+=$XDG_DATA_HOME/ljos/rewrite.jsonl=. Set =rewrite = false= in a repository's
+=ljos.toml= to run its lines as written. The log keeps a row for a swap it declined too.
 
 If =ljos-policyd= is missing, slow or crashes, the command runs and ljos logs a warning.
 Nothing in ljos turns a fault into a refusal.

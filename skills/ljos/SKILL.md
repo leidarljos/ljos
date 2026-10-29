@@ -306,12 +306,12 @@ is active for this seat. The person at their own terminal is never gated.
   as a child; the same objection is not filed again. A round count does
   not close the issue. When the seats still split, the reading names the
   open objection children. A person closes the ticket.
-  `ljos reopen ISSUE` puts back the state from before a close this program
-  wrote, and only that close. A person has to be present. The close is a
-  tracker commit whose own diff adds the DONE line and the logbook line.
-  A subject alone is not that record, and a logbook line only in the
-  working tree is not either. A process `LJOS_SEAT` has to match the
-  seat file. The caller does not take the claim.
+  `ljos reopen ISSUE` puts a finished or cancelled issue back to the state
+  the close took it from, whoever closed it. A person has to be present.
+  The close stays on the logbook, with the reopen under it as a dated
+  note. The caller does not take the claim. `ljos withdraw ISSUE` takes
+  back this seat's ballot, and `ljos withdraw ISSUE --note TEXT` takes
+  back a note it wrote. The note stays, with the withdrawal under it.
   A tally printed later is
   who voted. On a hard question the ballot carries the private forecast
   of the others, `ljos vote ISSUE --for OPTION --expect OPTION`; `ljos predict`
