@@ -8,8 +8,8 @@ core.tools_tokens: 7857
 core.sha256: 88ee109da2a1cf77658c7bfdf9156b15ba75b806b7804d96cba39f5cbc4a743b
 core.names: ljos_rule ljos_request_approval ljos_prefer ljos_remember ljos_search ljos_start ljos_guard_check ljos_file ljos_options ljos_note ljos_recall ljos_sitting ljos_finish ljos_claim ljos_release ljos_send ljos_inbox ljos_reply ljos_vote ljos_consensus ljos_doctor
 all.tools: 52
-all.tokens: 17706
+all.tokens: 17748
 all.instructions_tokens: 215
-all.tools_tokens: 17491
-all.sha256: 7cb10b10f472df641953fd59a2adb5abccd8449ddab8f2d1bfadbaeef118ec67
+all.tools_tokens: 17533
+all.sha256: 88d5efd808864eb5e120a68182b385af244f4e33ac38570ccd6574089725d6dc
 all.names: ljos_rule ljos_request_approval ljos_prefer ljos_remember ljos_search ljos_start ljos_guard_check ljos_file ljos_options ljos_note ljos_recall ljos_sitting ljos_finish ljos_claim ljos_release ljos_send ljos_inbox ljos_reply ljos_vote ljos_consensus ljos_doctor ljos_bump_plan ljos_calibrate ljos_cards ljos_complete ljos_conflicts ljos_consolidate ljos_current ljos_deed ljos_due ljos_evidence ljos_findings ljos_forget ljos_graded ljos_group ljos_habit ljos_handover ljos_island ljos_learn ljos_mail_search ljos_mail_show ljos_policy ljos_predict ljos_read ljos_receive ljos_timeline ljos_trust ljos_brief ljos_persona ljos_personas ljos_playbook ljos_playbooks
