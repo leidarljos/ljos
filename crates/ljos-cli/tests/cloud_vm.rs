@@ -1130,20 +1130,21 @@ fn cloud_up_command(root: &Path, bin: &Path, path: &str) -> String {
         .to_string()
 }
 
-/// Putting the install dir first reaches this process and shells that
-/// read the edited profile. A client started any other way keeps the
-/// PATH `cloud up` found, so the bare name is written only when that PATH
-/// already runs this install. A trailing slash or a symlink names the
-/// same directory.
+/// A client spawns the server with a PATH of its own, which neither this
+/// process nor the edited profile reaches. So the entry names the install
+/// by its absolute path, even when the PATH `cloud up` found already runs
+/// it, and a client whose PATH finds a stale copy first still starts this
+/// install.
 #[test]
-fn cloud_up_writes_the_bare_name_only_when_path_already_runs_this_install() {
+fn cloud_up_writes_the_absolute_server_whatever_path_it_found() {
     let _g = Guard::new();
-    for (shape, bare) in [
-        ("{stale}:/usr/bin:/bin", false),
-        ("{stale}:{bin}/:/usr/bin:/bin", false),
-        ("{stale}:{link}:/usr/bin:/bin", false),
-        ("{bin}/:/usr/bin:/bin", true),
-        ("{link}:{stale}:/usr/bin:/bin", true),
+    for shape in [
+        "{stale}:/usr/bin:/bin",
+        "{stale}:{bin}/:/usr/bin:/bin",
+        "{stale}:{link}:/usr/bin:/bin",
+        "{bin}/:/usr/bin:/bin",
+        "{link}:{stale}:/usr/bin:/bin",
+        "{bin}:/usr/bin:/bin",
     ] {
         let root = tempfile::tempdir().unwrap();
         let bin = root.path().join("custom/bin");
@@ -1157,12 +1158,22 @@ fn cloud_up_writes_the_bare_name_only_when_path_already_runs_this_install() {
             .replace("{stale}", stale.to_str().unwrap())
             .replace("{bin}", bin.to_str().unwrap())
             .replace("{link}", link.to_str().unwrap());
-        let want = if bare {
-            "ljos-mcp".to_string()
-        } else {
-            bin.join("ljos-mcp").display().to_string()
-        };
-        assert_eq!(cloud_up_command(root.path(), &bin, &path), want, "{shape}");
+        let command = cloud_up_command(root.path(), &bin, &path);
+        assert_eq!(
+            command,
+            bin.join("ljos-mcp").display().to_string(),
+            "{shape}"
+        );
+        let client = Command::new(&command)
+            .env_clear()
+            .env("PATH", format!("{}:/usr/bin:/bin", stale.display()))
+            .env("HOME", root.path().join("elsewhere"))
+            .output()
+            .unwrap();
+        assert!(
+            client.status.success(),
+            "{shape}: a client with the stale copy first on PATH ran {command}: {client:?}"
+        );
     }
 }
 

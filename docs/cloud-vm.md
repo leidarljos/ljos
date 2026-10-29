@@ -1,6 +1,6 @@
 # A fresh machine
 
-`ljos cloud up` installs `ljos`, `ljos-mcp`, `ljos-policyd`, and `packsetd` when the release lists it, into `~/.local/bin`, and on a cloud VM the encoder `packset-embed`. It checks the SHA-256 sums, puts that directory first on PATH for this process and in `~/.profile` and `~/.bashrc`, then writes `~/.cursor/mcp.json`. The command is `ljos-mcp` when PATH already runs this install as `cloud up` starts, and the absolute path otherwise, since a client that does not read the edited profile keeps the PATH it had. It clones `LJOS_TRACKER_REMOTE`. Run it again and it refreshes the clone and the MCP command, rewrites env-owned wake entries from `LJOS_WAKE_<SEAT>_URL`, and refreshes the scope `cloud` age identity from the named secret.
+`ljos cloud up` installs `ljos`, `ljos-mcp`, `ljos-policyd`, and `packsetd` when the release lists it, into `~/.local/bin`, and on a cloud VM the encoder `packset-embed`. It checks the SHA-256 sums, puts that directory first on PATH for this process and in `~/.profile` and `~/.bashrc`, then writes `~/.cursor/mcp.json`. The command is always the absolute path of `ljos-mcp`. A client that spawns servers with its own PATH never reads the edited profile, and it still starts this install. It clones `LJOS_TRACKER_REMOTE`. Run it again and it refreshes the clone and the MCP command, rewrites env-owned wake entries from `LJOS_WAKE_<SEAT>_URL`, and refreshes the scope `cloud` age identity from the named secret.
 
 `sh scripts/install.sh --cloud` is the same bootstrap. When the binaries are already installed and `ljos cloud up` answers, that command is all that runs. `--force` downloads again. From this repository, if the installed `ljos` has no `cloud up`, the script builds this tree's `ljos` and `ljos-mcp` and leaves them in place.
 
@@ -101,7 +101,7 @@ Without `LJOS_TRACKER_REMOTE`, the clone an earlier boot made names the remote. 
 
 A clone that fails does not stop `cloud up`. The line names the remote without its token and says what to set. The machine then runs with no shared tracker, and the MCP entry does not claim push mode. Set `LJOS_CLOUD_AGE_SECRET` to the name of the secret that holds the age identity for scope `cloud`. The identity stays out of `environment.json` too.
 
-`cloud up` rewrites the harness MCP command to `ljos-mcp` when PATH already runs this install, and to the absolute path when another copy or none would run. A claim, a note and a vote then push to the tracker, and another clone sees them after a fetch. A `STARTED` claim this seat made on this machine whose program has exited returns to `TODO` after `LJOS_LEASE_SECS`. A claim whose program is still running stays, and so does every claim another machine holds. The tracker URL has to be one the machine's git credentials can clone.
+`cloud up` rewrites the harness MCP command to the absolute path of this install, whatever PATH the client has. A claim, a note and a vote then push to the tracker, and another clone sees them after a fetch. A `STARTED` claim this seat made on this machine whose program has exited returns to `TODO` after `LJOS_LEASE_SECS`. A claim whose program is still running stays, and so does every claim another machine holds. The tracker URL has to be one the machine's git credentials can clone.
 
 ## Deeds
 

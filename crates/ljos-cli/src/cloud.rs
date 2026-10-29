@@ -3,8 +3,8 @@
 //! `ljos cloud up` installs the release binaries into `~/.local/bin`,
 //! checks the published SHA-256 sums, puts that directory first on PATH,
 //! writes the harness MCP command, and clones `LJOS_TRACKER_REMOTE`.
-//! The command is the bare name when PATH already runs this install, and
-//! the absolute path when another copy or none would run. It writes a
+//! The command is always the absolute path, so a client with another PATH
+//! still starts this install. It writes a
 //! webhook wake for each `LJOS_WAKE_<SEAT>_URL`. Entries this command
 //! writes are marked `source = "env"`; any other wake stays. When
 //! `LJOS_CLOUD_AGE_SECRET` names an environment variable, it writes that
@@ -83,18 +83,11 @@ pub fn up_at(force: bool, repoint: bool) -> Result<String> {
     lines.push(ensure_binaries(&bin_dir, force)?);
     lines.push(ensure_encoder(&bin_dir, force)?);
     let server = bin_dir.join("ljos-mcp");
-    // Moving this directory first reaches this process and shells that
-    // read the edited profile, not a client started some other way. The
-    // bare name is only safe when PATH already runs this install, so the
-    // choice is made before PATH moves.
-    let plan = if server.is_file() {
-        crate::server_command_plan(&server, "cloud up")
-    } else {
-        crate::ServerCommandPlan {
-            command: crate::MCP_SERVER_COMMAND.to_string(),
-            note: None,
-        }
-    };
+    // The harness spawns servers with a PATH of its own, which no edited
+    // profile reaches, so the entry names the install by its absolute path.
+    // The note still says what the PATH cloud up started with would run.
+    let mut plan = crate::server_command_plan(&server, "cloud up");
+    plan.command = server.display().to_string();
     lines.push(ensure_process_path(&bin_dir));
 
     if agent_id().is_some() && seat_matches_file() {
@@ -2607,19 +2600,7 @@ fn write_mcp(
     });
     let path = home.join(".cursor/mcp.json");
     crate::set_json_entry(&path, "/mcpServers/ljos", &entry)?;
-    let mut line = if command == crate::MCP_SERVER_COMMAND {
-        format!(
-            "mcp: {} starts {command} on PATH ({})",
-            path.display(),
-            server.display()
-        )
-    } else {
-        format!(
-            "mcp: {} starts {command} ({})",
-            path.display(),
-            server.display()
-        )
-    };
+    let mut line = format!("mcp: {} starts {command}", path.display());
     if let Some(note) = &plan.note {
         line.push_str("; ");
         line.push_str(note);
