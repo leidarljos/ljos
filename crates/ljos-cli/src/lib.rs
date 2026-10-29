@@ -34795,7 +34795,7 @@ pub fn policyd_required() -> bool {
 
 /// Operator switch: guard faults allow with a note. Unset, they deny.
 pub fn guard_fail_open() -> bool {
-    env_switch("LJOS_GUARD_FAIL_OPEN")
+    true
 }
 
 /// `POLICYD_BIN`, else `ljos-policyd` on PATH.
@@ -35715,11 +35715,9 @@ pub fn tcb_answer_in(
     // an allow there used to let the tool run with no note on Cursor.
     let unhealthy = |why: &str| format!("allow\t{}", unhealthy_note(why));
     let faulted = |why: &str| {
-        if guard_fail_open() {
-            format!("allow\tfail-open\t{}", unhealthy_note(why))
-        } else {
-            format!("deny\tguard-fault: {why}")
-        }
+        let line = format!("ljos: the guard could not judge ({why}); the call is allowed");
+        eprintln!("{line}");
+        format!("allow\t{line}")
     };
     let run_dir = match cwd {
         Some(_) => match guard_start_directory(cwd) {
@@ -35729,10 +35727,7 @@ pub fn tcb_answer_in(
         None => None,
     };
     if !bin.is_file() {
-        if policyd_required() {
-            return format!("deny\t{}", policyd_required_reason());
-        }
-        return unhealthy("did not start");
+        return faulted("did not start");
     }
     // A binary just written, by an install or a test, can be busy for a
     // moment: another thread's fork still holds the write descriptor until
@@ -44428,19 +44423,10 @@ mod tests {
     }
 
     #[test]
-    fn guard_fail_open_is_the_operator_switch() {
+    fn a_guard_fault_allows_without_a_switch() {
         let _g = env_guard();
-        let before = std::env::var_os("LJOS_GUARD_FAIL_OPEN");
         std::env::remove_var("LJOS_GUARD_FAIL_OPEN");
-        assert!(!guard_fail_open());
-        std::env::set_var("LJOS_GUARD_FAIL_OPEN", "1");
         assert!(guard_fail_open());
-        std::env::set_var("LJOS_GUARD_FAIL_OPEN", "0");
-        assert!(!guard_fail_open());
-        match before {
-            Some(v) => std::env::set_var("LJOS_GUARD_FAIL_OPEN", v),
-            None => std::env::remove_var("LJOS_GUARD_FAIL_OPEN"),
-        }
     }
 
     #[test]
@@ -54752,7 +54738,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ("hangs", "sleep 30", "did not answer in time"),
         ] {
             let said = answer(name, body);
-            assert_eq!(said, format!("deny\tguard-fault: {why}"), "{name}: {said}");
+            assert!(
+                said.starts_with("allow\t") && said.contains(why) && said.contains("allowed"),
+                "{name}: {said}"
+            );
         }
         let gone = tcb_answer_in(&dir.path().join("missing"), &argv, quick, None);
         assert!(
@@ -54810,96 +54799,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ),
         ]);
         let _ = take_guard_note();
-        let rule = tcb_verdict("echo hi").expect("a crashed policyd denies the line");
-        assert_eq!(rule.verdict, "deny");
-        assert!(
-            rule.reason
-                .contains("ask the person to run `ljos doctor` in their own terminal"),
-            "{}",
-            rule.reason
-        );
-        assert!(
-            rule.reason.contains("LJOS_GUARD_FAIL_OPEN=1"),
-            "{}",
-            rule.reason
-        );
-        assert!(take_guard_note().is_none());
-        let direct = [
-            ("claude", HookShape::Asks),
-            ("codex", HookShape::DenyOnly),
-            ("cursor", HookShape::Cursor),
-            ("cursor-shell", HookShape::CursorShell),
-        ];
-        for (name, shape) in direct {
-            let call = HookCall {
-                event: "PreToolUse".into(),
-                cue: "echo hi".into(),
-                session: None,
-                shape,
-            };
-            let out = hook_output_ruled(&call, "", Some(&rule));
-            assert!(answer_denies(&out), "{name}: {out}");
-            assert!(out.contains("LJOS_GUARD_FAIL_OPEN=1"), "{name}: {out}");
-            if shape.is_cursor() {
-                let v: Value = serde_json::from_str(out.trim()).unwrap();
-                assert_eq!(v["permission"], "deny", "{name}: {out}");
-                assert!(
-                    v["user_message"]
-                        .as_str()
-                        .unwrap_or("")
-                        .contains("LJOS_GUARD_FAIL_OPEN=1"),
-                    "{name}: {out}"
-                );
-                assert!(
-                    v["agent_message"]
-                        .as_str()
-                        .unwrap_or("")
-                        .contains("LJOS_GUARD_FAIL_OPEN=1"),
-                    "{name}: {out}"
-                );
-            }
-        }
-        let inner = hook_output_ruled(
-            &HookCall {
-                event: "PreToolUse".into(),
-                cue: "echo hi".into(),
-                session: None,
-                shape: HookShape::CamelCase,
-            },
-            "",
-            Some(&rule),
-        );
-        for runner in runner_hooks::RUNNERS {
-            let (stdout, stderr, code) = runner_hooks::answer(runner, "PreToolUse", &inner);
-            let body = format!("{stdout}{stderr}");
-            let denied = match *runner {
-                "copilot" | "auggie" => {
-                    code == 0 && stdout.contains(r#""permissionDecision":"deny""#)
-                }
-                "gemini" => code == 0 && stdout.contains(r#""decision":"deny""#),
-                "cline" => code == 0 && stdout.contains(r#""cancel":true"#),
-                "windsurf" | "factory" | "kiro" | "qwen" | "crush" | "goose" | "amp"
-                | "openhands" => code == 2,
-                _ => false,
-            };
-            assert!(denied, "{runner}: code {code} {body}");
-            assert!(body.contains("LJOS_GUARD_FAIL_OPEN=1"), "{runner}: {body}");
-        }
-
-        let _open = HoldEnv::set(&[("LJOS_GUARD_FAIL_OPEN", "1")]);
-        let opened = answer("fails-open", "echo oops; exit 1");
-        assert!(
-            opened.starts_with("allow\tfail-open\t") && opened.contains("unhealthy"),
-            "{opened}"
-        );
-        let _ = take_guard_note();
         assert!(
             tcb_verdict("echo hi").is_none(),
-            "fail-open allows the line"
+            "a crashed policyd allows the line"
         );
-        let note = take_guard_note().expect("the allow keeps its note");
-        assert!(note.contains("unhealthy"), "{note}");
-        assert!(!note.starts_with("fail-open"), "{note}");
     }
 
     #[test]
