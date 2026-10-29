@@ -4,10 +4,21 @@
 
 use std::ffi::c_char;
 
+#[cfg(target_os = "linux")]
 extern "C" {
     pub fn ljos_test_enter_cgroup(dir: *const c_char) -> i32;
     pub fn ljos_test_session_cgroup();
 }
+
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn ljos_test_enter_cgroup(_dir: *const c_char) -> i32 {
+    -1
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn ljos_test_session_cgroup() {}
 
 /// Address of the mover. A test binary keeps a pointer to it so the
 /// linker pulls the object, constructor included.

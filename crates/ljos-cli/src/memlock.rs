@@ -109,7 +109,7 @@ impl Locked {
     }
 
     /// Whether the system locked the buffer.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn is_locked(&self) -> bool {
         self.locked
     }

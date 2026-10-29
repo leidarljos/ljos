@@ -1,7 +1,7 @@
 //! Processes above this one, each named by its pid and its start time, so
 //! a pid the kernel has since handed to another process is not taken for
-//! the one that was recorded. Read from `/proc`; elsewhere every list is
-//! empty and nothing is alive.
+//! the one that was recorded. Read from `/proc` on Linux and `libproc` and
+//! `sysctl` on macOS; elsewhere every list is empty and nothing is alive.
 
 use std::path::{Path, PathBuf};
 
@@ -33,6 +33,7 @@ struct Stat {
     start: u64,
 }
 
+#[cfg(target_os = "linux")]
 fn stat(pid: u32) -> Option<Stat> {
     let raw = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let open = raw.find('(')?;
@@ -46,6 +47,46 @@ fn stat(pid: u32) -> Option<Stat> {
         ppid: rest.get(1)?.parse().ok()?,
         start: rest.get(19)?.parse().ok()?,
     })
+}
+
+#[cfg(target_os = "macos")]
+fn stat(pid: u32) -> Option<Stat> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    // SAFETY: the buffer is a zeroed proc_bsdinfo of the size passed.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            libc::c_int::try_from(pid).ok()?,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            std::ptr::addr_of_mut!(info).cast(),
+            size,
+        )
+    };
+    if n != size {
+        return None;
+    }
+    let comm: Vec<u8> = info
+        .pbi_comm
+        .iter()
+        .take_while(|c| **c != 0)
+        .map(|c| c.to_ne_bytes()[0])
+        .collect();
+    let start = info
+        .pbi_start_tvsec
+        .saturating_mul(1_000_000)
+        .saturating_add(info.pbi_start_tvusec);
+    Some(Stat {
+        comm: String::from_utf8_lossy(&comm).into_owned(),
+        dead: info.pbi_status == libc::SZOMB,
+        ppid: info.pbi_ppid,
+        start,
+    })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn stat(_pid: u32) -> Option<Stat> {
+    None
 }
 
 /// The process `pid` names now.
@@ -85,35 +126,8 @@ pub fn ancestors() -> Vec<Proc> {
 }
 
 /// `pid`'s parent and its own name.
-#[cfg(not(target_os = "macos"))]
 fn parent_and_name(pid: u32) -> Option<(u32, String)> {
     stat(pid).map(|s| (s.ppid, s.comm))
-}
-
-#[cfg(target_os = "macos")]
-fn parent_and_name(pid: u32) -> Option<(u32, String)> {
-    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
-    // SAFETY: the buffer is a zeroed proc_bsdinfo of the size passed.
-    let n = unsafe {
-        libc::proc_pidinfo(
-            libc::c_int::try_from(pid).ok()?,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            std::ptr::addr_of_mut!(info).cast(),
-            size,
-        )
-    };
-    if n != size {
-        return None;
-    }
-    let comm: Vec<u8> = info
-        .pbi_comm
-        .iter()
-        .take_while(|c| **c != 0)
-        .map(|c| c.to_ne_bytes()[0])
-        .collect();
-    Some((info.pbi_ppid, String::from_utf8_lossy(&comm).into_owned()))
 }
 
 fn split_environ(raw: &[u8]) -> Vec<(String, String)> {
@@ -128,7 +142,7 @@ fn split_environ(raw: &[u8]) -> Vec<(String, String)> {
 
 /// The environment `pid` was started with. A program it runs can set its
 /// own variables, but cannot change what its parent was started with.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 #[must_use]
 pub fn environ(pid: u32) -> Option<Vec<(String, String)>> {
     std::fs::read(format!("/proc/{pid}/environ"))
@@ -137,8 +151,7 @@ pub fn environ(pid: u32) -> Option<Vec<(String, String)>> {
 }
 
 #[cfg(target_os = "macos")]
-#[must_use]
-pub fn environ(pid: u32) -> Option<Vec<(String, String)>> {
+fn procargs2_buf(pid: u32) -> Option<Vec<u8>> {
     let mut mib = [
         libc::CTL_KERN,
         libc::KERN_PROCARGS2,
@@ -175,6 +188,13 @@ pub fn environ(pid: u32) -> Option<Vec<(String, String)>> {
         return None;
     }
     buf.truncate(size);
+    Some(buf)
+}
+
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn environ(pid: u32) -> Option<Vec<(String, String)>> {
+    let buf = procargs2_buf(pid)?;
     // argc, the executable path and its padding, argc words, then the
     // environment up to an empty string.
     let argc = usize::try_from(i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?)).ok()?;
@@ -190,6 +210,125 @@ pub fn environ(pid: u32) -> Option<Vec<(String, String)>> {
         .flat_map(|w| w.iter().copied().chain([0]))
         .collect();
     Some(split_environ(&env))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[must_use]
+pub fn environ(_pid: u32) -> Option<Vec<(String, String)>> {
+    None
+}
+
+/// The command-line words of `pid`.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn argv(pid: u32) -> Option<Vec<String>> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let words: Vec<String> = raw
+        .split(|b| *b == 0)
+        .filter(|w| !w.is_empty())
+        .map(|w| String::from_utf8_lossy(w).into_owned())
+        .collect();
+    (!words.is_empty()).then_some(words)
+}
+
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn argv(pid: u32) -> Option<Vec<String>> {
+    let buf = procargs2_buf(pid)?;
+    let argc = usize::try_from(i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?)).ok()?;
+    if argc == 0 {
+        return None;
+    }
+    let words: Vec<String> = buf[4..]
+        .split(|b| *b == 0)
+        .skip(1)
+        .skip_while(|w| w.is_empty())
+        .take(argc)
+        .filter(|w| !w.is_empty())
+        .map(|w| String::from_utf8_lossy(w).into_owned())
+        .collect();
+    (!words.is_empty()).then_some(words)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[must_use]
+pub fn argv(_pid: u32) -> Option<Vec<String>> {
+    None
+}
+
+/// The executable path of `pid`.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn exe(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn exe(pid: u32) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut buf = [0u8; 4096];
+    // SAFETY: proc_pidpath writes at most `buf.len()` bytes into `buf`.
+    let len = unsafe {
+        libc::proc_pidpath(
+            libc::c_int::try_from(pid).ok()?,
+            buf.as_mut_ptr().cast(),
+            u32::try_from(buf.len()).ok()?,
+        )
+    };
+    let len = usize::try_from(len)
+        .ok()
+        .filter(|&n| n > 0 && n <= buf.len())?;
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..len])))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[must_use]
+pub fn exe(_pid: u32) -> Option<PathBuf> {
+    None
+}
+
+/// The working directory of `pid`.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn cwd(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn cwd(pid: u32) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_vnodepathinfo>()).ok()?;
+    // SAFETY: the buffer is a zeroed proc_vnodepathinfo of the size passed.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            libc::c_int::try_from(pid).ok()?,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            std::ptr::addr_of_mut!(info).cast(),
+            size,
+        )
+    };
+    if n != size {
+        return None;
+    }
+    let bytes: Vec<u8> = info
+        .pvi_cdir
+        .vip_path
+        .iter()
+        .flatten()
+        .take_while(|c| **c != 0)
+        .map(|c| c.to_ne_bytes()[0])
+        .collect();
+    (!bytes.is_empty()).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(&bytes)))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[must_use]
+pub fn cwd(_pid: u32) -> Option<PathBuf> {
+    None
 }
 
 /// The process the nearest runner on this process's chain started: the
@@ -229,8 +368,7 @@ pub fn alive(p: &Proc) -> bool {
 pub fn boot() -> &'static str {
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     BOOT.get_or_init(|| {
-        std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
-            .ok()
+        raw_boot_id()
             .map(|s| {
                 s.trim()
                     .chars()
@@ -241,6 +379,37 @@ pub fn boot() -> &'static str {
             .filter(|s: &String| !s.is_empty())
             .unwrap_or_else(|| "-".into())
     })
+}
+
+#[cfg(target_os = "linux")]
+fn raw_boot_id() -> Option<String> {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()
+}
+
+#[cfg(target_os = "macos")]
+fn raw_boot_id() -> Option<String> {
+    let mut buf = [0u8; 64];
+    let mut size = buf.len();
+    // SAFETY: buf holds `size` bytes, and sysctlbyname writes at most `size`.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"kern.bootsessionuuid".as_ptr(),
+            buf.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || size == 0 {
+        return None;
+    }
+    let end = buf[..size].iter().position(|&b| b == 0).unwrap_or(size);
+    String::from_utf8(buf[..end].to_vec()).ok()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn raw_boot_id() -> Option<String> {
+    None
 }
 
 /// `p` as one word that names it on this machine and boot.
@@ -778,20 +947,17 @@ impl From<&std::fs::Metadata> for Owner {
 /// the caller holds for `file`. `None` unless every component above
 /// `file` is a directory and the file the walk ends on is a regular
 /// file that is `expect`.
-#[cfg(target_os = "linux")]
 fn pinned_walk(file: &Path, expect: (u64, u64)) -> Option<Vec<Owner>> {
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
     use std::os::unix::ffi::OsStrExt as _;
     use std::os::unix::fs::MetadataExt as _;
+    #[cfg(target_os = "linux")]
+    let flags = libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     let open = |dir: libc::c_int, name: &std::ffi::CStr| {
         // SAFETY: name is NUL-terminated, and openat only reads it.
-        let fd = unsafe {
-            libc::openat(
-                dir,
-                name.as_ptr(),
-                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
+        let fd = unsafe { libc::openat(dir, name.as_ptr(), flags) };
         // SAFETY: a descriptor openat returned is open and owned here.
         (fd >= 0).then(|| std::fs::File::from(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) }))
     };
@@ -817,11 +983,6 @@ fn pinned_walk(file: &Path, expect: (u64, u64)) -> Option<Vec<Owner>> {
         owners.push(Owner::from(&meta));
     }
     (meta.is_file() && expect == (meta.dev(), meta.ino())).then_some(owners)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn pinned_walk(_file: &Path, _expect: (u64, u64)) -> Option<Vec<Owner>> {
-    None
 }
 
 /// Whether a Nix store and an entry in it are as Nix leaves them, so
@@ -901,7 +1062,6 @@ fn runner_at(
 /// Whether `path` is a runtime ([`RUNTIMES`]) by its exact name, and
 /// an installed copy kept as a runner file is ([`runner_of_file`]):
 /// below an install root, left to the person, and the file `expect`.
-#[cfg(target_os = "linux")]
 fn runtime_of_file(
     path: &Path,
     home: Option<&Path>,
@@ -970,29 +1130,44 @@ fn walk_kept(owners: &[Owner], at: usize, in_store: bool, person: &Person) -> bo
     top && owners[at..].iter().all(|dir| person_keeps(*dir, person))
 }
 
+#[cfg(target_os = "linux")]
+fn running_exe(pid: u32) -> Option<(PathBuf, Option<(u64, u64)>)> {
+    use std::os::unix::fs::MetadataExt as _;
+    let path = format!("/proc/{pid}/exe");
+    let exe = std::fs::read_link(&path).ok()?;
+    let running = std::fs::metadata(&path)
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()));
+    Some((exe, running))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn running_exe(pid: u32) -> Option<(PathBuf, Option<(u64, u64)>)> {
+    use std::os::unix::fs::MetadataExt as _;
+    let exe = exe(pid)?;
+    let running = std::fs::metadata(&exe)
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()));
+    Some((exe, running))
+}
+
 /// The runner `pid` is, from the file the kernel runs it from, never
 /// from the name it gives itself. An installed runtime such as `node`
 /// ([`runtime_of_file`]) is the runner whose script it runs, that
 /// script's path resolved on disk and judged as a runner file is. The
 /// script's path comes from the process's own arguments, so only a
 /// runtime the person installed is believed about it.
-#[cfg(target_os = "linux")]
 #[must_use]
 pub fn exe_runner(pid: u32) -> Option<&'static str> {
-    use std::os::unix::fs::MetadataExt as _;
-    let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
-    let running = std::fs::metadata(format!("/proc/{pid}/exe"))
-        .ok()
-        .map(|meta| (meta.dev(), meta.ino()));
+    let (exe, running) = running_exe(pid)?;
     let script = || {
-        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-        let script = cmdline
-            .split(|b| *b == 0)
+        let words = argv(pid)?;
+        let script = words
+            .into_iter()
             .skip(1)
-            .map(String::from_utf8_lossy)
             .find(|a| !a.is_empty() && !a.starts_with('-'))?;
-        let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
-        Some(cwd.join(script.as_ref()))
+        let cwd = cwd(pid)?;
+        Some(cwd.join(script))
     };
     let home = own_home();
     let person = Person::new(&SystemAccounts);
@@ -1011,7 +1186,6 @@ pub fn exe_runner(pid: u32) -> Option<&'static str> {
 /// script a runtime there runs. `None` when `running` could not be
 /// read, since the path alone may name another file than the one the
 /// process runs.
-#[cfg(target_os = "linux")]
 fn runner_from(
     exe: &Path,
     running: Option<(u64, u64)>,
@@ -1031,14 +1205,6 @@ fn runner_from(
     let script = std::fs::canonicalize(script()?).ok()?;
     let meta = std::fs::metadata(&script).ok()?;
     runner_of_file(&script, home, store, person, (meta.dev(), meta.ino()))
-}
-
-/// Off Linux there is no `/proc/<pid>/exe` to read nor a descriptor
-/// walk ([`pinned_walk`]), so no process is an installed runner.
-#[cfg(not(target_os = "linux"))]
-#[must_use]
-pub fn exe_runner(_pid: u32) -> Option<&'static str> {
-    None
 }
 
 /// Editors and agents. A server whose chain still holds one of these is
@@ -1240,27 +1406,16 @@ fn bare_hook_command(cmd: &str) -> bool {
 /// command: a shell by the file it runs from, started as `SHELL -c CMD`
 /// with [`bare_hook_command`] for CMD. `dash` forks that command rather
 /// than replacing itself with it.
-#[cfg(target_os = "linux")]
 fn hook_shell(pid: u32) -> bool {
-    let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe")) else {
+    let Some(exe) = exe(pid) else {
         return false;
     };
     let shell = exe
         .file_name()
         .and_then(|f| f.to_str())
         .is_some_and(|f| SHELLS.contains(&f));
-    let argv: Vec<String> = std::fs::read(format!("/proc/{pid}/cmdline"))
-        .unwrap_or_default()
-        .split(|b| *b == 0)
-        .map(|a| String::from_utf8_lossy(a).into_owned())
-        .collect();
-    shell
-        && matches!(argv.as_slice(), [_, c, cmd, last] if c == "-c" && last.is_empty() && bare_hook_command(cmd))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn hook_shell(_pid: u32) -> bool {
-    false
+    let words = argv(pid).unwrap_or_default();
+    shell && matches!(words.as_slice(), [_, c, cmd] if c == "-c" && bare_hook_command(cmd))
 }
 
 /// The nearest process above this one that is a runner by the file the
@@ -1328,9 +1483,12 @@ fn current_sid() -> Result<u32, String> {
 
 fn here_evidence() -> Result<Here, String> {
     let sid = current_sid()?;
+    #[cfg(target_os = "linux")]
     let cgroup = std::fs::read_to_string("/proc/self/cgroup").map_err(|_| {
         "the cgroup cannot be read, so a tool call cannot be told from the runner".to_string()
     })?;
+    #[cfg(not(target_os = "linux"))]
+    let cgroup = format!("sid:{sid}");
     if cgroup.is_empty() {
         return Err("the cgroup is empty, so a tool call cannot be told from the runner".into());
     }

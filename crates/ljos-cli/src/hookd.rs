@@ -498,7 +498,17 @@ fn same_user(stream: &UnixStream) -> bool {
     rc == 0 && cred.uid == unsafe { libc::geteuid() }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn same_user(stream: &UnixStream) -> bool {
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    // SAFETY: getpeereid writes the peer's euid and egid into the two locals.
+    let rc = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+    // SAFETY: geteuid only reads the process identity.
+    rc == 0 && uid == unsafe { libc::geteuid() }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn same_user(_stream: &UnixStream) -> bool {
     true
 }

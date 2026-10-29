@@ -2475,16 +2475,8 @@ fn tmux_pane_conversation(sock: &str, pane: Option<&str>) -> Option<String> {
         .unwrap_or(chain.len());
     let mut active_texts: Vec<String> = Vec::new();
     for (pid, _) in &chain[..stop] {
-        #[cfg(not(target_os = "linux"))]
-        let _ = pid;
-        #[cfg(target_os = "linux")]
-        if let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) {
-            let s = raw
-                .split(|b| *b == 0)
-                .filter(|w| !w.is_empty())
-                .map(|w| String::from_utf8_lossy(w).into_owned())
-                .collect::<Vec<_>>()
-                .join(" ");
+        if let Some(words) = proc_tree::argv(*pid) {
+            let s = words.join(" ");
             if !s.is_empty() {
                 active_texts.push(s);
             }
@@ -3021,28 +3013,56 @@ fn ps_bin() -> &'static str {
     "/bin/ps"
 }
 
-/// macOS has no procfs. `/bin/ps` prints the parent and the short command name.
-#[cfg(target_os = "macos")]
-fn parent_and_comm(pid: u32) -> Option<(u32, String)> {
-    let out = std::process::Command::new(ps_bin())
+/// Whether `pid` still exists in the kernel: `kill(pid, 0)` succeeds or
+/// refuses with `EPERM`. `ESRCH` and out-of-range pids are gone.
+#[cfg(any(test, target_os = "macos"))]
+fn pid_exists(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: signal 0 probes whether `pid` exists without sending a signal.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+/// Run `ps` to read `pid`'s parent and short command name. `Err(())` when
+/// `ps` could not be run, printed malformed output, or exited non-zero while
+/// `pid` still exists; `Ok(None)` when `pid` is gone; `Ok(Some((ppid, comm)))`
+/// when `ps` named it.
+#[cfg(any(test, target_os = "macos"))]
+fn ps_parent_and_comm(ps: &Path, pid: u32) -> Result<Option<(u32, String)>, ()> {
+    let out = std::process::Command::new(ps)
         .args(["-o", "ppid=,comm=", "-p", &pid.to_string()])
         .output()
-        .ok()?;
+        .map_err(|_| ())?;
     if !out.status.success() {
-        return None;
+        return if pid_exists(pid) { Err(()) } else { Ok(None) };
     }
-    let text = String::from_utf8(out.stdout).ok()?;
-    let line = text.lines().next()?.trim();
-    let (ppid, comm) = line.split_once(char::is_whitespace)?;
+    let text = String::from_utf8(out.stdout).map_err(|_| ())?;
+    let Some(line) = text.lines().next().map(str::trim).filter(|l| !l.is_empty()) else {
+        return if pid_exists(pid) { Err(()) } else { Ok(None) };
+    };
+    let (ppid, comm) = line.split_once(char::is_whitespace).ok_or(())?;
     let comm = comm.trim();
     if comm.is_empty() {
-        return None;
+        return Err(());
     }
     let comm = std::path::Path::new(comm)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(comm);
-    Some((ppid.parse().ok()?, comm.to_string()))
+    Ok(Some((ppid.parse().map_err(|_| ())?, comm.to_string())))
+}
+
+/// macOS has no procfs. `/bin/ps` prints the parent and the short command name.
+#[cfg(target_os = "macos")]
+fn parent_and_comm(pid: u32) -> Option<(u32, String)> {
+    ps_parent_and_comm(Path::new(ps_bin()), pid).ok().flatten()
 }
 
 #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
@@ -3213,6 +3233,7 @@ fn segment_names_runner(segment: &str, runners: &[String]) -> bool {
 
 /// Whether `text` is `/proc/self/cgroup` for a process still inside a
 /// runner's scope. Each line is `id:controllers:path`.
+#[cfg(any(test, target_os = "linux"))]
 fn cgroup_text_names_runner(text: &str, runners: &[String]) -> bool {
     text.lines().any(|line| {
         let path = line.rsplit_once(':').map_or(line, |(_, path)| path);
@@ -3224,6 +3245,7 @@ fn cgroup_text_names_runner(text: &str, runners: &[String]) -> bool {
 /// Whether `text` is a transient scope, the cgroup `systemd-run --scope`
 /// and a D-Bus `StartTransientUnit` of mode scope leave behind. The unit
 /// is named `run-*.scope`. A login is `session-*.scope` and is not this.
+#[cfg(any(test, target_os = "linux"))]
 fn cgroup_text_is_transient(text: &str) -> bool {
     text.lines().any(|line| {
         let path = line.rsplit_once(':').map_or(line, |(_, path)| path);
@@ -3590,7 +3612,7 @@ fn login_holder(comm: &str) -> bool {
 
 /// A multiplexer server daemonises, so pid 1 (or a subreaper) is its
 /// parent by design: that is not a process adopted after its parent died.
-#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn multiplexer(comm: &str) -> bool {
     let base = comm.split(':').next().unwrap_or(comm).trim();
     ["tmux", "screen", "zellij"]
@@ -3760,10 +3782,8 @@ fn host_at_terminal() -> bool {
     if launchd_without_tty(parent_name().as_deref(), tty) || ci_env_set() {
         return false;
     }
-    match at_terminal_with_responsible(tty, responsible_comm().as_deref(), &runner_names()) {
-        Some(present) => present,
-        None => false,
-    }
+    at_terminal_with_responsible(tty, responsible_comm().as_deref(), &runner_names())
+        .unwrap_or_default()
 }
 
 /// The command name of this process's parent.
@@ -3838,15 +3858,10 @@ const ENTRY_STEMS: &[&str] = &["index", "main", "cli", "server", "entry", "run",
 /// what ran that is neither a version (`2.1.266`) nor a place (`bin`,
 /// `versions`); for an interpreter, the script it was handed. Falls back
 /// to the kernel's short name.
-#[cfg(target_os = "linux")]
 fn program_name(pid: u32, comm: &str) -> String {
-    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-    let args: Vec<String> = cmdline
-        .split(|b| *b == 0)
-        .filter(|a| !a.is_empty())
-        .map(|a| String::from_utf8_lossy(a).into_owned())
-        .collect();
-    name_from_argv(&args).unwrap_or_else(|| comm.to_string())
+    proc_tree::argv(pid)
+        .and_then(|args| name_from_argv(&args))
+        .unwrap_or_else(|| comm.to_string())
 }
 
 /// [`program_name`] from an argv already split.
@@ -3890,11 +3905,6 @@ fn name_from_argv(args: &[String]) -> Option<String> {
         }
     }
     None
-}
-
-#[cfg(not(target_os = "linux"))]
-fn program_name(_pid: u32, comm: &str) -> String {
-    comm.to_string()
 }
 
 /// The program part of an argv's first word. Electron and Chromium apps
@@ -14981,12 +14991,18 @@ pub fn per_user_pack_port(uid: u32) -> u16 {
 /// The user id that owns the socket listening on TCP `port`, read from the
 /// kernel's socket tables (`/proc/net/tcp`, `/proc/net/tcp6`). `None` when
 /// nothing listens there, or off Linux where the tables are not files.
+#[cfg(target_os = "linux")]
 fn listener_uid(port: u16) -> Option<u32> {
     let tables: Vec<String> = ["/proc/net/tcp", "/proc/net/tcp6"]
         .iter()
         .filter_map(|p| std::fs::read_to_string(p).ok())
         .collect();
     listener_uid_in(&tables, port)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn listener_uid(_port: u16) -> Option<u32> {
+    None
 }
 
 /// [`listener_uid`] over the text of the tables. A row is `sl local remote
@@ -26742,6 +26758,7 @@ fn recorded_push_pid(log: &Path) -> Option<u32> {
 }
 
 /// A `git` process whose parent is the recorded push shell.
+#[cfg(target_os = "linux")]
 fn git_child_alive(parent: u32) -> bool {
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return false;
@@ -26774,6 +26791,35 @@ fn git_child_alive(parent: u32) -> bool {
             return true;
         }
     }
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn git_child_alive(parent: u32) -> bool {
+    let Ok(out) = std::process::Command::new(ps_bin())
+        .args(["-A", "-o", "ppid=,comm="])
+        .output()
+    else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let parent = parent.to_string();
+    String::from_utf8_lossy(&out.stdout).lines().any(|line| {
+        let Some((ppid, comm)) = line.trim().split_once(char::is_whitespace) else {
+            return false;
+        };
+        let base = Path::new(comm.trim())
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(comm.trim());
+        ppid == parent && base == "git"
+    })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn git_child_alive(_parent: u32) -> bool {
     false
 }
 
@@ -26967,9 +27013,7 @@ fn unpushed_drift(root: &Path, up: &str) -> Option<(String, bool)> {
 /// login runs with their resident memory. A kill within a day turns the
 /// row to `warn`: one kill took the encoder, the next the compositor.
 fn host_row() -> Habitat {
-    let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease")
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| "unknown kernel".into());
+    let kernel = kernel_release();
     let kills = oom_kills();
     let (servers, rss_kb) = ljos_mcp_servers();
     let mcp = format!("{servers} ljos-mcp, {} MB resident", rss_kb / 1024);
@@ -27003,6 +27047,32 @@ fn host_row() -> Habitat {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn kernel_release() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "unknown kernel".into())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn kernel_release() -> String {
+    let mut name: libc::utsname = unsafe { std::mem::zeroed() };
+    // SAFETY: uname fills the zeroed utsname buffer.
+    if unsafe { libc::uname(&mut name) } != 0 {
+        return "unknown kernel".into();
+    }
+    // SAFETY: release is a NUL-terminated string inside utsname.
+    let rel = unsafe { std::ffi::CStr::from_ptr(name.release.as_ptr()) }
+        .to_string_lossy()
+        .trim()
+        .to_string();
+    if rel.is_empty() {
+        "unknown kernel".into()
+    } else {
+        rel
+    }
+}
+
 /// How long an OOM kill keeps the host row failing.
 pub const OOM_RECENT_S: u64 = 86_400;
 
@@ -27030,10 +27100,17 @@ pub fn oom_recent(count: u64, seen: Option<(u64, u64)>, now: u64) -> (bool, (u64
 }
 
 /// OOM kills since boot, from `/proc/vmstat`; none where it is not.
+#[cfg(target_os = "linux")]
 fn oom_kills() -> Option<u64> {
     parse_oom_kills(&std::fs::read_to_string("/proc/vmstat").ok()?)
 }
 
+#[cfg(not(target_os = "linux"))]
+fn oom_kills() -> Option<u64> {
+    None
+}
+
+#[cfg(any(test, target_os = "linux"))]
 fn parse_oom_kills(vmstat: &str) -> Option<u64> {
     vmstat
         .lines()
@@ -27043,6 +27120,7 @@ fn parse_oom_kills(vmstat: &str) -> Option<u64> {
 
 /// The ljos-mcp processes of this user and their summed resident size in
 /// kB, from procfs.
+#[cfg(target_os = "linux")]
 fn ljos_mcp_servers() -> (usize, u64) {
     let uid = std::fs::read_to_string("/proc/self/status")
         .ok()
@@ -27071,7 +27149,42 @@ fn ljos_mcp_servers() -> (usize, u64) {
     (count, rss)
 }
 
+#[cfg(target_os = "macos")]
+fn ljos_mcp_servers() -> (usize, u64) {
+    let Ok(out) = std::process::Command::new(ps_bin())
+        .args(["-u", &euid().to_string(), "-o", "rss=,comm="])
+        .output()
+    else {
+        return (0, 0);
+    };
+    if !out.status.success() {
+        return (0, 0);
+    }
+    let mut count = 0;
+    let mut rss = 0u64;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let Some((rss_s, comm)) = line.trim().split_once(char::is_whitespace) else {
+            continue;
+        };
+        let base = Path::new(comm.trim())
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(comm.trim());
+        if base == "ljos-mcp" {
+            count += 1;
+            rss += rss_s.parse::<u64>().unwrap_or(0);
+        }
+    }
+    (count, rss)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn ljos_mcp_servers() -> (usize, u64) {
+    (0, 0)
+}
+
 /// The first number on a `/proc/*/status` line.
+#[cfg(any(test, target_os = "linux"))]
 fn status_field(status: &str, key: &str) -> Option<String> {
     status
         .lines()
@@ -30260,13 +30373,31 @@ fn read_hold(actor: &str) -> Option<Hold> {
     })
 }
 
+#[cfg(any(test, target_os = "macos"))]
+fn hold_alive_on_macos(hold: &Hold, ps: &Path) -> bool {
+    match ps_parent_and_comm(ps, hold.pid) {
+        Ok(Some((_, comm))) => comm == hold.comm,
+        Ok(None) => false,
+        Err(()) => true,
+    }
+}
+
 /// Whether the conversation that wrote a hold is still running: its
-/// process exists and is still the program it was. Off Linux nothing can
-/// be read, and an unknown conversation is taken as running.
+/// process exists and is still the program it was. When a process cannot
+/// be inspected, an unknown conversation is taken as running.
 fn hold_alive(hold: &Hold) -> bool {
-    match parent_and_comm(hold.pid) {
-        Some((_, comm)) => comm == hold.comm,
-        None => !cfg!(target_os = "linux"),
+    #[cfg(target_os = "linux")]
+    {
+        parent_and_comm(hold.pid).is_some_and(|(_, comm)| comm == hold.comm)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        hold_alive_on_macos(hold, Path::new(ps_bin()))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = hold;
+        true
     }
 }
 
@@ -32914,6 +33045,7 @@ pub fn orphaned_index_lock(dir: &Path) -> Option<String> {
 /// Whether a git process on this machine works in `top`, by its working
 /// directory. One whose directory cannot be read may be the holder, and
 /// counts.
+#[cfg(target_os = "linux")]
 fn git_runs_in(top: &Path) -> bool {
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return true;
@@ -32939,6 +33071,50 @@ fn git_runs_in(top: &Path) -> bool {
         }
     }
     false
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn git_runs_in_ps(top: &Path, ps_stdout: &str, cwd_of: impl Fn(u32) -> Option<PathBuf>) -> bool {
+    for line in ps_stdout.lines() {
+        let Some((pid_s, comm)) = line.trim().split_once(char::is_whitespace) else {
+            continue;
+        };
+        let Ok(pid) = pid_s.parse::<u32>() else {
+            continue;
+        };
+        let base = Path::new(comm.trim())
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(comm.trim());
+        if base != "git" && !base.starts_with("git-") {
+            continue;
+        }
+        match cwd_of(pid) {
+            Some(cwd) if cwd.starts_with(top) => return true,
+            None => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn git_runs_in(top: &Path) -> bool {
+    let Ok(out) = std::process::Command::new(ps_bin())
+        .args(["-A", "-o", "pid=,comm="])
+        .output()
+    else {
+        return true;
+    };
+    if !out.status.success() {
+        return true;
+    }
+    git_runs_in_ps(top, &String::from_utf8_lossy(&out.stdout), proc_tree::cwd)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn git_runs_in(_top: &Path) -> bool {
+    true
 }
 
 fn index_busy(out: &std::process::Output) -> bool {
@@ -41360,6 +41536,60 @@ mod tests {
         assert_eq!(newest(&hold_alive).as_deref(), Some("acme-live"));
         std::fs::remove_file(dir.path().join("hold-a")).unwrap();
         assert_eq!(newest(&hold_alive), None);
+    }
+
+    #[test]
+    fn a_failed_ps_on_macos_leaves_a_live_hold_alone_and_an_unreadable_git_cwd_holds_the_lock() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let script = |name: &str, body: &str| -> PathBuf {
+            let p = dir.path().join(name);
+            std::fs::write(&p, body).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let failing_ps = script("ps-fail", "#!/bin/sh\nexit 1\n");
+        let empty_ps = script("ps-empty", "#!/bin/sh\nexit 0\n");
+        let good_ps = script("ps-good", "#!/bin/sh\nprintf '1 /usr/bin/claude\\n'\n");
+        let hold = |pid: u32, comm: &str| Hold {
+            assignee: "sess-a".into(),
+            seat: "acme".into(),
+            pid,
+            comm: comm.into(),
+            since: "2026-09-27T10:00:00Z".into(),
+        };
+        let me = std::process::id();
+        assert!(
+            hold_alive_on_macos(&hold(me, "claude"), &dir.path().join("no-such-ps")),
+            "a missing ps is unknown, not dead"
+        );
+        assert!(
+            hold_alive_on_macos(&hold(me, "claude"), &failing_ps),
+            "a ps that exits 1 on a live pid is unknown, not dead"
+        );
+        assert!(
+            hold_alive_on_macos(&hold(me, "claude"), &empty_ps),
+            "a ps that prints nothing for a live pid is unknown, not dead"
+        );
+        assert!(
+            !hold_alive_on_macos(&hold(u32::MAX, "claude"), &failing_ps),
+            "a dead pid is not kept"
+        );
+        assert!(hold_alive_on_macos(&hold(me, "claude"), &good_ps));
+        assert!(!hold_alive_on_macos(&hold(me, "other"), &good_ps));
+
+        let top = Path::new("/work/repo");
+        assert!(!git_runs_in_ps(top, "100 /bin/bash\n", |_| None));
+        assert!(!git_runs_in_ps(top, "200 /usr/bin/git\n", |_| {
+            Some(PathBuf::from("/elsewhere"))
+        }));
+        assert!(git_runs_in_ps(top, "200 /usr/bin/git\n", |_| {
+            Some(PathBuf::from("/work/repo/sub"))
+        }));
+        assert!(
+            git_runs_in_ps(top, "200 /usr/bin/git\n", |_| None),
+            "an unreadable git cwd on macOS counts as a live holder"
+        );
     }
 
     #[test]
@@ -51888,8 +52118,13 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 None => std::env::remove_var("CURSOR_AGENT"),
             }
         }
-        let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
-        let scope = super::cgroup_read_is_runner(Ok(&text), &super::runner_names());
+        #[cfg(target_os = "linux")]
+        let scope = {
+            let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+            super::cgroup_read_is_runner(Ok(&text), &super::runner_names())
+        };
+        #[cfg(not(target_os = "linux"))]
+        let scope = super::runner_scope_or_tree();
         if scope {
             assert!(
                 at_terminal.0 && !at_terminal.1,
@@ -52006,8 +52241,13 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     #[test]
     fn this_process_follows_its_cgroup() {
         let _g = env_guard();
-        let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
-        let named = super::cgroup_read_is_runner(Ok(&text), &super::runner_names());
+        #[cfg(target_os = "linux")]
+        let named = {
+            let text = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+            super::cgroup_read_is_runner(Ok(&text), &super::runner_names())
+        };
+        #[cfg(not(target_os = "linux"))]
+        let named = super::runner_scope_or_tree();
         super::PERSON_AT_TERMINAL.with(|p| p.set(true));
         let under = super::under_a_runner();
         super::PERSON_AT_TERMINAL.with(|p| p.set(false));

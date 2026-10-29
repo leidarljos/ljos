@@ -3169,7 +3169,8 @@ pub const FORWARDED: &str = "LJOS_MCP_FORWARDED";
 
 /// The installed binary, when the one this server runs from has been
 /// replaced on disk since it started. A runner keeps its server for the
-/// whole conversation, so without this an install reached no running agent.
+/// whole conversation, so without this an install reaches no running session.
+#[cfg(target_os = "linux")]
 fn replaced_binary() -> Option<PathBuf> {
     if std::env::var_os(FORWARDED).is_some() {
         return None;
@@ -3178,6 +3179,24 @@ fn replaced_binary() -> Option<PathBuf> {
     let path = exe.to_str()?.strip_suffix(" (deleted)")?;
     let path = PathBuf::from(path);
     path.is_file().then_some(path)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn replaced_binary() -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt as _;
+    if std::env::var_os(FORWARDED).is_some() {
+        return None;
+    }
+    static STARTED: std::sync::OnceLock<Option<(PathBuf, u64, u64)>> = std::sync::OnceLock::new();
+    let (path, dev, ino) = STARTED
+        .get_or_init(|| {
+            let path = std::env::current_exe().ok()?;
+            let meta = std::fs::metadata(&path).ok()?;
+            Some((path, meta.dev(), meta.ino()))
+        })
+        .as_ref()?;
+    let now = std::fs::metadata(path).ok()?;
+    ((now.dev(), now.ino()) != (*dev, *ino) && path.is_file()).then(|| path.clone())
 }
 
 type ForwardReply = Result<serde_json::Value, serde_json::Value>;

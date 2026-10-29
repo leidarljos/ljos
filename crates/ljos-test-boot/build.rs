@@ -1,6 +1,9 @@
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/move.c");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
+        return;
+    }
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
     let obj = std::path::Path::new(&out_dir).join("move.o");
     let lib = std::path::Path::new(&out_dir).join("libljos_test_move.a");

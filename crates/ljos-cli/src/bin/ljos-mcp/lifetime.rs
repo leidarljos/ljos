@@ -27,6 +27,7 @@ pub fn settle_window() -> Duration {
 static IN_FLIGHT: Mutex<Vec<RequestId>> = Mutex::new(Vec::new());
 static READER: Mutex<Option<Waker>> = Mutex::new(None);
 static CLOSING: AtomicBool = AtomicBool::new(false);
+#[cfg(any(test, target_os = "linux"))]
 static PRCTL_LOGGED: AtomicBool = AtomicBool::new(false);
 /// Unix seconds of the last client request, or zero before the watch starts.
 static LAST_REQUEST: AtomicU64 = AtomicU64::new(0);
@@ -263,6 +264,7 @@ fn still_there(_watched: &Watched) -> bool {
 }
 
 /// Report one failed `PR_SET_PDEATHSIG`. Later failures stay quiet.
+#[cfg(any(test, target_os = "linux"))]
 fn note_prctl(rc: i32) {
     if rc == 0 || PRCTL_LOGGED.swap(true, Ordering::Relaxed) {
         return;

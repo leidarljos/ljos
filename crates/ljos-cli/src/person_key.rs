@@ -1441,14 +1441,18 @@ mod tests {
     fn pty_pair() -> (std::fs::File, std::fs::File) {
         use std::os::fd::FromRawFd as _;
         let (mut master, mut slave) = (-1, -1);
+        #[cfg(target_os = "macos")]
+        let (termios, winsize) = (std::ptr::null_mut(), std::ptr::null_mut());
+        #[cfg(not(target_os = "macos"))]
+        let (termios, winsize) = (std::ptr::null(), std::ptr::null());
         // SAFETY: openpty writes two fresh descriptors into the locals.
         let rc = unsafe {
             libc::openpty(
                 &mut master,
                 &mut slave,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
+                termios,
+                winsize,
             )
         };
         assert_eq!(rc, 0);

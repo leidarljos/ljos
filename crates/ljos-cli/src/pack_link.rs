@@ -151,6 +151,7 @@ fn foreign(url: &str) -> bool {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn loopback_port(url: &str) -> Option<u16> {
     let rest = url
         .strip_prefix("http://")
@@ -163,6 +164,7 @@ fn loopback_port(url: &str) -> Option<u16> {
     matches!(host, "127.0.0.1" | "localhost" | "[::1]").then_some(port)
 }
 
+#[cfg(target_os = "linux")]
 fn listen_uids(table: &str, port: u16) -> Vec<u32> {
     table
         .lines()

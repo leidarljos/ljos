@@ -161,11 +161,26 @@ fn raw_host() -> String {
     {
         return host;
     }
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
+    kernel_hostname()
         .map(|h| h.trim().to_string())
-        .ok()
         .filter(|h| !h.is_empty())
         .unwrap_or_else(|| "host".into())
+}
+
+#[cfg(target_os = "linux")]
+fn kernel_hostname() -> Option<String> {
+    std::fs::read_to_string("/proc/sys/kernel/hostname").ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn kernel_hostname() -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: gethostname writes at most `buf.len()` bytes into `buf`.
+    if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8(buf[..end].to_vec()).ok()
 }
 
 fn config_dir() -> PathBuf {

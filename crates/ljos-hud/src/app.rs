@@ -521,6 +521,7 @@ fn load_snap_with(cue: Option<String>) -> Task<Message> {
     )
 }
 
+#[cfg(target_os = "linux")]
 fn delayed_activate(attempt: u8) -> Task<Message> {
     let wait_ms = if attempt == 0 {
         30

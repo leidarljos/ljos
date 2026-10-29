@@ -22,6 +22,10 @@ impl Pty {
     #[must_use]
     pub fn open() -> Self {
         let (mut master, mut slave) = (-1, -1);
+        #[cfg(target_os = "macos")]
+        let (termios, winsize) = (std::ptr::null_mut(), std::ptr::null_mut());
+        #[cfg(not(target_os = "macos"))]
+        let (termios, winsize) = (std::ptr::null(), std::ptr::null());
         // SAFETY: openpty writes two descriptors into the locals; the name,
         // termios and winsize arguments may be null.
         let rc = unsafe {
@@ -29,8 +33,8 @@ impl Pty {
                 &mut master,
                 &mut slave,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
+                termios,
+                winsize,
             )
         };
         assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
