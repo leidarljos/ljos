@@ -32,7 +32,7 @@ Each seat signs its ballots and its handovers with `~/.local/share/ljos/seats/SE
 
 `ljos doctor` warns while the tracker has commits the remote lacks. A harness MCP command that will not run on this machine fails the `mcp` row. On a cloud VM, a codespace, or CI the row says to run `ljos cloud up`. Anywhere else it names `ljos onboard --harness` for that file, including Cursor's `mcp.json`. A desktop Cursor terminal sets `CURSOR_AGENT=1` and is not a cloud VM. CI counts by value: `GITHUB_ACTIONS=true`, `GITLAB_CI=true`, `CI=true`, `BUILDKITE=true`, `TF_BUILD=True`, `CIRCLECI=true`, or a `JENKINS_URL`. `false` is not a job. The row reads every harness file ljos writes.
 
-A `STARTED` claim whose process is gone, older than the lease (`LJOS_LEASE_SECS`, default 900 seconds), goes back to `TODO` when `ljos cloud up` or a sitting runs under `LJOS_TRACKER_GIT=push`. The release is pushed with the other tracker writes. A claim this machine still holds is kept. The hold is the nearest program above the command that is not a shell, and it keeps only the issue it names, for as long as that program is still running. `ljos claim` commits and pushes that issue the same way a note does.
+A `STARTED` claim this machine made, whose process is gone and that is older than the lease (`LJOS_LEASE_SECS`, default 900 seconds), goes back to `TODO` when a sitting runs under `LJOS_TRACKER_GIT=push`. `ljos cloud up` does the same for its own seat's claims only. The release is pushed with the other tracker writes. A claim is this machine's when a hold record here names it. A claim another machine or seat holds has no record here and stays, however old it is. A claim this machine still holds is kept. The hold is the nearest program above the command that is not a shell, and it keeps only the issue it names, for as long as that program is still running. `ljos claim` commits and pushes that issue the same way a note does.
 
 ## The encoder
 
@@ -89,7 +89,7 @@ Another repository:
 
 Set `LJOS_TRACKER_REMOTE` in the environment. The tracker repository has to be one the git credentials on the machine can clone. The URL stays out of `environment.json`. Set `LJOS_CLOUD_AGE_SECRET` to the name of the secret that holds the age identity for scope `cloud`. The identity stays out of `environment.json` too.
 
-`cloud up` rewrites the harness MCP command to `ljos-mcp` when PATH already runs this install, and to the absolute path when another copy or none would run. A claim, a note and a vote then push to the tracker, and another clone sees them after a fetch. A `STARTED` claim whose program has exited returns to `TODO` after `LJOS_LEASE_SECS`. A claim whose program is still running stays. The tracker URL has to be one the machine's git credentials can clone.
+`cloud up` rewrites the harness MCP command to `ljos-mcp` when PATH already runs this install, and to the absolute path when another copy or none would run. A claim, a note and a vote then push to the tracker, and another clone sees them after a fetch. A `STARTED` claim this seat made on this machine whose program has exited returns to `TODO` after `LJOS_LEASE_SECS`. A claim whose program is still running stays, and so does every claim another machine holds. The tracker URL has to be one the machine's git credentials can clone.
 
 ## Deeds
 
