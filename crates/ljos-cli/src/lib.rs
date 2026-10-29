@@ -4557,10 +4557,9 @@ pub fn derived_seat(who: &Seat) -> Option<Derived> {
 
 /// The seat a tracker write (note, claim, sitting, finish, file, deed) is
 /// made under. A seat taken from the process or the login is that seat.
-/// A seats file that is present still has to list it.
+/// The tracker's roster, when it lists seats, still has to name it.
 ///
-/// The seat is [`resolve_seat`]'s, the one `ljos seat` prints, so a
-/// conversation id `seats.toml` maps writes as that seat.
+/// The seat is [`resolve_seat`]'s, the one `ljos seat` prints.
 ///
 /// # Errors
 ///
@@ -4859,54 +4858,11 @@ pub fn format_seat_row() -> String {
 
 /// Who `ljos seat` and `ljos doctor` name.
 ///
-/// A call's seat, then a name from `LJOS_SEAT`, `VISSUE_AGENT` or
-/// `LJOS_HOLD`, with the source label [`whoami`] already gives those.
-/// With none of those, a Grok Bot conversation id is the seat: `seats.toml`,
-/// else `grokbot-` and the first eight characters. Otherwise [`whoami`].
+/// A call's seat, then the seat [`whoami`] names from `LJOS_SEAT`,
+/// `VISSUE_AGENT` or `LJOS_HOLD`. A conversation id does not name a seat.
 #[must_use]
 pub fn resolve_seat() -> Seat {
-    if let Ok(seat) = CALL_SEAT.try_with(Clone::clone) {
-        return seat;
-    }
-    if named_var("LJOS_SEAT").is_some()
-        || named_var("VISSUE_AGENT").is_some()
-        || (hold_env_allowed() && named_var("LJOS_HOLD").is_some())
-    {
-        return whoami();
-    }
-    if let Some(seat) = conversation_seat() {
-        return seat;
-    }
     whoami()
-}
-
-/// The seat a `CURSOR_CONVERSATION_ID` maps to, when nothing else named one.
-fn conversation_seat() -> Option<Seat> {
-    let id = cursor_conversation()?;
-    let id = id.as_str();
-    let (name, source) = match mapped_seat(&seats_file(), id) {
-        Some(name) => (name, "seats.toml"),
-        None => (fallback_seat(id)?, "CURSOR_CONVERSATION_ID"),
-    };
-    let slug = seat_slug(&name);
-    if slug == "runner" || omitted_actor_name(&slug) {
-        return None;
-    }
-    // `ljos claim` holds as `SEAT@TAG` once the seat is named. The hook
-    // used to hold as the bare mapped name, so one conversation had two.
-    Some(Seat {
-        holder: holder_for_session(&name, id),
-        seat: name,
-        source: source.to_string(),
-    })
-}
-
-/// The seat name for one Grok Bot conversation. `seats.toml` wins. An id
-/// that is not listed becomes `grokbot-` plus its first eight characters,
-/// never the raw id. A subagent's id has no seat of its own: `None`.
-#[must_use]
-pub fn seat_for_agent(id: &str) -> Option<String> {
-    mapped_seat(&seats_file(), id).or_else(|| fallback_seat(id))
 }
 
 thread_local! {
@@ -5305,11 +5261,10 @@ fn seated_name(raw: &str) -> Option<String> {
     (slug != "runner" && !omitted_actor_name(&slug)).then_some(slug)
 }
 
-/// The seat a git hook may book as. `LJOS_SEAT`, then `seats.toml` through
-/// `CURSOR_CONVERSATION_ID`, then `grokbot-` plus the first eight characters
-/// of that id, then `antigravity` when `ANTIGRAVITY_CONVERSATION_ID` is
-/// set, then `opencode` when `OPENCODE_SESSION_ID` is set. Nothing here
-/// reads the process tree. `None` means the hook does not book.
+/// The seat a git hook may book as. `LJOS_SEAT`, then `antigravity` when
+/// `ANTIGRAVITY_CONVERSATION_ID` is set, then `opencode` when
+/// `OPENCODE_SESSION_ID` is set. A conversation id does not name a seat.
+/// Nothing here reads the process tree. `None` means the hook does not book.
 #[must_use]
 pub fn git_hook_seat() -> Option<String> {
     if let Some(name) = named_var("LJOS_SEAT") {
@@ -5322,15 +5277,6 @@ pub fn git_hook_seat() -> Option<String> {
             return Some(seat);
         }
     }
-    if let Some(name) = grokbot_seat_name().filter(|name| {
-        if is_raw_subagent_name(name) {
-            return false;
-        }
-        let slug = seat_slug(name);
-        slug != "runner" && !omitted_actor_name(&slug)
-    }) {
-        return Some(name);
-    }
     if stamped_id("ANTIGRAVITY_CONVERSATION_ID").is_some() {
         return Some("antigravity".to_string());
     }
@@ -5340,17 +5286,8 @@ pub fn git_hook_seat() -> Option<String> {
     None
 }
 
-/// The seat `CURSOR_CONVERSATION_ID` maps to: `seats.toml`, else `grokbot-`
-/// plus the first eight characters. `None` when the variable is unset.
-/// [`format_seat_command`] prints that name alone when no seat was named.
-#[must_use]
-pub fn grokbot_seat_name() -> Option<String> {
-    seat_for_agent(&cursor_conversation()?)
-}
-
-/// Whether `CURSOR_CONVERSATION_ID` names a subagent that `seats.toml`
-/// does not list. Its commits are not booked; [`git_hook_seat`] callers
-/// say so instead of booking under `grokbot-sand-sub`.
+/// Whether `CURSOR_CONVERSATION_ID` names a subagent and no seat was
+/// named. Its commits are not booked; [`git_hook_seat`] callers say so.
 #[must_use]
 pub fn unseated_subagent() -> bool {
     let named = [
@@ -5364,8 +5301,7 @@ pub fn unseated_subagent() -> bool {
         // subagent. The name `grokbot-sand-sub` is not a seat.
         return set.iter().any(|name| is_raw_subagent_name(name));
     }
-    cursor_conversation()
-        .is_some_and(|id| subagent_id(&id) && mapped_seat(&seats_file(), &id).is_none())
+    cursor_conversation().is_some_and(|id| subagent_id(&id))
 }
 
 /// What a seat-bound command says to a subagent that has no seat.
@@ -5379,51 +5315,10 @@ pub fn subagent_id(id: &str) -> bool {
     id.starts_with("sand-sub")
 }
 
-fn fallback_seat(id: &str) -> Option<String> {
-    if subagent_id(id) {
-        return None;
-    }
-    let prefix: String = id.chars().take(8).collect();
-    Some(format!("grokbot-{prefix}"))
-}
-
-/// `seats.toml` in the ljos config directory, the base every user config
-/// layer is read from. No variable names another file: a shell that could
-/// point the check at a file of its own would pass it.
-fn seats_file() -> PathBuf {
-    config_base()
-        .unwrap_or_else(|| PathBuf::from(".config"))
-        .join("ljos")
-        .join("seats.toml")
-}
-
-fn mapped_seat(path: &Path, id: &str) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let table: toml::Table = toml::from_str(&text).ok()?;
-    match table.get(id)? {
-        toml::Value::String(name) => {
-            let name = name.trim();
-            if name.is_empty() {
-                None
-            } else {
-                Some(name.to_string())
-            }
-        }
-        _ => None,
-    }
-}
-
-/// What `ljos seat` prints. A conversation id with no named seat prints
-/// the mapped name alone, so a shell can export it. Every other resolution
-/// is the seat, holder and source [`format_seat_row`] uses.
+/// What `ljos seat` prints: the seat, holder and source.
 #[must_use]
 pub fn format_seat_command() -> String {
-    let seat = resolve_seat();
-    if seat.source == "seats.toml" || seat.source == "CURSOR_CONVERSATION_ID" {
-        format!("{}\n", seat.seat)
-    } else {
-        format_seat(&seat)
-    }
+    format_seat(&resolve_seat())
 }
 
 /// `ljos seat`: who is sitting, one field a line.
@@ -6423,7 +6318,7 @@ pub(crate) fn seat_env_text(name: &str) -> String {
 }
 
 /// Grok Bot has no prompt hook. An exported `LJOS_SEAT` is that seat.
-/// Otherwise the conversation id is looked up in `seats.toml` by `ljos seat`.
+/// A conversation id does not name one. A subagent with none is told so.
 /// Any other shell runner keeps an exported seat and otherwise uses its
 /// harness name.
 fn seat_lines(name: &str) -> String {
@@ -6431,24 +6326,10 @@ fn seat_lines(name: &str) -> String {
         return keep_seat_assignment(name);
     }
     format!(
-        "# Seat names live in ${{XDG_CONFIG_HOME:-$HOME/.config}}/ljos/seats.toml, read by `ljos seat`.\n\
-         # An unknown conversation id becomes grokbot-<first 8 characters>, never the raw id.\n\
+        "# An exported LJOS_SEAT is the seat. A conversation id does not name one.\n\
          # A subagent (sand-sub...) gets no seat: export the parent's LJOS_SEAT.\n\
-         # An exported LJOS_SEAT is kept; the conversation id does not replace it.\n\
-         if [ -z \"${{LJOS_SHELL_SESSION:-}}\" ]; then\n\
-         \texport LJOS_SHELL_SESSION=$$\n\
-         fi\n\
          case \"${{CURSOR_CONVERSATION_ID:-}}\" in\n\
          \tsand-sub*) [ -n \"${{LJOS_SEAT:-}}\" ] || echo \"ljos: a subagent has no seat of its own; export LJOS_SEAT=<the parent's seat>\" >&2 ;;\n\
-         \t*) if [ -z \"${{LJOS_SEAT:-}}\" ] && [ -n \"${{CURSOR_CONVERSATION_ID:-}}\" ]; then\n\
-         \t_ljos_named=$(ljos seat 2>/dev/null | head -n 1 | awk '{{ print $NF }}')\n\
-         \tcase \"$_ljos_named\" in\n\
-         \t\t\"\"|*[!A-Za-z0-9_-]*) LJOS_SEAT=grokbot-$(printf %.8s \"$CURSOR_CONVERSATION_ID\") ;;\n\
-         \t\t*) LJOS_SEAT=$_ljos_named ;;\n\
-         \tesac\n\
-         \texport LJOS_SEAT\n\
-         \tunset _ljos_named\n\
-         fi ;;\n\
          esac\n\
          {}",
         keep_seat_assignment(name)
@@ -44700,20 +44581,6 @@ mod tests {
         assert!(!same_seat("", "free-claude", &known));
     }
 
-    #[test]
-    fn an_unknown_agent_id_is_a_grokbot_prefix_not_the_raw_id() {
-        let id = "bc-1234abcd-rest";
-        assert_eq!(fallback_seat(id).as_deref(), Some("grokbot-bc-1234a"));
-        assert_ne!(fallback_seat(id).as_deref(), Some(id));
-        assert_eq!(fallback_seat("sand-subagent-0f3a"), None);
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("seats.toml");
-        std::fs::write(&path, format!("{id:?} = \"rgoswami\"\n")).unwrap();
-        assert_eq!(mapped_seat(&path, id).as_deref(), Some("rgoswami"));
-        assert_eq!(mapped_seat(&path, "other-id-9999"), None);
-        assert_eq!(mapped_seat(&dir.path().join("missing.toml"), id), None);
-    }
-
     /// A hook call is read from the runner's JSON or from plain text, and
     /// the answer is the runner's shape only when there is something to say.
     #[test]
@@ -48029,8 +47896,8 @@ mod tests {
             env.contains("export LJOS_SEAT=\"${LJOS_SEAT:-grokbot}\"\n"),
             "{env}"
         );
-        assert!(env.contains("ljos seat"), "{env}");
-        assert!(env.contains("seats.toml"), "{env}");
+        assert!(!env.contains("ljos seat"), "{env}");
+        assert!(!env.contains("seats.toml"), "{env}");
         assert!(env.contains("LJOS_SEAT is the name"), "{env}");
         assert!(
             env.contains("  export LJOS_SESSION_ID=grokbot-shell\nfi\n"),
@@ -55888,7 +55755,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     #[test]
-    fn the_doctor_seat_source_row_names_the_seat_a_conversation_maps_to() {
+    fn a_conversation_id_and_a_seats_file_do_not_name_the_seat() {
         let _env = env_guard();
         let keys = [
             "LJOS_SEAT",
@@ -55915,8 +55782,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 "0b1c2d3e-0000-4000-8000-000000000000",
             );
         }
-        let (row, seat) =
-            with_config_home(dir.path(), || (doctor_seat_source(), resolve_seat().seat));
+        let (row, seat) = with_config_home(dir.path(), || (doctor_seat_source(), resolve_seat()));
         unsafe {
             for (k, v) in saved {
                 match v {
@@ -55925,9 +55791,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 }
             }
         }
-        assert_eq!(seat, "saddle");
+        assert_ne!(seat.seat, "saddle");
+        assert!(!seat.source.contains("seats.toml"), "{seat:?}");
         assert!(row.ok, "{}", row.state);
-        assert_eq!(row.state, "saddle named by seats.toml");
+        assert!(!row.state.contains("seats.toml"), "{}", row.state);
     }
 
     #[test]

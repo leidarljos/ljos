@@ -197,39 +197,25 @@ fn with_no_roster_any_named_seat_writes_and_a_list_keeps_the_rest_out() {
 }
 
 #[test]
-fn a_conversation_the_seats_file_maps_writes_as_that_seat() {
+fn a_seats_file_does_not_name_the_write() {
     let b = Bench::new();
     b.seats("\"0b1c2d3e-0000-4000-8000-000000000000\" = \"saddle\"\n");
-    let out = b.ljos_env(
-        &[(
-            "CURSOR_CONVERSATION_ID",
-            "0b1c2d3e-0000-4000-8000-000000000000",
-        )],
-        &["note", "proj-aaaa", "progress"],
-    );
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(!err.contains("no seat is named"), "{err}");
-    assert!(!err.contains("no seat named"), "{err}");
-    assert!(b.calls().contains("vissue note proj-aaaa"), "{}", b.calls());
-}
-
-#[test]
-fn a_write_records_the_seat_the_seats_file_maps() {
-    let b = Bench::new();
-    b.seats("\"0b1c2d3e-0000-4000-8000-000000000000\" = \"saddle\"\n");
-    b.ljos_env(
-        &[(
-            "CURSOR_CONVERSATION_ID",
-            "0b1c2d3e-0000-4000-8000-000000000000",
-        )],
-        &["note", "proj-aaaa", "progress"],
-    );
+    let env = [(
+        "CURSOR_CONVERSATION_ID",
+        "0b1c2d3e-0000-4000-8000-000000000000",
+    )];
+    for args in [
+        &["note", "proj-aaaa", "progress"][..],
+        &["vote", "proj-aaaa", "--for", "accept", "--used", "none"],
+        &["playbook", "proj-aaaa", "sit"],
+    ] {
+        let _ = b.ljos_env(&env, args);
+    }
     let calls = b.calls();
-    let note = calls
-        .lines()
-        .find(|l| l.starts_with("vissue note proj-aaaa"))
-        .unwrap_or_else(|| panic!("no note: {calls}"));
-    assert!(note.ends_with("VISSUE_AGENT=saddle"), "{note}");
+    assert!(
+        !calls.contains("VISSUE_AGENT=saddle"),
+        "seats.toml named the write:\n{calls}"
+    );
 }
 
 #[test]
@@ -364,26 +350,6 @@ fn a_bump_plan_is_filed_only_as_a_listed_seat() {
 }
 
 #[test]
-fn a_conversation_the_seats_file_maps_votes_as_that_seat() {
-    let b = Bench::new();
-    b.seats("\"0b1c2d3e-0000-4000-8000-000000000000\" = \"saddle\"\n");
-    let out = b.ljos_env(
-        &[(
-            "CURSOR_CONVERSATION_ID",
-            "0b1c2d3e-0000-4000-8000-000000000000",
-        )],
-        &["vote", "proj-aaaa", "--for", "accept", "--used", "none"],
-    );
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(!err.contains("no seat is named"), "{err}");
-    let calls = b.calls();
-    assert!(
-        calls.contains("vissue vote proj-aaaa --for accept --used none VISSUE_AGENT=saddle"),
-        "{calls}"
-    );
-}
-
-#[test]
 fn a_ballot_or_a_withdrawal_as_another_seat_is_refused() {
     let b = Bench::new();
     b.seats("seats = [\"saddle\", \"inky\"]\n");
@@ -497,25 +463,6 @@ fn a_vissue_list_that_names_no_seat_refuses_every_write() {
     assert!(err.contains("vissue.toml"), "{err}");
     assert!(err.contains(&path.display().to_string()), "{err}");
     assert_eq!(b.calls(), "", "nothing reached the tracker");
-}
-
-#[test]
-fn a_playbook_binding_records_the_seat_the_seats_file_maps() {
-    let b = Bench::new();
-    b.seats("\"0b1c2d3e-0000-4000-8000-000000000000\" = \"saddle\"\n");
-    b.ljos_env(
-        &[(
-            "CURSOR_CONVERSATION_ID",
-            "0b1c2d3e-0000-4000-8000-000000000000",
-        )],
-        &["playbook", "proj-aaaa", "sit"],
-    );
-    let calls = b.calls();
-    let note = calls
-        .lines()
-        .find(|l| l.starts_with("vissue note proj-aaaa playbook: sit"))
-        .unwrap_or_else(|| panic!("no binding: {calls}"));
-    assert!(note.ends_with("VISSUE_AGENT=saddle"), "{note}");
 }
 
 #[test]

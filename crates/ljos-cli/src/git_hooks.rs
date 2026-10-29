@@ -30,9 +30,9 @@
 //! git config --local --unset core.hooksPath
 //! ```
 //!
-//! A commit is booked only when a seat resolves from `LJOS_SEAT`, then
-//! `seats.toml` through `CURSOR_CONVERSATION_ID`, then `grokbot-<id8>`,
-//! then an agy or opencode conversation id. The process tree is not a seat.
+//! A commit is booked only when a seat resolves from `LJOS_SEAT`, then an
+//! agy or opencode conversation id. A conversation id does not name a seat.
+//! The process tree is not a seat.
 //! The holder is `SEAT@TAG`, the same name `ljos claim` uses. Paths in
 //! `[git_hooks] skip` of `ljos.toml`, plus `/tmp`, `/var/tmp`, `/dev/shm`,
 //! the tracker, `CLAIMDAG_DIR` and the deedar store, are not booked.
@@ -963,9 +963,8 @@ fn book_commit(hook: &str) -> Result<()> {
     let Some(head) = git_line(&["rev-parse", "HEAD"]) else {
         return Ok(());
     };
-    // The process tree is not a seat. Without LJOS_SEAT, seats.toml, the
-    // grokbot-<id8> fallback, or an agy or opencode conversation, the
-    // commit stays unbooked; a subagent is told.
+    // The process tree is not a seat. Without LJOS_SEAT, or an agy or
+    // opencode conversation, the commit stays unbooked; a subagent is told.
     let Some(seat) = crate::git_hook_seat() else {
         if tracker {
             refuse_tracker_commit(

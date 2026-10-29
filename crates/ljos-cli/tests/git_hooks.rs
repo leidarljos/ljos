@@ -1075,7 +1075,7 @@ fn the_guard_prints_the_session_brief_once() {
 }
 
 #[test]
-fn ljos_seat_reads_seats_toml_and_never_prints_a_raw_id() {
+fn ljos_seat_ignores_a_seats_file_and_a_raw_conversation_id() {
     let hab = Hab::new("repo");
     let id = "bc-1234abcd-rest";
     let dir = hab.config.join("ljos");
@@ -1087,7 +1087,9 @@ fn ljos_seat_reads_seats_toml_and_never_prints_a_raw_id() {
         None,
         &[("LJOS_SEAT", ""), ("CURSOR_CONVERSATION_ID", id)],
     );
-    assert_eq!(String::from_utf8(known.stdout).unwrap().trim(), "rgoswami");
+    let said = String::from_utf8(known.stdout).unwrap();
+    assert!(!said.contains("rgoswami"), "{said}");
+    assert!(!said.contains("seats.toml"), "{said}");
     let unknown_id = "zzzzzzzz-hello";
     let unknown = hab.ljos_in(
         &hab.repo,
@@ -1096,7 +1098,7 @@ fn ljos_seat_reads_seats_toml_and_never_prints_a_raw_id() {
         &[("LJOS_SEAT", ""), ("CURSOR_CONVERSATION_ID", unknown_id)],
     );
     let name = String::from_utf8(unknown.stdout).unwrap();
-    assert_eq!(name.trim(), "grokbot-zzzzzzzz");
+    assert!(!name.contains("grokbot-zzzzzzzz"), "{name}");
     assert_ne!(name.trim(), unknown_id);
 }
 
@@ -1333,11 +1335,10 @@ fn under_exec_daemon(hab: &Hab, extra: &[(&str, &str)]) -> Output {
     cmd.output().unwrap()
 }
 
-/// The parent is `exec-daemon`. The claim, the deed and the tracker record
-/// use the seat from `seats.toml`, then the `grokbot-<id8>` fallback, never
-/// the process tree.
+/// The parent is `exec-daemon`. A seats file and a conversation id do not
+/// book the commit, and neither does the process tree.
 #[test]
-fn a_git_hook_under_exec_daemon_books_the_seat() {
+fn a_git_hook_ignores_a_seats_file_and_the_process_tree() {
     let hab = Hab::new("repo");
     let id = "bc-1234abcd-rest";
     let dir = hab.config.join("ljos");
@@ -1346,28 +1347,16 @@ fn a_git_hook_under_exec_daemon_books_the_seat() {
     let out = under_exec_daemon(&hab, &[("CURSOR_CONVERSATION_ID", id)]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{err}");
-    let holder = format!("rgoswami@{}", ljos_cli::session_tag(id));
     let vlog = vissue_log(&hab.tracker);
     let dlog = fs::read_to_string(hab.tracker.join("deedar.log")).unwrap_or_default();
-    let org = fs::read_to_string(hab.tracker.join("Software/probe/issues.org")).unwrap_or_default();
     assert!(
-        vlog.contains(&format!("VISSUE_AGENT={holder}")),
-        "the claim was not {holder}:\n{vlog}\n{err}"
+        !vlog.contains("rgoswami") && !vlog.contains("exec-daemon"),
+        "the hook booked from the file or the tree:\n{vlog}\n{err}"
     );
     assert!(
-        dlog.contains(&format!("--agent {holder}")),
-        "the deed was not {holder}:\n{dlog}"
+        !dlog.contains("rgoswami") && !dlog.contains("exec-daemon"),
+        "{dlog}"
     );
-    assert!(
-        org.contains("by rgoswami"),
-        "the record was not the seat:\n{org}"
-    );
-    for (what, text) in [("claim", &vlog), ("deed", &dlog), ("record", &org)] {
-        assert!(
-            !text.contains("exec-daemon"),
-            "the {what} used the process tree:\n{text}"
-        );
-    }
 
     let hab = Hab::new("repo");
     let unknown = "zzzzzzzz-hello";
@@ -1377,19 +1366,16 @@ fn a_git_hook_under_exec_daemon_books_the_seat() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let holder = format!("grokbot-zzzzzzzz@{}", ljos_cli::session_tag(unknown));
     let vlog = vissue_log(&hab.tracker);
     let dlog = fs::read_to_string(hab.tracker.join("deedar.log")).unwrap_or_default();
     assert!(
-        vlog.contains(&format!("VISSUE_AGENT={holder}")),
-        "an unmapped conversation did not fall back to grokbot-<id8>@tag:\n{vlog}"
+        !vlog.contains("grokbot-zzzzzzzz") && !vlog.contains("exec-daemon"),
+        "{vlog}"
     );
     assert!(
-        dlog.contains(&format!("--agent {holder}")),
-        "the deed did not use the fallback:\n{dlog}"
+        !dlog.contains("grokbot-zzzzzzzz") && !dlog.contains("exec-daemon"),
+        "{dlog}"
     );
-    assert!(!vlog.contains("exec-daemon"), "{vlog}");
-    assert!(!dlog.contains("exec-daemon"), "{dlog}");
 }
 
 /// A subagent's conversation id is not a seat. Its first eight characters
@@ -1974,9 +1960,8 @@ fn a_claude_session_is_not_booked_by_the_git_hook() {
 }
 
 /// With a vissue.toml seat list, the hook books a commit only for a seat
-/// it lists: an unlisted `LJOS_SEAT`, the `grokbot-<id8>` of an unmapped
-/// conversation and an agy conversation book nothing, a commit that names
-/// an open issue included.
+/// it lists. An unlisted `LJOS_SEAT` and an agy conversation book nothing.
+/// A conversation id does not name a seat, so that commit is not booked.
 #[test]
 fn a_git_hook_books_only_a_seat_vissue_toml_lists() {
     let hab = Hab::new("repo");
@@ -1993,12 +1978,44 @@ fn a_git_hook_books_only_a_seat_vissue_toml_lists() {
     );
     sit(&hab, "probe-51a2", "antigravity@sit", "antigravity");
     commit_with(&hab, "a.txt", "probe-32fx: unlisted seat", &[], false);
-    commit_with(
-        &hab,
-        "b.txt",
-        "unmapped conversation",
-        &[("CURSOR_CONVERSATION_ID", cursor)],
-        true,
+    let env = commit_env(&hab, &[("CURSOR_CONVERSATION_ID", cursor)], true);
+    fs::write(hab.repo.join("b.txt"), "x\n").unwrap();
+    let add = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(&hab.repo)
+        .args(["add", "b.txt"])
+        .env_clear()
+        .envs(env.clone())
+        .output()
+        .unwrap();
+    assert!(
+        add.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let refused = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(&hab.repo)
+        .args(["commit", "-q", "-m", "unmapped conversation"])
+        .env_clear()
+        .envs(env)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "{err}");
+    assert!(err.contains("sitting-gate"), "{err}");
+    let unstage = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(&hab.repo)
+        .args(["reset", "-q", "HEAD", "--", "b.txt"])
+        .env_clear()
+        .envs(commit_env(&hab, &[], true))
+        .output()
+        .unwrap();
+    assert!(
+        unstage.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unstage.stderr)
     );
     commit_with(
         &hab,
