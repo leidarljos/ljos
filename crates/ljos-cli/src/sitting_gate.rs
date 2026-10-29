@@ -362,7 +362,7 @@ pub fn live_sitting() -> Result<String, String> {
     }
     let mut first_err = None;
     for (issue, hold) in candidates {
-        let card = match crate::issue_record(&issue) {
+        let card = match crate::held_issue_record(&issue) {
             Ok(c) => c,
             Err(e) => {
                 first_err.get_or_insert_with(|| {
