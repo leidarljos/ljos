@@ -8,8 +8,8 @@ use ljos_cli::{
     forecasts_from_json, format_bump_rows, format_consolidation, format_doctor,
     format_doctor_short, format_findings, format_hits, format_hubs, format_island,
     format_playbooks, format_readings, format_remembered, format_seat_command, format_steps,
-    format_write_ack, graded, habit, habits, handover, healthy, hook_note, island_entities, join,
-    learn_anchors, learn_and_write, learn_reading, learn_shared, mark_seen, now_utc, on_path,
+    format_write_ack, graded, habit, habits, handover_scoped, healthy, hook_note, island_entities,
+    join, learn_anchors, learn_and_write, learn_reading, learn_shared, mark_seen, now_utc, on_path,
     onboard_to, pack, packset_consolidate, packset_forget, packset_hubs, packset_island_as,
     packset_search_as_of, packset_write_as, panel, panel_steps, parse_every, personas_from_pack,
     playbooks_from_pack, policy_with_memory, post_hook_stdout, predictions_of, prompt_hook_stdout,
@@ -1178,6 +1178,9 @@ enum Cmd {
         /// The log size the receiver kept last time (`size=` in its kept head): the bag then carries the bridge from it.
         #[arg(long)]
         since_size: Option<u64>,
+        /// Carry only the atoms tagged `scope:NAME`, sealed with age to that scope's recipients in `.ljos/sync.toml`.
+        #[arg(long, value_name = "NAME")]
+        scope: Option<String>,
     },
     /// Check a satchel that arrived; --import puts its atoms in this seat's pack.
     Receive {
@@ -3476,8 +3479,9 @@ fn run_command() -> Result<()> {
             issue,
             to,
             since_size,
+            scope,
         } => {
-            for line in handover(&out, &project, &issue, since_size)? {
+            for line in handover_scoped(&out, &project, &issue, since_size, scope.as_deref())? {
                 println!("{line}");
             }
             if let Some(dest) = to {

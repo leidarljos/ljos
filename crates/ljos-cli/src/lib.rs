@@ -31,6 +31,7 @@ mod deedbag;
 pub mod extract;
 pub mod gates;
 pub mod git_hooks;
+mod handover_scope;
 pub mod hookd;
 pub mod hud;
 pub mod idle_drop;
@@ -27627,6 +27628,23 @@ pub fn handover(
     issues: &[String],
     since_size: Option<u64>,
 ) -> Result<Vec<String>> {
+    handover_scoped(out, projects, issues, since_size, None)
+}
+
+/// [`handover`] that, with `scope`, carries only the atoms tagged
+/// `scope:<scope>`, sealed with age to that scope's recipients.
+///
+/// # Errors
+///
+/// As [`handover`]. With `scope`, also a scope no tracker lists recipients
+/// for, or an age that refused to seal.
+pub fn handover_scoped(
+    out: &Path,
+    projects: &[String],
+    issues: &[String],
+    since_size: Option<u64>,
+    scope: Option<&str>,
+) -> Result<Vec<String>> {
     if projects.is_empty() && issues.is_empty() {
         bail!("handover: name a project or an issue");
     }
@@ -27648,6 +27666,14 @@ pub fn handover(
 
     let mut cited = String::new();
     match pack() {
+        Ok(client) if scope.is_some() => {
+            let atoms_dir = out.join("data").join("atoms");
+            let scope = scope.unwrap_or_default();
+            let (said, kept) =
+                handover_scope::enclose(out, &atoms_dir, &client.workspace(), scope)?;
+            lines.extend(said);
+            cited = kept;
+        }
         Ok(client) => {
             let atoms_dir = out.join("data").join("atoms");
             match run_captured(
@@ -27854,7 +27880,10 @@ pub fn receive(
         lines.push("unsigned".into());
     }
 
-    let atoms = enclosed_atoms(dir)?;
+    let mut atoms = enclosed_atoms(dir)?;
+    let (sealed, opened) = handover_scope::open_sealed(&dir.join("data").join("atoms"))?;
+    lines.extend(opened);
+    atoms.extend(sealed);
     let rows = trust_rows(&atoms);
     lines.push(format!(
         "{} atoms enclosed, {} trust rows",
@@ -27903,7 +27932,8 @@ pub fn receive(
     Ok(lines)
 }
 
-/// Every atom in a satchel's `data/atoms/*.jsonl`.
+/// Every atom in a satchel's `data/atoms/*.jsonl`. A sealed
+/// `<scope>.jsonl.age` is left to `receive`, which opens it.
 pub fn enclosed_atoms(dir: &Path) -> Result<Vec<Value>> {
     let atoms_dir = dir.join("data").join("atoms");
     let Ok(entries) = std::fs::read_dir(&atoms_dir) else {
@@ -27911,6 +27941,9 @@ pub fn enclosed_atoms(dir: &Path) -> Result<Vec<Value>> {
     };
     let mut out = Vec::new();
     for entry in entries.flatten() {
+        if handover_scope::sealed_scope(&entry.path()).is_some() {
+            continue;
+        }
         let text = std::fs::read_to_string(entry.path())?;
         for line in text.lines().filter(|l| !l.trim().is_empty()) {
             out.push(

@@ -746,6 +746,58 @@ fn scope_is_configured(scope: &Scope, name: &str) -> bool {
     name == scope.name || scope.scopes.contains_key(name)
 }
 
+/// The recipients a handover of scope `scope_name` is sealed to: the
+/// scope's recipients in the first synced tracker that lists it. For scope
+/// `cloud` with none listed, the cloud identity's own public key.
+///
+/// # Errors
+///
+/// No tracker lists the scope and no identity stands in, or a
+/// `.ljos/sync.toml` does not parse.
+pub(crate) fn handover_recipients(scope_name: &str) -> Result<Vec<String>> {
+    if !valid_scope_name(scope_name) {
+        bail!("handover: {scope_name:?} is not a scope name");
+    }
+    for root in sync_roots().unwrap_or_default() {
+        if let Some(scope) = scope_of_repo(&root)? {
+            if let Some(recipients) = scope.recipients_for(scope_name).filter(|r| !r.is_empty()) {
+                return Ok(recipients.to_vec());
+            }
+        }
+    }
+    let cloud = cloud_identity_path();
+    if scope_name == CLOUD_SCOPE && read_identity(&cloud).is_some_and(|text| age_identity(&text)) {
+        return Ok(vec![identity_recipient(&cloud)?]);
+    }
+    bail!(
+        "handover: no tracker lists recipients for scope {scope_name}, so nothing was sealed; add them under [scopes] in .ljos/sync.toml"
+    )
+}
+
+/// Seal `plain` to `recipients` at `out`.
+///
+/// # Errors
+///
+/// age refused, or the file could not be written.
+pub(crate) fn seal_to(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
+    let sealed = seal_bytes(plain, recipients)?;
+    let tmp = out.with_extension("age.tmp");
+    std::fs::write(&tmp, sealed).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, out).with_context(|| format!("install {}", out.display()))?;
+    Ok(())
+}
+
+/// Open `path` with the identities scope `scope_name` may use. `None`
+/// when none of them opens it.
+///
+/// # Errors
+///
+/// age is missing, or refused with this machine's own key.
+pub(crate) fn open_scoped(path: &Path, scope_name: &str) -> Result<Option<String>> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    open_sealed_bytes(&bytes, &identities_for_open(scope_name))
+}
+
 /// Seal `plain` to the recipients into `out`.
 #[cfg(test)]
 fn seal(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
