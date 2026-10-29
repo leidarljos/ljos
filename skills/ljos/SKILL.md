@@ -537,7 +537,11 @@ An agent's lesson is a proposal at L0 (`derived`) with origin `agent-derived`
 and its provenance (seat, harness, session, time, reason). `ljos accept`
 promotes it to `explicit` and writes it. A lesson the person types at
 `ljos finish` in a terminal of their own, with no agent runner above it,
-is written at once as `user-declared`. A lesson the person types with
+is written at once as `user-declared`. A yes the person said in chat is
+passed on instead: `ljos accept ID --quote "their words" --at TIME --via
+SEAT` keeps the sentence, the time and the seat that carried it with the
+acceptance. All three are needed, and the quote is the person's own
+sentence, not a paraphrase. A lesson the person types with
 `ljos remember` stays `user-declared`, and the same words satisfy the open
 proposal. The verb then fires the island,
 completes the session node, and learns from a named outcome. Without

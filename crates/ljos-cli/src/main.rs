@@ -342,8 +342,19 @@ enum Cmd {
         #[command(subcommand)]
         cmd: MemCmd,
     },
-    /// Write one agent proposal into the pack as a standing lesson. Under an agent runner, only a proposal another conversation filed, such as a worker's.
-    Accept { id: String },
+    /// Write one agent proposal into the pack as a standing lesson. Under an agent runner, only a proposal another conversation filed, such as a worker's, or one the person said yes to in their own words.
+    Accept {
+        id: String,
+        /// The person's own words accepting this lesson, as they said them. Needs --at and --via, and takes the place of a terminal of the person's own.
+        #[arg(long)]
+        quote: Option<String>,
+        /// When the person said those words, RFC 3339, such as 2026-10-28T14:02:11Z.
+        #[arg(long)]
+        at: Option<String>,
+        /// The seat that carried the words here.
+        #[arg(long)]
+        via: Option<String>,
+    },
     /// Retire the note memories an older `ljos note` wrote. Runs once per seat; the tracker copies stay.
     RetireNotes,
     /// Retire one memory by id. The record stays, marked retired.
@@ -1717,13 +1728,17 @@ fn run_command() -> Result<()> {
                 }
             }
         }
-        Cmd::Accept { id } => {
+        Cmd::Accept { id, quote, at, via } => {
+            let yes = ljos_cli::quoted_yes::read(quote.as_deref(), at.as_deref(), via.as_deref())?;
             let id = ljos_cli::admit::resolve_id(&id)?;
             // The agent proposed the lesson; accepting it is a review by
             // someone else. Under a runner that is the conversation that
             // started a worker, reviewing the worker's proposal; an agent
-            // that accepted its own proposal would skip the review.
-            if ljos_cli::under_a_runner()
+            // that accepted its own proposal would skip the review. A yes
+            // the person said in their own words is the review, carried by
+            // the seat that heard it and kept with the acceptance.
+            if yes.is_none()
+                && ljos_cli::under_a_runner()
                 && !ljos_cli::accepts_another_conversation(
                     ljos_cli::admit::proposed_by(&id).as_deref(),
                     &ljos_cli::holder_name(),
@@ -1732,10 +1747,12 @@ fn run_command() -> Result<()> {
                 bail!(
                     "accept: this conversation filed {id}, or the proposal names no conversation, \
                      and an agent can't accept its own proposal. The person runs `ljos accept {id}` \
-                     in a terminal of their own, or the conversation that started this worker runs it"
+                     in a terminal of their own, the conversation that started this worker runs it, \
+                     or this one passes on what the person said: `ljos accept {id} --quote \"...\" \
+                     --at TIME --via SEAT`"
                 );
             }
-            print!("{}", ljos_cli::admit::accept(&id)?);
+            print!("{}", ljos_cli::admit::accept_on(&id, yes.as_ref())?);
         }
         Cmd::Memories { cmd } => memories_cmd(cmd)?,
         Cmd::RetireNotes => print!("{}", ljos_cli::note_retire::sweep()?),

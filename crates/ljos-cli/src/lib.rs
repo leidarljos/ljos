@@ -55,6 +55,7 @@ mod person_tty;
 pub mod persona_session;
 pub mod plugin;
 pub mod proc_tree;
+pub mod quoted_yes;
 pub mod reap;
 pub mod recall_floor;
 pub mod record;

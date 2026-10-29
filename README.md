@@ -102,7 +102,9 @@ Remembered, oldest first (`ljos search` for more):
 ```
 
 A preference you type takes effect at once. A lesson an agent proposes at `ljos finish`
-stays out until you run `ljos accept ID` in your own terminal.
+stays out until you run `ljos accept ID` in your own terminal. A yes you said in chat
+counts too. The seat that heard it runs `ljos accept ID --quote "..." --at TIME --via SEAT`,
+and the acceptance keeps those words.
 
 ## Two seats on one ticket
 
@@ -292,7 +294,7 @@ ljos island "rebuild the site"
 ljos due
 ljos graded ID [--lapsed]
 ljos forget ID --why DEED
-ljos accept ID
+ljos accept ID [--quote "..." --at ISO_TIME --via SEAT]
 ljos trust alice bob 0.8 --why DEED
 ljos learn ISSUE --outcome OPTION
 ljos handover --out DIR --issue ISSUE

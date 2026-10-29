@@ -26,6 +26,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use crate::quoted_yes::Yes;
 use crate::PacksetClient;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -71,6 +72,10 @@ struct Record {
     /// `user-declared`, `agent-derived`, `tool-echo` or `peer`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     origin: String,
+    /// The person's words this acceptance rests on, where a seat carried
+    /// them instead of the person typing in a terminal of their own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grant: Option<Yes>,
     atom: Value,
 }
 
@@ -425,6 +430,7 @@ fn file_proposal(client: &PacksetClient, mut atom: Value, post: bool) -> Result<
         text,
         kind,
         origin,
+        grant: None,
         atom,
     };
     let remote = rec.remote;
@@ -495,15 +501,18 @@ fn close_remote(rec: &Record) {
     let _ = accept_on_writer(&client, &workspace, remote_id);
 }
 
-fn accepted_line(id: &str, kind: &str, posted: &Value) -> String {
+fn accepted_line(rec: &Record, posted: &Value) -> String {
     let origin = posted
         .get("origin")
         .and_then(Value::as_str)
         .filter(|origin| !origin.is_empty())
         .unwrap_or(ORIGIN_AGENT);
     format!(
-        "accepted {id} as {kind} origin {origin}{}\n",
-        crate::revision_note(posted)
+        "accepted {} as {} origin {origin}{}\n{}",
+        rec.id,
+        rec.kind,
+        crate::revision_note(posted),
+        rec.grant.as_ref().map(Yes::line).unwrap_or_default()
     )
 }
 
@@ -591,6 +600,20 @@ pub fn resolve_id(id: &str) -> Result<String> {
     crate::resolve_short_id("accept", id, &open)
 }
 
+/// Every acceptance that rests on a person's words a seat carried, by
+/// proposal id. An audit reads these to see which lessons went in on a
+/// quoted yes rather than from a terminal of the person's own.
+#[must_use]
+pub fn granted() -> Vec<(String, Yes)> {
+    let mut out: Vec<(String, Yes)> = read_latest()
+        .into_values()
+        .filter(|rec| rec.status == "accepted")
+        .filter_map(|rec| rec.grant.map(|yes| (rec.id, yes)))
+        .collect();
+    out.sort_by(|a, b| a.1.at.cmp(&b.1.at).then_with(|| a.0.cmp(&b.0)));
+    out
+}
+
 /// The conversation that filed an open proposal: the holder its atom's
 /// source names. `None` when the id is not on file or the atom names none.
 #[must_use]
@@ -606,6 +629,16 @@ pub fn proposed_by(id: &str) -> Option<String> {
 /// Write one open proposal into the pack. A satisfied proposal was already
 /// written by `remember` or `prefer`. An accepted one is already there.
 pub fn accept(id: &str) -> Result<String> {
+    accept_on(id, None)
+}
+
+/// [`accept`], recording the person's words the acceptance rests on.
+///
+/// `yes` is a yes a seat carried from chat, see [`crate::quoted_yes`]. It
+/// is kept on the proposal's accepted row, beside the acceptance it
+/// stands for, and said back on the line the caller prints. `None` is the
+/// terminal path, where the person ran the accept themselves.
+pub fn accept_on(id: &str, yes: Option<&crate::quoted_yes::Yes>) -> Result<String> {
     let _g = gate();
     let id = id.trim();
     if id.is_empty() {
@@ -614,6 +647,7 @@ pub fn accept(id: &str) -> Result<String> {
     let Some(mut rec) = read_latest().get(id).cloned() else {
         bail!("accept: no open proposal {id}");
     };
+    rec.grant = yes.cloned();
     match rec.status.as_str() {
         "satisfied" => {
             close_remote(&rec);
@@ -630,7 +664,7 @@ pub fn accept(id: &str) -> Result<String> {
         let posted = accept_on_writer(&client, &workspace, &remote_id)?;
         rec.status = "accepted".into();
         append(&rec)?;
-        return Ok(accepted_line(&rec.id, &rec.kind, &posted));
+        return Ok(accepted_line(&rec, &posted));
     }
     // A person accepting the proposal is the promotion off L0. Tool output
     // and another seat stay at `derived` until this line. The origin stays,
@@ -640,7 +674,7 @@ pub fn accept(id: &str) -> Result<String> {
         Ok(posted) => {
             rec.status = "accepted".into();
             append(&rec)?;
-            Ok(accepted_line(&rec.id, &rec.kind, &posted))
+            Ok(accepted_line(&rec, &posted))
         }
         Err(e) => {
             let text = e.to_string();
@@ -655,7 +689,7 @@ pub fn accept(id: &str) -> Result<String> {
             rec.remote_id = Some(remote_id);
             rec.status = "accepted".into();
             append(&rec)?;
-            Ok(accepted_line(&rec.id, &rec.kind, &posted))
+            Ok(accepted_line(&rec, &posted))
         }
     }
 }
@@ -674,6 +708,7 @@ mod tests {
             text: "use uv for python envs".into(),
             kind: "lesson".into(),
             origin: ORIGIN_AGENT.into(),
+            grant: None,
             atom: serde_json::json!({"text": "use uv for python envs"}),
         }
     }
