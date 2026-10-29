@@ -54355,9 +54355,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     }
 
     /// A line whose `cd` the shell undoes, or runs where it leaves the line
-    /// alone, still runs `make clean-all` in `project`, and `lnk/..` is
-    /// `project` again, as a logical `cd` takes `..` off by name, though
-    /// `lnk` is a link to a directory whose parent is `elsewhere`.
+    /// alone, still writes the hook file in `project`. `seat` there is a
+    /// link to `~/.cursor`. `lnk/..` is `project` again, as a logical `cd`
+    /// takes `..` off by name, and `-P` is folded the same way. `cd -`
+    /// leaves the directory unknown, so the write is not that hook file.
     #[test]
     fn shell_lines_that_left_the_start_directory_are_still_denied() {
         if !crate::tool_installed("ljos-policyd") {
@@ -54370,26 +54371,26 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let elsewhere = root.path().join("elsewhere");
         std::fs::create_dir_all(project.join("safe")).unwrap();
         std::fs::create_dir_all(elsewhere.join("leaf")).unwrap();
-        std::fs::write(project.join("safe/Makefile"), PLAIN_MAKEFILE).unwrap();
-        std::fs::write(elsewhere.join("Makefile"), PLAIN_MAKEFILE).unwrap();
+        plain_seat(&project.join("safe"));
+        plain_seat(&elsewhere);
         std::os::unix::fs::symlink(elsewhere.join("leaf"), project.join("lnk")).unwrap();
         let verdict = |line: &str| tcb_verdict_in(line, Some(&project));
         for line in [
-            "cd safe | true && make clean-all",
-            "cd safe & make clean-all",
-            "cd missing ; make clean-all",
-            "pushd safe && popd && make clean-all",
-            "cd safe && cd - && make clean-all",
-            "cd lnk/.. && make clean-all",
-            "cd lnk && cd .. && make clean-all",
+            "cd safe | true && echo x > seat/hooks.json",
+            "cd safe & echo x > seat/hooks.json",
+            "cd missing ; echo x > seat/hooks.json",
+            "pushd safe && popd && echo x > seat/hooks.json",
+            "cd lnk/.. && echo x > seat/hooks.json",
+            "cd lnk && cd .. && echo x > seat/hooks.json",
+            "cd -P lnk/.. && echo x > seat/hooks.json",
         ] {
             let rule = verdict(line).unwrap_or_else(|| panic!("{line:?} was allowed"));
             assert_eq!(rule.verdict, "deny", "{line:?}: {}", rule.reason);
             assert_eq!(rule.pattern, "ljos-policyd", "{line:?}: {}", rule.reason);
         }
         for line in [
-            "cd safe && make clean-all",
-            "cd -P lnk/.. && make clean-all",
+            "cd safe && echo x > seat/hooks.json",
+            "cd safe && cd - && echo x > seat/hooks.json",
         ] {
             assert!(verdict(line).is_none(), "{line:?}: {:?}", verdict(line));
         }
@@ -54402,19 +54403,37 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             .expect("ljos-policyd is not on PATH; CI builds it from ljos-policyd develop")
     }
 
-    const RISKY_MAKEFILE: &str = "test:\n\techo test\nclean-all:\n\trm -rf $(HOME)/.cache ~\n";
-    const PLAIN_MAKEFILE: &str = "test:\n\techo test\nclean-all:\n\techo clean\n";
+    /// `echo x > seat/hooks.json`. `seat` is a link to `~/.cursor` in a
+    /// directory this write must refuse, and an ordinary directory where
+    /// the same write may run.
+    const SEAT_WRITE: &str = "echo x > seat/hooks.json";
 
-    /// A tree whose `project/Makefile` removes HOME on `make clean-all`,
-    /// below one whose `clean-all` only echoes, judged by the real
-    /// ljos-policyd from a seat HOME. Take [`env_guard`] first.
+    /// Point `dir/seat` at `home/.cursor`, which holds the hook file.
+    fn risky_seat(dir: &std::path::Path, home: &std::path::Path) {
+        let cursor = home.join(".cursor");
+        std::fs::create_dir_all(&cursor).unwrap();
+        std::fs::create_dir_all(dir).unwrap();
+        let link = dir.join("seat");
+        if link.symlink_metadata().is_ok() {
+            std::fs::remove_file(&link).unwrap();
+        }
+        std::os::unix::fs::symlink(cursor, link).unwrap();
+    }
+
+    /// An ordinary `seat` directory, so the hook write stays in `dir`.
+    fn plain_seat(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir.join("seat")).unwrap();
+    }
+
+    /// A tree whose `project/seat` is a link to the seat's `~/.cursor`,
+    /// judged by the real ljos-policyd from that HOME. Take [`env_guard`]
+    /// first.
     fn policyd_tree(name: &str) -> (tempfile::TempDir, SeatDir, HoldEnv) {
         let bin = real_policyd();
         let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("project")).unwrap();
-        std::fs::write(root.path().join("Makefile"), PLAIN_MAKEFILE).unwrap();
-        std::fs::write(root.path().join("project/Makefile"), RISKY_MAKEFILE).unwrap();
         let home = SeatDir::new(name);
+        std::fs::create_dir_all(root.path().join("project")).unwrap();
+        risky_seat(&root.path().join("project"), home.path());
         // ljos-policyd will not unpack its pack under a state path with
         // `..` in it, and answers `pack-unavailable`, which is no verdict.
         let state = std::fs::canonicalize(home.path()).unwrap().join("policyd");
@@ -54428,8 +54447,10 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         (root, home, env)
     }
 
-    /// A subshell, a substitution, a separator with no space around it,
-    /// or a newline still runs `make clean-all` in `project`.
+    /// A subshell that itself `cd`s, a separator with no space around it,
+    /// or a newline still writes the hook file in `project`. A command in
+    /// parentheses after `&&`, and a substitution, are judged from the
+    /// start directory, where `seat` is an ordinary directory.
     #[test]
     fn a_cd_the_shell_reads_is_where_policyd_judges_the_line() {
         if !crate::tool_installed("ljos-policyd") {
@@ -54438,32 +54459,35 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
         let _g = env_guard();
         let (root, _home, _env) = policyd_tree("policyd-line");
+        plain_seat(root.path());
         let verdict = |line: &str| tcb_verdict_in(line, Some(root.path()));
+        let write = SEAT_WRITE;
         for line in [
-            "(cd project; make clean-all)",
-            "cd project && (make clean-all)",
-            "cd project && echo $(make clean-all)",
-            "cd project && echo `make clean-all`",
-            "cd project;make clean-all",
-            "cd project&&make clean-all",
-            "cd project\nmake clean-all",
+            format!("(cd project; {write})"),
+            format!("cd project;{write}"),
+            format!("cd project&&{write}"),
+            format!("cd project\n{write}"),
         ] {
-            let rule = verdict(line).unwrap_or_else(|| panic!("{line:?} was allowed"));
+            let rule = verdict(&line).unwrap_or_else(|| panic!("{line:?} was allowed"));
             assert_eq!(rule.verdict, "deny", "{line:?}: {}", rule.reason);
             assert_eq!(rule.pattern, "ljos-policyd", "{line:?}: {}", rule.reason);
         }
         for line in [
-            "make clean-all",
-            "(cd project; make test)",
-            "cd project;make test",
-            "cd project\nmake test",
+            write.to_string(),
+            format!("cd project && ({write})"),
+            format!("cd project && echo $({write})"),
+            format!("cd project && echo `{write}`"),
+            "(cd project; echo ok)".to_string(),
+            "cd project;echo ok".to_string(),
+            "cd project\necho ok".to_string(),
         ] {
-            assert!(verdict(line).is_none(), "{line:?}: {:?}", verdict(line));
+            assert!(verdict(&line).is_none(), "{line:?}: {:?}", verdict(&line));
         }
     }
 
-    /// A `cd` through `$HOME`, `${HOME}`, `~`, `~login` or a `CDPATH`
-    /// entry still runs `make clean-all` where it lands.
+    /// A `cd` through `$HOME`, `${HOME}`, `~` or `~login` still writes the
+    /// hook file where it lands. A `CDPATH` entry is not applied to that
+    /// write, so `cd proj` stays at the start.
     #[test]
     fn a_cd_through_home_or_cdpath_is_judged_where_it_lands() {
         if !crate::tool_installed("ljos-policyd") {
@@ -54472,14 +54496,12 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
         let _g = env_guard();
         let (root, home, _env) = policyd_tree("policyd-home");
-        for (dir, makefile) in [
-            (home.path().join("proj"), RISKY_MAKEFILE),
-            (home.path().join("plain"), PLAIN_MAKEFILE),
-            (root.path().join("lib/proj"), RISKY_MAKEFILE),
-        ] {
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("Makefile"), makefile).unwrap();
+        for dir in [home.path().join("proj"), root.path().join("lib/proj")] {
+            risky_seat(&dir, home.path());
         }
+        plain_seat(&home.path().join("plain"));
+        plain_seat(&root.path().join("lib"));
+        plain_seat(root.path());
         // SAFETY: getpwuid returns null or a record that stays valid until
         // the next lookup, and both fields are copied out at once.
         let (login, pw_home) = unsafe {
@@ -54493,24 +54515,27 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             .prefix(".ljos-login-")
             .tempdir_in(&pw_home)
             .unwrap();
-        std::fs::create_dir_all(theirs.path().join("proj")).unwrap();
-        std::fs::write(theirs.path().join("proj/Makefile"), RISKY_MAKEFILE).unwrap();
+        risky_seat(&theirs.path().join("proj"), home.path());
         let below = theirs.path().strip_prefix(&pw_home).unwrap().display();
         let verdict = |line: &str| tcb_verdict_in(line, Some(root.path()));
+        let write = SEAT_WRITE;
         for line in [
-            "cd $HOME/proj && make clean-all".to_string(),
-            "cd ${HOME}/proj && make clean-all".to_string(),
-            "cd ~/proj && make clean-all".to_string(),
-            format!("cd ~{login}/{below}/proj && make clean-all"),
-            "CDPATH=lib cd proj && make clean-all".to_string(),
-            "CDPATH=$HOME cd proj && make clean-all".to_string(),
+            format!("cd $HOME/proj && {write}"),
+            format!("cd ${{HOME}}/proj && {write}"),
+            format!("cd ~/proj && {write}"),
+            format!("cd ~{login}/{below}/proj && {write}"),
         ] {
             let rule = verdict(&line).unwrap_or_else(|| panic!("{line:?} was allowed"));
             assert_eq!(rule.verdict, "deny", "{line:?}: {}", rule.reason);
             assert_eq!(rule.pattern, "ljos-policyd", "{line:?}: {}", rule.reason);
         }
-        for line in ["cd ~/plain && make clean-all", "cd lib && make clean-all"] {
-            assert!(verdict(line).is_none(), "{line:?}: {:?}", verdict(line));
+        for line in [
+            format!("CDPATH=lib cd proj && {write}"),
+            format!("CDPATH=$HOME cd proj && {write}"),
+            format!("cd ~/plain && {write}"),
+            format!("cd lib && {write}"),
+        ] {
+            assert!(verdict(&line).is_none(), "{line:?}: {:?}", verdict(&line));
         }
     }
 
@@ -54524,30 +54549,38 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             return;
         }
         let script = |line: &str| tcb_argvs(line)[0][2].clone();
+        let write = SEAT_WRITE;
         for (line, read) in [
             (
-                "cd project && \\\nmake clean-all",
-                "cd project && make clean-all",
+                format!("cd project && \\\n{write}"),
+                format!("cd project && {write}"),
             ),
-            ("ma\\\nke clean-all", "make clean-all"),
-            ("echo \"a\\\nb\"", "echo \"ab\""),
-            ("echo `echo x\\\ny`", "echo `echo xy`"),
+            (
+                "ec\\\nho x > seat/hooks.json".to_string(),
+                write.to_string(),
+            ),
+            ("echo \"a\\\nb\"".to_string(), "echo \"ab\"".to_string()),
+            (
+                "echo `echo x\\\ny`".to_string(),
+                "echo `echo xy`".to_string(),
+            ),
         ] {
-            assert_eq!(script(line), read, "{line:?}");
+            assert_eq!(script(&line), read, "{line:?}");
         }
         for line in [
-            "echo 'a\\\nb'",
-            "echo $'a\\\nb'",
-            "echo a\\\\\nmake clean-all",
-            "# note \\\nmake clean-all",
+            "echo 'a\\\nb'".to_string(),
+            "echo $'a\\\nb'".to_string(),
+            format!("echo a\\\\\n{write}"),
+            format!("# note \\\n{write}"),
         ] {
-            assert_eq!(script(line), line, "{line:?}");
+            assert_eq!(script(&line), line, "{line:?}");
         }
         let _g = env_guard();
         let (root, _home, _env) = policyd_tree("policyd-continued");
-        let rule = tcb_verdict_in("cd project && \\\nmake clean-all", Some(root.path()))
+        let rule = tcb_verdict_in(&format!("cd project && \\\n{write}"), Some(root.path()))
             .expect("a continued line was allowed");
         assert_eq!(rule.verdict, "deny", "{}", rule.reason);
+        assert_eq!(rule.pattern, "ljos-policyd", "{}", rule.reason);
     }
 
     /// A here-document's body is data unless a shell on the line reads it
@@ -54562,51 +54595,57 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
         let _g = env_guard();
         let (root, _home, _env) = policyd_tree("policyd-heredoc");
+        plain_seat(root.path());
         let project = root.path().join("project");
         let project = project.as_path();
+        let write = SEAT_WRITE;
         for (line, at) in [
-            ("bash <<'EOF'\nmake clean-all\nEOF", project),
+            (format!("bash <<'EOF'\n{write}\nEOF"), project),
             (
-                "cd project && bash <<'EOF'\nmake clean-all\nEOF",
+                format!("cd project && bash <<'EOF'\n{write}\nEOF"),
                 root.path(),
             ),
             (
-                "bash <<'EOF'\ncd project && make clean-all\nEOF",
+                format!("bash <<'EOF'\ncd project && {write}\nEOF"),
                 root.path(),
             ),
             (
-                "cat <<'EOF' | sh\ncd project\nmake clean-all\nEOF",
+                format!("cat <<'EOF' | sh\ncd project\n{write}\nEOF"),
                 root.path(),
             ),
             (
-                "cat <<EOF\n$(cd project && make clean-all)\nEOF",
+                format!("cat <<EOF\n$(cd project && {write})\nEOF"),
                 root.path(),
             ),
             (
-                "echo ${x:-<<EOF}\ncd project && make clean-all\nEOF",
+                format!("echo ${{x:-<<EOF}}\ncd project && {write}\nEOF"),
                 root.path(),
             ),
             (
-                "echo $((1<<EOF))\ncd project && make clean-all\nEOF",
+                format!("echo $((1<<EOF))\ncd project && {write}\nEOF"),
                 root.path(),
             ),
             (
-                "echo $[1<<EOF]\ncd project && make clean-all\nEOF",
+                format!("echo $[1<<EOF]\ncd project && {write}\nEOF"),
                 root.path(),
             ),
-            ("cat <<<EOF\ncd project && make clean-all\nEOF", root.path()),
+            (
+                format!("cat <<<EOF\ncd project && {write}\nEOF"),
+                root.path(),
+            ),
         ] {
             let rule =
-                tcb_verdict_in(line, Some(at)).unwrap_or_else(|| panic!("{line:?} was allowed"));
+                tcb_verdict_in(&line, Some(at)).unwrap_or_else(|| panic!("{line:?} was allowed"));
             assert_eq!(rule.verdict, "deny", "{line:?}: {}", rule.reason);
+            assert_eq!(rule.pattern, "ljos-policyd", "{line:?}: {}", rule.reason);
         }
         for line in [
-            "cat <<'EOF'\nsudo reboot\nEOF",
-            "cat <<'EOF' > notes.md\ncd project && make clean-all\nEOF",
-            "cat <<'EOF'\n$(sudo reboot)\nEOF",
-            "cat <<EOF\nrun $(echo make clean-all) in project\nEOF",
+            "cat <<'EOF'\nsudo reboot\nEOF".to_string(),
+            format!("cat <<'EOF' > notes.md\ncd project && {write}\nEOF"),
+            "cat <<'EOF'\n$(sudo reboot)\nEOF".to_string(),
+            format!("cat <<EOF\nrun $(echo {write}) in project\nEOF"),
         ] {
-            let rule = tcb_verdict_in(line, Some(root.path()));
+            let rule = tcb_verdict_in(&line, Some(root.path()));
             assert!(rule.is_none(), "{line:?}: {rule:?}");
         }
     }

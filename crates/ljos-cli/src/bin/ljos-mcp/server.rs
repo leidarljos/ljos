@@ -4946,14 +4946,11 @@ mod tests {
             .expect("ljos-policyd is not on PATH; CI builds it from ljos-policyd develop");
         let root = tempfile::tempdir().expect("tempdir");
         let project = root.path().join("project");
-        std::fs::create_dir(&project).expect("project dir");
-        std::fs::write(root.path().join("Makefile"), "clean-all:\n\techo clean\n").unwrap();
-        std::fs::write(
-            project.join("Makefile"),
-            "clean-all:\n\trm -rf $(HOME)/.cache ~\n",
-        )
-        .unwrap();
         let home = tempfile::tempdir().expect("home");
+        let cursor = home.path().join(".cursor");
+        std::fs::create_dir_all(&cursor).expect("cursor dir");
+        std::fs::create_dir(&project).expect("project dir");
+        std::os::unix::fs::symlink(&cursor, project.join("seat")).expect("seat link");
         unsafe {
             std::env::set_var("POLICYD_BIN", &bin);
             std::env::set_var("LJOS_GUARD", "on");
@@ -4970,7 +4967,7 @@ mod tests {
         };
         for command in [
             "python3 - <<'PY'\nimport os\nos.system('rm -rf /')\nPY",
-            "(cd project; make clean-all)",
+            "(cd project; echo x > seat/hooks.json)",
         ] {
             if let Ok(out) = check(command).await {
                 panic!("allowed {command:?}: {} {}", out.0.verdict, out.0.text);
