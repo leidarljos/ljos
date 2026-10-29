@@ -52,27 +52,56 @@ sha256_of() {
     shasum -a 256 "$1" | cut -d' ' -f1
   fi
 }
-# Another launcher started beside this one may hold the lock. Its pid is in
-# the lock; a lock whose pid is gone is taken over.
+# Another launcher started beside this one may hold the lock. The lock is a
+# hard link to a file that already holds its owner's pid, so no lock is
+# ever seen without one. A lock whose pid is gone or empty is taken over.
 take_lock() {
+  printf '%s\n' $$ > "$mine" || return 1
   n=0
-  while ! mkdir "$lock" 2>/dev/null; do
-    held=$(cat "$lock/pid" 2>/dev/null)
-    if [ -n "$held" ] && ! kill -0 "$held" 2>/dev/null; then
-      rm -rf "$lock"
-      continue
+  while :; do
+    if [ ! -d "$lock" ] && ln "$mine" "$lock" 2>/dev/null; then
+      rm -f "$mine"
+      return 0
     fi
-    [ $n -lt 90 ] || return 1
+    held=$(cat "$lock" 2>/dev/null)
+    if [ -z "$held" ] || ! kill -0 "$held" 2>/dev/null; then
+      steal "$held" && continue
+    fi
+    if [ $n -ge 90 ]; then
+      rm -f "$mine"
+      return 1
+    fi
     n=$((n + 1))
     sleep 1
   done
-  echo $$ > "$lock/pid"
+}
+# Move the dead lock aside, so two waiters never both remove it. If what
+# moved is not the lock that was read, a live launcher took it in between
+# and gets it back. Should that fail too, both install; each binary is
+# renamed into place whole, so the overlap costs one more download.
+steal() {
+  aside=$lock.dead.$$
+  rm -rf "$aside"
+  if ! mv "$lock" "$aside" 2>/dev/null; then
+    [ -e "$lock" ] || [ -L "$lock" ] || return 0
+    return 1
+  fi
+  if [ "$(cat "$aside" 2>/dev/null)" != "$1" ] && [ -f "$aside" ]; then
+    ln "$aside" "$lock" 2>/dev/null
+  fi
+  rm -rf "$aside"
+}
+drop_lock() {
+  if [ "$(cat "$lock" 2>/dev/null)" = "$$" ]; then
+    rm -f "$lock"
+  fi
+  rm -rf "$stage"
 }
 fetch_release() {
   case $name in ljos | ljos-mcp) ;; *) return 1 ;; esac
   cloud_vm || return 1
   [ -n "$bin_dir" ] || return 1
-  root=$(CDPATH= cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd) || return 1
+  root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd) || return 1
   ver=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([0-9][0-9.]*\)".*/\1/p' \
     "$root/.cursor-plugin/plugin.json" "$root/.claude-plugin/plugin.json" 2>/dev/null | head -n 1)
   if [ -z "$ver" ]; then
@@ -92,47 +121,66 @@ fetch_release() {
   asset=ljos-v$ver-$target.tar.gz
   mkdir -p "$bin_dir" || return 1
   lock=$bin_dir/.ljos-plugin-fetch
+  mine=$lock.$$
+  stage=$bin_dir/.ljos-plugin-stage.$$
   if ! take_lock; then
     why="another launcher is still fetching release v$ver"
     return 1
   fi
+  for old in "$lock".* "$bin_dir"/.ljos-plugin-stage.*; do
+    [ -e "$old" ] || continue
+    kill -0 "${old##*.}" 2>/dev/null || rm -rf "$old"
+  done
   if [ -x "$bin_dir/$name" ]; then
-    rm -rf "$lock"
+    drop_lock
     return 0
   fi
-  stage=$lock/stage
-  mkdir -p "$stage"
-  if ! get_asset "$asset" "$lock/$asset" || ! get_asset "$asset.sha256" "$lock/$asset.sha256"; then
-    why=${why:-"release v$ver has no $asset"}
-    rm -rf "$lock"
+  if ! mkdir "$stage" || ! mkdir "$stage/unpacked"; then
+    why="$stage could not be made"
+    drop_lock
     return 1
   fi
-  want=$(sed 's/[ *].*//' "$lock/$asset.sha256" | head -n 1)
-  got=$(sha256_of "$lock/$asset")
+  if ! get_asset "$asset" "$stage/$asset" || ! get_asset "$asset.sha256" "$stage/$asset.sha256"; then
+    why=${why:-"release v$ver has no $asset"}
+    drop_lock
+    return 1
+  fi
+  want=$(sed 's/[ *].*//' "$stage/$asset.sha256" | head -n 1)
+  got=$(sha256_of "$stage/$asset")
   if [ -z "$want" ] || [ "$want" != "$got" ]; then
     why="$asset does not match its published SHA-256, so nothing was installed"
-    rm -rf "$lock"
+    drop_lock
     return 1
   fi
-  if ! tar -xzf "$lock/$asset" -C "$stage" 2>/dev/null; then
+  if ! tar -xzf "$stage/$asset" -C "$stage/unpacked" 2>/dev/null; then
     why="$asset did not unpack"
-    rm -rf "$lock"
+    drop_lock
     return 1
   fi
   for prog in ljos ljos-mcp; do
-    found=$(find "$stage" -type f -name "$prog" | head -n 1)
+    found=$(find "$stage/unpacked" -type f -name "$prog" | head -n 1)
     if [ -z "$found" ]; then
       why="$asset holds no $prog"
-      rm -rf "$lock"
+      drop_lock
       return 1
     fi
   done
+  # The stage sits in the bin directory, so each mv is a rename.
+  done_progs=
   for prog in ljos ljos-mcp; do
-    found=$(find "$stage" -type f -name "$prog" | head -n 1)
-    cp "$found" "$bin_dir/$prog.new.$$" && chmod 755 "$bin_dir/$prog.new.$$" &&
-      mv -f "$bin_dir/$prog.new.$$" "$bin_dir/$prog"
+    found=$(find "$stage/unpacked" -type f -name "$prog" | head -n 1)
+    if ! chmod 755 "$found" || ! mv -f "$found" "$bin_dir/$prog"; then
+      if [ -n "$done_progs" ]; then
+        why="$prog could not be moved into $bin_dir, so only$done_progs was installed"
+      else
+        why="$prog could not be moved into $bin_dir, so nothing was installed"
+      fi
+      drop_lock
+      return 1
+    fi
+    done_progs="$done_progs $prog"
   done
-  rm -rf "$lock"
+  drop_lock
   printf 'ljos plugin: installed ljos and ljos-mcp from release v%s into %s (SHA-256 checked)\n' "$ver" "$bin_dir" >&2
 }
 if fetch_release && [ -x "$bin_dir/$name" ]; then
@@ -145,7 +193,7 @@ fi
 # every shell command.
 printf '%s: not installed, so the MCP server has no tools\n' "$name" >&2
 if [ -n "$why" ]; then
-  printf 'ljos plugin: the release was not fetched: %s\n' "$why" >&2
+  printf 'ljos plugin: the release was not installed: %s\n' "$why" >&2
 fi
 hint="ljos plugin: $name is not installed, so the ljos memory and command guard are off. Install with: cargo binstall --locked ljos packset packset-embed vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus (or ask the agent to use the ljos-setup skill). Then run: ljos doctor"
 printf '%s\n' "$hint" >&2
