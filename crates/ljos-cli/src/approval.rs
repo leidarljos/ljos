@@ -616,6 +616,15 @@ pub fn hook_output(input: &str, call: &HookCall, context: &str, verdict: Option<
     if let (true, Some(rule)) = (granted, verdict) {
         crate::log_bypass("approval", "one-use grant", &call.cue, rule);
     }
+    if crate::answer_denies(&out) {
+        if let Some(rule) = verdict {
+            let seat = std::env::var("LJOS_SEAT")
+                .ok()
+                .filter(|seat| !seat.trim().is_empty())
+                .unwrap_or_else(|| "seat".into());
+            crate::digest::note_guard("refusal", &seat, &rule.reason);
+        }
+    }
     out
 }
 

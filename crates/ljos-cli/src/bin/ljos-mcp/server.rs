@@ -253,6 +253,7 @@ const SEAT_FREE_TOOLS: &[&str] = &[
     "ljos_conflicts",
     "ljos_evidence",
     "ljos_current",
+    "ljos_digest",
     "ljos_timeline",
     "ljos_cards",
     "ljos_consensus",
@@ -626,6 +627,17 @@ pub struct OptionsArgs {
 pub struct IssueArgs {
     /// The issue id.
     pub issue: String,
+}
+
+/// What every seat did since a time.
+#[derive(Deserialize, JsonSchema)]
+pub struct DigestArgs {
+    /// A day (`YYYY-MM-DD`), a time, or `last`. Omit to show everything.
+    #[serde(default)]
+    pub since: Option<String>,
+    /// Print one JSON document.
+    #[serde(default)]
+    pub json: Option<bool>,
 }
 
 /// The issue to settle, and whether to run the tracker's settle too.
@@ -1845,6 +1857,27 @@ impl LjosServer {
     ) -> Result<Json<Said>, McpError> {
         ljos_cli::panel_gate::note_tracker_read(&args.issue);
         let text = timeline(&args.issue, 60).map_err(refused)?;
+        Ok(Json(Said { text, aside: None }))
+    }
+
+    #[tool(
+        description = "Call this for one view of what happened across every seat, newest first: tickets filed, claimed and closed, votes and consensus, deeds, claims taken or released, guard refusals and rewrites, and memory. Pass since as a day, a time, or last. last continues from the previous digest. Read-only.",
+        annotations(
+            title = "Digest across seats",
+            read_only_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ljos_digest(
+        &self,
+        Parameters(args): Parameters<DigestArgs>,
+    ) -> Result<Json<Said>, McpError> {
+        let since = args
+            .since
+            .as_deref()
+            .map(str::trim)
+            .filter(|since| !since.is_empty());
+        let text = ljos_cli::digest::digest(since, args.json.unwrap_or(false)).map_err(refused)?;
         Ok(Json(Said { text, aside: None }))
     }
 
@@ -4470,7 +4503,7 @@ mod tests {
         let tools = LjosServer::tool_router().list_all();
         assert_eq!(
             tools.len(),
-            52,
+            53,
             "{:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );

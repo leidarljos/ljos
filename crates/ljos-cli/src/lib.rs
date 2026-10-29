@@ -28,6 +28,7 @@ mod cloud_hook;
 pub mod command_prefs;
 pub mod converge;
 mod deedbag;
+pub mod digest;
 pub mod extract;
 pub mod gates;
 pub mod git_hooks;
@@ -35147,6 +35148,9 @@ fn tcb_line_in(line: &str, cwd: Option<&Path>) -> Option<String> {
                 clear_guard_note();
                 return Some(t);
             }
+        }
+        if t.starts_with("allow\trewrite\t") {
+            digest::note_policyd_line(&t);
         }
         if answer.as_deref().is_none_or(|a| weight(&t) > weight(a)) {
             answer = Some(t);

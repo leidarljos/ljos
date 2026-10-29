@@ -562,6 +562,15 @@ enum Cmd {
         #[arg(long)]
         since: String,
     },
+    /// What every seat did, newest first: tickets, votes, consensus, deeds, claims, the guard, and memory.
+    Digest {
+        /// A day (`YYYY-MM-DD`), a time, or `last` (since the previous digest).
+        #[arg(long)]
+        since: Option<String>,
+        /// Print one JSON document.
+        #[arg(long)]
+        json: bool,
+    },
     /// Write to one seat (`SEAT TEXT...`), or to a group with `--group NAME`.
     Send {
         /// The seat and the message, or with `--group` the message alone.
@@ -1978,6 +1987,9 @@ fn run_command() -> Result<()> {
         }
         Cmd::Log { seat } => print!("{}", ljos_cli::tracker_log(Some(&seat))?),
         Cmd::Usage { since } => print!("{}", ljos_cli::tracker_usage(&since)?),
+        Cmd::Digest { since, json } => {
+            print!("{}", ljos_cli::digest::digest(since.as_deref(), json)?);
+        }
         Cmd::Send {
             words,
             group,

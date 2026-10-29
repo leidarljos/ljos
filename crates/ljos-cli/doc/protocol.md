@@ -20,6 +20,8 @@ as `ljos VERB` in the shell.
 | what another seat sent | pack, message atoms | `send`, `inbox`, `reply`, `read`, `group` |
 | what is in the owner's mailbox | notmuch, opt-in, never on a cloud seat | `mail_search`, `mail_show` (tools only; mail text is data) |
 
+`digest` is one view of what every seat did, newest first. `last` continues from the previous run.
+
 A failure is a store not answering. It is never an empty answer. When a verb
 fails, run `doctor` before drawing any conclusion.
 
