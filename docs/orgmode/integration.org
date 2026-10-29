@@ -44,15 +44,16 @@ Concurrency here is checked with a hammer test: =packsetd= serves many
 readers and one writer, and the hammer rerun is the regression check.
 
 **An Erlang-style plugin tree: no as an Open Telecom Platform (OTP) port, yes as the pattern.**
-What Erlang would buy is supervision: a crashed worker restarts, a bad
-message is refused at the boundary, fail-closed by default. The seat
-already has that shape without the runtime: =ljos-policyd= (or
-=phronesis_check_shell= behind it) refuses at the boundary and protocol
-failures deny; =ljos doctor= names each habitat and whether it answers,
-and a missing one is reported rather than guessed around; the claim graph
+What Erlang would buy is supervision: a crashed worker restarts, and a bad
+message is refused at the boundary. The seat
+already has that shape without the runtime. =ljos-policyd= (or
+=phronesis_check_shell= behind it) refuses at the boundary. A policyd that is
+missing or slow does not stop the work: the command runs and ljos logs a warning.
+=ljos doctor= names each habitat and whether it answers,
+and a missing one is reported rather than guessed around. The claim graph
 lives in =$XDG_RUNTIME_DIR= so a reboot clears leases instead of
 resurrecting stale locks. A new plugin therefore looks like a habitat:
-one store, one CLI, one Model Context Protocol (MCP) surface, fail-closed, doctor-visible. That is
+one store, one CLI, one Model Context Protocol (MCP) surface, doctor-visible. That is
 cheaper than an OTP tree and keeps every store a file a person can read.
 
 **herdr as the tooling integration: yes, and it is the ongoing work.**
@@ -61,7 +62,7 @@ reason in a herdr pane when herdr is up and fall back to a tmux window
 when it is not (=crates/ljos-cli/src/persona_session.rs=), the runner
 works in the persona's home as its own seat, and the person's watch-and-talk
 window is that same pane. The direction is more of this same
-system: herdr panes as supervised seats, the seat guard refusing writes
+system: herdr panes as supervised seats, policyd refusing writes
 to the seat's own files, approvals flowing through =ljos approve= on any
 runner. The [[file:grok-build.org][Grok Build]] page is the reference
 integration; each runner registers the events its table names.
@@ -96,46 +97,43 @@ same everywhere and the envelope differs:
 | Crush | skill | =PreToolUse= on =bash=, exit 2 with the reason on stderr | none | =~/.config/crush/crush.json=; Crush fires only =PreToolUse= so far |
 | Auggie | skill | =PreToolUse= on =launch-process=, =permissionDecision= | none: an ask is a deny that says so | =~/.augment/settings.json= runs =~/.augment/ljos-guard-auggie.sh= |
 | Amp | skill | =Bash= delegated first in =amp.permissions=, exit 2 | Amp's prompt, from exit 1 | =~/.config/amp/settings.json= runs =~/.config/amp/ljos-guard-amp.sh= |
-| goose | skill in the plugin | =PreToolUse= on =shell=, exit 2, fails closed | none | user plugin =~/.agents/plugins/ljos=; server in =~/.config/goose/config.yaml= |
+| goose | skill in the plugin | =PreToolUse= on =shell=, exit 2 | none | user plugin =~/.agents/plugins/ljos=; server in =~/.config/goose/config.yaml= |
 | OpenHands | =UserPromptSubmit= =additionalContext= | =PreToolUse= on =terminal=, exit 2 | none | =~/.openhands/hooks.json= and =~/.openhands/mcp.json= |
 | Continue | rules file; =SessionStart= hook | advisory: hooks in =~/.continue/settings.json= are written, cn 1.5.47 does not fire them | runner prompt | =~/.continue/mcpServers/ljos.json= |
 | Roo Code, Kilo Code | skill | advisory: no tool hook | runner prompt | the extension's =mcp_settings.json= |
 | Grok Bot | the skill, then =ljos hook --prompt= | =ljos policy --fail-on-deny= exits 1 | the person runs the command | no MCP server and no hook file; source the env file =onboard= writes |
 
 Codex runs a hook only after you trust it. After =ljos onboard --harness codex=,
-open =/hooks= and trust each ljos hook before the guard runs, and trust it
-again after an upgrade rewrites one. Until then only the rm, git and find
-shims guard Codex's commands. =ljos doctor= reports an untrusted hook when
+open =/hooks= and trust each ljos hook before it runs.
+Trust it again after an upgrade rewrites one. Until then the hook does not run,
+and policyd sees none of Codex's commands. =ljos doctor= reports an untrusted hook when
 it can see one.
 
 The runners from Copilot down call =ljos hook --runner NAME=. That
 command reads the runner's payload as Claude Code's, runs the same hook,
 and writes the answer back in the runner's field names and exit code.
-On a tool call, the relay denies when the inner hook crashes, exits
-non-zero without an answer, or runs past =GUARD_TIMEOUT=, which is 5
-seconds unless =LJOS_GUARD_TIMEOUT= names another number of seconds.
-A policyd that is installed but hangs, crashes, or prints no verdict
-is denied by the check itself. The reason asks the person to run
-=ljos doctor= in their own terminal. A missing =ljos-policyd= is an
-allow with a note, not that deny. =LJOS_GUARD_FAIL_OPEN=1= restores
-the old allow-with-note behavior for a fault while the seat is repaired.
+On a tool call, the relay lets the command run and logs a warning in three cases.
+The inner hook crashes, exits non-zero without an answer, or runs past =GUARD_TIMEOUT=.
+That is 5 seconds unless =LJOS_GUARD_TIMEOUT= names another number of seconds.
+A policyd that is missing, hangs, crashes, or prints no answer does not
+stop the command either. =POLICYD_REQUIRED=1= refuses the line when no binary answers.
 On any other event, such as a prompt, the relay waits 9 seconds, past
 the inner hook's own 8 second deadline, and a fault lets the event
-through with a note that the guard is unhealthy.
+through with a note.
 
 ** When a hook fails
 
-A guard is only as strong as what the runner does when the hook breaks.
-Each runner decides that itself, and they disagree. The table says what
+A check works only when its hook runs. What happens when the hook breaks is the runner's call,
+and the runners disagree. The table says what
 happens to the command when the seat's hook crashes, times out, or
 prints something the runner cannot read. "Runs" means the command goes
 ahead unchecked.
 
 | Runner | Hook exits non-zero (not 2) or crashes | Hook times out | Answer is not JSON | Source |
 |---+---+---+---+---|
-| Claude Code | blocked: the seat writes ="onFailure": "block"= on its =PreToolUse= hook | blocked | blocked | [[https://docs.claude.com/en/docs/claude-code/hooks][hooks reference]] |
+| Claude Code | runs; only exit 2 blocks | runs | runs | [[https://docs.claude.com/en/docs/claude-code/hooks][hooks reference]] |
 | Codex | runs; only exit 2 with a reason on stderr blocks | runs | runs | [[https://developers.openai.com/codex/hooks][hooks]], [[https://github.com/openai/codex/blob/de8fab6d7adfcef8b4ce6f02f3b5c8be4092015a/codex-rs/hooks/src/events/pre_tool_use.rs][pre_tool_use.rs]] |
-| Cursor | blocked: the seat sets =failClosed= on the permission events | blocked | =beforeShellExecution= blocks it | Cursor hooks docs |
+| Cursor | runs: the seat does not set =failClosed= | runs | =beforeShellExecution= blocks it | Cursor hooks docs |
 | GitHub Copilot CLI | blocked | runs | falls through to Copilot's own permission flow | [[https://docs.github.com/en/copilot/reference/hooks-reference][hooks reference]] |
 | Gemini CLI | runs, with a warning | not documented | runs | [[https://geminicli.com/docs/hooks/reference/][hooks reference]] |
 | Windsurf (Devin Desktop) | runs; only exit 2 blocks | not documented | not read; the exit code decides | [[https://docs.devin.ai/desktop/cascade/hooks][Cascade hooks]] |
@@ -145,31 +143,28 @@ ahead unchecked.
 | Qwen Code | runs; only exit 2 blocks | not documented | not read; the exit code decides | [[https://qwenlm.github.io/qwen-code-docs/en/users/features/hooks/][hooks]] |
 | Crush | runs; only exit 2 blocks | runs | not read; the exit code decides | [[https://github.com/charmbracelet/crush/blob/main/docs/hooks/README.md][hooks]] |
 
-Three things on the seat's side close part of the gap. A guard fault
-denies the tool call: a =ljos-policyd= that is installed but hangs,
-crashes, or prints no verdict, a relay that cannot read its input, and
-a wait past =LJOS_GUARD_TIMEOUT=. A missing =ljos-policyd= still
-allows, with a note, so CI and a fresh install are not locked out.
-=POLICYD_REQUIRED=1= refuses the line when no binary answers, on the
-relay and on a direct hook. =LJOS_GUARD_FAIL_OPEN=1= restores the old
-allow-with-note behavior for a fault while that is repaired. The hook
-files the seat writes give each runner a
-timeout of 10 to 20 seconds; a check that takes longer meets the
-"times out" column. None of these helps when the =ljos= binary itself
-is gone: on Copilot and Kiro that blocks every shell command, and on
+The seat does not turn a fault into a refusal. A =ljos-policyd= that is missing, hangs, crashes,
+or prints no answer lets the command run, and ljos logs a warning. So do a relay that cannot read its
+input and a wait past =LJOS_GUARD_TIMEOUT=. CI and a fresh install are never locked out.
+The hook files the seat writes give each runner a
+timeout of 10 to 20 seconds. A check that takes longer meets the
+"times out" column. None of this helps when the =ljos= binary itself
+is gone. On Copilot and Kiro that blocks every shell command, and on
 every other runner the commands run unchecked.
 
-When the seat's own hook fails on a permission event, with an error, a
-panic, or on Cursor no verdict in 8 seconds, it does not leave the
-answer to the runner. It writes a deny in the runner's JSON and exits
-2, which Claude Code, Codex and both Cursor hosts read as a deny.
+When the seat's own hook fails on a permission event, it writes an allow in the runner's JSON, so a
+runner that blocks on a missing answer still runs the command.
 
-Two rules hold on every runner. First, the seat guard refuses a command
-that writes the seat's own files (its binaries, its hook entries,
-=~/.config/ljos=, the approvals store): an agent cannot rewrite the law
-it runs under. Second, =ljos policy -- COMMAND= prints the combined
-answer for one command without running it, so every integration is
-testable without the runner: =scripts/smoke.sh= does exactly that.
+Two rules hold on every runner. First, policyd refuses a command
+that writes the seat's own files: its binaries, its hook entries and its policy files.
+An agent cannot rewrite the law it runs under. ljos adds one more refusal, for a command or
+a file tool that writes the tracker's files by hand.
+Second, =ljos policy -- COMMAND= prints the answer for one command without running it,
+so every integration is testable without the runner. =scripts/smoke.sh= does exactly that.
+
+policyd can also answer a command with a fixed one. This is coming in 0.35.0. Claude Code and Cursor take the
+new line through the hook's updated input. Every other runner in the table gets a note that
+names the new command.
 
 * Dogfooding
 

@@ -16,18 +16,16 @@ Paste it where the runner keeps its MCP servers. The ``env`` is empty on
 purpose. The server names the seat after the client that connects, so a
 runner that calls itself ``acme-cli`` is the seat ``acme-cli`` and a
 runner that calls itself ``brio`` is ``brio``, with nothing set per runner.
-A shell the runner opens finds the same seat: ``ljos`` walks its own
-process tree to the record the server left for that runner, or, when the
-runner has no MCP, to the first ancestor that is not a shell. Each
-conversation keeps its claims as the seat tagged with its process, so two
-conversations of one runner hold two tickets.
+A shell the runner opens finds the same seat through ``LJOS_SEAT``, or through the markers the
+runner leaves in the environment. A derived name is a seat. Each conversation keeps its claims as
+the seat tagged with its session, so two conversations of one runner hold two tickets.
 
 .. code:: console
 
    $ ljos seat
    seat    acme-cli
    holder  acme-cli-39u
-   source  the server the runner opened, process 4242
+   source  the client name the MCP server received
 
 The protocol goes where the agent reads its instructions: ``ljos protocol``
 prints it, the server serves the same text at ``ljos://protocol`` and names
@@ -64,14 +62,13 @@ from a config file, can be described once in
 ``--dry-run`` reports what would be written.
 
 Codex runs a hook only after you trust it. After ``ljos onboard --harness codex``,
-open ``/hooks`` and trust each ljos hook before the guard runs, and trust it
-again after an upgrade rewrites one. Until then only the rm, git and find
-shims guard Codex's commands. ``ljos doctor`` reports an untrusted hook when
+open ``/hooks`` and trust each ljos hook before it runs.
+Trust it again after an upgrade rewrites one. Until then the hook does not run,
+and policyd sees none of Codex's commands. ``ljos doctor`` reports an untrusted hook when
 the trust file has no ``trusted_hash``, or is older than the hooks file.
 
 The example carries the runners this seat has carried through one piece
-of work, each in the shape it takes the server: a runner with an ``mcp
-add`` of its own by that command; ``grok`` and a runner with a TOML config
+of work, each in the shape it takes the server: a runner with an ``mcp add`` of its own by that command; ``grok`` and a runner with a TOML config
 by a table appended to it; ``opencode`` and ``omp`` by a JSON pointer set in
 their MCP file; ``hermes`` by its ``mcp add`` with the tool question
 answered. The same verb takes ``cursor`` (the IDE and the ``agent`` CLI share
@@ -97,7 +94,7 @@ Seat a shell-only agent
 =======================
 
 Grok Bot runs shell commands on a Linux box. It is not an MCP runner and
-it has no command hook, so the process tree is not its seat.
+it has no command hook, so the env file names its seat.
 
 .. code:: console
 
@@ -114,6 +111,28 @@ is the same shape under the name ``shell``. The env file sets
 or a hook. ``--fail-on-deny`` exits 1 when the answer is a deny. Without
 the flag, ``ljos hook`` and ``ljos policy`` still exit 0, so a runner that
 reads the JSON sees no change. An ``ask`` still exits 0; the text says ``ask``.
+
+Add a seat, and let it close tickets
+====================================
+
+Coming in 0.35.0. The tracker's ``vissue.toml`` lists the seats. ``ljos seat add NAME`` writes the row,
+so nobody edits the file by hand.
+
+.. code:: console
+
+   $ ljos seat add carol
+
+By default a seat cannot close a ticket. ``ljos finish`` leaves the ticket open, and a person closes it.
+A grant changes that for one seat. Here a person says in their own words that carol may close
+the tickets she filed or has claimed, and a recorder writes it down:
+
+.. code:: console
+
+   $ ljos seat grant carol close=own --quote "carol may close what she files" --at 2026-10-29T02:00:00Z --via alice
+
+The row lives in ``vissue.toml``. It holds the quote, the time, the recorder named by ``--via`` and
+the tracker commit. A grant edited into the file by hand is ignored. A seat cannot grant itself.
+Every close that uses the grant cites the record.
 
 Write to another seat
 =====================
@@ -171,7 +190,7 @@ The sender does not wait on it and needs to know nothing about the recipient's r
 A command runs under ``sh -c`` with ``LJOS_SEAT`` set to the recipient, so ``ljos inbox`` in it reads the right mail.
 With a prefix wake, ``LJOS_SEAT`` is still the run seat that matched the prefix.
 ``LJOS_WAKE_FROM``, ``LJOS_WAKE_MSG``, ``LJOS_WAKE_ISSUE`` and ``LJOS_WAKE_INTERRUPT`` name the message, so a wake can ignore plain mail and act only on an interrupt.
-The guard judges the command when it is set and again on every run.
+policyd judges the command when it is set and again on every run.
 A ``deny`` or an ``ask`` keeps it from running, since nobody is there to answer an ask.
 A command is stopped after 30 seconds; ``--timeout S`` changes that, and an agent run such as ``claude -p`` needs a longer one.
 Two sends close together start two wakes, so a wake that resumes a session holds a lock (``flock -n``) and leaves a running session to its ``Stop`` hook.
@@ -216,9 +235,9 @@ Add ``hooks`` to the runner's table and onboard again:
 From then on, before each prompt, the runner pipes it to ``ljos hook`` and
 the memories it activates return as context, preferences first.
 Do not add ``PreToolUse`` as a search event. A turn issues many tool
-calls and one prompt. On a tool call the hook applies the Trusted
-Computing Base (TCB)
-(``ljos-policyd``) and then pack rules. A deny blocks.
+calls and one prompt. On a tool call the hook asks ``ljos-policyd``, the
+Trusted Computing Base (TCB), and then applies pack rules. A deny blocks.
+If policyd is missing, slow or crashes, the command runs and ljos logs a warning.
 
 .. code:: console
 
@@ -231,9 +250,8 @@ Otherwise the hook stops the command and prints a request id. Calling
 that can display one. Otherwise the person replies ``approve REQUEST_ID``
 in the same conversation, where the prompt hook records the grant, or runs
 ``ljos approve REQUEST_ID`` in a terminal of their own. The command refuses under an agent
-runner or without a terminal, a request from another conversation is not
-granted from this one, and the seat guard refuses typing an approval into
-a pane, so an agent cannot grant itself consent. Once the person has
+runner or without a terminal. A request from another conversation is not
+granted from this one. An agent therefore cannot grant itself consent. Once the person has
 approved, the agent retries the original tool call.
 
 .. code:: console
@@ -254,7 +272,7 @@ working-directory overrides to this check.
 The grant lasts for one matching attempt and expires fifteen minutes
 after the request. A changed command, reported directory, conversation,
 tool, or rule needs its own approval. Retrying an expired or consumed id
-is refused. Deny rules and the policy binary still run on every attempt
+is refused. Deny rules and policyd still run on every attempt
 and take precedence over consent. Native execution permissions still
 apply after the hook accepts the retry.
 
@@ -279,41 +297,40 @@ A policy daemon does the same with the argv:
    cargo test --release
    Remembered, oldest first (`ljos search` for more):
 
-Choose the branches a lease push asks on
-========================================
+Let policyd fix a command
+=========================
 
-A ``git push --force-with-lease`` replaces the remote branch, so the guard
-asks before one lands on ``main``, ``master``, ``develop`` or a branch the
-checkout protects. Onto any other branch it runs: the remote refuses a
-lease push when it holds commits you have not fetched. The destination is
-each refspec's branch on the remote (``src:dst``, a bare ``branch``,
-``HEAD:branch``), and a ref the lease names (``--force-with-lease=main:abc123``)
-counts too. A ``+refspec``, ``--force`` or ``-f`` asks whatever the branch.
+Coming in 0.35.0. policyd can answer a command with a fixed one instead of a refusal.
+The answer is one line of three tab-separated fields: ``allow``, ``rewrite`` and the new command.
+The first rewrite runs a command through ``uv run``.
 
-With no refspec, the guard reads the current branch's upstream in the
-checkout, and asks when it cannot tell: no upstream, a detached ``HEAD``, a
-wildcard or ``--all``.
+Claude Code and Cursor take the new line through the hook's updated input. Other runners get
+a note that names the new command. ``ljos policy -- COMMAND``
+prints the answer without running anything, so you can see a rewrite before an agent meets it.
 
-Name more protected branches with ``protected_branches`` in ``ljos.toml`` (the
-user, seat or repository file) or in ``.ljos/gates.toml``. A later file
-replaces the list an earlier one set, and the owners check reads the same
-list. ``main``, ``master`` and ``develop`` ask whatever the list says.
+Two parts of the rewrite are coming in 0.35.0 as well. One is a log of rewrites. The other is a switch
+for one repository: set ``rewrite = false`` there, and policyd stops fixing commands in it.
+
+Choose which branches the push check covers
+===========================================
+
+ljos keeps one push check. A push onto a protected branch asks when the ticket of your
+sitting has no settled consensus. The check asks and never denies. ``main``, ``master`` and ``develop``
+are always protected. Name more with ``protected_branches`` in ``ljos.toml``, in the user, seat or
+repository file. A later file replaces the list an earlier one set.
 
 .. code:: toml
 
-   # .ljos/gates.toml
+   # ljos.toml
    protected_branches = ["main", "release"]
 
-A plain push runs onto any branch of your own repositories, protected or
-not, and so does a merge you push there. To have the guard ask before a
-plain push onto a protected branch of someone else's repository, name your
-accounts and organisations with ``owners``. Unset, every repository counts
-as yours.
+Everything else that concerns a push is policyd's. An ordinary push of a branch runs, and so does a
+lease push to a feature branch. A lease push or a force push onto a protected branch asks.
+Deleting a remote branch and rewriting published history ask or deny.
 
-.. code:: toml
-
-   # ~/.config/ljos/ljos.toml
-   owners = ["HaoZeke", "leidarljos"]
+With one active seat in ``vissue.toml``, that seat's own vote settles consensus for the check.
+This is solo mode, and it is coming in 0.35.0. With two or more seats, the normal quorum applies.
+For a push that must never happen, protect the branch on the forge as well.
 
 Let Jev judge the prompt
 ========================
@@ -439,8 +456,7 @@ is set to, from Claude Opus or GPT-5 to ``gpt-oss-120b`` on an
 OpenAI-compatible endpoint. It is a ``[[harness]]`` in
 ``~/.config/ljos/harnesses.toml``. Its
 ``start`` and ``resume`` argv say how it opens a session and how it resumes
-the latest one in a directory, for example ``resume = ["grok",
-"--continue"]``. It starts in a pane the person can watch and talk in: a
+the latest one in a directory, for example ``resume = ["grok", "--continue"]``. It starts in a pane the person can watch and talk in: a
 herdr workspace when herdr's server is up, else a window of the tmux
 session ``ljos-personas``. A ``[[tool]]`` the runners file declares is tried
 before either (see *Open persona panes in another tool*). A runner that
@@ -521,8 +537,8 @@ permission prompt. Cursor runs the Claude hooks itself where
 ``ljos onboard --harness claude`` already ran. The events Claude's file
 names stay there. ``beforeShellExecution``, ``preToolUse``,
 ``beforeMCPExecution``, ``beforeReadFile`` and ``postToolUseFailure`` are
-still written to ``~/.cursor/hooks.json``, and the permission events
-fail closed. The seat answers both files in Cursor's shape.
+still written to ``~/.cursor/hooks.json``. If a hook fails, the command runs. The seat answers
+both files in Cursor's shape.
 
 Spawn a persona as a subagent
 =============================
@@ -590,8 +606,7 @@ A runner on the machine is the judge through ``command``: an argv that
 reads the request JSON on stdin (``state``, and ``questions``, each with a
 ``type`` of ``noul`` or ``choice``, ``instructions`` and ``criteria``) and prints
 ``{"answers": {...}}`` on stdout inside ``budget_ms``. A ``noul`` answer is
-``{"noul": p}`` or a bare number; a ``choice`` answer is ``{"choice": KEY,
-"confidence": p, "probabilities": {...}}``, and a bare key means a
+``{"noul": p}`` or a bare number; a ``choice`` answer is ``{"choice": KEY, "confidence": p, "probabilities": {...}}``, and a bare key means a
 sure one. A question with no answer refuses the whole reply, so the hook
 takes its local path rather than half a judgment.
 
@@ -646,8 +661,7 @@ One sitting on the ticket, one island per recipe before it is touched:
 
 Then the ladder, each rung its own artifact: ``eb-stack recipe check``,
 ``eb-stack package bump`` (the lock under ``out/locks`` is ``resolves``),
-``eb-stack recipe lint``, ``eb-stack target doctor``, ``eb-stack campaign
-run`` and ``campaign status`` (``builds``, ``binary-verified``). Over MCP the
+``eb-stack recipe lint``, ``eb-stack target doctor``, ``eb-stack campaign run`` and ``campaign status`` (``builds``, ``binary-verified``). Over MCP the
 same verbs are ``eb_recipe_check``, ``eb_package_bump``, ``eb_recipe_lint``,
 ``eb_target_doctor``, ``eb_campaign_run``, ``eb_campaign_status``, beside
 ``ljos_sitting``, ``ljos_island``, ``ljos_remember`` and ``ljos_finish``.
@@ -808,17 +822,14 @@ Each persona is one atom in the pack; its ballots carry its name. The
 settle takes its anchor, never below the 0.5 every other voter on the
 ballot, the seat too, settles at: the reviewer at 0.2 settles at 0.5 and
 counts as much as a seat, and the reader at 0.8 moves most of the way
-toward the others. A trust row scoped with ``--about
-docs`` weighs only on issues whose title says ``docs``, and ``--about`` is
+toward the others. A trust row scoped with ``--about docs`` weighs only on issues whose title says ``docs``, and ``--about`` is
 also what seats a persona: ``ljos panel ISSUE`` and the ``run_a_panel``
 prompt brief only the personas whose domains the issue's title or its
 island names, and every persona when none does.
 
-A persona keeps its own tree over the seat's facts. ``ljos remember --as
-NAME`` writes into the set ``persona-NAME``, where the duplicate and
+A persona keeps its own tree over the seat's facts. ``ljos remember --as NAME`` writes into the set ``persona-NAME``, where the duplicate and
 replacement rules run among its own conclusions and never against the
-seat's or another persona's; the seat still reads every set. ``ljos
-island CUE --as NAME`` walks the pack through that persona's link
+seat's or another persona's; the seat still reads every set. ``ljos island CUE --as NAME`` walks the pack through that persona's link
 weights, and with ``--fire`` tightens the paths it walked under its own
 name (``link_weights_by``), leaving the seat's weights as they were. Two
 personas that read the same island differently end up with different
@@ -842,8 +853,7 @@ A run on another machine needs ljos and the tracker there.
 The run's harness id is the ballot's session, so two runs count twice and a run or subagent that votes again counts once.
 When nothing names the run but the seat, ``ljos vote`` and the tally call the session unverified.
 Persona ballots and Jev ballots are advisory.
-The push gate counts seat ballots from another seat.
-A push whose ``LJOS_CITE`` names an issue those ballots do not decide is denied, and the refusal says why.
+The push check reads seat ballots only. See *Choose which branches the push check covers*.
 
 Cast persona ballots through Jev
 ================================
@@ -900,10 +910,10 @@ With Jev on, the ``Stop`` and ``SubagentStop`` hooks audit the turn once
 before the agent stops. The audit reads four parts of the turn, bounded
 to a few thousand tokens:
 
--  the person's last request
--  the shell commands the turn ran since that request
--  the latest test output, or the last output when no test ran
--  the final message from the agent
+- the person's last request
+- the shell commands the turn ran since that request
+- the latest test output, or the last output when no test ran
+- the final message from the agent
 
 Jev answers three questions about it:
 
@@ -1057,7 +1067,6 @@ tracker has a different head of the branch, as of the last fetch: two
 seats pushing to two remotes each read only their own writes. A sitting's own tracker push goes to
 every remote that carries the branch. A missing
 claim graph is reported and is not a failure: the first claim creates it.
-A damaged guard bypass log is a ``warn`` row and is not a failure: the guard still judges every command.
-A seat nobody named, taken from the program above the shell or from the login user under a runner, is a ``warn`` ``seat source`` row and is not a failure: reads work, and tracker writes are refused until ``LJOS_SEAT`` names the seat.
+A seat nobody named is a derived seat, and a derived seat is a seat. The ``seat source`` row says where the name came from.
 A damaged note queue is a ``no`` row and fails: it holds memory copies the pack has not taken.
 An empty or missing log of either is whole.

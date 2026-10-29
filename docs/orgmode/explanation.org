@@ -135,7 +135,7 @@ a warning. The tracker's =vissue.toml= lists the seats.
 - =ljos seat add NAME= writes the seat's row in =vissue.toml=. Coming in 0.35.0.
 - Solo mode: when =vissue.toml= lists one active seat, that seat's own vote settles consensus for
   the push check. With two or more seats, the normal quorum applies. Coming in 0.35.0.
-- A grant lets one named seat close tickets. Coming in 0.35.0.
+- A grant with ~close=own~ lets one named seat close the tickets it filed or has claimed. Coming in 0.35.0.
 - Without a grant, =ljos finish= leaves the ticket open, and a person closes it.
 
 A grant is made with ~ljos seat grant SEAT close=own --quote "..." --at ISO --via RECORDER~. The

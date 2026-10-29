@@ -136,7 +136,7 @@ ljos seat add carol
 That name is `LJOS_SEAT` when it is set. Otherwise ljos derives one from the
 runner, and a derived name counts as a seat.
 
-**Grants.** Coming in 0.35.0. A grant lets one named seat close tickets.
+**Grants.** Coming in 0.35.0. A grant with `close=own` lets one named seat close the tickets it filed or has claimed.
 Without a grant, `ljos finish` leaves the ticket open for the person to close.
 
 ```
