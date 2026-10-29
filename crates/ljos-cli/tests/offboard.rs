@@ -325,3 +325,27 @@ fn marker_fallback_removes_every_shipped_runner() {
         assert_eq!(files_under(home), before, "{}", harness.name);
     }
 }
+
+#[test]
+fn aider_roundtrip_and_marker_fallback_restore_the_home() {
+    for fallback in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let bin = fake_runner_commands(home);
+        write(
+            &home.join(".aider.conf.yml"),
+            "model: sonnet\nread:\n  - mine.md\n",
+        );
+        write(&home.join("mine.md"), "mine\n");
+        let before = files_under(home);
+
+        let onboard = run(home, &bin, &["onboard", "--harness", "aider"]);
+        assert!(onboard.status.success(), "{onboard:?}");
+        if fallback {
+            fs::remove_dir_all(home.join(".local/state/ljos/onboard")).unwrap();
+        }
+        let offboard = run(home, &bin, &["offboard", "--runner", "aider"]);
+        assert!(offboard.status.success(), "{offboard:?}");
+        assert_eq!(files_under(home), before, "fallback={fallback}");
+    }
+}

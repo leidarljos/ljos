@@ -1083,7 +1083,24 @@ fn legacy_aider(dry: bool, steps: &mut Vec<Step>) -> Result<()> {
     let Ok(text) = fs::read_to_string(&config) else {
         return Ok(());
     };
-    let out = text
+    let out = aider_without_entry(&text, &entry);
+    if out != text {
+        if dry {
+            steps.push(would_remove("aider", &config));
+        } else if out.trim().is_empty() {
+            fs::remove_file(&config)?;
+            remove_empty_parents(config.parent(), home_path().as_deref());
+            steps.push(removed("aider", &config));
+        } else {
+            fs::write(&config, out)?;
+            steps.push(removed("aider", &config));
+        }
+    }
+    Ok(())
+}
+
+fn aider_without_entry(text: &str, entry: &str) -> String {
+    let mut lines: Vec<&str> = text
         .lines()
         .filter(|line| {
             line.trim()
@@ -1091,18 +1108,29 @@ fn legacy_aider(dry: bool, steps: &mut Vec<Step>) -> Result<()> {
                 .trim_matches(['"', '\''])
                 != entry
         })
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
-    if out != text {
-        if dry {
-            steps.push(would_remove("aider", &config));
-        } else {
-            fs::write(&config, out)?;
-            steps.push(removed("aider", &config));
-        }
+        .collect();
+    let empty_read: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(at, line)| {
+            if line.trim() != "read:" {
+                return None;
+            }
+            let has_item = lines[at + 1..]
+                .iter()
+                .take_while(|next| next.trim().is_empty() || next.starts_with(char::is_whitespace))
+                .any(|next| next.trim_start().starts_with("- "));
+            (!has_item).then_some(at)
+        })
+        .collect();
+    for at in empty_read.into_iter().rev() {
+        lines.remove(at);
     }
-    Ok(())
+    if lines.is_empty() {
+        String::new()
+    } else {
+        lines.join("\n") + "\n"
+    }
 }
 
 fn remove_owned(
