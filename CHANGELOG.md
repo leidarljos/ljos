@@ -5,6 +5,23 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.35.1 (2026-10-29)
+
+### Features
+
+- `ljos seat grant SEAT close=ID[,ID...]` records a quoted yes that a seat may close those tickets.
+  `--ids-file PATH` reads the same list, one id per line, and the row stores the ids.
+  The commit, the quote, the time and the recording seat are checked the same way as `close=own`.
+  A hand-written row does not count, and a ticket the list does not name is refused.
+  The close note cites the grant.
+
+### Fixes
+
+- `ljos consensus` no longer waits out a silent pack once for every read it makes.
+  The first read still uses its budget.
+  A later read in that run returns at once, so the waits are not added together.
+
+
 ## 0.35.0 (2026-10-29)
 
 ### Features
