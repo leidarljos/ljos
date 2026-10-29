@@ -11,9 +11,9 @@
 //! runs: the extraction is a bounded, deterministic read. A sentence
 //! already kept (by its normalized form) is not written again.
 //!
-//! It is off unless `LJOS_EXTRACT=on`. Memory is written on purpose: a
-//! transcript the seat mined is nobody's claim, and a session that ends
-//! should leave the pack as it found it.
+//! The read runs at session end. `LJOS_EXTRACT=off` turns it off.
+//! A mined sentence is still nobody's claim: the note stays on the
+//! tracker, and no prompt hook injects it.
 
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -205,8 +205,7 @@ fn plain_failure(err: &anyhow::Error) -> String {
     text
 }
 
-/// Whether the person asked for session-end extraction: `LJOS_EXTRACT=on`.
-/// Anything else, the variable unset included, leaves it off.
+/// Whether session-end extraction runs. It does, unless `LJOS_EXTRACT=off`.
 #[must_use]
 pub fn asked_for() -> bool {
     asked_by(std::env::var("LJOS_EXTRACT").ok().as_deref())
@@ -215,7 +214,7 @@ pub fn asked_for() -> bool {
 /// [`asked_for`] over the variable's value, so a test names it.
 #[must_use]
 pub fn asked_by(set: Option<&str>) -> bool {
-    set.is_some_and(|v| v.trim() == "on")
+    !matches!(set.map(str::trim), Some("off"))
 }
 
 /// Read the session's transcript (the hook payload's `transcript_path`),
@@ -329,16 +328,16 @@ mod tests {
         assert!(got.last().unwrap().contains("19"), "the newest are kept");
     }
 
-    /// ljos-9c12: memory is written on purpose, so a seat that said
-    /// nothing mines no transcript.
+    /// Unset runs the read. Only `off` stops it.
     #[test]
-    fn extraction_waits_to_be_asked_for() {
-        assert!(!asked_by(None));
-        assert!(!asked_by(Some("")));
-        assert!(!asked_by(Some("off")));
-        assert!(!asked_by(Some("1")));
+    fn extraction_runs_unless_turned_off() {
+        assert!(asked_by(None));
+        assert!(asked_by(Some("")));
         assert!(asked_by(Some("on")));
         assert!(asked_by(Some(" on ")));
+        assert!(asked_by(Some("1")));
+        assert!(!asked_by(Some("off")));
+        assert!(!asked_by(Some(" off ")));
     }
 
     #[test]

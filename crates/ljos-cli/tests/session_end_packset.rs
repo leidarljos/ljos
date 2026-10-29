@@ -2,9 +2,9 @@
 //!
 //! `ljos hook` takes a SessionEnd payload. packsetd, from PATH, is the
 //! pack, in its own home. A live sitting is a hold whose process is this
-//! test. Extraction is off unless `LJOS_EXTRACT=on`; when it is on, the
-//! stored note names that issue, stays an agent note, and a later prompt
-//! does not repeat the sentence.
+//! test. Extraction runs unless `LJOS_EXTRACT=off`. The stored note names
+//! that issue, stays an agent note, and a later prompt does not repeat
+//! the sentence.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -16,8 +16,8 @@ use serde_json::Value;
 
 const FACT: &str = "The root cause was a shared temp directory between the two test processes.";
 const ISSUE: &str = "probe-0001";
-/// What a seat that asked for session-end extraction sets.
-const ASKED: &[(&str, &str)] = &[("LJOS_EXTRACT", "on")];
+/// Unset: extraction is on. These calls do not set `LJOS_EXTRACT`.
+const ASKED: &[(&str, &str)] = &[];
 
 struct Daemon {
     child: std::process::Child,
@@ -336,10 +336,13 @@ fn session_end_extract_off_stores_nothing() {
     no_http_refusal(&stderr);
 }
 
-/// ljos-9c12: memory is written on purpose. A seat that never asked for
-/// extraction ends its session with the pack as it found it.
+/// With `LJOS_EXTRACT` unset, the sitting's note is written.
 #[test]
-fn session_end_stores_nothing_when_nobody_asked() {
+fn session_end_stores_facts_when_extract_is_unset() {
+    if !ljos_cli::tool_installed("packsetd") {
+        eprintln!("skipped: packsetd is not installed");
+        return;
+    }
     let pack = Daemon::start();
     let seat = Seat::new();
     seat.sit();
@@ -347,12 +350,8 @@ fn session_end_stores_nothing_when_nobody_asked() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "hook failed\n{}", text_of(&out));
     assert!(
-        fact_atom(&atoms(&pack.url)).is_none(),
-        "an unasked session end stored a note\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("facts from"),
-        "the transcript was read with nobody asking:\n{stderr}"
+        fact_atom(&atoms(&pack.url)).is_some(),
+        "an unset session end stored no note\n{stderr}"
     );
     no_http_refusal(&stderr);
 }

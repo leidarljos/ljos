@@ -2,9 +2,9 @@
 //!
 //! A sentence an agent wrote in its own reply is the agent's reading of the
 //! work, not a fact the person stated. Writing it as a lesson let it ride
-//! onto later prompts as a standing claim. Extraction, which a seat asks
-//! for with `LJOS_EXTRACT=on`, writes a `note` atom with agent
-//! provenance, so it stays out of prompt facts.
+//! onto later prompts as a standing claim. Extraction runs unless
+//! `LJOS_EXTRACT=off`. It writes a `note` atom with agent provenance, so
+//! it stays out of prompt facts.
 
 ljos_test_boot::harness!();
 use std::io::{Read, Write};
@@ -78,8 +78,7 @@ fn serve(atoms: Arc<Mutex<Vec<serde_json::Value>>>) -> String {
     format!("http://{addr}")
 }
 
-#[test]
-fn session_end_extraction_writes_notes_not_lessons() {
+fn posted_notes(extract: Option<&str>) -> Vec<serde_json::Value> {
     let home = tempfile::tempdir().unwrap();
     let transcript = home.path().join("transcript.jsonl");
     std::fs::write(
@@ -115,7 +114,8 @@ fn session_end_extraction_writes_notes_not_lessons() {
     })
     .to_string();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    child
         .args(["hook"])
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -129,9 +129,12 @@ fn session_end_extraction_writes_notes_not_lessons() {
         .env("PACKSET_TIMEOUT_MS", "2000")
         .env("LJOS_SEAT", "probe-seat")
         .env("LJOS_HOLD", "book-holder")
-        .env("LJOS_EXTRACT", "on")
         .env("LJOS_USER_RULES_SYNC", "off")
-        .env("VISSUE_NO_ROUTE", "1")
+        .env("VISSUE_NO_ROUTE", "1");
+    if let Some(value) = extract {
+        child.env("LJOS_EXTRACT", value);
+    }
+    let mut child = child
         .current_dir(home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -151,6 +154,12 @@ fn session_end_extraction_writes_notes_not_lessons() {
     );
 
     let stored = atoms.lock().unwrap().clone();
+    stored
+}
+
+#[test]
+fn session_end_extraction_writes_notes_not_lessons() {
+    let stored = posted_notes(None);
     let posted: Vec<&serde_json::Value> = stored
         .iter()
         .filter(|a| a["text"].as_str().is_some_and(|t| t.contains("root cause")))
@@ -175,4 +184,15 @@ fn session_end_extraction_writes_notes_not_lessons() {
             "the note lacks provenance: {atom}"
         );
     }
+}
+
+#[test]
+fn session_end_extract_off_writes_nothing() {
+    let stored = posted_notes(Some("off"));
+    assert!(
+        stored.iter().all(|atom| !atom["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("root cause"))),
+        "LJOS_EXTRACT=off still stored a note: {stored:?}"
+    );
 }
