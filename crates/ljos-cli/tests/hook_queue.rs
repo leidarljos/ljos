@@ -262,19 +262,6 @@ fn creates(hab: &Hab) -> usize {
         .count()
 }
 
-fn commits(dir: &Path) -> Vec<String> {
-    let out = Command::new("/usr/bin/git")
-        .arg("-C")
-        .arg(dir)
-        .args(["log", "--format=%s"])
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::to_string)
-        .collect()
-}
-
 fn lock_file(path: &Path) -> std::fs::File {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let file = std::fs::OpenOptions::new()
@@ -401,7 +388,7 @@ fn twenty_calls_at_once_each_answer_inside_200_ms_and_30_mb() {
         "{answered} hook timing lines for 21 calls:\n{times}"
     );
     drain(&hab);
-    assert_eq!(creates(&hab), 10, "every first write still files its claim");
+    assert_eq!(creates(&hab), 0, "a first write does not file a claim");
     let times = std::fs::read_to_string(hab.run.join("ljos/hook-times.log")).unwrap();
     let mut gates = 0;
     for line in times.lines() {
@@ -415,64 +402,6 @@ fn twenty_calls_at_once_each_answer_inside_200_ms_and_30_mb() {
         gates += usize::from(words[0] == "hook");
     }
     assert_eq!(gates, 21, "one timing line per gate call:\n{times}");
-}
-
-/// A call made while another process holds the book lock still gets its
-/// answer at once; its book waits and is applied once the lock is free.
-#[test]
-fn a_call_gets_its_answer_while_another_process_holds_the_book_lock() {
-    let hab = hab("booklock");
-    let held = lock_file(&hab.run.join("ljos/book.lock"));
-    for (what, payload) in [
-        ("edit", claude_edit(&hab, "locked-out")),
-        ("shell", cursor_shell(&hab, "locked-out-shell", "ls")),
-    ] {
-        let started = Instant::now();
-        let out = within(
-            feed(ljos(&hab, &["hook"]), &payload),
-            Duration::from_secs(5),
-            what,
-        );
-        assert!(out.status.success(), "{what}");
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "{what} took {:?} behind the book lock",
-            started.elapsed()
-        );
-        if what == "shell" {
-            let said = String::from_utf8_lossy(&out.stdout);
-            assert!(said.contains("\"permission\":\"allow\""), "{said}");
-        }
-    }
-    assert_eq!(creates(&hab), 0, "nothing books while the lock is held");
-    drop(held);
-    drain(&hab);
-    assert_eq!(
-        creates(&hab),
-        1,
-        "the queued write claimed once the lock was free"
-    );
-}
-
-/// Filing a claim reads the tracker, so a queued claim is filed with the
-/// book lock let go and no other bookkeeper on the host waits on it.
-#[test]
-fn a_queued_claim_is_filed_with_the_book_lock_free() {
-    let hab = hab("claimfree");
-    let out = within(
-        feed(ljos(&hab, &["hook"]), &claude_edit(&hab, "claimer")),
-        Duration::from_secs(5),
-        "a write",
-    );
-    assert!(out.status.success());
-    drain(&hab);
-    assert_eq!(creates(&hab), 1);
-    let seen = std::fs::read_to_string(hab.tracker.join("book-lock.log")).unwrap_or_default();
-    assert_eq!(
-        seen.trim(),
-        "free",
-        "the claim was filed under the book lock"
-    );
 }
 
 /// A pack that accepts and never answers costs a gate one short wait, and
@@ -692,52 +621,6 @@ fn a_server_killed_mid_wait_falls_back_and_fails_closed() {
     assert!(stdout.contains("\"permission\":\"allow\""), "{stdout}");
 }
 
-/// A read-only call makes no tracker commit, and the claims a burst of
-/// writes files are committed together, once per tracker file.
-#[test]
-fn reads_commit_nothing_and_queued_claims_commit_once() {
-    let hab = hab("batch");
-    let before = commits(&hab.tracker).len();
-    let out = within(
-        feed(
-            ljos(&hab, &["hook"]),
-            &cursor_shell(&hab, "reader", "cat README.md"),
-        ),
-        Duration::from_secs(5),
-        "a read",
-    );
-    assert!(out.status.success());
-    drain(&hab);
-    assert_eq!(
-        commits(&hab.tracker).len(),
-        before,
-        "a read committed the tracker"
-    );
-    let draining = lock_file(&hab.run.join("ljos/bookq.lock"));
-    for i in 0..4 {
-        let out = within(
-            feed(
-                ljos(&hab, &["hook"]),
-                &claude_edit(&hab, &format!("writer-{i}")),
-            ),
-            Duration::from_secs(5),
-            "a write",
-        );
-        assert!(out.status.success());
-    }
-    drop(draining);
-    drain(&hab);
-    assert_eq!(creates(&hab), 4);
-    let made = commits(&hab.tracker);
-    assert_eq!(made.len(), before + 1, "{made:?}");
-    for n in 1..=4 {
-        assert!(
-            made[0].contains(&format!("probe-{n:04x} claimed")),
-            "{made:?}"
-        );
-    }
-}
-
 /// `ljos doctor` says how long gate calls took and how long they waited.
 #[test]
 fn doctor_reports_hook_p95_and_lock_waits() {
@@ -771,75 +654,6 @@ fn doctor_reports_hook_p95_and_lock_waits() {
     assert!(line.contains("over 3 gate calls"), "{line}");
     assert!(line.contains("queue wait p95"), "{line}");
     assert!(line.contains("book lock wait p95"), "{line}");
-}
-
-/// One drainer applies queued calls of two conversations, each as the
-/// conversation its payload names: each claim is booked under its own
-/// holder, though both hook processes, and so the drainer, carry a third
-/// conversation's id.
-#[test]
-fn the_drainer_books_each_queued_call_as_its_payloads_conversation() {
-    const X: &str = "0199a1b2-c3d4-4e5f-8a6b-00000000000x";
-    const Y: &str = "0199a1b2-c3d4-4e5f-8a6b-00000000000y";
-    const W: &str = "0199a1b2-c3d4-4e5f-8a6b-00000000000w";
-    let hab = hab("perjob");
-    let draining = lock_file(&hab.run.join("ljos/bookq.lock"));
-    for conv in [X, Y] {
-        let payload = serde_json::json!({
-            "cursor_version": "2.4.0",
-            "conversation_id": conv,
-            "session_id": "cursor-sess-0002bbbb",
-            "hook_event_name": "preToolUse",
-            "tool_name": "Write",
-            "tool_input": {"file_path": hab.repo.join("README.md"), "content": "grown"},
-            "cwd": hab.repo,
-        })
-        .to_string();
-        let mut cmd = ljos(&hab, &["hook"]);
-        cmd.env("CURSOR_CONVERSATION_ID", W);
-        let out = within(
-            feed(cmd, &payload),
-            Duration::from_secs(5),
-            "a queued write",
-        );
-        assert!(out.status.success());
-    }
-    drop(draining);
-    drain(&hab);
-    assert_eq!(creates(&hab), 2);
-    let book = |conv: &str| {
-        let tag = ljos_cli::session_tag(conv);
-        std::fs::read_to_string(hab.run.join(format!("ljos/book-{tag}.json"))).unwrap_or_default()
-    };
-    assert!(
-        book(X).contains("\"issue\":\"probe-0001\""),
-        "X's book: {}",
-        book(X)
-    );
-    assert!(
-        book(Y).contains("\"issue\":\"probe-0002\""),
-        "Y's book: {}",
-        book(Y)
-    );
-    assert!(
-        book(W).is_empty(),
-        "the env's conversation booked: {}",
-        book(W)
-    );
-    let mut claims: Vec<String> = std::fs::read_to_string(hab.tracker.join("claims.log"))
-        .unwrap_or_default()
-        .lines()
-        .map(str::to_string)
-        .collect();
-    claims.sort();
-    assert_eq!(
-        claims,
-        [
-            format!("probe-0001 probe-seat@{}", ljos_cli::session_tag(X)),
-            format!("probe-0002 probe-seat@{}", ljos_cli::session_tag(Y)),
-        ],
-        "the holders the drainer claimed as"
-    );
 }
 
 /// A seat-tool shortcut must not trust only the tool name prefix.

@@ -885,12 +885,15 @@ fn gate_runner(name: &str) -> Result<()> {
     if name != "pre-push" {
         return Ok(());
     }
-    let cfg = crate::gates::consensus_push(repo.as_deref()).map_err(|why| {
-        anyhow!(
-            "sitting-gate: {}",
-            crate::sitting_gate::unread_settings(&why)
-        )
-    })?;
+    let cfg = match crate::gates::consensus_push(repo.as_deref()) {
+        Ok(cfg) => cfg,
+        Err(why) => {
+            return Err(anyhow!(
+                "sitting-gate: {}",
+                crate::sitting_gate::unread_settings(&why)
+            ))
+        }
+    };
     let dest = match std::io::read_to_string(std::io::stdin()) {
         Ok(refs) => protected_ref(&refs, &cfg.branches),
         Err(e) => Some(format!("sends refs the hook cannot read ({e})")),
@@ -898,8 +901,7 @@ fn gate_runner(name: &str) -> Result<()> {
     let Some(dest) = dest else {
         return Ok(());
     };
-    if issue.is_empty() || !crate::protected_push_cleared(&issue, &crate::seat_name(), cfg.quorum)
-    {
+    if issue.is_empty() || !crate::protected_push_cleared(&issue, &crate::seat_name(), cfg.quorum) {
         let why = "the sitting has no settled consensus".to_string();
         let wait = crate::sitting_gate::seats_wait(&dest, &cfg.branches, &issue, &why);
         return Err(anyhow!("sitting-gate: {wait}"));
@@ -1003,69 +1005,15 @@ fn book_commit(hook: &str) -> Result<()> {
     // An amend or a rebase lists old and new shas. Move the citation
     // before the "already booked" return: post-commit may have cited the
     // new HEAD already, and the old sha would otherwise stay on the issue.
-    if hook == "post-rewrite" {
-        crate::bookkeep::repoint_commits(&repo, &rewrite_pairs());
-    }
     if already_booked(&repo, &head) {
         return Ok(());
     }
     let subject = git_line(&["log", "-1", "--format=%s"]).unwrap_or_default();
-    // A hook exports GIT_DIR. Later `git -C` on the tracker must not follow
-    // it, and a nested commit must not re-enter this hook. Both ride on the
-    // child git and ljos processes; this process keeps the environment it
-    // was started with, so the rev-parse above still sees the checkout.
-    // Finish idle rows in other checkouts before this commit is cited into
-    // an open sitting. That path returns without observe, which is the
-    // other place the idle sweep runs.
-    // The tool calls before this commit may still have their book queued.
-    crate::book_queue::catch_up();
-    let session = crate::harness_book_session().unwrap_or_else(crate::bookkeep::seat_session);
-    crate::bookkeep::sweep_idle_sittings(&session, &repo);
-    // A subject or body that names an open issue (`ljos-policyd-32fx: ...`,
-    // `Fixes ljos-xsor`) books the commit on that issue. A new issue is
-    // filed only when the message names none the tracker holds open.
-    let message = git_line(&["log", "-1", "--format=%B"]).unwrap_or_default();
-    if let Some(issue) = crate::bookkeep::named_open_issue(&message) {
-        crate::bookkeep::book_named_commit(&repo, &head, &issue);
-        remember_booked(&repo, &head);
-        if let Some(line) = crate::bookkeep::commit_recall_line(&session, &repo, &subject) {
-            println!("{line}");
-        }
-        return Ok(());
-    }
-    // The commit already belongs to an open sitting in this checkout.
-    // Booking it on the seat's own session would open a second book.
-    if crate::bookkeep::cite_into_open_sitting(&repo) {
-        remember_booked(&repo, &head);
-        return Ok(());
-    }
-    let command = if subject.is_empty() {
-        "git commit".to_string()
-    } else {
-        format!("git commit -m {}", shell_quote(&subject))
-    };
-    let raw = serde_json::json!({
-        "hook_event_name": "PostToolUse",
-        "session_id": session,
-        "cwd": repo,
-        "tool_name": "Bash",
-        "tool_input": {"command": command},
-        "tool_response": {"exit_code": 0},
-        "prompt": subject,
-        "ljos_git_hook": true,
-    })
-    .to_string();
-    let call = crate::HookCall {
-        event: "PostToolUse".into(),
-        cue: command,
-        session: Some(session.clone()),
-        shape: crate::HookShape::Asks,
-    };
-    let _ = crate::bookkeep::observe(&raw, &call);
+    println!(
+        "{}",
+        crate::bookkeep::note_after_commit(&repo, &head, &subject)
+    );
     remember_booked(&repo, &head);
-    if let Some(line) = crate::bookkeep::commit_recall_line(&session, &repo, &subject) {
-        println!("{line}");
-    }
     Ok(())
 }
 
@@ -1083,33 +1031,6 @@ fn foreign_session() -> bool {
     ["CLAUDECODE", "CODEX_THREAD_ID", "CODEX_SESSION_ID"]
         .iter()
         .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
-}
-
-fn rewrite_pairs() -> Vec<(String, String)> {
-    use std::io::{IsTerminal, Read};
-    if std::io::stdin().is_terminal() {
-        return Vec::new();
-    }
-    let mut raw = String::new();
-    if std::io::stdin().read_to_string(&mut raw).is_err() {
-        return Vec::new();
-    }
-    raw.lines()
-        .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let old = parts.next()?;
-            let new = parts.next()?;
-            if commit_sha(old) && commit_sha(new) {
-                Some((old.to_string(), new.to_string()))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-fn commit_sha(text: &str) -> bool {
-    (text.len() == 40 || text.len() == 64) && text.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn mid_rewrite() -> bool {

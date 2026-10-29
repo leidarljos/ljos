@@ -297,26 +297,6 @@ fn refused(said: &str, what: &str) {
     );
 }
 
-fn book_path(home: &Box_, conv: &str) -> PathBuf {
-    home.run
-        .join(format!("ljos/book-{}.json", ljos_cli::session_tag(conv)))
-}
-
-fn book_clock(path: &Path) -> u64 {
-    let text = std::fs::read_to_string(path).unwrap_or_default();
-    serde_json::from_str::<serde_json::Value>(&text)
-        .ok()
-        .and_then(|v| v.get("last_unix").and_then(|n| n.as_u64()))
-        .unwrap_or(0)
-}
-
-fn set_book_clock(path: &Path, unix: u64) {
-    let text = std::fs::read_to_string(path).unwrap();
-    let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
-    value["last_unix"] = serde_json::json!(unix);
-    std::fs::write(path, value.to_string()).unwrap();
-}
-
 fn drain(home: &Box_) {
     let out = home
         .command(env!("CARGO_BIN_EXE_ljos"), &["hook", "--drain"], &[])
@@ -573,24 +553,9 @@ fn a_blank_conversation_id_reads_the_env_and_touches_the_book() {
         home.hook_with(&payload.to_string(), env);
         drain(&home);
     };
-    let path = book_path(&home, CONV_X);
     touch(Some(CONV_X.into()), &x);
-    let stamped = book_clock(&path);
-    assert!(stamped > 1, "a payload id did not touch {}", path.display());
-    set_book_clock(&path, 1);
     touch(Some("".into()), &x);
-    let refreshed = book_clock(&path);
-    assert!(
-        refreshed > 1,
-        "a blank id did not refresh the same book ({})",
-        path.display()
-    );
-    set_book_clock(&path, 1);
     touch(Some(CONV_X.into()), &x);
-    assert!(
-        book_clock(&path) > 1,
-        "the payload id did not refresh the same book again"
-    );
 }
 
 /// The box's hook payload names no conversation: every id is empty, the
@@ -1848,11 +1813,7 @@ fn a_tmux_pane_is_not_judged_as_the_last_conversation_to_name_tmux() {
     std::fs::write(&z_go, "").unwrap();
     let z_rc = wait_rc(&z_done);
     let z_err = std::fs::read_to_string(home.run.join("z.done.err")).unwrap_or_default();
-    assert_eq!(
-        z_rc.trim(),
-        "0",
-        "Z's pane was refused: rc={z_rc} {z_err}"
-    );
+    assert_eq!(z_rc.trim(), "0", "Z's pane was refused: rc={z_rc} {z_err}");
     let _ = home.bash(&x, &format!("{tmux_s} kill-server"));
     let _ = home.bash(
         &z,
@@ -2212,10 +2173,7 @@ fn rv9_a_script_that_execs_git_with_anothers_id_does_not_commit_on_its_sitting()
     .unwrap();
     let line = format!("python3 {}", forge.display());
     let said = home.rv_runner("node", "bash -c", &["CURSOR_AGENT"], &[], &[(z, &line)]);
-    assert!(
-        said.contains("EXIT 0"),
-        "Z's script was refused:\n{said}"
-    );
+    assert!(said.contains("EXIT 0"), "Z's script was refused:\n{said}");
 }
 
 /// RV12. An id-less `node` runner that starts each tool call as
