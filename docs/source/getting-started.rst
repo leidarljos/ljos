@@ -184,18 +184,33 @@ close the ticket. A person does, when the work is accepted.
 3. Seats and grants
 ===================
 
-Coming in 0.35.0. The tracker keeps the list of seats. Add one with:
+Coming in 0.35.0. The tracker's ``vissue.toml`` lists the seats. Add one with:
 
 .. code:: console
 
    $ ljos seat add carol
 
-You no longer edit a file by hand. ``ljos seat`` prints the name this agent works under and
+``ljos seat add`` writes the seat's row in ``vissue.toml``. You no longer edit the file by hand.
+``ljos seat`` prints the name this agent works under and
 where the name came from. The name is ``LJOS_SEAT`` when it is set. Otherwise ljos derives
 one from the runner, and a derived name counts as a seat.
 
-Seat grants are coming in 0.35.0. A grant lets one named seat do one thing it could not
-do alone, such as close a ticket. Without a grant, ``ljos finish`` leaves the ticket open.
+A grant lets one named seat close tickets. It is coming in 0.35.0. Without a grant,
+``ljos finish`` leaves the ticket open for a person to close.
+
+.. code:: console
+
+   $ ljos seat grant alice close=own --quote "the person's words" --at 2026-10-29T02:00:00Z --via RECORDER
+
+The row lives in ``vissue.toml``. It holds the quote, the time, the recorder named by ``--via``,
+and the tracker commit. A grant edited in by hand is ignored. A seat cannot grant itself.
+Every close cites the grant record.
+
+Solo mode
+---------
+
+Coming in 0.35.0. When ``vissue.toml`` lists one active seat, that seat's own vote settles
+consensus for the push check. With two or more seats, the normal quorum applies.
 
 4. Ask policyd
 ==============
@@ -216,10 +231,12 @@ There are four answers. ``allow`` runs the command. ``ask`` shows the runner's p
 prompt, and you answer it. ``deny`` stops the command and names the rule. ``rewrite`` is coming
 in 0.35.0. It replaces the command with a fixed one and lets that one run.
 The answer is ``allow``, ``rewrite`` and the new command, separated by tabs.
+A log of rewrites is coming in 0.35.0. So is a per-repository switch: ``rewrite = false`` turns
+rewriting off for that repository.
 
 A force push to ``main``, ``master``, ``develop`` or a protected branch asks. An ordinary push of a
 branch runs. A push onto a protected branch also asks when the ticket of your sitting has no
-settled consensus.
+settled consensus. With one active seat, its own vote settles it.
 
 If ``ljos-policyd`` is missing or slow, the command runs and ljos logs a warning.
 ``ljos doctor`` shows the policy row.

@@ -125,20 +125,33 @@ moves the rows toward the voters who turned out right.
 
 ### Seats
 
-The tracker keeps the list of seats. Coming in 0.35.0:
+The tracker's `vissue.toml` lists the seats. Coming in 0.35.0:
 
 ```
 ljos seat add carol
 ```
 
-`ljos seat add NAME` registers a seat on the tracker, so nobody edits a file by hand.
+`ljos seat add NAME` writes the seat's row in `vissue.toml`, so nobody edits the file by hand.
 `ljos seat` prints the name this agent works under and where the name came from.
 That name is `LJOS_SEAT` when it is set. Otherwise ljos derives one from the
 runner, and a derived name counts as a seat.
 
-Seat grants are coming in 0.35.0. A grant lets one named seat do one thing it could
-not do alone, such as close a ticket. Without a grant, `ljos finish` leaves the
-ticket open for the person to close.
+**Grants.** Coming in 0.35.0. A grant lets one named seat close tickets.
+Without a grant, `ljos finish` leaves the ticket open for the person to close.
+
+```
+ljos seat grant SEAT close=own --quote "the person's words" --at ISO_TIME --via RECORDER
+```
+
+The row lives in `vissue.toml`. It holds the quote, the time, the recorder named by `--via`,
+and the tracker commit. Three rules apply:
+
+- A grant edited into `vissue.toml` by hand is ignored.
+- A seat cannot grant itself.
+- Every close cites the grant record.
+
+**Solo mode.** Coming in 0.35.0. When `vissue.toml` lists one active seat, that seat's own vote
+settles consensus for the push check. With two or more seats, the normal quorum applies.
 
 ### What happened
 
@@ -191,6 +204,9 @@ Claude Code and Cursor take the new command back from the hook and run it.
 A runner that has no field for this gets a note that names the new command.
 policyd keeps a log of what it denies.
 
+Coming in 0.35.0: a log of rewrites, and a per-repository switch. Setting `rewrite = false`
+turns rewriting off for that repository.
+
 ### The two checks ljos keeps
 
 Only ljos knows the tracker and the sitting, so it keeps two checks.
@@ -199,7 +215,8 @@ Only ljos knows the tracker and the sitting, so it keeps two checks.
   Use `ljos file`, `ljos note`, `ljos vote` and `ljos finish`. Ticket text is data
   and is never read as a command.
 - A push onto a protected branch asks when the ticket of the current sitting has no
-  settled consensus. It asks. It does not deny.
+  settled consensus. It asks. It does not deny. With one active seat, that seat's own vote
+  settles it. With two or more, the normal quorum applies.
 
 If `ljos-policyd` is missing or slow, the command runs and ljos logs a warning.
 `ljos doctor` shows the policy row. `ljos policy -- COMMAND` prints the answer for

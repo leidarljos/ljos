@@ -88,8 +88,10 @@ the new command, separated by tabs. Its first rewrite runs the command through =
 
 Claude Code and Cursor accept an updated command from the hook, and ljos hands the new line back
 through that field. A runner without that field gets a note that names the new command. policyd
-writes a log of what it denies. There is no log of rewrites yet, and no per-repository switch to
-turn one off.
+writes a log of what it denies.
+
+Two more parts are coming in 0.35.0. One is a log of rewrites. The other is a per-repository
+switch: =rewrite = false= turns rewriting off for that repository.
 
 ** The two checks ljos keeps
 
@@ -97,8 +99,8 @@ turn one off.
   files by hand is refused. Ticket text is data, so a ticket body that mentions a path or a
   command is never read as one.
 - A push onto a protected branch asks when the ticket of the current sitting has no settled
-  consensus. It asks. It does not deny. With one seat, there is no consensus to find, so it asks
-  every time and you answer.
+  consensus. It asks. It does not deny. With one active seat, that seat's own vote settles it.
+  With two or more, the normal quorum applies.
 
 ** What fails open
 
@@ -128,12 +130,19 @@ Claims belong to one conversation. Memory, ballots and trust belong to the seat.
 is =SEAT@session=, and the session id is the one the runner gives.
 
 A seat does not need to be listed before it writes. An unset seat writes under its login seat with
-a warning. The tracker keeps the list of seats.
+a warning. The tracker's =vissue.toml= lists the seats.
 
-- =ljos seat add NAME= registers a seat on the tracker. Coming in 0.35.0.
-- A seat grant lets one named seat do one thing it could not do alone, such as close a ticket.
-  Coming in 0.35.0.
+- =ljos seat add NAME= writes the seat's row in =vissue.toml=. Coming in 0.35.0.
+- Solo mode: when =vissue.toml= lists one active seat, that seat's own vote settles consensus for
+  the push check. With two or more seats, the normal quorum applies. Coming in 0.35.0.
+- A grant lets one named seat close tickets. Coming in 0.35.0.
 - Without a grant, =ljos finish= leaves the ticket open, and a person closes it.
+
+A grant is made with ~ljos seat grant SEAT close=own --quote "..." --at ISO --via RECORDER~. The
+row lives in =vissue.toml=. It holds the quote, the time, the recorder and the tracker commit. A
+grant edited in by hand is ignored, because only the command writes the commit that backs the row.
+A seat cannot grant itself. Every close cites the grant record, so a close can be traced to the
+words that allowed it.
 
 A shell-only agent has no MCP client and no hook. =ljos onboard= for such a runner writes the skill
 and an env file. Source the file, and =LJOS_SEAT= is the name.
