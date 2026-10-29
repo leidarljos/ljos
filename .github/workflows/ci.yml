@@ -204,6 +204,13 @@ jobs:
           toolchain: 1.97.1
           targets: aarch64-apple-darwin, x86_64-apple-darwin
           components: clippy
+      # The pin in rust-toolchain.toml is the compiler cargo runs.
+      # Targets on the action's toolchain do not reach that pin.
+      - name: The pinned cross target
+        run: |
+          set -eu
+          rustup target add x86_64-apple-darwin
+          rustup target list --installed | grep -qx x86_64-apple-darwin
       - name: Check aarch64-apple-darwin
         run: cargo check --locked --workspace --all-targets --target aarch64-apple-darwin
       - name: Check x86_64-apple-darwin
