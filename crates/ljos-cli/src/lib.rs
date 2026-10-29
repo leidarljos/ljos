@@ -48798,7 +48798,7 @@ mod tests {
     fn doctor_names_every_refused_state_log_damaged() {
         use std::os::unix::fs::PermissionsExt;
         let _g = env_guard();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = socket_tempdir();
         let data = dir.path().join("data");
         let state = dir.path().join("state");
         let home = dir.path().join("home");
@@ -49059,6 +49059,19 @@ mod tests {
         assert_eq!(row.state, "empty");
         assert_eq!(listing(&queue_dir), before);
         assert_eq!(listing(outside.path()), ["fifo"]);
+    }
+
+    /// A directory whose nested socket paths fit in `sun_path`.
+    /// macOS stops at 104 bytes with the NUL. A long `TMPDIR` would
+    /// make `UnixListener::bind` fail before the case runs.
+    fn socket_tempdir() -> tempfile::TempDir {
+        let room = if cfg!(target_os = "macos") { 103 } else { 107 };
+        let tail = "/state/ljos/note-queue.jsonl".len() + 16;
+        if std::env::temp_dir().as_os_str().len() + tail < room {
+            tempfile::tempdir().unwrap()
+        } else {
+            tempfile::tempdir_in("/tmp").unwrap()
+        }
     }
 
     fn bounded<T: Send + 'static>(what: &str, body: impl FnOnce() -> T + Send + 'static) -> T {

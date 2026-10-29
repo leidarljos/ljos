@@ -6,6 +6,8 @@ ljos_test_boot::harness!();
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[path = "common/seat_root.rs"]
@@ -113,6 +115,7 @@ fn call(
 }
 
 /// Feed `payload` and wait until the hook exits. The wait is the process.
+/// Fifteen seconds with no exit is a hang, and the test says so.
 fn call_wait(mut cmd: Command, payload: &[u8]) -> (Duration, Output, std::io::Result<()>) {
     let started = Instant::now();
     let mut child = cmd.spawn().unwrap();
@@ -123,8 +126,29 @@ fn call_wait(mut cmd: Command, payload: &[u8]) -> (Duration, Output, std::io::Re
         drop(stdin);
         wrote
     });
+    let pid = child.id();
+    let done = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&done);
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            if flag.load(Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // SAFETY: a signal to the hook this test started.
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    });
     let out = child.wait_with_output().unwrap();
-    (started.elapsed(), out, writer.join().unwrap())
+    done.store(true, Ordering::Relaxed);
+    let took = started.elapsed();
+    assert!(
+        took < Duration::from_secs(15),
+        "hook did not exit within 15s\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (took, out, writer.join().unwrap())
 }
 
 fn cursor(event: &str, extra: serde_json::Value) -> String {
@@ -149,8 +173,9 @@ fn permission(out: &Output) -> String {
 
 /// The early read scan used to run after each 4 KiB chunk over the whole
 /// buffer. A large payload that is not a read then costs time quadratic
-/// in its size. The queue is off, so admission cannot spend this budget.
-/// The process is waited on, and three seconds is the one-pass bound.
+/// in its size. With the queue off, three seconds is the one-pass bound.
+/// With the queue on, the wait is the process: admission is not part of
+/// that bound.
 #[test]
 fn a_large_tool_payload_is_read_in_one_pass() {
     let hab = hab("onepass");
@@ -181,20 +206,25 @@ fn a_large_tool_payload_is_read_in_one_pass() {
             ),
         ),
     ];
-    for (what, payload) in &cases {
-        let (took, out, wrote) = call_wait(hook(&hab, false), payload.as_bytes());
-        assert!(wrote.is_ok(), "{what}: the writer saw {wrote:?}");
-        assert_eq!(
-            out.status.code(),
-            Some(0),
-            "{what}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(
-            took < Duration::from_secs(3),
-            "{what} took {took:?}\n{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+    for queue in [false, true] {
+        for (what, payload) in &cases {
+            let label = format!("{what} queue={queue}");
+            let (took, out, wrote) = call_wait(hook(&hab, queue), payload.as_bytes());
+            assert!(wrote.is_ok(), "{label}: the writer saw {wrote:?}");
+            assert_eq!(
+                out.status.code(),
+                Some(0),
+                "{label}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            if !queue {
+                assert!(
+                    took < Duration::from_secs(3),
+                    "{label} took {took:?}\n{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+        }
     }
 }
 

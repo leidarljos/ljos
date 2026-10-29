@@ -762,10 +762,11 @@ mod tests {
             let gate = Arc::clone(gate);
             std::thread::spawn(move || gate.serve(&theirs));
             writeln!(&mut &mine, "wait {ms}").unwrap();
+            mine.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             let mut line = String::new();
             BufReader::new(mine.try_clone().unwrap())
                 .read_line(&mut line)
-                .unwrap();
+                .expect("hook slot hung");
             (mine, line)
         };
         let (first, said) = call(&gate, 1000);
@@ -780,10 +781,11 @@ mod tests {
         let (_third, said) = call(&gate, 1000);
         assert_eq!(said.trim(), "full 1");
         drop(first);
+        mine.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         let mut line = String::new();
         BufReader::new(mine.try_clone().unwrap())
             .read_line(&mut line)
-            .unwrap();
+            .expect("queued slot hung");
         assert!(line.starts_with("go "), "{line}");
         let (_late, said) = call(&gate, 50);
         assert_eq!(said.trim(), "late");

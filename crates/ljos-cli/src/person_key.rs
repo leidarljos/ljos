@@ -1457,15 +1457,43 @@ mod tests {
         };
         assert_eq!(rc, 0);
         // SAFETY: both descriptors are owned here alone. Close-on-exec keeps
-        // them out of what other tests start meanwhile.
+        // them out of what other tests start meanwhile. The foreground
+        // group is this process when the kernel allows it, so a later
+        // read is not left waiting to become foreground.
         unsafe {
             libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC);
             libc::fcntl(slave, libc::F_SETFD, libc::FD_CLOEXEC);
+            let pgrp = libc::getpgrp();
+            let _ = libc::ioctl(slave, libc::TIOCSPGRP, &pgrp);
             (
                 std::fs::File::from_raw_fd(master),
                 std::fs::File::from_raw_fd(slave),
             )
         }
+    }
+
+    /// Run `body` and fail if it is still going after five seconds.
+    fn bounded<T: Send + 'static>(
+        what: &'static str,
+        body: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(body());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap_or_else(|_| panic!("{what} hung"))
+    }
+
+    fn take_shown(shown: std::thread::JoinHandle<String>) -> String {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(shown.join().ok());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| panic!("terminal reader hung"))
     }
 
     fn echo_on(tty: &std::fs::File) -> bool {
@@ -1523,10 +1551,14 @@ mod tests {
                 ("The same again: ", "correct horse battery"),
             ],
         );
-        set_from(&path, &mut slave).unwrap();
+        let key = path.clone();
+        let slave = bounded("set", move || {
+            set_from(&key, &mut slave).unwrap();
+            slave
+        });
         assert!(echo_on(&slave), "echo stayed off");
         drop(slave);
-        let shown = shown.join().unwrap();
+        let shown = take_shown(shown);
         assert!(shown.contains("The same again: "), "{shown}");
         assert!(!shown.contains("horse"), "{shown}");
         let phc = read(&path).unwrap().expect("a key");
@@ -1548,10 +1580,14 @@ mod tests {
         ] {
             let (master, mut slave) = pty_pair();
             let shown = typist(master, answers);
-            assert!(set_from(&path, &mut slave).is_err());
+            let key = path.clone();
+            let slave = bounded("set", move || {
+                assert!(set_from(&key, &mut slave).is_err());
+                slave
+            });
             assert!(echo_on(&slave));
             drop(slave);
-            shown.join().unwrap();
+            take_shown(shown);
         }
         assert!(!path.exists());
     }
@@ -1570,19 +1606,24 @@ mod tests {
         let (master, slave) = pty_pair();
         let answer = typed.unwrap_or("\u{4}");
         let shown = typist(master, vec![(PROMPT, answer)]);
-        let pauses = std::cell::RefCell::new(Vec::new());
-        let out = ask_with(
-            dir,
-            Some(slave),
-            &["CURSOR_AGENT".to_string()],
-            "git push",
-            || now,
-            |d| pauses.borrow_mut().push(d.as_secs()),
-        );
+        let pauses = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = std::sync::Arc::clone(&pauses);
+        let dir = dir.to_path_buf();
+        let out = bounded("passphrase prompt", move || {
+            ask_with(
+                &dir,
+                Some(slave),
+                &["CURSOR_AGENT".to_string()],
+                "git push",
+                || now,
+                move |d| record.lock().unwrap().push(d.as_secs()),
+            )
+        });
+        let pauses = pauses.lock().unwrap().clone();
         Asked {
             out,
-            shown: shown.join().unwrap(),
-            pauses: pauses.into_inner(),
+            shown: take_shown(shown),
+            pauses,
         }
     }
 
@@ -1648,17 +1689,20 @@ mod tests {
         assert_eq!(pauses, vec![2, 4, 8, 16, 32]);
         let (master, slave) = pty_pair();
         let shown = typist(master, vec![]);
-        let out = ask_with(
-            dir.path(),
-            Some(slave),
-            &["CURSOR_AGENT".to_string()],
-            "git push",
-            || 1010,
-            |_| panic!("a lockout waited"),
-        );
+        let root = dir.path().to_path_buf();
+        let out = bounded("lockout", move || {
+            ask_with(
+                &root,
+                Some(slave),
+                &["CURSOR_AGENT".to_string()],
+                "git push",
+                || 1010,
+                |_| panic!("a lockout waited"),
+            )
+        });
         let why = out.unwrap_err();
         assert!(why.contains("does not ask again until"), "{why}");
-        assert!(shown.join().unwrap().is_empty(), "the lockout prompted");
+        assert!(take_shown(shown).is_empty(), "the lockout prompted");
         let after = ask_at(
             dir.path(),
             Some("correct horse battery"),
@@ -1794,20 +1838,29 @@ mod tests {
         for typed in ["x", long] {
             let (master, mut slave) = pty_pair();
             let shown = typist(master, vec![("Line: ", typed)]);
-            let line = crate::person_tty::ask(&mut slave, "Line: ")
-                .unwrap()
-                .unwrap();
-            assert_eq!(line.bytes(), typed.as_bytes());
-            assert_eq!(line.capacity(), MAX_LINE, "{} bytes", typed.len());
+            let typed = typed.to_string();
+            let (bytes, cap, slave) = bounded("line", move || {
+                let line = crate::person_tty::ask(&mut slave, "Line: ")
+                    .unwrap()
+                    .unwrap();
+                let bytes = line.bytes().to_vec();
+                let cap = line.capacity();
+                (bytes, cap, slave)
+            });
+            assert_eq!(bytes, typed.as_bytes());
+            assert_eq!(cap, MAX_LINE, "{} bytes", typed.len());
             drop(slave);
-            shown.join().unwrap();
+            take_shown(shown);
         }
         let longer: &'static str = "a".repeat(MAX_LINE + 1).leak();
         let (master, mut slave) = pty_pair();
         let shown = typist(master, vec![("Line: ", longer)]);
-        assert!(crate::person_tty::ask(&mut slave, "Line: ").is_err());
+        let slave = bounded("long line", move || {
+            assert!(crate::person_tty::ask(&mut slave, "Line: ").is_err());
+            slave
+        });
         drop(slave);
-        shown.join().unwrap();
+        take_shown(shown);
     }
 
     #[test]
@@ -1906,21 +1959,30 @@ mod tests {
 
         let (master, slave) = pty_pair();
         let shown = typist(master, vec![(PROMPT, "a runner's own phrase")]);
-        let swapped = std::cell::Cell::new(false);
-        let out = ask_with(
-            &dir,
-            Some(slave),
-            &["CURSOR_AGENT".to_string()],
-            "git push",
-            || {
-                if !swapped.replace(true) {
-                    swap();
-                }
-                1000
-            },
-            |_| {},
-        );
-        shown.join().unwrap();
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let root = dir.clone();
+        let away = moved.clone();
+        let other = evil.clone();
+        let out = bounded("swapped prompt", move || {
+            let clock_dir = root.clone();
+            let clock_away = away.clone();
+            let clock_other = other.clone();
+            ask_with(
+                &root,
+                Some(slave),
+                &["CURSOR_AGENT".to_string()],
+                "git push",
+                move || {
+                    if !flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        std::fs::rename(&clock_dir, &clock_away).unwrap();
+                        std::os::unix::fs::symlink(&clock_other, &clock_dir).unwrap();
+                    }
+                    1000
+                },
+                |_| {},
+            )
+        });
+        take_shown(shown);
         assert_eq!(out, Err("the passphrase did not match".into()));
         assert_eq!(
             std::fs::read_to_string(moved.join(FAILS_NAME)).unwrap(),

@@ -176,8 +176,14 @@ impl Quiet {
             };
             let mut off = saved;
             off.c_lflag &= !(libc::ECHO | libc::ECHOE | libc::ECHOK | libc::ECHONL);
-            if libc::tcsetattr(fd, libc::TCSAFLUSH, &off) != 0 {
+            // TCSANOW, not TCSAFLUSH. On macOS a flush waits until
+            // output drains, and a pty with no session never drains,
+            // so the prompt hangs. Type-ahead is dropped afterwards.
+            if libc::tcsetattr(fd, libc::TCSANOW, &off) != 0 {
                 return Err(std::io::Error::last_os_error()).context("turning echo off");
+            }
+            if libc::tcflush(fd, libc::TCIFLUSH) != 0 {
+                return Err(std::io::Error::last_os_error()).context("dropping type-ahead");
             }
             Ok(quiet)
         }

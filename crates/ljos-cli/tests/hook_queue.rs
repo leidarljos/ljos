@@ -1256,9 +1256,28 @@ fn watch_rules_read(path: &Path) -> i32 {
 }
 
 /// Block until the watch from [`watch_rules_read`] sees a read close.
+/// Five seconds with no close is a hang, and the test says so.
 fn wait_rules_read(fd: i32) {
+    let deadline = Instant::now() + Duration::from_secs(5);
     let mut buf = [0u8; 4096];
     loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !left.is_zero(),
+            "the hook did not close the rules file after reading it"
+        );
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ms = i32::try_from(left.as_millis().min(i32::MAX as u128)).unwrap_or(i32::MAX);
+        // SAFETY: one pollfd for the inotify descriptor this test owns.
+        let rc = unsafe { libc::poll(&mut pfd, 1, ms) };
+        if rc == 0 {
+            continue;
+        }
+        assert!(rc > 0, "inotify poll: {}", std::io::Error::last_os_error());
         // SAFETY: `buf` is ours and `fd` is the inotify descriptor.
         let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
         if n > 0 {

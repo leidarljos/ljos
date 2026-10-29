@@ -118,7 +118,12 @@ mod tests {
         use std::os::unix::net::UnixListener;
 
         let _guard = crate::env_lock();
-        let dir = tempfile::tempdir().unwrap();
+        let room = if cfg!(target_os = "macos") { 103 } else { 107 };
+        let dir = if std::env::temp_dir().as_os_str().len() + 24 < room {
+            tempfile::tempdir().unwrap()
+        } else {
+            tempfile::tempdir_in("/tmp").unwrap()
+        };
         let path = dir.path().join("hud.sock");
         let _listener = UnixListener::bind(&path).unwrap();
         #[allow(unused_unsafe)]
