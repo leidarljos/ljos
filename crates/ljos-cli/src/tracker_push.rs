@@ -103,6 +103,49 @@ pub(crate) fn publish(start: &Path) -> Result<(), String> {
     ))
 }
 
+/// Publish `HEAD` to one named remote branch with an explicit refspec.
+///
+/// The caller has already established that this is the permitted
+/// destination. Unlike [`publish`], this does not consult implicit push
+/// configuration or update mirrors.
+pub(crate) fn publish_explicit(start: &Path, remote: &str, branch: &str) -> Result<(), String> {
+    let owned = repo_root(start);
+    let dir = owned.as_path();
+    prepare_tracker(dir, false, true)?;
+    let onto = format!("{remote}/{branch}");
+    let spec = format!("HEAD:refs/heads/{branch}");
+    let mut last = String::from("push refused");
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(
+                200 * u64::try_from(attempt).unwrap_or(1),
+            ));
+        }
+        if let Err(e) = integrate_from(dir, remote, &onto) {
+            last = e;
+            if last.starts_with("fetch failed") {
+                continue;
+            }
+            let _held = crate::tracker_commit_lock(dir);
+            let _ = abort_rebase(dir);
+            let _ = git(dir, &["merge", "--abort"]);
+            return Err(last);
+        }
+        let out = git(dir, &["push", "-q", remote, &spec]);
+        if out.status.success() {
+            return Ok(());
+        }
+        let said = output_text(&out);
+        last = first_line(&said);
+        if !rejected(&said) {
+            break;
+        }
+    }
+    Err(format!(
+        "{last}; still not pushed after {ATTEMPTS} attempts"
+    ))
+}
+
 /// The shell that makes one push attempt. The parent retries a rejection
 /// in-process, where an org conflict can be unioned.
 pub(crate) fn push_script(dir: &Path, mirrors: &[(String, String)]) -> String {
@@ -353,7 +396,12 @@ fn push_mirrors(dir: &Path) -> Result<(), String> {
 }
 
 fn integrate(dir: &Path) -> Result<(), String> {
-    let fetched = git(dir, &["fetch", "-q", "origin"]);
+    let onto = rebase_target(dir);
+    integrate_from(dir, "origin", &onto)
+}
+
+fn integrate_from(dir: &Path, remote: &str, onto: &str) -> Result<(), String> {
+    let fetched = git(dir, &["fetch", "-q", remote]);
     // The replay rewrites the index and the working tree, so it waits for
     // a seat's commit in flight and no commit starts until it is done. The
     // fetch, which may wait on the network, is outside.
@@ -365,11 +413,10 @@ fn integrate(dir: &Path) -> Result<(), String> {
             first_line(&output_text(&fetched))
         ));
     }
-    let onto = rebase_target(dir);
-    if let Err(e) = rebase_onto(dir, &onto) {
+    if let Err(e) = rebase_onto(dir, onto) {
         if rebase_in_progress(dir) || has_unmerged(dir) {
             clear_stopped(dir)?;
-            merge_onto(dir, &onto)?;
+            merge_onto(dir, onto)?;
         } else {
             let _ = abort_rebase(dir);
             return Err(e);

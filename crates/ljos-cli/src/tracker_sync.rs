@@ -14,11 +14,11 @@ pub fn tracker_sync_line() -> Option<String> {
     let root = layout.root();
     let unpushed = unpushed_count(root).unwrap_or(0);
     let edits = org_edits(root);
-    if unpushed == 0 && edits == 0 {
+    if unpushed == 0 && edits.count == 0 {
         return None;
     }
-    let phrase = counts_phrase(unpushed, edits);
-    let fix = fix_command(root, unpushed, edits);
+    let phrase = counts_phrase(unpushed, edits.count);
+    let fix = fix_command(root, unpushed, &edits);
     Some(format!("tracker: {phrase}; fix: {fix}\n"))
 }
 
@@ -41,12 +41,12 @@ pub fn push_leftover() -> String {
     let Some(waiting) = unpushed_count(&root).filter(|n| *n > 0) else {
         return String::new();
     };
-    // Only the remote's default branch is published from finish. Any
-    // other branch is left where it is, with no refusal recorded.
-    if !on_default_branch(&root) {
+    // Resolve what an implicit push would update before doing any network
+    // write. Only the primary remote's default branch is published.
+    let Some(destination) = safe_push_destination(&root) else {
         return String::new();
-    }
-    match crate::tracker_push::publish(&root) {
+    };
+    match crate::tracker_push::publish_explicit(&root, &destination.remote, &destination.branch) {
         Ok(()) => {
             crate::clear_push_refusal();
             format!("tracker git: pushed {waiting}\n")
@@ -86,47 +86,84 @@ fn has_remote(root: &Path) -> bool {
         .is_some_and(|text| text.lines().any(|line| !line.trim().is_empty()))
 }
 
-/// The checkout is on the branch `origin/HEAD` names. With no
-/// `origin/HEAD`, `main` or `master` counts when that remote branch
-/// exists. Every other name is skipped.
-fn on_default_branch(root: &Path) -> bool {
-    let Some(head) = crate::git_ok_stdout(root, &["rev-parse", "--abbrev-ref", "HEAD"]) else {
-        return false;
-    };
-    let head = head.trim();
-    if head.is_empty() || head == "HEAD" {
-        return false;
-    }
-    if let Some(origin_head) =
-        crate::git_ok_stdout(root, &["rev-parse", "--abbrev-ref", "origin/HEAD"])
-    {
-        let origin_head = origin_head.trim();
-        let default = origin_head.rsplit('/').next().unwrap_or(origin_head);
-        return !default.is_empty() && head == default;
-    }
-    if head != "main" && head != "master" {
-        return false;
-    }
-    let remote = format!("origin/{head}");
-    crate::git_ok_stdout(root, &["rev-parse", "--verify", "--quiet", &remote]).is_some()
+struct PushDestination {
+    remote: String,
+    branch: String,
 }
 
-fn org_edits(root: &Path) -> usize {
+/// The destination Git's configured implicit push would use, but only
+/// when it is exactly `origin`'s default branch.
+fn safe_push_destination(root: &Path) -> Option<PushDestination> {
+    let push = crate::git_ok_stdout(root, &["rev-parse", "--symbolic-full-name", "@{push}"])?;
+    let push = push.trim();
+    let default = remote_default_branch(root, "origin")?;
+    let expected = format!("refs/remotes/origin/{default}");
+    if push != expected {
+        return None;
+    }
+    Some(PushDestination {
+        remote: "origin".to_string(),
+        branch: default,
+    })
+}
+
+fn remote_default_branch(root: &Path, remote: &str) -> Option<String> {
+    let remote_head = format!("refs/remotes/{remote}/HEAD");
+    if let Some(target) = crate::git_ok_stdout(root, &["symbolic-ref", "--quiet", &remote_head]) {
+        let prefix = format!("refs/remotes/{remote}/");
+        if let Some(branch) = target.trim().strip_prefix(&prefix) {
+            if !branch.is_empty() {
+                return Some(branch.to_string());
+            }
+        }
+    }
+    let out = crate::git_ok_stdout(root, &["ls-remote", "--symref", remote, "HEAD"])?;
+    out.lines().find_map(|line| {
+        let target = line.strip_prefix("ref: refs/heads/")?;
+        let (branch, name) = target.split_once('\t')?;
+        (name == "HEAD" && !branch.is_empty()).then(|| branch.to_string())
+    })
+}
+
+struct OrgEdits {
+    count: usize,
+    untracked: Vec<String>,
+}
+
+fn org_edits(root: &Path) -> OrgEdits {
     if git_leaves_edits() {
-        return 0;
+        return OrgEdits {
+            count: 0,
+            untracked: Vec::new(),
+        };
     }
     let Some(status) = crate::git_ok_stdout(
         root,
         &["status", "--porcelain", "--untracked-files=all", "--", "."],
     ) else {
-        return 0;
+        return OrgEdits {
+            count: 0,
+            untracked: Vec::new(),
+        };
     };
-    status
-        .lines()
-        .filter_map(|line| line.get(3..))
-        .map(|path| path.rsplit(" -> ").next().unwrap_or(path).trim_matches('"'))
-        .filter(|path| path.ends_with(".org"))
-        .count()
+    let mut edits = OrgEdits {
+        count: 0,
+        untracked: Vec::new(),
+    };
+    for line in status.lines() {
+        let Some(path) = line.get(3..) else {
+            continue;
+        };
+        let path = path.rsplit(" -> ").next().unwrap_or(path).trim_matches('"');
+        if !path.ends_with(".org") {
+            continue;
+        }
+        edits.count += 1;
+        if line.starts_with("??") {
+            edits.untracked.push(path.to_string());
+        }
+    }
+    edits
 }
 
 fn counts_phrase(unpushed: u64, edits: usize) -> String {
@@ -144,18 +181,31 @@ fn counts_phrase(unpushed: u64, edits: usize) -> String {
     parts.join(", ")
 }
 
-fn fix_command(root: &Path, unpushed: u64, edits: usize) -> String {
+fn fix_command(root: &Path, unpushed: u64, edits: &OrgEdits) -> String {
     let quoted = crate::tools::sh_quote(&root.display().to_string());
     let mut parts = Vec::new();
-    if edits > 0 {
+    if edits.count > 0 {
         let message = crate::tools::sh_quote("tracker: commit issue edits");
-        parts.push(format!("git -C {quoted} add -- ."));
+        parts.push(format!("git -C {quoted} add -u -- ."));
+        if !edits.untracked.is_empty() {
+            let paths = edits
+                .untracked
+                .iter()
+                .map(|path| crate::tools::sh_quote(path))
+                .collect::<Vec<_>>()
+                .join(" ");
+            parts.push(format!("git -C {quoted} add -- {paths}"));
+        }
         parts.push(format!("git -C {quoted} commit -m {message}"));
     }
     // A commit of the edits is itself unpushed, so the fix publishes
-    // whenever a remote can take it.
-    if unpushed > 0 || (edits > 0 && has_remote(root)) {
-        parts.push(format!("git -C {quoted} push"));
+    // only when the configured destination is the permitted default.
+    if unpushed > 0 || (edits.count > 0 && has_remote(root)) {
+        if let Some(destination) = safe_push_destination(root) {
+            let remote = crate::tools::sh_quote(&destination.remote);
+            let spec = crate::tools::sh_quote(&format!("HEAD:refs/heads/{}", destination.branch));
+            parts.push(format!("git -C {quoted} push {remote} {spec}"));
+        }
     }
     parts.join(" && ")
 }
@@ -238,7 +288,10 @@ mod tests {
         let line = super::tracker_sync_line().unwrap();
         assert!(line.starts_with("tracker: 1 unpushed; fix: "), "{line}");
         assert!(line.contains("git -C "), "{line}");
-        assert!(line.contains(" push\n"), "{line}");
+        assert!(
+            line.contains("push 'origin' 'HEAD:refs/heads/main'"),
+            "{line}"
+        );
         assert!(!line.contains("uncommitted"), "{line}");
 
         std::fs::write(root.join("Software/probe/issues.org"), "* DONE [#C] a\n").unwrap();
@@ -246,10 +299,17 @@ mod tests {
         std::fs::write(root.join("Software/probe/issues/extra.org"), "* TODO b\n").unwrap();
         let both = super::tracker_sync_line().unwrap();
         assert!(both.contains("1 unpushed, 2 uncommitted edits"), "{both}");
-        assert!(both.contains("add -- ."), "{both}");
-        assert!(!both.contains("add -u"), "{both}");
+        assert!(both.contains("add -u -- ."), "{both}");
+        assert!(
+            both.contains("add -- 'Software/probe/issues/extra.org'"),
+            "{both}"
+        );
+        assert!(!both.contains("add -- ."), "{both}");
         assert!(both.contains("commit -m "), "{both}");
-        assert!(both.contains(" push\n"), "{both}");
+        assert!(
+            both.contains("push 'origin' 'HEAD:refs/heads/main'"),
+            "{both}"
+        );
 
         unsafe { std::env::set_var("LJOS_TRACKER_GIT", "off") };
         let off = super::tracker_sync_line().unwrap();
@@ -394,5 +454,96 @@ mod tests {
         assert!(said.is_empty(), "{said}");
         let heads = review_heads(&origin);
         assert!(!heads.contains("refs/heads/feature"), "{heads}");
+    }
+
+    #[test]
+    fn review2_main_tracking_a_feature_branch_pushes_the_feature() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let (root, origin) = checkout(dir.path());
+        isolate(&root);
+        git(&root, &["remote", "set-head", "origin", "main"]);
+        git(&root, &["push", "-q", "origin", "main:feature"]);
+        git(&root, &["fetch", "-q", "origin"]);
+        git(&root, &["branch", "-q", "-u", "origin/feature"]);
+        git(&root, &["config", "push.default", "upstream"]);
+        let before = review_heads(&origin);
+        git(&root, &["commit", "-q", "--allow-empty", "-m", "on main"]);
+        let said = super::push_leftover();
+        let after = review_heads(&origin);
+        eprintln!("REVIEW2 said={said:?}\nbefore={before}\nafter={after}");
+        assert_eq!(before, after, "said={said:?}");
+    }
+
+    #[test]
+    fn review2_main_tracking_a_feature_branch_default_push_config() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let (root, origin) = checkout(dir.path());
+        isolate(&root);
+        git(&root, &["remote", "set-head", "origin", "main"]);
+        git(&root, &["push", "-q", "origin", "main:feature"]);
+        git(&root, &["fetch", "-q", "origin"]);
+        git(&root, &["branch", "-q", "-u", "origin/feature"]);
+        let before = review_heads(&origin);
+        git(&root, &["commit", "-q", "--allow-empty", "-m", "on main"]);
+        let said = super::push_leftover();
+        let after = review_heads(&origin);
+        eprintln!("REVIEW2 said={said:?}\nbefore={before}\nafter={after}");
+        assert_eq!(before, after, "said={said:?}");
+        assert!(said.is_empty(), "{said}");
+    }
+
+    #[test]
+    fn review2_main_tracking_another_remote_pushes_there() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let (root, origin) = checkout(dir.path());
+        isolate(&root);
+        let fork = dir.path().join("fork.git");
+        git(
+            dir.path(),
+            &["init", "-q", "--bare", "-b", "main", fork.to_str().unwrap()],
+        );
+        git(&root, &["remote", "add", "fork", fork.to_str().unwrap()]);
+        git(&root, &["remote", "set-head", "origin", "main"]);
+        git(&root, &["push", "-q", "-u", "fork", "main"]);
+        let before_fork = review_heads(&fork);
+        git(&root, &["commit", "-q", "--allow-empty", "-m", "on main"]);
+        let said = super::push_leftover();
+        let after_fork = review_heads(&fork);
+        let after_origin = review_heads(&origin);
+        eprintln!("REVIEW2 said={said:?}\nfork before={before_fork}\nfork after={after_fork}\norigin={after_origin}");
+        assert_eq!(before_fork, after_fork, "said={said:?}");
+    }
+
+    #[test]
+    fn review2_the_fix_commits_and_pushes_a_stray_file() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let (root, origin) = checkout(dir.path());
+        isolate(&root);
+        std::fs::write(root.join("Software/probe/issues.org"), "* DONE [#C] a\n").unwrap();
+        std::fs::write(root.join("scratch.env"), "GITHUB_TOKEN=ghp_notreal\n").unwrap();
+        let line = super::tracker_sync_line().unwrap();
+        eprintln!("REVIEW2 line={line}");
+        let fix = line.split_once("fix: ").unwrap().1.trim().to_string();
+        let ran = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&fix)
+            .output()
+            .unwrap();
+        let tree = std::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(&origin)
+            .args(["ls-tree", "-r", "--name-only", "main"])
+            .output()
+            .unwrap();
+        let tree = String::from_utf8_lossy(&tree.stdout).into_owned();
+        eprintln!(
+            "REVIEW2 exit={:?} origin main tree:\n{tree}",
+            ran.status.code()
+        );
+        assert!(!tree.contains("scratch.env"), "{tree}");
     }
 }
