@@ -1,1 +1,0 @@
-The explanation says what the person passphrase, its argon2id cost and its pepper protect against, and what they do not: code running as the same Unix user can read the hash and the pepper and guess offline.

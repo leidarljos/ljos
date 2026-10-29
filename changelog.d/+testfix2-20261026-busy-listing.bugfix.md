@@ -1,1 +1,0 @@
-The lean listing retry count no longer depends on a token file in the login pack home. With a token, the first successful answer is a rejected bearer check and the listing is another request, so the same test saw three requests once and four the next time. An empty pack home has no token, and each try is the listing.

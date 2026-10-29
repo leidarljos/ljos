@@ -1,1 +1,0 @@
-The seat guard reads the words an inline program is handed after its code. `sh -c 'rm -rf "$1"' _ ~` is read with `$1` replaced by `~`, and so are `$0` to `$9`, `${N}`, `$@` and `$*`. Interpreter code whose tree call takes `sys.argv[1]`, `$ARGV[0]` or the like is refused when a handed word is a tree above the person key.

@@ -1,1 +1,0 @@
-A quoted here-document fed to `python3 -`, `node`, `perl` or `ruby` is judged as that program only, not also as shell. A line that sources a file before such a heredoc is no longer refused because `import` reads as ImageMagick's `import`. A body fed to a shell, or piped on to one, and the substitutions of an unquoted body are judged as shell as before.

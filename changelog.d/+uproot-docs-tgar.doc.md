@@ -1,1 +1,0 @@
-The explanation of the person passphrase no longer says the seat guard refuses a recursive delete or move of any directory above the key. It now names the commands and code it reads, and says a path built from parts it cannot read is not refused.

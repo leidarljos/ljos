@@ -1,1 +1,0 @@
-The seat guard reads the options of `rm` and `mv` the way GNU does before it checks for a tree above the person key. An abbreviated long option such as `rm --recur ~` or `mv --targ /tmp ~`, and a grouped short option such as `mv -t/tmp ~` or `mv -ft /tmp ~`, are now refused. Removing a project directory, `/tmp/x` or `~/scratch/x` still passes.

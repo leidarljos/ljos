@@ -1,1 +1,0 @@
-The seat guard matches a glob against the files on disk, and follows each match that is a symlink. A recursive delete or move such as `rm -rf /tmp/links/h*`, where `h` links to the home, is now refused.

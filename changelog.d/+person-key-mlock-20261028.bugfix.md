@@ -1,1 +1,0 @@
-The person passphrase buffer and the argon2id output are locked in memory with `mlock` while they live, and zeroed before they are unlocked, so they are not written to swap. When `ulimit -l` refuses the lock, ljos warns once and goes on unlocked. The derived output is now compared in place, without a copy into the hash crate's `Output`.

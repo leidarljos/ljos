@@ -1,1 +1,0 @@
-`ljos workflow --round` no longer marks a parent DONE at a round count, on a round of notes, or when a wall budget is spent. It files the next round until the panel passes. The person closes with `ljos finish --close`.

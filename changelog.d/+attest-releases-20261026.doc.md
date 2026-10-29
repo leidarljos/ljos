@@ -1,1 +1,0 @@
-The install paragraph names the releases that publish a build attestation: deedar v0.5.0, consensus v0.8.0 and v0.9.0, claimdag v0.8.0, and packset v0.16.1. The summary counts a download as not published when its release has none.

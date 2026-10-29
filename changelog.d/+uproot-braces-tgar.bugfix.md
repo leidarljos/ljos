@@ -1,1 +1,0 @@
-The seat guard makes brace expansions before it checks for a tree above the person key, so `rm -rf ~/{.config,x}` and `rm -rf {~,/tmp}/.config` are now refused. A brace expansion that names only trees beside the key, such as `rm -rf {~,/tmp}/x`, still passes.

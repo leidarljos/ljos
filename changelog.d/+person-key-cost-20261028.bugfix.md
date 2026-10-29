@@ -1,1 +1,0 @@
-A new person passphrase hash is argon2id at 64 MiB, three passes and four lanes, and `ljos person-key set` takes at least 16 bytes. A hash kept by an earlier ljos is below that cost and no longer reads as a key: run `ljos person-key set` again from your own terminal.

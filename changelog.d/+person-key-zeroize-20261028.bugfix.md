@@ -1,1 +1,0 @@
-The person passphrase is read into one buffer sized for the longest line, so a long line no longer leaves an unzeroed copy behind when the buffer grows. The argon2id working memory and output are zeroed after `ljos person-key set` and after each prompt, on an error as well.

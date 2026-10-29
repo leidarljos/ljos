@@ -1,1 +1,0 @@
-`ljos-mcp` now tracks and queues a `tools/call` only when rmcp reads the inbound line as a call-tool request, and it claims that lifetime slot before rmcp request checks run. Malformed or pre-dispatch-refused calls no longer block later ordered memory calls or delay stdin shutdown.

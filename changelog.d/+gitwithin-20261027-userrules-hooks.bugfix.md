@@ -1,1 +1,0 @@
-Sharing user rules no longer runs the login's git hooks or the ones `ljos git-hooks install` writes. Under an automated runner with no live sitting, that pre-commit refused the user-rules commit in a repository that was not a tracker checkout. The rules never reached the tracker. The push still runs the pre-push `ljos cloud up` installs.

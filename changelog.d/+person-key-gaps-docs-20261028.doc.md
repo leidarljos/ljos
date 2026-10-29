@@ -1,1 +1,0 @@
-The explanation of the person passphrase now says that the seat guard refuses a recursive delete or move above the key directory, that the key files are reached through one directory descriptor with no symlink followed, and that the passphrase and the argon2id output are locked in memory where the limit allows.

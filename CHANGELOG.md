@@ -5,11 +5,231 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
-## Unreleased
+## 0.35.0 (2026-10-29)
+
+### Features
+
+- Onboard records runner file backups, and `ljos offboard` restores them while preserving later edits.
+- The PreToolUse hook can now fix a command instead of only refusing it.
+  When ljos-policyd answers `allow<TAB>rewrite<TAB>LINE`, the guard judges
+  LINE again. Claude Code, Codex, Grok Build and Cursor's `preToolUse` run
+  an accepted LINE as an updated tool input. Cursor's
+  `beforeShellExecution` and the relayed runners cannot take a new input,
+  so they refuse the call with "Run `LINE` instead". A LINE the guard
+  refuses or rewrites again refuses the call. In every refused case the
+  original line does not run. A uv refusal of `python x.py` stays a
+  refusal, and it now names `uv run x.py`.
+- The digest and the sitting header name unpushed tracker commits and uncommitted edits, and the command that fixes them.
+  Finish pushes those commits when the tracker config allows a push.
+- The guard can answer a call with another call to run in its place, such as `uv run pytest` for a bare `pytest`.
+  That swap now shows one line saying which call ran and which was asked for.
+  Each swap is kept in `$XDG_DATA_HOME/ljos/rewrite.jsonl`, a row per call, so a session can be read back afterwards.
+  `rewrite = false` in a repository's `ljos.toml` runs its lines as they were written.
+  A call the switch declined is kept too, so the log shows what would have been swapped.
+- `ljos accept ID --quote "..." --at TIME --via SEAT` writes a proposed lesson on a yes the person said in chat.
+  Before, an acceptance needed a terminal of the person's own, since an agent could otherwise accept the proposal it filed.
+  The seat that heard the yes passes on the words, the time they were said, and its own name.
+  All three are needed, and the acceptance keeps them, so it can be read back and disowned.
+  A quote of fewer than four words, a time ahead of now, and a quote with no time or no seat are refused.
+  Running `ljos accept ID` in a terminal still needs no quote.
+- `ljos digest` lists what each seat did, newest first.
+  `last` continues from the previous run. JSON and the MCP tool print the same view.
+- `ljos person-key set` keeps an argon2id hash of a passphrase the person
+  types twice on their own terminal. When a runner variable is the
+  only reason ljos refuses a commit or a push that
+  needs a sitting, ljos asks for that passphrase on the controlling
+  terminal. A right answer lets that one command through. A runner in the
+  process tree or its scope is never asked. Five wrong answers in 15
+  minutes stop the prompt until the window passes.
+- `ljos person-key set` writes 32 random bytes to `person-key.pepper` beside the hash, mode 0600, and argon2id takes them as its secret. A copy of the hash alone can no longer be guessed. A process of the same Unix user can still read both files and guess offline. A key kept without a pepper does not verify: run `ljos person-key set` again.
+- `ljos reopen ID` now puts any finished or cancelled ticket back to work.
+  It used to undo only a close this program wrote, from the seat that wrote it, so a hand close or another seat's close stood.
+  The ticket goes back to the state the close took it from, and the reopen is a dated note beside the close.
+  `ljos withdraw ID` takes back this seat's ballot on a ticket, as `ljos vote ID --withdraw` does.
+  `ljos withdraw ID --note TEXT` takes back a note the seat wrote.
+  The note stays on the logbook with the withdrawal under it, so a reader sees both.
+  A note ljos keeps for itself, such as a ballot signature, is not a note a seat takes back this way.
+- `ljos reopen` puts a ticket back to the state before a close this
+  program wrote. The writer is the seat on that tracker commit, or on
+  the logbook line this program stamped. A note is not that record.
+  Another seat is refused. The caller does not take the claim.
+
+### Fixes
+
+- A ballot signature left on an issue's parent or design child, and bound
+  to that issue, now refuses a second ballot from the same session. A
+  signature for a sibling still does not, so a session that voted on one
+  issue can vote on the next.
+- A consensus pause was only printed. The next reading sat
+  another round and the ticket never named it. The pause is
+  written on the ticket once.
+- A detach test enters a fresh cgroup whose name is a runner. Joining the namespace root with claude selects /sys/fs/cgroup/claude/cgroup.procs, and that write is rejected when the directory is already populated or the child is not a domain that can take a process. A transient scope is created by the same move, under its own run-*.scope name.
+- A full child list or a spent budget no longer asks for a close. The objections stay listed and the ticket stays open.
+- A nested split counted only the issue it was reading, so a
+  tree of dissent children filed past the descendant limit.
+  The count now starts at the top of that tree and pauses there.
+- A new person passphrase hash is argon2id at 64 MiB, three passes and four lanes, and `ljos person-key set` takes at least 16 bytes. A hash kept by an earlier ljos is below that cost and no longer reads as a key: run `ljos person-key set` again from your own terminal.
+- A placeholder filed for a sitting stays open when a later commit names another ticket.
+- A quoted here-document fed to `python3 -`, `node`, `perl` or `ruby` is judged as that program only, not also as shell. A line that sources a file before such a heredoc is no longer refused because `import` reads as ImageMagick's `import`. A body fed to a shell, or piped on to one, and the substitutions of an unquoted body are judged as shell as before.
+- A raw tracker close is answered with `ljos finish`, not
+  `ljos finish --close`. A raw cancel names `--status cancelled`. The
+  command line flag stays for the person.
+- A runner can close a ticket without naming vissue as the
+  command. An interpreter, a copied binary, a substitution, and an
+  in-place edit of issues.org are refused on the guard path.
+- A seat named in the tracker's vissue.toml can file, note and vote when LJOS_SEAT is that name. `ljos seat add` writes the row. No seats file is required.
+
+  `ljos seat grant` records a quoted yes that a seat may close tickets it filed or holds. The row keeps the quote, the time, the recording seat and the commit. A hand edit is ignored. The close note cites the grant.
+- A sitting ending, an idle sweep, or a dead owner no longer marks a
+  ticket DONE. A placeholder filed in that sitting and never worked on
+  stays open. The person closes with `ljos finish --close`.
+- A sitting printed the pack's best connected memories whatever the task was.
+  A sitting on a parser bug opened with a disk audit and a credential rotation.
+  The island rows are now held to a relevance floor against the sitting's own title.
+  The sitting says how many rows it left out.
+  A review backlog no longer floods the same output.
+  Past forty due, the sitting prints the count and the verb that works through them.
+- A test harness leaves a host cgroup that names a runner, and drops runner variables the host left on it. The product still treats a path component of a cloud runner's named workload cgroup as that runner. The release binary does not link that move.
+- A tracker log that a merge or a checkout replaced kept its digest, so
+  ljos sync left the other seal in place while the atoms matched. The
+  digest now names the sealed file too. The first sync after upgrading
+  seals each log once, since older digests do not name it.
+- A workflow plan at the child cap or the descendant limit filed
+  what fit and dropped the rest without a name. The plan now
+  stops at the smaller room and names every objection it did
+  not file.
+- An objection past the child cap is written on the parent, and the
+  reading pauses for a person. It is not only printed. The parent stays
+  open.
+- At the descendant limit the reading pauses for a person and does
+  not file another child. The parent stays open. The workflow note no
+  longer says the loop closes itself.
+- Fix session cast refusal to read withdrawal cuts from each family issue logbook.
+  Add a regression test with parent and child notes where a withdrawn child ballot can be cast again.
+- Name the issue in new ballot-withdrawn notes and match withdrawals by issue plus voter.
+  Keep legacy notes scoped to the logbook issue and add CLI and MCP tests for child withdraw with parent signatures.
+- Seat-facing text no longer points at a close flag. A person
+  closes the ticket. The flag is named only when a person is
+  present.
+- Session-end extraction stores each fact as a note on the open sitting, which packset requires. With no sitting it prints why and does not post, because packset has no note that names no ticket.
+- Sharing user rules from inside a git hook, or with `GIT_DIR` exported, no longer stages, commits or pushes in the caller's repository. The fetch, merge, commit and push now run in the tracker checkout.
+- Sharing user rules no longer runs the login's git hooks or the ones `ljos git-hooks install` writes. Under an automated runner with no live sitting, that pre-commit refused the user-rules commit in a repository that was not a tracker checkout. The rules never reached the tracker. The push still runs the pre-push `ljos cloud up` installs.
+- The lean listing retry count no longer depends on a token file in the login pack home. With a token, the first successful answer is a rejected bearer check and the listing is another request, so the same test saw three requests once and four the next time. An empty pack home has no token, and each try is the listing.
+- The ljos-atoms merge driver exported this host's log into the work
+  tree and then copied the file git asked for. A rebase that replayed
+  this host's digest stopped on "Your local changes would be
+  overwritten". The driver now seals the log in memory from the pack and
+  writes only the file git hands it.
+- The person key directory is opened once, refusing a symlink in its place, and the key, its pepper and its failure count are read, written, renamed and removed through that descriptor with `O_NOFOLLOW`. A directory or file swapped for a symlink between a check and its use is no longer followed, and a link in place of any of them is refused.
+- The person passphrase buffer and the argon2id output are locked in memory with `mlock` while they live, and zeroed before they are unlocked, so they are not written to swap. When `ulimit -l` refuses the lock, ljos warns once and goes on unlocked. The derived output is now compared in place, without a copy into the hash crate's `Output`.
+- The person passphrase is read into one buffer sized for the longest line, so a long line no longer leaves an unzeroed copy behind when the buffer grows. The argon2id working memory and output are zeroed after `ljos person-key set` and after each prompt, on an error as well.
+- The release runner test builds ljos and ljos-mcp when those release binaries are missing.
+  cargo test does not build that profile, so the check stopped before it could read the binary.
+- The seat guard does not expand a `~user` path, and judges it by its file name instead. A recursive delete or move of `~user` or `~user/.config` is now refused when that name is on the way down to the person key.
+- The seat guard makes brace expansions before it checks for a tree above the person key, so `rm -rf ~/{.config,x}` and `rm -rf {~,/tmp}/.config` are now refused. A brace expansion that names only trees beside the key, such as `rm -rf {~,/tmp}/x`, still passes.
+- The seat guard matches a glob against the files on disk, and follows each match that is a symlink. A recursive delete or move such as `rm -rf /tmp/links/h*`, where `h` links to the home, is now refused.
+- The seat guard reads a tree call written without parentheses, such as Ruby's `FileUtils.rm_rf Dir.home` or Perl's `rmtree $ENV{HOME}`. It also reads one with a blank before them, such as `rmtree ($ENV{HOME})`. It follows the names code gives a tree call, as in `from shutil import rmtree as r` or `r = shutil.rmtree`. These calls on a tree above the person key were allowed before.
+- The seat guard reads the code `python3 -c`, `perl -e`, `ruby -e`, `node -e` or a heredoc fed to them runs, and refuses a call that removes or moves a tree above the person key, such as `shutil.rmtree(os.path.expanduser('~'))`, `FileUtils.rm_rf(Dir.home)` or `fs.rmSync(os.homedir(), ...)`. The path is built from the call's string literals, the ways code names the home, path joins and simple assignments. These calls were allowed before. A call on a tree elsewhere under the home still passes.
+- The seat guard reads the options of `rm` and `mv` the way GNU does before it checks for a tree above the person key. An abbreviated long option such as `rm --recur ~` or `mv --targ /tmp ~`, and a grouped short option such as `mv -t/tmp ~` or `mv -ft /tmp ~`, are now refused. Removing a project directory, `/tmp/x` or `~/scratch/x` still passes.
+- The seat guard reads the words an inline program is handed after its code. `sh -c 'rm -rf "$1"' _ ~` is read with `$1` replaced by `~`, and so are `$0` to `$9`, `${N}`, `$@` and `$*`. Interpreter code whose tree call takes `sys.argv[1]`, `$ARGV[0]` or the like is refused when a handed word is a tree above the person key.
+- The seat guard refuses a recursive delete or move of any directory that holds the person key directory, resolved the same way as before: `rm -rf ~`, `rm -r ~/..`, `find ~ -delete`, a `find` that runs `rm` or `mv`, `mv ~ x`, `rsync --delete` into the home, `rsync --remove-source-files` from it, and `trash` or `gio trash` of it. These were allowed before. A recursive delete or move elsewhere under the home, such as `rm -rf ~/proj/build`, still passes.
+- The seat guard resolves a path before it compares it with the person key: `~` and `$HOME` (as the shell has them and as the passwd home), the directory a `cd` reached, `.`, `..`, `//`, a glob, and symlinks along the part that exists. It refuses a tool call that writes, moves, removes, links over or changes the mode of the key, its pepper, its failure count, `~/.config/ljos`, or `~/.config` itself. `mv ~/.config ~/.config.old`, `rm -rf ~/.config`, `chmod 000 ~/.config/ljos` and the same through a symlink were allowed before.
+- The seat guard takes wrappers such as `env`, `nice`, `nohup`, `timeout` and `xargs` off the command a `find -exec` runs. A `find ~ -exec env rm -rf {} +` is now refused like the same `find` that runs `rm` directly.
+- The seat hook matches a vissue write tool as well as an ljos tool. A DONE close from a seat is refused and names `ljos finish`. A Write or Edit of `issues.org` takes the same refusal.
+- The test hook that keeps the person key in another directory is no longer in a release build. It comes with the `test-hooks` feature, which only this package's own tests turn on.
+- The tracker commit lock stays on the checkout it was given. An exported `GIT_DIR` or `GIT_WORK_TREE` outside a git hook used to place the lock file and its exclude line in that other repository.
+- The user-rules commit is authored and committed as the tracker checkout's `user.name` and `user.email`. An exported `GIT_AUTHOR_*`, `GIT_COMMITTER_*` or `EMAIL`, such as a hook or a script sets for its own commits, no longer signs it.
+- Writes inside the installed git hooks directory are refused.
+  A global core.hooksPath change is refused the same way.
+  A read of that directory or of .gitconfig stays allowed.
+- `ljos consensus` no longer marks a ticket DONE when a round count is reached. A split reading names the open objection children and leaves the state alone. The person closes with `ljos finish --close`.
+- `ljos doctor` and `ljos git-hooks status` fail when the `pre-commit` or `pre-push` hook git runs lacks the current ljos block. A stub written before v0.34.0 ends its `ljos git-hook` call in `|| true`, so the sitting check printed its refusal and git went ahead. The refusal now names such a stub and says git will go on anyway. `ljos git-hooks install` rewrites it.
+- `ljos onboard` no longer makes a tracker inside a checkout of something else.
+  A seat whose home sat in a product repository had its tracker written among that project's files.
+  The next `git add -A` there would commit them.
+  Onboard now names the checkout it found and asks for a `VISSUE_ROOT` outside it.
+  A path the checkout already ignores is nobody's files, and the tracker may live there.
+  Every habitat ljos starts is also told which tracker it means, so a ticket written from a product checkout goes to the configured tracker.
+  Before, a checkout holding a directory named `Software` passed for a tracker and took the write.
+  Standing in a tracker of your own still means that tracker.
+- `ljos reap --apply` names a runaway ticket and leaves it open. The person closes with `ljos finish --close`.
+- `ljos workflow --round` no longer marks a parent DONE at a round count, on a round of notes, or when a wall budget is spent. It files the next round until the panel passes. The person closes with `ljos finish --close`.
+- `ljos-mcp` now tracks and queues a `tools/call` only when rmcp reads the inbound line as a call-tool request, and it claims that lifetime slot before rmcp request checks run. Malformed or pre-dispatch-refused calls no longer block later ordered memory calls or delay stdin shutdown.
+- `ljos_finish` no longer takes a close flag. The tool does not close
+  the tracker ticket. The person still closes with `ljos finish --close`.
+- `vote --withdraw` now always withdraws the drawer row on the issue named in
+  the command, for CLI and MCP.
+
+  When a family signature exists, `ballot-withdrawn` is written on the
+  signature logbook; no signature means no withdrawal note is written.
+- `vote --withdraw` now withdraws a family ballot on the issue where that
+  session's ballot signature lives, for both CLI and MCP calls.
+
+  Session cast refusals now read withdrawal notes from that same logbook and
+  name the exact `ljos vote ISSUE --withdraw --as NAME` command that clears it.
+- ljos finish --close closed a ticket under a runner with no
+  terminal. It now asks whether a person is present and refuses
+  when nobody is, before anything is written.
+- ljos reopen used a commit subject and a logbook line a seat
+  can write. It now asks for a person, reads the seat file, and
+  accepts only a commit whose own diff adds both close lines.
+- ljos sync ended with SIGPIPE and no line when age refused a recipient
+  of a scope and the log was larger than the pipe buffer. It now exits
+  with age's error, which names the recipient.
+- ljos sync hung on a tracker log larger than the pipe buffers, and a
+  large log sealed only to other machines ended it with SIGPIPE and no
+  line. The ciphertext now goes to age from a thread while the plaintext
+  drains, and a log this machine cannot open is reported and skipped.
+- ljos sync sealed and committed each host's whole atoms log on every
+  change, so the tracker grew by a full copy of the log each sync. A sync
+  now seals only the atoms that were added, changed or dropped, as one
+  small chunk beside the log, and leaves the base file alone. The first
+  sync after upgrading seals each log whole once, and the syncs after it
+  write chunks. A log is sealed whole again in place of its 65th chunk,
+  or of a chunk that would bring its chunks past the size of the base.
+- ljos_finish took a close field and dropped it. A caller
+  that sent close true learned nothing. Unknown fields are
+  now an error, and the message names close.
 
 ### Documentation
 
-- The README shows the sitting picture under the title (`docs/demo/04-sitting.gif`). The demo pictures are `docs/demo/01-install.gif`, `docs/demo/02-memory.gif`, `docs/demo/03-policy.gif` and `docs/demo/04-sitting.gif`.
+- A session-end note is written only when the conversation has an open sitting.
+  The README, the getting started page, the integration table and the exported explanation now say so.
+  With no sitting the hook prints one line and writes nothing, because packset keeps a note only on a ticket.
+  The read stays on by default.
+  LJOS_EXTRACT=off turns the read off.
+  The prompt hook does not inject the note.
+- Each picture keeps the typed command above the lines it
+  prints. A long report is narrowed with a filter typed in
+  the command.
+- The README says ljos cloud up and the cloud install script are in v0.33.0 and later.
+- The README shows the sitting picture under the title, docs/demo/04-sitting.gif.
+  The demo pictures are docs/demo/01-install.gif, docs/demo/02-memory.gif, docs/demo/03-policy.gif and docs/demo/04-sitting.gif.
+- The explanation of the person passphrase no longer says the seat guard refuses a recursive delete or move of any directory above the key. It now names the commands and code it reads, and says a path built from parts it cannot read is not refused.
+- The explanation of the person passphrase now says that the seat guard refuses a recursive delete or move above the key directory, that the key files are reached through one directory descriptor with no symlink followed, and that the passphrase and the argon2id output are locked in memory where the limit allows.
+- The explanation says a session-end read writes an unverified note only when the conversation holds a live sitting. With no sitting it posts nothing and prints one line, because packset keeps a note only on a ticket. The read stays on unless LJOS_EXTRACT=off, and the prompt hook never injects the note.
+- The explanation says what the person passphrase, its argon2id cost and its pepper protect against, and what they do not: code running as the same Unix user can read the hash and the pepper and guess offline.
+- The install paragraph names the releases that publish a build attestation: deedar v0.5.0, consensus v0.8.0 and v0.9.0, claimdag v0.8.0, and packset v0.16.1. The summary counts a download as not published when its release has none.
+- The install paragraph says deedar v0.5.0, consensus v0.8.0 and v0.9.0, claimdag v0.8.0 and packset v0.16.1 carry attestations.
+- The second vote is typed as ljos vote, the same shape as
+  the first. The ticket id is read off screen, and the recall
+  stays up at the end.
+
+### Removals
+
+- Session-end extraction, which mined the transcript for sentences to keep, is off unless `LJOS_EXTRACT=on`.
+  Memory is written on purpose, and a sentence the seat found in its own prose is nobody's claim.
+  A session that ends should leave the pack as it found it.
+- `ljos note` no longer writes a copy of the note into memory.
+  A working note is tracker text, and the memory copy carried a review clock.
+  A seat that worked for a while owed thousands of reviews on notes nobody meant to learn.
+  Recall kept handing those notes back as well.
+  The note now goes to the ticket's logbook alone.
+  A copy an older `ljos note` left waiting in the queue is dropped rather than sent.
+  `ljos retire-notes` tombstones the note memories an older `ljos note` left in the pack.
+  It runs once per seat, and the tracker copies stay.
+- `max_rounds` is no longer a budget key. A round count does not close a ticket. The protocol, the skill, and the consensus text say the same.
+
 
 ## 0.34.1 (2026-10-27)
 
