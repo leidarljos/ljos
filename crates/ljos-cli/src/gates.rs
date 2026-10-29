@@ -360,6 +360,41 @@ fn consensus_keys(path: &Path) -> Result<(Option<usize>, Option<Vec<String>>), S
     Ok((quorum, branches))
 }
 
+/// The config layers a command run in `cwd` reads: [`config_layers`] in a
+/// checkout, and the files outside one otherwise.
+pub(crate) fn rewrite_layers(cwd: Option<&Path>) -> Vec<PathBuf> {
+    match cwd.and_then(repo_root) {
+        Some(root) => config_layers(&root),
+        None => user_layers(),
+    }
+}
+
+/// What `path` sets `rewrite` to, under `[gates]` or at the top of the
+/// file, and `None` when it does not set it. A repository sets it to
+/// `false` to have its lines run as they were written.
+///
+/// # Errors
+///
+/// The file cannot be read or does not parse, or `rewrite` is not a
+/// true-or-false value.
+pub(crate) fn rewrite_key(path: &Path) -> Result<Option<bool>, String> {
+    let Some(root) = read_layer(path)? else {
+        return Ok(None);
+    };
+    let src = root
+        .get("gates")
+        .and_then(toml::Value::as_table)
+        .unwrap_or(&root);
+    match src.get("rewrite") {
+        None => Ok(None),
+        Some(toml::Value::Boolean(on)) => Ok(Some(*on)),
+        Some(_) => Err(format!(
+            "`{}` key `rewrite` must be true or false. Fix the file, then retry.",
+            path.display()
+        )),
+    }
+}
+
 /// Where `call`, a `git push` on `line`, lands that needs a consensus: a
 /// branch in `branches`, in backticks, or why the push cannot be told
 /// from one that does. `None` when each ref it updates is read and none

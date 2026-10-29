@@ -68,6 +68,7 @@ pub mod seat_roster;
 pub mod sitting_gate;
 pub mod slot;
 pub mod subagent;
+pub mod swap_log;
 pub mod sync;
 pub mod tools;
 mod tracker_attach;
@@ -34641,10 +34642,13 @@ pub fn tcb_verdict(line: &str) -> Option<Rule> {
 }
 
 /// [`tcb_verdict`] for a command whose working directory is `cwd`.
-/// `ljos-policyd` is started there once that path resolves.
+/// `ljos-policyd` is started there once that path resolves. A verdict
+/// that hands back another call to run leaves a note and a log row, see
+/// [`swap_log::apply_rewrite`].
 #[must_use]
 pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     clear_guard_note();
+    swap_log::clear();
     if bookkeep::guard_suspended() {
         return sitting_gate::guard_line(line, cwd);
     }
@@ -34667,7 +34671,19 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         return None;
     };
     if !t.starts_with("deny") {
+        // A verdict that hands back another call to run says so, in the
+        // same note the person already reads about this call. A rewrite
+        // of a changed copy runs neither line, so it is no swap.
+        let exact = tcb_script(line).trim() == line.trim();
+        if exact {
+            if let Some(swap) = swap_log::apply_rewrite(line, &t, cwd) {
+                set_guard_note(swap.note);
+            }
+        }
         if let Some(command) = rewrite::from_policyd(&t) {
+            if !swap_log::allowed_in(cwd) {
+                return None;
+            }
             return rewrite::hold_exact(line, &tcb_script(line), command);
         }
         // Only the fail-open marker is a fault the switch let through. An

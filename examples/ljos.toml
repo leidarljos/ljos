@@ -21,6 +21,13 @@
 name = "Rohit Goswami"
 email = "rgoswami@ieee.org"
 
+# The guard may answer a call with another call to run in its place, such
+# as `uv run pytest` for a bare `pytest` under a project that pins its
+# environment. Each swap is said in one line and kept in
+# $XDG_DATA_HOME/ljos/rewrite.jsonl. Set this to false to have this
+# repository's lines run as they were written.
+# rewrite = false
+
 # Commits under these paths are not booked. /tmp, /var/tmp, /dev/shm, the
 # tracker, CLAIMDAG_DIR and the deedar store are always skipped. A reinstall
 # rewrites the hook scripts and leaves this file alone.

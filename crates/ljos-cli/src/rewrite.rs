@@ -795,4 +795,74 @@ esac
         };
         assert!(rule.reason.contains("`echo c`"), "{}", rule.reason);
     }
+
+    /// A policyd rewrite the guard accepts reaches the runner as its new
+    /// input, and the same swap is said and kept in the rewrite log. With
+    /// the repository's `rewrite = false` the line runs as written, and
+    /// the declined swap is still kept.
+    #[test]
+    fn a_policyd_rewrite_is_passed_on_and_also_noted_and_logged() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _g = crate::tests::env_guard();
+        let home = tempfile::tempdir().unwrap();
+        let repo = home.path().join("proj");
+        std::fs::create_dir_all(&repo).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(init.status.success(), "{init:?}");
+        let bin = home.path().join("policyd");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\ncase \"$5\" in\n  \"python x.py --n 3\") printf \"allow\\trewrite\\tbash -c 'uv run x.py --n 3'\\n\" ;;\n  *) echo allow ;;\nesac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: under the lock every environment-reading test takes,
+        // which puts each name back when it drops.
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("XDG_DATA_HOME", home.path().join("data"));
+            std::env::set_var("XDG_CONFIG_HOME", home.path().join("config"));
+            std::env::set_var("POLICYD_BIN", &bin);
+            std::env::set_var("PACKSET_URL", "off");
+            std::env::set_var("LJOS_OFF", "0");
+            std::env::set_var("LJOS_GUARD", "on");
+            for key in ["POLICYD_REQUIRED", "LJOS_GUARD_FAIL_OPEN", "LJOS_CONFIG"] {
+                std::env::remove_var(key);
+            }
+        }
+        let dir = Some(repo.as_path());
+        let judge = |line: &str| crate::tcb_verdict_in(line, dir);
+        let call = hook_call(CLAUDE);
+
+        let _ = crate::take_guard_note();
+        let verdict = crate::tcb_verdict_in(&call.cue, dir);
+        assert!(verdict.is_none(), "{verdict:?}");
+        let note = crate::take_guard_note().expect("the swap is said");
+        let outcome = pick(&call, None, judge).expect("the rewrite is passed on");
+        let v = answer_json(CLAUDE, &outcome, false);
+        assert_eq!(
+            v["hookSpecificOutput"]["updatedInput"]["command"], "uv run x.py --n 3",
+            "{v}"
+        );
+        assert!(note.contains("`uv run x.py --n 3`"), "{note}");
+        assert!(note.contains("`python x.py --n 3`"), "{note}");
+        let kept = crate::swap_log::rows();
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert!(kept[0].applied, "{kept:?}");
+        assert_eq!(kept[0].ran, "uv run x.py --n 3");
+
+        std::fs::write(repo.join("ljos.toml"), "rewrite = false\n").unwrap();
+        let _ = crate::take_guard_note();
+        let verdict = crate::tcb_verdict_in(&call.cue, dir);
+        assert!(verdict.is_none(), "{verdict:?}");
+        assert!(crate::take_guard_note().is_none(), "nothing was swapped");
+        assert_eq!(pick(&call, None, judge), None, "the line runs as written");
+        let kept = crate::swap_log::rows();
+        assert_eq!(kept.len(), 2, "{kept:?}");
+        assert!(!kept[1].applied, "the switch declined it: {kept:?}");
+    }
 }
