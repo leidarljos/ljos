@@ -16,8 +16,8 @@ use ljos_cli::{
     protocol_text, read_campaign, receive, release, remember_findings, reopen, rows_about, run,
     run_as, run_captured, session_end, settle_discount, sitting_gated, stop_hook_stdout, timeline,
     topic_words, tracker_show_json, trim_num, trust_from_pack, uncite_deed, with_discount,
-    withdraw_prediction, write_outcome, write_persona_as, write_prediction, write_rule,
-    write_trust, Persona, PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
+    write_outcome, write_persona_as, write_prediction, write_rule, write_trust, Persona,
+    PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
 };
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -1330,11 +1330,22 @@ enum Cmd {
         #[arg(long)]
         close: bool,
     },
-    /// Put an issue back to the state it had before a close this program wrote.
-    /// A person has to be present. A note is not that record. The caller does not take the claim.
+    /// Put a finished or cancelled issue back to the state the close took it from.
+    /// A person has to be present. The close stays on the logbook, with the reopen under it. The caller does not take the claim.
     Reopen {
         /// The tracker id of the issue.
         issue: String,
+    },
+    /// Take back this seat's own ballot or note on an issue. Nothing is deleted: the withdrawal is a dated note beside it.
+    Withdraw {
+        /// The tracker id of the issue.
+        issue: String,
+        /// The note to take back, whole or the part of it that names one note. Without this, the ballot is taken back.
+        #[arg(long, value_name = "TEXT")]
+        note: Option<String>,
+        /// The name a ballot was cast under, for a persona's ballot.
+        #[arg(long = "as", value_name = "NAME")]
+        as_persona: Option<String>,
     },
     /// Write trust rows from a project's voting history: Dawid-Skene accuracy per voter, no truth labels.
     Calibrate {
@@ -2104,40 +2115,7 @@ fn run_command() -> Result<()> {
         } => match choice {
             None if withdraw => {
                 let who = ljos_cli::ballot_voter("vote", as_persona.as_deref())?;
-                let ballot_issue = ljos_cli::panel_gate::standing_ballot_issue(&issue, &who);
-                // A ballot already taken back still leaves its forecast to
-                // take back, so a second withdraw finishes the first.
-                match ljos_cli::run_captured_as(
-                    "vissue",
-                    &["vote", &issue, "--withdraw"],
-                    Some(&who),
-                ) {
-                    Ok(said) => {
-                        print!("{}", said.stdout);
-                        if let Some(ballot_issue) = ballot_issue.as_deref() {
-                            if let Err(e) =
-                                ljos_cli::ballot_sig::note_withdrawn_on(ballot_issue, &who, &issue)
-                            {
-                                eprintln!("ljos vote: {e:#}");
-                            }
-                        }
-                    }
-                    Err(e) if format!("{e:#}").contains("holds no ballot") => {
-                        println!("{issue}: {who} holds no ballot; withdrawing the forecast");
-                        if let Some(ballot_issue) = ballot_issue.as_deref() {
-                            if let Err(e) =
-                                ljos_cli::ballot_sig::note_withdrawn_on(ballot_issue, &who, &issue)
-                            {
-                                eprintln!("ljos vote: {e:#}");
-                            }
-                        }
-                    }
-                    Err(e) => return Err(e),
-                }
-                let n = withdraw_prediction(&issue, &who)
-                    .with_context(|| format!("ballot withdrawn; the forecast for {who} was not"))?;
-                println!("{n} forecast(s) withdrawn for {who}");
-                print!("{}", ljos_cli::persist_tracker(&issue, "ballot withdrawn"));
+                print!("{}", ljos_cli::undo::withdraw_ballot(&issue, &who)?);
             }
             None if jev => {
                 let name = as_persona.as_deref().unwrap_or_default();
@@ -3650,6 +3628,20 @@ fn run_command() -> Result<()> {
         Cmd::Reopen { issue } => {
             print!("{}", reopen(&issue)?);
         }
+        Cmd::Withdraw {
+            issue,
+            note,
+            as_persona,
+        } => match note {
+            Some(text) => {
+                let seat = ljos_cli::seat_name();
+                print!("{}", ljos_cli::undo::withdraw_note(&issue, &seat, &text)?);
+            }
+            None => {
+                let who = ljos_cli::ballot_voter("withdraw", as_persona.as_deref())?;
+                print!("{}", ljos_cli::undo::withdraw_ballot(&issue, &who)?);
+            }
+        },
         Cmd::Calibrate { project, rounds } => {
             let rows = calibrate(&project, rounds)?;
             for row in &rows {
@@ -3756,6 +3748,7 @@ fn tracker_write(cmd: &Cmd) -> Option<&'static str> {
         Cmd::Note { .. } => "note",
         Cmd::Finish { .. } => "finish",
         Cmd::Reopen { .. } => "reopen",
+        Cmd::Withdraw { .. } => "withdraw",
         Cmd::Release { .. } => "release",
         Cmd::Complete { .. } => "complete",
         Cmd::File { .. } => "file",

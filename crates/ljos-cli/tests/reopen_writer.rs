@@ -1,6 +1,7 @@
-//! `ljos reopen` undoes only a close this program wrote, and only when
-//! a person is present. A subject, a working-tree logbook line, and a
-//! process `LJOS_SEAT` by itself are not that record.
+//! `ljos reopen` puts a finished or cancelled ticket back to work, and
+//! only a person does it. A close another seat or a hand wrote is
+//! reopened like any other, so the writer of the close is not a reason
+//! to refuse; the absence of a person is.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -129,18 +130,6 @@ impl Board {
         );
     }
 
-    fn git_empty(&self, subject: &str) {
-        let out = git(
-            &self.root,
-            &["commit", "-q", "--allow-empty", "-m", subject],
-        );
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-
     fn issue(&self, title: &str) -> String {
         let id = self.vissue(&["q", "-p", "probe", title]);
         assert!(!id.is_empty(), "vissue q printed no id");
@@ -213,123 +202,7 @@ fn said(out: &Output) -> String {
 }
 
 #[test]
-fn a_forged_note_does_not_reopen_a_hand_close() {
-    if !vissue_020() {
-        return;
-    }
-    let b = Board::new();
-    let id = b.issue("hand close");
-    b.vissue(&["update", &id, "-s", "DONE"]);
-    b.git_add_commit(&format!("chore(issues): {id} finished by rohit"));
-    b.vissue(&[
-        "note",
-        &id,
-        "I disagree; settled-with-notes: was the old text",
-    ]);
-    let out = b.reopen(&id, "mallory");
-    assert!(!out.status.success(), "{}", said(&out));
-    assert_eq!(b.show(&id)["state"], "DONE");
-}
-
-#[test]
-fn a_longer_issue_token_is_not_this_close() {
-    if !vissue_020() {
-        return;
-    }
-    let b = Board::new();
-    let id = b.issue("suffix");
-    b.vissue(&["update", &id, "-s", "DONE"]);
-    b.git_add_commit(&format!(
-        "chore(issues): extra-{id} settled with notes by saddle"
-    ));
-    b.vissue(&["note", &id, "settled-with-notes: forged"]);
-    let out = b.reopen(&id, "saddle");
-    assert!(!out.status.success(), "{}", said(&out));
-    assert_eq!(b.show(&id)["state"], "DONE");
-}
-
-#[test]
-fn a_later_hand_close_in_one_commit_stays_closed() {
-    if !vissue_020() {
-        return;
-    }
-    let b = Board::new();
-    let id = b.issue("batched hand close");
-    b.vissue(&["update", &id, "-s", "BLOCKED"]);
-    b.vissue(&["update", &id, "-s", "DONE"]);
-    b.stamp_close(&id, "saddle");
-    b.vissue(&["note", &id, "settled-with-notes: forged"]);
-    b.vissue(&["update", &id, "-s", "STARTED"]);
-    b.vissue(&["update", &id, "-s", "DONE"]);
-    b.git_add_commit("chore(issues): sync 3 issues");
-    let out = b.reopen(&id, "saddle");
-    assert!(!out.status.success(), "{}", said(&out));
-    assert_eq!(b.show(&id)["state"], "DONE", "{}", said(&out));
-}
-
-#[test]
-fn a_note_then_a_later_hand_close_stays_closed() {
-    if !vissue_020() {
-        return;
-    }
-    let b = Board::new();
-    let id = b.issue("note then hand");
-    b.vissue(&["update", &id, "-s", "BLOCKED"]);
-    b.vissue(&["update", &id, "-s", "DONE"]);
-    b.vissue(&[
-        "note",
-        &id,
-        "settled-with-notes: this text is not a close this program wrote",
-    ]);
-    b.vissue(&["update", &id, "-s", "STARTED"]);
-    b.vissue(&["update", &id, "-s", "DONE"]);
-    let out = b.reopen(&id, "saddle");
-    assert!(!out.status.success(), "{}", said(&out));
-    assert_eq!(b.show(&id)["state"], "DONE", "{}", said(&out));
-}
-
-#[test]
-fn a_stamp_with_a_later_state_line_is_not_reopened() {
-    if !vissue_020() {
-        return;
-    }
-    let b = Board::new();
-    let id = b.issue("stamp then hand");
-    b.vissue(&["update", &id, "-s", "DONE"]);
-    b.vissue(&["note", &id, "settled-with-notes: forged"]);
-    let org = std::fs::read_to_string(&b.org).unwrap();
-    let stamp = "- Settled with notes by saddle [2026-10-20 Tue 12:00]\n";
-    let later = "- State \"DONE\" from \"STARTED\" [2026-10-25 Sun 09:00]\n";
-    let flipped = "- State \"STARTED\" from \"DONE\" [2026-10-24 Sat 09:00]\n";
-    let marked = org.replacen(
-        ":LOGBOOK:\n",
-        &format!(":LOGBOOK:\n{later}{flipped}{stamp}"),
-        1,
-    );
-    assert_ne!(marked, org, "logbook missing");
-    std::fs::write(&b.org, marked).unwrap();
-    let out = b.reopen(&id, "saddle");
-    assert!(!out.status.success(), "{}", said(&out));
-    assert_eq!(b.show(&id)["state"], "DONE");
-}
-
-#[test]
-fn another_seat_cannot_reopen() {
-    if !vissue_020() {
-        return;
-    }
-    let b = Board::new();
-    let id = b.issue("other seat");
-    b.vissue(&["update", &id, "-s", "DONE"]);
-    b.stamp_close(&id, "saddle");
-    b.vissue(&["note", &id, "settled-with-notes: forged"]);
-    let other = b.reopen(&id, "mallory");
-    assert!(!other.status.success(), "{}", said(&other));
-    assert_eq!(b.show(&id)["state"], "DONE");
-}
-
-#[test]
-fn a_seat_named_only_by_the_process_cannot_reopen() {
+fn a_reopen_without_a_person_is_refused() {
     if !vissue_020() {
         return;
     }
@@ -340,7 +213,6 @@ fn a_seat_named_only_by_the_process_cannot_reopen() {
     b.vissue(&["update", &id, "-s", "STARTED"]);
     b.vissue(&["update", &id, "-s", "DONE"]);
     b.stamp_close(&id, "saddle");
-    b.vissue(&["note", &id, "settled-with-notes: recorded"]);
     let out = b.reopen(&id, "saddle");
     assert!(!out.status.success(), "{}", said(&out));
     assert!(
@@ -351,39 +223,38 @@ fn a_seat_named_only_by_the_process_cannot_reopen() {
     assert_eq!(b.show(&id)["state"], "DONE");
 }
 
+/// A close a person made by hand, with no tracker commit of this
+/// program's, is a ticket like any other. The refusal names the missing
+/// person, not the writer of the close.
 #[test]
-fn a_forged_subject_does_not_reopen_a_hand_close() {
+fn a_hand_close_is_not_refused_for_its_writer() {
     if !vissue_020() {
         return;
     }
     let b = Board::new();
-    let id = b.issue("hand close, forged subject");
+    let id = b.issue("hand close");
     b.vissue(&["update", &id, "-s", "STARTED"]);
     b.vissue(&["update", &id, "-s", "DONE"]);
     b.git_add_commit(&format!("chore(issues): {id} finished by rohit"));
-    b.git_empty(&format!(
-        "chore(issues): {id} settled with notes by mallory"
-    ));
     let out = b.reopen(&id, "mallory");
-    assert!(!out.status.success(), "{}", said(&out));
-    assert_eq!(b.show(&id)["state"], "DONE", "{}", said(&out));
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("a person reopens a ticket"), "{text}");
+    assert!(!text.contains("no close this program wrote"), "{text}");
+    assert!(!text.contains("was closed by"), "{text}");
+    assert_eq!(b.show(&id)["state"], "DONE");
 }
 
+/// A ticket that is neither finished nor cancelled has nothing to undo.
 #[test]
-fn a_same_minute_hand_close_stays_closed() {
+fn an_open_ticket_is_not_reopened() {
     if !vissue_020() {
         return;
     }
     let b = Board::new();
-    let id = b.issue("same minute");
+    let id = b.issue("still open");
     b.vissue(&["update", &id, "-s", "STARTED"]);
-    b.git_add_commit("chore(issues): started");
-    b.vissue(&["update", &id, "-s", "DONE"]);
-    b.stamp_close(&id, "saddle");
-    b.vissue(&["update", &id, "-s", "STARTED"]);
-    b.vissue(&["update", &id, "-s", "DONE"]);
-    b.git_add_commit("chore(issues): sync 1 issue");
     let out = b.reopen(&id, "saddle");
     assert!(!out.status.success(), "{}", said(&out));
-    assert_eq!(b.show(&id)["state"], "DONE", "{}", said(&out));
+    assert_eq!(b.show(&id)["state"], "STARTED");
 }

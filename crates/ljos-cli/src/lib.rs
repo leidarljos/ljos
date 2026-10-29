@@ -75,6 +75,7 @@ mod tracker_push;
 pub mod tracker_sync;
 pub mod tree_cleanup;
 pub mod turn_record;
+pub mod undo;
 pub mod upgrade;
 pub mod user_rules;
 pub mod wake;
@@ -31727,20 +31728,23 @@ struct StateFlip {
     stamp: String,
 }
 
-/// Put `issue` back to the state it had before a close this program wrote.
-/// A person has to be present. The caller is the seat named in the seat
-/// file, and a process `LJOS_SEAT` has to agree with that file when one
-/// is set. The close is a tracker commit whose own diff adds the DONE
-/// line and the logbook line. A subject alone, and a logbook line that
-/// exists only in the working tree, are not that record. Every state
-/// line is compared, so a later hand close in the same minute stays.
-/// The caller does not take the claim.
+/// Put a finished or cancelled `issue` back to work. A person has to be
+/// present. The caller is the seat named in the seat file, and a process
+/// `LJOS_SEAT` has to agree with that file when one is set.
+///
+/// The state it goes back to is the one the close took it from. A close
+/// this program wrote, whose own commit diff adds the DONE line and the
+/// logbook line, names that state exactly; otherwise the logbook's newest
+/// state line does, and a ticket whose logbook says nothing goes back to
+/// [`undo::FRESH_STATE`]. A close another seat or a person wrote is
+/// reopened all the same: a mistake is undone by whoever finds it. The
+/// reopen is a dated note beside the close, so neither is lost. The
+/// caller does not take the claim.
 ///
 /// # Errors
 ///
-/// No person is present, the seat file does not agree, `issue` is not
-/// DONE, this program did not write the close, the ticket moved after
-/// that close, or this seat is not the one that wrote it.
+/// No person is present, the seat file does not agree, `issue` is neither
+/// finished nor cancelled, or the tracker refused the write.
 pub fn reopen(issue: &str) -> Result<String> {
     let issue = issue.trim();
     if issue.is_empty() {
@@ -31752,25 +31756,14 @@ pub fn reopen(issue: &str) -> Result<String> {
     let caller = reopen_caller()?;
     let v = issue_record(issue)?;
     let state = v["state"].as_str().unwrap_or("");
-    if state != "DONE" {
-        bail!("reopen: {issue} is {state}, not DONE; nothing was written");
+    if !undo::is_closed(state) {
+        bail!("reopen: {issue} is {state}, neither finished nor cancelled; nothing was written");
     }
-    let found = match find_written_close(issue) {
-        CloseFind::Ready(found) => found,
-        CloseFind::Moved => {
-            bail!("reopen: {issue} moved after the close this program wrote; nothing was written")
-        }
-        CloseFind::None => {
-            bail!("reopen: {issue} has no close this program wrote; nothing was written")
-        }
+    let prior = match find_written_close(issue) {
+        CloseFind::Ready(found) if same_writer(&caller, &found.writer) => found.prior,
+        _ => undo::prior_state(&v, state).unwrap_or_else(|| undo::FRESH_STATE.to_string()),
     };
-    if !same_writer(&caller, &found.writer) {
-        bail!(
-            "reopen: {issue} was closed by {}; this seat is {caller}; nothing was written",
-            found.writer
-        );
-    }
-    run_captured("vissue", &["update", issue, "-s", &found.prior])?;
+    run_captured("vissue", &["update", issue, "-s", &prior])?;
     if let Ok(after) = issue_record(issue) {
         if let Some(who) = after["claimed_by"]
             .as_str()
@@ -31780,7 +31773,12 @@ pub fn reopen(issue: &str) -> Result<String> {
             let _ = unstamp_tracker(issue, who, false);
         }
     }
-    let mut out = format!("{issue} reopened as {}\n", found.prior);
+    let note = undo::reopen_note(&caller, state);
+    if let Err(e) = run_captured("vissue", &["note", issue, &note]) {
+        eprintln!("ljos reopen: the note on {issue} was not written: {e:#}");
+    }
+    let mut out = format!("{issue} reopened as {prior}\n");
+    out.push_str("the close stays on the logbook, with the reopen under it\n");
     out.push_str(&persist_tracker(issue, "reopened"));
     Ok(out)
 }
