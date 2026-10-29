@@ -8450,8 +8450,8 @@ fn mcp_atom(raw: &str) -> String {
     }
 }
 
-/// A shell line the tracker guard already judges, built from a vissue
-/// MCP write. `None` for a tool that is not one of those writes.
+/// A shell line the tracker guard already judges, built from a
+/// vissue MCP write. `None` for a tool that is not one of those writes.
 fn vissue_mcp_line(tool: &str, input: &Value) -> Option<String> {
     let verb = vissue_mcp_verb(tool)?;
     let parsed;
@@ -29896,16 +29896,83 @@ fn write_hold(actor: &str, assignee: &str, node: &str) {
     // The issue is the sixth line: a subagent reads what its parent holds
     // from here, since asking the tracker takes longer than a hook may run.
     // The seventh names the claim graph, since every graph on the host
-    // shares this directory.
+    // shares this directory. The eighth names the tracker that holds the
+    // issue, so a gate reads one tracker instead of walking every root.
     let _ = std::fs::write(
         path,
         format!(
-            "{assignee}\n{}\n{pid}\n{comm}\n{}\n{node}\n{}\n",
+            "{assignee}\n{}\n{pid}\n{comm}\n{}\n{node}\n{}\n{}\n",
             seat_name(),
             now_utc(),
-            claim_graph_scope()
+            claim_graph_scope(),
+            tracker_line(node)
         ),
     );
+}
+
+/// `<root>\t<prefix>` of the tracker that holds `node`, or empty when no
+/// tracker reads it. The tracker this process resolves is asked first; the
+/// router walk runs only when that one lacks the issue.
+fn tracker_line(node: &str) -> String {
+    let Ok(layout) = vissue_core::Layout::resolve(None, None) else {
+        return String::new();
+    };
+    let layout = if vissue_core::agent::show_json(&layout, node).is_ok() {
+        layout
+    } else {
+        match vissue_core::Router::load(layout).and_then(|r| r.find_by_id(node)) {
+            Ok(found) => found.layout,
+            Err(_) => return String::new(),
+        }
+    };
+    format_tracker_line(layout.root(), layout.prefix())
+}
+
+fn format_tracker_line(root: &Path, prefix: &str) -> String {
+    format!("{}\t{prefix}", root.display())
+}
+
+/// The tracker named on a hold record's eighth line.
+fn parse_tracker_line(line: &str) -> Option<vissue_core::Layout> {
+    let (root, prefix) = line.trim_end().split_once('\t')?;
+    (!root.is_empty()).then(|| vissue_core::Layout::new(root, prefix))
+}
+
+/// The tracker a hold record in `dir` names for `node`; `None` when no
+/// record holds it or the record was written before the eighth line.
+fn held_tracker_in(dir: &Path, node: &str) -> Option<vissue_core::Layout> {
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with("hold-") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.get(5).map(|n| n.trim()) != Some(node.trim()) {
+            continue;
+        }
+        if let Some(layout) = lines.get(7).and_then(|l| parse_tracker_line(l)) {
+            return Some(layout);
+        }
+    }
+    None
+}
+
+/// [`issue_record`] for an issue a hold record names: read from the tracker
+/// the record names when it has the issue, so a commit gate does not walk
+/// every tracker root on the host.
+///
+/// # Errors
+///
+/// As [`issue_record`].
+pub fn held_issue_record(issue: &str) -> Result<Value> {
+    if let Some(layout) = held_tracker_in(&runtime_dir(), issue) {
+        if let Ok(v) = vissue_core::agent::show_json(&layout, issue) {
+            return Ok(v);
+        }
+    }
+    issue_record(issue)
 }
 
 /// The claim graph a hold record belongs to: `CLAIMDAG_DIR`, or `-` for
@@ -47794,6 +47861,31 @@ mod tests {
             held_from_records_in(&[], dir.path(), &chain, "bob", graph).as_deref(),
             Some("acme-bob1")
         );
+    }
+
+    /// A hold record's eighth line names the tracker of its issue, and a
+    /// record written before that line existed names none.
+    #[test]
+    fn hold_record_names_the_tracker_of_its_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let tracker = dir.path().join("company-notes");
+        let line = format_tracker_line(&tracker, "Issues");
+        std::fs::write(
+            dir.path().join("hold-a"),
+            format!("inky\ninky\n1\nljos\n2026-10-29T00:00:00Z\nacme-ls53\n-\n{line}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("hold-b"),
+            "inky\ninky\n1\nljos\n2026-10-29T00:00:00Z\nacme-old1\n-\n",
+        )
+        .unwrap();
+        let layout = held_tracker_in(dir.path(), "acme-ls53").expect("tracker");
+        assert_eq!(layout.root(), tracker.as_path());
+        assert_eq!(layout.prefix(), "Issues");
+        assert!(held_tracker_in(dir.path(), "acme-old1").is_none());
+        assert!(held_tracker_in(dir.path(), "acme-none").is_none());
+        assert!(parse_tracker_line("").is_none());
     }
 
     /// two shells that source a shell runner's env file hold under one
