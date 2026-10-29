@@ -101,7 +101,7 @@ Without `LJOS_TRACKER_REMOTE`, the clone an earlier boot made names the remote. 
 
 A clone that fails does not stop `cloud up`. The line names the remote without its token and says what to set. The machine then runs with no shared tracker, and the MCP entry does not claim push mode. Set `LJOS_CLOUD_AGE_SECRET` to the name of the secret that holds the age identity for scope `cloud`. The identity stays out of `environment.json` too.
 
-`cloud up` rewrites the harness MCP command to the absolute path of this install, whatever PATH the client has. A claim, a note and a vote then push to the tracker, and another clone sees them after a fetch. A `STARTED` claim this seat made on this machine whose program has exited returns to `TODO` after `LJOS_LEASE_SECS`. A claim whose program is still running stays, and so does every claim another machine holds. The tracker URL has to be one the machine's git credentials can clone.
+`cloud up` rewrites the harness MCP command to the absolute path of this install, whatever PATH the client has. A claim, a note and a vote then push to the tracker, and another clone sees them after a fetch. A `STARTED` claim this seat made on this machine whose program has exited returns to `TODO` after `LJOS_LEASE_SECS`. A claim whose program is still running stays, and so does every claim another machine holds. A hold record with no issue line keeps its seat's claims while its program runs, and releases none of them once it exits. The tracker URL has to be one the machine's git credentials can clone.
 
 ## Deeds
 

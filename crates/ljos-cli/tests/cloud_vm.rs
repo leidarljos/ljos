@@ -3391,6 +3391,44 @@ fn a_claim_from_another_machine_stays_claimed() {
     assert_eq!(state_of(&remote, "probe-old1"), "STARTED", "{remote}");
 }
 
+/// A hold named by the seat with a blank issue line keeps that seat's
+/// claims while its runner lives. It cannot say which claims were its own,
+/// so a dead one releases none of them.
+#[test]
+fn a_dead_hold_with_no_issue_releases_no_claim_of_its_seat() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    isolate_git(root.path());
+    let origin = init_bare(root.path());
+    let mine = ":CLAIMED_BY: vm-mine\n:CLAIMED_AT: [2020-01-01 Wed 00:00]\n";
+    seed(
+        root.path(),
+        &origin,
+        &board(&[
+            issue_block("probe-one", "STARTED", mine, &[]),
+            issue_block("probe-two", "STARTED", mine, &[]),
+        ]),
+    );
+    let vm = clone_of(root.path(), &origin, "vm");
+    let runtime = root.path().join("run");
+    fs::create_dir_all(runtime.join("ljos")).unwrap();
+    fs::write(
+        runtime.join("ljos").join("hold-vm-mine"),
+        "vm-mine\nseat\n4194303\nno-such-runner\n2020-01-01T00:00:00Z\n\n-\n",
+    )
+    .unwrap();
+    std::env::set_var("HOME", root.path().join("home"));
+    std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+    std::env::set_var("LJOS_TRACKER_GIT", "push");
+    std::env::set_var("VISSUE_ROOT", &vm);
+    std::env::set_var("ISSUE_ROOT", &vm);
+    let said = ljos_cli::cloud::reap_gone_owners(Some("vm-mine"), 900);
+    assert!(!said.contains("no longer claimed"), "{said}");
+    let local = fs::read_to_string(vm.join("Software/probe/issues.org")).unwrap();
+    assert_eq!(state_of(&local, "probe-one"), "STARTED", "{local}");
+    assert_eq!(state_of(&local, "probe-two"), "STARTED", "{local}");
+}
+
 #[test]
 fn a_live_hold_keeps_its_issue_and_a_dead_process_is_released() {
     let _g = Guard::new();

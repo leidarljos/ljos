@@ -3412,7 +3412,8 @@ fn local_hold(assignee: &str, issue: &str) -> Option<bool> {
         let Some(actor) = name.strip_prefix("hold-") else {
             continue;
         };
-        if !hold_names_claim(actor, assignee, issue) {
+        let naming = hold_names_claim(actor, assignee, issue);
+        if naming == HoldNames::Other {
             continue;
         }
         let Some(hold) = crate::read_hold(actor) else {
@@ -3421,9 +3422,23 @@ fn local_hold(assignee: &str, issue: &str) -> Option<bool> {
         if crate::hold_alive(&hold) {
             return Some(true);
         }
-        found = Some(false);
+        // A hold that names no issue cannot say which claims it held, so
+        // once its runner is gone it releases none of them.
+        if naming == HoldNames::Issue {
+            found = Some(false);
+        }
     }
     found
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum HoldNames {
+    /// The record names this issue.
+    Issue,
+    /// A record named by the seat itself with a blank issue line: it
+    /// keeps every claim of that seat while its runner lives.
+    AnyOfSeat,
+    Other,
 }
 
 /// Whether this hold record is the one `ljos claim` wrote for `issue`.
@@ -3433,10 +3448,10 @@ fn local_hold(assignee: &str, issue: &str) -> Option<bool> {
 /// its sixth line is the issue. A filename that is already the seat still
 /// matches, which is how a hand-written hold keeps its claim. A live hold
 /// for another issue does not keep this one.
-fn hold_names_claim(actor: &str, assignee: &str, issue: &str) -> bool {
+fn hold_names_claim(actor: &str, assignee: &str, issue: &str) -> HoldNames {
     let path = crate::runtime_dir().join(format!("hold-{actor}"));
     let Ok(text) = fs::read_to_string(path) else {
-        return false;
+        return HoldNames::Other;
     };
     let lines: Vec<&str> = text.lines().map(str::trim).collect();
     let record_assignee = lines.first().copied().unwrap_or("");
@@ -3444,12 +3459,20 @@ fn hold_names_claim(actor: &str, assignee: &str, issue: &str) -> bool {
     let name_ok =
         crate::same_holder(actor, assignee) || crate::same_holder(record_assignee, assignee);
     if !name_ok {
-        return false;
+        return HoldNames::Other;
     }
     if node.is_empty() {
-        return crate::same_holder(actor, assignee);
+        return if crate::same_holder(actor, assignee) {
+            HoldNames::AnyOfSeat
+        } else {
+            HoldNames::Other
+        };
     }
-    node == issue
+    if node == issue {
+        HoldNames::Issue
+    } else {
+        HoldNames::Other
+    }
 }
 
 fn bin_dir(home: &Path) -> PathBuf {
