@@ -1989,6 +1989,28 @@ fn executable(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Copy `src` beside `dest` and rename it over `dest`. A running binary
+/// cannot be opened for writing (ETXTBSY), and the `ljos` running cloud up
+/// is often the one being replaced; a rename leaves it running from the
+/// old inode.
+fn install_binary(src: &Path, dest: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("ljos");
+    let tmp = dest.with_file_name(format!(".{name}.tmp-{}", std::process::id()));
+    let _ = fs::remove_file(&tmp);
+    let copied = (|| -> Result<()> {
+        fs::copy(src, &tmp)
+            .with_context(|| format!("copy {} to {}", src.display(), tmp.display()))?;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
+        fs::rename(&tmp, dest).with_context(|| format!("install {}", dest.display()))?;
+        Ok(())
+    })();
+    if copied.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    copied
+}
+
 fn install_from_dir(bin_dir: &Path, src: &Path) -> Result<String> {
     let sums_path = src.join("SHA256SUMS");
     let text =
@@ -2042,18 +2064,35 @@ fn install_from_dir(bin_dir: &Path, src: &Path) -> Result<String> {
         }
     }
     fs::create_dir_all(bin_dir)?;
+    let mut copied = Vec::new();
+    let mut kept = Vec::new();
     for name in &install {
         let dest = bin_dir.join(name);
-        fs::copy(src.join(name), &dest)
-            .with_context(|| format!("copy {name} to {}", dest.display()))?;
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&dest, fs::Permissions::from_mode(0o755))?;
+        if executable(&dest) && sha256_file(&dest).is_ok_and(|got| got == want[*name]) {
+            kept.push(*name);
+            continue;
+        }
+        install_binary(&src.join(name), &dest)?;
+        copied.push(*name);
     }
-    Ok(format!(
-        "binaries: installed {} into {} (checksums match)",
-        install.join(", "),
-        bin_dir.display()
-    ))
+    let mut line = if copied.is_empty() {
+        format!(
+            "binaries: {} already in {}",
+            kept.join(", "),
+            bin_dir.display()
+        )
+    } else {
+        format!(
+            "binaries: installed {} into {}",
+            copied.join(", "),
+            bin_dir.display()
+        )
+    };
+    if !copied.is_empty() && !kept.is_empty() {
+        line.push_str(&format!("; {} already there", kept.join(", ")));
+    }
+    line.push_str(" (checksums match)");
+    Ok(line)
 }
 
 fn sha256_file(path: &Path) -> Result<String> {

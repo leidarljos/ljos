@@ -285,6 +285,90 @@ fn a_checksum_mismatch_installs_nothing() {
     assert!(!bins.join("ljos-mcp").exists());
 }
 
+/// A later boot reruns `cloud up` from the `ljos` the first run installed.
+/// When the release directory holds a newer `ljos`, that run replaces its
+/// own binary, which Linux refuses to open for writing while it runs. A
+/// rerun of the same release rewrites nothing.
+#[test]
+fn cloud_up_reruns_from_the_installed_ljos_with_a_release_dir() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let rel = root.path().join("rel");
+    let search = root.path().join("workspace");
+    let bin = home.join(".local/bin");
+    for dir in [&home, &rel, &search] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    fs::copy(env!("CARGO_BIN_EXE_ljos"), rel.join("ljos")).unwrap();
+    executable(&rel.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
+    executable(&rel.join("ljos-policyd"), "#!/bin/sh\nexit 0\n");
+    let names = ["ljos", "ljos-mcp", "ljos-policyd"];
+    fs::write(rel.join("SHA256SUMS"), sums(&rel, &names)).unwrap();
+    let up = |ljos: &Path| {
+        let out = Command::new(ljos)
+            .args(["cloud", "up"])
+            .env_clear()
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_RUNTIME_DIR", root.path().join("run"))
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("LJOS_RELEASE_DIR", &rel)
+            .env("LJOS_TRACKER_SEARCH", &search)
+            .env("LJOS_SEAT", "rerun-seat")
+            .env("DEEDAR_HOST_SIGNING_KEY", "off")
+            .output()
+            .unwrap();
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "{} cloud up: {said}", ljos.display());
+        said
+    };
+    up(Path::new(env!("CARGO_BIN_EXE_ljos")));
+    let installed = bin.join("ljos");
+    use std::os::unix::fs::MetadataExt;
+    let first = fs::metadata(&installed).unwrap().ino();
+    // Trailing bytes leave the ELF runnable and give it a new sum.
+    fs::OpenOptions::new()
+        .append(true)
+        .open(rel.join("ljos"))
+        .unwrap()
+        .write_all(b"\0next release")
+        .unwrap();
+    fs::write(rel.join("SHA256SUMS"), sums(&rel, &names)).unwrap();
+    let said = up(&installed);
+    assert!(said.contains("binaries: installed ljos into"), "{said}");
+    assert!(
+        said.contains("ljos-mcp, ljos-policyd already there"),
+        "{said}"
+    );
+    let second = fs::metadata(&installed).unwrap().ino();
+    assert_ne!(
+        second, first,
+        "the rerun wrote over the running ljos instead of renaming"
+    );
+    assert_eq!(sums(&bin, &names), sums(&rel, &names));
+    let said = up(&installed);
+    assert!(
+        said.contains("binaries: ljos, ljos-mcp, ljos-policyd already in"),
+        "{said}"
+    );
+    assert_eq!(fs::metadata(&installed).unwrap().ino(), second);
+    let left: Vec<_> = fs::read_dir(&bin)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".tmp-"))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "temp files left in {}: {left:?}",
+        bin.display()
+    );
+}
+
 /// A home and a release directory with the required binaries and the
 /// encoder archives as the release workflow packs them, each beside its
 /// `.sha256`.
