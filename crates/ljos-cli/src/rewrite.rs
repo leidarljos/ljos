@@ -510,8 +510,9 @@ mod tests {
         );
         let prompt = hook_call(r#"{"hook_event_name":"UserPromptSubmit","prompt":"python x.py"}"#);
         assert!(pick(&prompt, Some(&uv_refusal()), allow_all).is_none());
+        // Only a shell tool's input is sent back, whatever the cue.
         let read = r#"{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"command":"python x.py --n 3"}}"#;
-        let call = hook_call(read);
+        let call = hook_call(CLAUDE);
         let fix = pick(&call, Some(&uv_refusal()), allow_all).unwrap();
         let v: Value = serde_json::from_str(
             answer_with(read, &call, "", Some(&uv_refusal()), &fix, false).trim(),
