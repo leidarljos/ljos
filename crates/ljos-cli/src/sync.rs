@@ -780,11 +780,30 @@ pub(crate) fn handover_recipients(scope_name: &str) -> Result<Vec<String>> {
 ///
 /// age refused, or the file could not be written.
 pub(crate) fn seal_to(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
+    use std::io::Write as _;
     let sealed = seal_bytes(plain, recipients)?;
-    let tmp = out.with_extension("age.tmp");
-    std::fs::write(&tmp, sealed).with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, out).with_context(|| format!("install {}", out.display()))?;
-    Ok(())
+    let name = out
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("sealed.age");
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    // Two seals into one directory each write their own temp file.
+    let tmp = out.with_file_name(format!(".{name}.tmp-{}-{stamp}", std::process::id()));
+    let wrote = (|| -> Result<()> {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .and_then(|mut file| file.write_all(&sealed))
+            .with_context(|| format!("write {}", tmp.display()))?;
+        std::fs::rename(&tmp, out).with_context(|| format!("install {}", out.display()))
+    })();
+    if wrote.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    wrote
 }
 
 /// Open `path` with the identities scope `scope_name` may use. `None`
@@ -801,11 +820,7 @@ pub(crate) fn open_scoped(path: &Path, scope_name: &str) -> Result<Option<String
 /// Seal `plain` to the recipients into `out`.
 #[cfg(test)]
 fn seal(plain: &str, recipients: &[String], out: &Path) -> Result<()> {
-    let sealed = seal_bytes(plain, recipients)?;
-    let tmp = out.with_extension("age.tmp");
-    std::fs::write(&tmp, sealed)?;
-    std::fs::rename(&tmp, out)?;
-    Ok(())
+    seal_to(plain, recipients, out)
 }
 
 /// `plain` sealed to the recipients. age writes to a pipe, so the caller
@@ -6450,6 +6465,43 @@ mod tests {
         );
         assert_eq!(open(&out, &other).unwrap(), None);
         assert!(seal("x", &[], &out).is_err(), "no recipients is refused");
+    }
+
+    /// Two handovers into one directory used to share `<file>.age.tmp`, so
+    /// one could rename the other's half-written file into place.
+    #[test]
+    fn each_seal_writes_its_own_temp_file() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("mine.key");
+        let made = Command::new("age-keygen")
+            .arg("-o")
+            .arg(&key)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "age-keygen must be installed");
+        let public = identity_recipient(&key).unwrap();
+        let out = dir.path().join("cloud.jsonl.age");
+        let shared = dir.path().join("cloud.jsonl.age.tmp");
+        std::fs::write(&shared, "another run is writing this\n").unwrap();
+        seal_to("{\"text\":\"x\"}\n", std::slice::from_ref(&public), &out).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&shared).unwrap(),
+            "another run is writing this\n",
+            "the seal wrote over another run's temp file"
+        );
+        assert_eq!(
+            open(&out, &key).unwrap().as_deref(),
+            Some("{\"text\":\"x\"}\n")
+        );
+        let mut left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp-"))
+            .collect();
+        left.sort();
+        assert!(left.is_empty(), "temp files left: {left:?}");
     }
 
     /// rage under fr_FR says "Aucune clef correspondante" instead of
