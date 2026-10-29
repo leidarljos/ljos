@@ -69,6 +69,7 @@ pub mod sync;
 pub mod tools;
 mod tracker_attach;
 mod tracker_push;
+pub mod tracker_sync;
 pub mod tree_cleanup;
 pub mod turn_record;
 pub mod upgrade;
@@ -27618,6 +27619,16 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                 }
             }
         }
+        // A sync line printed ahead of the first section. The compact
+        // sitting keeps it and drops every other preamble line.
+        "" => {
+            for l in lines {
+                if l.starts_with("tracker:") && !l.trim().is_empty() {
+                    out.push_str(l);
+                    out.push('\n');
+                }
+            }
+        }
         // recall and timeline are for `--verbose`.
         _ => {}
     }
@@ -31310,6 +31321,9 @@ pub fn sitting_gated(
     playbook: Option<&str>,
 ) -> Result<String> {
     let mut out = String::new();
+    if let Some(line) = tracker_sync::tracker_sync_line() {
+        out.push_str(&line);
+    }
     let mut sections = SectionCursor::new();
     let rows = doctor_seat();
     sections.heading(&mut out, "doctor");
@@ -32310,6 +32324,7 @@ pub fn finish(
     let (deeds, deed_paths) = deedbag::on_finish(issue);
     out.push_str(&deeds);
     out.push_str(&persist_tracker_with(issue, "finished", &deed_paths));
+    out.push_str(&tracker_sync::push_leftover());
     // Memory crosses by handover. Finish does not seal the pack into the
     // tracker.
     Ok(out)

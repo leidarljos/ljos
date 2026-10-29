@@ -98,7 +98,7 @@ pub fn digest(since: Option<&str>, json: bool) -> Result<String> {
     collect_memory(&window, &mut rows);
     dedup(&mut rows);
     store_marker(started)?;
-    let banner: Option<String> = None;
+    let banner = crate::tracker_sync::tracker_sync_line();
     if json {
         Ok(render_json(
             since_label.as_deref(),
