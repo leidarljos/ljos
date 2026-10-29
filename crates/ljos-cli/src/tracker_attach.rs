@@ -6,10 +6,13 @@
 //! URL to the clone, so the clone has the credentials the environment gave
 //! that checkout.
 //!
-//! `LJOS_TRACKER_TOKEN` is a token that can push to the tracker. It is
-//! stored mode 0600 beside the env file, and the clone's own credential
-//! helper reads it there. Global URL rewrites do not apply to the clone's
-//! URL, so a token the machine holds for another repository is not sent.
+//! `LJOS_TRACKER_TOKEN` is a token that can push to the tracker. Without
+//! it, a password in the lending checkout's URL, as written or as a global
+//! rewrite expands it, is the token. It is stored mode 0600 beside the env
+//! file, and the clone's own credential helper reads it there; no URL git
+//! stores or passes to a child carries it. Global URL rewrites and
+//! credential helpers do not apply to the clone, so a token the machine
+//! holds for another repository is not sent.
 
 use std::fs;
 use std::io::Write;
@@ -30,10 +33,22 @@ const WORKSPACE_ROOTS: &[&str] = &["/workspace"];
 pub(crate) struct Remote {
     /// The URL with no user or password. This one is written down.
     pub shown: String,
-    /// The URL the clone fetches from.
+    /// The URL the clone fetches from. It carries no password.
     pub fetch: String,
     /// Where the URL came from, for the line `cloud up` prints.
     pub from: String,
+    /// A password that was in the URL, kept for the credential helper.
+    pub secret: Option<Secret>,
+}
+
+/// A password taken out of a URL. Its `Debug` does not print it.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Secret(pub String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(..)")
+    }
 }
 
 /// The tracker remote for a clone at `dest`, or `None` when nothing names
@@ -43,43 +58,100 @@ pub(crate) fn find(given: Option<&str>, dest: &Path) -> Option<Remote> {
     if let Some(given) = given {
         let lent = checkouts.iter().find_map(|dir| {
             origin(dir)
-                .filter(|url| same_remote(url, given))
-                .map(|url| (dir, url))
+                .filter(|(url, _)| same_remote(url, given))
+                .map(|found| (dir, found))
         });
         return Some(match lent {
-            Some((dir, url)) => Remote {
+            Some((dir, (fetch, secret))) => Remote {
                 shown: redact(given),
-                fetch: url,
+                fetch,
                 from: format!(
                     "LJOS_TRACKER_REMOTE, fetched as {} fetches it",
                     dir.display()
                 ),
+                secret,
             },
-            None => Remote {
-                shown: redact(given),
-                fetch: given.to_string(),
-                from: "LJOS_TRACKER_REMOTE".into(),
-            },
+            None => {
+                let (fetch, secret) = split_userinfo(given);
+                Remote {
+                    shown: redact(given),
+                    fetch,
+                    from: "LJOS_TRACKER_REMOTE".into(),
+                    secret: secret.map(Secret),
+                }
+            }
         });
     }
-    if let Some(url) = origin(dest) {
+    if let Some((fetch, secret)) = origin(dest) {
         return Some(Remote {
-            shown: redact(&url),
-            fetch: url,
+            shown: redact(&fetch),
+            fetch,
             from: format!("the clone at {}", dest.display()),
+            secret,
         });
     }
     checkouts
         .iter()
         .find(|dir| is_tracker(dir))
         .and_then(|dir| {
-            let url = origin(dir)?;
+            let (fetch, secret) = origin(dir)?;
             Some(Remote {
-                shown: redact(&url),
-                fetch: url,
+                shown: redact(&fetch),
+                fetch,
                 from: format!("the tracker checkout at {}", dir.display()),
+                secret,
             })
         })
+}
+
+/// `url` without its password, and the password. An HTTP URL loses its
+/// user too; another scheme keeps the user, which ssh needs. A path or
+/// an scp-style address is returned as it is.
+pub(crate) fn split_userinfo(url: &str) -> (String, Option<String>) {
+    let url = url.trim();
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return (url.to_string(), None);
+    };
+    let (authority, path) = rest.find('/').map_or((rest, ""), |i| rest.split_at(i));
+    let Some((userinfo, host)) = authority.rsplit_once('@') else {
+        return (url.to_string(), None);
+    };
+    let (user, password) = match userinfo.split_once(':') {
+        Some((user, password)) => (user, Some(password)),
+        None => (userinfo, None),
+    };
+    let clean = if matches!(scheme, "http" | "https") || user.is_empty() {
+        format!("{scheme}://{host}{path}")
+    } else {
+        format!("{scheme}://{user}@{host}{path}")
+    };
+    (
+        clean,
+        password.filter(|p| !p.is_empty()).map(percent_decode),
+    )
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[i], hex) {
+            (b'%', Some(byte)) => {
+                out.push(byte);
+                i += 3;
+            }
+            (byte, _) => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Whether two remote URLs name one repository. The scheme, a user or
@@ -166,19 +238,27 @@ fn is_tracker(dir: &Path) -> bool {
     })
 }
 
-fn origin(dir: &Path) -> Option<String> {
+/// The origin `dir` names, with no password, and the password it fetches
+/// with: one written in the URL, or one a global rewrite adds to this
+/// same repository's URL. A rewrite to another repository lends nothing.
+fn origin(dir: &Path) -> Option<(String, Option<Secret>)> {
     if !dir.exists() {
         return None;
     }
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["remote", "get-url", "origin"])
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
-    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (out.status.success() && !url.is_empty()).then_some(url)
+    let written = git_line(dir, &["config", "--get", "remote.origin.url"])?;
+    let (fetch, mut secret) = split_userinfo(&written);
+    if secret.is_none() {
+        secret = git_line(dir, &["remote", "get-url", "origin"])
+            .filter(|expanded| *expanded != written && same_remote(expanded, &written))
+            .and_then(|expanded| split_userinfo(&expanded).1);
+    }
+    Some((fetch, secret.map(Secret)))
+}
+
+fn git_line(dir: &Path, args: &[&str]) -> Option<String> {
+    let out = git(dir, args).ok()?;
+    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !line.is_empty()).then_some(line)
 }
 
 /// The token in `LJOS_TRACKER_TOKEN`, when it holds one.
@@ -190,10 +270,15 @@ pub(crate) fn token() -> Option<String> {
 }
 
 /// The URL a token is sent to: HTTPS with the user `x-access-token` and no
-/// password, for a hosted remote. `None` for a path or a `file://` URL,
-/// which take no token.
+/// password, for a hosted remote. A plain HTTP remote stays HTTP. `None`
+/// for a path or a `file://` URL, which take no token.
 pub(crate) fn token_url(url: &str) -> Option<String> {
     let url = url.trim();
+    let scheme_out = if url.starts_with("http://") {
+        "http"
+    } else {
+        "https"
+    };
     let (host, path) = if let Some((scheme, rest)) = url.split_once("://") {
         if !matches!(scheme, "https" | "http" | "ssh" | "git+ssh") {
             return None;
@@ -214,7 +299,8 @@ pub(crate) fn token_url(url: &str) -> Option<String> {
         let host = left.rsplit_once('@').map_or(left, |(_, h)| h);
         (host.to_string(), path.trim_start_matches('/').to_string())
     };
-    (!host.is_empty() && !path.is_empty()).then(|| format!("https://x-access-token@{host}/{path}"))
+    (!host.is_empty() && !path.is_empty())
+        .then(|| format!("{scheme_out}://x-access-token@{host}/{path}"))
 }
 
 /// Where the token is kept.
@@ -267,29 +353,71 @@ pub(crate) fn store_token(home: &Path, token: &str) -> Result<String> {
     Ok(helper(&path))
 }
 
-/// The `-c` options a clone runs with: the helper list emptied, then
-/// `helper` alone.
-pub(crate) fn clone_config(helper: &str) -> Vec<String> {
-    vec![
+/// The `-c` options a clone of `url` runs with. `url` rewritten to itself
+/// is the longest `insteadOf` match, so no other rewrite applies. The
+/// helper list is emptied and holds `helper` alone, and no askpass runs.
+pub(crate) fn clone_config(url: &str, helper: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "-c".to_string(),
+        format!("url.{url}.insteadOf={url}"),
         "-c".into(),
         "credential.helper=".into(),
         "-c".into(),
-        format!("credential.helper={helper}"),
-    ]
+        "core.askPass=".into(),
+    ];
+    if let Some(helper) = helper {
+        args.push("-c".into());
+        args.push(format!("credential.helper={helper}"));
+    }
+    args
 }
 
-/// Keep `helper` as the clone's only credential helper, and fetch and push
-/// through `url`.
-pub(crate) fn configure(dir: &Path, helper: &str, url: &str) -> Result<()> {
+/// Refuse a clone whose URL a rewrite still turns into one with a password.
+/// Only a rule written for exactly `url` can, since it ties with the one
+/// [`clone_config`] adds and git keeps the first.
+///
+/// # Errors
+///
+/// That rule exists. The error names `shown`, never the password.
+pub(crate) fn refuse_secret_rewrite(url: &str, shown: &str) -> Result<()> {
+    let mut args = clone_config(url, None);
+    args.extend(["ls-remote".into(), "--get-url".into(), url.into()]);
+    let out = Command::new("git")
+        .args(&args)
+        .stdin(Stdio::null())
+        .output()
+        .context("git ls-remote --get-url")?;
+    let expanded = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if out.status.success() && expanded != url && split_userinfo(&expanded).1.is_some() {
+        bail!(
+            "tracker: a url.*.insteadOf rule in git config rewrites {shown} to a URL with a password, so it was not cloned; remove that rule"
+        );
+    }
+    Ok(())
+}
+
+/// Keep `helper` as the clone's only credential helper, fetch and push
+/// through `url`, and let no global rewrite change `url`.
+pub(crate) fn configure(dir: &Path, helper: Option<&str>, url: &str) -> Result<()> {
     let _ = git(
         dir,
         &["config", "--local", "--unset-all", "credential.helper"],
     );
-    for args in [
-        vec!["config", "--local", "--add", "credential.helper", ""],
-        vec!["config", "--local", "--add", "credential.helper", helper],
-        vec!["remote", "set-url", "origin", url],
-    ] {
+    let rewrite = format!("url.{url}.insteadOf");
+    let _ = git(dir, &["config", "--local", "--unset-all", &rewrite]);
+    let mut steps = vec![vec!["config", "--local", "--add", "credential.helper", ""]];
+    if let Some(helper) = helper {
+        steps.push(vec![
+            "config",
+            "--local",
+            "--add",
+            "credential.helper",
+            helper,
+        ]);
+    }
+    steps.push(vec!["config", "--local", rewrite.as_str(), url]);
+    steps.push(vec!["remote", "set-url", "origin", url]);
+    for args in steps {
         let out = git(dir, &args)?;
         if !out.status.success() {
             bail!(
@@ -349,5 +477,43 @@ mod tests {
         assert_eq!(token_url("ssh://git@github.com:22/o/t.git"), want);
         assert_eq!(token_url("/srv/tracker.git"), None);
         assert_eq!(token_url("file:///srv/tracker.git"), None);
+        assert_eq!(
+            token_url("http://127.0.0.1:8080/o/t.git").as_deref(),
+            Some("http://x-access-token@127.0.0.1:8080/o/t.git")
+        );
+    }
+
+    #[test]
+    fn a_password_comes_out_of_the_url_and_ssh_keeps_its_user() {
+        assert_eq!(
+            split_userinfo("https://x-access-token:s%2Fcret@github.com/o/t.git"),
+            (
+                "https://github.com/o/t.git".to_string(),
+                Some("s/cret".to_string())
+            )
+        );
+        assert_eq!(
+            split_userinfo("https://someone@github.com/o/t"),
+            ("https://github.com/o/t".to_string(), None)
+        );
+        assert_eq!(
+            split_userinfo("ssh://git:pw@github.com/o/t"),
+            (
+                "ssh://git@github.com/o/t".to_string(),
+                Some("pw".to_string())
+            )
+        );
+        for kept in [
+            "git@github.com:o/t.git",
+            "/srv/tracker.git",
+            "https://github.com/o/t",
+        ] {
+            assert_eq!(split_userinfo(kept), (kept.to_string(), None), "{kept}");
+        }
+        assert_eq!(
+            format!("{:?}", Secret("hunter2".into())),
+            "Secret(..)",
+            "a Debug print shows no password"
+        );
     }
 }

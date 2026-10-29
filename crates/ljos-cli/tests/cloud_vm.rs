@@ -1037,6 +1037,194 @@ fn a_tracker_clone_that_fails_names_the_fix_and_finishes_cloud_up() {
     assert!(!mcp.contains("LJOS_TRACKER_GIT"), "{mcp}");
 }
 
+/// A workspace checkout whose origin URL carries a password lends that
+/// password, and `git clone` would store whatever URL it is given. The
+/// clone gets the URL without it, and the helper answers with it.
+#[test]
+fn a_password_in_the_workspace_origin_stays_out_of_the_clone() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, origin) = tracker_vm(root.path());
+    let lent = "https://x-access-token:lent-token@github.com/example/tracker";
+    let bare = "https://x-access-token@github.com/example/tracker";
+    // Both forms lead to the local bare repository, so a clone of either
+    // succeeds offline and shows which one git stored.
+    fs::write(
+        root.path().join("gitconfig"),
+        format!(
+            "[url \"{}\"]\n\tinsteadOf = {bare}\n\tinsteadOf = {lent}\n",
+            origin.display()
+        ),
+    )
+    .unwrap();
+    let checkout = clone_of(root.path(), &origin, "workspace/tracker");
+    git(&checkout, &["remote", "set-url", "origin", lent]);
+    let said = ljos_cli::cloud::up(false).unwrap();
+    assert!(said.contains("tracker: cloned"), "{said}");
+    assert!(!said.contains("lent-token"), "{said}");
+    let tracker = home.join(".local/share/ljos/tracker");
+    assert_eq!(
+        git(&tracker, &["config", "--get", "remote.origin.url"]).trim(),
+        bare
+    );
+    let config = fs::read_to_string(tracker.join(".git/config")).unwrap();
+    assert!(!config.contains("lent-token"), "{config}");
+    let file = home.join(".config/ljos/tracker.token");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap().trim(), "lent-token");
+    for written in [home.join(".config/ljos/env"), home.join(".cursor/mcp.json")] {
+        let text = fs::read_to_string(&written).unwrap();
+        assert!(!text.contains("lent-token"), "{}", written.display());
+    }
+}
+
+/// Standard Base64 with padding, for a Basic `Authorization` value.
+fn base64(bytes: &[u8]) -> String {
+    const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ABC[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// An HTTP server on 127.0.0.1 that answers every request 401 and asks for
+/// Basic auth. It keeps each `Authorization` value it is sent.
+fn auth_probe() -> (u16, std::sync::Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let keep = seen.clone();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 && !line.trim().is_empty() {
+                if let Some((name, value)) = line.trim_end().split_once(':') {
+                    if name.eq_ignore_ascii_case("authorization") {
+                        keep.lock().unwrap().push(value.trim().to_string());
+                    }
+                }
+                line.clear();
+            }
+            let _ = stream.write_all(
+                b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"tracker\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+    });
+    (port, seen)
+}
+
+/// A global `insteadOf` that adds the machine's token, and a global
+/// credential helper, would both hand the tracker host a token meant for
+/// another repository. The clone runs with neither: only the tracker
+/// token is sent, and with no tracker token nothing is.
+#[test]
+fn a_global_rewrite_or_helper_sends_the_tracker_no_other_token() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (home, _origin) = tracker_vm(root.path());
+    let (port, seen) = auth_probe();
+    let asked = root.path().join("helper-asked");
+    let helper = root.path().join("helper.sh");
+    executable(
+        &helper,
+        &format!(
+            "#!/bin/sh\ntouch '{}'\n[ \"$1\" = get ] && printf 'username=x-access-token\\npassword=helper-token\\n'\nexit 0\n",
+            asked.display()
+        ),
+    );
+    fs::write(
+        root.path().join("gitconfig"),
+        format!(
+            "[url \"http://x-access-token:machine-token@127.0.0.1:{port}/\"]\n\
+             \tinsteadOf = http://x-access-token@127.0.0.1:{port}/\n\
+             \tinsteadOf = http://127.0.0.1:{port}/\n\
+             [credential]\n\thelper = {}\n",
+            helper.display()
+        ),
+    )
+    .unwrap();
+    let trace = root.path().join("trace");
+    std::env::set_var("GIT_TRACE", &trace);
+    let remote = format!("http://127.0.0.1:{port}/example/tracker");
+    std::env::set_var("LJOS_TRACKER_REMOTE", &remote);
+    std::env::set_var("LJOS_TRACKER_TOKEN", "tracker-secret");
+    let said = ljos_cli::cloud::up(false).unwrap();
+    std::env::remove_var("LJOS_TRACKER_TOKEN");
+    let without = ljos_cli::cloud::up(false).unwrap();
+    std::env::remove_var("GIT_TRACE");
+
+    let sent = seen.lock().unwrap().clone();
+    let basic = |password: &str| {
+        format!(
+            "Basic {}",
+            base64(format!("x-access-token:{password}").as_bytes())
+        )
+    };
+    assert!(
+        sent.contains(&basic("tracker-secret")),
+        "the tracker token was not sent: {sent:?}\n{said}"
+    );
+    for other in ["machine-token", "helper-token"] {
+        assert!(!sent.contains(&basic(other)), "{other} was sent: {sent:?}");
+    }
+    assert!(!asked.exists(), "the global credential helper was asked");
+    let traced = fs::read_to_string(&trace).unwrap_or_default();
+    assert!(!traced.contains("machine-token"), "{traced}");
+    assert!(!traced.contains("tracker-secret"), "{traced}");
+    assert!(without.contains("tracker: clone of"), "{without}");
+    assert!(without.contains("LJOS_TRACKER_TOKEN"), "{without}");
+    assert!(!without.contains("machine-token"), "{without}");
+    let env = fs::read_to_string(home.join(".config/ljos/env")).unwrap();
+    assert!(!env.contains("LJOS_TRACKER_GIT=push"), "{env}");
+}
+
+/// A rule written for exactly the clone's URL ties with the rewrite that
+/// pins it, and git keeps the user's. When that rule adds a password the
+/// clone is refused, and the password is in no line.
+#[test]
+fn a_rewrite_of_the_exact_tracker_url_to_a_password_is_refused() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _origin) = tracker_vm(root.path());
+    let remote = "https://127.0.0.1:1/example/tracker";
+    fs::write(
+        root.path().join("gitconfig"),
+        format!("[url \"https://x-access-token:tied-token@127.0.0.1:1/example/tracker\"]\n\tinsteadOf = {remote}\n"),
+    )
+    .unwrap();
+    let trace = root.path().join("trace");
+    std::env::set_var("GIT_TRACE", &trace);
+    std::env::set_var("LJOS_TRACKER_REMOTE", remote);
+    let said = ljos_cli::cloud::up(false).unwrap();
+    std::env::remove_var("GIT_TRACE");
+    assert!(
+        said.contains("to a URL with a password, so it was not cloned"),
+        "{said}"
+    );
+    assert!(!said.contains("tied-token"), "{said}");
+    let traced = fs::read_to_string(&trace).unwrap_or_default();
+    assert!(
+        !traced.contains("git-remote-https"),
+        "a clone ran: {traced}"
+    );
+}
+
 #[test]
 fn cloud_up_puts_ljos_mcp_on_path_before_the_config() {
     let _g = Guard::new();

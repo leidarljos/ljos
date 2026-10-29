@@ -2419,7 +2419,8 @@ fn ensure_tracker(
     seat: &str,
     home: &Path,
 ) -> Result<(String, bool)> {
-    let token = match crate::tracker_attach::token() {
+    let secret = crate::tracker_attach::token().or_else(|| remote.secret.clone().map(|s| s.0));
+    let token = match secret {
         Some(token) => crate::tracker_attach::token_url(&remote.fetch)
             .map(|url| crate::tracker_attach::store_token(home, &token).map(|helper| (helper, url)))
             .transpose()?,
@@ -2428,7 +2429,7 @@ fn ensure_tracker(
     if is_work_tree(dest) {
         ensure_identity(dest, seat)?;
         if let Some((helper, url)) = &token {
-            crate::tracker_attach::configure(dest, helper, url)?;
+            crate::tracker_attach::configure(dest, Some(helper), url)?;
         }
         let line = match crate::tracker_push::publish(dest) {
             Ok(()) => format!("tracker: updated {}", dest.display()),
@@ -2466,9 +2467,17 @@ fn ensure_tracker(
     })
 }
 
-/// `text` with the fetch URL, which may carry a token, shown without it.
+/// `text` with the fetch URL shown as written down, and no token in it.
 fn hide(text: &str, remote: &crate::tracker_attach::Remote) -> String {
-    text.replace(&remote.fetch, &remote.shown)
+    let mut text = text.replace(&remote.fetch, &remote.shown);
+    let tokens = [
+        crate::tracker_attach::token(),
+        remote.secret.clone().map(|s| s.0),
+    ];
+    for token in tokens.into_iter().flatten() {
+        text = text.replace(&token, "***");
+    }
+    text
 }
 
 /// Clone `remote` to `dest`. `token` is the credential helper and the URL
@@ -2488,28 +2497,27 @@ fn clone_tracker(
         .context("tracker path has no name")?
         .to_string_lossy()
         .to_string();
-    let mut cmd = Command::new("git");
-    cmd.current_dir(parent);
-    let url = match token {
-        Some((helper, url)) => {
-            cmd.args(crate::tracker_attach::clone_config(helper));
-            url.as_str()
-        }
-        None => remote.fetch.as_str(),
+    let (url, helper) = match token {
+        Some((helper, url)) => (url.as_str(), Some(helper.as_str())),
+        None => (remote.fetch.as_str(), None),
     };
-    let out = cmd
+    let shown = &remote.shown;
+    crate::tracker_attach::refuse_secret_rewrite(url, shown)?;
+    let out = Command::new("git")
+        .current_dir(parent)
+        .args(crate::tracker_attach::clone_config(url, helper))
         .args(["clone", "--quiet", url, &name])
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env_remove("GIT_ASKPASS")
         .stdin(std::process::Stdio::null())
         .output()
         .context("git clone")?;
-    let shown = &remote.shown;
     if !out.status.success() {
         let said = String::from_utf8_lossy(&out.stderr);
         bail!("tracker: clone of {shown} failed: {}", said.trim());
     }
-    if let Some((helper, url)) = token {
-        crate::tracker_attach::configure(dest, helper, url)?;
+    if let Some(helper) = helper {
+        crate::tracker_attach::configure(dest, Some(helper), url)?;
     }
     ensure_identity(dest, seat)?;
     let from = &remote.from;
