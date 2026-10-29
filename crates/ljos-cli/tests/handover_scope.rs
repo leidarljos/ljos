@@ -158,6 +158,11 @@ impl World {
     }
 
     fn ljos(&self, machine: &str, args: &[&str]) -> Output {
+        self.ljos_with(machine, args, &self.tools)
+    }
+
+    /// [`World::ljos`] with `first` searched before the tools.
+    fn ljos_with(&self, machine: &str, args: &[&str], first: &Path) -> Output {
         let home = self.root.path().join(machine);
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(args)
@@ -166,7 +171,10 @@ impl World {
             .env("XDG_CONFIG_HOME", home.join(".config"))
             .env("XDG_STATE_HOME", home.join(".local/state"))
             .env("XDG_RUNTIME_DIR", home.join("run"))
-            .env("PATH", format!("{}:/usr/bin:/bin", self.tools.display()))
+            .env(
+                "PATH",
+                format!("{}:{}:/usr/bin:/bin", first.display(), self.tools.display()),
+            )
             .env("PACKSET_URL", format!("http://127.0.0.1:{}", self.port))
             .env("PACKSET_HOME", self.root.path().join("box/pack"))
             .env("ISSUE_ROOT", &self.tracker)
@@ -300,6 +308,72 @@ fn a_scope_with_no_recipients_writes_no_atoms() {
         "{text}"
     );
     assert!(!bag.join("data/atoms").exists(), "{text}");
+}
+
+/// The plaintext export is made outside the bag, so a copy of the bag
+/// cannot carry it. An export that cannot be removed stops the handover.
+#[test]
+fn a_plaintext_export_that_cannot_be_removed_stops_the_handover() {
+    use std::os::unix::fs::PermissionsExt;
+    let w = World::new();
+    let wrap = w.root.path().join("wrap");
+    std::fs::create_dir_all(&wrap).unwrap();
+    let seen = w.root.path().join("export-dir");
+    let script = format!(
+        "#!/bin/sh\n'{}' \"$@\" || exit $?\n\
+         if [ \"$1\" = export ] && [ \"$2\" = --into ]; then\n\
+         printf '%s' \"$3\" > '{}'\n\
+         mkdir -p \"$3/locked\" && touch \"$3/locked/kept\" && chmod 0500 \"$3/locked\"\n\
+         fi\n",
+        w.tools.join("packset").display(),
+        seen.display()
+    );
+    std::fs::write(wrap.join("packset"), script).unwrap();
+    std::fs::set_permissions(wrap.join("packset"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let bag = w.bag("stuck");
+    let bag_arg = bag.display().to_string();
+    let out = w.ljos_with(
+        "box",
+        &[
+            "handover",
+            "--out",
+            &bag_arg,
+            "--project",
+            "probe",
+            "--scope",
+            "cloud",
+        ],
+        &wrap,
+    );
+    let text = said(&out);
+    let export = PathBuf::from(std::fs::read_to_string(&seen).expect("packset export ran"));
+    let _ = std::fs::set_permissions(
+        export.join("locked"),
+        std::fs::Permissions::from_mode(0o700),
+    );
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("could not be removed"), "{text}");
+    assert!(text.contains("nothing was handed over"), "{text}");
+    assert!(
+        !export.starts_with(&bag),
+        "the export {} is inside the bag",
+        export.display()
+    );
+    if bag.exists() {
+        for file in files_under(&bag) {
+            let plain = String::from_utf8_lossy(&std::fs::read(&file).unwrap()).into_owned();
+            assert!(
+                !plain.contains(CLOUD_TEXT),
+                "{} is plaintext",
+                file.display()
+            );
+            assert!(
+                !plain.contains(BOX_TEXT),
+                "{} holds box memory",
+                file.display()
+            );
+        }
+    }
 }
 
 #[test]

@@ -12,7 +12,7 @@ use serde_json::Value;
 /// A sealed scope file in a bag: `data/atoms/<scope>.jsonl.age`.
 pub(crate) const SEALED_SUFFIX: &str = ".jsonl.age";
 
-/// Export the pack's `workspace` beside the bag, keep the atoms of
+/// Export the pack's `workspace` outside the bag, keep the atoms of
 /// `scope`, and seal them into `atoms_dir`. Returns the lines to print and
 /// the accessions those atoms cite. The plaintext export is removed before
 /// this returns.
@@ -21,14 +21,15 @@ pub(crate) const SEALED_SUFFIX: &str = ".jsonl.age";
 ///
 /// The scope has no recipients, age refused, or the export could not be
 /// read. Nothing is sealed then, and the plaintext export is still removed.
+/// An export that could not be removed is an error too, so the handover
+/// stops before anything is sent.
 pub(crate) fn enclose(
-    out: &Path,
     atoms_dir: &Path,
     workspace: &str,
     scope: &str,
 ) -> Result<(Vec<String>, String)> {
     let recipients = crate::sync::handover_recipients(scope)?;
-    let export = private_dir(out)?;
+    let export = private_dir()?;
     let result = (|| {
         let said = crate::run_captured(
             "packset",
@@ -52,17 +53,29 @@ pub(crate) fn enclose(
         )];
         Ok((lines, cited))
     })();
-    let _ = std::fs::remove_dir_all(&export);
+    if let Err(e) = std::fs::remove_dir_all(&export) {
+        bail!(
+            "handover: the plaintext export at {} could not be removed ({e}), so nothing was handed over; remove it by hand",
+            export.display()
+        );
+    }
     result
 }
 
-/// A directory only this user can read, beside the bag and outside its
-/// payload, for the plaintext export.
-fn private_dir(out: &Path) -> Result<PathBuf> {
+/// A new directory only this user can read, in the runtime directory and
+/// so outside the bag a later copy sends, for the plaintext export.
+fn private_dir() -> Result<PathBuf> {
     use std::os::unix::fs::DirBuilderExt;
-    std::fs::create_dir_all(out).with_context(|| format!("create {}", out.display()))?;
-    let dir = out.join(format!(".scope-export-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let parent = crate::runtime_dir();
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&parent)
+        .with_context(|| format!("create {}", parent.display()))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let dir = parent.join(format!(".scope-export-{}-{stamp}", std::process::id()));
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&dir)

@@ -27669,8 +27669,7 @@ pub fn handover_scoped(
         Ok(client) if scope.is_some() => {
             let atoms_dir = out.join("data").join("atoms");
             let scope = scope.unwrap_or_default();
-            let (said, kept) =
-                handover_scope::enclose(out, &atoms_dir, &client.workspace(), scope)?;
+            let (said, kept) = handover_scope::enclose(&atoms_dir, &client.workspace(), scope)?;
             lines.extend(said);
             cited = kept;
         }
