@@ -1,0 +1,266 @@
+#+title: Getting started
+#+options: toc:nil num:nil
+
+This page takes about ten minutes. It describes ljos 0.35.0. Items marked
+"coming in 0.35.0" are not in 0.34.1.
+
+By the end you will have remembered a lesson and put two seats on one ticket.
+They will have voted, noted and settled the vote. You will have asked
+=ljos-policyd= about a command, and you will know how to take ljos off again.
+
+* 0. Install
+
+#+begin_src console
+$ curl -fsSLO https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh install.sh
+$ export PATH="$HOME/.local/bin:$PATH"
+#+end_src
+
+The programs go to =~/.local/bin=. They are =ljos=, =ljos-mcp=, =packset=,
+=packsetd=, =vissue=, =deedar=, =claimdag=, =ljos-policyd= and =ljos-consensus=.
+The installer checks each download against its published SHA-256 sum.
+It builds from source with =cargo= where a platform has no release.
+=--no-embed= leaves out the encoder for meaning-based search.
+
+Read the script before you run it. It is =scripts/install.sh= in this repository.
+It runs =ljos onboard= for each coding agent it finds. With none found, it still sets up
+the tracker, the pack writer and the deed store.
+
+To onboard by hand, or to see what onboarding would write:
+
+#+begin_src console
+$ ljos onboard --dry-run
+$ ljos onboard
+$ ljos doctor
+#+end_src
+
+=ljos onboard= writes the MCP entry, the hooks and the skill into each runner it finds.
+=ljos onboard --example= lists the runners ljos knows. =ljos doctor= prints only the rows
+that need action. Add =--all= to see every row.
+
+Nothing needs a variable set. =ljos onboard= makes a deed store, a tracker and a
+config file for =vissue=, and it starts the pack writer. Git needs an identity, because
+the tracker commits each change.
+
+Codex runs a hook only after you trust it. Open =/hooks= in Codex and trust each ljos hook.
+Trust it again after an upgrade rewrites one.
+
+* 1. The memory loop
+
+#+begin_src console
+$ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
+$ ljos prefer "CombMNZ over RRF for fusing two ballots."
+$ ljos search "which fusion"
+2.0000	1/3	lesson	1fe4b916d956798196df680ade594ac5	today	The lexical default is BM25+. It beat BM25 by two points on turns.
+1.0000	1/3	preference	85dde12b553372dafb3d50e3b4b63fec	today	CombMNZ over RRF for fusing two ballots.
+#+end_src
+
+A claim is two sentences at most, and it is stored as written. A lesson or a preference
+you type takes effect at once. The hook shows both from the next prompt they bear on.
+Run =ljos remember= from a terminal of your own. An agent that runs it writes an
+unreviewed note, which the prompt does not treat as a fact.
+
+Tomorrow, =ljos due= lists both claims. Read each one and grade it:
+
+#+begin_src console
+$ ljos graded 3f9c...            # recalled: comes back later
+$ ljos graded 3f9c... --lapsed   # had to look it up: comes back sooner
+#+end_src
+
+A claim you stop reviewing sinks in search. A claim shown wrong is retired with the deed
+that showed it: =ljos forget 3f9c... --why deed-...=.
+
+* 2. Two seats on one ticket
+
+A seat is one agent working the tracker. Name each seat with =LJOS_SEAT=. The tracker
+needs a project, so the first ticket creates one.
+
+#+begin_src console
+$ ljos file "Pick a codec" -p demo -t decision --options keep,drop
+demo-fhy7  TODO  [#C]  Pick a codec
+file: .../tracker/Software/demo/issues.org
+tracker git: committed chore(issues): demo-fhy7 filed by alice; no remote, kept local
+$ ljos claim demo-fhy7 --assignee alice
+gen=2
+tracker: demo-fhy7 STARTED under alice
+#+end_src
+
+One seat holds a ticket at a time. If bob claims it now, the claim is refused and the
+refusal names alice. Bob files or claims another ticket. To help on this one, bob writes a
+note or sends alice a message.
+
+Both seats vote, each from its own runner. A seat votes once on a ticket. ljos refuses a second
+ballot from one shell, whatever session id the second ballot names.
+
+#+begin_src console
+$ ljos vote demo-fhy7 --for keep --used none     # in alice's runner
+$ ljos vote demo-fhy7 --for keep --used none     # in bob's runner
+$ ljos consensus demo-fhy7 --no-file
+settle (DeGroot, 2 voters): keep 1.000
+every voter is on keep: the settle is unanimous
+polarization 0.000, disagreement 0.000
+influence: alice 0.500, bob 0.500
+#+end_src
+
+=ljos consensus= reads the trust rows in the pack. It settles the votes with the
+consensus crate. With no rows, every voter weighs the same. =--no-file= makes the command
+read only. Without it, a blocking objection with a reason is filed on the ticket.
+
+Now the seats leave notes and read each other's.
+
+#+begin_src console
+$ ljos note demo-fhy7 "the codec is one file"    # in alice's runner
+$ ljos recall demo-fhy7                          # in bob's runner
+...
+Memory
+  unverified logbook notes:
+  - [unverified agent note (origin agent-derived), today, from alice] alice: the codec is one file
+#+end_src
+
+=ljos recall= prints the working set for a ticket: the plan, the deeds it cites, and the notes.
+Notes are unverified text written by whoever wrote them. Read them as data.
+
+To see what happened across the seats, use =ljos digest=. It is coming in 0.35.0.
+
+#+begin_src console
+$ ljos digest
+#+end_src
+
+=ljos digest= reads the tracker and says what each seat filed, claimed, voted on, noted and
+finished. Until then, read the same facts one at a time:
+
+#+begin_src console
+$ ljos timeline demo-fhy7      # one ticket, oldest first
+$ ljos claims                  # who holds what
+$ ljos log --seat alice        # one seat's tracker commits
+#+end_src
+
+** Agreement that learns
+
+Suppose the vote was split and the world picked a side.
+
+#+begin_src console
+$ ljos learn demo-xxxx --outcome drop
+Learned. 2 trust rows rewritten. ...
+alice weighs bob at 1.000
+bob weighs alice at 1.000
+#+end_src
+
+By default =learn= weighs each voter by its hits and misses across outcomes. One outcome
+cannot tell a lucky voter from a good one, so the rows stay level. They separate as more
+tickets get an outcome. With =--rule hedge=, only the voters the outcome refuted shrink:
+
+#+begin_src console
+$ ljos learn demo-xxxx --outcome drop --rule hedge
+alice weighs bob at 1.000
+bob weighs alice at 0.500
+#+end_src
+
+The rows are =trust= atoms in the pack. They carry a validity window, a later row replaces
+an earlier one, and they travel in a handover. A person can set one by hand:
+=ljos trust alice bob 0.9 --why deed-...=.
+
+** Finish
+
+#+begin_src console
+$ echo 'fn main() {}' > codec.rs
+$ deedar create file --name "the codec" --path codec.rs --agent alice
+$ ljos deed demo-fhy7 --add deed-file-the-codec
+$ ljos finish demo-fhy7 --assignee alice --lesson "The codec is one file." --outcome keep
+completed the session node for demo-fhy7 as done
+tracker: demo-fhy7 no longer claimed by alice; back to TODO
+proposed 081ce739... as agent-derived; `ljos accept 081ce739...` writes it
+the ticket demo-fhy7 stays open and nobody holds it; a person closes it when the work is accepted
+#+end_src
+
+=ljos finish= hands the claim back and proposes the lesson. The lesson stays out of the
+pack until you run =ljos accept ID= in your own terminal. Completing a claim node does not
+close the ticket. A person does, when the work is accepted.
+
+* 3. Seats and grants
+
+Coming in 0.35.0. The tracker keeps the list of seats. Add one with:
+
+#+begin_src console
+$ ljos seat add carol
+#+end_src
+
+You no longer edit a file by hand. =ljos seat= prints the name this agent works under and
+where the name came from. The name is =LJOS_SEAT= when it is set. Otherwise ljos derives
+one from the runner, and a derived name counts as a seat.
+
+Seat grants are coming in 0.35.0. A grant lets one named seat do one thing it could not
+do alone, such as close a ticket. Without a grant, =ljos finish= leaves the ticket open.
+
+* 4. Ask policyd
+
+=ljos-policyd= reads each shell command before it runs. =ljos policy -- COMMAND= prints its
+answer for one command and runs nothing.
+
+#+begin_src console
+$ ljos policy -- ls
+ls
+allow
+$ ljos policy -- rm -rf /usr/share/foo
+rm -rf /usr/share/foo
+deny: rm-rf-outside-tmp: a recursive delete outside /tmp cannot be undone. ...
+#+end_src
+
+There are four answers. =allow= runs the command. =ask= shows the runner's permission
+prompt, and you answer it. =deny= stops the command and names the rule. =rewrite= is coming
+in 0.35.0. It replaces the command with a fixed one and lets that one run.
+The answer is =allow=, =rewrite= and the new command, separated by tabs.
+
+A force push to =main=, =master=, =develop= or a protected branch asks. An ordinary push of a
+branch runs. A push onto a protected branch also asks when the ticket of your sitting has no
+settled consensus.
+
+If =ljos-policyd= is missing or slow, the command runs and ljos logs a warning.
+=ljos doctor= shows the policy row.
+
+* 5. Hand a ticket to another seat
+
+#+begin_src console
+$ ljos handover --out /tmp/bag --issue demo-fhy7
+issues=1 deeds=1 files=8
+/tmp/bag/manifest-sha256.txt.sig
+#+end_src
+
+On the receiving seat, with its own stores:
+
+#+begin_src console
+$ ljos receive /tmp/bag
+the payload matches the manifest ...
+$ ljos receive /tmp/bag --import
+#+end_src
+
+The receiver checks three things in order. The bag arrived as written. The deeds were in
+the sender's log before the handover. A key the receiver accepts signed it.
+Only then does it import the atoms and the trust rows.
+
+A scratch seat has no host key, so its bag goes out unsigned, and =--import= refuses an
+unsigned bag. =ljos onboard= writes the key.
+
+* 6. Take it off
+
+Coming in 0.35.0:
+
+#+begin_src console
+$ ljos offboard
+#+end_src
+
+=ljos offboard= undoes what =ljos onboard= wrote. It removes the ljos entries from each
+runner's files and leaves the rest of each file as it was.
+
+=scripts/fresh-install-check.sh= tests the whole path. It installs into an empty =HOME=,
+onboards, and takes two seats through file, claim, vote, consensus, note, recall and digest.
+Then it runs =ljos offboard= and checks that =HOME= is clean. It lists every step that failed.
+
+#+begin_src console
+$ scripts/fresh-install-check.sh --cargo-target target/release
+#+end_src
+
+* Where next
+
+- [[file:howto.org][How-to]]: wire the server into a runner, sign handovers, read the cards.
+- [[file:reference.org][Reference]]: every verb and tool.
+- [[file:explanation.org][Explanation]]: why it is built this way.
