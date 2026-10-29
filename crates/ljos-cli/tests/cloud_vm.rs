@@ -3080,6 +3080,7 @@ fn a_missing_mcp_binary_is_named() {
         .arg("ljos-mcp")
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &home)
+        .env("LJOS_PLUGIN_FETCH", "0")
         .output()
         .unwrap();
     let err = String::from_utf8_lossy(&out.stderr);

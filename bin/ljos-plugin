@@ -8,18 +8,145 @@ if command -v "$name" >/dev/null 2>&1; then
   exec "$name" "$@"
 fi
 home=${HOME:-}
-if [ -n "$home" ]; then
-  for dir in "$home/.cargo/bin" "$home/.local/bin"; do
-    if [ -x "$dir/$name" ]; then
-      exec "$dir/$name" "$@"
+bin_dir=${LJOS_BIN_DIR:-}
+if [ -z "$bin_dir" ] && [ -n "$home" ]; then
+  bin_dir=$home/.local/bin
+fi
+for dir in "$bin_dir" "${CARGO_HOME:-}/bin" "$home/.cargo/bin" "$home/.local/bin"; do
+  case $dir in /bin | /.cargo/bin | /.local/bin) continue ;; esac
+  if [ -x "$dir/$name" ]; then
+    exec "$dir/$name" "$@"
+  fi
+done
+
+# A cloud VM starts the MCP server at boot, before anything has installed
+# ljos, and the client gets only HOME, PATH, SHELL, TERM, USER and LOGNAME.
+# There `ljos` and `ljos-mcp` come from this plugin's own release: the ljos
+# tarball, checked against the SHA-256 published beside it. One tarball is
+# under a second. LJOS_PLUGIN_FETCH=0 turns this off, =1 turns it on
+# elsewhere. LJOS_RELEASE_DIR names a directory holding the release assets.
+why=
+cloud_vm() {
+  case ${LJOS_PLUGIN_FETCH:-} in
+    0 | off | false) return 1 ;;
+    1 | on | true) return 0 ;;
+  esac
+  [ -e /run/cursor/api.sock ] || [ -n "${CURSOR_AGENT_ID:-}${CLOUD_AGENT_ID:-}" ]
+}
+get_asset() {
+  if [ -n "${LJOS_RELEASE_DIR:-}" ]; then
+    cp "$LJOS_RELEASE_DIR/$1" "$2" 2>/dev/null
+  elif command -v curl >/dev/null 2>&1; then
+    curl -fsSL --max-time 60 -o "$2" "https://github.com/leidarljos/ljos/releases/download/v$ver/$1"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -T 60 -O "$2" "https://github.com/leidarljos/ljos/releases/download/v$ver/$1"
+  else
+    why="neither curl nor wget is here"
+    return 1
+  fi
+}
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+# Another launcher started beside this one may hold the lock. Its pid is in
+# the lock; a lock whose pid is gone is taken over.
+take_lock() {
+  n=0
+  while ! mkdir "$lock" 2>/dev/null; do
+    held=$(cat "$lock/pid" 2>/dev/null)
+    if [ -n "$held" ] && ! kill -0 "$held" 2>/dev/null; then
+      rm -rf "$lock"
+      continue
+    fi
+    [ $n -lt 90 ] || return 1
+    n=$((n + 1))
+    sleep 1
+  done
+  echo $$ > "$lock/pid"
+}
+fetch_release() {
+  case $name in ljos | ljos-mcp) ;; *) return 1 ;; esac
+  cloud_vm || return 1
+  [ -n "$bin_dir" ] || return 1
+  root=$(CDPATH= cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd) || return 1
+  ver=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([0-9][0-9.]*\)".*/\1/p' \
+    "$root/.cursor-plugin/plugin.json" "$root/.claude-plugin/plugin.json" 2>/dev/null | head -n 1)
+  if [ -z "$ver" ]; then
+    why="the plugin manifest names no version"
+    return 1
+  fi
+  case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64) target=x86_64-unknown-linux-gnu ;;
+    Linux-aarch64 | Linux-arm64) target=aarch64-unknown-linux-gnu ;;
+    Darwin-x86_64) target=x86_64-apple-darwin ;;
+    Darwin-arm64) target=aarch64-apple-darwin ;;
+    *)
+      why="release v$ver has no build for $(uname -s)-$(uname -m)"
+      return 1
+      ;;
+  esac
+  asset=ljos-v$ver-$target.tar.gz
+  mkdir -p "$bin_dir" || return 1
+  lock=$bin_dir/.ljos-plugin-fetch
+  if ! take_lock; then
+    why="another launcher is still fetching release v$ver"
+    return 1
+  fi
+  if [ -x "$bin_dir/$name" ]; then
+    rm -rf "$lock"
+    return 0
+  fi
+  stage=$lock/stage
+  mkdir -p "$stage"
+  if ! get_asset "$asset" "$lock/$asset" || ! get_asset "$asset.sha256" "$lock/$asset.sha256"; then
+    why=${why:-"release v$ver has no $asset"}
+    rm -rf "$lock"
+    return 1
+  fi
+  want=$(sed 's/[ *].*//' "$lock/$asset.sha256" | head -n 1)
+  got=$(sha256_of "$lock/$asset")
+  if [ -z "$want" ] || [ "$want" != "$got" ]; then
+    why="$asset does not match its published SHA-256, so nothing was installed"
+    rm -rf "$lock"
+    return 1
+  fi
+  if ! tar -xzf "$lock/$asset" -C "$stage" 2>/dev/null; then
+    why="$asset did not unpack"
+    rm -rf "$lock"
+    return 1
+  fi
+  for prog in ljos ljos-mcp; do
+    found=$(find "$stage" -type f -name "$prog" | head -n 1)
+    if [ -z "$found" ]; then
+      why="$asset holds no $prog"
+      rm -rf "$lock"
+      return 1
     fi
   done
+  for prog in ljos ljos-mcp; do
+    found=$(find "$stage" -type f -name "$prog" | head -n 1)
+    cp "$found" "$bin_dir/$prog.new.$$" && chmod 755 "$bin_dir/$prog.new.$$" &&
+      mv -f "$bin_dir/$prog.new.$$" "$bin_dir/$prog"
+  done
+  rm -rf "$lock"
+  printf 'ljos plugin: installed ljos and ljos-mcp from release v%s into %s (SHA-256 checked)\n' "$ver" "$bin_dir" >&2
+}
+if fetch_release && [ -x "$bin_dir/$name" ]; then
+  exec "$bin_dir/$name" "$@"
 fi
+
 # The binary is missing. The first line is the one a client shows when the
 # server never starts and the tool list stays empty. The next line says
 # how to install it. A missing seat is no guard, not a reason to stop
 # every shell command.
 printf '%s: not installed, so the MCP server has no tools\n' "$name" >&2
+if [ -n "$why" ]; then
+  printf 'ljos plugin: the release was not fetched: %s\n' "$why" >&2
+fi
 hint="ljos plugin: $name is not installed, so the ljos memory and command guard are off. Install with: cargo binstall --locked ljos packset packset-embed vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus (or ask the agent to use the ljos-setup skill). Then run: ljos doctor"
 printf '%s\n' "$hint" >&2
 if [ "$name" = ljos ] && [ "${1:-}" = hook ]; then
