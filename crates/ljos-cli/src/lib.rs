@@ -33470,17 +33470,24 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
             "tracker git: committed {message}; no remote, kept local\n"
         ));
     }
+    let Some(destination) = tracker_sync::safe_push_destination(dir) else {
+        return say(format!(
+            "tracker git: committed {message}; push destination is not origin's default, kept local\n"
+        ));
+    };
     if mode == "push" {
-        return say(match tracker_push::publish(dir) {
-            Ok(()) => {
-                clear_push_refusal();
-                format!("tracker git: committed and pushed {message}\n")
-            }
-            Err(e) => {
-                record_push_refusal(&e);
-                format!("tracker git: committed {message}; push queued: {e}\n")
-            }
-        });
+        return say(
+            match tracker_push::publish_explicit(dir, &destination.remote, &destination.branch) {
+                Ok(()) => {
+                    clear_push_refusal();
+                    format!("tracker git: committed and pushed {message}\n")
+                }
+                Err(e) => {
+                    record_push_refusal(&e);
+                    format!("tracker git: committed {message}; push queued: {e}\n")
+                }
+            },
+        );
     }
     // A push can run a repository's pre-push hook that publishes data first
     // and takes minutes. The sitting waits a bounded time; a push still going
@@ -33493,17 +33500,11 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
         ));
     };
     let err = out.try_clone();
-    // Every other remote that carries the branch gets it too: seats that
-    // read a tracker through different remotes see each other's claims
-    // only when every push reaches all of them.
-    let mirrors = tracker_upstream(dir)
-        .and_then(|up| tracker_mirrors(dir, &up))
-        .unwrap_or_default();
     // Another seat's push is fetched and rebased, not merged and not forced.
     // The first attempt is this script. A non-fast-forward comes back here
-    // and [`tracker_push::push_checkout`] unions the org headings, then
-    // retries. A branch with no upstream is pushed with `-u origin <branch>`.
-    let script = tracker_push::push_script(dir, &mirrors);
+    // and [`tracker_push::publish_explicit`] unions the org headings, then
+    // retries to the same checked destination.
+    let script = tracker_push::push_script_explicit(&destination.remote, &destination.branch);
     let mut push = std::process::Command::new("sh");
     push.current_dir(dir)
         .args(["-c", &script])
@@ -33535,10 +33536,18 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
                 let said = std::fs::read(&log).unwrap_or_default();
                 let said = String::from_utf8_lossy(&said);
                 if tracker_push::rejected(&said) {
-                    return say(match tracker_push::push_checkout(dir) {
-                        Ok(()) => format!("tracker git: committed and pushed {message}\n"),
-                        Err(e) => format!("tracker git: committed {message}; push refused: {e}\n"),
-                    });
+                    return say(
+                        match tracker_push::publish_explicit(
+                            dir,
+                            &destination.remote,
+                            &destination.branch,
+                        ) {
+                            Ok(()) => format!("tracker git: committed and pushed {message}\n"),
+                            Err(e) => {
+                                format!("tracker git: committed {message}; push refused: {e}\n")
+                            }
+                        },
+                    );
                 }
                 return say(format!(
                     "tracker git: committed {message}; push refused: {}\n",
@@ -33593,7 +33602,10 @@ pub fn drain_tracker_pushes() -> String {
     if count.is_empty() || count == "0" {
         return String::new();
     }
-    match tracker_push::publish(&root) {
+    let Some(destination) = tracker_sync::safe_push_destination(&root) else {
+        return String::new();
+    };
+    match tracker_push::publish_explicit(&root, &destination.remote, &destination.branch) {
         Ok(()) => {
             clear_push_refusal();
             format!("tracker git: pushed {count} queued\n")
@@ -38903,6 +38915,96 @@ mod tests {
         ] {
             std::env::remove_var(var);
         }
+    }
+
+    #[test]
+    fn tracker_persistence_and_drain_skip_an_unsafe_push_target() {
+        let _env = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("work");
+        let remote = dir.path().join("remote.git");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(
+            dir.path(),
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        std::fs::create_dir_all(root.join("Software/probe")).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        for (key, value) in [
+            ("user.email", "seat@example.invalid"),
+            ("user.name", "seat"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "/dev/null"),
+        ] {
+            git(&root, &["config", key, value]);
+        }
+        let issues = root.join("Software/probe/issues.org");
+        let heading = "* TODO [#C] Probe\n:PROPERTIES:\n:ID:         probe-safe\n:END:\n";
+        std::fs::write(&issues, heading).unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "seed"]);
+        git(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&root, &["push", "-q", "-u", "origin", "main"]);
+        git(&root, &["push", "-q", "origin", "main:feature"]);
+        git(&root, &["fetch", "-q", "origin"]);
+        git(&root, &["branch", "-q", "-u", "origin/feature"]);
+        git(&root, &["config", "push.default", "upstream"]);
+        let heads = || {
+            let out = std::process::Command::new("git")
+                .arg("--git-dir")
+                .arg(&remote)
+                .args([
+                    "for-each-ref",
+                    "--format=%(refname) %(objectname)",
+                    "refs/heads",
+                ])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let before = heads();
+        unsafe {
+            std::env::set_var("VISSUE_ROOT", &root);
+            std::env::set_var("VISSUE_NO_ROUTE", "1");
+            std::env::remove_var("ISSUE_ROOT");
+            std::env::remove_var("LJOS_TRACKER_GIT");
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+        }
+        std::fs::write(&issues, heading.replace("TODO", "STARTED")).unwrap();
+        let said = super::persist_tracker("probe-safe", "claimed");
+        assert!(said.contains("kept local"), "{said}");
+        assert_eq!(heads(), before, "{said}");
+
+        unsafe { std::env::set_var("LJOS_TRACKER_GIT", "push") };
+        std::fs::write(&issues, heading.replace("TODO", "DONE")).unwrap();
+        let said = super::persist_tracker("probe-safe", "finished");
+        assert!(said.contains("kept local"), "{said}");
+        assert_eq!(heads(), before, "{said}");
+
+        assert!(super::drain_tracker_pushes().is_empty());
+        assert_eq!(heads(), before);
     }
 
     /// A tracker write reaches git: the ticket's file alone is committed, a

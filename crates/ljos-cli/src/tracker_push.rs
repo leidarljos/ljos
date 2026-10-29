@@ -146,25 +146,11 @@ pub(crate) fn publish_explicit(start: &Path, remote: &str, branch: &str) -> Resu
     ))
 }
 
-/// The shell that makes one push attempt. The parent retries a rejection
-/// in-process, where an org conflict can be unioned.
-pub(crate) fn push_script(dir: &Path, mirrors: &[(String, String)]) -> String {
-    let push = primary_push(dir);
-    let mut script = format!("{push}; rc=$?");
-    if !mirrors.is_empty() {
-        script.push_str("; if [ \"$rc\" -eq 0 ]; then");
-        for (remote, branch) in mirrors {
-            let spec = format!("HEAD:refs/heads/{branch}");
-            script.push_str(&format!(
-                " git push -q {} {} || rc=1;",
-                crate::tools::sh_quote(remote),
-                crate::tools::sh_quote(&spec)
-            ));
-        }
-        script.push_str(" fi");
-    }
-    script.push_str("; exit $rc");
-    script
+/// One explicit push for a destination already approved by the caller.
+pub(crate) fn push_script_explicit(remote: &str, branch: &str) -> String {
+    let remote = crate::tools::sh_quote(remote);
+    let spec = crate::tools::sh_quote(&format!("HEAD:refs/heads/{branch}"));
+    format!("git push -q {remote} {spec}")
 }
 
 /// Whether git refused the update because the remote moved.
@@ -354,16 +340,6 @@ fn split_heading(text: &str) -> (String, Vec<(String, String)>, Vec<String>) {
         body.push(line.trim_end().to_string());
     }
     (headline, props, body)
-}
-
-fn primary_push(dir: &Path) -> String {
-    if upstream_set(dir) {
-        return "git push -q".to_string();
-    }
-    match branch_name(dir) {
-        Some(branch) => format!("git push -q -u origin {}", crate::tools::sh_quote(&branch)),
-        None => "git push -q".to_string(),
-    }
 }
 
 fn push_once(dir: &Path) -> Output {
@@ -1389,10 +1365,10 @@ mod tests {
 
     #[test]
     fn the_push_script_does_not_force() {
-        let dir = tempfile::tempdir().unwrap();
-        let script = push_script(dir.path(), &[]);
+        let script = push_script_explicit("origin", "main");
         assert!(!script.contains("force"), "{script}");
         assert!(!script.contains(" -f "), "{script}");
+        assert!(script.contains("'HEAD:refs/heads/main'"), "{script}");
     }
 
     #[test]

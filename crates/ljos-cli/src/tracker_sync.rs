@@ -86,14 +86,14 @@ fn has_remote(root: &Path) -> bool {
         .is_some_and(|text| text.lines().any(|line| !line.trim().is_empty()))
 }
 
-struct PushDestination {
-    remote: String,
-    branch: String,
+pub(crate) struct PushDestination {
+    pub(crate) remote: String,
+    pub(crate) branch: String,
 }
 
 /// The destination Git's configured implicit push would use, but only
 /// when it is exactly `origin`'s default branch.
-fn safe_push_destination(root: &Path) -> Option<PushDestination> {
+pub(crate) fn safe_push_destination(root: &Path) -> Option<PushDestination> {
     let push = crate::git_ok_stdout(root, &["rev-parse", "--symbolic-full-name", "@{push}"])?;
     let push = push.trim();
     let default = remote_default_branch(root, "origin")?;
