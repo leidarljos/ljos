@@ -79,7 +79,11 @@
 | =doctor [--all]= | all | whether ljos is ready, and the rows that need action; exit 1 when a required part does not answer or the note queue is damaged. =--all= (alias =--verbose=) prints every row, the ones that answer included. A =panes= row names the tool that opens persona panes; with =jev.toml= present, a =jev= row carries the month's calls, cached answers and spend |
 | =seat [add NAME | grant SEAT close=own --quote TEXT --at TIME --via SEAT]= | tracker | who is sitting; =add= writes NAME into the tracker's =vissue.toml= seat list; =grant= records a quoted yes that SEAT may close tickets it filed or holds |
 | =protocol= | none | print the sitting protocol |
-| =onboard [--harness NAME] [--skills DIR] [--dry-run] [--example]= | runner | alone, print the one =mcpServers= entry any runner takes; with a runner named in =~/.config/ljos/harnesses.toml=, register =ljos-mcp= with it, install the protocol as its skill, and write the personas into its =agents= directory; a shell runner (=shell = true=, =grokbot=, or =shell=) writes the skill and an env file and registers no server and no hook |
+| =onboard [--harness NAME] [--skills DIR] [--dry-run] [--example]= | runner | alone, print the one =mcpServers= entry any runner takes; with a runner named in =~/.config/ljos/harnesses.toml=, register =ljos-mcp= with it, install the protocol as its skill, and write the personas into its =agents= directory; a shell runner (=shell = true=, =grokbot=, or =shell=) writes the skill and an env file and registers no server and no hook; changed runner files and their previous bytes are recorded for =offboard= |
+| =offboard [--runner NAME] [--dry-run]= | runner | restore runner files changed by =onboard= and remove files created only for ljos; =--runner= limits removal to one runner; =--dry-run= reports without writing; later edits are preserved; an older installation without a manifest is removed by its ljos markers |
+
+The manifest and backups are under =${XDG_STATE_HOME:-~/.local/state}/ljos/onboard=.
+They are removed after every recorded runner is offboarded.
 
 =ljos file "TITLE" --options A,B= writes =Options: A, B= as the first body line.
 =ljos options ISSUE A,B= appends that line and refuses fewer than two.

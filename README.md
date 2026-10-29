@@ -68,6 +68,7 @@ Read the script before you run it; it is
 ```
 cargo binstall --locked ljos packset vissue-cli vissue-mcp deedar-cli claimdag-cli ljos-policyd ljos-consensus   # or: cargo install --locked, same list
 ljos onboard                                # every coding tool found on this machine: MCP server, hooks and skill
+ljos offboard                               # restore runner files changed by onboard
 ljos prefer "Push a tag with git push origin TAG; --follow-tags skips lightweight tags."
 ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the release runbook."
 ```
@@ -76,6 +77,12 @@ ljos rule 'terraform destroy*' --verdict deny --why "Destroy only from the relea
 `opencode`, `omp`, `hermes`, `windsurf`, `zed`, `vscode`, `claude-desktop`,
 `gemini`, `amazonq`, `kiro`, `copilot`, `factory`, `qwen`, `crush`, `cline`,
 `auggie`, `amp`, `goose`, `openhands`, `continue`, `roo` or `kilo`.
+Onboard records changed runner files and their original bytes.
+`ljos offboard` restores those files and removes files created only for ljos.
+Use `--dry-run` to preview the work, or `--runner NAME` to remove one runner.
+Files edited after onboarding are preserved.
+The manifest and backups live under `${XDG_STATE_HOME:-~/.local/state}/ljos/onboard`.
+They are removed after every recorded runner is offboarded.
 Cursor's IDE and its `agent` CLI share `~/.cursor/mcp.json`.
 A fresh machine runs `ljos cloud up`, or `sh scripts/install.sh --cloud`.
 Both are in v0.33.0 and later, and the install line above fetches that release or a newer one.
@@ -438,6 +445,8 @@ ljos onboard --harness all --dry-run           # what onboarding every runner fo
 ljos onboard --harness json                    # the one MCP server entry any runner takes
 ljos onboard --harness hermes                  # register with a runner named in harnesses.toml; opencode, hermes, omp, grok, antigravity, cursor come as shapes
 ljos onboard --harness grokbot --skills ~/.grokbot/skills   # shell-only: skill and an env file, no MCP server and no hook
+ljos offboard                                  # undo every recorded runner installation
+ljos offboard --runner hermes --dry-run         # preview removal for one runner
 source ~/.config/ljos/grokbot.env              # LJOS_SEAT=grokbot; the process tree is not this seat
 echo "$prompt" | ljos hook --prompt            # the prompt hook, from a shell
 ljos policy --fail-on-deny -- git push --force # exit 1 on a deny; without the flag the exit stays 0

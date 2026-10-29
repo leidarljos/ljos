@@ -396,6 +396,29 @@ fn hooks_dir() -> PathBuf {
     data_home().join("ljos").join("git-hooks")
 }
 
+pub(crate) fn onboard_hooks_dir() -> PathBuf {
+    hooks_dir()
+}
+
+pub(crate) fn onboard_hook_paths(dir: &Path) -> Vec<PathBuf> {
+    HOOK_NAMES.iter().map(|name| dir.join(name)).collect()
+}
+
+pub(crate) fn configured_hooks_path(git_env: &[(&str, &str)]) -> Option<PathBuf> {
+    let configured = global_hooks_path(git_env);
+    nonempty(configured.as_deref()).map(PathBuf::from)
+}
+
+pub(crate) fn onboarding_installed() -> bool {
+    let dir = hooks_dir();
+    let configured = global_hooks_path(&[]);
+    match nonempty(configured.as_deref()) {
+        Some(path) if same_dir(Path::new(path), &dir) => owned_installed(&dir),
+        Some(path) => hooks_present(Path::new(path), &dir),
+        None => owned_installed(&dir),
+    }
+}
+
 fn data_home() -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
         return PathBuf::from(dir);

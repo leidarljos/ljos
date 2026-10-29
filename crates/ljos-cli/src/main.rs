@@ -1173,6 +1173,15 @@ enum Cmd {
         #[arg(long)]
         skills: Option<PathBuf>,
     },
+    /// Remove runner configuration written by onboard.
+    Offboard {
+        /// Remove one runner only. Without this, remove every recorded runner.
+        #[arg(long)]
+        runner: Option<String>,
+        /// Report what would be restored or removed and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Pack a slice of the seat: satchel, atoms, the deeds both cite; sealed and signed.
     Handover {
         /// Where to write the satchel.
@@ -1425,7 +1434,7 @@ fn run_command() -> Result<()> {
             ljos_cli::runner_env::refresh_for_fix();
             ljos_cli::cloud::replace_stale_guard();
         }
-        Cmd::Doctor { .. } | Cmd::Record { .. } => {}
+        Cmd::Doctor { .. } | Cmd::Record { .. } | Cmd::Onboard { .. } | Cmd::Offboard { .. } => {}
         _ => {
             ljos_cli::runner_skills::refresh_on_new_version();
             ljos_cli::runner_env::refresh_on_new_version();
@@ -3488,6 +3497,13 @@ fn run_command() -> Result<()> {
             }
             print!("{}", format_steps(&steps));
             if steps.iter().any(|s| !s.ok) {
+                std::process::exit(1);
+            }
+        }
+        Cmd::Offboard { runner, dry_run } => {
+            let steps = ljos_cli::offboard::offboard(runner.as_deref(), dry_run)?;
+            print!("{}", format_steps(&steps));
+            if steps.iter().any(|step| !step.ok) {
                 std::process::exit(1);
             }
         }

@@ -43,6 +43,7 @@ pub mod mailbox;
 mod memlock;
 pub mod memories;
 pub mod note_queue;
+pub mod offboard;
 pub mod pack_copy;
 pub mod pack_link;
 pub mod panel_cloud;
@@ -6647,6 +6648,25 @@ pub fn onboard_in(
 }
 
 pub(crate) fn onboard_in_at(
+    file: &Path,
+    harness: &str,
+    dry: bool,
+    skills: Option<&Path>,
+    place: Option<OnboardPlace<'_>>,
+) -> Result<Vec<Step>> {
+    let journal = offboard::Journal::begin(file, harness, skills, place, dry);
+    let result = onboard_in_at_inner(file, harness, dry, skills, place);
+    if let Some(journal) = journal {
+        if let Err(error) = journal.finish() {
+            if result.is_ok() {
+                return Err(error);
+            }
+        }
+    }
+    result
+}
+
+fn onboard_in_at_inner(
     file: &Path,
     harness: &str,
     dry: bool,
