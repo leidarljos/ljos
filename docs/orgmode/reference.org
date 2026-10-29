@@ -68,7 +68,7 @@
 | =cards [--dir DIR]= | cards | print =USER.md= and =MEMORY.md= |
 | =approve REQUEST_ID= | runtime | record explicit consent for one pending hook request; one matching attempt, fifteen-minute lifetime, deny rules still apply |
 | =policy [--fail-on-deny] ARGV...= | policy, pack | the line as it would run, the trusted computing base (TCB) answer if =ljos-policyd= gave one (from 0.35.0 that may be a rewritten line), then a matching pack rule, then what the pack knows that bears on it; =--fail-on-deny= exits 1 on a deny, and without the flag the exit stays 0 |
-| =hook [--limit N] [--prompt [--text]] [--fail-on-deny] [--runner NAME] [--git-commit] [--git-hook post-commit\vert post-rewrite]= | policy, pack | hook JSON or argv on stdin; =--runner= reads the payload of =copilot=, =gemini=, =windsurf=, =factory=, =kiro=, =cline=, =qwen= or =crush= and answers in that runner's shape; =--prompt= reads stdin as the prompt, and =--text= with it prints what the agent would read as plain text instead of JSON; on =PreToolUse= the TCB and pack rules, a deny is =permissionDecision=, and from 0.35.0 a rewrite goes back as the updated input for Claude Code and Cursor; =--fail-on-deny= exits 1 on a deny and without the flag the exit stays 0; on a prompt the hits scoring at least 0.6 of the best that name its subject, or with a pack that sends cosines the encoder's first hit at 0.66 or more and a hit sharing a word within 0.05 of the best cosine, preferences first then lessons oldest first, each with its age, three at most, each once between compactions; on a failed tool, up to three that share at least two content words with the command and its error. =--git-commit= books the commit git just created and reads no stdin; =--git-hook= names =post-commit= or =post-rewrite=. [[*Git hooks][Git hooks]] |
+| =hook [--limit N] [--prompt [--text]] [--fail-on-deny] [--runner NAME] [--git-commit] [--git-hook post-commit\vert post-rewrite]= | policy, pack | hook JSON or argv on stdin; =--runner= reads the payload of =copilot=, =gemini=, =windsurf=, =factory=, =kiro=, =cline=, =qwen= or =crush= and answers in that runner's shape; =--prompt= reads stdin as the prompt, and =--text= with it prints what the agent would read as plain text instead of JSON; on =PreToolUse= the TCB and pack rules, a deny is =permissionDecision=, and from 0.35.0 a rewrite goes back as the updated input for Claude Code, Codex, Grok Build and Cursor's =preToolUse=, and another runner gets a refusal that names the new line; =--fail-on-deny= exits 1 on a deny and without the flag the exit stays 0; on a prompt the hits scoring at least 0.6 of the best that name its subject, or with a pack that sends cosines the encoder's first hit at 0.66 or more and a hit sharing a word within 0.05 of the best cosine, preferences first then lessons oldest first, each with its age, three at most, each once between compactions; on a failed tool, up to three that share at least two content words with the command and its error. =--git-commit= books the commit git just created and reads no stdin; =--git-hook= names =post-commit= or =post-rewrite=. [[*Git hooks][Git hooks]] |
 | =git-hooks install\vert uninstall\vert status= | git | install, remove, or show the global git hooks that book commits. =install= prints =installed= and the directory; =uninstall= prints =uninstalled=; =status= prints where the hooks are and what =core.hooksPath= says. [[*Git hooks][Git hooks]] |
 | =bump-plan BUNDLE --project P --parent I [--generation G] [--dry-run]= | tracker | one child issue per module the bundle's lock builds, under =I=, blocked by the modules built before it along the edges of its software bill of materials; ids are a hash of module and generation, so a rerun keeps what exists and adds what is missing; =--dry-run= prints the rows |
 | =findings STATE [--remember] [--all] [--issue I]= | pack, deed store, tracker | the typed findings of an eb-stack campaign state, one per line: id, status, class/disposition, stage, recipe, the fix or the summary; =--remember= files one lesson per finding a person or a seat resolved (recipe, step, error line, fix), origin =tool-echo= at L0 (=derived=), under the recipe's name, its package and the class; =ljos accept ID= promotes it to =explicit= and writes it; =--all= takes the ones a later attempt superseded too; =--issue= cites the state file as a deed on the issue |
@@ -424,8 +424,9 @@ because only ljos knows the tracker and the sitting.
 | =rewrite= | coming in 0.35.0: the command runs in a fixed form |
 
 On the wire, a rewrite is one line of three tab-separated fields: =allow=, =rewrite= and the new command.
-The hook hands it back as the updated input for Claude Code and Cursor. A runner without that field
-gets a note that names the new command. The first rewrite runs the command through =uv run=.
+The new line runs only when the guard also allows it. The hook hands it back as the updated input for
+Claude Code, Codex, Grok Build and Cursor's =preToolUse=. A runner without that field gets a refusal that
+names the new command, so the old line never runs. The first rewrite runs the command through =uv run=.
 A log of rewrites and a per-repository switch, =rewrite = false=, are coming in 0.35.0 too.
 
 If =ljos-policyd= is missing, slow or crashes, the command runs and ljos logs a warning.
@@ -435,8 +436,8 @@ The tracker write check refuses a command, or a file tool, that writes the track
 A ticket body that names a path or a command is never read as one.
 
 The push check asks, and never denies, on a push onto a protected branch when the ticket of
-the current sitting has no settled consensus. =main=, =master= and =develop= are protected, and
-=protected_branches= in =ljos.toml= adds more. With one active seat in =vissue.toml=, that seat's own vote
+the current sitting has no settled consensus. It covers =develop= and =main= unless
+=consensus_branches= in =ljos.toml= names others. With one active seat in =vissue.toml=, that seat's own vote
 settles it. This solo mode is coming in 0.35.0. With two or more seats, the normal quorum applies.
 
 Every other push rule is policyd's.
@@ -448,8 +449,8 @@ Every other push rule is policyd's.
 | a push onto a protected branch, with no settled consensus on the sitting's ticket | asks |
 | deleting a remote branch, or rewriting published history | asks or denies, by policyd's table |
 
-On a cloud seat, one policyd rule refuses =gh pr create= and =gh pr merge=.
-The same rule refuses a push to any ref but the seat's own branch. Branch protection on the remote does the rest.
+A cloud seat has one push rule. It may push the branches named in its =ljos.toml= and =develop=, with no force
+and no delete. Opening or merging a pull request is not refused. Branch protection on the remote does the rest.
 
 The remote is the one the command names, else the branch's upstream,
 else =origin=, read in the directory a =cd= or =git -C= before the push

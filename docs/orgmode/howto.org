@@ -299,8 +299,9 @@ Coming in 0.35.0. policyd can answer a command with a fixed one instead of a ref
 The answer is one line of three tab-separated fields: =allow=, =rewrite= and the new command.
 The first rewrite runs a command through =uv run=.
 
-Claude Code and Cursor take the new line through the hook's updated input. Other runners get
-a note that names the new command. =ljos policy -- COMMAND=
+The new line runs only when the guard also allows it. Claude Code, Codex, Grok Build and
+Cursor's =preToolUse= take it through the hook's updated input. Other runners get a refusal
+that names the new command, so the old line never runs. =ljos policy -- COMMAND=
 prints the answer without running anything, so you can see a rewrite before an agent meets it.
 
 Two parts of the rewrite are coming in 0.35.0 as well. One is a log of rewrites. The other is a switch
@@ -309,17 +310,18 @@ for one repository: set =rewrite = false= there, and policyd stops fixing comman
 * Choose which branches the push check covers
 
 ljos keeps one push check. A push onto a protected branch asks when the ticket of your
-sitting has no settled consensus. The check asks and never denies. =main=, =master= and =develop=
-are always protected. Name more with =protected_branches= in =ljos.toml=, in the user, seat or
-repository file. A later file replaces the list an earlier one set.
+sitting has no settled consensus. The check asks and never denies. It covers =develop= and =main=
+unless =consensus_branches= in =ljos.toml= names others. The user and seat files set the list.
+The repository's =ljos.toml=, =LJOS_CONFIG= and =.ljos/gates.toml= only add branches to it.
 
 #+begin_src toml
 # ljos.toml
-protected_branches = ["main", "release"]
+consensus_branches = ["main", "release"]
 #+end_src
 
 Everything else that concerns a push is policyd's. An ordinary push of a branch runs, and so does a
 lease push to a feature branch. A lease push or a force push onto a protected branch asks.
+For that ask, =main=, =master= and =develop= are always protected, and =protected_branches= adds more.
 Deleting a remote branch and rewriting published history ask or deny.
 
 With one active seat in =vissue.toml=, that seat's own vote settles consensus for the check.

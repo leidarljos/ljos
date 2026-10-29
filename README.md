@@ -75,11 +75,14 @@ ljos hook after `ljos onboard`, and again after an upgrade.
 Coming in 0.35.0:
 
 ```
+ljos offboard --dry-run
 ljos offboard
 ```
 
 `ljos offboard` undoes what `ljos onboard` wrote. It removes the ljos entries from
-each runner's files and leaves the rest of each file as it was.
+each runner's files and leaves the rest of each file as it was. `--runner NAME`
+takes off one runner only. `--dry-run` lists what it would change. Onboard keeps its
+manifest and backups under `${XDG_STATE_HOME:-~/.local/state}/ljos/onboard`.
 `scripts/fresh-install-check.sh` installs into an empty `HOME`, runs a full
 session, runs `ljos offboard`, and checks that `HOME` is clean.
 
@@ -193,6 +196,12 @@ policyd refuses or asks about:
 
 A lease push to a feature branch is allowed. An ordinary push of a branch is allowed.
 
+For `git push --force origin main`, the hook hands the runner this answer, and the runner asks you:
+
+```
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"git-force-push: it rewrites shared history, so the agent asks you first (ljos rule `git-force-push`)"}}
+```
+
 ### The rewrite
 
 Coming in 0.35.0. Some commands are not dangerous, only wrong for this project.
@@ -200,8 +209,9 @@ policyd can answer with a fixed command. Its first rewrite runs the command thro
 `uv run`. The answer is one line of text: `allow`, then `rewrite`, then the new
 command, separated by tabs.
 
-Claude Code and Cursor take the new command back from the hook and run it.
-A runner that has no field for this gets a note that names the new command.
+The new command runs only when the guard also allows it. Claude Code, Codex, Grok Build
+and Cursor's `preToolUse` take it back from the hook and run it. A runner that has no
+field for this gets a refusal that names the new command, so the old line never runs.
 policyd keeps a log of what it denies.
 
 Coming in 0.35.0: a log of rewrites, and a per-repository switch. Setting `rewrite = false`
@@ -252,8 +262,9 @@ and counts as advice. When Jev does not answer, the local answer stands.
 ## Cloud VMs
 
 `ljos cloud up` puts a fresh machine on the shared tracker. `sh scripts/install.sh --cloud`
-does the same from a checkout. On a cloud seat, one policyd rule refuses `gh pr create`
-and `gh pr merge`. The same rule refuses a push to any ref but the seat's own branch.
+does the same from a checkout. A cloud seat has one push rule. It may push the branches
+named in its `ljos.toml` and `develop`, with no force and no delete. Opening or merging a
+pull request is not refused.
 [docs/cloud-vm.md](docs/cloud-vm.md) has the environment file and the push mode.
 
 ## Commands
@@ -272,7 +283,8 @@ ljos claims
 ljos digest                   # coming in 0.35.0
 ljos seat                     # who is sitting
 ljos seat add NAME            # coming in 0.35.0
-ljos offboard                 # coming in 0.35.0
+ljos seat grant SEAT close=own --quote "..." --at ISO_TIME --via RECORDER   # coming in 0.35.0
+ljos offboard [--runner NAME] [--dry-run]   # coming in 0.35.0
 ljos remember "the default fuse is CombMNZ"
 ljos prefer "CombMNZ over RRF"
 ljos search fuse
@@ -298,13 +310,26 @@ a transcript. `forget` retires a claim and keeps the record that it was held.
 
 ## MCP
 
-`ljos-mcp` serves the same verbs over stdio. By default it lists a core set of tools.
-`LJOS_MCP_TOOLS=all` lists every tool. Cards are the resources `ljos://cards/USER.md`
-and `ljos://cards/MEMORY.md`, and the protocol is `ljos://protocol`.
+`ljos-mcp` serves the same verbs over stdio. By default it lists twenty-one core
+tools, guard and memory first: `rule`, `request_approval`, `prefer`, `remember`,
+`search`, `start`, `guard_check`, `file`, `options`, `note`, `recall`, `sitting`,
+`finish`, `claim`, `release`, `send`, `inbox`, `reply`, `vote`, `consensus` and
+`doctor`, each with the prefix `ljos_`. Every listed tool costs its description and
+schema on every session: 8,072 tokens for the core set against 17,991 for all
+fifty-three (o200k_base count of `initialize` instructions and the `tools/list`
+result). `LJOS_MCP_TOOLS=all` lists every tool. Cards are the resources
+`ljos://cards/USER.md` and `ljos://cards/MEMORY.md`, and the protocol is `ljos://protocol`.
 
 ```json
 {"mcpServers": {"ljos": {"command": "ljos-mcp"}}}
 ```
+
+The official MCP Registry lists the server from the crates.io page of `ljos`,
+and checks this line there:
+
+- mcp-name: io.github.leidarljos/ljos
+
+`server.json` holds the registry entry, and a release tag publishes it.
 
 ## Check an install
 

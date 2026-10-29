@@ -26,10 +26,11 @@ Read the script before you run it. It is ``scripts/install.sh`` in this reposito
 It runs ``ljos onboard`` for each coding agent it finds. With none found, it still sets up
 the tracker, the pack writer and the deed store.
 
-To onboard by hand, or to see what onboarding would write:
+To install by hand, or to see what onboarding would write:
 
 .. code:: console
 
+   $ cargo binstall --locked ljos packset deedar-cli claimdag-cli vissue-cli vissue-mcp ljos-policyd ljos-consensus
    $ ljos onboard --dry-run
    $ ljos onboard
    $ ljos doctor

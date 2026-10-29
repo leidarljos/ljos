@@ -92,9 +92,10 @@ them costs a round trip, and the agent often retries the same line.
 So policyd can answer with the fixed command. The answer is one line: ``allow``, then ``rewrite``, then
 the new command, separated by tabs. Its first rewrite runs the command through ``uv run``.
 
-Claude Code and Cursor accept an updated command from the hook, and ljos hands the new line back
-through that field. A runner without that field gets a note that names the new command. policyd
-writes a log of what it denies.
+The new command runs only when the guard also allows it. Claude Code, Codex, Grok Build and
+Cursor's ``preToolUse`` accept an updated command from the hook, and ljos hands the new line back
+through that field. A runner without that field gets a refusal that names the new command, so the
+old line never runs. policyd writes a log of what it denies.
 
 Two more parts are coming in 0.35.0. One is a log of rewrites. The other is a per-repository
 switch: ``rewrite = false`` turns rewriting off for that repository.
@@ -127,8 +128,9 @@ attacker.
 Cloud seats
 -----------
 
-On a cloud seat, one policyd rule refuses ``gh pr create`` and ``gh pr merge``. The same rule refuses
-a push to any ref but the seat's own branch. Branch protection on the remote does the rest.
+A cloud seat has one push rule. It may push the branches named in its ``ljos.toml`` and ``develop``.
+It may not force a push or delete a ref. Opening or merging a pull request is not refused.
+Branch protection on the remote does the rest.
 
 Who is sitting
 ==============
@@ -140,8 +142,9 @@ connected. ``ljos seat`` prints the seat, the holder, and where each name came f
 Claims belong to one conversation. Memory, ballots and trust belong to the seat. The holder
 is ``SEAT@session``, and the session id is the one the runner gives.
 
-A seat does not need to be listed before it writes. An unset seat writes under its login seat with
-a warning. The tracker's ``vissue.toml`` lists the seats.
+On a fresh tracker with no seat list, any seat may write. An unset seat writes under its login
+seat with a warning. Once the tracker's ``vissue.toml`` lists seats, a tracker write from a seat it
+does not list is refused.
 
 - ``ljos seat add NAME`` writes the seat's row in ``vissue.toml``. Coming in 0.35.0.
 - Solo mode: when ``vissue.toml`` lists one active seat, that seat's own vote settles consensus for
