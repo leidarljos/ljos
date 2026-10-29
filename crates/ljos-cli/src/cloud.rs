@@ -150,6 +150,7 @@ pub fn up_at(force: bool, repoint: bool) -> Result<String> {
             crate::sync::WRITE_SCOPE_KEY,
             crate::sync::CLOUD_SCOPE.to_string(),
         ),
+        (crate::sync::SYNC_HOST_KEY, seat.clone()),
     ];
     if std::env::var("DEEDAR_HOST_SIGNING_KEY").ok().as_deref() != Some("off") {
         pairs.push(("DEEDAR_HOST_SIGNING_KEY", key.display().to_string()));
@@ -2572,6 +2573,7 @@ fn write_mcp(
     let mut env = serde_json::Map::new();
     env.insert("LJOS_SEAT".into(), serde_json::json!(seat));
     env.insert("VISSUE_AGENT".into(), serde_json::json!(seat));
+    env.insert(crate::sync::SYNC_HOST_KEY.into(), serde_json::json!(seat));
     env.insert(
         "LJOS_SEAT_KEY".into(),
         serde_json::json!(key.display().to_string()),

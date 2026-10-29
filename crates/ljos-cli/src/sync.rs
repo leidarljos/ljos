@@ -143,11 +143,22 @@ pub fn host() -> String {
     machine_name(&raw_host())
 }
 
+/// Set by `ljos cloud up` to the seat, in the process and in
+/// `~/.config/ljos/env`. Every cloud VM has the same host name, so logs
+/// named by it would overwrite each other, and each VM would skip the
+/// others' logs as its own.
+pub const SYNC_HOST_KEY: &str = "LJOS_SYNC_HOST";
+
 fn raw_host() -> String {
-    if let Some(host) = std::env::var_os("LJOS_TEST_HOSTNAME").and_then(|raw| {
-        let host = raw.to_string_lossy().trim().to_string();
-        (!host.is_empty()).then_some(host)
-    }) {
+    let set = |value: Option<String>| {
+        value
+            .map(|raw| raw.trim().to_string())
+            .filter(|host| !host.is_empty())
+    };
+    if let Some(host) = set(std::env::var(SYNC_HOST_KEY).ok())
+        .or_else(|| set(std::env::var("LJOS_TEST_HOSTNAME").ok()))
+        .or_else(|| set(env_file_value(SYNC_HOST_KEY)))
+    {
         return host;
     }
     std::fs::read_to_string("/proc/sys/kernel/hostname")
@@ -360,12 +371,13 @@ fn check_scope_name(path: &Path, name: &str) -> Result<()> {
 pub fn machine_write_scope() -> Option<String> {
     let raw = std::env::var(WRITE_SCOPE_KEY)
         .ok()
-        .or_else(write_scope_from_env_file)?;
+        .or_else(|| env_file_value(WRITE_SCOPE_KEY))?;
     let name = raw.trim();
     valid_scope_name(name).then(|| name.to_string())
 }
 
-fn write_scope_from_env_file() -> Option<String> {
+/// `key` in `~/.config/ljos/env`.
+fn env_file_value(key: &str) -> Option<String> {
     let home = std::env::var_os("HOME")?;
     let text = std::fs::read_to_string(PathBuf::from(home).join(".config/ljos/env")).ok()?;
     text.lines().find_map(|line| {
@@ -373,8 +385,8 @@ fn write_scope_from_env_file() -> Option<String> {
         if line.is_empty() || line.starts_with('#') {
             return None;
         }
-        let (key, value) = line.split_once('=')?;
-        (key.trim() == WRITE_SCOPE_KEY).then(|| value.trim().to_string())
+        let (name, value) = line.split_once('=')?;
+        (name.trim() == key).then(|| value.trim().to_string())
     })
 }
 
@@ -7157,6 +7169,134 @@ mod tests {
         let tracked = git(&["ls-files", ".ljos/atoms"]);
         assert!(tracked.contains("gonehost.jsonl.age"), "{tracked}");
         assert!(!tracked.contains("gonehost+cloud"), "{tracked}");
+    }
+
+    /// Every cloud VM has the host name `cursor`. Each seat names its own
+    /// log, so a sitting on one VM takes the scope cloud atoms that a seat
+    /// on another VM wrote, and leaves the box log closed.
+    #[test]
+    fn a_sitting_on_one_cloud_vm_recalls_what_another_vm_learned() {
+        let _g = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let git = |at: &Path, args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(at)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let gitconfig = dir.path().join("gitconfig");
+        std::fs::write(
+            &gitconfig,
+            "[user]\n\temail = seat@example.invalid\n\tname = seat\n[commit]\n\tgpgsign = false\n",
+        )
+        .unwrap();
+        std::env::set_var("GIT_CONFIG_GLOBAL", &gitconfig);
+        std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+        let box_public = age_keygen(&dir.path().join("box.key"));
+        let public = vm_with_only_the_cloud_identity(&dir.path().join("a"));
+        let secret = std::fs::read_to_string(cloud_identity_path()).unwrap();
+
+        let remote = dir.path().join("remote.git");
+        git(
+            dir.path(),
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        let seed = dir.path().join("seed");
+        git(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                seed.to_str().unwrap(),
+            ],
+        );
+        std::fs::create_dir_all(seed.join(".ljos")).unwrap();
+        std::fs::write(
+            seed.join(".ljos/sync.toml"),
+            format!(
+                "name = \"grokbot\"\nrecipients = [\"{box_public}\"]\n[scopes]\ncloud = [\"{public}\"]\n"
+            ),
+        )
+        .unwrap();
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-q", "-m", "seed"]);
+        git(&seed, &["push", "-q", "-u", "origin", "main"]);
+        let clone = |name: &str| {
+            let at = dir.path().join(name);
+            git(
+                dir.path(),
+                &[
+                    "clone",
+                    "-q",
+                    remote.to_str().unwrap(),
+                    at.to_str().unwrap(),
+                ],
+            );
+            at
+        };
+        let tracker_a = clone("tracker-a");
+        let tracker_b = clone("tracker-b");
+        std::env::set_var("LJOS_TEST_HOSTNAME", "cursor");
+        std::env::set_var("LJOS_TRACKER_GIT", "push");
+        std::env::remove_var("VISSUE_ROOT");
+
+        std::env::set_var(SYNC_HOST_KEY, "cursor-seat-a");
+        std::env::set_var("ISSUE_ROOT", &tracker_a);
+        let learned = std::sync::Arc::new(std::sync::Mutex::new(vec![
+            atom("a1", "learned on vm a", &["scope:cloud"]),
+            atom("a2", "box only", &["scope:grokbot"]),
+        ]));
+        std::env::set_var("PACKSET_URL", serve_pack(learned));
+        let exported = sync_repo_in_passing(false, true).unwrap();
+        let shared = git(&remote, &["ls-tree", "-r", "--name-only", "main"]);
+        assert!(
+            shared.contains(".ljos/atoms/cursor-seat-a+cloud.jsonl.age"),
+            "{exported}\n{shared}"
+        );
+
+        let b = dir.path().join("b");
+        std::env::set_var("HOME", b.join("home"));
+        std::env::set_var("XDG_CONFIG_HOME", b.join("config"));
+        std::env::set_var("XDG_STATE_HOME", b.join("state"));
+        std::fs::create_dir_all(cloud_identity_path().parent().unwrap()).unwrap();
+        std::fs::write(cloud_identity_path(), &secret).unwrap();
+        std::env::set_var(SYNC_HOST_KEY, "cursor-seat-b");
+        std::env::set_var("ISSUE_ROOT", &tracker_b);
+        let posted = std::sync::Arc::default();
+        std::env::set_var("PACKSET_URL", serve_pack(std::sync::Arc::clone(&posted)));
+        let said = sync_repo_in_passing(true, false).unwrap();
+        assert!(
+            said.contains("cursor-seat-a: 1 cloud atoms taken"),
+            "{said}"
+        );
+        assert_eq!(posted_texts(&posted), vec!["learned on vm a"]);
+
+        std::env::remove_var(SYNC_HOST_KEY);
+        assert_eq!(host(), "cursor", "without the seat both VMs are one host");
+        std::env::remove_var("LJOS_TEST_HOSTNAME");
+        std::fs::create_dir_all(b.join("home/.config/ljos")).unwrap();
+        std::fs::write(
+            b.join("home/.config/ljos/env"),
+            "LJOS_SYNC_HOST=cursor-seat-b\n",
+        )
+        .unwrap();
+        assert_eq!(host(), "cursor-seat-b", "the env file names the seat");
     }
 
     /// A peer's `gonehost+cloud.jsonl.age` is a symlink to a local file

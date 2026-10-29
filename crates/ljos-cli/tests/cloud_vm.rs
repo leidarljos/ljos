@@ -738,6 +738,14 @@ fn cloud_up_installs_points_the_harness_and_clones() {
     let env = fs::read_to_string(home.join(".config/ljos/env")).unwrap();
     assert!(env.contains("LJOS_SEAT=cursor-abcdef012345\n"), "{env}");
     assert!(env.contains("VISSUE_AGENT=cursor-abcdef012345\n"), "{env}");
+    assert!(
+        env.contains("LJOS_SYNC_HOST=cursor-abcdef012345\n"),
+        "{env}"
+    );
+    assert_eq!(
+        doc["mcpServers"]["ljos"]["env"]["LJOS_SYNC_HOST"], "cursor-abcdef012345",
+        "{mcp}"
+    );
     assert!(env.contains("LJOS_TRACKER_GIT=push\n"), "{env}");
     assert!(env.contains("VISSUE_ROOT="), "{env}");
     let signing = env
