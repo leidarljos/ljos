@@ -3228,6 +3228,9 @@ fn run_command() -> Result<()> {
             quorum,
             deadline,
         } => {
+            // One silent pack is waited out once. Trust, the roster and the
+            // listing each ask, and a second wait would hold the reading.
+            let _quiet = ljos_cli::pack_link::QuietPack::enter();
             // Rows scoped to a domain apply when the issue is about it; the
             // personas' anchors go to both settles; the issue's tags pick
             // the model.

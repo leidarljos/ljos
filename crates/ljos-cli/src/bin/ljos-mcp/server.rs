@@ -2260,6 +2260,8 @@ impl LjosServer {
         &self,
         Parameters(args): Parameters<ConsensusArgs>,
     ) -> Result<Json<Rows<Said>>, McpError> {
+        // One silent pack is waited out once, as on the command line.
+        let _quiet = ljos_cli::pack_link::QuietPack::enter();
         // Rows scoped to a domain apply when the issue is about it; the
         // personas' anchors go to both settles.
         let shown = tracker_show_json(&args.issue).ok();

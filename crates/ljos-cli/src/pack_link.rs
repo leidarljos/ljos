@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -200,7 +201,69 @@ struct Raw {
     keep: bool,
 }
 
+/// The pack accepted a connection and then stayed silent, or the connect
+/// itself never finished. While a [`QuietPack`] guard is alive, the first
+/// such read still waits out its budget and a later read returns before it
+/// opens another socket. A consensus reading asks several times. Without
+/// the stop, each ask waited the whole budget and the command sat for the
+/// sum. Dropping the guard clears it, so a later call can try the pack again.
+static PACK_QUIET: AtomicBool = AtomicBool::new(false);
+static QUIET_HELD: AtomicUsize = AtomicUsize::new(0);
+
+/// Remember one quiet pack for the reads this guard covers.
+pub struct QuietPack;
+
+impl QuietPack {
+    /// Start remembering a silent pack. The first guard of a pile drops a
+    /// quiet read already seen, so the pile starts with a fresh try.
+    #[must_use]
+    pub fn enter() -> Self {
+        if QUIET_HELD.fetch_add(1, Ordering::AcqRel) == 0 {
+            PACK_QUIET.store(false, Ordering::Relaxed);
+        }
+        Self
+    }
+}
+
+impl Drop for QuietPack {
+    fn drop(&mut self) {
+        if QUIET_HELD.fetch_sub(1, Ordering::AcqRel) == 1 {
+            PACK_QUIET.store(false, Ordering::Relaxed);
+        }
+    }
+}
+
+fn holding_quiet() -> bool {
+    QUIET_HELD.load(Ordering::Relaxed) > 0
+}
+
+fn pack_quiet() -> bool {
+    holding_quiet() && PACK_QUIET.load(Ordering::Relaxed)
+}
+
+fn mark_pack_quiet() {
+    if holding_quiet() {
+        PACK_QUIET.store(true, Ordering::Relaxed);
+    }
+}
+
+fn quiet_io() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::TimedOut, "the pack did not answer")
+}
+
+/// A read or a connect that ended because the socket stayed silent.
+/// A refused connect is not this: the writer may still be starting.
+fn io_is_quiet(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    )
+}
+
 fn connect(addr: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
+    if pack_quiet() {
+        return Err(quiet_io());
+    }
     if side_budget_spent() {
         return Err(budget_spent());
     }
@@ -208,7 +271,12 @@ fn connect(addr: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
     let result = connect_once(addr, timeout);
     // A connect that returns a socket is the pack accepting. Time spent
     // there is not a quiet wait. A connect that fails spends the budget.
-    if result.is_err() {
+    // A connect that never finishes is remembered, so the next read does
+    // not wait the budget out again.
+    if let Err(err) = &result {
+        if io_is_quiet(err) {
+            mark_pack_quiet();
+        }
         super::charge_side_wait(started.elapsed());
     }
     result
@@ -959,6 +1027,9 @@ fn refused(url: &str, code: u16, body: &str) -> Error {
 }
 
 fn send(live: &mut Slot, origin: &Url, call: &Wire<'_>, timeout: Duration) -> std::io::Result<Raw> {
+    if pack_quiet() {
+        return Err(quiet_io());
+    }
     if side_budget_spent() {
         return Err(budget_spent());
     }
@@ -966,7 +1037,12 @@ fn send(live: &mut Slot, origin: &Url, call: &Wire<'_>, timeout: Duration) -> st
     let result = send_once(live, origin, call, timeout);
     // An answer is not charged. A read that ends without one is a quiet
     // socket and spends the budget, so the next read does not open another.
-    if result.is_err() {
+    // Outside a hook the side budget is not armed. The quiet flag is that
+    // same stop for a command, which asks the pack more than once.
+    if let Err(err) = &result {
+        if io_is_quiet(err) {
+            mark_pack_quiet();
+        }
         super::charge_side_wait(started.elapsed());
     }
     result
