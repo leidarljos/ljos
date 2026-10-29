@@ -390,15 +390,8 @@ fn install_with_no_coding_tool_leaves_a_seat_a_sitting_opens_on() {
     let sitting = said(&sat);
     let logged = read(&calls);
     assert!(sat.status.success(), "{sitting}\ncalls:\n{logged}");
-    assert!(
-        sitting.starts_with("tracker: 1 uncommitted edit; fix: "),
-        "{sitting}"
-    );
-    let ready = sitting
-        .split_once('\n')
-        .map(|(_, rest)| rest)
-        .unwrap_or(sitting.as_str());
-    assert!(ready.starts_with("ljos is ready:"), "{sitting}");
+    assert!(sitting.starts_with("ljos is ready:"), "{sitting}");
+    assert!(!sitting.contains("uncommitted edit"), "{sitting}");
     assert!(
         sitting.contains("tracker: demo-0001 STARTED under demo"),
         "{sitting}"

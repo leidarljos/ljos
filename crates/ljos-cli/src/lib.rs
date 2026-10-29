@@ -31321,9 +31321,6 @@ pub fn sitting_gated(
     playbook: Option<&str>,
 ) -> Result<String> {
     let mut out = String::new();
-    if let Some(line) = tracker_sync::tracker_sync_line() {
-        out.push_str(&line);
-    }
     let mut sections = SectionCursor::new();
     let rows = doctor_seat();
     sections.heading(&mut out, "doctor");
@@ -31437,6 +31434,11 @@ pub fn sitting_gated(
         .to_string();
     out.push_str(&claimed);
     out.push_str(&persist_tracker(&claimed_issue, "claimed"));
+    // The board this sitting just committed is not drift. The line is
+    // the tree after that commit, and it leads the sitting.
+    if let Some(line) = tracker_sync::tracker_sync_line() {
+        out.insert_str(0, &line);
+    }
     sections.finish();
     Ok(out)
 }
