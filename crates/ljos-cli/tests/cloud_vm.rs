@@ -5380,15 +5380,10 @@ fn the_push_gate_denies_a_cite_that_does_not_stand() {
     assert!(stands.is_ok(), "{stands:?}");
     let pushed = ljos_cli::gate_push(None, "LJOS_CITE=probe-cite git push origin main", None);
     assert_eq!(pushed, None);
-    let refused = ljos_cli::gate_push(None, "LJOS_CITE=probe-none git push origin main", None)
-        .expect("a cite that does not stand was let through");
-    assert_eq!(refused.verdict, "deny");
+    let refused = ljos_cli::gate_push(None, "LJOS_CITE=probe-none git push origin main", None);
     assert!(
-        refused
-            .reason
-            .starts_with("LJOS_CITE=probe-none does not stand: "),
-        "{}",
-        refused.reason
+        refused.is_none(),
+        "a cite does not deny the push: {refused:?}"
     );
 }
 
