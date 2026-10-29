@@ -257,19 +257,8 @@ fn a_cloud_seat_is_refused_even_with_a_mailbox() {
     let home = tempfile::tempdir().unwrap();
     let mailbox = maildir::mailbox();
     configure(home.path(), &mailbox);
-    let deny = |pattern: &str| ljos_cli::Rule {
-        pattern: pattern.into(),
-        verdict: "deny".into(),
-        reason: "cloud seat rule".into(),
-    };
-    ljos_cli::keep_rules(
-        &home.path().join("config/ljos/cloud-guard-rules.json"),
-        &[
-            deny("cloud-cursor-push"),
-            deny("cloud-gh-pr-create"),
-            deny("cloud-gh-pr-merge"),
-        ],
-    );
+    std::fs::create_dir_all(home.path().join("config/ljos")).unwrap();
+    std::fs::write(home.path().join("config/ljos/push-allow"), "").unwrap();
     let thread = mailbox.thread_of("plain-1@example.test");
     let ran = session(
         home.path(),
@@ -293,34 +282,16 @@ fn any_cloud_marker_refuses_the_mail_tools() {
         return;
     }
     let mailbox = maildir::mailbox();
-    let extra = serde_json::to_string(&json!([
-        ["cloud-cursor-push", "deny", "r"],
-        ["cloud-gh-pr-create", "deny", "r"],
-        ["cloud-gh-pr-merge", "deny", "r"],
-        ["rm -rf *", "deny", "an extra rule"]
-    ]))
-    .unwrap();
-    for (name, text) in [
-        ("cloud-guard-rules.json", extra.as_str()),
-        ("cloud-guard-rules.json", "not json"),
-        ("cloud-guard-rules.json", "[]"),
-        ("push-allow", ""),
-    ] {
-        let home = tempfile::tempdir().unwrap();
-        configure(home.path(), &mailbox);
-        std::fs::write(home.path().join("config/ljos").join(name), text).unwrap();
-        let ran = session(
-            home.path(),
-            Some("mail_search"),
-            &[call("ljos_mail_search", json!({"query": "lunch"}))],
-        );
-        assert_eq!(ran.by_id(2)["result"]["isError"], true, "{name} {text}");
-        assert!(
-            ran.text(2).contains("cloud seat"),
-            "{name}: {}",
-            ran.text(2)
-        );
-    }
+    let home = tempfile::tempdir().unwrap();
+    configure(home.path(), &mailbox);
+    std::fs::write(home.path().join("config/ljos/push-allow"), "").unwrap();
+    let ran = session(
+        home.path(),
+        Some("mail_search"),
+        &[call("ljos_mail_search", json!({"query": "lunch"}))],
+    );
+    assert_eq!(ran.by_id(2)["result"]["isError"], true, "push-allow");
+    assert!(ran.text(2).contains("cloud seat"), "{}", ran.text(2));
 }
 
 #[test]

@@ -647,22 +647,6 @@ fn canonical_hook_path(our_dir: &Path) -> PathBuf {
     fs::canonicalize(&path).unwrap_or(path)
 }
 
-thread_local! {
-    /// Config files a curl or wget on the line being judged names.
-    static LINE_CONFIGS: std::cell::RefCell<Vec<PathBuf>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// Judge a line with the config files it names protected, so a write on
-/// the same line cannot change one between the guard's read and the
-/// client's.
-pub(crate) fn with_line_configs<T>(named: Vec<PathBuf>, judge: impl FnOnce() -> T) -> T {
-    let before = LINE_CONFIGS.with(|cell| cell.replace(named));
-    let out = judge();
-    LINE_CONFIGS.with(|cell| cell.replace(before));
-    out
-}
-
 /// The hook directory, the hook file, the allowlist, the git hooks
 /// directory ljos installs as `core.hooksPath`, and the gitconfig files
 /// that can name that key. A write to one of these disarms the hook. The
@@ -722,7 +706,6 @@ pub(crate) fn protected_write_targets() -> Vec<PathBuf> {
             }
         }
     }
-    LINE_CONFIGS.with(|named| out.extend(named.borrow().iter().cloned()));
     if let Some(seat) = recorded_seat() {
         out.push(seat.join(".git/config"));
     }

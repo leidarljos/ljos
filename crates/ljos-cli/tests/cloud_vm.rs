@@ -1545,14 +1545,6 @@ fn cloud_refusal(line: &str, cwd: &Path) -> Option<ljos_cli::Rule> {
         .filter(|rule| rule.reason.starts_with("cloud seat rule"))
 }
 
-fn seat_rule(pattern: &str, reason: &str) -> ljos_cli::Rule {
-    ljos_cli::Rule {
-        pattern: pattern.to_string(),
-        verdict: "deny".to_string(),
-        reason: reason.to_string(),
-    }
-}
-
 fn refused(line: &str, cwd: &Path) -> ljos_cli::Rule {
     let hit = cloud_refusal(line, cwd)
         .unwrap_or_else(|| panic!("`{line}` in {} was allowed", cwd.display()));
@@ -1582,15 +1574,16 @@ fn cloud_up_installs_cloud_guard_refusals_idempotently() {
 
     let first = ljos_cli::cloud::up(false).unwrap();
     assert!(first.contains("guard:"), "{first}");
-    let rules = home.join(".config/ljos/cloud-guard-rules.json");
-    let before = fs::read_to_string(&rules).unwrap();
-    assert!(!before.trim().is_empty(), "{before:?}");
+    let allow = home.join(".config/ljos/push-allow");
+    let before = fs::read_to_string(&allow).unwrap();
+    assert!(
+        !home.join(".config/ljos/cloud-guard-rules.json").exists(),
+        "cloud up does not write a refusal file"
+    );
 
     for denied in [
         "git push origin cursor/probe",
         "git push origin HEAD:cursor/probe",
-        "gh pr create --fill",
-        "gh pr merge 7",
     ] {
         let hit = ljos_cli::static_guard(denied).unwrap_or_else(|| panic!("{denied} was allowed"));
         assert_eq!(hit.verdict, "deny", "{denied}: {hit:?}");
@@ -1601,24 +1594,23 @@ fn cloud_up_installs_cloud_guard_refusals_idempotently() {
         );
     }
     assert!(ljos_cli::static_guard("git push origin develop").is_none());
+    assert!(ljos_cli::static_guard("gh pr create --fill").is_none());
+    assert!(ljos_cli::static_guard("gh pr merge 7").is_none());
 
     let present = ljos_cli::cloud::guard_row();
     assert_eq!(present.name, "cloud guard");
     assert!(present.ok, "{present:?}");
     assert!(
-        present.state.contains("denies cursor/* pushes"),
+        present.state.contains("named branches and develop"),
         "{present:?}"
     );
 
     let second = ljos_cli::cloud::up(false).unwrap();
-    assert!(
-        second.contains("already has cloud seat refusals"),
-        "{second}"
-    );
+    assert!(second.contains("guard:"), "{second}");
     assert_eq!(
-        fs::read_to_string(&rules).unwrap(),
+        fs::read_to_string(&allow).unwrap(),
         before,
-        "a second cloud up rewrote cloud guard rules"
+        "a second cloud up rewrote the push allowlist"
     );
 }
 
@@ -1963,193 +1955,9 @@ fn cloud_guard_refuses_send_pack_bulk_flags_for_cursor_refs() {
     }
 }
 
-#[test]
-fn cloud_guard_reads_the_gh_pr_verb_and_never_its_arguments() {
-    let _g = Guard::new();
-    let root = tempfile::tempdir().unwrap();
-    seat_env(root.path());
-    ljos_cli::cloud::up(false).unwrap();
-    let here = root.path();
-
-    for line in [
-        "gh pr create --fill",
-        "gh pr new --fill",
-        "gh pr --repo owner/name create",
-        "gh pr --repo=owner/name create",
-        "gh pr -R owner/name create",
-        "gh pr create --repo owner/name",
-        "gh --repo owner/name pr create",
-        "FOO=1 gh pr create",
-        "'gh' pr \"create\" --fill",
-        "git push origin develop && gh pr create --fill",
-    ] {
-        let hit = refused(line, here);
-        assert_eq!(hit.pattern, "cloud-gh-pr-create", "{line}: {hit:?}");
-        assert!(hit.reason.contains("never open pull requests"), "{hit:?}");
-    }
-    for line in [
-        "gh pr merge 7",
-        "gh pr --repo owner/name merge",
-        "gh pr -R owner/name merge",
-        "gh -R owner/name pr merge 7",
-        "env GH_TOKEN=x gh pr --repo=owner/name merge 7",
-        "/usr/local/bin/gh pr merge --squash 7",
-        "sh -c 'gh pr merge 7'",
-    ] {
-        let hit = refused(line, here);
-        assert_eq!(hit.pattern, "cloud-gh-pr-merge", "{line}: {hit:?}");
-        assert!(hit.reason.contains("never merge pull requests"), "{hit:?}");
-    }
-    for line in [
-        "gh pr comment --body 'please pr create a follow-up'",
-        "gh pr comment -b 'do not pr merge yet'",
-        "gh pr review 5 --comment 'LGTM, pr merge when green'",
-        "gh issue create --title 'pr create'",
-        "FOO=1 gh pr comment 7 --body \"pr merge\"",
-    ] {
-        let hit = refused(line, here);
-        assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {hit:?}");
-    }
-    for line in [
-        "gh help pr create",
-        "gh pr list",
-        "gh pr view 7 --repo owner/name",
-        "gh pr -R owner/name checks 7",
-        "echo gh pr create",
-    ] {
-        allowed(line, here);
-    }
-}
-
 /// `gh api` and a gh alias open or merge a pull request without the words
 /// `gh pr create` or `gh pr merge`. The bare remote is the repo those
 /// commands are judged in.
-#[test]
-fn cloud_guard_refuses_gh_api_aliases_ready_and_reopen() {
-    let _g = Guard::new();
-    let gh_dir = gh_bin_dir();
-    let root = tempfile::tempdir().unwrap();
-    seat_env(root.path());
-    std::env::set_var("PATH", format!("{}:/usr/bin:/bin", gh_dir.display()));
-    let cfg = root.path().join("ghcfg");
-    let empty = root.path().join("empty-gh");
-    fs::create_dir_all(&cfg).unwrap();
-    fs::create_dir_all(&empty).unwrap();
-    std::env::set_var("GH_CONFIG_DIR", &cfg);
-    ljos_cli::cloud::up(false).unwrap();
-    let (origin, repo) = bare_checkout(root.path());
-    assert!(
-        git(&origin, &["show-ref"]).contains("refs/heads/develop"),
-        "the bare remote has no develop"
-    );
-
-    let set = |name: &str, expansion: &str| {
-        let out = Command::new("gh")
-            .args(["alias", "set", name, expansion])
-            .output()
-            .unwrap_or_else(|e| panic!("gh alias set {name}: {e}"));
-        assert!(
-            out.status.success(),
-            "gh alias set {name}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    };
-    set("pc", "pr create --fill");
-    set("ship", "pr merge --squash");
-    set(
-        "mkpr",
-        "api repos/acme/widgets/pulls -f title=t -f head=feature-x -f base=develop",
-    );
-    set("bang", "!gh pr reopen 3");
-
-    let here = repo.as_path();
-    let open_query = "gh api graphql -f query='mutation { createPullRequest(input: {repositoryId: \"R\"}) { clientMutationId } }'";
-    let merge_query = "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"P\"}) { clientMutationId } }'";
-    let reopen_query = "gh api graphql -f query='mutation { reopenPullRequest(input: {pullRequestId: \"P\"}) { clientMutationId } }'";
-    let ready_query = "gh api graphql -f query='mutation { markPullRequestReadyForReview(input: {pullRequestId: \"P\"}) { clientMutationId } }'";
-    let auto_query = "gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {pullRequestId: \"P\"}) { clientMutationId } }'";
-    for line in [
-        "gh pr ready 7",
-        "gh pr reopen 7",
-        "gh pr --repo acme/widgets ready 4",
-        "gh pc --fill",
-        "gh ship 9",
-        "gh bang",
-        "gh mkpr",
-        "gh api repos/acme/widgets/pulls -f title=t -f head=feature-x -f base=develop",
-        "gh api --method POST /repos/acme/widgets/pulls -f title=t -f head=feature-x -f base=develop",
-        "gh api --method PUT repos/acme/widgets/pulls/7/merge",
-        "gh api repos/acme/widgets/pulls/7/merge -f merge_method=squash",
-        "gh api -X PUT https://api.github.com/repos/acme/widgets/pulls/7/merge",
-        open_query,
-        merge_query,
-        reopen_query,
-        ready_query,
-        auto_query,
-    ] {
-        let hit = refused(line, here);
-        assert!(
-            hit.pattern == "cloud-gh-pr-create" || hit.pattern == "cloud-gh-pr-merge",
-            "{line}: {hit:?}"
-        );
-    }
-    assert_eq!(refused("gh pr ready 7", here).pattern, "cloud-gh-pr-create",);
-    assert_eq!(
-        refused("gh pr reopen 7", here).pattern,
-        "cloud-gh-pr-create",
-    );
-    assert_eq!(
-        refused("gh api --method PUT repos/acme/widgets/pulls/7/merge", here).pattern,
-        "cloud-gh-pr-merge",
-    );
-    assert_eq!(refused(open_query, here).pattern, "cloud-gh-pr-create");
-    assert_eq!(refused(merge_query, here).pattern, "cloud-gh-pr-merge");
-    assert_eq!(refused(auto_query, here).pattern, "cloud-gh-pr-merge");
-
-    fs::write(
-        repo.join("open.graphql"),
-        "mutation { createPullRequest(input: {}) { clientMutationId } }\n",
-    )
-    .unwrap();
-    fs::write(repo.join("read.graphql"), "query { viewer { login } }\n").unwrap();
-    assert_eq!(
-        refused("gh api graphql -F query=@open.graphql", here).pattern,
-        "cloud-gh-pr-create"
-    );
-
-    for line in [
-        "gh api repos/acme/widgets/issues -f title=t -f body=b",
-        "gh pr comment --body 'please pr create a follow-up'",
-    ] {
-        let hit = refused(line, here);
-        assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {hit:?}");
-    }
-    for line in [
-        "gh api repos/acme/widgets/pulls",
-        "gh api repos/acme/widgets/pulls/7",
-        "gh api --method GET repos/acme/widgets/pulls/7/merge",
-        "gh api -X GET repos/acme/widgets/pulls -f per_page=5",
-        "gh api graphql -f query='query { viewer { login } }'",
-        "gh api graphql -F query=@read.graphql",
-        "gh pr list",
-        "gh pr checkout 7",
-    ] {
-        allowed(line, here);
-    }
-
-    // The alias is in `cfg`, not in the process config. The guard has to
-    // read the directory the command itself names. A name with no alias
-    // there is not a read, so it is refused, and it is not the open rule.
-    std::env::set_var("GH_CONFIG_DIR", &empty);
-    let unseen = refused("gh pc --fill", here);
-    assert_eq!(unseen.pattern, "cloud-cursor-push", "{unseen:?}");
-    assert!(
-        !unseen.reason.contains("never open pull requests"),
-        "{unseen:?}"
-    );
-    let prefixed = format!("GH_CONFIG_DIR={} gh pc --fill", cfg.display());
-    assert_eq!(refused(&prefixed, here).pattern, "cloud-gh-pr-create");
-}
 
 #[test]
 fn cloud_guard_refuses_gh_api_ref_writes() {
@@ -2225,18 +2033,18 @@ fn cloud_guard_refuses_gh_api_ref_writes() {
         "gh api graphql -f query='mutation { createRef(input: {repositoryId: \"R\", name: \"refs/heads/feature/safe\", oid: \"O\"}) { clientMutationId } }'",
         "gh api graphql -F query=@safe-create.graphql",
     ] {
-        let hit = refused(line, here);
-        assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {hit:?}");
+        allowed(line, here);
     }
 
     for line in [
+        "gh issue create --title bug --body details",
+        "gh pr comment 1 --body x",
         "gh api --method PATCH repos/acme/widgets/git/refs/heads/develop -f sha=0123456789012345678901234567890123456789",
         "gh api --method POST repos/acme/widgets/git/refs -f ref=refs/heads/develop -f sha=0123456789012345678901234567890123456789",
         "gh api graphql -f query='mutation { createRef(input: {repositoryId: \"R\", name: \"refs/heads/develop\", oid: \"O\"}) { clientMutationId } }'",
         "gh api graphql -f query='mutation { addComment(input: {body: \"deleteRef\"}) { clientMutationId } }'",
     ] {
-        let hit = refused(line, here);
-        assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {hit:?}");
+        allowed(line, here);
     }
     for line in [
         "gh api repos/acme/widgets/git/refs/heads/main",
@@ -2371,46 +2179,44 @@ fn cloud_guard_judges_ref_writes_by_the_seat_allowlist() {
         bash_env.as_str(),
         "git config alias.ship '!git push origin main' && git ship",
     ] {
-        let hit = refused(line, here);
-        assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {hit:?}");
+        let gh = line.trim_start().starts_with("gh ")
+            || line.trim_start().starts_with("curl ")
+            || line.contains("xargs gh ")
+            || line.contains("gh alias")
+            || line.contains("gh poke")
+            || line.contains("gh release")
+            || line.contains("gh repo sync");
+        if gh {
+            allowed(line, here);
+        } else {
+            let hit = refused(line, here);
+            assert_eq!(hit.pattern, "cloud-cursor-push", "{line}: {hit:?}");
+        }
     }
-    refused(&develop_at, here);
+    allowed(&develop_at, here);
     allowed(&source_dev, here);
     allowed(&source_missing, here);
     allowed(
         "curl -s -H \"Authorization: Bearer $GH_TOKEN\" https://api.github.com/user",
         here,
     );
-    refused(
+    allowed(
         "gh api --method POST repos/acme/widgets/merges -f base=develop -f head=feature-x",
         here,
     );
-    refused(
+    allowed(
         "gh api --method PUT repos/acme/widgets/contents/README.md -f message=m -f content=eQ== -f branch=develop",
         here,
     );
-    refused(
+    allowed(
         "gh api graphql -f query='mutation { createCommitOnBranch(input: {branch: {branchName: \"develop\"}}) { clientMutationId } }'",
         here,
     );
-    refused(
+    allowed(
         "gh api graphql -f query='mutation { mergeBranch(input: {base: \"develop\", head: \"feature-x\"}) { clientMutationId } }'",
         here,
     );
     let _ = std::fs::set_permissions(&unread, std::os::unix::fs::PermissionsExt::from_mode(0o644));
-}
-
-fn gh_bin_dir() -> PathBuf {
-    let out = Command::new("sh")
-        .arg("-c")
-        .arg("command -v gh")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "gh is not on PATH");
-    PathBuf::from(String::from_utf8(out.stdout).unwrap().trim())
-        .parent()
-        .unwrap()
-        .to_path_buf()
 }
 
 /// A clone of a local bare remote on `develop`, with `feature-x` and
@@ -2582,169 +2388,6 @@ fn cloud_guard_allows_resolved_destinations_toplevel_and_tags() {
         "{tag_text}"
     );
     assert!(!remote_has("refs/tags/cursor/mark"));
-}
-
-/// The rule file an older `ljos cloud up` wrote: a push regex and two gh
-/// globs. Reason text differs from the current file, and the order does too.
-fn older_rules() -> Vec<ljos_cli::Rule> {
-    let push = "re:git push(?:\\s+\\S+)*\\s(?:\\S*:)?(?:refs/heads/)?cursor/\\S+(?:\\s|$)";
-    vec![
-        seat_rule(
-            "gh* pr merge*",
-            "cloud seat rule: merge refusal, older wording",
-        ),
-        seat_rule(push, "cloud seat rule: push refusal, older wording"),
-        seat_rule(
-            "gh* pr create*",
-            "cloud seat rule: open refusal, older wording",
-        ),
-    ]
-}
-
-/// An older rule file is still a cloud seat. Its patterns are judged as the
-/// current refusals, doctor warns, and `--fix` replaces that file. The bare
-/// remote is what the old regex let a push update.
-#[test]
-fn cloud_guard_reads_an_older_rule_file_as_the_current_refusals() {
-    let _g = Guard::new();
-    let root = tempfile::tempdir().unwrap();
-    let home = seat_env(root.path());
-    let (origin, repo) = bare_checkout(root.path());
-    let rules = home.join(".config/ljos/cloud-guard-rules.json");
-    ljos_cli::keep_rules(&rules, &older_rules());
-
-    assert!(
-        ljos_cli::cloud::cloud_seat(),
-        "a known older file is a cloud seat"
-    );
-    let row = ljos_cli::cloud::guard_row();
-    assert!(!row.ok, "{row:?}");
-    assert!(row.state.contains("is stale; ljos doctor --fix"), "{row:?}");
-    assert_eq!(ljos_cli::doctor_word(&row), "warn", "{row:?}");
-    assert!(ljos_cli::healthy(std::slice::from_ref(&row)), "{row:?}");
-    assert!(
-        ljos_cli::format_doctor_short(std::slice::from_ref(&row)).contains("cloud guard"),
-        "{}",
-        ljos_cli::format_doctor_short(std::slice::from_ref(&row))
-    );
-
-    let pushed = refused("git push origin +cursor/probe", &repo);
-    assert!(
-        pushed.reason.contains("this push updates cursor/probe"),
-        "{}",
-        pushed.reason
-    );
-    assert!(pushed.reason.contains("older wording"), "{}", pushed.reason);
-    let dry = sh_at(&repo, "git push --dry-run origin +cursor/probe");
-    let dry_text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&dry.stdout),
-        String::from_utf8_lossy(&dry.stderr)
-    );
-    assert!(
-        dry.status.success() && dry_text.contains("cursor/probe"),
-        "{dry_text}"
-    );
-    assert!(
-        !git(&origin, &["show-ref"]).contains("refs/heads/cursor/probe"),
-        "the refused push updated the remote"
-    );
-    allowed("git push origin cursor/probe:develop", &repo);
-    sh_ok(&repo, "git push origin cursor/probe:develop");
-    assert!(!git(&origin, &["show-ref"]).contains("refs/heads/cursor/probe"));
-    allowed("git push git@github.com:cursor/ljos.git develop", &repo);
-    let comment = refused("gh pr comment --body 'please pr create a follow-up'", &repo);
-    assert!(
-        comment.reason.contains("not a GitHub read"),
-        "{}",
-        comment.reason
-    );
-    let opened = refused("gh pr -R owner/name create", &repo);
-    assert_eq!(opened.pattern, "gh* pr create*");
-    assert!(opened.reason.contains("older wording"), "{opened:?}");
-    assert_eq!(
-        refused("gh pr -R owner/name merge 7", &repo).pattern,
-        "gh* pr merge*"
-    );
-
-    let said = ljos_cli::cloud::up(false).unwrap();
-    assert!(said.contains("now denies"), "{said}");
-    let canonical = fs::read_to_string(&rules).unwrap();
-    let present = ljos_cli::cloud::guard_row();
-    assert!(present.ok, "{present:?}");
-    assert!(
-        present.state.contains("denies cursor/* pushes"),
-        "{present:?}"
-    );
-    let again = ljos_cli::cloud::up(false).unwrap();
-    assert!(again.contains("already has cloud seat refusals"), "{again}");
-    assert_eq!(fs::read_to_string(&rules).unwrap(), canonical);
-
-    ljos_cli::keep_rules(&rules, &older_rules());
-    ljos_cli::cloud::replace_stale_guard();
-    assert_eq!(fs::read_to_string(&rules).unwrap(), canonical);
-    assert!(ljos_cli::cloud::guard_row().ok);
-
-    ljos_cli::keep_rules(
-        &rules,
-        &[
-            seat_rule("cloud-cursor-push", "cloud seat rule: push"),
-            seat_rule("gh* pr create*", "cloud seat rule: open"),
-            seat_rule("gh* pr merge*", "cloud seat rule: merge"),
-        ],
-    );
-    assert!(ljos_cli::cloud::cloud_seat());
-    assert!(
-        ljos_cli::cloud::guard_row().state.contains("is stale;"),
-        "{:?}",
-        ljos_cli::cloud::guard_row()
-    );
-    ljos_cli::cloud::replace_stale_guard();
-    assert_eq!(fs::read_to_string(&rules).unwrap(), canonical);
-
-    ljos_cli::keep_rules(
-        &rules,
-        &[
-            seat_rule("cloud-gh-pr-merge", "cloud seat rule: still a merge"),
-            seat_rule("cloud-cursor-push", "cloud seat rule: still a push"),
-            seat_rule("cloud-gh-pr-create", "cloud seat rule: still an open"),
-        ],
-    );
-    let reworded = fs::read_to_string(&rules).unwrap();
-    assert!(ljos_cli::cloud::cloud_seat());
-    let same = ljos_cli::cloud::guard_row();
-    assert!(same.ok, "{same:?}");
-    assert_eq!(ljos_cli::doctor_word(&same), "ok");
-    ljos_cli::cloud::replace_stale_guard();
-    assert_eq!(fs::read_to_string(&rules).unwrap(), reworded);
-
-    fs::remove_file(&rules).unwrap();
-    ljos_cli::cloud::replace_stale_guard();
-    assert!(
-        !rules.exists(),
-        "doctor --fix installed a missing guard file"
-    );
-    let missing = ljos_cli::cloud::guard_row();
-    assert!(missing.state.contains("run `ljos cloud up`"), "{missing:?}");
-    assert_eq!(ljos_cli::doctor_word(&missing), "info");
-    assert!(!ljos_cli::cloud::cloud_seat());
-
-    ljos_cli::keep_rules(
-        &rules,
-        &[seat_rule("git push*", "cloud seat rule: hand edit")],
-    );
-    let hand = fs::read_to_string(&rules).unwrap();
-    let edited = ljos_cli::cloud::guard_row();
-    assert!(
-        edited
-            .state
-            .contains("differs from the cloud seat refusals"),
-        "{edited:?}"
-    );
-    assert_eq!(ljos_cli::doctor_word(&edited), "warn");
-    assert!(!ljos_cli::cloud::cloud_seat());
-    ljos_cli::cloud::replace_stale_guard();
-    assert_eq!(fs::read_to_string(&rules).unwrap(), hand);
 }
 
 #[test]
