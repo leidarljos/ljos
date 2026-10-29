@@ -3190,7 +3190,11 @@ fn run_command() -> Result<()> {
                     };
                 }
             }
-            let output = ljos_cli::approval::hook_output(&input, &call, &context, verdict);
+            let output = ljos_cli::rewrite::answer(&input, &call, &context, verdict, |line| {
+                ljos_cli::tcb_verdict_in(line, dir)
+                    .or_else(|| ljos_cli::ruled_verdict(&rules, line))
+            })
+            .unwrap_or_else(|| ljos_cli::approval::hook_output(&input, &call, &context, verdict));
             ljos_cli::answer_gate(&output);
             if let Some(reason) = ask {
                 ljos_cli::book_queue::enqueue_ask(&input, &call, &reason);

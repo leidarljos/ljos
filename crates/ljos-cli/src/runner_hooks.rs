@@ -779,6 +779,7 @@ pub fn relay(runner: &str, input: &str, limit: usize, event: Option<&str>) -> an
             Ok(exe) => {
                 let mut cmd = std::process::Command::new(exe);
                 cmd.arg("hook").arg("--limit").arg(limit.to_string());
+                cmd.env(crate::rewrite::RELAY_VAR, runner);
                 if let Some(e) = event {
                     cmd.arg("--event").arg(e);
                 }

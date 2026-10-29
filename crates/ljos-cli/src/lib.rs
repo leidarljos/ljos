@@ -52,6 +52,7 @@ pub mod plugin;
 pub mod proc_tree;
 pub mod reap;
 pub mod record;
+pub mod rewrite;
 pub mod runner_env;
 pub mod runner_hooks;
 pub mod runner_skills;
@@ -34619,6 +34620,10 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         return None;
     };
     if !t.starts_with("deny") {
+        if let Some(command) = rewrite::from_policyd(&t) {
+            rewrite::hold(line, command);
+            return None;
+        }
         // Only the fail-open marker is a fault the switch let through. An
         // unready token is an allow with a note and is not a bypass.
         if t.trim().starts_with("allow\tfail-open\t") {
