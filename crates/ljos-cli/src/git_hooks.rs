@@ -874,13 +874,14 @@ fn gate_runner(name: &str) -> Result<()> {
     // to the process match.
     let seat = crate::git_hook_seat();
     let _actor = seat.as_deref().map(crate::HookActor::enter);
-    let verb = if name == "pre-push" { "push" } else { "commit" };
-    let issue = crate::sitting_gate::live_sitting().map_err(|why| {
-        anyhow!(
-            "sitting-gate: {}",
-            crate::sitting_gate::no_sitting(verb, &why)
-        )
-    })?;
+    let issue = match crate::sitting_gate::live_sitting() {
+        Ok(issue) => issue,
+        Err(_) => match crate::sitting_gate::open_or_name_sitting() {
+            Some(issue) => issue,
+            None if name != "pre-push" => return Ok(()),
+            None => String::new(),
+        },
+    };
     if name != "pre-push" {
         return Ok(());
     }
@@ -897,12 +898,13 @@ fn gate_runner(name: &str) -> Result<()> {
     let Some(dest) = dest else {
         return Ok(());
     };
-    crate::protected_push_stands(&issue, cfg.quorum)
-        .map(drop)
-        .map_err(|why| {
-            let wait = crate::sitting_gate::seats_wait(&dest, &cfg.branches, &issue, &why);
-            anyhow!("sitting-gate: {wait}")
-        })
+    if issue.is_empty() || !crate::protected_push_cleared(&issue, &crate::seat_name(), cfg.quorum)
+    {
+        let why = "the sitting has no settled consensus".to_string();
+        let wait = crate::sitting_gate::seats_wait(&dest, &cfg.branches, &issue, &why);
+        return Err(anyhow!("sitting-gate: {wait}"));
+    }
+    Ok(())
 }
 
 /// What a push whose pre-push stdin is `refs` sends onto a branch in

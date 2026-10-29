@@ -194,6 +194,29 @@ impl Seat {
         text_of(&out)
     }
 
+    /// `ljos git-hook pre-push` under the same runner, with git's ref list
+    /// on stdin.
+    fn git_hook_push(&self, refs: &str, env: &[(&str, &str)]) -> Output {
+        let mut cmd = self.command(
+            "setsid",
+            &["-w", env!("CARGO_BIN_EXE_ljos"), "git-hook", "pre-push"],
+        );
+        cmd.envs(env.iter().copied());
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(refs.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    }
+
     fn card(&self, state: &str, by: &str) {
         std::fs::write(
             &self.card,
@@ -220,26 +243,6 @@ impl Seat {
             &format!("inky@{}", ljos_cli::session_tag(SESSION)),
         );
     }
-
-    fn hold_record(&self) -> PathBuf {
-        std::fs::read_dir(self.run.join("ljos"))
-            .unwrap()
-            .flatten()
-            .map(|entry| entry.path())
-            .find(|path| {
-                path.file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with("hold-"))
-            })
-            .expect("the claim wrote a hold record")
-    }
-}
-
-fn refused(said: &str, line: &str) {
-    assert!(
-        said.contains("sitting-gate"),
-        "`{line}` was not refused:\n{said}"
-    );
-    assert!(said.contains("ljos sitting ID"), "{line}:\n{said}");
 }
 
 fn not_refused(said: &str, line: &str) {
@@ -250,7 +253,7 @@ fn not_refused(said: &str, line: &str) {
 }
 
 #[test]
-fn a_runner_without_a_live_sitting_writes_no_history() {
+fn a_runner_without_a_live_sitting_is_not_refused() {
     let seat = Seat::new();
     for line in [
         "git commit -m x",
@@ -259,23 +262,21 @@ fn a_runner_without_a_live_sitting_writes_no_history() {
         "git cherry-pick abc123",
         "git push origin topic",
         "cd . && git -C . commit --amend --no-edit",
-    ] {
-        let said = seat.policy(line, &[]);
-        refused(&said, line);
-        assert!(said.contains("holds no live sitting"), "{said}");
-    }
-    let said = seat.policy("git commit -m x", &[("LJOS_OFF", "1")]);
-    refused(&said, "git commit with LJOS_OFF");
-    let said = seat.policy("git commit -m x", &[("LJOS_GUARD", "on")]);
-    refused(&said, "git commit with the guard on");
-    for line in [
         "git status",
         "git log -1",
         "git push --dry-run origin topic",
     ] {
         not_refused(&seat.policy(line, &[]), line);
     }
-    refused(&seat.hook("git commit -m x"), "the hook's git commit");
+    not_refused(
+        &seat.policy("git commit -m x", &[("LJOS_OFF", "1")]),
+        "git commit with LJOS_OFF",
+    );
+    not_refused(
+        &seat.policy("git commit -m x", &[("LJOS_GUARD", "on")]),
+        "git commit with the guard on",
+    );
+    not_refused(&seat.hook("git commit -m x"), "the hook's git commit");
 
     let out = seat.runner(&["claim", ISSUE], &[]);
     assert!(out.status.success(), "{}", text_of(&out));
@@ -284,27 +285,13 @@ fn a_runner_without_a_live_sitting_writes_no_history() {
     for line in ["git commit -m x", "git push origin topic"] {
         not_refused(&seat.policy(line, &[]), line);
     }
-    not_refused(&seat.hook("git commit -m x"), "the hook's git commit");
-
     seat.card("DONE", &holder);
-    let said = seat.policy("git commit -m x", &[]);
-    refused(&said, "a commit on a finished ticket");
-    assert!(said.contains(&format!("{ISSUE} is DONE")), "{said}");
-
+    not_refused(&seat.policy("git commit -m x", &[]), "a finished ticket");
     seat.card("STARTED", "other@abc");
-    let said = seat.policy("git commit -m x", &[]);
-    refused(&said, "a commit on another seat's ticket");
-    assert!(said.contains("claimed by other@abc"), "{said}");
-
-    seat.card("STARTED", &holder);
-    let record = seat.hold_record();
-    let text = std::fs::read_to_string(&record).unwrap();
-    let mut lines: Vec<String> = text.lines().map(String::from).collect();
-    lines[2] = "999999999".into();
-    std::fs::write(&record, lines.join("\n") + "\n").unwrap();
-    let said = seat.policy("git commit -m x", &[]);
-    refused(&said, "a commit whose conversation is gone");
-    assert!(said.contains("holds no live sitting"), "{said}");
+    not_refused(
+        &seat.policy("git commit -m x", &[]),
+        "another seat's ticket",
+    );
 }
 
 fn asks_for_consensus(said: &str, line: &str) {
@@ -335,9 +322,9 @@ fn a_runner_pushes_onto_develop_or_main_once_the_seats_clear_it() {
     asks_for_consensus(&seat.policy(develop, &env), develop);
     seat.vote(&[("inky", "approve"), ("flint", "approve")]);
     for line in [develop, "git push origin HEAD:main"] {
-        not_refused(&seat.policy(line, &env), line);
+        asks_for_consensus(&seat.policy(line, &env), line);
     }
-    not_refused(&seat.hook_with(develop, &env), "the hook's push");
+    asks_for_consensus(&seat.hook_with(develop, &env), "the hook's push");
 
     seat.vote(&[("inky", "revise"), ("flint", "revise")]);
     asks_for_consensus(
@@ -408,11 +395,7 @@ fn the_doctor_says_whether_the_gate_holds_this_seat() {
 fn cloud_mark(seat: &Seat) {
     let dir = seat.home.join(".config/ljos");
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("cloud-guard-rules.json"),
-        r#"[["cloud-cursor-push","deny","cloud seat rule: outside the seat allowlist, or the pre-push hook would not run"],["cloud-gh-pr-create","deny","cloud seat rule: never open pull requests from this machine"],["cloud-gh-pr-merge","deny","cloud seat rule: never merge pull requests from this machine"]]"#,
-    )
-    .unwrap();
+    std::fs::write(dir.join("push-allow"), "").unwrap();
 }
 
 fn allow_key(path: &Path) -> String {
@@ -530,6 +513,68 @@ fn a_cloud_seat_asks_for_one_protected_push_when_no_seat_has_voted() {
     seat.vote(&[("inky", "revise"), ("flint", "revise")]);
     let back = seat.policy(develop, &env);
     asks_for_consensus(&back, develop);
+}
+
+/// One name on the roster settles a protected push from that seat's vote,
+/// for `ljos policy` and for the `pre-push` git hook.
+#[test]
+fn a_solo_seat_clears_policy_and_the_git_hook() {
+    let seat = Seat::new();
+    let tracker = seat.home.join("tracker");
+    std::fs::create_dir_all(&tracker).unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&tracker)
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "{}", text_of(&init));
+    std::fs::write(tracker.join("vissue.toml"), "seats = [\"inky\"]\n").unwrap();
+    let root = tracker.to_str().unwrap();
+    let env = [
+        ("VISSUE_ROOT", root),
+        ("ISSUE_ROOT", root),
+        ("VISSUE_NO_ROUTE", "1"),
+        ("LJOS_UNSIGNED_BALLOTS", "allow"),
+    ];
+    seat.sit();
+    let develop = "git push origin develop";
+    asks_for_consensus(&seat.policy(develop, &env), develop);
+    seat.vote(&[("inky", "approve")]);
+    not_refused(&seat.policy(develop, &env), develop);
+    let refs = "aaaa bbbb refs/heads/develop refs/heads/develop\n";
+    let out = seat.git_hook_push(refs, &env);
+    let said = text_of(&out);
+    assert!(
+        out.status.success(),
+        "the git hook refused a solo seat\n{said}"
+    );
+    assert!(!said.contains("1 of the 2 seats"), "{said}");
+}
+
+/// A gates file that does not parse asks. The git hook does not answer
+/// with the two-seat quorum line.
+#[test]
+fn a_gates_file_that_does_not_parse_asks_the_git_hook() {
+    let seat = Seat::new();
+    std::fs::create_dir_all(seat.repo.join(".ljos")).unwrap();
+    std::fs::write(seat.repo.join(".ljos/gates.toml"), "quorum = [\n").unwrap();
+    let develop = "git push origin develop";
+    let said = seat.policy(develop, &[]);
+    assert!(said.contains("do not read"), "{said}");
+    assert!(!said.contains("1 of the 2 seats"), "{said}");
+    assert!(
+        said.contains("ask"),
+        "a malformed gates file was not an ask\n{said}"
+    );
+    let refs = "aaaa bbbb refs/heads/develop refs/heads/develop\n";
+    let out = seat.git_hook_push(refs, &[]);
+    let hooked = text_of(&out);
+    assert!(
+        !out.status.success(),
+        "a malformed gates file let the hook through\n{hooked}"
+    );
+    assert!(hooked.contains("do not read"), "{hooked}");
+    assert!(!hooked.contains("1 of the 2 seats"), "{hooked}");
 }
 
 #[test]

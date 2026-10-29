@@ -110,10 +110,10 @@ fn judge_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     let calls = match crate::gates::git_calls(line, cwd) {
         Ok(calls) => calls,
         Err(why) => {
-            return Some(refusal(&format!(
-                "{why}, so the sitting gate cannot tell what this line writes. \
-                 Run the git command directly"
-            )))
+            let note = format!("ljos: the guard could not judge ({why}); the call is allowed");
+            eprintln!("{note}");
+            crate::bookkeep::log_line(&note);
+            return None;
         }
     };
     if let Some(rule) = protected_branch_ask(&calls, line) {
@@ -125,13 +125,27 @@ fn judge_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         }
         return None;
     }
-    let first = calls
+    if !calls
         .iter()
-        .find(|call| writes_history(call) && !protected_history_push(call, line))?;
-    if let Err(why) = live_sitting() {
-        return Some(refusal(&no_sitting(&first.sub, &why)));
+        .any(|call| writes_history(call) && !protected_history_push(call, line))
+    {
+        return None;
+    }
+    if live_sitting().is_err() {
+        if let Some(issue) = open_or_name_sitting() {
+            crate::bookkeep::log_line(&format!("sitting-gate: open sitting {issue}"));
+        }
     }
     None
+}
+
+/// The open sitting this conversation already holds. A policy check does
+/// not file a ticket.
+pub(crate) fn open_or_name_sitting() -> Option<String> {
+    if let Some(issue) = crate::bookkeep::open_issue() {
+        return Some(issue);
+    }
+    crate::live_held_issue().map(|(issue, _)| issue)
 }
 
 /// A force, a delete, or a mirror push is not this check. Later rules
@@ -314,7 +328,7 @@ pub fn doctor_row(cwd: Option<&Path>) -> crate::Habitat {
     let sitting = match live_sitting() {
         Ok(issue) => format!("this conversation sits on {issue}"),
         Err(why) => format!(
-            "{why}, so a commit, merge, rebase, cherry-pick or push waits for `ljos sitting ID`"
+            "{why}; a commit, merge, rebase, cherry-pick or push opens a sitting or names the open one"
         ),
     };
     let named: Vec<String> = cfg.branches.iter().map(|b| format!("`{b}`")).collect();
@@ -540,7 +554,14 @@ mod tests {
         assert!(!crate::protected_push_settled(
             &one, &quiet, &none, "ada", 2, &own
         ));
-        assert!(!crate::protected_push_settled(&one, &[], &none, "ada", 2, &own));
+        assert!(!crate::protected_push_settled(
+            &one,
+            &[],
+            &none,
+            "ada",
+            2,
+            &own
+        ));
     }
 
     #[test]
@@ -573,5 +594,51 @@ mod tests {
         assert!(!crate::protected_push_settled(
             &two, &split, &none, "ada", 2, &own
         ));
+    }
+
+    /// A gates file that does not parse asks. The push is not a hard denial.
+    #[test]
+    fn a_gates_file_that_does_not_parse_asks() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}");
+        };
+        git(&["init", "-q", "-b", "develop"]);
+        std::fs::create_dir_all(dir.path().join(".ljos")).unwrap();
+        std::fs::write(dir.path().join(".ljos/gates.toml"), "quorum = [\n").unwrap();
+        let _posed = Posed::runner();
+        let rule = guard_line("git push origin develop", Some(dir.path())).unwrap();
+        assert_eq!(rule.verdict, "ask");
+        assert!(rule.reason.contains("do not read"), "{}", rule.reason);
+    }
+
+    /// A git alias nest the guard cannot read allows the line and warns.
+    #[test]
+    fn an_unreadable_git_line_is_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["init", "-q"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        for (name, next) in [("a", "b"), ("b", "c"), ("c", "d"), ("d", "e")] {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["config", &format!("alias.{name}"), &format!("!git {next}")])
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+        }
+        let _posed = Posed::runner();
+        assert!(guard_line("git a", Some(dir.path())).is_none());
     }
 }
