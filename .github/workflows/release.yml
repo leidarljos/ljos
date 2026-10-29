@@ -109,9 +109,23 @@ jobs:
   # cloud VM only. The job reads no ljos source, so a run by hand for an
   # older tag builds the same pair.
   encoder:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            triple: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            triple: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            triple: aarch64-apple-darwin
+            osx_arch: arm64
+          - os: macos-latest
+            triple: x86_64-apple-darwin
+            osx_arch: x86_64
+    runs-on: ${{ matrix.os }}
     env:
-      TARGET: x86_64-unknown-linux-gnu
+      TARGET: ${{ matrix.triple }}
       ORT_VERSION: 1.28.3
       PACKSET_EMBED_VERSION: 0.16.0
     steps:
@@ -119,6 +133,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
           toolchain: 1.89.0
+          targets: ${{ matrix.triple }}
       # ONNX Runtime 1.28.3 vendors protobuf 21.12, so protoc has to be
       # that release: Debian's protobuf-compiler 3.21.12, which Ubuntu
       # 24.04 carries. cdn.pyke.io resolves to nothing, so a build that
@@ -126,9 +141,19 @@ jobs:
       - name: Build tools
         run: |
           set -eu
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential cmake python3 protobuf-compiler pkg-config libssl-dev
-          test "$(/usr/bin/protoc --version)" = "libprotoc 3.21.12"
+          if [ "${RUNNER_OS}" = "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends build-essential cmake python3 protobuf-compiler pkg-config libssl-dev
+            protoc=/usr/bin/protoc
+          else
+            curl -fsSL -o "$RUNNER_TEMP/protoc.zip" \
+              https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protoc-21.12-osx-universal_binary.zip
+            echo "1acab3d1f774d120d5a38bccb78fd379d35226b254dc258978bc45593478ca4c  $RUNNER_TEMP/protoc.zip" | shasum -a 256 -c -
+            unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
+            protoc="$RUNNER_TEMP/protoc/bin/protoc"
+          fi
+          test "$("$protoc" --version)" = "libprotoc 3.21.12"
+          echo "PROTOC=$protoc" >> "$GITHUB_ENV"
           echo "0.0.0.0 cdn.pyke.io" | sudo tee -a /etc/hosts
       # A release builds ONNX Runtime from source. A cache saved on another
       # ref would ship that build, so a tag and a run by hand do not restore
@@ -141,23 +166,33 @@ jobs:
           key: onnxruntime-${{ env.ORT_VERSION }}-shared-telemetry-off-protoc-3.21.12-${{ env.TARGET }}
       - name: Build ONNX Runtime from source
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch' || steps.ort.outputs.cache-hit != 'true'
-        env:
-          CC: gcc
-          CXX: g++
         run: |
           set -eu
           src="$RUNNER_TEMP/onnxruntime-src"
           prefix="$RUNNER_TEMP/onnxruntime"
           git clone --quiet --depth 1 --branch "v$ORT_VERSION" https://github.com/microsoft/onnxruntime "$src"
           cd "$src"
-          ./build.sh --config Release --build_shared_lib --parallel --skip_tests \
-            --compile_no_warning_as_error --skip_submodule_sync \
-            --cmake_extra_defines "CMAKE_INSTALL_PREFIX=$prefix" \
-              onnxruntime_BUILD_UNIT_TESTS=OFF onnxruntime_USE_TELEMETRY=OFF \
-              ONNX_CUSTOM_PROTOC_EXECUTABLE=/usr/bin/protoc
-          grep -qx 'onnxruntime_USE_TELEMETRY:BOOL=OFF' build/Linux/Release/CMakeCache.txt
-          grep -Eqx 'ONNX_CUSTOM_PROTOC_EXECUTABLE:[A-Z]+=/usr/bin/protoc' build/Linux/Release/CMakeCache.txt
-          cmake --install build/Linux/Release
+          if [ "${RUNNER_OS}" = "macOS" ]; then
+            ./build.sh --config Release --build_shared_lib --parallel --skip_tests \
+              --compile_no_warning_as_error --skip_submodule_sync \
+              --osx_arch "${{ matrix.osx_arch }}" \
+              --cmake_extra_defines "CMAKE_INSTALL_PREFIX=$prefix" \
+                onnxruntime_BUILD_UNIT_TESTS=OFF onnxruntime_USE_TELEMETRY=OFF \
+                "ONNX_CUSTOM_PROTOC_EXECUTABLE=$PROTOC"
+            grep -qx 'onnxruntime_USE_TELEMETRY:BOOL=OFF' build/MacOS/Release/CMakeCache.txt
+            grep -Eqx "ONNX_CUSTOM_PROTOC_EXECUTABLE:[A-Z]+=$PROTOC" build/MacOS/Release/CMakeCache.txt
+            cmake --install build/MacOS/Release
+          else
+            export CC=gcc CXX=g++
+            ./build.sh --config Release --build_shared_lib --parallel --skip_tests \
+              --compile_no_warning_as_error --skip_submodule_sync \
+              --cmake_extra_defines "CMAKE_INSTALL_PREFIX=$prefix" \
+                onnxruntime_BUILD_UNIT_TESTS=OFF onnxruntime_USE_TELEMETRY=OFF \
+                "ONNX_CUSTOM_PROTOC_EXECUTABLE=$PROTOC"
+            grep -qx 'onnxruntime_USE_TELEMETRY:BOOL=OFF' build/Linux/Release/CMakeCache.txt
+            grep -Eqx "ONNX_CUSTOM_PROTOC_EXECUTABLE:[A-Z]+=$PROTOC" build/Linux/Release/CMakeCache.txt
+            cmake --install build/Linux/Release
+          fi
           cp LICENSE ThirdPartyNotices.txt "$prefix/"
       # ort links the shared library in ORT_LIB_PATH and downloads nothing.
       # pkg-config stays out, so no other libonnxruntime can win. The rpath
@@ -168,11 +203,15 @@ jobs:
           ORT_PREFER_DYNAMIC_LINK: "1"
           ORT_SKIP_DOWNLOAD: "1"
           LIBONNXRUNTIME_NO_PKG_CONFIG: "1"
-          RUSTFLAGS: -C link-arg=-Wl,-rpath,$ORIGIN/../lib/onnxruntime
         run: |
           set -eu
+          if [ "${RUNNER_OS}" = "macOS" ]; then
+            export RUSTFLAGS="-C link-arg=-Wl,-rpath,@loader_path/../lib/onnxruntime"
+          else
+            export RUSTFLAGS="-C link-arg=-Wl,-rpath,\$ORIGIN/../lib/onnxruntime"
+          fi
           log="$RUNNER_TEMP/embed-build.log"
-          if ! cargo install --locked -vv --root "$RUNNER_TEMP/embed" \
+          if ! cargo install --locked -vv --target "$TARGET" --root "$RUNNER_TEMP/embed" \
               --version "$PACKSET_EMBED_VERSION" packset-embed > "$log" 2>&1; then
             tail -n 200 "$log"
             exit 1
@@ -191,8 +230,13 @@ jobs:
           rt="onnxruntime-$TARGET"
           embed="packset-embed-$TARGET"
           mkdir -p "dist/$rt/lib/onnxruntime" "dist/$embed/bin"
-          cp -L "$RUNNER_TEMP/onnxruntime/lib/libonnxruntime.so.1" "dist/$rt/lib/onnxruntime/"
-          find "$RUNNER_TEMP/onnxruntime/lib" -type f -name 'libonnxruntime.so*' -exec cp {} "dist/$rt/lib/onnxruntime/" \;
+          if [ "${RUNNER_OS}" = "macOS" ]; then
+            cp -L "$RUNNER_TEMP/onnxruntime/lib/libonnxruntime.1.dylib" "dist/$rt/lib/onnxruntime/"
+            find "$RUNNER_TEMP/onnxruntime/lib" -type f -name 'libonnxruntime*.dylib' -exec cp {} "dist/$rt/lib/onnxruntime/" \;
+          else
+            cp -L "$RUNNER_TEMP/onnxruntime/lib/libonnxruntime.so.1" "dist/$rt/lib/onnxruntime/"
+            find "$RUNNER_TEMP/onnxruntime/lib" -type f -name 'libonnxruntime.so*' -exec cp {} "dist/$rt/lib/onnxruntime/" \;
+          fi
           cp "$RUNNER_TEMP/onnxruntime/LICENSE" "$RUNNER_TEMP/onnxruntime/ThirdPartyNotices.txt" "dist/$rt/lib/onnxruntime/"
           cp "$RUNNER_TEMP/embed/bin/packset-embed" "dist/$embed/bin/"
           tar -C "dist/$rt" -czf "dist/$rt.tar.gz" lib
@@ -201,14 +245,26 @@ jobs:
           mkdir -p "$check"
           tar -C "$check" -xzf "dist/$rt.tar.gz"
           tar -C "$check" -xzf "dist/$embed.tar.gz"
-          readelf -d "$check/bin/packset-embed" | grep -F "[\$ORIGIN/../lib/onnxruntime]"
-          ldd "$check/bin/packset-embed" | grep -F "$check/bin/../lib/onnxruntime/libonnxruntime.so.1 "
-          "$check/bin/packset-embed" --help > /dev/null
+          if [ "${RUNNER_OS}" = "macOS" ]; then
+            otool -l "$check/bin/packset-embed" | grep -F "@loader_path/../lib/onnxruntime"
+            otool -L "$check/bin/packset-embed" | grep -F "libonnxruntime.1.dylib"
+            if [ "$TARGET" = "aarch64-apple-darwin" ]; then
+              "$check/bin/packset-embed" --help > /dev/null
+            fi
+          else
+            readelf -d "$check/bin/packset-embed" | grep -F "[\$ORIGIN/../lib/onnxruntime]"
+            ldd "$check/bin/packset-embed" | grep -F "$check/bin/../lib/onnxruntime/libonnxruntime.so.1 "
+            "$check/bin/packset-embed" --help > /dev/null
+          fi
           cd dist
           for f in "$rt.tar.gz" "$embed.tar.gz"; do
             sha256sum "$f" > "$f.sha256"
           done
-          sha256sum "$RUNNER_TEMP/onnxruntime/lib/libonnxruntime.so.1" >> "$rt.tar.gz.sha256"
+          if [ "${RUNNER_OS}" = "macOS" ]; then
+            sha256sum "$RUNNER_TEMP/onnxruntime/lib/libonnxruntime.1.dylib" >> "$rt.tar.gz.sha256"
+          else
+            sha256sum "$RUNNER_TEMP/onnxruntime/lib/libonnxruntime.so.1" >> "$rt.tar.gz.sha256"
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: encoder-${{ env.TARGET }}

@@ -44,6 +44,9 @@ const CURSOR_PUSH: &str = "cloud-cursor-push";
 const ENCODER_ARCHIVES: &[&str] = &["onnxruntime", "packset-embed"];
 /// Where the encoder's rpath, `$ORIGIN/../lib/onnxruntime`, finds the runtime.
 const ENCODER_LIB: &str = "lib/onnxruntime";
+#[cfg(target_os = "macos")]
+const ENCODER_SONAME: &str = "libonnxruntime.1.dylib";
+#[cfg(not(target_os = "macos"))]
 const ENCODER_SONAME: &str = "libonnxruntime.so.1";
 
 /// Names the environment variable that holds the age identity for scope
@@ -2318,8 +2321,15 @@ fn cloud_vm() -> bool {
 }
 
 fn encoder_target() -> Option<&'static str> {
-    match (std::env::consts::ARCH, std::env::consts::OS) {
+    encoder_target_for(std::env::consts::ARCH, std::env::consts::OS)
+}
+
+fn encoder_target_for(arch: &str, os: &str) -> Option<&'static str> {
+    match (arch, os) {
         ("x86_64", "linux") => Some("x86_64-unknown-linux-gnu"),
+        ("aarch64", "linux") => Some("aarch64-unknown-linux-gnu"),
+        ("x86_64", "macos") => Some("x86_64-apple-darwin"),
+        ("aarch64", "macos") => Some("aarch64-apple-darwin"),
         _ => None,
     }
 }
@@ -4188,5 +4198,48 @@ mod tests {
         let keys = json_seat_keys(&doc);
         assert!(keys.contains("ljos.seat"), "{keys:?}");
         assert!(keys.contains("ljos_seat"), "{keys:?}");
+    }
+
+    #[test]
+    fn encoder_ships_for_macos_and_linux_on_x86_64_and_aarch64() {
+        for (arch, os, want) in [
+            ("x86_64", "linux", "x86_64-unknown-linux-gnu"),
+            ("aarch64", "linux", "aarch64-unknown-linux-gnu"),
+            ("x86_64", "macos", "x86_64-apple-darwin"),
+            ("aarch64", "macos", "aarch64-apple-darwin"),
+        ] {
+            assert_eq!(encoder_target_for(arch, os), Some(want));
+        }
+        assert_eq!(encoder_target_for("x86_64", "windows"), None);
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let yml = fs::read_to_string(root.join(".github/workflows/release.yml")).unwrap();
+        let triples: Vec<&str> = yml
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("triple: "))
+            .collect();
+        assert_eq!(
+            triples,
+            [
+                "x86_64-unknown-linux-gnu",
+                "aarch64-unknown-linux-gnu",
+                "aarch64-apple-darwin",
+                "x86_64-apple-darwin",
+            ]
+        );
+        assert!(
+            yml.contains("protoc-21.12-osx-universal_binary.zip"),
+            "Darwin encoder build must pin protoc 3.21.12"
+        );
+        assert_eq!(
+            yml.matches("ONNX_CUSTOM_PROTOC_EXECUTABLE=$PROTOC").count(),
+            2,
+            "both macOS and Linux encoder builds pass ONNX_CUSTOM_PROTOC_EXECUTABLE"
+        );
+        assert_eq!(
+            yml.matches("ONNX_CUSTOM_PROTOC_EXECUTABLE:[A-Z]+=$PROTOC")
+                .count(),
+            2,
+            "both macOS and Linux encoder builds verify ONNX_CUSTOM_PROTOC_EXECUTABLE in CMakeCache.txt"
+        );
     }
 }
