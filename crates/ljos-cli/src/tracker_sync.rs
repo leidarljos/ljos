@@ -41,6 +41,11 @@ pub fn push_leftover() -> String {
     let Some(waiting) = unpushed_count(&root).filter(|n| *n > 0) else {
         return String::new();
     };
+    // Only the remote's default branch is published from finish. Any
+    // other branch is left where it is, with no refusal recorded.
+    if !on_default_branch(&root) {
+        return String::new();
+    }
     match crate::tracker_push::publish(&root) {
         Ok(()) => {
             crate::clear_push_refusal();
@@ -81,6 +86,31 @@ fn has_remote(root: &Path) -> bool {
         .is_some_and(|text| text.lines().any(|line| !line.trim().is_empty()))
 }
 
+/// The checkout is on the branch `origin/HEAD` names. With no
+/// `origin/HEAD`, `main` or `master` counts when that remote branch
+/// exists. Every other name is skipped.
+fn on_default_branch(root: &Path) -> bool {
+    let Some(head) = crate::git_ok_stdout(root, &["rev-parse", "--abbrev-ref", "HEAD"]) else {
+        return false;
+    };
+    let head = head.trim();
+    if head.is_empty() || head == "HEAD" {
+        return false;
+    }
+    if let Some(origin_head) =
+        crate::git_ok_stdout(root, &["rev-parse", "--abbrev-ref", "origin/HEAD"])
+    {
+        let origin_head = origin_head.trim();
+        let default = origin_head.rsplit('/').next().unwrap_or(origin_head);
+        return !default.is_empty() && head == default;
+    }
+    if head != "main" && head != "master" {
+        return false;
+    }
+    let remote = format!("origin/{head}");
+    crate::git_ok_stdout(root, &["rev-parse", "--verify", "--quiet", &remote]).is_some()
+}
+
 fn org_edits(root: &Path) -> usize {
     if git_leaves_edits() {
         return 0;
@@ -119,10 +149,12 @@ fn fix_command(root: &Path, unpushed: u64, edits: usize) -> String {
     let mut parts = Vec::new();
     if edits > 0 {
         let message = crate::tools::sh_quote("tracker: commit issue edits");
-        parts.push(format!("git -C {quoted} add -u -- ."));
+        parts.push(format!("git -C {quoted} add -- ."));
         parts.push(format!("git -C {quoted} commit -m {message}"));
     }
-    if unpushed > 0 {
+    // A commit of the edits is itself unpushed, so the fix publishes
+    // whenever a remote can take it.
+    if unpushed > 0 || (edits > 0 && has_remote(root)) {
         parts.push(format!("git -C {quoted} push"));
     }
     parts.join(" && ")
@@ -214,7 +246,8 @@ mod tests {
         std::fs::write(root.join("Software/probe/issues/extra.org"), "* TODO b\n").unwrap();
         let both = super::tracker_sync_line().unwrap();
         assert!(both.contains("1 unpushed, 2 uncommitted edits"), "{both}");
-        assert!(both.contains("add -u -- ."), "{both}");
+        assert!(both.contains("add -- ."), "{both}");
+        assert!(!both.contains("add -u"), "{both}");
         assert!(both.contains("commit -m "), "{both}");
         assert!(both.contains(" push\n"), "{both}");
 
@@ -269,5 +302,97 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&still.stdout).trim(), "1");
+    }
+
+    fn review_heads(origin: &Path) -> String {
+        let out = std::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(origin)
+            .args([
+                "for-each-ref",
+                "--format=%(refname) %(objectname:short)",
+                "refs/heads",
+            ])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[test]
+    fn review_repro_finish_pushes_a_new_branch_that_is_not_the_default() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let (root, origin) = checkout(dir.path());
+        isolate(&root);
+        git(&root, &["remote", "set-head", "origin", "main"]);
+        git(&root, &["checkout", "-q", "-b", "wip"]);
+        git(&root, &["commit", "-q", "--allow-empty", "-m", "on wip"]);
+        let said = super::push_leftover();
+        let heads = review_heads(&origin);
+        assert!(!heads.contains("refs/heads/wip"), "said={said:?}\n{heads}");
+        assert!(said.is_empty(), "{said}");
+    }
+
+    #[test]
+    fn review_repro_finish_pushes_a_tracked_feature_branch() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let (root, origin) = checkout(dir.path());
+        isolate(&root);
+        git(&root, &["checkout", "-q", "-b", "feature"]);
+        git(&root, &["push", "-q", "-u", "origin", "feature"]);
+        let before = review_heads(&origin);
+        git(
+            &root,
+            &["commit", "-q", "--allow-empty", "-m", "feature work"],
+        );
+        let said = super::push_leftover();
+        let after = review_heads(&origin);
+        assert_eq!(before, after, "said={said:?}");
+        assert!(said.is_empty(), "{said}");
+    }
+
+    #[test]
+    fn review_repro_the_suggested_fix_leaves_a_new_issue_file() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let (root, _) = checkout(dir.path());
+        isolate(&root);
+        std::fs::create_dir_all(root.join("Software/probe/issues")).unwrap();
+        std::fs::write(root.join("Software/probe/issues/extra.org"), "* TODO b\n").unwrap();
+        let line = super::tracker_sync_line().unwrap();
+        let fix = line.split_once("fix: ").unwrap().1.trim().to_string();
+        let ran = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&fix)
+            .output()
+            .unwrap();
+        let again = super::tracker_sync_line();
+        assert!(
+            again.is_none(),
+            "fix={fix}\nexit={:?} {}\nstill: {again:?}",
+            ran.status.code(),
+            String::from_utf8_lossy(&ran.stderr)
+        );
+    }
+
+    #[test]
+    fn review_repro_a_feature_branch_with_no_upstream_counts_as_unpushed() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let (root, origin) = checkout(dir.path());
+        isolate(&root);
+        git(&root, &["remote", "set-head", "origin", "main"]);
+        git(&root, &["checkout", "-q", "-b", "feature"]);
+        git(
+            &root,
+            &["commit", "-q", "--allow-empty", "-m", "local only"],
+        );
+        let line = super::tracker_sync_line().unwrap();
+        assert!(line.contains("1 unpushed"), "{line}");
+        let said = super::push_leftover();
+        assert!(said.is_empty(), "{said}");
+        let heads = review_heads(&origin);
+        assert!(!heads.contains("refs/heads/feature"), "{heads}");
     }
 }
