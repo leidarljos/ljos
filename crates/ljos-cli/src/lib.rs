@@ -34740,7 +34740,17 @@ fn policy_reading_in(
         session: None,
         shape: HookShape::Asks,
     };
-    let context = hook_timed("policy_context", || hook_context(&call, 5));
+    // The pack's recall runs beside the verdict and is waited for only up
+    // to [`policy_recall_wait`]: the verdict never waits on memory.
+    let started = std::time::Instant::now();
+    let recall = {
+        let call = call.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(hook_timed("policy_context", || hook_context(&call, 5)));
+        });
+        rx
+    };
     // The rules are the law's memory: a deny or an ask fires before the
     // context, so a reader sees the verdict first. A line the fast check
     // already judged does not wait on policyd, which can hang. A guard that
@@ -34782,6 +34792,14 @@ fn policy_reading_in(
         Some(rule) if !deny => Some(rule),
         _ => gated,
     };
+    let wait = policy_recall_wait().saturating_sub(started.elapsed());
+    let context = recall.recv_timeout(wait).unwrap_or_else(|_| {
+        eprintln!(
+            "ljos policy: the memory recall had not answered after {}s, so this verdict carries none",
+            policy_recall_wait().as_secs()
+        );
+        String::new()
+    });
     let ruled = hook_output_ruled(&call, &context, gated.as_ref());
     // A TCB `allow` is not the verdict once this seat asks or denies. The
     // line the person reads is the ask, including a force push on a box
@@ -34806,6 +34824,16 @@ fn policy_reading_in(
         Some(tcb) => Ok(format!("{line}\n{tcb}\n{ruled}")),
         None => Ok(format!("{line}\n{ruled}")),
     }
+}
+
+/// How long `ljos policy` waits, from its start, for the pack's recall
+/// beside the verdict: `LJOS_POLICY_RECALL_WAIT` seconds, else 3.
+fn policy_recall_wait() -> std::time::Duration {
+    let secs = std::env::var("LJOS_POLICY_RECALL_WAIT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(3);
+    std::time::Duration::from_secs(secs)
 }
 
 fn tcb_is_allow(text: &str) -> bool {
