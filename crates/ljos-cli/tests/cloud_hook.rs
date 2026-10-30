@@ -5,6 +5,7 @@
 
 ljos_test_boot::harness!();
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
@@ -958,4 +959,277 @@ fn send_pack_checks_the_destination_repository() {
     refused("git send-pack other develop", here);
     allowed("git send-pack --dry-run origin develop", here);
     allowed("git push other develop", here);
+}
+
+fn hook_push(repo: &Path, local: &str, remote: &str) -> std::process::Output {
+    let refs = format!("refs/heads/develop {local} refs/heads/develop {remote}\n");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .current_dir(repo)
+        .args(["git-hook", "pre-push", "origin", "origin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(refs.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+/// A commit-msg hook that appends a by-line is refused on push. The same
+/// tree rebuilt with commit-tree, and a Tests paragraph, are allowed.
+/// A by-line with no blank line before it is refused too.
+#[test]
+fn a_commit_message_hook_is_refused_on_push() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    let (origin, repo) = bare_repo(root.path(), "seat");
+    let hooks = repo.join(".git/hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    executable(
+        &hooks.join("commit-msg"),
+        "#!/bin/sh\nprintf '\\nCo-authored-by: Ada Lovelace <ada@example.com>\\n' >> \"$1\"\n",
+    );
+    git(&repo, &["commit", "-q", "--allow-empty", "-m", "note"]);
+    let body = git(&repo, &["log", "-1", "--format=%B"]);
+    assert!(
+        body.lines().any(|line| line.starts_with("Co-authored-by:")),
+        "{body}"
+    );
+    let bad = git(&repo, &["rev-parse", "HEAD"]);
+    let parent = git(&repo, &["rev-parse", "HEAD^"]);
+
+    std::env::set_current_dir(&repo).unwrap();
+    ljos_cli::cloud::up(false).unwrap();
+    std::env::set_current_dir(root.path()).unwrap();
+    ljos_cli::cloud::write_push_allowlist(&[origin.to_str().unwrap()], &[], &["develop"]).unwrap();
+
+    push_fails(&repo, "git push origin develop");
+    assert!(!has_ref(&origin, "refs/heads/develop"));
+    let hooked = hook_push(&repo, bad.trim(), parent.trim());
+    let hooked_text = text_of(&hooked);
+    assert!(!hooked.status.success(), "{hooked_text}");
+    assert!(hooked_text.contains("message is refused"), "{hooked_text}");
+
+    sh_ok(
+        &repo,
+        "parent=$(git rev-parse HEAD^)\n\
+         tree=$(git rev-parse 'HEAD^{tree}')\n\
+         clean=$(git commit-tree \"$tree\" -p \"$parent\" -m note)\n\
+         git reset -q --hard \"$clean\"\n",
+    );
+    let clean = git(&repo, &["rev-parse", "HEAD"]);
+    sh_ok(&repo, "git push -q origin develop");
+    assert!(has_ref(&origin, "refs/heads/develop"));
+    let allowed = hook_push(&repo, clean.trim(), parent.trim());
+    let allowed_text = text_of(&allowed);
+    assert!(
+        !allowed_text.contains("message is refused"),
+        "{allowed_text}"
+    );
+
+    sh_ok(
+        &repo,
+        "parent=$(git rev-parse HEAD)\n\
+         tree=$(git rev-parse 'HEAD^{tree}')\n\
+         printf 'note\\nCo-authored-by: Ada Lovelace <ada@example.com>\\n' > msg\n\
+         bad=$(git commit-tree \"$tree\" -p \"$parent\" -F msg)\n\
+         git reset -q --hard \"$bad\"\n",
+    );
+    let glued = git(&repo, &["log", "-1", "--format=%B"]);
+    assert!(
+        glued.contains("Co-authored-by:"),
+        "the by line was not stored:\n{glued}"
+    );
+    assert!(
+        !glued.contains("\n\nCo-authored-by:"),
+        "a blank line slipped in:\n{glued}"
+    );
+    let glued_sha = git(&repo, &["rev-parse", "HEAD"]);
+    let tip = git(&repo, &["rev-parse", "HEAD^"]);
+    push_fails(&repo, "git push origin develop");
+    let glued_hook = hook_push(&repo, glued_sha.trim(), tip.trim());
+    let glued_text = text_of(&glued_hook);
+    assert!(
+        glued_text.contains("message is refused"),
+        "a by line with no blank line was allowed: {glued_text}"
+    );
+
+    sh_ok(
+        &repo,
+        "parent=$(git rev-parse HEAD^)\n\
+         tree=$(git rev-parse 'HEAD^{tree}')\n\
+         printf 'note\\n\\nTests: cargo test\\n' > msg\n\
+         ok=$(git commit-tree \"$tree\" -p \"$parent\" -F msg)\n\
+         git reset -q --hard \"$ok\"\n",
+    );
+    sh_ok(&repo, "git push -q origin develop");
+    assert!(has_ref(&origin, "refs/heads/develop"));
+}
+
+/// Join `before` and `after` with a tab from `printf '\t'`.
+fn tab_message(before: &str, after: &str) -> String {
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg("printf '%s' \"$1\"; printf '\\t'; printf '%s' \"$2\"")
+        .arg("tab")
+        .arg(before)
+        .arg(after)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text_of(&out));
+    String::from_utf8(out.stdout).unwrap()
+}
+
+fn message_push(repo: &Path, parent: &str, message: &str) -> std::process::Output {
+    let msg = repo.join("push-msg");
+    fs::write(&msg, message).unwrap();
+    let script = format!(
+        "tree=$(git rev-parse '{parent}^{{tree}}')\n\
+         made=$(git commit-tree \"$tree\" -p {parent} -F push-msg)\n\
+         git reset -q --hard \"$made\"\n\
+         git push origin develop\n"
+    );
+    sh_at(repo, &script)
+}
+
+/// The cloud pre-push script refuses the same lines the other checks do,
+/// and still allows a Tests paragraph, a note paragraph, and prose.
+#[test]
+fn the_cloud_pre_push_script_uses_the_line_rule() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    let (origin, repo) = bare_repo(root.path(), "seat");
+    std::env::set_current_dir(&repo).unwrap();
+    ljos_cli::cloud::up(false).unwrap();
+    std::env::set_current_dir(root.path()).unwrap();
+    ljos_cli::cloud::write_push_allowlist(&[origin.to_str().unwrap()], &[], &["develop"]).unwrap();
+    sh_ok(&repo, "git push -q -u origin develop");
+    let parent = git(&repo, &["rev-parse", "HEAD"]);
+    let parent = parent.trim().to_string();
+
+    for message in [
+        "note\nCo-authored-by : x\n",
+        "note\n  Co-authored-by: x\n",
+        "note\nMade-with : x\n",
+        "note\n Made-with: x\n",
+        "note\nCURSOR_AGENT=1\n",
+        "note\n  CURSOR_AGENT=1\n",
+        "note\nCURSOR_AGENT: 1\n",
+        "note\ncursoragent\n",
+        "note\nCursor Agent wrote this\n",
+        "note\nsee cursoragent in the note\n",
+        "note\nsee a cursor agent in the note\n",
+        &tab_message("note\n", "Co-authored-by: A\n"),
+        &tab_message("note\nCo-authored-by", ": A\n"),
+        &tab_message("note\n", "CURSOR_AGENT=1\n"),
+        &tab_message("note\nCURSOR_AGENT", "=1\n"),
+    ] {
+        let out = message_push(&repo, &parent, message);
+        let text = text_of(&out);
+        assert!(!out.status.success(), "accepted:\n{message}{text}");
+        assert!(text.contains("pre-push:"), "{message}{text}");
+        assert!(text.contains("message is refused"), "{message}{text}");
+        sh_ok(&repo, &format!("git reset -q --hard {parent}"));
+    }
+    for message in [
+        "note\n\nTests: cargo test\n",
+        "note\n\nNote: kept\n",
+        "The Signed-off-by line is gone.\n",
+        "see CURSOR_AGENT in the prose\n",
+        "The figures are generated with matplotlib.\n",
+        "the plot was made with cursor tools.\n",
+        "note\n\nTests: ran cargo test\n",
+        "Ask the author by mail.\n",
+    ] {
+        let out = message_push(&repo, &parent, message);
+        let text = text_of(&out);
+        assert!(out.status.success(), "refused:\n{message}{text}");
+        sh_ok(&repo, &format!("git reset -q --hard {parent}"));
+        sh_ok(
+            &origin,
+            &format!("git update-ref refs/heads/develop {parent}"),
+        );
+    }
+    let _ = origin;
+}
+
+/// A new branch on top of a refused commit that is already on a remote
+/// is allowed. The check reads only commits the remotes do not have.
+#[test]
+fn a_new_branch_omits_a_commit_already_on_a_remote() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    let (origin, repo) = bare_repo(root.path(), "seat");
+    sh_ok(
+        &repo,
+        "tree=$(git rev-parse 'HEAD^{tree}')\n\
+         parent=$(git rev-parse HEAD)\n\
+         printf 'note\\nCo-authored-by: Ada <ada@example.com>\\n' > msg\n\
+         bad=$(git commit-tree \"$tree\" -p \"$parent\" -F msg)\n\
+         git reset -q --hard \"$bad\"\n\
+         git push -q -u origin develop\n",
+    );
+    assert!(has_ref(&origin, "refs/heads/develop"));
+    std::env::set_current_dir(&repo).unwrap();
+    ljos_cli::cloud::up(false).unwrap();
+    std::env::set_current_dir(root.path()).unwrap();
+    ljos_cli::cloud::write_push_allowlist(&[origin.to_str().unwrap()], &[], &["develop", "topic"])
+        .unwrap();
+    sh_ok(
+        &repo,
+        "git checkout -q -b topic\n\
+         tree=$(git rev-parse 'HEAD^{tree}')\n\
+         parent=$(git rev-parse HEAD)\n\
+         clean=$(git commit-tree \"$tree\" -p \"$parent\" -m note)\n\
+         git reset -q --hard \"$clean\"\n\
+         git push -q -u origin topic\n",
+    );
+    assert!(has_ref(&origin, "refs/heads/topic"));
+    let clean = git(&repo, &["rev-parse", "HEAD"]);
+    let zero = "0000000000000000000000000000000000000000";
+    let out = hook_push(&repo, clean.trim(), zero);
+    let text = text_of(&out);
+    assert!(
+        !text.contains("message is refused"),
+        "a new branch reread an old commit: {text}"
+    );
+}
+
+/// A pre-push stdin line that is not a ref update is refused.
+#[test]
+fn a_pre_push_line_that_is_not_a_ref_is_refused() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, _xdg) = seat_env(root.path());
+    clear_ids();
+    let (_origin, repo) = bare_repo(root.path(), "seat");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ljos"))
+        .current_dir(&repo)
+        .args(["git-hook", "pre-push"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"not a ref update\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let text = text_of(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("cannot read"), "{text}");
 }

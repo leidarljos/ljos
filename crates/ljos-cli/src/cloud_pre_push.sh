@@ -112,6 +112,29 @@ host_path() {
   fi
 }
 
+# Refuse when a commit in the rev-list arguments cannot be read, or a
+# message matches the line rule. A Tests or note paragraph is not that
+# line. $1 names the branch. The rest is passed to git rev-list.
+refuse_commit_messages() {
+  label=$1
+  shift
+  if ! commits=$(/usr/bin/git rev-list "$@" 2>/dev/null); then
+    echo "pre-push: cannot read commits on $label" >&2
+    exit 1
+  fi
+  for c in $commits; do
+    if ! body=$(/usr/bin/git log -1 --format=%B "$c" 2>/dev/null); then
+      echo "pre-push: cannot read $c" >&2
+      exit 1
+    fi
+    if printf '%s\n' "$body" | /usr/bin/grep -iEq \
+      '^[[:blank:]]*(([A-Za-z0-9-]+-by|made-with)[[:blank:]]*:|cursor[_-]?agent[A-Za-z0-9_]*[[:blank:]]*[=:]|generated with|made with cursor)|cursor agent|cursoragent'; then
+      echo "pre-push: $c message is refused" >&2
+      exit 1
+    fi
+  done
+}
+
 # ljos-push-gate
 PATH=/usr/bin:/bin
 export PATH
@@ -206,6 +229,11 @@ while IFS=' ' read -r local_ref local_sha remote_ref remote_sha _; do
       echo "pre-push: this push updates $branch; a cloud seat may push only its named branches and develop" >&2
       exit 1
     fi
+  fi
+  if [ "$remote_sha" = "$z" ]; then
+    refuse_commit_messages "$branch" "$local_sha" --not --remotes
+  else
+    refuse_commit_messages "$branch" "$remote_sha..$local_sha"
   fi
 done
 exit 0

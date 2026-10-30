@@ -22,7 +22,6 @@ mod runner;
 const PASS: &str = "correct horse battery";
 const PROMPT: &str = "Type your person passphrase to run this git push as you: ";
 const NOT_GATED: &str = "The person at their own terminal is not gated";
-const PUSH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/heads/develop refs/heads/develop\n";
 
 /// The child's key directory. Read by this test binary only.
 const CHILD_DIR: &str = "PERSON_GATE_CHILD_DIR";
@@ -58,6 +57,8 @@ struct Case {
     home: tempfile::TempDir,
     keys: PathBuf,
     repo: PathBuf,
+    /// A real commit on both sides, so the message check has nothing new to read.
+    push: String,
 }
 
 impl Case {
@@ -78,7 +79,44 @@ impl Case {
             .status()
             .unwrap();
         assert!(init.success());
-        Self { home, keys, repo }
+        for (key, value) in [
+            ("user.email", "t@example.invalid"),
+            ("user.name", "t"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "/dev/null"),
+        ] {
+            let out = Command::new("git")
+                .args(["config", key, value])
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{key}");
+        }
+        let made = Command::new("git")
+            .args(["commit", "-q", "--allow-empty", "-m", "seed"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "{}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        let head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(head.status.success());
+        let sha = String::from_utf8(head.stdout).unwrap();
+        let sha = sha.trim();
+        let push = format!("refs/heads/develop {sha} refs/heads/develop {sha}\n");
+        Self {
+            home,
+            keys,
+            repo,
+            push,
+        }
     }
 
     /// The child command, run directly or through `wrapper`.
@@ -151,7 +189,7 @@ fn the_right_passphrase_on_the_terminal_lets_the_push_through() {
     let case = Case::new(true);
     let (out, shown) = on_pty(
         &mut case.command(None, Some("CURSOR_AGENT")),
-        PUSH,
+        &case.push,
         Some(PASS),
     );
     let said = String::from_utf8_lossy(&out.stdout);
@@ -174,7 +212,7 @@ fn a_wrong_passphrase_is_refused_and_counted() {
     let case = Case::new(true);
     let (out, _) = on_pty(
         &mut case.command(None, Some("CURSOR_AGENT")),
-        PUSH,
+        &case.push,
         Some("not the passphrase"),
     );
     let err = refused(&out);
@@ -198,7 +236,7 @@ fn five_wrong_passphrases_lock_the_prompt_out() {
     for i in 0..5 {
         let (out, shown) = on_pty(
             &mut case.command(None, Some("CURSOR_AGENT")),
-            PUSH,
+            &case.push,
             Some("not the passphrase"),
         );
         let err = refused(&out);
@@ -207,7 +245,7 @@ fn five_wrong_passphrases_lock_the_prompt_out() {
     assert_eq!(case.failures(), 5);
     let (out, shown) = on_pty(
         &mut case.command(None, Some("CURSOR_AGENT")),
-        PUSH,
+        &case.push,
         Some(PASS),
     );
     let err = refused(&out);
@@ -220,7 +258,11 @@ fn five_wrong_passphrases_lock_the_prompt_out() {
 #[test]
 fn nothing_typed_is_refused() {
     let case = Case::new(true);
-    let (out, shown) = on_pty(&mut case.command(None, Some("CURSOR_AGENT")), PUSH, None);
+    let (out, shown) = on_pty(
+        &mut case.command(None, Some("CURSOR_AGENT")),
+        &case.push,
+        None,
+    );
     assert!(shown.contains(PROMPT), "{shown}");
     let err = refused(&out);
     assert!(err.contains("nothing was typed"), "{err}");
@@ -237,7 +279,7 @@ fn a_hard_runner_is_never_asked() {
     runner::runner_at(&claude);
     let (out, shown) = on_pty(
         &mut case.command(Some(&claude), Some("CURSOR_AGENT")),
-        PUSH,
+        &case.push,
         Some(PASS),
     );
     let err = refused(&out);
@@ -270,7 +312,7 @@ fn piped_stdin_without_a_terminal_cannot_answer() {
         .stdin
         .take()
         .unwrap()
-        .write_all(format!("{PASS}\n{PASS}\n").as_bytes())
+        .write_all(case.push.as_bytes())
         .unwrap();
     let out = pty::wait_output(child, 60);
     let err = refused(&out);
@@ -285,7 +327,7 @@ fn piped_stdin_with_a_terminal_cannot_answer() {
     let case = Case::new(true);
     let (out, shown) = on_pty(
         &mut case.command(None, Some("CURSOR_AGENT")),
-        &format!("{PASS}\n{PASS}\n"),
+        &case.push,
         None,
     );
     assert!(shown.contains(PROMPT), "{shown}");
@@ -307,7 +349,7 @@ fn no_variable_supplies_the_passphrase() {
     ] {
         cmd.env(name, PASS);
     }
-    let (out, shown) = on_pty(&mut cmd, PUSH, None);
+    let (out, shown) = on_pty(&mut cmd, &case.push, None);
     assert!(shown.contains(PROMPT), "{shown}");
     let err = refused(&out);
     assert!(err.contains("nothing was typed"), "{err}");
@@ -319,7 +361,7 @@ fn no_key_is_refused_without_a_prompt() {
     let case = Case::new(false);
     let (out, shown) = on_pty(
         &mut case.command(None, Some("CURSOR_AGENT")),
-        PUSH,
+        &case.push,
         Some(PASS),
     );
     let err = refused(&out);
@@ -346,7 +388,7 @@ fn an_interrupt_at_the_prompt_restores_echo() {
         .stdin
         .take()
         .unwrap()
-        .write_all(PUSH.as_bytes())
+        .write_all(case.push.as_bytes())
         .unwrap();
     assert!(term.wait_for(PROMPT, 30), "{}", term.shown());
     assert!(!term.echo_on(), "echo was on at the prompt");

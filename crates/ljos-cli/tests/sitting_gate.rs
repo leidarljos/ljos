@@ -217,6 +217,34 @@ impl Seat {
         child.wait_with_output().unwrap()
     }
 
+    /// One real commit on both sides, so the message check has nothing new
+    /// to read and the sitting check still sees `develop`.
+    fn same_commit_refs(&self) -> String {
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&self.repo)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", text_of(&out));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["config", "user.email", "t@example.invalid"]);
+        git(&["config", "user.name", "t"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        git(&["config", "core.hooksPath", "/dev/null"]);
+        let head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&self.repo)
+            .output()
+            .unwrap();
+        if !head.status.success() {
+            git(&["commit", "-q", "--allow-empty", "-m", "seed"]);
+        }
+        let sha = git(&["rev-parse", "HEAD"]);
+        format!("refs/heads/develop {sha} refs/heads/develop {sha}\n")
+    }
+
     fn card(&self, state: &str, by: &str) {
         std::fs::write(
             &self.card,
@@ -541,8 +569,8 @@ fn a_solo_seat_clears_policy_and_the_git_hook() {
     asks_for_consensus(&seat.policy(develop, &env), develop);
     seat.vote(&[("inky", "approve")]);
     not_refused(&seat.policy(develop, &env), develop);
-    let refs = "aaaa bbbb refs/heads/develop refs/heads/develop\n";
-    let out = seat.git_hook_push(refs, &env);
+    let refs = seat.same_commit_refs();
+    let out = seat.git_hook_push(&refs, &env);
     let said = text_of(&out);
     assert!(
         out.status.success(),
@@ -566,8 +594,8 @@ fn a_gates_file_that_does_not_parse_asks_the_git_hook() {
         said.contains("ask"),
         "a malformed gates file was not an ask\n{said}"
     );
-    let refs = "aaaa bbbb refs/heads/develop refs/heads/develop\n";
-    let out = seat.git_hook_push(refs, &[]);
+    let refs = seat.same_commit_refs();
+    let out = seat.git_hook_push(&refs, &[]);
     let hooked = text_of(&out);
     assert!(
         !out.status.success(),

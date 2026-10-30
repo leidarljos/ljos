@@ -17,7 +17,11 @@
 //! the hook. `pre-commit` and `pre-push` run the sitting gate under an
 //! agent runner: a commit needs a live sitting, and a push onto a
 //! protected branch also needs the sitting's ticket to clear it. That
-//! refusal fails the hook. `pre-push` copies stdin like `post-rewrite`.
+//! refusal fails the hook. `pre-push` also refuses a commit it would
+//! send whose message has a by-trailer, a made-with line, or a
+//! generated line, and it refuses when those commits cannot be read.
+//! A Tests paragraph is not that line. The check runs with or without
+//! a runner. `pre-push` copies stdin like `post-rewrite`.
 //!
 //! `pre-commit install` follows `core.hooksPath` and would replace stubs
 //! ljos owns. Install the framework into the repository, then let the stub
@@ -801,8 +805,10 @@ pub fn run_git_commit(hook: &str) -> Result<()> {
 /// Run the ljos part of git hook `name`.
 ///
 /// `post-commit` and `post-rewrite` book the commit. `pre-commit` and
-/// `pre-push` run the sitting gate ([`gate`]). Any other name succeeds
-/// and does nothing. Arguments git passed the hook are ignored.
+/// `pre-push` run the sitting gate ([`gate`]). `pre-push` also refuses
+/// a pushed commit whose message matches [`line_refused`]. Any other
+/// name succeeds and does nothing. Arguments git passed the hook are
+/// ignored.
 ///
 /// # Errors
 ///
@@ -811,15 +817,171 @@ pub fn run_git_commit(hook: &str) -> Result<()> {
 pub fn run_named(name: &str) -> Result<()> {
     let name = name.trim();
     if books_commit(name) {
-        run_git_commit(name)
-    } else if gates_git(name) {
-        gate(name).map_err(|err| match dropped_refusal(name) {
-            Some(why) => anyhow!("{err:#}\n{why}"),
-            None => err,
-        })
-    } else {
-        Ok(())
+        return run_git_commit(name);
     }
+    if name == "pre-push" {
+        let refs = std::io::read_to_string(std::io::stdin())
+            .map_err(|err| anyhow!("pre-push: cannot read the refs ({err})"))?;
+        refuse_push_messages(&refs)?;
+        return gate(name, &refs).map_err(|err| dropped(name, err));
+    }
+    if gates_git(name) {
+        return gate(name, "").map_err(|err| dropped(name, err));
+    }
+    Ok(())
+}
+
+fn dropped(name: &str, err: anyhow::Error) -> anyhow::Error {
+    match dropped_refusal(name) {
+        Some(why) => anyhow!("{err:#}\n{why}"),
+        None => err,
+    }
+}
+
+/// Refuse when a commit the push would send cannot be read, or its
+/// message has a line [`line_refused`] names. A delete sends nothing.
+/// A line that is not a ref update is refused.
+fn refuse_push_messages(refs: &str) -> Result<()> {
+    for line in refs.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() != 4 {
+            bail!("pre-push: cannot read `{line}`");
+        }
+        let local_sha = fields[1];
+        let remote_sha = fields[3];
+        if !is_object_name(local_sha) || !is_object_name(remote_sha) {
+            bail!("pre-push: cannot read `{line}`");
+        }
+        if is_zero_name(local_sha) {
+            continue;
+        }
+        let listed = if is_zero_name(remote_sha) {
+            listed_commits(&[local_sha, "--not", "--remotes"])?
+        } else {
+            let range = format!("{remote_sha}..{local_sha}");
+            listed_commits(&[&range])?
+        };
+        for sha in listed {
+            let body = commit_body(&sha)?;
+            if message_refused(&body) {
+                bail!("pre-push: {sha} message is refused");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_object_name(text: &str) -> bool {
+    matches!(text.len(), 40 | 64) && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn is_zero_name(text: &str) -> bool {
+    is_object_name(text) && text.bytes().all(|b| b == b'0')
+}
+
+fn listed_commits(args: &[&str]) -> Result<Vec<String>> {
+    let mut git_args = vec!["rev-list"];
+    git_args.extend_from_slice(args);
+    let shown = args.join(" ");
+    let out = git_command(&git_args, &[])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .with_context(|| format!("pre-push: cannot read commits in {shown}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        bail!("pre-push: cannot read commits in {shown} ({})", err.trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+fn commit_body(sha: &str) -> Result<String> {
+    let out = git_command(&["log", "-1", "--format=%B", sha], &[])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .with_context(|| format!("pre-push: cannot read {sha}"))?;
+    if !out.status.success() {
+        bail!("pre-push: cannot read {sha}");
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn message_refused(body: &str) -> bool {
+    phrase_refused(&body.to_ascii_lowercase()) || body.lines().any(line_refused)
+}
+
+/// A by-trailer, a made-with line, a generated line at the start of
+/// the line, or a machine account mark anywhere on the line. A Tests
+/// or note paragraph is none of those. A generated phrase
+/// mid-sentence is not a generated line.
+fn line_refused(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    account_anywhere(&lower) || phrase_refused(&lower) || anchored_mark(&lower)
+}
+
+/// `cursor agent` and `cursoragent` match anywhere on the line.
+fn account_anywhere(lower: &str) -> bool {
+    lower.contains("cursor agent") || lower.contains("cursoragent")
+}
+
+/// `generated with` and `made with cursor` match only at the start of
+/// the line, after optional blanks.
+fn phrase_refused(lower: &str) -> bool {
+    let rest = lower.trim_start_matches([' ', '\t']);
+    rest.starts_with("generated with") || rest.starts_with("made with cursor")
+}
+
+fn anchored_mark(lower: &str) -> bool {
+    let rest = lower.trim_start_matches([' ', '\t']);
+    made_with_mark(rest) || by_mark(rest) || cursor_assign(rest)
+}
+
+fn made_with_mark(rest: &str) -> bool {
+    let Some(after) = rest.strip_prefix("made-with") else {
+        return false;
+    };
+    after.trim_start_matches([' ', '\t']).starts_with(':')
+}
+
+fn by_mark(rest: &str) -> bool {
+    let Some(colon) = rest.find(':') else {
+        return false;
+    };
+    let token = rest[..colon].trim_end_matches([' ', '\t']);
+    let Some(name) = token.strip_suffix("-by") else {
+        return false;
+    };
+    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+fn cursor_assign(rest: &str) -> bool {
+    let Some(after_cursor) = rest.strip_prefix("cursor") else {
+        return false;
+    };
+    let after_sep = after_cursor
+        .strip_prefix('_')
+        .or_else(|| after_cursor.strip_prefix('-'))
+        .unwrap_or(after_cursor);
+    let Some(after_agent) = after_sep.strip_prefix("agent") else {
+        return false;
+    };
+    let mut end = 0;
+    for c in after_agent.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            end += c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let after = after_agent[end..].trim_start_matches([' ', '\t']);
+    after.starts_with('=') || after.starts_with(':')
 }
 
 /// Why git goes on after the gate refuses, when the hook file it is
@@ -849,11 +1011,11 @@ fn dropped_refusal(name: &str) -> Option<String> {
 /// person. When a runner variable is the only cause, and the call would
 /// be refused, the person is asked for their passphrase on the
 /// controlling terminal; a right answer lets this one call through.
-fn gate(name: &str) -> Result<()> {
+fn gate(name: &str, refs: &str) -> Result<()> {
     let Some(cause) = crate::runner_cause() else {
         return Ok(());
     };
-    let refused = match gate_runner(name) {
+    let refused = match gate_runner(name, refs) {
         Ok(()) => return Ok(()),
         Err(refused) => refused,
     };
@@ -879,7 +1041,7 @@ fn gate(name: &str) -> Result<()> {
     }
 }
 
-fn gate_runner(name: &str) -> Result<()> {
+fn gate_runner(name: &str, refs: &str) -> Result<()> {
     let repo = git_line(&["rev-parse", "--show-toplevel"])
         .map(PathBuf::from)
         .or_else(git_dir);
@@ -925,10 +1087,7 @@ fn gate_runner(name: &str) -> Result<()> {
             ))
         }
     };
-    let dest = match std::io::read_to_string(std::io::stdin()) {
-        Ok(refs) => protected_ref(&refs, &cfg.branches),
-        Err(e) => Some(format!("sends refs the hook cannot read ({e})")),
-    };
+    let dest = protected_ref(refs, &cfg.branches);
     let Some(dest) = dest else {
         return Ok(());
     };
@@ -1601,5 +1760,47 @@ mod tests {
         assert_eq!(mapped(&cmd, "PATH"), Some(Some(OsStr::new("/usr/bin"))));
         assert_eq!(std::env::var_os("LJOS_GIT_HOOK"), before_hook);
         assert_eq!(std::env::var_os("GIT_DIR"), before_dir);
+    }
+
+    #[test]
+    fn a_tests_paragraph_is_kept_and_a_by_line_is_refused() {
+        assert!(!super::line_refused("Tests: cargo test"));
+        assert!(!super::message_refused("note\n\nTests: cargo test\n"));
+        assert!(super::line_refused("Co-authored-by: Ada <ada@example.com>"));
+        assert!(super::line_refused("Signed-off-by: Ada <ada@example.com>"));
+        assert!(super::message_refused(
+            "note\nCo-authored-by: Ada <ada@example.com>\n"
+        ));
+        assert!(super::line_refused("Made-with: a tool"));
+        assert!(super::line_refused("Generated with a tool"));
+        assert!(super::line_refused("made with cursor"));
+        assert!(!super::line_refused(
+            "See Co-authored-by: Ada <ada@example.com>"
+        ));
+        assert!(super::line_refused("Cursor Agent wrote this"));
+        assert!(super::line_refused("cursoragent"));
+        assert!(super::line_refused("see cursoragent in the note"));
+        assert!(super::line_refused("see a cursor agent in the note"));
+        assert!(!super::line_refused("the plot was made with cursor tools"));
+        assert!(super::line_refused("CURSOR_AGENT=1"));
+        assert!(super::line_refused("  CURSOR_AGENT=1"));
+        assert!(super::line_refused("CURSOR_AGENT: 1"));
+        assert!(super::line_refused("Co-authored-by : x"));
+        assert!(super::line_refused("  Co-authored-by: x"));
+        assert!(super::line_refused("Made-with : x"));
+        assert!(super::line_refused(" Made-with: x"));
+        assert!(!super::line_refused("Note: kept"));
+        assert!(!super::line_refused("The Signed-off-by line is gone."));
+        assert!(!super::line_refused("see CURSOR_AGENT in the prose"));
+        assert!(super::line_refused("\tCo-authored-by: A"));
+        assert!(super::line_refused("Co-authored-by\t: A"));
+        assert!(super::line_refused("\tCURSOR_AGENT=1"));
+        assert!(super::line_refused("CURSOR_AGENT\t=1"));
+        assert!(!super::line_refused(
+            "The figures are generated with matplotlib."
+        ));
+        assert!(!super::line_refused("Tests: ran cargo test"));
+        assert!(!super::line_refused("Ask the author by mail."));
+        assert!(!super::line_refused("Signed-off-by"));
     }
 }
