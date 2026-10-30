@@ -25869,7 +25869,11 @@ fn with_locked_row_file(
                 }
                 let left = deadline.saturating_duration_since(now);
                 std::thread::sleep(pause.min(left));
-                if pause < std::time::Duration::from_millis(8) {
+                // The pause stays short: a holder keeps the lock for one
+                // write, so a long sleep lands past a lock that was free,
+                // and a best-effort row then runs out its budget on a
+                // slow machine with many writers at once.
+                if pause < std::time::Duration::from_millis(2) {
                     pause *= 2;
                 }
             }
