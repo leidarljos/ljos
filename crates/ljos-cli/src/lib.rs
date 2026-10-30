@@ -38190,10 +38190,13 @@ mod tests {
             cmd.args(args)
                 .current_dir(&repo)
                 .env("HOME", &home)
+                // The shim reads the verdict with head, cut, sed and tr. A
+                // Homebrew git lives apart from them, so the system
+                // directories stay on the path.
                 .env(
                     "PATH",
                     format!(
-                        "{}:{}:{}",
+                        "{}:{}:{}:/usr/bin:/bin",
                         guard.display(),
                         fake.display(),
                         real_git.parent().unwrap().display()
