@@ -2,14 +2,14 @@ tokenizer: o200k_base
 text: initialize instructions, and the tools/list result object as the server sent it
 total: the two token counts added
 core.tools: 21
-core.tokens: 8062
+core.tokens: 8064
 core.instructions_tokens: 215
-core.tools_tokens: 7847
-core.sha256: fe3b262c89a2ab828da2056c96fdef21efc39440641ec1bb482e489f0035fd3d
+core.tools_tokens: 7849
+core.sha256: 602f0b199e010fe865ad55f986ec8f319417fb47149bd9cbe27ee7d802af1b99
 core.names: ljos_rule ljos_request_approval ljos_prefer ljos_remember ljos_search ljos_start ljos_guard_check ljos_file ljos_options ljos_note ljos_recall ljos_sitting ljos_finish ljos_claim ljos_release ljos_send ljos_inbox ljos_reply ljos_vote ljos_consensus ljos_doctor
 all.tools: 53
-all.tokens: 17981
+all.tokens: 17985
 all.instructions_tokens: 215
-all.tools_tokens: 17766
-all.sha256: 438395233e5da89992744be5a53dce070c629f489ac966fd209d73b2d57c5bdc
+all.tools_tokens: 17770
+all.sha256: 3d34b1216aa0dea7eed4860143d854d3ff13c14c1c21096f56ddfbad27bd6b04
 all.names: ljos_rule ljos_request_approval ljos_prefer ljos_remember ljos_search ljos_start ljos_guard_check ljos_file ljos_options ljos_note ljos_recall ljos_sitting ljos_finish ljos_claim ljos_release ljos_send ljos_inbox ljos_reply ljos_vote ljos_consensus ljos_doctor ljos_bump_plan ljos_calibrate ljos_cards ljos_complete ljos_conflicts ljos_consolidate ljos_current ljos_deed ljos_digest ljos_due ljos_evidence ljos_findings ljos_forget ljos_graded ljos_group ljos_habit ljos_handover ljos_island ljos_learn ljos_mail_search ljos_mail_show ljos_policy ljos_predict ljos_read ljos_receive ljos_timeline ljos_trust ljos_brief ljos_persona ljos_personas ljos_playbook ljos_playbooks
