@@ -30012,12 +30012,21 @@ fn unheld_refusal(text: &str) -> Option<&str> {
 pub fn unstamp_tracker(issue: &str, holder: &str, reopen: bool) -> Result<Option<String>> {
     let issue = issue.trim();
     let holder = holder.trim();
-    let layout = vissue_core::Layout::resolve(None, None)?;
-    let Ok(hit) = vissue_core::Router::load(layout)?.find_by_id(issue) else {
-        return Ok(None);
+    let (path, project) = match issue_spot::find(issue) {
+        Some(spot) => {
+            let path = spot.layout.project_issues_path(&spot.rec().project);
+            (path, spot.rec().project.clone())
+        }
+        None => {
+            let layout = vissue_core::Layout::resolve(None, None)?;
+            let Ok(hit) = vissue_core::Router::load(layout)?.find_by_id(issue) else {
+                return Ok(None);
+            };
+            (hit.path, hit.project)
+        }
     };
-    let said = vissue_core::store::with_issues_lock(&hit.path, || {
-        let mut doc = vissue_core::IssueDoc::parse_file(&hit.project, &hit.path)?;
+    let said = vissue_core::store::with_issues_lock(&path, || {
+        let mut doc = vissue_core::IssueDoc::parse_file(&project, &path)?;
         let Some(h) = doc.headings.iter_mut().find(|h| h.id == issue) else {
             return Ok(None);
         };
@@ -30222,6 +30231,9 @@ fn write_hold(actor: &str, assignee: &str, node: &str) {
 /// tracker reads it. The tracker this process resolves is asked first; the
 /// router walk runs only when that one lacks the issue.
 fn tracker_line(node: &str) -> String {
+    if let Some(spot) = issue_spot::find(node) {
+        return format_tracker_line(spot.layout.root(), spot.layout.prefix());
+    }
     let Ok(layout) = vissue_core::Layout::resolve(None, None) else {
         return String::new();
     };
