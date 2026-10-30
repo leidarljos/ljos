@@ -36491,9 +36491,10 @@ fn output_within(
     .stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
     if let Some(bytes) = stdin {
-        let mut input = child.stdin.take().ok_or_else(|| {
-            std::io::Error::other("the child has no stdin")
-        })?;
+        let mut input = child
+            .stdin
+            .take()
+            .ok_or_else(|| std::io::Error::other("the child has no stdin"))?;
         input.write_all(bytes)?;
         drop(input);
     }
