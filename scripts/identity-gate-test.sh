@@ -75,10 +75,70 @@ fail_msg "Signed-off-by trailer" \
   -m "note" -m "Signed-off-by: Rohit Goswami <rgoswami@ieee.org>"
 fail_msg "generated line" \
   -m "note" -m "Generated with a tool"
-fail_msg "agent account line" \
+fail_msg "Made-with line" \
+  -m "note" -m "Made-with: a tool"
+fail_msg "made with cursor line" \
+  -m "note" -m "made with cursor"
+fail_msg "by line with no blank line" \
+  -m "$(printf 'note\nCo-authored-by: Ada Lovelace <ada@example.com>')"
+fail_msg "account line" \
   -m "note" -m "Cursor Agent wrote this"
 fail_msg "account token" \
   -m "note" -m "cursoragent"
+fail_msg "account token mid line" \
+  -m "note" -m "see cursoragent in the note"
+fail_msg "account words mid line" \
+  -m "note" -m "see a cursor agent in the note"
+fail_msg "account assignment" \
+  -m "note" -m "CURSOR_AGENT=1"
+fail_msg "indented account assignment" \
+  -m "$(printf 'note\n  CURSOR_AGENT=1')"
+fail_msg "account colon" \
+  -m "note" -m "CURSOR_AGENT: 1"
+fail_msg "by line with a space before the colon" \
+  -m "note" -m "Co-authored-by : x"
+fail_msg "indented by line" \
+  -m "$(printf 'note\n  Co-authored-by: x')"
+fail_msg "made-with with a space before the colon" \
+  -m "note" -m "Made-with : x"
+fail_msg "indented made-with line" \
+  -m "$(printf 'note\n Made-with: x')"
+fail_msg "tab before a by line" \
+  -m "$(printf 'note\n'; printf '\t'; printf 'Co-authored-by: A\n')"
+fail_msg "tab before the by colon" \
+  -m "$(printf 'note\nCo-authored-by'; printf '\t'; printf ': A\n')"
+fail_msg "tab before an account assignment" \
+  -m "$(printf 'note\n'; printf '\t'; printf 'CURSOR_AGENT=1\n')"
+fail_msg "tab before the account equals" \
+  -m "$(printf 'note\nCURSOR_AGENT'; printf '\t'; printf '=1\n')"
+
+git checkout -q -B plain "$base"
+git commit --allow-empty -q -m "note" -m "Tests: cargo test"
+"$gate" "$base..HEAD"
+git checkout -q -B plain "$base"
+git commit --allow-empty -q -m "note" -m "Note: kept"
+"$gate" "$base..HEAD"
+git checkout -q -B plain "$base"
+git commit --allow-empty -q -m "The Signed-off-by line is gone."
+"$gate" "$base..HEAD"
+git checkout -q -B plain "$base"
+git commit --allow-empty -q -m "see CURSOR_AGENT in the prose"
+"$gate" "$base..HEAD"
+git checkout -q -B plain "$base"
+git commit --allow-empty -q -m "The figures are generated with matplotlib."
+"$gate" "$base..HEAD"
+git checkout -q -B plain "$base"
+git commit --allow-empty -q -m "the plot was made with cursor tools"
+"$gate" "$base..HEAD"
+git checkout -q -B plain "$base"
+git commit --allow-empty -q -m "note" -m "Tests: ran cargo test"
+"$gate" "$base..HEAD"
+git checkout -q -B plain "$base"
+git commit --allow-empty -q -m "Ask the author by mail."
+"$gate" "$base..HEAD"
+git checkout -q -B plain "$base"
+git commit --allow-empty -q -m "Signed-off-by"
+"$gate" "$base..HEAD"
 
 # New branch: history already on another remote-tracking branch is out.
 git checkout -q -B develop "$base"
