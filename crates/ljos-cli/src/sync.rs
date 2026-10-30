@@ -1484,27 +1484,14 @@ fn plan_log_write(
     recipients: &[String],
     previous: Option<&[u8]>,
 ) -> LogWrite {
-    let previous = previous.and_then(|bytes| std::str::from_utf8(bytes).ok());
-    let fields: Vec<&str> = previous.unwrap_or("").split_whitespace().collect();
-    if fields.len() != 3 || fields[1] != crate::work_id(&recipients.join(",")) {
-        return LogWrite::Whole;
-    }
-    let Ok(Some(base)) = read_beneath(root, log_rel) else {
-        return LogWrite::Whole;
-    };
-    let identities = identities_for_open(scope_name);
-    let Ok(Some(opened)) = open_sealed_bytes(&base, &identities) else {
+    let Some(OwnLog {
+        base,
+        base_len,
+        view,
+    }) = open_own_log(root, log_rel, host, scope_name, recipients, previous)
+    else {
         return LogWrite::Whole;
     };
-    let Some((named_host, named_scope, base_body)) = split_header(&opened) else {
-        return LogWrite::Whole;
-    };
-    if named_host != host || named_scope != scope_name {
-        return LogWrite::Whole;
-    }
-    let view = read_chunks(base_body, &base, host, scope_name, &identities, |n| {
-        read_beneath(root, &chunk_rel(log_rel, n))
-    });
     let (Some(had), Some(has)) = (lines_by_id(&view.body), lines_by_id(body)) else {
         return LogWrite::Whole;
     };
@@ -1529,10 +1516,280 @@ fn plan_log_write(
     }
     let n = view.applied + 1;
     let plain = chunk_header(host, scope_name, &blob_digest(&base), n) + &lines;
-    if n > MAX_CHUNKS || view.chunk_bytes + plain.len() > opened.len() {
+    if n > MAX_CHUNKS || view.chunk_bytes + plain.len() > base_len {
         return LogWrite::Whole;
     }
     LogWrite::Chunk { n, plain, changes }
+}
+
+/// This host's log of `scope_name`, as a reader sees it, when a chunk may
+/// be written over it.
+struct OwnLog {
+    /// The sealed base.
+    base: Vec<u8>,
+    /// The plaintext bytes of the base, header included.
+    base_len: usize,
+    view: LogView,
+}
+
+/// The log at `log_rel` when this ljos wrote it to the same recipients
+/// and this machine can open it: a digest with three fields whose
+/// recipients match, and a base whose header names this host and scope.
+fn open_own_log(
+    root: &Path,
+    log_rel: &str,
+    host: &str,
+    scope_name: &str,
+    recipients: &[String],
+    previous: Option<&[u8]>,
+) -> Option<OwnLog> {
+    let previous = previous.and_then(|bytes| std::str::from_utf8(bytes).ok());
+    let fields: Vec<&str> = previous.unwrap_or("").split_whitespace().collect();
+    if fields.len() != 3 || fields[1] != crate::work_id(&recipients.join(",")) {
+        return None;
+    }
+    let base = read_beneath(root, log_rel).ok()??;
+    let identities = identities_for_open(scope_name);
+    let opened = open_sealed_bytes(&base, &identities).ok()??;
+    let (named_host, named_scope, base_body) = split_header(&opened)?;
+    if named_host != host || named_scope != scope_name {
+        return None;
+    }
+    let view = read_chunks(base_body, &base, host, scope_name, &identities, |n| {
+        read_beneath(root, &chunk_rel(log_rel, n))
+    });
+    Some(OwnLog {
+        base_len: opened.len(),
+        base,
+        view,
+    })
+}
+
+/// Seal the atoms of `issue` alone into this machine's log in each
+/// tracker that names a scope, and commit the log as a sync would.
+/// Finish calls this. Every other atom stays as the last export left it,
+/// since importers retire what leaves a host's log. A tracker with no
+/// scope stays quiet, and a ticket with no atoms seals nothing.
+///
+/// # Errors
+///
+/// The pack did not answer, or age refused to seal for a reason other
+/// than being absent.
+pub fn seal_ticket_in_passing(issue: &str) -> Result<String> {
+    let mode = tracker_git(false);
+    let mut atoms: Option<Vec<Value>> = None;
+    let mut out = String::new();
+    for root in sync_roots()? {
+        let Some(scope) = scope_of_repo(&root)? else {
+            continue;
+        };
+        if mode == TrackerGit::Off {
+            out.push_str("sync: off (LJOS_TRACKER_GIT); `ljos sync` runs it by hand\n");
+            continue;
+        }
+        let ticket = match &atoms {
+            Some(ticket) => ticket,
+            None => {
+                let client = crate::pack()?;
+                let all = crate::atoms_lean(&client, &client.workspace())?;
+                atoms.insert(
+                    all.into_iter()
+                        .filter(|atom| atom_issue(atom) == issue)
+                        .collect(),
+                )
+            }
+        };
+        if ticket.is_empty() {
+            continue;
+        }
+        if let Err(e) = crate::tracker_push::prepare_tracker(&root, false, true) {
+            out.push_str(&format!("sync: merge setup: {e}\n"));
+        }
+        out.push_str(&seal_ticket(
+            &root,
+            &scope,
+            issue,
+            ticket,
+            mode == TrackerGit::Push,
+        )?);
+    }
+    Ok(out)
+}
+
+/// [`seal_ticket_in_passing`] for one tracker, with the ticket's atoms
+/// already read. `push` false commits and pushes nothing.
+fn seal_ticket(
+    root: &Path,
+    scope: &Scope,
+    issue: &str,
+    atoms: &[Value],
+    push: bool,
+) -> Result<String> {
+    let default = configured_default(scope)?;
+    if !age_on_path() {
+        return Ok(age_missing_line());
+    }
+    let mut out = String::new();
+    let mut sealed = false;
+    for named_scope in scope.all_scopes() {
+        if named_scope.name != scope.name && named_scope.recipients.is_empty() {
+            continue;
+        }
+        let (said, wrote) = seal_ticket_scope(
+            root,
+            &scope.name,
+            named_scope.name,
+            named_scope.recipients,
+            issue,
+            atoms,
+            &default,
+        )?;
+        if said == age_missing_line() {
+            return Ok(said);
+        }
+        out.push_str(&said);
+        sealed |= wrote;
+    }
+    if sealed {
+        out.push_str(&if scope.scopes.is_empty() {
+            commit_log(root, &scope.name, push)
+        } else {
+            commit_logs(root, scope, push)
+        });
+    }
+    Ok(out)
+}
+
+/// Seal the atoms of `issue` in `scope_name` as one chunk over this
+/// host's log, or as the whole log when there is none yet. A log this
+/// machine cannot add a chunk to is left alone, and the line says that
+/// `ljos sync` seals it. The bool is whether a file was written.
+fn seal_ticket_scope(
+    root: &Path,
+    primary_scope: &str,
+    scope_name: &str,
+    recipients: &[String],
+    issue: &str,
+    atoms: &[Value],
+    default: &str,
+) -> Result<(String, bool)> {
+    let host = host();
+    let body = log_lines(atoms, scope_name, default, scope_name != primary_scope);
+    let Some(has) = lines_by_id(&body) else {
+        bail!("sync: two atoms of {issue} share an id");
+    };
+    if has.is_empty() {
+        return Ok((String::new(), false));
+    }
+    let [log_rel, digest_rel] = host_log_rels_for_scope(&host, primary_scope, scope_name);
+    let recipients_said = format!(
+        "sealed to {} recipient{}",
+        recipients.len(),
+        if recipients.len() == 1 { "" } else { "s" }
+    );
+    let seal = |plain: &str| match seal_bytes(plain, recipients) {
+        Ok(sealed) => Ok(Some(sealed)),
+        Err(err) if age_missing(&err) => Ok(None),
+        Err(err) => Err(err),
+    };
+    if read_beneath(root, &log_rel)?.is_none() {
+        let plain = log_header(&host, scope_name) + &body;
+        let Some(sealed) = seal(&plain)? else {
+            return Ok((age_missing_line(), false));
+        };
+        write_beneath(root, &log_rel, &sealed)?;
+        remove_chunks(root, &log_rel, 0)?;
+        let digest = export_digest(root, &log_rel, &plain, recipients);
+        write_beneath(root, &digest_rel, digest.as_bytes())?;
+        return Ok((
+            format!(
+                "sync: sealed {} {scope_name} atoms of {issue} to {log_rel}, {recipients_said}\n",
+                has.len()
+            ),
+            true,
+        ));
+    }
+    let previous = read_beneath(root, &digest_rel)?;
+    let left = |why: &str| {
+        Ok((
+            format!("sync: {issue}: {why}; `ljos sync` seals the {scope_name} log whole\n"),
+            false,
+        ))
+    };
+    let Some(log) = open_own_log(
+        root,
+        &log_rel,
+        &host,
+        scope_name,
+        recipients,
+        previous.as_deref(),
+    ) else {
+        return left("this machine's log is not one it can add a chunk to");
+    };
+    if log.view.stopped.is_some() {
+        return left("a chunk of this machine's log did not read");
+    }
+    let Some(mut lines) = lines_by_id(&log.view.body) else {
+        return left("this machine's log does not name its atoms by id");
+    };
+    let mut chunk = String::new();
+    let mut changes = 0;
+    for (id, line) in &has {
+        if lines.get(id) != Some(line) {
+            chunk.push_str(line);
+            chunk.push('\n');
+            lines.insert(id.clone(), line.clone());
+            changes += 1;
+        }
+    }
+    let gone: Vec<String> = lines
+        .iter()
+        .filter(|(id, line)| {
+            !has.contains_key(*id)
+                && serde_json::from_str::<Value>(line).is_ok_and(|atom| atom_issue(&atom) == issue)
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in gone {
+        chunk.push_str(&serde_json::json!({ CHUNK_DROP: id }).to_string());
+        chunk.push('\n');
+        lines.remove(&id);
+        changes += 1;
+    }
+    if changes == 0 {
+        return Ok((
+            format!(
+                "sync: the {scope_name} log already holds the {} atoms of {issue}\n",
+                has.len()
+            ),
+            false,
+        ));
+    }
+    let n = log.view.applied + 1;
+    let plain = chunk_header(&host, scope_name, &blob_digest(&log.base), n) + &chunk;
+    if n > MAX_CHUNKS || log.view.chunk_bytes + plain.len() > log.base_len {
+        return left("this machine's log is due to be sealed whole");
+    }
+    let Some(sealed) = seal(&plain)? else {
+        return Ok((age_missing_line(), false));
+    };
+    remove_chunks(root, &log_rel, n - 1)?;
+    let rel = chunk_rel(&log_rel, n);
+    write_beneath(root, &rel, &sealed)?;
+    let reads: String = lines.values().map(|line| format!("{line}\n")).collect();
+    let digest = export_digest(
+        root,
+        &log_rel,
+        &(log_header(&host, scope_name) + &reads),
+        recipients,
+    );
+    write_beneath(root, &digest_rel, digest.as_bytes())?;
+    Ok((
+        format!(
+            "sync: sealed {changes} {scope_name} atoms of {issue} to {rel}, {recipients_said}\n"
+        ),
+        true,
+    ))
 }
 
 /// Remove the chunk files of `log_rel` past the first `keep`, and with
@@ -8616,6 +8873,62 @@ mod tests {
             log_lines(&atoms, "grokbot", "grokbot", false),
             "{out}"
         );
+    }
+
+    /// A ticket's seal over a log of 1500 writes one chunk of that ticket's
+    /// atoms. A peer reads the log as it was and those atoms, so nothing
+    /// is retired. A ticket atom the pack no longer holds is dropped, and
+    /// the next sync carries the atoms of other tickets.
+    #[test]
+    fn a_ticket_seal_adds_that_tickets_atoms_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = begin(dir.path());
+        let fix = Growth::new(dir.path());
+        let mut atoms: Vec<Value> = (0..1500).map(note).collect();
+        atoms.push(atom(
+            "t0",
+            "an older lesson of the ticket",
+            &["issue:proj-t1"],
+        ));
+        fix.sync(&atoms);
+        let base = fix.base_blob();
+        atoms.retain(|a| a["id"] != "t0");
+        let ticket: Vec<Value> = (1..=3)
+            .map(|n| atom(&format!("t{n}"), &format!("ticket lesson {n}"), &[]))
+            .map(|mut a| {
+                a["issue"] = "proj-t1".into();
+                a
+            })
+            .collect();
+        atoms.push(atom("o1", "another ticket's lesson", &["issue:proj-o1"]));
+        atoms.extend(ticket.iter().cloned());
+        let name = fix.scope.name.clone();
+        let said = seal_ticket(&fix.root, &fix.scope, "proj-t1", &ticket, false).unwrap();
+        assert!(
+            said.contains(&format!("sealed 4 {name} atoms of proj-t1")),
+            "{said}"
+        );
+        assert_eq!(fix.base_blob(), base, "the ticket seal rewrote the base");
+        let plain = open_sealed_bytes(
+            &std::fs::read(fix.chunk(1)).unwrap(),
+            &identities_for_open(&name),
+        )
+        .unwrap()
+        .unwrap();
+        let mut lines: Vec<&str> = plain.lines().skip(1).collect();
+        lines.sort_unstable();
+        assert_eq!(lines.len(), 4, "{plain}");
+        assert!(lines[0].contains("\"ticket lesson 1\""), "{plain}");
+        assert!(lines[3].contains("\"ljos_drop\":\"t0\""), "{plain}");
+        let mut taught: Vec<Value> = (0..1500).map(note).collect();
+        taught.extend(ticket.iter().cloned());
+        let (view, out) = fix.peer_view();
+        assert_eq!(view, log_lines(&taught, &name, &name, false), "{out}");
+
+        let said = fix.sync(&atoms);
+        assert!(said.contains("1 changed"), "{said}");
+        let (view, out) = fix.peer_view();
+        assert_eq!(view, log_lines(&atoms, &name, &name, false), "{out}");
     }
 
     /// A log an older ljos wrote, one sealed file and a digest of two

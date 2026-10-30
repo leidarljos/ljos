@@ -32826,8 +32826,9 @@ pub fn finish(
     out.push_str(&deeds);
     out.push_str(&persist_tracker_with(issue, "finished", &deed_paths));
     out.push_str(&tracker_sync::push_leftover());
-    // Memory crosses by handover. Finish does not seal the pack into the
-    // tracker.
+    // What this ticket taught leaves the machine with the tracker. The
+    // rest of the pack waits for `ljos sync`.
+    out.push_str(&sync::seal_ticket_in_passing(issue).unwrap_or_else(|e| format!("sync: {e:#}\n")));
     Ok(out)
 }
 
@@ -61589,6 +61590,152 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         );
         assert!(!said.contains("pushed pending"), "{said}");
         assert!(!said.contains("; pushed\n"), "{said}");
+    }
+
+    /// Finish seals what its own ticket taught and no other atom. An
+    /// earlier sync sealed 2000 atoms, and another ticket has taught one
+    /// since. Finish leaves the sealed base as it was and writes one chunk
+    /// holding the three atoms of its ticket.
+    #[test]
+    fn finish_seals_the_atoms_of_its_ticket_alone() {
+        let _g = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tracker");
+        let run = |cwd: &std::path::Path, bin: &str, args: &[&str]| {
+            let out = std::process::Command::new(bin)
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{bin} {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let project = root.join("Software/probe");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("issues.org"),
+            "#+TITLE: probe issues\n#+VISSUE: 1\n#+TODO: TODO STARTED | DONE\n* STARTED [#B] Finish a sitting\n:PROPERTIES:\n:ID:         probe-t1ck\n:END:\n",
+        )
+        .unwrap();
+        let state = dir.path().join("state");
+        let runtime = dir.path().join("run");
+        let config = dir.path().join("config");
+        for d in [&state, &runtime, &config] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        unsafe { std::env::remove_var("ISSUE_ROOT") };
+        let _env = HoldEnv::set(&[
+            ("VISSUE_ROOT", root.to_str().unwrap()),
+            ("VISSUE_NO_ROUTE", "1"),
+            ("LJOS_TRACKER_GIT", "commit"),
+            ("HOME", dir.path().to_str().unwrap()),
+            ("XDG_STATE_HOME", state.to_str().unwrap()),
+            ("XDG_RUNTIME_DIR", runtime.to_str().unwrap()),
+            ("XDG_CONFIG_HOME", config.to_str().unwrap()),
+        ]);
+        let key = sync::identity_path();
+        std::fs::create_dir_all(key.parent().unwrap()).unwrap();
+        let key_arg = key.to_str().unwrap();
+        run(dir.path(), "age-keygen", &["-o", key_arg]);
+        let public = run(dir.path(), "age-keygen", &["-y", key_arg]);
+        std::fs::create_dir_all(root.join(".ljos")).unwrap();
+        std::fs::write(
+            root.join(".ljos/sync.toml"),
+            format!("name = \"surf\"\nrecipients = [\"{public}\"]\n"),
+        )
+        .unwrap();
+        let lesson = |id: String, text: String, issue: Option<&str>| {
+            let entities: Vec<String> = issue.map(|i| format!("issue:{i}")).into_iter().collect();
+            serde_json::json!({"id": id, "text": text, "kind": "lesson", "entities": entities})
+        };
+        let earlier: Vec<Value> = (0..2000)
+            .map(|n| lesson(format!("a{n:05}"), format!("earlier work {n}"), None))
+            .collect();
+        run(&root, "git", &["init", "-q", "-b", "main"]);
+        run(
+            &root,
+            "git",
+            &["config", "user.email", "seat@example.invalid"],
+        );
+        run(&root, "git", &["config", "user.name", "seat"]);
+        run(&root, "git", &["config", "core.hooksPath", "/dev/null"]);
+        let scope = sync::scope_of_repo(&root).unwrap().unwrap();
+        sync::export(&root, &scope, &earlier).unwrap();
+        run(&root, "git", &["add", "."]);
+        run(&root, "git", &["commit", "-q", "-m", "seed"]);
+        let host = sync::host();
+        let log = root.join(format!(".ljos/atoms/{host}.jsonl.age"));
+        let base = std::fs::read(&log).unwrap();
+        let ticket: Vec<Value> = (0..3)
+            .map(|n| {
+                lesson(
+                    format!("t{n}"),
+                    format!("what this ticket taught {n}"),
+                    Some("probe-t1ck"),
+                )
+            })
+            .collect();
+        let mut pack = earlier.clone();
+        pack.push(lesson(
+            "b00001".into(),
+            "another ticket taught this".into(),
+            Some("probe-0th3"),
+        ));
+        pack.extend(ticket.iter().cloned());
+        let calls = dir.path().join("claimdag.log");
+        fake_claimdag(dir.path(), &calls);
+        let body = serde_json::json!({ "atoms": pack }).to_string();
+        let (url, _seen) = serve_http(move |req| {
+            let line = req.lines().next().unwrap_or("");
+            if line.contains("/v1/activate") {
+                (200, r#"{"island":[],"fired":0}"#.into())
+            } else if line.contains("/v1/atoms") {
+                (200, body.clone())
+            } else {
+                (200, "{}".into())
+            }
+        });
+        let _url = PackUrl::set(&url);
+        let said = with_fake_on_path(dir.path(), || {
+            finish(
+                "probe-t1ck",
+                "done",
+                None,
+                None,
+                false,
+                LEARN_BETA,
+                "alice",
+                Some(2),
+                false,
+            )
+        })
+        .unwrap_or_else(|e| panic!("finish failed: {e:#}"));
+        assert!(
+            said.contains("sync: sealed 3 surf atoms of probe-t1ck"),
+            "{said}"
+        );
+        assert!(
+            std::fs::read(&log).unwrap() == base,
+            "finish sealed the whole log again: {said}"
+        );
+        let chunk = root.join(format!(".ljos/atoms/{host}.chunks/1.age"));
+        let opened = run(
+            dir.path(),
+            "age",
+            &["-d", "-i", key_arg, chunk.to_str().unwrap()],
+        );
+        let sealed: Vec<&str> = opened.lines().skip(1).collect();
+        let want = sync::log_plaintext(&ticket, "surf", "surf");
+        assert_eq!(sealed, want.lines().collect::<Vec<_>>(), "{said}");
+        assert_eq!(
+            run(&root, "git", &["status", "--porcelain", "--", ".ljos"]),
+            "",
+            "the chunk was not committed: {said}"
+        );
     }
 
     #[test]
