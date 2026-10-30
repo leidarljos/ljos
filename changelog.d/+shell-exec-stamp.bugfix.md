@@ -1,0 +1,1 @@
+A command a bash `sh -c` line execs in its own place, such as `sh -c 'ljos claim ID'` under a runner, holds under the conversation id it was started with. A runner above it that carries only `CURSOR_AGENT` no longer turns the claim into the bare seat. A shell a runner started keeps the id bash gave that runner on its command line.
