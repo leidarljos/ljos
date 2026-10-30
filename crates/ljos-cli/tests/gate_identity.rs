@@ -161,6 +161,23 @@ impl Box_ {
         text_of(&child.wait_with_output().unwrap())
     }
 
+    /// `ljos git-hook pre-push` as conversation `conv`. Empty stdin names
+    /// no protected ref. The sitting check still runs.
+    fn pre_push(&self, conv: &str) -> String {
+        let mut cmd = self.command(
+            "setsid",
+            &["-w", env!("CARGO_BIN_EXE_ljos"), "git-hook", "pre-push"],
+            &[("CURSOR_CONVERSATION_ID", conv), ("LJOS_HOOKD", "off")],
+        );
+        let child = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        text_of(&child.wait_with_output().unwrap())
+    }
+
     /// Shells a process `runner` starts one after another, as a runner
     /// starts each of its conversations' tool calls under itself. The
     /// runner runs with `env`; each step's shell is started with the
@@ -2891,6 +2908,86 @@ fn two_conversations_can_check_one_bare_seat_record() {
             &home.hook(loser, MERGE, &[("LJOS_HOOKD", "off")]),
             &format!("round {round}: loser {loser} follow-up check"),
         );
+    }
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+}
+
+/// Two conversations race a push check on one bare-seat record.
+/// The push check still adopts. At most one conversation adopts it,
+/// and a later check does not hand it to the other.
+#[test]
+fn two_conversations_racing_on_a_bare_seat_hold_adopts_at_most_one() {
+    let home = std::sync::Arc::new(Box_::new());
+    home.card("inky");
+    let bare_actor = ljos_cli::work_id(&format!("inky:{ISSUE}"));
+    let bare_path = home.run.join(format!("ljos/hold-{bare_actor}"));
+    std::fs::create_dir_all(home.run.join("ljos")).unwrap();
+    let x_actor = ljos_cli::work_id(&format!("{}:{ISSUE}", holder(CONV_X)));
+    let y_actor = ljos_cli::work_id(&format!("{}:{ISSUE}", holder(CONV_Y)));
+    let x_path = home.run.join(format!("ljos/hold-{x_actor}"));
+    let y_path = home.run.join(format!("ljos/hold-{y_actor}"));
+    let x_who = holder(CONV_X);
+    let y_who = holder(CONV_Y);
+
+    let fake_bin = home.run.join("fake-mcp");
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    let fake_mcp = fake_bin.join("ljos-mcp");
+    std::os::unix::fs::symlink("/bin/sleep", &fake_mcp).unwrap();
+    let mut sleeper = Command::new(&fake_mcp).arg("300").spawn().unwrap();
+    let pid = sleeper.id();
+
+    for round in 0..32 {
+        for entry in std::fs::read_dir(home.run.join("ljos")).unwrap().flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("session-")
+                || name.starts_with("hold-")
+                || name == "first-hook-conv"
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+        std::fs::write(
+            &bare_path,
+            format!("inky\ninky\n{pid}\nljos-mcp\n2026-10-25T00:00:00Z\n{ISSUE}\n-\n"),
+        )
+        .unwrap_or_else(|e| panic!("round {round}: {e}"));
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let h1 = std::sync::Arc::clone(&home);
+        let b1 = std::sync::Arc::clone(&barrier);
+        let t1 = std::thread::spawn(move || {
+            b1.wait();
+            h1.pre_push(CONV_X)
+        });
+        let h2 = std::sync::Arc::clone(&home);
+        let b2 = std::sync::Arc::clone(&barrier);
+        let t2 = std::thread::spawn(move || {
+            b2.wait();
+            h2.pre_push(CONV_Y)
+        });
+        let _out_x = t1.join().unwrap();
+        let _out_y = t2.join().unwrap();
+
+        let x_has = x_path.is_file();
+        let y_has = y_path.is_file();
+        assert!(
+            x_has ^ y_has,
+            "round {round}: expected one adopt, x={x_has} y={y_has}"
+        );
+        let winner = if x_has { &x_who } else { &y_who };
+        let bare = std::fs::read_to_string(&bare_path).unwrap();
+        assert_eq!(
+            bare.lines().next(),
+            Some(winner.as_str()),
+            "round {round}: bare record"
+        );
+
+        let _ = home.pre_push(CONV_X);
+        let _ = home.pre_push(CONV_Y);
+        assert_eq!(x_path.is_file(), x_has, "round {round}: x follow-up");
+        assert_eq!(y_path.is_file(), y_has, "round {round}: y follow-up");
     }
     let _ = sleeper.kill();
     let _ = sleeper.wait();
