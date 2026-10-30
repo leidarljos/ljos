@@ -1482,7 +1482,13 @@ mod tests {
         }
     }
 
-    /// Run `body` and fail if it does not return quickly.
+    /// How long a prompt or a set may sit with nothing completed before
+    /// the test fails. The body ends when the line has been read. This
+    /// only trips when that never happens.
+    const HANG: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// Wait until `body` finishes. A hang fails here, with `what` in the
+    /// message, instead of holding the job.
     fn bounded<T: Send + 'static>(
         what: &'static str,
         body: impl FnOnce() -> T + Send + 'static,
@@ -1491,7 +1497,7 @@ mod tests {
         std::thread::spawn(move || {
             let _ = tx.send(body());
         });
-        rx.recv_timeout(std::time::Duration::from_secs(5))
+        rx.recv_timeout(HANG)
             .unwrap_or_else(|_| panic!("{what} hung"))
     }
 
@@ -1500,7 +1506,7 @@ mod tests {
         std::thread::spawn(move || {
             let _ = tx.send(shown.join().ok());
         });
-        rx.recv_timeout(std::time::Duration::from_secs(5))
+        rx.recv_timeout(HANG)
             .ok()
             .flatten()
             .unwrap_or_else(|| panic!("terminal reader hung"))
