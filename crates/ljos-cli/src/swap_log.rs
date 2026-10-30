@@ -285,7 +285,7 @@ mod tests {
 
     fn git_repo(path: &Path) {
         std::fs::create_dir_all(path).unwrap();
-        let out = std::process::Command::new("git")
+        let out = crate::git_cmd()
             .args(["init", "-q"])
             .current_dir(path)
             .output()

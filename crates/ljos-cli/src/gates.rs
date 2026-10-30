@@ -6,7 +6,7 @@
 //! and foreign-owner gates are gone.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// Nothing left for a push to warn about. The evidence gate is gone.
 #[must_use]
@@ -533,7 +533,7 @@ fn git_config(cwd: &Path, key: &str) -> Option<String> {
 }
 
 fn git_text(cwd: &Path, args: &[&str]) -> Option<String> {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::git_cmd();
     // An exported GIT_DIR would answer for another repository. The
     // directory this command is judged in is the one named here.
     crate::clear_git_repo_env(&mut cmd);
@@ -802,7 +802,7 @@ mod tests {
     const AUTHOR_EMAIL: &str = "ada@example.com";
 
     fn git(dir: &Path, args: &[&str]) {
-        let output = Command::new("git")
+        let output = crate::git_cmd()
             .arg("-C")
             .arg(dir)
             .args(args)

@@ -889,6 +889,10 @@ fn gate_runner(name: &str) -> Result<()> {
     {
         return Ok(());
     }
+    // A commit is not this check. The push below is.
+    if name != "pre-push" {
+        return Ok(());
+    }
     // In a hook the process tree names the hook's own shell. The seat a
     // booking would take is the one the sitting was taken under. With a
     // conversation id in the environment only that conversation's holder
@@ -899,15 +903,8 @@ fn gate_runner(name: &str) -> Result<()> {
     let _actor = seat.as_deref().map(crate::HookActor::enter);
     let issue = match crate::sitting_gate::live_sitting() {
         Ok(issue) => issue,
-        Err(_) => match crate::sitting_gate::open_or_name_sitting() {
-            Some(issue) => issue,
-            None if name != "pre-push" => return Ok(()),
-            None => String::new(),
-        },
+        Err(_) => crate::sitting_gate::open_or_name_sitting().unwrap_or_default(),
     };
-    if name != "pre-push" {
-        return Ok(());
-    }
     let cfg = match crate::gates::consensus_push(repo.as_deref()) {
         Ok(cfg) => cfg,
         Err(why) => {
@@ -1326,7 +1323,7 @@ pub(crate) fn with_hook_children_for_test<T>(run: impl FnOnce() -> T) -> T {
 }
 
 fn git_command(args: &[&str], git_env: &[(&str, &str)]) -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::git_cmd();
     cmd.args(args);
     for (key, value) in git_env {
         cmd.env(key, value);

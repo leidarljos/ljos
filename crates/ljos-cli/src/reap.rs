@@ -95,7 +95,7 @@ pub fn idle_claims(held: &[Held], idle: Duration, now: i64) -> Vec<Held> {
 /// Newest tracker commit whose subject names `id`, Unix seconds.
 fn last_commit(id: &str) -> Option<i64> {
     let root = std::env::var("VISSUE_ROOT").ok()?;
-    let out = std::process::Command::new("git")
+    let out = crate::git_cmd()
         .args(["-C", &root, "log", "-1", "--format=%ct", "-F", "--grep", id])
         .output()
         .ok()?;

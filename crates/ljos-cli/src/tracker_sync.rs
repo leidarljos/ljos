@@ -215,7 +215,7 @@ mod tests {
     use std::path::Path;
 
     fn git(dir: &Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
+        let out = crate::git_cmd()
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -343,7 +343,7 @@ mod tests {
         );
         let said = super::push_leftover();
         assert!(said.contains("pushed 1"), "{said}");
-        let ahead = std::process::Command::new("git")
+        let ahead = crate::git_cmd()
             .arg("-C")
             .arg(&root)
             .args(["rev-list", "--count", "origin/main..HEAD"])
@@ -355,7 +355,7 @@ mod tests {
         git(&root, &["commit", "-q", "--allow-empty", "-m", "held"]);
         unsafe { std::env::set_var("LJOS_TRACKER_GIT", "commit") };
         assert!(super::push_leftover().is_empty());
-        let still = std::process::Command::new("git")
+        let still = crate::git_cmd()
             .arg("-C")
             .arg(&root)
             .args(["rev-list", "--count", "origin/main..HEAD"])
@@ -365,7 +365,7 @@ mod tests {
     }
 
     fn review_heads(origin: &Path) -> String {
-        let out = std::process::Command::new("git")
+        let out = crate::git_cmd()
             .arg("--git-dir")
             .arg(origin)
             .args([
@@ -533,7 +533,7 @@ mod tests {
             .arg(&fix)
             .output()
             .unwrap();
-        let tree = std::process::Command::new("git")
+        let tree = crate::git_cmd()
             .arg("--git-dir")
             .arg(&origin)
             .args(["ls-tree", "-r", "--name-only", "main"])

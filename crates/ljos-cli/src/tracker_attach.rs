@@ -17,7 +17,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{bail, Context, Result};
 
@@ -382,7 +382,7 @@ pub(crate) fn clone_config(url: &str, helper: Option<&str>) -> Vec<String> {
 pub(crate) fn refuse_secret_rewrite(url: &str, shown: &str) -> Result<()> {
     let mut args = clone_config(url, None);
     args.extend(["ls-remote".into(), "--get-url".into(), url.into()]);
-    let out = Command::new("git")
+    let out = crate::git_cmd()
         .args(&args)
         .stdin(Stdio::null())
         .output()
@@ -431,7 +431,7 @@ pub(crate) fn configure(dir: &Path, helper: Option<&str>, url: &str) -> Result<(
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
-    Command::new("git")
+    crate::git_cmd()
         .arg("-C")
         .arg(dir)
         .args(args)

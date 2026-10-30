@@ -2513,7 +2513,7 @@ fn clone_tracker(
     };
     let shown = &remote.shown;
     crate::tracker_attach::refuse_secret_rewrite(url, shown)?;
-    let out = Command::new("git")
+    let out = crate::git_cmd()
         .current_dir(parent)
         .args(crate::tracker_attach::clone_config(url, helper))
         .args(["clone", "--quiet", url, &name])
@@ -2560,7 +2560,7 @@ fn ensure_identity(dir: &Path, seat: &str) -> Result<()> {
 }
 
 fn git_local(dir: &Path, key: &str) -> Option<String> {
-    let out = Command::new("git")
+    let out = crate::git_cmd()
         .arg("-C")
         .arg(dir)
         .args(["config", "--local", "--get", key])
@@ -2575,7 +2575,7 @@ fn git_local(dir: &Path, key: &str) -> Option<String> {
 }
 
 fn git_set(dir: &Path, key: &str, value: &str) -> Result<()> {
-    let out = Command::new("git")
+    let out = crate::git_cmd()
         .arg("-C")
         .arg(dir)
         .args(["config", "--local", key, value])
@@ -2593,7 +2593,7 @@ fn git_set(dir: &Path, key: &str, value: &str) -> Result<()> {
 }
 
 fn is_work_tree(dir: &Path) -> bool {
-    let Ok(out) = Command::new("git")
+    let Ok(out) = crate::git_cmd()
         .arg("-C")
         .arg(dir)
         .args(["rev-parse", "--is-inside-work-tree"])

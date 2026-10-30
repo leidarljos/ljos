@@ -687,7 +687,7 @@ mod grant_tests {
     use super::honored_grant;
 
     fn git(dir: &std::path::Path, args: &[&str]) -> String {
-        let out = std::process::Command::new("git")
+        let out = crate::git_cmd()
             .arg("-C")
             .arg(dir)
             .args(args)

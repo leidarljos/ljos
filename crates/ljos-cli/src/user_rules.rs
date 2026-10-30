@@ -2666,7 +2666,7 @@ mod tests {
     }
 
     fn git_ok(dir: &std::path::Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
+        let out = crate::git_cmd()
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -2738,7 +2738,7 @@ mod tests {
     }
 
     fn remote_paths(bare: &std::path::Path) -> String {
-        let out = std::process::Command::new("git")
+        let out = crate::git_cmd()
             .arg("-C")
             .arg(bare)
             .args(["ls-tree", "-r", "--name-only", "HEAD"])
@@ -2748,7 +2748,7 @@ mod tests {
     }
 
     fn head(dir: &std::path::Path) -> String {
-        let out = std::process::Command::new("git")
+        let out = crate::git_cmd()
             .arg("-C")
             .arg(dir)
             .args(["rev-parse", "HEAD"])

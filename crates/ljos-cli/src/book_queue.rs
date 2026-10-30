@@ -523,7 +523,7 @@ mod tests {
     use super::*;
 
     fn git(dir: &Path, args: &[&str]) {
-        let ok = std::process::Command::new("git")
+        let ok = crate::git_cmd()
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -559,7 +559,7 @@ mod tests {
                 "one",
             ],
         );
-        let said = std::process::Command::new("git")
+        let said = crate::git_cmd()
             .arg("-C")
             .arg(repo)
             .args(["rev-parse", "HEAD"])

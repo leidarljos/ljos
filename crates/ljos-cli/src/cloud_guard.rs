@@ -7,7 +7,7 @@
 use std::cell::OnceCell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 /// git's own options before the subcommand that take the next word.
 const GIT_VALUED: &[&str] = &[
@@ -1125,7 +1125,7 @@ fn toplevel_cd(here: Option<PathBuf>, to: &str) -> Option<PathBuf> {
         return None;
     }
     let here = here?;
-    let out = Command::new("git")
+    let out = crate::git_cmd()
         .current_dir(here)
         .args(["rev-parse", "--show-toplevel"])
         .stdin(Stdio::null())
@@ -1860,7 +1860,7 @@ struct Checkout {
 
 impl Checkout {
     fn git(&self, extra: &[String], args: &[&str]) -> Option<Output> {
-        Command::new("git")
+        crate::git_cmd()
             .current_dir(self.dir.as_ref()?)
             .envs(self.env.iter().map(|(k, v)| (k, v)))
             .args(&self.place)

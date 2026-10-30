@@ -80,7 +80,7 @@ pub fn product_repo(root: &Path) -> Option<PathBuf> {
 /// caller refuses rather than writing into a checkout on a guess.
 #[must_use]
 pub fn kept_out(repo: &Path, root: &Path) -> bool {
-    std::process::Command::new("git")
+    crate::git_cmd()
         .arg("-C")
         .arg(repo)
         .arg("check-ignore")
@@ -228,7 +228,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let product = dir.path().join("myapp");
         std::fs::create_dir_all(&product).unwrap();
-        let out = std::process::Command::new("git")
+        let out = crate::git_cmd()
             .args(["init", "-q"])
             .current_dir(&product)
             .output()

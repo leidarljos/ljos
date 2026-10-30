@@ -22236,7 +22236,7 @@ fn push_facts(url: &str, tagged: bool) -> PushFacts {
 }
 
 fn git_out(dir: Option<&str>, args: &[&str]) -> Option<String> {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = git_cmd();
     if let Some(d) = dir {
         cmd.arg("-C").arg(d);
     }
@@ -32407,7 +32407,7 @@ fn clear_git_repo_env(cmd: &mut std::process::Command) {
 /// A child git command that follows `-C` in `dir` and does not inherit an
 /// exported repository from the parent process.
 pub(crate) fn git_at(dir: &Path) -> std::process::Command {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = git_cmd();
     // A test may name a decoy on this command. Drop it with the variables
     // a hook would have exported, so `-C` is the checkout.
     apply_git_command_env(&mut cmd);
@@ -32674,7 +32674,7 @@ pub fn tracker_log(seat: Option<&str>) -> Result<String> {
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .root()
         .to_path_buf();
-    let out = std::process::Command::new("git")
+    let out = git_cmd()
         .arg("-C")
         .arg(&root)
         .args(["log", "--format=%h %s"])
@@ -32720,7 +32720,7 @@ pub fn tracker_usage(since: &str) -> Result<String> {
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .root()
         .to_path_buf();
-    let out = std::process::Command::new("git")
+    let out = git_cmd()
         .arg("-C")
         .arg(&root)
         .args(["log", &format!("--since={since}"), "--format=%s"])
@@ -32834,7 +32834,7 @@ fn git_toplevel(start: &Path) -> Option<PathBuf> {
     // directories then look like that work tree, so a temporary home was
     // refused as if it were this repository. The guard is about the
     // directory on disk.
-    let out = std::process::Command::new("git")
+    let out = git_cmd()
         .arg("-C")
         .arg(start)
         .args(["rev-parse", "--show-toplevel"])
@@ -32874,7 +32874,7 @@ pub fn commit_paths(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
         return PathCommit::Refused(why);
     }
     let git = |head: &[&str]| {
-        let mut cmd = std::process::Command::new("git");
+        let mut cmd = git_cmd();
         cmd.arg("-C")
             .arg(dir)
             .args(head)
@@ -32943,7 +32943,7 @@ const ORPHAN_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 /// git process working in the checkout. A git killed outright leaves one,
 /// and every later commit fails on it until a person removes it.
 pub fn orphaned_index_lock(dir: &Path) -> Option<String> {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = git_cmd();
     cmd.arg("-C")
         .arg(dir)
         .args(["rev-parse", "--absolute-git-dir", "--show-toplevel"])
@@ -34391,6 +34391,17 @@ fn policy_reading_in(
     cwd: Option<&Path>,
     tcb: impl FnOnce() -> Option<String>,
 ) -> Result<String> {
+    policy_reading_known(argv, cwd, tcb, false)
+}
+
+/// [`policy_reading_in`]. `static_clear` means the static guard already
+/// ran on this line and allowed it, so it is not run again.
+fn policy_reading_known(
+    argv: &[String],
+    cwd: Option<&Path>,
+    tcb: impl FnOnce() -> Option<String>,
+    static_clear: bool,
+) -> Result<String> {
     let line = policy_line(argv)?;
     let call = HookCall {
         event: "argv".into(),
@@ -34404,12 +34415,14 @@ fn policy_reading_in(
     // already judged does not wait on policyd, which can hang. A guard that
     // is switched off judges nothing, policyd included.
     let off = bookkeep::guard_suspended();
-    let fast = if off {
+    let fast = if static_clear {
+        None
+    } else if off {
         sitting_gate::guard_line(&line, cwd)
     } else {
         static_guard_in(&line, cwd)
     };
-    let judged = fast.is_some();
+    let judged = !static_clear && fast.is_some();
     let rules = if off { Vec::new() } else { rules_for_gate() };
     let cwd_text = cwd
         .filter(|path| path.is_dir())
@@ -34635,7 +34648,7 @@ pub fn guard_report_in(line: &str, cwd: Option<&Path>) -> Result<GuardReport> {
         bail!("guard: pass the command to check");
     }
     let warning = gates::take_push_warning();
-    let mut text = policy_reading_in(&argv, cwd, || tcb_line_in(line, cwd))?;
+    let mut text = policy_reading_known(&argv, cwd, || tcb_line_in(line, cwd), true)?;
     let verdict = policy_verdict(&text);
     if verdict == "deny" {
         bail!("{text}");
@@ -34761,9 +34774,16 @@ pub fn tcb_verdict(line: &str) -> Option<Rule> {
 /// [`swap_log::apply_rewrite`].
 #[must_use]
 pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
+    tcb_after_static(line, cwd, false)
+}
+
+/// [`tcb_verdict_in`] after the static guard has already allowed `line`.
+/// The static guard is not run again.
+#[must_use]
+pub fn tcb_after_static(line: &str, cwd: Option<&Path>, static_clear: bool) -> Option<Rule> {
     clear_guard_note();
     swap_log::clear();
-    if bookkeep::guard_suspended() {
+    if !static_clear && bookkeep::guard_suspended() {
         return sitting_gate::guard_line(line, cwd);
     }
     let start = match guard_start_directory(cwd) {
@@ -34775,8 +34795,10 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         }
     };
     let cwd = Some(start.as_path());
-    if let Some(rule) = static_guard_in(line, cwd) {
-        return Some(rule);
+    if !static_clear {
+        if let Some(rule) = static_guard_in(line, cwd) {
+            return Some(rule);
+        }
     }
     let Some(t) = tcb_line_in(line, cwd) else {
         if policyd_bin().is_none() {
@@ -37514,17 +37536,44 @@ impl Drop for GitCommandEnv {
     }
 }
 
-/// Copy a test's git environment onto `cmd`. Outside the test build this
-/// does nothing, and git keeps the process environment.
+/// Drop the guard shim directory from `cmd`'s `PATH`, so a git this
+/// process starts is the real git and does not enter the guard again.
+pub(crate) fn strip_guard_bin(cmd: &mut std::process::Command) {
+    let Some(path) = std::env::var_os("PATH") else {
+        return;
+    };
+    let guard = guard_bin_dir();
+    let guard_real = std::fs::canonicalize(&guard).unwrap_or_else(|_| guard.clone());
+    let kept: Vec<std::path::PathBuf> = std::env::split_paths(&path)
+        .filter(|dir| {
+            if dir == &guard {
+                return false;
+            }
+            std::fs::canonicalize(dir).ok().as_ref() != Some(&guard_real)
+        })
+        .collect();
+    if let Ok(joined) = std::env::join_paths(kept) {
+        cmd.env("PATH", joined);
+    }
+}
+
+/// A git child with the guard directory off its search list.
+pub(crate) fn git_cmd() -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    strip_guard_bin(&mut cmd);
+    cmd
+}
+
+/// Copy a test's git environment onto `cmd`, and drop the guard
+/// directory from that child's search list.
 pub(crate) fn apply_git_command_env(cmd: &mut std::process::Command) {
+    strip_guard_bin(cmd);
     #[cfg(test)]
     GIT_COMMAND_ENV.with(|slot| {
         for (key, value) in slot.borrow().iter() {
             cmd.env(key, value);
         }
     });
-    #[cfg(not(test))]
-    let _ = cmd;
 }
 
 /// Whether `key` is a variable an agent runner stamps on its shell, or one
@@ -37865,7 +37914,7 @@ mod tests {
         publish_exe(&fake.join("git"), "#!/bin/sh\necho ran\n");
         let run = |home: &std::path::Path, env: &[(&str, &str)], cwd: &std::path::Path| {
             let _ = std::fs::remove_file(&marker);
-            let mut cmd = std::process::Command::new("git");
+            let mut cmd = git_cmd();
             cmd.arg("branch")
                 .arg("-D")
                 .arg("gone")
@@ -38849,12 +38898,7 @@ mod tests {
             dir.path().join("hooks"),
         );
         let git = |cwd: &std::path::Path, args: &[&str]| {
-            let o = std::process::Command::new("git")
-                .arg("-C")
-                .arg(cwd)
-                .args(args)
-                .output()
-                .unwrap();
+            let o = git_cmd().arg("-C").arg(cwd).args(args).output().unwrap();
             assert!(
                 o.status.success(),
                 "git {args:?}: {}",
@@ -38941,12 +38985,7 @@ mod tests {
         let root = dir.path().join("work");
         let remote = dir.path().join("remote.git");
         let git = |cwd: &std::path::Path, args: &[&str]| {
-            let out = std::process::Command::new("git")
-                .arg("-C")
-                .arg(cwd)
-                .args(args)
-                .output()
-                .unwrap();
+            let out = git_cmd().arg("-C").arg(cwd).args(args).output().unwrap();
             assert!(
                 out.status.success(),
                 "git {args:?}: {}",
@@ -38989,7 +39028,7 @@ mod tests {
         git(&root, &["branch", "-q", "-u", "origin/feature"]);
         git(&root, &["config", "push.default", "upstream"]);
         let heads = || {
-            let out = std::process::Command::new("git")
+            let out = git_cmd()
                 .arg("--git-dir")
                 .arg(&remote)
                 .args([
@@ -39032,12 +39071,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let run = |args: &[&str]| {
-            let o = std::process::Command::new("git")
-                .arg("-C")
-                .arg(root)
-                .args(args)
-                .output()
-                .unwrap();
+            let o = git_cmd().arg("-C").arg(root).args(args).output().unwrap();
             assert!(
                 o.status.success(),
                 "git {args:?}: {}",
@@ -39109,12 +39143,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let run = |args: &[&str]| {
-            let o = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&root)
-                .args(args)
-                .output()
-                .unwrap();
+            let o = git_cmd().arg("-C").arg(&root).args(args).output().unwrap();
             assert!(
                 o.status.success(),
                 "git {args:?}: {}",
@@ -39200,12 +39229,7 @@ mod tests {
         let arm = repo.join("target/arm");
         std::fs::create_dir_all(&arm).unwrap();
         let run = |args: &[&str]| {
-            let out = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(args)
-                .output()
-                .unwrap();
+            let out = git_cmd().arg("-C").arg(&repo).args(args).output().unwrap();
             assert!(
                 out.status.success(),
                 "git {args:?}: {}",
@@ -39213,7 +39237,7 @@ mod tests {
             );
         };
         let run_root = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = git_cmd()
                 .arg("-C")
                 .arg(dir.path())
                 .args(args)
@@ -39276,7 +39300,7 @@ mod tests {
         let origin = dir.path().join("origin.git");
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
-        let init = std::process::Command::new("git")
+        let init = git_cmd()
             .args(["init", "-q", "--bare"])
             .arg(&bare)
             .output()
@@ -39287,7 +39311,7 @@ mod tests {
             String::from_utf8_lossy(&init.stderr)
         );
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = git_cmd()
                 .env("GIT_DIR", &bare)
                 .env("GIT_WORK_TREE", &home)
                 .args(args)
@@ -39305,7 +39329,7 @@ mod tests {
         git(&["add", ".vimrc"]);
         git(&["commit", "-q", "-m", "seed"]);
         git(&["checkout", "-q", "-b", "feature/dots"]);
-        let origin_init = std::process::Command::new("git")
+        let origin_init = git_cmd()
             .args(["init", "-q", "--bare", "-b", "main"])
             .arg(&origin)
             .output()
@@ -39437,14 +39461,14 @@ mod tests {
             format!("{}\n", ballot_sig::PIN_FILE),
         )
         .unwrap();
-        let decoy_add = std::process::Command::new("git")
+        let decoy_add = git_cmd()
             .arg("-C")
             .arg(&decoy)
             .args(["add", ".gitignore"])
             .status()
             .unwrap();
         assert!(decoy_add.success());
-        let decoy_commit = std::process::Command::new("git")
+        let decoy_commit = git_cmd()
             .arg("-C")
             .arg(&decoy)
             .args(["commit", "-q", "-m", "ignore pin"])
@@ -39472,7 +39496,7 @@ mod tests {
         assert!(said.contains("committed chore(issues): probe-a1b2 claimed by saddle"));
         assert_eq!(std::env::var_os("GIT_DIR"), before_dir);
         assert_eq!(std::env::var_os("GIT_WORK_TREE"), before_tree);
-        let log = std::process::Command::new("git")
+        let log = git_cmd()
             .arg("-C")
             .arg(&real)
             .args(["log", "-2", "--format=%s"])
@@ -39617,7 +39641,7 @@ mod tests {
         let hook = hooks.join("pre-commit");
         std::fs::write(&hook, "#!/bin/sh\nkill -9 $PPID\n").unwrap();
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let set = std::process::Command::new("git")
+        let set = git_cmd()
             .arg("-C")
             .arg(dir.path())
             .args(["config", "core.hooksPath"])
@@ -39650,12 +39674,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let run = |args: &[&str]| {
-            let output = std::process::Command::new("git")
-                .arg("-C")
-                .arg(root)
-                .args(args)
-                .output()
-                .unwrap();
+            let output = git_cmd().arg("-C").arg(root).args(args).output().unwrap();
             assert!(
                 output.status.success(),
                 "git {args:?}: {}",
@@ -39744,12 +39763,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let run = |args: &[&str]| {
-            let o = std::process::Command::new("git")
-                .arg("-C")
-                .arg(root)
-                .args(args)
-                .output()
-                .unwrap();
+            let o = git_cmd().arg("-C").arg(root).args(args).output().unwrap();
             assert!(
                 o.status.success(),
                 "git {args:?}: {}",
@@ -39792,12 +39806,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let outer = dir.path();
         let run = |args: &[&str]| {
-            let out = std::process::Command::new("git")
-                .arg("-C")
-                .arg(outer)
-                .args(args)
-                .output()
-                .unwrap();
+            let out = git_cmd().arg("-C").arg(outer).args(args).output().unwrap();
             assert!(
                 out.status.success(),
                 "git {args:?}: {}",
@@ -39849,12 +39858,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let run = |args: &[&str]| {
-            let o = std::process::Command::new("git")
-                .arg("-C")
-                .arg(root)
-                .args(args)
-                .output()
-                .unwrap();
+            let o = git_cmd().arg("-C").arg(root).args(args).output().unwrap();
             assert!(
                 o.status.success(),
                 "git {args:?}: {}",
@@ -39976,12 +39980,7 @@ mod tests {
 
     fn git_scratch(root: &std::path::Path) {
         let run = |args: &[&str]| {
-            let o = std::process::Command::new("git")
-                .arg("-C")
-                .arg(root)
-                .args(args)
-                .output()
-                .unwrap();
+            let o = git_cmd().arg("-C").arg(root).args(args).output().unwrap();
             assert!(
                 o.status.success(),
                 "git {args:?}: {}",
@@ -40003,12 +40002,7 @@ mod tests {
         let root = dir.path().join("work");
         std::fs::create_dir_all(root.join("Software")).unwrap();
         let git = |cwd: &std::path::Path, args: &[&str]| {
-            let o = std::process::Command::new("git")
-                .arg("-C")
-                .arg(cwd)
-                .args(args)
-                .output()
-                .unwrap();
+            let o = git_cmd().arg("-C").arg(cwd).args(args).output().unwrap();
             assert!(
                 o.status.success(),
                 "git {args:?}: {}",
@@ -40064,12 +40058,7 @@ mod tests {
         let (root, remote) = (dir.path().join("work"), dir.path().join("remote.git"));
         std::fs::create_dir_all(root.join("Software")).unwrap();
         let git = |cwd: &std::path::Path, args: &[&str]| {
-            let o = std::process::Command::new("git")
-                .arg("-C")
-                .arg(cwd)
-                .args(args)
-                .output()
-                .unwrap();
+            let o = git_cmd().arg("-C").arg(cwd).args(args).output().unwrap();
             assert!(
                 o.status.success(),
                 "git {args:?}: {}",
@@ -40145,12 +40134,7 @@ mod tests {
         let (root, remote) = (dir.path().join("work"), dir.path().join("remote.git"));
         std::fs::create_dir_all(root.join("Software")).unwrap();
         let git = |cwd: &std::path::Path, args: &[&str]| {
-            let o = std::process::Command::new("git")
-                .arg("-C")
-                .arg(cwd)
-                .args(args)
-                .output()
-                .unwrap();
+            let o = git_cmd().arg("-C").arg(cwd).args(args).output().unwrap();
             assert!(
                 o.status.success(),
                 "git {args:?}: {}",
@@ -40205,12 +40189,7 @@ mod tests {
         let (root, remote) = (dir.path().join("work"), dir.path().join("remote.git"));
         std::fs::create_dir_all(root.join("Software")).unwrap();
         let git = |cwd: &std::path::Path, args: &[&str]| {
-            let o = std::process::Command::new("git")
-                .arg("-C")
-                .arg(cwd)
-                .args(args)
-                .output()
-                .unwrap();
+            let o = git_cmd().arg("-C").arg(cwd).args(args).output().unwrap();
             assert!(
                 o.status.success(),
                 "git {args:?}: {}",
@@ -49700,7 +49679,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = git_cmd()
                 .arg("-C")
                 .arg(repo.path())
                 .args(args)
@@ -54406,7 +54385,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
 
             let repo = tempfile::tempdir().unwrap();
             let git = |a: &[&str]| {
-                let out = std::process::Command::new("git")
+                let out = git_cmd()
                     .arg("-C")
                     .arg(repo.path())
                     .args(a)
@@ -54426,7 +54405,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                         git(&["config", &key, &format!("refs/heads/{up}")]);
                     }
                     None => {
-                        let _ = std::process::Command::new("git")
+                        let _ = git_cmd()
                             .arg("-C")
                             .arg(repo.path())
                             .args(["config", "--unset", &key])
@@ -55228,7 +55207,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     fn evidenced_push_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = git_cmd()
                 .arg("-C")
                 .arg(dir.path())
                 .args(args)
@@ -55260,7 +55239,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         std::fs::create_dir_all(dir.path().join(".ljos")).unwrap();
         std::fs::write(dir.path().join(".ljos/gates.toml"), "test = \"true\"\n").unwrap();
         let sha = String::from_utf8(
-            std::process::Command::new("git")
+            git_cmd()
                 .arg("-C")
                 .arg(dir.path())
                 .args(["rev-parse", "HEAD"])
@@ -60716,12 +60695,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let remote = dir.path().join("remote.git");
         let root = dir.path().join("tracker");
         let git = |cwd: &std::path::Path, args: &[&str]| {
-            let out = std::process::Command::new("git")
-                .arg("-C")
-                .arg(cwd)
-                .args(args)
-                .output()
-                .unwrap();
+            let out = git_cmd().arg("-C").arg(cwd).args(args).output().unwrap();
             assert!(
                 out.status.success(),
                 "git {args:?}: {}",
@@ -61939,7 +61913,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         )
         .unwrap();
         let git = |args: &[&str]| -> String {
-            let out = std::process::Command::new("git")
+            let out = git_cmd()
                 .arg("-C")
                 .arg(&root)
                 .args(args)
@@ -62198,7 +62172,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ),
         )
         .unwrap();
-        let git = std::process::Command::new("git")
+        let git = git_cmd()
             .arg("-C")
             .arg(&root)
             .args(["init", "-b", "main"])
@@ -62472,7 +62446,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ),
         )
         .unwrap();
-        let git = std::process::Command::new("git")
+        let git = git_cmd()
             .arg("-C")
             .arg(&root)
             .args(["init", "-b", "main"])
@@ -62679,7 +62653,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         // GIT_DIR overrides -C. A parallel test exports it, and the pin
         // checkout would then land in that repository.
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = git_cmd()
                 .args(args)
                 .env("GIT_TERMINAL_PROMPT", "0")
                 .env_remove("GIT_DIR")
@@ -62715,7 +62689,7 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 "https://github.com/leidarljos/deedar.git",
             ]);
         }
-        let head = std::process::Command::new("git")
+        let head = git_cmd()
             .args(["-C", src_arg, "rev-parse", "HEAD"])
             .env("GIT_TERMINAL_PROMPT", "0")
             .env_remove("GIT_DIR")

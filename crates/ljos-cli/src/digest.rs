@@ -1444,7 +1444,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     fn git(dir: &std::path::Path, args: &[&str], date: &str) {
-        let out = std::process::Command::new("git")
+        let out = crate::git_cmd()
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -1883,7 +1883,7 @@ mod tests {
         let first = digest(Some("last"), false).unwrap();
         assert!(first.contains("filed probe-b"), "{first}");
         let later = chrono::Utc::now() + chrono::Duration::seconds(5);
-        let out = std::process::Command::new("git")
+        let out = crate::git_cmd()
             .arg("-C")
             .arg(&root)
             .args(["commit", "-q", "--amend", "--no-edit"])
@@ -2178,7 +2178,7 @@ mod tests {
                 "chore(issues): probe-c filed by carol",
             ],
         ] {
-            let out = std::process::Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(&root)
                 .args(&args)

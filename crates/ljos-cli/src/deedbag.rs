@@ -1096,7 +1096,7 @@ mod tests {
     #[test]
     fn a_linked_deeds_directory_is_not_written_through() {
         let git = |cwd: &Path, args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(cwd)
                 .args(args)

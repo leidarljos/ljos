@@ -5303,7 +5303,7 @@ mod tests {
 
     fn rules_repo(root: &Path) -> String {
         let git = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(root)
                 .args(args)
@@ -5418,7 +5418,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(root)
                 .args(args)
@@ -5456,7 +5456,7 @@ mod tests {
         let remote = dir.path().join("remote.git");
         let root = dir.path().join("local");
         let git = |cwd: &std::path::Path, args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(cwd)
                 .args(args)
@@ -5504,7 +5504,7 @@ mod tests {
             said.contains("pushed pending commits"),
             "an unchanged atom log must still push: {said}"
         );
-        let remote_log = std::process::Command::new("git")
+        let remote_log = crate::git_cmd()
             .arg("-C")
             .arg(&remote)
             .args(["log", "--format=%s"])
@@ -5538,7 +5538,7 @@ mod tests {
         let remote = dir.path().join("remote.git");
         let root = dir.path().join("local");
         let git = |cwd: &std::path::Path, args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(cwd)
                 .args(args)
@@ -5607,7 +5607,7 @@ mod tests {
         let root = dir.path().join("local");
         let other = dir.path().join("other");
         let git = |cwd: &std::path::Path, args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(cwd)
                 .args(args)
@@ -5684,7 +5684,7 @@ mod tests {
         std::env::set_var("LJOS_TRACKER_GIT", "off");
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let init = std::process::Command::new("git")
+        let init = crate::git_cmd()
             .arg("-C")
             .arg(root)
             .args(["init", "-q"])
@@ -6918,7 +6918,7 @@ mod tests {
         let remote = dir.path().join("remote.git");
         let root = dir.path().join("local");
         let git = |cwd: &Path, args: &[&str]| {
-            let out = Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(cwd)
                 .args(args)
@@ -7245,7 +7245,7 @@ mod tests {
         .unwrap();
         std::fs::write(atoms.join("gonehost+cloud.digest"), "digest\n").unwrap();
         let git = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(&root)
                 .args(args)
@@ -7298,7 +7298,7 @@ mod tests {
         let _g = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let git = |at: &Path, args: &[&str]| {
-            let out = Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(at)
                 .args(args)
@@ -7448,7 +7448,7 @@ mod tests {
         let link = root.join(".ljos/atoms/gonehost+cloud.jsonl.age");
         std::os::unix::fs::symlink(&local, &link).unwrap();
         let git = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(&root)
                 .args(args)
@@ -7546,7 +7546,7 @@ mod tests {
         .unwrap();
         std::fs::write(atoms.join("gonehost+cloud.digest"), "digest\n").unwrap();
         let git = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(&root)
                 .args(args)
@@ -7973,7 +7973,7 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let mut cmd = Command::new("git");
+        let mut cmd = crate::git_cmd();
         cmd.arg("-C")
             .arg(root)
             .args(["commit", "-q", "-m", message, "--"])
@@ -9764,7 +9764,7 @@ mod tests {
         let root = dir.path().join("repo");
         std::fs::create_dir_all(&root).unwrap();
         let git = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(&root)
                 .args(args)
@@ -9841,7 +9841,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let git = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(root)
                 .args(args)
@@ -10406,7 +10406,7 @@ mod tests {
         }
         let root = dir.path().join("tracker");
         std::fs::create_dir_all(root.join(".ljos")).unwrap();
-        let git = Command::new("git")
+        let git = crate::git_cmd()
             .arg("-C")
             .arg(&root)
             .args(["init", "-q", "-b", "main"])
@@ -10481,7 +10481,7 @@ mod tests {
     }
 
     fn git_ok(cwd: &Path, args: &[&str]) {
-        let out = Command::new("git")
+        let out = crate::git_cmd()
             .arg("-C")
             .arg(cwd)
             .args(args)
@@ -11026,7 +11026,7 @@ mod tests {
         );
         std::fs::write(fix.peer.join(".ljos/atoms/alice+cloud.jsonl.age"), &headed).unwrap();
         git_ok(&fix.peer, &["add", "-A", ".ljos/atoms"]);
-        let dated = Command::new("git")
+        let dated = crate::git_cmd()
             .arg("-C")
             .arg(&fix.peer)
             .args(["commit", "-q", "-m", "alice's headed log"])
@@ -11051,7 +11051,7 @@ mod tests {
         let replaced = clone("replaced", &[]);
         git_ok(&replaced, &["replace", "--graft", "HEAD"]);
         let grafted = clone("grafted", &[]);
-        let head = Command::new("git")
+        let head = crate::git_cmd()
             .arg("-C")
             .arg(&grafted)
             .args(["rev-parse", "HEAD"])
@@ -11092,7 +11092,7 @@ mod tests {
         }
         let said = import(&shallow, &fix.scope()).unwrap();
         assert!(said.contains("`git fetch --unshallow`"), "{said}");
-        let still = Command::new("git")
+        let still = crate::git_cmd()
             .arg("-C")
             .arg(&shallow)
             .args(["rev-parse", "--is-shallow-repository"])
@@ -11119,7 +11119,7 @@ mod tests {
             return;
         }
         fn git_text(cwd: &Path, args: &[&str]) -> String {
-            let out = Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(cwd)
                 .args(args)
@@ -11135,7 +11135,7 @@ mod tests {
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         }
         fn object_present(cwd: &Path, oid: &str) -> bool {
-            Command::new("git")
+            crate::git_cmd()
                 .arg("-C")
                 .arg(cwd)
                 .args(["cat-file", "-e", oid])

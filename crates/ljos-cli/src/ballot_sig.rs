@@ -578,7 +578,7 @@ pub fn tracker_is_git_checkout() -> Option<bool> {
 /// either. An exported `GIT_DIR` or object directory would answer for
 /// another repository in place of `root`, so those are dropped too.
 pub(crate) fn git_history(root: &Path) -> std::process::Command {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = crate::git_cmd();
     crate::clear_git_repo_env(&mut cmd);
     cmd.arg("--no-replace-objects")
         .arg("-C")
@@ -1847,14 +1847,13 @@ pub fn unsigned_allowed() -> bool {
 mod tests {
     use super::*;
     use std::path::Path;
-    use std::process::Command;
 
     fn key(b: u8) -> SigningKey {
         SigningKey::from_bytes(&[b; 32])
     }
 
     fn git(dir: &Path, args: &[&str], env: &[(&str, String)]) {
-        let mut cmd = Command::new("git");
+        let mut cmd = crate::git_cmd();
         cmd.arg("-C").arg(dir).args(args);
         for (k, v) in env {
             cmd.env(k, v);

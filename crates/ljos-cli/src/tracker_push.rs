@@ -1063,7 +1063,7 @@ fn work_tree_of(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn work_tree_cwd() -> Result<PathBuf, String> {
-    let out = std::process::Command::new("git")
+    let out = crate::git_cmd()
         .args(["rev-parse", "--show-toplevel"])
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
@@ -1507,7 +1507,7 @@ note from b
         let right = right.join().unwrap();
         assert!(left.is_ok(), "clone a: {left:?}");
         assert!(right.is_ok(), "clone b: {right:?}");
-        let shown = std::process::Command::new("git")
+        let shown = crate::git_cmd()
             .arg("-C")
             .arg(&origin)
             .args(["show", "HEAD:issues.org"])
@@ -1550,7 +1550,7 @@ body b
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let run = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(root)
                 .args(args)
@@ -1586,7 +1586,7 @@ body b
             1,
             "{attrs}"
         );
-        let driver = std::process::Command::new("git")
+        let driver = crate::git_cmd()
             .arg("-C")
             .arg(root)
             .args(["config", "--local", "--get", "merge.ljos-atoms.driver"])
@@ -1596,7 +1596,7 @@ body b
             String::from_utf8_lossy(&driver.stdout).trim(),
             "ljos merge-atoms %A %P"
         );
-        let name = std::process::Command::new("git")
+        let name = crate::git_cmd()
             .arg("-C")
             .arg(root)
             .args(["config", "--local", "--get", "merge.ljos-atoms.name"])
@@ -1606,7 +1606,7 @@ body b
             String::from_utf8_lossy(&name.stdout).trim(),
             "re-export local atoms"
         );
-        let count = std::process::Command::new("git")
+        let count = crate::git_cmd()
             .arg("-C")
             .arg(root)
             .args(["rev-list", "--count", "HEAD"])
@@ -1630,7 +1630,7 @@ body b
         std::fs::create_dir_all(&outer).unwrap();
         std::fs::create_dir_all(&nested).unwrap();
         let run_outer = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(&outer)
                 .args(args)
@@ -1648,7 +1648,7 @@ body b
         run_outer(&["config", "user.name", "seat"]);
         run_outer(&["config", "core.hooksPath", "/dev/null"]);
         let config_get = |key: &str| -> String {
-            let out = std::process::Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(&outer)
                 .args(["config", "--local", "--get", key])
@@ -1667,7 +1667,7 @@ body b
         prepare_tracker(&nested, true, false).unwrap();
         let _held = crate::tracker_commit_lock(&nested);
 
-        let top_nested = std::process::Command::new("git")
+        let top_nested = crate::git_cmd()
             .arg("-C")
             .arg(&nested)
             .args(["rev-parse", "--show-toplevel"])
@@ -1715,7 +1715,7 @@ body b
         let home = dir.path().join("home");
         let tracker = dir.path().join("tracker");
         std::fs::create_dir_all(&home).unwrap();
-        let init = std::process::Command::new("git")
+        let init = crate::git_cmd()
             .args(["init", "-q", "--bare"])
             .arg(&bare)
             .output()
@@ -1727,7 +1727,7 @@ body b
         );
 
         let git_bare = |args: &[&str]| -> String {
-            let out = std::process::Command::new("git")
+            let out = crate::git_cmd()
                 .arg("--git-dir")
                 .arg(&bare)
                 .args(args)
@@ -1761,7 +1761,7 @@ body b
             }
         }
 
-        let top = std::process::Command::new("git")
+        let top = crate::git_cmd()
             .arg("-C")
             .arg(&tracker)
             .args(["rev-parse", "--show-toplevel"])
@@ -1827,7 +1827,7 @@ body b
         let previous = std::env::var_os("LJOS_ATOMS_DRIVER");
         unsafe { std::env::set_var("LJOS_ATOMS_DRIVER", &driver) };
         let run = |cwd: &Path, args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(cwd)
                 .args(args)
@@ -1927,7 +1927,7 @@ body b
             assert!(result.is_ok(), "clone {i}: {result:?}");
         }
         let shown = |spec: &str| {
-            let out = std::process::Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(&origin)
                 .args(["show", &format!("HEAD:{spec}")])
@@ -1961,7 +1961,7 @@ body b
                 ("core.hooksPath", "/dev/null"),
                 ("commit.gpgsign", "false"),
             ] {
-                let out = std::process::Command::new("git")
+                let out = crate::git_cmd()
                     .arg("-C")
                     .arg(dir)
                     .args(["config", key, value])
@@ -2000,7 +2000,7 @@ body b
         let previous = std::env::var_os("LJOS_ATOMS_DRIVER");
         unsafe { std::env::set_var("LJOS_ATOMS_DRIVER", &driver) };
         let run = |cwd: &Path, args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(cwd)
                 .args(args)
@@ -2076,7 +2076,7 @@ body b
             }
         }
         assert!(pushed.is_ok(), "{pushed:?}");
-        let body = std::process::Command::new("git")
+        let body = crate::git_cmd()
             .arg("-C")
             .arg(&origin)
             .args(["show", &format!("HEAD:{digest}")])
@@ -2086,7 +2086,7 @@ body b
         assert!(text.contains("re-exported"), "{text}");
         assert!(text.contains(&digest), "{text}");
         assert!(!text.contains("side-"), "{text}");
-        let parents = std::process::Command::new("git")
+        let parents = crate::git_cmd()
             .arg("-C")
             .arg(&origin)
             .args(["rev-list", "--parents", "-n", "1", "HEAD"])
@@ -2328,7 +2328,7 @@ body b
         let host = crate::sync::host();
         let rel = format!(".ljos/atoms/{host}.jsonl.age");
         let run = |cwd: &std::path::Path, args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(cwd)
                 .args(args)
@@ -2397,7 +2397,7 @@ body b
         run(&b, &["add", ".ljos/atoms"]);
         run(&b, &["commit", "-q", "-m", "from b"]);
         run(&b, &["fetch", "-q", "origin"]);
-        let merged = std::process::Command::new("git")
+        let merged = crate::git_cmd()
             .arg("-C")
             .arg(&b)
             .args(["merge", "--no-edit", "origin/main"])

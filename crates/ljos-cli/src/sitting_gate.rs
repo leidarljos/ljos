@@ -119,22 +119,8 @@ fn judge_line(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     if let Some(rule) = protected_branch_ask(&calls, line) {
         return Some(rule);
     }
-    if crate::call_unattributed() {
-        if history_or_unread(line, cwd) {
-            crate::bookkeep::log_line("hook: unattributed call, no conversation id");
-        }
-        return None;
-    }
-    if !calls
-        .iter()
-        .any(|call| writes_history(call) && !protected_history_push(call, line))
-    {
-        return None;
-    }
-    if live_sitting().is_err() {
-        if let Some(issue) = open_or_name_sitting() {
-            crate::bookkeep::log_line(&format!("sitting-gate: open sitting {issue}"));
-        }
+    if crate::call_unattributed() && history_or_unread(line, cwd) {
+        crate::bookkeep::log_line("hook: unattributed call, no conversation id");
     }
     None
 }
@@ -159,16 +145,6 @@ fn plain_protected_push(args: &[String]) -> bool {
             || arg == "--mirror"
             || arg.starts_with(':')
     })
-}
-
-fn protected_history_push(call: &GitCall, line: &str) -> bool {
-    if call.sub != "push" || !writes_history(call) {
-        return false;
-    }
-    let Ok(cfg) = crate::gates::consensus_push(Some(&call.cwd)) else {
-        return false;
-    };
-    crate::gates::protected_push(call, line, &cfg.branches).is_some()
 }
 
 /// A push onto a protected branch asks when the sitting has no settled
@@ -601,7 +577,7 @@ mod tests {
     fn a_gates_file_that_does_not_parse_asks() {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(dir.path())
                 .args(args)
@@ -622,7 +598,7 @@ mod tests {
     #[test]
     fn an_unreadable_git_line_is_allowed() {
         let dir = tempfile::tempdir().unwrap();
-        let out = std::process::Command::new("git")
+        let out = crate::git_cmd()
             .arg("-C")
             .arg(dir.path())
             .args(["init", "-q"])
@@ -630,7 +606,7 @@ mod tests {
             .unwrap();
         assert!(out.status.success());
         for (name, next) in [("a", "b"), ("b", "c"), ("c", "d"), ("d", "e")] {
-            let out = std::process::Command::new("git")
+            let out = crate::git_cmd()
                 .arg("-C")
                 .arg(dir.path())
                 .args(["config", &format!("alias.{name}"), &format!("!git {next}")])

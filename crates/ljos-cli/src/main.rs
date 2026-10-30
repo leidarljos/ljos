@@ -2881,8 +2881,10 @@ fn run_command() -> Result<()> {
                 None
             } else if let Some(rule) = fast {
                 Some(rule)
+            } else if suspended {
+                None
             } else if on_tool && !argv.is_empty() {
-                ljos_cli::tcb_verdict_in(&call.cue, dir)
+                ljos_cli::tcb_after_static(&call.cue, dir, true)
             } else if on_tool {
                 ljos_cli::seat_guard(&call.cue)
             } else {

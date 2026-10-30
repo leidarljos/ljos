@@ -395,7 +395,7 @@ fn deepen(root: &Path, remote: &str) -> bool {
 }
 
 fn git_fetch(root: &Path, args: &[&str]) -> bool {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = crate::git_cmd();
     crate::clear_git_repo_env(&mut cmd);
     cmd.arg("-c")
         .arg("protocol.file.allow=always")
@@ -1244,7 +1244,7 @@ mod tests {
     }
 
     fn git_ok(dir: &std::path::Path, args: &[&str]) -> String {
-        let out = std::process::Command::new("git")
+        let out = crate::git_cmd()
             .arg("-C")
             .arg(dir)
             .args(args)

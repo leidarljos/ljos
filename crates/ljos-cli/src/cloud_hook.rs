@@ -12,12 +12,10 @@
 //! environment does not choose that path. `cloud up` records the seat
 //! repository once and leaves it there.
 
+use anyhow::{bail, Context, Result};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-use anyhow::{bail, Context, Result};
 
 /// The hook git runs. The bytes on disk have to match this; `ljos doctor`
 /// treats any other text as a hook that was replaced.
@@ -230,7 +228,7 @@ fn work_tree() -> Option<PathBuf> {
 }
 
 fn work_tree_of(dir: &Path) -> Option<PathBuf> {
-    let out = Command::new("git")
+    let out = crate::git_cmd()
         .current_dir(dir)
         .args(["rev-parse", "--show-toplevel"])
         .stdin(std::process::Stdio::null())
@@ -343,7 +341,7 @@ fn set_local(seat: &Path, dir: &Path) -> Result<()> {
 }
 
 fn git_config(args: &[&str]) -> Result<()> {
-    let out = Command::new("git")
+    let out = crate::git_cmd()
         .args(args)
         .stdin(std::process::Stdio::null())
         .output()
@@ -359,7 +357,7 @@ fn git_config(args: &[&str]) -> Result<()> {
 
 fn local_hooks_path(seat: &Path) -> Option<String> {
     let seat_s = seat.display().to_string();
-    let out = Command::new("git")
+    let out = crate::git_cmd()
         .args([
             "-C",
             &seat_s,
@@ -381,7 +379,7 @@ fn local_hooks_path(seat: &Path) -> Option<String> {
 }
 
 fn global_hooks_path() -> std::result::Result<String, String> {
-    let out = Command::new("git")
+    let out = crate::git_cmd()
         .args(["config", "--global", "--get", "core.hooksPath"])
         .stdin(std::process::Stdio::null())
         .output()
@@ -441,7 +439,7 @@ trap '/bin/rm -f "$tmp"' EXIT
 }
 
 fn origin_url() -> Option<String> {
-    let out = Command::new("git")
+    let out = crate::git_cmd()
         .args(["remote", "get-url", "origin"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -590,7 +588,7 @@ fn effective_hooks_value() -> std::result::Result<(String, PathBuf), String> {
     } else {
         None
     };
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::git_cmd();
     cmd.args(["config", "--show-origin", "--get", "core.hooksPath"]);
     cmd.stdin(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::null());
@@ -1112,6 +1110,7 @@ fn strip_git(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn shell_key(url: &str) -> String {
         let dir = tempfile::tempdir().unwrap();

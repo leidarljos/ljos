@@ -577,6 +577,109 @@ fn a_gates_file_that_does_not_parse_asks_the_git_hook() {
     assert!(!hooked.contains("1 of the 2 seats"), "{hooked}");
 }
 
+/// One commit check returns while the adopt lock is held and the tracker
+/// program does not answer. A guard git on the search list is not the git
+/// the check starts.
+#[test]
+fn a_commit_check_finishes_with_a_stuck_lock_and_a_slow_vissue() {
+    use std::os::unix::io::AsRawFd;
+    use std::time::{Duration, Instant};
+    let seat = Seat::new();
+    let share = seat.home.join(".local/share");
+    let guard = share.join("ljos/guard-bin");
+    std::fs::create_dir_all(&guard).unwrap();
+    script(&guard.join("git"), "#!/bin/sh\nsleep 30\nexit 0\n");
+    script(
+        &seat.bin.join("vissue"),
+        "#!/bin/sh\nsleep 30\nprintf '%s\\n' '{\"id\":\"proj-gate\",\"state\":\"STARTED\",\"claimed_by\":\"inky\"}'\n",
+    );
+    let runtime = seat.run.join("ljos");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(runtime.join("hold-adopt.lock"))
+        .unwrap();
+    assert_eq!(
+        unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) },
+        0
+    );
+    let fake = seat.bin.join("ljos-mcp");
+    std::os::unix::fs::symlink("/bin/sleep", &fake).unwrap();
+    let mut sleeper = Command::new(&fake).arg("300").spawn().unwrap();
+    let bare = ljos_cli::work_id(&format!("inky:{ISSUE}"));
+    std::fs::write(
+        runtime.join(format!("hold-{bare}")),
+        format!(
+            "inky\ninky\n{}\nljos-mcp\n2026-10-25T00:00:00Z\n{ISSUE}\n-\n",
+            sleeper.id()
+        ),
+    )
+    .unwrap();
+    let path = format!("{}:{}:/usr/bin:/bin", guard.display(), seat.bin.display());
+    let extra = [("CURSOR_CONVERSATION_ID", SESSION)];
+    let run = |args: &[&str], stdin: Option<&str>| -> Duration {
+        let mut cmd = seat.command(env!("CARGO_BIN_EXE_ljos"), args);
+        cmd.envs(extra.iter().copied())
+            .env("PATH", &path)
+            .env("XDG_DATA_HOME", &share)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if args.first() == Some(&"hook") {
+            cmd.stdin(Stdio::piped());
+        }
+        let mut child = cmd.spawn().unwrap();
+        if let Some(body) = stdin {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(body.as_bytes())
+                .unwrap();
+        }
+        let pid = child.id();
+        let started = Instant::now();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(child.wait_with_output());
+        });
+        let out = rx.recv_timeout(Duration::from_secs(3)).unwrap_or_else(|_| {
+            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            panic!("commit check hung");
+        });
+        let out = out.unwrap();
+        let took = started.elapsed();
+        assert!(
+            out.status.success(),
+            "commit check failed after {took:?}\n{}",
+            text_of(&out)
+        );
+        assert!(
+            took < Duration::from_secs(2),
+            "commit check took {took:?}\n{}",
+            text_of(&out)
+        );
+        took
+    };
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": SESSION,
+        "conversation_id": SESSION,
+        "cwd": seat.repo,
+        "tool_name": "Bash",
+        "tool_input": {"command": "git commit -m x"},
+    })
+    .to_string();
+    let hook_took = run(&["hook"], Some(&payload));
+    let pre_took = run(&["git-hook", "pre-commit"], None);
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+    drop(lock_file);
+    eprintln!("commit check hook {hook_took:?} pre-commit {pre_took:?}");
+}
+
 #[test]
 fn the_person_at_a_terminal_is_not_refused() {
     let seat = Seat::new();

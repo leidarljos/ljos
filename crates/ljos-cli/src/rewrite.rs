@@ -807,7 +807,7 @@ esac
         let home = tempfile::tempdir().unwrap();
         let repo = home.path().join("proj");
         std::fs::create_dir_all(&repo).unwrap();
-        let init = std::process::Command::new("git")
+        let init = crate::git_cmd()
             .args(["init", "-q"])
             .current_dir(&repo)
             .output()

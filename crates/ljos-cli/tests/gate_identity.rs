@@ -2808,12 +2808,11 @@ fn a_bare_seat_assignee_on_anothers_hold_record_does_not_pass_first_check() {
     );
 }
 
-/// When two conversations race to adopt one bare-seat sitting record,
-/// the atomic transition under the adoption lock lets at most one
-/// conversation adopt it on every round, and the winner keeps passing
-/// while the other is refused.
+/// Two conversations can check one bare-seat record at the same time.
+/// A merge check does not adopt that record, and neither check is
+/// refused for lack of a sitting.
 #[test]
-fn two_conversations_racing_on_a_bare_seat_hold_adopts_at_most_one() {
+fn two_conversations_can_check_one_bare_seat_record() {
     let home = std::sync::Arc::new(Box_::new());
     home.card("inky");
     let bare_actor = ljos_cli::work_id(&format!("inky:{ISSUE}"));
@@ -2876,8 +2875,8 @@ fn two_conversations_racing_on_a_bare_seat_hold_adopts_at_most_one() {
                 .unwrap_or_default()
                 .lines()
                 .next()
-                .is_some_and(|l| l != "inky"),
-            "round {round}: bare-seat hold still has bare assignee"
+                .is_some_and(|l| l == "inky"),
+            "round {round}: a merge check adopted the bare-seat hold"
         );
         let (winner, loser) = if x_ok {
             (CONV_X, CONV_Y)
