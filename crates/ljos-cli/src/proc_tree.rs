@@ -64,7 +64,10 @@ fn stat(pid: u32) -> Option<Stat> {
         )
     };
     if n != size {
-        return None;
+        // The full record is the owner's or root's to read. A process
+        // another user owns (launchd, sshd, a login shell's parent) still
+        // answers the short record, so the walk does not stop below it.
+        return short_stat(pid);
     }
     let comm: Vec<u8> = info
         .pbi_comm
@@ -82,6 +85,74 @@ fn stat(pid: u32) -> Option<Stat> {
         ppid: info.pbi_ppid,
         start,
     })
+}
+
+/// `pid`'s parent, name and state from the short BSD record, which any
+/// user may read, and its start time from `kern.proc.pid`.
+#[cfg(target_os = "macos")]
+fn short_stat(pid: u32) -> Option<Stat> {
+    let mut info: libc::proc_bsdshortinfo = unsafe { std::mem::zeroed() };
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdshortinfo>()).ok()?;
+    // SAFETY: the buffer is a zeroed proc_bsdshortinfo of the size passed.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            libc::c_int::try_from(pid).ok()?,
+            libc::PROC_PIDT_SHORTBSDINFO,
+            0,
+            std::ptr::addr_of_mut!(info).cast(),
+            size,
+        )
+    };
+    if n != size {
+        return None;
+    }
+    let comm: Vec<u8> = info
+        .pbsi_comm
+        .iter()
+        .take_while(|c| **c != 0)
+        .map(|c| c.to_ne_bytes()[0])
+        .collect();
+    Some(Stat {
+        comm: String::from_utf8_lossy(&comm).into_owned(),
+        dead: info.pbsi_status == libc::SZOMB,
+        ppid: info.pbsi_ppid,
+        start: kern_proc_start(pid)?,
+    })
+}
+
+/// The start time `kern.proc.pid` gives for `pid`, in microseconds. A
+/// `struct kinfo_proc` opens with `kp_proc.p_un`, whose `p_starttime` is a
+/// `struct timeval`: seconds as an `i64`, then microseconds as an `i32`.
+#[cfg(target_os = "macos")]
+fn kern_proc_start(pid: u32) -> Option<u64> {
+    let mut mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROC,
+        libc::KERN_PROC_PID,
+        libc::c_int::try_from(pid).ok()?,
+    ];
+    let mut buf = [0u8; 1024];
+    let mut len: libc::size_t = buf.len();
+    // SAFETY: the buffer and its length are passed together; sysctl writes
+    // at most `len` bytes and stores how many it wrote.
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            buf.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || len < 12 {
+        return None;
+    }
+    let sec = i64::from_ne_bytes(buf[0..8].try_into().ok()?);
+    let usec = i32::from_ne_bytes(buf[8..12].try_into().ok()?);
+    let sec = u64::try_from(sec).ok()?;
+    let usec = u64::try_from(usec).ok()?;
+    Some(sec.saturating_mul(1_000_000).saturating_add(usec))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
