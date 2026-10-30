@@ -778,8 +778,8 @@ fn a_stalled_tracker_refuses_a_protected_push_and_passes_another() {
         let out = seat.git_hook_push(refs, &env);
         (out, started.elapsed())
     };
-    let develop = "aaaa bbbb refs/heads/develop refs/heads/develop\n";
-    let (out, took) = run(develop);
+    let develop = seat.same_commit_refs();
+    let (out, took) = run(&develop);
     let said = text_of(&out);
     assert!(
         took >= Duration::from_millis(1500) && took < Duration::from_secs(15),
@@ -799,8 +799,8 @@ fn a_stalled_tracker_refuses_a_protected_push_and_passes_another() {
         !marker.exists(),
         "the protected push reached a consensus check"
     );
-    let topic = "aaaa bbbb refs/heads/topic refs/heads/topic\n";
-    let (out, took) = run(topic);
+    let topic = develop.replace("refs/heads/develop", "refs/heads/topic");
+    let (out, took) = run(&topic);
     let said = text_of(&out);
     assert!(
         took >= Duration::from_millis(1500) && took < Duration::from_secs(15),
