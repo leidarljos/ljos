@@ -2070,6 +2070,30 @@ fn same_runtime_dir(env: &[(String, String)]) -> bool {
     }
 }
 
+/// The basename of `_` when it is the last entry of `env`, as bash leaves
+/// it for the program it starts.
+fn last_underscore(env: &[(String, String)]) -> Option<&str> {
+    let (k, v) = env.last()?;
+    (k == "_").then(|| v.rsplit('/').next().unwrap_or(v))
+}
+
+/// Whether `env`, this process's own, is the one a shell handed it by
+/// exec'ing it in its own place (`bash -c 'ljos ...'`): bash leaves `SHLVL`
+/// and, last, `_` naming the program it started, which is this one.
+fn shell_execed_self(env: &[(String, String)]) -> bool {
+    if !env.iter().any(|(k, _)| k == "SHLVL") {
+        return false;
+    }
+    let Some(under) = env.last().filter(|(k, _)| k == "_").map(|(_, v)| v) else {
+        return false;
+    };
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    canon(Path::new(under)) == canon(&exe)
+}
+
 fn clean_shell_environ(env: Vec<(String, String)>, is_self: bool) -> Vec<(String, String)> {
     let is_bash_cursor =
         env.iter().any(|(k, _)| k == "SHLVL") && env.iter().any(|(k, _)| k == "CURSOR_AGENT");
@@ -2079,6 +2103,19 @@ fn clean_shell_environ(env: Vec<(String, String)>, is_self: bool) -> Vec<(String
     let Some(pwd_at) = env.iter().position(|(k, _)| k == "PWD") else {
         return env;
     };
+    // A shell whose environment a runner handed down: bash put the inline
+    // assignment at the head for that runner (`ID=x cursor-agent ...`), and
+    // the runner started this shell with it unchanged. The id is the
+    // runner's own, not an override of this shell's.
+    if !is_self
+        && last_underscore(&env).is_some_and(|name| {
+            HARNESS_NAMES
+                .iter()
+                .any(|h| seat_slug(h) == seat_slug(name))
+        })
+    {
+        return env;
+    }
     // tmux and screen sort the environment they pass to a pane, placing
     // `CURSOR_*` before `PWD` without any inline assignment. zsh keeps
     // the inherited environment before `LOGNAME`, `SHLVL` and `PWD`.
@@ -2340,6 +2377,14 @@ fn stamp_from_ancestors() -> Option<Vec<(String, String)>> {
             .iter()
             .take_while(|(pid, comm)| !is_harness_process(*pid, comm) && comm != "node")
             .all(|(_, comm)| !is_shell(comm) && WRAPPERS.contains(&comm.as_str()))
+    {
+        return None;
+    }
+    // `bash -c 'ljos ...'` execs ljos in place of the shell, so the shell
+    // that carried the stamp is this process: an ancestor that only marks
+    // a runner does not outrank the id this process was started with.
+    if self_has_id
+        && proc_tree::environ(std::process::id()).is_some_and(|env| shell_execed_self(&env))
     {
         return None;
     }
