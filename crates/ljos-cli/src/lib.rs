@@ -8528,8 +8528,8 @@ fn mcp_atom(raw: &str) -> String {
     }
 }
 
-/// A shell line the tracker guard already judges, built from a vissue
-/// MCP write. `None` for a tool that is not one of those writes.
+/// A shell line the tracker guard already judges, built from a vissue MCP
+/// write. `None` for a tool that is not one of those writes.
 fn vissue_mcp_line(tool: &str, input: &Value) -> Option<String> {
     let verb = vissue_mcp_verb(tool)?;
     let parsed;
@@ -25507,11 +25507,13 @@ pub(crate) fn open_regular_at(
     if fd < 0 {
         let err = std::io::Error::last_os_error();
         // A directory opened for write is EISDIR before fstat, and a
-        // socket opened O_NONBLOCK is ENXIO. Neither is a regular file,
-        // and the open itself did not wait.
+        // socket opened O_NONBLOCK is ENXIO on Linux and EOPNOTSUPP on
+        // macOS. None is a regular file, and the open itself did not wait.
         return Err(match err.raw_os_error() {
             Some(libc::ELOOP) => StateRefusal::Symlink(path.to_path_buf()).into(),
-            Some(libc::EISDIR | libc::ENXIO) => StateRefusal::NotRegular(path.to_path_buf()).into(),
+            Some(libc::EISDIR | libc::ENXIO | libc::EOPNOTSUPP) => {
+                StateRefusal::NotRegular(path.to_path_buf()).into()
+            }
             _ => err,
         });
     }
