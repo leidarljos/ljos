@@ -39548,6 +39548,42 @@ mod tests {
         );
     }
 
+    /// A tracker write gives up on another writer's commit lock at its
+    /// deadline and names the lock, instead of waiting without end.
+    #[test]
+    fn a_held_tracker_lock_is_waited_out_only_until_the_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let out = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let held = tracker_commit_lock(repo);
+        assert!(held.0.is_some(), "the first writer holds the lock");
+        let started = std::time::Instant::now();
+        let second = tracker_commit_lock_by(
+            repo,
+            started + std::time::Duration::from_millis(300),
+        );
+        let waited = started.elapsed();
+        assert!(second.is_none(), "a held lock is not taken twice");
+        assert!(
+            waited >= std::time::Duration::from_millis(300),
+            "gave up early: {waited:?}"
+        );
+        assert!(
+            waited < std::time::Duration::from_secs(5),
+            "waited past the deadline: {waited:?}"
+        );
+        let busy = tracker_lock_busy(repo);
+        assert!(busy.contains(TRACKER_LOCK), "{busy}");
+        assert!(busy.contains("not committed"), "{busy}");
+        drop(held);
+        assert!(tracker_commit_lock_by(repo, std::time::Instant::now()).is_some());
+    }
+
     /// A bare `GIT_DIR` plus `GIT_WORK_TREE` checkout still commits and
     /// lease-pushes. Its work tree has no `.git` of its own, so it takes no
     /// tracker lock: the exported variables do not make it a checkout.
