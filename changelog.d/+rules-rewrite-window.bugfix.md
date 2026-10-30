@@ -1,0 +1,1 @@
+A user-rules file rewritten in place was read as corrupt when the writer paused for more than 80 ms between its truncate and its write, and a GitHub write the rules do not cover was refused in that window. The read now waits 250 ms for the bytes to change before it treats the file as corrupt, and re-reads a changing file for up to 600 ms.

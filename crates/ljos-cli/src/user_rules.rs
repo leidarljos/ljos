@@ -174,10 +174,15 @@ pub(crate) fn read_all() -> Result<Vec<UserRule>> {
     }
 }
 
-/// How long an unchanged bad file is treated as corrupt.
-const RULES_STABLE: std::time::Duration = std::time::Duration::from_millis(80);
-/// How long a file whose bytes keep changing is re-read.
-const RULES_HARD: std::time::Duration = std::time::Duration::from_millis(200);
+/// How long an unchanged bad file is treated as corrupt. A rewrite is
+/// empty between its truncate and its write, and on a busy machine the
+/// writer can be set aside for longer than a few milliseconds there, so
+/// the window is wide enough that a paused rewrite is not read as a
+/// corrupt file. A file that is truly empty costs this much once.
+const RULES_STABLE: std::time::Duration = std::time::Duration::from_millis(250);
+/// How long a file whose bytes keep changing is re-read. Well inside the
+/// hook's own five-second budget.
+const RULES_HARD: std::time::Duration = std::time::Duration::from_millis(600);
 
 #[derive(PartialEq, Eq)]
 struct RulesStamp {
