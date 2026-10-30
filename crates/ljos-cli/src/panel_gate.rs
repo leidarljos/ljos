@@ -212,10 +212,10 @@ fn parent_of(v: &Value) -> Option<String> {
 }
 
 fn children_of(issue: &str) -> Vec<String> {
-    let Ok(said) = crate::run_captured("vissue", &["children", issue, "--json"]) else {
+    let Ok(said) = crate::tracker_listing(&["children", issue, "--json"]) else {
         return Vec::new();
     };
-    serde_json::from_str::<Vec<Value>>(&said.stdout)
+    serde_json::from_str::<Vec<Value>>(&said)
         .ok()
         .into_iter()
         .flatten()

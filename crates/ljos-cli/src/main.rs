@@ -3238,6 +3238,9 @@ fn run_command() -> Result<()> {
             // One silent pack is waited out once. Trust, the roster and the
             // listing each ask, and a second wait would hold the reading.
             let _quiet = ljos_cli::pack_link::QuietPack::enter();
+            // Each ticket of the family is read once for the whole reading.
+            // A dissent filed below is a write, and is read afresh.
+            let reading = ljos_cli::TrackerReading::enter();
             // Rows scoped to a domain apply when the issue is about it; the
             // personas' anchors go to both settles; the issue's tags pick
             // the model.
@@ -3320,6 +3323,7 @@ fn run_command() -> Result<()> {
             // A tie files nothing. Each filing reading sits one panel round.
             // `--no-file` keeps this a pure read. Filing never fails the
             // reading.
+            drop(reading);
             let dissent = if no_file || !on_path("vissue") {
                 Vec::new()
             } else {

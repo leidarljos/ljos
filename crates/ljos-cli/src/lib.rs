@@ -23008,8 +23008,8 @@ pub fn seats_decide(
 }
 
 fn vissue_json(args: &[&str]) -> std::result::Result<Value, String> {
-    let said = run_captured("vissue", args).map_err(|e| format!("{e:#}"))?;
-    serde_json::from_str(&said.stdout).map_err(|e| e.to_string())
+    let said = tracker_listing(args).map_err(|e| format!("{e:#}"))?;
+    serde_json::from_str(&said).map_err(|e| e.to_string())
 }
 
 /// An issue's ballots and the persona names to leave out of them. The
@@ -30770,6 +30770,9 @@ pub(crate) fn revision_note(body: &Value) -> String {
 ///
 /// The tracker root cannot be resolved, or `id` is not in it.
 pub fn tracker_show_json(id: &str) -> Result<Value> {
+    if let Some(card) = READING.with(|r| r.borrow_mut().as_mut().map(|r| r.card(id))) {
+        return card;
+    }
     let layout = vissue_core::Layout::resolve(None, None).map_err(anyhow::Error::from)?;
     let found = vissue_core::Router::load(layout)
         .map_err(anyhow::Error::from)?
@@ -30785,6 +30788,23 @@ pub fn issue_record(issue: &str) -> Result<Value> {
     if in_push_check() && push_slow() {
         bail!("the tracker or lock was slow");
     }
+    if let Some(v) = READING.with(|r| {
+        r.borrow()
+            .as_ref()
+            .and_then(|r| r.records.get(issue).cloned())
+    }) {
+        return Ok(v);
+    }
+    let v = issue_record_afresh(issue)?;
+    READING.with(|r| {
+        if let Some(r) = r.borrow_mut().as_mut() {
+            r.records.insert(issue.to_string(), v.clone());
+        }
+    });
+    Ok(v)
+}
+
+fn issue_record_afresh(issue: &str) -> Result<Value> {
     if let Ok(v) = tracker_show_json(issue) {
         if v.get("id").is_some() || v.get("title").is_some() || v.get("logbook").is_some() {
             return Ok(v);
@@ -30802,6 +30822,107 @@ pub fn issue_record(issue: &str) -> Result<Value> {
             }
         })?;
     serde_json::from_str(&said.stdout).context("vissue show --json")
+}
+
+/// One reading of the tracker. While the guard is alive on this thread,
+/// each ticket's record and each `vissue` listing is read once, and every
+/// record comes from one parse of the tracker. A consensus reads the same
+/// family of tickets many times over, and outside a reading each read
+/// parses the whole tracker. Dropping the guard forgets what was read, so
+/// a later write is read afresh.
+pub struct TrackerReading {
+    outer: bool,
+}
+
+#[derive(Default)]
+struct ReadOnce {
+    corpus: Vec<((PathBuf, String), Vec<vissue_core::views::IssueRec>)>,
+    records: std::collections::BTreeMap<String, Value>,
+    listings: std::collections::BTreeMap<Vec<String>, String>,
+}
+
+thread_local! {
+    static READING: std::cell::RefCell<Option<ReadOnce>> = const { std::cell::RefCell::new(None) };
+}
+
+impl TrackerReading {
+    #[must_use]
+    pub fn enter() -> Self {
+        let outer = READING.with(|r| {
+            let mut r = r.borrow_mut();
+            let outer = r.is_none();
+            if outer {
+                *r = Some(ReadOnce::default());
+            }
+            outer
+        });
+        Self { outer }
+    }
+}
+
+impl Drop for TrackerReading {
+    fn drop(&mut self) {
+        if self.outer {
+            READING.with(|r| *r.borrow_mut() = None);
+        }
+    }
+}
+
+impl ReadOnce {
+    /// The card `vissue show --json` prints, from each layout parsed once.
+    fn card(&mut self, id: &str) -> Result<Value> {
+        let layout = vissue_core::Layout::resolve(None, None).map_err(anyhow::Error::from)?;
+        let router = vissue_core::Router::load(layout).map_err(anyhow::Error::from)?;
+        let mut hits = Vec::new();
+        for layout in router.unique_layouts() {
+            let key = (layout.root().to_path_buf(), layout.prefix().to_string());
+            let at = match self.corpus.iter().position(|(k, _)| *k == key) {
+                Some(at) => at,
+                None => {
+                    let recs =
+                        vissue_core::catalog::load_recs(layout).map_err(anyhow::Error::from)?;
+                    self.corpus.push((key, recs));
+                    self.corpus.len() - 1
+                }
+            };
+            if self.corpus[at].1.iter().any(|rec| rec.heading.id == id) {
+                hits.push(at);
+            }
+        }
+        match hits.as_slice() {
+            [at] => {
+                let detail = vissue_core::catalog::CatalogService::from_recs(&self.corpus[*at].1)
+                    .detail(id)
+                    .map_err(anyhow::Error::from)?;
+                Ok(serde_json::to_value(detail)?)
+            }
+            [] => bail!("{id} is not in the tracker"),
+            _ => bail!("{id} is in more than one tracker"),
+        }
+    }
+}
+
+/// What `vissue ARGS` prints, asked once inside a [`TrackerReading`].
+///
+/// # Errors
+///
+/// The tracker could not be run, or it failed.
+pub fn tracker_listing(args: &[&str]) -> Result<String> {
+    let key: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
+    if let Some(out) = READING.with(|r| {
+        r.borrow()
+            .as_ref()
+            .and_then(|r| r.listings.get(&key).cloned())
+    }) {
+        return Ok(out);
+    }
+    let said = run_captured("vissue", args)?;
+    READING.with(|r| {
+        if let Some(r) = r.borrow_mut().as_mut() {
+            r.listings.insert(key, said.stdout.clone());
+        }
+    });
+    Ok(said.stdout)
 }
 
 /// Whether an issue asks for a decision: a `decision` tag, a `decision`
@@ -36423,9 +36544,9 @@ pub fn settle_in_words(
 ///
 /// The tracker did not list them.
 pub fn raw_ballot_rows(issue: &str) -> Result<Vec<Value>> {
-    let said = run_captured("vissue", &["vote", issue, "--json"])
+    let said = tracker_listing(&["vote", issue, "--json"])
         .with_context(|| format!("vote: the tracker did not list ballots on {issue}"))?;
-    Ok(serde_json::from_str(said.stdout.trim()).unwrap_or_default())
+    Ok(serde_json::from_str(said.trim()).unwrap_or_default())
 }
 
 /// The ballots that count. Ballots that share a session id or a parent
