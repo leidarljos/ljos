@@ -14,7 +14,7 @@ fn script(dir: &Path, name: &str, body: &str) {
 }
 
 #[test]
-fn a_ballot_from_a_shell_with_no_seat_is_refused() {
+fn a_persona_ballot_is_recorded_when_no_seat_is_named() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("calls.log");
     let log_s = log.display();
@@ -63,21 +63,18 @@ fn a_ballot_from_a_shell_with_no_seat_is_refused() {
         "--as",
         "reviewer",
     ];
-    let cast_derived = ljos(None, &vote);
-    let err = String::from_utf8_lossy(&cast_derived.stderr);
-    assert!(
-        !err.contains("no seat is named"),
-        "a derived seat is a seat: {err}"
-    );
-
-    // The stub tracker holds the ballot once `vissue vote` wrote it, so the
-    // cast is proved by the tracker's read-back, not by the exit of the vote.
-    let cast = ljos(Some("reviewer"), &vote);
+    // No LJOS_SEAT: `--as reviewer` still records the persona. The derived
+    // seat is the caster, named on the provenance line.
+    let cast = ljos(None, &vote);
+    let said = String::from_utf8_lossy(&cast.stdout);
+    let err = String::from_utf8_lossy(&cast.stderr);
     assert!(cast.status.success(), "{cast:?}");
+    assert!(!err.contains("no seat is named"), "{err}");
     assert!(
-        String::from_utf8_lossy(&cast.stdout).contains("recorded on the tracker: reviewer for a"),
+        said.contains("recorded on the tracker: reviewer for a"),
         "{cast:?}"
     );
+    assert!(said.contains("reviewer cast by "), "{cast:?}");
     let calls = std::fs::read_to_string(&log).unwrap();
     assert!(
         calls.contains("vissue vote proj-aaaa --for a --used none VISSUE_AGENT=reviewer"),

@@ -132,8 +132,10 @@ LJOS_SEAT=alice ljos digest
 ```
 
 A second claim on a held ticket is refused, and the refusal names the holder.
-A seat votes once per ticket. Naming another session id does not make a second voice.
-One shell casts one ballot. A second ballot from it is refused, even under another `LJOS_SEAT`.
+A persona ballot records the casting seat, the parent session and the persona.
+Ballots that share a session id or a parent are all recorded and count as one voice.
+When they disagree, the latest ballot is that voice.
+`ljos consensus` names the ballots it folded and why.
 
 The ballot list goes to `ljos consensus`. The command reads the pack's trust rows.
 The consensus crate settles the votes. With no rows, every voter weighs the same. `ljos learn ID --outcome OPTION`

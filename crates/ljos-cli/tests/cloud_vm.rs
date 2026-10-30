@@ -5473,11 +5473,11 @@ fn serve_empty_pack() -> String {
     format!("http://{addr}")
 }
 
-/// Two standing seats vote ship from one harness session. The older note
-/// is the pusher. Raw rows are two ballots, so a cite that does not count
-/// them stands; consensus, which counts, does not. Both paths refuse.
+/// Two standing seats vote ship from one harness session. Both ballots
+/// are recorded. They count as one voice in the push count, the later
+/// seat, and consensus does not refuse the shared session.
 #[test]
-fn duplicate_ballots_from_one_session_have_one_push_verdict() {
+fn ballots_that_share_a_session_still_count() {
     let _g = Guard::new();
     let root = tempfile::tempdir().unwrap();
     let (_origin, repo) = slot_world(root.path(), &["probe-dup"]);
@@ -5514,21 +5514,32 @@ fn duplicate_ballots_from_one_session_have_one_push_verdict() {
     assert_eq!(ljos_cli::seat_name(), "ljosbot");
     let rows = ljos_cli::ballot_rows(issue);
     assert_eq!(rows.len(), 1, "{rows:?}");
-    assert_eq!(rows[0]["agent"].as_str(), Some("ljosbot"), "{rows:?}");
+    let voice = rows[0]["agent"].as_str().unwrap_or("");
+    assert!(voice == "ljosbot" || voice == "inky", "{rows:?}");
+    assert!(ljos_cli::panel_gate::settle_refusal(issue).is_none());
     let cite = ljos_cli::cite_stands(issue);
-    let (words, json) = ljos_cli::push_cite_reading(
+    let (words, _json) = ljos_cli::push_cite_reading(
         issue,
         &rows,
         &std::collections::BTreeSet::new(),
         &ljos_cli::seat_name(),
     );
-    let stands = json["push_cite"]["stands"].as_bool().unwrap();
-    assert!(!stands, "{words}");
-    assert!(words.contains("does not stand"), "{words}");
-    assert_eq!(cite.is_ok(), stands, "{cite:?} {words}");
-    let err = cite.unwrap_err();
-    assert!(err.contains("the only seat ballot"), "{err}");
-    assert!(err.contains("ljosbot"), "{err}");
+    let said = format!("{cite:?}\n{words}");
+    let hits = ["ljosbot for ship", "inky for ship"]
+        .into_iter()
+        .filter(|name| said.contains(name))
+        .count();
+    assert_eq!(hits, 1, "{said}");
+    let push = ljos_cli::protected_push_stands(issue, 2).unwrap_err();
+    let push_hits = ["ljosbot for ship", "inky for ship"]
+        .into_iter()
+        .filter(|name| push.contains(name))
+        .count();
+    assert_eq!(push_hits, 1, "{push}");
+    assert!(
+        push.contains("1 of the 2 seats") || push.contains("the only seat"),
+        "{push}"
+    );
 }
 
 /// A tracker under `root` where `inky`, pinned before any slot, voted

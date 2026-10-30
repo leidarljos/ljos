@@ -350,10 +350,11 @@ fn a_bump_plan_is_filed_only_as_a_listed_seat() {
 }
 
 #[test]
-fn a_ballot_or_a_withdrawal_as_another_seat_is_refused() {
+fn a_ballot_or_a_withdrawal_as_another_persona_is_recorded() {
     let b = Bench::new();
     b.seats("seats = [\"saddle\", \"inky\"]\n");
-    for args in [
+    let _ = b.ljos(
+        Some("saddle"),
         &[
             "vote",
             "proj-aaaa",
@@ -363,28 +364,28 @@ fn a_ballot_or_a_withdrawal_as_another_seat_is_refused() {
             "none",
             "--as",
             "inky",
-        ][..],
-        &["vote", "proj-aaaa", "--withdraw", "--as", "inky"],
-    ] {
-        let out = b.ljos(Some("saddle"), args);
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(!out.status.success(), "{args:?} went through: {out:?}");
-        assert!(
-            err.contains("--as inky is not this seat, saddle"),
-            "{args:?}: {err}"
-        );
-    }
-    assert_eq!(b.calls(), "", "nothing reached the tracker");
-
-    b.ljos(
+        ],
+    );
+    let _ = b.ljos(
         Some("saddle"),
-        &["vote", "proj-aaaa", "--withdraw", "--as", "saddle"],
+        &["vote", "proj-aaaa", "--withdraw", "--as", "inky"],
     );
     let calls = b.calls();
+    let persona = "persona:saddle:inky";
     assert!(
-        calls.contains("vissue vote proj-aaaa --withdraw VISSUE_AGENT=saddle"),
+        calls.contains(&format!(
+            "vissue vote proj-aaaa --for accept --used none VISSUE_AGENT={persona}"
+        )),
         "{calls}"
     );
+    assert!(
+        calls.contains(&format!(
+            "vissue vote proj-aaaa --withdraw VISSUE_AGENT={persona}"
+        )),
+        "{calls}"
+    );
+    assert!(!calls.contains("VISSUE_AGENT=inky"), "{calls}");
+    assert!(!calls.contains("not this seat"), "{calls}");
 }
 
 #[test]
@@ -554,13 +555,17 @@ fn a_forecast_is_recorded_as_the_seat_the_check_named() {
     assert!(out.status.success(), "{out:?}");
     assert!(said.contains("\"agent\": \"saddle\""), "{said}");
 
-    let refused = b.ljos_env(
+    let named = b.ljos_env(
         &[("LJOS_SEAT", "saddle"), ("PACKSET_URL", &pack)],
         &["predict", "proj-aaaa", "--expect", "accept", "--as", "inky"],
     );
-    let err = String::from_utf8_lossy(&refused.stderr);
-    assert!(!refused.status.success(), "{refused:?}");
-    assert!(err.contains("--as inky is not this seat, saddle"), "{err}");
+    let said = String::from_utf8_lossy(&named.stdout);
+    assert!(named.status.success(), "{named:?}");
+    assert!(
+        said.contains("\"agent\": \"persona:saddle:inky\""),
+        "{said}"
+    );
+    assert!(!said.contains("\"agent\": \"inky\""), "{said}");
 }
 
 #[test]

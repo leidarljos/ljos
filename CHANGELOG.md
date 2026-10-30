@@ -17,6 +17,14 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ### Fixes
 
+- A ballot is recorded as the caster's persona ballot when its as option names a standing seat, the person, or a persona mark.
+  The note keeps the persona, the caster and the parent session.
+  It is not that seat's ballot, and it is signed with the caster's key.
+  A withdrawal takes back a ballot that caster cast, and leaves another seat's ballot in place.
+  Ballots that share a session id or a parent are all recorded and count as one voice in the tally, the settle and a protected push.
+  When those ballots disagree, the latest one is the voice.
+  `ljos consensus` names the ballots it folded and why.
+  Nothing is refused when the ballot is written.
 - A `prompt` verdict from ljos-policyd asks the person.
   A program that names a credential path waits for the person to approve it.
   A deny still wins over that ask, and a prompt with no token stays a fault.

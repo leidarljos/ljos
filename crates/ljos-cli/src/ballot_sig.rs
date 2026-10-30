@@ -24,6 +24,12 @@ use std::path::{Path, PathBuf};
 
 /// The note prefix a signature rides under.
 pub const SIG_NOTE: &str = "ballot-sig: ";
+/// The note prefix for who cast a persona ballot:
+/// `ballot-from: PERSONA CASTER PARENT`.
+pub const FROM_NOTE: &str = "ballot-from: ";
+/// Drawer agent for a caster's persona ballot of a protected name:
+/// `persona:CASTER:PERSONA`. It is not that seat's own ballot.
+pub const PERSONA_VOTER: &str = "persona:";
 /// The note prefix a withdrawn ballot rides under.
 pub const WITHDRAWN_NOTE: &str = "ballot-withdrawn: ";
 /// The pin file at the tracker root.
@@ -1120,19 +1126,127 @@ fn pin_first(path: &Path, voter: &str, mine: &str) -> Result<BTreeMap<String, St
     Ok(pinned)
 }
 
+/// The session a subagent's binding sits under. `SESSION:AGENT` yields
+/// `SESSION`. A session with no agent is its own parent.
+#[must_use]
+pub fn parent_session(harness: &str) -> String {
+    let harness = harness.trim();
+    if harness.is_empty() || harness == "-" {
+        return String::new();
+    }
+    match harness.split_once(':') {
+        Some((parent, agent)) if !parent.is_empty() && !agent.is_empty() => parent.to_string(),
+        _ => harness.to_string(),
+    }
+}
+
+/// Who cast `persona`: the process seat, or the session when the seat is
+/// empty, and the parent session.
+#[must_use]
+pub fn cast_from(persona: &str) -> (String, String, String) {
+    let id = identity();
+    let parent = parent_session(&id.harness);
+    let parent = if parent.is_empty() {
+        "-".to_string()
+    } else {
+        field(&parent)
+    };
+    let seat = crate::seat_name();
+    let caster = if seat.trim().is_empty() {
+        parent.clone()
+    } else {
+        field(&seat)
+    };
+    (field(persona), caster, parent)
+}
+
+/// `ballot-from: PERSONA CASTER PARENT`.
+#[must_use]
+pub fn provenance_line(persona: &str, caster: &str, parent: &str) -> String {
+    format!(
+        "{FROM_NOTE}{} {} {}",
+        field(persona),
+        field(caster),
+        field(parent)
+    )
+}
+
+/// The drawer agent for a persona ballot `caster` cast in `persona`'s name.
+/// Both parts are seat slugs, so the id is stable across spellings.
+#[must_use]
+pub fn caster_persona_voter(caster: &str, persona: &str) -> String {
+    format!(
+        "{PERSONA_VOTER}{}:{}",
+        field(&crate::canonical_seat_name(caster)),
+        field(&crate::canonical_seat_name(persona))
+    )
+}
+
+/// Drawer id when `--as` itself begins with [`PERSONA_VOTER`].
+/// The caster field is `caster`. The rest of the given name is kept.
+#[must_use]
+pub fn prefixed_persona_voter(caster: &str, rest: &str) -> String {
+    let persona = field(rest);
+    let persona = if persona.is_empty() || persona == "-" {
+        "persona".to_string()
+    } else {
+        persona
+    };
+    format!(
+        "{PERSONA_VOTER}{}:{persona}",
+        field(&crate::canonical_seat_name(caster))
+    )
+}
+
+/// `CASTER`, `PERSONA` from [`caster_persona_voter`].
+/// The persona may itself contain colons. The caster is only the first field.
+#[must_use]
+pub fn parse_caster_persona_voter(voter: &str) -> Option<(String, String)> {
+    let rest = voter.trim().strip_prefix(PERSONA_VOTER)?;
+    let (caster, persona) = rest.split_once(':')?;
+    if caster.is_empty() || persona.is_empty() || caster.contains(':') {
+        return None;
+    }
+    Some((caster.to_string(), persona.to_string()))
+}
+
+/// `PERSONA`, `CASTER`, `PARENT` from a provenance note.
+#[must_use]
+pub fn parse_from(note: &str) -> Option<(String, String, String)> {
+    let rest = note.trim().strip_prefix(FROM_NOTE)?;
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    let [persona, caster, parent] = parts.as_slice() else {
+        return None;
+    };
+    Some((
+        (*persona).to_string(),
+        (*caster).to_string(),
+        (*parent).to_string(),
+    ))
+}
+
 /// Sign this seat's ballot, bound to the harness session, and leave the
-/// note on the issue. A seat whose key differs from
-/// its pin is refused, and the ballot stays unsigned (so the gate will not
-/// count it).
+/// note on the issue. A persona cast is signed as that persona. A ballot
+/// whose agent is [`caster_persona_voter`] is signed with the caster's
+/// key, never with the named seat's key. The provenance note names the
+/// persona, the caster and the parent.
+/// A seat whose key differs from its pin is refused, and the ballot stays
+/// unsigned (so the gate will not count it).
 ///
 /// # Errors
 ///
 /// No seat key, a key that does not match the pin, or a tracker write that
 /// failed.
 pub fn sign_ballot(issue: &str, voter: &str, choice: &str) -> Result<String> {
+    // A protected name is signed by the caster embedded in the agent.
+    // The named seat's key is never loaded.
+    let (signer, persona) = match parse_caster_persona_voter(voter) {
+        Some((caster, persona)) => (caster, persona),
+        None => (voter.to_string(), voter.to_string()),
+    };
     if let Some((existing, withdrawn)) = newest_sig(issue, voter) {
         if verifies(issue, &existing) {
-            match resign_of(&existing, choice, voter, withdrawn) {
+            match resign_of(&existing, choice, &signer, withdrawn) {
                 Resign::Keep => {
                     return Ok(format!("ballot already signed by {voter}\n"));
                 }
@@ -1143,7 +1257,7 @@ pub fn sign_ballot(issue: &str, voter: &str, choice: &str) -> Result<String> {
             }
         }
     }
-    let (key, mine) = signing_key(voter)?;
+    let (key, mine) = signing_key(&signer)?;
     let id = identity();
     let note = sign_bound(&key, issue, voter, choice, &id.harness, &id.nonce);
     if write_sig_note(issue, &note).is_err() {
@@ -1161,6 +1275,22 @@ pub fn sign_ballot(issue: &str, voter: &str, choice: &str) -> Result<String> {
     if id.seat_only() {
         said.push_str(&format!("{}\n", unverified_sentence(&id.harness)));
     }
+    let (persona, caster, parent) = if signer == persona {
+        cast_from(&persona)
+    } else {
+        let parent = parent_session(&id.harness);
+        let parent = if parent.is_empty() {
+            "-".to_string()
+        } else {
+            field(&parent)
+        };
+        (field(&persona), field(&signer), parent)
+    };
+    let from = provenance_line(&persona, &caster, &parent);
+    if write_sig_note(issue, &from).is_err() {
+        let _ = crate::run_captured("vissue", &["note", issue, &from]);
+    }
+    said.push_str(&format!("{persona} cast by {caster}, parent {parent}\n"));
     Ok(said)
 }
 
@@ -1514,6 +1644,26 @@ mod tests {
             "git {:?} failed: {}",
             args,
             String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn a_caster_persona_voter_names_the_caster_and_the_persona() {
+        let id = caster_persona_voter("Saddle", "INKY");
+        assert_eq!(id, "persona:saddle:inky");
+        assert_eq!(
+            parse_caster_persona_voter(&id),
+            Some(("saddle".to_string(), "inky".to_string()))
+        );
+        assert!(parse_caster_persona_voter("inky").is_none());
+        assert!(parse_caster_persona_voter("persona:saddle").is_none());
+        assert_eq!(
+            prefixed_persona_voter("saddle", "inky:x"),
+            "persona:saddle:inky:x"
+        );
+        assert_eq!(
+            parse_caster_persona_voter("persona:saddle:inky:x"),
+            Some(("saddle".to_string(), "inky:x".to_string()))
         );
     }
 

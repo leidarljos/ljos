@@ -4452,6 +4452,39 @@ fn login_user() -> String {
         .unwrap_or_else(|| "seat".to_string())
 }
 
+/// The account that owns this process. A tool can change `USER`. It
+/// cannot change this. This is the person a ballot must not be written as.
+fn process_account() -> Option<String> {
+    let mut buf = vec![0u8; 1024];
+    loop {
+        // SAFETY: passwd is plain data, so all zeroes is a valid value.
+        let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: getpwuid_r writes at most buf.len() bytes into buf and
+        // points entry's fields into it. buf outlives the copy below.
+        let rc = unsafe {
+            libc::getpwuid_r(
+                libc::getuid(),
+                &mut entry,
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                &mut found,
+            )
+        };
+        if rc == libc::ERANGE && buf.len() < 1 << 20 {
+            buf.resize(buf.len() * 2, 0);
+            continue;
+        }
+        if rc != 0 || found.is_null() || entry.pw_name.is_null() {
+            return None;
+        }
+        // SAFETY: pw_name is a NUL-terminated string inside buf.
+        let name = unsafe { std::ffi::CStr::from_ptr(entry.pw_name) };
+        let name = name.to_string_lossy().trim().to_string();
+        return (!name.is_empty()).then_some(name);
+    }
+}
+
 /// Where a seat nobody named came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Derived {
@@ -4573,25 +4606,54 @@ pub fn write_assignee(
     Ok(assignee)
 }
 
-/// The name a ballot or a withdrawal records: this process's seat, the one
-/// [`write_seat`] checked. `--as` (MCP `as`) may name that seat and no
-/// other; a persona votes from a session seated as that persona.
+/// The name a ballot or a withdrawal records. `--as` (MCP `as`) names the
+/// persona. The process seat is who casts it, and that seat is kept with
+/// the ballot. An empty name is this seat's own ballot. A standing seat,
+/// the person, or a name that begins with `persona:` is recorded as the
+/// caster's persona ballot, not as that seat's own ballot.
 ///
 /// # Errors
 ///
-/// `named` is another seat.
-pub fn ballot_voter(verb: &str, named: Option<&str>) -> Result<String> {
+/// Never. The result stays a [`Result`] so callers keep one shape.
+pub fn ballot_voter(_verb: &str, named: Option<&str>) -> Result<String> {
     let seat = seat_name();
-    if let Some(name) = named.map(str::trim).filter(|n| !n.is_empty()) {
-        let slug = canonical_seat_name(name);
-        if slug != canonical_seat_name(&seat) {
-            bail!(
-                "{verb}: --as {name} is not this seat, {seat}; a ballot is recorded as the seat that casts it. \
-                 Drop --as, or cast it from a session seated as {name} (`export LJOS_SEAT={slug}`); nothing was written"
-            );
-        }
+    let Some(name) = named.map(str::trim).filter(|n| !n.is_empty()) else {
+        return Ok(seat);
+    };
+    if let Some(rest) = name.strip_prefix(ballot_sig::PERSONA_VOTER) {
+        return Ok(ballot_sig::prefixed_persona_voter(&seat, rest));
     }
-    Ok(seat)
+    if canonical_seat_name(name) == canonical_seat_name(&seat) {
+        return Ok(seat);
+    }
+    if protected_ballot_name(name) {
+        return Ok(ballot_sig::caster_persona_voter(&seat, name));
+    }
+    Ok(name.to_string())
+}
+
+/// Whether `--as name` must not be written as that seat's own ballot.
+/// A standing seat, on the frozen list or by a pin that stood, and the
+/// account that owns this process, are that set.
+fn protected_ballot_name(name: &str) -> bool {
+    let slug = canonical_seat_name(name);
+    if slug.is_empty() {
+        return false;
+    }
+    if process_account().is_some_and(|account| canonical_seat_name(&account) == slug) {
+        return true;
+    }
+    if slot::standing(&slug) {
+        return true;
+    }
+    match slot::starts() {
+        Ok(Some(starts)) => {
+            let pins = ballot_sig::pins();
+            let key = pins.get(&slug).map(String::as_str);
+            slot::stands(&slug, key, Some(starts.as_slice())).unwrap_or(false)
+        }
+        _ => false,
+    }
 }
 
 /// Refuse a tracker write from a seat the tracker's `vissue.toml` does not
@@ -22354,7 +22416,7 @@ pub fn uncite_deed(ticket: &str, accession: &str) -> Result<String> {
 
 /// Whether a cite stands: a tracker issue its seat ballots decide
 /// ([`seats_decide`]), open or closed. The ballots are the ones
-/// [`ballot_rows`] counts, so one session is one ballot here and in
+/// [`ballot_rows`] counts, so one session is one voice here and in
 /// `ljos consensus`. The text says which ballots it counted. A deed
 /// alone does not stand: the pushing seat can mint one with `deedar
 /// create` a moment before the push, so the decision has to be on an
@@ -22579,8 +22641,9 @@ pub fn deed_alone(cite: &str) -> String {
 }
 
 /// The ballots that count toward a push cite, as `(agent, choice)`. A
-/// persona's ballot, or a Jev ballot (`judge:MODEL`) cast for one, is
-/// left out: a seat can write personas and have them vote with it.
+/// persona's ballot, a Jev ballot (`judge:MODEL`), or a caster's persona
+/// ballot of a standing seat or the person, is left out: a seat can write
+/// personas and have them vote with it.
 fn seat_ballots<'a>(
     ballots: &'a [Value],
     personas: &std::collections::BTreeSet<String>,
@@ -22588,7 +22651,11 @@ fn seat_ballots<'a>(
     ballots
         .iter()
         .filter_map(|b| Some((b["agent"].as_str()?.trim(), b["choice"].as_str()?)))
-        .filter(|(agent, _)| !personas.contains(*agent) && !agent.starts_with("judge:"))
+        .filter(|(agent, _)| {
+            !personas.contains(*agent)
+                && !agent.starts_with("judge:")
+                && ballot_sig::parse_caster_persona_voter(agent).is_none()
+        })
         .collect()
 }
 
@@ -31033,8 +31100,8 @@ workflow. The stage and the next step, the same reading as `ljos workflow`.",
         name: "panel",
         optional: true,
         step: "`== panel`, left out unless the issue is a decision. One brief per persona\n   \
-the issue speaks to. Each brief goes to its own subagent or run, which\n   \
-casts `ljos vote --as NAME` itself.",
+the issue speaks to. A session casts `ljos vote --as NAME` for each.\n   \
+Consensus records those ballots and counts one voice per session.",
     },
     SittingSection {
         name: "recall",
@@ -35915,10 +35982,9 @@ pub fn raw_ballot_rows(issue: &str) -> Result<Vec<Value>> {
     Ok(serde_json::from_str(said.stdout.trim()).unwrap_or_default())
 }
 
-/// The ballots that count. The drawer may hold several personas from one
-/// session; only the first ballot that session cast is returned, and a
-/// session that filed a candidate is left out. Empty when the tracker
-/// does not answer.
+/// The ballots that count. Ballots that share a session id or a parent
+/// are one voice, the latest when they disagree. A session that filed a
+/// candidate is left out. Empty when the tracker does not answer.
 #[must_use]
 pub fn ballot_rows(issue: &str) -> Vec<Value> {
     match raw_ballot_rows(issue) {
@@ -36390,8 +36456,8 @@ pub fn identity_or_seat(identity: Option<&str>) -> Option<String> {
 }
 
 /// Give a child this process's connection. A nested `ljos vote` then signs
-/// with the same session, a subagent's included. The seat argument is not
-/// copied onto the session.
+/// with the same session, a subagent's included. The child inherits the
+/// harness id. The name on the ballot is not copied onto that session.
 pub fn bind_connection_env(cmd: &mut std::process::Command) {
     // The tracker goes with the connection: a habitat started from a
     // product checkout must write to the seat's tracker, not to the
@@ -36405,7 +36471,8 @@ pub fn bind_connection_env(cmd: &mut std::process::Command) {
 }
 
 /// [`run`] with `VISSUE_AGENT` set to `identity`, so a ballot or a claim is
-/// recorded under a persona's name rather than the seat's.
+/// recorded under that name. A standing seat or the person named on a
+/// ballot is the caster's persona ballot, not that seat's own row.
 pub fn run_as(bin: &str, args: &[impl AsRef<str>], identity: Option<&str>) -> Result<()> {
     use std::process::{Command, Stdio};
     let path = which::which(bin).with_context(|| format!("{bin} not on PATH"))?;
@@ -51398,6 +51465,28 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 .counted,
             "codex for ship"
         );
+    }
+
+    #[test]
+    fn a_named_standing_seat_counts_as_a_persona_ballot() {
+        let personas = std::collections::BTreeSet::new();
+        let ballot =
+            |agent: &str, choice: &str| serde_json::json!({"agent": agent, "choice": choice});
+        let persona = super::ballot_sig::caster_persona_voter("saddle", "inky");
+        assert_eq!(persona, "persona:saddle:inky");
+        let rows = [ballot("inky", "ship"), ballot(&persona, "hold")];
+        let d = seats_decide("demo-1", &rows, &personas, "saddle").unwrap();
+        assert_eq!(d.choice, "ship");
+        assert!(d.counted.contains("inky for ship"), "{d:?}");
+        assert!(
+            d.counted.contains("1 persona or judge ballot left out"),
+            "{d:?}"
+        );
+        assert!(!d.counted.contains(&persona), "{d:?}");
+        let only = [ballot(&persona, "ship")];
+        let err = seats_decide("demo-1", &only, &personas, "saddle").unwrap_err();
+        assert!(err.contains("no seat voted"), "{err}");
+        assert!(err.contains("1 persona or judge ballot left out"), "{err}");
     }
 
     #[test]

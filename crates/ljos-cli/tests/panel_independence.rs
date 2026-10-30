@@ -363,7 +363,7 @@ fn vote(world: &World, seat: &str, session: &str, issue: &str) {
 }
 
 #[test]
-fn one_session_of_n_seats_is_refused_at_the_cast() {
+fn one_session_of_n_seats_is_recorded_and_weighed() {
     let world = World::new();
     vote(&world, "alice", "sess-shared-0001", "demo-ind1");
     for seat in ["bob", "carol"] {
@@ -373,19 +373,23 @@ fn one_session_of_n_seats_is_refused_at_the_cast() {
             &["vote", "demo-ind1", "--for", "ship", "--used", "none"],
         );
         let said = text(&out);
-        assert!(!out.status.success(), "{said}");
-        assert!(
-            said.contains("already cast") && said.contains("Nothing was cast"),
-            "{said}"
-        );
+        assert!(out.status.success(), "{said}");
+        assert!(said.contains("parent sess-shared-0001"), "{said}");
     }
     let tally = world.ljos("alice", "sess-alice-0001", &["vote", "demo-ind1"]);
     let said = text(&tally);
     assert!(tally.status.success(), "{said}");
     let stdout = String::from_utf8_lossy(&tally.stdout);
     assert!(stdout.contains("1 ballot counts"), "{said}");
-    assert!(stdout.contains("alice"), "{said}");
-    assert!(!stdout.contains("bob"), "{said}");
+    assert!(stdout.contains("carol  ship"), "{said}");
+    assert!(
+        stdout.contains("folded into one voice (same session sess-shared-0001):"),
+        "{said}"
+    );
+    assert!(stdout.contains("counted carol"), "{said}");
+    for seat in ["alice", "bob", "carol"] {
+        assert!(stdout.contains(seat), "{said}");
+    }
 }
 
 #[test]
@@ -491,14 +495,13 @@ fn one_sand_subagent_five_personas_count_as_the_first_ballot() {
     assert!(tally.status.success(), "{said}");
     let stdout = String::from_utf8_lossy(&tally.stdout);
     assert!(stdout.contains("1 ballot counts"), "{said}");
-    assert!(stdout.contains("academic  rail"), "{said}");
+    assert!(stdout.contains("finance  rail"), "{said}");
     assert!(
-        stdout.contains("a later ballot on this session is ignored"),
+        stdout.contains(&format!("folded into one voice (same session {session}):")),
         "{said}"
     );
-    for persona in &personas[1..] {
+    for persona in &personas {
         assert!(stdout.contains(persona), "{said}");
-        assert!(stdout.contains("same session"), "{said}");
     }
     assert!(stdout.contains(session), "{said}");
     assert!(!stdout.contains("finance  bus"), "{said}");
@@ -519,13 +522,6 @@ fn one_sand_subagent_five_personas_count_as_the_first_ballot() {
                 && said.contains(session),
             "{persona}: {said}"
         );
-        assert!(
-            said.contains(
-                "Each persona brief goes to its own subagent or run, \
-                 which casts `ljos vote --as NAME` itself"
-            ),
-            "{persona}: {said}"
-        );
     }
     let other = world.ljos(
         "clerk",
@@ -542,7 +538,11 @@ fn one_sand_subagent_five_personas_count_as_the_first_ballot() {
     let stdout = String::from_utf8_lossy(&again.stdout);
     assert!(stdout.contains("2 ballots count"), "{said}");
     assert!(stdout.contains("clerk  rail"), "{said}");
-    assert!(stdout.contains("academic  rail"), "{said}");
+    assert!(stdout.contains("finance  rail"), "{said}");
+    assert!(
+        stdout.contains(&format!("folded into one voice (same session {session}):")),
+        "{said}"
+    );
 }
 
 #[test]
@@ -1425,7 +1425,6 @@ fn a_persona_cast_then_withdraw_leaves_the_tally_at_zero() {
     let stdout = String::from_utf8_lossy(&tally.stdout);
     assert!(stdout.contains("0 ballots count"), "{said}");
     assert!(!stdout.contains("ship"), "{said}");
-    // Another persona from the session is still not another voice.
     let other = world.ljos(
         "editor",
         session,
@@ -1434,11 +1433,9 @@ fn a_persona_cast_then_withdraw_leaves_the_tally_at_zero() {
         ],
     );
     let said = text(&other);
-    assert!(!other.status.success(), "{said}");
+    assert!(other.status.success(), "{said}");
     assert!(
-        said.contains("withdrawn")
-            && said.contains("first ballot stands")
-            && said.contains("Nothing was cast"),
+        said.contains("editor cast by editor, parent sess-review-1"),
         "{said}"
     );
     // The persona that withdrew casts again, and the new ballot counts.
@@ -1456,6 +1453,12 @@ fn a_persona_cast_then_withdraw_leaves_the_tally_at_zero() {
     let stdout = String::from_utf8_lossy(&tally.stdout);
     assert!(stdout.contains("1 ballot counts"), "{said}");
     assert!(stdout.contains("reviewer  hold"), "{said}");
+    assert!(
+        stdout.contains("folded into one voice (same session sess-review-1):"),
+        "{said}"
+    );
+    assert!(stdout.contains("editor"), "{said}");
+    assert!(stdout.contains("counted reviewer"), "{said}");
     assert!(!stdout.contains("ship"), "{said}");
 }
 
@@ -1681,30 +1684,55 @@ fn runs_with_their_own_harness_ids_each_count_and_one_run_counts_once() {
         assert!(said.contains(&format!("session {session}")), "{said}");
         assert!(!said.contains("unverified"), "{said}");
     }
-    for (name, choice) in [("reviewer-e", "ship"), ("reviewer-a", "hold")] {
-        let again = world.ljos_env(
-            name,
-            cloud,
-            &[
-                "vote", issue, "--for", choice, "--used", "none", "--as", name,
-            ],
-        );
-        let said = text(&again);
-        assert!(!again.status.success(), "{said}");
-        assert!(
-            said.contains("already cast") && said.contains("Nothing was cast"),
-            "{said}"
-        );
-    }
+    let extra = world.ljos_env(
+        "reviewer-e",
+        cloud,
+        &[
+            "vote",
+            issue,
+            "--for",
+            "ship",
+            "--used",
+            "none",
+            "--as",
+            "reviewer-e",
+        ],
+    );
+    assert!(extra.status.success(), "{}", text(&extra));
+    let again = world.ljos_env(
+        "reviewer-a",
+        cloud,
+        &[
+            "vote",
+            issue,
+            "--for",
+            "hold",
+            "--used",
+            "none",
+            "--as",
+            "reviewer-a",
+        ],
+    );
+    let said = text(&again);
+    assert!(!again.status.success(), "{said}");
+    assert!(
+        said.contains("already cast") && said.contains("Nothing was cast"),
+        "{said}"
+    );
     let tally = world.ljos("ljosbot", "sess-reader-0001", &["vote", issue]);
     let said = text(&tally);
     assert!(tally.status.success(), "{said}");
     let stdout = String::from_utf8_lossy(&tally.stdout);
     assert!(stdout.contains("4 ballots count"), "{said}");
-    for name in ["reviewer-a", "reviewer-b", "reviewer-c", "reviewer-d"] {
+    for name in ["reviewer-b", "reviewer-c", "reviewer-d", "reviewer-e"] {
         assert!(stdout.contains(&format!("{name}  ship")), "{said}");
     }
-    assert!(!stdout.contains("reviewer-e"), "{said}");
+    assert!(
+        stdout.contains("folded into one voice (same session bc-0a1b2c3d-run-a):"),
+        "{said}"
+    );
+    assert!(stdout.contains("counted reviewer-e"), "{said}");
+    assert!(stdout.contains("reviewer-a"), "{said}");
     assert!(!stdout.contains("ignored"), "{said}");
 }
 
@@ -1769,21 +1797,21 @@ fn subagents_of_one_session_each_count_and_one_subagent_counts_once() {
     assert!(said.contains(&format!("session {parent}\n")), "{said}");
     let again = cast("toolu_01c", Some("agent-a1"), "reviewer-c", "hold");
     let said = text(&again);
-    assert!(!again.status.success(), "{said}");
-    assert!(
-        said.contains("already cast") && said.contains(&format!("({parent}:agent-a1)")),
-        "{said}"
-    );
-    assert!(said.contains(ljos_cli::panel_gate::OWN_BALLOT), "{said}");
+    assert!(again.status.success(), "{said}");
     let tally = world.ljos("ljosbot", "sess-reader-0001", &["vote", issue]);
     let said = text(&tally);
     assert!(tally.status.success(), "{said}");
     let stdout = String::from_utf8_lossy(&tally.stdout);
-    assert!(stdout.contains("3 ballots count"), "{said}");
-    for name in ["reviewer-a", "reviewer-b", "coordinator"] {
-        assert!(stdout.contains(&format!("{name}  ship")), "{said}");
+    assert!(stdout.contains("1 ballot counts"), "{said}");
+    assert!(stdout.contains("reviewer-c  hold"), "{said}");
+    assert!(
+        stdout.contains(&format!("folded into one voice (same parent {parent}):")),
+        "{said}"
+    );
+    for name in ["reviewer-a", "reviewer-b", "coordinator", "reviewer-c"] {
+        assert!(stdout.contains(name), "{said}");
     }
-    assert!(!stdout.contains("reviewer-c"), "{said}");
+    assert!(stdout.contains("counted reviewer-c"), "{said}");
     assert!(!stdout.contains("ignored"), "{said}");
 }
 
@@ -1837,13 +1865,7 @@ fn a_box_seat_with_no_session_counts_each_subagent() {
     }
     let again = cast("toolu_b4", Some("agent-a1"), "reviewer-c", "hold");
     let said = text(&again);
-    assert!(!again.status.success(), "{said}");
-    assert!(
-        said.contains(&format!(
-            "already cast a ballot on {issue} ({parent}:agent-a1)"
-        )),
-        "{said}"
-    );
+    assert!(again.status.success(), "{said}");
     for (conversation, name) in [
         ("sand-subagent-box-0001", "reviewer-d"),
         ("sand-subagent-box-0002", "reviewer-e"),
@@ -1866,8 +1888,14 @@ fn a_box_seat_with_no_session_counts_each_subagent() {
     let said = text(&tally);
     assert!(tally.status.success(), "{said}");
     let stdout = String::from_utf8_lossy(&tally.stdout);
-    assert!(stdout.contains("5 ballots count"), "{said}");
-    assert!(!stdout.contains("reviewer-c"), "{said}");
+    assert!(stdout.contains("3 ballots count"), "{said}");
+    assert!(stdout.contains("reviewer-c  hold"), "{said}");
+    assert!(stdout.contains("reviewer-d  ship"), "{said}");
+    assert!(stdout.contains("reviewer-e  ship"), "{said}");
+    assert!(
+        stdout.contains(&format!("folded into one voice (same parent {parent}):")),
+        "{said}"
+    );
     assert!(!stdout.contains("unverified"), "{said}");
 }
 
@@ -2143,14 +2171,8 @@ fn one_shell_that_renames_its_session_between_casts_casts_once() {
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(stdout.contains("session sess-flip-a-000"), "{var}: {said}");
         assert!(stdout.contains("first 0"), "{var}: {said}");
-        assert!(!stdout.contains("second 0"), "{var}: {said}");
-        assert!(
-            said.contains(&format!(
-                "this shell already cast a ballot on {issue} as session sess-flip-a-000{i}."
-            )) && said.contains("Nothing was cast"),
-            "{var}: {said}"
-        );
-        assert!(counted(&world, &issue).contains("1 ballot counts"), "{var}");
+        assert!(stdout.contains("second 0"), "{var}: {said}");
+        assert!(counted(&world, &issue).contains("2 ballots count"), "{var}");
     }
     // Two agents, each running its own command in its own shell, count.
     let issue = "demo-flip-apart";
@@ -2210,16 +2232,14 @@ fn a_hooked_harness_that_renames_its_session_casts_once() {
         &[("LJOS_SESSION_ID", "sess-flip-other-0001")],
     );
     let said = text(&out);
-    assert!(!out.status.success(), "{said}");
-    assert!(
-        said.contains(&format!(
-            "the harness running this line already cast a ballot on {issue} as session {parent}."
-        )) && said.contains("Nothing was cast"),
-        "{said}"
-    );
+    assert!(out.status.success(), "{said}");
     let tally = counted(&world, issue);
     assert!(tally.contains("2 ballots count"), "{tally}");
-    assert!(!tally.contains("reviewer-c"), "{tally}");
+    assert!(tally.contains("reviewer-c  ship"), "{tally}");
+    assert!(
+        tally.contains(&format!("folded into one voice (same parent {parent}):")),
+        "{tally}"
+    );
 }
 
 #[test]
@@ -2293,22 +2313,21 @@ fn claude_subagents_voting_over_mcp_each_count() {
         assert!(said.contains(&format!("session {session}\n")), "{said}");
     }
     let (error, said) = answer(6);
-    assert!(
-        error
-            && said.contains(&format!(
-                "already cast a ballot on {issue} ({parent}:agent-m1)"
-            )),
-        "{said}"
-    );
+    assert!(!error, "{said}");
     let (error, said) = answer(7);
-    assert!(
-        error && said.contains(&format!("({parent})")),
-        "a tool use id names its agent once: {said}"
-    );
+    assert!(!error, "{said}");
     let tally = world.ljos("ljosbot", "sess-reader-0001", &["vote", issue]);
     let stdout = String::from_utf8_lossy(&tally.stdout);
-    assert!(stdout.contains("3 ballots count"), "{}", text(&tally));
-    assert!(!stdout.contains("reviewer-c") && !stdout.contains("reviewer-d"));
+    assert!(stdout.contains("1 ballot counts"), "{}", text(&tally));
+    assert!(
+        stdout.contains("reviewer-c") && stdout.contains("reviewer-d"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("folded into one voice (same parent {parent}):")),
+        "{stdout}"
+    );
+    assert!(stdout.contains("counted reviewer-d"), "{stdout}");
 }
 
 #[test]
@@ -2348,13 +2367,17 @@ fn codex_subagent_threads_each_count_under_their_root_session() {
     }
     let again = cast("reviewer-c", "019a7c3e-thread-a", "hold");
     let said = text(&again);
-    assert!(!again.status.success(), "{said}");
-    assert!(said.contains("already cast"), "{said}");
+    assert!(again.status.success(), "{said}");
     let tally = world.ljos("ljosbot", "sess-reader-0001", &["vote", issue]);
     let said = text(&tally);
     let stdout = String::from_utf8_lossy(&tally.stdout);
-    assert!(stdout.contains("3 ballots count"), "{said}");
-    assert!(!stdout.contains("reviewer-c"), "{said}");
+    assert!(stdout.contains("1 ballot counts"), "{said}");
+    assert!(stdout.contains("reviewer-c  hold"), "{said}");
+    assert!(
+        stdout.contains(&format!("folded into one voice (same parent {root}):")),
+        "{said}"
+    );
+    assert!(stdout.contains("counted reviewer-c"), "{said}");
 }
 
 #[test]
@@ -2390,51 +2413,365 @@ fn a_seat_no_harness_names_is_an_unverified_session() {
         ],
     );
     let said = text(&second);
-    assert!(!second.status.success(), "{said}");
+    assert!(second.status.success(), "{said}");
     assert!(
-        said.contains("--as reviewer-b is not this seat, ljosbot")
-            && said.contains("nothing was written"),
+        said.contains("reviewer-b cast by ljosbot, parent ljosbot"),
         "{said}"
     );
-    // A ballot that went around the cast gate, as `vissue vote` and a later
-    // signature on the same seat leave it.
-    let ballots_path = world.state.join("ballots.json");
-    let mut ballots: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&ballots_path).unwrap()).unwrap();
-    ballots[issue]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::json!({"agent": "reviewer-b", "choice": "hold"}));
-    std::fs::write(&ballots_path, ballots.to_string()).unwrap();
-    let notes_path = world.state.join("notes.json");
-    let mut notes: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&notes_path).unwrap()).unwrap();
-    let key = ed25519_dalek::SigningKey::from_bytes(&[12; 32]);
-    let sig = ljos_cli::ballot_sig::sign_bound(
-        &key,
-        issue,
-        "reviewer-b",
-        "hold",
-        "ljosbot",
-        ljos_cli::ballot_sig::SEAT_NONCE,
-    );
-    notes[issue]
-        .as_array_mut()
-        .unwrap()
-        .insert(0, serde_json::json!({ "note": sig }));
-    std::fs::write(&notes_path, notes.to_string()).unwrap();
     let tally = world.ljos("ljosbot", "sess-reader-0001", &["vote", issue]);
     let said = text(&tally);
     assert!(tally.status.success(), "{said}");
     let stdout = String::from_utf8_lossy(&tally.stdout);
     assert!(stdout.contains("1 ballot counts"), "{said}");
+    assert!(stdout.contains("reviewer-b  hold"), "{said}");
     assert!(
-        stdout.contains("ljosbot  ship  (unverified session)"),
+        stdout.contains("folded into one voice (same session ljosbot):"),
         "{said}"
     );
-    assert!(
-        stdout.contains("reviewer-b  ljosbot  (same session, unverified)"),
-        "{said}"
-    );
+    assert!(stdout.contains("counted reviewer-b"), "{said}");
+    assert!(stdout.contains("ljosbot"), "{said}");
     assert!(stdout.contains(&unverified), "{said}");
+}
+
+fn signed_key(said: &str, voter: &str) -> String {
+    let marker = format!("ballot signed by {voter} with key ");
+    let rest = said.split(&marker).nth(1).unwrap_or("");
+    rest.split('…').next().unwrap_or("").trim().to_string()
+}
+
+fn account_name() -> String {
+    let out = Command::new("id").arg("-un").output().unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+#[test]
+fn a_named_standing_seat_is_the_casters_persona_ballot() {
+    let world = World::new();
+    let issue = "demo-as-inky";
+    let session = "sess-caster-0001";
+    let own = world.ljos(
+        "saddle",
+        session,
+        &["vote", "demo-own", "--for", "ship", "--used", "none"],
+    );
+    let own_said = text(&own);
+    assert!(own.status.success(), "{own_said}");
+    let saddle_key = signed_key(&own_said, "saddle");
+    assert!(!saddle_key.is_empty(), "{own_said}");
+
+    let cast = world.ljos(
+        "saddle",
+        session,
+        &[
+            "vote", issue, "--for", "hold", "--used", "none", "--as", "inky",
+        ],
+    );
+    let said = text(&cast);
+    assert!(cast.status.success(), "{said}");
+    let persona = "persona:saddle:inky";
+    assert!(
+        said.contains("inky cast by saddle, parent sess-caster-0001"),
+        "{said}"
+    );
+    assert!(
+        said.contains(&format!("ballot signed by {persona}")),
+        "{said}"
+    );
+    assert!(!said.contains("ballot signed by inky"), "{said}");
+    assert_eq!(signed_key(&said, persona), saddle_key, "{said}");
+
+    let inky = world.ljos(
+        "inky",
+        "sess-inky-0001",
+        &["vote", issue, "--for", "ship", "--used", "none"],
+    );
+    let inky_said = text(&inky);
+    assert!(inky.status.success(), "{inky_said}");
+    assert_ne!(signed_key(&inky_said, "inky"), saddle_key, "{inky_said}");
+
+    let tally = world.ljos("clerk", "sess-reader-0001", &["vote", issue]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("2 ballots count"), "{said}");
+    assert!(stdout.contains("inky  ship"), "{said}");
+    assert!(stdout.contains(&format!("{persona}  hold")), "{said}");
+    assert!(
+        stdout.contains("inky cast by saddle, parent sess-caster-0001"),
+        "{said}"
+    );
+
+    let ballots = std::fs::read_to_string(world.state.join("ballots.json")).unwrap();
+    assert!(ballots.contains("\"agent\": \"inky\""), "{ballots}");
+    assert!(
+        ballots.contains(&format!("\"agent\": \"{persona}\"")),
+        "{ballots}"
+    );
+
+    let withdrawn = world.ljos(
+        "saddle",
+        session,
+        &["vote", issue, "--withdraw", "--as", "inky"],
+    );
+    assert_withdraw_forecast_error(&withdrawn, issue, persona);
+    let ballots = std::fs::read_to_string(world.state.join("ballots.json")).unwrap();
+    assert!(ballots.contains("\"agent\": \"inky\""), "{ballots}");
+    assert!(
+        !ballots.contains(&format!("\"agent\": \"{persona}\"")),
+        "{ballots}"
+    );
+    let tally = world.ljos("clerk", "sess-reader-0001", &["vote", issue]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("1 ballot counts"), "{said}");
+    assert!(stdout.contains("inky  ship"), "{said}");
+    assert!(!stdout.contains("hold"), "{said}");
+}
+
+#[test]
+fn a_named_person_is_the_casters_persona_ballot() {
+    let world = World::new();
+    let person = account_name();
+    assert!(!person.is_empty());
+    assert_ne!(person, "saddle");
+    let issue = "demo-as-person";
+    let session = "sess-person-0001";
+    let own = world.ljos(
+        &person,
+        "sess-login-0001",
+        &["vote", issue, "--for", "ship", "--used", "none"],
+    );
+    assert!(own.status.success(), "{}", text(&own));
+    let cast = world.ljos(
+        "saddle",
+        session,
+        &[
+            "vote", issue, "--for", "hold", "--used", "none", "--as", &person,
+        ],
+    );
+    let said = text(&cast);
+    assert!(cast.status.success(), "{said}");
+    let persona = format!("persona:saddle:{person}");
+    assert!(
+        said.contains(&format!("{person} cast by saddle, parent {session}")),
+        "{said}"
+    );
+    assert!(
+        !said.contains(&format!("ballot signed by {person}")),
+        "{said}"
+    );
+    let withdrawn = world.ljos(
+        "saddle",
+        session,
+        &["vote", issue, "--withdraw", "--as", &person],
+    );
+    assert_withdraw_forecast_error(&withdrawn, issue, &persona);
+    let ballots = std::fs::read_to_string(world.state.join("ballots.json")).unwrap();
+    assert!(
+        ballots.contains(&format!("\"agent\": \"{person}\"")),
+        "{ballots}"
+    );
+    assert!(
+        !ballots.contains(&format!("\"agent\": \"{persona}\"")),
+        "{ballots}"
+    );
+}
+
+#[test]
+fn a_persona_prefix_is_wrapped_as_the_casters_ballot() {
+    let world = World::new();
+    let issue = "demo-as-mark";
+    let session = "sess-mark-0001";
+    let own = world.ljos(
+        "saddle",
+        session,
+        &["vote", "demo-own-mark", "--for", "ship", "--used", "none"],
+    );
+    let own_said = text(&own);
+    assert!(own.status.success(), "{own_said}");
+    let saddle_key = signed_key(&own_said, "saddle");
+    let inky = world.ljos(
+        "inky",
+        "sess-inky-mark",
+        &["vote", issue, "--for", "ship", "--used", "none"],
+    );
+    let inky_said = text(&inky);
+    assert!(inky.status.success(), "{inky_said}");
+    assert_ne!(signed_key(&inky_said, "inky"), saddle_key, "{inky_said}");
+    let cast = world.ljos(
+        "saddle",
+        session,
+        &[
+            "vote",
+            issue,
+            "--for",
+            "hold",
+            "--used",
+            "none",
+            "--as",
+            "persona:inky:x",
+        ],
+    );
+    let said = text(&cast);
+    assert!(cast.status.success(), "{said}");
+    let persona = "persona:saddle:inky:x";
+    assert!(said.contains("inky:x cast by saddle"), "{said}");
+    assert!(!said.contains("cast by inky"), "{said}");
+    assert!(
+        said.contains(&format!("ballot signed by {persona}")),
+        "{said}"
+    );
+    assert_eq!(signed_key(&said, persona), saddle_key, "{said}");
+    let ballots = std::fs::read_to_string(world.state.join("ballots.json")).unwrap();
+    assert!(ballots.contains("\"agent\": \"inky\""), "{ballots}");
+    assert!(
+        ballots.contains(&format!("\"agent\": \"{persona}\"")),
+        "{ballots}"
+    );
+    let withdrawn = world.ljos(
+        "saddle",
+        session,
+        &["vote", issue, "--withdraw", "--as", "persona:inky:x"],
+    );
+    assert_withdraw_forecast_error(&withdrawn, issue, persona);
+    let ballots = std::fs::read_to_string(world.state.join("ballots.json")).unwrap();
+    assert!(ballots.contains("\"agent\": \"inky\""), "{ballots}");
+    assert!(
+        !ballots.contains(&format!("\"agent\": \"{persona}\"")),
+        "{ballots}"
+    );
+}
+
+#[test]
+fn one_session_switching_seats_counts_as_one_push_voice() {
+    let world = World::new();
+    let issue = "demo-switch-seat";
+    let session = "sess-switch-0001";
+    for seat in ["ljosbot", "inky"] {
+        let out = world.ljos(
+            seat,
+            session,
+            &["vote", issue, "--for", "ship", "--used", "none"],
+        );
+        let said = text(&out);
+        assert!(out.status.success(), "{said}");
+        assert!(said.contains(&format!("session {session}")), "{said}");
+    }
+    let ballots = std::fs::read_to_string(world.state.join("ballots.json")).unwrap();
+    assert!(ballots.contains("\"agent\": \"ljosbot\""), "{ballots}");
+    assert!(ballots.contains("\"agent\": \"inky\""), "{ballots}");
+    let tally = counted(&world, issue);
+    assert!(tally.contains("1 ballot counts"), "{tally}");
+    assert!(
+        tally.contains(&format!("folded into one voice (same session {session}):")),
+        "{tally}"
+    );
+    assert!(
+        tally.contains("ljosbot") && tally.contains("inky"),
+        "{tally}"
+    );
+    assert!(tally.contains("counted inky"), "{tally}");
+    let pack = empty_pack();
+    let out = world.ljos_env(
+        "disk-saver",
+        &[
+            ("SEAT_SESSION_ID", "sess-reader-0001"),
+            ("PACKSET_URL", &pack),
+        ],
+        &["consensus", issue],
+    );
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("counted inky for ship"), "{said}");
+    assert!(!stdout.contains("ljosbot for ship"), "{said}");
+    assert!(
+        stdout.contains(&format!("folded into one voice (same session {session}):")),
+        "{said}"
+    );
+}
+
+#[test]
+fn three_subagents_of_one_parent_count_as_one_voice_and_stay_recorded() {
+    let world = World::new();
+    let issue = "demo-three-agents";
+    let parent = "5f0c8e2a-three-parent";
+    let env: &[(&str, &str)] = &[("CLAUDE_CODE_SESSION_ID", parent)];
+    let cast = [
+        ("toolu_t1", "agent-a1", "reviewer-a"),
+        ("toolu_t2", "agent-b2", "reviewer-b"),
+        ("toolu_t3", "agent-c3", "reviewer-c"),
+    ];
+    for (tool_use, agent, name) in cast {
+        let args = [
+            "vote", issue, "--for", "ship", "--used", "none", "--as", name,
+        ];
+        let hook = world.hook(
+            env,
+            &serde_json::json!({
+                "session_id": parent,
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_use_id": tool_use,
+                "agent_id": agent,
+                "agent_type": "reviewer",
+                "tool_input": {"command": format!("ljos {}", args.join(" "))},
+            }),
+        );
+        assert!(hook.status.success(), "{}", text(&hook));
+        let out = world.ljos_env(name, env, &args);
+        let said = text(&out);
+        assert!(out.status.success(), "{said}");
+        assert!(
+            said.contains(&format!("session {parent}:{agent}\n")),
+            "{said}"
+        );
+    }
+    let ballots = std::fs::read_to_string(world.state.join("ballots.json")).unwrap();
+    for (_, _, name) in cast {
+        assert!(
+            ballots.contains(&format!("\"agent\": \"{name}\"")),
+            "{ballots}"
+        );
+    }
+    let tally = counted(&world, issue);
+    assert!(tally.contains("1 ballot counts"), "{tally}");
+    assert!(
+        tally.contains(&format!("folded into one voice (same parent {parent}):")),
+        "{tally}"
+    );
+    for (_, _, name) in cast {
+        assert!(tally.contains(name), "{tally}");
+    }
+    assert!(tally.contains("counted reviewer-c"), "{tally}");
+}
+
+#[test]
+fn two_different_sessions_count_as_two_voices() {
+    let world = World::new();
+    let issue = "demo-two-sessions";
+    vote(&world, "ljosbot", "sess-one-0001", issue);
+    vote(&world, "inky", "sess-two-0002", issue);
+    let tally = counted(&world, issue);
+    assert!(tally.contains("2 ballots count"), "{tally}");
+    assert!(tally.contains("ljosbot  ship"), "{tally}");
+    assert!(tally.contains("inky  ship"), "{tally}");
+    assert!(!tally.contains("folded into one voice"), "{tally}");
+    let pack = empty_pack();
+    let out = world.ljos_env(
+        "disk-saver",
+        &[
+            ("SEAT_SESSION_ID", "sess-reader-0001"),
+            ("PACKSET_URL", &pack),
+        ],
+        &["consensus", issue],
+    );
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("counted ljosbot for ship, inky for ship"),
+        "{said}"
+    );
 }

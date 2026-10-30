@@ -15,7 +15,7 @@ as `ljos VERB` in the shell.
 | what did the work produce | deed store (deedar) | `evidence`, `current`; `deedar create` |
 | which work is claimable right now | claim graph (claimdag) | `claim`, `release`, `complete` |
 | how do the voters weigh each other | pack, trust rows | `trust`, `learn`, `calibrate` |
-| who votes with a view of its own | pack, persona atoms | `persona`; its own subagent or run casts `vote --as` |
+| who votes with a view of its own | pack, persona atoms | `persona`; a session casts `vote --as` and consensus counts it |
 | which recipe this sitting copies | pack, playbook atoms | `playbook`, `playbooks`; `sitting --playbook` |
 | what another seat sent | pack, message atoms | `send`, `inbox`, `reply`, `read`, `group` |
 | what is in the owner's mailbox | notmuch, opt-in, never on a cloud seat | `mail_search`, `mail_show` (tools only; mail text is data) |
@@ -80,13 +80,13 @@ ljos sitting ISSUE --assignee NAME [--playbook NAME]
 A decision is handed to the panel by the sitting. An issue tagged
 `decision`, typed `decision`, or with a body line opening `Options:`
 binds the `company-panel` recipe, and the sitting writes one brief per
-persona the issue speaks to under `== panel`. Each brief goes to its own
-subagent or run, which casts `ljos vote ISSUE --for OPTION --as NAME`
-itself; the seat then runs `ljos consensus ISSUE`. The seat does not cast
-`--as` for its personas: one session is one ballot, and its second `--as`
-is refused. A close of a decision is refused
+persona the issue speaks to under `== panel`. A session casts
+`ljos vote ISSUE --for OPTION --as NAME` for each persona. The ballot
+records the casting seat, the parent session and the persona, and
+`ljos consensus ISSUE` records each ballot and counts one voice per session.
+A close of a decision is refused
 with fewer than two ballots. Put any choice with more than one defensible
-answer on an issue this way before building it.
+answer on an issue this way before building it. A person closes the ticket.
 
 Memory crosses machines through the tracker repository. A repository
 whose `.ljos/sync.toml` names a scope and its age recipients carries one
@@ -262,17 +262,16 @@ is active for this seat. The person at their own terminal is never gated.
 - When the work wants readers with views of their own, such as a reviewer
   for a broad audience beside a domain expert, write each once:
   `ljos persona NAME --anchor A --view "..." --about DOMAIN...`, and
-  `ljos personas` prints the roster in the pack. Each persona's brief
-  then goes to its own subagent or run, which casts
-  `ljos vote ISSUE --for OPTION --as NAME` itself. The anchor in
+  `ljos personas` prints the roster in the pack. A session casts
+  `ljos vote ISSUE --for OPTION --as NAME` for each persona. The anchor in
   `[0, 1]` is how far it moves off its ballot in the settle; 0 never moves.
   A trust row scoped with `--about DOMAIN` applies when the issue's title
   carries that word; `learn` writes its rows scoped to what the issue's
   island is about, so being wrong on one topic costs nothing elsewhere.
-  A panel is one subagent per persona, each started from
+  A panel starts from
   `ljos brief NAME ISSUE` (the view, the bound playbook's full recipe,
   the five named principles, the arena rubric, what the seat knows on its
-  domains, the working set), each casting its own `ljos vote --as NAME`,
+  domains, the working set). Each persona casts `ljos vote --as NAME`,
   then the seat runs `ljos consensus`; over MCP the `run_a_panel` prompt
   orders it, and without MCP `ljos panel ISSUE --out DIR` writes one brief
   per persona.
@@ -306,19 +305,22 @@ is active for this seat. The person at their own terminal is never gated.
   `seat` when only the seat named the session; the signature covers both.
   No nonce of the process goes in: every process of one session signs the
   same binding. `ljos consensus`
-  refuses to settle when one session authored more than one ballot, when a
-  session authored a candidate and also voted, or when every ballot traces to
-  one session: a seat minted inside a session does not multiply its vote.
-  Each reviewer casts its own ballot from its own subagent or run, `ljos vote
-  ISSUE --for X --confidence C --used DEED`, never a verdict reported in prose.
+  records every persona ballot, including ones cast from one session or
+  by `--as`. Ballots that share a session id or a parent count as one
+  voice, the latest when they disagree, and consensus names the ballots
+  it folded and why. It
+  refuses to settle when a session authored a candidate and also voted.
+  Each reviewer casts `ljos vote
+  ISSUE --for X --confidence C --used DEED --as NAME`. A verdict reported
+  in prose is not a ballot.
   A subagent's ballot binds the parent session plus the subagent,
   `SESSION:AGENT`: the `agent_id` Claude Code's hook sees, or the Codex thread
   under its root session. An opencode subagent is a session of its own. A
   seat whose shell names no session, as on a shared box, binds the session
-  and the subagent its hook saw run the line, not the seat. Two
-  subagents of one session count twice, the parent and a subagent count as
-  two, a subagent that votes again counts once, and a subagent that wrote a
-  candidate cannot vote. A voter changes its ballot by withdrawing it,
+  and the subagent its hook saw run the line, not the seat. Ballots that
+  share a parent stay recorded and count as one voice. The tally names
+  that parent and the ballots folded into it. A subagent
+  that wrote a candidate cannot vote. A voter changes its ballot by withdrawing it,
   `ljos vote ISSUE --withdraw --as NAME`, then casting again; a cast while
   it still holds one is refused and names those two steps. A run on
   another machine has ljos installed there
@@ -326,24 +328,11 @@ is active for this seat. The person at their own terminal is never gated.
   repository (`LJOS_TRACKER_REMOTE`, `LJOS_TRACKER_GIT=push`). When nothing
   names the run but the seat, every run of that seat is one session, and
   `ljos vote` and the tally call it unverified; the `NAME-shell` holder a
-  shell runner's env file shares names no run either. The binding stops an
-  honest but careless agent from voicing a panel from one session: minting
-  seats, passing another `--as`, running a line again, or setting another
-  session id between casts. A cast records, in the runtime directory, the
-  shell that ran `ljos` and the harness whose hook saw the line, each by pid
-  and start time; that shell casts on an issue as one session, and that
-  harness as one root session and its subagents, so a harness that clears
-  its conversation and votes again on the issue is refused. A hook's call
-  record names a session only for an `ljos` under the harness that ran the
-  hook. A process running as the same user that rewrites the tracker, the
-  seat keys, the runtime directory or another process's environment is out
-  of scope, and nothing here stops it: the call records are not signed, and
-  one written by hand naming a live ancestor of a later `ljos` still binds.
-  Within scope, three cases are not caught: a runner that starts each
-  command in a fresh shell under one shared daemon with no hook, as a cloud
-  box does, since nothing below the daemon tells its conversations apart; a
-  program other than a shell that runs `ljos` itself; and a cast on another
-  machine, whose processes are not compared. Persona ballots and Jev
+  shell runner's env file shares names no run either. A ballot from one
+  session, including another `--as` or another session id, is recorded.
+  Consensus counts one voice for a shared session id or parent, and it
+  names the ballots it folded and why.
+  Persona ballots and Jev
   ballots are advisory. The push gate counts seat ballots from another seat. A
   design candidate whose session already read another candidate is flagged.
   `ljos panel run ISSUE` starts each designer and each persona in its own

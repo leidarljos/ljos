@@ -542,7 +542,7 @@ fn an_ask_is_rendered_for_each_harness() {
 }
 
 #[test]
-fn persona_ballots_from_one_holder_count_once() {
+fn persona_ballots_from_one_holder_all_count() {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
     let home = dir.path().join("home");
@@ -652,7 +652,11 @@ else:
     let (ok, tally, stderr) = vote(&["vote", "Rig-uw1n"]);
     assert!(ok, "{tally}\n{stderr}");
     assert!(tally.contains("1 ballot counts"), "{tally}");
-    assert!(!tally.contains("5 ballots"), "{tally}");
+    assert!(
+        tally.contains("folded into one voice (same session sess-holder-0001):"),
+        "{tally}"
+    );
+    assert!(tally.contains("counted delta"), "{tally}");
     let (ok, said, stderr) = vote(&["consensus", "Rig-uw1n", "--no-file", "--json"]);
     assert!(ok, "{said}\n{stderr}");
     let logged = std::fs::read_to_string(&consensus_log).unwrap_or_default();
@@ -667,14 +671,18 @@ else:
         .unwrap_or("");
     let rows: Vec<serde_json::Value> = serde_json::from_str(ballots.trim()).unwrap_or_default();
     assert_eq!(rows.len(), 1, "{logged}");
+    assert_eq!(rows[0]["agent"], "delta");
+    assert_eq!(rows[0]["choice"], "B");
     let (ok, stdout, stderr) = vote(&["vote", "Rig-uw2n", "--for", "A", "--used", "none"]);
     assert!(ok, "{stdout}\n{stderr}");
     let (ok, stdout, stderr) = vote(&[
         "vote", "Rig-uw2n", "--for", "B", "--used", "none", "--as", "alpha",
     ]);
-    assert!(!ok, "a second persona was counted\n{stdout}\n{stderr}");
-    let refused = format!("{stdout}\n{stderr}");
-    assert!(refused.contains("already cast"), "{refused}");
+    assert!(ok, "{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("alpha cast by alpha, parent sess-holder-0001"),
+        "{stdout}"
+    );
 }
 
 const NORMAL_GIT: &str = "git add .; git commit -m note; git push origin topic";

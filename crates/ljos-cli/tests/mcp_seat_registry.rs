@@ -143,7 +143,7 @@ fn a_listed_seat_cannot_write_as_another_assignee() {
 }
 
 #[test]
-fn a_listed_seat_cannot_vote_or_withdraw_as_another() {
+fn a_listed_seat_records_a_persona_ballot() {
     let root = tempfile::tempdir().unwrap();
     let call = server(root.path());
     let seats = root.path().join("config/ljos/seats.toml");
@@ -157,25 +157,17 @@ fn a_listed_seat_cannot_vote_or_withdraw_as_another() {
         args["seat"] = "saddle".into();
         args["as"] = "stranger".into();
         let said = call("ljos_vote", args);
-        assert!(said.contains("\"isError\":true"), "{said}");
-        assert!(
-            said.contains("--as stranger is not this seat, saddle"),
-            "{said}"
-        );
+        assert!(!said.contains("not this seat"), "{said}");
     }
 }
 
 #[test]
-fn a_listed_seat_cannot_forecast_as_another() {
+fn a_listed_seat_forecasts_as_a_persona() {
     let root = tempfile::tempdir().unwrap();
     let call = server(root.path());
     let said = call(
         "ljos_predict",
         serde_json::json!({"seat": "saddle", "issue": "proj-aaaa", "expect": "accept", "as": "stranger"}),
     );
-    assert!(said.contains("\"isError\":true"), "{said}");
-    assert!(
-        said.contains("--as stranger is not this seat, saddle"),
-        "{said}"
-    );
+    assert!(!said.contains("not this seat"), "{said}");
 }

@@ -68,6 +68,7 @@ const MACHINERY: &[&str] = &[
     NOTE_WITHDRAWN,
     REOPEN_NOTE,
     "ballot-sig: ",
+    "ballot-from: ",
     "ballot-withdrawn: ",
     "candidate-sig: ",
     "quorum: ",

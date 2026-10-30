@@ -742,8 +742,9 @@ enum Cmd {
         /// popular reading has a forecast without a second verb.
         #[arg(long)]
         expect: Option<String>,
-        /// This seat's own name. A ballot or a withdrawal `--as` another
-        /// seat is refused: a persona votes from a session seated as it.
+        /// The persona this ballot records. The casting seat and the parent
+        /// session are stored with it. Consensus counts the ballot.
+        /// A standing seat or the person is the caster's persona ballot.
         /// With `--jev`, the persona Jev answers for.
         #[arg(long = "as")]
         as_persona: Option<String>,
@@ -960,7 +961,7 @@ enum Cmd {
         /// The option you expect to win, or a JSON object of option to share.
         #[arg(long)]
         expect: String,
-        /// This seat's own name; another seat is refused.
+        /// The persona this forecast records. Absent, the casting seat.
         #[arg(long = "as")]
         as_persona: Option<String>,
     },
@@ -3252,6 +3253,7 @@ fn run_command() -> Result<()> {
             // of seats alone stays plain DeGroot.
             let ballots = ljos_cli::ballot_rows(&id);
             ljos_cli::require_ballots(&id, &ballots)?;
+            let provenance = ljos_cli::panel_gate::panel_provenance(&id);
             if let Some(msg) = ljos_cli::panel_gate::settle_refusal(&id) {
                 let flags = ljos_cli::panel_gate::blind_lines_for(&id);
                 if json {
@@ -3259,9 +3261,11 @@ fn run_command() -> Result<()> {
                         "settled": false,
                         "panel": {"settled": false, "refusal": msg, "blind": flags},
                         "push_cite": {"issue": id, "stands": false, "refusal": msg},
+                        "provenance": provenance,
                     });
                     println!("{}", serde_json::to_string_pretty(&doc)?);
                 } else {
+                    print!("{provenance}");
                     println!("{msg}");
                     for line in flags {
                         println!("blind design: {line}");
@@ -3333,6 +3337,9 @@ fn run_command() -> Result<()> {
                 }
                 let mut doc = ljos_cli::consensus_document(&gate_json, &said);
                 doc["protected_push"] = protected_json;
+                if !provenance.is_empty() {
+                    doc["provenance"] = serde_json::json!(provenance);
+                }
                 if !dissent.is_empty() {
                     doc["dissent"] = serde_json::json!(dissent);
                 }
@@ -3341,6 +3348,7 @@ fn run_command() -> Result<()> {
             }
             print!("{gate}");
             print!("{protected}");
+            print!("{provenance}");
             for line in &dissent {
                 println!("dissent: {line}");
             }

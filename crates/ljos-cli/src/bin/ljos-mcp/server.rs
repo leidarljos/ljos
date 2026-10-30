@@ -658,7 +658,7 @@ pub struct PredictArgs {
     pub issue: String,
     /// The option you expect to win, or an object of option to share.
     pub expect: serde_json::Value,
-    /// This seat's own name; another seat is refused.
+    /// The persona this forecast records. Absent, the casting seat.
     #[serde(rename = "as")]
     pub as_persona: Option<String>,
 }
@@ -750,8 +750,8 @@ pub struct VoteArgs {
     /// does not depend on a second call. Absent, the ballot stands alone.
     #[serde(default)]
     pub expect: Option<serde_json::Value>,
-    /// This seat's own name. A ballot or a withdrawal `as` another seat is
-    /// refused: a persona votes from a session seated as that persona.
+    /// The persona this ballot records. The casting seat and the parent
+    /// session are stored with it. Consensus counts the ballot.
     #[serde(rename = "as")]
     pub as_persona: Option<String>,
     /// With `as` and no `choice`: ask Jev for the persona's ballot. A sure
@@ -1883,7 +1883,7 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this when a decision has more than one defensible answer: cast one ballot, or omit the option to read the count. Pass `confidence` in (0, 1], the probability that the choice is the outcome (DeGroot 1974, doi:10.1080/01621459.1974.10480137). Omit it only when you are not forecasting; a hard vote is not scored. ljos_learn scores confidence once the outcome is named; no settle and no push cite weighs it. Pass `expect` as the option you think the others will pick, or an object of option to share: that private forecast is what the surprisingly popular reading needs, and it belongs on this ballot rather than a later call. Pass `used` as comma-separated deed accessions, or `none` when the ballot used no deed (doi:10.1007/3-540-44503-X_20). The text that comes back is a count, not the settle. Call ljos_consensus before acting. A ballot is this seat's; `as` another seat is refused.",
+        description = "Call this when a decision has more than one defensible answer: cast one ballot, or omit the option to read the count. Pass `confidence` in (0, 1], the probability that the choice is the outcome (DeGroot 1974, doi:10.1080/01621459.1974.10480137). Omit it only when you are not forecasting; a hard vote is not scored. ljos_learn scores confidence once the outcome is named; no settle and no push cite weighs it. Pass `expect` as the option you think the others will pick, or an object of option to share: that private forecast is what the surprisingly popular reading needs, and it belongs on this ballot rather than a later call. Pass `used` as comma-separated deed accessions, or `none` when the ballot used no deed (doi:10.1007/3-540-44503-X_20). The text that comes back is a count, not the settle. Call ljos_consensus before acting. `as` names the persona. The ballot is recorded with the casting seat and the parent session, and consensus counts it.",
         annotations(
             title = "Vote",
             read_only_hint = false,
