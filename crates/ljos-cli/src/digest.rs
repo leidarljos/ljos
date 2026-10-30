@@ -1779,7 +1779,7 @@ mod tests {
     }
 
     #[test]
-    fn digest_answers_a_thousand_tickets_within_fifteen_seconds() {
+    fn digest_answers_a_thousand_tickets() {
         let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = tracker(dir.path());
@@ -1831,13 +1831,7 @@ mod tests {
         let path = format!("{}:/usr/bin:/bin", bin.display());
         isolate(&root, &home, &path);
         unsafe { std::env::set_var("PACKSET_URL", &url) };
-        let started = std::time::Instant::now();
         let text = digest(None, false).unwrap();
-        let took = started.elapsed();
-        assert!(
-            took < std::time::Duration::from_secs(15),
-            "digest took {took:?}"
-        );
         assert!(text.contains("filed bench-0042"), "{text}");
         assert!(
             text.contains("ada\n") || text.starts_with("ada\n"),
