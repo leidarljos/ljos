@@ -23,3 +23,12 @@ serde_json = "1"
 toml = "0.8"
 which = "7"
 vissue-core = "0.20"
+
+# argon2id at the person-key cost (64 MiB, three passes, four lanes) runs
+# seconds per hash unoptimised. Debug and test builds optimise the hash
+# alone, so a prompt test answers in the time a person would wait.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
