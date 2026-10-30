@@ -29,6 +29,9 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 - A raw drawer row plus a signature on an unverified seat stays one voice with that seat.
 - A subagent of a root session counts with its parent.
   The 0.35.1 note said the agent runner's row does not bind it, which was wrong.
+- The passphrase line cap is 240 bytes, so the tty never drops the newline on macOS.
+- An lsof listen row is read from the field before the listen mark.
+- A slow pre-push check is judged by the push continuing and by the sitting it names.
 
 ## 0.35.2 (2026-10-30)
 

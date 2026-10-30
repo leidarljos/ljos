@@ -905,10 +905,15 @@ fn gate_runner(name: &str) -> Result<()> {
     let issue = match crate::sitting_gate::live_sitting() {
         Ok(issue) => issue,
         Err(_) => {
+            let named = crate::sitting_gate::open_or_name_sitting().unwrap_or_default();
             if crate::push_slow() {
-                eprintln!("{}", crate::push_slow_line());
+                if named.is_empty() {
+                    eprintln!("{}", crate::push_slow_line());
+                } else {
+                    eprintln!("{}; sitting {named}", crate::push_slow_line());
+                }
             }
-            crate::sitting_gate::open_or_name_sitting().unwrap_or_default()
+            named
         }
     };
     let cfg = match crate::gates::consensus_push(repo.as_deref()) {

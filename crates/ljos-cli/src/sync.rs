@@ -5084,20 +5084,29 @@ fn other_writer_port(pid: u32) -> Option<u16> {
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
-    for line in text.lines().skip(1) {
-        let Some(name) = line.split_whitespace().last() else {
-            continue;
-        };
-        let Some((_, port)) = name.rsplit_once(':') else {
-            continue;
-        };
-        if let Ok(port) = port.parse::<u16>() {
-            if port != 0 {
-                return Some(port);
-            }
+    for line in text.lines() {
+        if let Some(port) = port_from_lsof_line(line) {
+            return Some(port);
         }
     }
     None
+}
+
+/// The port in one `lsof` line. A default row ends in `(LISTEN)`, so the
+/// address is the field before that mark. `lsof -Fn` puts the address on
+/// its own `n` line.
+#[cfg(test)]
+fn port_from_lsof_line(line: &str) -> Option<u16> {
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    let name = if let Some(at) = fields.iter().position(|field| *field == "(LISTEN)") {
+        *fields.get(at.checked_sub(1)?)?
+    } else if let Some(rest) = line.trim().strip_prefix('n') {
+        rest
+    } else {
+        return None;
+    };
+    let port = name.rsplit_once(':')?.1;
+    port.parse().ok().filter(|port: &u16| *port != 0)
 }
 
 /// A listening port in a `/proc/net/tcp` table whose inode is one of `inodes`.
@@ -5385,6 +5394,13 @@ mod tests {
         assert_eq!(super::listen_port_in(&inodes, table), Some(0xB381));
         inodes.clear();
         assert_eq!(super::listen_port_in(&inodes, table), None);
+        let macos = "packsetd 4321 ubuntu 7u IPv4 0x1a2b3c4d 0t0 TCP 127.0.0.1:54321 (LISTEN)";
+        assert_eq!(super::port_from_lsof_line(macos), Some(54321));
+        assert_eq!(super::port_from_lsof_line("n127.0.0.1:54321"), Some(54321));
+        assert_eq!(
+            super::port_from_lsof_line("COMMAND PID USER FD TYPE NAME"),
+            None
+        );
     }
 
     /// `age` that writes its stdin to `-o`. The caller holds [`crate::test_env_lock`].
