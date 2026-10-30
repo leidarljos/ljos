@@ -148,8 +148,9 @@ fn plain_protected_push(args: &[String]) -> bool {
 }
 
 /// A push onto a protected branch asks when the sitting has no settled
-/// consensus. One active seat settles on its own vote. Two or more use
-/// the ordinary quorum. A conversation id is not read here.
+/// consensus, and the ask names the refusal after that sentence. One
+/// active seat settles on its own vote. Two or more use the ordinary
+/// quorum. A conversation id is not read here.
 fn protected_branch_ask(calls: &[GitCall], line: &str) -> Option<Rule> {
     for push in calls
         .iter()
@@ -166,8 +167,10 @@ fn protected_branch_ask(calls: &[GitCall], line: &str) -> Option<Rule> {
         let Some(issue) = crate::seat_held_issue() else {
             return Some(asked(&protected_ask(&dest, &cfg.branches)));
         };
-        if !crate::protected_push_cleared(&issue, &crate::seat_name(), cfg.quorum) {
-            return Some(asked(&protected_ask(&dest, &cfg.branches)));
+        if let Err(reason) = crate::protected_push_refusal(&issue, &crate::seat_name(), cfg.quorum)
+        {
+            let why = format!("the sitting has no settled consensus: {reason}");
+            return Some(asked(&seats_wait(&dest, &cfg.branches, &issue, &why)));
         }
     }
     None
