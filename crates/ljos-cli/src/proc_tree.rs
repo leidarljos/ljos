@@ -2643,8 +2643,13 @@ mod tests {
     fn the_walk_reads_up_to_a_process_with_no_parent() {
         let chain = ancestors();
         let top = chain.last().expect("the test runner is above this process");
+        let top = stat(top.pid).expect("the top process was just read");
+        // A parent the kernel will not name ends the walk. macOS answers
+        // that way for a process this user cannot inspect. pid 0 is the
+        // same stop when the parent can be read.
+        let hidden_parent = top.ppid != 0 && stat(top.ppid).is_none();
         assert!(
-            chain.len() == DEPTH || stat(top.pid).is_some_and(|s| s.ppid == 0),
+            chain.len() == DEPTH || top.ppid == 0 || hidden_parent,
             "{chain:?}"
         );
     }
