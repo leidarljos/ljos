@@ -10,7 +10,7 @@ use ljos_cli::{
     format_playbooks, format_readings, format_remembered, format_seat_command, format_steps,
     format_write_ack, graded, habit, habits, handover_scoped, healthy, hook_note, island_entities,
     join, learn_anchors, learn_and_write, learn_reading, learn_shared, mark_seen, now_utc, on_path,
-    onboard_to, pack, packset_consolidate, packset_forget, packset_hubs, packset_island_as,
+    onboard_to, packset_consolidate, packset_forget, packset_hubs, packset_island_as,
     packset_search_as_of, packset_write_as, panel, panel_steps, parse_every, personas_from_pack,
     playbooks_from_pack, policy_with_memory, post_hook_stdout, predictions_of, prompt_hook_stdout,
     protocol_text, read_campaign, receive, release, remember_findings, reopen, rows_about, run,
@@ -3248,17 +3248,18 @@ fn run_command() -> Result<()> {
             // personas' anchors go to both settles; the issue's tags pick
             // the model.
             let (topic, tags) = ljos_cli::hook_timed("consensus_issue", || issue_topic_and_tags(&id));
-            let trust = ljos_cli::hook_timed("consensus_trust", || {
-                rows_about(&pack_trust_or_none(), &topic)
+            // One read of the kinds the reading uses: trust rows, outcomes
+            // and forecasts, not the whole pack twice.
+            let atoms = ljos_cli::hook_timed("consensus_trust", || match ljos_cli::consensus_atoms() {
+                Ok(atoms) => atoms,
+                Err(e) => {
+                    eprintln!("ljos: no trust rows ({e:#}); settling with equal weights");
+                    Vec::new()
+                }
             });
+            let trust = rows_about(&ljos_cli::trust_rows(&atoms), &topic);
             let personas =
                 ljos_cli::hook_timed("consensus_personas", || personas_from_pack().unwrap_or_default());
-            let atoms = pack()
-                .and_then(|c| {
-                    ljos_cli::atoms_lean(&c, &c.workspace())
-                        .context("consensus: GET /v1/atoms failed")
-                })
-                .unwrap_or_default();
             // A persona on the ballot settles under its anchor, and every
             // other voter, the seat too, under the default one; a ballot
             // of seats alone stays plain DeGroot.
@@ -3823,17 +3824,6 @@ fn tracker_write(cmd: &Cmd) -> Option<&'static str> {
         Cmd::BumpPlan { dry_run: false, .. } => "bump-plan",
         _ => return None,
     })
-}
-
-/// The pack's rows, or none with a note: a seat without a pack still settles.
-fn pack_trust_or_none() -> Vec<Trust> {
-    match trust_from_pack() {
-        Ok(rows) => rows,
-        Err(e) => {
-            eprintln!("ljos: no trust rows ({e:#}); settling with equal weights");
-            Vec::new()
-        }
-    }
 }
 
 /// The quorum gate on `id`. Met, the reading goes on. Short, it says so

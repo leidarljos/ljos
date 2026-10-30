@@ -25197,6 +25197,31 @@ pub fn trust_from_pack() -> Result<Vec<Trust>> {
     Ok(trust_rows(&atoms))
 }
 
+/// The kinds a consensus reads from the pack: trust rows for the weights
+/// and the standing, outcomes for the correlation discount, forecasts for
+/// the surprisingly popular answer.
+pub const CONSENSUS_KINDS: &[&str] = &["trust", "outcome", "prediction"];
+
+/// The pack's live atoms of [`CONSENSUS_KINDS`], lean, one listing per
+/// kind. The writer filters each before it builds the answer, so a pack of
+/// many lessons is not copied and parsed to find a few dozen rows; each
+/// kind keeps the order the whole listing gives it.
+///
+/// # Errors
+///
+/// The pack not answering, or an answer that is not atoms.
+pub fn consensus_atoms() -> Result<Vec<Value>> {
+    let client = pack()?;
+    let workspace = client.workspace();
+    let mut out = Vec::new();
+    for kind in CONSENSUS_KINDS {
+        let (atoms, _) = atoms_listed_of(&client, &workspace, true, Some(kind), None, false)
+            .with_context(|| format!("trust: GET /v1/atoms?kind={kind} failed"))?;
+        out.extend(atoms);
+    }
+    Ok(out)
+}
+
 /// POST one trust row.
 pub fn write_trust(row: &Trust, why: &[String]) -> Result<Value> {
     let client = pack()?;
