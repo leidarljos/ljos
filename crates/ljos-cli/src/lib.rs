@@ -6398,14 +6398,69 @@ esac
 # main, master, develop, and `protected_branches` in the checkout's
 # `.ljos/gates.toml` or `ljos.toml`. A list the shim cannot read on one
 # line is `?`, which matches no branch name, so the push asks.
+# The list is read in the shell. grep, sed and tr are not on every PATH.
 guarded_branches() {
   printf 'main master develop'
   top=$("$real" -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 0
   for f in "$top/.ljos/gates.toml" "$top/ljos.toml"; do
-    [ -f "$f" ] || continue
-    grep -q 'protected_branches' "$f" 2>/dev/null || continue
-    names=$(sed -n 's/^[[:space:]]*protected_branches[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' "$f" | tr -d "\"'," | tr '\n' ' ')
-    if [ -n "$names" ]; then printf ' %s' "$names"; else printf ' ?'; fi
+    [ -f "$f" ] && [ -r "$f" ] || continue
+    saw=0
+    matched=0
+    names=
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        *protected_branches*) saw=1 ;;
+        *) continue ;;
+      esac
+      rest=$line
+      while :; do
+        case "$rest" in
+          [[:space:]]*) rest=${rest#?} ;;
+          *) break ;;
+        esac
+      done
+      case "$rest" in
+        protected_branches[[:space:]]*|protected_branches=*) ;;
+        *) continue ;;
+      esac
+      body=${rest#protected_branches}
+      while :; do
+        case "$body" in
+          [[:space:]]*) body=${body#?} ;;
+          *) break ;;
+        esac
+      done
+      case "$body" in
+        =*) ;;
+        *) continue ;;
+      esac
+      body=${body#=}
+      while :; do
+        case "$body" in
+          [[:space:]]*) body=${body#?} ;;
+          *) break ;;
+        esac
+      done
+      case "$body" in
+        '['*']'*) ;;
+        *) continue ;;
+      esac
+      inner=${body#*[}
+      inner=${inner%]*}
+      cleaned=
+      while [ -n "$inner" ]; do
+        c=${inner%"${inner#?}"}
+        inner=${inner#?}
+        case "$c" in
+          \"|\'|,) ;;
+          *) cleaned=$cleaned$c ;;
+        esac
+      done
+      matched=1
+      names=$names$cleaned' '
+    done < "$f"
+    [ "$saw" -eq 1 ] || continue
+    if [ "$matched" -eq 1 ]; then printf ' %s' "$names"; else printf ' ?'; fi
   done
 }
 # Whether this git call is a --force-with-lease push the hook would let
@@ -6481,6 +6536,48 @@ lease_free() {
     exit 0
   )
 }
+# Drop leading and trailing whitespace. The same characters sed's
+# [[:space:]] class drops, and no other process.
+trim_ws() {
+  t=$1
+  while :; do
+    case "$t" in
+      [[:space:]]*) t=${t#?} ;;
+      *) break ;;
+    esac
+  done
+  while :; do
+    case "$t" in
+      *[[:space:]]) t=${t%?} ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$t"
+}
+# ASCII fold. `policyd_unjudged` ignores case for the same letters.
+lower_ascii() {
+  s=$1
+  out=
+  up=ABCDEFGHIJKLMNOPQRSTUVWXYZ
+  lo=abcdefghijklmnopqrstuvwxyz
+  while [ -n "$s" ]; do
+    c=${s%"${s#?}"}
+    s=${s#?}
+    u=$up
+    l=$lo
+    while [ -n "$u" ]; do
+      uc=${u%"${u#?}"}
+      lc=${l%"${l#?}"}
+      u=${u#?}
+      l=${l#?}
+      [ "$c" = "$uc" ] || continue
+      c=$lc
+      break
+    done
+    out=$out$c
+  done
+  printf '%s' "$out"
+}
 # The first git of a conversation is the session start this runner never
 # hooks. The brief is held claims, recall and unread mail, on stderr, once.
 # Bound the wait: a slow seat must not hold the command. A failure allows it.
@@ -6495,11 +6592,22 @@ if command -v ljos-policyd >/dev/null 2>&1; then
   verdict=$(ljos-policyd check -- "$me" "$@" 2>/dev/null)
   case $verdict in
     deny*)
-      # The line is terminated before cut reads it: BSD cut drops a final
-      # line that has no newline, and the shim then read no rule.
-      rule=$(printf '%s\n' "$verdict" | head -n 1 | cut -f 2)
-      rule=$(printf '%s' "$rule" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-      folded=$(printf '%s' "$rule" | tr '[:upper:]' '[:lower:]')
+      # First line, field after the first tab. Trim and fold in the shell.
+      # head, cut, sed and tr are missing when PATH is only the guard and
+      # git's directory, and an empty read allows a named denial.
+      nl='
+'
+      line=${verdict%%"$nl"*}
+      tab=$(printf '\t')
+      case "$line" in
+        *"$tab"*)
+          rest=${line#*"$tab"}
+          rule=${rest%%"$tab"*}
+          ;;
+        *) rule=$line ;;
+      esac
+      rule=$(trim_ws "$rule")
+      folded=$(lower_ascii "$rule")
       # The same seat-not-ready tokens as `policyd_unjudged`: empty, the
       # bare engine name, a bind that did not take, and `pack-unavailable`
       # with or without the pack's text. A `phronesis:` token, or a named
@@ -6510,7 +6618,7 @@ if command -v ljos-policyd >/dev/null 2>&1; then
           case "$folded" in
             pack-unavailable:*)
               text=${rule#*:}
-              text=$(printf '%s' "$text" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+              text=$(trim_ws "$text")
               [ -n "$text" ] && why="$why: $text"
               ;;
           esac
@@ -38175,6 +38283,12 @@ mod tests {
             "#!/bin/sh\ncase \"$*\" in\n*push*--force*) printf 'deny\\tgit-force-push\\n'; exit 2;;\n*) printf 'allow\\n';;\nesac\n",
         );
         let real_git = which::which("git").expect("git on PATH");
+        // git's own directory is /usr/bin on Linux, which also has head,
+        // cut, sed and tr, and another prefix on macOS, which does not.
+        // A directory that holds only git is that PATH on either system.
+        let git_bin = root.path().join("git-bin");
+        std::fs::create_dir_all(&git_bin).unwrap();
+        std::os::unix::fs::symlink(&real_git, git_bin.join("git")).unwrap();
         // A parallel test may set GIT_DIR on this process. These git
         // commands have to see this checkout, not that one.
         let scrub = |cmd: &mut std::process::Command| {
@@ -38207,16 +38321,13 @@ mod tests {
             cmd.args(args)
                 .current_dir(&repo)
                 .env("HOME", &home)
-                // The shim reads the verdict with head, cut, sed and tr. A
-                // Homebrew git lives apart from them, so the system
-                // directories stay on the path.
                 .env(
                     "PATH",
                     format!(
-                        "{}:{}:{}:/usr/bin:/bin",
+                        "{}:{}:{}",
                         guard.display(),
                         fake.display(),
-                        real_git.parent().unwrap().display()
+                        git_bin.display()
                     ),
                 )
                 .env_remove("LJOS_OFF")
