@@ -5,6 +5,14 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.35.2 (2026-10-30)
+
+### Fixes
+
+- Session-end extraction runs again unless `LJOS_EXTRACT=off`.
+  A mined sentence is still a tracker note, and no prompt hook injects it.
+
+
 ## 0.35.1 (2026-10-29)
 
 ### Features

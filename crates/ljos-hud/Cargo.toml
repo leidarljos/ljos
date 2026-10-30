@@ -35,7 +35,7 @@ path = "src/bin.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-ljos = { path = "../ljos-cli", version = "0.35.1" }
+ljos = { path = "../ljos-cli", version = "0.35.2" }
 claimdag = "0.8"
 iced = { version = "0.14", default-features = true, features = [
     "tokio",
