@@ -5082,79 +5082,16 @@ pub fn same_conversation_tag(held: &str, assignee: &str) -> bool {
     }
 }
 
-/// The loop variables a line binds to paths in a runtime ljos directory.
-/// `for f in DIR/hold-*` writes nothing; it only names files. What the
-/// loop body does with `$f` is judged as if the body named the first such
-/// path, so `cat "$f"` reads and `rm "$f"` or `> "$f"` still writes.
-#[derive(Default)]
-struct LoopVars(Vec<(String, String)>);
-
-impl LoopVars {
-    /// Whether `words`, wrappers off, are a `for NAME in WORDS` or
-    /// `select NAME in WORDS` head. When one of WORDS, or a word inside a
-    /// `$(...)` or backticks among them, reaches a runtime ljos directory,
-    /// NAME stands for that path in the commands after.
-    fn bind(&mut self, words: &[String], cwd: Option<&Path>) -> bool {
-        let Some(first) = words.first() else {
-            return false;
-        };
-        if !matches!(first.as_str(), "for" | "select") {
-            return false;
-        }
-        let Some(name) = words.get(1) else {
-            return true;
-        };
-        let listed = words.iter().skip(2).skip_while(|w| *w != "in").skip(1);
-        let mut found = None;
-        for w in listed {
-            let inner = w
-                .strip_prefix("$(")
-                .and_then(|b| b.strip_suffix(')'))
-                .or_else(|| w.strip_prefix('`').and_then(|b| b.strip_suffix('`')));
-            let cands = inner.map_or_else(|| vec![w.clone()], shell_words);
-            found = cands.into_iter().find(|c| {
-                kept_prompt::names_one(c)
-                    || kept_prompt::path_of(c, cwd).is_some_and(|p| kept_prompt::inside(&p))
-            });
-            if found.is_some() {
-                break;
-            }
-        }
-        self.0.retain(|(n, _)| n != name);
-        if let Some(path) = found {
-            self.0.push((name.clone(), path));
-        }
-        true
-    }
-
-    /// `words` with each bound `$NAME` and `${NAME}` put back as its path.
-    fn apply(&self, words: &[String]) -> Vec<String> {
-        words
-            .iter()
-            .map(|w| {
-                self.0.iter().fold(w.clone(), |w, (name, path)| {
-                    w.replace(&format!("${{{name}}}"), path)
-                        .replace(&format!("${name}"), path)
-                })
-            })
-            .collect()
-    }
-}
-
 /// Whether `line`, starting in `cwd`, writes a sitting or conversation
 /// binding record inside the runtime `ljos` directory.
 pub(crate) fn writes_hold_record(line: &str, cwd: Option<&Path>) -> bool {
     let mut cwd = cwd
         .map(Path::to_path_buf)
         .or_else(|| std::env::current_dir().ok());
-    let mut loops = LoopVars::default();
     for seg in nested_lines(line, 0).iter().flat_map(|l| raw_segments(l)) {
         let words = shell_words(&seg);
         let (at, _) = prefix_end(&words);
-        if loops.bind(&words[at..], cwd.as_deref()) {
-            continue;
-        }
-        let words = &loops.apply(&words[at..]);
+        let words = &words[at..];
         let Some(first) = words.first() else { continue };
         let first = first.rsplit('/').next().unwrap_or(first);
         if matches!(first, "cd" | "pushd") {
@@ -17077,61 +17014,18 @@ pub fn packset_write(label: &str, text: &str) -> Result<Value> {
 ///
 /// # Errors
 ///
-/// An empty text, or the pack refusing the note. A pack that keeps a note
-/// only on a ticket, while this conversation holds no sitting, is refused
-/// with [`REMEMBER_NOTE_WITHOUT_TICKET`], which says what to do instead.
+/// An empty text, or the pack refusing the note.
 pub fn packset_write_remember_note(text: &str, persona: Option<&str>) -> Result<Value> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         bail!("Remember: empty text is not a claim");
     }
     let client = pack()?;
-    let issue = live_held_issue().map(|(issue, _)| issue);
-    let mut atom = remember_note_atom(trimmed, persona, &client.workspace(), issue.as_deref());
-    let prefix = "Remember: POST /v1/atoms failed";
-    let posted = match with_writer(|| {
-        admit::post_kept(&client, &atom).map_err(|e| with_post_failure(prefix, e))
-    }) {
-        Err(e) if note_kind_unknown(&e) => {
-            atom["kind"] = Value::String("summary".into());
-            with_writer(|| {
-                admit::post_kept(&client, &atom).map_err(|e| with_post_failure(prefix, e))
-            })
-        }
-        other => other,
-    };
-    posted.map_err(|e| match issue {
-        None if note_needs_ticket(&e) => e.context(REMEMBER_NOTE_WITHOUT_TICKET),
-        _ => e,
-    })
-}
-
-/// Why an agent's `ljos remember` was not kept when the pack wants a
-/// ticket for a note and this conversation holds no sitting, and what to
-/// do instead.
-pub const REMEMBER_NOTE_WITHOUT_TICKET: &str = "remember: these words are not in the person's \
-     latest prompt, so they are kept as an agent's note, and the pack keeps a note only on a \
-     ticket while this conversation holds no sitting. Open one with `ljos sitting ISSUE` and \
-     run this again, or write it with `ljos note ISSUE \"...\"`. To keep the person's own words \
-     as theirs, pass them exactly as their latest prompt has them, or ask them to run `ljos \
-     remember` in their terminal";
-
-/// Whether the pack refused a note for naming no ticket.
-fn note_needs_ticket(err: &anyhow::Error) -> bool {
-    format!("{err:#}").contains("note atom needs issue")
-}
-
-/// The atom an agent's `ljos remember` posts for `text`: kind `note`,
-/// basis and origin agent, tagged with its source, the persona's set when
-/// one is named, and the held `issue` when there is one, since the pack
-/// keeps a note on the ticket whose logbook it copies.
-fn remember_note_atom(
-    text: &str,
-    persona: Option<&str>,
-    workspace: &str,
-    issue: Option<&str>,
-) -> Value {
-    let mut atom = atom_body(packset_core::record::NOTE_KIND, text, workspace);
+    let mut atom = atom_body(
+        packset_core::record::NOTE_KIND,
+        trimmed,
+        &client.workspace(),
+    );
     atom["source"]["basis"] = Value::String(Basis::Agent.as_str().into());
     let mut tags = vec![
         format!("{NOTE_BASIS_ENTITY}agent"),
@@ -17141,15 +17035,19 @@ fn remember_note_atom(
         tags.push(persona_entity(name));
         atom["set"] = Value::String(persona_set(name));
     }
-    if let Some(issue) = issue.map(str::trim).filter(|i| !i.is_empty()) {
-        tags.push(format!("issue:{issue}"));
-    }
     add_entities(&mut atom, tags);
-    if let Some(issue) = issue {
-        stamp_issue(&mut atom, issue);
-    }
     admit::stamp_origin(&mut atom, admit::ORIGIN_AGENT);
-    atom
+    let prefix = "Remember: POST /v1/atoms failed";
+    match with_writer(|| admit::post_kept(&client, &atom).map_err(|e| with_post_failure(prefix, e)))
+    {
+        Err(e) if note_kind_unknown(&e) => {
+            atom["kind"] = Value::String("summary".into());
+            with_writer(|| {
+                admit::post_kept(&client, &atom).map_err(|e| with_post_failure(prefix, e))
+            })
+        }
+        other => other,
+    }
 }
 
 pub fn packset_prefer(text: &str, persona: Option<&str>) -> Result<Value> {
@@ -23266,9 +23164,6 @@ const READERS: &[&str] = &[
     "wc",
     "bat",
     "cmp",
-    "[",
-    "[[",
-    "test",
 ];
 
 /// The command line `ssh` runs on its host: what follows the host, its
@@ -23556,17 +23451,13 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         return Some(too_deep_rule().clone());
     }
     let mut named_session = false;
-    let mut loops = LoopVars::default();
     for seg in nested_lines(line, 0).iter().flat_map(|l| raw_segments(l)) {
         // Every wrapper off, as a rule sees it: `nice tmux send-keys` and
         // `timeout 5 xdotool type` are the tools they run.
         let words = shell_words(&seg);
         let (at, _) = prefix_end(&words);
         named_session |= assigns_session(&words[..at]);
-        if loops.bind(&words[at..], cwd.as_deref()) {
-            continue;
-        }
-        let words = loops.apply(&words[at..]);
+        let words = words[at..].to_vec();
         let Some(first) = words.first() else { continue };
         let first = first.rsplit('/').next().unwrap_or(first);
         if matches!(
@@ -24174,102 +24065,6 @@ fn push_segment(call: &PushCall) -> String {
     }
 }
 
-/// What a rule is tried on for `lines`: each command as written, so a
-/// rule on a prefix still sees it, with its quotes off, with git's and a
-/// tool's options off, and with its prefixes off; never the raw line,
-/// which carries heredoc bodies and other data the shell does not run.
-fn rule_cues(lines: &[String]) -> Vec<String> {
-    let raw: Vec<String> = lines.iter().flat_map(|l| raw_segments(l)).collect();
-    let mut cues: Vec<String> = raw.iter().map(|s| s.trim().to_string()).collect();
-    // Every word with its quotes off too: `git 'push'` and `git pu''sh`
-    // are the push they run.
-    for seg in &raw {
-        let mut words = plain_words(seg);
-        cues.push(words.join(" "));
-        drop_git_options(&mut words);
-        cues.push(words.join(" "));
-        drop_tool_options(&mut words);
-        cues.push(words.join(" "));
-    }
-    for seg in &raw {
-        let stripped = strip_prefixes(seg).join(" ");
-        if !stripped.is_empty() && !cues.contains(&stripped) {
-            cues.push(stripped);
-        }
-        if let Some(norm) = plain_command(seg) {
-            if !cues.contains(&norm) {
-                cues.push(norm);
-            }
-        }
-    }
-    cues
-}
-
-/// `lines`, as [`nested_lines`] gives them, parted into the lines that run
-/// here and the lines an `ssh` on them runs on its host, with everything
-/// nested inside those. A line is hosted only when it is the exact script
-/// an `ssh` segment hands over, so a line not recognised stays here.
-fn split_ssh_hosted(lines: Vec<String>) -> (Vec<String>, Vec<String>) {
-    let mut pending: Vec<String> = Vec::new();
-    let mut here = Vec::new();
-    let mut hosted = Vec::new();
-    for l in lines {
-        if let Some(at) = pending.iter().position(|p| *p == l) {
-            pending.swap_remove(at);
-            hosted.push(l);
-            continue;
-        }
-        for seg in raw_segments(&l) {
-            let words = shell_words(&seg);
-            let (at, _) = prefix_end(&words);
-            if words.get(at).map(|w| base_name(w)) != Some("ssh") {
-                continue;
-            }
-            if let Some(script) = shell_c_script(&seg) {
-                pending.extend(nested_lines(&script, 0));
-            }
-        }
-        here.push(l);
-    }
-    (here, hosted)
-}
-
-/// Whether the command `cue` builds or runs tests, so that its whole
-/// effect stays on the host that runs it: `cargo test`, `make`, `ninja`,
-/// `cmake`, `meson compile`, `ctest`, `pytest` and the like.
-fn builds_on_its_host(cue: &str) -> bool {
-    let words = shell_words(cue);
-    let (at, _) = prefix_end(&words);
-    let Some(cmd) = words.get(at).map(|w| base_name(w)) else {
-        return false;
-    };
-    let sub = words[at + 1..]
-        .iter()
-        .find(|w| !w.starts_with('-') && !w.starts_with('+'))
-        .map(String::as_str);
-    match cmd {
-        "make" | "ninja" | "cmake" | "ctest" | "pytest" | "tox" | "nox" => true,
-        "cargo" => matches!(
-            sub,
-            Some(
-                "build"
-                    | "b"
-                    | "test"
-                    | "t"
-                    | "check"
-                    | "c"
-                    | "clippy"
-                    | "bench"
-                    | "nextest"
-                    | "doc"
-            )
-        ),
-        "meson" => matches!(sub, Some("compile" | "test" | "setup")),
-        "go" => matches!(sub, Some("build" | "test" | "vet")),
-        _ => false,
-    }
-}
-
 /// The verdict the rules give a command line: the first `deny` wins, then
 /// the first `ask`, else none, each tried on the whole line and on every
 /// command in it. Returns the rule that fired.
@@ -24281,17 +24076,23 @@ pub fn verdict_for<'a>(rules: &'a [Rule], line: &str) -> Option<&'a Rule> {
     if !rules.is_empty() && nested_too_deep(line) {
         return Some(too_deep_rule());
     }
-    let (here, hosted) = split_ssh_hosted(nested_lines(line, 0));
-    let cues = rule_cues(&here);
-    let hosted = rule_cues(&hosted);
-    // A build or a test that ssh runs on another host runs there, not
-    // here. Every other command ssh runs is judged as if run here.
-    let fires = |r: &Rule| {
-        cues.iter().any(|c| rule_matches(&r.pattern, c))
-            || hosted
-                .iter()
-                .any(|c| rule_matches(&r.pattern, c) && !builds_on_its_host(c))
-    };
+    let raw: Vec<String> = nested_lines(line, 0)
+        .iter()
+        .flat_map(|l| raw_segments(l))
+        .collect();
+    let mut cues: Vec<String> = raw.iter().map(|s| s.trim().to_string()).collect();
+    // Every word with its quotes off too: `git 'push'` and `git pu''sh`
+    // are the push they run.
+    for seg in &raw {
+        let mut words = plain_words(seg);
+        cues.push(words.join(" "));
+        drop_git_options(&mut words);
+        cues.push(words.join(" "));
+        drop_tool_options(&mut words);
+        cues.push(words.join(" "));
+    }
+    cues.extend(command_segments(line));
+    let fires = |r: &Rule| cues.iter().any(|c| rule_matches(&r.pattern, c));
     rules
         .iter()
         .find(|r| r.verdict == "deny" && fires(r))
@@ -57882,44 +57683,6 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
     }
 
-    /// A rule on a local build or test does not fire on the one ssh runs
-    /// on its host, however it is wrapped there. The same command run
-    /// here, and a push ssh runs, still fire.
-    #[test]
-    fn a_build_ssh_runs_on_its_host_is_not_a_local_build() {
-        let rules = vec![
-            Rule {
-                pattern: "cargo test*".into(),
-                verdict: "deny".into(),
-                reason: "not on the desktop".into(),
-            },
-            Rule {
-                pattern: "git push -f*".into(),
-                verdict: "deny".into(),
-                reason: "no force".into(),
-            },
-        ];
-        for line in [
-            "cd ~/x && sed -n 1,5p a.rs; ssh -o BatchMode=yes rg.terra 'cd ~/wt/x && CARGO_TARGET_DIR=~/t ~/.cargo/bin/cargo test --test cli 2>&1 | head -40'",
-            "ssh -o BatchMode=yes rg.terra 'cd ~/wt/x && env PATH=$HOME/.cargo/bin:$PATH CARGO_TARGET_DIR=$HOME/t nice cargo test -p ljos 2>&1 | head'",
-            "ssh h 'cd ~/x && srun -c 16 cargo test --workspace'",
-            "ssh h \"bash -c 'cargo test'\"",
-        ] {
-            assert!(verdict_for(&rules, line).is_none(), "{line}");
-        }
-        for line in [
-            "cargo test",
-            "cd x && cargo test -p ljos",
-            "ssh h 'cargo test' && cargo test",
-            "cargo test; ssh h 'cargo test'",
-            "(cargo test); ssh h 'cargo test'",
-            "ssh h 'cd r && git push -f'",
-            "ssh h 'cargo test && git push -f origin main'",
-        ] {
-            assert!(verdict_for(&rules, line).is_some(), "{line}");
-        }
-    }
-
     /// A line nested past what the seat reads is refused whole, by the
     /// rules and by the seat guard, so depth is not a way past either.
     #[test]
@@ -58036,60 +57799,6 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(seat_guard("ljos seat").is_none());
         assert!(seat_guard("ljos prefer --review").is_none());
         assert!(seat_guard("cat /run/user/1000/ljos/approvals/0123.json").is_none());
-    }
-
-    /// An agent's `ljos remember` note carries the held ticket, which the
-    /// pack needs to keep a note. With no sitting it names none, and the
-    /// pack's refusal is answered with what to pass instead. The note is
-    /// still the agent's, never the person's.
-    #[test]
-    fn an_agent_remember_note_carries_the_held_ticket() {
-        let held = remember_note_atom("Use eb-stack for every step.", None, "w", Some("ljos-5b5i"));
-        assert_eq!(held["issue"], "ljos-5b5i", "{held}");
-        let tags = held["entities"].to_string();
-        assert!(tags.contains("issue:ljos-5b5i"), "{held}");
-        assert!(tags.contains("note-source:ljos-remember"), "{held}");
-        assert!(!tags.contains("via:prompt"), "{held}");
-        assert_eq!(held["kind"], packset_core::record::NOTE_KIND, "{held}");
-        assert_eq!(held["source"]["basis"], "agent", "{held}");
-        let bare = remember_note_atom("Use eb-stack for every step.", None, "w", None);
-        assert!(bare.get("issue").is_none(), "{bare}");
-        assert!(!bare["entities"].to_string().contains("issue:"), "{bare}");
-        let refused = anyhow::anyhow!(
-            "bad response: http://127.0.0.1:8761/v1/atoms: 400: note atom needs issue, the ticket whose logbook it copies"
-        )
-        .context("Remember: POST /v1/atoms failed");
-        assert!(note_needs_ticket(&refused));
-        let told = format!("{:#}", refused.context(REMEMBER_NOTE_WITHOUT_TICKET));
-        assert!(told.contains("ljos sitting ISSUE"), "{told}");
-        assert!(told.contains("ljos note ISSUE"), "{told}");
-        assert!(!note_needs_ticket(&anyhow::anyhow!(
-            "400: atom sentence too long"
-        )));
-    }
-
-    /// A `for` loop over sitting records names them and writes nothing.
-    /// The loop body is judged with the loop variable as the path, so a
-    /// body that reads passes and one that removes or redirects into a
-    /// record is still refused, by the sitting gate and the seat guard.
-    #[test]
-    fn a_loop_over_sitting_records_reads_them_unless_its_body_writes() {
-        let _g = env_guard();
-        for line in [
-            "for f in /run/user/1000/ljos/hold-* ; do [ -f \"$f\" ] && grep -l vdjv \"$f\"; done",
-            "ls -t \"/run/user/1000/ljos\" | head -8; for f in $(ls -t /run/user/1000/ljos/hold-* | head -4); do echo \"== $f\"; cat \"$f\"; done",
-        ] {
-            assert!(!writes_hold_record(line, None), "{line}");
-            assert!(seat_guard(line).is_none(), "{line}");
-        }
-        for line in [
-            "for f in /run/user/1000/ljos/hold-*; do rm \"$f\"; done",
-            "for f in /run/user/1000/ljos/hold-*; do echo x > \"${f}\"; done",
-            "for f in $(ls /run/user/1000/ljos/hold-*); do cp /tmp/x \"$f\"; done",
-        ] {
-            assert!(writes_hold_record(line, None), "{line}");
-            assert!(seat_guard(line).is_some(), "{line}");
-        }
     }
 
     /// prefixes come off with their flags and the values those flags take,
