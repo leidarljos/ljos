@@ -55048,6 +55048,25 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         }
     }
 
+    /// A python program fed on a here-document, between a `cd` and a later
+    /// command, reaches ljos-policyd as `python3 -c PROGRAM` only: its dict
+    /// braces are not in the shell line, where they would read as a brace
+    /// expansion.
+    #[test]
+    fn a_heredoc_program_between_commands_goes_as_its_own_argv() {
+        let line = "cd /tmp && python3 -I - <<'EOF'\nk = {\"a\": \"x, y\",\n     \"b\": \"z\"}\nEOF\nscp -q out.tsv h:d/";
+        let argvs = tcb_argvs(line);
+        assert!(!argvs[0][2].contains("k = {"), "{argvs:?}");
+        assert!(argvs[0][2].contains("scp -q out.tsv"), "{argvs:?}");
+        assert!(
+            argvs
+                .iter()
+                .any(|a| a.first().is_some_and(|w| w == "python3")
+                    && a.iter().any(|w| w.contains("k = {"))),
+            "{argvs:?}"
+        );
+    }
+
     /// A policyd that hangs, crashes, or prints garbage used to allow the
     /// tool call. Claude Code, Codex and Cursor call `ljos hook` directly,
     /// so that allow reached the runner, and Cursor's was a bare allow
