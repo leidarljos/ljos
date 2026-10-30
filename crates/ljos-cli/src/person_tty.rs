@@ -12,7 +12,12 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use anyhow::{bail, Context, Result};
 
 /// The longest line read, in bytes. A longer one is refused.
-pub(crate) const MAX_LINE: usize = 1024;
+///
+/// Kept below POSIX's guaranteed canonical-line floor (255), so
+/// `MAX_LINE + 1` plus the trailing newline still reaches user space on
+/// every tty and can be refused as too long instead of stalling in the
+/// line discipline.
+pub(crate) const MAX_LINE: usize = 240;
 
 /// Signals that end the process while the prompt is up. Each restores the
 /// terminal first, then takes its default action.
@@ -232,5 +237,18 @@ impl Drop for Quiet {
             }
             libc::pthread_sigmask(libc::SIG_SETMASK, &self.mask, std::ptr::null_mut());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Secret;
+
+    /// Keep room for one byte past MAX_LINE and the trailing newline on
+    /// canonical ttys that only guarantee 255 bytes.
+    #[test]
+    fn max_line_fits_the_posix_canonical_floor() {
+        let max_line = Secret::new().capacity();
+        assert!(max_line + 2 <= 255, "MAX_LINE={max_line}");
     }
 }
