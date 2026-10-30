@@ -50235,12 +50235,18 @@ mod tests {
             // SAFETY: `held` stays open until the unlock below.
             assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
             locked.send(()).unwrap();
-            let started = std::time::Instant::now();
+            // The hold ends at its deadline, whatever a sleep overshoots
+            // on a busy runner, so the waiter's cap keeps its slack.
+            let deadline = std::time::Instant::now() + span;
             let mut n = 0u32;
-            while started.elapsed() < span {
+            loop {
                 writeln!(held, "{{\"holder\":{n}}}").unwrap();
                 n += 1;
-                std::thread::sleep(gap);
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                std::thread::sleep(gap.min(left));
             }
             // SAFETY: the same descriptor, still open.
             unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_UN) };
@@ -50257,10 +50263,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rows.jsonl");
         std::fs::write(&path, b"").unwrap();
+        // The hold outlasts ROW_LOCK_WAIT and ends well inside
+        // ROW_LOCK_WAIT_TOTAL, so a slow scheduler on the runner has room.
         let holder = hold_and_append(
             &path,
             std::time::Duration::from_millis(20),
-            std::time::Duration::from_millis(350),
+            std::time::Duration::from_millis(300),
         );
         let started = std::time::Instant::now();
         let wrote = append_locked_row(&path, b"{\"who\":\"waiter\"}\n", Durability::BestEffort);
