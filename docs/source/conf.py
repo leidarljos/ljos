@@ -12,8 +12,13 @@ _ROOT = _DOCS.parent.parent
 project = "ljos"
 copyright = "2026, Rohit Goswami"
 author = "Rohit Goswami"
-release = "0.1.0"
-version = "0.1"
+# The version is the workspace's, so the site never lags a release.
+import re as _re
+from pathlib import Path as _Path
+_CARGO = _Path(__file__).resolve().parents[2] / "Cargo.toml"
+_m = _re.search(r'^version\s*=\s*"([^"]+)"', _CARGO.read_text(), _re.M)
+release = _m.group(1) if _m else "0.0.0"
+version = release
 
 extensions = [
     "sphinx.ext.mathjax",
