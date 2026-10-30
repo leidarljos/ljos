@@ -25752,6 +25752,20 @@ pub(crate) fn append_locked_row_capped(
     })
 }
 
+/// The process that holds the write lock on `fd`, if another process
+/// holds it. `None` when the lock is free or the query failed.
+fn lock_holder(fd: std::os::unix::io::RawFd) -> Option<libc::pid_t> {
+    // SAFETY: flock is plain data. F_GETLK fills it and does not lock.
+    let mut info: libc::flock = unsafe { std::mem::zeroed() };
+    info.l_type = libc::F_WRLCK as _;
+    info.l_whence = libc::SEEK_SET as _;
+    let rc = unsafe { libc::fcntl(fd, libc::F_GETLK, &mut info) };
+    if rc != 0 || info.l_type == libc::F_UNLCK as libc::c_short {
+        return None;
+    }
+    Some(info.l_pid)
+}
+
 fn with_locked_row_file(
     path: &Path,
     durability: Durability,
@@ -25773,7 +25787,8 @@ fn with_locked_row_file(
     )?;
     file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     let wait = durability.lock_wait();
-    let deadline = std::time::Instant::now() + wait;
+    let mut since = std::time::Instant::now();
+    let mut held_by: Option<libc::pid_t> = None;
     loop {
         // SAFETY: this descriptor stays open until the matching unlock.
         // The lock is advisory, so the row is written on this same
@@ -25783,14 +25798,24 @@ fn with_locked_row_file(
         }
         let err = std::io::Error::last_os_error();
         match err.raw_os_error() {
-            Some(libc::EWOULDBLOCK | libc::EINTR) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(2));
-            }
-            Some(libc::EWOULDBLOCK) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    format!("still locked after {}ms", wait.as_millis()),
-                ));
+            // A different holder means a live writer finished one row.
+            // The wait starts again. The same holder for the whole wait
+            // is not one of ours, and the row is skipped.
+            Some(code)
+                if code == libc::EWOULDBLOCK || code == libc::EAGAIN || code == libc::EINTR =>
+            {
+                let holder = lock_holder(file.as_raw_fd());
+                if holder != held_by {
+                    held_by = holder;
+                    since = std::time::Instant::now();
+                }
+                if since.elapsed() >= wait {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        format!("still locked after {}ms", wait.as_millis()),
+                    ));
+                }
+                std::thread::yield_now();
             }
             _ => return Err(err),
         }
