@@ -25835,13 +25835,26 @@ fn with_locked_row_file(
     // a write-only descriptor answers that with EBADF. O_RDWR also opens a
     // fifo without waiting for a reader, so the regular-file check can
     // refuse it instead of blocking.
-    let mut file = open_regular_at(
-        &dir,
-        &name,
-        path,
-        libc::O_RDWR | libc::O_APPEND | libc::O_CREAT,
-        0o600,
-    )?;
+    // Several writers creating the same new log at once: APFS has
+    // answered one of them ENOENT for a moment while another's create
+    // was landing. The open is tried again a few times before that is
+    // taken as the answer.
+    let mut tries = 0;
+    let mut file = loop {
+        match open_regular_at(
+            &dir,
+            &name,
+            path,
+            libc::O_RDWR | libc::O_APPEND | libc::O_CREAT,
+            0o600,
+        ) {
+            Err(err) if err.raw_os_error() == Some(libc::ENOENT) && tries < 5 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            other => break other?,
+        }
+    };
     file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     let wait = durability.lock_wait();
     let deadline = std::time::Instant::now() + wait;

@@ -1,0 +1,1 @@
+Several hooks creating the same new state log at once could lose one row on macOS: APFS answered one creating open with ENOENT while another writer's create was landing, and the proposal or bypass row was dropped. The creating open is retried a few times before the error stands.
