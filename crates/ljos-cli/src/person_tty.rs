@@ -178,12 +178,42 @@ impl Quiet {
             off.c_lflag &= !(libc::ECHO | libc::ECHOE | libc::ECHOK | libc::ECHONL);
             // TCSANOW, not TCSAFLUSH. On macOS a flush waits until
             // output drains, and a pty with no session never drains,
-            // so the prompt hangs. Type-ahead is dropped afterwards.
+            // so the prompt hangs. Type-ahead is dropped by reading
+            // what is already queued, which ends when the queue is empty.
             if libc::tcsetattr(fd, libc::TCSANOW, &off) != 0 {
                 return Err(std::io::Error::last_os_error()).context("turning echo off");
             }
-            if libc::tcflush(fd, libc::TCIFLUSH) != 0 {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags < 0 {
+                return Err(std::io::Error::last_os_error()).context("reading the terminal flags");
+            }
+            if libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) != 0 {
                 return Err(std::io::Error::last_os_error()).context("dropping type-ahead");
+            }
+            let mut byte = 0u8;
+            loop {
+                let n = libc::read(fd, std::ptr::addr_of_mut!(byte).cast(), 1);
+                if n > 0 {
+                    continue;
+                }
+                if n == 0 {
+                    break;
+                }
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if err.raw_os_error() == Some(libc::EAGAIN)
+                    || err.raw_os_error() == Some(libc::EWOULDBLOCK)
+                {
+                    break;
+                }
+                let _ = libc::fcntl(fd, libc::F_SETFL, flags);
+                return Err(err).context("dropping type-ahead");
+            }
+            if libc::fcntl(fd, libc::F_SETFL, flags) != 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("restoring the terminal flags");
             }
             Ok(quiet)
         }

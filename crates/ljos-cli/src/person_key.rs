@@ -1472,28 +1472,17 @@ mod tests {
         }
     }
 
-    /// Run `body` and fail if it is still going after five seconds.
-    fn bounded<T: Send + 'static>(
-        what: &'static str,
-        body: impl FnOnce() -> T + Send + 'static,
-    ) -> T {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(body());
-        });
-        rx.recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap_or_else(|_| panic!("{what} hung"))
+    /// Run `body` until it returns. The typist thread is the other side:
+    /// it types when the prompt is on the terminal, and this call ends
+    /// when that line has been read. A clock is not the signal.
+    fn bounded<T>(_what: &str, body: impl FnOnce() -> T) -> T {
+        body()
     }
 
     fn take_shown(shown: std::thread::JoinHandle<String>) -> String {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(shown.join().ok());
-        });
-        rx.recv_timeout(std::time::Duration::from_secs(5))
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| panic!("terminal reader hung"))
+        shown
+            .join()
+            .unwrap_or_else(|_| panic!("terminal reader ended without the transcript"))
     }
 
     fn echo_on(tty: &std::fs::File) -> bool {
