@@ -1648,6 +1648,8 @@ fn format_plan(issue: &str, harness: &str, jobs: &[Job], dry_run: bool) -> Strin
     out
 }
 
+/// One session run to its end. A session that ran and failed is an error
+/// like one that never started: neither cast a ballot.
 fn run_job(job: &Job) -> Result<String> {
     if job.argv.is_empty() {
         anyhow::bail!("{} did not start: no argv", job.role);
@@ -1665,13 +1667,15 @@ fn run_job(job: &Job) -> Result<String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     match cmd.output() {
-        Ok(out) => {
-            let code = out.status.code().unwrap_or(1);
-            Ok(format!(
-                "{} session {} exited {code}\n",
-                job.role, job.session
-            ))
+        Ok(out) if out.status.success() => {
+            Ok(format!("{} session {} exited 0\n", job.role, job.session))
         }
+        Ok(out) => anyhow::bail!(
+            "{} session {} exited {}",
+            job.role,
+            job.session,
+            out.status.code().unwrap_or(1)
+        ),
         Err(e) => anyhow::bail!(
             "{} session {} did not start ({}): {e}",
             job.role,
@@ -1716,6 +1720,7 @@ pub fn panel_run(
         return Ok(out);
     }
     let at_once = crate::panel_concurrency().max(1);
+    let mut failed = 0;
     for chunk in jobs.chunks(at_once) {
         let mut handles = Vec::new();
         for job in chunk {
@@ -1725,11 +1730,28 @@ pub fn panel_run(
         for handle in handles {
             match handle.join() {
                 Ok(Ok(line)) => out.push_str(&line),
-                Ok(Err(err)) => return Err(err),
-                Err(_) => anyhow::bail!("a panel member thread stopped"),
+                Ok(Err(err)) => {
+                    failed += 1;
+                    out.push_str(&format!("{err:#}\n"));
+                }
+                Err(_) => {
+                    failed += 1;
+                    out.push_str("a panel member thread stopped\n");
+                }
             }
         }
     }
+    let ran = jobs.len() - failed;
+    if failed > 0 {
+        anyhow::bail!(
+            "{out}panel run {issue}: opened {ran} of {} sessions",
+            jobs.len()
+        );
+    }
+    out.push_str(&format!(
+        "panel run {issue}: opened {ran} of {} sessions\n",
+        jobs.len()
+    ));
     Ok(out)
 }
 

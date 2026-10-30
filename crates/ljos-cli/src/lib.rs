@@ -11118,60 +11118,203 @@ pub fn panel_concurrency() -> usize {
         })
 }
 
-/// Start each member once fewer than `at_once` are running. The opener counts
-/// its own children rather than leaving the count to a shell: under dash,
-/// `jobs` inside a command substitution lists none.
+/// Start every member, each once fewer than `at_once` are running, and say
+/// how many opened. A member that could not start did not open, and the
+/// rest still start. A member that exits while later members wait for a
+/// slot opened only when it exited 0 and `voted` finds its ballot. A member
+/// that has exited by the final check, with any status, did not open.
+/// The opener counts its own children rather than leaving the count to a
+/// shell: under dash, `jobs` inside a command substitution lists none.
+///
+/// # Errors
+///
+/// Fewer members opened than were given, named one by one.
 fn start_members(
     members: &[(String, PathBuf, Vec<String>)],
     at_once: usize,
-) -> Result<Vec<std::process::Child>> {
-    let mut running: Vec<std::process::Child> = Vec::new();
+    voted: &dyn Fn(&str) -> bool,
+) -> Result<String> {
+    let mut running: Vec<(&str, std::process::Child)> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
     for (persona, log, argv) in members {
         loop {
-            running.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+            reap_members(&mut running, &mut failed, voted);
             if running.len() < at_once.max(1) {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        running.push(spawn_member(persona, argv, log)?);
+        match spawn_member(persona, argv, log) {
+            Ok(child) => running.push((persona, child)),
+            Err(err) => failed.push(format!("{persona} did not start: {err:#}")),
+        }
     }
-    Ok(running)
-}
-
-/// A member that has already exited did not vote. Opening then reports
-/// success only while every member is still running.
-fn confirm_members(running: &mut [std::process::Child]) -> Result<()> {
     std::thread::sleep(std::time::Duration::from_millis(200));
-    for child in running {
+    for (persona, child) in &mut running {
         match child.try_wait() {
             Ok(None) => {}
             Ok(Some(status)) => {
-                bail!("a panel member exited {status} before it could vote")
+                failed.push(format!("{persona} exited {status} before it could vote"));
             }
-            Err(err) => bail!("a panel member could not be checked: {err}"),
+            Err(err) => failed.push(format!("{persona} could not be checked: {err}")),
         }
     }
-    Ok(())
+    members_opened(members.len(), &failed)
+}
+
+/// Drop the members that have exited, noting each that failed, and each
+/// that exited 0 with no ballot `voted` can find.
+fn reap_members(
+    running: &mut Vec<(&str, std::process::Child)>,
+    failed: &mut Vec<String>,
+    voted: &dyn Fn(&str) -> bool,
+) {
+    running.retain_mut(|(persona, child)| match child.try_wait() {
+        Ok(None) => true,
+        Ok(Some(status)) => {
+            if !status.success() {
+                failed.push(format!("{persona} {status}"));
+            } else if !voted(persona) {
+                failed.push(format!("{persona} exited before it voted"));
+            }
+            false
+        }
+        Err(err) => {
+            failed.push(format!("{persona} could not be checked: {err}"));
+            false
+        }
+    });
+}
+
+/// Whether the tracker lists a ballot on `issue` from `persona`, cast as
+/// its own seat or by a caster in its name.
+fn persona_voted(issue: &str, persona: &str) -> bool {
+    raw_ballot_rows(issue).is_ok_and(|rows| {
+        rows.iter().any(|row| {
+            let agent = row["agent"].as_str().unwrap_or("").trim();
+            agent == persona
+                || ballot_sig::parse_caster_persona_voter(agent).is_some_and(|(_, p)| p == persona)
+        })
+    })
+}
+
+/// "opened N of N members", or an error naming the count and each member
+/// that did not open.
+fn members_opened(roster: usize, failed: &[String]) -> Result<String> {
+    let opened = roster.saturating_sub(failed.len());
+    if roster == 0 {
+        bail!("opened 0 of 0 members: nobody is seated");
+    }
+    if !failed.is_empty() {
+        bail!(
+            "opened {opened} of {roster} members; {} did not: {}",
+            failed.len(),
+            failed.join(", ")
+        );
+    }
+    Ok(format!("opened {opened} of {roster} members\n"))
 }
 
 #[cfg(test)]
 mod panel_open_tests {
+    fn member(
+        n: usize,
+        run: &str,
+        dir: &std::path::Path,
+    ) -> (String, std::path::PathBuf, Vec<String>) {
+        (
+            format!("m{n:02}"),
+            dir.join(format!("m{n:02}.log")),
+            vec!["sh".into(), "-c".into(), run.into()],
+        )
+    }
+
     #[test]
-    fn opening_one_of_forty_four_is_not_success() {
-        let err = super::roster_open(1, 44).unwrap_err().to_string();
-        assert!(err.contains("opened 1 of 44"), "{err}");
-        let full = super::roster_open(44, 44).unwrap();
-        assert!(full.contains("opened 44 of 44"), "{full}");
+    fn a_panel_that_opens_one_of_forty_four_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let members: Vec<_> = (0..44)
+            .map(|n| member(n, if n == 0 { "sleep 2" } else { "exit 1" }, dir.path()))
+            .collect();
+        let err = super::start_members(&members, 4, &|_| false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("opened 1 of 44 members"), "{err}");
+        assert!(err.contains("43 did not"), "{err}");
+        assert!(err.contains("m43"), "{err}");
+    }
+
+    #[test]
+    fn a_member_that_cannot_start_does_not_stop_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = dir.path().join("ledger");
+        let mut members = vec![(
+            "ghost".to_string(),
+            dir.path().join("ghost.log"),
+            vec!["/nonexistent/runner".to_string()],
+        )];
+        for n in 0..3 {
+            members.push(member(
+                n,
+                &format!("echo m{n:02} >> '{}'; sleep 1", ledger.display()),
+                dir.path(),
+            ));
+        }
+        let listed = |persona: &str| {
+            std::fs::read_to_string(&ledger)
+                .unwrap_or_default()
+                .lines()
+                .any(|line| line == persona)
+        };
+        let err = super::start_members(&members, 1, &listed)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("opened 3 of 4 members"), "{err}");
+        assert!(err.contains("ghost did not start"), "{err}");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::fs::read_to_string(&ledger)
+            .unwrap_or_default()
+            .lines()
+            .count()
+            < 3
+            && std::time::Instant::now() < until
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(std::fs::read_to_string(&ledger).unwrap().lines().count(), 3);
     }
 
     #[test]
     fn a_member_that_exits_at_once_is_not_opened() {
-        let mut child = std::process::Command::new("false").spawn().unwrap();
-        let err = super::confirm_members(std::slice::from_mut(&mut child))
+        let dir = tempfile::tempdir().unwrap();
+        let err = super::start_members(&[member(0, "false", dir.path())], 1, &|_| false)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("exited"), "{err}");
+        assert!(err.contains("opened 0 of 1 members"), "{err}");
+        assert!(err.contains("exit status: 1"), "{err}");
+    }
+
+    #[test]
+    fn a_member_that_exits_zero_at_once_is_not_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = super::start_members(&[member(0, "true", dir.path())], 1, &|_| false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("opened 0 of 1 members"), "{err}");
+        assert!(err.contains("m00 exited exit status: 0"), "{err}");
+    }
+
+    #[test]
+    fn a_member_that_exits_zero_with_no_ballot_while_others_wait_is_not_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let members = [
+            member(0, "true", dir.path()),
+            member(1, "sleep 2", dir.path()),
+        ];
+        let err = super::start_members(&members, 1, &|_| false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("opened 1 of 2 members"), "{err}");
+        assert!(err.contains("m00 exited before it voted"), "{err}");
     }
 }
 
@@ -11203,21 +11346,12 @@ pub fn open_decision_panel(prompt: &str, cwd: Option<&str>, log: &Path) -> Resul
     let briefs = runtime_dir().join(format!("panel-{issue}"));
     let wrote = panel(&issue, &briefs)?;
     append_log(log, &wrote);
+    let (_, seated) = panel_roster(&issue)?;
     let mut members: Vec<(String, PathBuf, Vec<String>)> = Vec::new();
-    for path in std::fs::read_dir(&briefs)
-        .with_context(|| format!("read {}", briefs.display()))?
-        .flatten()
-    {
-        let path = path.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
-        let persona = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("member")
-            .to_string();
-        let brief = std::fs::read_to_string(&path)?;
+    for persona in seated.into_iter().map(|p| p.name) {
+        let path = briefs.join(format!("{persona}.md"));
+        let brief =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         let task = decision_member_task(&brief, &persona, &issue);
         let task_file = briefs.join(format!("{persona}.prompt"));
         std::fs::write(&task_file, task)?;
@@ -11225,30 +11359,18 @@ pub fn open_decision_panel(prompt: &str, cwd: Option<&str>, log: &Path) -> Resul
         let member_log = briefs.join(format!("{persona}.log"));
         members.push((persona, member_log, argv));
     }
-    let n = members.len();
-    let (roster, _) = panel_roster(&issue)?;
-    let line = roster_open(n, roster)?;
     let at_once = match panel_concurrency() {
         0 => usize::MAX,
         bound => bound,
     };
-    let mut running = start_members(&members, at_once)?;
-    confirm_members(&mut running)?;
+    let opened = start_members(&members, at_once, &|persona| persona_voted(&issue, persona))
+        .map_err(|err| {
+            append_log(log, &format!("error: {err:#} on {issue}\n"));
+            err.context(format!("panel on {issue}"))
+        })?;
+    let line = format!("{} on {issue}\n", opened.trim_end());
     append_log(log, &line);
     Ok(line)
-}
-
-/// `started` members of a roster of `roster`. Fewer than the roster is an
-/// error, so "opened 1 of 44" is not a success.
-///
-/// # Errors
-///
-/// No member started, or fewer started than the roster holds.
-pub fn roster_open(started: usize, roster: usize) -> Result<String> {
-    if roster == 0 || started < roster {
-        bail!("opened {started} of {roster} members");
-    }
-    Ok(format!("opened {started} of {roster} members\n"))
 }
 
 fn append_log(log: &Path, text: &str) {
@@ -61890,7 +62012,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
                 )
             })
             .collect();
-        start_members(&members, 2).unwrap();
+        // The members exit within the run, so the count is not what this reads.
+        let _ = start_members(&members, 2, &|_| true);
         let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
         let mut seen = String::new();
         while std::time::Instant::now() < until {
@@ -61924,7 +62047,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             dir.path().join("skeptic.log"),
             vec!["sh".into(), "-c".into(), run],
         )];
-        start_members(&members, 1).unwrap();
+        // The member exits at once, so the count is not what this reads.
+        let _ = start_members(&members, 1, &|_| true);
         let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while !out.exists() && std::time::Instant::now() < until {
             std::thread::sleep(std::time::Duration::from_millis(50));

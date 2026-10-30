@@ -251,3 +251,42 @@ fn panel_run_detects_installed_runner_cli_and_supports_configured_templates() {
         "{custom_recorded}"
     );
 }
+
+#[test]
+fn a_panel_run_that_opens_one_of_forty_four_says_so() {
+    let world = World::new();
+    let ledger = world.state.join("ran.txt");
+    let member = script(
+        &world.bin,
+        "member",
+        &format!(
+            "#!/bin/sh\necho \"$LJOS_SEAT\" >> '{}'\n[ \"$LJOS_SEAT\" = p00 ]\n",
+            ledger.display()
+        ),
+    );
+    let personas: Vec<String> = (0..44).map(|n| format!("p{n:02}")).collect();
+    let personas = personas.join(",");
+    let out = world.command(
+        &["panel", "run", "demo-1", "--designers", "0"],
+        &[
+            ("LJOS_PANEL_PERSONAS", personas.as_str()),
+            ("LJOS_MEMBER_BIN", member.to_str().unwrap()),
+            ("LJOS_PANEL_CONCURRENCY", "4"),
+        ],
+    );
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "one of 44 opened and it said success:\n{said}"
+    );
+    assert!(said.contains("opened 1 of 44 sessions"), "{said}");
+    assert_eq!(
+        std::fs::read_to_string(&ledger).unwrap().lines().count(),
+        44,
+        "every member is started"
+    );
+}
