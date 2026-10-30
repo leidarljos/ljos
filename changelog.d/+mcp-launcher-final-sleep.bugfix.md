@@ -1,0 +1,1 @@
+`ljos-mcp` started by a shell whose last command is `sleep`, such as `sh -c 'ljos-mcp & sleep 600'`, exits when the client behind that shell exits. The shell runs `sleep` in its own process, and the server took `sleep` for its client.

@@ -52,9 +52,11 @@ struct Watched {
 
 /// Names that only launch the server and are not the client. `node` is
 /// here only when it is running npx; a node that is the editor is not.
+/// A shell runs its last command in its own process, so `sh -c 'ljos-mcp &
+/// sleep 600'` leaves `sleep` where the shell was; `sleep` speaks no MCP.
 const LAUNCHERS: &[&str] = &[
     "sh", "bash", "zsh", "fish", "dash", "env", "npx", "uvx", "timeout", "nohup", "setsid",
-    "script",
+    "script", "sleep",
 ];
 
 /// Whether `name` is one of [`LAUNCHERS`], comparing the file name.
