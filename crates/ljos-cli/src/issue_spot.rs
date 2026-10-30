@@ -130,6 +130,23 @@ pub fn answer(args: &[&str]) -> Option<String> {
     serde_json::to_string(&value).ok()
 }
 
+/// `vissue vote ID --for CHOICE --used USED [--confidence P]` as `who`,
+/// written in this process to the layout [`find`] reaches the id in.
+/// `None` when [`find`] does not reach it: the caller runs `vissue`.
+pub fn cast(
+    id: &str,
+    who: &str,
+    choice: &str,
+    used: &str,
+    confidence: Option<&str>,
+) -> Option<anyhow::Result<String>> {
+    let spot = find(id)?;
+    Some(
+        vissue_core::ops::vote_with(&spot.layout, id, Some(choice), who, Some(used), confidence)
+            .map_err(anyhow::Error::from),
+    )
+}
+
 /// [`Spot`] for `id` in `layout` alone.
 #[must_use]
 pub fn in_layout(layout: &Layout, id: &str) -> Option<Spot> {
