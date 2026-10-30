@@ -217,6 +217,8 @@ jobs:
         run: cargo check --locked --workspace --all-targets --target x86_64-apple-darwin
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Install age
+        run: brew install age
       - name: Unit tests
         run: cargo test --locked --workspace --lib
 
