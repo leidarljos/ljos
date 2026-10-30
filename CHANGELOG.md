@@ -17,6 +17,9 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 ### Fixes
 
+- A `prompt` verdict from ljos-policyd asks the person.
+  A program that names a credential path waits for the person to approve it.
+  A deny still wins over that ask, and a prompt with no token stays a fault.
 - `ljos consensus` no longer waits out a silent pack once for every read it makes.
   The first read still uses its budget.
   A later read in that run returns at once, so the waits are not added together.

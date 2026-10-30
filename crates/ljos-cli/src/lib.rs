@@ -34414,6 +34414,12 @@ fn tcb_is_allow(text: &str) -> bool {
     text.split(['\t', ' ', '\n']).next().unwrap_or("") == "allow"
 }
 
+/// A `ljos-policyd` line whose first word is `prompt`. The token after the
+/// tab is the check that asked. A bare `prompt` is not this.
+fn tcb_is_prompt(text: &str) -> bool {
+    text.split(['\t', ' ', '\n']).next().unwrap_or("") == "prompt"
+}
+
 /// The check name on a `ljos-policyd` verdict line (`deny\tgit-force-push`).
 fn policyd_token(line: &str) -> &str {
     line.lines()
@@ -34607,14 +34613,15 @@ pub fn guard_command(line: &str) -> Result<String> {
 }
 
 /// `allow`, `ask`, or `deny` from a policy reading. A force push that
-/// still carries the policyd deny token is an ask.
+/// still carries the policyd deny token is an ask. A `prompt` line is
+/// the same ask: policyd asked, and the command waits for the person.
 fn policy_verdict(text: &str) -> &'static str {
     let mut ask = false;
     let mut deny = false;
     for line in text.lines() {
         let line = line.trim();
         let head = line.split([':', '\t']).next().unwrap_or(line);
-        if head == "ask" || line.contains("\task") {
+        if head == "ask" || head == "prompt" || line.contains("\task") {
             ask = true;
         }
         if head == "deny" || line.contains("\tdeny") {
@@ -34634,14 +34641,16 @@ fn policy_verdict(text: &str) -> &'static str {
 }
 
 /// Whether a policy reading refuses the command. A verdict line opens with
-/// `deny` or `ask`, or carries that word after a tab. Prose that merely
-/// uses the words does not.
+/// `deny`, `ask`, or `prompt`, or carries deny or ask after a tab. Prose
+/// that merely uses the words does not. `prompt` is policyd's ask.
 #[must_use]
 pub fn command_refused(text: &str) -> bool {
     text.lines().any(|line| {
         let line = line.trim();
         let head = line.split([':', '\t']).next().unwrap_or(line);
-        matches!(head, "deny" | "ask") || line.contains("\tdeny") || line.contains("\task")
+        matches!(head, "deny" | "ask" | "prompt")
+            || line.contains("\tdeny")
+            || line.contains("\task")
     })
 }
 
@@ -34723,6 +34732,19 @@ pub fn tcb_verdict_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
         }
         return None;
     };
+    // `prompt\t<token>` is an ask, the same card a force push uses. A
+    // prompt with no token never reaches here: that line is a fault.
+    if tcb_is_prompt(&t) {
+        let token = policyd_token(&t);
+        if !token.is_empty() {
+            let code = token.split(':').next().unwrap_or(token).trim();
+            return Some(Rule {
+                pattern: code.to_string(),
+                verdict: "ask".into(),
+                reason: policyd_reason(token),
+            });
+        }
+    }
     if !t.starts_with("deny") {
         // A verdict that hands back another call to run says so, in the
         // same note the person already reads about this call. A rewrite
@@ -35043,8 +35065,9 @@ fn heredoc_reading(body: &str, quoted: bool, data: bool) -> String {
 }
 
 /// ljos-policyd's answer on `line` run from `cwd`, over each call of
-/// [`tcb_argvs`]: the first deny, or else an allow, the fail-open one or
-/// one with a note when any was. None when no ljos-policyd answered. A
+/// [`tcb_argvs`]: the first deny, or else the first `prompt`, or else an
+/// allow, the fail-open one or one with a note when any was. A later
+/// allow does not replace a prompt. None when no ljos-policyd answered. A
 /// lease push the checkout clears is not a deny: ljos-policyd cannot read
 /// where a bare one goes. Nor is a faulted guard on a [`repair_line`],
 /// which is let through with the fault as its note.
@@ -35057,6 +35080,7 @@ fn tcb_line_in(line: &str, cwd: Option<&Path>) -> Option<String> {
         }
     };
     let mut answer: Option<String> = None;
+    let mut prompt: Option<String> = None;
     for (i, argv) in tcb_argvs(line).into_iter().enumerate() {
         let Some(mut t) = tcb_check_in(&argv, cwd) else {
             continue;
@@ -35081,6 +35105,12 @@ fn tcb_line_in(line: &str, cwd: Option<&Path>) -> Option<String> {
                 return Some(t);
             }
         }
+        if tcb_is_prompt(&t) {
+            if prompt.is_none() {
+                prompt = Some(t);
+            }
+            continue;
+        }
         if t.starts_with("allow\trewrite\t") {
             digest::note_policyd_line(&t);
         }
@@ -35088,7 +35118,7 @@ fn tcb_line_in(line: &str, cwd: Option<&Path>) -> Option<String> {
             answer = Some(t);
         }
     }
-    answer
+    prompt.or(answer)
 }
 
 /// A line whose every pipeline is `ljos doctor` or `ljos onboard`,
@@ -35497,6 +35527,7 @@ pub fn policyd_reason(token: &str) -> String {
             "a secret on the command line lands in shell history and the process list. Read it \
              from a file or an environment variable instead"
         }
+        "credential-mention" => "this program names a credential path; the person approves it",
         "python-missing-pep723" => {
             "this Python file has no PEP 723 script block, so its dependencies are unnamed. \
              Add a `# /// script` block, or run the file with the interpreter that already \
@@ -35671,9 +35702,11 @@ pub fn tcb_answer_in(
         let _ = pipe.read_to_string(&mut out);
     }
     let text = out.trim().to_string();
-    // `check` prints `allow` and exits 0, or prints `deny` and exits 2.
-    // A deny whose token is only the engine name has no reason. That is an
-    // overloaded or half-open policyd, and the command is allowed.
+    // `check` prints `allow` or `prompt` and exits 0, or prints `deny` and
+    // exits 2. `prompt` with a token is an ask. `prompt` with no token is
+    // no verdict. A deny whose token is only the engine name has no
+    // reason. That is an overloaded or half-open policyd, and the command
+    // is allowed.
     let first = text.split(['\t', ' ', '\n']).next().unwrap_or("");
     match (first, status.success()) {
         ("deny", _) => match unjudged_why(policyd_token(&text)) {
@@ -35681,6 +35714,7 @@ pub fn tcb_answer_in(
             None => text,
         },
         ("allow", true) => text,
+        ("prompt", true) if !policyd_token(&text).is_empty() => text,
         _ => faulted("gave no verdict"),
     }
 }
@@ -54895,12 +54929,17 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             ),
             "deny\tphronesis: seat could not open"
         );
+        assert_eq!(
+            answer("asks", "printf 'prompt\\tcredential-mention\\n'"),
+            "prompt\tcredential-mention"
+        );
         for (name, body, why) in [
             ("crashes", "kill -SEGV $$", "gave no verdict"),
             ("fails", "echo oops; exit 1", "gave no verdict"),
             ("garbage", "echo ok", "gave no verdict"),
             ("silent", "exit 0", "gave no verdict"),
             ("allows-then-fails", "echo allow; exit 3", "gave no verdict"),
+            ("bare-prompt", "printf 'prompt\\n'", "gave no verdict"),
             ("hangs", "sleep 30", "did not answer in time"),
         ] {
             let said = answer(name, body);
@@ -54969,6 +55008,107 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             tcb_verdict("echo hi").is_none(),
             "a crashed policyd allows the line"
         );
+    }
+
+    /// A `prompt` from policyd is an ask, including when only the
+    /// interpreter's program asks and the shell line allows. A deny on
+    /// either call still wins. The path in the program is fake.
+    #[test]
+    fn a_prompt_verdict_asks_and_a_deny_still_wins() {
+        let _g = env_guard();
+        let seat = SeatDir::new("prompt-ask");
+        let data = seat.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let line = "python3 - <<'PY'\nprint(open('/tmp/fake/.secrets/gh_fake').read())\nPY";
+        let asks = fake_policyd(
+            seat.path(),
+            "asks",
+            "printf 'prompt\\tcredential-mention\\n'",
+        );
+        let _env = HoldEnv::set(&[
+            ("HOME", seat.path().to_str().unwrap()),
+            ("XDG_DATA_HOME", data.to_str().unwrap()),
+            ("XDG_CONFIG_HOME", data.to_str().unwrap()),
+            ("LJOS_OFF", "0"),
+            ("LJOS_GUARD", "on"),
+            ("PACKSET_URL", "off"),
+            ("POLICYD_BIN", asks.to_str().unwrap()),
+        ]);
+        let rule = tcb_verdict_in(line, Some(seat.path())).expect("a prompt asks");
+        assert_eq!(rule.verdict, "ask");
+        assert_ne!(rule.verdict, "deny");
+        assert_eq!(rule.pattern, "credential-mention");
+        assert_eq!(rule.reason, policyd_reason("credential-mention"));
+        assert!(rule.reason.contains("credential path"), "{}", rule.reason);
+        let log = data.join("ljos/bypass.jsonl");
+        if log.is_file() {
+            let text = std::fs::read_to_string(&log).unwrap();
+            assert!(
+                !text.contains("fail-open") && !text.contains("gave no verdict"),
+                "{text}"
+            );
+        }
+        let report = guard_report_in(line, Some(seat.path())).expect("the guard asks");
+        assert_eq!(report.verdict, "ask", "{}", report.text);
+        assert!(
+            report.text.contains("credential-mention"),
+            "{}",
+            report.text
+        );
+        assert!(command_refused("prompt\tcredential-mention\n"));
+        assert_eq!(policy_verdict("prompt\tcredential-mention\n"), "ask");
+        assert_eq!(
+            policy_verdict("echo hi\nprompt\tcredential-mention\nallow\n"),
+            "ask"
+        );
+        assert_eq!(
+            policy_verdict("deny\tcurl-pipe-shell\nprompt\tcredential-mention\n"),
+            "deny"
+        );
+        assert!(unjudged_why("credential-mention").is_none());
+
+        let split = fake_policyd(
+            seat.path(),
+            "split",
+            "case \"$3\" in\n\
+             python3) printf 'prompt\\tcredential-mention\\n' ;;\n\
+             *) printf 'allow\\n' ;;\n\
+             esac",
+        );
+        unsafe { std::env::set_var("POLICYD_BIN", &split) };
+        let asked = tcb_verdict_in(line, Some(seat.path())).expect("python asks");
+        assert_eq!(asked.verdict, "ask");
+        assert_eq!(asked.pattern, "credential-mention");
+
+        let deny_later = fake_policyd(
+            seat.path(),
+            "deny-later",
+            "case \"$3\" in\n\
+             python3) printf 'deny\\tcurl-pipe-shell\\n'; exit 2 ;;\n\
+             *) printf 'prompt\\tcredential-mention\\n' ;;\n\
+             esac",
+        );
+        unsafe { std::env::set_var("POLICYD_BIN", &deny_later) };
+        let denied = tcb_verdict_in(line, Some(seat.path())).expect("deny wins");
+        assert_eq!(denied.verdict, "deny");
+        assert!(
+            denied.reason.contains("curl-pipe-shell"),
+            "{}",
+            denied.reason
+        );
+
+        let deny_first = fake_policyd(
+            seat.path(),
+            "deny-first",
+            "case \"$3\" in\n\
+             bash) printf 'deny\\tcurl-pipe-shell\\n'; exit 2 ;;\n\
+             *) printf 'prompt\\tcredential-mention\\n' ;;\n\
+             esac",
+        );
+        unsafe { std::env::set_var("POLICYD_BIN", &deny_first) };
+        let first = tcb_verdict_in(line, Some(seat.path())).expect("first deny wins");
+        assert_eq!(first.verdict, "deny");
+        assert!(first.reason.contains("curl-pipe-shell"), "{}", first.reason);
     }
 
     #[test]
