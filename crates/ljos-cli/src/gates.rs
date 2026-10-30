@@ -534,6 +534,9 @@ fn git_config(cwd: &Path, key: &str) -> Option<String> {
 
 fn git_text(cwd: &Path, args: &[&str]) -> Option<String> {
     let mut cmd = Command::new("git");
+    // An exported GIT_DIR would answer for another repository. The
+    // directory this command is judged in is the one named here.
+    crate::clear_git_repo_env(&mut cmd);
     cmd.arg("-C")
         .arg(cwd)
         .args(args)
