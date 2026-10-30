@@ -2291,6 +2291,74 @@ fn one_shell_that_renames_its_session_is_one_push_voice() {
 }
 
 #[test]
+fn a_python_launch_with_a_new_session_counts_once() {
+    let world = World::new();
+    let issue = "demo-py-launch";
+    let script = format!(
+        "LJOS_SESSION_ID=sess-py-a-0001 LJOS_SEAT=ljosbot \"$LJOS\" vote {issue} --for ship --used none --as ljosbot; echo first $?\n\
+         python3 -c 'import os,subprocess; e=dict(os.environ, LJOS_SESSION_ID=\"sess-py-b-0002\", LJOS_SEAT=\"inky\"); r=subprocess.run([os.environ[\"LJOS\"],\"vote\",\"{issue}\",\"--for\",\"ship\",\"--used\",\"none\",\"--as\",\"inky\"], env=e); raise SystemExit(r.returncode)'; echo second $?\n"
+    );
+    let out = shell(&world, &[], &script);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("first 0"), "{said}");
+    assert!(stdout.contains("second 0"), "{said}");
+    let tally = counted(&world, issue);
+    assert!(tally.contains("1 ballot counts"), "{tally}");
+    assert!(
+        tally.contains("folded into one voice (same shell"),
+        "{tally}"
+    );
+    assert!(
+        tally.contains("ljosbot") && tally.contains("inky"),
+        "{tally}"
+    );
+    let notes = std::fs::read_to_string(world.state.join("notes.json")).unwrap();
+    assert!(notes.contains("sess-py-a-0001"), "{notes}");
+    assert!(notes.contains("sess-py-b-0002"), "{notes}");
+    let ballots = std::fs::read_to_string(world.state.join("ballots.json")).unwrap();
+    assert!(ballots.contains("\"agent\": \"ljosbot\""), "{ballots}");
+    assert!(ballots.contains("\"agent\": \"inky\""), "{ballots}");
+}
+
+#[test]
+fn a_renamed_binary_with_a_new_session_counts_once() {
+    let world = World::new();
+    let issue = "demo-link-launch";
+    let script = format!(
+        "LJOS_SESSION_ID=sess-ln-a-0001 LJOS_SEAT=ljosbot \"$LJOS\" vote {issue} --for ship --used none --as ljosbot; echo first $?\n\
+         d=$(mktemp -d); ln -s \"$LJOS\" \"$d/notljos\"\n\
+         LJOS_SESSION_ID=sess-ln-b-0002 LJOS_SEAT=inky \"$d/notljos\" vote {issue} --for ship --used none --as inky; echo second $?\n\
+         LJOS_SESSION_ID=sess-ln-c-0003 LJOS_SEAT=mina bash -c 'exec -a other \"$LJOS\" vote {issue} --for ship --used none --as mina'; echo third $?\n"
+    );
+    let out = shell(&world, &[], &script);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("first 0"), "{said}");
+    assert!(stdout.contains("second 0"), "{said}");
+    assert!(stdout.contains("third 0"), "{said}");
+    let tally = counted(&world, issue);
+    assert!(tally.contains("1 ballot counts"), "{tally}");
+    assert!(
+        tally.contains("folded into one voice (same shell"),
+        "{tally}"
+    );
+    assert!(tally.contains("ljosbot"), "{tally}");
+    assert!(tally.contains("inky"), "{tally}");
+    assert!(tally.contains("mina"), "{tally}");
+    let notes = std::fs::read_to_string(world.state.join("notes.json")).unwrap();
+    assert!(notes.contains("sess-ln-a-0001"), "{notes}");
+    assert!(notes.contains("sess-ln-b-0002"), "{notes}");
+    assert!(notes.contains("sess-ln-c-0003"), "{notes}");
+    let ballots = std::fs::read_to_string(world.state.join("ballots.json")).unwrap();
+    assert!(ballots.contains("\"agent\": \"ljosbot\""), "{ballots}");
+    assert!(ballots.contains("\"agent\": \"inky\""), "{ballots}");
+    assert!(ballots.contains("\"agent\": \"mina\""), "{ballots}");
+}
+
+#[test]
 fn a_hooked_harness_that_renames_its_session_casts_once() {
     // Separate commands under one harness whose hook saw each line. A
     // subagent of the hook's session counts. A command that names another
@@ -2537,6 +2605,56 @@ fn a_seat_no_harness_names_is_an_unverified_session() {
     assert!(stdout.contains("counted reviewer-b"), "{said}");
     assert!(stdout.contains("ljosbot"), "{said}");
     assert!(stdout.contains(&unverified), "{said}");
+    // A ballot that went around the cast gate, as a raw drawer row and a
+    // later signature on the same seat leave it.
+    let raw = "demo-seat-raw";
+    let first = world.ljos_env(
+        "ljosbot",
+        &[],
+        &["vote", raw, "--for", "ship", "--used", "none"],
+    );
+    let said = text(&first);
+    assert!(first.status.success(), "{said}");
+    let ballots_path = world.state.join("ballots.json");
+    let mut ballots: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&ballots_path).unwrap()).unwrap();
+    ballots[raw]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"agent": "reviewer-b", "choice": "hold"}));
+    std::fs::write(&ballots_path, ballots.to_string()).unwrap();
+    let notes_path = world.state.join("notes.json");
+    let mut notes: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&notes_path).unwrap()).unwrap();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[12; 32]);
+    let sig = ljos_cli::ballot_sig::sign_bound(
+        &key,
+        raw,
+        "reviewer-b",
+        "hold",
+        "ljosbot",
+        ljos_cli::ballot_sig::SEAT_NONCE,
+    );
+    notes[raw]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, serde_json::json!({ "note": sig }));
+    std::fs::write(&notes_path, notes.to_string()).unwrap();
+    let tally = world.ljos("ljosbot", "sess-reader-0001", &["vote", raw]);
+    let said = text(&tally);
+    assert!(tally.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&tally.stdout);
+    assert!(stdout.contains("1 ballot counts"), "{said}");
+    assert!(
+        stdout.contains("folded into one voice (same session ljosbot):"),
+        "{said}"
+    );
+    assert!(stdout.contains("reviewer-b"), "{said}");
+    assert!(stdout.contains("ljosbot"), "{said}");
+    assert!(stdout.contains(&unverified), "{said}");
+    let recorded = std::fs::read_to_string(&ballots_path).unwrap();
+    assert!(recorded.contains("ljosbot"), "{recorded}");
+    assert!(recorded.contains("reviewer-b"), "{recorded}");
 }
 
 fn signed_key(said: &str, voter: &str) -> String {
