@@ -63066,7 +63066,35 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         let bin_dir = cache.join("bin");
         let bin = bin_dir.join("deedar");
         let stamp = cache.join("sha");
-        if bin.is_file() && std::fs::read_to_string(&stamp).ok().as_deref() == Some(sha.as_str()) {
+        let built = || {
+            bin.is_file() && std::fs::read_to_string(&stamp).ok().as_deref() == Some(sha.as_str())
+        };
+        if built() {
+            return bin_dir;
+        }
+        // A test runner that starts each test in its own process gives each
+        // its own `BUILT`. The lock file keeps the fetch and the build to one
+        // process; the others wait and find the stamp.
+        std::fs::create_dir_all(&cache)
+            .unwrap_or_else(|e| panic!("deedar cache {}: {e}", cache.display()));
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(cache.join("build.lock"))
+            .unwrap_or_else(|e| panic!("deedar build lock: {e}"));
+        {
+            use std::os::unix::io::AsRawFd;
+            // SAFETY: flock on a descriptor `lock` owns; it is let go on drop.
+            let rc = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
+            assert_eq!(
+                rc,
+                0,
+                "deedar build lock: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        if built() {
             return bin_dir;
         }
         let src = cache.join("src");
@@ -63168,13 +63196,18 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             produced.display()
         );
         std::fs::create_dir_all(&bin_dir).unwrap();
-        std::fs::copy(&produced, &bin).unwrap_or_else(|e| panic!("install deedar: {e}"));
+        // Copied beside and renamed in, so no process ever runs a binary
+        // that is still open for writing.
+        let staged = bin_dir.join(".deedar.new");
+        std::fs::copy(&produced, &staged).unwrap_or_else(|e| panic!("install deedar: {e}"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+        std::fs::rename(&staged, &bin).unwrap_or_else(|e| panic!("install deedar: {e}"));
         std::fs::write(&stamp, &sha).unwrap();
+        drop(lock);
         assert!(bin.is_file(), "deedar is not on PATH");
         bin_dir
     }
