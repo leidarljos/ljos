@@ -11247,6 +11247,7 @@ fn file_yes_no(parent: Option<&str>, prompt: &str) -> Result<String> {
     argv.push("--tags".into());
     argv.push("decision,panel".into());
     argv.push(title);
+    issue_spot::forget_reads();
     let out = std::process::Command::new(which::which("vissue").context("vissue not on PATH")?)
         .args(&argv)
         .env("VISSUE_AGENT", seat_name())
@@ -36814,6 +36815,9 @@ fn route_vissue(cmd: &mut std::process::Command, bin: &str, args: &[impl AsRef<s
         return;
     }
     let words: Vec<&str> = args.iter().map(AsRef::as_ref).collect();
+    if !issue_spot::is_kept_read(&words) {
+        issue_spot::forget_reads();
+    }
     for (key, value) in hook_timed("vissue_route", || issue_spot::route_env(&words)) {
         cmd.env(key, value);
     }
@@ -36894,9 +36898,28 @@ pub fn run_captured_as(
 ) -> Result<Said> {
     let words: Vec<&str> = args.iter().map(AsRef::as_ref).collect();
     let stage = format!("exec {bin} {}", words.first().copied().unwrap_or(""));
-    hook_timed(&stage, || {
+    // A read already answered in this process, about files that have not
+    // changed since, is answered again without a process.
+    let kept = if bin == "vissue" {
+        hook_timed("vissue_read_key", || issue_spot::read_key(&words))
+    } else {
+        None
+    };
+    if let Some((key, sig)) = &kept {
+        if let Some(stdout) = issue_spot::kept_read(key, sig) {
+            return Ok(Said {
+                stdout,
+                stderr: String::new(),
+            });
+        }
+    }
+    let said = hook_timed(&stage, || {
         run_captured_within(bin, args, identity, CAPTURE_DEADLINE)
-    })
+    })?;
+    if let Some((key, sig)) = kept {
+        issue_spot::keep_read(key, sig, &said.stdout);
+    }
+    Ok(said)
 }
 
 fn capture_timed_out(err: &anyhow::Error) -> bool {

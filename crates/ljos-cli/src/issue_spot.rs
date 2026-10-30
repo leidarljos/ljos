@@ -238,6 +238,74 @@ pub fn route_env(args: &[&str]) -> Vec<(&'static str, String)> {
     ]
 }
 
+/// The reads whose answer is kept: `vissue show|vote|children ID --json`.
+const KEPT_READS: &[&str] = &["show", "vote", "children"];
+
+/// A kept read: the command line and the layout it was pointed at, the
+/// signature of the issue's project files when it ran, and what it printed.
+type KeptRead = (Vec<String>, Vec<Stamp>, String);
+
+/// Reads this process already ran. The gate asks the same question of
+/// the same issue several times in one check; each `vissue` process on a
+/// large tracker walks every project in it.
+static READS: Mutex<Vec<KeptRead>> = Mutex::new(Vec::new());
+
+/// The key a kept read is filed under, and the project signature it holds
+/// for: `None` for any command line but a kept read about an issue
+/// [`find`] reaches.
+#[must_use]
+pub fn read_key(args: &[&str]) -> Option<(Vec<String>, Vec<Stamp>)> {
+    let [verb, id, "--json"] = args else {
+        return None;
+    };
+    if !KEPT_READS.contains(verb) {
+        return None;
+    }
+    let spot = find(id)?;
+    let sig = signature(&spot.layout.project_issues_path(&spot.rec().project))?;
+    let mut key: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
+    key.push(spot.layout.root().display().to_string());
+    key.push(spot.layout.prefix().to_string());
+    Some((key, sig))
+}
+
+/// What the read filed under `key` printed, while the project's files
+/// still have signature `sig`.
+#[must_use]
+pub fn kept_read(key: &[String], sig: &[Stamp]) -> Option<String> {
+    READS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|(k, s, _)| k == key && s == sig)
+        .map(|(_, _, out)| out.clone())
+}
+
+/// File what a read printed.
+pub fn keep_read(key: Vec<String>, sig: Vec<Stamp>, out: &str) {
+    let mut held = READS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    held.retain(|(k, _, _)| *k != key);
+    held.push((key, sig, out.to_string()));
+}
+
+/// Drop every kept read. Any `vissue` command that is not a kept read may
+/// write the tracker, and a tracker that is not a file on this disk (a
+/// stand-in in a test) changes no signature when it does.
+pub fn forget_reads() {
+    READS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
+/// Whether `args` is a kept read's command line, whatever the issue.
+#[must_use]
+pub fn is_kept_read(args: &[&str]) -> bool {
+    matches!(args, [verb, _, "--json"] if KEPT_READS.contains(verb))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,6 +388,33 @@ Body.\n\n\
         std::fs::write(tmp.path().join("Issues/demo/issues.org"), moved).unwrap();
         let after = in_layout(&layout, "demo-bbbb").expect("found");
         assert_eq!(after.card().unwrap()["state"], "STARTED");
+    }
+
+    /// A kept read answers only while the project's files keep their
+    /// signature, and any other tracker command drops every kept read.
+    #[test]
+    fn a_kept_read_lasts_while_the_files_do() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = layout_with_board(tmp.path());
+        let file = layout.project_issues_path("demo");
+        let before = signature(&file).unwrap();
+        let key = vec![
+            "vote".to_string(),
+            "demo-aaaa".to_string(),
+            "--json".to_string(),
+            tmp.path().display().to_string(),
+        ];
+        keep_read(key.clone(), before.clone(), "[]");
+        assert_eq!(kept_read(&key, &before).as_deref(), Some("[]"));
+        std::fs::write(&file, format!("{BOARD}\n")).unwrap();
+        let after = signature(&file).unwrap();
+        assert_ne!(before, after, "a longer file has another signature");
+        assert!(kept_read(&key, &after).is_none());
+        assert!(is_kept_read(&["children", "demo-aaaa", "--json"]));
+        assert!(!is_kept_read(&["vote", "demo-aaaa", "--for", "x"]));
+        keep_read(key.clone(), after.clone(), "[]");
+        forget_reads();
+        assert!(kept_read(&key, &after).is_none());
     }
 
     #[test]
