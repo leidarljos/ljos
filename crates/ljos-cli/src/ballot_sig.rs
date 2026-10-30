@@ -509,9 +509,7 @@ pub(crate) fn tracker_git(args: &[&str]) -> Option<String> {
 #[must_use]
 pub fn tracker_is_git_checkout() -> Option<bool> {
     let root = env_root()?;
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
+    let out = git_history(&root)
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
         .ok()?;
@@ -534,6 +532,16 @@ pub(crate) fn git_history(root: &Path) -> std::process::Command {
         .arg(root)
         .env("GIT_NO_REPLACE_OBJECTS", "1")
         .env("GIT_GRAFT_FILE", "/dev/null");
+    // Stop the walk at the parent. A scratch directory inside another
+    // checkout is not that checkout, and a repository of its own is found
+    // before the walk reaches the ceiling.
+    if let Some(parent) = root
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        let ceiling = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+        cmd.env("GIT_CEILING_DIRECTORIES", ceiling);
+    }
     cmd
 }
 
