@@ -38219,8 +38219,8 @@ mod tests {
             String::from_utf8_lossy(&head.stderr)
         );
         let main = shim(&["push", "--force-with-lease", "nowhere", "HEAD:main"]);
-        assert_eq!(main.status.code(), Some(126));
         let said = String::from_utf8_lossy(&main.stderr);
+        assert_eq!(main.status.code(), Some(126), "{said}");
         assert!(said.contains("asks (git-force-push)"), "{said}");
         let forced = shim(&["push", "--force", "nowhere", "feature"]);
         assert_eq!(forced.status.code(), Some(126));
