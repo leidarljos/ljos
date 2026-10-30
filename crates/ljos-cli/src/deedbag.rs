@@ -1037,34 +1037,38 @@ mod tests {
 
     #[test]
     fn a_failed_publish_keeps_the_old_bag() {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("seat");
         std::fs::create_dir_all(dest.join("kept")).unwrap();
         std::fs::write(dest.join("kept").join("marker"), b"old bag").unwrap();
-        let here = std::fs::metadata(dir.path()).unwrap().dev();
-        let shm = std::fs::metadata("/dev/shm")
-            .unwrap_or_else(|e| panic!("/dev/shm: {e}"))
-            .dev();
-        assert_ne!(
-            here, shm,
-            "/dev/shm is not a separate filesystem, so the copy path cannot fail on its own"
-        );
         // SAFETY: geteuid only reads this process's credentials.
         assert_ne!(
             unsafe { libc::geteuid() },
             0,
             "root can read a mode 000 file, so the copy would not fail"
         );
-        let scratch = tempfile::tempdir_in("/dev/shm").unwrap();
+        // The parent cannot be written, so the rename that would stage
+        // the bag on one filesystem fails and the copy runs. A second
+        // filesystem is not required.
+        let hold = tempfile::tempdir().unwrap();
+        let parent_dir = hold.path().join("hold");
+        std::fs::create_dir(&parent_dir).unwrap();
+        let scratch = tempfile::tempdir_in(&parent_dir).unwrap();
         std::fs::create_dir_all(scratch.path().join("fresh")).unwrap();
         let blocked = scratch.path().join("fresh").join("blocked");
         std::fs::write(&blocked, b"new").unwrap();
         let mut perms = std::fs::metadata(&blocked).unwrap().permissions();
         perms.set_mode(0o000);
         std::fs::set_permissions(&blocked, perms).unwrap();
+        let mut dir_perms = std::fs::metadata(&parent_dir).unwrap().permissions();
+        dir_perms.set_mode(0o555);
+        std::fs::set_permissions(&parent_dir, dir_perms).unwrap();
         let parent = std::fs::File::open(dir.path()).unwrap();
         let err = publish(&parent, "seat", scratch.path());
+        let mut dir_perms = std::fs::metadata(&parent_dir).unwrap().permissions();
+        dir_perms.set_mode(0o755);
+        std::fs::set_permissions(&parent_dir, dir_perms).unwrap();
         let mut perms = std::fs::metadata(&blocked).unwrap().permissions();
         perms.set_mode(0o644);
         std::fs::set_permissions(&blocked, perms).unwrap();
