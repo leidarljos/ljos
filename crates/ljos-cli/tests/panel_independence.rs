@@ -2172,7 +2172,38 @@ fn one_shell_that_renames_its_session_between_casts_casts_once() {
         assert!(stdout.contains("session sess-flip-a-000"), "{var}: {said}");
         assert!(stdout.contains("first 0"), "{var}: {said}");
         assert!(stdout.contains("second 0"), "{var}: {said}");
-        assert!(counted(&world, &issue).contains("2 ballots count"), "{var}");
+        let tally = counted(&world, &issue);
+        assert!(tally.contains("1 ballot counts"), "{var}: {tally}");
+        assert!(
+            tally.contains("folded into one voice (same shell"),
+            "{var}: {tally}"
+        );
+        assert!(
+            tally.contains("reviewer-a") && tally.contains("reviewer-b"),
+            "{var}: {tally}"
+        );
+        let notes = std::fs::read_to_string(world.state.join("notes.json")).unwrap();
+        assert!(
+            notes.contains(&format!("sess-flip-a-000{i}"))
+                && notes.contains(&format!("sess-flip-b-000{i}")),
+            "{var}: {notes}"
+        );
+        let pack = empty_pack();
+        let consensus = world.ljos_env(
+            "disk-saver",
+            &[
+                ("SEAT_SESSION_ID", "sess-reader-0001"),
+                ("PACKSET_URL", &pack),
+            ],
+            &["consensus", &issue],
+        );
+        let said = text(&consensus);
+        assert!(consensus.status.success(), "{var}: {said}");
+        let consensus_out = String::from_utf8_lossy(&consensus.stdout);
+        assert!(
+            consensus_out.contains("folded into one voice (same shell"),
+            "{var}: {said}"
+        );
     }
     // Two agents, each running its own command in its own shell, count.
     let issue = "demo-flip-apart";
@@ -2190,10 +2221,81 @@ fn one_shell_that_renames_its_session_between_casts_casts_once() {
 }
 
 #[test]
+fn one_shell_with_two_seats_and_no_session_counts_once() {
+    // No session variable. Two seat names in one shell are one voice.
+    let world = World::new();
+    let issue = "demo-seat-shell";
+    let script = format!(
+        "env -u VISSUE_AGENT LJOS_SEAT=seat-alpha \"$LJOS\" vote {issue} --for ship --used none --as seat-alpha; echo \"first $?\"\n\
+         env -u VISSUE_AGENT LJOS_SEAT=seat-beta \"$LJOS\" vote {issue} --for hold --used none --as seat-beta; echo \"second $?\"\n"
+    );
+    let out = shell(&world, &[], &script);
+    let said = text(&out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("first 0"), "{said}");
+    assert!(stdout.contains("second 0"), "{said}");
+    let tally = counted(&world, issue);
+    assert!(tally.contains("1 ballot counts"), "{tally}");
+    assert!(
+        tally.contains("folded into one voice (same shell"),
+        "{tally}"
+    );
+    assert!(
+        tally.contains("seat-alpha") && tally.contains("seat-beta"),
+        "{tally}"
+    );
+    let notes = std::fs::read_to_string(world.state.join("notes.json")).unwrap();
+    assert!(
+        notes.contains("seat-alpha") && notes.contains("seat-beta"),
+        "{notes}"
+    );
+}
+
+#[test]
+fn one_shell_that_renames_its_session_is_one_push_voice() {
+    let world = World::new();
+    let issue = "demo-flip-push";
+    let script = format!(
+        "LJOS_SESSION_ID=sess-push-a-0001 LJOS_SEAT=ljosbot \"$LJOS\" vote {issue} --for ship --used none --as ljosbot\n\
+         LJOS_SESSION_ID=sess-push-b-0002 LJOS_SEAT=inky \"$LJOS\" vote {issue} --for ship --used none --as inky\n"
+    );
+    let out = shell(&world, &[], &script);
+    assert!(out.status.success(), "{}", text(&out));
+    let tally = counted(&world, issue);
+    assert!(tally.contains("1 ballot counts"), "{tally}");
+    assert!(
+        tally.contains("folded into one voice (same shell"),
+        "{tally}"
+    );
+    let pack = empty_pack();
+    let consensus = world.ljos_env(
+        "disk-saver",
+        &[
+            ("SEAT_SESSION_ID", "sess-reader-0001"),
+            ("PACKSET_URL", &pack),
+        ],
+        &["consensus", issue],
+    );
+    let said = text(&consensus);
+    assert!(consensus.status.success(), "{said}");
+    let stdout = String::from_utf8_lossy(&consensus.stdout);
+    let hits = ["ljosbot for ship", "inky for ship"]
+        .into_iter()
+        .filter(|name| stdout.contains(name))
+        .count();
+    assert_eq!(hits, 1, "{said}");
+    assert!(
+        stdout.contains("folded into one voice (same shell"),
+        "{said}"
+    );
+}
+
+#[test]
 fn a_hooked_harness_that_renames_its_session_casts_once() {
     // Separate commands under one harness whose hook saw each line. A
-    // subagent of the hook's session counts; a command that names another
-    // root session in its environment is the same harness and is refused.
+    // subagent of the hook's session counts. A command that names another
+    // root session in its environment is the same harness and folds into
+    // that root.
     let world = World::new();
     let issue = "demo-flip-harness";
     let parent = "4f0a6c2e-flip-parent";
@@ -2234,10 +2336,14 @@ fn a_hooked_harness_that_renames_its_session_casts_once() {
     let said = text(&out);
     assert!(out.status.success(), "{said}");
     let tally = counted(&world, issue);
-    assert!(tally.contains("2 ballots count"), "{tally}");
+    assert!(tally.contains("1 ballot counts"), "{tally}");
     assert!(tally.contains("reviewer-c  ship"), "{tally}");
     assert!(
-        tally.contains(&format!("folded into one voice (same parent {parent}):")),
+        tally.contains(&format!("folded into one voice (same harness {parent}):")),
+        "{tally}"
+    );
+    assert!(
+        tally.contains("reviewer-a") && tally.contains("reviewer-b"),
         "{tally}"
     );
 }

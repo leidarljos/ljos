@@ -21,9 +21,14 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
   The note keeps the persona, the caster and the parent session.
   It is not that seat's ballot, and it is signed with the caster's key.
   A withdrawal takes back a ballot that caster cast, and leaves another seat's ballot in place.
-  Ballots that share a session id or a parent are all recorded and count as one voice in the tally, the settle and a protected push.
+  Every ballot is recorded.
+  Ballots count as one voice when they share a session id, a parent, a calling shell or the root session of one agent runner.
+  That voice counts once in the tally, the settle and a protected push.
   When those ballots disagree, the latest one is the voice.
-  `ljos consensus` names the ballots it folded and why.
+  The note keeps the session the environment claimed, and the ballot is signed as the earlier voice.
+  `ljos consensus` names the ballots it folded and why, including the shell or the agent runner.
+  A subagent of that root session is not bound by the agent runner's row.
+  A seat is its own voice only when the cast has no shell, no agent runner and no earlier row.
   Nothing is refused when the ballot is written.
 - A `prompt` verdict from ljos-policyd asks the person.
   A program that names a credential path waits for the person to approve it.

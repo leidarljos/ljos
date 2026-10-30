@@ -133,9 +133,12 @@ LJOS_SEAT=alice ljos digest
 
 A second claim on a held ticket is refused, and the refusal names the holder.
 A persona ballot records the casting seat, the parent session and the persona.
-Ballots that share a session id or a parent are all recorded and count as one voice.
+Every ballot is recorded.
+Ballots count as one voice when they share a session id, a parent, a calling shell or the root session of one agent runner.
 When they disagree, the latest ballot is that voice.
-`ljos consensus` names the ballots it folded and why.
+`ljos consensus` names the ballots it folded and why, including that shell or agent runner.
+A subagent of that root session is not bound by the agent runner's row.
+A seat ballot is its own voice only when the cast has no shell, no agent runner and no earlier row.
 
 The ballot list goes to `ljos consensus`. The command reads the pack's trust rows.
 The consensus crate settles the votes. With no rows, every voter weighs the same. `ljos learn ID --outcome OPTION`

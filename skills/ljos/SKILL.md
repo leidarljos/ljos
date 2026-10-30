@@ -163,7 +163,7 @@ binds the `company-panel` recipe, and the sitting writes one brief per
 persona the issue speaks to under `== panel`. A session casts
 `ljos vote ISSUE --for OPTION --as NAME` for each persona. The ballot
 records the casting seat, the parent session and the persona, and
-`ljos consensus ISSUE` records each ballot and counts one voice per session.
+`ljos consensus ISSUE` records each ballot and counts one voice per session, one voice per shell and one voice per agent runner's root session.
 A close of a decision is refused
 with fewer than two ballots. Put any choice with more than one defensible
 answer on an issue this way before building it. A person closes the ticket.
@@ -383,23 +383,31 @@ is active for this seat. The person at their own terminal is never gated.
   session, the MCP call's session, a `*_SESSION_ID` in the environment, else
   the run's `CURSOR_AGENT_ID` or `GITHUB_RUN_ID`) and a marker, `-`, or
   `seat` when only the seat named the session; the signature covers both.
+  When the process tree matches an earlier cast, the signature also covers
+  that voice and the session the environment claimed. A six-field note
+  from before that field still verifies.
   No nonce of the process goes in: every process of one session signs the
   same binding. `ljos consensus`
   records every persona ballot, including ones cast from one session or
-  by `--as`. Ballots that share a session id or a parent count as one
+  by `--as`. Ballots that share a session id, a parent, a calling shell
+  or an agent runner's root session count as one
   voice, the latest when they disagree, and consensus names the ballots
   it folded and why. It
   refuses to settle when a session authored a candidate and also voted.
-  Each reviewer casts `ljos vote
-  ISSUE --for X --confidence C --used DEED --as NAME`. A verdict reported
+  Each reviewer casts
+  `ljos vote ISSUE --for X --confidence C --used DEED --as NAME`. A verdict reported
   in prose is not a ballot.
   A subagent's ballot binds the parent session plus the subagent,
   `SESSION:AGENT`: the `agent_id` Claude Code's hook sees, or the Codex thread
   under its root session. An opencode subagent is a session of its own. A
   seat whose shell names no session, as on a shared box, binds the session
-  and the subagent its hook saw run the line, not the seat. Ballots that
-  share a parent stay recorded and count as one voice. The tally names
-  that parent and the ballots folded into it. A subagent
+  and the subagent its hook saw run the line, not the seat. That seat is
+  its own voice only when the cast has no shell, no agent runner and no earlier
+  row. Ballots that
+  share a parent stay recorded and count as one voice. One shell is one
+  voice, and one agent runner's root session is one voice. A subagent of
+  that root is not bound by the runner's row. The tally names
+  that parent, that shell or that runner, and the ballots folded into it. A subagent
   that wrote a candidate cannot vote. A voter changes its ballot by withdrawing it,
   `ljos vote ISSUE --withdraw --as NAME`, then casting again; a cast while
   it still holds one is refused and names those two steps. A run on
@@ -410,7 +418,8 @@ is active for this seat. The person at their own terminal is never gated.
   `ljos vote` and the tally call it unverified; the `NAME-shell` holder a
   shell runner's env file shares names no run either. A ballot from one
   session, including another `--as` or another session id, is recorded.
-  Consensus counts one voice for a shared session id or parent, and it
+  One shell or one agent runner's root session is one voice. Consensus counts that voice
+  once, including for a protected push, and it
   names the ballots it folded and why.
   Persona ballots and Jev
   ballots are advisory. The push gate counts seat ballots from another seat. A

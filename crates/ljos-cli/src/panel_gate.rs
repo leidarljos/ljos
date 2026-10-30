@@ -1,8 +1,9 @@
 //! A ballot records the persona, the seat or session that cast it, and
-//! the parent session. Ballots that share a session id or a parent are
-//! all recorded. They count as one voice, the latest when they disagree.
-//! Consensus names the ballots it folded and why. A session that filed a
-//! design candidate does not also vote.
+//! the parent session. Ballots that share a session id, a parent, a
+//! calling shell or a harness root are all recorded. They count as one
+//! voice, the latest when they disagree. Consensus names the ballots it
+//! folded and why. A subagent of that harness session is its own voice.
+//! A session that filed a design candidate does not also vote.
 //!
 //! A design candidate whose session had already read another candidate is
 //! flagged: the round was not blind.
@@ -523,13 +524,85 @@ impl TreeRow {
         )
     }
 
-    /// Whether the row can still refuse a cast: a process it names runs,
+    /// Whether the row can still bind a cast: a process it names runs,
     /// and its claim was kept or its holder is still at it.
     fn live(&self) -> bool {
         let runs = |t: &str| t != "-" && proc_tree::token_alive(t);
         (runs(&self.shell) || runs(&self.harness))
             && (self.state == CAST_STATE || runs(&self.state))
     }
+
+    /// The earlier voice when a cast as `key` under `tree` repeats this
+    /// row. A shell runs one agent's commands, so any other session from
+    /// it is that voice. A harness runs a parent and its subagents, so
+    /// only another root session from it is. A subagent of the same root,
+    /// in its own shell, is not. The pair is `(why, session key)`:
+    /// `shell` or `harness`, and this row's session.
+    fn binds(&self, key: &str, tree: &CastTree) -> Option<(&'static str, String)> {
+        let same = |mine: &Option<String>, theirs: &str| mine.as_deref() == Some(theirs);
+        if same(&tree.shell, &self.shell) && self.session != key {
+            Some(("shell", self.session.clone()))
+        } else if same(&tree.harness, &self.harness)
+            && session_root(&self.session) != session_root(key)
+        {
+            Some(("harness", self.session.clone()))
+        } else {
+            None
+        }
+    }
+}
+
+fn session_root(key: &str) -> &str {
+    key.split(':').next().unwrap_or(key)
+}
+
+fn voice_of(
+    why: &str,
+    session: &str,
+    claimed: &ballot_sig::SessionIdentity,
+) -> ballot_sig::VoiceBind {
+    let (harness, nonce) = session
+        .strip_prefix("nonce:")
+        .map(|nonce| ("-".to_string(), nonce.to_string()))
+        .unwrap_or_else(|| (session.to_string(), "-".to_string()));
+    ballot_sig::VoiceBind {
+        harness,
+        nonce,
+        claimed_harness: claimed.harness.clone(),
+        claimed_nonce: claimed.nonce.clone(),
+        why: why.to_string(),
+    }
+}
+
+fn bound_of(
+    rows: &[TreeRow],
+    key: &str,
+    tree: &CastTree,
+    claimed: &ballot_sig::SessionIdentity,
+) -> Option<ballot_sig::VoiceBind> {
+    let (why, session) = rows.iter().find_map(|row| row.binds(key, tree))?;
+    Some(voice_of(why, &session, claimed))
+}
+
+/// The voice `claimed` folds into on `issue`, when a live row shares its
+/// shell or its harness root. `None` when this process has no tree, or
+/// no row matches.
+pub(crate) fn peek_bound(
+    issue: &str,
+    claimed: &ballot_sig::SessionIdentity,
+) -> Option<ballot_sig::VoiceBind> {
+    let tree = CastTree::here();
+    if tree.shell.is_none() && tree.harness.is_none() {
+        return None;
+    }
+    let key = session_key(&claimed.harness, &claimed.nonce);
+    let text = std::fs::read_to_string(tree_path(issue)).unwrap_or_default();
+    let rows: Vec<TreeRow> = text
+        .lines()
+        .filter_map(TreeRow::parse)
+        .filter(TreeRow::live)
+        .collect();
+    bound_of(&rows, &key, &tree, claimed)
 }
 
 /// The rows of `issue` on this tracker: another tracker's issue of the
@@ -574,23 +647,41 @@ struct TreeHold {
 }
 
 /// Record this process's row. A shared shell or harness does not refuse
-/// another persona.
-fn hold_tree(issue: &str, key: &str, tree: &CastTree) -> Result<Option<TreeHold>> {
+/// the cast. It binds the ballot to the earlier row's session, which is
+/// the voice both ballots count as. The row stores that voice.
+fn hold_tree(
+    issue: &str,
+    claimed: &ballot_sig::SessionIdentity,
+    tree: &CastTree,
+) -> Result<Option<TreeHold>> {
     if tree.shell.is_none() && tree.harness.is_none() {
+        ballot_sig::clear_voice_bind();
         return Ok(None);
     }
+    let key = session_key(&claimed.harness, &claimed.nonce);
     let me =
         proc_tree::of(std::process::id()).map_or_else(|| "-".to_string(), |p| proc_tree::token(&p));
-    let row = TreeRow {
-        shell: tree.shell.clone().unwrap_or_else(|| "-".into()),
-        harness: tree.harness.clone().unwrap_or_else(|| "-".into()),
-        session: key.to_string(),
-        state: me,
-    };
     let path = tree_path(issue);
-    edit_rows(&path, |rows| {
+    let row = edit_rows(&path, |rows| {
+        let bound = bound_of(rows, &key, tree, claimed);
+        let session = bound
+            .as_ref()
+            .map(|bind| session_key(&bind.harness, &bind.nonce))
+            .filter(|session| !session.is_empty())
+            .unwrap_or_else(|| key.clone());
+        if let Some(bound) = bound {
+            ballot_sig::set_voice_bind(bound);
+        } else {
+            ballot_sig::clear_voice_bind();
+        }
+        let row = TreeRow {
+            shell: tree.shell.clone().unwrap_or_else(|| "-".into()),
+            harness: tree.harness.clone().unwrap_or_else(|| "-".into()),
+            session,
+            state: me,
+        };
         rows.push(row.clone());
-        Ok(())
+        Ok(row)
     })?;
     Ok(Some(TreeHold { path, row }))
 }
@@ -633,6 +724,11 @@ impl Drop for SessionBallot {
         if let Some(tree) = &self.tree {
             tree.settle(self.kept);
         }
+        // `keep` drops this value before the note is signed. The voice
+        // bind has to outlive that drop; `sign_ballot` clears it.
+        if !self.kept {
+            ballot_sig::end_cast();
+        }
         if self.kept {
             return;
         }
@@ -665,14 +761,18 @@ fn held_choice(issue: &str, voter: &str) -> Option<String> {
 /// This voter already holds a ballot on `issue`, this process already
 /// holds that claim, or it authored a candidate tied to `issue`.
 pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
+    ballot_sig::begin_cast(issue);
+    let claimed = ballot_sig::claimed_identity();
     let id = ballot_sig::identity();
     let key = session_key(&id.harness, &id.nonce);
     let own = notes_on(issue);
     let family = family_notes(issue);
     if let Some(why) = session_cast_refusal_on(issue, &key, voter, &own, &family) {
+        ballot_sig::end_cast();
         bail!("{why}");
     }
     if let Some(choice) = held_choice(issue, voter) {
+        ballot_sig::end_cast();
         bail!(
             "{voter} already holds a ballot on {issue} for {choice}. Nothing was cast. {}",
             replace_hint(issue, voter)
@@ -681,6 +781,7 @@ pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
     let mark = format!("{}\n{voter}", issue.trim());
     let mut held = CAST.lock().unwrap_or_else(|e| e.into_inner());
     if !held.insert(mark.clone()) {
+        ballot_sig::end_cast();
         bail!(
             "{voter} already cast a ballot on {issue} in this process. Nothing was cast. {}",
             replace_hint(issue, voter)
@@ -692,7 +793,7 @@ pub fn claim_session_ballot(issue: &str, voter: &str) -> Result<SessionBallot> {
         kept: false,
         tree: None,
     };
-    ballot.tree = hold_tree(issue, &key, &CastTree::here())?;
+    ballot.tree = hold_tree(issue, &claimed, &CastTree::here())?;
     Ok(ballot)
 }
 
@@ -759,6 +860,9 @@ struct Tally {
 struct VoiceLink {
     keys: Vec<String>,
     parents: Vec<String>,
+    /// `(why, voice session)` from a tree-bound note. `why` is `shell` or
+    /// `harness`.
+    links: Vec<(String, String)>,
     newest: usize,
 }
 
@@ -775,6 +879,7 @@ fn voice_links(sigs: &[(bool, ballot_sig::SigNote)]) -> BTreeMap<String, VoiceLi
         let link = links.entry(sig.voter.clone()).or_insert_with(|| VoiceLink {
             keys: Vec::new(),
             parents: Vec::new(),
+            links: Vec::new(),
             newest: at,
         });
         if !key.is_empty() && !link.keys.contains(&key) {
@@ -782,6 +887,17 @@ fn voice_links(sigs: &[(bool, ballot_sig::SigNote)]) -> BTreeMap<String, VoiceLi
         }
         if !parent.is_empty() && !link.parents.contains(&parent) {
             link.parents.push(parent);
+        }
+        if let Some(why) = sig
+            .link
+            .clone()
+            .filter(|why| why == "shell" || why == "harness")
+        {
+            let voice = sig.harness.clone().unwrap_or_default();
+            let pair = (why, voice);
+            if !pair.1.is_empty() && !link.links.contains(&pair) {
+                link.links.push(pair);
+            }
         }
     }
     links
@@ -811,16 +927,38 @@ fn remember_link(at: &mut BTreeMap<String, usize>, uf: &mut [usize], i: usize, n
     }
 }
 
-/// Why these ballots are one voice: one session id, or one parent.
+/// Why these ballots are one voice: one shell, one harness root, one
+/// session id, or one parent.
 fn fold_why(members: &[usize], rows: &[Value], links: &BTreeMap<String, VoiceLink>) -> String {
     let mut keys = std::collections::BTreeSet::new();
     let mut parents = std::collections::BTreeSet::new();
+    let mut shells = std::collections::BTreeSet::new();
+    let mut harnesses = std::collections::BTreeSet::new();
     for &i in members {
         let voter = rows[i]["agent"].as_str().unwrap_or("").trim();
         if let Some(link) = links.get(voter) {
             keys.extend(link.keys.iter().cloned());
             parents.extend(link.parents.iter().cloned());
+            for (why, voice) in &link.links {
+                if why == "shell" {
+                    shells.insert(voice.clone());
+                } else if why == "harness" {
+                    harnesses.insert(voice.clone());
+                }
+            }
         }
+    }
+    if !shells.is_empty() {
+        return format!(
+            "same shell {}",
+            shells.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    if !harnesses.is_empty() {
+        return format!(
+            "same harness {}",
+            harnesses.into_iter().collect::<Vec<_>>().join(", ")
+        );
     }
     if keys.len() == 1 {
         let key = keys.iter().next().map(String::as_str).unwrap_or("");
@@ -1602,7 +1740,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_tree_row_parses_and_a_dead_process_is_dropped() {
+    fn a_shell_casts_as_one_session_and_a_harness_as_one_root() {
         let row = TreeRow {
             shell: "b:10:1".into(),
             harness: "b:20:2".into(),
@@ -1610,7 +1748,85 @@ mod tests {
             state: CAST_STATE.into(),
         };
         assert_eq!(TreeRow::parse(&row.line()), Some(row.clone()));
+        let tree = |shell: &str, harness: &str| CastTree {
+            shell: Some(shell.into()),
+            harness: Some(harness.into()),
+        };
+        assert_eq!(
+            row.binds("sess-root:agent-b", &tree("b:10:1", "b:30:3")),
+            Some(("shell", "sess-root:agent-a".to_string())),
+            "the same shell binds the later session to the earlier voice"
+        );
+        assert_eq!(
+            row.binds("sess-root:agent-a", &tree("b:10:1", "b:20:2")),
+            None,
+            "the same session is the cast gate's to judge"
+        );
+        assert_eq!(
+            row.binds("sess-root:agent-b", &tree("b:11:1", "b:20:2")),
+            None,
+            "a subagent of the same root in its own shell is its own voice"
+        );
+        assert_eq!(
+            row.binds("sess-other", &tree("b:11:1", "b:20:2")),
+            Some(("harness", "sess-root:agent-a".to_string())),
+            "another root session on the same harness is the earlier voice"
+        );
+        assert_eq!(row.binds("sess-other", &CastTree::default()), None);
         assert!(!row.live(), "a row naming no running process is dropped");
+    }
+
+    #[test]
+    fn a_linked_ballot_folds_into_the_earlier_voice() {
+        let k = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
+        let first = ballot_sig::sign_bound(&k, "demo-tree", "alice", "ship", "sess-a", "-");
+        let second = ballot_sig::sign_linked(
+            &k,
+            "demo-tree",
+            "bea",
+            "hold",
+            ballot_sig::LinkedFields {
+                harness: "sess-a",
+                nonce: "-",
+                claimed_harness: "sess-b",
+                claimed_nonce: "-",
+                link: "shell",
+            },
+        );
+        let rows = [
+            serde_json::json!({"agent": "alice", "choice": "ship"}),
+            serde_json::json!({"agent": "bea", "choice": "hold"}),
+        ];
+        let tally = tally_voices(
+            "demo-tree",
+            &rows,
+            &[second, first],
+            &std::collections::BTreeSet::new(),
+        );
+        assert_eq!(tally.counted.len(), 1, "{:?}", tally.counted);
+        assert!(
+            tally
+                .folds
+                .iter()
+                .any(|line| line.contains("folded into one voice (same shell sess-a)")),
+            "{:?}",
+            tally.folds
+        );
+        let apart = [
+            ballot_sig::sign_bound(&k, "demo-tree", "carol", "ship", "sess-c", "-"),
+            ballot_sig::sign_bound(&k, "demo-tree", "dora", "ship", "sess-d", "-"),
+        ];
+        let rows = [
+            serde_json::json!({"agent": "carol", "choice": "ship"}),
+            serde_json::json!({"agent": "dora", "choice": "ship"}),
+        ];
+        let (counted, _) = tally_of(
+            "demo-tree",
+            &rows,
+            &apart,
+            &std::collections::BTreeSet::new(),
+        );
+        assert_eq!(counted.len(), 2, "{counted:?}");
     }
 
     fn seat(voter: &str, harness: &str) -> BallotTrace {

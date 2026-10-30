@@ -63,8 +63,44 @@ pub fn message_v2(issue: &str, voter: &str, choice: &str, harness: &str, nonce: 
     .into_bytes()
 }
 
+/// The session the environment claimed, and why the ballot folds.
+struct ClaimedSession<'a> {
+    harness: &'a str,
+    nonce: &'a str,
+    /// `shell` or `harness`.
+    link: &'a str,
+}
+
+/// [`message_v2`] plus the session the environment claimed and why this
+/// ballot folds into the voice (`shell` or `harness`).
+#[must_use]
+fn message_v3(
+    issue: &str,
+    voter: &str,
+    choice: &str,
+    harness: &str,
+    nonce: &str,
+    claimed: ClaimedSession<'_>,
+) -> Vec<u8> {
+    format!(
+        "ljos-ballot/v3\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+        issue.trim(),
+        voter.trim(),
+        choice.trim(),
+        harness.trim(),
+        nonce.trim(),
+        claimed.harness.trim(),
+        claimed.nonce.trim(),
+        claimed.link.trim()
+    )
+    .into_bytes()
+}
+
 /// A signature note's fields. `harness` and `nonce` are set when the note
-/// is a v2 binding.
+/// is a v2 binding. A tree-bound note also names the session the
+/// environment claimed (`claimed_harness`, `claimed_nonce`) and why the
+/// ballot folds (`link`: `shell` or `harness`). The signature covers
+/// those fields. `harness` and `nonce` are the voice the ballot counts as.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SigNote {
     pub voter: String,
@@ -73,6 +109,9 @@ pub struct SigNote {
     pub sig: String,
     pub harness: Option<String>,
     pub nonce: Option<String>,
+    pub claimed_harness: Option<String>,
+    pub claimed_nonce: Option<String>,
+    pub link: Option<String>,
 }
 
 impl SigNote {
@@ -84,11 +123,13 @@ impl SigNote {
 }
 
 /// `ballot-sig: VOTER CHOICE KEYHEX SIGHEX`, or the same plus
-/// `HARNESS NONCE` when the ballot is bound to a session. The choice may
-/// hold spaces (`beside binary`): the key and signature are found by their
-/// hex lengths, counted from the end, and the choice is the text between
-/// the voter and the key. A note whose key is not 64 hex digits parses only
-/// in the four- or six-field shape.
+/// `HARNESS NONCE` when the ballot is bound to a session. A ballot folded
+/// by the process tree adds `CLAIMED_HARNESS CLAIMED_NONCE LINK`. The
+/// choice may hold spaces (`beside binary`): the key and signature are
+/// found by their hex lengths, counted from the end, and the choice is
+/// the text between the voter and the key. A note whose key is not 64 hex
+/// digits parses only in the four- or six-field shape. A six-field note
+/// has no claimed session and no link.
 #[must_use]
 pub fn parse_note(note: &str) -> Option<SigNote> {
     let rest = note.trim().strip_prefix(SIG_NOTE)?;
@@ -99,15 +140,18 @@ pub fn parse_note(note: &str) -> Option<SigNote> {
     }
     let tok = |i: usize| &rest[at[i].0..at[i].1];
     let key_at = |i: usize| is_hex_len(tok(i), 64) && is_hex_len(tok(i + 1), 128);
-    // Where the key sits, and whether a session follows the signature.
-    let (k, bound) = if n >= 6 && key_at(n - 4) {
-        (n - 4, true)
+    // Where the key sits, and how many session fields follow the signature.
+    // 3: voice, claimed session, and link. 2: voice. 1: choice only.
+    let (k, kind) = if n >= 9 && key_at(n - 7) {
+        (n - 7, 3)
+    } else if n >= 6 && key_at(n - 4) {
+        (n - 4, 2)
     } else if key_at(n - 2) {
-        (n - 2, false)
+        (n - 2, 1)
     } else if n == 6 {
-        (2, true)
+        (2, 2)
     } else if n == 4 {
-        (2, false)
+        (2, 1)
     } else {
         return None;
     };
@@ -117,8 +161,11 @@ pub fn parse_note(note: &str) -> Option<SigNote> {
         choice: choice.to_string(),
         key: tok(k).to_string(),
         sig: tok(k + 1).to_string(),
-        harness: bound.then(|| tok(k + 2).to_string()),
-        nonce: bound.then(|| tok(k + 3).to_string()),
+        harness: (kind >= 2).then(|| tok(k + 2).to_string()),
+        nonce: (kind >= 2).then(|| tok(k + 3).to_string()),
+        claimed_harness: (kind == 3).then(|| tok(k + 4).to_string()),
+        claimed_nonce: (kind == 3).then(|| tok(k + 5).to_string()),
+        link: (kind == 3).then(|| tok(k + 6).to_string()),
     })
 }
 
@@ -597,7 +644,81 @@ pub fn sign_bound(
     )
 }
 
+/// Fields of a tree-bound signature: the voice, the claimed session, and
+/// why (`shell` or `harness`).
+pub(crate) struct LinkedFields<'a> {
+    pub harness: &'a str,
+    pub nonce: &'a str,
+    pub claimed_harness: &'a str,
+    pub claimed_nonce: &'a str,
+    pub link: &'a str,
+}
+
+/// A ballot signed as the voice in `fields`, keeping the session the
+/// environment claimed.
+#[must_use]
+pub(crate) fn sign_linked(
+    key: &SigningKey,
+    issue: &str,
+    voter: &str,
+    choice: &str,
+    fields: LinkedFields<'_>,
+) -> String {
+    let harness = field(fields.harness);
+    let nonce = field(fields.nonce);
+    let claimed_harness = field(fields.claimed_harness);
+    let claimed_nonce = field(fields.claimed_nonce);
+    let link = field(fields.link);
+    let (public, sig) = signed_hex(
+        key,
+        &message_v3(
+            issue,
+            voter,
+            choice,
+            &harness,
+            &nonce,
+            ClaimedSession {
+                harness: &claimed_harness,
+                nonce: &claimed_nonce,
+                link: &link,
+            },
+        ),
+    );
+    format!(
+        "{SIG_NOTE}{} {} {} {} {} {} {} {} {}",
+        voter.trim(),
+        choice.trim(),
+        public,
+        sig,
+        harness,
+        nonce,
+        claimed_harness,
+        claimed_nonce,
+        link
+    )
+}
+
 fn covered(issue: &str, note: &SigNote) -> Vec<u8> {
+    if let (Some(h), Some(n), Some(ch), Some(cn), Some(link)) = (
+        &note.harness,
+        &note.nonce,
+        &note.claimed_harness,
+        &note.claimed_nonce,
+        &note.link,
+    ) {
+        return message_v3(
+            issue,
+            &note.voter,
+            &note.choice,
+            h,
+            n,
+            ClaimedSession {
+                harness: ch,
+                nonce: cn,
+                link,
+            },
+        );
+    }
     match (&note.harness, &note.nonce) {
         (Some(h), Some(n)) => message_v2(issue, &note.voter, &note.choice, h, n),
         _ => message(issue, &note.voter, &note.choice),
@@ -1049,12 +1170,52 @@ fn named_session_actor(key: &str) -> Option<String> {
     Some(name)
 }
 
-/// This process's session identity. Stable across processes of one holder.
-/// A subagent the harness named is `SESSION:AGENT`, a session of its own.
-/// With no session in the environment, the one the hook saw run this
-/// line comes before the seat.
+/// The voice a process-tree match binds this cast to, plus the session
+/// the environment claimed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VoiceBind {
+    pub harness: String,
+    pub nonce: String,
+    pub claimed_harness: String,
+    pub claimed_nonce: String,
+    /// `shell` or `harness`.
+    pub why: String,
+}
+
+std::thread_local! {
+    static CAST_ISSUE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static VOICE_BIND: std::cell::RefCell<Option<VoiceBind>> = const { std::cell::RefCell::new(None) };
+}
+
+/// This cast is on `issue`. A later [`identity`] can see that issue's
+/// tree before it falls back to the seat.
+pub(crate) fn begin_cast(issue: &str) {
+    CAST_ISSUE.with(|c| *c.borrow_mut() = Some(issue.to_string()));
+    VOICE_BIND.with(|c| *c.borrow_mut() = None);
+}
+
+/// Forget the cast scope and any voice bound for it.
+pub(crate) fn end_cast() {
+    CAST_ISSUE.with(|c| *c.borrow_mut() = None);
+    VOICE_BIND.with(|c| *c.borrow_mut() = None);
+}
+
+pub(crate) fn set_voice_bind(bind: VoiceBind) {
+    VOICE_BIND.with(|c| *c.borrow_mut() = Some(bind));
+}
+
+pub(crate) fn clear_voice_bind() {
+    VOICE_BIND.with(|c| *c.borrow_mut() = None);
+}
+
+pub(crate) fn current_bind() -> Option<VoiceBind> {
+    VOICE_BIND.with(|c| c.borrow().clone())
+}
+
+/// The session the environment, the hook or the seat names, before a
+/// process-tree voice replaces a fresh seat.
 #[must_use]
-pub fn identity() -> SessionIdentity {
+pub fn claimed_identity() -> SessionIdentity {
     let harness = harness_session();
     if !harness.is_empty() {
         let harness = match subagent(&harness) {
@@ -1082,6 +1243,36 @@ pub fn identity() -> SessionIdentity {
             nonce: "-".into(),
         },
     }
+}
+
+/// This process's session identity. Stable across processes of one holder.
+/// A subagent the harness named is `SESSION:AGENT`, a session of its own.
+/// With no session in the environment, the one the hook saw run this
+/// line comes before the seat. A seat is a fresh voice only when this
+/// cast has no process tree and no earlier row: the tree-bound voice
+/// comes first.
+#[must_use]
+pub fn identity() -> SessionIdentity {
+    if let Some(bind) = current_bind() {
+        return SessionIdentity {
+            harness: bind.harness,
+            nonce: bind.nonce,
+        };
+    }
+    let claimed = claimed_identity();
+    if !claimed.seat_only() {
+        return claimed;
+    }
+    let Some(issue) = CAST_ISSUE.with(|c| c.borrow().clone()) else {
+        return claimed;
+    };
+    if let Some(bind) = crate::panel_gate::peek_bound(&issue, &claimed) {
+        return SessionIdentity {
+            harness: bind.harness,
+            nonce: bind.nonce,
+        };
+    }
+    claimed
 }
 
 /// The key `voter` signs with, pinned on first use.
@@ -1238,6 +1429,13 @@ pub fn parse_from(note: &str) -> Option<(String, String, String)> {
 /// No seat key, a key that does not match the pin, or a tracker write that
 /// failed.
 pub fn sign_ballot(issue: &str, voter: &str, choice: &str) -> Result<String> {
+    struct ClearCast;
+    impl Drop for ClearCast {
+        fn drop(&mut self) {
+            end_cast();
+        }
+    }
+    let _clear = ClearCast;
     // A protected name is signed by the caster embedded in the agent.
     // The named seat's key is never loaded.
     let (signer, persona) = match parse_caster_persona_voter(voter) {
@@ -1258,8 +1456,25 @@ pub fn sign_ballot(issue: &str, voter: &str, choice: &str) -> Result<String> {
         }
     }
     let (key, mine) = signing_key(&signer)?;
+    let bind = current_bind();
     let id = identity();
-    let note = sign_bound(&key, issue, voter, choice, &id.harness, &id.nonce);
+    let note = if let Some(bind) = &bind {
+        sign_linked(
+            &key,
+            issue,
+            voter,
+            choice,
+            LinkedFields {
+                harness: &id.harness,
+                nonce: &id.nonce,
+                claimed_harness: &bind.claimed_harness,
+                claimed_nonce: &bind.claimed_nonce,
+                link: &bind.why,
+            },
+        )
+    } else {
+        sign_bound(&key, issue, voter, choice, &id.harness, &id.nonce)
+    };
     if write_sig_note(issue, &note).is_err() {
         crate::run_captured("vissue", &["note", issue, &note])?;
     }
@@ -1274,6 +1489,12 @@ pub fn sign_ballot(issue: &str, voter: &str, choice: &str) -> Result<String> {
     );
     if id.seat_only() {
         said.push_str(&format!("{}\n", unverified_sentence(&id.harness)));
+    }
+    if let Some(bind) = &bind {
+        said.push_str(&format!(
+            "claimed session {}, folded into {session} (same {})\n",
+            bind.claimed_harness, bind.why
+        ));
     }
     let (persona, caster, parent) = if signer == persona {
         cast_from(&persona)
@@ -1811,6 +2032,42 @@ mod tests {
             &pins
         )
         .is_empty());
+    }
+
+    #[test]
+    fn a_linked_note_keeps_a_six_field_note_and_verifies() {
+        let k = key(8);
+        let old = sign_bound(&k, "demo-link", "alice", "ship", "sess-a", "-");
+        let parsed = parse_note(&old).unwrap();
+        assert_eq!(parsed.harness.as_deref(), Some("sess-a"));
+        assert_eq!(parsed.link, None);
+        assert!(verifies("demo-link", &parsed));
+        let linked = sign_linked(
+            &k,
+            "demo-link",
+            "bea",
+            "hold beside",
+            LinkedFields {
+                harness: "sess-a",
+                nonce: "-",
+                claimed_harness: "sess-b",
+                claimed_nonce: "-",
+                link: "shell",
+            },
+        );
+        let parsed = parse_note(&linked).unwrap();
+        assert_eq!(parsed.choice, "hold beside");
+        assert_eq!(parsed.harness.as_deref(), Some("sess-a"));
+        assert_eq!(parsed.nonce.as_deref(), Some("-"));
+        assert_eq!(parsed.claimed_harness.as_deref(), Some("sess-b"));
+        assert_eq!(parsed.claimed_nonce.as_deref(), Some("-"));
+        assert_eq!(parsed.link.as_deref(), Some("shell"));
+        assert!(verifies("demo-link", &parsed));
+        assert!(!verifies("demo-other", &parsed));
+        assert_eq!(
+            note_session(&linked),
+            Some(("sess-a".to_string(), "-".to_string()))
+        );
     }
 
     #[test]
