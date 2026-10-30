@@ -5,6 +5,43 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.35.3 (2026-10-30)
+
+### Fixes
+
+- A best-effort row keeps waiting while other writers append, and stops after 500 ms in total, or after 250 ms with no new row.
+- A best-effort state-log row (a bypass or hook-trace line) gave up on its lock after 50 ms, and a writer the scheduler had set aside on a busy machine held it longer than that, so the row was dropped. The budget is 250 ms; with no contention nothing waits.
+- A best-effort state-log row (a bypass or hook-trace line) slept up to 8 ms between lock tries inside its 50 ms budget, so on a slow machine with many hooks writing at once a row could run out its budget while the lock was free, and was dropped. The pause now stays at 2 ms, so the row is written.
+- A guard fault no longer tells the agent to set `LJOS_GUARD_FAIL_OPEN=1`, a switch 0.35.0 removed. The refusal says the line ran with the warning and that the person repairs the guard with `ljos doctor`. The doc comments on the TCB verdict say the same.
+- A panel that started 1 of its 44 members still reported success.
+  Now the panel counts the seated members that opened and names the rest.
+  It fails unless all of them opened.
+  A member that exits early is named and not counted, even when it exits 0.
+  In the start loop, an exit 0 counts only with a ballot on the ticket.
+  `ljos panel run` fails when a session fails.
+- A protected branch list with no space after the comma was read as one name.
+  The list now keeps each name, including single quotes, a trailing comma and Windows line endings.
+- A protected push is refused when the tracker read misses its bound, before the consensus checks, and the message says to retry.
+  A push onto another branch still continues, and bookkeeping stays skipped.
+- A push refuses a commit whose message has a by-trailer, a made-with line, or a generated line at the start of a line, or a machine account mark anywhere on a line, including when a tab separates the mark.
+  A Tests paragraph, a note paragraph, and a generated phrase mid-sentence are still allowed.
+  A new branch is checked only for commits the remotes do not already have.
+  `ljos cloud up` unsets only the hooks path that has a commit message hook it did not write, and leaves its own hooks path in place.
+  Doctor reports that foreign path as not ok.
+- A user-rules file rewritten in place was read as corrupt when the writer paused for more than 80 ms between its truncate and its write, and a GitHub write the rules do not cover was refused in that window. The read now waits 250 ms for the bytes to change before it treats the file as corrupt, and re-reads a changing file for up to 600 ms.
+- On macOS a state log swapped for a Unix socket was reported as a raw OS error instead of the state refusal, because opening a socket fails there with EOPNOTSUPP rather than ENXIO. Both now read as a log that is not a regular file.
+- On macOS the git shim read ljos-policyd's refusal as having no rule, said the guard was unhealthy, and ran the command.
+  The shim took the verdict apart with `head`, `cut`, `sed` and `tr`, and BSD `cut` drops a final line without a newline.
+  The shim now reads the rule and the `protected_branches` list in the shell.
+  A force push onto a protected branch asks on macOS as it does on Linux, and on a PATH that has git but not those tools.
+  `ljos onboard` rewrites the installed shims.
+- Several hooks creating the same new state log at once could lose one row on macOS: APFS answered one creating open with ENOENT while another writer's create was landing, and the proposal or bypass row was dropped. The creating open is retried a few times before the error stands.
+- `ljos consensus` on a decision with many children read every ticket of the family again and again, and took minutes on a large tracker.
+  Now it reads each ticket once per run and prints the same reading.
+- `ljos finish` sealed every atom in the pack into the tracker log, which was 17k atoms on one finish, and later sealed none.
+  It now seals the atoms of its own ticket as one chunk over the log, and `ljos sync` still seals the rest.
+
+
 ## Unreleased
 
 ### Fixes

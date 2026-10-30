@@ -1,1 +1,0 @@
-A best-effort state-log row (a bypass or hook-trace line) slept up to 8 ms between lock tries inside its 50 ms budget, so on a slow machine with many hooks writing at once a row could run out its budget while the lock was free, and was dropped. The pause now stays at 2 ms, so the row is written.

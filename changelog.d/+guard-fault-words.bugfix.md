@@ -1,1 +1,0 @@
-A guard fault no longer tells the agent to set `LJOS_GUARD_FAIL_OPEN=1`, a switch 0.35.0 removed. The refusal says the line ran with the warning and that the person repairs the guard with `ljos doctor`. The doc comments on the TCB verdict say the same.
