@@ -705,23 +705,10 @@ mod grant_tests {
     /// not a listed seat, is not a standing grant.
     #[test]
     fn a_grant_must_be_on_head_and_via_a_listed_seat() {
-        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
-            ["VISSUE_ROOT", "ISSUE_ROOT", "VISSUE_NO_ROUTE"]
-                .into_iter()
-                .map(|key| (key, std::env::var_os(key)))
-                .collect();
-        struct PutBack(Vec<(&'static str, Option<std::ffi::OsString>)>);
-        impl Drop for PutBack {
-            fn drop(&mut self) {
-                for (key, value) in &self.0 {
-                    match value {
-                        Some(value) => std::env::set_var(key, value),
-                        None => std::env::remove_var(key),
-                    }
-                }
-            }
-        }
-        let _restore = PutBack(saved);
+        // The environment is process-global. Writing the tracker root
+        // here without the suite lock let a ledger read in the same run
+        // resolve this checkout instead of its own.
+        let _lock = crate::test_env_lock();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         git(root, &["init", "-q", "-b", "main"]);
