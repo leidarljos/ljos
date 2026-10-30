@@ -4986,9 +4986,19 @@ pub fn same_seat(held: &str, holder: &str, known: &std::collections::BTreeSet<St
     suffixed(&seat_a, &seat_b) || suffixed(&seat_b, &seat_a)
 }
 
-/// [`same_seat`] against the seats this tracker lists.
+/// [`same_seat`] against the seats this tracker lists. The list only keeps
+/// a suffixed name from folding into a seat, so it is read only for a
+/// pair that differs by such a suffix: reading it walks every issue file
+/// under the tracker root.
 #[must_use]
 pub fn same_seat_here(held: &str, holder: &str) -> bool {
+    if !same_seat(held, holder, &std::collections::BTreeSet::new()) {
+        return false;
+    }
+    let seat = |name: &str| holder_seat(name).map(|(seat, _)| seat);
+    if seat(held) == seat(holder) {
+        return true;
+    }
     same_seat(held, holder, &tracker_known_seats())
 }
 
@@ -22666,25 +22676,28 @@ pub fn protected_push_settled(
 /// panel the gate refuses, is not settled.
 #[must_use]
 pub fn protected_push_cleared(issue: &str, pusher: &str, quorum: usize) -> bool {
-    let roster = tracker_roster_names();
+    let roster = hook_timed("cleared_roster", tracker_roster_names);
     if roster.len() == 1 {
-        return solo_vote_settles(&roster[0], &ballot_rows(issue));
+        let rows = hook_timed("cleared_ballots", || ballot_rows(issue));
+        return solo_vote_settles(&roster[0], &rows);
     }
-    if panel_gate::settle_refusal(issue).is_some() {
+    if hook_timed("cleared_refusal", || panel_gate::settle_refusal(issue)).is_some() {
         return false;
     }
-    let (rows, personas) = match cite_ballots(issue) {
+    let (rows, personas) = match hook_timed("cleared_cite", || cite_ballots(issue)) {
         Ok(found) => found,
         Err(_) => (ballot_rows(issue), std::collections::BTreeSet::new()),
     };
-    let card = issue_record(issue).ok();
+    let card = hook_timed("cleared_card", || issue_record(issue).ok());
     let notes = card.as_ref().map(ballot_sig::notes_of).unwrap_or_default();
-    let pins = ballot_sig::pins_for_check()
+    let pins = hook_timed("cleared_pins", ballot_sig::pins_for_check)
         .map(|(pins, _)| pins)
         .unwrap_or_default();
-    let tracker = slot::tracker_id();
+    let tracker = hook_timed("cleared_tracker", slot::tracker_id);
     let family = |voter: &str| slot::family_of(&tracker, issue, voter, &notes, &pins);
-    protected_push_settled(&roster, &rows, &personas, pusher, quorum, &family)
+    hook_timed("cleared_settle", || {
+        protected_push_settled(&roster, &rows, &personas, pusher, quorum, &family)
+    })
 }
 
 pub fn protected_push_stands(issue: &str, quorum: usize) -> std::result::Result<String, String> {
