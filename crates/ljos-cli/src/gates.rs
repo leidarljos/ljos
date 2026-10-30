@@ -959,6 +959,33 @@ mod tests {
     }
 
     #[test]
+    fn a_tight_protected_branch_list_keeps_each_name() {
+        let dir = repo();
+        let home = tempfile::tempdir().unwrap();
+        let _layers = layers(home.path(), None);
+        let cwd = dir.path();
+        let want = ["main", "master", "develop", "feat", "y"]
+            .map(str::to_string)
+            .to_vec();
+        for body in [
+            "protected_branches = [\"feat\",\"y\"]\n",
+            "protected_branches = [\"feat\", \"y\"]\n",
+            "protected_branches = [ \"feat\" , \"y\" ]\n",
+            "protected_branches = ['feat','y']\n",
+            "protected_branches = [\"feat\",\"y\",]\n",
+            "protected_branches = [\"feat\",\"y\"]\r\n",
+        ] {
+            gates(cwd, body);
+            assert_eq!(lease_protected(Some(cwd)).as_ref(), Some(&want), "{body:?}");
+        }
+        gates(cwd, "protected_branches = \"release\"\n");
+        assert!(
+            lease_protected(Some(cwd)).is_none(),
+            "a value that is not a list asks"
+        );
+    }
+
+    #[test]
     fn a_push_lands_where_git_would_put_it_and_an_unread_one_is_protected() {
         let dir = repo();
         let cwd = dir.path();

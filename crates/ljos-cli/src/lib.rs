@@ -6399,6 +6399,59 @@ esac
 # `.ljos/gates.toml` or `ljos.toml`. A list the shim cannot read on one
 # line is `?`, which matches no branch name, so the push asks.
 # The list is read in the shell. grep, sed and tr are not on every PATH.
+# A comma splits names with or without a space. A trailing comma adds
+# none, and single quotes count. Anything else is unreadable.
+list_names() {
+  s=$1
+  out=
+  while :; do
+    while [ -n "$s" ]; do
+      c=${s%"${s#?}"}
+      case $c in
+        [[:space:]]) s=${s#?} ;;
+        *) break ;;
+      esac
+    done
+    [ -n "$s" ] || break
+    c=${s%"${s#?}"}
+    case $c in
+      \"|\') ;;
+      *) return 1 ;;
+    esac
+    q=$c
+    s=${s#?}
+    name=
+    closed=
+    while [ -n "$s" ]; do
+      c=${s%"${s#?}"}
+      s=${s#?}
+      if [ "$c" = "$q" ]; then
+        closed=1
+        break
+      fi
+      if [ "$q" = '"' ] && [ "$c" = '\' ]; then
+        return 1
+      fi
+      name=$name$c
+    done
+    [ "$closed" = 1 ] || return 1
+    [ -n "$name" ] && out=$out' '$name
+    while [ -n "$s" ]; do
+      c=${s%"${s#?}"}
+      case $c in
+        [[:space:]]) s=${s#?} ;;
+        *) break ;;
+      esac
+    done
+    [ -n "$s" ] || break
+    c=${s%"${s#?}"}
+    case $c in
+      ,) s=${s#?} ;;
+      *) return 1 ;;
+    esac
+  done
+  printf '%s' "$out"
+}
 guarded_branches() {
   printf 'main master develop'
   top=$("$real" -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 0
@@ -6447,17 +6500,13 @@ guarded_branches() {
       esac
       inner=${body#*[}
       inner=${inner%]*}
-      cleaned=
-      while [ -n "$inner" ]; do
-        c=${inner%"${inner#?}"}
-        inner=${inner#?}
-        case "$c" in
-          \"|\'|,) ;;
-          *) cleaned=$cleaned$c ;;
-        esac
-      done
-      matched=1
-      names=$names$cleaned' '
+      if got=$(list_names "$inner"); then
+        matched=1
+        names=$names$got
+      else
+        matched=0
+        break
+      fi
     done < "$f"
     [ "$saw" -eq 1 ] || continue
     if [ "$matched" -eq 1 ]; then printf ' %s' "$names"; else printf ' ?'; fi
@@ -38390,6 +38439,117 @@ mod tests {
             Some(126),
             "a protected branch asks"
         );
+    }
+
+    /// A protected list keeps each name when the comma has no space after
+    /// it. A lease push to `feat` or `y` asks, and one to any other branch
+    /// runs. Spaces, single quotes, a trailing comma and CRLF are the same
+    /// two names. A value that is not a list asks.
+    #[cfg(unix)]
+    #[test]
+    fn a_guard_shim_asks_for_each_branch_in_a_tight_list() {
+        let _g = env_guard();
+        let root = tempfile::tempdir().unwrap();
+        let guard = root.path().join("guard-bin");
+        let fake = root.path().join("fake");
+        let home = root.path().join("home");
+        let repo = root.path().join("repo");
+        for d in [&guard, &fake, &home, &repo] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        publish_exe(&guard.join("git"), super::GUARD_SHIM);
+        publish_exe(
+            &fake.join("ljos-policyd"),
+            "#!/bin/sh\ncase \"$*\" in\n*push*--force*) printf 'deny\\tgit-force-push\\n'; exit 2;;\n*) printf 'allow\\n';;\nesac\n",
+        );
+        let real_git = which::which("git").expect("git on PATH");
+        let git_bin = root.path().join("git-bin");
+        std::fs::create_dir_all(&git_bin).unwrap();
+        std::os::unix::fs::symlink(&real_git, git_bin.join("git")).unwrap();
+        let scrub = |cmd: &mut std::process::Command| {
+            cmd.env_remove("GIT_DIR");
+            cmd.env_remove("GIT_WORK_TREE");
+        };
+        let plain = |args: &[&str]| {
+            let mut cmd = std::process::Command::new(&real_git);
+            cmd.arg("-C")
+                .arg(&repo)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Rohit Goswami")
+                .env("GIT_AUTHOR_EMAIL", "rgoswami@ieee.org")
+                .env("GIT_COMMITTER_NAME", "Rohit Goswami")
+                .env("GIT_COMMITTER_EMAIL", "rgoswami@ieee.org");
+            scrub(&mut cmd);
+            let out = cmd.output().unwrap();
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        plain(&["init", "-q", "-b", "main"]);
+        plain(&["config", "commit.gpgsign", "false"]);
+        plain(&["commit", "-q", "--allow-empty", "-m", "seed"]);
+        let shim = |args: &[&str]| {
+            let mut cmd = std::process::Command::new(guard.join("git"));
+            cmd.args(args)
+                .current_dir(&repo)
+                .env("HOME", &home)
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}:{}",
+                        guard.display(),
+                        fake.display(),
+                        git_bin.display()
+                    ),
+                )
+                .env_remove("LJOS_OFF")
+                .env("LJOS_GUARD", "on");
+            scrub(&mut cmd);
+            cmd.output().unwrap()
+        };
+        std::fs::create_dir_all(repo.join(".ljos")).unwrap();
+        let gates = repo.join(".ljos/gates.toml");
+        for body in [
+            "protected_branches = [\"feat\",\"y\"]\n",
+            "protected_branches = [\"feat\", \"y\"]\n",
+            "protected_branches = [ \"feat\" , \"y\" ]\n",
+            "protected_branches = ['feat','y']\n",
+            "protected_branches = [\"feat\",\"y\",]\n",
+            "protected_branches = [\"feat\",\"y\"]\r\n",
+        ] {
+            std::fs::write(&gates, body).unwrap();
+            for branch in ["feat", "y"] {
+                let pushed = shim(&["push", "--force-with-lease", "nowhere", branch]);
+                let said = String::from_utf8_lossy(&pushed.stderr);
+                assert_eq!(pushed.status.code(), Some(126), "{body:?} {branch}: {said}");
+                assert!(
+                    said.contains("asks (git-force-push)"),
+                    "{body:?} {branch}: {said}"
+                );
+            }
+            let other = shim(&["push", "--force-with-lease", "nowhere", "other"]);
+            let said = String::from_utf8_lossy(&other.stderr);
+            assert_ne!(
+                other.status.code(),
+                Some(126),
+                "{body:?} an unlisted branch runs: {said}"
+            );
+            assert!(
+                !said.contains("asks (git-force-push)"),
+                "{body:?} an unlisted branch runs: {said}"
+            );
+        }
+        std::fs::write(&gates, "protected_branches = \"release\"\n").unwrap();
+        let unreadable = shim(&["push", "--force-with-lease", "nowhere", "other"]);
+        let said = String::from_utf8_lossy(&unreadable.stderr);
+        assert_eq!(
+            unreadable.status.code(),
+            Some(126),
+            "a value that is not a list asks: {said}"
+        );
+        assert!(said.contains("asks (git-force-push)"), "{said}");
     }
 
     /// The in-process guard matches the shim: a temp home and LJOS_OFF do
