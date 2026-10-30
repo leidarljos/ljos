@@ -1249,7 +1249,11 @@ pub fn sign_own_ballot(issue: &str) -> Result<String> {
         return Ok(String::new());
     };
     let layout = vissue_core::Layout::resolve(None, None)?;
-    let ballots = vissue_core::ops::ballots(&layout, issue)?;
+    // The id's own project first; the whole tracker only when it is not there.
+    let ballots = match crate::issue_spot::ballots_in(&layout, issue) {
+        Some(ballots) => ballots,
+        None => vissue_core::ops::ballots(&layout, issue)?,
+    };
     let Some(choice) = ballots
         .iter()
         .find(|b| b.agent == voter)

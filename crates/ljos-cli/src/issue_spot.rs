@@ -298,6 +298,164 @@ pub fn forget_reads() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clear();
+    TRACKERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
+/// The ballots in a heading's `:VOTES:` drawer, read the way the tracker
+/// crate reads them: one ballot per agent, the last line winning, and a
+/// line that is not a ballot left out.
+#[must_use]
+pub fn heading_ballots(heading: &vissue_core::IssueHeading) -> Vec<vissue_core::ops::Ballot> {
+    let Some(drawer) = heading
+        .extra_drawers
+        .iter()
+        .find(|d| drawer_name_is(d, "VOTES"))
+    else {
+        return Vec::new();
+    };
+    let mut ballots: Vec<vissue_core::ops::Ballot> = Vec::new();
+    for line in drawer.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.eq_ignore_ascii_case(":VOTES:")
+            || trimmed.eq_ignore_ascii_case(":END:")
+        {
+            continue;
+        }
+        if let Some(b) = parse_ballot(trimmed) {
+            match ballots.iter_mut().find(|x| x.agent == b.agent) {
+                Some(existing) => *existing = b,
+                None => ballots.push(b),
+            }
+        }
+    }
+    ballots
+}
+
+fn drawer_name_is(drawer: &str, name: &str) -> bool {
+    drawer
+        .lines()
+        .next()
+        .map(str::trim)
+        .and_then(|first| first.strip_prefix(':'))
+        .and_then(|rest| rest.strip_suffix(':'))
+        .is_some_and(|n| n.eq_ignore_ascii_case(name))
+}
+
+/// `[date] agent: choice used=X confidence=P`, the first `": "` ending the
+/// agent.
+fn parse_ballot(line: &str) -> Option<vissue_core::ops::Ballot> {
+    let (stamp, rest) = line.strip_prefix('[')?.split_once("] ")?;
+    let (agent, choice) = rest.split_once(": ")?;
+    let agent = agent.trim();
+    let choice = choice.trim();
+    if agent.is_empty() || choice.is_empty() {
+        return None;
+    }
+    let (choice, used, confidence) = split_ballot_tail(choice);
+    Some(vissue_core::ops::Ballot {
+        agent: agent.to_string(),
+        choice: choice.to_string(),
+        stamp: format!("[{stamp}]"),
+        used,
+        confidence,
+    })
+}
+
+fn split_ballot_tail(choice: &str) -> (&str, Option<String>, Option<String>) {
+    if let Some((choice, tail)) = choice.split_once(" used=") {
+        let (used, confidence) = match tail.split_once(" confidence=") {
+            Some((used, confidence)) => (used, Some(confidence.to_string())),
+            None => (tail, None),
+        };
+        let used = (!used.is_empty()).then(|| used.to_string());
+        return (choice.trim(), used, confidence);
+    }
+    if let Some((choice, confidence)) = choice.split_once(" confidence=") {
+        return (choice.trim(), None, Some(confidence.to_string()));
+    }
+    (choice, None, None)
+}
+
+/// The ballots on `id` in `layout`, from the id's own project, or `None`
+/// when that project does not hold it.
+#[must_use]
+pub fn ballots_in(layout: &Layout, id: &str) -> Option<Vec<vissue_core::ops::Ballot>> {
+    in_layout(layout, id.trim()).map(|spot| heading_ballots(&spot.rec().heading))
+}
+
+/// Whole trackers this process parsed, by layout, with the signature of the
+/// project whose issue asked. A child may live in another project of the
+/// same tracker, so `children` reads them all; one parse answers every
+/// `children` question while the asking project keeps its files.
+static TRACKERS: Mutex<BTreeMap<(PathBuf, String), (Vec<Stamp>, Arc<Vec<IssueRec>>)>> =
+    Mutex::new(BTreeMap::new());
+
+fn tracker_recs(spot: &Spot) -> Option<Arc<Vec<IssueRec>>> {
+    let key = (
+        spot.layout.root().to_path_buf(),
+        spot.layout.prefix().to_string(),
+    );
+    let sig = signature(&spot.layout.project_issues_path(&spot.rec().project))?;
+    {
+        let held = TRACKERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((seen, recs)) = held.get(&key) {
+            if *seen == sig {
+                return Some(Arc::clone(recs));
+            }
+        }
+    }
+    let recs = Arc::new(vissue_core::catalog::load_recs(&spot.layout).ok()?);
+    TRACKERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key, (sig, Arc::clone(&recs)));
+    Some(recs)
+}
+
+/// What `vissue vote ID --json` and `vissue children ID --json` print,
+/// answered in this process from the layout [`find`] reaches `ID` in. A
+/// gate and a consensus ask these about many issues, and each `vissue`
+/// process pays its own start and its own walk. `None` for any other
+/// command line and for an id [`find`] does not reach; the caller then
+/// asks the tracker.
+#[must_use]
+pub fn answer(args: &[&str]) -> Option<String> {
+    let [verb, id, "--json"] = args else {
+        return None;
+    };
+    match *verb {
+        "vote" => {
+            let spot = find(id)?;
+            let rows: Vec<Value> = heading_ballots(&spot.rec().heading)
+                .iter()
+                .map(|b| {
+                    serde_json::json!({
+                        "agent": b.agent,
+                        "choice": b.choice,
+                        "stamp": b.stamp,
+                        "used": b.used,
+                        "confidence": b.confidence,
+                    })
+                })
+                .collect();
+            Some(Value::Array(rows).to_string())
+        }
+        "children" => {
+            let spot = find(id)?;
+            let recs = tracker_recs(&spot)?;
+            let rows = vissue_core::catalog::children_from(&recs, id.trim()).ok()?;
+            let mut out = serde_json::to_string_pretty(&rows).ok()?;
+            out.push('\n');
+            Some(out)
+        }
+        _ => None,
+    }
 }
 
 /// Whether `args` is a kept read's command line, whatever the issue.
@@ -423,5 +581,72 @@ Body.\n\n\
         assert!(route_env(&["vote", "--json"]).is_empty());
         assert!(route_env(&["create", "demo-aaaa"]).is_empty());
         assert!(route_env(&["vote"]).is_empty());
+    }
+
+    /// The drawer is read as the tracker crate reads it: a recast agent's
+    /// last line wins, the `used` and `confidence` tails split off, a
+    /// line that is not a ballot is left out, and a heading with no
+    /// drawer has no ballots.
+    #[test]
+    fn ballots_match_the_tracker_crate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board = BOARD.replace(
+            "[2026-10-30 Fri 09:00] inky@box: land used=none confidence=0.9\n",
+            "[2026-10-30 Fri 09:00] inky@box: land used=none confidence=0.9\n\
+             [2026-10-30 Fri 09:01] pinky: hold: with a colon\n\
+             not a ballot line\n\
+             [2026-10-30 Fri 09:02] clyde: ship confidence=0.4\n\
+             [2026-10-30 Fri 09:03] blinky: wait used=dd-1,dd-2\n\
+             [2026-10-30 Fri 09:04] pinky: land used=\n",
+        );
+        std::fs::create_dir_all(tmp.path().join("Issues/demo")).unwrap();
+        std::fs::write(tmp.path().join("Issues/demo/issues.org"), board).unwrap();
+        let layout = Layout::new(tmp.path(), "Issues");
+        for id in ["demo-aaaa", "demo-bbbb"] {
+            let ours = ballots_in(&layout, id).expect("found");
+            let theirs = vissue_core::ops::ballots(&layout, id).unwrap();
+            assert_eq!(ours, theirs, "{id}");
+        }
+        assert_eq!(ballots_in(&layout, "demo-aaaa").unwrap().len(), 4);
+        assert!(ballots_in(&layout, "demo-zzzz").is_none());
+    }
+
+    /// `children` reads the whole tracker: a child filed in another project
+    /// of the same layout is listed, as the tracker lists it.
+    #[test]
+    fn children_match_the_tracker_crate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = layout_with_board(tmp.path());
+        std::fs::create_dir_all(tmp.path().join("Issues/other")).unwrap();
+        std::fs::write(
+            tmp.path().join("Issues/other/issues.org"),
+            "#+TODO: TODO STARTED | DONE CANCELLED\n\n\
+             * TODO [#A] Far child :task:\n\
+             :PROPERTIES:\n\
+             :ID:         other-cccc\n\
+             :PARENT:     demo-aaaa\n\
+             :END:\n",
+        )
+        .unwrap();
+        let spot = in_layout(&layout, "demo-aaaa").expect("found");
+        let recs = tracker_recs(&spot).expect("parsed");
+        let ours = vissue_core::catalog::children_from(&recs, "demo-aaaa").unwrap();
+        let all = vissue_core::catalog::load_recs(&layout).unwrap();
+        let theirs = vissue_core::catalog::CatalogService::from_recs(&all)
+            .children("demo-aaaa")
+            .unwrap();
+        assert_eq!(ours, theirs);
+        let ids: Vec<&str> = ours.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, ["other-cccc", "demo-bbbb"]);
+        let again = tracker_recs(&spot).expect("parsed");
+        assert!(Arc::ptr_eq(&recs, &again), "the parse is kept");
+        // A write to the asking project is seen by the next read.
+        let moved = BOARD.replace("* TODO [#C] Child", "* STARTED [#C] Child");
+        std::fs::write(tmp.path().join("Issues/demo/issues.org"), moved).unwrap();
+        let spot = in_layout(&layout, "demo-aaaa").expect("found");
+        let after = tracker_recs(&spot).expect("parsed");
+        assert!(!Arc::ptr_eq(&recs, &after), "a changed project is read again");
+        let kids = vissue_core::catalog::children_from(&after, "demo-aaaa").unwrap();
+        assert_eq!(kids[1].state, "STARTED");
     }
 }

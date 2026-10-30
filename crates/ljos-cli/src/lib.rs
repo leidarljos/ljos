@@ -36923,6 +36923,16 @@ pub fn run_captured_as(
 ) -> Result<Said> {
     let words: Vec<&str> = args.iter().map(AsRef::as_ref).collect();
     let stage = format!("exec {bin} {}", words.first().copied().unwrap_or(""));
+    // A ballot or children read about an issue this process can reach is
+    // answered from the files, without a `vissue` process.
+    if bin == "vissue" {
+        if let Some(stdout) = hook_timed("vissue_in_process", || issue_spot::answer(&words)) {
+            return Ok(Said {
+                stdout,
+                stderr: String::new(),
+            });
+        }
+    }
     // A read already answered in this process, about files that have not
     // changed since, is answered again without a process.
     let kept = if bin == "vissue" {
