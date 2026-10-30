@@ -3069,9 +3069,13 @@ enum Install {
 }
 
 fn install_identity(path: &Path, text: &str) -> Result<Install> {
+    let unwound = unwind_system_links(path);
+    let path = unwound.as_path();
     // A symlink anywhere in the path would make the read, the chmod, and
     // the replace land in the directory the link points at. The final
     // component is still refused below; this catches a parent.
+    // A symlink the system owns, such as `/tmp` or `/var`, is already
+    // replaced above. A link a user can swap is not.
     refuse_symlink_parent(path)?;
     // Follow a symlink and the identity would be written into the target,
     // or the target's mode would change. A link is left to write_private,
@@ -3119,6 +3123,71 @@ fn ancestor_is_symlink(path: &Path) -> bool {
         }
     }
     false
+}
+
+/// A symlink owned by root, in a directory owned by root that other
+/// users cannot write. `/tmp` and `/var` on macOS are this. A link in a
+/// directory the user can write is a swap, and is not.
+fn system_owned_symlink(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !meta.file_type().is_symlink() || meta.uid() != 0 {
+        return false;
+    }
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let Ok(dir) = fs::symlink_metadata(parent) else {
+        return false;
+    };
+    if dir.uid() != 0 {
+        return false;
+    }
+    let mode = dir.mode();
+    if mode & 0o002 != 0 {
+        return false;
+    }
+    if mode & 0o020 != 0 && dir.gid() != 0 {
+        return false;
+    }
+    true
+}
+
+/// Replace symlink components the system owns with their targets, and
+/// leave every other component as given. A user link stays a link so the
+/// caller can refuse it.
+fn unwind_system_links(path: &Path) -> PathBuf {
+    fn walk(path: &Path, depth: u8) -> PathBuf {
+        if depth > 8 {
+            return path.to_path_buf();
+        }
+        let mut out = PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::RootDir => out.push(component),
+                std::path::Component::CurDir => {}
+                std::path::Component::Normal(name) => {
+                    out.push(name);
+                    if system_owned_symlink(&out) {
+                        let Ok(target) = fs::read_link(&out) else {
+                            continue;
+                        };
+                        let next = if target.is_absolute() {
+                            target
+                        } else {
+                            out.parent().unwrap_or(Path::new("/")).join(target)
+                        };
+                        out = walk(&next, depth + 1);
+                    }
+                }
+                _ => return path.to_path_buf(),
+            }
+        }
+        out
+    }
+    walk(path, 0)
 }
 
 fn refuse_symlink_parent(path: &Path) -> Result<()> {
@@ -3189,6 +3258,8 @@ fn open_nofollow(path: &Path) -> std::io::Result<fs::File> {
 
 fn set_mode_0600(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
+    let unwound = unwind_system_links(path);
+    let path = unwound.as_path();
     // Linux returns ENOTDIR, not ELOOP, when O_DIRECTORY meets a symlink
     // parent. Name that before opening so the chmod is not the probe.
     let linked = ancestor_is_symlink(path)
@@ -3219,6 +3290,8 @@ fn set_mode_0600(path: &Path) -> Result<()> {
 /// through, so no other user can read the identity even for a moment.
 fn write_private(path: &Path, text: &str) -> Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let unwound = unwind_system_links(path);
+    let path = unwound.as_path();
     refuse_symlink_parent(path)?;
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;

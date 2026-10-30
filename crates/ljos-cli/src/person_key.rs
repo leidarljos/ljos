@@ -114,6 +114,11 @@ fn guarded() -> Option<(Vec<PathBuf>, Vec<PathBuf>)> {
 /// cannot expand.
 fn paths_of(word: &str, cwd: Option<&Path>) -> Vec<Option<PathBuf>> {
     let mut out = vec![crate::kept_prompt::path_of(word, cwd)];
+    if let Some(logical) = crate::kept_prompt::logical_path_of(word, cwd) {
+        if !out.iter().flatten().any(|path| path == &logical) {
+            out.push(Some(logical));
+        }
+    }
     if let Some(home) = crate::proc_tree::own_home() {
         for prefix in ["~", "$HOME", "${HOME}"] {
             if let Some(rest) = word
@@ -122,6 +127,11 @@ fn paths_of(word: &str, cwd: Option<&Path>) -> Vec<Option<PathBuf>> {
             {
                 let word = format!("{}{rest}", home.display());
                 out.push(crate::kept_prompt::path_of(&word, cwd));
+                if let Some(logical) = crate::kept_prompt::logical_path_of(&word, cwd) {
+                    if !out.iter().flatten().any(|path| path == &logical) {
+                        out.push(Some(logical));
+                    }
+                }
             }
         }
     }
@@ -2013,5 +2023,28 @@ mod tests {
         }
         assert_eq!(got, Some(own.join(".config/ljos/person-key")));
         assert!(!got.unwrap().starts_with(tmp.path()));
+    }
+
+    /// `cd` through a symlink keeps the spelling the shell keeps. `..`
+    /// then pops that spelling, so a path written against `/tmp` still
+    /// names the directory beside it when `/tmp` points elsewhere.
+    #[test]
+    fn cd_through_a_symlink_keeps_the_spelling() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("private/tmp");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = root.path().join("tmp");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let words = vec!["cd".to_string(), link.display().to_string()];
+        let cwd = crate::kept_prompt::after_cd(&words, Some(root.path())).unwrap();
+        assert_eq!(cwd, link);
+        let word = format!("../tmp/../{}", "marker");
+        let logical = crate::kept_prompt::logical_path_of(&word, Some(&cwd)).unwrap();
+        assert_eq!(logical, root.path().join("marker"));
+        let physical = crate::kept_prompt::resolve(&cwd.join(&word));
+        assert_ne!(
+            physical, logical,
+            "following the link before .. leaves the logical path"
+        );
     }
 }

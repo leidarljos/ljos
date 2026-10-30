@@ -321,8 +321,32 @@ pub fn path_is_temp(path: Option<&Path>) -> bool {
     if path.as_os_str().is_empty() {
         return false;
     }
-    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let path = canonical_existing_prefix(path);
     resolved_path_is_temp(&path)
+}
+
+/// `path` with the longest existing prefix resolved, and the missing
+/// tail put back. `canonicalize` of a path that does not exist yet
+/// returns the spelling unchanged, so `/tmp/scratch` would not match a
+/// temp root of `/private/tmp` when `/tmp` is a symlink.
+fn canonical_existing_prefix(path: &Path) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut cur = path.to_path_buf();
+    loop {
+        if let Ok(mut real) = std::fs::canonicalize(&cur) {
+            for name in missing.iter().rev() {
+                real.push(name);
+            }
+            return real;
+        }
+        let Some(name) = cur.file_name().map(|name| name.to_os_string()) else {
+            return path.to_path_buf();
+        };
+        missing.push(name);
+        if !cur.pop() {
+            return path.to_path_buf();
+        }
+    }
 }
 
 /// [`path_is_temp`] for a path already resolved.
@@ -474,4 +498,30 @@ pub(crate) fn read_text_bounded(path: &Path) -> Option<String> {
         return None;
     }
     std::fs::read_to_string(path).ok()
+}
+
+#[cfg(test)]
+mod temp_path_tests {
+    use super::*;
+
+    /// A path that is not created yet, under a symlink the temp root
+    /// resolves through, is still inside that root.
+    #[test]
+    fn a_missing_path_under_a_symlinked_temp_is_temporary() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("private/tmp");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = root.path().join("tmp");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let canon = std::fs::canonicalize(&link).unwrap();
+        TEST_TEMP_ROOTS.with(|roots| roots.replace(Some(vec![canon.clone()])));
+        let missing = link.join("scratch");
+        assert!(
+            path_is_temp(Some(&missing)),
+            "{} against {}",
+            missing.display(),
+            canon.display()
+        );
+        TEST_TEMP_ROOTS.with(|roots| roots.replace(None));
+    }
 }

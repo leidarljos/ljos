@@ -537,16 +537,31 @@ pub(crate) fn written_target(
     walk(args, cwd, 0)
 }
 
+/// The path `word` names from `cwd`, with `.` and `..` removed and
+/// symlinks left as the shell spelled them. Bash `cd` keeps that
+/// spelling: `/tmp` stays `/tmp` when it points at `/private/tmp`, and
+/// `..` pops `/tmp`, not `/private`.
+pub(crate) fn logical_path_of(word: &str, cwd: Option<&Path>) -> Option<PathBuf> {
+    let word = expand(word)?;
+    let path = Path::new(&word);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd?.join(path)
+    };
+    Some(crate::lexical_path(&joined))
+}
+
 /// Where the shell stands after `cd` or `pushd` with `words`, from `cwd`.
-/// `None` when that is not known.
+/// `None` when that is not known. The directory is the logical one.
 pub(crate) fn after_cd(words: &[String], cwd: Option<&Path>) -> Option<PathBuf> {
     let target = words
         .iter()
         .skip(1)
         .find(|w| !w.starts_with('-') || *w == "-");
     match target.map(String::as_str) {
-        None => var("HOME").map(PathBuf::from).map(|h| resolve(&h)),
+        None => var("HOME").map(|h| crate::lexical_path(Path::new(&h))),
         Some("-") => None,
-        Some(t) => path_of(t, cwd),
+        Some(t) => logical_path_of(t, cwd),
     }
 }

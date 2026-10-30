@@ -63,6 +63,9 @@ macro_rules! harness {
         #[used]
         #[allow(dead_code)]
         static LJOS_TEST_SESSION: unsafe extern "C" fn() = $crate::SESSION;
+        #[used]
+        #[allow(dead_code)]
+        static LJOS_TEST_CANON: unsafe extern "C" fn() = $crate::CANON_TMP;
     };
 }
 
@@ -75,6 +78,19 @@ static LJOS_TEST_HARNESS: unsafe extern "C" fn(*const c_char) -> i32 = ENTER;
 #[used]
 #[allow(dead_code)]
 static LJOS_TEST_SESSION: unsafe extern "C" fn() = SESSION;
+
+extern "C" {
+    fn ljos_test_canon_tmpdir_keep();
+}
+
+/// Address of the temp-dir setup. Referencing it keeps that object,
+/// constructor included.
+#[doc(hidden)]
+pub const CANON_TMP: unsafe extern "C" fn() = ljos_test_canon_tmpdir_keep;
+
+#[used]
+#[allow(dead_code)]
+static LJOS_TEST_CANON_TMP: unsafe extern "C" fn() = CANON_TMP;
 
 #[cfg(test)]
 mod tests {
