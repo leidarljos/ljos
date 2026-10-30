@@ -932,6 +932,11 @@ fn gate_runner(name: &str) -> Result<()> {
     let Some(dest) = dest else {
         return Ok(());
     };
+    // The tracker read already missed its bound. Stop before the
+    // consensus checks. Empty notes would fail as a missing family.
+    if crate::push_tracker_slow() {
+        return Err(anyhow!("sitting-gate: {}", crate::push_tracker_slow_line()));
+    }
     if issue.is_empty() || !crate::protected_push_cleared(&issue, &crate::seat_name(), cfg.quorum) {
         let why = "the sitting has no settled consensus".to_string();
         let wait = crate::sitting_gate::seats_wait(&dest, &cfg.branches, &issue, &why);

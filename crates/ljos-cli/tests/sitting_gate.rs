@@ -680,6 +680,122 @@ fn a_commit_check_finishes_with_a_stuck_lock_and_a_slow_vissue() {
     eprintln!("commit check hook {hook_took:?} pre-commit {pre_took:?}");
 }
 
+/// A tracker that stalls past the pre-push bound refuses a protected
+/// push before any consensus check. The same stall lets an ordinary
+/// push through, and the sitting is still named.
+#[test]
+fn a_stalled_tracker_refuses_a_protected_push_and_passes_another() {
+    use std::time::{Duration, Instant};
+    let seat = Seat::new();
+    let tracker = seat.home.join("tracker");
+    std::fs::create_dir_all(&tracker).unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&tracker)
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "{}", text_of(&init));
+    std::fs::write(
+        tracker.join("vissue.toml"),
+        "seats = [\"inky\", \"flint\"]\n",
+    )
+    .unwrap();
+    let marker = seat._dir.path().join("vote-called");
+    let holder = format!("inky@{}", ljos_cli::session_tag(SESSION));
+    script(
+        &seat.bin.join("vissue"),
+        &format!(
+            "#!/bin/sh\ncase \"$1\" in\n  show) sleep 4 ;;\n  vote) touch '{}' ;;\nesac\nexit 0\n",
+            marker.display()
+        ),
+    );
+    let runtime = seat.run.join("ljos");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let fake = seat.bin.join("ljos-mcp");
+    std::os::unix::fs::symlink("/bin/sleep", &fake).unwrap();
+    let mut sleeper = Command::new(&fake)
+        .arg("300")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let bare = ljos_cli::work_id(&format!("inky:{ISSUE}"));
+    std::fs::write(
+        runtime.join(format!("hold-{bare}")),
+        format!(
+            "inky\ninky\n{}\nljos-mcp\n2026-10-25T00:00:00Z\n{ISSUE}\n-\n",
+            sleeper.id()
+        ),
+    )
+    .unwrap();
+    let tagged = ljos_cli::work_id(&format!("{holder}:{ISSUE}"));
+    std::fs::write(
+        runtime.join(format!("hold-{tagged}")),
+        format!(
+            "{holder}\ninky\n{}\nljos-mcp\n2026-10-25T00:00:01Z\n{ISSUE}\n-\n",
+            sleeper.id()
+        ),
+    )
+    .unwrap();
+    let root = tracker.to_str().unwrap();
+    let env = [
+        ("VISSUE_ROOT", root),
+        ("ISSUE_ROOT", root),
+        ("VISSUE_NO_ROUTE", "1"),
+        ("LJOS_UNSIGNED_BALLOTS", "allow"),
+        ("CURSOR_CONVERSATION_ID", SESSION),
+    ];
+    let run = |refs: &str| {
+        let started = Instant::now();
+        let out = seat.git_hook_push(refs, &env);
+        (out, started.elapsed())
+    };
+    let develop = "aaaa bbbb refs/heads/develop refs/heads/develop\n";
+    let (out, took) = run(develop);
+    let said = text_of(&out);
+    assert!(
+        took >= Duration::from_millis(1500) && took < Duration::from_secs(15),
+        "protected push took {took:?}\n{said}"
+    );
+    assert!(
+        !out.status.success(),
+        "a stalled tracker let the protected push through\n{said}"
+    );
+    assert!(
+        said.contains("the tracker was slow, so retry the push"),
+        "protected push\n{said}"
+    );
+    assert!(!said.contains("settled consensus"), "{said}");
+    assert!(!said.contains("model families"), "{said}");
+    assert!(
+        !marker.exists(),
+        "the protected push reached a consensus check"
+    );
+    let topic = "aaaa bbbb refs/heads/topic refs/heads/topic\n";
+    let (out, took) = run(topic);
+    let said = text_of(&out);
+    assert!(
+        took >= Duration::from_millis(1500) && took < Duration::from_secs(15),
+        "ordinary push took {took:?}\n{said}"
+    );
+    assert!(out.status.success(), "ordinary push was refused\n{said}");
+    assert!(
+        said.contains("the tracker or lock was slow"),
+        "ordinary push\n{said}"
+    );
+    assert!(
+        said.contains(&format!("sitting {ISSUE}")),
+        "the slow check did not name the sitting\n{said}"
+    );
+    assert!(!said.contains("retry the push"), "{said}");
+    assert!(
+        !marker.exists(),
+        "the ordinary push reached a consensus check"
+    );
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+}
+
 /// One push check returns while the adopt lock is held and the tracker
 /// program does not answer. The push continues, and the message names
 /// the sitting.

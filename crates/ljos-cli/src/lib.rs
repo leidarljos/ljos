@@ -30460,15 +30460,18 @@ pub fn live_held_issue() -> Option<(String, Hold)> {
 const PUSH_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// How long a pre-push check waits for the tracker program. About two
-/// seconds, the same kind of bound as [`GUARD_TIMEOUT`]. A miss does not
-/// refuse the push.
+/// seconds, the same kind of bound as [`GUARD_TIMEOUT`]. A miss refuses
+/// a protected push. Any other push continues.
 const PUSH_TRACKER_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 const PUSH_SLOW_LINE: &str = "the tracker or lock was slow";
 
+const PUSH_TRACKER_SLOW_LINE: &str = "the tracker was slow, so retry the push";
+
 std::thread_local! {
     static PUSH_CHECK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static PUSH_SLOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static PUSH_TRACKER_SLOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Mark this thread as a pre-push sitting check until dropped.
@@ -30478,6 +30481,7 @@ impl PushCheck {
     pub(crate) fn enter() -> Self {
         PUSH_CHECK.with(|on| on.set(true));
         PUSH_SLOW.with(|slow| slow.set(false));
+        PUSH_TRACKER_SLOW.with(|slow| slow.set(false));
         Self
     }
 }
@@ -30486,6 +30490,7 @@ impl Drop for PushCheck {
     fn drop(&mut self) {
         PUSH_CHECK.with(|on| on.set(false));
         PUSH_SLOW.with(|slow| slow.set(false));
+        PUSH_TRACKER_SLOW.with(|slow| slow.set(false));
     }
 }
 
@@ -30499,16 +30504,33 @@ fn note_push_slow() {
     }
 }
 
+fn note_push_tracker_slow() {
+    note_push_slow();
+    if in_push_check() {
+        PUSH_TRACKER_SLOW.with(|slow| slow.set(true));
+    }
+}
+
 /// Whether the adopt lock or the tracker missed its bound on this
-/// pre-push check. The push is not refused for that.
+/// pre-push check. Bookkeeping is skipped either way.
 pub(crate) fn push_slow() -> bool {
     PUSH_SLOW.with(|slow| slow.get())
+}
+
+/// Whether the tracker read missed its bound on this pre-push check.
+pub(crate) fn push_tracker_slow() -> bool {
+    PUSH_TRACKER_SLOW.with(|slow| slow.get())
 }
 
 /// The one line a pre-push check prints when the tracker or the lock
 /// was slow.
 pub(crate) fn push_slow_line() -> &'static str {
     PUSH_SLOW_LINE
+}
+
+/// Why a protected push stops when the tracker read missed its bound.
+pub(crate) fn push_tracker_slow_line() -> &'static str {
+    PUSH_TRACKER_SLOW_LINE
 }
 
 /// Adopt a live bare-seat hold record for this conversation when the
@@ -30818,7 +30840,7 @@ fn issue_record_afresh(issue: &str) -> Result<Value> {
     let said = run_captured_within("vissue", &["show", issue, "--json"], None, deadline)
         .inspect_err(|err| {
             if in_push_check() && capture_timed_out(err) {
-                note_push_slow();
+                note_push_tracker_slow();
             }
         })?;
     serde_json::from_str(&said.stdout).context("vissue show --json")
