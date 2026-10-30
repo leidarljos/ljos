@@ -1233,3 +1233,154 @@ fn a_pre_push_line_that_is_not_a_ref_is_refused() {
     assert!(!out.status.success(), "{text}");
     assert!(text.contains("cannot read"), "{text}");
 }
+
+/// A hooks directory with a commit-msg hook this install did not write
+/// is unset, and doctor reports it as not ok.
+#[test]
+fn cloud_up_drops_a_foreign_commit_hook_directory() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, xdg) = seat_env(root.path());
+    clear_ids();
+    let (_origin, repo) = bare_repo(root.path(), "seat");
+    let foreign = root.path().join("agent-hooks");
+    fs::create_dir_all(&foreign).unwrap();
+    executable(
+        &foreign.join("commit-msg"),
+        "#!/bin/sh\nprintf '\\nCo-authored-by: Ada <ada@example.com>\\n' >> \"$1\"\n",
+    );
+    executable(&foreign.join("prepare-commit-msg"), "#!/bin/sh\nexit 0\n");
+    executable(&foreign.join("pre-push"), "#!/bin/sh\nexit 0\n");
+    git(
+        &repo,
+        &["config", "core.hooksPath", foreign.to_str().unwrap()],
+    );
+    git(
+        &repo,
+        &[
+            "config",
+            "--global",
+            "core.hooksPath",
+            foreign.to_str().unwrap(),
+        ],
+    );
+
+    std::env::set_current_dir(&repo).unwrap();
+    ljos_cli::cloud::up(false).unwrap();
+    std::env::set_current_dir(root.path()).unwrap();
+
+    let local = git(&repo, &["config", "--local", "--get", "core.hooksPath"]);
+    let ours = xdg.join("ljos/hooks");
+    assert_eq!(local.trim(), ours.to_str().unwrap(), "{local}");
+    let global = Command::new("git")
+        .args(["config", "--global", "--get", "core.hooksPath"])
+        .output()
+        .unwrap();
+    assert!(
+        !global.status.success(),
+        "global hooksPath still set: {}",
+        text_of(&global)
+    );
+    let pre = fs::read_to_string(foreign.join("pre-push")).unwrap();
+    assert!(!pre.contains("ljos-cloud-chain"), "{pre}");
+    assert_eq!(pre, "#!/bin/sh\nexit 0\n");
+    let row = ljos_cli::cloud::guard_row();
+    assert!(row.ok, "{row:?}");
+
+    git(
+        &repo,
+        &["config", "core.hooksPath", foreign.to_str().unwrap()],
+    );
+    let bad = ljos_cli::cloud::guard_row();
+    assert!(!bad.ok, "{bad:?}");
+    assert!(bad.state.contains("did not write"), "{bad:?}");
+}
+
+fn whole_stub(name: &str) -> String {
+    format!("#!/bin/sh\n# ljos:begin git-hook\nljos git-hook {name} \"$@\"\n# ljos:end git-hook\n")
+}
+
+/// A foreign local hooks path does not unset a global path that names
+/// a directory of whole ljos stubs.
+#[test]
+fn cloud_up_keeps_a_global_stub_directory() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, xdg) = seat_env(root.path());
+    clear_ids();
+    let (_origin, repo) = bare_repo(root.path(), "seat");
+    let stubs = root.path().join("ljos-stubs");
+    fs::create_dir_all(&stubs).unwrap();
+    let commit_msg = whole_stub("commit-msg");
+    let prepare = whole_stub("prepare-commit-msg");
+    fs::write(stubs.join("commit-msg"), &commit_msg).unwrap();
+    fs::write(stubs.join("prepare-commit-msg"), &prepare).unwrap();
+    let foreign = root.path().join("agent-hooks");
+    fs::create_dir_all(&foreign).unwrap();
+    executable(
+        &foreign.join("commit-msg"),
+        "#!/bin/sh\nprintf '\\nCo-authored-by: Ada <ada@example.com>\\n' >> \"$1\"\n",
+    );
+    executable(&foreign.join("pre-push"), "#!/bin/sh\nexit 0\n");
+    git(
+        &repo,
+        &["config", "core.hooksPath", foreign.to_str().unwrap()],
+    );
+    git(
+        &repo,
+        &[
+            "config",
+            "--global",
+            "core.hooksPath",
+            stubs.to_str().unwrap(),
+        ],
+    );
+    std::env::set_current_dir(&repo).unwrap();
+    ljos_cli::cloud::up(false).unwrap();
+    std::env::set_current_dir(root.path()).unwrap();
+    let local = git(&repo, &["config", "--local", "--get", "core.hooksPath"]);
+    assert_eq!(local.trim(), xdg.join("ljos/hooks").to_str().unwrap());
+    let global = git(&repo, &["config", "--global", "--get", "core.hooksPath"]);
+    assert_eq!(global.trim(), stubs.to_str().unwrap());
+    assert_eq!(
+        fs::read_to_string(foreign.join("pre-push")).unwrap(),
+        "#!/bin/sh\nexit 0\n"
+    );
+    assert_eq!(
+        fs::read_to_string(stubs.join("commit-msg")).unwrap(),
+        commit_msg
+    );
+}
+
+/// A commit-msg hook with lines outside the ljos block is foreign.
+/// cloud up does not rewrite that file.
+#[test]
+fn cloud_up_treats_a_stub_with_foreign_lines_as_foreign() {
+    let _g = Guard::new();
+    let root = tempfile::tempdir().unwrap();
+    let (_home, xdg) = seat_env(root.path());
+    clear_ids();
+    let (_origin, repo) = bare_repo(root.path(), "seat");
+    let mixed = root.path().join("mixed-hooks");
+    fs::create_dir_all(&mixed).unwrap();
+    let body = "#!/bin/sh\necho mine\n# ljos:begin git-hook\nljos git-hook commit-msg \"$@\"\n# ljos:end git-hook\n";
+    fs::write(mixed.join("commit-msg"), body).unwrap();
+    executable(&mixed.join("pre-push"), "#!/bin/sh\nexit 0\n");
+    git(
+        &repo,
+        &["config", "core.hooksPath", mixed.to_str().unwrap()],
+    );
+    std::env::set_current_dir(&repo).unwrap();
+    ljos_cli::cloud::up(false).unwrap();
+    std::env::set_current_dir(root.path()).unwrap();
+    let local = git(&repo, &["config", "--local", "--get", "core.hooksPath"]);
+    assert_eq!(local.trim(), xdg.join("ljos/hooks").to_str().unwrap());
+    assert_eq!(fs::read_to_string(mixed.join("commit-msg")).unwrap(), body);
+    assert_eq!(
+        fs::read_to_string(mixed.join("pre-push")).unwrap(),
+        "#!/bin/sh\nexit 0\n"
+    );
+    assert!(!fs::read_to_string(mixed.join("pre-push"))
+        .unwrap()
+        .contains("ljos-cloud-chain"));
+}

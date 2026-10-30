@@ -10,7 +10,12 @@
 //!
 //! The hook reads the allowlist next to its own directory. The pusher's
 //! environment does not choose that path. `cloud up` records the seat
-//! repository once and leaves it there.
+//! repository once and leaves it there. A commit whose message has a
+//! by-trailer, a made-with line, or a generated line is refused, and so
+//! is a push whose commits cannot be read. A directory that has a
+//! commit-msg or prepare-commit-msg hook this install did not write is
+//! not chained: that path is unset, and the repository points at the
+//! installed hook directory.
 
 use anyhow::{bail, Context, Result};
 use std::fs;
@@ -281,25 +286,47 @@ fn write_executable(path: &Path, body: &str) -> Result<()> {
 }
 
 fn point_hooks(our_dir: &Path, seat: Option<&Path>) -> Result<()> {
+    let local_dir =
+        seat.and_then(|seat| local_hooks_path(seat).map(|value| resolve_hooks_value(&value, seat)));
+    let global_dir = global_hooks_path().ok().map(PathBuf::from);
+    let local_foreign = local_dir
+        .as_ref()
+        .is_some_and(|dir| hook_dir_is_foreign(dir, our_dir));
+    let global_foreign = global_dir
+        .as_ref()
+        .is_some_and(|dir| hook_dir_is_foreign(dir, our_dir));
+    if local_foreign || global_foreign {
+        return reclaim_foreign_hooks(
+            our_dir,
+            seat,
+            local_foreign,
+            global_foreign,
+            local_dir.is_none(),
+        );
+    }
     if let Some(seat) = seat {
-        if let Some(local) = local_hooks_path(seat) {
-            let local_path = resolve_hooks_value(&local, seat);
+        if let Some(local_path) = local_dir {
             if paths_same(&local_path, our_dir) {
                 return Ok(());
             }
             if local_path.is_dir() {
-                chain_into(&local_path, our_dir)?;
-                return Ok(());
+                if may_rewrite_hooks(&local_path, our_dir) {
+                    chain_into(&local_path, our_dir)?;
+                    return Ok(());
+                }
+                return set_local(seat, our_dir);
             }
         }
-        if let Ok(global) = global_hooks_path() {
-            let global_path = PathBuf::from(&global);
+        if let Some(global_path) = global_dir {
             if paths_same(&global_path, our_dir) {
                 return set_local(seat, our_dir);
             }
             if global_path.is_dir() {
-                chain_into(&global_path, our_dir)?;
-                return set_local(seat, &global_path);
+                if may_rewrite_hooks(&global_path, our_dir) {
+                    chain_into(&global_path, our_dir)?;
+                    return set_local(seat, &global_path);
+                }
+                return set_local(seat, our_dir);
             }
         }
         set_local(seat, our_dir)?;
@@ -314,19 +341,179 @@ fn point_hooks(our_dir: &Path, seat: Option<&Path>) -> Result<()> {
         }
         return Ok(());
     }
-    match global_hooks_path() {
-        Ok(value) => {
-            let path = PathBuf::from(&value);
+    match global_dir {
+        Some(path) => {
             if paths_same(&path, our_dir) {
                 return Ok(());
             }
             if path.is_dir() {
-                return chain_into(&path, our_dir);
+                if may_rewrite_hooks(&path, our_dir) {
+                    return chain_into(&path, our_dir);
+                }
+                return set_global(our_dir);
             }
             set_global(our_dir)
         }
-        Err(_) => set_global(our_dir),
+        None => set_global(our_dir),
     }
+}
+
+/// A commit-msg or prepare-commit-msg hook in `dir` that this install
+/// did not write. A missing file is not one. A file that cannot be
+/// read counts, so an unreadable hook is not chained.
+fn foreign_message_hooks(dir: &Path) -> bool {
+    ["commit-msg", "prepare-commit-msg"].iter().any(|name| {
+        let path = dir.join(name);
+        path.is_file() && !ljos_owns_file(&path)
+    })
+}
+
+fn ljos_owns_file(path: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    text.as_bytes() == HOOK_SCRIPT.as_bytes() || whole_stub(&text) || whole_chain(&text)
+}
+
+fn whole_stub(text: &str) -> bool {
+    let mut lines: Vec<&str> = text.lines().collect();
+    if lines.first().is_some_and(|line| line.starts_with("#!")) {
+        lines.remove(0);
+    }
+    while lines.first().is_some_and(|line| line.trim().is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    let Some(first) = lines.first() else {
+        return false;
+    };
+    let Some(last) = lines.last() else {
+        return false;
+    };
+    first.starts_with("# ljos:begin git-hook")
+        && last.starts_with("# ljos:end git-hook")
+        && lines
+            .iter()
+            .filter(|line| line.starts_with("# ljos:begin git-hook"))
+            .count()
+            == 1
+        && lines
+            .iter()
+            .filter(|line| line.starts_with("# ljos:end git-hook"))
+            .count()
+            == 1
+}
+
+fn whole_chain(text: &str) -> bool {
+    let mut lines: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if lines.first().is_some_and(|line| line.starts_with("#!")) {
+        lines.remove(0);
+    }
+    let Some(first) = lines.first() else {
+        return false;
+    };
+    if !first.starts_with("# ljos-cloud-chain ") {
+        return false;
+    }
+    lines.iter().all(|line| {
+        let line = line.trim();
+        line.starts_with("# ljos-cloud-chain ")
+            || line.starts_with("PATH=")
+            || line == "export PATH"
+            || line == "unset IFS"
+            || line == "set -eu"
+            || line.starts_with("prev=")
+            || line.starts_with("canon=")
+            || line.starts_with("tmp=")
+            || line.starts_with("trap ")
+            || line.starts_with("/bin/cat ")
+            || line.starts_with("\"$prev\"")
+            || line.starts_with("\"$canon\"")
+    })
+}
+
+fn hook_dir_is_protected(dir: &Path, our_dir: &Path) -> bool {
+    paths_same(dir, our_dir) || paths_same(dir, &crate::git_hooks::onboard_hooks_dir())
+}
+
+fn hook_dir_is_foreign(dir: &Path, our_dir: &Path) -> bool {
+    !hook_dir_is_protected(dir, our_dir) && foreign_message_hooks(dir)
+}
+
+fn ljos_owned_message_dir(dir: &Path) -> bool {
+    ["commit-msg", "prepare-commit-msg"].iter().any(|name| {
+        let path = dir.join(name);
+        path.is_file() && ljos_owns_file(&path)
+    })
+}
+
+fn may_rewrite_hooks(dir: &Path, our_dir: &Path) -> bool {
+    !hook_dir_is_protected(dir, our_dir) && !ljos_owned_message_dir(dir)
+}
+
+/// Unset only a level whose directory is foreign. A path that names
+/// this install's own hooks is left in place, and no file in a hooks
+/// directory is written.
+fn reclaim_foreign_hooks(
+    our_dir: &Path,
+    seat: Option<&Path>,
+    local_foreign: bool,
+    global_foreign: bool,
+    local_unset: bool,
+) -> Result<()> {
+    if local_foreign {
+        if let Some(seat) = seat {
+            unset_local(seat)?;
+        }
+    }
+    if global_foreign {
+        unset_global()?;
+    }
+    if let Some(seat) = seat {
+        if local_foreign || local_unset {
+            set_local(seat, our_dir)?;
+        }
+    } else if global_foreign {
+        set_global(our_dir)?;
+    }
+    Ok(())
+}
+
+fn unset_local(seat: &Path) -> Result<()> {
+    let seat_s = seat.display().to_string();
+    config_optional(&[
+        "-C",
+        &seat_s,
+        "config",
+        "--local",
+        "--unset-all",
+        "core.hooksPath",
+    ])
+}
+
+fn unset_global() -> Result<()> {
+    config_optional(&["config", "--global", "--unset-all", "core.hooksPath"])
+}
+
+/// `Ok` when the key was unset or was not set. Exit 5 is the missing key.
+fn config_optional(args: &[&str]) -> Result<()> {
+    let out = crate::git_cmd()
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .context("git config core.hooksPath")?;
+    if out.status.success() || out.status.code() == Some(5) {
+        return Ok(());
+    }
+    bail!(
+        "git config core.hooksPath: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
 }
 
 fn set_global(dir: &Path) -> Result<()> {
@@ -556,6 +743,12 @@ pub(crate) fn hook_line() -> std::result::Result<String, String> {
 fn effective_hook_ok(our_dir: &Path) -> std::result::Result<(), String> {
     let (value, base) = effective_hooks_value()?;
     let resolved = resolve_hooks_value(&value, &base);
+    if foreign_message_hooks(&resolved) {
+        return Err(format!(
+            "pre-push hook not named by core.hooksPath ({value}); \
+             that directory has a commit hook this install did not write"
+        ));
+    }
     if paths_same(&resolved, our_dir) {
         return Ok(());
     }
