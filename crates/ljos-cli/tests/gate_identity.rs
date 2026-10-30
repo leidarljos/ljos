@@ -1018,24 +1018,26 @@ fn a_processs_own_env_does_not_outrank_its_shells_stamp() {
         "env -u CURSOR_CONVERSATION_ID".to_string(),
         "CURSOR_CONVERSATION_ID=sand-subagent-0009zzzz".to_string(),
     ] {
-        let said = text_of(&home.sh(&z, &format!("{forge} \"$LJOS\" doctor --all")));
+        // `; exit $?` keeps Z's shell alive under the forged call and passes
+        // its status through. Where /bin/sh is bash, `sh -c 'CMD'` execs a
+        // lone simple command in place, so no process would hold Z's id and
+        // the scenario (a forged id beside a shell that carries the real
+        // one) would not exist. dash forks either way; the trailing builtin
+        // makes every sh behave the same.
+        let kept = |cmd: &str| format!("{forge} {cmd}; exit $?");
+        let said = text_of(&home.sh(&z, &kept("\"$LJOS\" doctor --all")));
         sits_nowhere(&said, &format!("Z's doctor with {forge}"));
         let said = text_of(&home.sh(
             &z,
-            &format!("{forge} \"$LJOS\" policy -- git merge --ff-only FETCH_HEAD"),
+            &kept("\"$LJOS\" policy -- git merge --ff-only FETCH_HEAD"),
         ));
         assert!(
             !said.contains("deny: sitting-gate"),
             "Z's policy with {forge}:\n{said}"
         );
-        // `; exit $?` keeps Z's shell alive under ljos. Where /bin/sh is
-        // bash, `sh -c 'CMD'` execs a lone simple command in place, so no
-        // process would hold Z's id and the scenario (a forged id beside a
-        // shell that carries the real one) would not exist. dash forks
-        // either way; the trailing builtin makes every sh behave the same.
-        let said = text_of(&home.sh(&z, &format!("{forge} \"$LJOS\" seat; exit $?")));
+        let said = text_of(&home.sh(&z, &kept("\"$LJOS\" seat")));
         assert_eq!(seat_holder(&said), holder(CONV_Z), "Z's seat with {forge}");
-        let out = home.sh(&z, &format!("{forge} {commit}"));
+        let out = home.sh(&z, &kept(&commit));
         assert!(
             out.status.success() || !text_of(&out).contains("sitting-gate"),
             "Z's commit with {forge} was refused for lack of a sitting:\n{}",
