@@ -3695,8 +3695,17 @@ struct ArchiveMember {
 /// Members of one encoder archive. A listing tar will not parse is refused,
 /// so a hostile header cannot be unpacked on the strength of a later stat.
 fn refuse_unsafe_archive(file: &Path) -> Result<()> {
-    let out = Command::new("tar")
-        .args(["--full-time", "--quoting-style=shell-always", "-tvzf"])
+    // GNU tar quotes each name, so a name may hold a newline. bsdtar, the
+    // tar macOS ships, has no quoting style; it escapes control bytes
+    // instead, so one member is one line.
+    let bsd = tar_is_bsdtar();
+    let mut cmd = Command::new("tar");
+    if bsd {
+        cmd.arg("-tvzf");
+    } else {
+        cmd.args(["--full-time", "--quoting-style=shell-always", "-tvzf"]);
+    }
+    let out = cmd
         .arg(file)
         .stdin(std::process::Stdio::null())
         .env("LC_ALL", "C")
@@ -3709,7 +3718,12 @@ fn refuse_unsafe_archive(file: &Path) -> Result<()> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    let members = match parse_tar_listing(&out.stdout) {
+    let parsed = if bsd {
+        parse_bsdtar_listing(&out.stdout)
+    } else {
+        parse_tar_listing(&out.stdout)
+    };
+    let members = match parsed {
         Ok(members) => members,
         Err(err) => bail!("tar {}: {err}; nothing was installed", file.display()),
     };
@@ -3758,6 +3772,63 @@ fn archive_member_path_ok(name: &[u8]) -> bool {
     }
     path.components()
         .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
+/// Whether `tar` on the PATH is bsdtar (libarchive), which takes neither
+/// `--full-time` nor `--quoting-style`.
+fn tar_is_bsdtar() -> bool {
+    Command::new("tar")
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("bsdtar"))
+}
+
+/// bsdtar's `tar -tv`: mode, links, owner, group, size, three date
+/// fields, then the name, one member per line. A symlink's line ends
+/// ` -> TARGET` and a hard link's ` link to TARGET`; those members are
+/// refused by kind, so the name is cut there.
+fn parse_bsdtar_listing(bytes: &[u8]) -> Result<Vec<ArchiveMember>> {
+    let mut members = Vec::new();
+    for line in bytes.split(|b| *b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let kind = line[0];
+        let mut rest = line;
+        for _ in 0..8 {
+            let start = rest
+                .iter()
+                .position(|b| *b != b' ')
+                .context("short tar member line")?;
+            rest = &rest[start..];
+            let end = rest
+                .iter()
+                .position(|b| *b == b' ')
+                .context("short tar member line")?;
+            rest = &rest[end..];
+        }
+        let start = rest
+            .iter()
+            .position(|b| *b != b' ')
+            .context("tar member has no name")?;
+        let mut name = &rest[start..];
+        let cut = match kind {
+            b'l' => Some(b" -> ".as_slice()),
+            b'h' => Some(b" link to ".as_slice()),
+            _ => None,
+        };
+        if let Some(sep) = cut {
+            if let Some(at) = name.windows(sep.len()).position(|w| w == sep) {
+                name = &name[..at];
+            }
+        }
+        members.push(ArchiveMember {
+            kind,
+            name: name.to_vec(),
+        });
+    }
+    Ok(members)
 }
 
 /// `tar -tv` with `--quoting-style=shell-always`. Names may contain
@@ -3870,7 +3941,9 @@ fn regular_file(path: &Path) -> bool {
 
 #[cfg(all(test, unix))]
 mod archive_member_tests {
-    use super::{archive_member_path_ok, parse_tar_listing, refuse_unsafe_archive};
+    use super::{
+        archive_member_path_ok, parse_bsdtar_listing, parse_tar_listing, refuse_unsafe_archive,
+    };
 
     #[test]
     fn shell_quotes_and_escaping_paths_parse() {
@@ -3902,6 +3975,29 @@ mod archive_member_tests {
             b"lib/onnxruntime/libonnxruntime.so.1"
         ));
         assert!(archive_member_path_ok(b"lib/"));
+    }
+
+    #[test]
+    fn a_bsdtar_listing_names_each_member_and_its_kind() {
+        let listing = b"drwxr-xr-x  0 runner staff       0 Oct 29 22:00 bin/\n\
+-rwxr-xr-x  0 runner staff    1024 Oct 29 22:00 bin/a file\n\
+lrwxr-xr-x  0 runner staff       0 Oct 29 22:00 bin/packset-embed -> /etc/passwd\n\
+hrwxr-xr-x  0 runner staff       0 Oct 29 22:00 bin/b link to bin/a file\n";
+        let members = parse_bsdtar_listing(listing).unwrap();
+        let got: Vec<(u8, &[u8])> = members
+            .iter()
+            .map(|m| (m.kind, m.name.as_slice()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (b'd', b"bin/".as_slice()),
+                (b'-', b"bin/a file".as_slice()),
+                (b'l', b"bin/packset-embed".as_slice()),
+                (b'h', b"bin/b".as_slice()),
+            ]
+        );
+        assert!(parse_bsdtar_listing(b"-rw-r--r-- 0 a b 1 Oct\n").is_err());
     }
 
     #[test]

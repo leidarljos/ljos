@@ -1,0 +1,1 @@
+The encoder archive check reads a bsdtar listing, so `ljos cloud` no longer refuses every archive on macOS because its tar takes neither `--full-time` nor `--quoting-style`. Symlink and hard link members are still refused.
