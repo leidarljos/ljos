@@ -680,6 +680,88 @@ fn a_commit_check_finishes_with_a_stuck_lock_and_a_slow_vissue() {
     eprintln!("commit check hook {hook_took:?} pre-commit {pre_took:?}");
 }
 
+/// One push check returns while the adopt lock is held and the tracker
+/// program does not answer. The check refuses instead of waiting them out.
+#[test]
+fn a_push_check_finishes_with_a_stuck_lock_and_a_slow_vissue() {
+    use std::os::unix::io::AsRawFd;
+    use std::time::{Duration, Instant};
+    let seat = Seat::new();
+    let share = seat.home.join(".local/share");
+    let guard = share.join("ljos/guard-bin");
+    std::fs::create_dir_all(&guard).unwrap();
+    script(&guard.join("git"), "#!/bin/sh\nsleep 30\nexit 0\n");
+    script(
+        &seat.bin.join("vissue"),
+        "#!/bin/sh\nsleep 30\nprintf '%s\\n' '{\"id\":\"proj-gate\",\"state\":\"STARTED\",\"claimed_by\":\"inky\"}'\n",
+    );
+    let runtime = seat.run.join("ljos");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(runtime.join("hold-adopt.lock"))
+        .unwrap();
+    assert_eq!(
+        unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) },
+        0
+    );
+    let fake = seat.bin.join("ljos-mcp");
+    std::os::unix::fs::symlink("/bin/sleep", &fake).unwrap();
+    let mut sleeper = Command::new(&fake)
+        .arg("300")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let bare = ljos_cli::work_id(&format!("inky:{ISSUE}"));
+    std::fs::write(
+        runtime.join(format!("hold-{bare}")),
+        format!(
+            "inky\ninky\n{}\nljos-mcp\n2026-10-25T00:00:00Z\n{ISSUE}\n-\n",
+            sleeper.id()
+        ),
+    )
+    .unwrap();
+    let path = format!("{}:{}:/usr/bin:/bin", guard.display(), seat.bin.display());
+    let mut cmd = seat.command(env!("CARGO_BIN_EXE_ljos"), &["git-hook", "pre-push"]);
+    cmd.env("PATH", &path)
+        .env("XDG_DATA_HOME", &share)
+        .env("CURSOR_CONVERSATION_ID", SESSION)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = cmd.spawn().unwrap();
+    let pid = child.id();
+    let started = Instant::now();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    let out = rx.recv_timeout(Duration::from_secs(3)).unwrap_or_else(|_| {
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        panic!("push check hung");
+    });
+    let out = out.unwrap();
+    let took = started.elapsed();
+    let said = text_of(&out);
+    assert!(
+        !out.status.success(),
+        "push check was allowed after {took:?}\n{said}"
+    );
+    assert!(
+        said.contains("this push is refused"),
+        "push check after {took:?}\n{said}"
+    );
+    assert!(
+        took < Duration::from_secs(2),
+        "push check took {took:?}\n{said}"
+    );
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+    drop(lock_file);
+    eprintln!("push check {took:?}");
+}
+
 #[test]
 fn the_person_at_a_terminal_is_not_refused() {
     let seat = Seat::new();

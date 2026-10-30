@@ -30114,6 +30114,58 @@ pub fn live_held_issue() -> Option<(String, Hold)> {
     live_held_issues().into_iter().next()
 }
 
+/// How long one step of a pre-push sitting check waits. The adopt lock
+/// and the tracker program each get this. A stuck tracker or a lock
+/// that is still taken then refuses the push.
+const PUSH_STEP: std::time::Duration = std::time::Duration::from_millis(400);
+
+const PUSH_TRACKER: &str = "the tracker did not answer, so this push is refused";
+const PUSH_LOCK: &str = "the sitting lock is held, so this push is refused";
+
+std::thread_local! {
+    static PUSH_CHECK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static PUSH_BLOCK: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+/// Mark this thread as a pre-push sitting check until dropped.
+pub(crate) struct PushCheck;
+
+impl PushCheck {
+    pub(crate) fn enter() -> Self {
+        PUSH_CHECK.with(|on| on.set(true));
+        PUSH_BLOCK.with(|why| why.set(None));
+        Self
+    }
+}
+
+impl Drop for PushCheck {
+    fn drop(&mut self) {
+        PUSH_CHECK.with(|on| on.set(false));
+        PUSH_BLOCK.with(|why| why.set(None));
+    }
+}
+
+fn in_push_check() -> bool {
+    PUSH_CHECK.with(|on| on.get())
+}
+
+fn block_push(why: &'static str) {
+    if !in_push_check() {
+        return;
+    }
+    PUSH_BLOCK.with(|slot| {
+        if slot.get().is_none() {
+            slot.set(Some(why));
+        }
+    });
+}
+
+/// The refusal a pre-push check recorded, when the lock or the tracker
+/// did not finish inside [`PUSH_STEP`].
+pub(crate) fn push_block() -> Option<&'static str> {
+    PUSH_BLOCK.with(|slot| slot.get())
+}
+
 /// Adopt a live bare-seat hold record for this conversation when the
 /// tracker has the ticket open under the bare seat. A bare-seat record
 /// can be adopted when `holder_from_bare_session_record` names this
@@ -30121,8 +30173,12 @@ pub fn live_held_issue() -> Option<(String, Hold)> {
 /// record was written by `ljos-mcp` and `first-hook-conv` was not yet
 /// set. The transition from `seat` to `own` is made once under an
 /// exclusive lock by rewriting the record in place and also writing the
-/// conversation-scoped record.
+/// conversation-scoped record. On a pre-push check the lock and the
+/// tracker read are bounded, and a miss refuses the push.
 fn adopt_bare_seat_hold(dir: &Path, seat: &str, own: &str, graph: &str) {
+    if push_block().is_some() {
+        return;
+    }
     let Some((node, hold)) =
         newest_record_in(&[seat.to_string()], dir, &[], seat, graph, &hold_alive)
     else {
@@ -30147,8 +30203,18 @@ fn adopt_bare_seat_hold(dir: &Path, seat: &str, own: &str, graph: &str) {
     else {
         return;
     };
-    let Ok(card) = issue_record(&node) else {
-        return;
+    let card = match issue_record(&node) {
+        Ok(card) => card,
+        // The tracker bound already fired. Wait the lock bound too, so a
+        // held lock cannot remain unbounded on this path.
+        Err(_) if push_block().is_some() => {
+            let lock_path = dir.join("hold-adopt.lock");
+            if CommitLock::acquire_by(&lock_path, std::time::Instant::now() + PUSH_STEP).is_none() {
+                block_push(PUSH_LOCK);
+            }
+            return;
+        }
+        Err(_) => return,
     };
     let state = card["state"].as_str().unwrap_or("").trim();
     if state.is_empty() || matches!(state, "DONE" | "CANCELLED") {
@@ -30158,7 +30224,18 @@ fn adopt_bare_seat_hold(dir: &Path, seat: &str, own: &str, graph: &str) {
     if holder_parts(by).1.is_some() || !same_seat_here(by, seat) {
         return;
     }
-    let _lock = CommitLock::acquire(&dir.join("hold-adopt.lock"));
+    let lock_path = dir.join("hold-adopt.lock");
+    let _lock = if in_push_check() {
+        match CommitLock::acquire_by(&lock_path, std::time::Instant::now() + PUSH_STEP) {
+            Some(lock) => lock,
+            None => {
+                block_push(PUSH_LOCK);
+                return;
+            }
+        }
+    } else {
+        CommitLock::acquire(&lock_path)
+    };
     let Ok(meta) = std::fs::metadata(&bare_path) else {
         return;
     };
@@ -30362,7 +30439,17 @@ pub fn issue_record(issue: &str) -> Result<Value> {
             return Ok(v);
         }
     }
-    let said = run_captured("vissue", &["show", issue, "--json"])?;
+    let deadline = if in_push_check() {
+        PUSH_STEP
+    } else {
+        CAPTURE_DEADLINE
+    };
+    let said = run_captured_within("vissue", &["show", issue, "--json"], None, deadline)
+        .inspect_err(|err| {
+            if in_push_check() && capture_timed_out(err) {
+                block_push(PUSH_TRACKER);
+            }
+        })?;
     serde_json::from_str(&said.stdout).context("vissue show --json")
 }
 
@@ -36623,6 +36710,19 @@ fn output_within(
     })
 }
 
+/// Stop `child`. When `group` is set, also signal the process group the
+/// child leads, so a grandchild cannot keep a pipe open.
+fn stop_captured(child: &mut std::process::Child, group: bool) {
+    if group {
+        let pid = child.id() as i32;
+        // SAFETY: `pid` is the child's process group, started above with
+        // `process_group(0)`. The signal does not go to this process.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// [`run_captured_as`] that stops the child at `deadline`. Stdout and
 /// stderr are drained while it runs, so a full pipe cannot stall it
 /// past the wait.
@@ -36647,6 +36747,13 @@ fn run_captured_within(
         cmd.arg(a.as_ref());
     }
     git_hooks::hook_child_env(&mut cmd);
+    // A pre-push check kills the whole group. A shell that sleeps in a
+    // child would otherwise keep the pipe open after the shell is gone.
+    let group = in_push_check();
+    if group {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -36684,16 +36791,14 @@ fn run_captured_within(
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
+                stop_captured(&mut child, group);
                 let _ = out_task.join();
                 let _ = err_task.join();
                 bail!("{bin} did not answer in time");
             }
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
             Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                stop_captured(&mut child, group);
                 let _ = out_task.join();
                 let _ = err_task.join();
                 bail!("{bin}: {e}");

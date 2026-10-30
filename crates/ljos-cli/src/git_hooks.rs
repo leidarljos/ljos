@@ -901,10 +901,15 @@ fn gate_runner(name: &str) -> Result<()> {
     // to the process match.
     let seat = crate::git_hook_seat();
     let _actor = seat.as_deref().map(crate::HookActor::enter);
+    let _push = crate::PushCheck::enter();
     let issue = match crate::sitting_gate::live_sitting() {
         Ok(issue) => issue,
+        Err(_) if crate::push_block().is_some() => String::new(),
         Err(_) => crate::sitting_gate::open_or_name_sitting().unwrap_or_default(),
     };
+    if let Some(why) = crate::push_block() {
+        return Err(anyhow!("sitting-gate: {why}"));
+    }
     let cfg = match crate::gates::consensus_push(repo.as_deref()) {
         Ok(cfg) => cfg,
         Err(why) => {
