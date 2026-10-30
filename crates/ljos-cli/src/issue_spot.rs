@@ -418,17 +418,47 @@ fn tracker_recs(spot: &Spot) -> Option<Arc<Vec<IssueRec>>> {
     Some(recs)
 }
 
+/// Whether the `vissue` on `PATH` is a compiled executable. Only the
+/// tracker's own binary reads the files the way this process does; a
+/// script by that name (a wrapper, or a stand-in in a test) answers
+/// however it was written to, so it is asked.
+fn tracker_is_executable() -> bool {
+    use std::io::Read as _;
+    let Ok(path) = which::which("vissue") else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    if std::fs::File::open(&path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .is_err()
+    {
+        return false;
+    }
+    matches!(
+        magic,
+        [0x7f, b'E', b'L', b'F']
+            | [0xcf, 0xfa, 0xed, 0xfe]
+            | [0xce, 0xfa, 0xed, 0xfe]
+            | [0xca, 0xfe, 0xba, 0xbe]
+            | [b'M', b'Z', _, _]
+    )
+}
+
 /// What `vissue vote ID --json` and `vissue children ID --json` print,
 /// answered in this process from the layout [`find`] reaches `ID` in. A
 /// gate and a consensus ask these about many issues, and each `vissue`
 /// process pays its own start and its own walk. `None` for any other
-/// command line and for an id [`find`] does not reach; the caller then
-/// asks the tracker.
+/// command line, for an id [`find`] does not reach, and when the `vissue`
+/// on `PATH` is a script rather than the tracker's executable; the caller
+/// then asks that `vissue`.
 #[must_use]
 pub fn answer(args: &[&str]) -> Option<String> {
     let [verb, id, "--json"] = args else {
         return None;
     };
+    if !matches!(*verb, "vote" | "children") || !tracker_is_executable() {
+        return None;
+    }
     match *verb {
         "vote" => {
             let spot = find(id)?;
