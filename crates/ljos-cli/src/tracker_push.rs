@@ -2232,11 +2232,6 @@ body b
         let pack_home = dir.path().join("pack");
         std::fs::create_dir_all(home.join(".config/ljos")).unwrap();
         std::fs::create_dir_all(&pack_home).unwrap();
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
         let packsetd = std::env::var_os("PATH")
             .and_then(|path| {
                 std::env::split_paths(&path)
@@ -2245,7 +2240,7 @@ body b
             })
             .expect("packsetd on PATH; CI builds it from packset develop");
         let mut daemon = std::process::Command::new(packsetd)
-            .args(["--port", &port.to_string(), "--home"])
+            .args(["--port", "0", "--home"])
             .arg(&pack_home)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -2257,15 +2252,7 @@ body b
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("packsetd on PATH");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
-            assert!(daemon.try_wait().unwrap().is_none(), "packsetd exited");
-            assert!(
-                std::time::Instant::now() < deadline,
-                "packsetd did not listen"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        let port = crate::sync::wait_for_writer(&mut daemon);
         let key = home.join(".config/ljos/age.key");
         let made = std::process::Command::new("age-keygen")
             .arg("-o")

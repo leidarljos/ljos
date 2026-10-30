@@ -2221,20 +2221,13 @@ mod tests {
     /// for the token this process then shows it; CI builds it from packset
     /// develop.
     fn packsetd(home: &std::path::Path) -> (std::process::Child, String) {
-        use std::io::{Read, Write};
         const TOKEN: &str = "7a6b5c4d3e2f10017a6b5c4d3e2f10017a6b5c4d3e2f10017a6b5c4d3e2f1001";
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
         let dir = home.join("pack");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("token"), format!("{TOKEN}\n")).unwrap();
         unsafe { std::env::set_var("PACKSET_TOKEN", TOKEN) };
         let mut child = std::process::Command::new("packsetd")
-            .args(["--port", &port.to_string()])
-            .arg("--home")
+            .args(["--port", "0", "--home"])
             .arg(&dir)
             .env_remove("PACKSET_AUTH")
             .env("PACKSET_HOME", &dir)
@@ -2243,23 +2236,7 @@ mod tests {
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("packsetd is not on PATH; CI builds it from packset develop");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        loop {
-            assert!(child.try_wait().unwrap().is_none(), "packsetd exited");
-            if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
-                let _ = stream.write_all(b"GET /health HTTP/1.1\r\nConnection: close\r\n\r\n");
-                let mut said = String::new();
-                let _ = stream.read_to_string(&mut said);
-                if said.starts_with("HTTP/1.1 200") {
-                    break;
-                }
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "packsetd did not answer"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        let port = crate::sync::wait_for_writer(&mut child);
         (child, format!("http://127.0.0.1:{port}"))
     }
 

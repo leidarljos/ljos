@@ -5028,6 +5028,136 @@ pub fn exchange_user_rules(
     Ok(out)
 }
 
+/// The port `pid` is listening on. A test that binds a free port and then
+/// drops it leaves a gap, and another test can take that port before the
+/// writer binds. The writer binds port zero instead, and the test reads
+/// the port from this process.
+#[cfg(test)]
+pub(crate) fn writer_port(pid: u32) -> Option<u16> {
+    #[cfg(target_os = "linux")]
+    {
+        linux_writer_port(pid)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        other_writer_port(pid)
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn linux_writer_port(pid: u32) -> Option<u16> {
+    let mut inodes = std::collections::BTreeSet::new();
+    let entries = std::fs::read_dir(format!("/proc/{pid}/fd")).ok()?;
+    for entry in entries.flatten() {
+        let Ok(target) = std::fs::read_link(entry.path()) else {
+            continue;
+        };
+        let text = target.to_string_lossy();
+        let Some(rest) = text.strip_prefix("socket:[") else {
+            continue;
+        };
+        let Some(inode) = rest.strip_suffix(']') else {
+            continue;
+        };
+        if let Ok(inode) = inode.parse::<u64>() {
+            inodes.insert(inode);
+        }
+    }
+    if inodes.is_empty() {
+        return None;
+    }
+    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        let Ok(text) = std::fs::read_to_string(table) else {
+            continue;
+        };
+        if let Some(port) = listen_port_in(&inodes, &text) {
+            return Some(port);
+        }
+    }
+    None
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+fn other_writer_port(pid: u32) -> Option<u16> {
+    let out = std::process::Command::new("lsof")
+        .args(["-nP", "-a", "-p", &pid.to_string(), "-iTCP", "-sTCP:LISTEN"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines().skip(1) {
+        let Some(name) = line.split_whitespace().last() else {
+            continue;
+        };
+        let Some((_, port)) = name.rsplit_once(':') else {
+            continue;
+        };
+        if let Ok(port) = port.parse::<u16>() {
+            if port != 0 {
+                return Some(port);
+            }
+        }
+    }
+    None
+}
+
+/// A listening port in a `/proc/net/tcp` table whose inode is one of `inodes`.
+#[cfg(test)]
+fn listen_port_in(inodes: &std::collections::BTreeSet<u64>, table: &str) -> Option<u16> {
+    for line in table.lines().skip(1) {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        let (Some(local), Some(state), Some(inode)) = (cols.get(1), cols.get(3), cols.get(9))
+        else {
+            continue;
+        };
+        if *state != "0A" {
+            continue;
+        }
+        let Ok(inode) = inode.parse::<u64>() else {
+            continue;
+        };
+        if !inodes.contains(&inode) {
+            continue;
+        }
+        let Some((_, port)) = local.rsplit_once(':') else {
+            continue;
+        };
+        if let Ok(port) = u16::from_str_radix(port, 16) {
+            if port != 0 {
+                return Some(port);
+            }
+        }
+    }
+    None
+}
+
+/// Wait until `child` is listening and answers `GET /health`. The child
+/// must have been started with `--port 0`.
+#[cfg(test)]
+pub(crate) fn wait_for_writer(child: &mut std::process::Child) -> u16 {
+    use std::io::{Read, Write};
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        assert!(child.try_wait().unwrap().is_none(), "packsetd exited");
+        if let Some(port) = writer_port(child.id()) {
+            if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+                let _ = stream.write_all(
+                    b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+                );
+                let mut said = String::new();
+                let _ = stream.read_to_string(&mut said);
+                if said.starts_with("HTTP/1.1 200") {
+                    return port;
+                }
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "packsetd did not listen"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5226,13 +5356,8 @@ mod tests {
     /// Caller holds [`crate::test_env_lock`] and sets the pack environment.
     fn spawn_pack(pack_home: &Path) -> (u16, PackDaemon) {
         std::fs::create_dir_all(pack_home).unwrap();
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
         let mut daemon = Command::new(packsetd_bin())
-            .args(["--port", &port.to_string(), "--home"])
+            .args(["--port", "0", "--home"])
             .arg(pack_home)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -5244,16 +5369,22 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
-            assert!(daemon.try_wait().unwrap().is_none(), "packsetd exited");
-            assert!(
-                std::time::Instant::now() < deadline,
-                "packsetd did not listen"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        let port = super::wait_for_writer(&mut daemon);
         (port, PackDaemon(daemon))
+    }
+
+    #[test]
+    fn a_listen_row_names_the_port_of_its_inode() {
+        let mut inodes = std::collections::BTreeSet::new();
+        inodes.insert(842665);
+        let table = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   6: 0100007F:B381 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 842665 1 000000007d796a8e 100 0 0 10 0
+   7: 0100007F:00AA 00000000:0000 01 00000000:00000000 00:00000000 00000000  1000        0 842665 1 000000007d796a8e 100 0 0 10 0
+";
+        assert_eq!(super::listen_port_in(&inodes, table), Some(0xB381));
+        inodes.clear();
+        assert_eq!(super::listen_port_in(&inodes, table), None);
     }
 
     /// `age` that writes its stdin to `-o`. The caller holds [`crate::test_env_lock`].
