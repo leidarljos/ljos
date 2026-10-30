@@ -5141,6 +5141,64 @@ impl LoopVars {
     }
 }
 
+/// `segment` with each `$(...)` or backtick pair that is the value of an
+/// assignment, `NAME=$(...)`, put as the one word `$(:)`. The body runs
+/// as a line of its own, which [`nested_lines`] reads, and the assignment
+/// runs nothing else; split into the segment's words it would read as the
+/// operands of a command, so `d=$(ls -d DIR)` named `DIR` as a word the
+/// assignment writes. A substitution anywhere else is left as written.
+fn without_substitutions(segment: &str) -> String {
+    let chars: Vec<char> = segment.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(segment.len());
+    // Where the word now being read starts in `out`.
+    let mut word = 0;
+    let mut i = 0;
+    let assigns = |w: &str| {
+        let w = w.strip_suffix('"').unwrap_or(w);
+        w.strip_suffix('=')
+            .map(|k| k.strip_suffix('+').unwrap_or(k))
+            .is_some_and(|k| {
+                k.chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
+    };
+    while i < n {
+        match chars[i] {
+            '\\' => {
+                out.extend(&chars[i..(i + 2).min(n)]);
+                i += 2;
+            }
+            '\'' => {
+                let end = (i + 1..n).find(|k| chars[*k] == '\'').map_or(n, |k| k + 1);
+                out.extend(&chars[i..end]);
+                i = end;
+            }
+            '$' if chars.get(i + 1) == Some(&'(')
+                && chars.get(i + 2) != Some(&'(')
+                && assigns(&out[word..]) =>
+            {
+                out.push_str("$(:)");
+                i = nested_end(&chars, i);
+            }
+            '`' if assigns(&out[word..]) => {
+                out.push_str("$(:)");
+                i = nested_end(&chars, i);
+            }
+            c => {
+                out.push(c);
+                i += 1;
+                if c.is_whitespace() || matches!(c, ';' | '&' | '|') {
+                    word = out.len();
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Whether `line`, starting in `cwd`, writes a sitting or conversation
 /// binding record inside the runtime `ljos` directory.
 pub(crate) fn writes_hold_record(line: &str, cwd: Option<&Path>) -> bool {
@@ -5149,11 +5207,13 @@ pub(crate) fn writes_hold_record(line: &str, cwd: Option<&Path>) -> bool {
         .or_else(|| std::env::current_dir().ok());
     let mut loops = LoopVars::default();
     for seg in nested_lines(line, 0).iter().flat_map(|l| raw_segments(l)) {
-        let words = shell_words(&seg);
-        let (at, _) = prefix_end(&words);
-        if loops.bind(&words[at..], cwd.as_deref()) {
+        let listed = shell_words(&seg);
+        let (at, _) = prefix_end(&listed);
+        if loops.bind(&listed[at..], cwd.as_deref()) {
             continue;
         }
+        let words = shell_words(&without_substitutions(&seg));
+        let (at, _) = prefix_end(&words);
         let words = &loops.apply(&words[at..]);
         let Some(first) = words.first() else { continue };
         let first = first.rsplit('/').next().unwrap_or(first);
@@ -23560,13 +23620,25 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
     for seg in nested_lines(line, 0).iter().flat_map(|l| raw_segments(l)) {
         // Every wrapper off, as a rule sees it: `nice tmux send-keys` and
         // `timeout 5 xdotool type` are the tools they run.
-        let words = shell_words(&seg);
-        let (at, _) = prefix_end(&words);
-        named_session |= assigns_session(&words[..at]);
-        if loops.bind(&words[at..], cwd.as_deref()) {
+        let listed = shell_words(&seg);
+        let (at, _) = prefix_end(&listed);
+        if loops.bind(&listed[at..], cwd.as_deref()) {
             continue;
         }
-        let words = loops.apply(&words[at..]);
+        named_session |= assigns_session(&listed[..at]);
+        let words = loops.apply(&listed[at..]);
+        // The words a path is looked for in: each substitution one word,
+        // since its body is a line of its own.
+        let collapsed = shell_words(&without_substitutions(&seg));
+        let (cat, _) = prefix_end(&collapsed);
+        let paths = loops.apply(&collapsed[cat..]);
+        let path_first = paths
+            .first()
+            .map_or("", |w| w.rsplit('/').next().unwrap_or(w));
+        let path_reads = path_first.is_empty()
+            || READERS.contains(&path_first)
+            || path_first == "ljos"
+            || kept_prompt::reads_only(path_first);
         let Some(first) = words.first() else { continue };
         let first = first.rsplit('/').next().unwrap_or(first);
         if matches!(
@@ -23601,11 +23673,10 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
                     .into(),
             });
         }
-        let reads = READERS.contains(&first) || first == "ljos" || kept_prompt::reads_only(first);
-        if let Some(t) = kept_prompt::reached(&words, cwd.as_deref(), reads)
+        if let Some(t) = kept_prompt::reached(&paths, cwd.as_deref(), path_reads)
             .or_else(|| kept_prompt::code_reaches(&words, line))
-            .or_else(|| person_key::reached(&words, cwd.as_deref(), reads))
-            .or_else(|| person_key::uproots(&words, cwd.as_deref()))
+            .or_else(|| person_key::reached(&paths, cwd.as_deref(), path_reads))
+            .or_else(|| person_key::uproots(&paths, cwd.as_deref()))
             .or_else(|| person_key::code_uproots(&words, line, cwd.as_deref()))
         {
             return Some(refuse(&t));
@@ -23724,17 +23795,17 @@ pub fn seat_guard_in(line: &str, cwd: Option<&Path>) -> Option<Rule> {
                 continue;
             }
         }
-        let redirect_target = words
+        let redirect_target = paths
             .windows(2)
             .find(|w| w[0] == ">" && is_path_word(&w[1], cwd.as_deref()))
             .map(|w| w[1].clone());
         if let Some(t) = redirect_target {
             return Some(refuse(&t));
         }
-        if READERS.contains(&first) {
+        if path_reads {
             continue;
         }
-        if let Some(t) = words
+        if let Some(t) = paths
             .iter()
             .skip(1)
             .find(|w| is_path_word(w, cwd.as_deref()))
@@ -58097,6 +58168,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         for line in [
             "for f in /run/user/1000/ljos/hold-* ; do [ -f \"$f\" ] && grep -l vdjv \"$f\"; done",
             "ls -t \"/run/user/1000/ljos\" | head -8; for f in $(ls -t /run/user/1000/ljos/hold-* | head -4); do echo \"== $f\"; cat \"$f\"; done",
+            "d=$(ls -d /run/user/1000/ljos* 2>/dev/null | head -3); echo \"$d\"; for f in /run/user/1000/ljos/hold-* ; do [ -f \"$f\" ] && grep -l vdjv \"$f\"; done 2>/dev/null | head; grep -rl vdjv /run/user/1000/ljos 2>/dev/null | head -3",
+            "d=\"$(ls -d /run/user/1000/ljos)\"; echo \"$d\"",
         ] {
             assert!(!writes_hold_record(line, None), "{line}");
             assert!(seat_guard(line).is_none(), "{line}");
@@ -58105,6 +58178,8 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             "for f in /run/user/1000/ljos/hold-*; do rm \"$f\"; done",
             "for f in /run/user/1000/ljos/hold-*; do echo x > \"${f}\"; done",
             "for f in $(ls /run/user/1000/ljos/hold-*); do cp /tmp/x \"$f\"; done",
+            "d=$(ls /tmp); cp /tmp/x /run/user/1000/ljos/hold-1",
+            "rm -f $(ls -d /run/user/1000/ljos/hold-*)",
         ] {
             assert!(writes_hold_record(line, None), "{line}");
             assert!(seat_guard(line).is_some(), "{line}");
