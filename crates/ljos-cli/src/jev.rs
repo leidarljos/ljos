@@ -315,14 +315,9 @@ fn key_by_command(judge: &str, argv: &[String]) -> Option<String> {
         return Some(key);
     }
     let (prog, args) = argv.split_first()?;
-    let out = std::process::Command::new("timeout")
-        .arg("3")
-        .arg(prog)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
+    let mut cmd = std::process::Command::new(prog);
+    cmd.args(args);
+    let out = crate::output_within(cmd, None, std::time::Duration::from_secs(3)).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -1082,28 +1077,20 @@ fn chat_post(cfg: &Judge, key: &str, body: &Value) -> Option<Value> {
 }
 
 /// The command backend: the request on stdin, `{"answers": ...}` on
-/// stdout, inside the budget under `timeout`, as the key command runs.
+/// stdout, inside the budget, as the key command runs.
 fn command_post(cfg: &Judge, body: &Value) -> Option<Value> {
-    use std::io::Write;
     let argv = cfg.command.as_deref()?;
     let (prog, args) = argv.split_first()?;
     let secs = (cfg.budget_ms.div_ceil(1000)).max(1);
-    let mut child = std::process::Command::new("timeout")
-        .arg(secs.to_string())
-        .arg(prog)
-        .args(args)
-        .env("LJOS_JUDGE", "1")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    child
-        .stdin
-        .take()?
-        .write_all(body.to_string().as_bytes())
-        .ok()?;
-    let out = child.wait_with_output().ok()?;
+    let mut cmd = std::process::Command::new(prog);
+    cmd.args(args).env("LJOS_JUDGE", "1");
+    let text = body.to_string();
+    let out = crate::output_within(
+        cmd,
+        Some(text.as_bytes()),
+        std::time::Duration::from_secs(secs),
+    )
+    .ok()?;
     if !out.status.success() {
         return None;
     }

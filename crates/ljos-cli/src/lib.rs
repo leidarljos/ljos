@@ -25072,21 +25072,17 @@ fn bin_version(bin: &str) -> Option<String> {
     let path = which::which(bin).ok()?;
     // MCP servers that do not implement --version sit on stdio.
     // Cap the wait so doctor cannot hang the seat.
-    let mut cmd = if bin.ends_with("-mcp") {
-        let mut c = Command::new("timeout");
-        c.args(["0.4", path.to_str()?, "--version"]);
-        c
+    let mut cmd = Command::new(&path);
+    cmd.arg("--version");
+    let said = if bin.ends_with("-mcp") {
+        output_within(cmd, None, std::time::Duration::from_millis(400)).ok()?
     } else {
-        let mut c = Command::new(&path);
-        c.arg("--version");
-        c
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .ok()?
     };
-    let said = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .ok()?;
     let stdout = String::from_utf8_lossy(&said.stdout);
     let stderr = String::from_utf8_lossy(&said.stderr);
     parse_semver(&stdout)
@@ -26125,13 +26121,10 @@ fn crate_version_for(crate_name: &str, have: Option<&str>) -> Option<CrateVersio
 /// Evidence citations and forecast confidence are part of the ballot protocol.
 /// A version line alone does not establish that the tracker accepts them.
 fn check_vissue_ballot_protocol(path: &Path) -> Result<()> {
-    use std::process::{Command, Stdio};
-    let said = Command::new("timeout")
-        .arg("2")
-        .arg(path)
-        .args(["vote", "--help"])
-        .stdin(Stdio::null())
-        .output()
+    use std::process::Command;
+    let mut cmd = Command::new(path);
+    cmd.args(["vote", "--help"]);
+    let said = output_within(cmd, None, std::time::Duration::from_secs(2))
         .context("could not check vissue vote --help")?;
     if !said.status.success() {
         bail!("vissue vote --help failed ({})", said.status);
@@ -36401,6 +36394,83 @@ pub fn run_captured_as(
 
 fn capture_timed_out(err: &anyhow::Error) -> bool {
     err.to_string().contains("did not answer in time")
+}
+
+/// Run `cmd` and stop it if it is still going after `deadline`.
+/// `stdin` is written and closed first, so a child that reads until
+/// end of file can finish. Stdout and stderr are drained while it runs.
+/// The `timeout` program is not used: macOS does not ship it.
+fn output_within(
+    mut cmd: std::process::Command,
+    stdin: Option<&[u8]>,
+    deadline: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+    cmd.stdin(if stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    if let Some(bytes) = stdin {
+        let mut input = child.stdin.take().ok_or_else(|| {
+            std::io::Error::other("the child has no stdin")
+        })?;
+        input.write_all(bytes)?;
+        drop(input);
+    }
+    let mut out_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("the child has no stdout"))?;
+    let mut err_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("the child has no stderr"))?;
+    let out_task = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = out_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let err_task = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = err_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_task.join();
+                let _ = err_task.join();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "the command was still running",
+                ));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_task.join();
+                let _ = err_task.join();
+                return Err(err);
+            }
+        }
+    };
+    let stdout = out_task.join().unwrap_or_default();
+    let stderr = err_task.join().unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 /// [`run_captured_as`] that stops the child at `deadline`. Stdout and
