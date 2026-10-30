@@ -5,6 +5,19 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## Unreleased
+
+### Fixes
+
+- On macOS a terminal prompt is read without waiting for output to drain.
+  A command is stopped in this process when its time is up, and the macOS job installs age before the tests.
+  A temporary tracker is not the repository around it, and a temporary path still counts when a symlink hides the real directory.
+  A state row gives up its lock after one wait, even when the holder changes.
+  A short tar listing is used when the long options are refused, and a symlink in it is still refused.
+  A bag copy fails when the stage directory cannot be written, and a process walk stops when a parent cannot be read.
+  Git is judged in the directory the command names.
+  A large digest is checked by what it prints.
+
 ## 0.35.2 (2026-10-30)
 
 ### Fixes
