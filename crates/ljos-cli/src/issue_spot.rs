@@ -19,7 +19,9 @@
 //! one tracker instead of walking every routed one.
 
 use serde_json::Value;
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use vissue_core::Layout;
 use vissue_core::views::IssueRec;
 
@@ -43,10 +45,65 @@ fn project_dir(layout: &Layout, project: &str) -> Option<String> {
         .find(|name| name.to_lowercase() == lower)
 }
 
+/// One file's length and modification time.
+type Stamp = (PathBuf, u64, std::time::SystemTime);
+
+/// What a project's files look like on disk: the length and modification
+/// time of `issues.org`, of a ledger's `issues/` directory beside it, and
+/// of each file in that directory. Two reads with the same signature read
+/// the same bytes, so a parse is kept while the signature holds.
+fn signature(path: &Path) -> Option<Vec<Stamp>> {
+    let stamp = |p: &Path| -> Option<Stamp> {
+        let meta = std::fs::metadata(p).ok()?;
+        Some((p.to_path_buf(), meta.len(), meta.modified().ok()?))
+    };
+    let mut out = vec![stamp(path)?];
+    if let Some(ledger) = path.parent().map(|dir| dir.join("issues")) {
+        if let Ok(entries) = std::fs::read_dir(&ledger) {
+            let mut files: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+            files.sort();
+            out.push(stamp(&ledger)?);
+            for file in files {
+                out.push(stamp(&file)?);
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Parses this process already made, by project file. A gate asks about
+/// an issue, its parent and each child, each several times; one parse
+/// answers them all while the files stay as they were.
+static PARSED: Mutex<BTreeMap<(PathBuf, String), (Vec<Stamp>, Arc<Vec<IssueRec>>)>> =
+    Mutex::new(BTreeMap::new());
+
 /// Every heading of one project, with the file each one lives in.
-fn project_recs(layout: &Layout, dir: &str) -> Option<Vec<IssueRec>> {
+fn project_recs(layout: &Layout, dir: &str) -> Option<Arc<Vec<IssueRec>>> {
     let path = layout.project_issues_path(dir);
-    let doc = vissue_core::IssueDoc::parse_file(dir, &path).ok()?;
+    let key = (path.clone(), dir.to_string());
+    let sig = signature(&path);
+    if let Some(sig) = &sig {
+        let held = PARSED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((seen, recs)) = held.get(&key) {
+            if seen == sig {
+                return Some(Arc::clone(recs));
+            }
+        }
+    }
+    let recs = Arc::new(parse_recs(&path, dir)?);
+    if let Some(sig) = sig {
+        PARSED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, (sig, Arc::clone(&recs)));
+    }
+    Some(recs)
+}
+
+fn parse_recs(path: &Path, dir: &str) -> Option<Vec<IssueRec>> {
+    let doc = vissue_core::IssueDoc::parse_file(dir, path).ok()?;
     let files: Vec<PathBuf> = doc
         .headings
         .iter()
@@ -73,7 +130,7 @@ fn project_recs(layout: &Layout, dir: &str) -> Option<Vec<IssueRec>> {
 #[derive(Debug, Clone)]
 pub struct Spot {
     pub layout: Layout,
-    pub recs: Vec<IssueRec>,
+    pub recs: Arc<Vec<IssueRec>>,
     id: String,
 }
 
@@ -121,9 +178,13 @@ pub fn find(id: &str) -> Option<Spot> {
     if let Some(spot) = in_layout(&default, id) {
         return Some(spot);
     }
+    let default_key = (default.root().to_path_buf(), default.prefix().to_string());
     let router = vissue_core::Router::load(default).ok()?;
     let routed = router.route(project);
-    let mut tried = vec![(routed.layout.root().to_path_buf(), routed.layout.prefix().to_string())];
+    let mut tried = vec![
+        (default_key.0, default_key.1),
+        (routed.layout.root().to_path_buf(), routed.layout.prefix().to_string()),
+    ];
     if let Some(dir) = project_dir(&routed.layout, &routed.dir) {
         if let Some(recs) = project_recs(&routed.layout, &dir) {
             if recs.iter().any(|rec| rec.heading.id == id) {
@@ -242,6 +303,23 @@ Body.\n\n\
         assert!(vissue_core::agent::show_json(&layout, "demo-aaaa").is_err());
         let spot = in_layout(&layout, "demo-aaaa").expect("found");
         assert_eq!(spot.card().unwrap()["id"], "demo-aaaa");
+    }
+
+    /// A parse is reused while the file is unchanged and read again once
+    /// it changes, so a write between two reads is seen.
+    #[test]
+    fn a_kept_parse_follows_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = layout_with_board(tmp.path());
+        let first = in_layout(&layout, "demo-bbbb").expect("found");
+        assert_eq!(first.card().unwrap()["state"], "TODO");
+        let again = in_layout(&layout, "demo-bbbb").expect("found");
+        assert!(Arc::ptr_eq(&first.recs, &again.recs), "the parse is kept");
+        // A longer heading changes the length even inside one clock tick.
+        let moved = BOARD.replace("* TODO [#C] Child", "* STARTED [#C] Child");
+        std::fs::write(tmp.path().join("Issues/demo/issues.org"), moved).unwrap();
+        let after = in_layout(&layout, "demo-bbbb").expect("found");
+        assert_eq!(after.card().unwrap()["state"], "STARTED");
     }
 
     #[test]
