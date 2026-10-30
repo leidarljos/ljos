@@ -354,8 +354,8 @@ pub fn live_sitting() -> Result<String, String> {
         );
     }
     let candidates = crate::live_held_issues();
-    if let Some(why) = crate::push_block() {
-        return Err(why.to_string());
+    if crate::push_slow() {
+        return Err(crate::push_slow_line().to_string());
     }
     if candidates.is_empty() {
         return Err("this conversation holds no live sitting".into());

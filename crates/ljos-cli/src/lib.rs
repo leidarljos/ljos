@@ -30114,17 +30114,20 @@ pub fn live_held_issue() -> Option<(String, Hold)> {
     live_held_issues().into_iter().next()
 }
 
-/// How long one step of a pre-push sitting check waits. The adopt lock
-/// and the tracker program each get this. A stuck tracker or a lock
-/// that is still taken then refuses the push.
-const PUSH_STEP: std::time::Duration = std::time::Duration::from_millis(400);
+/// How long a pre-push check waits for the adopt lock. A miss does not
+/// refuse the push.
+const PUSH_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(400);
 
-const PUSH_TRACKER: &str = "the tracker did not answer, so this push is refused";
-const PUSH_LOCK: &str = "the sitting lock is held, so this push is refused";
+/// How long a pre-push check waits for the tracker program. About two
+/// seconds, the same kind of bound as [`GUARD_TIMEOUT`]. A miss does not
+/// refuse the push.
+const PUSH_TRACKER_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+const PUSH_SLOW_LINE: &str = "the tracker or lock was slow";
 
 std::thread_local! {
     static PUSH_CHECK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static PUSH_BLOCK: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    static PUSH_SLOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Mark this thread as a pre-push sitting check until dropped.
@@ -30133,7 +30136,7 @@ pub(crate) struct PushCheck;
 impl PushCheck {
     pub(crate) fn enter() -> Self {
         PUSH_CHECK.with(|on| on.set(true));
-        PUSH_BLOCK.with(|why| why.set(None));
+        PUSH_SLOW.with(|slow| slow.set(false));
         Self
     }
 }
@@ -30141,7 +30144,7 @@ impl PushCheck {
 impl Drop for PushCheck {
     fn drop(&mut self) {
         PUSH_CHECK.with(|on| on.set(false));
-        PUSH_BLOCK.with(|why| why.set(None));
+        PUSH_SLOW.with(|slow| slow.set(false));
     }
 }
 
@@ -30149,21 +30152,22 @@ fn in_push_check() -> bool {
     PUSH_CHECK.with(|on| on.get())
 }
 
-fn block_push(why: &'static str) {
-    if !in_push_check() {
-        return;
+fn note_push_slow() {
+    if in_push_check() {
+        PUSH_SLOW.with(|slow| slow.set(true));
     }
-    PUSH_BLOCK.with(|slot| {
-        if slot.get().is_none() {
-            slot.set(Some(why));
-        }
-    });
 }
 
-/// The refusal a pre-push check recorded, when the lock or the tracker
-/// did not finish inside [`PUSH_STEP`].
-pub(crate) fn push_block() -> Option<&'static str> {
-    PUSH_BLOCK.with(|slot| slot.get())
+/// Whether the adopt lock or the tracker missed its bound on this
+/// pre-push check. The push is not refused for that.
+pub(crate) fn push_slow() -> bool {
+    PUSH_SLOW.with(|slow| slow.get())
+}
+
+/// The one line a pre-push check prints when the tracker or the lock
+/// was slow.
+pub(crate) fn push_slow_line() -> &'static str {
+    PUSH_SLOW_LINE
 }
 
 /// Adopt a live bare-seat hold record for this conversation when the
@@ -30174,9 +30178,10 @@ pub(crate) fn push_block() -> Option<&'static str> {
 /// set. The transition from `seat` to `own` is made once under an
 /// exclusive lock by rewriting the record in place and also writing the
 /// conversation-scoped record. On a pre-push check the lock and the
-/// tracker read are bounded, and a miss refuses the push.
+/// tracker read are bounded. A miss leaves the sitting to be opened or
+/// named, and does not refuse the push.
 fn adopt_bare_seat_hold(dir: &Path, seat: &str, own: &str, graph: &str) {
-    if push_block().is_some() {
+    if push_slow() {
         return;
     }
     let Some((node, hold)) =
@@ -30207,10 +30212,12 @@ fn adopt_bare_seat_hold(dir: &Path, seat: &str, own: &str, graph: &str) {
         Ok(card) => card,
         // The tracker bound already fired. Wait the lock bound too, so a
         // held lock cannot remain unbounded on this path.
-        Err(_) if push_block().is_some() => {
+        Err(_) if push_slow() => {
             let lock_path = dir.join("hold-adopt.lock");
-            if CommitLock::acquire_by(&lock_path, std::time::Instant::now() + PUSH_STEP).is_none() {
-                block_push(PUSH_LOCK);
+            if CommitLock::acquire_by(&lock_path, std::time::Instant::now() + PUSH_LOCK_WAIT)
+                .is_none()
+            {
+                note_push_slow();
             }
             return;
         }
@@ -30226,10 +30233,10 @@ fn adopt_bare_seat_hold(dir: &Path, seat: &str, own: &str, graph: &str) {
     }
     let lock_path = dir.join("hold-adopt.lock");
     let _lock = if in_push_check() {
-        match CommitLock::acquire_by(&lock_path, std::time::Instant::now() + PUSH_STEP) {
+        match CommitLock::acquire_by(&lock_path, std::time::Instant::now() + PUSH_LOCK_WAIT) {
             Some(lock) => lock,
             None => {
-                block_push(PUSH_LOCK);
+                note_push_slow();
                 return;
             }
         }
@@ -30434,20 +30441,23 @@ pub fn tracker_show_json(id: &str) -> Result<Value> {
 /// prints it when the crate has no record. A stub tracker in a test
 /// answers only the second.
 pub fn issue_record(issue: &str) -> Result<Value> {
+    if in_push_check() && push_slow() {
+        bail!("the tracker or lock was slow");
+    }
     if let Ok(v) = tracker_show_json(issue) {
         if v.get("id").is_some() || v.get("title").is_some() || v.get("logbook").is_some() {
             return Ok(v);
         }
     }
     let deadline = if in_push_check() {
-        PUSH_STEP
+        PUSH_TRACKER_WAIT
     } else {
         CAPTURE_DEADLINE
     };
     let said = run_captured_within("vissue", &["show", issue, "--json"], None, deadline)
         .inspect_err(|err| {
             if in_push_check() && capture_timed_out(err) {
-                block_push(PUSH_TRACKER);
+                note_push_slow();
             }
         })?;
     serde_json::from_str(&said.stdout).context("vissue show --json")

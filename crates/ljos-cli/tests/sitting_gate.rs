@@ -681,7 +681,8 @@ fn a_commit_check_finishes_with_a_stuck_lock_and_a_slow_vissue() {
 }
 
 /// One push check returns while the adopt lock is held and the tracker
-/// program does not answer. The check refuses instead of waiting them out.
+/// program does not answer. The check does not refuse, and it returns
+/// inside the hang guard.
 #[test]
 fn a_push_check_finishes_with_a_stuck_lock_and_a_slow_vissue() {
     use std::os::unix::io::AsRawFd;
@@ -745,15 +746,19 @@ fn a_push_check_finishes_with_a_stuck_lock_and_a_slow_vissue() {
     let took = started.elapsed();
     let said = text_of(&out);
     assert!(
-        !out.status.success(),
-        "push check was allowed after {took:?}\n{said}"
+        out.status.success(),
+        "push check was refused after {took:?}\n{said}"
     );
     assert!(
-        said.contains("this push is refused"),
+        said.contains("the tracker or lock was slow"),
         "push check after {took:?}\n{said}"
     );
     assert!(
-        took < Duration::from_secs(2),
+        !said.contains("this push is refused"),
+        "push check was refused after {took:?}\n{said}"
+    );
+    assert!(
+        took < Duration::from_secs(3),
         "push check took {took:?}\n{said}"
     );
     let _ = sleeper.kill();
