@@ -118,7 +118,7 @@ jobs:
         run: |
           set -euo pipefail
           git clone --depth 1 --branch v0.20.0 https://github.com/leidarljos/vissue.git "${{ runner.temp }}/vissue"
-          cargo build --locked --manifest-path "${{ runner.temp }}/vissue/Cargo.toml" -p vissue-cli --bin vissue
+          cargo build --locked -p vissue-cli --bin vissue --manifest-path "${{ runner.temp }}/vissue/Cargo.toml"
           mkdir -p "${{ runner.temp }}/bin"
           install -m 0755 "${{ runner.temp }}/vissue/target/debug/vissue" "${{ runner.temp }}/bin/vissue"
           echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
@@ -217,6 +217,12 @@ jobs:
         run: cargo check --locked --workspace --all-targets --target x86_64-apple-darwin
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # The sync, rules and push tests seal with age, as on the Linux job.
+      - name: age
+        run: |
+          set -eu
+          brew install age
+          command -v age-keygen
       - name: Unit tests
         run: cargo test --locked --workspace --lib
 
