@@ -1482,23 +1482,40 @@ mod tests {
         }
     }
 
-    /// How long a prompt or a set may sit with nothing completed before
-    /// the test fails. The body ends when the line has been read. This
-    /// only trips when that never happens.
-    const HANG: std::time::Duration = std::time::Duration::from_secs(60);
+    /// How long a prompt may stay down, or a body with no prompt may
+    /// run, before the test fails. Once the prompt is up the body is
+    /// waited on by its channel. The hash after the line is read is
+    /// that wait, and this clock is only the guard for a prompt that
+    /// never arrives.
+    const HANG: std::time::Duration = std::time::Duration::from_secs(5);
 
-    /// Wait until `body` finishes. A hang fails here, with `what` in the
-    /// message, instead of holding the job.
+    /// Run `body` until it finishes. `prompted` is the signal that the
+    /// prompt is up and its line has been typed. Five seconds is only
+    /// the guard for that signal, or for a body that never prompts.
+    /// After the signal the channel is the wait, so a slow hash is not
+    /// a longer deadline.
     fn bounded<T: Send + 'static>(
         what: &'static str,
+        prompted: &std::sync::mpsc::Receiver<()>,
         body: impl FnOnce() -> T + Send + 'static,
     ) -> T {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _ = tx.send(body());
         });
-        rx.recv_timeout(HANG)
-            .unwrap_or_else(|_| panic!("{what} hung"))
+        let started = std::time::Instant::now();
+        loop {
+            if let Ok(value) = rx.try_recv() {
+                return value;
+            }
+            if prompted.try_recv().is_ok() {
+                return rx.recv().unwrap_or_else(|_| panic!("{what} hung"));
+            }
+            if started.elapsed() >= HANG {
+                panic!("{what} hung");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     fn take_shown(shown: std::thread::JoinHandle<String>) -> String {
@@ -1525,15 +1542,22 @@ mod tests {
     /// Types each line on `master` once the terminal shows its prompt,
     /// the way a person answers, and returns all the terminal showed.
     /// Echo off drops type-ahead, so nothing is typed sooner.
+    /// The reader, and a signal sent once the first prompt is up and
+    /// its line has been typed. A body with no prompt never sends.
     fn typist(
         mut master: std::fs::File,
         answers: Vec<(&'static str, &'static str)>,
-    ) -> std::thread::JoinHandle<String> {
+    ) -> (
+        std::thread::JoinHandle<String>,
+        std::sync::mpsc::Receiver<()>,
+    ) {
         use std::io::{Read as _, Write as _};
-        std::thread::spawn(move || {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
             let mut shown = Vec::new();
             let mut since = 0;
             let mut answers = answers.into_iter().peekable();
+            let mut told = false;
             let mut buf = [0u8; 256];
             while let Ok(n) = master.read(&mut buf) {
                 if n == 0 {
@@ -1545,11 +1569,16 @@ mod tests {
                         master.write_all(format!("{line}\n").as_bytes()).unwrap();
                         since = shown.len();
                         answers.next();
+                        if !told {
+                            let _ = tx.send(());
+                            told = true;
+                        }
                     }
                 }
             }
             String::from_utf8_lossy(&shown).into_owned()
-        })
+        });
+        (handle, rx)
     }
 
     /// Typed twice on the terminal, a long enough passphrase is kept and
@@ -1560,7 +1589,7 @@ mod tests {
         let path = dir.path().join(KEY_NAME);
         let (master, mut slave) = pty_pair();
         assert!(echo_on(&slave));
-        let shown = typist(
+        let (shown, prompted) = typist(
             master,
             vec![
                 ("New person passphrase: ", "correct horse battery"),
@@ -1568,7 +1597,7 @@ mod tests {
             ],
         );
         let key = path.clone();
-        let slave = bounded("set", move || {
+        let slave = bounded("set", &prompted, move || {
             set_from(&key, &mut slave).unwrap();
             slave
         });
@@ -1595,9 +1624,9 @@ mod tests {
             ],
         ] {
             let (master, mut slave) = pty_pair();
-            let shown = typist(master, answers);
+            let (shown, prompted) = typist(master, answers);
             let key = path.clone();
-            let slave = bounded("set", move || {
+            let slave = bounded("set", &prompted, move || {
                 assert!(set_from(&key, &mut slave).is_err());
                 slave
             });
@@ -1621,11 +1650,11 @@ mod tests {
     fn ask_at(dir: &Path, typed: Option<&'static str>, now: u64) -> Asked {
         let (master, slave) = pty_pair();
         let answer = typed.unwrap_or("\u{4}");
-        let shown = typist(master, vec![(PROMPT, answer)]);
+        let (shown, prompted) = typist(master, vec![(PROMPT, answer)]);
         let pauses = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let record = std::sync::Arc::clone(&pauses);
         let dir = dir.to_path_buf();
-        let out = bounded("passphrase prompt", move || {
+        let out = bounded("passphrase prompt", &prompted, move || {
             ask_with(
                 &dir,
                 Some(slave),
@@ -1704,9 +1733,9 @@ mod tests {
         }
         assert_eq!(pauses, vec![2, 4, 8, 16, 32]);
         let (master, slave) = pty_pair();
-        let shown = typist(master, vec![]);
+        let (shown, prompted) = typist(master, vec![]);
         let root = dir.path().to_path_buf();
-        let out = bounded("lockout", move || {
+        let out = bounded("lockout", &prompted, move || {
             ask_with(
                 &root,
                 Some(slave),
@@ -1853,9 +1882,9 @@ mod tests {
         let long: &'static str = "a".repeat(MAX_LINE).leak();
         for typed in ["x", long] {
             let (master, mut slave) = pty_pair();
-            let shown = typist(master, vec![("Line: ", typed)]);
+            let (shown, prompted) = typist(master, vec![("Line: ", typed)]);
             let typed = typed.to_string();
-            let (bytes, cap, slave) = bounded("line", move || {
+            let (bytes, cap, slave) = bounded("line", &prompted, move || {
                 let line = crate::person_tty::ask(&mut slave, "Line: ")
                     .unwrap()
                     .unwrap();
@@ -1870,8 +1899,8 @@ mod tests {
         }
         let longer: &'static str = "a".repeat(MAX_LINE + 1).leak();
         let (master, mut slave) = pty_pair();
-        let shown = typist(master, vec![("Line: ", longer)]);
-        let slave = bounded("long line", move || {
+        let (shown, prompted) = typist(master, vec![("Line: ", longer)]);
+        let slave = bounded("long line", &prompted, move || {
             assert!(crate::person_tty::ask(&mut slave, "Line: ").is_err());
             slave
         });
@@ -1974,12 +2003,12 @@ mod tests {
         unswap();
 
         let (master, slave) = pty_pair();
-        let shown = typist(master, vec![(PROMPT, "a runner's own phrase")]);
+        let (shown, prompted) = typist(master, vec![(PROMPT, "a runner's own phrase")]);
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let root = dir.clone();
         let away = moved.clone();
         let other = evil.clone();
-        let out = bounded("swapped prompt", move || {
+        let out = bounded("swapped prompt", &prompted, move || {
             let clock_dir = root.clone();
             let clock_away = away.clone();
             let clock_other = other.clone();
