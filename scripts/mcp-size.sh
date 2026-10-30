@@ -165,7 +165,9 @@ def norm(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 readme = (root / "README.md").read_text()
-mcp = readme.split("## MCP", 1)[1].split("\n## ", 1)[0]
+# The section whose level-two heading names MCP, whatever else it says.
+heading = re.search(r"^## [^\n]*\bMCP\b[^\n]*$", readme, re.M)
+mcp = readme[heading.end():].split("\n## ", 1)[0] if heading else ""
 flat = norm(mcp)
 core_clause = f"lists {words(core['tools'])} core tools"
 token_clause = (
