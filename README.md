@@ -137,7 +137,7 @@ Every ballot is recorded.
 Ballots count as one voice when they share a session id, a parent, a calling shell or the root session of one agent runner.
 When they disagree, the latest ballot is that voice.
 `ljos consensus` names the ballots it folded and why, including that shell or agent runner.
-A subagent of that root session is not bound by the agent runner's row.
+A subagent of that root session counts with its parent.
 A seat ballot is its own voice only when the cast has no shell, no agent runner and no earlier row.
 
 The ballot list goes to `ljos consensus`. The command reads the pack's trust rows.

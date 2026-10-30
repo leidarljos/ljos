@@ -17,6 +17,18 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
   A bag copy fails when the stage directory cannot be written, and a process walk stops when a parent cannot be read.
   Git is judged in the directory the command names.
   A large digest is checked by what it prints.
+- A pre-push sitting check does not refuse the push when it misses the adopt lock or the tracker.
+  It names the sitting already open, prints that the tracker or lock was slow, and the push continues.
+  The tracker wait is about two seconds.
+  The lock wait is four hundred milliseconds.
+- A person prompt test fails when a later prompt never arrives.
+  The five second cap still applies after the prompt is up.
+- A cast launched by Python, or from a binary whose argv0 is not ljos, binds by the resolved executable and the shell above that launch.
+  Renaming the session and the seat still leaves one voice.
+  Every ballot is recorded, and a write is not refused.
+- A raw drawer row plus a signature on an unverified seat stays one voice with that seat.
+- A subagent of a root session counts with its parent.
+  The 0.35.1 note said the agent runner's row does not bind it, which was wrong.
 
 ## 0.35.2 (2026-10-30)
 

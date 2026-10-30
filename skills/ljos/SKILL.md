@@ -406,7 +406,7 @@ is active for this seat. The person at their own terminal is never gated.
   row. Ballots that
   share a parent stay recorded and count as one voice. One shell is one
   voice, and one agent runner's root session is one voice. A subagent of
-  that root is not bound by the runner's row. The tally names
+  that root counts with its parent. The tally names
   that parent, that shell or that runner, and the ballots folded into it. A subagent
   that wrote a candidate cannot vote. A voter changes its ballot by withdrawing it,
   `ljos vote ISSUE --withdraw --as NAME`, then casting again; a cast while
