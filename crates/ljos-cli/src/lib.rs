@@ -17959,7 +17959,8 @@ pub fn latest_note_value(v: &Value, prefix: &str) -> Option<String> {
 ///
 /// The tracker not answering.
 pub fn playbook_named_on(issue: &str) -> Result<Option<String>> {
-    let v = issue_record(issue)?;
+    let said = run_captured("vissue", &["show", issue, "--json"])?;
+    let v: Value = serde_json::from_str(&said.stdout).context("vissue show --json")?;
     Ok(playbook_name_from_issue(&v))
 }
 
@@ -18450,7 +18451,8 @@ pub fn format_workflow_status(s: &WorkflowStatus) -> String {
 
 /// The children of `parent` as the tracker holds them now.
 fn workflow_children(parent: &str) -> Result<Vec<WorkflowChild>> {
-    let rows = tracker_children(parent)?;
+    let said = run_captured("vissue", &["children", parent, "--json"])?;
+    let rows: Vec<Value> = serde_json::from_str(&said.stdout).context("vissue children --json")?;
     let mut out = Vec::new();
     for row in rows {
         let Some(id) = row["id"].as_str() else {
@@ -18463,20 +18465,6 @@ fn workflow_children(parent: &str) -> Result<Vec<WorkflowChild>> {
         out.push(child);
     }
     Ok(out)
-}
-
-/// The rows `vissue children PARENT --json` prints, read from the
-/// parent's own project when [`issue_spot::find`] has it there.
-///
-/// # Errors
-///
-/// The tracker did not list the children.
-pub fn tracker_children(parent: &str) -> Result<Vec<Value>> {
-    if let Some(rows) = issue_spot::find(parent).and_then(|spot| spot.children()) {
-        return Ok(rows);
-    }
-    let said = run_captured("vissue", &["children", parent, "--json"])?;
-    serde_json::from_str(&said.stdout).context("vissue children --json")
 }
 
 /// The workflow an issue carries, read from the tracker.
@@ -36302,9 +36290,6 @@ pub fn settle_in_words(
 ///
 /// The tracker did not list them.
 pub fn raw_ballot_rows(issue: &str) -> Result<Vec<Value>> {
-    if let Some(spot) = issue_spot::find(issue) {
-        return Ok(spot.ballots());
-    }
     let said = run_captured("vissue", &["vote", issue, "--json"])
         .with_context(|| format!("vote: the tracker did not list ballots on {issue}"))?;
     Ok(serde_json::from_str(said.stdout.trim()).unwrap_or_default())
@@ -36796,6 +36781,19 @@ pub fn identity_or_seat(identity: Option<&str>) -> Option<String> {
 /// Give a child this process's connection. A nested `ljos vote` then signs
 /// with the same session, a subagent's included. The seat argument is not
 /// copied onto the session.
+/// Point a `vissue VERB ID` process at the one layout that holds `ID`,
+/// with routing off, so it does not walk every routed tracker. See
+/// [`issue_spot::route_env`].
+fn route_vissue(cmd: &mut std::process::Command, bin: &str, args: &[impl AsRef<str>]) {
+    if bin != "vissue" {
+        return;
+    }
+    let words: Vec<&str> = args.iter().map(AsRef::as_ref).collect();
+    for (key, value) in hook_timed("vissue_route", || issue_spot::route_env(&words)) {
+        cmd.env(key, value);
+    }
+}
+
 pub fn bind_connection_env(cmd: &mut std::process::Command) {
     // The tracker goes with the connection: a habitat started from a
     // product checkout must write to the seat's tracker, not to the
@@ -36818,6 +36816,7 @@ pub fn run_as(bin: &str, args: &[impl AsRef<str>], identity: Option<&str>) -> Re
         cmd.env("VISSUE_AGENT", who);
     }
     bind_connection_env(&mut cmd);
+    route_vissue(&mut cmd, bin, args);
     for a in args {
         cmd.arg(a.as_ref());
     }
@@ -36869,14 +36868,6 @@ pub fn run_captured_as(
     identity: Option<&str>,
 ) -> Result<Said> {
     let words: Vec<&str> = args.iter().map(AsRef::as_ref).collect();
-    if bin == "vissue" {
-        if let Some(stdout) = hook_timed("local vissue read", || issue_spot::answer(&words)) {
-            return Ok(Said {
-                stdout,
-                stderr: String::new(),
-            });
-        }
-    }
     let stage = format!("exec {bin} {}", words.first().copied().unwrap_or(""));
     hook_timed(&stage, || {
         run_captured_within(bin, args, identity, CAPTURE_DEADLINE)
@@ -36907,6 +36898,7 @@ fn run_captured_within(
         cmd.env("VISSUE_AGENT", who);
     }
     bind_connection_env(&mut cmd);
+    route_vissue(&mut cmd, bin, args);
     for a in args {
         cmd.arg(a.as_ref());
     }

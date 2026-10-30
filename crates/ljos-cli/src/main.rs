@@ -2209,18 +2209,7 @@ fn run_command() -> Result<()> {
                     args.push(format!("{p}"));
                 }
                 let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-                ljos_cli::hook_timed("vote_cast", || {
-                    match ljos_cli::issue_spot::cast(
-                        &issue,
-                        &who,
-                        &args[3],
-                        used,
-                        confidence.map(|p| format!("{p}")).as_deref(),
-                    ) {
-                        Some(said) => said.map(|text| print!("{text}")),
-                        None => run_as("vissue", &refs, Some(&who)),
-                    }
-                })?;
+                ljos_cli::hook_timed("vote_cast", || run_as("vissue", &refs, Some(&who)))?;
                 // Read the ballot back: only the tracker is proof it exists.
                 let rows: Vec<serde_json::Value> = ljos_cli::hook_timed("vote_readback", || {
                     ljos_cli::raw_ballot_rows(&issue).unwrap_or_default()

@@ -13,6 +13,10 @@
 //! answers; a second definition of the same id elsewhere is not looked for.
 //! Every helper returns `None` when the id is not found that way, and the
 //! caller then asks the tracker the slow way.
+//!
+//! A `vissue` process the seat runs about one issue is pointed at the
+//! layout found here, with routing off ([`route_env`]), so it reads that
+//! one tracker instead of walking every routed one.
 
 use serde_json::Value;
 use std::path::PathBuf;
@@ -90,61 +94,6 @@ impl Spot {
         serde_json::to_value(svc.detail(&self.id).ok()?).ok()
     }
 
-    /// The rows `vissue children ID --json` prints, from the issue's own
-    /// project: `ljos file --parent` and the workflow verbs file every
-    /// child there.
-    #[must_use]
-    pub fn children(&self) -> Option<Vec<Value>> {
-        let svc = vissue_core::catalog::CatalogService::from_recs(&self.recs);
-        let rows = svc.children(&self.id).ok()?;
-        serde_json::to_value(rows)
-            .ok()?
-            .as_array()
-            .cloned()
-    }
-
-    /// The rows `vissue vote ID --json` prints, read from the heading's
-    /// `VOTES` drawer in drawer order. One ballot per agent, the last line
-    /// winning, as the tracker reads a hand-edited duplicate.
-    #[must_use]
-    pub fn ballots(&self) -> Vec<Value> {
-        ballots_of(&self.rec().heading)
-    }
-}
-
-/// What `vissue show ID --json`, `vissue vote ID --json` or `vissue
-/// children ID --json` would print, read in this process, or `None` for
-/// any other command line and for an id [`find`] does not reach.
-#[must_use]
-pub fn answer(args: &[&str]) -> Option<String> {
-    let [verb, id, "--json"] = args else {
-        return None;
-    };
-    let spot = find(id)?;
-    let value = match *verb {
-        "show" => spot.card()?,
-        "vote" => Value::Array(spot.ballots()),
-        "children" => Value::Array(spot.children()?),
-        _ => return None,
-    };
-    serde_json::to_string(&value).ok()
-}
-
-/// `vissue vote ID --for CHOICE --used USED [--confidence P]` as `who`,
-/// written in this process to the layout [`find`] reaches the id in.
-/// `None` when [`find`] does not reach it: the caller runs `vissue`.
-pub fn cast(
-    id: &str,
-    who: &str,
-    choice: &str,
-    used: &str,
-    confidence: Option<&str>,
-) -> Option<anyhow::Result<String>> {
-    let spot = find(id)?;
-    Some(
-        vissue_core::ops::vote_with(&spot.layout, id, Some(choice), who, Some(used), confidence)
-            .map_err(anyhow::Error::from),
-    )
 }
 
 /// [`Spot`] for `id` in `layout` alone.
@@ -199,84 +148,33 @@ pub fn find(id: &str) -> Option<Spot> {
     None
 }
 
-/// The name of the drawer ballots live in.
-const VOTES_DRAWER: &str = "VOTES";
+/// Verbs whose second word is the issue they read or write.
+const ID_VERBS: &[&str] = &["show", "vote", "children", "recall", "note", "append"];
 
-fn drawer_is(drawer: &str, name: &str) -> bool {
-    drawer
-        .lines()
-        .next()
-        .map(str::trim)
-        .and_then(|first| first.strip_prefix(':'))
-        .and_then(|rest| rest.strip_suffix(':'))
-        .is_some_and(|n| n.eq_ignore_ascii_case(name))
-}
-
-/// `choice used=X confidence=P`, split the way the tracker splits it.
-fn split_tail(choice: &str) -> (&str, Option<String>, Option<String>) {
-    if let Some((choice, tail)) = choice.split_once(" used=") {
-        let (used, confidence) = match tail.split_once(" confidence=") {
-            Some((used, confidence)) => (used, Some(confidence.to_string())),
-            None => (tail, None),
-        };
-        let used = (!used.is_empty()).then(|| used.to_string());
-        return (choice.trim(), used, confidence);
-    }
-    if let Some((choice, confidence)) = choice.split_once(" confidence=") {
-        return (choice.trim(), None, Some(confidence.to_string()));
-    }
-    (choice, None, None)
-}
-
-/// One drawer line, `[stamp] agent: choice`, as a `vissue vote --json` row.
-fn ballot_row(line: &str) -> Option<(String, Value)> {
-    let (stamp, rest) = line.strip_prefix('[')?.split_once("] ")?;
-    let (agent, choice) = rest.split_once(": ")?;
-    let agent = agent.trim();
-    let choice = choice.trim();
-    if agent.is_empty() || choice.is_empty() {
-        return None;
-    }
-    let (choice, used, confidence) = split_tail(choice);
-    Some((
-        agent.to_string(),
-        serde_json::json!({
-            "agent": agent,
-            "choice": choice,
-            "stamp": format!("[{stamp}]"),
-            "used": used,
-            "confidence": confidence,
-        }),
-    ))
-}
-
-/// The ballots on `heading`, as `vissue vote ID --json` prints them.
+/// The environment that points a `vissue VERB ID ...` process at the
+/// layout [`find`] reaches `ID` in, with routing off, so the process
+/// reads that tracker alone: `ISSUE_ROOT` and `VISSUE_ROOT` (the tracker
+/// reads `ISSUE_ROOT` first), `VISSUE_PREFIX`, and `VISSUE_NO_ROUTE`.
+/// Empty for any other command line and for an id [`find`] does not
+/// reach; the process then routes as it always does.
 #[must_use]
-pub fn ballots_of(heading: &vissue_core::IssueHeading) -> Vec<Value> {
-    let Some(drawer) = heading
-        .extra_drawers
-        .iter()
-        .find(|d| drawer_is(d, VOTES_DRAWER))
-    else {
+pub fn route_env(args: &[&str]) -> Vec<(&'static str, String)> {
+    let [verb, id, ..] = args else {
         return Vec::new();
     };
-    let mut rows: Vec<(String, Value)> = Vec::new();
-    for line in drawer.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty()
-            || trimmed.eq_ignore_ascii_case(&format!(":{VOTES_DRAWER}:"))
-            || trimmed.eq_ignore_ascii_case(":END:")
-        {
-            continue;
-        }
-        if let Some((agent, row)) = ballot_row(trimmed) {
-            match rows.iter_mut().find(|(a, _)| *a == agent) {
-                Some(existing) => existing.1 = row,
-                None => rows.push((agent, row)),
-            }
-        }
+    if !ID_VERBS.contains(verb) || id.starts_with('-') {
+        return Vec::new();
     }
-    rows.into_iter().map(|(_, row)| row).collect()
+    let Some(spot) = find(id) else {
+        return Vec::new();
+    };
+    let root = spot.layout.root().display().to_string();
+    vec![
+        ("ISSUE_ROOT", root.clone()),
+        ("VISSUE_ROOT", root),
+        ("VISSUE_PREFIX", spot.layout.prefix().to_string()),
+        ("VISSUE_NO_ROUTE", "1".to_string()),
+    ]
 }
 
 #[cfg(test)]
@@ -291,8 +189,6 @@ mod tests {
 :END:\n\
 :VOTES:\n\
 [2026-10-30 Fri 09:00] inky@box: land used=none confidence=0.9\n\
-[2026-10-30 Fri 09:01] other@box: hold\n\
-[2026-10-30 Fri 09:02] inky@box: land used=deed-1\n\
 :END:\n\
 Body.\n\n\
 * TODO [#C] Child :task:\n\
@@ -317,64 +213,26 @@ Body.\n\n\
     }
 
     #[test]
-    fn a_spot_reads_the_card_the_ballots_and_the_children() {
+    fn the_card_matches_the_tracker_crate() {
         let tmp = tempfile::tempdir().unwrap();
         let layout = layout_with_board(tmp.path());
-        let spot = in_layout(&layout, "demo-aaaa").expect("found");
-        let card = spot.card().expect("card");
-        assert_eq!(card["state"], "STARTED");
-        assert_eq!(card["claimed_by"], "inky@box");
-        let ballots = spot.ballots();
-        assert_eq!(ballots.len(), 2);
-        assert_eq!(ballots[0]["agent"], "inky@box");
-        assert_eq!(ballots[0]["choice"], "land");
-        assert_eq!(ballots[0]["used"], "deed-1");
-        assert!(ballots[0]["confidence"].is_null());
-        assert_eq!(ballots[1]["choice"], "hold");
-        let children = spot.children().expect("children");
-        assert_eq!(children.len(), 1);
-        assert_eq!(children[0]["id"], "demo-bbbb");
+        for id in ["demo-aaaa", "demo-bbbb"] {
+            let spot = in_layout(&layout, id).expect("found");
+            let full = vissue_core::agent::show_json(&layout, id).unwrap();
+            assert_eq!(spot.card().unwrap(), full);
+            assert_eq!(spot.rec().heading.id, id);
+        }
         assert!(in_layout(&layout, "demo-zzzz").is_none());
         assert!(in_layout(&layout, "other-aaaa").is_none());
     }
 
-    #[test]
-    fn the_card_matches_the_tracker_crate() {
-        let tmp = tempfile::tempdir().unwrap();
-        let layout = layout_with_board(tmp.path());
-        let spot = in_layout(&layout, "demo-bbbb").expect("found");
-        let full = vissue_core::agent::show_json(&layout, "demo-bbbb").unwrap();
-        assert_eq!(spot.card().unwrap(), full);
-        let ballots: Vec<Value> = vissue_core::ops::ballots(&layout, "demo-aaaa")
-            .unwrap()
-            .iter()
-            .map(|b| {
-                serde_json::json!({
-                    "agent": b.agent,
-                    "choice": b.choice,
-                    "stamp": b.stamp,
-                    "used": b.used,
-                    "confidence": b.confidence,
-                })
-            })
-            .collect();
-        assert_eq!(in_layout(&layout, "demo-aaaa").unwrap().ballots(), ballots);
-    }
-
-    #[test]
-    fn only_the_three_reads_are_answered_here() {
-        assert!(answer(&["vote", "demo-aaaa"]).is_none());
-        assert!(answer(&["vote", "demo-aaaa", "--for", "x"]).is_none());
-        assert!(answer(&["recall", "demo-aaaa", "--json"]).is_none());
-    }
-
-    /// A project of many issues beside the one asked about is not read.
+    /// A project beside the one asked about is not read: a walk over every
+    /// project fails on a file that does not parse, a read of the issue's
+    /// own project does not.
     #[test]
     fn a_lookup_reads_one_project_only() {
         let tmp = tempfile::tempdir().unwrap();
         let layout = layout_with_board(tmp.path());
-        // A second project whose file does not parse: a walk over every
-        // project fails on it, a read of `demo` alone does not.
         std::fs::create_dir_all(tmp.path().join("Issues/broken")).unwrap();
         std::fs::write(
             tmp.path().join("Issues/broken/issues.org"),
@@ -384,5 +242,13 @@ Body.\n\n\
         assert!(vissue_core::agent::show_json(&layout, "demo-aaaa").is_err());
         let spot = in_layout(&layout, "demo-aaaa").expect("found");
         assert_eq!(spot.card().unwrap()["id"], "demo-aaaa");
+    }
+
+    #[test]
+    fn only_a_verb_on_an_issue_is_pointed_at_a_layout() {
+        assert!(route_env(&["q", "-p", "demo", "title"]).is_empty());
+        assert!(route_env(&["vote", "--json"]).is_empty());
+        assert!(route_env(&["create", "demo-aaaa"]).is_empty());
+        assert!(route_env(&["vote"]).is_empty());
     }
 }
