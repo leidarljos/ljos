@@ -1045,7 +1045,12 @@ fn a_processs_own_env_does_not_outrank_its_shells_stamp() {
             !said.contains("deny: sitting-gate"),
             "Z's policy with {forge}:\n{said}"
         );
-        let said = text_of(&home.sh(&z, &format!("{forge} \"$LJOS\" seat")));
+        // `; exit $?` keeps Z's shell alive under ljos. Where /bin/sh is
+        // bash, `sh -c 'CMD'` execs a lone simple command in place, so no
+        // process would hold Z's id and the scenario (a forged id beside a
+        // shell that carries the real one) would not exist. dash forks
+        // either way; the trailing builtin makes every sh behave the same.
+        let said = text_of(&home.sh(&z, &format!("{forge} \"$LJOS\" seat; exit $?")));
         assert_eq!(seat_holder(&said), holder(CONV_Z), "Z's seat with {forge}");
         let out = home.sh(&z, &format!("{forge} {commit}"));
         assert!(
