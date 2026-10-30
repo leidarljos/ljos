@@ -25887,10 +25887,10 @@ pub(crate) fn complete_rows_counted<T: serde::de::DeserializeOwned>(
 }
 
 /// How long a best-effort [`append_locked_row`] tries for the lock before
-/// it skips the row. A holder keeps the lock for one write, so with no
-/// contention nothing waits; the budget is for a holder the scheduler
-/// has set aside on a busy machine, which 50 ms did not outlast when
-/// thirty-two hooks wrote at once on a small runner.
+/// it skips the row. A later row starts this wait over. A holder keeps the
+/// lock for one write, so with no contention nothing waits; the budget is
+/// for a holder the scheduler has set aside on a busy machine, which 50 ms
+/// did not outlast when thirty-two hooks wrote at once on a small runner.
 pub(crate) const ROW_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// How long a durable [`append_locked_row`] waits for the lock before it
@@ -25898,6 +25898,13 @@ pub(crate) const ROW_LOCK_WAIT: std::time::Duration = std::time::Duration::from_
 /// one `write(2)`, so a verdict or a queued memory is not dropped for a
 /// brush with contention, bounded so a wedged holder still returns.
 pub(crate) const ROW_LOCK_WAIT_DURABLE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The most a best-effort [`append_locked_row`] waits in total, however
+/// often another writer's row starts [`ROW_LOCK_WAIT`] over.
+pub(crate) const ROW_LOCK_WAIT_TOTAL: std::time::Duration = std::time::Duration::from_millis(500);
+const _: () = assert!(ROW_LOCK_WAIT_TOTAL.as_millis() <= GUARD_TIMEOUT.as_millis());
+const _: () = assert!(ROW_LOCK_WAIT_TOTAL.as_millis() <= ROW_LOCK_WAIT_DURABLE.as_millis());
+const _: () = assert!(ROW_LOCK_WAIT.as_millis() < ROW_LOCK_WAIT_TOTAL.as_millis());
 
 /// How hard [`append_locked_row`] tries for the lock before it gives up.
 #[derive(Clone, Copy)]
@@ -25907,8 +25914,10 @@ pub(crate) enum Durability {
     /// caller can roll back or tell the person it did not land.
     Durable,
     /// A row the command hook writes, such as the bypass, hook-trace and
-    /// judge logs: try [`ROW_LOCK_WAIT`] and skip, so a lock held by
-    /// something stuck never holds the person's command.
+    /// judge logs: try [`ROW_LOCK_WAIT`] after the last appended row and
+    /// skip, so a quiet lock never keeps the person's command waiting.
+    /// Writers that are still appending start that wait over, and
+    /// [`ROW_LOCK_WAIT_TOTAL`] ends it when they do not pause.
     BestEffort,
 }
 
@@ -25931,12 +25940,13 @@ impl Durability {
 /// written is the caller's to skip.
 ///
 /// `durability` sets how long the lock is tried. A [`Durability::Durable`]
-/// row waits [`ROW_LOCK_WAIT_DURABLE`] and reports `WouldBlock` on failure,
-/// so a verdict or a queued memory is not dropped for a brush with
-/// contention. A [`Durability::BestEffort`] row, which the command hook
-/// writes, waits [`ROW_LOCK_WAIT`] and then gives up: a writer holds the
-/// lock for one `write(2)`, and a lock held longer than that is not one of
-/// ours, so the row is skipped rather than the person's command.
+/// row waits [`ROW_LOCK_WAIT_DURABLE`] from the start and reports
+/// `WouldBlock` on failure, so a verdict or a queued memory is not dropped
+/// for a brush with contention. A [`Durability::BestEffort`] row, which
+/// the command hook writes, waits [`ROW_LOCK_WAIT`] after the last row
+/// another writer appended, and never longer than [`ROW_LOCK_WAIT_TOTAL`]
+/// from the start. A holder that adds nothing for that whole wait is not
+/// one of ours, so the row is skipped rather than the person's command.
 ///
 /// The directory `path` sits in is one ljos made, such as
 /// `$XDG_STATE_HOME/ljos`, and a symlink there is refused as well: it
@@ -26017,8 +26027,21 @@ fn with_locked_row_file(
     };
     file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     let wait = durability.lock_wait();
-    let deadline = std::time::Instant::now() + wait;
+    let started = std::time::Instant::now();
+    let hard = started
+        + match durability {
+            Durability::BestEffort => ROW_LOCK_WAIT_TOTAL,
+            Durability::Durable => wait,
+        };
+    let mut deadline = started + wait;
     let mut pause = std::time::Duration::from_millis(1);
+    // Best-effort only. The length is how a waiter sees that another
+    // writer appended. A pid is not that: on Linux `fcntl` does not see
+    // a `flock`, and threads of one process share a pid.
+    let mut seen_len = match durability {
+        Durability::BestEffort => file.metadata().ok().map(|meta| meta.len()),
+        Durability::Durable => None,
+    };
     loop {
         // SAFETY: this descriptor stays open until the matching unlock.
         // The lock is advisory, so the row is written on this same
@@ -26028,16 +26051,32 @@ fn with_locked_row_file(
         }
         let err = std::io::Error::last_os_error();
         match err.raw_os_error() {
-            // The deadline is the start of this wait. A new holder does
-            // not move it. The pause grows so a busy lock does not spin.
+            // Durable: the deadline is the start of this wait. A new
+            // writer does not move it. Best-effort: an appended row
+            // starts the wait over, and the total stops at
+            // `ROW_LOCK_WAIT_TOTAL`. A writer that adds nothing for the
+            // whole wait is skipped. The pause grows so a busy lock
+            // does not spin.
             Some(code)
                 if code == libc::EWOULDBLOCK || code == libc::EAGAIN || code == libc::EINTR =>
             {
                 let now = std::time::Instant::now();
+                if seen_len.is_some() {
+                    if let Some(len) = file.metadata().ok().map(|meta| meta.len()) {
+                        if seen_len != Some(len) {
+                            seen_len = Some(len);
+                            deadline = (now + wait).min(hard);
+                            pause = std::time::Duration::from_millis(1);
+                        }
+                    }
+                }
                 if now >= deadline {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::WouldBlock,
-                        format!("still locked after {}ms", wait.as_millis()),
+                        format!(
+                            "still locked after {}ms",
+                            now.saturating_duration_since(started).as_millis()
+                        ),
                     ));
                 }
                 let left = deadline.saturating_duration_since(now);
@@ -49771,6 +49810,89 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
         drop(held);
+    }
+
+    /// Another thread takes `LOCK_EX` on its own descriptor and appends a
+    /// row every `gap` until `span` has passed, then unlocks. Returns only
+    /// after that lock is taken.
+    fn hold_and_append(
+        path: &std::path::Path,
+        gap: std::time::Duration,
+        span: std::time::Duration,
+    ) -> std::thread::JoinHandle<()> {
+        let path = path.to_path_buf();
+        let (locked, wait) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            use std::io::Write;
+            use std::os::unix::io::AsRawFd;
+            let mut held = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            // SAFETY: `held` stays open until the unlock below.
+            assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
+            locked.send(()).unwrap();
+            let started = std::time::Instant::now();
+            let mut n = 0u32;
+            while started.elapsed() < span {
+                writeln!(held, "{{\"holder\":{n}}}").unwrap();
+                n += 1;
+                std::thread::sleep(gap);
+            }
+            // SAFETY: the same descriptor, still open.
+            unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_UN) };
+        });
+        wait.recv().expect("holder locked");
+        handle
+    }
+
+    /// A best-effort row is kept while another writer appends on its own
+    /// descriptor. The lock outlasts [`ROW_LOCK_WAIT`], and the row is in
+    /// the file once that writer unlocks.
+    #[test]
+    fn a_best_effort_row_waits_while_a_queue_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rows.jsonl");
+        std::fs::write(&path, b"").unwrap();
+        let holder = hold_and_append(
+            &path,
+            std::time::Duration::from_millis(20),
+            std::time::Duration::from_millis(350),
+        );
+        let started = std::time::Instant::now();
+        let wrote = append_locked_row(&path, b"{\"who\":\"waiter\"}\n", Durability::BestEffort);
+        let elapsed = started.elapsed();
+        holder.join().unwrap();
+        wrote.expect("queued row");
+        assert!(elapsed > ROW_LOCK_WAIT, "waited only {elapsed:?}");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("{\"who\":\"waiter\"}"), "{text}");
+    }
+
+    /// Steady growth restarts the quiet wait, and the total cap still
+    /// ends it. The other writer appends for longer than that cap.
+    #[test]
+    fn a_best_effort_row_gives_up_under_steady_growth() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rows.jsonl");
+        std::fs::write(&path, b"").unwrap();
+        let holder = hold_and_append(
+            &path,
+            std::time::Duration::from_millis(10),
+            std::time::Duration::from_secs(3),
+        );
+        let started = std::time::Instant::now();
+        let wrote = append_locked_row(&path, b"{\"who\":\"waiter\"}\n", Durability::BestEffort);
+        let elapsed = started.elapsed();
+        holder.join().unwrap();
+        let err = wrote.expect_err("steady growth");
+        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock, "{err}");
+        assert!(
+            elapsed < ROW_LOCK_WAIT_TOTAL + std::time::Duration::from_millis(300),
+            "waited {elapsed:?}"
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("{\"who\":\"waiter\"}"), "{text}");
     }
 
     /// `hook-trace.jsonl` is the same append as the bypass log: one JSON
