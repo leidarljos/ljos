@@ -3,11 +3,15 @@
 
 fn tracker(seats: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
+    // The person's global config may carry commit hooks; the fixture's
+    // repository reads none of it.
     let git = |args: &[&str]| {
         let out = std::process::Command::new("git")
             .arg("-C")
             .arg(dir.path())
             .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .unwrap();
         assert!(out.status.success(), "{args:?}");
