@@ -2,7 +2,7 @@
 //! the parent session. Ballots that share a session id, a parent, a
 //! calling shell or a harness root are all recorded. They count as one
 //! voice, the latest when they disagree. Consensus names the ballots it
-//! folded and why. A subagent of that harness session is its own voice.
+//! folded and why. A subagent of that root counts with its parent.
 //! A session that filed a design candidate does not also vote.
 //!
 //! A design candidate whose session had already read another candidate is
@@ -476,16 +476,21 @@ struct CastTree {
 }
 
 impl CastTree {
-    /// This process's tree. Only the `ljos` command line has one: the MCP
+    /// This process's tree. Only the `ljos` executable has one, matched by
+    /// its resolved path, so a link or another argv0 still binds. The MCP
     /// server answers a parent and its subagents alike, and names each
     /// call's session itself.
     fn here() -> Self {
-        if !crate::subagent::runs_as_ljos() {
+        let mine = proc_tree::exe(std::process::id());
+        if !mine
+            .as_ref()
+            .is_some_and(|path| proc_tree::is_ljos_exe(path))
+        {
             return Self::default();
         }
         let chain = proc_tree::ancestors();
         Self {
-            shell: proc_tree::calling_shell(&chain).map(proc_tree::token),
+            shell: proc_tree::cast_shell(&chain, mine.as_deref()).map(proc_tree::token),
             harness: crate::subagent::taken_harness().map(|p| proc_tree::token(&p)),
         }
     }
@@ -534,9 +539,9 @@ impl TreeRow {
 
     /// The earlier voice when a cast as `key` under `tree` repeats this
     /// row. A shell runs one agent's commands, so any other session from
-    /// it is that voice. A harness runs a parent and its subagents, so
-    /// only another root session from it is. A subagent of the same root,
-    /// in its own shell, is not. The pair is `(why, session key)`:
+    /// it is that voice. A runner row binds another root session. A
+    /// subagent of the same root is not bound here, and the parent fold
+    /// counts it with that root. The pair is `(why, session key)`:
     /// `shell` or `harness`, and this row's session.
     fn binds(&self, key: &str, tree: &CastTree) -> Option<(&'static str, String)> {
         let same = |mine: &Option<String>, theirs: &str| mine.as_deref() == Some(theirs);
@@ -1765,7 +1770,7 @@ mod tests {
         assert_eq!(
             row.binds("sess-root:agent-b", &tree("b:11:1", "b:20:2")),
             None,
-            "a subagent of the same root in its own shell is its own voice"
+            "a subagent of the same root counts with its parent"
         );
         assert_eq!(
             row.binds("sess-other", &tree("b:11:1", "b:20:2")),

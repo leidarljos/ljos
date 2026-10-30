@@ -477,6 +477,65 @@ pub fn calling_shell(chain: &[Proc]) -> Option<&Proc> {
     Some(top)
 }
 
+fn exe_path_key(path: &Path) -> std::ffi::OsString {
+    let text = path.as_os_str().to_string_lossy();
+    match text.strip_suffix(" (deleted)") {
+        Some(plain) => std::ffi::OsString::from(plain),
+        None => path.as_os_str().to_os_string(),
+    }
+}
+
+fn same_resolved_exe(pid: u32, mine: &Path) -> bool {
+    exe(pid).is_some_and(|theirs| exe_path_key(&theirs) == exe_path_key(mine))
+}
+
+/// Whether `path` is the `ljos` executable. The resolved file name stays
+/// `ljos` when argv0 is a link or another name.
+#[must_use]
+pub fn is_ljos_exe(path: &Path) -> bool {
+    let key = exe_path_key(path);
+    Path::new(&key)
+        .file_name()
+        .is_some_and(|name| name == "ljos")
+}
+
+fn is_python(p: &Proc) -> bool {
+    p.comm.starts_with("python")
+}
+
+/// The shell a cast binds to. Ancestors whose resolved executable is
+/// `mine` are this program, whatever argv0 said, and they do not end the
+/// walk. A Python process that launched it does not end the walk either.
+/// The outermost nested shell is then the one [`calling_shell`] would take.
+/// `None` when some other program, an agent runner or the session is the
+/// first program above this process.
+#[must_use]
+pub fn cast_shell<'a>(chain: &'a [Proc], mine: Option<&Path>) -> Option<&'a Proc> {
+    let transparent =
+        |p: &Proc| is_wrapper(p) || mine.is_some_and(|mine| same_resolved_exe(p.pid, mine));
+    let mut i = 0;
+    while i < chain.len() {
+        let p = &chain[i];
+        if transparent(p) || is_python(p) {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    let mut top = chain.get(i).filter(|p| is_shell(p))?;
+    i += 1;
+    while i < chain.len() {
+        let p = &chain[i];
+        if is_shell(p) {
+            top = p;
+        } else if !transparent(p) {
+            break;
+        }
+        i += 1;
+    }
+    Some(top)
+}
+
 /// Where a chain stops being the hook's own: the person's session, a
 /// terminal or the init system ([`crate::is_session`]), or pid 1 unless
 /// it is a harness. Every sitting in that session shares it, and it
@@ -2541,8 +2600,17 @@ mod tests {
         ];
         assert_eq!(calling_shell(&chain), Some(&chain[2]));
         assert_eq!(calling_shell(&[harness.clone(), named(5, "bash")]), None);
-        assert_eq!(calling_shell(&[named(3, "env"), harness]), None);
+        assert_eq!(calling_shell(&[named(3, "env"), harness.clone()]), None);
         assert_eq!(calling_shell(&[]), None);
+        let launched = [named(3, "python3"), named(4, "sh"), named(5, "bash")];
+        assert_eq!(calling_shell(&launched), None);
+        assert_eq!(cast_shell(&launched, None), Some(&launched[2]));
+        assert_eq!(cast_shell(&[harness, named(5, "bash")], None), None);
+        assert_eq!(
+            cast_shell(&[named(9, "cargo"), named(5, "bash")], None),
+            None
+        );
+        assert_eq!(cast_shell(&[], None), None);
     }
 
     #[test]
