@@ -8110,8 +8110,7 @@ pub fn command_directory(input: &str) -> Result<PathBuf> {
 
 /// Where a call whose [`command_directory`] does not resolve is read: the
 /// session directory when it exists, and otherwise the process directory.
-/// A prompt is read there, and so is a command with
-/// `LJOS_GUARD_FAIL_OPEN=1`.
+/// A prompt is read there.
 #[must_use]
 pub fn fallback_directory(input: &str) -> Option<PathBuf> {
     session_directory(input).or_else(|| std::env::current_dir().ok().filter(|path| path.is_dir()))
@@ -35061,7 +35060,8 @@ pub fn tool_installed(tool: &str) -> bool {
     }
 }
 
-/// Operator switch: guard faults allow with a note. Unset, they deny.
+/// Guard faults allow with a note. The deny-on-fault switch is gone, so
+/// this is always true; the callers keep one shape for the fault path.
 pub fn guard_fail_open() -> bool {
     true
 }
@@ -35078,8 +35078,8 @@ pub fn policyd_bin() -> Option<std::path::PathBuf> {
 /// `ljos-policyd` on that whole line, and the first deny stands. A heredoc
 /// body is data the shell feeds a command, and it is not sent as argv.
 /// With the TCB required and absent, the line is refused. A policyd that
-/// is present but times out, crashes, or prints no verdict refuses the
-/// line, unless `LJOS_GUARD_FAIL_OPEN` is set.
+/// is present but times out, crashes, or prints no verdict allows the
+/// line with one warning, and the fault is logged.
 #[must_use]
 pub fn tcb_verdict(line: &str) -> Option<Rule> {
     tcb_verdict_in(line, None)
@@ -35152,12 +35152,12 @@ pub fn tcb_after_static(line: &str, cwd: Option<&Path>, static_clear: bool) -> O
             }
             return rewrite::hold_exact(line, &tcb_script(line), command);
         }
-        // Only the fail-open marker is a fault the switch let through. An
+        // Only the fail-open marker is a fault the guard let through. An
         // unready token is an allow with a note and is not a bypass.
         if t.trim().starts_with("allow\tfail-open\t") {
             log_bypass(
                 "switch",
-                "LJOS_GUARD_FAIL_OPEN=1",
+                "guard-fault",
                 line,
                 &Rule {
                     pattern: "ljos-policyd".into(),
@@ -35547,13 +35547,13 @@ fn repair_line(line: &str) -> bool {
 }
 
 /// What a faulted guard tells the agent. The repair is the person's:
-/// they run `ljos doctor` in their own terminal. `LJOS_GUARD_FAIL_OPEN=1`
-/// is the switch that allows other lines until then.
+/// they run `ljos doctor` in their own terminal. Other lines run with
+/// this warning until then.
 #[must_use]
 pub fn guard_fault_reason(why: &str) -> String {
     format!(
         "the ljos guard failed ({why}); ask the person to run `ljos doctor` in their own \
-         terminal. LJOS_GUARD_FAIL_OPEN=1 allows other lines until the guard is repaired, and \
+         terminal. Other lines run with this warning until the guard is repaired, and \
          `ljos doctor` or `ljos onboard` still runs."
     )
 }
@@ -35633,7 +35633,7 @@ pub fn take_guard_note() -> Option<String> {
 
 fn guard_note_of(text: &str) -> Option<String> {
     let rest = text.trim().strip_prefix("allow\t")?;
-    // `fail-open` marks an allow `LJOS_GUARD_FAIL_OPEN` chose. The person
+    // `fail-open` marks an allow a guard fault chose. The person
     // reads the sentence after it; the marker stays on the raw line so a
     // later log can tell this allow from an unready token.
     let rest = rest.strip_prefix("fail-open\t").unwrap_or(rest);
@@ -35652,8 +35652,8 @@ pub fn unhealthy_note(why: &str) -> String {
 
 /// A force push, a seat deny rule, an `rm -rf` outside a temp directory,
 /// or a commit, push, or merge the gates refuse, judged in this process.
-/// `None` means the slow check may run. A timeout there denies the line
-/// unless `LJOS_GUARD_FAIL_OPEN` is set.
+/// `None` means the slow check may run. A timeout there allows the line
+/// with a warning.
 /// A temp home is not a seat unless `LJOS_GUARD=on`, and this returns
 /// `None` there too, past the sitting gate ([`sitting_gate::guard_line`]),
 /// which judges a runner's history writes under any home and with
@@ -35980,8 +35980,8 @@ pub fn policyd_reason(token: &str) -> String {
 /// One line from `ljos-policyd check -- argv`. None only when there is no
 /// binary to ask: absence is not a deny unless `POLICYD_REQUIRED` says so.
 /// A binary that is there but fails to start, crashes, hangs past
-/// [`guard_timeout`], or prints something that is not a verdict denies the
-/// line. `LJOS_GUARD_FAIL_OPEN=1` allows that fault and says the guard is
+/// [`guard_timeout`], or prints something that is not a verdict is a
+/// fault: the line is allowed, and the answer says the guard is
 /// unhealthy. A line [`static_guard`] already judged does not
 /// wait for that binary. The binary keeps this process's directory;
 /// [`tcb_verdict_in`] starts it in the hook's directory instead.

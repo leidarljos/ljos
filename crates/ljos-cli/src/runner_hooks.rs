@@ -576,10 +576,10 @@ pub fn relay_timeout(event: &str) -> std::time::Duration {
     }
 }
 
-/// A deny for an inner hook fault on a tool call. `what` says how it
-/// failed. With `LJOS_GUARD_FAIL_OPEN=1`, or on any event that is not a
-/// gate, this is the old allow with a note: a prompt that the guard could
-/// not finish is not a command, and denying it blocks the person.
+/// The answer for an inner hook fault. `what` says how it failed. A
+/// fault allows with a note on every event: a prompt that the guard could
+/// not finish is not a command, and a command the guard could not judge
+/// runs with the warning, since the deny-on-fault switch is gone.
 fn fault_output(event: &str, what: &str) -> String {
     if !gate_event(event) || crate::guard_fail_open() {
         return json!({
