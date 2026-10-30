@@ -1482,18 +1482,15 @@ mod tests {
         }
     }
 
-    /// How long a prompt may stay down, or a body with no prompt may
-    /// run, before the test fails. Once the prompt is up the body is
-    /// waited on by its channel. The hash after the line is read is
-    /// that wait, and this clock is only the guard for a prompt that
-    /// never arrives.
+    /// How long a prompt may stay down, and how long the body may run
+    /// after the prompt is up, before the test fails. The same five
+    /// seconds covers both, so a later prompt that never arrives fails
+    /// the test.
     const HANG: std::time::Duration = std::time::Duration::from_secs(5);
 
     /// Run `body` until it finishes. `prompted` is the signal that the
-    /// prompt is up and its line has been typed. Five seconds is only
-    /// the guard for that signal, or for a body that never prompts.
-    /// After the signal the channel is the wait, so a slow hash is not
-    /// a longer deadline.
+    /// prompt is up and its line has been typed. Five seconds guards
+    /// that signal, and the same cap guards the wait after it.
     fn bounded<T: Send + 'static>(
         what: &'static str,
         prompted: &std::sync::mpsc::Receiver<()>,
@@ -1509,7 +1506,9 @@ mod tests {
                 return value;
             }
             if prompted.try_recv().is_ok() {
-                return rx.recv().unwrap_or_else(|_| panic!("{what} hung"));
+                return rx
+                    .recv_timeout(HANG)
+                    .unwrap_or_else(|_| panic!("{what} hung"));
             }
             if started.elapsed() >= HANG {
                 panic!("{what} hung");
