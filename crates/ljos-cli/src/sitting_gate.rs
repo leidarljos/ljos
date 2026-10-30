@@ -180,17 +180,21 @@ fn protected_branch_ask(calls: &[GitCall], line: &str) -> Option<Rule> {
         .filter(|call| call.sub == "push" && writes_history(call))
         .filter(|call| plain_protected_push(&call.args))
     {
-        let cfg = match crate::gates::consensus_push(Some(&push.cwd)) {
+        let cfg = match crate::hook_timed("push_gate_settings", || {
+            crate::gates::consensus_push(Some(&push.cwd))
+        }) {
             Ok(cfg) => cfg,
             Err(why) => return Some(asked(&unread_settings(&why))),
         };
         let Some(dest) = crate::gates::protected_push(push, line, &cfg.branches) else {
             continue;
         };
-        let Some(issue) = crate::seat_held_issue() else {
+        let Some(issue) = crate::hook_timed("push_gate_held", crate::seat_held_issue) else {
             return Some(asked(&protected_ask(&dest, &cfg.branches)));
         };
-        if !crate::protected_push_cleared(&issue, &crate::seat_name(), cfg.quorum) {
+        if !crate::hook_timed("push_gate_cleared", || {
+            crate::protected_push_cleared(&issue, &crate::seat_name(), cfg.quorum)
+        }) {
             return Some(asked(&protected_ask(&dest, &cfg.branches)));
         }
     }

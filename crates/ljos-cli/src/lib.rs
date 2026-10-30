@@ -36,6 +36,7 @@ mod handover_scope;
 pub mod hookd;
 pub mod hud;
 pub mod idle_drop;
+pub mod issue_spot;
 pub mod jev;
 mod kept_prompt;
 pub mod mail;
@@ -17958,8 +17959,7 @@ pub fn latest_note_value(v: &Value, prefix: &str) -> Option<String> {
 ///
 /// The tracker not answering.
 pub fn playbook_named_on(issue: &str) -> Result<Option<String>> {
-    let said = run_captured("vissue", &["show", issue, "--json"])?;
-    let v: Value = serde_json::from_str(&said.stdout).context("vissue show --json")?;
+    let v = issue_record(issue)?;
     Ok(playbook_name_from_issue(&v))
 }
 
@@ -18450,8 +18450,7 @@ pub fn format_workflow_status(s: &WorkflowStatus) -> String {
 
 /// The children of `parent` as the tracker holds them now.
 fn workflow_children(parent: &str) -> Result<Vec<WorkflowChild>> {
-    let said = run_captured("vissue", &["children", parent, "--json"])?;
-    let rows: Vec<Value> = serde_json::from_str(&said.stdout).context("vissue children --json")?;
+    let rows = tracker_children(parent)?;
     let mut out = Vec::new();
     for row in rows {
         let Some(id) = row["id"].as_str() else {
@@ -18464,6 +18463,20 @@ fn workflow_children(parent: &str) -> Result<Vec<WorkflowChild>> {
         out.push(child);
     }
     Ok(out)
+}
+
+/// The rows `vissue children PARENT --json` prints, read from the
+/// parent's own project when [`issue_spot::find`] has it there.
+///
+/// # Errors
+///
+/// The tracker did not list the children.
+pub fn tracker_children(parent: &str) -> Result<Vec<Value>> {
+    if let Some(rows) = issue_spot::find(parent).and_then(|spot| spot.children()) {
+        return Ok(rows);
+    }
+    let said = run_captured("vissue", &["children", parent, "--json"])?;
+    serde_json::from_str(&said.stdout).context("vissue children --json")
 }
 
 /// The workflow an issue carries, read from the tracker.
@@ -18494,8 +18507,7 @@ pub fn workflow_status(parent: &str) -> Result<Option<WorkflowStatus>> {
         .map(|(_, c)| c.id.clone());
     let ballots = match &latest {
         Some(id) => {
-            let said = run_captured("vissue", &["vote", id, "--json"])?;
-            forecasts_from_json(&said.stdout)?
+            forecasts_from_json(&raw_ballot_json(id)?)?
         }
         None => Vec::new(),
     };
@@ -18618,8 +18630,7 @@ fn panel_state_for(parent: &str, status: &WorkflowStatus) -> Result<converge::Pa
             objections.extend(converge::objections_in(&v, parent));
         }
         if !panel.open() {
-            let said = run_captured("vissue", &["vote", &panel.id, "--json"])?;
-            let ballots = forecasts_from_json(&said.stdout).unwrap_or_default();
+            let ballots = forecasts_from_json(&raw_ballot_json(&panel.id)?).unwrap_or_default();
             let verdict = panel_verdict(&ballots, &workflow_config());
             awaiting_ballots = verdict
                 .reasons
@@ -22851,21 +22862,15 @@ pub fn seats_decide(
     })
 }
 
-fn vissue_json(args: &[&str]) -> std::result::Result<Value, String> {
-    let said = run_captured("vissue", args).map_err(|e| format!("{e:#}"))?;
-    serde_json::from_str(&said.stdout).map_err(|e| e.to_string())
-}
-
 /// An issue's ballots and the persona names to leave out of them. The
 /// rows are what [`panel_gate::counted_ballots`] keeps of `vissue vote
 /// --json`, the same rows [`ballot_rows`] hands to consensus.
 fn cite_ballots(
     cite: &str,
 ) -> std::result::Result<(Vec<Value>, std::collections::BTreeSet<String>), String> {
-    let ballots = vissue_json(&["vote", cite, "--json"])
-        .map_err(|e| format!("{cite}: the ballots are not readable: {e}"))?;
-    let ballots =
-        panel_gate::counted_ballots(cite, &ballots.as_array().cloned().unwrap_or_default());
+    let ballots = raw_ballot_rows(cite)
+        .map_err(|e| format!("{cite}: the ballots are not readable: {e:#}"))?;
+    let ballots = panel_gate::counted_ballots(cite, &ballots);
     Ok((ballots, cite_roster(cite)?))
 }
 
@@ -24710,8 +24715,8 @@ pub fn settle_discount(
     let named: Vec<(Vec<(String, String)>, String)> = outcomes
         .into_iter()
         .filter_map(|(issue, choice)| {
-            let said = run_captured("vissue", &["vote", &issue, "--json"]).ok()?;
-            let ballots: Vec<(String, String)> = forecasts_from_json(&said.stdout)
+            let said = raw_ballot_json(&issue).ok()?;
+            let ballots: Vec<(String, String)> = forecasts_from_json(&said)
                 .ok()?
                 .into_iter()
                 .map(|f| (f.agent, f.choice))
@@ -30283,6 +30288,9 @@ fn held_tracker_in(dir: &Path, node: &str) -> Option<vissue_core::Layout> {
 /// As [`issue_record`].
 pub fn held_issue_record(issue: &str) -> Result<Value> {
     if let Some(layout) = held_tracker_in(&runtime_dir(), issue) {
+        if let Some(v) = issue_spot::in_layout(&layout, issue).and_then(|spot| spot.card()) {
+            return Ok(v);
+        }
         if let Ok(v) = vissue_core::agent::show_json(&layout, issue) {
             return Ok(v);
         }
@@ -30641,6 +30649,9 @@ pub(crate) fn revision_note(body: &Value) -> String {
 ///
 /// The tracker root cannot be resolved, or `id` is not in it.
 pub fn tracker_show_json(id: &str) -> Result<Value> {
+    if let Some(card) = issue_spot::find(id).and_then(|spot| spot.card()) {
+        return Ok(card);
+    }
     let layout = vissue_core::Layout::resolve(None, None).map_err(anyhow::Error::from)?;
     let found = vissue_core::Router::load(layout)
         .map_err(anyhow::Error::from)?
@@ -32498,10 +32509,10 @@ pub fn finish(
         }
     }
     if let Some(option) = outcome.map(str::trim).filter(|o| !o.is_empty()) {
-        let said = run_captured("vissue", &["vote", issue, "--json"]).with_context(|| {
+        let said = raw_ballot_json(issue).with_context(|| {
             format!("finish: the session node for {issue} is completed; reading its ballots failed, `ljos learn {issue} --outcome {option}` retries")
         })?;
-        let forecasts = forecasts_from_json(&said.stdout)?;
+        let forecasts = forecasts_from_json(&said)?;
         if forecasts.len() < 2 {
             out.push_str("outcome named but fewer than two ballots; nothing to learn from\n");
         } else {
@@ -32800,6 +32811,32 @@ fn exclude_tracker_lock(common: &Path) {
 /// `index.lock`. Taking it twice in one thread waits forever.
 pub fn tracker_commit_lock(dir: &Path) -> CommitLock {
     tracker_lock_path(dir).map_or(CommitLock(None), |path| CommitLock::acquire(&path))
+}
+
+/// How long a tracker write waits for another writer's commit lock before
+/// it says so and leaves the write uncommitted: `LJOS_TRACKER_LOCK_WAIT`
+/// seconds, else 20.
+#[must_use]
+pub fn tracker_lock_wait() -> std::time::Duration {
+    let secs = std::env::var("LJOS_TRACKER_LOCK_WAIT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(20);
+    std::time::Duration::from_secs(secs)
+}
+
+/// The line a tracker write prints when another writer kept the commit
+/// lock of `dir` past [`tracker_lock_wait`].
+#[must_use]
+pub fn tracker_lock_busy(dir: &Path) -> String {
+    let lock = tracker_lock_path(dir).map_or_else(
+        || dir.display().to_string(),
+        |path| path.display().to_string(),
+    );
+    format!(
+        "tracker git: another writer held {lock} for {}s, so this write is on disk and not committed; the next tracker commit carries it, or run `ljos sync`\n",
+        tracker_lock_wait().as_secs()
+    )
 }
 
 /// [`tracker_commit_lock`] for a caller with a time budget: `None` when
@@ -33418,6 +33455,12 @@ fn persist_tracker_with(issue: &str, verb: &str, also: &[String]) -> String {
 /// The file that holds `issue`. A ledger fold names `issues/<id>.org`.
 /// A single board names `issues.org`. `show_json` prints `path:start-end`.
 fn tracker_issue_path(issue: &str) -> Result<PathBuf, String> {
+    if let Some(spot) = issue_spot::find(issue) {
+        let path = spot.rec().path.clone();
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
     let layout = vissue_core::Layout::resolve(None, None).map_err(|e| e.to_string())?;
     let hit = vissue_core::Router::load(layout)
         .map_err(|e| e.to_string())?
@@ -33560,7 +33603,10 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
     // that another seat's commit is about to make stale. A git process
     // outside ljos that holds the index is waited out a few times before
     // the line says so.
-    let held = tracker_commit_lock(dir);
+    let Some(held) = tracker_commit_lock_by(dir, std::time::Instant::now() + tracker_lock_wait())
+    else {
+        return tracker_lock_busy(dir);
+    };
     let mut live: Vec<&str> = Vec::new();
     let mut ignored_note = String::new();
     if also.is_empty() {
@@ -34694,17 +34740,19 @@ fn policy_reading_in(
         session: None,
         shape: HookShape::Asks,
     };
-    let context = hook_context(&call, 5);
+    let context = hook_timed("policy_context", || hook_context(&call, 5));
     // The rules are the law's memory: a deny or an ask fires before the
     // context, so a reader sees the verdict first. A line the fast check
     // already judged does not wait on policyd, which can hang. A guard that
     // is switched off judges nothing, policyd included.
     let off = bookkeep::guard_suspended();
-    let fast = if off {
-        sitting_gate::guard_line(&line, cwd)
-    } else {
-        static_guard_in(&line, cwd)
-    };
+    let fast = hook_timed("static_guard", || {
+        if off {
+            sitting_gate::guard_line(&line, cwd)
+        } else {
+            static_guard_in(&line, cwd)
+        }
+    });
     let judged = fast.is_some();
     let rules = if off { Vec::new() } else { rules_for_gate() };
     let cwd_text = cwd
@@ -34718,14 +34766,16 @@ fn policy_reading_in(
     let gated = if off {
         None
     } else {
-        redirect_seat_verb(
-            gate_push(
-                ruled_verdict(&rules, &line).as_ref(),
+        hook_timed("gate_push", || {
+            redirect_seat_verb(
+                gate_push(
+                    ruled_verdict(&rules, &line).as_ref(),
+                    &line,
+                    cwd_text.as_deref(),
+                ),
                 &line,
-                cwd_text.as_deref(),
-            ),
-            &line,
-        )
+            )
+        })
     };
     let deny = gated.as_ref().is_some_and(|rule| rule.verdict == "deny");
     let gated = match fast {
@@ -34739,7 +34789,7 @@ fn policy_reading_in(
     let tcb = if judged || off {
         None
     } else {
-        match tcb() {
+        match hook_timed("tcb", tcb) {
             // `git-force-push` asks, the same way the push gate does. The raw
             // `deny` line would read as a refusal beside that ask.
             Some(tcb) if policyd_token(&tcb) == "git-force-push" => None,
@@ -36224,9 +36274,21 @@ pub fn settle_in_words(
 ///
 /// The tracker did not list them.
 pub fn raw_ballot_rows(issue: &str) -> Result<Vec<Value>> {
+    if let Some(spot) = issue_spot::find(issue) {
+        return Ok(spot.ballots());
+    }
     let said = run_captured("vissue", &["vote", issue, "--json"])
         .with_context(|| format!("vote: the tracker did not list ballots on {issue}"))?;
     Ok(serde_json::from_str(said.stdout.trim()).unwrap_or_default())
+}
+
+/// [`raw_ballot_rows`] as the JSON text `vissue vote ID --json` prints.
+///
+/// # Errors
+///
+/// The tracker did not list them.
+pub fn raw_ballot_json(issue: &str) -> Result<String> {
+    Ok(serde_json::to_string(&raw_ballot_rows(issue)?)?)
 }
 
 /// The ballots that count. The drawer may hold several personas from one
@@ -36778,7 +36840,19 @@ pub fn run_captured_as(
     args: &[impl AsRef<str>],
     identity: Option<&str>,
 ) -> Result<Said> {
-    run_captured_within(bin, args, identity, CAPTURE_DEADLINE)
+    let words: Vec<&str> = args.iter().map(AsRef::as_ref).collect();
+    if bin == "vissue" {
+        if let Some(stdout) = hook_timed("local vissue read", || issue_spot::answer(&words)) {
+            return Ok(Said {
+                stdout,
+                stderr: String::new(),
+            });
+        }
+    }
+    let stage = format!("exec {bin} {}", words.first().copied().unwrap_or(""));
+    hook_timed(&stage, || {
+        run_captured_within(bin, args, identity, CAPTURE_DEADLINE)
+    })
 }
 
 fn capture_timed_out(err: &anyhow::Error) -> bool {

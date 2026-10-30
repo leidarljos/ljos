@@ -1100,7 +1100,16 @@ fn signing_key(voter: &str) -> Result<(SigningKey, String)> {
 /// lost, and the file is replaced whole, so a `git add` never hashes half
 /// of it. The seat's tracker commit carries the pin.
 fn pin_first(path: &Path, voter: &str, mine: &str) -> Result<BTreeMap<String, String>> {
-    let _held = crate::tracker_commit_lock(path.parent().unwrap_or_else(|| Path::new(".")));
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let Some(_held) =
+        crate::tracker_commit_lock_by(dir, std::time::Instant::now() + crate::tracker_lock_wait())
+    else {
+        bail!(
+            "another writer held the tracker's commit lock in {} for {}s, so the key pin was not written and this ballot is not signed",
+            dir.display(),
+            crate::tracker_lock_wait().as_secs()
+        );
+    };
     let mut pinned = std::fs::read_to_string(path)
         .map(|t| parse_pins(&t))
         .unwrap_or_default();
@@ -1191,7 +1200,10 @@ fn same_voter(signed: &str, voter: &str) -> bool {
 
 fn newest_sig(issue: &str, voter: &str) -> Option<(SigNote, bool)> {
     let layout = vissue_core::Layout::resolve(None, None).ok()?;
-    let (heading, _, _) = vissue_core::store::find_by_id(&layout, issue).ok()??;
+    let heading = match crate::issue_spot::in_layout(&layout, issue) {
+        Some(spot) => spot.rec().heading.clone(),
+        None => vissue_core::store::find_by_id(&layout, issue).ok()??.0,
+    };
     let mut cut = None;
     let mut newest = None;
     for (at, entry) in heading.logbook.iter().enumerate() {

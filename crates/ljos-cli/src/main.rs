@@ -1502,7 +1502,9 @@ fn run_command() -> Result<()> {
     ) {
         ljos_cli::book_queue::catch_up();
     }
-    let checked = tracker_write(&cmd).map(ljos_cli::write_seat).transpose()?;
+    let checked = ljos_cli::hook_timed("write_seat", || {
+        tracker_write(&cmd).map(ljos_cli::write_seat).transpose()
+    })?;
     let _seated = checked.as_ref().map(ljos_cli::Seated::enter);
     let assignee_for = |verb: &str, passed: Option<&str>, delegates: bool| -> Result<String> {
         let name = cli_assignee(passed);
@@ -2153,7 +2155,12 @@ fn run_command() -> Result<()> {
                             "{voter}: cast {} for {name} at confidence {:.2}",
                             b.choice, b.confidence
                         );
-                        print!("{}", ljos_cli::persist_tracker(&issue, "ballot cast"));
+                        print!(
+                    "{}",
+                    ljos_cli::hook_timed("vote_persist", || {
+                        ljos_cli::persist_tracker(&issue, "ballot cast")
+                    })
+                );
                     }
                     ljos_cli::JevVote::Escalated(b) => {
                         drop(cast);
@@ -2180,7 +2187,9 @@ fn run_command() -> Result<()> {
             }
             Some(c) => {
                 let who = ljos_cli::ballot_voter("vote", as_persona.as_deref())?;
-                let cast = ljos_cli::panel_gate::claim_session_ballot(&issue, &who)?;
+                let cast = ljos_cli::hook_timed("vote_claim", || {
+                    ljos_cli::panel_gate::claim_session_ballot(&issue, &who)
+                })?;
                 let used = used.as_deref().unwrap_or("");
                 if used.is_empty() {
                     bail!(
@@ -2200,13 +2209,11 @@ fn run_command() -> Result<()> {
                     args.push(format!("{p}"));
                 }
                 let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-                run_as("vissue", &refs, Some(&who))?;
+                ljos_cli::hook_timed("vote_cast", || run_as("vissue", &refs, Some(&who)))?;
                 // Read the ballot back: only the tracker is proof it exists.
-                let rows: Vec<serde_json::Value> =
-                    ljos_cli::run_captured("vissue", &["vote", &issue, "--json"])
-                        .ok()
-                        .and_then(|o| serde_json::from_str(&o.stdout).ok())
-                        .unwrap_or_default();
+                let rows: Vec<serde_json::Value> = ljos_cli::hook_timed("vote_readback", || {
+                    ljos_cli::raw_ballot_rows(&issue).unwrap_or_default()
+                });
                 if !ljos_cli::tracker_holds_ballot(&rows, &who, &args[3]) {
                     bail!(
                         "the tracker does not hold a ballot from {who} for {} on {issue}: nothing was cast",
@@ -2218,7 +2225,9 @@ fn run_command() -> Result<()> {
                 // Every ballot, a persona's included, is signed and bound to
                 // this connection. The push gate still counts only seat
                 // ballots; the panel gate counts the session, not the seat.
-                match ljos_cli::ballot_sig::sign_ballot(&issue, &who, &args[3]) {
+                match ljos_cli::hook_timed("vote_sign", || {
+                    ljos_cli::ballot_sig::sign_ballot(&issue, &who, &args[3])
+                }) {
                     Ok(said) => print!("{said}"),
                     Err(e) => eprintln!("ljos vote: {e:#}"),
                 }
@@ -3238,9 +3247,12 @@ fn run_command() -> Result<()> {
             // Rows scoped to a domain apply when the issue is about it; the
             // personas' anchors go to both settles; the issue's tags pick
             // the model.
-            let (topic, tags) = issue_topic_and_tags(&id);
-            let trust = rows_about(&pack_trust_or_none(), &topic);
-            let personas = personas_from_pack().unwrap_or_default();
+            let (topic, tags) = ljos_cli::hook_timed("consensus_issue", || issue_topic_and_tags(&id));
+            let trust = ljos_cli::hook_timed("consensus_trust", || {
+                rows_about(&pack_trust_or_none(), &topic)
+            });
+            let personas =
+                ljos_cli::hook_timed("consensus_personas", || personas_from_pack().unwrap_or_default());
             let atoms = pack()
                 .and_then(|c| {
                     ljos_cli::atoms_lean(&c, &c.workspace())
@@ -3250,9 +3262,11 @@ fn run_command() -> Result<()> {
             // A persona on the ballot settles under its anchor, and every
             // other voter, the seat too, under the default one; a ballot
             // of seats alone stays plain DeGroot.
-            let ballots = ljos_cli::ballot_rows(&id);
+            let ballots = ljos_cli::hook_timed("consensus_ballots", || ljos_cli::ballot_rows(&id));
             ljos_cli::require_ballots(&id, &ballots)?;
-            if let Some(msg) = ljos_cli::panel_gate::settle_refusal(&id) {
+            if let Some(msg) = ljos_cli::hook_timed("consensus_refusal", || {
+                ljos_cli::panel_gate::settle_refusal(&id)
+            }) {
                 let flags = ljos_cli::panel_gate::blind_lines_for(&id);
                 if json {
                     let doc = serde_json::json!({
@@ -3292,10 +3306,12 @@ fn run_command() -> Result<()> {
             // the tally.
             ljos_cli::bind_settle_ballots(&mut steps, &ballots);
             // First what the push gate decides: seat ballots only.
-            let (gate, gate_json) =
-                ljos_cli::push_cite_reading_on_roster(&id, &ballots, &ljos_cli::seat_name());
-            let (protected, protected_json) =
-                ljos_cli::protected_push_reading(&id, std::env::current_dir().ok().as_deref());
+            let (gate, gate_json) = ljos_cli::hook_timed("consensus_cite", || {
+                ljos_cli::push_cite_reading_on_roster(&id, &ballots, &ljos_cli::seat_name())
+            });
+            let (protected, protected_json) = ljos_cli::hook_timed("consensus_protected", || {
+                ljos_cli::protected_push_reading(&id, std::env::current_dir().ok().as_deref())
+            });
             // The named outcomes show which voters err together, and
             // those voters are discounted.
             let discount = settle_discount(&atoms).map(|(discount, line)| {
@@ -3317,7 +3333,7 @@ fn run_command() -> Result<()> {
             let dissent = if no_file || !on_path("vissue") {
                 Vec::new()
             } else {
-                ljos_cli::converge::record_dissents(&id)
+                ljos_cli::hook_timed("consensus_dissent", || ljos_cli::converge::record_dissents(&id))
             };
             if json {
                 // One document on stdout. The push cite stays at the top
@@ -3698,8 +3714,7 @@ fn run_command() -> Result<()> {
             share,
             rule,
         } => {
-            let said = run_captured("vissue", &["vote", &id, "--json"])?;
-            let forecasts = forecasts_from_json(&said.stdout)?;
+            let forecasts = forecasts_from_json(&ljos_cli::raw_ballot_json(&id)?)?;
             let (outcome, off) = ljos_cli::named_outcome(
                 &id,
                 &outcome,
