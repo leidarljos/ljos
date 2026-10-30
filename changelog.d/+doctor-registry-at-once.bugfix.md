@@ -1,0 +1,1 @@
+`ljos doctor` asks crates.io for every seat binary at once instead of one after another, so the rows wait for the slowest answer. A note queue row written just before the doctor ran is no longer called damaged because the registry lookups had used up its five seconds.

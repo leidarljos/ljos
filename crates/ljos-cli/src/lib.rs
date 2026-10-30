@@ -26500,6 +26500,17 @@ fn check_vissue_ballot_protocol(path: &Path) -> Result<()> {
 /// The seat's own rows: binaries, pack, host key, deed store, tracker,
 /// claim graph. What a sitting checks; the runner rows are onboarding.
 pub fn doctor_seat() -> Vec<Habitat> {
+    // Each registry lookup is its own request. Asked together, the rows
+    // wait for the slowest answer rather than the sum of them; the loop
+    // below reads the answers back from the process cache.
+    std::thread::scope(|s| {
+        let mut asked = std::collections::BTreeSet::new();
+        for (_, crate_name) in SEAT_BINS {
+            if asked.insert(*crate_name) {
+                s.spawn(move || crate_max_version(crate_name, false));
+            }
+        }
+    });
     let mut out = Vec::new();
     for (bin, crate_name) in SEAT_BINS {
         let found = which::which(bin).ok();
