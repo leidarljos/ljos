@@ -3768,21 +3768,8 @@ struct ArchiveMember {
 /// Members of one encoder archive. A listing tar will not parse is refused,
 /// so a hostile header cannot be unpacked on the strength of a later stat.
 fn refuse_unsafe_archive(file: &Path) -> Result<()> {
-    let out = Command::new("tar")
-        .args(["--full-time", "--quoting-style=shell-always", "-tvzf"])
-        .arg(file)
-        .stdin(std::process::Stdio::null())
-        .env("LC_ALL", "C")
-        .output()
-        .context("tar")?;
-    if !out.status.success() {
-        bail!(
-            "tar {}: {}; nothing was installed",
-            file.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let members = match parse_tar_listing(&out.stdout) {
+    let listing = tar_verbose_listing(file)?;
+    let members = match parse_tar_listing(&listing) {
         Ok(members) => members,
         Err(err) => bail!("tar {}: {err}; nothing was installed", file.display()),
     };
@@ -3833,9 +3820,58 @@ fn archive_member_path_ok(name: &[u8]) -> bool {
         .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
-/// `tar -tv` with `--quoting-style=shell-always`. Names may contain
-/// newlines, so records are split on the shell quotes, not on lines.
+/// `tar -tv`. GNU tar is asked for shell quotes. A tar that rejects those
+/// flags, such as the one shipped on macOS, is asked again with `-tvzf`
+/// only. A listing that does not parse is refused.
+fn tar_verbose_listing(file: &Path) -> Result<Vec<u8>> {
+    let run = |args: &[&str]| {
+        Command::new("tar")
+            .args(args)
+            .arg(file)
+            .stdin(std::process::Stdio::null())
+            .env("LC_ALL", "C")
+            .output()
+            .context("tar")
+    };
+    let gnu = run(&["--full-time", "--quoting-style=shell-always", "-tvzf"])?;
+    if gnu.status.success() {
+        return Ok(gnu.stdout);
+    }
+    let err = String::from_utf8_lossy(&gnu.stderr);
+    let unsupported = err.contains("not supported")
+        || err.to_ascii_lowercase().contains("unrecognized")
+        || err.to_ascii_lowercase().contains("unknown option")
+        || err.to_ascii_lowercase().contains("illegal option");
+    if !unsupported {
+        bail!(
+            "tar {}: {}; nothing was installed",
+            file.display(),
+            err.trim()
+        );
+    }
+    let plain = run(&["-tvzf"])?;
+    if !plain.status.success() {
+        bail!(
+            "tar {}: {}; nothing was installed",
+            file.display(),
+            String::from_utf8_lossy(&plain.stderr).trim()
+        );
+    }
+    Ok(plain.stdout)
+}
+
+/// `tar -tv`, either shell-quoted or the short listing. Names may contain
+/// newlines in the quoted form, so those records are split on the quotes.
 fn parse_tar_listing(bytes: &[u8]) -> Result<Vec<ArchiveMember>> {
+    if let Ok(members) = parse_quoted_tar_listing(bytes) {
+        if !members.is_empty() || bytes.iter().all(|byte| *byte == b'\n') {
+            return Ok(members);
+        }
+    }
+    parse_plain_tar_listing(bytes)
+}
+
+fn parse_quoted_tar_listing(bytes: &[u8]) -> Result<Vec<ArchiveMember>> {
     let mut members = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
@@ -3869,6 +3905,56 @@ fn parse_tar_listing(bytes: &[u8]) -> Result<Vec<ArchiveMember>> {
         i = j;
     }
     Ok(members)
+}
+
+/// A `tar -tv` line without shell quotes. The name follows the date.
+/// A symlink's target after ` -> ` is not part of the name.
+fn parse_plain_tar_listing(bytes: &[u8]) -> Result<Vec<ArchiveMember>> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut members = Vec::new();
+    for line in text.split('\n') {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        let kind = line.as_bytes()[0];
+        let name = plain_member_name(line).context("tar member has no name")?;
+        members.push(ArchiveMember {
+            kind,
+            name: name.into_bytes(),
+        });
+    }
+    if members.is_empty() {
+        bail!("tar member list is empty");
+    }
+    Ok(members)
+}
+
+fn plain_member_name(line: &str) -> Option<String> {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i + 4 < bytes.len() {
+        let month = bytes[i].is_ascii_uppercase()
+            && bytes[i + 1].is_ascii_lowercase()
+            && bytes[i + 2].is_ascii_lowercase()
+            && bytes[i + 3] == b' ';
+        if month {
+            let mut parts = line[i..].split_whitespace();
+            let _month = parts.next()?;
+            let _day = parts.next()?;
+            let _when = parts.next()?;
+            let name = parts.collect::<Vec<_>>().join(" ");
+            let name = name.split(" -> ").next().unwrap_or(&name);
+            let name = name.split(" link to ").next().unwrap_or(name);
+            let name = name.trim();
+            if name.is_empty() {
+                return None;
+            }
+            return Some(name.to_string());
+        }
+        i += 1;
+    }
+    None
 }
 
 /// One shell-always single-quoted word. `'\''` is a literal quote.
@@ -4000,6 +4086,22 @@ mod archive_member_tests {
         let err = refuse_unsafe_archive(&archive).unwrap_err().to_string();
         assert!(err.contains("symlink"), "{err}");
         assert!(err.contains("nothing was installed"), "{err}");
+    }
+
+    /// The short listing has no shell quotes. A symlink is still named,
+    /// and its target is not part of the member path.
+    #[test]
+    fn a_short_tar_listing_names_a_symlink() {
+        let raw = b"\
+lrwxr-xr-x  0 0 0 0 Jan  1  1970 bin/packset-embed -> /etc/passwd
+-rw-r--r--  0 0 0 17 Jan  1  1970 bin/real
+";
+        let members = parse_tar_listing(raw).unwrap();
+        assert_eq!(members.len(), 2, "{members:?}");
+        assert_eq!(members[0].kind, b'l');
+        assert_eq!(members[0].name, b"bin/packset-embed");
+        assert_eq!(members[1].kind, b'-');
+        assert_eq!(members[1].name, b"bin/real");
     }
 }
 
