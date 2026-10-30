@@ -1,0 +1,1 @@
+A best-effort state-log row (a bypass or hook-trace line) gave up on its lock after 50 ms, and a writer the scheduler had set aside on a busy machine held it longer than that, so the row was dropped. The budget is 250 ms; with no contention nothing waits.

@@ -25838,8 +25838,11 @@ pub(crate) fn complete_rows_counted<T: serde::de::DeserializeOwned>(
 }
 
 /// How long a best-effort [`append_locked_row`] tries for the lock before
-/// it skips the row.
-pub(crate) const ROW_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+/// it skips the row. A holder keeps the lock for one write, so with no
+/// contention nothing waits; the budget is for a holder the scheduler
+/// has set aside on a busy machine, which 50 ms did not outlast when
+/// thirty-two hooks wrote at once on a small runner.
+pub(crate) const ROW_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// How long a durable [`append_locked_row`] waits for the lock before it
 /// reports failure. Long enough to outlast a writer that holds the lock for
