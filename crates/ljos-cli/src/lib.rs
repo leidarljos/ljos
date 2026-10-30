@@ -3311,6 +3311,18 @@ fn responsible_names_runner(comm: Option<&str>, runners: &[String]) -> bool {
     }
 }
 
+/// A named responsible process is a runner when its name says so.
+/// No name is not a runner when the process tree was read and can be
+/// judged on its own. An empty tree means the parents could not be read,
+/// which still counts as a runner.
+#[cfg(any(test, target_os = "macos"))]
+fn responsible_scope_is_runner(comm: Option<&str>, tree_seen: bool, runners: &[String]) -> bool {
+    match comm {
+        Some(comm) => responsible_names_runner(Some(comm), runners),
+        None => !tree_seen,
+    }
+}
+
 /// `launchctl submit` reparents onto launchd and drops the responsible
 /// process. With no controlling terminal that process is not the person.
 #[cfg(any(test, target_os = "macos"))]
@@ -3323,7 +3335,11 @@ fn launchd_without_tty(parent: Option<&str>, tty: bool) -> bool {
 /// counts as a runner.
 #[cfg(target_os = "macos")]
 fn scope_names_runner(runners: &[String]) -> bool {
-    responsible_names_runner(responsible_comm().as_deref(), runners)
+    responsible_scope_is_runner(
+        responsible_comm().as_deref(),
+        !ancestry().is_empty(),
+        runners,
+    )
 }
 
 #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
@@ -52042,6 +52058,18 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
             Some(false)
         );
         assert!(super::responsible_names_runner(None, &runners));
+        assert!(!super::responsible_scope_is_runner(None, true, &runners));
+        assert!(super::responsible_scope_is_runner(None, false, &runners));
+        assert!(super::responsible_scope_is_runner(
+            Some("Cursor"),
+            true,
+            &runners
+        ));
+        assert!(!super::responsible_scope_is_runner(
+            Some("Terminal"),
+            true,
+            &runners
+        ));
         assert!(!super::responsible_names_runner(Some("Terminal"), &runners));
         assert!(super::responsible_names_runner(Some("Cursor"), &runners));
         assert!(super::launchd_without_tty(Some("launchd"), false));
