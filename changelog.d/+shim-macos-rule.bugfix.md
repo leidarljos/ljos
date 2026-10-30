@@ -1,0 +1,1 @@
+On macOS the git shim read ljos-policyd's refusal as having no rule, said the guard was unhealthy, and ran the command. BSD `cut` drops a final line without a newline, and the verdict was piped to it without one. The shim now terminates the line, so a force push onto a protected branch asks on macOS as it does on Linux. `ljos onboard` rewrites the installed shims.

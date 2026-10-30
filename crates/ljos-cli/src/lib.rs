@@ -6495,7 +6495,9 @@ if command -v ljos-policyd >/dev/null 2>&1; then
   verdict=$(ljos-policyd check -- "$me" "$@" 2>/dev/null)
   case $verdict in
     deny*)
-      rule=$(printf '%s' "$verdict" | head -n 1 | cut -f 2)
+      # The line is terminated before cut reads it: BSD cut drops a final
+      # line that has no newline, and the shim then read no rule.
+      rule=$(printf '%s\n' "$verdict" | head -n 1 | cut -f 2)
       rule=$(printf '%s' "$rule" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
       folded=$(printf '%s' "$rule" | tr '[:upper:]' '[:lower:]')
       # The same seat-not-ready tokens as `policyd_unjudged`: empty, the

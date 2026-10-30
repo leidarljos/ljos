@@ -1,0 +1,1 @@
+On macOS a state log swapped for a Unix socket was reported as a raw OS error instead of the state refusal, because opening a socket fails there with EOPNOTSUPP rather than ENXIO. Both now read as a log that is not a regular file.
