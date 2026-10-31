@@ -9562,10 +9562,47 @@ fn glue_word(word: &str) -> bool {
     word.len() < 3 || CUE_STOP.contains(&word) || CUE_STOP_SHORT.contains(&word)
 }
 
+/// A pure function of one text, remembered for this process. The lexical
+/// passes score the same few hundred texts several times a prompt, and
+/// the cue once per text; the profile put a fifth of a prompt hook in
+/// [`phrase_acronyms`] alone. The memo is bounded so a server that lives
+/// for hours does not grow without end.
+fn text_memo(
+    memo: &std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
+    text: &str,
+    compute: impl FnOnce(&str) -> Vec<String>,
+) -> Vec<String> {
+    const TEXT_MEMO_CAP: usize = 20_000;
+    {
+        let kept = memo
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(found) = kept.get(text) {
+            return found.clone();
+        }
+    }
+    let out = compute(text);
+    let mut kept = memo
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if kept.len() >= TEXT_MEMO_CAP {
+        kept.clear();
+    }
+    kept.insert(text.to_string(), out.clone());
+    out
+}
+
 /// Initials of a phrase that has a small word in the middle.
 /// `conflict of interest` is `coi`. A run of names with nothing between
 /// them is left alone, so `add lodash dependency` does not become a token.
+/// Remembered per text ([`text_memo`]).
 fn phrase_acronyms(text: &str) -> Vec<String> {
+    static MEMO: std::sync::Mutex<std::collections::HashMap<String, Vec<String>>> =
+        std::sync::Mutex::new(std::collections::HashMap::new());
+    text_memo(&MEMO, text, phrase_acronyms_of)
+}
+
+fn phrase_acronyms_of(text: &str) -> Vec<String> {
     let words: Vec<String> = text
         .split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
@@ -9611,6 +9648,12 @@ fn phrase_acronyms(text: &str) -> Vec<String> {
 /// Words plus the abbreviations of its phrases. A claim that says `COI`
 /// and a prompt that says `conflict of interest` share `coi`.
 fn match_tokens(text: &str) -> Vec<String> {
+    static MEMO: std::sync::Mutex<std::collections::HashMap<String, Vec<String>>> =
+        std::sync::Mutex::new(std::collections::HashMap::new());
+    text_memo(&MEMO, text, match_tokens_of)
+}
+
+fn match_tokens_of(text: &str) -> Vec<String> {
     let mut words = prompt_words(text);
     words.extend(phrase_acronyms(text));
     words.sort_unstable();
