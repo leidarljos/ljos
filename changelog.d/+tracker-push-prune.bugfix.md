@@ -1,0 +1,1 @@
+A background or refused tracker push left its log and child record in the runtime directory for the doctor to read, and nothing removed them: 406 pairs on one seat. The next push prunes every exited log before it; a push still running keeps its own.
