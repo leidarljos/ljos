@@ -754,7 +754,7 @@ fn load(verb: &str) -> Result<Vec<Value>> {
     Ok(atoms)
 }
 
-fn load_quiet() -> Option<Vec<Value>> {
+fn load_quiet() -> Option<std::sync::Arc<Vec<Value>>> {
     let client = super::pack().ok()?;
     let workspace = client.workspace();
     super::atoms_lean_shared(&client, &workspace).ok()

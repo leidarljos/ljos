@@ -15837,7 +15837,7 @@ pub fn atoms_timeout() -> std::time::Duration {
     }
 }
 
-type Listing = Option<(std::time::Instant, String, Vec<Value>)>;
+type Listing = Option<(std::time::Instant, String, std::sync::Arc<Vec<Value>>)>;
 
 /// The listing [`atoms_lean_shared`] last fetched. A whole pack, so a
 /// long-lived server drops it once idle.
@@ -15852,23 +15852,32 @@ pub fn drop_listing_cache() {
 
 /// [`atoms_lean`] for the reads one prompt makes side by side (the due line
 /// and the mail): the second takes the listing the first fetched when it is
-/// under two seconds old, so the prompt pays for the listing once.
+/// under two seconds old, so the prompt pays for the listing once. The
+/// listing is shared, not copied: a copy of a few thousand atoms is
+/// milliseconds a reader.
 ///
 /// # Errors
 ///
 /// The pack not answering, or an answer that is not atoms.
-pub(crate) fn atoms_lean_shared(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>> {
+pub(crate) fn atoms_lean_shared(
+    client: &PacksetClient,
+    workspace: &str,
+) -> Result<std::sync::Arc<Vec<Value>>> {
     let key = format!("{}|{workspace}", client.base());
     let mut last = LAST_LISTING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some((at, held, atoms)) = last.as_ref() {
         if *held == key && at.elapsed() < std::time::Duration::from_secs(2) {
-            return Ok(atoms.clone());
+            return Ok(std::sync::Arc::clone(atoms));
         }
     }
-    let atoms = atoms_lean(client, workspace)?;
-    *last = Some((std::time::Instant::now(), key, atoms.clone()));
+    let atoms = std::sync::Arc::new(atoms_lean(client, workspace)?);
+    *last = Some((
+        std::time::Instant::now(),
+        key,
+        std::sync::Arc::clone(&atoms),
+    ));
     Ok(atoms)
 }
 
