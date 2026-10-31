@@ -9372,7 +9372,7 @@ fn cue_content_words(text: &str) -> Vec<String> {
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| w.len() >= 4)
         .map(str::to_lowercase)
-        .filter(|w| !CUE_STOP.contains(&w.as_str()))
+        .filter(|w| !cue_stop(w))
         .collect();
     words.sort_unstable();
     words.dedup();
@@ -9413,16 +9413,19 @@ fn singular(w: &str) -> String {
 /// says `npm` or `migration` where the preference says `npm` or
 /// `migrations`. Rule words go before the plural is taken off, since
 /// [`singular`] makes `always` into `alway`, which is on no list.
+/// Remembered per text ([`text_memo`]): the match tokens, the cue terms
+/// and the abbreviation check each ask it of the same claim.
 fn prompt_words(text: &str) -> Vec<String> {
+    static MEMO: std::sync::LazyLock<TextMemo> = std::sync::LazyLock::new(TextMemo::default);
+    text_memo(&MEMO, text, prompt_words_of)
+}
+
+fn prompt_words_of(text: &str) -> Vec<String> {
     let mut words: Vec<String> = text
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| w.len() >= 3)
         .map(str::to_lowercase)
-        .filter(|w| {
-            !CUE_STOP.contains(&w.as_str())
-                && !CUE_STOP_SHORT.contains(&w.as_str())
-                && !RULE_WORDS.contains(&w.as_str())
-        })
+        .filter(|w| !stop_word(w))
         .map(|w| singular(&w))
         .collect();
     words.sort_unstable();
@@ -9443,10 +9446,7 @@ const RULE_WORDS: &[&str] = &[
 /// word that sits in standing rules of every kind.
 pub(crate) fn is_lesson_filler(word: &str) -> bool {
     let word = word.to_ascii_lowercase();
-    word.len() < 3
-        || CUE_STOP.contains(&word.as_str())
-        || CUE_STOP_SHORT.contains(&word.as_str())
-        || RULE_WORDS.contains(&word.as_str())
+    word.len() < 3 || stop_word(&word)
 }
 
 /// Names that mean one tool or one thing. A prompt that says `golang`
@@ -9552,7 +9552,7 @@ fn cue_terms(text: &str, claim: bool) -> Vec<String> {
 fn cue_terms_of(text: &str, claim: bool) -> Vec<String> {
     let mut words: Vec<String> = prompt_words(text)
         .into_iter()
-        .filter(|w| !RULE_WORDS.contains(&w.as_str()))
+        .filter(|w| !rule_word(w))
         .collect();
     words.extend(alias_words(text, claim));
     words.sort_unstable();
@@ -9573,7 +9573,41 @@ fn names_the_cue(text: &str, cue: &str) -> bool {
 /// name, or a stop word. `of` is short, so `conflict of interest` keeps
 /// the `o`.
 fn glue_word(word: &str) -> bool {
-    word.len() < 3 || CUE_STOP.contains(&word) || CUE_STOP_SHORT.contains(&word)
+    word.len() < 3 || cue_stop(word) || cue_stop_short(word)
+}
+
+/// The word lists as sets. A prompt hook asks these of every word of
+/// every stored claim, tens of thousands of asks a prompt, and a scan of
+/// the list per ask was a tenth of the hook's own time.
+fn word_set(words: &'static [&'static str]) -> std::collections::HashSet<&'static str> {
+    words.iter().copied().collect()
+}
+
+/// Whether `word` is on [`CUE_STOP`].
+fn cue_stop(word: &str) -> bool {
+    static SET: std::sync::LazyLock<std::collections::HashSet<&'static str>> =
+        std::sync::LazyLock::new(|| word_set(CUE_STOP));
+    SET.contains(word)
+}
+
+/// Whether `word` is on [`CUE_STOP_SHORT`].
+fn cue_stop_short(word: &str) -> bool {
+    static SET: std::sync::LazyLock<std::collections::HashSet<&'static str>> =
+        std::sync::LazyLock::new(|| word_set(CUE_STOP_SHORT));
+    SET.contains(word)
+}
+
+/// Whether `word` is on [`RULE_WORDS`].
+fn rule_word(word: &str) -> bool {
+    static SET: std::sync::LazyLock<std::collections::HashSet<&'static str>> =
+        std::sync::LazyLock::new(|| word_set(RULE_WORDS));
+    SET.contains(word)
+}
+
+/// Whether `word` is on any of [`CUE_STOP`], [`CUE_STOP_SHORT`] or
+/// [`RULE_WORDS`].
+fn stop_word(word: &str) -> bool {
+    cue_stop(word) || cue_stop_short(word) || rule_word(word)
 }
 
 /// A pure function of one text, remembered for this process. The lexical
@@ -9646,9 +9680,7 @@ fn phrase_acronyms_of(text: &str) -> Vec<String> {
                 .collect();
             if !(3..=6).contains(&acronym.len())
                 || !acronym.chars().all(|c| c.is_ascii_alphabetic())
-                || CUE_STOP.contains(&acronym.as_str())
-                || CUE_STOP_SHORT.contains(&acronym.as_str())
-                || RULE_WORDS.contains(&acronym.as_str())
+                || stop_word(&acronym)
             {
                 continue;
             }
@@ -10100,15 +10132,19 @@ fn recall_body(atom: &Value) -> String {
     text
 }
 
-/// How many atoms contain each word, once per atom.
+/// How many atoms contain each word, once per atom. Each doc is the
+/// sorted, duplicate-free token list [`match_tokens`] gives, so a word
+/// is counted once per doc by skipping the repeat of its neighbour.
 fn document_frequency(docs: &[Vec<String>]) -> std::collections::HashMap<String, usize> {
-    let mut df = std::collections::HashMap::new();
+    let mut df: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for doc in docs {
-        let mut words = doc.clone();
-        words.sort();
-        words.dedup();
-        for word in words {
-            *df.entry(word).or_default() += 1;
+        let mut last: Option<&str> = None;
+        for word in doc {
+            if last == Some(word.as_str()) {
+                continue;
+            }
+            last = Some(word);
+            *df.entry(word.clone()).or_default() += 1;
         }
     }
     df
