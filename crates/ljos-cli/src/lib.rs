@@ -34490,6 +34490,9 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
             "tracker git: committed {message}; push not started: no log file\n"
         ));
     };
+    // This push is the latest word on the remote; the exited logs before
+    // it are not. A push still running keeps its log.
+    prune_push_logs(Some(&log));
     let err = out.try_clone();
     // Another seat's push is fetched and rebased, not merged and not forced.
     // The first attempt is this script. A non-fast-forward comes back here
@@ -34629,6 +34632,15 @@ fn record_push_refusal(why: &str) {
 }
 
 fn clear_push_refusal() {
+    prune_push_logs(None);
+}
+
+/// Remove every `tracker-push-<pid>.log` whose push has exited, and its
+/// `.child` record, except `keep`. A push that finished in the background
+/// or was refused leaves its log for `ljos doctor` to read; the next push
+/// is the moment that log stops being the latest word, and without this
+/// the runtime directory held one pair per sitting, hundreds in a week.
+fn prune_push_logs(keep: Option<&Path>) {
     let Ok(entries) = std::fs::read_dir(runtime_dir()) else {
         return;
     };
@@ -34644,7 +34656,7 @@ fn clear_push_refusal() {
         let Ok(pid) = rest.parse::<u32>() else {
             continue;
         };
-        if push_still_running(&ent.path(), pid) {
+        if keep.is_some_and(|k| k == ent.path()) || push_still_running(&ent.path(), pid) {
             continue;
         }
         let _ = std::fs::remove_file(push_child_record(&ent.path()));
