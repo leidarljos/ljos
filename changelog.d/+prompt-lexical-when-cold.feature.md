@@ -1,0 +1,1 @@
+A prompt hook ranked every stored atom lexically before asking whether the encoder was loaded, and threw the ranking away whenever the encoder was warm, which is every prompt after the first minutes. On a machine whose encoder answered warm in the last ten minutes the ranking is made only when the encoder turns out cold.

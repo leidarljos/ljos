@@ -10329,9 +10329,26 @@ fn hook_note_from_pack(call: &HookCall, limit: usize) -> (String, Vec<String>) {
     // shares no word with them, so this waits a short bound for the
     // encoder and then searches. Still cold after that, the prompt hears
     // that memory is starting, once a session.
-    let recalled = hook_timed("lexical_recall", || lexical_recall(call, cue, limit));
-    if hook_timed("encoder_cold", encoder_is_cold) {
+    // On a machine whose encoder answered warm in the last few minutes
+    // the ranking is not needed before the status call, so it is left to
+    // the cold branch; a cold machine keeps the order above.
+    let warm_lately = encoder_warm_lately();
+    let recalled = if warm_lately {
+        None
+    } else {
+        hook_timed("lexical_recall", || lexical_recall(call, cue, limit))
+    };
+    let cold = hook_timed("encoder_cold", encoder_is_cold);
+    if !cold {
+        note_encoder_warm();
+    }
+    if cold {
         hook_timed("encoder_warm", start_encoder_warm);
+        let recalled = if warm_lately {
+            hook_timed("lexical_recall", || lexical_recall(call, cue, limit))
+        } else {
+            recalled
+        };
         if let Some((text, mut ids)) = recalled {
             ids.extend(pending);
             let out = if nudge.is_empty() {
@@ -12417,6 +12434,29 @@ fn wait_for_encoder(bound: std::time::Duration) -> bool {
         }
         std::thread::sleep(pause);
     }
+}
+
+/// How long an encoder that answered warm is taken as warm for the
+/// ordering of a prompt's recall. The status call still runs each prompt.
+const ENCODER_WARM_FOR: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+fn encoder_warm_mark() -> PathBuf {
+    runtime_dir().join("encoder-warm")
+}
+
+/// Whether the encoder answered warm within [`ENCODER_WARM_FOR`].
+fn encoder_warm_lately() -> bool {
+    std::fs::metadata(encoder_warm_mark())
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|at| at.elapsed().ok())
+        .is_some_and(|age| age < ENCODER_WARM_FOR)
+}
+
+/// Record that the encoder answered warm now.
+fn note_encoder_warm() {
+    let _ = std::fs::create_dir_all(runtime_dir());
+    let _ = std::fs::write(encoder_warm_mark(), b"");
 }
 
 /// Whether the pack's encoder has not answered yet. The status call has
