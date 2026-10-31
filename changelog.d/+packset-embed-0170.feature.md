@@ -1,0 +1,1 @@
+A release ships packset-embed 0.17.0, whose encoders use at most four ONNX Runtime threads for a query and whose cross-encoder uses at most eight: a dozen-token query on a twelve-core laptop went from 31 ms with a tail to 86 ms to 19 ms.
