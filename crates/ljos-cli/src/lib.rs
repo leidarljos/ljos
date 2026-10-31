@@ -15869,7 +15869,12 @@ fn atoms_listed_of(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         kept.retain(|(k, _, _, _)| k != &key);
-        kept.push((key, std::time::Instant::now(), atoms.clone(), answered.trusted));
+        kept.push((
+            key,
+            std::time::Instant::now(),
+            atoms.clone(),
+            answered.trusted,
+        ));
     }
     Ok((atoms, answered.trusted))
 }
@@ -35650,10 +35655,7 @@ fn which_cached(tool: &str) -> Option<std::path::PathBuf> {
     let mut found = FOUND
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((_, _, hit)) = found
-        .iter()
-        .find(|(p, t, _)| p == &path_env && t == tool)
-    {
+    if let Some((_, _, hit)) = found.iter().find(|(p, t, _)| p == &path_env && t == tool) {
         return hit.clone();
     }
     let hit = which::which(tool).ok();
