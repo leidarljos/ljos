@@ -16046,7 +16046,12 @@ fn atoms_listed_of(
         .and_then(|_| listing_cache_path(workspace, token));
     if let (Some(path), Some(stamp)) = (&cache, &stamp) {
         if let Some((atoms, trusted)) = cached_listing(path, stamp) {
-            seed_tokens(path, stamp, &atoms);
+            // A listing kept before the sidecar existed, or by another
+            // version, has none that fits: this hook writes it through
+            // the memos it fills anyway.
+            if !seed_tokens(path, stamp, &atoms) {
+                keep_tokens(path, stamp, &atoms);
+            }
             if let Some(key) = memo_key {
                 let mut kept = ATOM_LISTINGS
                     .lock()
@@ -16208,17 +16213,18 @@ fn keep_tokens(listing: &Path, stamp: &str, atoms: &[Value]) {
 
 /// Seed the token memos from the sidecar written under `stamp` for these
 /// `atoms`, when it is there, is this version's, and has a line per atom.
-fn seed_tokens(listing: &Path, stamp: &str, atoms: &[Value]) {
+/// False when there is no such sidecar.
+fn seed_tokens(listing: &Path, stamp: &str, atoms: &[Value]) -> bool {
     let Ok(text) = std::fs::read_to_string(tokens_sidecar_path(listing)) else {
-        return;
+        return false;
     };
     let mut lines = text.lines();
     if lines.next() != Some(tokens_header(stamp).as_str()) {
-        return;
+        return false;
     }
     let rows: Vec<&str> = lines.collect();
     if rows.len() != atoms.len() {
-        return;
+        return false;
     }
     let tokens = |field: &str| -> Vec<String> {
         field
@@ -16239,6 +16245,7 @@ fn seed_tokens(listing: &Path, stamp: &str, atoms: &[Value]) {
         seed_text_memo(&PHRASE_ACRONYMS_MEMO, text, tokens(acronyms));
         seed_text_memo(&CLAIM_TERMS_MEMO, text, tokens(terms));
     }
+    true
 }
 
 pub fn pack() -> Result<PacksetClient> {
