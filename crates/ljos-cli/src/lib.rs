@@ -15763,8 +15763,8 @@ fn atoms_listed(
 /// answer serves them all for [`ATOMS_MEMO`]. Only a hook keeps one: a
 /// server that lives for hours reads the pack each time. A write through
 /// this seat's client drops the memo ([`forget_atom_listings`]).
-static ATOM_LISTINGS: std::sync::Mutex<Vec<(String, std::time::Instant, Vec<Value>, bool)>> =
-    std::sync::Mutex::new(Vec::new());
+type AtomListing = (String, std::time::Instant, Vec<Value>, bool);
+static ATOM_LISTINGS: std::sync::Mutex<Vec<AtomListing>> = std::sync::Mutex::new(Vec::new());
 /// How long a listing serves later reads in one hook process.
 const ATOMS_MEMO: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -35644,8 +35644,8 @@ pub fn tool_installed(tool: &str) -> bool {
 /// was looked up on. A hook asks for the same few programs several times
 /// a call, and each lookup walks every directory on `PATH`.
 fn on_path(tool: &str) -> Option<std::path::PathBuf> {
-    static FOUND: std::sync::Mutex<Vec<(String, String, Option<std::path::PathBuf>)>> =
-        std::sync::Mutex::new(Vec::new());
+    type Found = (String, String, Option<std::path::PathBuf>);
+    static FOUND: std::sync::Mutex<Vec<Found>> = std::sync::Mutex::new(Vec::new());
     let path_env = std::env::var("PATH").unwrap_or_default();
     let mut found = FOUND
         .lock()
