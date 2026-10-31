@@ -8,6 +8,9 @@ prompt-hook.after: 370-480 ms (ljos 0.35.6), 8 pack requests, of which pool_sear
 pack-search.before: 95-230 ms per /v1/search (packset 0.16.1): MMR diversify 73-77% of the writer's search CPU (cubic Jaccard over hash sets), packset-embed query 31 ms median with a tail to 86 ms on twelve threads, packset-milli child process 10-16 ms
 pack-search.after: 44-54 ms median, 128 ms max, per /v1/search (packset 0.17.0): the writer's own CPU fell from 71% of the search samples to 1.4%, the encoder runs four threads, packset-milli child process 10-16 ms unchanged
 prompt-hook.pack-0170: 324-375 ms with ljos 0.35.6, of which pool_search 149-179 ms: the pack answers in about 50 ms and the rest is the hook's own lexical pass over the stored claims
+prompt-hook.0357: 263-273 ms (ljos 0.35.7 with packset 0.17.0, fresh session each run): pool_search 115-121 ms, mail 4-5 ms, due_nudge 60 ms which a real session pays once since the listing then stays memoised; the token sidecar beside the cached listing is 163 KB
+tool-hook.0357: 35-36 ms steady, 46 ms with a cold gate (one status read)
 doctor.before: 9.0 s warm (ljos 0.35.1)
-doctor.after: 2.1 s warm (ljos 0.35.6); of which the sync import opened about 1,500 age chunks, a GitHub fetch about 1 s, `claimdag list` 0.5 s
+doctor.after: 2.1 s warm (ljos 0.35.6); strace put 1.7 s of it in `claude mcp get ljos`, the Claude harness's registered command, a Node runtime start
+doctor.0357: 0.79-0.82 s warm (ljos 0.35.7), the registered command's pass kept for an hour; what remains is `git status` of the tracker checkout at 0.25 s, the pack reads and the seat tools' own starts
 third-party: none measured; the figures above are against this seat's own floors and raw endpoints, not against another memory hook
