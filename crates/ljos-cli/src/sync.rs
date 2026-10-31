@@ -3202,8 +3202,8 @@ fn history_of_log_is_headed(
     // synced for weeks, on every doctor. The answer is kept. A blob found
     // headed stays headed while that object is in the history. A history
     // with no headed blob stays so while HEAD is the commit it was read
-    // at, the history has no cut, every object it read is still here, and
-    // the identities that open the log are unchanged. Those four checks
+    // at, the history has no cut, every object the walk listed is still
+    // here, and the identities that open the log are unchanged. Those checks
     // are a rev-parse, a stat or two and one cat-file; the walk they
     // replace listed every object of the log's history.
     let mark = headed_mark_path(root, rel, host, scope_name);
@@ -3271,13 +3271,14 @@ fn history_of_log_is_headed(
     let row = match (&answer, &head) {
         (Some(oid), _) => format!("headed {oid}\n"),
         (None, Some(head)) => {
+            // Every object the walk listed: the commits and trees on the
+            // way as well as the blobs, so a clone that later loses any
+            // of them reads as missing history, as the walk would say.
             let mut row = format!("none {head} {identities_key}\n");
             for line in listed.lines() {
-                if let Some((oid, path)) = line.split_once(' ') {
-                    if path == rel {
-                        row.push_str(oid);
-                        row.push('\n');
-                    }
+                if let Some(oid) = line.split(' ').next().filter(|oid| !oid.is_empty()) {
+                    row.push_str(oid);
+                    row.push('\n');
                 }
             }
             row
