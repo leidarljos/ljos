@@ -1,0 +1,1 @@
+A prompt hook pulled the whole pack listing, about a megabyte the writer builds in a fifth of a second, on every prompt for its lexical fallback, and asked the same search and the same status twice. The listing is kept on disk under the pack's last-write stamp and reused while the stamp stands, and a hook answers a repeated search or status read from the answer it already has.

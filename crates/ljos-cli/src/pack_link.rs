@@ -43,11 +43,60 @@ impl Clone for PacksetClient {
 
 /// One answer. `trusted` means the token was on this answer, after the
 /// proof held.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Answer {
     pub status: u16,
     pub body: String,
     pub trusted: bool,
+}
+
+/// Answers a hook process already has for a search or a status read, by
+/// request, for [`ANSWER_MEMO`]. A prompt hook asks the same search
+/// twice and the status twice; the second asks are answered here. Only a
+/// hook keeps one, and any write through the client drops it.
+type KeptAnswer = (String, Instant, Answer);
+static KEPT_ANSWERS: Mutex<Vec<KeptAnswer>> = Mutex::new(Vec::new());
+const ANSWER_MEMO: Duration = Duration::from_secs(2);
+
+fn answer_memo_key(
+    method: &str,
+    path: &str,
+    query: &[(&str, &str)],
+    bearer: bool,
+) -> Option<String> {
+    if method != "GET" || !matches!(path, "/v1/search" | "/v1/status") {
+        return None;
+    }
+    std::env::var_os("LJOS_IN_HOOK")?;
+    let mut key = format!("{path}|{bearer}");
+    for (k, v) in query {
+        key.push('|');
+        key.push_str(k);
+        key.push('=');
+        key.push_str(v);
+    }
+    Some(key)
+}
+
+fn kept_answer(key: &str) -> Option<Answer> {
+    let kept = KEPT_ANSWERS.lock().unwrap_or_else(|p| p.into_inner());
+    kept.iter()
+        .find(|(k, at, _)| k == key && at.elapsed() < ANSWER_MEMO)
+        .map(|(_, _, answer)| answer.clone())
+}
+
+fn keep_answer(key: String, answer: &Answer) {
+    let mut kept = KEPT_ANSWERS.lock().unwrap_or_else(|p| p.into_inner());
+    kept.retain(|(k, _, _)| k != &key);
+    kept.push((key, Instant::now(), answer.clone()));
+}
+
+/// Drop every kept answer. Called on any write through the client.
+pub(crate) fn forget_kept_answers() {
+    KEPT_ANSWERS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clear();
 }
 
 struct Slot {
@@ -612,6 +661,11 @@ impl PacksetClient {
         if method != "GET" {
             crate::forget_atom_listings();
             crate::forget_gate_fresh();
+            forget_kept_answers();
+        }
+        let memo_key = answer_memo_key(method, path, query, bearer);
+        if let Some(answer) = memo_key.as_deref().and_then(kept_answer) {
+            return Ok(answer);
         }
         let Some(addr) = self.addr else {
             return Err(Error::Bad(format!(
@@ -622,7 +676,7 @@ impl PacksetClient {
         let token = load_token();
         *self.token.lock().unwrap_or_else(|p| p.into_inner()) = token.clone();
         let allow = bearer && token.is_some() && !foreign(&self.base);
-        self.exchange(
+        let answer = self.exchange(
             addr,
             &Wire {
                 method,
@@ -633,7 +687,13 @@ impl PacksetClient {
             },
             allow,
             timeout,
-        )
+        )?;
+        if let Some(key) = memo_key {
+            if (200..300).contains(&answer.status) {
+                keep_answer(key, &answer);
+            }
+        }
+        Ok(answer)
     }
 
     fn exchange(
