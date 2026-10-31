@@ -5,6 +5,13 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.35.6 (2026-10-31)
+
+### Features
+
+- A prompt hook ranked every stored atom lexically before asking whether the encoder was loaded, and threw the ranking away whenever the encoder was warm, which is every prompt after the first minutes. On a machine whose encoder answered warm in the last ten minutes the ranking is made only when the encoder turns out cold.
+
+
 ## 0.35.5 (2026-10-31)
 
 ### Fixes
