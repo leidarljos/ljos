@@ -5,6 +5,13 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.35.5 (2026-10-31)
+
+### Fixes
+
+- The doctor's headed-history answer is trusted without listing the log's history again: a negative answer is kept with HEAD, the reachable commit count, the identities and every object the walk saw, and stands while all of them do; a positive answer stands while its object is in the history. On this seat the warm doctor went from 3.3 s to 2.1 s.
+
+
 ## 0.35.4 (2026-10-31)
 
 ### Features

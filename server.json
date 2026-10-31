@@ -3,7 +3,7 @@
   "name": "io.github.leidarljos/ljos",
   "title": "ljos",
   "description": "Local memory, a work tracker and a shell-command guard shared by coding agents on one machine.",
-  "version": "0.35.4",
+  "version": "0.35.5",
   "websiteUrl": "https://leidarljos.github.io",
   "repository": {
     "url": "https://github.com/leidarljos/ljos",
@@ -22,7 +22,7 @@
       "registryType": "cargo",
       "registryBaseUrl": "https://crates.io",
       "identifier": "ljos",
-      "version": "0.35.4",
+      "version": "0.35.5",
       "packageArguments": [
         {
           "type": "positional",
