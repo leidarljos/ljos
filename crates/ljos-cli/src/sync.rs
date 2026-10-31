@@ -2298,10 +2298,11 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
             let (kept, refused) = post_incoming(&client, &workspace, &plan.incoming.post);
             write_taken(root, &plan.scope_name, &plan.host, &plan.plain)?;
             if !plan.sealed.is_empty() {
-                let _ = std::fs::write(
-                    sealed_mark_path(root, &plan.scope_name, &plan.host),
-                    &plan.sealed,
-                );
+                let mark = sealed_mark_path(root, &plan.scope_name, &plan.host);
+                if let Some(dir) = mark.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let _ = std::fs::write(mark, &plan.sealed);
             }
             out.push_str(&format!(
                 "sync: {}: {kept} {} atoms taken, {refused} refused, {retired} retired\n",
@@ -2343,9 +2344,16 @@ static SKIP_UNCHANGED_LOGS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// Where the sealed digest of the last applied import of `host`'s log in
-/// `scope` is kept: beside the taken record.
+/// `scope` is kept: under the sync state's `sealed` tree, apart from the
+/// taken records, whose directory holds exactly what the import wrote.
 fn sealed_mark_path(root: &Path, scope: &str, host: &str) -> PathBuf {
-    state_base().join(format!("{}.sealed", taken_rel(root, scope, host)))
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&(root.to_string_lossy().as_ref(), scope, host), &mut hasher);
+    let key = std::hash::Hasher::finish(&hasher);
+    state_base()
+        .join("sync")
+        .join("sealed")
+        .join(format!("{key:016x}"))
 }
 
 struct ListedLog {
