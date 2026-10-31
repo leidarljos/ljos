@@ -3021,7 +3021,7 @@ fn open_sealed_bytes(bytes: &[u8], identities: &[PathBuf]) -> Result<Option<Stri
             let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
         }
     }
-    let body: &[u8] = opened.as_deref().map_or(b"", str::as_bytes);
+    let body: &[u8] = opened.as_deref().map_or(&[], str::as_bytes);
     let tmp = mark.with_extension(format!("tmp{}", std::process::id()));
     if write_private(&tmp, body).is_ok() && std::fs::rename(&tmp, &mark).is_err() {
         let _ = std::fs::remove_file(&tmp);
