@@ -1,0 +1,1 @@
+The doctor's sync import opened every host's chunks with `age` on each call, about 1,500 runs here with nothing new. What age gave for one ciphertext under one set of identities is now kept by digest, readable by this user alone, in the same state tree that already holds the taken records' plaintext; a later import reads it without a run.
