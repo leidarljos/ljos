@@ -3199,41 +3199,67 @@ fn history_of_log_is_headed(
 ) -> Result<bool, String> {
     // The walk reads and opens every committed version of the log, one
     // age run per version per identity: thousands on a seat that has
-    // synced for weeks, on every doctor. The answer is kept: a blob found
-    // headed stays headed while that object is in the history, and a
-    // history with no headed blob stays so while HEAD is the commit it
-    // was read at.
+    // synced for weeks, on every doctor. The answer is kept. A blob found
+    // headed stays headed while that object is in the history. A history
+    // with no headed blob stays so while the listing of its versions and
+    // the identities that open them are unchanged.
+    let unread = || format!("git could not read the history of {rel}");
+    let args = [
+        "rev-list",
+        "--full-history",
+        "--objects",
+        "--missing=print",
+        "HEAD",
+        "--",
+        rel,
+    ];
+    let out = match git(root, &args) {
+        Ok(out) if out.status.success() => out,
+        _ => return Err(unread()),
+    };
+    let listed = String::from_utf8_lossy(&out.stdout).into_owned();
+    if listed.lines().any(|line| line.starts_with('?')) {
+        return Err(format!("this clone lacks objects in the history of {rel}"));
+    }
     let mark = headed_mark_path(root, rel, host, scope_name);
-    let head = git(root, &["rev-parse", "HEAD"])
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
-    if let Some((kind, oid)) = std::fs::read_to_string(&mark).ok().and_then(|text| {
+    let none_key = {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&listed, &mut hasher);
+        for identity in identities {
+            std::hash::Hash::hash(identity, &mut hasher);
+            if let Ok(meta) = std::fs::metadata(identity) {
+                std::hash::Hash::hash(&meta.len(), &mut hasher);
+                if let Ok(at) = meta.modified() {
+                    std::hash::Hash::hash(&at, &mut hasher);
+                }
+            }
+        }
+        format!("{:016x}", std::hash::Hasher::finish(&hasher))
+    };
+    if let Some((kind, value)) = std::fs::read_to_string(&mark).ok().and_then(|text| {
         text.trim()
             .split_once(' ')
-            .map(|(k, o)| (k.to_string(), o.to_string()))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
     }) {
         match kind.as_str() {
-            "headed" if git(root, &["cat-file", "-e", &oid]).is_ok_and(|o| o.status.success()) => {
+            "headed"
+                if git(root, &["cat-file", "-e", &value]).is_ok_and(|o| o.status.success()) =>
+            {
                 return Ok(true);
             }
-            "none" if head.as_deref() == Some(oid.as_str()) => return Ok(false),
+            "none" if value == none_key => return Ok(false),
             _ => {}
         }
     }
-    let answer = history_of_log_is_headed_walk(root, rel, identities, host, scope_name)?;
+    let answer = headed_blob_in_listing(root, &listed, rel, identities, host, scope_name)?;
     if let Some(dir) = mark.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    match (&answer, &head) {
-        (Some(oid), _) => {
-            let _ = std::fs::write(&mark, format!("headed {oid}\n"));
-        }
-        (None, Some(head)) => {
-            let _ = std::fs::write(&mark, format!("none {head}\n"));
-        }
-        (None, None) => {}
-    }
+    let row = match &answer {
+        Some(oid) => format!("headed {oid}\n"),
+        None => format!("none {none_key}\n"),
+    };
+    let _ = std::fs::write(&mark, row);
     Ok(answer.is_some())
 }
 
@@ -3253,33 +3279,17 @@ fn headed_mark_path(root: &Path, rel: &str, host: &str, scope_name: &str) -> Pat
 }
 
 /// The walk behind [`history_of_log_is_headed`]: the blob id of the first
-/// committed version whose header names `host` and `scope_name`, or
-/// `None` when no version does.
-fn history_of_log_is_headed_walk(
+/// version in `listed` (rev-list `--objects` output for `rel`) whose header
+/// names `host` and `scope_name`, or `None` when no version does.
+fn headed_blob_in_listing(
     root: &Path,
+    listed: &str,
     rel: &str,
     identities: &[PathBuf],
     host: &str,
     scope_name: &str,
 ) -> Result<Option<String>, String> {
     let unread = || format!("git could not read the history of {rel}");
-    let args = [
-        "rev-list",
-        "--full-history",
-        "--objects",
-        "--missing=print",
-        "HEAD",
-        "--",
-        rel,
-    ];
-    let out = match git(root, &args) {
-        Ok(out) if out.status.success() => out,
-        _ => return Err(unread()),
-    };
-    let listed = String::from_utf8_lossy(&out.stdout);
-    if listed.lines().any(|line| line.starts_with('?')) {
-        return Err(format!("this clone lacks objects in the history of {rel}"));
-    }
     for line in listed.lines() {
         let Some((oid, path)) = line.split_once(' ') else {
             continue;

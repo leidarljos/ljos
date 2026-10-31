@@ -34,25 +34,28 @@ struct Stat {
     start: u64,
 }
 
-/// One process's stat, read once per process: a hook walks the tree from
-/// several places, and a process above this one does not change its
-/// parent or its start while the hook runs.
+/// One process's stat. The processes above this one are read once per
+/// process: a hook walks the tree from several places, and a process
+/// above this one keeps its parent and its start while the hook runs.
+/// Any other process, such as a child this process reaps, is read fresh.
 fn stat(pid: u32) -> Option<Stat> {
-    static READ: std::sync::LazyLock<
-        std::sync::Mutex<std::collections::HashMap<u32, Option<Stat>>>,
-    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    if let Some(found) = READ
+    if let Some(found) = ancestor_stats()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(&pid)
     {
         return found.clone();
     }
-    let read = stat_read(pid);
-    READ.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(pid, read.clone());
-    read
+    stat_read(pid)
+}
+
+type AncestorStats = std::sync::Mutex<std::collections::HashMap<u32, Option<Stat>>>;
+
+/// The stats of the processes above this one, filled by the first walk
+/// up from this process ([`above`] on this pid).
+fn ancestor_stats() -> &'static AncestorStats {
+    static STATS: std::sync::OnceLock<AncestorStats> = std::sync::OnceLock::new();
+    STATS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
 #[cfg(target_os = "linux")]
@@ -196,12 +199,20 @@ pub fn of(pid: u32) -> Option<Proc> {
 /// in a container that may be the harness itself.
 #[must_use]
 pub fn above(pid: u32) -> Vec<Proc> {
+    let own = pid == std::process::id();
     let mut out = Vec::new();
     let mut next = stat(pid).map(|s| s.ppid);
     while let Some(p) = next.filter(|&p| p > 0 && out.len() < DEPTH) {
         let Some(s) = stat(p) else {
             break;
         };
+        if own {
+            ancestor_stats()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(p)
+                .or_insert_with(|| Some(s.clone()));
+        }
         next = Some(s.ppid);
         out.push(Proc {
             pid: p,
