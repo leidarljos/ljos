@@ -34,10 +34,11 @@ struct Stat {
     start: u64,
 }
 
-/// One process's stat. The processes above this one are read once per
-/// process: a hook walks the tree from several places, and a process
-/// above this one keeps its parent and its start while the hook runs.
-/// Any other process, such as a child this process reaps, is read fresh.
+/// One process's stat. Inside a hook, the processes above this one are
+/// read once: a hook walks the tree from several places and is gone in
+/// well under a second. A server that lives for hours watches its parent
+/// through this, so outside a hook every read is fresh, and a child this
+/// process reaps reads as gone everywhere.
 fn stat(pid: u32) -> Option<Stat> {
     if let Some(found) = ancestor_stats()
         .lock()
@@ -206,7 +207,7 @@ pub fn above(pid: u32) -> Vec<Proc> {
         let Some(s) = stat(p) else {
             break;
         };
-        if own {
+        if own && std::env::var_os("LJOS_IN_HOOK").is_some() {
             ancestor_stats()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
