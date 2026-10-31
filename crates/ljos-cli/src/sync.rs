@@ -3201,8 +3201,51 @@ fn history_of_log_is_headed(
     // age run per version per identity: thousands on a seat that has
     // synced for weeks, on every doctor. The answer is kept. A blob found
     // headed stays headed while that object is in the history. A history
-    // with no headed blob stays so while the listing of its versions and
-    // the identities that open them are unchanged.
+    // with no headed blob stays so while HEAD is the commit it was read
+    // at, the history has no cut, every object it read is still here, and
+    // the identities that open the log are unchanged. Those four checks
+    // are a rev-parse, a stat or two and one cat-file; the walk they
+    // replace listed every object of the log's history.
+    let mark = headed_mark_path(root, rel, host, scope_name);
+    let head = git(root, &["rev-parse", "HEAD"])
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
+    let identities_key = {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for identity in identities {
+            std::hash::Hash::hash(identity, &mut hasher);
+            if let Ok(meta) = std::fs::metadata(identity) {
+                std::hash::Hash::hash(&meta.len(), &mut hasher);
+                if let Ok(at) = meta.modified() {
+                    std::hash::Hash::hash(&at, &mut hasher);
+                }
+            }
+        }
+        format!("{:016x}", std::hash::Hasher::finish(&hasher))
+    };
+    if let Ok(text) = std::fs::read_to_string(&mark) {
+        let mut lines = text.lines();
+        let first: Vec<&str> = lines.next().unwrap_or("").split(' ').collect();
+        match first.as_slice() {
+            ["headed", oid]
+                if git(root, &["cat-file", "-e", oid]).is_ok_and(|o| o.status.success()) =>
+            {
+                return Ok(true);
+            }
+            ["none", kept_head, kept_identities]
+                if head.as_deref() == Some(*kept_head)
+                    && *kept_identities == identities_key
+                    && history_gap(root).is_none() =>
+            {
+                let oids: Vec<&str> = lines.collect();
+                if objects_present(root, &oids) {
+                    return Ok(false);
+                }
+            }
+            _ => {}
+        }
+    }
     let unread = || format!("git could not read the history of {rel}");
     let args = [
         "rev-list",
@@ -3221,46 +3264,60 @@ fn history_of_log_is_headed(
     if listed.lines().any(|line| line.starts_with('?')) {
         return Err(format!("this clone lacks objects in the history of {rel}"));
     }
-    let mark = headed_mark_path(root, rel, host, scope_name);
-    let none_key = {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        std::hash::Hash::hash(&listed, &mut hasher);
-        for identity in identities {
-            std::hash::Hash::hash(identity, &mut hasher);
-            if let Ok(meta) = std::fs::metadata(identity) {
-                std::hash::Hash::hash(&meta.len(), &mut hasher);
-                if let Ok(at) = meta.modified() {
-                    std::hash::Hash::hash(&at, &mut hasher);
-                }
-            }
-        }
-        format!("{:016x}", std::hash::Hasher::finish(&hasher))
-    };
-    if let Some((kind, value)) = std::fs::read_to_string(&mark).ok().and_then(|text| {
-        text.trim()
-            .split_once(' ')
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-    }) {
-        match kind.as_str() {
-            "headed"
-                if git(root, &["cat-file", "-e", &value]).is_ok_and(|o| o.status.success()) =>
-            {
-                return Ok(true);
-            }
-            "none" if value == none_key => return Ok(false),
-            _ => {}
-        }
-    }
     let answer = headed_blob_in_listing(root, &listed, rel, identities, host, scope_name)?;
     if let Some(dir) = mark.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let row = match &answer {
-        Some(oid) => format!("headed {oid}\n"),
-        None => format!("none {none_key}\n"),
+    let row = match (&answer, &head) {
+        (Some(oid), _) => format!("headed {oid}\n"),
+        (None, Some(head)) => {
+            let mut row = format!("none {head} {identities_key}\n");
+            for line in listed.lines() {
+                if let Some((oid, path)) = line.split_once(' ') {
+                    if path == rel {
+                        row.push_str(oid);
+                        row.push('\n');
+                    }
+                }
+            }
+            row
+        }
+        (None, None) => String::new(),
     };
-    let _ = std::fs::write(&mark, row);
+    if !row.is_empty() {
+        let _ = std::fs::write(&mark, row);
+    }
     Ok(answer.is_some())
+}
+
+/// Whether every object in `oids` is in this repository, asked in one
+/// `git cat-file --batch-check`. An empty list is present.
+fn objects_present(root: &Path, oids: &[&str]) -> bool {
+    use std::io::Write;
+    if oids.is_empty() {
+        return true;
+    }
+    let mut cmd = crate::git_at(root);
+    let Ok(mut child) = cmd
+        .args(["cat-file", "--batch-check"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        for oid in oids {
+            if writeln!(stdin, "{oid}").is_err() {
+                return false;
+            }
+        }
+    }
+    let Ok(out) = child.wait_with_output() else {
+        return false;
+    };
+    out.status.success() && !String::from_utf8_lossy(&out.stdout).contains(" missing")
 }
 
 /// Where the answer of [`history_of_log_is_headed`] is kept for one
