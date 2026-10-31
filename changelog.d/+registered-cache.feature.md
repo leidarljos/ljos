@@ -1,0 +1,1 @@
+The doctor ran each runner's `registered` command on every call; `claude mcp get ljos` starts a Node runtime and was 1.7 s of a 2 s doctor. A pass is kept for an hour under the command's words, the way a probe's pass is kept for a day; a failure is not kept.

@@ -5384,12 +5384,7 @@ pub fn format_seat(seat: &Seat) -> String {
 fn is_registered(h: &Harness, server: &Path) -> Option<bool> {
     if !h.registered.is_empty() {
         let argv = filled(&h.registered, server, &h.name);
-        return Some(
-            argv.first().is_some_and(|bin| on_path(bin)) && {
-                let (bin, rest) = (&argv[0], &argv[1..]);
-                run_captured(bin, rest).is_ok()
-            },
-        );
+        return Some(registered_by_command(&argv));
     }
     if let (Some(config), Some(marker)) = (&h.config, &h.marker) {
         return Some(std::fs::read_to_string(expand(config)).is_ok_and(|t| t.contains(marker)));
@@ -5403,6 +5398,44 @@ fn is_registered(h: &Harness, server: &Path) -> Option<bool> {
         );
     }
     None
+}
+
+/// Whether a runner's `registered` command passes. A pass is kept for an
+/// hour under the command's words: `claude mcp get ljos` starts a Node
+/// runtime and was 1.7 s of a 2 s doctor, and a registration does not
+/// move between doctors. A failure is not kept, so a registration made
+/// since is seen at once.
+fn registered_by_command(argv: &[String]) -> bool {
+    const REGISTERED_FOR: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+    let mark = {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&argv.join("\u{1f}"), &mut hasher);
+        state_base_dir()
+            .join("registered")
+            .join(format!("{:016x}", std::hash::Hasher::finish(&hasher)))
+    };
+    let passed_lately = std::fs::metadata(&mark)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|at| at.elapsed().ok())
+        .is_some_and(|age| age < REGISTERED_FOR);
+    if passed_lately {
+        return true;
+    }
+    let Some((bin, rest)) = argv.split_first() else {
+        return false;
+    };
+    if !on_path(bin) {
+        return false;
+    }
+    let passed = run_captured(bin, rest).is_ok();
+    if passed {
+        if let Some(dir) = mark.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&mark, b"");
+    }
+    passed
 }
 
 /// Set `pointer` in the JSON document at `config` to `entry`, making the
