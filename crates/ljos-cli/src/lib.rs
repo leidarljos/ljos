@@ -20600,10 +20600,7 @@ fn gate_read_in_hook() -> (Vec<Rule>, Vec<(String, String)>) {
         .unwrap_or_default();
     if let Some(path) = &kept {
         keep_prefs(&gate_sibling(path, "prefs-"), &preferences);
-        let _ = std::fs::write(
-            gate_sibling(path, "fresh-"),
-            stamp.as_deref().unwrap_or(""),
-        );
+        let _ = std::fs::write(gate_sibling(path, "fresh-"), stamp.as_deref().unwrap_or(""));
     }
     (rules, preferences)
 }
