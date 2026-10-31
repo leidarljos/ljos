@@ -35636,14 +35636,14 @@ pub fn tool_installed(tool: &str) -> bool {
     if tool.contains('/') {
         path.is_file()
     } else {
-        on_path(tool).is_some()
+        which_cached(tool).is_some()
     }
 }
 
 /// `which::which(tool)`, remembered for this process under the `PATH` it
 /// was looked up on. A hook asks for the same few programs several times
 /// a call, and each lookup walks every directory on `PATH`.
-fn on_path(tool: &str) -> Option<std::path::PathBuf> {
+fn which_cached(tool: &str) -> Option<std::path::PathBuf> {
     type Found = (String, String, Option<std::path::PathBuf>);
     static FOUND: std::sync::Mutex<Vec<Found>> = std::sync::Mutex::new(Vec::new());
     let path_env = std::env::var("PATH").unwrap_or_default();
@@ -35672,7 +35672,7 @@ pub fn policyd_bin() -> Option<std::path::PathBuf> {
     std::env::var_os("POLICYD_BIN")
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from)
-        .or_else(|| on_path("ljos-policyd"))
+        .or_else(|| which_cached("ljos-policyd"))
 }
 
 /// The TCB's verdict on a shell line: a fast in-process check first, then
@@ -37363,7 +37363,7 @@ pub fn consensus_document(gate: &Value, said: &[(String, String)]) -> Value {
 }
 
 pub fn on_path(bin: &str) -> bool {
-    which::which(bin).is_ok()
+    which_cached(bin).is_some()
 }
 
 pub fn run(bin: &str, args: &[impl AsRef<str>]) -> Result<()> {
