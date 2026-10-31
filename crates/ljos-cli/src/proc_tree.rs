@@ -1244,7 +1244,8 @@ fn resolved_roots(home: Option<&Path>, store: &Path) -> (Vec<PathBuf>, PathBuf) 
     // for them once per ancestor, and each resolve reads every link on
     // the way to every root.
     type Roots = (Vec<PathBuf>, PathBuf);
-    static RESOLVED: std::sync::LazyLock<std::sync::Mutex<Vec<(Option<PathBuf>, PathBuf, Roots)>>> =
+    type Resolved = (Option<PathBuf>, PathBuf, Roots);
+    static RESOLVED: std::sync::LazyLock<std::sync::Mutex<Vec<Resolved>>> =
         std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
     let key_home = home.map(Path::to_path_buf);
     if let Some((_, _, roots)) = RESOLVED
