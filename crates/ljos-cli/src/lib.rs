@@ -16014,7 +16014,16 @@ pub(crate) fn forget_atom_listings() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clear();
+    *ORIGINS_RECORDED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 }
+
+/// When this hook process last recorded the origin of every row of the
+/// listing ([`keep_origins_of`]). The pass over a few thousand rows ran
+/// once per search, twice a prompt, and between two searches of one hook
+/// the listing is the memo's: a write forgets this with the memo.
+static ORIGINS_RECORDED: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
 
 /// [`atoms_listed`] narrowed to one `kind` when given: the writer filters
 /// before it builds the answer, so a gate's read does not copy the pack.
@@ -35199,7 +35208,12 @@ fn stored_bodies() -> &'static std::sync::Mutex<std::collections::BTreeMap<Strin
 /// or a record whose `valid_to` has passed, is not held: packsetd lists
 /// one that is still due, and its by-id read answers 404.
 fn record_held(id: &str, atom: &Value) {
-    if !live_now(atom, &now_utc()) {
+    record_held_at(id, atom, &now_utc());
+}
+
+/// [`record_held`] at `now`.
+fn record_held_at(id: &str, atom: &Value, now: &str) {
+    if !live_now(atom, now) {
         record_origin(id, None);
         return;
     }
@@ -35268,8 +35282,14 @@ fn record_listed(atom: &Value, proven: bool) {
 /// agent's, as [`stored_by`] reads it, and overwrites a person recorded
 /// before: an older packsetd lists a stored row without its origin.
 pub(crate) fn keep_origin(atom: &Value) {
+    keep_origin_at(atom, &now_utc());
+}
+
+/// [`keep_origin`] at `now`, for a pass over a listing that reads the
+/// clock once.
+fn keep_origin_at(atom: &Value, now: &str) {
     if let Some(id) = atom.get("id").and_then(Value::as_str) {
-        record_held(id, atom);
+        record_held_at(id, atom, now);
     }
 }
 
@@ -35296,13 +35316,27 @@ fn keep_origins_of<'a>(client: &PacksetClient, hits: impl IntoIterator<Item = &'
             return;
         }
     };
-    atoms.iter().for_each(keep_origin);
+    let now = now_utc();
+    let recorded_lately = atoms_memo_on()
+        && ORIGINS_RECORDED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some_and(|at| at.elapsed() < ATOMS_MEMO);
+    if !recorded_lately {
+        atoms.iter().for_each(|atom| keep_origin_at(atom, &now));
+        if atoms_memo_on() {
+            *ORIGINS_RECORDED
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(std::time::Instant::now());
+        }
+    }
     for id in ids {
         match atoms
             .iter()
             .find(|a| a.get("id").and_then(Value::as_str) == Some(id))
         {
-            Some(held) => record_held(id, held),
+            Some(held) => record_held_at(id, held, &now),
             None => record_origin(id, None),
         }
     }
