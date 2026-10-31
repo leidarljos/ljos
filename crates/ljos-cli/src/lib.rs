@@ -14615,8 +14615,47 @@ fn harness_rows() -> Vec<Habitat> {
 }
 
 /// Run a runner's probe with a thirty-second limit; it passes when it
-/// exits 0 and its output names `ljos_sitting`.
+/// exits 0 and its output names `ljos_sitting`. A pass is kept for a day
+/// under the probe's words: a runner's own `mcp test` starts the server
+/// and can take seconds, and the registration it checks does not move
+/// between doctors.
 fn probe_lists_ljos(argv: &[String]) -> std::result::Result<(), String> {
+    const PROBE_PASS_FOR: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+    let mark = {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&argv.join("\u{1f}"), &mut hasher);
+        state_base_dir()
+            .join("probes")
+            .join(format!("{:016x}", std::hash::Hasher::finish(&hasher)))
+    };
+    let passed_lately = std::fs::metadata(&mark)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|at| at.elapsed().ok())
+        .is_some_and(|age| age < PROBE_PASS_FOR);
+    if passed_lately {
+        return Ok(());
+    }
+    let answer = probe_lists_ljos_run(argv);
+    if answer.is_ok() {
+        if let Some(dir) = mark.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&mark, b"");
+    }
+    answer
+}
+
+/// `$XDG_STATE_HOME/ljos`, else `~/.local/state/ljos`.
+fn state_base_dir() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
+        .unwrap_or_else(|| PathBuf::from(".local/state"))
+        .join("ljos")
+}
+
+fn probe_lists_ljos_run(argv: &[String]) -> std::result::Result<(), String> {
     use std::io::Read;
     use std::process::{Command, Stdio};
     let (bin, args) = argv.split_first().ok_or("empty probe")?;
