@@ -3211,6 +3211,13 @@ fn history_of_log_is_headed(
         .ok()
         .filter(|out| out.status.success())
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
+    // Deepening a shallow clone adds commits under the same HEAD, so the
+    // reachable count is part of the key.
+    let reach = git(root, &["rev-list", "--count", "HEAD"])
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_default();
     let identities_key = {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for identity in identities {
@@ -3233,8 +3240,9 @@ fn history_of_log_is_headed(
             {
                 return Ok(true);
             }
-            ["none", kept_head, kept_identities]
+            ["none", kept_head, kept_reach, kept_identities]
                 if head.as_deref() == Some(*kept_head)
+                    && *kept_reach == reach
                     && *kept_identities == identities_key
                     && history_gap(root).is_none() =>
             {
@@ -3274,7 +3282,7 @@ fn history_of_log_is_headed(
             // Every object the walk listed: the commits and trees on the
             // way as well as the blobs, so a clone that later loses any
             // of them reads as missing history, as the walk would say.
-            let mut row = format!("none {head} {identities_key}\n");
+            let mut row = format!("none {head} {reach} {identities_key}\n");
             for line in listed.lines() {
                 if let Some(oid) = line.split(' ').next().filter(|oid| !oid.is_empty()) {
                     row.push_str(oid);
