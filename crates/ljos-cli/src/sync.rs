@@ -2250,6 +2250,9 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
     {
         return Ok("sync: no age identity on this machine; `ljos sync --key` makes one\n".into());
     }
+    // An import writes the taken records; what age gave on the way is
+    // kept beside them for the next import.
+    let _keep = KeepOpened::start();
     // Retirement reads the adopt commits, not the directory. A missing
     // atoms directory, or one that only holds this machine, still has to
     // reach that step: the adopt commit is what removes the gone log.
@@ -3000,39 +3003,55 @@ fn open_sealed_bytes(bytes: &[u8], identities: &[PathBuf]) -> Result<Option<Stri
     // plaintext, so what age gave is kept by digest: the doctor's import
     // opens every host's chunks on each call, about 1,500 age runs here
     // with nothing new. The taken records already hold this plaintext at
-    // rest in the same state tree. A miss is kept as an empty mark; an
-    // error is not kept.
-    let mark = opened_mark_path(bytes, identities);
-    match std::fs::read(&mark) {
-        Ok(kept) if kept.is_empty() => return Ok(None),
-        Ok(kept) => {
+    // rest in the same state tree, and the mark is read and written the
+    // way they are, below the state root with no symlink followed. A miss
+    // is kept as an empty mark; an error is not kept. Only an import
+    // keeps one: the doctor's other reads leave the state as they found
+    // it, and a mark that cannot be read is opened again.
+    let rel = opened_mark_rel(bytes, identities);
+    match read_beneath(&state_base(), &rel) {
+        Ok(Some(kept)) if kept.is_empty() => return Ok(None),
+        Ok(Some(kept)) => {
             if let Ok(text) = String::from_utf8(kept) {
                 return Ok(Some(text));
             }
         }
-        Err(_) => {}
+        Ok(None) | Err(_) => {}
     }
     let opened = open_sealed_bytes_with_age(bytes, identities)?;
-    if let Some(dir) = mark.parent() {
-        let _ = std::fs::create_dir_all(dir);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
-        }
-    }
-    let body: &[u8] = opened.as_deref().map_or(&[], str::as_bytes);
-    let tmp = mark.with_extension(format!("tmp{}", std::process::id()));
-    if write_private(&tmp, body).is_ok() && std::fs::rename(&tmp, &mark).is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    if KEEP_OPENED.with(std::cell::Cell::get) {
+        let body: &[u8] = opened.as_deref().map_or(&[], str::as_bytes);
+        let _ = write_beneath(&state_base(), &rel, body);
     }
     Ok(opened)
 }
 
-/// Where the plaintext age gave for one ciphertext under one set of
-/// identities is kept: the sync state's `opened` tree, by digest of the
-/// ciphertext and of the identities' paths, sizes and times.
-fn opened_mark_path(bytes: &[u8], identities: &[PathBuf]) -> PathBuf {
+thread_local! {
+    /// Whether this thread is inside a write of the sync state, where
+    /// [`open_sealed_bytes`] may keep what age gave.
+    static KEEP_OPENED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Lets [`open_sealed_bytes`] keep what age gave while the holder lives,
+/// on this thread. [`import`] holds one; a doctor read does not.
+struct KeepOpened(bool);
+
+impl KeepOpened {
+    fn start() -> Self {
+        Self(KEEP_OPENED.with(|keep| keep.replace(true)))
+    }
+}
+
+impl Drop for KeepOpened {
+    fn drop(&mut self) {
+        KEEP_OPENED.with(|keep| keep.set(self.0));
+    }
+}
+
+/// Where below the state root the plaintext age gave for one ciphertext
+/// under one set of identities is kept: `sync/opened/<digest>`, by digest
+/// of the ciphertext and of the identities' paths, sizes and times.
+fn opened_mark_rel(bytes: &[u8], identities: &[PathBuf]) -> String {
     use sha2::Digest as _;
     let mut hasher = sha2::Sha256::new();
     hasher.update(bytes);
@@ -3047,23 +3066,7 @@ fn opened_mark_path(bytes: &[u8], identities: &[PathBuf]) -> PathBuf {
             }
         }
     }
-    state_base()
-        .join("sync")
-        .join("opened")
-        .join(hex::encode(hasher.finalize()))
-}
-
-/// Write `body` to `path` readable by this user alone.
-fn write_private(path: &Path, body: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)?.write_all(body)
+    format!("sync/opened/{}", hex::encode(hasher.finalize()))
 }
 
 fn open_sealed_bytes_with_age(bytes: &[u8], identities: &[PathBuf]) -> Result<Option<String>> {
