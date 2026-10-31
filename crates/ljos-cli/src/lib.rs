@@ -15823,6 +15823,33 @@ fn atoms_listed_of(
             return Ok((atoms.clone(), *trusted));
         }
     }
+    // The whole listing is a megabyte the writer builds in a fifth of a
+    // second. A hook keeps the last one on disk under the pack's own
+    // last-write stamp: while the stamp stands, the listing does too.
+    let whole = kind.is_none() && limit.is_none() && !newest;
+    let stamp = if memo_key.is_some() && whole {
+        client
+            .status(Some(workspace))
+            .ok()
+            .and_then(|st| st.get("last_write_ts")?.as_str().map(str::to_string))
+    } else {
+        None
+    };
+    let cache = stamp
+        .as_ref()
+        .and_then(|_| listing_cache_path(workspace, token));
+    if let (Some(path), Some(stamp)) = (&cache, &stamp) {
+        if let Some((atoms, trusted)) = cached_listing(path, stamp) {
+            if let Some(key) = memo_key {
+                let mut kept = ATOM_LISTINGS
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                kept.retain(|(k, _, _, _)| k != &key);
+                kept.push((key, std::time::Instant::now(), atoms.clone(), trusted));
+            }
+            return Ok((atoms, trusted));
+        }
+    }
     // A runner kills PreToolUse at 10s and then ignores the hook, which
     // drops a deny. Inside a hook the listing stops at 2s so the local
     // gate still runs. Outside a hook the caller's PACKSET_TIMEOUT_MS
@@ -15876,7 +15903,51 @@ fn atoms_listed_of(
             answered.trusted,
         ));
     }
+    if let (Some(path), Some(stamp)) = (cache, stamp) {
+        keep_listing(&path, &stamp, &atoms, answered.trusted);
+    }
     Ok((atoms, answered.trusted))
+}
+
+/// `$XDG_DATA_HOME/ljos/listing-<workspace>-<token>.json`: the last whole
+/// listing a hook read, with the pack stamp it was read under.
+fn listing_cache_path(workspace: &str, token: bool) -> Option<PathBuf> {
+    let safe: String = workspace
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    let who = if token { "seat" } else { "open" };
+    Some(
+        data_base()?
+            .join("ljos")
+            .join(format!("listing-{safe}-{who}.json")),
+    )
+}
+
+/// The cached listing at `path` when it was read under `stamp`.
+fn cached_listing(path: &Path, stamp: &str) -> Option<(Vec<Value>, bool)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut doc: Value = serde_json::from_str(&text).ok()?;
+    if doc.get("stamp")?.as_str()? != stamp {
+        return None;
+    }
+    let trusted = doc.get("trusted")?.as_bool()?;
+    let atoms = doc.get_mut("atoms")?.take();
+    Some((serde_json::from_value(atoms).ok()?, trusted))
+}
+
+/// Keep `atoms` at `path` under `stamp`, through a temporary file, so a
+/// hook reading at the same time sees the old listing or the new.
+fn keep_listing(path: &Path, stamp: &str, atoms: &[Value], trusted: bool) {
+    let doc = serde_json::json!({ "stamp": stamp, "trusted": trusted, "atoms": atoms });
+    let Some(dir) = path.parent() else { return };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let tmp = dir.join(format!(".listing-{}.tmp", std::process::id()));
+    if std::fs::write(&tmp, doc.to_string()).is_ok() && std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 pub fn pack() -> Result<PacksetClient> {
