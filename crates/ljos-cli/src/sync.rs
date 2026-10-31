@@ -2345,7 +2345,9 @@ static SKIP_UNCHANGED_LOGS: std::sync::atomic::AtomicBool =
 /// Where the sealed digest of the last applied import of `host`'s log in
 /// `scope` is kept: beside the taken record.
 fn sealed_mark_path(root: &Path, scope: &str, host: &str) -> PathBuf {
-    state_base().join(format!("{}.sealed", taken_rel(root, scope, host)))
+    let mut path = taken_path(root, scope, host).into_os_string();
+    path.push(".sealed");
+    PathBuf::from(path)
 }
 
 struct ListedLog {
@@ -2514,7 +2516,6 @@ fn import_jobs(root: &Path, scope: &Scope, me: &str) -> Result<(Vec<ImportJob>, 
             host,
             scope_name,
             plain: String::new(),
-            sealed: String::new(),
         });
     }
     Ok((jobs, out))
