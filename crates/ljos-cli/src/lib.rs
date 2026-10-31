@@ -15963,9 +15963,12 @@ fn atoms_listed_of(
     // second. A hook keeps the last one on disk under the pack's own
     // last-write stamp: while the stamp stands, the listing does too.
     let whole = kind.is_none() && limit.is_none() && !newest;
+    // The pack-wide stamp: a write to any workspace moves it, which is
+    // conservative, and the same status read serves the encoder check in
+    // this hook through the client's memo.
     let stamp = if memo_key.is_some() && whole {
         client
-            .status(Some(workspace))
+            .status(None)
             .ok()
             .and_then(|st| st.get("last_write_ts")?.as_str().map(str::to_string))
     } else {
