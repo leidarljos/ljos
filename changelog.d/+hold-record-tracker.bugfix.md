@@ -1,0 +1,1 @@
+A commit under a sitting on an issue held in a second tracker root waited about 45 s and the hook timed out: the gate looked the issue up through the router, which reads every project under every root, and then asked vissue, which walked again. The hold record now carries the tracker root and prefix, and the gate reads that tracker first.
