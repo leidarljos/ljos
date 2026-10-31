@@ -9416,8 +9416,7 @@ fn singular(w: &str) -> String {
 /// Remembered per text ([`text_memo`]): the match tokens, the cue terms
 /// and the abbreviation check each ask it of the same claim.
 fn prompt_words(text: &str) -> Vec<String> {
-    static MEMO: std::sync::LazyLock<TextMemo> = std::sync::LazyLock::new(TextMemo::default);
-    text_memo(&MEMO, text, prompt_words_of)
+    text_memo(&PROMPT_WORDS_MEMO, text, prompt_words_of)
 }
 
 fn prompt_words_of(text: &str) -> Vec<String> {
@@ -9543,9 +9542,11 @@ fn alias_words(text: &str, claim: bool) -> Vec<String> {
 /// without a plural of [`RULE_WORDS`] (`keeps`), plus the alias groups
 /// each names.
 fn cue_terms(text: &str, claim: bool) -> Vec<String> {
-    static CLAIMS: std::sync::LazyLock<TextMemo> = std::sync::LazyLock::new(TextMemo::default);
-    static CUES: std::sync::LazyLock<TextMemo> = std::sync::LazyLock::new(TextMemo::default);
-    let memo = if claim { &CLAIMS } else { &CUES };
+    let memo = if claim {
+        &CLAIM_TERMS_MEMO
+    } else {
+        &CUE_TERMS_MEMO
+    };
     text_memo(memo, text, |t| cue_terms_of(t, claim))
 }
 
@@ -9617,6 +9618,28 @@ fn stop_word(word: &str) -> bool {
 /// for hours does not grow without end.
 type TextMemo = std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>;
 
+/// The memos the token sidecar seeds ([`seed_tokens`]): the words of a
+/// text, its phrase abbreviations and its claim terms.
+static PROMPT_WORDS_MEMO: std::sync::LazyLock<TextMemo> =
+    std::sync::LazyLock::new(TextMemo::default);
+static PHRASE_ACRONYMS_MEMO: std::sync::LazyLock<TextMemo> =
+    std::sync::LazyLock::new(TextMemo::default);
+static CLAIM_TERMS_MEMO: std::sync::LazyLock<TextMemo> =
+    std::sync::LazyLock::new(TextMemo::default);
+static CUE_TERMS_MEMO: std::sync::LazyLock<TextMemo> = std::sync::LazyLock::new(TextMemo::default);
+
+/// Put a value computed elsewhere into a text memo.
+fn seed_text_memo(memo: &TextMemo, text: &str, value: Vec<String>) {
+    const TEXT_MEMO_CAP: usize = 20_000;
+    let mut kept = memo
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if kept.len() >= TEXT_MEMO_CAP {
+        kept.clear();
+    }
+    kept.insert(text.to_string(), value);
+}
+
 fn text_memo(
     memo: &TextMemo,
     text: &str,
@@ -9647,8 +9670,7 @@ fn text_memo(
 /// them is left alone, so `add lodash dependency` does not become a token.
 /// Remembered per text ([`text_memo`]).
 fn phrase_acronyms(text: &str) -> Vec<String> {
-    static MEMO: std::sync::LazyLock<TextMemo> = std::sync::LazyLock::new(TextMemo::default);
-    text_memo(&MEMO, text, phrase_acronyms_of)
+    text_memo(&PHRASE_ACRONYMS_MEMO, text, phrase_acronyms_of)
 }
 
 fn phrase_acronyms_of(text: &str) -> Vec<String> {
@@ -16024,6 +16046,7 @@ fn atoms_listed_of(
         .and_then(|_| listing_cache_path(workspace, token));
     if let (Some(path), Some(stamp)) = (&cache, &stamp) {
         if let Some((atoms, trusted)) = cached_listing(path, stamp) {
+            seed_tokens(path, stamp, &atoms);
             if let Some(key) = memo_key {
                 let mut kept = ATOM_LISTINGS
                     .lock()
@@ -16089,6 +16112,7 @@ fn atoms_listed_of(
     }
     if let (Some(path), Some(stamp)) = (cache, stamp) {
         keep_listing(&path, &stamp, &atoms, answered.trusted);
+        keep_tokens(&path, &stamp, &atoms);
     }
     Ok((atoms, answered.trusted))
 }
@@ -16131,6 +16155,89 @@ fn keep_listing(path: &Path, stamp: &str, atoms: &[Value], trusted: bool) {
     let tmp = dir.join(format!(".listing-{}.tmp", std::process::id()));
     if std::fs::write(&tmp, doc.to_string()).is_ok() && std::fs::rename(&tmp, path).is_err() {
         let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// Beside the cached listing, `listing-<workspace>-<who>-tokens.txt`: for
+/// each atom, in listing order, the words of its text, its phrase
+/// abbreviations and its claim terms, tab-separated, tokens separated by
+/// spaces, under a first line of the pack stamp and this version. A
+/// hook that reads the listing from disk seeds its memos from it, so the
+/// lexical scoring does not tokenise every claim again in every hook
+/// process: on this seat that was a quarter of a prompt hook's own time.
+fn tokens_sidecar_path(listing: &Path) -> PathBuf {
+    let name = listing
+        .file_name()
+        .map(|n| n.to_string_lossy().replace(".json", "-tokens.txt"))
+        .unwrap_or_else(|| "listing-tokens.txt".to_string());
+    listing.with_file_name(name)
+}
+
+/// The sidecar's first line: the stamp and the tokeniser's version, so a
+/// release that changes a word list reads none of an older one.
+fn tokens_header(stamp: &str) -> String {
+    format!("{stamp}\t{}", env!("CARGO_PKG_VERSION"))
+}
+
+fn atom_text(atom: &Value) -> &str {
+    atom.get("text").and_then(Value::as_str).unwrap_or("")
+}
+
+/// Write the token sidecar for `atoms`, through a temporary file. The
+/// tokens come through the memos, so the scoring that follows in this
+/// process finds them there.
+fn keep_tokens(listing: &Path, stamp: &str, atoms: &[Value]) {
+    let path = tokens_sidecar_path(listing);
+    let mut out = tokens_header(stamp);
+    out.push('\n');
+    for atom in atoms {
+        let text = atom_text(atom);
+        out.push_str(&prompt_words(text).join(" "));
+        out.push('\t');
+        out.push_str(&phrase_acronyms(text).join(" "));
+        out.push('\t');
+        out.push_str(&cue_terms(text, true).join(" "));
+        out.push('\n');
+    }
+    let Some(dir) = path.parent() else { return };
+    let tmp = dir.join(format!(".tokens-{}.tmp", std::process::id()));
+    if std::fs::write(&tmp, out).is_ok() && std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// Seed the token memos from the sidecar written under `stamp` for these
+/// `atoms`, when it is there, is this version's, and has a line per atom.
+fn seed_tokens(listing: &Path, stamp: &str, atoms: &[Value]) {
+    let Ok(text) = std::fs::read_to_string(tokens_sidecar_path(listing)) else {
+        return;
+    };
+    let mut lines = text.lines();
+    if lines.next() != Some(tokens_header(stamp).as_str()) {
+        return;
+    }
+    let rows: Vec<&str> = lines.collect();
+    if rows.len() != atoms.len() {
+        return;
+    }
+    let tokens = |field: &str| -> Vec<String> {
+        field
+            .split(' ')
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    for (atom, row) in atoms.iter().zip(rows) {
+        let mut fields = row.split('\t');
+        let (Some(words), Some(acronyms), Some(terms)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let text = atom_text(atom);
+        seed_text_memo(&PROMPT_WORDS_MEMO, text, tokens(words));
+        seed_text_memo(&PHRASE_ACRONYMS_MEMO, text, tokens(acronyms));
+        seed_text_memo(&CLAIM_TERMS_MEMO, text, tokens(terms));
     }
 }
 
