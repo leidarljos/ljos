@@ -20563,6 +20563,17 @@ fn gate_read_in_hook() -> (Vec<Rule>, Vec<(String, String)>) {
     let Ok(client) = pack() else {
         return kept_only(kept);
     };
+    // The mark names the pack's last-write stamp the kept rules were read
+    // under. While the pack still shows that stamp nothing in it has
+    // moved, so the kept rules and preferences are what a listing would
+    // say: one status read stands in for two listings.
+    let stamp = with_pack_timeout(HOOK_PACK_MS, || pack_stamp(&client));
+    if let (Some(path), Some(stamp)) = (&kept, stamp.as_deref()) {
+        if gate_kept_under(path, stamp) {
+            let _ = std::fs::write(gate_sibling(path, "fresh-"), stamp);
+            return (kept_rules(path), kept_prefs(&gate_sibling(path, "prefs-")));
+        }
+    }
     let workspace = client.workspace();
     let read = |kind: &str| {
         with_pack_timeout(HOOK_PACK_MS, || {
@@ -20589,15 +20600,39 @@ fn gate_read_in_hook() -> (Vec<Rule>, Vec<(String, String)>) {
         .unwrap_or_default();
     if let Some(path) = &kept {
         keep_prefs(&gate_sibling(path, "prefs-"), &preferences);
-        let _ = std::fs::write(gate_sibling(path, "fresh-"), b"");
+        let _ = std::fs::write(
+            gate_sibling(path, "fresh-"),
+            stamp.as_deref().unwrap_or(""),
+        );
     }
     (rules, preferences)
 }
 
 /// How long the rules and preferences a hook read from the pack serve
-/// the next hooks without a read. A write through this seat's client
-/// drops the mark at once ([`forget_gate_fresh`]).
+/// the next hooks without any read. After that one status read says
+/// whether the pack moved ([`gate_kept_under`]). A write through this
+/// seat's client drops the mark at once ([`forget_gate_fresh`]).
 const GATE_FRESH: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The pack's last-write stamp, from one status read; None when the
+/// pack does not answer or has no stamp yet.
+fn pack_stamp(client: &PacksetClient) -> Option<String> {
+    client
+        .status(None)
+        .ok()?
+        .get("last_write_ts")?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Whether the kept rules and preferences were read under `stamp`: the
+/// freshness mark names it and the preferences sit beside the rules.
+fn gate_kept_under(rules_path: &Path, stamp: &str) -> bool {
+    gate_sibling(rules_path, "prefs-").is_file()
+        && std::fs::read_to_string(gate_sibling(rules_path, "fresh-"))
+            .is_ok_and(|kept| kept.trim() == stamp)
+}
 
 /// The file beside the kept rules whose name starts with `prefix`
 /// instead of `rules-`: the kept preferences, or the freshness mark.
