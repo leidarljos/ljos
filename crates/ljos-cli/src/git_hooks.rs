@@ -1096,8 +1096,13 @@ fn gate_runner(name: &str, refs: &str) -> Result<()> {
     if crate::push_tracker_slow() {
         return Err(anyhow!("sitting-gate: {}", crate::push_tracker_slow_line()));
     }
-    if issue.is_empty() || !crate::protected_push_cleared(&issue, &crate::seat_name(), cfg.quorum) {
+    if issue.is_empty() {
         let why = "the sitting has no settled consensus".to_string();
+        let wait = crate::sitting_gate::seats_wait(&dest, &cfg.branches, &issue, &why);
+        return Err(anyhow!("sitting-gate: {wait}"));
+    }
+    if let Err(reason) = crate::protected_push_refusal(&issue, &crate::seat_name(), cfg.quorum) {
+        let why = format!("the sitting has no settled consensus: {reason}");
         let wait = crate::sitting_gate::seats_wait(&dest, &cfg.branches, &issue, &why);
         return Err(anyhow!("sitting-gate: {wait}"));
     }

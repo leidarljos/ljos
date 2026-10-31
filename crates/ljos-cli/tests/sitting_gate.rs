@@ -350,9 +350,9 @@ fn a_runner_pushes_onto_develop_or_main_once_the_seats_clear_it() {
     asks_for_consensus(&seat.policy(develop, &env), develop);
     seat.vote(&[("inky", "approve"), ("flint", "approve")]);
     for line in [develop, "git push origin HEAD:main"] {
-        asks_for_consensus(&seat.policy(line, &env), line);
+        not_refused(&seat.policy(line, &env), line);
     }
-    asks_for_consensus(&seat.hook_with(develop, &env), "the hook's push");
+    not_refused(&seat.hook_with(develop, &env), "the hook's push");
 
     seat.vote(&[("inky", "revise"), ("flint", "revise")]);
     asks_for_consensus(
@@ -577,6 +577,52 @@ fn a_solo_seat_clears_policy_and_the_git_hook() {
         "the git hook refused a solo seat\n{said}"
     );
     assert!(!said.contains("1 of the 2 seats"), "{said}");
+}
+
+/// Two roster seats with no slot each count as their own family. Both
+/// voting `push` clears a protected push. One vote names the shortfall.
+#[test]
+fn two_unslotted_seats_clear_a_protected_push() {
+    let seat = Seat::new();
+    let tracker = seat.home.join("tracker");
+    std::fs::create_dir_all(&tracker).unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&tracker)
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "{}", text_of(&init));
+    std::fs::write(
+        tracker.join("vissue.toml"),
+        "seats = [\"moss\", \"fern\"]\n",
+    )
+    .unwrap();
+    let root = tracker.to_str().unwrap();
+    let env = [
+        ("VISSUE_ROOT", root),
+        ("ISSUE_ROOT", root),
+        ("VISSUE_NO_ROUTE", "1"),
+        ("LJOS_UNSIGNED_BALLOTS", "allow"),
+        ("PACKSET_URL", "off"),
+    ];
+    seat.card("STARTED", "moss");
+    seat.vote(&[("moss", "push"), ("fern", "push")]);
+    let cleared = seat.runner(&["consensus", ISSUE, "--no-file"], &env);
+    let said = text_of(&cleared);
+    assert!(cleared.status.success(), "{said}");
+    assert!(
+        said.contains("has a settled consensus for a push onto"),
+        "{said}"
+    );
+    seat.vote(&[("moss", "push")]);
+    let waiting = seat.runner(&["consensus", ISSUE, "--no-file"], &env);
+    let said = text_of(&waiting);
+    assert!(waiting.status.success(), "{said}");
+    assert!(
+        said.contains("the sitting has no settled consensus:"),
+        "{said}"
+    );
+    assert!(said.contains("1 of the 2 seats"), "{said}");
 }
 
 /// A gates file that does not parse asks. The git hook does not answer

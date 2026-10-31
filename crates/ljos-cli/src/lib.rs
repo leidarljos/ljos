@@ -22782,17 +22782,6 @@ pub fn cite_stands(cite: &str) -> std::result::Result<String, String> {
 /// Options a panel settles on that send the work back instead of on.
 const NOT_A_GO: &[&str] = &["revise", "reject", "block"];
 
-/// Whether `issue` lets a runner push onto a protected branch: its seat
-/// ballots, the ones a push cite counts ([`cite_stands`]), decide an
-/// option that does not send the work back, `quorum` seats voted, not
-/// all of them the pushing seat, and they run `min(quorum, 2)` model
-/// families. Two conversations of one seat are one seat. A seat's
-/// family is the model its verified slot records ([`slot::family_of`]);
-/// a seat with no slot recording one is a family of its own.
-///
-/// # Errors
-///
-/// Why the push waits, naming the ballots counted.
 /// Whether `seat`'s own ballot on `rows` settles a protected push.
 /// One active seat is enough: that seat's choice is the consensus.
 #[must_use]
@@ -22818,8 +22807,10 @@ pub fn solo_vote_settles(seat: &str, rows: &[Value]) -> bool {
 /// Whether a protected push is settled.
 ///
 /// One name in the tracker's active roster: that seat's own vote settles
-/// it. Two or more names: the ordinary quorum, without a conversation id,
-/// a runner variable, or a pin walk.
+/// it. Two or more names: the ordinary quorum and `min(quorum, 2)` model
+/// families, without a conversation id, a runner variable, or a pin walk.
+/// A seat whose `family` returns nothing is a family of its own. Two seats
+/// of one recorded family do not settle.
 #[must_use]
 pub fn protected_push_settled(
     roster: &[String],
@@ -22829,8 +22820,27 @@ pub fn protected_push_settled(
     quorum: usize,
     family: &dyn Fn(&str) -> Option<String>,
 ) -> bool {
+    protected_push_outcome("push", roster, rows, personas, pusher, quorum, family).is_ok()
+}
+
+fn protected_push_outcome(
+    label: &str,
+    roster: &[String],
+    rows: &[Value],
+    personas: &std::collections::BTreeSet<String>,
+    pusher: &str,
+    quorum: usize,
+    family: &dyn Fn(&str) -> Option<String>,
+) -> std::result::Result<(), String> {
     if roster.len() == 1 {
-        return solo_vote_settles(&roster[0], rows);
+        return if solo_vote_settles(&roster[0], rows) {
+            Ok(())
+        } else {
+            Err(format!(
+                "the only active seat {} has no settled vote on {label}",
+                roster[0]
+            ))
+        };
     }
     let named: std::collections::BTreeSet<String> = roster
         .iter()
@@ -22852,23 +22862,47 @@ pub fn protected_push_settled(
             .cloned()
             .collect()
     };
-    protected_decision("push", &rows, personas, pusher, quorum, family).is_ok()
+    protected_decision(label, &rows, personas, pusher, quorum, family).map(|_| ())
 }
 
 /// A protected push on `issue` is settled for `pusher`.
 ///
 /// One active roster name settles on that seat's own vote. Two or more
 /// use [`cite_ballots`] (persona ballots left out) and the model family
-/// [`slot::family_of`] records. A roster the pack cannot filter, or a
-/// panel the gate refuses, is not settled.
+/// [`slot::family_of`] records. A seat with no recorded family is a family
+/// of its own. When the pack roster cannot be read, the ballots on the
+/// issue are used. A panel the gate refuses is not settled.
+/// [`protected_push_refusal`] returns the refusal text.
 #[must_use]
 pub fn protected_push_cleared(issue: &str, pusher: &str, quorum: usize) -> bool {
+    protected_push_refusal(issue, pusher, quorum).is_ok()
+}
+
+/// Why a protected push on `issue` is not settled for `pusher`.
+///
+/// `Ok(())` when it is settled. The error is the refusal the hook prints
+/// after the settled-consensus line.
+pub fn protected_push_refusal(
+    issue: &str,
+    pusher: &str,
+    quorum: usize,
+) -> std::result::Result<(), String> {
     let roster = tracker_roster_names();
     if roster.len() == 1 {
-        return solo_vote_settles(&roster[0], &ballot_rows(issue));
+        let rows = ballot_rows(issue);
+        let none = |_: &str| None;
+        return protected_push_outcome(
+            issue,
+            &roster,
+            &rows,
+            &std::collections::BTreeSet::new(),
+            pusher,
+            quorum,
+            &none,
+        );
     }
-    if panel_gate::settle_refusal(issue).is_some() {
-        return false;
+    if let Some(why) = panel_gate::settle_refusal(issue) {
+        return Err(why);
     }
     let (rows, personas) = match cite_ballots(issue) {
         Ok(found) => found,
@@ -22881,9 +22915,19 @@ pub fn protected_push_cleared(issue: &str, pusher: &str, quorum: usize) -> bool 
         .unwrap_or_default();
     let tracker = slot::tracker_id();
     let family = |voter: &str| slot::family_of(&tracker, issue, voter, &notes, &pins);
-    protected_push_settled(&roster, &rows, &personas, pusher, quorum, &family)
+    protected_push_outcome(issue, &roster, &rows, &personas, pusher, quorum, &family)
 }
 
+/// Whether `issue` lets a runner push onto a protected branch.
+///
+/// Seat ballots must agree on an option that sends the work on, `quorum`
+/// seats must have voted, not all of them the pushing seat, and they must
+/// run `min(quorum, 2)` model families. A seat with no slot recording a
+/// family is a family of its own.
+///
+/// # Errors
+///
+/// Why the push waits, naming the ballots counted.
 pub fn protected_push_stands(issue: &str, quorum: usize) -> std::result::Result<String, String> {
     let card =
         issue_record(issue).map_err(|e| format!("the tracker does not read {issue} ({e:#})"))?;
@@ -22904,6 +22948,17 @@ pub fn protected_push_stands(issue: &str, quorum: usize) -> std::result::Result<
         .map_err(|e| format!("{e}{}", signed.said()))
 }
 
+/// Whether `counted` seat ballots let a protected push on `issue` go on.
+///
+/// They must agree on an option that does not send the work back, `quorum`
+/// seats must have voted, not all of them `pusher`, and they must run
+/// `min(quorum, 2)` model families. Two conversations of one seat are one
+/// seat. A seat's family is what `family` returns. A seat it does not name
+/// is a family of its own.
+///
+/// # Errors
+///
+/// Why the push waits, naming the ballots counted.
 fn protected_decision(
     issue: &str,
     counted: &[Value],
@@ -22937,8 +22992,10 @@ fn protected_decision(
             d.counted
         ));
     }
-    let families: std::collections::BTreeSet<String> =
-        seats.values().filter_map(|agent| family(agent)).collect();
+    let families: std::collections::BTreeSet<String> = seats
+        .iter()
+        .map(|(seat, agent)| family(agent).unwrap_or_else(|| format!("{seat}'s own")))
+        .collect();
     let need = quorum.min(2);
     if families.len() < need {
         let one = families.iter().next().cloned().unwrap_or_default();
@@ -36842,15 +36899,17 @@ pub fn protected_push_reading(issue: &str, cwd: Option<&std::path::Path>) -> (St
     let mut json = serde_json::json!({
         "issue": issue, "quorum": cfg.quorum, "branches": cfg.branches,
     });
-    let settled = protected_push_cleared(issue, &seat_name(), cfg.quorum);
-    let words = if settled {
-        json["stands"] = true.into();
-        format!("protected push: {issue} has a settled consensus for a push onto {named}\n")
-    } else {
-        let why = "the sitting has no settled consensus".to_string();
-        json["stands"] = false.into();
-        json["refusal"] = why.clone().into();
-        format!("protected push: {issue} does not clear a push onto {named}: {why}\n")
+    let words = match protected_push_refusal(issue, &seat_name(), cfg.quorum) {
+        Ok(()) => {
+            json["stands"] = true.into();
+            format!("protected push: {issue} has a settled consensus for a push onto {named}\n")
+        }
+        Err(reason) => {
+            let why = format!("the sitting has no settled consensus: {reason}");
+            json["stands"] = false.into();
+            json["refusal"] = why.clone().into();
+            format!("protected push: {issue} does not clear a push onto {named}: {why}\n")
+        }
     };
     (words, json)
 }
@@ -52476,9 +52535,16 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
              counted inky@a1 for approve, inky@b2 for approve"
         );
         let unrecorded = [ballot("inky", "approve"), ballot("moss", "approve")];
-        assert!(
-            decide(&unrecorded, "inky", 2).is_err(),
-            "a seat no slot names is not a family of its own"
+        assert_eq!(
+            decide(&unrecorded, "inky", 2).unwrap(),
+            "surf-ab12 decides approve with 2 seats from 2 model families; \
+             counted inky for approve, moss for approve"
+        );
+        let bare = [ballot("moss", "approve"), ballot("fern", "approve")];
+        assert_eq!(
+            decide(&bare, "moss", 2).unwrap(),
+            "surf-ab12 decides approve with 2 seats from 2 model families; \
+             counted moss for approve, fern for approve"
         );
         let advised = [ballot("inky", "approve"), ballot("reviewer", "approve")];
         assert!(decide(&advised, "flint", 2)

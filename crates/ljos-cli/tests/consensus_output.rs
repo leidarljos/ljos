@@ -141,15 +141,9 @@ fn the_reading_says_whether_a_protected_push_clears() {
     assert!(out.status.success(), "{out:?}");
     let doc = one_document(&out.stdout);
     let protected = &doc["protected_push"];
-    // Two seats with no recorded model families do not settle a protected push.
-    assert_eq!(protected["stands"], false, "{doc}");
-    assert!(
-        protected["refusal"]
-            .as_str()
-            .unwrap_or("")
-            .contains("settled consensus"),
-        "{doc}"
-    );
+    // Two seats with no recorded family each count as their own, so quorum 2 settles.
+    assert_eq!(protected["stands"], true, "{doc}");
+    assert!(protected.get("refusal").is_none(), "{doc}");
     assert_eq!(protected["quorum"], 2, "{doc}");
     assert_eq!(
         protected["branches"],
@@ -166,7 +160,7 @@ fn the_reading_says_whether_a_protected_push_clears() {
     assert!(
         text.contains(
             "protected push: proj-v0te does not clear a push onto `develop`, `main`: \
-             the sitting has no settled consensus"
+             the sitting has no settled consensus: 2 of the 3 seats"
         ),
         "{text}"
     );
