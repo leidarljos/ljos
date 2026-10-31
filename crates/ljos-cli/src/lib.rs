@@ -35649,18 +35649,25 @@ pub fn tool_installed(tool: &str) -> bool {
 /// was looked up on. A hook asks for the same few programs several times
 /// a call, and each lookup walks every directory on `PATH`.
 fn which_cached(tool: &str) -> Option<std::path::PathBuf> {
-    type Found = (String, String, Option<std::path::PathBuf>);
+    type Found = (String, String, std::path::PathBuf);
     static FOUND: std::sync::Mutex<Vec<Found>> = std::sync::Mutex::new(Vec::new());
     let path_env = std::env::var("PATH").unwrap_or_default();
     let mut found = FOUND
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((_, _, hit)) = found.iter().find(|(p, t, _)| p == &path_env && t == tool) {
-        return hit.clone();
+    // A hit stands while the file is still there: a directory on PATH
+    // can lose the program between two lookups. A miss is looked up
+    // again, so a program that appears is found.
+    if let Some((_, _, hit)) = found
+        .iter()
+        .find(|(p, t, hit)| p == &path_env && t == tool && hit.is_file())
+    {
+        return Some(hit.clone());
     }
-    let hit = which::which(tool).ok();
+    found.retain(|(p, t, _)| !(p == &path_env && t == tool));
+    let hit = which::which(tool).ok()?;
     found.push((path_env, tool.to_string(), hit.clone()));
-    hit
+    Some(hit)
 }
 
 /// Guard faults allow with a note. The deny-on-fault switch is gone, so
