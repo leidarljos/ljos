@@ -1,1 +1,0 @@
-A prompt hook recorded the origin of every listed claim after each of its two searches, reading the clock once per claim; the pass runs once per hook process now, with the clock read once, and a write to the pack starts it over.

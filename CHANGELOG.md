@@ -5,6 +5,23 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.35.7 (2026-10-31)
+
+### Features
+
+- A prompt hook recorded the origin of every listed claim after each of its two searches, reading the clock once per claim; the pass runs once per hook process now, with the clock read once, and a write to the pack starts it over.
+- A prompt hook tokenised every stored claim in every hook process, a quarter of the hook's own time, because the memos that remember a claim's words, abbreviations and terms die with the process. The listing a hook keeps on disk now has a token sidecar beside it, one line per claim under the pack stamp and the release's version, and a hook that reads the listing from disk seeds its memos from it.
+- A prompt hook tokenises every stored claim once per process, and each word was checked against the stop lists by a scan of the list, tens of thousands of scans a prompt; the lists are sets now. The words of a claim are remembered per text like its match tokens, so the three passes that ask for them tokenise it once, the document frequency no longer sorts a copy of token lists that arrive sorted, and the listing the due line and the mail share is handed over by reference rather than copied.
+- A release ships packset-embed 0.17.0, whose encoders use at most four ONNX Runtime threads for a query and whose cross-encoder uses at most eight: a dozen-token query on a twelve-core laptop went from 31 ms with a tail to 86 ms to 19 ms.
+- A tool-call hook whose kept rules were more than three seconds old listed the pack's rules and preferences again, two listings and their proof, on most tool calls of a working session. The freshness mark now names the pack's last-write stamp, and a hook asks the pack's status first: while the stamp stands, the kept rules and preferences are what the pack would say, and the two listings are not made.
+- The doctor ran each runner's `registered` command on every call; `claude mcp get ljos` starts a Node runtime and was 1.7 s of a 2 s doctor. A pass is kept for an hour under the command's words, the way a probe's pass is kept for a day; a failure is not kept.
+- The doctor's sync import opened every host's chunks with `age` on each call, about 1,500 runs here with nothing new. What age gave for one ciphertext under one set of identities is now kept by digest in the same state tree that already holds the taken records' plaintext, written and read the way they are, and only by an import; a later import reads it without a run.
+
+### Fixes
+
+- A background or refused tracker push left its log and child record in the runtime directory for the doctor to read, and nothing removed them: 406 pairs on one seat. The next push prunes every exited log before it; a push still running keeps its own.
+
+
 ## 0.35.6 (2026-10-31)
 
 ### Features
