@@ -1,0 +1,12 @@
+machine: 12-core x86_64 laptop, Linux 7.0, seat pack of about 2,500 atoms, packsetd and packset-embed local
+method: wall time of the installed `ljos hook` on a fixed PreToolUse and UserPromptSubmit input with a fresh session id, LJOS_HOOK_TIMING=1 for the stages; `curl -w %{time_total}` on the pack's own endpoints; perf record on the writer and the hook
+floors: trivial process 3 ms; `ljos` start 6 ms; `ljos-policyd check` alone 8 ms; pack /v1/status 1 ms; pack /v1/atoms listing 35 ms (787 KB)
+tool-hook.before: 52 ms (ljos 0.35.1)
+tool-hook.after: 34-48 ms (ljos 0.35.6), of which 6 ms process start, 8 ms policyd, and a cold gate reads two listings once per 3 s
+prompt-hook.before: 970 ms (ljos 0.35.1), 27 pack requests
+prompt-hook.after: 370-480 ms (ljos 0.35.6), 8 pack requests, of which pool_search 205-303 ms is one pack search and mail 16-25 ms
+pack-search.before: 95-230 ms per /v1/search (packset 0.16.1): MMR diversify 73-77% of the writer's search CPU (cubic Jaccard over hash sets), packset-embed query 31 ms median with a tail to 86 ms on twelve threads, packset-milli child process 10-16 ms
+pack-search.after: PENDING (packset 0.17.0)
+doctor.before: 9.0 s warm (ljos 0.35.1)
+doctor.after: 2.1 s warm (ljos 0.35.6); of which the sync import opened about 1,500 age chunks, a GitHub fetch about 1 s, `claimdag list` 0.5 s
+third-party: none measured; the figures above are against this seat's own floors and raw endpoints, not against another memory hook
