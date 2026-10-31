@@ -9567,8 +9567,10 @@ fn glue_word(word: &str) -> bool {
 /// the cue once per text; the profile put a fifth of a prompt hook in
 /// [`phrase_acronyms`] alone. The memo is bounded so a server that lives
 /// for hours does not grow without end.
+type TextMemo = std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>;
+
 fn text_memo(
-    memo: &std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
+    memo: &TextMemo,
     text: &str,
     compute: impl FnOnce(&str) -> Vec<String>,
 ) -> Vec<String> {
@@ -9597,8 +9599,7 @@ fn text_memo(
 /// them is left alone, so `add lodash dependency` does not become a token.
 /// Remembered per text ([`text_memo`]).
 fn phrase_acronyms(text: &str) -> Vec<String> {
-    static MEMO: std::sync::Mutex<std::collections::HashMap<String, Vec<String>>> =
-        std::sync::Mutex::new(std::collections::HashMap::new());
+    static MEMO: std::sync::LazyLock<TextMemo> = std::sync::LazyLock::new(TextMemo::default);
     text_memo(&MEMO, text, phrase_acronyms_of)
 }
 
@@ -9648,8 +9649,7 @@ fn phrase_acronyms_of(text: &str) -> Vec<String> {
 /// Words plus the abbreviations of its phrases. A claim that says `COI`
 /// and a prompt that says `conflict of interest` share `coi`.
 fn match_tokens(text: &str) -> Vec<String> {
-    static MEMO: std::sync::Mutex<std::collections::HashMap<String, Vec<String>>> =
-        std::sync::Mutex::new(std::collections::HashMap::new());
+    static MEMO: std::sync::LazyLock<TextMemo> = std::sync::LazyLock::new(TextMemo::default);
     text_memo(&MEMO, text, match_tokens_of)
 }
 
