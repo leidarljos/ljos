@@ -15758,6 +15758,28 @@ fn atoms_listed(
     atoms_listed_of(client, workspace, token, None, None, false)
 }
 
+/// Listings this hook process already read, by request. A hook lists the
+/// pack for its rules, its due count and its recall in turn, and one
+/// answer serves them all for [`ATOMS_MEMO`]. Only a hook keeps one: a
+/// server that lives for hours reads the pack each time. A write through
+/// this seat's client drops the memo ([`forget_atom_listings`]).
+static ATOM_LISTINGS: std::sync::Mutex<Vec<(String, std::time::Instant, Vec<Value>, bool)>> =
+    std::sync::Mutex::new(Vec::new());
+/// How long a listing serves later reads in one hook process.
+const ATOMS_MEMO: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn atoms_memo_on() -> bool {
+    std::env::var_os("LJOS_IN_HOOK").is_some()
+}
+
+/// Drop every listing this process kept. Called on any write to the pack.
+pub(crate) fn forget_atom_listings() {
+    ATOM_LISTINGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
 /// [`atoms_listed`] narrowed to one `kind` when given: the writer filters
 /// before it builds the answer, so a gate's read does not copy the pack.
 fn atoms_listed_of(
@@ -15779,6 +15801,27 @@ fn atoms_listed_of(
     }
     if newest {
         query.push(("order", "newest"));
+    }
+    let memo_key = atoms_memo_on().then(|| {
+        let mut key = format!("{url}|{token}");
+        for (k, v) in &query {
+            key.push('|');
+            key.push_str(k);
+            key.push('=');
+            key.push_str(v);
+        }
+        key
+    });
+    if let Some(key) = &memo_key {
+        let kept = ATOM_LISTINGS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, _, atoms, trusted)) = kept
+            .iter()
+            .find(|(k, at, _, _)| k == key && at.elapsed() < ATOMS_MEMO)
+        {
+            return Ok((atoms.clone(), *trusted));
+        }
     }
     // A runner kills PreToolUse at 10s and then ignores the hook, which
     // drops a deny. Inside a hook the listing stops at 2s so the local
@@ -15820,7 +15863,15 @@ fn atoms_listed_of(
         .get_mut("atoms")
         .map(Value::take)
         .unwrap_or(Value::Array(Vec::new()));
-    Ok((serde_json::from_value(atoms)?, answered.trusted))
+    let atoms: Vec<Value> = serde_json::from_value(atoms)?;
+    if let Some(key) = memo_key {
+        let mut kept = ATOM_LISTINGS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        kept.retain(|(k, _, _, _)| k != &key);
+        kept.push((key, std::time::Instant::now(), atoms.clone(), answered.trusted));
+    }
+    Ok((atoms, answered.trusted))
 }
 
 pub fn pack() -> Result<PacksetClient> {
@@ -20285,6 +20336,15 @@ fn gate_read_in_hook() -> (Vec<Rule>, Vec<(String, String)>) {
     if pack_slow_lately() {
         return kept_only(kept);
     }
+    // The rules and the preferences a hook read a moment ago stand for
+    // the hooks of the next GATE_FRESH. A write through this seat's client
+    // drops the mark, so a rule the person just wrote is read at once.
+    if let Some(path) = &kept {
+        if gate_fresh_lately(path) {
+            let rules = kept_rules(path);
+            return (rules, kept_prefs(&gate_sibling(path, "prefs-")));
+        }
+    }
     let Ok(client) = pack() else {
         return kept_only(kept);
     };
@@ -20312,7 +20372,92 @@ fn gate_read_in_hook() -> (Vec<Rule>, Vec<(String, String)>) {
             preferences_of(&theirs)
         })
         .unwrap_or_default();
+    if let Some(path) = &kept {
+        keep_prefs(&gate_sibling(path, "prefs-"), &preferences);
+        let _ = std::fs::write(gate_sibling(path, "fresh-"), b"");
+    }
     (rules, preferences)
+}
+
+/// How long the rules and preferences a hook read from the pack serve
+/// the next hooks without a read. A write through this seat's client
+/// drops the mark at once ([`forget_gate_fresh`]).
+const GATE_FRESH: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The file beside the kept rules whose name starts with `prefix`
+/// instead of `rules-`: the kept preferences, or the freshness mark.
+fn gate_sibling(rules_path: &Path, prefix: &str) -> PathBuf {
+    let name = rules_path
+        .file_name()
+        .map(|n| n.to_string_lossy().replacen("rules-", prefix, 1))
+        .unwrap_or_else(|| prefix.to_string());
+    rules_path.with_file_name(name)
+}
+
+fn gate_fresh_lately(rules_path: &Path) -> bool {
+    std::fs::metadata(gate_sibling(rules_path, "fresh-"))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|at| at.elapsed().ok())
+        .is_some_and(|age| age < GATE_FRESH)
+}
+
+/// Drop every freshness mark, so the next hook reads the pack. Called on
+/// any write to the pack through this seat's client.
+pub(crate) fn forget_gate_fresh() {
+    let Some(dir) = data_base().map(|b| b.join("ljos")) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with("fresh-") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Write the preferences a hook read, as `[id, text]` rows, beside the
+/// kept rules, through a temporary file.
+fn keep_prefs(path: &Path, prefs: &[(String, String)]) {
+    let body = Value::Array(
+        prefs
+            .iter()
+            .map(|(id, text)| serde_json::json!([id, text]))
+            .collect(),
+    )
+    .to_string();
+    if std::fs::read_to_string(path).is_ok_and(|old| old == body) {
+        return;
+    }
+    let Some(dir) = path.parent() else { return };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let tmp = dir.join(format!(".prefs-{}.tmp", std::process::id()));
+    if std::fs::write(&tmp, &body).is_ok() && std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// The preferences last kept at `path`; none when there is no file or it
+/// does not parse.
+fn kept_prefs(path: &Path) -> Vec<(String, String)> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(Value::Array(rows)) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            Some((
+                row.get(0)?.as_str()?.to_string(),
+                row.get(1)?.as_str()?.to_string(),
+            ))
+        })
+        .collect()
 }
 
 /// The live preferences in a set of atoms, as (id, text).
@@ -35491,8 +35636,29 @@ pub fn tool_installed(tool: &str) -> bool {
     if tool.contains('/') {
         path.is_file()
     } else {
-        which::which(tool).is_ok()
+        on_path(tool).is_some()
     }
+}
+
+/// `which::which(tool)`, remembered for this process under the `PATH` it
+/// was looked up on. A hook asks for the same few programs several times
+/// a call, and each lookup walks every directory on `PATH`.
+fn on_path(tool: &str) -> Option<std::path::PathBuf> {
+    static FOUND: std::sync::Mutex<Vec<(String, String, Option<std::path::PathBuf>)>> =
+        std::sync::Mutex::new(Vec::new());
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    let mut found = FOUND
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, _, hit)) = found
+        .iter()
+        .find(|(p, t, _)| p == &path_env && t == tool)
+    {
+        return hit.clone();
+    }
+    let hit = which::which(tool).ok();
+    found.push((path_env, tool.to_string(), hit.clone()));
+    hit
 }
 
 /// Guard faults allow with a note. The deny-on-fault switch is gone, so
@@ -35506,7 +35672,7 @@ pub fn policyd_bin() -> Option<std::path::PathBuf> {
     std::env::var_os("POLICYD_BIN")
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from)
-        .or_else(|| which::which("ljos-policyd").ok())
+        .or_else(|| on_path("ljos-policyd"))
 }
 
 /// The TCB's verdict on a shell line: a fast in-process check first, then

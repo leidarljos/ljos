@@ -607,6 +607,12 @@ impl PacksetClient {
         bearer: bool,
         timeout: Duration,
     ) -> Result<Answer, Error> {
+        // A write changes what a listing would say: the memo this process
+        // keeps and the gate's freshness mark both go.
+        if method != "GET" {
+            crate::forget_atom_listings();
+            crate::forget_gate_fresh();
+        }
         let Some(addr) = self.addr else {
             return Err(Error::Bad(format!(
                 "{} is not a socket this seat can pin",

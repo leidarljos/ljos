@@ -190,10 +190,13 @@ pub fn above(pid: u32) -> Vec<Proc> {
     out
 }
 
-/// The processes above this one, nearest first.
+/// The processes above this one, nearest first. Walked once: a process
+/// does not move in the tree, and a hook asks for its ancestors from
+/// several places in one call.
 #[must_use]
 pub fn ancestors() -> Vec<Proc> {
-    above(std::process::id())
+    static WALKED: std::sync::OnceLock<Vec<Proc>> = std::sync::OnceLock::new();
+    WALKED.get_or_init(|| above(std::process::id())).clone()
 }
 
 /// `pid`'s parent and its own name.
