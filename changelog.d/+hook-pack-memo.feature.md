@@ -1,1 +1,0 @@
-A hook read the whole pack up to five times in one call: once each for its rules, its preferences, its due count, its recall and its consolidation pairs. One listing now serves a hook process for two seconds, so a prompt hook reads the pack once and parses it once.

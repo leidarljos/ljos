@@ -5,6 +5,30 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.35.4 (2026-10-31)
+
+### Features
+
+- A hook read the whole pack up to five times in one call: once each for its rules, its preferences, its due count, its recall and its consolidation pairs. One listing now serves a hook process for two seconds, so a prompt hook reads the pack once and parses it once.
+- A prompt hook pulled the whole pack listing, about a megabyte the writer builds in a fifth of a second, on every prompt for its lexical fallback, and asked the same search and the same status twice. The listing is kept on disk under the pack's last-write stamp and reused while the stamp stands, and a hook answers a repeated search or status read from the answer it already has.
+- A prompt hook spent a fifth of its time building phrase acronyms and match tokens for the same few hundred memory texts on every lexical pass, and for the prompt once per text. Both are remembered per text for the life of the process, bounded, so each text is tokenised once.
+- A tool-call hook asked the pack for its rules and preferences on every call, two listings each time, and walked PATH for the same programs several times a call. The rules and preferences a hook read stand for the hooks of the next three seconds, kept beside the rules file; a write to the pack through this seat drops them at once. Program lookups and the process tree are read once per hook.
+- A tool-call hook read each ancestor's process record from several walkers, resolved every install root once per ancestor, read the kernel socket tables on each connection to the pack, and looked the account up six times. Each is now read once per hook.
+- `ljos doctor` took nine seconds here. Most of it was the sync check reading and decrypting every committed version of every host's atoms log, thousands of `age` runs, on each doctor, and a runner probe that starts the runner's own MCP server. A log found headed is remembered while that object is in the history, a history with no headed blob while HEAD stands, and a probe that passed is remembered for a day.
+
+### Fixes
+
+- A command a bash `sh -c` line execs in its own place, such as `sh -c 'ljos claim ID'` under a runner, holds under the conversation id it was started with. A runner above it that carries only `CURSOR_AGENT` no longer turns the claim into the bare seat. A shell a runner started keeps the id bash gave that runner on its command line.
+- A commit under a sitting on an issue held in a second tracker root waited about 45 s and the hook timed out: the gate looked the issue up through the router, which reads every project under every root, and then asked vissue, which walked again. The hold record now carries the tracker root and prefix, and the gate reads that tracker first.
+- A recorded grant could not close a ticket from a runner. The command guard refused the finish close before finish read the grant. The guard now leaves that command to finish. A close with no grant is still refused and the ticket stays open. A raw tracker close under a runner is still refused.
+- A seat with no recorded model family counts as its own family again.
+  Two standing seats can clear a protected push.
+  Two seats of one recorded family still cannot.
+  A refused push names the reason after the settled-consensus line.
+- On macOS the process walk reads past an ancestor another user owns, such as launchd or a root login process, from the short process record any user may read. The walk used to stop below the first such process.
+- The atoms merge driver finds a merge file reached through a symlinked directory, such as a macOS temp path under `/var`, inside the work tree git names by its real path.
+
+
 ## 0.35.3 (2026-10-30)
 
 ### Fixes

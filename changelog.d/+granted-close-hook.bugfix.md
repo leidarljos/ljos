@@ -1,1 +1,0 @@
-A recorded grant could not close a ticket from a runner. The command guard refused the finish close before finish read the grant. The guard now leaves that command to finish. A close with no grant is still refused and the ticket stays open. A raw tracker close under a runner is still refused.

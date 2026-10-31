@@ -1,1 +1,0 @@
-On macOS the process walk reads past an ancestor another user owns, such as launchd or a root login process, from the short process record any user may read. The walk used to stop below the first such process.

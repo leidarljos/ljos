@@ -1,1 +1,0 @@
-A prompt hook spent a fifth of its time building phrase acronyms and match tokens for the same few hundred memory texts on every lexical pass, and for the prompt once per text. Both are remembered per text for the life of the process, bounded, so each text is tokenised once.
