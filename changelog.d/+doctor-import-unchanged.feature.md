@@ -1,1 +1,0 @@
-The doctor ran a full sync import on every call, opening and decrypting every host's log and chunks even when nothing had changed. The import now keeps the sealed digest of each log it applied, and the doctor passes over a log whose bytes are the ones it last applied. `ljos sync` still reads every log.

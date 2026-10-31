@@ -2284,7 +2284,6 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
                     host: job.host,
                     scope_name: job.scope_name,
                     plain: job.plain,
-                    sealed: job.sealed,
                     sender,
                     incoming,
                 })
@@ -2297,12 +2296,6 @@ pub fn import(root: &Path, scope: &Scope) -> Result<String> {
         for (plan, retired) in plans.iter().zip(retired) {
             let (kept, refused) = post_incoming(&client, &workspace, &plan.incoming.post);
             write_taken(root, &plan.scope_name, &plan.host, &plan.plain)?;
-            if !plan.sealed.is_empty() {
-                let _ = std::fs::write(
-                    sealed_mark_path(root, &plan.scope_name, &plan.host),
-                    &plan.sealed,
-                );
-            }
             out.push_str(&format!(
                 "sync: {}: {kept} {} atoms taken, {refused} refused, {retired} retired\n",
                 plan.host, plan.scope_name
@@ -2329,25 +2322,6 @@ struct ImportJob {
     host: String,
     scope_name: String,
     plain: String,
-    /// [`sealed_files_digest`] of the log as read, kept beside the taken
-    /// record once the job is applied, so a doctor can tell an unchanged
-    /// log without opening it.
-    sealed: String,
-}
-
-/// Whether an import may pass over a log whose sealed bytes are the ones
-/// its last applied import read. The doctor sets this: it runs the import
-/// on every call, and an unchanged log yields the plan it yielded last
-/// time. An explicit `ljos sync` reads every log.
-static SKIP_UNCHANGED_LOGS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// Where the sealed digest of the last applied import of `host`'s log in
-/// `scope` is kept: beside the taken record.
-fn sealed_mark_path(root: &Path, scope: &str, host: &str) -> PathBuf {
-    let mut path = taken_path(root, scope, host).into_os_string();
-    path.push(".sealed");
-    PathBuf::from(path)
 }
 
 struct ListedLog {
@@ -2438,20 +2412,10 @@ fn import_jobs(root: &Path, scope: &Scope, me: &str) -> Result<(Vec<ImportJob>, 
                 host: log.host,
                 scope_name: log.scope_name,
                 plain: String::new(),
-                sealed: String::new(),
             });
             continue;
         }
         let identities = identities_for_open(&log.scope_name);
-        let sealed = sealed_files_digest(root, &log.rel);
-        if SKIP_UNCHANGED_LOGS.load(std::sync::atomic::Ordering::Relaxed)
-            && std::fs::read_to_string(sealed_mark_path(root, &log.scope_name, &log.host))
-                .is_ok_and(|kept| kept.trim() == sealed)
-        {
-            // The bytes are the ones the last applied import read, so the
-            // plan would be the one it made. Nothing is opened.
-            continue;
-        }
         let Some(bytes) = read_beneath(root, &log.rel)? else {
             continue;
         };
@@ -2470,7 +2434,6 @@ fn import_jobs(root: &Path, scope: &Scope, me: &str) -> Result<(Vec<ImportJob>, 
                     host: log.host,
                     scope_name: log.scope_name,
                     plain: view.body,
-                    sealed,
                 });
             }
             Opened::Refused(line) | Opened::Hidden { line, .. } => out.push_str(&line),
@@ -2525,7 +2488,6 @@ struct ImportPlan {
     host: String,
     scope_name: String,
     plain: String,
-    sealed: String,
     sender: String,
     incoming: Incoming,
 }
@@ -4562,10 +4524,7 @@ pub(crate) fn fetch_for_inbox(commit: Option<&str>) -> Result<String> {
             out.push_str(&note_commit(root, commit, fetched_ok));
         }
         if let Some(scope) = scope_of_repo(root)? {
-            SKIP_UNCHANGED_LOGS.store(true, std::sync::atomic::Ordering::Relaxed);
-            let imported = import(root, &scope);
-            SKIP_UNCHANGED_LOGS.store(false, std::sync::atomic::Ordering::Relaxed);
-            out.push_str(&imported?);
+            out.push_str(&import(root, &scope)?);
         }
     }
     Ok(out)
