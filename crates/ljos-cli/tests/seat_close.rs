@@ -2,8 +2,10 @@
 //! The owner's quoted yes is the grant. A hand edit is not.
 
 ljos_test_boot::harness!();
+use std::io::Write;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 
 fn script(dir: &Path, name: &str, body: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -164,6 +166,72 @@ fn finish_close(w: &World, seat: &str, issue: &str) -> std::process::Output {
         &["finish", issue, "--close", "--gen", "2", "--assignee", seat],
         true,
     )
+}
+
+/// `ljos hook` under a runner, judging `line` and not running it.
+fn hook_line(w: &World, session: &str, line: &str) -> Output {
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": session,
+        "cwd": &w.root,
+        "tool_name": "Bash",
+        "tool_input": {"command": line},
+    });
+    let mut cmd = runner_cmd(w, &["hook"]);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+fn runner_cmd(w: &World, args: &[&str]) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    cmd.args(args)
+        .env_clear()
+        .env("PATH", &w.path)
+        .env("HOME", &w.home)
+        .env("XDG_CONFIG_HOME", w.home.join(".config"))
+        .env("XDG_STATE_HOME", w.home.join(".state"))
+        .env("XDG_RUNTIME_DIR", w.root.join("run"))
+        .env("VISSUE_ROOT", &w.tracker)
+        .env("LJOS_TRACKER_GIT", "off")
+        .env("PACKSET_URL", "off")
+        .env("LJOS_ASK_PACK", "off")
+        .env("LJOS_GUARD", "on")
+        .env("LJOS_USER_RULES_SYNC", "off")
+        .env("CURSOR_AGENT", "1")
+        .stdin(Stdio::null());
+    // SAFETY: setsid is async-signal-safe and the closure touches nothing
+    // of the parent's.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let _ = std::fs::create_dir_all(w.root.join("run"));
+    cmd
+}
+
+fn runner_finish(w: &World, seat: &str, issue: &str) -> Output {
+    runner_cmd(
+        w,
+        &["finish", issue, "--close", "--gen", "2", "--assignee", seat],
+    )
+    .env("LJOS_SEAT", seat)
+    .output()
+    .unwrap()
+}
+
+fn hook_allows(out: &Output) -> bool {
+    out.status.success() && !ljos_cli::answer_denies(&String::from_utf8_lossy(&out.stdout))
 }
 
 fn log_updates(w: &World, issue: &str) -> usize {
@@ -575,4 +643,83 @@ fn a_named_list_closes_those_tickets_and_a_hand_edit_does_not() {
         text(&again)
     );
     assert_eq!(log_updates(&w, "proj-else"), before);
+}
+
+/// The hook used to refuse every finish close before finish could read a
+/// grant. A grant that covers the ticket is allowed, and running it closes
+/// the ticket and notes the grant. With no grant, finish refuses and the
+/// ticket stays open. A raw tracker close under a runner is still refused.
+#[test]
+fn a_granted_close_passes_the_hook_and_an_ungranted_close_stays_open() {
+    let w = World::new();
+    for name in ["clerk", "s"] {
+        let out = w.ljos("clerk", &["seat", "add", name], false);
+        assert!(out.status.success(), "add {name}: {}", text(&out));
+    }
+    let quote = "yes s may close proj-own";
+    let at = "2026-10-29T00:00:00Z";
+    let granted = w.ljos(
+        "clerk",
+        &[
+            "seat",
+            "grant",
+            "s",
+            "close=proj-own",
+            "--quote",
+            quote,
+            "--at",
+            at,
+            "--via",
+            "clerk",
+        ],
+        false,
+    );
+    assert!(granted.status.success(), "grant: {}", text(&granted));
+
+    let line = "LJOS_SEAT=s ljos finish proj-own --close";
+    let judged = hook_line(&w, "granted-close-own", line);
+    let said = text(&judged);
+    assert!(hook_allows(&judged), "granted close was refused:\n{said}");
+
+    let closed = runner_finish(&w, "s", "proj-own");
+    let said = text(&closed);
+    assert!(closed.status.success(), "granted finish: {said}");
+    assert!(said.contains("standing grant allowed this close"), "{said}");
+    assert!(said.contains(quote), "{said}");
+    assert!(said.contains(at), "{said}");
+    assert!(said.contains("via: clerk"), "{said}");
+    let calls = std::fs::read_to_string(&w.log).unwrap();
+    assert!(
+        calls.contains("vissue note proj-own standing grant allowed this close"),
+        "{calls}"
+    );
+    assert!(calls.contains(quote), "{calls}");
+    assert!(calls.contains("vissue update proj-own -s DONE"), "{calls}");
+
+    let bare = "LJOS_SEAT=clerk ljos finish proj-clerk --close";
+    let judged = hook_line(&w, "granted-close-none", bare);
+    let said = text(&judged);
+    assert!(
+        hook_allows(&judged),
+        "ungranted close was refused before finish:\n{said}"
+    );
+    let refused = runner_finish(&w, "clerk", "proj-clerk");
+    let said = text(&refused);
+    assert!(!refused.status.success(), "ungranted close wrote: {said}");
+    assert!(said.contains("a person closes a ticket"), "{said}");
+    assert!(said.contains("ljos seat grant"), "{said}");
+    assert_eq!(log_updates(&w, "proj-clerk"), 0, "an ungranted close wrote");
+
+    let raw = hook_line(&w, "granted-close-raw", "vissue close proj-clerk");
+    let said = text(&raw);
+    assert!(!hook_allows(&raw), "raw close was allowed:\n{said}");
+    assert!(
+        said.contains("ljos finish proj-clerk"),
+        "raw close did not name finish:\n{said}"
+    );
+    assert!(
+        !said.contains("--close"),
+        "raw close named the flag:\n{said}"
+    );
+    assert_eq!(log_updates(&w, "proj-clerk"), 0, "a raw close wrote");
 }

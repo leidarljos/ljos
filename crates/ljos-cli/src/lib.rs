@@ -23990,10 +23990,11 @@ pub fn redirect_seat_verb(rule: Option<Rule>, line: &str) -> Option<Rule> {
 
 /// A tracker write that does not name `vissue` as its command. An
 /// interpreter whose text runs a write or opens `issues.org`, a
-/// substitution that resolves to the `vissue` binary, a copy of that
-/// binary, and `ljos finish --close` are the same write. The direct
-/// verb is [`raw_tracker_write`]. A runner is refused. A person at a
-/// terminal is not.
+/// substitution that resolves to the `vissue` binary, and a copy of
+/// that binary are the same write. The direct verb is
+/// [`raw_tracker_write`]. A runner is refused. A person at a terminal
+/// is not. `ljos finish --close` is not one of these: finish refuses a
+/// close that no grant covers, before it writes.
 fn indirect_tracker_write(line: &str) -> Option<Rule> {
     if !under_a_runner() {
         return None;
@@ -24191,14 +24192,7 @@ fn segment_writes_tracker_indirectly(seg: &str, copied: &[String]) -> bool {
         return true;
     }
     let cmd = words[0].as_str();
-    if copied.iter().any(|dest| dest == cmd)
-        && words.iter().skip(1).any(|w| is_tracker_write_verb(w))
-    {
-        return true;
-    }
-    command_base(&words[0]) == "ljos"
-        && words.iter().any(|w| w == "finish")
-        && words.iter().any(|w| w == "--close")
+    copied.iter().any(|dest| dest == cmd) && words.iter().skip(1).any(|w| is_tracker_write_verb(w))
 }
 
 /// A tracker verb that writes, run raw under an agent runner. ljos is the

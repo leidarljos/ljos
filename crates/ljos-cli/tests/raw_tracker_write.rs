@@ -167,7 +167,6 @@ fn an_indirect_tracker_write_under_a_runner_is_refused() {
         "cp $(command -v vissue) /tmp/vi && /tmp/vi close ljos-ab12",
         "sed -i 's/^\\* TODO/* DONE/' issues.org",
         "perl -pi -e 's/^\\* TODO/* DONE/' issues.org",
-        "ljos finish ljos-ab12 --close",
     ];
     for line in lines {
         let out = policy(home.path(), line);
@@ -178,6 +177,41 @@ fn an_indirect_tracker_write_under_a_runner_is_refused() {
         assert!(
             !reason.contains("--close"),
             "{line} still names the close flag:\n{said}"
+        );
+    }
+}
+
+/// `ljos finish ID --close` is finish's own close. The guard leaves it
+/// to finish, which refuses a close no grant covers. A raw `vissue close`
+/// stays refused above.
+#[test]
+fn a_finish_close_under_a_runner_is_left_to_finish() {
+    let home = tempfile::tempdir().unwrap();
+    for line in [
+        "ljos finish ljos-ab12 --close",
+        "LJOS_SEAT=s ljos finish ljos-ab12 --close",
+    ] {
+        let out = policy(home.path(), line);
+        let said = text(&out);
+        assert!(out.status.success(), "{line} was refused:\n{said}");
+        assert!(!said.contains("deny:"), "{line}:\n{said}");
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "finish-close-allow-0001",
+            "cwd": home.path(),
+            "tool_name": "Bash",
+            "tool_input": {"command": line},
+        });
+        let hooked = hook_payload(home.path(), payload);
+        let said = text(&hooked);
+        assert!(
+            hooked.status.success(),
+            "hook exited {:?} for {line}:\n{said}",
+            hooked.status
+        );
+        assert!(
+            !ljos_cli::answer_denies(&String::from_utf8_lossy(&hooked.stdout)),
+            "hook refused {line}:\n{said}"
         );
     }
 }
