@@ -26,6 +26,7 @@ impl Proc {
 /// How far up a chain is read.
 const DEPTH: usize = 32;
 
+#[derive(Clone)]
 struct Stat {
     comm: String,
     dead: bool,
@@ -33,8 +34,29 @@ struct Stat {
     start: u64,
 }
 
-#[cfg(target_os = "linux")]
+/// One process's stat, read once per process: a hook walks the tree from
+/// several places, and a process above this one does not change its
+/// parent or its start while the hook runs.
 fn stat(pid: u32) -> Option<Stat> {
+    static READ: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<u32, Option<Stat>>>,
+    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(found) = READ
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&pid)
+    {
+        return found.clone();
+    }
+    let read = stat_read(pid);
+    READ.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(pid, read.clone());
+    read
+}
+
+#[cfg(target_os = "linux")]
+fn stat_read(pid: u32) -> Option<Stat> {
     let raw = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let open = raw.find('(')?;
     let close = raw.rfind(')')?;
@@ -50,7 +72,7 @@ fn stat(pid: u32) -> Option<Stat> {
 }
 
 #[cfg(target_os = "macos")]
-fn stat(pid: u32) -> Option<Stat> {
+fn stat_read(pid: u32) -> Option<Stat> {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
     // SAFETY: the buffer is a zeroed proc_bsdinfo of the size passed.
@@ -156,7 +178,7 @@ fn kern_proc_start(pid: u32) -> Option<u64> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn stat(_pid: u32) -> Option<Stat> {
+fn stat_read(_pid: u32) -> Option<Stat> {
     None
 }
 
@@ -1218,12 +1240,32 @@ fn runtime_of_file(
 /// The install roots for `home` ([`install_roots`]) and the Nix store
 /// `store`, resolved.
 fn resolved_roots(home: Option<&Path>, store: &Path) -> (Vec<PathBuf>, PathBuf) {
-    let roots = install_roots(home)
+    // Resolved once per process for each home and store: the walk asks
+    // for them once per ancestor, and each resolve reads every link on
+    // the way to every root.
+    type Roots = (Vec<PathBuf>, PathBuf);
+    static RESOLVED: std::sync::LazyLock<std::sync::Mutex<Vec<(Option<PathBuf>, PathBuf, Roots)>>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+    let key_home = home.map(Path::to_path_buf);
+    if let Some((_, _, roots)) = RESOLVED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|(h, s, _)| *h == key_home && s == store)
+    {
+        return roots.clone();
+    }
+    let roots: Vec<PathBuf> = install_roots(home)
         .iter()
         .filter_map(|root| std::fs::canonicalize(root).ok())
         .collect();
-    let store = std::fs::canonicalize(store).unwrap_or_else(|_| store.to_path_buf());
-    (roots, store)
+    let resolved_store = std::fs::canonicalize(store).unwrap_or_else(|_| store.to_path_buf());
+    let out = (roots, resolved_store);
+    RESOLVED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((key_home, store.to_path_buf(), out.clone()));
+    out
 }
 
 /// Whether `file`, a resolved path below install root `root`, is the

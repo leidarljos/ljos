@@ -4500,6 +4500,13 @@ fn login_user() -> String {
 /// The account that owns this process. A tool can change `USER`. It
 /// cannot change this. This is the person a ballot must not be written as.
 fn process_account() -> Option<String> {
+    // The account does not change while the process runs, and a hook asks
+    // several times; the passwd lookup is made once.
+    static ACCOUNT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    ACCOUNT.get_or_init(process_account_read).clone()
+}
+
+fn process_account_read() -> Option<String> {
     let mut buf = vec![0u8; 1024];
     loop {
         // SAFETY: passwd is plain data, so all zeroes is a valid value.
@@ -9536,6 +9543,13 @@ fn alias_words(text: &str, claim: bool) -> Vec<String> {
 /// without a plural of [`RULE_WORDS`] (`keeps`), plus the alias groups
 /// each names.
 fn cue_terms(text: &str, claim: bool) -> Vec<String> {
+    static CLAIMS: std::sync::LazyLock<TextMemo> = std::sync::LazyLock::new(TextMemo::default);
+    static CUES: std::sync::LazyLock<TextMemo> = std::sync::LazyLock::new(TextMemo::default);
+    let memo = if claim { &CLAIMS } else { &CUES };
+    text_memo(memo, text, |t| cue_terms_of(t, claim))
+}
+
+fn cue_terms_of(text: &str, claim: bool) -> Vec<String> {
     let mut words: Vec<String> = prompt_words(text)
         .into_iter()
         .filter(|w| !RULE_WORDS.contains(&w.as_str()))

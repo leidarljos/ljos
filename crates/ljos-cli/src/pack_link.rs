@@ -178,6 +178,27 @@ fn budget() -> Duration {
 /// Whether every socket listening on the loopback port of `url` belongs to
 /// another user. Unknown is not foreign.
 fn foreign(url: &str) -> bool {
+    // Answered once per process for each url: the socket tables are read
+    // in full each time, and a hook connects several times.
+    static KNOWN: std::sync::LazyLock<Mutex<Vec<(String, bool)>>> =
+        std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+    if let Some((_, known)) = KNOWN
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .find(|(u, _)| u == url)
+    {
+        return *known;
+    }
+    let answer = foreign_read(url);
+    KNOWN
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push((url.to_string(), answer));
+    answer
+}
+
+fn foreign_read(url: &str) -> bool {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::MetadataExt;

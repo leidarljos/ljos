@@ -1,0 +1,1 @@
+A tool-call hook read each ancestor's process record from several walkers, resolved every install root once per ancestor, read the kernel socket tables on each connection to the pack, and looked the account up six times. Each is now read once per hook.
