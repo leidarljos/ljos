@@ -26857,8 +26857,8 @@ fn bin_version(bin: &str) -> Option<String> {
     // Cap the wait so doctor cannot hang the seat.
     let mut cmd = Command::new(&path);
     cmd.arg("--version");
-    let said = if bin.ends_with("-mcp") {
-        output_within(cmd, None, std::time::Duration::from_millis(400)).ok()?
+    let said = if bin.ends_with("-mcp") || bin == "ljos-policyd" {
+        output_within(cmd, None, SEAT_ANSWER_BUDGET).ok()?
     } else {
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -28963,6 +28963,14 @@ pub fn failing(rows: &[Habitat]) -> Vec<&str> {
 /// holds; `ljos doctor` reports them as `info`.
 const SITTING_DEGRADED: &[&str] = &["packset-embed", "encoder"];
 
+/// Tools a sitting opens without. `ljos claim` never asks them. Missing,
+/// not running, or silent past [`SEAT_ANSWER_BUDGET`], they are named on
+/// one line and the sitting goes on.
+const SITTING_SOFT: &[&str] = &["ljos-mcp", "ljos-policyd"];
+
+/// How long a sitting waits for `ljos-mcp` or `ljos-policyd` to answer.
+const SEAT_ANSWER_BUDGET: std::time::Duration = std::time::Duration::from_millis(400);
+
 /// The required rows a sitting cannot open without, by name.
 #[must_use]
 pub fn failing_for_sitting(rows: &[Habitat]) -> Vec<&str> {
@@ -28988,6 +28996,24 @@ const OPTIONAL_ROWS: &[&str] = &[
 /// load. The host row printed `no` beside an exit of 0, and a sitting
 /// opened under it, so the word and the gate disagreed.
 const WARN_ROWS: &[&str] = &["host"];
+
+/// One line when a sitting opened without `ljos-mcp` or `ljos-policyd`.
+#[must_use]
+pub fn sitting_without_tools(rows: &[Habitat]) -> Option<String> {
+    let names: Vec<&str> = rows
+        .iter()
+        .filter(|row| SITTING_SOFT.contains(&row.name) && !sitting_tool_answered(row))
+        .map(|row| row.name)
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    Some(format!("sitting opened without {}\n", names.join(" and ")))
+}
+
+fn sitting_tool_answered(row: &Habitat) -> bool {
+    row.ok && !row.state.contains("  ?")
+}
 
 /// The line a sitting prints under its doctor when a `warn` row failed:
 /// what the row means for the work that follows.
@@ -33556,12 +33582,18 @@ pub fn sitting_gated(
     let rows = doctor_seat();
     sections.heading(&mut out, "doctor");
     out.push_str(&format_doctor(&rows));
-    let down = failing_for_sitting(&rows);
+    let down: Vec<&str> = failing_for_sitting(&rows)
+        .into_iter()
+        .filter(|name| !SITTING_SOFT.contains(name))
+        .collect();
     if !down.is_empty() {
         bail!(
             "{out}sitting: {} does not answer; nothing was claimed",
             down.join(", ")
         );
+    }
+    if let Some(line) = sitting_without_tools(&rows) {
+        out.push_str(&line);
     }
     if rows
         .iter()
@@ -43791,6 +43823,57 @@ mod tests {
         };
         assert_eq!(doctor_word(&calm), "ok");
         assert_eq!(sitting_warn_line(&[calm]), None);
+    }
+
+    /// A missing or silent `ljos-mcp` or `ljos-policyd` does not stop a
+    /// sitting. The same rows are what `ljos claim` never asks. A process
+    /// that does not exit is not waited out.
+    #[test]
+    fn a_sitting_opens_without_mcp_or_policyd() {
+        let rows = [
+            Habitat {
+                name: "ljos-mcp",
+                state: "not on PATH; cargo install --locked ljos".into(),
+                ok: false,
+            },
+            Habitat {
+                name: "ljos-policyd",
+                state: "/bin/ljos-policyd  ?".into(),
+                ok: true,
+            },
+            Habitat {
+                name: "pack",
+                state: "answers".into(),
+                ok: true,
+            },
+        ];
+        let hard: Vec<&str> = failing_for_sitting(&rows)
+            .into_iter()
+            .filter(|name| !SITTING_SOFT.contains(name))
+            .collect();
+        assert!(hard.is_empty(), "{hard:?}");
+        assert_eq!(
+            sitting_without_tools(&rows).as_deref(),
+            Some("sitting opened without ljos-mcp and ljos-policyd\n")
+        );
+        let ready = [
+            Habitat {
+                name: "ljos-mcp",
+                state: "/bin/ljos-mcp  0.35.10".into(),
+                ok: true,
+            },
+            Habitat {
+                name: "ljos-policyd",
+                state: "/bin/ljos-policyd  0.6.4".into(),
+                ok: true,
+            },
+        ];
+        assert_eq!(sitting_without_tools(&ready), None);
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+        let started = std::time::Instant::now();
+        assert!(output_within(cmd, None, SEAT_ANSWER_BUDGET).is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
     /// Older preferences and lessons are a warning. They are named, and
