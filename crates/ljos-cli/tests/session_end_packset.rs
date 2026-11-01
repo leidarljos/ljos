@@ -176,6 +176,23 @@ fn hook(seat: &Seat, url: &str, payload: &str, extra: &[(&str, &str)]) -> Output
     child.wait_with_output().unwrap()
 }
 
+fn wait_done(seat: &Seat) -> String {
+    let path = seat.run().join("ljos/session-finish.done");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if !text.is_empty() {
+                return text;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "session finish did not complete"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn text_of(out: &Output) -> String {
     format!(
         "status {}\nstdout:\n{}\nstderr:\n{}",
@@ -234,16 +251,16 @@ fn session_end_stores_facts_on_the_open_sitting() {
     let seat = Seat::new();
     seat.sit();
     let out = session_end(&seat, &pack.url, ASKED);
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "hook failed\n{}", text_of(&out));
-    no_http_refusal(&stderr);
+    let report = wait_done(&seat);
+    no_http_refusal(&report);
     assert!(
-        !stderr.contains("holds no sitting"),
-        "a live sitting was treated as none:\n{stderr}"
+        !report.contains("holds no sitting"),
+        "a live sitting was treated as none:\n{report}"
     );
     assert!(
-        stderr.contains("wrote 1"),
-        "debug did not report the write:\n{stderr}"
+        report.contains("wrote 1"),
+        "debug did not report the write:\n{report}"
     );
     let stored = atoms(&pack.url);
     let atom = fact_atom(&stored).unwrap_or_else(|| {
@@ -295,21 +312,21 @@ fn session_end_without_a_sitting_does_not_post() {
     let pack = Daemon::start();
     let seat = Seat::new();
     let out = session_end(&seat, &pack.url, ASKED);
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "hook failed\n{}", text_of(&out));
+    let report = wait_done(&seat);
     assert!(
         fact_atom(&atoms(&pack.url)).is_none(),
-        "a note was stored with no sitting\n{stderr}"
+        "a note was stored with no sitting\n{report}"
     );
     assert!(
-        stderr.contains("holds no sitting") && stderr.contains("only on a ticket"),
-        "stderr did not say why the write was skipped:\n{stderr}"
+        report.contains("holds no sitting") && report.contains("only on a ticket"),
+        "the finish did not say why the write was skipped:\n{report}"
     );
-    no_http_refusal(&stderr);
+    no_http_refusal(&report);
     assert_eq!(
-        stderr.matches("holds no sitting").count(),
+        report.matches("holds no sitting").count(),
         1,
-        "more than one skip line:\n{stderr}"
+        "more than one skip line:\n{report}"
     );
 }
 
@@ -323,17 +340,17 @@ fn session_end_extract_off_stores_nothing() {
     let seat = Seat::new();
     seat.sit();
     let out = session_end(&seat, &pack.url, &[("LJOS_EXTRACT", "off")]);
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "hook failed\n{}", text_of(&out));
+    let report = wait_done(&seat);
     assert!(
         fact_atom(&atoms(&pack.url)).is_none(),
-        "LJOS_EXTRACT=off still stored a note\n{stderr}"
+        "LJOS_EXTRACT=off still stored a note\n{report}"
     );
     assert!(
-        !stderr.contains("holds no sitting"),
-        "extract off still talked about a sitting:\n{stderr}"
+        !report.contains("holds no sitting"),
+        "extract off still talked about a sitting:\n{report}"
     );
-    no_http_refusal(&stderr);
+    no_http_refusal(&report);
 }
 
 /// With `LJOS_EXTRACT` unset, the sitting's note is written.
@@ -347,11 +364,11 @@ fn session_end_stores_facts_when_extract_is_unset() {
     let seat = Seat::new();
     seat.sit();
     let out = session_end(&seat, &pack.url, &[]);
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "hook failed\n{}", text_of(&out));
+    let report = wait_done(&seat);
     assert!(
         fact_atom(&atoms(&pack.url)).is_some(),
-        "an unset session end stored no note\n{stderr}"
+        "an unset session end stored no note\n{report}"
     );
-    no_http_refusal(&stderr);
+    no_http_refusal(&report);
 }

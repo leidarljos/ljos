@@ -12067,7 +12067,7 @@ pub fn stop_audit(input: &str, stop_active: bool) -> Option<String> {
         .as_str()
         .or_else(|| v["transcriptPath"].as_str());
     let mut turn = path
-        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|p| extract::read_tail(std::path::Path::new(p), extract::MAX_TRANSCRIPT_BYTES))
         .map(|t| stop_turn_from_transcript(&t))
         .unwrap_or_default();
     if let Some(last) = v["last_assistant_message"]
@@ -12098,8 +12098,7 @@ pub fn seat_stop_reason(input: &str, stop_active: bool, subagent: bool) -> Optio
     let path = v["transcript_path"]
         .as_str()
         .or_else(|| v["transcriptPath"].as_str())?;
-    let turn = std::fs::read_to_string(path)
-        .ok()
+    let turn = extract::read_tail(std::path::Path::new(path), extract::MAX_TRANSCRIPT_BYTES)
         .map(|t| stop_turn_from_transcript(&t))?;
     if asks_decision(&turn.request) && !turn.balloted {
         return Some(decision_hold());
@@ -12156,7 +12155,10 @@ pub fn limit_stop(input: &str, session: Option<&str>) -> Option<String> {
     let path = v["transcript_path"]
         .as_str()
         .or_else(|| v["transcriptPath"].as_str())?;
-    let notice = limit_notice(&std::fs::read_to_string(path).ok()?)?;
+    let notice = limit_notice(&extract::read_tail(
+        std::path::Path::new(path),
+        extract::MAX_TRANSCRIPT_BYTES,
+    )?)?;
     let key = format!("limit:{notice}");
     if seen_ids(session).contains(&key) {
         return None;
@@ -12505,6 +12507,71 @@ pub fn subagent_stop_reason(
 /// shortest runner cut-off seen is grok's 15 s on a prompt; this leaves it
 /// room on a loaded host.
 pub const HOOK_DEADLINE_MS: u64 = 8000;
+
+/// The longest a hook or a guard check may block on a slow pack, lock, or
+/// child process. The shortest session-end cap onboard writes is 5 s.
+/// A tool hook's cap is 10 s. This stays under 2 s.
+pub const HOOK_WALL_BUDGET_MS: u64 = 2_000;
+
+thread_local! {
+    /// When this call must be done. Set by [`arm_wall_budget`] or
+    /// [`arm_hook_wall_budget`]. A pack read and a child process stop
+    /// here instead of at their own timeout.
+    static WALL_DEADLINE: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+    /// The pack timeout for this thread, in milliseconds. A recall thread
+    /// and the verdict do not share one environment variable, so one
+    /// thread's read cannot hold the other.
+    static PACK_BUDGET_MS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Clears the wall budget when dropped, so a later call on this thread
+/// is not still inside a budget that already ended.
+pub struct WallGuard(Option<std::time::Instant>);
+
+impl Drop for WallGuard {
+    fn drop(&mut self) {
+        WALL_DEADLINE.with(|cell| cell.set(self.0.take()));
+    }
+}
+
+/// Bound this call to [`HOOK_WALL_BUDGET_MS`] from now. A long-lived server
+/// arms this per guard check. A hook process uses [`arm_hook_wall_budget`]
+/// so time already spent waiting for a slot counts. Hold the guard for
+/// the call. Dropping it clears the bound.
+#[must_use]
+pub fn arm_wall_budget() -> WallGuard {
+    let previous = WALL_DEADLINE.with(|cell| {
+        cell.replace(Some(
+            std::time::Instant::now() + std::time::Duration::from_millis(HOOK_WALL_BUDGET_MS),
+        ))
+    });
+    WallGuard(previous)
+}
+
+/// Bound this hook process to [`HOOK_WALL_BUDGET_MS`] from the moment it
+/// started, which is before it waited for a slot. Hold the guard for the
+/// hook call.
+#[must_use]
+pub fn arm_hook_wall_budget() -> WallGuard {
+    let left = std::time::Duration::from_millis(HOOK_WALL_BUDGET_MS)
+        .saturating_sub(hookd::started().elapsed());
+    let previous = WALL_DEADLINE.with(|cell| cell.replace(Some(std::time::Instant::now() + left)));
+    WallGuard(previous)
+}
+
+/// Time left in the armed wall budget. `None` when this call is not armed.
+pub(crate) fn wall_left() -> Option<std::time::Duration> {
+    WALL_DEADLINE.with(|cell| {
+        cell.get()
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+    })
+}
+
+/// The pack timeout this thread asked for, when [`with_pack_timeout`] set one.
+pub(crate) fn pack_budget_ms() -> Option<u64> {
+    PACK_BUDGET_MS.with(|cell| cell.get())
+}
 
 /// How much quiet pack time a side event may spend. Time spent while the
 /// pack is answering does not come out of this. A socket that accepts and
@@ -13640,32 +13707,25 @@ pub(crate) fn with_env_mutation<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
-/// Run `f` with the pack client's request timeout set to `ms`, then put
-/// back whatever it was.
+/// Run `f` with this thread's pack timeout set to `ms`, then put back
+/// whatever it was. The value stays on this thread. Another thread's
+/// recall does not wait out this read, and this read does not wait out
+/// that recall.
 fn with_pack_timeout<R>(ms: u64, f: impl FnOnce() -> R) -> R {
     let ms = match side_remaining_ms() {
         Some(0) => 1,
         Some(_) => ms.clamp(1, SIDE_READ_CAP_MS),
         None => ms,
     };
-    with_env_mutation(|| {
-        let before = std::env::var_os("PACKSET_TIMEOUT_MS");
-        // SAFETY: the hook reads and sets this on one thread, before and after
-        // the one request it bounds. The mutation lock keeps another thread
-        // from observing the temporary value.
-        unsafe { std::env::set_var("PACKSET_TIMEOUT_MS", ms.to_string()) };
-        struct Put(Option<std::ffi::OsString>);
-        impl Drop for Put {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(v) => unsafe { std::env::set_var("PACKSET_TIMEOUT_MS", v) },
-                    None => unsafe { std::env::remove_var("PACKSET_TIMEOUT_MS") },
-                }
-            }
+    let previous = PACK_BUDGET_MS.with(|cell| cell.replace(Some(ms)));
+    struct Put(Option<u64>);
+    impl Drop for Put {
+        fn drop(&mut self) {
+            PACK_BUDGET_MS.with(|cell| cell.set(self.0.take()));
         }
-        let _put = Put(before);
-        f()
-    })
+    }
+    let _put = Put(previous);
+    f()
 }
 
 /// Phrases a person uses when the agent has forgotten something it was
@@ -16101,17 +16161,25 @@ pub fn is_pack_busy(err: &anyhow::Error) -> bool {
     err.chain().any(timeout_cause)
 }
 
-/// How long one pack request may take: `PACKSET_TIMEOUT_MS`, else thirty
-/// seconds, as the pack client reads it. The status line sets 300.
+/// How long one pack request may take: this thread's bound, else
+/// `PACKSET_TIMEOUT_MS`, else thirty seconds. An armed wall budget
+/// shortens it further. The status line sets 300.
 fn pack_timeout() -> std::time::Duration {
-    let base = std::env::var("PACKSET_TIMEOUT_MS")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .filter(|ms| *ms > 0)
+    let base = pack_budget_ms()
+        .or_else(|| {
+            std::env::var("PACKSET_TIMEOUT_MS")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|ms| *ms > 0)
+        })
         .map_or(
             std::time::Duration::from_secs(30),
             std::time::Duration::from_millis,
         );
+    let base = match wall_left() {
+        Some(left) => base.min(left),
+        None => base,
+    };
     cap_pack_wait(base).max(std::time::Duration::from_millis(1))
 }
 
@@ -16432,14 +16500,16 @@ fn atoms_listed_of(
     // gate still runs. Outside a hook the caller's PACKSET_TIMEOUT_MS
     // still bounds it. A writer that answers busy is asked again until
     // that deadline. A [`PackClock`] is one try, and a timeout is
-    // [`PackBusy`].
+    // [`PackBusy`]. The clock is the command's shared budget. A thread
+    // bound, from `with_pack_timeout` or a wall budget, shortens this
+    // one read and does not raise the clock.
     let armed = pack_link::clock_armed();
-    let deadline = std::time::Instant::now()
-        + if armed {
-            pack_call_budget()
-        } else {
-            pack_timeout().min(atoms_timeout())
-        };
+    let slice = if armed {
+        pack_call_budget().min(pack_timeout())
+    } else {
+        pack_timeout().min(atoms_timeout())
+    };
+    let deadline = std::time::Instant::now() + slice;
     let mut wait = BUSY_WAIT;
     let mut tries = 0;
     let answered = loop {
@@ -36988,6 +37058,9 @@ fn policy_reading_known(
     tcb: impl FnOnce() -> Option<String>,
     static_clear: bool,
 ) -> Result<String> {
+    // A guard check shares the hook's wall budget. A slow pack or a slow
+    // policyd stops at that budget. The recall runs beside the verdict.
+    let _wall = arm_wall_budget();
     let line = policy_line(argv)?;
     let call = HookCall {
         event: "argv".into(),
@@ -36995,8 +37068,6 @@ fn policy_reading_known(
         session: None,
         shape: HookShape::Asks,
     };
-    // The pack's recall runs beside the verdict and is waited for only up
-    // to [`policy_recall_wait`]: the verdict never waits on memory.
     let started = std::time::Instant::now();
     let recall = {
         let call = call.clone();
@@ -37021,7 +37092,14 @@ fn policy_reading_known(
         }
     });
     let judged = !static_clear && fast.is_some();
-    let rules = if off { Vec::new() } else { rules_for_gate() };
+    // The same bound as a hook: one short read, then the rules kept on
+    // disk. An unbounded listing is what made a commit check sit on a
+    // quiet pack until the runner killed it.
+    let rules = if off {
+        Vec::new()
+    } else {
+        gate_read_in_hook().0
+    };
     let cwd_text = cwd
         .filter(|path| path.is_dir())
         .map(|d| d.display().to_string())
@@ -37049,11 +37127,15 @@ fn policy_reading_known(
         Some(rule) if !deny => Some(rule),
         _ => gated,
     };
-    let wait = policy_recall_wait().saturating_sub(started.elapsed());
+    // Leave a little of the budget for the verdict text after this wait.
+    let wait = wall_left()
+        .unwrap_or_else(policy_recall_wait)
+        .min(policy_recall_wait().saturating_sub(started.elapsed()))
+        .saturating_sub(std::time::Duration::from_millis(40));
     let context = recall.recv_timeout(wait).unwrap_or_else(|_| {
         eprintln!(
-            "ljos policy: the memory recall had not answered after {}s, so this verdict carries none",
-            policy_recall_wait().as_secs()
+            "ljos policy: the memory recall had not answered after {} ms, so this verdict carries none",
+            wait.as_millis()
         );
         String::new()
     });
@@ -38413,6 +38495,10 @@ pub fn tcb_answer_in(
     };
     let Ok(mut child) = spawn_while_busy(spawn) else {
         return faulted("did not start");
+    };
+    let deadline = match wall_left() {
+        Some(left) => deadline.min(left),
+        None => deadline,
     };
     let start = std::time::Instant::now();
     let status = loop {
@@ -40304,6 +40390,46 @@ pub(crate) fn git_cmd() -> std::process::Command {
     let mut cmd = std::process::Command::new("git");
     strip_guard_bin(&mut cmd);
     cmd
+}
+
+/// [`std::process::Command::output`], stopped when a wall budget is armed
+/// and spent. The child is killed. The caller treats that as no answer.
+pub(crate) fn bounded_output(
+    cmd: &mut std::process::Command,
+) -> std::io::Result<std::process::Output> {
+    let Some(left) = wall_left() else {
+        return cmd.output();
+    };
+    if left.is_zero() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "hook budget spent",
+        ));
+    }
+    // [`Command::output`] pipes both streams. A child that inherits the
+    // hook's stdout would print into the runner's answer.
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output(),
+            Ok(None) if start.elapsed() < left => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "hook budget spent",
+                ));
+            }
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 /// Copy a test's git environment onto `cmd`, and drop the guard

@@ -1552,7 +1552,7 @@ fn git_command(args: &[&str], git_env: &[(&str, &str)]) -> Command {
 }
 
 fn git_line(args: &[&str]) -> Option<String> {
-    let out = git_command(args, &[]).output().ok()?;
+    let out = crate::bounded_output(&mut git_command(args, &[])).ok()?;
     if !out.status.success() {
         return None;
     }

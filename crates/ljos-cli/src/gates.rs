@@ -544,7 +544,7 @@ fn git_text(cwd: &Path, args: &[&str]) -> Option<String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     crate::apply_git_command_env(&mut cmd);
-    let out = cmd.output().ok()?;
+    let out = crate::bounded_output(&mut cmd).ok()?;
     if !out.status.success() {
         return None;
     }

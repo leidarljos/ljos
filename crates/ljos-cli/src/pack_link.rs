@@ -168,11 +168,18 @@ fn host_header(url: &Url) -> String {
 }
 
 fn budget() -> Duration {
-    std::env::var("PACKSET_TIMEOUT_MS")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .filter(|ms| *ms > 0)
-        .map_or(Duration::from_secs(30), Duration::from_millis)
+    let base = crate::pack_budget_ms()
+        .or_else(|| {
+            std::env::var("PACKSET_TIMEOUT_MS")
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|ms| *ms > 0)
+        })
+        .map_or(Duration::from_secs(30), Duration::from_millis);
+    match crate::wall_left() {
+        Some(left) => base.min(left).max(Duration::from_millis(1)),
+        None => base,
+    }
 }
 
 struct Clock {

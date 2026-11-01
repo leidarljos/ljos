@@ -167,6 +167,7 @@ fn admitted_command(args: &[String]) -> bool {
                 | "--runner"
                 | "--drain"
                 | "--apply-book"
+                | "--finish-session"
                 | "-h"
                 | "--help"
         )
@@ -204,7 +205,12 @@ fn env_num(key: &str) -> Option<u64> {
 }
 
 fn admit_budget() -> Duration {
-    Duration::from_millis(env_num("LJOS_HOOK_ADMIT_MS").unwrap_or(ADMIT_MS))
+    if let Some(ms) = env_num("LJOS_HOOK_ADMIT_MS") {
+        return Duration::from_millis(ms);
+    }
+    // The queue and the work share the hook's wall budget. A slot that
+    // never comes is judged in this process once that budget is spent.
+    Duration::from_millis(ADMIT_MS.min(crate::HOOK_WALL_BUDGET_MS))
 }
 
 enum Ask {
@@ -708,6 +714,11 @@ mod tests {
         assert!(!admitted_command(&args(&["hook", "--git-commit"])));
         assert!(!admitted_command(&args(&["hook", "--runner=gemini"])));
         assert!(!admitted_command(&args(&["hook", "--drain"])));
+        assert!(!admitted_command(&args(&[
+            "hook",
+            "--finish-session",
+            "job.json"
+        ])));
         assert!(!admitted_command(&args(&["note", "x"])));
         assert!(!admitted_command(&args(&[])));
     }

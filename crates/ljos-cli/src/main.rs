@@ -14,10 +14,10 @@ use ljos_cli::{
     packset_search_as_of, packset_write_as, panel, panel_steps, parse_every, personas_from_pack,
     playbooks_from_pack, policy_with_memory, post_hook_stdout, predictions_of, prompt_hook_stdout,
     protocol_text, read_campaign, receive, release, remember_findings, reopen, rows_about, run,
-    run_as, run_captured, session_end, settle_discount, sitting_gated, stop_hook_stdout, timeline,
-    topic_words, tracker_show_json, trim_num, trust_from_pack, uncite_deed, with_discount,
-    write_outcome, write_persona_as, write_prediction, write_rule, write_trust, Persona,
-    PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
+    run_as, run_captured, settle_discount, sitting_gated, stop_hook_stdout, timeline, topic_words,
+    tracker_show_json, trim_num, trust_from_pack, uncite_deed, with_discount, write_outcome,
+    write_persona_as, write_prediction, write_rule, write_trust, Persona, PersonaWrite, Reading,
+    Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
 };
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -1090,6 +1090,14 @@ enum Cmd {
         /// Apply these queued book jobs, in order. The drainer runs this.
         #[arg(long, num_args = 1.., hide = true, conflicts_with = "drain")]
         apply_book: Vec<std::path::PathBuf>,
+        /// Finish a session off the runner's clock. The SessionEnd hook starts this.
+        #[arg(
+            long,
+            hide = true,
+            value_name = "FILE",
+            conflicts_with_all = ["prompt", "runner", "git_commit", "brief_once", "drain"]
+        )]
+        finish_session: Option<std::path::PathBuf>,
     },
     /// Run the ljos part of one git hook. The block `ljos git-hooks install` appends calls this.
     GitHook {
@@ -2751,6 +2759,7 @@ fn run_command() -> Result<()> {
             drain,
             no_wait,
             apply_book,
+            finish_session,
         } => {
             if text {
                 return prompt_as_text(limit);
@@ -2762,9 +2771,13 @@ fn run_command() -> Result<()> {
                 std::process::exit(ljos_cli::book_queue::apply(&apply_book));
             }
             if git_commit {
+                let _wall = ljos_cli::arm_hook_wall_budget();
                 return ljos_cli::git_hooks::run_git_commit(
                     git_hook.as_deref().unwrap_or("post-commit"),
                 );
+            }
+            if let Some(path) = finish_session {
+                return ljos_cli::extract::run_finish_job(&path);
             }
             if brief_once {
                 ljos_cli::bookkeep::print_brief_once();
@@ -2816,6 +2829,7 @@ fn run_command() -> Result<()> {
                     anyhow::bail!("hook: stdin is not utf-8");
                 }
             };
+            let _wall = ljos_cli::arm_hook_wall_budget();
             ljos_cli::log_recall("hook", event.as_deref().unwrap_or("-"));
             if let Some(runner) = runner.as_deref() {
                 if !ljos_cli::runner_hooks::is_runner(runner) {
@@ -3005,14 +3019,11 @@ fn run_command() -> Result<()> {
                 }
             }
             // At the end of a session the memories it used fire together,
-            // and there is nothing to say.
+            // and the transcript is read, in a detached process. This
+            // process does not wait on the pack or the tracker.
             if call.event == "SessionEnd" {
-                session_end(call.session.as_deref());
-                ljos_cli::extract::at_session_end(&input, call.session.as_deref());
-                // Finish or release after extract. A bookkeeping error stays
-                // off the answer: this event has nothing to say.
                 let _ = ljos_cli::bookkeep::observe(&input, &call);
-                let _ = ljos_cli::drain_tracker_pushes();
+                ljos_cli::extract::at_session_end(&input, call.session.as_deref());
                 return Ok(());
             }
             // On a tool call the pack's rules give a verdict; on a prompt

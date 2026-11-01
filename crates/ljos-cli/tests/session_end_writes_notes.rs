@@ -78,6 +78,23 @@ fn serve(atoms: Arc<Mutex<Vec<serde_json::Value>>>) -> String {
     format!("http://{addr}")
 }
 
+fn wait_done(run: &std::path::Path) -> String {
+    let path = run.join("ljos/session-finish.done");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if !text.is_empty() {
+                return text;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "session finish did not complete"
+        );
+        thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 fn posted_notes(extract: Option<&str>) -> Vec<serde_json::Value> {
     let home = tempfile::tempdir().unwrap();
     let transcript = home.path().join("transcript.jsonl");
@@ -152,6 +169,7 @@ fn posted_notes(extract: Option<&str>) -> Vec<serde_json::Value> {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
+    let _ = wait_done(&run);
 
     let stored = atoms.lock().unwrap().clone();
     stored
