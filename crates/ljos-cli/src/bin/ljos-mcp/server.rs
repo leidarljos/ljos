@@ -1839,7 +1839,7 @@ impl LjosServer {
             .map_err(refused)?;
         said.0
             .text
-            .push_str(&ljos_cli::recall_memories(&args.issue));
+            .push_str(&ljos_cli::recall_memories(&args.issue).map_err(refused)?);
         Ok(said)
     }
 
@@ -2843,8 +2843,14 @@ impl LjosServer {
     }
 
     #[tool(
-        description = "Call this to see what other seats have sent this seat. The list is unread mail, and listing does not write a receipt. ljos hook --prompt writes a receipt for each message it shows. Pass all to include mail already read. A pack that does not answer is an error, not an empty list. Receipts on messages this seat sent are listed once, the first time they are shown.",
-        annotations(title = "Inbox", read_only_hint = true, open_world_hint = false)
+        description = "Call this to see what other seats have sent this seat. The list is unread mail, and each message shown is marked read. Pass all to include mail already read. ljos reply still answers a message after it is read. A pack that does not answer is an error, not an empty list. A pack that runs out of time is `pack busy, try again`. Receipts on messages this seat sent are listed once, the first time they are shown.",
+        annotations(
+            title = "Inbox",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn ljos_inbox(
         &self,
@@ -4551,6 +4557,7 @@ mod tests {
                 "ljos_group",
                 "ljos_habit",
                 "ljos_handover",
+                "ljos_inbox",
                 "ljos_island",
                 "ljos_learn",
                 "ljos_note",

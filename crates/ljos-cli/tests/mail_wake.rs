@@ -540,21 +540,7 @@ fn two_seats_exchange_mail_and_the_prompt_writes_a_receipt() {
     assert!(text(&bob).contains(&id), "{}", text(&bob));
     assert!(text(&bob).contains("the build is red"), "{}", text(&bob));
     assert!(!text(&bob).contains("receipt\t"), "{}", text(&bob));
-    let quiet = run(ALICE, &["inbox"], None);
-    assert_eq!(text(&quiet).trim(), "inbox: nothing unread");
-
-    let read = run(BOB, &["read", &id], None);
-    assert!(read.status.success(), "{}", text(&read));
-    assert!(
-        text(&read).contains(&format!("read {id}")),
-        "{}",
-        text(&read)
-    );
-    assert!(!text(&read).contains("already"), "{}", text(&read));
-    let again = run(BOB, &["read", &id], None);
-    assert!(again.status.success(), "{}", text(&again));
-    assert!(text(&again).contains("already"), "{}", text(&again));
-
+    // Listing writes the receipt, so the sender sees it on the next inbox.
     let saw = run(ALICE, &["inbox"], None);
     assert!(saw.status.success(), "{}", text(&saw));
     assert!(
@@ -562,6 +548,10 @@ fn two_seats_exchange_mail_and_the_prompt_writes_a_receipt() {
         "{}",
         text(&saw)
     );
+
+    let read = run(BOB, &["read", &id], None);
+    assert!(read.status.success(), "{}", text(&read));
+    assert!(text(&read).contains("already"), "{}", text(&read));
 
     let reply = run(BOB, &["reply", &id, "looking"], None);
     assert!(reply.status.success(), "{}", text(&reply));
@@ -589,11 +579,6 @@ fn two_seats_exchange_mail_and_the_prompt_writes_a_receipt() {
     );
     assert!(urgent.status.success(), "{}", text(&urgent));
     let urgent_id = sent_id(&urgent);
-    let hot = run(BOB, &["inbox"], None);
-    assert!(text(&hot).starts_with(&urgent_id), "{}", text(&hot));
-    assert!(text(&hot).contains("interrupt"), "{}", text(&hot));
-    assert!(text(&hot).contains("stop the release"), "{}", text(&hot));
-
     let prompt = run(BOB, &["hook", "--prompt"], Some("what should I do next\n"));
     assert!(prompt.status.success(), "{}", text(&prompt));
     let shown = String::from_utf8_lossy(&prompt.stdout);

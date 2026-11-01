@@ -677,10 +677,14 @@ and the atom takes that issue's scope, so `ljos sync` carries it in the
 sealed log of the repository that has the issue. A message with no issue
 travels in the machine's default scope, the same way an unscoped lesson does.
 
-`ljos inbox` lists what this seat has not read. Listing does not write a
-receipt. `ljos read ID` writes one, kind `receipt`, and the sender sees it
-on a later `ljos inbox`. `ljos reply ID TEXT` writes back to the sender,
-keeps the issue, and carries `reply:ID`, so the thread stays on the work.
+`ljos inbox` lists what this seat has not read, and writes a receipt for
+each message it shows. The next inbox leaves those out. `ljos inbox --all`
+shows mail already read. `ljos read ID` writes a receipt too, kind
+`receipt`, and the sender sees it on a later `ljos inbox`. `ljos reply
+ID TEXT` writes back to the sender, keeps the issue, and carries
+`reply:ID`, so the thread stays on the work. A reply still answers a
+message after it is read. The inbox reads kinds `message`, `receipt` and
+`group` only, so the rest of the pack is not copied for a listing.
 `ljos inbox --sync [COMMIT]` fetches until the remote has that commit,
 for up to 30 seconds (`LJOS_INBOX_SYNC_WAIT`), or else takes the remote
 head, imports the sealed logs, and then lists. With no remote the flag
@@ -691,9 +695,21 @@ drop. Membership is atoms of kind `group`, so it travels in the same log.
 
 `ljos hook --prompt` prints unread mail at the front of the next prompt
 and writes a receipt for each message it shows. Shown there is read.
-When the pack does not answer, the hook prints `mail could not be checked`
-and does not block the prompt. A shell seat has no hook. It polls
-`ljos inbox` and writes a receipt with `ljos read`.
+When the pack refuses the listing, the hook prints `mail could not be checked`
+and does not block the prompt. When a pack call runs out of time, the hook
+prints nothing and exits 0.
+
+Mail, inbox, recall and the hook give each pack call a connect timeout
+and a total timeout. `LJOS_PACK_CONNECT_MS` is the connect timeout
+(default 300, at most 1000). `LJOS_PACK_TIMEOUT_MS` is the total for an
+interactive command (default 4000, at most 5000). `LJOS_HOOK_PACK_TIMEOUT_MS`
+is the total inside a hook (default 1500, at most 2000). `PACKSET_TIMEOUT_MS`
+is used when the matching one of those is unset, and it cannot stretch
+these calls past the caps. A call that runs out of time is not tried
+again. An interactive command prints `pack busy, try again` and exits 75.
+
+A shell seat has no hook. It polls `ljos inbox`, which writes the receipt.
+`ljos read` writes one for a message the seat names.
 
 An idle agent has no next prompt, so a seat can name how to wake it.
 `ljos wake --command CMD` runs `CMD` with `LJOS_SEAT` set to the seat, and `ljos wake --webhook URL --key-file FILE` posts the envelope (never the body) to a URL such as a Example Host routine's webhook.

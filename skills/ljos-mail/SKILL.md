@@ -15,8 +15,10 @@ message to one seat or to a group.
 - To a group: `ljos send --group NAME "text"`. `ljos group NAME --add SEAT`
   adds a member.
 - Read: the prompt hook shows unread mail at the start of the next turn and
-  marks it read. `ljos inbox` lists unread mail without marking it.
-- Mark read: `ljos read ID`. Reply: `ljos reply ID "text"` (keeps the ticket).
+  marks it read. `ljos inbox` lists unread mail and marks what it shows.
+  `ljos inbox --all` shows mail already read.
+- Mark read: `ljos read ID`. Reply: `ljos reply ID "text"` (keeps the ticket,
+  and still answers a message after it is read).
 - A message carries up to 16,000 characters. A longer report goes in a
   file: `deedar create file --path FILE --agent SEAT`, then send the
   accession it prints.
@@ -32,6 +34,7 @@ A wake name ending in `-` matches every longer seat that starts with it, so mail
 In push mode (`LJOS_TRACKER_GIT=push`) the wake pushes the sealed log first, so a seat on another machine can read the letter. The send does not wait. A failed push is written to the wake log and the wake still runs.
 The envelope carries that commit: `LJOS_WAKE_COMMIT` for a command, and `commit` in the webhook JSON. It is left out when no log commit was made.
 `ljos inbox --sync [COMMIT]` fetches until the remote has that commit, for up to 30 seconds (`LJOS_INBOX_SYNC_WAIT`), or else takes the remote head, imports, and lists. With no remote it only lists.
+A pack call from mail, inbox, recall or a hook has a short connect timeout (`LJOS_PACK_CONNECT_MS`, default 300) and a short total timeout (`LJOS_PACK_TIMEOUT_MS`, default 4000, at most 5000; `LJOS_HOOK_PACK_TIMEOUT_MS` in a hook, default 1500, at most 2000). On a timeout the command prints `pack busy, try again` and exits 75. A hook prints nothing and exits 0. The call is not tried again.
 An agent still working gets interrupt mail when it is about to stop, so use `--interrupt` when the work cannot wait.
 A seat name ljos has never seen is refused with the closest one it knows.
 

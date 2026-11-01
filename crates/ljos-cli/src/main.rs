@@ -619,9 +619,11 @@ enum Cmd {
         #[arg(long)]
         new_seat: bool,
     },
-    /// Mail this seat has not read. Listing does not write a receipt.
-    /// `ljos hook --prompt` writes a receipt for each message it shows.
-    /// A pack that does not answer is an error.
+    /// Mail this seat has not read. Each message shown is marked read.
+    /// `ljos inbox --all` shows mail already read. `ljos reply` still
+    /// answers it. `ljos hook --prompt` writes a receipt for each message
+    /// it shows. A pack that does not answer is an error. A pack that
+    /// runs out of time prints `pack busy, try again` and exits 75.
     Inbox {
         /// Include mail this seat has already read.
         #[arg(long)]
@@ -1507,6 +1509,15 @@ fn main() -> Result<()> {
     ljos_cli::hookd::admit();
     let ran = run_command();
     if let Err(e) = &ran {
+        if ljos_cli::is_pack_busy(e) {
+            // A hook that still holds the error prints nothing. The runner
+            // is not failed for a pack that did not answer in time.
+            if std::env::var_os("LJOS_IN_HOOK").is_some() {
+                std::process::exit(0);
+            }
+            eprintln!("{}", ljos_cli::PACK_BUSY_LINE);
+            std::process::exit(ljos_cli::PACK_BUSY_EXIT);
+        }
         // A gate whose hook fails answers allow in the runner's JSON with
         // the note that says why, and exits 0: a broken ljos blocks nothing.
         ljos_cli::answer_failed_gate(&format!("{e:#}"));
@@ -2268,7 +2279,7 @@ fn run_command() -> Result<()> {
             let said = ljos_cli::tracker_recall(&issue)?;
             eprint!("{}", said.stderr);
             print!("{}", said.stdout);
-            print!("{}", ljos_cli::recall_memories(&issue));
+            print!("{}", ljos_cli::recall_memories(&issue)?);
         }
         Cmd::Reap { idle, apply } => {
             print!(
@@ -2922,6 +2933,7 @@ fn run_command() -> Result<()> {
             // the whole tracker are skipped from here on.
             // SAFETY: single-threaded here, before anything reads the environment.
             unsafe { std::env::set_var("LJOS_IN_HOOK", "1") };
+            let _pack_clock = ljos_cli::arm_hook_pack();
             let _side_bound = ljos_cli::arm_side_bound(&call);
             let (subagent, stop_active, agent) = ljos_cli::hook_subagent(&input);
             ljos_cli::hook_trace(&input, &call, subagent.as_deref());

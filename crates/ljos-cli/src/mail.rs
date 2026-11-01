@@ -740,12 +740,18 @@ fn ensure_mail(client: &crate::PacksetClient, verb: &str) -> Result<()> {
 }
 
 fn listed() -> Result<Vec<Value>> {
+    let _clock = super::arm_cmd_pack();
     let client = super::pack()?;
     let workspace = client.workspace();
-    super::atoms_lean(&client, &workspace).context("mail: the pack did not answer")
+    match super::atoms_mail(&client, &workspace) {
+        Err(err) if super::is_pack_busy(&err) => Err(super::pack_busy_err()),
+        Err(err) => Err(err).context("mail: the pack did not answer"),
+        Ok(atoms) => Ok(atoms),
+    }
 }
 
 fn load(verb: &str) -> Result<Vec<Value>> {
+    let _clock = super::arm_cmd_pack();
     let client = super::pack()?;
     let atoms = listed()?;
     if !atoms.iter().any(is_mail_atom) {
@@ -754,18 +760,24 @@ fn load(verb: &str) -> Result<Vec<Value>> {
     Ok(atoms)
 }
 
-fn load_quiet() -> Option<std::sync::Arc<Vec<Value>>> {
-    let client = super::pack().ok()?;
-    let workspace = client.workspace();
-    super::atoms_lean_shared(&client, &workspace).ok()
+fn load_quiet() -> Option<Vec<Value>> {
+    listed().ok()
 }
 
 fn post(atom: &Value, verb: &str) -> Result<Value> {
+    let _clock = super::arm_cmd_pack();
     let client = super::pack()?;
     super::with_writer(|| {
         client
             .post_atom(atom)
             .with_context(|| format!("{verb}: POST /v1/atoms failed"))
+    })
+    .map_err(|err| {
+        if super::is_pack_busy(&err) {
+            super::pack_busy_err()
+        } else {
+            err
+        }
     })
 }
 
@@ -779,6 +791,7 @@ fn stamp_source(atom: &mut Value) {
 
 /// Write one message and print its id.
 pub fn send(args: &Send<'_>) -> Result<String> {
+    let _clock = super::arm_cmd_pack();
     let text = args.text.trim();
     if text.is_empty() {
         bail!("send: empty text");
@@ -806,7 +819,7 @@ pub fn send(args: &Send<'_>) -> Result<String> {
     if group.is_none() {
         ensure_mail(&client, "send")?;
         if !args.new_seat {
-            let known = known_seats(&listed()?);
+            let known = known_seats(&seats_heard()?);
             for seat in &to {
                 check_known(seat, &known, false)?;
             }
@@ -865,10 +878,12 @@ fn wake_after(m: &Outgoing) -> String {
 /// Unread mail for this seat, then receipts on what it sent that it has not
 /// been shown yet.
 ///
-/// Listing does not write a receipt. `ljos hook --prompt` does, for each
-/// message it shows. A pack that does not answer, or that refuses mail, is
-/// an error. `ljos_inbox` calls this. This does not fetch the tracker;
-/// [`inbox_sync`] does.
+/// Each unread message shown is marked read, with a receipt in the pack.
+/// `ljos inbox --all` also shows mail already read. `ljos hook --prompt`
+/// writes a receipt for each message it shows. A pack that does not
+/// answer, or that refuses mail, is an error. A pack that runs out of
+/// time is [`super::PackBusy`]. `ljos_inbox` calls this. This does not
+/// fetch the tracker; [`inbox_sync`] does.
 pub fn inbox(all: bool) -> Result<String> {
     inbox_sync(all, None)
 }
@@ -894,12 +909,48 @@ pub fn inbox_sync(all: bool, until: Option<&str>) -> Result<String> {
             eprint!("{note}");
         }
     }
+    // The fetch above is the tracker's. The pack budget starts after it,
+    // so a slow fetch does not eat the listing.
+    let _clock = super::arm_cmd_pack();
     let atoms = load("inbox")?;
     let seat = super::seat_name();
     let seen = receipt_seen();
     let (text, keys) = render_inbox(&atoms, &seat, all, &seen);
     remember_receipts(&keys);
+    mark_shown(&atoms, &seat)?;
     Ok(text)
+}
+
+/// Receipts for the unread messages `atoms` holds for `seat`. The next
+/// inbox leaves them out. Already-read messages are left as they are.
+fn mark_shown(atoms: &[Value], seat: &str) -> Result<()> {
+    let letters = inbox_letters(atoms, seat, false);
+    if letters.is_empty() {
+        return Ok(());
+    }
+    let client = super::pack()?;
+    let workspace = workspace_of(Some(&client.workspace()));
+    let at = super::now_utc();
+    for letter in &letters {
+        let mut atom = receipt_atom(letter, seat, &at, &workspace);
+        stamp_source(&mut atom);
+        post(&atom, "inbox")?;
+    }
+    Ok(())
+}
+
+/// Seats the pack has heard from, for `ljos send`.
+///
+/// This is the one mail read that asks for the whole listing: a seat is
+/// named on whatever atom it wrote, not only on mail. The call stays
+/// inside the pack budget.
+fn seats_heard() -> Result<Vec<Value>> {
+    let client = super::pack()?;
+    let workspace = client.workspace();
+    match super::atoms_lean(&client, &workspace) {
+        Err(err) if super::is_pack_busy(&err) => Err(super::pack_busy_err()),
+        other => other.context("mail: the pack did not answer"),
+    }
 }
 
 /// The commit `--sync` asked for. An empty flag means `LJOS_WAKE_COMMIT`
@@ -945,6 +996,7 @@ fn receipt_atom(msg: &Letter, reader: &str, at: &str, workspace: &str) -> Value 
 /// Write a receipt for one message. A second read of the same message
 /// writes nothing.
 pub fn read(id: &str) -> Result<String> {
+    let _clock = super::arm_cmd_pack();
     let id = id.trim();
     if id.is_empty() {
         bail!("read: name a message");
@@ -995,6 +1047,7 @@ fn read_ids(ids: &[String]) {
 
 /// Answer a message. The reply goes to its sender and keeps its issue.
 pub fn reply(id: &str, text: &str, interrupt: bool) -> Result<String> {
+    let _clock = super::arm_cmd_pack();
     let id = id.trim();
     let text = text.trim();
     if id.is_empty() {
@@ -1068,6 +1121,7 @@ fn group_atom(name: &str, seat: &str, drop: bool, by: &str, workspace: &str) -> 
 
 /// List a group, or add and remove members. A drop is its own atom.
 pub fn group(name: &str, add: &[String], remove: &[String]) -> Result<String> {
+    let _clock = super::arm_cmd_pack();
     let name = check_name("group", name)?;
     if add.is_empty() && remove.is_empty() {
         let atoms = load("group")?;
@@ -1164,11 +1218,16 @@ fn remember_receipts(keys: &[String]) {
 pub const MAIL_UNCHECKED: &str = "mail could not be checked";
 
 /// Unread mail and unseen receipts for the prompt hook. A pack that does
-/// not answer leaves one line, so unread mail is not silent.
+/// not answer leaves one line, so unread mail is not silent. A pack that
+/// runs out of time leaves the line out: the hook prints nothing.
 #[must_use]
 pub fn prompt_note() -> (String, Vec<String>) {
-    let Some(atoms) = load_quiet() else {
-        return (MAIL_UNCHECKED.to_string(), Vec::new());
+    // Listing only. A probe would be stored by a writer that keeps mail,
+    // and the next search would have to read it.
+    let atoms = match listed() {
+        Ok(atoms) => atoms,
+        Err(err) if super::is_pack_busy(&err) => return (String::new(), Vec::new()),
+        Err(_) => return (MAIL_UNCHECKED.to_string(), Vec::new()),
     };
     let seat = super::seat_name();
     let letters = inbox_letters(&atoms, &seat, false);
@@ -1192,7 +1251,7 @@ pub const STOP_MAIL_HEAD: &str =
 /// error would keep every turn open.
 #[must_use]
 pub fn stop_note() -> (String, Vec<String>) {
-    let Some(atoms) = load_quiet() else {
+    let Ok(atoms) = listed() else {
         return (String::new(), Vec::new());
     };
     stop_lines(&atoms, &super::seat_name())

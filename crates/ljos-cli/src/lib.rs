@@ -15977,6 +15977,130 @@ const BUSY_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
 /// How many times a busy writer is asked again.
 const BUSY_TRIES: u32 = 3;
 
+/// One line when a pack call runs out of time. Exit [`PACK_BUSY_EXIT`].
+pub const PACK_BUSY_LINE: &str = "pack busy, try again";
+
+/// Exit status for [`PACK_BUSY_LINE`]. Temporary failure, so a caller can
+/// tell it from a refused command.
+pub const PACK_BUSY_EXIT: i32 = 75;
+
+/// Interactive mail, inbox and recall. Under five seconds.
+const PACK_CMD_BUDGET_MS: u64 = 4_000;
+const PACK_CMD_BUDGET_MAX_MS: u64 = 5_000;
+/// A hook. Under two seconds.
+const PACK_HOOK_BUDGET_MS: u64 = 1_500;
+const PACK_HOOK_BUDGET_MAX_MS: u64 = 2_000;
+/// Connect, for a writer that accepts slowly. Under the call's total.
+const PACK_CONNECT_MS: u64 = 300;
+const PACK_CONNECT_MAX_MS: u64 = 1_000;
+
+/// The pack did not answer before its budget. One line, no cause chain.
+#[derive(Debug)]
+pub struct PackBusy;
+
+impl std::fmt::Display for PackBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(PACK_BUSY_LINE)
+    }
+}
+
+impl std::error::Error for PackBusy {}
+
+pub fn pack_busy_err() -> anyhow::Error {
+    anyhow::Error::new(PackBusy)
+}
+
+fn env_ms(key: &str) -> Option<u64> {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+}
+
+fn capped_ms(configured: Option<u64>, default_ms: u64, max_ms: u64) -> std::time::Duration {
+    std::time::Duration::from_millis(configured.unwrap_or(default_ms).min(max_ms).max(1))
+}
+
+/// Total wait for pack calls in a hook.
+/// `LJOS_HOOK_PACK_TIMEOUT_MS`, else `PACKSET_TIMEOUT_MS`, else 1500.
+/// Never above 2000.
+#[must_use]
+pub fn pack_hook_budget() -> std::time::Duration {
+    capped_ms(
+        env_ms("LJOS_HOOK_PACK_TIMEOUT_MS").or_else(|| env_ms("PACKSET_TIMEOUT_MS")),
+        PACK_HOOK_BUDGET_MS,
+        PACK_HOOK_BUDGET_MAX_MS,
+    )
+}
+
+/// Total wait for interactive mail, inbox and recall.
+/// `LJOS_PACK_TIMEOUT_MS`, else `PACKSET_TIMEOUT_MS`, else 4000.
+/// Never above 5000.
+#[must_use]
+pub fn pack_cmd_budget() -> std::time::Duration {
+    capped_ms(
+        env_ms("LJOS_PACK_TIMEOUT_MS").or_else(|| env_ms("PACKSET_TIMEOUT_MS")),
+        PACK_CMD_BUDGET_MS,
+        PACK_CMD_BUDGET_MAX_MS,
+    )
+}
+
+/// [`pack_hook_budget`] inside a hook, otherwise [`pack_cmd_budget`].
+#[must_use]
+pub fn pack_call_budget() -> std::time::Duration {
+    if std::env::var_os("LJOS_IN_HOOK").is_some() {
+        pack_hook_budget()
+    } else {
+        pack_cmd_budget()
+    }
+}
+
+/// Connect timeout for a clocked pack call.
+/// `LJOS_PACK_CONNECT_MS`, else 300, never above 1000 or the call budget.
+#[must_use]
+pub fn pack_connect_budget() -> std::time::Duration {
+    capped_ms(
+        env_ms("LJOS_PACK_CONNECT_MS"),
+        PACK_CONNECT_MS,
+        PACK_CONNECT_MAX_MS,
+    )
+    .min(pack_call_budget())
+}
+
+/// Start the hook's pack budget. Later mail and recall guards keep it.
+#[must_use]
+pub fn arm_hook_pack() -> pack_link::PackClock {
+    pack_link::PackClock::enter(pack_hook_budget())
+}
+
+/// Start the interactive pack budget.
+#[must_use]
+pub fn arm_cmd_pack() -> pack_link::PackClock {
+    pack_link::PackClock::enter(pack_call_budget())
+}
+
+fn timeout_cause(cause: &(dyn std::error::Error + 'static)) -> bool {
+    if cause.downcast_ref::<PackBusy>().is_some() {
+        return true;
+    }
+    if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+        return matches!(
+            io.kind(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        ) || io.to_string().contains("the pack did not answer");
+    }
+    if let Some(inner) = cause.downcast_ref::<packset_client::Error>() {
+        return pack_link::error_is_timeout(inner);
+    }
+    false
+}
+
+/// Whether `err` is a pack call that ran out of time, or [`PackBusy`].
+#[must_use]
+pub fn is_pack_busy(err: &anyhow::Error) -> bool {
+    err.chain().any(timeout_cause)
+}
+
 /// How long one pack request may take: `PACKSET_TIMEOUT_MS`, else thirty
 /// seconds, as the pack client reads it. The status line sets 300.
 fn pack_timeout() -> std::time::Duration {
@@ -16039,6 +16163,14 @@ fn ensure_writer() -> Result<()> {
 }
 
 fn with_writer<T>(op: impl Fn() -> Result<T>) -> Result<T> {
+    // A clocked call returns the first answer. Starting the writer, or
+    // asking again, is what turned one timeout into a minute.
+    if pack_link::clock_armed() {
+        return match op() {
+            Err(err) if is_pack_busy(&err) || writer_busy(&err) => Err(pack_busy_err()),
+            other => other,
+        };
+    }
     let mut wait = BUSY_WAIT;
     let mut tries = 0;
     loop {
@@ -16124,6 +16256,20 @@ pub(crate) fn atoms_lean_shared(
 /// The pack not answering, or an answer that is not atoms.
 pub fn atoms_lean(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>> {
     Ok(atoms_listed(client, workspace, true)?.0)
+}
+
+/// Message, receipt and group atoms.
+///
+/// The writer filters on `kind` before it builds the answer, so mail does
+/// not copy every lesson and every body. A clocked call that runs out of
+/// time is [`PackBusy`], and the later kinds are not asked.
+pub(crate) fn atoms_mail(client: &PacksetClient, workspace: &str) -> Result<Vec<Value>> {
+    let mut out = Vec::new();
+    for kind in ["message", "receipt", "group"] {
+        let (atoms, _) = atoms_listed_of(client, workspace, true, Some(kind), None, false)?;
+        out.extend(atoms);
+    }
+    Ok(out)
 }
 
 /// The newest lean atoms, capped by the writer before it builds the answer.
@@ -16285,12 +16431,22 @@ fn atoms_listed_of(
     // drops a deny. Inside a hook the listing stops at 2s so the local
     // gate still runs. Outside a hook the caller's PACKSET_TIMEOUT_MS
     // still bounds it. A writer that answers busy is asked again until
-    // that deadline.
-    let deadline = std::time::Instant::now() + pack_timeout().min(atoms_timeout());
+    // that deadline. A [`PackClock`] is one try, and a timeout is
+    // [`PackBusy`].
+    let armed = pack_link::clock_armed();
+    let deadline = std::time::Instant::now()
+        + if armed {
+            pack_call_budget()
+        } else {
+            pack_timeout().min(atoms_timeout())
+        };
     let mut wait = BUSY_WAIT;
     let mut tries = 0;
     let answered = loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if armed && left.is_zero() {
+            return Err(pack_busy_err());
+        }
         let answer = client.roundtrip(
             "GET",
             "/v1/atoms",
@@ -16301,7 +16457,8 @@ fn atoms_listed_of(
         );
         match answer {
             Ok(answer)
-                if answer.status == 503
+                if !armed
+                    && answer.status == 503
                     && tries < BUSY_TRIES
                     && std::time::Instant::now() + wait < deadline =>
             {
@@ -16312,7 +16469,12 @@ fn atoms_listed_of(
             other => break other,
         }
     };
-    let answered = answered.map_err(|err| anyhow::Error::from(err).context(url.clone()))?;
+    let answered = match answered {
+        Err(err) if armed && pack_link::error_is_timeout(&err) => return Err(pack_busy_err()),
+        Err(err) => return Err(anyhow::Error::from(err).context(url)),
+        Ok(answer) if armed && answer.status == 503 => return Err(pack_busy_err()),
+        Ok(answer) => answer,
+    };
     if !(200..300).contains(&answered.status) {
         anyhow::bail!("{url}: status code {}", answered.status);
     }
@@ -32352,21 +32514,29 @@ pub const RELATED_MEMORY_CAP: usize = 5;
 /// pack holds nothing on it. A pack that does not answer is started, as
 /// the doctor starts it, and the line says so only when the start did not
 /// bring it up.
-pub fn recall_memories(issue: &str) -> String {
+pub fn recall_memories(issue: &str) -> Result<String> {
+    let _clock = arm_cmd_pack();
     recall_memories_with(issue, true)
 }
 
 /// [`recall_memories`] for prompt injection: note memories are left out so
-/// a working note cannot come back as a fact on the next prompt.
+/// a working note cannot come back as a fact on the next prompt. A pack
+/// that runs out of time adds nothing, so the hook stays quiet.
 pub(crate) fn recall_memories_for_prompt(issue: &str) -> String {
-    recall_memories_with(issue, false)
+    let _clock = arm_cmd_pack();
+    match recall_memories_with(issue, false) {
+        Ok(text) => text,
+        Err(err) if is_pack_busy(&err) => String::new(),
+        Err(err) => recall_down(&err),
+    }
 }
 
-fn recall_memories_with(issue: &str, include_notes: bool) -> String {
+fn recall_memories_with(issue: &str, include_notes: bool) -> Result<String> {
     let issue = issue.trim();
     let mut woke = false;
     let mut ask = |what: &dyn Fn() -> Result<Vec<Hit>>| -> Result<Vec<Hit>> {
         match what() {
+            Err(err) if is_pack_busy(&err) => Err(pack_busy_err()),
             Ok(h) => Ok(h),
             Err(_) if !woke => {
                 woke = true;
@@ -32378,8 +32548,13 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> String {
     };
     // A pack that cannot list its atoms (an older or stand-in writer) still
     // answers the search below, so the tagged list is empty rather than an
-    // error; a pack that answers neither is down.
-    let own = ask(&|| issue_memories(issue)).unwrap_or_default();
+    // error; a pack that answers neither is down. A timeout is not that:
+    // the call is not started again.
+    let own = match ask(&|| issue_memories(issue)) {
+        Ok(hits) => hits,
+        Err(err) if is_pack_busy(&err) => return Err(err),
+        Err(_) => Vec::new(),
+    };
     let mut cues = vec![issue.to_string()];
     if let Ok(t) = issue_title(issue) {
         if t != issue {
@@ -32391,11 +32566,18 @@ fn recall_memories_with(issue: &str, include_notes: bool) -> String {
     for cue in &cues {
         match ask(&|| packset_search_relevant(cue, pool)) {
             Ok(hits) => related.extend(hits),
-            Err(e) if own.is_empty() && related.is_empty() => return recall_down(&e),
+            Err(err) if is_pack_busy(&err) => return Err(err),
+            Err(e) if own.is_empty() && related.is_empty() => return Ok(recall_down(&e)),
             Err(_) => break,
         }
     }
-    recall_lines(&own, related, &cues.join(" "), &now_utc(), include_notes)
+    Ok(recall_lines(
+        &own,
+        related,
+        &cues.join(" "),
+        &now_utc(),
+        include_notes,
+    ))
 }
 
 /// The `cap` of `rows` most relevant to `cue`, in the order they came.
@@ -41143,7 +41325,7 @@ mod tests {
             ("VISSUE_ROOT", dir.path().to_str().unwrap()),
             ("VISSUE_NO_ROUTE", "1"),
         ]);
-        let text = recall_memories("sample-k2p2");
+        let text = recall_memories("sample-k2p2").unwrap();
         assert!(text.contains("rotated from 1Password"), "{text}");
         assert!(text.contains("before the old one expires"), "{text}");
         assert!(
@@ -44572,6 +44754,48 @@ mod tests {
             "another prompt answers"
         );
         unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+    }
+
+    #[test]
+    fn pack_call_budgets_stay_under_their_caps() {
+        let _g = env_guard();
+        let keys = [
+            "LJOS_PACK_TIMEOUT_MS",
+            "LJOS_HOOK_PACK_TIMEOUT_MS",
+            "LJOS_PACK_CONNECT_MS",
+            "PACKSET_TIMEOUT_MS",
+            "LJOS_IN_HOOK",
+        ];
+        let saved: Vec<_> = keys
+            .iter()
+            .map(|key| (*key, std::env::var_os(key)))
+            .collect();
+        let restore = |saved: &Vec<(&str, Option<std::ffi::OsString>)>| {
+            for (key, value) in saved {
+                match value {
+                    Some(value) => unsafe { std::env::set_var(key, value) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
+            }
+        };
+        for key in keys {
+            unsafe { std::env::remove_var(key) };
+        }
+        assert!(pack_cmd_budget() < std::time::Duration::from_secs(5));
+        assert!(pack_hook_budget() < std::time::Duration::from_secs(2));
+        assert!(pack_connect_budget() <= std::time::Duration::from_secs(1));
+        assert!(pack_connect_budget() <= pack_cmd_budget());
+        unsafe {
+            std::env::set_var("LJOS_PACK_TIMEOUT_MS", "30000");
+            std::env::set_var("LJOS_HOOK_PACK_TIMEOUT_MS", "30000");
+            std::env::set_var("LJOS_PACK_CONNECT_MS", "30000");
+        }
+        assert_eq!(pack_cmd_budget(), std::time::Duration::from_secs(5));
+        assert_eq!(pack_hook_budget(), std::time::Duration::from_secs(2));
+        assert!(pack_connect_budget() <= std::time::Duration::from_secs(1));
+        unsafe { std::env::set_var("LJOS_IN_HOOK", "1") };
+        assert_eq!(pack_call_budget(), std::time::Duration::from_secs(2));
+        restore(&saved);
     }
 
     /// Codex's copy of a prompt event says what the first delivery said,

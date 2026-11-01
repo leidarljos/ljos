@@ -175,6 +175,66 @@ fn budget() -> Duration {
         .map_or(Duration::from_secs(30), Duration::from_millis)
 }
 
+struct Clock {
+    deadline: Instant,
+    depth: u32,
+}
+
+static CLOCK: Mutex<Option<Clock>> = Mutex::new(None);
+
+/// Bound every pack socket call until this guard drops.
+/// A nested guard keeps the earlier deadline, so a hook's budget is not
+/// stretched by a later mail read.
+pub struct PackClock;
+
+impl PackClock {
+    #[must_use]
+    pub fn enter(total: Duration) -> Self {
+        let mut slot = CLOCK.lock().unwrap_or_else(|p| p.into_inner());
+        match slot.as_mut() {
+            Some(clock) => clock.depth = clock.depth.saturating_add(1),
+            None => {
+                *slot = Some(Clock {
+                    deadline: Instant::now() + total,
+                    depth: 1,
+                });
+            }
+        }
+        Self
+    }
+}
+
+impl Drop for PackClock {
+    fn drop(&mut self) {
+        let mut slot = CLOCK.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(clock) = slot.as_mut() {
+            clock.depth = clock.depth.saturating_sub(1);
+            if clock.depth == 0 {
+                *slot = None;
+            }
+        }
+    }
+}
+
+fn clock_deadline() -> Option<Instant> {
+    CLOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .map(|clock| clock.deadline)
+}
+
+pub(crate) fn clock_armed() -> bool {
+    clock_deadline().is_some()
+}
+
+pub(crate) fn error_is_timeout(err: &Error) -> bool {
+    match err {
+        Error::Io(io) => io_is_quiet(io) || io.to_string().contains("the pack did not answer"),
+        _ => false,
+    }
+}
+
 /// Whether every socket listening on the loopback port of `url` belongs to
 /// another user. Unknown is not foreign.
 fn foreign(url: &str) -> bool {
@@ -367,12 +427,40 @@ fn budget_spent() -> std::io::Error {
 }
 
 fn connect_once(addr: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
-    let wait = capped_wait(timeout);
+    let wait = bounded_wait(timeout, true)?;
     let stream = TcpStream::connect_timeout(&addr, wait)?;
-    stream.set_read_timeout(Some(wait))?;
-    stream.set_write_timeout(Some(wait))?;
+    let io_wait = bounded_wait(timeout, false)?;
+    stream.set_read_timeout(Some(io_wait))?;
+    stream.set_write_timeout(Some(io_wait))?;
     let _ = stream.set_nodelay(true);
     Ok(stream)
+}
+
+/// The wait a socket call may use. With a [`PackClock`], a connect is
+/// capped by [`super::pack_connect_budget`] and every call stops at the
+/// clock. Past the clock the call returns before it opens a socket.
+fn bounded_wait(requested: Duration, connect: bool) -> std::io::Result<Duration> {
+    let mut wait = capped_wait(requested);
+    if let Some(deadline) = clock_deadline() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the pack did not answer",
+            ));
+        }
+        wait = wait.min(left);
+        if connect {
+            wait = wait.min(super::pack_connect_budget());
+        }
+        if wait.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the pack did not answer",
+            ));
+        }
+    }
+    Ok(wait)
 }
 
 /// A side-event bound shrinks this wait. A zero bound is one millisecond,
@@ -724,6 +812,11 @@ impl PacksetClient {
         allow: bool,
         timeout: Duration,
     ) -> Result<Answer, Error> {
+        // The proof and the call share this budget. A nested guard keeps
+        // the command's earlier deadline, so a hook stays under 2s and an
+        // interactive command under 5s across every socket of the call.
+        // A restart does not start the budget over.
+        let _budget = PackClock::enter(timeout);
         let slot = slot_for(addr);
         let mut live = slot.lock().unwrap_or_else(|p| p.into_inner());
         let tag = token_tag(call.token);
@@ -837,8 +930,16 @@ impl PacksetClient {
                 Err(err) => {
                     live.stream = None;
                     live.proven = false;
+                    // A silent writer is the answer. Another socket would
+                    // wait the budget out again, and three of those is a
+                    // minute and a half. A closed socket may be tried
+                    // again, inside the same deadline.
+                    if io_is_quiet(&err) {
+                        return Err(Error::Io(err));
+                    }
                     restarts += 1;
-                    if restarts > 2 {
+                    let spent = clock_deadline().is_some_and(|deadline| Instant::now() >= deadline);
+                    if spent || restarts > 2 {
                         return Err(Error::Io(err));
                     }
                     stage = 0;
@@ -878,6 +979,11 @@ impl PacksetClient {
         body: Option<&[u8]>,
         timeout: Duration,
     ) -> Result<Answer, Error> {
+        // One try. A busy or silent writer is the caller's answer, not
+        // a reason to wait and ask again.
+        if clock_armed() {
+            return self.roundtrip(method, path, query, body, true, timeout);
+        }
         let started = Instant::now();
         let mut wait = Duration::from_millis(50);
         for n in 0..4 {
@@ -1071,7 +1177,9 @@ impl PacksetClient {
         if rerank {
             query.push(("rerank", "1"));
         }
-        let timeout = if rerank {
+        // A rerank used to wait at least a minute, past any shorter
+        // budget. A clocked call, and a hook, keep the short budget.
+        let timeout = if rerank && !clock_armed() && std::env::var_os("LJOS_IN_HOOK").is_none() {
             Duration::from_secs(60).max(budget())
         } else {
             budget()
@@ -1145,7 +1253,7 @@ fn send_once(
         .stream
         .as_mut()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotConnected, "no pack socket"))?;
-    let wait = capped_wait(timeout);
+    let wait = bounded_wait(timeout, false)?;
     let deadline = Instant::now() + wait;
     stream.set_read_timeout(Some(wait))?;
     stream.set_write_timeout(Some(wait))?;
