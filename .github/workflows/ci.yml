@@ -160,12 +160,19 @@ jobs:
           command -v deedar
       # The guard tests ask the real ljos-policyd about a shell line, so
       # they run the build a release ships: develop, phronesis linked.
+      # phronesis has no tags; the pin is its main commit, which is 0.2.9.
       - name: Build ljos-policyd from develop with phronesis
         run: |
           set -euo pipefail
           sudo apt-get install -y --no-install-recommends meson ninja-build capnproto pkg-config
-          git clone --depth 1 --branch v0.2.5 https://github.com/leidarljos/phronesis "${{ runner.temp }}/phronesis"
-          cd "${{ runner.temp }}/phronesis"
+          sha=7d115de79407a54e0be5050f95107cfa08fe6277
+          dir="${{ runner.temp }}/phronesis"
+          git init -q "$dir"
+          git -C "$dir" remote add origin https://github.com/leidarljos/phronesis.git
+          git -C "$dir" fetch --depth 1 origin "$sha"
+          git -C "$dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$dir" rev-parse HEAD)" = "$sha"
+          cd "$dir"
           meson setup build --prefix="${{ runner.temp }}/phronesis-prefix" -Dtests=disabled
           meson compile -C build
           meson install -C build
