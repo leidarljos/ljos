@@ -212,7 +212,7 @@ fn basis(atom: &Value) -> Option<&str> {
         .filter(|b| !b.is_empty())
 }
 
-fn release_bin(version: &str) -> PathBuf {
+fn release_bin(version: &str) -> Option<PathBuf> {
     let dir =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../../target/oldljos/{version}"));
     std::fs::create_dir_all(&dir).unwrap();
@@ -220,9 +220,11 @@ fn release_bin(version: &str) -> PathBuf {
     let archive = dir.join(&asset);
     let sum = dir.join(format!("{asset}.sha256"));
     let base = format!("https://github.com/leidarljos/ljos/releases/download/v{version}");
-    if !archive.is_file() || !sum.is_file() {
-        fetch(&format!("{base}/{asset}"), &archive);
-        fetch(&format!("{base}/{asset}.sha256"), &sum);
+    if (!archive.is_file() || !sum.is_file())
+        && (!fetch(&format!("{base}/{asset}"), &archive)
+            || !fetch(&format!("{base}/{asset}.sha256"), &sum))
+    {
+        return None;
     }
     let want = std::fs::read_to_string(&sum).unwrap();
     let want = want.split_whitespace().next().expect("sha256 line");
@@ -235,7 +237,7 @@ fn release_bin(version: &str) -> PathBuf {
     assert_eq!(have, want, "v{version} archive checksum");
     let ljos = find_bin(&dir, "ljos");
     if ljos.is_file() {
-        return ljos;
+        return Some(ljos);
     }
     let status = Command::new("tar")
         .args([
@@ -247,7 +249,7 @@ fn release_bin(version: &str) -> PathBuf {
         .status()
         .unwrap();
     assert!(status.success(), "tar v{version}");
-    find_bin(&dir, "ljos")
+    Some(find_bin(&dir, "ljos"))
 }
 
 fn find_bin(dir: &Path, name: &str) -> PathBuf {
@@ -265,12 +267,15 @@ fn find_bin(dir: &Path, name: &str) -> PathBuf {
     dir.join(name)
 }
 
-fn fetch(url: &str, to: &Path) {
-    let status = Command::new("curl")
+fn fetch(url: &str, to: &Path) -> bool {
+    let ok = Command::new("curl")
         .args(["-fsSL", "-o", &to.display().to_string(), url])
         .status()
-        .expect("curl");
-    assert!(status.success(), "fetch {url}");
+        .is_ok_and(|status| status.success());
+    if !ok {
+        let _ = std::fs::remove_file(to);
+    }
+    ok
 }
 
 /// A parent whose comm is `systemd`, so the child reads as a person at a
@@ -325,7 +330,10 @@ fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
     let new = env!("CARGO_BIN_EXE_ljos");
 
     for version in VERSIONS {
-        let bin = release_bin(version);
+        let Some(bin) = release_bin(version) else {
+            eprintln!("skipped: the v{version} release archive could not be fetched");
+            return;
+        };
         let workspace = format!("v{}", version.replace('.', ""));
         let pref = format!("Keep the {version} notes in one paper file.");
         let lesson = format!("The {version} staging host reboots on its own night.");
@@ -366,7 +374,10 @@ fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
         );
     }
 
-    let old = release_bin("0.29.0");
+    let Some(old) = release_bin("0.29.0") else {
+        eprintln!("skipped: the v0.29.0 release archive could not be fetched");
+        return;
+    };
     let runner = seat
         .command(&old.display().to_string(), &["remember", RUNNER_LESSON])
         .env("PACKSET_WORKSPACE", "held")
@@ -375,7 +386,10 @@ fn terminal_writes_before_v0_30_are_promoted_and_a_held_lesson_is_listed() {
         .unwrap();
     succeeded(&runner, "v0.29 runner remember");
 
-    let current = release_bin("0.32.1");
+    let Some(current) = release_bin("0.32.1") else {
+        eprintln!("skipped: the v0.32.1 release archive could not be fetched");
+        return;
+    };
     let agent = seat
         .command(&current.display().to_string(), &["remember", AGENT_LESSON])
         .env("PACKSET_WORKSPACE", "held")
