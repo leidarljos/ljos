@@ -525,10 +525,7 @@ Body.\n\n\
     #[test]
     fn the_project_is_the_text_before_the_last_dash() {
         assert_eq!(project_of("ebstack-vdjv"), Some("ebstack"));
-        assert_eq!(
-            project_of("example-project-w3bv"),
-            Some("example-project")
-        );
+        assert_eq!(project_of("example-project-w3bv"), Some("example-project"));
         assert_eq!(
             project_of("example/code-quality-ffzl"),
             Some("example/code-quality")

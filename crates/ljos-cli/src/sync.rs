@@ -8949,7 +8949,8 @@ mod tests {
             format!("name = \"example-host\"\nrecipients = [\"{public}\"]\n"),
         )
         .unwrap();
-        let [log_rel, digest_rel] = host_log_rels_for_scope(&host(), "example-host", "example-host");
+        let [log_rel, digest_rel] =
+            host_log_rels_for_scope(&host(), "example-host", "example-host");
         std::fs::write(root.join(&log_rel), "ours\n").unwrap();
         std::fs::write(root.join(&digest_rel), "ours\n").unwrap();
         let current = root.join(".merge_file_probe");
@@ -9155,9 +9156,10 @@ mod tests {
         let _env = begin(dir.path());
         let fix = Growth::new(dir.path());
         let mut atoms: Vec<Value> = (0..200).map(note).collect();
-        let [log_rel, digest_rel] = host_log_rels_for_scope(&host(), "example-host", "example-host");
-        let plain =
-            log_header(&host(), "example-host") + &log_lines(&atoms, "example-host", "example-host", false);
+        let [log_rel, digest_rel] =
+            host_log_rels_for_scope(&host(), "example-host", "example-host");
+        let plain = log_header(&host(), "example-host")
+            + &log_lines(&atoms, "example-host", "example-host", false);
         let sealed = seal_bytes(&plain, std::slice::from_ref(&fix.public)).unwrap();
         write_beneath(&fix.root, &log_rel, &sealed).unwrap();
         let older = format!(
@@ -10348,10 +10350,14 @@ mod tests {
         let atoms = vec![atom("a", "kept", &[])];
         let root = dir.path().join("repo");
         std::fs::create_dir_all(&root).unwrap();
-        let [log_rel, digest_rel] = host_log_rels_for_scope(&host(), "example-host", "example-host");
+        let [log_rel, digest_rel] =
+            host_log_rels_for_scope(&host(), "example-host", "example-host");
         let run = || with_fake_age(dir.path(), || export(&root, &scope, &atoms)).unwrap();
         let said = run();
-        assert!(said.contains("sync: exported 1 example-host atoms"), "{said}");
+        assert!(
+            said.contains("sync: exported 1 example-host atoms"),
+            "{said}"
+        );
         let sealed = std::fs::read(root.join(&log_rel)).unwrap();
         let said = run();
         assert!(said.contains("unchanged since the last export"), "{said}");
@@ -10366,7 +10372,10 @@ mod tests {
         let older = format!("{} {}\n", crate::work_id(&plain), crate::work_id("age1box"));
         std::fs::write(root.join(&digest_rel), older).unwrap();
         let said = run();
-        assert!(said.contains("sync: exported 1 example-host atoms"), "{said}");
+        assert!(
+            said.contains("sync: exported 1 example-host atoms"),
+            "{said}"
+        );
         let said = run();
         assert!(said.contains("unchanged since the last export"), "{said}");
     }

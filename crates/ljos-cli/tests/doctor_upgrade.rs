@@ -467,7 +467,11 @@ _ljos_guard=\"${XDG_DATA_HOME:-$HOME/.local/share}/ljos/guard-bin\"\n";
         "{got}"
     );
     assert!(!got.contains("LJOS_OLD_MARKER"), "{got}");
-    let syntax = Command::new("sh").arg("-n").arg(&host_env).output().unwrap();
+    let syntax = Command::new("sh")
+        .arg("-n")
+        .arg(&host_env)
+        .output()
+        .unwrap();
     assert!(
         syntax.status.success(),
         "{}",

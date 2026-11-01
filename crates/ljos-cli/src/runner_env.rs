@@ -358,7 +358,9 @@ mod tests {
             .detail
             .contains("would write"));
         assert!(!path.exists() && !mark_path(&path).exists());
-        assert!(install(&path, "example_host", false).detail.contains("wrote"));
+        assert!(install(&path, "example_host", false)
+            .detail
+            .contains("wrote"));
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text, crate::seat_env_text("example_host"));
         assert_eq!(std::fs::read_to_string(mark_path(&path)).unwrap(), text);

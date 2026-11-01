@@ -5398,7 +5398,7 @@ pub(crate) fn is_raw_subagent_name(name: &str) -> bool {
     }
     let (body, _) = split_claim_scope(name);
     let head = body.split('@').next().unwrap_or(body).trim();
-    head.starts_with("sand-sub") || canonical_seat_name(name) == "example_host-sand-sub"
+    head.starts_with("sand-sub") || canonical_seat_name(name) == "example-host-sand-sub"
 }
 
 /// The seat to put in the environment for `name`. A display name whose
@@ -43751,9 +43751,13 @@ mod tests {
         let name = name_from_argv(&[line.to_string()]).unwrap();
         assert_eq!(name, "example-host");
         // Split argv the same: flags never reach the name.
-        let split: Vec<String> = ["/opt/example host/example-host", "--type=gpu-process", "--x=/a/b"]
-            .map(String::from)
-            .to_vec();
+        let split: Vec<String> = [
+            "/opt/example host/example-host",
+            "--type=gpu-process",
+            "--x=/a/b",
+        ]
+        .map(String::from)
+        .to_vec();
         assert_eq!(name_from_argv(&split).as_deref(), Some("example-host"));
         // Whatever the name, the seat stays a word.
         let long = "a".repeat(20) + "-" + &"b".repeat(20) + "-" + &"c".repeat(300);
@@ -47557,7 +47561,9 @@ mod tests {
             "disk-saver:proj-aaaa"
         );
         assert_eq!(claim_holder("runner").unwrap(), "runner");
-        let err = claim_holder("example-host-sand-sub").unwrap_err().to_string();
+        let err = claim_holder("example-host-sand-sub")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("no seat of its own"), "{err}");
         let err = claim_holder("sand-subagent-001").unwrap_err().to_string();
         assert!(err.contains("no seat of its own"), "{err}");
@@ -50928,15 +50934,11 @@ mod tests {
         };
         let said =
             super::not_assignee_message("demo-dlnj", "seat-bravo:demo-dlnj", Some(&hold), None);
-        assert!(
-            said.contains("held by seat-alfa (seat example"),
-            "{said}"
-        );
+        assert!(said.contains("held by seat-alfa (seat example"), "{said}");
         assert!(said.contains("not by seat-bravo,"), "{said}");
         assert!(said.contains("`--assignee seat-alfa`"), "{said}");
         assert!(said.contains("LJOS_SESSION_ID"), "{said}");
-        let said =
-            super::not_assignee_message("demo-dlnj", "seat-bravo", None, Some("seat-alfa"));
+        let said = super::not_assignee_message("demo-dlnj", "seat-bravo", None, Some("seat-alfa"));
         assert!(said.contains("`--assignee seat-alfa`"), "{said}");
         let said = super::not_assignee_message("demo-dlnj", "seat-bravo", None, None);
         assert!(said.contains("--assignee NAME"), "{said}");
@@ -51048,7 +51050,8 @@ mod tests {
         };
         let file = dir.join("harnesses.toml");
         let skills = dir.join("given");
-        let dry = super::onboard_in_at(&file, "example-host", true, Some(&skills), Some(place)).unwrap();
+        let dry =
+            super::onboard_in_at(&file, "example-host", true, Some(&skills), Some(place)).unwrap();
         assert!(dry.iter().all(|s| s.ok), "{dry:?}");
         assert!(dry
             .iter()
@@ -51060,7 +51063,10 @@ mod tests {
             .iter()
             .all(|s| s.what != "hook" && !s.what.contains("mcp")));
         assert!(!skills.exists(), "a dry run wrote the skill");
-        assert!(!dir.join("example-host.env").exists(), "a dry run wrote the env");
+        assert!(
+            !dir.join("example-host.env").exists(),
+            "a dry run wrote the env"
+        );
 
         let steps =
             super::onboard_in_at(&file, "example-host", false, Some(&skills), Some(place)).unwrap();
@@ -53618,14 +53624,17 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
     fn a_stale_runner_env_is_a_warning_not_a_failure() {
         let stale = super::Habitat {
             name: "runner env",
-            state: "example-host: /h/.config/ljos/example-host.env is stale; ljos doctor --fix".into(),
+            state: "example-host: /h/.config/ljos/example-host.env is stale; ljos doctor --fix"
+                .into(),
             ok: false,
         };
         assert_eq!(super::doctor_word(&stale), "warn");
         assert!(super::healthy(std::slice::from_ref(&stale)));
         let edited = super::Habitat {
             name: "runner env",
-            state: "example-host: /h/.config/ljos/example-host.env was edited by hand; ljos left it".into(),
+            state:
+                "example-host: /h/.config/ljos/example-host.env was edited by hand; ljos left it"
+                    .into(),
             ok: false,
         };
         assert_eq!(super::doctor_word(&edited), "warn");
