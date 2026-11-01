@@ -1,0 +1,146 @@
+# A fresh machine
+
+`ljos cloud up` installs `ljos`, `ljos-mcp`, `ljos-policyd`, and `packsetd` when the release lists it, into `~/.local/bin`, and on a cloud VM the encoder `packset-embed`. It checks the SHA-256 sums, puts that directory first on PATH for this process and in `~/.profile` and `~/.bashrc`, then writes `~/.cursor/mcp.json`. The command is always the absolute path of `ljos-mcp`. A client that spawns servers with its own PATH never reads the edited profile, and it still starts this install. It clones `LJOS_TRACKER_REMOTE`. Run it again and it refreshes the clone and the MCP command, rewrites env-owned wake entries from `LJOS_WAKE_<SEAT>_URL`, and refreshes the scope `cloud` age identity from the named secret.
+
+`sh scripts/install.sh --cloud` is the same bootstrap. When the binaries are already installed and `ljos cloud up` answers, that command is all that runs. `--force` downloads again. From this repository, if the installed `ljos` has no `cloud up`, the script builds this tree's `ljos` and `ljos-mcp` and leaves them in place.
+
+`ljos cloud up` and `install.sh --cloud` ship in v0.33.0. The latest release has both.
+
+## Environment
+
+`LJOS_TRACKER_REMOTE` is the https git URL of the shared tracker. Unset, `cloud up` installs the binaries and does not turn push mode on.
+
+`LJOS_TRACKER_GIT=push` commits each tracker write, fetches, rebases with the per-issue field merge, and pushes. It retries a few times and never forces. A failed push stays committed. The next write and the end of the session try again. `commit` commits and does not fetch or push. `off` skips the commit.
+
+`ljos send` and `ljos reply` in push mode push the sealed log from the detached wake before the wake fires, so the woken seat does not read an empty inbox. The send does not wait on that push. A failed push is a line in the wake log, and the wake still runs.
+
+The wake envelope names the tracker commit that holds the log. A command sees it as `LJOS_WAKE_COMMIT`, and a webhook as `commit` in the JSON. The field is absent when no log commit was made.
+
+The woken seat runs `ljos inbox --sync COMMIT`. That fetches until the remote has the commit, for up to 30 seconds (`LJOS_INBOX_SYNC_WAIT`), or else takes the remote head, imports the sealed logs, and lists. With no remote the flag only lists.
+
+`LJOS_SEAT` is the seat name. `ljos cloud up` appends the run id when one is present, at most 16 characters. On GitHub Actions that id is `GITHUB_RUN_ID`. Otherwise it is `CURSOR_AGENT_ID`, `CLOUD_AGENT_ID`, `AGENT_ID`, `CURSOR_CONVERSATION_ID`, or `CODESPACE_NAME`. `LJOS_SEAT=ridley-ci-a` with run `555001` is the seat `ridley-ci-a-555001`. Unset, the seat is the harness name and that id, or the machine name when there is no id. A seat left in `~/.config/ljos/env` by an earlier boot does not hide a new id.
+
+Each seat signs its ballots and its handovers with `~/.local/share/ljos/seats/SEAT/ballot.key`. `cloud up` points `LJOS_SEAT_KEY` and `DEEDAR_HOST_SIGNING_KEY` at that file, and writes `VISSUE_AGENT` as the same seat. The machine key `~/.config/deedar/host.key` stays where it is. A later process on that machine does not sign a ballot or a handover that already has a signature.
+
+`LJOS_CLOUD_AGE_SECRET` names the environment variable that holds the age identity for scope `cloud`. The value is an identity file as `age-keygen` writes it. `ljos cloud up` writes that identity to `$XDG_CONFIG_HOME/ljos/cloud.age`, or `~/.config/ljos/cloud.age` when `XDG_CONFIG_HOME` is unset, with mode 0600. The file sits beside this machine's own `age.key`. It stays out of the tracker, out of `~/.config/ljos/env`, and out of the harness config. `ljos doctor` reports the file. Sync opens scope `cloud`'s logs with this identity and with the machine key, and every other scope's logs with the machine key alone. With the variable unset, `cloud up` leaves any identity file already written where it is.
+
+`ljos cloud up` also writes `LJOS_WRITE_SCOPE=cloud` into `~/.config/ljos/env` and into the process environment. Memory and lessons written on that machine are tagged `scope:cloud`, so they seal into `<host>+cloud.jsonl.age` when the tracker lists `cloud` under `[scopes]`. `cloud up` does not set `default_scope`. An atom with no `scope:` entity stays on the primary log. A primary scope named `cloud` is refused.
+
+Every cloud VM has the host name `cursor`. Logs named by it would overwrite each other, and each VM would skip the others' logs as its own. So `cloud up` writes `LJOS_SYNC_HOST=<seat>` into the env file and the MCP entry, and the seat names the log instead. A sitting under `LJOS_TRACKER_GIT=push` fetches the tracker and imports every other seat's `+cloud` log this machine's identities open. The box's own logs stay closed to the cloud identity.
+
+`ljos handover --scope cloud` carries memory to a peer without the rest of the store. The bag holds only the atoms tagged `scope:cloud`, in `data/atoms/cloud.jsonl.age`. They are sealed to the `cloud` recipients under `[scopes]` in the tracker's `.ljos/sync.toml`, or to the cloud identity's key when none are listed. No atom is in the bag in plaintext. The plaintext export is made in the runtime directory, outside the bag, and removed before the bag is sealed. When it cannot be removed, the handover stops and sends nothing. The deeds that travel are the ones the satchel needs and the ones those atoms cite. `ljos receive` opens the file with the cloud identity. A machine without it says the atoms stay closed. A scope with no recipients writes no atoms and the handover fails.
+
+`LJOS_TRACKER_DIR` is the clone. The default is `~/.local/share/ljos/tracker`. `LJOS_BIN_DIR` is the binary directory. The default is `~/.local/bin`. `LJOS_RELEASE_DIR` is an offline directory of binaries and a `SHA256SUMS` file, and of the encoder archives with their `.sha256` files. A binary that already matches its sum is left alone. Any other is written beside its target and renamed over it, so the `ljos` running `cloud up` can replace itself. `LJOS_TRACKER_PUSH_WAIT` is how many seconds `ljos doctor` waits before an unpushed commit counts as stuck. The default is 5.
+
+`LJOS_WAKE_<SEAT>_URL` is the webhook that wakes a seat when mail from this machine reaches it. A wake fires on the sender's machine, so a VM that writes to a box seat needs one. `cloud up` writes each into `~/.config/ljos/wake.toml` with `key_env = "LJOS_WAKE_<SEAT>_KEY"` and `source = "env"`, so the bearer key is read from that variable when the wake fires and is never written to disk. `LJOS_WAKE_INKY_URL` and `LJOS_WAKE_INKY_KEY` wake the seat `inky`, and `LJOS_WAKE_EXAMPLE_HOST_URL` wakes `example-host`. The URL has to be https, or http when the host is exactly localhost, an IPv4 loopback address, or ::1. Pass both as secrets, so neither is in `environment.json`. Each run writes the `source = "env"` entries again. A wake without that source stays, and the line says so. Two variables that name one seat are refused, and the line names both. Other seats' wakes stay.
+
+`ljos doctor` warns while the tracker has commits the remote lacks. A harness MCP command that will not run on this machine fails the `mcp` row. On a cloud VM, a codespace, or CI the row says to run `ljos cloud up`. Anywhere else it names `ljos onboard --harness` for that file, including Cursor's `mcp.json`. A desktop Cursor terminal sets `CURSOR_AGENT=1` and is not a cloud VM. CI counts by value: `GITHUB_ACTIONS=true`, `GITLAB_CI=true`, `CI=true`, `BUILDKITE=true`, `TF_BUILD=True`, `CIRCLECI=true`, or a `JENKINS_URL`. `false` is not a job. The row reads every harness file ljos writes.
+
+A `STARTED` claim this machine made, whose process is gone and that is older than the lease (`LJOS_LEASE_SECS`, default 900 seconds), goes back to `TODO` when a sitting runs under `LJOS_TRACKER_GIT=push`. `ljos cloud up` does the same for its own seat's claims only. The release is pushed with the other tracker writes. A claim is this machine's when a hold record here names it. A claim another machine or seat holds has no record here and stays, however old it is. A claim this machine still holds is kept. The hold is the nearest program above the command that is not a shell, and it keeps only the issue it names, for as long as that program is still running. `ljos claim` commits and pushes that issue the same way a note does.
+
+## The encoder
+
+`packset-embed` gives a VM dense search and bulk encoding. The release workflow builds the Open Neural Network Exchange (ONNX) Runtime 1.28.3 from source with telemetry off and Debian's protoc, links `packset-embed` 0.16.0 to it with the rpath `$ORIGIN/../lib/onnxruntime`, and attaches `onnxruntime-TARGET.tar.gz` and `packset-embed-TARGET.tar.gz`, each with a `.sha256` beside it. Nothing comes from cdn.pyke.io. x86_64 Linux is the one target built.
+
+`cloud up` fetches both archives from the release of its own version and checks both sums before it unpacks either. A sum that does not match installs nothing and stops `cloud up`. The runtime goes to `~/.local/lib/onnxruntime`, beside the binary directory. A release without the archives leaves search lexical.
+
+A cloud VM is a run with `CURSOR_AGENT_ID` or `CLOUD_AGENT_ID` set, or a machine with `/run/cursor/api.sock`. A CI job is not one, including GitHub Actions. Anywhere else `cloud up` downloads no encoder and installs none. `sh scripts/install.sh --cloud` sets `WITH_EMBED=0` and does not build `packset-embed`. Search stays lexical.
+
+## A job step
+
+A GitHub Actions job, including a self-hosted ephemeral runner, uses the same bootstrap as a cloud runner. The job environment sets the stable seat name and the tracker URL. `GITHUB_RUN_ID` is already set. After `cloud up`, `~/.config/ljos/env` holds the suffixed seat. `vissue` reads the process environment, so that file is sourced before the vote. `ljos note` signs the ballot this seat cast and pushes the issue.
+
+```yaml
+- name: Seat on the shared tracker
+  env:
+    LJOS_SEAT: ridley-ci-a
+    LJOS_TRACKER_REMOTE: ${{ secrets.LJOS_TRACKER_REMOTE }}
+  run: |
+    curl -fsSL -o /tmp/ljos-install.sh https://github.com/leidarljos/ljos/releases/latest/download/install.sh
+    sh /tmp/ljos-install.sh --cloud
+    set -a
+    . "$HOME/.config/ljos/env"
+    set +a
+    vissue vote ISSUE --for ship --confidence 0.8 --used none
+    ljos note ISSUE "the job result"
+```
+
+The step fetches the latest release's script. v0.33.0 and later take `--cloud`. On this repository the install line is `sh scripts/install.sh --cloud`. The tracker URL stays in the job environment. The runner's git credentials have to be able to clone it.
+
+## Cloud runner environment
+
+`install` runs once, on the image build. `start` runs on every boot. The harness can sync an MCP config from another machine over the file `install` wrote, and the tracker clone has to be fetched again, so `start` runs `ljos cloud up` as well. Nothing waits on `start`.
+
+The harness can list the plugin's tools before `install` or `start` has run. It starts `bin/ljos-plugin` with only `HOME`, `PATH`, `SHELL`, `TERM`, `USER` and `LOGNAME` set. The launcher looks on PATH, then in `~/.local/bin` and `~/.cargo/bin`. On a cloud VM it then fetches `ljos` and `ljos-mcp` from the release that matches the plugin's version. It checks the tarball's SHA-256 before it installs anything into `~/.local/bin`. A second launcher waits for the first to finish. A lock whose launcher died, or that names no pid, is taken over at once. A binary that cannot be moved into place stops the install, and the launcher says which one. `LJOS_PLUGIN_FETCH=0` turns the fetch off, and `LJOS_PLUGIN_FETCH=1` turns it on away from a cloud VM. `LJOS_RELEASE_DIR` reads the tarball from a directory instead of GitHub. `LJOS_BIN_DIR` moves the install.
+
+This repository:
+
+```json
+{
+  "name": "ljos",
+  "install": "sh scripts/install.sh --cloud",
+  "start": "\"$HOME/.local/bin/ljos\" cloud up"
+}
+```
+
+Another repository:
+
+```json
+{
+  "name": "ljos",
+  "install": "curl -fsSL -o /tmp/ljos-install.sh https://github.com/leidarljos/ljos/releases/latest/download/install.sh && sh /tmp/ljos-install.sh --cloud",
+  "start": "\"$HOME/.local/bin/ljos\" cloud up"
+}
+```
+
+Set `LJOS_TRACKER_REMOTE` in the environment. The tracker repository has to be one the git credentials on the machine can clone. The URL stays out of `environment.json`.
+
+The machine's own git token often reaches only the workspace repository. Set `LJOS_TRACKER_TOKEN` to a token that can push to the tracker. `cloud up` keeps it in `~/.config/ljos/tracker.token`, mode 0600. The clone fetches and pushes through `https://x-access-token@HOST/PATH`, and its only credential helper reads that file. Without `LJOS_TRACKER_TOKEN`, a password in the lending checkout's origin URL is the token. That holds whether the URL carries it or a global rewrite adds it to the same repository. The clone stores the URL without the password. The clone itself runs with no global `insteadOf` rewrite and no global credential helper, so no other token reaches the tracker host. A rule written for exactly the clone's URL that adds a password stops the clone, and the line says to remove it. Writing a new token to the file is enough, and the next push uses it.
+
+Without `LJOS_TRACKER_REMOTE`, the clone an earlier boot made names the remote. Failing that, a checkout of a tracker in `/workspace` or directly inside it does. A tracker checkout holds `vissue.toml` or a `Software/<project>/issues.org`. A checkout whose origin is the named remote lends its fetch URL, so the clone gets the credentials the environment gave it. `LJOS_TRACKER_SEARCH` replaces `/workspace` with a list of directories.
+
+A clone that fails does not stop `cloud up`. The line names the remote without its token and says what to set. The machine then runs with no shared tracker, and the MCP entry does not claim push mode. Set `LJOS_CLOUD_AGE_SECRET` to the name of the secret that holds the age identity for scope `cloud`. The identity stays out of `environment.json` too.
+
+`cloud up` rewrites the harness MCP command to the absolute path of this install, whatever PATH the client has. A claim, a note and a vote then push to the tracker, and another clone sees them after a fetch. A `STARTED` claim this seat made on this machine whose program has exited returns to `TODO` after `LJOS_LEASE_SECS`. A claim whose program is still running stays, and so does every claim another machine holds. A hold record with no issue line keeps its seat's claims while its program runs, and releases none of them once it exits. The tracker URL has to be one the machine's git credentials can clone.
+
+## Deeds
+
+A cloud seat's finish exports the deeds that seat cited on the issue into `.ljos/deeds/<seat>/`. The bag carries the deed, the inclusion receipt, the file bytes and any supersedes link. The tracker commit takes the bag, so a fetch brings it to the box. A machine that never ran `ljos cloud up` writes no bag on finish.
+
+## Slots
+
+A run's seat is new, and the tracker pins its key the first time it signs. Any writer with push to the tracker can pin a name that way, and can set the author date on that commit, so the date is not what decides. A seat stands when its key was pinned in this tracker before slots began: the pin is in the parents of the commit that brought the first slot note, by commit order. Until a slot is committed, every committed pin stands. A name does not stand by itself on a git tracker: the first writer to sign as a name the tracker has not pinned pins it, so a name pinned after the first slot is a run seat like any other. A standing seat needs no slot and may sign one. Any other seat's ballot is left out of a push cite, and named, unless it is under a slot. The seat that launches a cloud runner or a job writes one on the issue it hands over, before the run's first ballot:
+
+```sh
+ljos slot ISSUE ridley-review --model grok-4 --run "$AGENT_ID" --key "$RUN_KEY"
+```
+
+`ridley-review` is the run's `LJOS_SEAT`, and the run id is appended the way `cloud up` appends it. A seat already ending in that suffix is refused, because `ridley-review` on that run boots as the same seat. `RUN_KEY` is the public key on the `seat key:` line `cloud up` prints on the run: the run mints its key on its own machine, and only ballots under that key count for it. A writer that pins the run's seat first under another key does not vote as the run. The slot is signed under the launcher's pinned key, and the launcher has to be a standing seat. The push gate counts a ballot the run casts as its own seat on that issue when the slot verifies and that issue's own entry already held the line in the commit that introduced the run seat's pin, and the push cite line `ljos consensus` prints reads it the same way. A copy of the line on another issue does not count, and an author date is not read. The slot also signs the tracker's root commits, so a copy on an issue with the same id on another tracker does not verify there. The push gate reads the seat ballots `ljos consensus` counts. Ballots that share a session id or a parent count as one voice, and consensus names the ballots it folded. A ballot cast `--as` a persona is a persona ballot, and the push gate leaves it out before any slot is read. Any other persona name is signed with its own key. A standing seat, the person, or a name opening with the persona mark is the caster's ballot and uses the caster's key. Settling reads no slot, and counts either ballot with or without one. A standing seat needs no slot. A tracker that is not a git repository keeps no order to read, so there the names on a list in ljos stand: `disk-saver`, `inky`, and `ljosbot`. One line per seat comes from `.ljos-seat-keys`. A second line for a seat refuses the pin file, so appending a line does not re-pin a seat. A pin the tracker once committed stays: a pin file that has changed or dropped one refuses every push cite until the line is back.
+
+## A panel
+
+`ljos panel ISSUE --cloud` writes one prompt file per persona under `--out` (default `panel`). Start one cloud seat from each file. The file sets `LJOS_SEAT` and `VISSUE_AGENT` to the persona's slug and `LJOS_TRACKER_GIT=push`, then says to run `ljos cloud up`, which appends the run id and mints the key. It says to load `~/.config/ljos/env` and cast the ballot `--as "$LJOS_SEAT"`, not `--as` the persona, so the ballot is the run seat's and the push gate reads its slot. The slot line is `slot: SEAT model=FAMILY`. Families rotate grok, opus, codex in persona name order. The launcher signs `slot: SEAT model=FAMILY run=RUN` when the run id exists; this command records the line and does not sign it. The file also states the push rules: only the seat's named branches and develop, no ref under `cursor/`, no `gh pr create`, no `gh pr merge`, no force-push, no deleting a ref. It says the shell guard filters a command as it is written and does not see inside a script, that the pre-push hook stops a git push, that `--no-verify` inside a script skips that hook, that git send-pack does not run it, and that a program that calls the GitHub API with the token needs a server-side ruleset. The brief is `ljos brief NAME ISSUE` on the seat after `cloud up`. The prompt file does not carry the pack. The tracker URL stays in the launcher's environment.
+
+## The cloud guard
+
+`ljos cloud up` installs two checks, and they do not see the same things.
+
+The shell guard is a filter on commands as written. It holds one push rule. A `git push` may update `develop` and the branches named in the seat's `ljos.toml`, and it may not force a push or delete a ref. The source side of a refspec, a remote URL, an option's value and the body of a comment are never what is refused. Opening or merging a pull request is not refused. `gh`, `curl`, `wget` and HTTPie are not read, so a ref write through the GitHub API is left to the server. `git push origin develop` is allowed at the shell even when the remote is another repository. The branch name is all that line shows. A `git send-pack` written on the line is judged by its refs. A send-pack started inside a script is not read.
+
+The pre-push hook is the git backstop for a `git push` that does not pass `--no-verify`. Git runs the hook `cloud up` installs for that push, including when a script, `make`, `npm`, or another program starts it, and passes the remote URL after `insteadOf` and the refs. The allowlist is the repository and the branch. This seat may fast-forward `develop` and the branches named in its `ljos.toml` on the repository `cloud up` recorded, and any branch of the tracker. A tag, a delete, a push that is not a fast-forward, and `develop` on any other repository are refused. A commit whose message has a by-trailer, a made-with line, a generated line, or a machine account mark is refused too, and so is a push whose commits cannot be read. A Tests or note paragraph is still allowed. A new branch is checked only for commits the remotes do not already have. The shell guard refuses `--no-verify` on a line it can see, a `-c` or `--config core.hooksPath`, the `GIT_CONFIG_*` variables that set that key, and a write to the hook or to a gitconfig. It does not read `./ship.sh`. `--no-verify` inside that script skips the hook. `git send-pack` does not run the hook. dulwich does not run it either. A server-side ruleset is what stops those.
+
+`cloud up` records the seat repository once. A later `cloud up` from another clone does not move that record. It points `core.hooksPath` at the hook when nothing else is booked. When a hooks directory is already booked, it chains a pre-push that runs the previous hook and then this one. A directory that has a commit-msg or prepare-commit-msg hook this install did not write is not chained. Only that level of the hooks path is unset, a path that names this install's own hooks is left in place, and no file in the directory is rewritten. The repository's hooks path then points at the installed hook directory. A repository whose own `core.hooksPath` names some other directory does not run the global hook. `ljos doctor` fails that row unless the effective hook is the installed script or a chain to it, and it fails a hooks path that has a commit hook this install did not write. The push that shares user rules runs the installed script from that directory and no other hook, whatever `core.hooksPath` names. The hook reads its allowlist from its own path. The pusher's `HOME`, `XDG_CONFIG_HOME`, and `PATH` are not where that file comes from.
+
+A program that calls the GitHub API with the token is out of reach of both checks. The shell guard never sees it, and the pre-push hook only runs for git. Stopping that takes a server-side ruleset.
+
+## The sitting gate
+
+An agent's history is booked on a ticket. Under an agent runner, `git commit`, `merge`, `rebase`, `cherry-pick`, `revert`, `am`, `pull` and `push` need a sitting: a live claim this seat took on an open ticket. When this conversation holds none, ljos names the sitting already open or opens one. The command is not refused. The person at their own terminal is not gated.
+
+A push onto `develop` or `main` from the shell asks when the sitting's ticket has no settled consensus. It asks. It does not deny. One active seat settles on its own vote. Two or more seats use the quorum. `ljos consensus ID --no-file` prints a `protected push:` line saying whether the seats clear it. A force, a delete and a mirror push are left to the other rules. A push onto this seat's topic branch needs only the sitting.
+
+`quorum` (2 unless set) and `consensus_branches` (`["develop", "main"]` unless set) go under `[gates]` or at the top of `~/.config/ljos/ljos.toml` or the seat's `~/.config/ljos/seats/SEAT/ljos.toml`. The repository's `ljos.toml`, `LJOS_CONFIG` and `.ljos/gates.toml` only raise the quorum and add branches, since a runner can write them. A quorum below 1, or a key of the wrong kind, makes a protected push ask until the file is fixed.
+
+The guard reads only the lines a runner types. `ljos git-hooks install` adds `pre-commit` and `pre-push` hooks for the commits and pushes a script makes. The `pre-commit` hook books the sitting and never refuses. The `pre-push` hook is stricter. It refuses a push onto a protected branch until the ticket's seats clear it, and it refuses one when the settings do not read. One listed seat clears it with its own vote. With two or more, the seats that clear it must run two model families. A store and a tracker checkout are not gated. `--no-verify` skips these hooks as it skips any other.
+
+`ljos doctor` prints a `sitting gate` row. Under a runner it is `ok` and names the seat, the sitting it found and the quorum, or `warn` when the settings do not read. On the person's machine it is `info` and fails nothing.

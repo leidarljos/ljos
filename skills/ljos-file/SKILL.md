@@ -1,0 +1,30 @@
+---
+name: ljos-file
+description: File a ticket on the vissue tracker and note progress on it. Use on found work that is not part of the current task, when the person asks to file or track something, or before starting work that has no ticket.
+---
+
+# File work on the tracker
+
+The tracker is vissue: plain Org files in a git repository, read by the
+person and by every agent on this machine. Each tracker verb takes a ticket id.
+
+- A new tracker ticket: `ljos file "One-line title" --top -p PROJECT` prints
+  the new id. `--parent ID` in place of `--top -p` puts it under an existing
+  ticket, in that ticket's project, and `-t bug` (or `task`, `decision`)
+  types it.
+- Mid-sitting, `ljos file "TITLE" -t bug` files a child of the held issue.
+  A bug in a tool (ljos, vissue, deedar) goes to the tool's project with
+  `-p PROJECT`; another project than the held issue's files at its top.
+- Note progress: `ljos note ISSUE "..."` (dated, committed).
+- A longer report is a longer note. Tags go on when filed: `--tags`.
+- Who has claimed what: `ljos claims`.
+- What is ready to work on: `ljos ready -p PROJECT` (the same list as
+  `vissue ready`). A ticket waiting on an open ticket is left out.
+  `ljos block ISSUE --on OTHER` records that wait, and `--off OTHER` drops
+  it. `ljos show ISSUE` names the blockers. A loop is refused.
+
+A ticket title says what is wrong or what is wanted, in one line a stranger can read:
+"Login fails when the password has a colon", not "auth bug".
+
+A ticket title is also the first thing the next agent reads, so write it
+before the work. Every piece of work has a ticket before it has a claim. Do not fix found work on the side: file it, and say so.

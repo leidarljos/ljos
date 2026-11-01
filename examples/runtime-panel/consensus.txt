@@ -1,0 +1,61 @@
+{
+  "options": [
+    "status-quo",
+    "tool-adapters"
+  ],
+  "shares": [
+    0.321428571646407,
+    0.6785714283535931
+  ],
+  "rounds": 24,
+  "settled": true,
+  "residual": 0.0,
+  "engine": "degroot-fj",
+  "polarization": 0.7463775511038646,
+  "disagreement": 1.4927551022077294
+}
+seat-tvpg: 5 ballots over 2 options, trust default (equal weight)
+  count
+    tool-adapters            3 (maintainer, integrator, reliability)
+    status-quo               2 (newcomer, perfengineer)
+  anchored after 28 round(s)
+    integrator               tool-adapters 0.873 susceptibility 0.50
+    maintainer               tool-adapters 0.955 susceptibility 0.20
+    newcomer                 status-quo 0.521 susceptibility 0.80
+    perfengineer             status-quo 0.858 susceptibility 0.30
+    reliability              tool-adapters 0.903 susceptibility 0.40
+  spread 0.814: what the group keeps disagreeing about after listening
+  mean of those positions
+    tool-adapters            0.670
+    status-quo               0.330
+{
+  "options": [
+    "status-quo",
+    "tool-adapters"
+  ],
+  "actual": [
+    0.4,
+    0.6
+  ],
+  "predicted": [
+    0.308,
+    0.49800000000000005
+  ],
+  "surprise": [
+    0.09200000000000003,
+    0.10199999999999992
+  ],
+  "answer": "tool-adapters",
+  "predictors": 5
+}
+{
+  "alpha": 0.15,
+  "standing": {
+    "cursor": 0.1459854014598811,
+    "integrator": 0.17080291970802372,
+    "maintainer": 0.17080291970802372,
+    "newcomer": 0.17080291970802372,
+    "perfengineer": 0.17080291970802372,
+    "reliability": 0.17080291970802372
+  }
+}

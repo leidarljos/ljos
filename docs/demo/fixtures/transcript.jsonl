@@ -1,0 +1,2 @@
+{"type":"user","message":{"role":"user","content":"Why did the tests clash?"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The root cause was a shared temp directory. Always isolate each test on this box."}]}}

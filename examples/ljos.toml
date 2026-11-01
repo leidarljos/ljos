@@ -1,0 +1,35 @@
+# Identity for the commit gate. This is configuration, not a built-in person.
+# Copy it to one of these, later files overriding earlier ones:
+#
+#   ~/.config/ljos/ljos.toml                         the user, every seat
+#   ~/.config/ljos/seats/$LJOS_SEAT/ljos.toml        one seat on a shared box
+#   ljos.toml                                        this repository
+#   .ljos/gates.toml                                 this repository's gate file
+#
+# `name` and `email` may sit in an [identity] table, as here, or as keys of
+# .ljos/gates.toml. With none of these set, a commit is not checked for who
+# wrote it. A machine trailer is still refused. A plain push always runs.
+# With `test` set, a push whose tip has no passing `ljos evidence record`
+# run carries a warning and still runs.
+#
+# `owners` names the accounts and organisations whose repositories are
+# yours. A push onto a protected branch of any other owner's repository
+# asks. Unset, every repository counts as yours.
+# owners = ["HaoZeke", "leidarljos"]
+
+[identity]
+name = "Rohit Goswami"
+email = "rgoswami@ieee.org"
+
+# The guard may answer a call with another call to run in its place, such
+# as `uv run pytest` for a bare `pytest` under a project that pins its
+# environment. Each swap is said in one line and kept in
+# $XDG_DATA_HOME/ljos/rewrite.jsonl. Set this to false to have this
+# repository's lines run as they were written.
+# rewrite = false
+
+# Commits under these paths are not booked. /tmp, /var/tmp, /dev/shm, the
+# tracker, CLAIMDAG_DIR and the deedar store are always skipped. A reinstall
+# rewrites the hook scripts and leaves this file alone.
+# [git_hooks]
+# skip = ["/srv/mirrors"]

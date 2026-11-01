@@ -1,0 +1,3418 @@
+//! A hook call is judged as the conversation its payload names. Many
+//! conversations of one user share one runtime directory and one
+//! `ljos hookd`, and the hook's own environment may name another of them
+//! or none. The sitting `ljos sitting` opened in a conversation's shell
+//! lets that conversation's history writes through, and no other's.
+#![cfg(target_os = "linux")]
+
+ljos_test_boot::harness!();
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+const ISSUE: &str = "proj-gate";
+const MERGE: &str = "git merge --ff-only FETCH_HEAD";
+const CONV_X: &str = "0199a1b2-c3d4-4e5f-8a6b-00000000000x";
+const CONV_Y: &str = "0199a1b2-c3d4-4e5f-8a6b-00000000000y";
+const CONV_Z: &str = "0199a1b2-c3d4-4e5f-8a6b-00000000000z";
+
+fn script(path: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, body).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn text_of(out: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// One user's box: a stub tracker, a repo that is not the tracker, and
+/// the runtime directory every conversation shares.
+struct Box_ {
+    _dir: tempfile::TempDir,
+    bin: PathBuf,
+    home: PathBuf,
+    run: PathBuf,
+    repo: PathBuf,
+    card: PathBuf,
+}
+
+impl Box_ {
+    fn new() -> Self {
+        let dir = tempfile::Builder::new()
+            .prefix("gi")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let root = dir.path().to_path_buf();
+        let (bin, home, run, repo) = (
+            root.join("bin"),
+            root.join("home"),
+            root.join("run"),
+            root.join("repo"),
+        );
+        let card = root.join("card.json");
+        for d in [&bin, &home, &run, &repo] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        script(
+            &bin.join("claimdag"),
+            "#!/bin/sh\ncase \"$1\" in\n  claim) echo gen=2 ;;\nesac\nexit 0\n",
+        );
+        script(
+            &bin.join("vissue"),
+            &format!(
+                "#!/bin/sh\ncase \"$1\" in\n  show) if [ \"$2\" = {ISSUE} ] && [ -f '{c}' ]; then cat '{c}'; else echo '{{}}'; fi ;;\n  claims) echo '[]' ;;\n  claim) echo claimed ;;\n  *) echo '{{}}' ;;\nesac\nexit 0\n",
+                c = card.display(),
+            ),
+        );
+        let init = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(init.status.success(), "{}", text_of(&init));
+        Self {
+            _dir: dir,
+            bin,
+            home,
+            run,
+            repo,
+            card,
+        }
+    }
+
+    /// `PROGRAM ARGS` with this user's environment and `extra` on top.
+    /// No conversation id unless `extra` names one.
+    fn command(&self, program: &str, args: &[&str], extra: &[(&str, &str)]) -> Command {
+        let mut cmd = Command::new(program);
+        cmd.args(args)
+            .env_clear()
+            .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
+            .env("HOME", &self.home)
+            .env("XDG_CONFIG_HOME", self.home.join(".config"))
+            .env("XDG_STATE_HOME", self.home.join(".local/state"))
+            .env("XDG_DATA_HOME", self.home.join(".local/share"))
+            .env("XDG_RUNTIME_DIR", &self.run)
+            .env("LJOS_SEAT", "inky")
+            .env("LJOS_TRACKER_GIT", "off")
+            .env("PACKSET_URL", "off")
+            .env("CURSOR_AGENT", "1")
+            .envs(extra.iter().copied())
+            .current_dir(&self.repo)
+            .stdin(Stdio::null());
+        cmd
+    }
+
+    /// `ljos ARGS` as a tool call of conversation `conv` runs it.
+    fn shell(&self, conv: &str, args: &[&str]) -> Output {
+        let mut all = vec!["-w", env!("CARGO_BIN_EXE_ljos")];
+        all.extend_from_slice(args);
+        self.command("setsid", &all, &[("CURSOR_CONVERSATION_ID", conv)])
+            .output()
+            .unwrap()
+    }
+
+    /// The `ljos hook` answer to a `preToolUse` of `line` whose
+    /// payload names `payload_conv`, in a hook process with `env`.
+    fn hook(&self, payload_conv: &str, line: &str, env: &[(&str, &str)]) -> String {
+        self.hook_with(&self.payload(Some(payload_conv.into()), line), env)
+    }
+
+    /// A `preToolUse` of `line` whose `conversation_id` is `conv`,
+    /// or that has no such field when `conv` is `None`.
+    fn payload(&self, conv: Option<serde_json::Value>, line: &str) -> String {
+        let mut payload = serde_json::json!({
+            "cursor_version": "2.4.0",
+            "hook_event_name": "preToolUse",
+            "session_id": "cursor-sess-0002bbbb",
+            "cwd": self.repo,
+            "tool_name": "Shell",
+            "tool_input": {"command": line},
+        });
+        if let Some(conv) = conv {
+            payload["conversation_id"] = conv;
+        }
+        payload.to_string()
+    }
+
+    fn hook_with(&self, payload: &str, env: &[(&str, &str)]) -> String {
+        let mut cmd = self.command("setsid", &["-w", env!("CARGO_BIN_EXE_ljos"), "hook"], env);
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.as_bytes())
+            .unwrap();
+        text_of(&child.wait_with_output().unwrap())
+    }
+
+    /// `ljos git-hook pre-push` as conversation `conv`. Empty stdin names
+    /// no protected ref. The sitting check still runs.
+    fn pre_push(&self, conv: &str) -> String {
+        let mut cmd = self.command(
+            "setsid",
+            &["-w", env!("CARGO_BIN_EXE_ljos"), "git-hook", "pre-push"],
+            &[("CURSOR_CONVERSATION_ID", conv), ("LJOS_HOOKD", "off")],
+        );
+        let child = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        text_of(&child.wait_with_output().unwrap())
+    }
+
+    /// Shells a process `runner` starts one after another, as a runner
+    /// starts each of its conversations' tool calls under itself. The
+    /// runner runs with `env`; each step's shell is started with the
+    /// conversation id the step names, or the runner's own. `$LJOS` is the
+    /// binary and `$PAYLOAD` a file holding `payload`. Says what every
+    /// shell said, and the last one's exit status as `EXIT n`.
+    fn under(
+        &self,
+        runner: &Path,
+        env: &[(&str, &str)],
+        payload: &str,
+        steps: &[(Option<&str>, &str)],
+    ) -> String {
+        let file = self.run.join("payload.json");
+        std::fs::write(&file, payload).unwrap();
+        let mut all = vec![("LJOS", env!("CARGO_BIN_EXE_ljos"))];
+        let file = file.display().to_string();
+        all.push(("PAYLOAD", &file));
+        all.extend_from_slice(env);
+        let steps = serde_json::to_string(steps).unwrap();
+        let out = self
+            .command(runner.to_str().unwrap(), &["-c", RUNNER, &steps], &all)
+            .output()
+            .unwrap();
+        text_of(&out)
+    }
+
+    /// `sh -c LINE` started with `env`, as a runner starts one tool call.
+    fn sh(&self, env: &[(&str, &str)], line: &str) -> Output {
+        let mut all = vec![("LJOS", env!("CARGO_BIN_EXE_ljos"))];
+        all.extend_from_slice(env);
+        self.command("sh", &["-c", line], &all).output().unwrap()
+    }
+
+    /// `bash -c LINE` started with `env`, including `SHLVL` as bash sets it.
+    fn bash(&self, env: &[(&str, &str)], line: &str) -> Output {
+        let mut all = vec![("LJOS", env!("CARGO_BIN_EXE_ljos"))];
+        all.extend_from_slice(env);
+        self.command("bash", &["-c", line], &all).output().unwrap()
+    }
+
+    fn card(&self, by: &str) {
+        std::fs::write(
+            &self.card,
+            serde_json::json!({"id": ISSUE, "state": "STARTED", "claimed_by": by}).to_string(),
+        )
+        .unwrap();
+    }
+
+    fn gate_row(&self, conv: &str) -> String {
+        let said = text_of(&self.shell(conv, &["doctor", "--all"]));
+        said.lines()
+            .find(|line| line.contains("\tsitting gate\t"))
+            .unwrap_or_else(|| panic!("no sitting gate row:\n{said}"))
+            .to_string()
+    }
+}
+
+/// `child`'s comm once it has exec'd `want`. `spawn` returns when the
+/// exec's close-on-exec pipe closes, a moment before the kernel renames
+/// the process, so the first read can still give the parent's thread name.
+fn exec_comm(child: &Child, want: &str) -> String {
+    let path = format!("/proc/{}/comm", child.id());
+    for _ in 0..500 {
+        let comm = std::fs::read_to_string(&path).unwrap();
+        if comm.trim() == want {
+            return comm;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    panic!("{path} never named {want}");
+}
+
+/// `ljos hookd` started as conversation `conv` would start it, once its
+/// socket answers. Killed on drop.
+struct Hookd(Child);
+
+impl Hookd {
+    fn start(home: &Box_, conv: &str) -> Self {
+        let child = home
+            .command(
+                env!("CARGO_BIN_EXE_ljos"),
+                &["hookd"],
+                &[("CURSOR_CONVERSATION_ID", conv)],
+            )
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let sock = home.run.join("ljos/hookd.sock");
+        let started = Instant::now();
+        while std::os::unix::net::UnixStream::connect(&sock).is_err() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "hookd never listened on {}",
+                sock.display()
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Self(child)
+    }
+
+    fn still_serves(&mut self) -> bool {
+        self.0.try_wait().unwrap().is_none()
+    }
+}
+
+impl Drop for Hookd {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+const RUNNER: &str = "
+import json, os, subprocess, sys
+rc = 0
+for conv, line in json.loads(sys.argv[1]):
+    env = dict(os.environ)
+    if conv is not None:
+        env['CURSOR_CONVERSATION_ID'] = conv
+    rc = subprocess.call(['sh', '-c', line], env=env)
+print('EXIT', rc)
+";
+
+fn holder(conv: &str) -> String {
+    format!("inky@{}", ljos_cli::session_tag(conv))
+}
+
+fn refused(said: &str, what: &str) {
+    assert!(
+        !said.contains("sitting-gate") || said.contains("settled consensus"),
+        "{what} was refused for lack of a sitting:\n{said}"
+    );
+}
+
+fn drain(home: &Box_) {
+    let out = home
+        .command(env!("CARGO_BIN_EXE_ljos"), &["hook", "--drain"], &[])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "drain: {}", text_of(&out));
+}
+
+fn sits_nowhere(row: &str, what: &str) {
+    assert!(row.contains("holds no live sitting"), "{what}:\n{row}");
+}
+
+fn allowed(said: &str, what: &str) {
+    assert!(
+        !said.contains("sitting-gate"),
+        "{what} was refused:\n{said}"
+    );
+}
+
+fn timed_calls(home: &Box_) -> usize {
+    std::fs::read_to_string(home.run.join("ljos/hook-times.log"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.starts_with("hook "))
+        .count()
+}
+
+#[test]
+fn a_hookd_started_by_one_conversation_judges_each_call_as_its_own() {
+    let home = Box_::new();
+    let mut hookd = Hookd::start(&home, CONV_Y);
+
+    // `ljos sitting` takes the claim this writes once the whole seat
+    // answers; the stub box has no pack, so the claim is taken directly.
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    let row = home.gate_row(CONV_X);
+    assert!(
+        row.contains(&format!("this conversation sits on {ISSUE}")),
+        "{row}"
+    );
+    sits_nowhere(&home.gate_row(CONV_Y), "the doctor of Y");
+
+    allowed(
+        &home.hook(CONV_X, MERGE, &[]),
+        "X's merge, no id in the hook's env",
+    );
+    allowed(
+        &home.hook(CONV_X, MERGE, &[("CURSOR_CONVERSATION_ID", CONV_Y)]),
+        "X's merge, Y's id in the hook's env",
+    );
+    refused(
+        &home.hook(CONV_Y, MERGE, &[("CURSOR_CONVERSATION_ID", CONV_Y)]),
+        "Y's merge",
+    );
+    refused(&home.hook(CONV_Z, MERGE, &[]), "Z's merge");
+    refused(
+        &home.hook(CONV_Z, MERGE, &[("CURSOR_CONVERSATION_ID", CONV_X)]),
+        "Z's merge, X's id in the hook's env",
+    );
+
+    assert!(hookd.still_serves(), "the hookd started by Y went away");
+    assert!(
+        timed_calls(&home) >= 5,
+        "the calls did not go through hookd"
+    );
+}
+
+/// The repro from the gatediag1 diagnosis: a live hold for conversation
+/// A, written by hand, and A's payload in a hook whose environment does
+/// or does not carry A's id.
+#[test]
+fn the_diag_repro_allows_a_without_its_id_in_the_hook_env() {
+    const CONV_A: &str = "cursor-conv-0001aaaa";
+    const CONV_B: &str = "cursor-conv-0009bbbb";
+    let home = Box_::new();
+    home.card(&holder(CONV_A));
+    let mut sleeper = Command::new("sleep").arg("300").spawn().unwrap();
+    let comm = exec_comm(&sleeper, "sleep");
+    std::fs::create_dir_all(home.run.join("ljos")).unwrap();
+    std::fs::write(
+        home.run.join("ljos/hold-live"),
+        format!(
+            "{}\ninky\n{}\n{}\n2026-10-25T00:00:00Z\n{ISSUE}\n-\n",
+            holder(CONV_A),
+            sleeper.id(),
+            comm.trim()
+        ),
+    )
+    .unwrap();
+
+    let row = home.gate_row(CONV_A);
+    assert!(
+        row.contains(&format!("this conversation sits on {ISSUE}")),
+        "{row}"
+    );
+    sits_nowhere(&home.gate_row(CONV_B), "the doctor of B");
+    allowed(
+        &home.hook(CONV_A, MERGE, &[("CURSOR_CONVERSATION_ID", CONV_A)]),
+        "A's merge with A's id in the env",
+    );
+    allowed(
+        &home.hook(CONV_A, MERGE, &[]),
+        "A's merge without an id in the env",
+    );
+    refused(&home.hook(CONV_B, MERGE, &[]), "B's merge");
+
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+}
+
+/// A `conversation_id` that names nobody is refused, whatever id the
+/// hook's own environment carries. A blank string is not such a name:
+/// it is resolved below. A payload without the field still falls back
+/// to the environment.
+#[test]
+fn an_unusable_conversation_id_is_refused_not_read_from_the_env() {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    let env = [("CURSOR_CONVERSATION_ID", CONV_X)];
+    for bad in [
+        serde_json::json!("-"),
+        serde_json::json!(null),
+        serde_json::json!("null"),
+        serde_json::json!("ab"),
+        serde_json::json!(format!("{CONV_X}\n")),
+        serde_json::json!(7),
+    ] {
+        let said = home.hook_with(&home.payload(Some(bad.clone()), MERGE), &env);
+        refused(&said, &format!("a merge whose conversation_id is {bad}"));
+    }
+    allowed(
+        &home.hook_with(&home.payload(None, MERGE), &env),
+        "a merge with no conversation_id, X's id in the env",
+    );
+}
+
+/// A blank `conversation_id` is the id the CLI would read. With that id
+/// in the environment the sitting is found and the book's clock moves.
+/// With no id there, the call is refused as a payload that names nobody.
+#[test]
+fn a_blank_conversation_id_reads_the_env_and_touches_the_book() {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    let x = [("CURSOR_CONVERSATION_ID", CONV_X)];
+    for blank in [serde_json::json!(""), serde_json::json!("   ")] {
+        allowed(
+            &home.hook_with(&home.payload(Some(blank.clone()), MERGE), &x),
+            &format!("a merge whose conversation_id is {blank}, X in the env"),
+        );
+    }
+    let said = home.hook_with(&home.payload(Some("".into()), MERGE), &[]);
+    refused(
+        &said,
+        "a merge whose conversation_id is blank and no id is stamped",
+    );
+    allowed(
+        &home.hook_with(
+            &home.payload(Some("".into()), MERGE),
+            &[
+                ("CURSOR_CONVERSATION_ID", CONV_X),
+                ("CURSOR_AGENT_ID", CONV_Y),
+                ("LJOS_SESSION_ID", CONV_Z),
+            ],
+        ),
+        "blank id, X in CURSOR_CONVERSATION_ID ahead of the agent id and LJOS_SESSION_ID",
+    );
+    refused(
+        &home.hook_with(
+            &home.payload(Some("".into()), MERGE),
+            &[
+                ("CURSOR_AGENT_ID", CONV_Y),
+                ("CURSOR_CONVERSATION_ID", CONV_Z),
+            ],
+        ),
+        "blank id, Z in CURSOR_CONVERSATION_ID, Y only in CURSOR_AGENT_ID",
+    );
+    let said = home.hook_with(
+        &home.payload(Some("".into()), MERGE),
+        &[("CURSOR_AGENT_ID", CONV_X)],
+    );
+    refused(
+        &said,
+        "blank id with only CURSOR_AGENT_ID, which names no session",
+    );
+
+    let y_sat = home
+        .command(
+            "setsid",
+            &["-w", env!("CARGO_BIN_EXE_ljos"), "claim", ISSUE],
+            &[("CODEX_THREAD_ID", CONV_Y)],
+        )
+        .output()
+        .unwrap();
+    assert!(y_sat.status.success(), "claim under Y: {}", text_of(&y_sat));
+    home.card(&holder(CONV_Y));
+    allowed(
+        &home.hook_with(
+            &home.payload(Some("".into()), MERGE),
+            &[
+                ("CODEX_THREAD_ID", CONV_Y),
+                ("CURSOR_CONVERSATION_ID", CONV_X),
+            ],
+        ),
+        "blank id, Y in CODEX_THREAD_ID ahead of X in CURSOR_CONVERSATION_ID",
+    );
+    home.card(&holder(CONV_X));
+    let said = home.hook_with(
+        &home.payload(Some("".into()), MERGE),
+        &[
+            ("CODEX_THREAD_ID", CONV_Y),
+            ("CURSOR_CONVERSATION_ID", CONV_X),
+        ],
+    );
+    assert!(
+        !said.contains("\"permission\":\"deny\""),
+        "blank id names the open sitting instead of refusing:\n{said}"
+    );
+
+    let raw = home
+        .command(
+            "setsid",
+            &["-w", env!("CARGO_BIN_EXE_ljos"), "claim", ISSUE],
+            &[("LJOS_SESSION_ID", CONV_Z)],
+        )
+        .output()
+        .unwrap();
+    assert!(raw.status.success(), "claim under Z: {}", text_of(&raw));
+    home.card(CONV_Z);
+    allowed(
+        &home.hook_with(
+            &home.payload(Some("".into()), MERGE),
+            &[("LJOS_SESSION_ID", CONV_Z)],
+        ),
+        "blank id, Z in LJOS_SESSION_ID alone",
+    );
+
+    home.card(&holder(CONV_X));
+    let touch = |conv: Option<serde_json::Value>, env: &[(&str, &str)]| {
+        let mut payload = serde_json::json!({
+            "cursor_version": "2.4.0",
+            "hook_event_name": "beforeShellExecution",
+            "cwd": home.repo,
+            "command": "true",
+        });
+        if let Some(conv) = conv {
+            payload["conversation_id"] = conv;
+        }
+        home.hook_with(&payload.to_string(), env);
+        drain(&home);
+    };
+    touch(Some(CONV_X.into()), &x);
+    touch(Some("".into()), &x);
+    touch(Some(CONV_X.into()), &x);
+}
+
+/// The box's hook payload names no conversation: every id is empty, the
+/// transcript path is null, and the hook process has no session variable.
+/// A commit is allowed and the book log records the call, and so is a push
+/// onto a topic branch; a push onto `develop` is refused, since no ticket's
+/// seats can clear a call that sits on none. An `rm -rf` outside a temp
+/// directory is still refused. A payload that names a conversation, and a
+/// non-empty id that names nobody, are refused.
+#[test]
+fn a_payload_with_no_conversation_id_skips_the_sitting_check() {
+    let home = Box_::new();
+    let push = "git push origin develop";
+    let topic = "git push origin topic";
+    let blank = |event: &str, line: &str, conv: Option<&str>| {
+        let mut payload = serde_json::json!({
+            "conversation_id": "",
+            "generation_id": "",
+            "session_id": "",
+            "model": "unknown",
+            "transcript_path": null,
+            "user_email": null,
+            "cursor_version": "1.0.0",
+            "cwd": home.repo,
+            "workspace_roots": [home.repo],
+            "tool_use_id": "11111111-2222-3333-4444-555555555555",
+            "hook_event_name": event,
+            "command": line,
+            "tool_name": "Shell",
+            "tool_input": {"command": line},
+        });
+        if let Some(conv) = conv {
+            payload["conversation_id"] = conv.into();
+        }
+        payload.to_string()
+    };
+    let on = [("LJOS_GUARD", "on")];
+    for event in ["preToolUse", "beforeShellExecution"] {
+        let said = home.hook_with(&blank(event, topic, None), &on);
+        allowed(
+            &said,
+            &format!("{event} topic push with no conversation id"),
+        );
+        let said = home.hook_with(&blank(event, MERGE, None), &on);
+        allowed(&said, &format!("{event} merge with no conversation id"));
+        let said = home.hook_with(&blank(event, push, None), &on);
+        assert!(
+            said.contains("sitting-gate") && said.contains("settled consensus"),
+            "{event} develop push with no conversation id:\n{said}"
+        );
+    }
+    let log = std::fs::read_to_string(home.run.join("ljos/book.log")).unwrap_or_default();
+    assert!(
+        log.contains("unattributed"),
+        "the book log did not record the call:\n{log}"
+    );
+    let omitted = serde_json::json!({
+        "cursor_version": "1.0.0",
+        "hook_event_name": "preToolUse",
+        "cwd": home.repo,
+        "tool_name": "Shell",
+        "tool_input": {"command": push},
+    })
+    .to_string();
+    let omitted_said = home.hook_with(&omitted, &on);
+    assert!(
+        omitted_said.contains("sitting-gate") && omitted_said.contains("settled consensus"),
+        "a develop push whose payload omits every id:\n{omitted_said}"
+    );
+    let rm = home.hook_with(&blank("preToolUse", "rm -rf /home/x", None), &on);
+    assert!(
+        rm.contains("rm-rf-outside-tmp") && rm.contains("\"permission\":\"deny\""),
+        "rm -rf was not denied:\n{rm}"
+    );
+    refused(
+        &home.hook_with(&blank("preToolUse", push, Some(CONV_Z)), &on),
+        "a push whose conversation_id is Z and no sitting is open",
+    );
+    let bad = home.hook_with(&blank("preToolUse", push, Some("-")), &on);
+    refused(&bad, "a push whose conversation_id is -");
+}
+
+/// A hook call or shell that names its conversation is not judged as the
+/// holder `LJOS_HOLD` names in the environment.
+#[test]
+fn a_named_call_ignores_ljos_hold_in_the_hook_env() {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    let hold = holder(CONV_X);
+    let env = [("LJOS_HOLD", hold.as_str())];
+    refused(
+        &home.hook(CONV_Z, MERGE, &env),
+        "Z's merge with X's LJOS_HOLD",
+    );
+    let mut z_hold = home.command(
+        "setsid",
+        &[
+            "-w",
+            env!("CARGO_BIN_EXE_ljos"),
+            "policy",
+            "--",
+            "git",
+            "merge",
+            "--ff-only",
+            "FETCH_HEAD",
+        ],
+        &[
+            ("CURSOR_CONVERSATION_ID", CONV_Z),
+            ("LJOS_HOLD", hold.as_str()),
+        ],
+    );
+    let said = text_of(&z_hold.output().unwrap());
+    assert!(!said.contains("deny: sitting-gate"), "{said}");
+    let mut z_gh = home.command(
+        "setsid",
+        &["-w", env!("CARGO_BIN_EXE_ljos"), "git-hook", "pre-commit"],
+        &[
+            ("CURSOR_CONVERSATION_ID", CONV_Z),
+            ("LJOS_HOLD", hold.as_str()),
+        ],
+    );
+    let out = z_gh.output().unwrap();
+    assert!(
+        out.status.success() || !text_of(&out).contains("sitting-gate"),
+        "{}",
+        text_of(&out)
+    );
+}
+
+/// An unbound `ljos hook` call (a `PreToolUse` payload with no
+/// `conversation_id`, as `force_push_sample` runs) honors `LJOS_HOLD`
+/// even when the hook process inherits `CURSOR_AGENT` or
+/// `CURSOR_CONVERSATION_ID` from an outer shell.
+#[test]
+fn an_unbound_hook_call_with_ljos_hold_honors_the_configured_holder() {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    let hold = holder(CONV_X);
+    let unbound = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": MERGE},
+        "cwd": home.repo,
+    })
+    .to_string();
+    allowed(
+        &home.hook_with(
+            &unbound,
+            &[
+                ("LJOS_HOLD", hold.as_str()),
+                ("CURSOR_AGENT", "1"),
+                ("CURSOR_CONVERSATION_ID", CONV_Z),
+            ],
+        ),
+        "unbound PreToolUse hook with LJOS_HOLD=X under outer CURSOR_CONVERSATION_ID=Z",
+    );
+}
+
+/// The gate's conversation comes from `conversation_id` alone. A payload
+/// whose `session_id` or `sessionId` is X's conversation id but that has
+/// no `conversation_id` is judged by the hook's environment, here Y's.
+#[test]
+fn a_session_id_never_names_the_gates_conversation() {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    for key in ["session_id", "sessionId"] {
+        let payload = serde_json::json!({
+            "cursor_version": "2.4.0",
+            "hook_event_name": "preToolUse",
+            key: CONV_X,
+            "cwd": home.repo,
+            "tool_name": "Shell",
+            "tool_input": {"command": MERGE},
+        })
+        .to_string();
+        refused(
+            &home.hook_with(&payload, &[("CURSOR_CONVERSATION_ID", CONV_Y)]),
+            &format!("a merge whose {key} is X's id, Y's id in the env"),
+        );
+    }
+}
+
+/// A subagent has its own conversation id, `sand-sub...`, and no parent
+/// in its payload. The runner starts its tools under the process that
+/// opened the parent's sitting; that process, whose own environment names
+/// X and whose pid X's hold recorded, lets it in, for the shell hook and
+/// the git hook alike. Any other id is judged by its name alone, so Z is
+/// not let in for being a child of X's process. A shared parent that
+/// names no conversation, or a wrapper such as `ljos`, links nobody, so
+/// stranger Z and Z's subagent under that shared parent are refused.
+#[test]
+fn a_subagent_writes_under_its_parents_sitting_and_z_does_not() {
+    const SUB: &str = "sand-subagent-0001cccc";
+    let home = Box_::new();
+    home.card(&holder(CONV_X));
+    let python = PathBuf::from("/usr/bin/python3");
+    let x = [("CURSOR_CONVERSATION_ID", CONV_X)];
+    let claim = format!("\"$LJOS\" claim {ISSUE} >/dev/null 2>&1");
+    let hook = "\"$LJOS\" hook < \"$PAYLOAD\"";
+    let commit = "\"$LJOS\" git-hook pre-commit";
+
+    for (shell, what) in [(CONV_X, "the parent's"), (CONV_Y, "another conversation's")] {
+        let said = home.under(
+            &python,
+            &x,
+            &home.payload(Some(SUB.into()), MERGE),
+            &[(None, &claim), (Some(shell), hook)],
+        );
+        allowed(
+            &said,
+            &format!("the subagent's merge, {what} id in the hook env"),
+        );
+    }
+    let said = home.under(&python, &x, "", &[(None, &claim), (Some(SUB), commit)]);
+    assert!(
+        said.contains("EXIT 0"),
+        "the subagent's commit was refused:\n{said}"
+    );
+    let said = home.under(&python, &x, "", &[(None, &claim), (Some(CONV_Z), commit)]);
+    assert!(
+        said.contains("EXIT 0"),
+        "Z's commit under X's process was refused:\n{said}"
+    );
+    refused(
+        &home.under(
+            &python,
+            &x,
+            &home.payload(Some(CONV_Z.into()), MERGE),
+            &[(None, &claim), (None, hook)],
+        ),
+        "Z's merge under X's process",
+    );
+
+    // Shared id-less parent: X claims in its shell, then Z's subagent and Z
+    // run under the same shared parent and are both refused.
+    refused(
+        &home.under(
+            &python,
+            &[],
+            &home.payload(Some(SUB.into()), MERGE),
+            &[(Some(CONV_X), &claim), (Some(CONV_Z), hook)],
+        ),
+        "Z's subagent merge under a shared parent that names no conversation",
+    );
+    refused(
+        &home.under(
+            &python,
+            &[],
+            &home.payload(Some(CONV_Z.into()), MERGE),
+            &[(Some(CONV_X), &claim), (Some(CONV_Z), hook)],
+        ),
+        "Z's merge under a shared parent that names no conversation",
+    );
+    let said = home.under(
+        &python,
+        &[],
+        "",
+        &[(Some(CONV_X), &claim), (Some(SUB), commit)],
+    );
+    assert!(
+        said.contains("EXIT 0"),
+        "Z's subagent commit under a shared parent was refused:\n{said}"
+    );
+
+    let fake = home.run.join("fake");
+    std::fs::create_dir_all(&fake).unwrap();
+    std::os::unix::fs::symlink(&python, fake.join("ljos")).unwrap();
+    let forge = format!(
+        "mkdir -p \"$XDG_RUNTIME_DIR/ljos\"; printf '%s\\n' '{}' inky \"$PPID\" ljos 2026-10-25T00:00:00Z {ISSUE} - > \"$XDG_RUNTIME_DIR/ljos/hold-fake\"",
+        holder(CONV_X)
+    );
+    let said = home.under(
+        &fake.join("ljos"),
+        &x,
+        &home.payload(Some(SUB.into()), MERGE),
+        &[(None, &forge), (None, hook)],
+    );
+    refused(
+        &said,
+        "a subagent's merge under an ljos process that names X",
+    );
+}
+
+/// A Claude Code hook names its conversation by `session_id` and the
+/// conversation's shells by the stamp in the environment. A subagent's
+/// call carries the parent's `session_id` and an `agent_id`, and passes
+/// on the parent's sitting. A `session_id` that names nobody is refused,
+/// whatever the environment says; a payload with no session key at all
+/// is judged by the environment, as before.
+#[test]
+fn a_claude_subagent_passes_and_a_session_id_that_names_nobody_is_refused() {
+    const P: &str = "claude-sess-0001aaaa";
+    let home = Box_::new();
+    let p = [("CLAUDE_SESSION_ID", P)];
+    let sat = home
+        .command(
+            "setsid",
+            &["-w", env!("CARGO_BIN_EXE_ljos"), "claim", ISSUE],
+            &p,
+        )
+        .output()
+        .unwrap();
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(P));
+    let claude = |session: Option<serde_json::Value>| {
+        let mut payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "agent_id": "agent-0001",
+            "tool_name": "Bash",
+            "tool_input": {"command": MERGE},
+            "cwd": home.repo,
+        });
+        if let Some(session) = session {
+            payload["session_id"] = session;
+        }
+        payload.to_string()
+    };
+    allowed(
+        &home.hook_with(&claude(Some(P.into())), &p),
+        "the Claude subagent's merge",
+    );
+    allowed(
+        &home.hook_with(&claude(None), &p),
+        "a Claude merge with no session key",
+    );
+    for bad in [
+        serde_json::json!(""),
+        serde_json::json!("-"),
+        serde_json::json!(null),
+        serde_json::json!("ab"),
+    ] {
+        refused(
+            &home.hook_with(&claude(Some(bad.clone())), &p),
+            &format!("a Claude merge whose session_id is {bad}"),
+        );
+    }
+
+    // Claude Task subagent when the shell has no session id stamped:
+    // the parent sits under the runner process (comm=python3), and the
+    // subagent's merge passes through ancestry.
+    let home2 = Box_::new();
+    let python = PathBuf::from("/usr/bin/python3");
+    let claim = format!("\"$LJOS\" claim {ISSUE} >/dev/null 2>&1");
+    let hook = "\"$LJOS\" hook < \"$PAYLOAD\"";
+    let sub_payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": P,
+        "agent_id": "agent-0001",
+        "tool_name": "Bash",
+        "tool_input": {"command": MERGE},
+        "cwd": home2.repo,
+    })
+    .to_string();
+    home2.card("inky");
+    let said = home2.under(
+        &python,
+        &[("CLAUDECODE", "1")],
+        &sub_payload,
+        &[(None, &claim), (None, hook)],
+    );
+    allowed(
+        &said,
+        "a Claude Task subagent merge when the shell carries no session id",
+    );
+}
+
+/// The record a hook keeps of a shell call, for the `ljos` line it runs,
+/// is filed under the session the gate and the ballot read the call as:
+/// a call's `conversation_id`, not its `session_id`, and a Claude
+/// call's `session_id` with its `agent_id`.
+#[test]
+fn a_hooks_call_record_is_filed_under_the_calls_conversation() {
+    let home = Box_::new();
+    let calls = home.run.join("ljos/agent-calls/shell");
+    let mut cursor: serde_json::Value =
+        serde_json::from_str(&home.payload(Some(CONV_X.into()), "ljos doctor")).unwrap();
+    cursor["tool_use_id"] = "tu-00000001".into();
+    home.hook_with(&cursor.to_string(), &[]);
+    assert!(calls.join(CONV_X).is_dir(), "no record under X");
+    assert!(
+        !calls.join("cursor-sess-0002bbbb").exists(),
+        "a record under the session_id"
+    );
+
+    const P: &str = "claude-sess-0001aaaa";
+    let claude = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": P,
+        "agent_id": "agent-0001",
+        "tool_use_id": "tu-00000002",
+        "tool_name": "Bash",
+        "tool_input": {"command": "ljos doctor"},
+        "cwd": home.repo,
+    });
+    home.hook_with(&claude.to_string(), &[]);
+    let kept: String = std::fs::read_dir(calls.join(P))
+        .unwrap()
+        .flatten()
+        .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
+        .collect();
+    assert!(kept.contains("agent-0001"), "{kept}");
+}
+
+/// What `ljos seat` says this process holds under.
+fn seat_holder(said: &str) -> String {
+    said.lines()
+        .find_map(|line| line.strip_prefix("holder\t"))
+        .unwrap_or_else(|| panic!("no holder line:\n{said}"))
+        .to_string()
+}
+
+/// A process cannot speak for another conversation by setting a variable
+/// in its own environment, in an inline `bash -c` override, via `exec env`,
+/// or in an intermediate non-shell program that spawns or `os.execve`s
+/// `git commit`. `LJOS_HARNESS_SESSION` names no conversation at all.
+#[test]
+fn a_processs_own_env_does_not_outrank_its_shells_stamp() {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    let hooks = home.run.join("githooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    script(
+        &hooks.join("pre-commit"),
+        "#!/bin/sh\nexec \"$LJOS\" git-hook pre-commit\n",
+    );
+    let commit = format!(
+        "git -c core.hooksPath={} -c user.name=t -c user.email=t@e commit -q --allow-empty -m t",
+        hooks.display()
+    );
+    let x = [("CURSOR_CONVERSATION_ID", CONV_X)];
+    let z = [("CURSOR_CONVERSATION_ID", CONV_Z)];
+
+    let own = text_of(&home.sh(&x, "\"$LJOS\" doctor --all"));
+    assert!(
+        own.contains(&format!("this conversation sits on {ISSUE}")),
+        "{own}"
+    );
+    let own = home.sh(&x, &commit);
+    assert!(own.status.success(), "X's own commit: {}", text_of(&own));
+    let own_bash = home.bash(&x, "\"$LJOS\" git-hook pre-commit");
+    assert!(
+        own_bash.status.success(),
+        "X's bash git-hook: {}",
+        text_of(&own_bash)
+    );
+
+    for forge in [
+        format!("CURSOR_CONVERSATION_ID={CONV_X}"),
+        format!("export CURSOR_CONVERSATION_ID={CONV_X};"),
+        format!("LJOS_HARNESS_SESSION={CONV_X}"),
+        format!("CURSOR_CONVERSATION_ID={CONV_X} LJOS_HARNESS_SESSION={CONV_X}"),
+        "env -u CURSOR_CONVERSATION_ID".to_string(),
+        "CURSOR_CONVERSATION_ID=sand-subagent-0009zzzz".to_string(),
+    ] {
+        // `; exit $?` keeps Z's shell alive under the forged call and passes
+        // its status through. Where /bin/sh is bash, `sh -c 'CMD'` execs a
+        // lone simple command in place, so no process would hold Z's id and
+        // the scenario (a forged id beside a shell that carries the real
+        // one) would not exist. dash forks either way; the trailing builtin
+        // makes every sh behave the same.
+        let kept = |cmd: &str| format!("{forge} {cmd}; exit $?");
+        let said = text_of(&home.sh(&z, &kept("\"$LJOS\" doctor --all")));
+        sits_nowhere(&said, &format!("Z's doctor with {forge}"));
+        let said = text_of(&home.sh(
+            &z,
+            &kept("\"$LJOS\" policy -- git merge --ff-only FETCH_HEAD"),
+        ));
+        assert!(
+            !said.contains("deny: sitting-gate"),
+            "Z's policy with {forge}:\n{said}"
+        );
+        let said = text_of(&home.sh(&z, &kept("\"$LJOS\" seat")));
+        assert_eq!(seat_holder(&said), holder(CONV_Z), "Z's seat with {forge}");
+        let out = home.sh(&z, &kept(&commit));
+        assert!(
+            out.status.success() || !text_of(&out).contains("sitting-gate"),
+            "Z's commit with {forge} was refused for lack of a sitting:\n{}",
+            text_of(&out)
+        );
+        let bash_line = if forge.starts_with("export ") {
+            format!("{forge} \"$LJOS\" git-hook pre-commit; exit $?")
+        } else {
+            format!("{forge} \"$LJOS\" git-hook pre-commit")
+        };
+        let out_bash = home.bash(&z, &bash_line);
+        assert!(
+            out_bash.status.success() || !text_of(&out_bash).contains("sitting-gate"),
+            "Z's bash git-hook with {forge} was refused for lack of a sitting:\n{}",
+            text_of(&out_bash)
+        );
+    }
+
+    let exec_env = home.bash(
+        &z,
+        &format!("exec env CURSOR_CONVERSATION_ID={CONV_X} \"$LJOS\" git-hook pre-commit"),
+    );
+    assert!(
+        exec_env.status.success() || !text_of(&exec_env).contains("sitting-gate"),
+        "Z's bash exec env git-hook was refused:\n{}",
+        text_of(&exec_env)
+    );
+
+    // Intermediate Python wrapper under Z's shell that sets
+    // CURSOR_CONVERSATION_ID=X (or removes it, or sets sand-sub) and calls
+    // ljos git-hook, ljos policy, or git commit (both spawn and os.execve).
+    for py_env in [
+        format!("e['CURSOR_CONVERSATION_ID'] = '{CONV_X}'"),
+        "e.pop('CURSOR_CONVERSATION_ID', None)".to_string(),
+        "e['CURSOR_CONVERSATION_ID'] = 'sand-subagent-0009zzzz'".to_string(),
+    ] {
+        let py_hook = format!(
+            "/usr/bin/python3 -c \"import os, subprocess, sys; e=dict(os.environ); {py_env}; r=subprocess.run([e['LJOS'], 'git-hook', 'pre-commit'], env=e, capture_output=True, text=True); sys.stderr.write(r.stderr); sys.exit(r.returncode)\""
+        );
+        let out = home.sh(&z, &py_hook);
+        assert!(
+            out.status.success() || !text_of(&out).contains("sitting-gate"),
+            "Python wrapper git-hook pre-commit ({py_env}) was refused:\n{}",
+            text_of(&out)
+        );
+
+        let py_pol = format!(
+            "/usr/bin/python3 -c \"import os, subprocess, sys; e=dict(os.environ); {py_env}; r=subprocess.run([e['LJOS'], 'policy', '--', 'git', 'merge', '--ff-only', 'FETCH_HEAD'], env=e, capture_output=True, text=True); sys.stdout.write(r.stdout); sys.exit(r.returncode)\""
+        );
+        let said = text_of(&home.sh(&z, &py_pol));
+        assert!(
+            !said.contains("deny: sitting-gate"),
+            "Python wrapper policy ({py_env}) was refused:\n{said}"
+        );
+
+        let py_commit_spawn = format!(
+            "exec /usr/bin/python3 -c \"import os, subprocess, sys; e=dict(os.environ); {py_env}; r=subprocess.run(['git', '-c', 'core.hooksPath={}', '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-q', '--allow-empty', '-m', 't'], env=e, capture_output=True, text=True); sys.stderr.write(r.stderr); sys.exit(r.returncode)\"",
+            hooks.display()
+        );
+        let out = home.bash(&z, &py_commit_spawn);
+        assert!(
+            out.status.success() || !text_of(&out).contains("sitting-gate"),
+            "Python spawn git commit ({py_env}) was refused:\n{}",
+            text_of(&out)
+        );
+
+        let py_commit_exec = format!(
+            "exec /usr/bin/python3 -c \"import os; e=dict(os.environ); {py_env}; os.execvpe('git', ['git', '-c', 'core.hooksPath={}', '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-q', '--allow-empty', '-m', 't'], e)\"",
+            hooks.display()
+        );
+        let out = home.bash(&z, &py_commit_exec);
+        assert!(
+            out.status.success() || !text_of(&out).contains("sitting-gate"),
+            "Python execve git commit ({py_env}) was refused:\n{}",
+            text_of(&out)
+        );
+    }
+
+    // X's own spawned git commit from Python is allowed.
+    let x_spawn = format!(
+        "exec /usr/bin/python3 -c \"import os, subprocess, sys; e=dict(os.environ); e['CURSOR_CONVERSATION_ID']='{CONV_X}'; r=subprocess.run(['git', '-c', 'core.hooksPath={}', '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-q', '--allow-empty', '-m', 't'], env=e, capture_output=True, text=True); sys.stderr.write(r.stderr); sys.exit(r.returncode)\"",
+        hooks.display()
+    );
+    let out = home.bash(&x, &x_spawn);
+    assert!(
+        out.status.success(),
+        "X's Python spawn git commit was refused:\n{}",
+        text_of(&out)
+    );
+
+    refused(
+        &home.hook_with(
+            &home.payload(Some("".into()), MERGE),
+            &[("LJOS_HARNESS_SESSION", CONV_X)],
+        ),
+        "an empty conversation_id, X in LJOS_HARNESS_SESSION",
+    );
+    refused(
+        &home.hook_with(
+            &home.payload(None, MERGE),
+            &[
+                ("LJOS_HARNESS_SESSION", CONV_X),
+                ("CURSOR_CONVERSATION_ID", CONV_Z),
+            ],
+        ),
+        "no conversation_id, X in LJOS_HARNESS_SESSION, Z's id in the env",
+    );
+}
+
+/// A `hold-*` record forged with another conversation's tag does not pass
+/// when the tracker row carries the real conversation's tag, and a shell
+/// command that redirects into a `hold-*` file in the runtime directory is
+/// refused by the command check.
+#[test]
+fn a_forged_sitting_record_with_another_conversations_tag_is_refused() {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+
+    let write_cmd = format!("printf 'x' > {}/ljos/hold-zz", home.run.display());
+    let shell_payload = serde_json::json!({
+        "cursor_version": "2.4.0",
+        "hook_event_name": "beforeShellExecution",
+        "conversation_id": CONV_Z,
+        "cwd": home.repo,
+        "command": write_cmd,
+    })
+    .to_string();
+    let said = home.hook_with(&shell_payload, &[]);
+    assert!(
+        said.contains("sitting-gate") && said.contains("\"permission\":\"deny\""),
+        "a shell write to a hold-* record under XDG_RUNTIME_DIR/ljos was not refused:\n{said}"
+    );
+
+    let real = std::fs::read_dir(home.run.join("ljos"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("hold-"))
+        })
+        .unwrap();
+    let lines: Vec<String> = std::fs::read_to_string(&real)
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect();
+    let mut forged = lines;
+    forged[0] = holder(CONV_Z);
+    let forged_path = home.run.join("ljos/hold-zz");
+    std::fs::write(&forged_path, forged.join("\n") + "\n").unwrap();
+    let said = home.hook(CONV_Z, MERGE, &[]);
+    assert!(
+        !said.contains("sitting-gate"),
+        "Z's merge names the open sitting instead of refusing:\n{said}"
+    );
+    let _ = std::fs::remove_file(&forged_path);
+}
+
+/// When `ljos-mcp` runs without a conversation id in its environment,
+/// `ljos_sitting` claims as `SEAT@TAG` when `_meta` names the
+/// conversation and as the bare seat when `_meta` does not; in both
+/// cases, the conversation's own merge is allowed and another
+/// conversation's merge is refused.
+#[test]
+fn an_mcp_sitting_covers_the_conversations_merge_with_and_without_meta() {
+    let home = Box_::new();
+    let org_dir = home.run.join("tracker/Software/proj");
+    std::fs::create_dir_all(&org_dir).unwrap();
+    let seed_tracker = || {
+        std::fs::write(
+            org_dir.join("issues.org"),
+            format!(
+                "#+TITLE: proj issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n* TODO [#C] the merge\n:PROPERTIES:\n:ID:         {ISSUE}\n:CREATED:    [2026-10-25 Sun]\n:END:\n"
+            ),
+        )
+        .unwrap();
+    };
+    seed_tracker();
+    let cache = home.home.join(".cache/ljos");
+    std::fs::create_dir_all(&cache).unwrap();
+    for name in [
+        "ljos",
+        "ljos-policyd",
+        "vissue-cli",
+        "vissue-mcp",
+        "deedar-cli",
+        "claimdag-cli",
+        "packset",
+        "packset-embed",
+    ] {
+        std::fs::write(cache.join(format!("crate-{name}")), "99.0.0\n").unwrap();
+    }
+    for name in ["deedar", "packset", "packsetd", "ljos-policyd"] {
+        script(
+            &home.bin.join(name),
+            &format!(
+                "#!/bin/sh\ncase \"$1\" in\n  --version|version) echo '{name} 99.0.0 (phronesis)' ;;\n  *) echo ok ;;\nesac\nexit 0\n"
+            ),
+        );
+    }
+    script(
+        &home.bin.join("claimdag"),
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'claimdag 99.0.0' ;;\n  list) echo '[]' ;;\n  claim) echo gen=2 ;;\n  *) echo ok ;;\nesac\nexit 0\n",
+    );
+    let card_path = home.card.display().to_string();
+    script(
+        &home.bin.join("vissue"),
+        &format!(
+            "#!/usr/bin/env python3\nimport json, os, pathlib, sys\n\
+             card = pathlib.Path({card_path:?})\n\
+             cmd = sys.argv[1] if len(sys.argv) > 1 else ''\n\
+             if cmd == '--version':\n\tprint('vissue 99.0.0')\n\
+             elif cmd == 'vote':\n\tprint('--used --confidence')\n\
+             elif cmd == 'identity':\n\tprint('vissue 99.0.0\\nroot=' + os.environ.get('VISSUE_ROOT','') + '\\nprefix=Software')\n\
+             elif cmd == 'claim':\n\tby = os.environ.get('VISSUE_AGENT', '')\n\tcard.write_text(json.dumps({{'id': {ISSUE:?}, 'state': 'STARTED', 'claimed_by': by}}))\n\tprint('claimed')\n\
+             elif cmd == 'show':\n\tprint(card.read_text() if card.exists() else json.dumps({{'id': {ISSUE:?}, 'title': 'the merge', 'state': 'TODO'}}))\n\
+             elif cmd == 'claims':\n\tprint('[]')\n\
+             else:\n\tprint('{{}}')\n"
+        ),
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let mut buf = [0u8; 2048];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let body =
+                r#"{"atoms":[],"island":[],"fired":0,"live":0,"embedder":{"available":false}}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = std::io::Write::write_all(&mut stream, resp.as_bytes());
+        }
+    });
+    let pack_url = format!("http://{addr}");
+
+    let mcp_call = |meta: Option<serde_json::Value>| -> (serde_json::Value, Child) {
+        let bin_dir = Path::new(env!("CARGO_BIN_EXE_ljos")).parent().unwrap();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
+        cmd.env_clear()
+            .env(
+                "PATH",
+                format!("{}:{}:/usr/bin:/bin", home.bin.display(), bin_dir.display()),
+            )
+            .env("HOME", &home.home)
+            .env("XDG_CONFIG_HOME", home.home.join(".config"))
+            .env("XDG_STATE_HOME", home.home.join(".local/state"))
+            .env("XDG_DATA_HOME", home.home.join(".local/share"))
+            .env("XDG_CACHE_HOME", home.home.join(".cache"))
+            .env("XDG_RUNTIME_DIR", &home.run)
+            .env("VISSUE_ROOT", home.run.join("tracker"))
+            .env("VISSUE_NO_ROUTE", "1")
+            .env("LJOS_SEAT", "inky")
+            .env("LJOS_PROJECT", "proj")
+            .env("LJOS_TRACKER_GIT", "off")
+            .env("PACKSET_URL", &pack_url)
+            .env("PACKSET_WORKSPACE", "seat")
+            .current_dir(&home.repo)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = cmd.spawn().unwrap();
+        let mut params = serde_json::json!({
+            "name": "ljos_sitting",
+            "arguments": {"issue": ISSUE}
+        });
+        if let Some(m) = meta {
+            params["_meta"] = m;
+        }
+        let reqs = [
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "cursor", "version": "2.4.0"}}
+            }),
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": params}),
+        ];
+        {
+            let stdin = child.stdin.as_mut().unwrap();
+            for r in &reqs {
+                writeln!(stdin, "{r}").unwrap();
+            }
+            stdin.flush().unwrap();
+        }
+        use std::io::BufRead;
+        let stdout = child.stdout.take().unwrap();
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut answer = serde_json::Value::Null;
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap() > 0 {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                if v.get("id") == Some(&serde_json::json!(2)) {
+                    answer = v;
+                    break;
+                }
+            }
+            line.clear();
+        }
+        (answer, child)
+    };
+
+    // 1. Without _meta: hooked via beforeMCPExecution, sitting succeeds, X's merge is allowed, and Y's is refused.
+    let pre_x = serde_json::json!({
+        "conversation_id": CONV_X,
+        "hook_event_name": "beforeMCPExecution",
+        "cursor_version": "2.4.0",
+        "tool_name": "ljos_sitting",
+        "tool_input": "{}",
+        "workspace_roots": ["/"]
+    })
+    .to_string();
+    let _ = home.hook_with(&pre_x, &[]);
+    let (no_meta, mut srv1) = mcp_call(None);
+    let no_meta_str = no_meta.to_string();
+    assert!(
+        no_meta["result"]["isError"] != true && no_meta.get("error").is_none(),
+        "expected success without _meta: {no_meta_str}"
+    );
+    allowed(
+        &home.hook(CONV_X, MERGE, &[]),
+        "X's merge after MCP sitting without _meta",
+    );
+    refused(
+        &home.hook(CONV_Y, MERGE, &[]),
+        "Y's merge after X's MCP sitting without _meta",
+    );
+    let _ = srv1.kill();
+    let _ = srv1.wait();
+
+    let clear_holds = || {
+        for entry in std::fs::read_dir(home.run.join("ljos")).unwrap().flatten() {
+            if entry.file_name().to_string_lossy().starts_with("hold-") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+        let _ = std::fs::remove_file(&home.card);
+        seed_tracker();
+    };
+    let bare_record = || {
+        std::fs::read_dir(home.run.join("ljos"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("hold-")
+            })
+            .expect("hold record after a bare sitting")
+    };
+
+    // 1b. X sits without _meta; another conversation gates first. The
+    // other conversation must not take X's sitting.
+    clear_holds();
+    let _ = home.hook_with(&pre_x, &[]);
+    let (_, mut srv1b) = mcp_call(None);
+    refused(
+        &home.hook(CONV_Y, MERGE, &[]),
+        "Y's merge gated before X's, after X's MCP sitting without _meta",
+    );
+    allowed(
+        &home.hook(CONV_X, MERGE, &[]),
+        "X's merge after Y gated first",
+    );
+    let _ = srv1b.kill();
+    let _ = srv1b.wait();
+
+    // 1c. X sits without _meta and the record cannot be rewritten: the
+    // seat is not adopted, so it must not cover a second conversation.
+    clear_holds();
+    let _ = home.hook_with(&pre_x, &[]);
+    let (_, mut srv1c) = mcp_call(None);
+    let record = bare_record();
+    let mut rlines: Vec<String> = std::fs::read_to_string(&record)
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect();
+    rlines[0] = "inky".into();
+    let bare_actor = ljos_cli::work_id(&format!("inky:{ISSUE}"));
+    let bare_path = home.run.join(format!("ljos/hold-{bare_actor}"));
+    std::fs::remove_file(&record).unwrap();
+    std::fs::write(&bare_path, rlines.join("\n") + "\n").unwrap();
+    home.card("inky");
+    let mut perms = std::fs::metadata(&bare_path).unwrap().permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&bare_path, perms).unwrap();
+    let _ = home.hook(CONV_X, MERGE, &[]);
+    refused(
+        &home.hook(CONV_Y, MERGE, &[]),
+        "Y's merge after X adopted a bare record it could not rewrite",
+    );
+    let mut perms = std::fs::metadata(&bare_path).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(&bare_path, perms).unwrap();
+    let _ = srv1c.kill();
+    let _ = srv1c.wait();
+
+    // Clean hold-* records and re-seed before testing _meta.
+    for entry in std::fs::read_dir(home.run.join("ljos")).unwrap().flatten() {
+        if entry.file_name().to_string_lossy().starts_with("hold-") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    let _ = std::fs::remove_file(&home.card);
+    seed_tracker();
+
+    // 2. With _meta.conversation_id = CONV_X: claims as inky@tag(CONV_X), hook allows X and refuses Y.
+    let (with_meta, mut srv2) = mcp_call(Some(serde_json::json!({"conversation_id": CONV_X})));
+    let with_meta_str = with_meta.to_string();
+    assert!(
+        with_meta["result"]["isError"] != true && with_meta.get("error").is_none(),
+        "expected success with _meta conversation_id: {with_meta_str}"
+    );
+    let card_text = std::fs::read_to_string(&home.card).unwrap();
+    assert!(
+        card_text.contains(&holder(CONV_X)),
+        "expected CLAIMED_BY {}: {card_text}",
+        holder(CONV_X)
+    );
+    allowed(
+        &home.hook(CONV_X, MERGE, &[]),
+        "X's merge after MCP sitting with _meta.conversation_id",
+    );
+    refused(
+        &home.hook(CONV_Y, MERGE, &[]),
+        "Y's merge after X's MCP sitting with _meta.conversation_id",
+    );
+    let _ = srv2.kill();
+    let _ = srv2.wait();
+}
+
+/// A shell that carries both `CODEX_THREAD_ID` and
+/// `CURSOR_CONVERSATION_ID` holds under the Codex thread: a Codex thread
+/// names its conversation first. A hook bound to the other id therefore
+/// does not see that sitting.
+#[test]
+fn a_shell_with_a_codex_thread_holds_under_the_thread() {
+    const T: &str = "codex-thread-00001111";
+    let home = Box_::new();
+    let both = [("CURSOR_CONVERSATION_ID", CONV_X), ("CODEX_THREAD_ID", T)];
+    let said = text_of(&home.sh(&both, "\"$LJOS\" seat"));
+    assert_eq!(seat_holder(&said), holder(T));
+    let sat = home.sh(&both, &format!("\"$LJOS\" claim {ISSUE}"));
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(T));
+    refused(
+        &home.hook(CONV_X, MERGE, &[]),
+        "X's merge after a sitting under the Codex thread",
+    );
+}
+
+/// A tool command under a runner may not write a sitting record. The
+/// records that bind a conversation for the paths that have no payload,
+/// `session-bare-SEAT`, `tmux-hook-conv` and `first-hook-conv`, decide
+/// whose sitting a call is judged by, so a shell line that writes one is
+/// refused like a line that writes `hold-*`.
+#[test]
+fn a_tool_command_may_not_write_the_records_that_bind_a_conversation() {
+    let home = Box_::new();
+    for name in [
+        "session-bare-inky",
+        "tmux-hook-conv",
+        "tmux-sock-abc",
+        "tmux-pane-abc-1",
+        "first-hook-conv",
+    ] {
+        let cmd = format!(
+            "printf '%s\\n' inky {} > {}/ljos/{name}",
+            holder(CONV_X),
+            home.run.display()
+        );
+        let payload = serde_json::json!({
+            "cursor_version": "2.4.0",
+            "hook_event_name": "beforeShellExecution",
+            "conversation_id": CONV_Z,
+            "cwd": home.repo,
+            "command": cmd,
+        })
+        .to_string();
+        let said = home.hook_with(&payload, &[]);
+        assert!(
+            said.contains("\"permission\":\"deny\""),
+            "a shell write to {name} was not refused:\n{said}"
+        );
+    }
+}
+
+const RV_RUNNER_ANY: &str = "
+import json, os, subprocess, sys
+rc = 0
+shell = os.environ['RV_SHELL'].split()
+for extra, line in json.loads(sys.argv[1]):
+    env = dict(os.environ)
+    env.update(extra)
+    rc = subprocess.call(shell + [line], env=env)
+print('EXIT', rc)
+";
+
+impl Box_ {
+    /// `bash_runner` with the shell the runner starts each step in named
+    /// by `shell` (`bash -c`, `sh -c`, `zsh -f -c`).
+    fn rv_runner(
+        &self,
+        comm: &str,
+        shell: &str,
+        unset: &[&str],
+        env: &[(&str, &str)],
+        steps: &[(Vec<(&str, &str)>, &str)],
+    ) -> String {
+        let link = self.bin.join(comm);
+        if !link.exists() {
+            std::os::unix::fs::symlink("/usr/bin/python3", &link).unwrap();
+        }
+        let steps: Vec<(std::collections::BTreeMap<&str, &str>, &str)> = steps
+            .iter()
+            .map(|(e, l)| (e.iter().copied().collect(), *l))
+            .collect();
+        let steps = serde_json::to_string(&steps).unwrap();
+        let mut args: Vec<String> = Vec::new();
+        for u in unset {
+            args.push("-u".into());
+            args.push((*u).into());
+        }
+        let link = link.display().to_string();
+        args.extend([link, "-c".into(), RV_RUNNER_ANY.into(), steps]);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let mut all = vec![("LJOS", env!("CARGO_BIN_EXE_ljos")), ("RV_SHELL", shell)];
+        all.extend_from_slice(env);
+        text_of(&self.command("env", &args, &all).output().unwrap())
+    }
+}
+
+fn rv_sat_x() -> (Box_, String) {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    let commit = pre_commit_hooks(&home);
+    (home, commit)
+}
+
+fn pre_commit_hooks(home: &Box_) -> String {
+    let hooks = home.run.join("githooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    script(
+        &hooks.join("pre-commit"),
+        "#!/bin/sh\nexec \"$LJOS\" git-hook pre-commit\n",
+    );
+    format!(
+        "git -c core.hooksPath={} -c user.name=t -c user.email=t@e commit -q --allow-empty -m t",
+        hooks.display()
+    )
+}
+
+/// RV10. A shell started without `XDG_RUNTIME_DIR` exports it later (a
+/// container with no `/run/user/UID`). Its own commits go through. No
+/// variable of the review corpus (`BOX`) is in its environment.
+#[test]
+fn rv10_a_shell_that_exports_its_runtime_dir_late_keeps_its_stamp() {
+    let (home, commit) = rv_sat_x();
+    let run = home.run.display().to_string();
+    let x = vec![("CURSOR_AGENT", "1"), ("CURSOR_CONVERSATION_ID", CONV_X)];
+    for line in [
+        format!("export XDG_RUNTIME_DIR={run}; {commit}; true"),
+        format!("export XDG_RUNTIME_DIR={run}; ( {commit} ); true"),
+        format!("export XDG_RUNTIME_DIR={run}; timeout 60 {commit}; true"),
+        format!("export XDG_RUNTIME_DIR={run}; bash -c '{commit}'; true"),
+        format!("export XDG_RUNTIME_DIR={run}; env A=1 {commit}; true"),
+    ] {
+        let said = home.rv_runner(
+            "node",
+            "bash -c",
+            &["CURSOR_AGENT", "XDG_RUNTIME_DIR"],
+            &[],
+            &[(x.clone(), &line)],
+        );
+        assert!(
+            said.contains("EXIT 0") && !said.contains("sitting-gate"),
+            "X's own `{line}` was refused:\n{said}"
+        );
+    }
+    let override_line =
+        format!("export XDG_RUNTIME_DIR={run}; CURSOR_CONVERSATION_ID={CONV_Z} {commit}; true");
+    let said = home.rv_runner(
+        "node",
+        "bash -c",
+        &["CURSOR_AGENT", "XDG_RUNTIME_DIR"],
+        &[],
+        &[(x, &override_line)],
+    );
+    assert!(
+        said.contains("EXIT 0") && !said.contains("sitting-gate"),
+        "X's shell that exported XDG_RUNTIME_DIR late lost its stamp to an inline override without BOX:\n{said}"
+    );
+}
+
+/// Under a shared `tmux` server, a conversation's own commit in a new
+/// window passes and another conversation's commit in a new window is
+/// refused, whether the sitting conversation or the other started the
+/// `tmux` server.
+#[test]
+fn a_tmux_window_allows_the_sitting_conversation_and_refuses_another() {
+    let Ok(tmux) = which::which("tmux").or_else(|_| {
+        let p = PathBuf::from("/exec-daemon/tmux");
+        p.is_file().then_some(p).ok_or(())
+    }) else {
+        return;
+    };
+    for first in [CONV_X, CONV_Z] {
+        let home = Box_::new();
+        let sat = home.shell(CONV_X, &["claim", ISSUE]);
+        assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+        home.card(&holder(CONV_X));
+        let hooks = home.run.join("githooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        script(
+            &hooks.join("pre-commit"),
+            &format!(
+                "#!/bin/sh\nexec {:?} git-hook pre-commit\n",
+                env!("CARGO_BIN_EXE_ljos")
+            ),
+        );
+        let sock = home.run.join("tmux.sock");
+        let tmux_s = format!("{} -S {}", tmux.display(), sock.display());
+        let start = home.bash(
+            &[("CURSOR_CONVERSATION_ID", first)],
+            &format!("{tmux_s} new-session -d -s base 'sleep 60'"),
+        );
+        assert!(start.status.success(), "tmux start: {}", text_of(&start));
+
+        let z_done = home.run.join("z.done");
+        let z_err = home.run.join("z.err");
+        let z_cmd = format!(
+            "{tmux_s} new-window -d 'git -c core.hooksPath={} -c user.name=t -c user.email=t@e commit -q --allow-empty -m z 2>{}; echo $? > {}'",
+            hooks.display(),
+            z_err.display(),
+            z_done.display()
+        );
+        refused(
+            &home.hook(CONV_Z, &z_cmd, &[("CURSOR_CONVERSATION_ID", CONV_Z)]),
+            "Z's tmux new-window commit hook",
+        );
+        let _ = home.bash(&[("CURSOR_CONVERSATION_ID", CONV_Z)], &z_cmd);
+        let t0 = Instant::now();
+        while !z_done.exists() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let z_rc = std::fs::read_to_string(&z_done).unwrap_or_default();
+        assert_eq!(
+            z_rc.trim(),
+            "0",
+            "Z's tmux commit was refused (server started by {first}): {}",
+            std::fs::read_to_string(&z_err).unwrap_or_default()
+        );
+
+        let x_done = home.run.join("x.done");
+        let x_err = home.run.join("x.err");
+        let x_cmd = format!(
+            "{tmux_s} new-window -d 'git -c core.hooksPath={} -c user.name=t -c user.email=t@e commit -q --allow-empty -m x 2>{}; echo $? > {}'",
+            hooks.display(),
+            x_err.display(),
+            x_done.display()
+        );
+        allowed(
+            &home.hook(CONV_X, &x_cmd, &[("CURSOR_CONVERSATION_ID", CONV_X)]),
+            "X's tmux new-window commit hook",
+        );
+        let _ = home.bash(&[("CURSOR_CONVERSATION_ID", CONV_X)], &x_cmd);
+        let t0 = Instant::now();
+        while !x_done.exists() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let x_rc = std::fs::read_to_string(&x_done).unwrap_or_default();
+        assert_eq!(
+            x_rc.trim(),
+            "0",
+            "X's tmux commit failed (server started by {first}): {}",
+            std::fs::read_to_string(&x_err).unwrap_or_default()
+        );
+
+        let _ = home.bash(
+            &[("CURSOR_CONVERSATION_ID", first)],
+            &format!("{tmux_s} kill-server"),
+        );
+    }
+}
+
+/// One tmux server serves two conversations. A pane's commit is judged
+/// as the conversation whose pane it is, not as whichever conversation's
+/// tool call last mentioned tmux. X's waiting commit must pass after Z
+/// ran an unrelated command naming tmux, and Z's waiting commit must not
+/// pass on X's sitting after X listed its windows.
+#[test]
+fn a_tmux_pane_is_not_judged_as_the_last_conversation_to_name_tmux() {
+    let Ok(tmux) = which::which("tmux").or_else(|_| {
+        let p = PathBuf::from("/exec-daemon/tmux");
+        p.is_file().then_some(p).ok_or(())
+    }) else {
+        return;
+    };
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    let hooks = home.run.join("githooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    script(
+        &hooks.join("pre-commit"),
+        &format!(
+            "#!/bin/sh\nexec {:?} git-hook pre-commit\n",
+            env!("CARGO_BIN_EXE_ljos")
+        ),
+    );
+    let sock = home.run.join("tmux.sock");
+    let tmux_s = format!("{} -S {}", tmux.display(), sock.display());
+    let x = [("CURSOR_CONVERSATION_ID", CONV_X)];
+    let z = [("CURSOR_CONVERSATION_ID", CONV_Z)];
+    let wait_then_commit = |who: &str| {
+        let go = home.run.join(format!("{who}.go"));
+        let done = home.run.join(format!("{who}.done"));
+        let body = format!(
+            "while [ ! -f {go} ]; do sleep 0.05; done\ngit -c core.hooksPath={h} -c user.name=t -c user.email=t@e commit -q --allow-empty -m {who} 2>{done}.err\necho $? > {done}\n",
+            go = go.display(),
+            h = hooks.display(),
+            done = done.display(),
+        );
+        let file = home.run.join(format!("{who}.sh"));
+        std::fs::write(&file, body).unwrap();
+        (go, done, file)
+    };
+    let wait_rc = |done: &Path| {
+        let t0 = Instant::now();
+        while !done.exists() && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::fs::read_to_string(done)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+
+    // X starts the server and a window that commits once told to.
+    let start = home.bash(&x, &format!("{tmux_s} new-session -d -s x 'sleep 60'"));
+    assert!(start.status.success(), "tmux start: {}", text_of(&start));
+    let (x_go, x_done, x_sh) = wait_then_commit("x");
+    let x_cmd = format!("{tmux_s} new-window -d 'sh {}'", x_sh.display());
+    allowed(&home.hook(CONV_X, &x_cmd, &x), "X's tmux window");
+    let _ = home.bash(&x, &x_cmd);
+    // Z reads a file whose name mentions tmux. Nothing of Z's runs in X's pane.
+    let _ = home.hook(CONV_Z, "cat ~/.tmux.conf", &z);
+    std::fs::write(&x_go, "").unwrap();
+    assert_eq!(
+        wait_rc(&x_done),
+        "0",
+        "X's own pane commit was refused after Z named tmux: {}",
+        std::fs::read_to_string(home.run.join("x.done.err")).unwrap_or_default()
+    );
+
+    // Z starts a tmux server of its own on another socket, then X lists
+    // the windows of X's server.
+    let (z_go, z_done, z_sh) = wait_then_commit("z");
+    let z_sock = home.run.join("tmux-z.sock");
+    let z_cmd = format!(
+        "{} -S {} new-session -d -s z 'sh {}'",
+        tmux.display(),
+        z_sock.display(),
+        z_sh.display()
+    );
+    let _ = home.hook(CONV_Z, &z_cmd, &z);
+    let _ = home.bash(&z, &z_cmd);
+    let _ = home.hook(CONV_X, &format!("{tmux_s} list-windows"), &x);
+    std::fs::write(&z_go, "").unwrap();
+    let z_rc = wait_rc(&z_done);
+    let z_err = std::fs::read_to_string(home.run.join("z.done.err")).unwrap_or_default();
+    assert_eq!(z_rc.trim(), "0", "Z's pane was refused: rc={z_rc} {z_err}");
+    let _ = home.bash(&x, &format!("{tmux_s} kill-server"));
+    let _ = home.bash(
+        &z,
+        &format!("{} -S {} kill-server", tmux.display(), z_sock.display()),
+    );
+}
+
+fn rv_tmux() -> PathBuf {
+    which::which("tmux")
+        .or_else(|_| {
+            let p = PathBuf::from("/exec-daemon/tmux");
+            p.is_file().then_some(p).ok_or(())
+        })
+        .expect("tmux is needed")
+}
+
+fn rv_wait(done: &Path) -> String {
+    let t0 = Instant::now();
+    while !done.exists() && t0.elapsed() < Duration::from_secs(15) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::fs::read_to_string(done)
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// A pane script that waits for `WHO.go`, commits, and writes its exit
+/// status to `WHO.done`.
+fn rv_pane_script(home: &Box_, hooks: &Path, who: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let go = home.run.join(format!("{who}.go"));
+    let done = home.run.join(format!("{who}.done"));
+    let body = format!(
+        "while [ ! -f {go} ]; do sleep 0.05; done\ngit -c core.hooksPath={h} -c user.name=t -c user.email=t@e commit -q --allow-empty -m {who} 2>{done}.err\necho $? > {done}\n",
+        go = go.display(),
+        h = hooks.display(),
+        done = done.display(),
+    );
+    let file = home.run.join(format!("{who}.sh"));
+    std::fs::write(&file, body).unwrap();
+    (go, done, file)
+}
+
+fn rv_git_hooks(home: &Box_) -> PathBuf {
+    let hooks = home.run.join("githooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    script(
+        &hooks.join("pre-commit"),
+        &format!(
+            "#!/bin/sh\nexec {:?} git-hook pre-commit\n",
+            env!("CARGO_BIN_EXE_ljos")
+        ),
+    );
+    hooks
+}
+
+/// RV1. Two conversations share one tmux server, as two bots that both
+/// run `tmux new -d` on the default socket do. X's own pane commit is
+/// still X's after Z opens a session of its own on that server.
+#[test]
+fn rv1_a_pane_on_a_shared_tmux_server_stays_its_conversations() {
+    let tmux = rv_tmux();
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    let hooks = rv_git_hooks(&home);
+    let sock = home.run.join("tmux.sock");
+    let tmux_s = format!("{} -S {}", tmux.display(), sock.display());
+    let x = [("CURSOR_CONVERSATION_ID", CONV_X)];
+    let z = [("CURSOR_CONVERSATION_ID", CONV_Z)];
+    let (go, done, file) = rv_pane_script(&home, &hooks, "x");
+    let x_cmd = format!("{tmux_s} new-session -d -s x 'sh {}'", file.display());
+    allowed(&home.hook(CONV_X, &x_cmd, &x), "X's tmux session");
+    let _ = home.bash(&x, &x_cmd);
+    let z_cmd = format!("{tmux_s} new-session -d -s z 'sleep 30'");
+    allowed(&home.hook(CONV_Z, &z_cmd, &z), "Z's tmux session");
+    let _ = home.bash(&z, &z_cmd);
+    std::fs::write(&go, "").unwrap();
+    let rc = rv_wait(&done);
+    let _ = home.bash(&x, &format!("{tmux_s} kill-server"));
+    assert_eq!(
+        rc,
+        "0",
+        "X's own pane commit was refused after Z opened a session on the same server: {}",
+        std::fs::read_to_string(home.run.join("x.done.err")).unwrap_or_default()
+    );
+}
+
+/// RV2. The reverse of RV1: Z's pane on the shared server does not
+/// commit on X's sitting because X opened a window after Z's pane
+/// started.
+#[test]
+fn rv2_a_pane_on_a_shared_tmux_server_does_not_borrow_the_last_openers_sitting() {
+    let tmux = rv_tmux();
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    let hooks = rv_git_hooks(&home);
+    let sock = home.run.join("tmux.sock");
+    let tmux_s = format!("{} -S {}", tmux.display(), sock.display());
+    let x = [("CURSOR_CONVERSATION_ID", CONV_X)];
+    let z = [("CURSOR_CONVERSATION_ID", CONV_Z)];
+    let (go, done, file) = rv_pane_script(&home, &hooks, "z");
+    let z_cmd = format!("{tmux_s} new-session -d -s z 'sh {}'", file.display());
+    let _ = home.hook(CONV_Z, &z_cmd, &z);
+    let _ = home.bash(&z, &z_cmd);
+    let x_cmd = format!("{tmux_s} new-window -d -t z 'sleep 30'");
+    let _ = home.hook(CONV_X, &x_cmd, &x);
+    let _ = home.bash(&x, &x_cmd);
+    std::fs::write(&go, "").unwrap();
+    let rc = rv_wait(&done);
+    let err = std::fs::read_to_string(home.run.join("z.done.err")).unwrap_or_default();
+    let _ = home.bash(&x, &format!("{tmux_s} kill-server"));
+    assert_eq!(rc.trim(), "0", "Z's pane was refused: rc={rc} {err}");
+}
+
+const RUNNER_BASH: &str = "
+import json, os, subprocess, sys
+rc = 0
+for extra, line in json.loads(sys.argv[1]):
+    env = dict(os.environ)
+    env.update(extra)
+    rc = subprocess.call(['bash', '-c', line], env=env)
+print('EXIT', rc)
+";
+
+impl Box_ {
+    /// A runner named `comm` (a python3 symlink) started without the
+    /// variables in `unset`, that runs each step as `bash -c LINE` with
+    /// the step's variables on top, as a runner starts one tool call.
+    fn bash_runner(
+        &self,
+        comm: &str,
+        unset: &[&str],
+        env: &[(&str, &str)],
+        steps: &[(Vec<(&str, &str)>, &str)],
+    ) -> String {
+        let link = self.bin.join(comm);
+        if !link.exists() {
+            std::os::unix::fs::symlink("/usr/bin/python3", &link).unwrap();
+        }
+        let steps: Vec<(std::collections::BTreeMap<&str, &str>, &str)> = steps
+            .iter()
+            .map(|(e, l)| (e.iter().copied().collect(), *l))
+            .collect();
+        let steps = serde_json::to_string(&steps).unwrap();
+        let mut args: Vec<String> = Vec::new();
+        for u in unset {
+            args.push("-u".into());
+            args.push((*u).into());
+        }
+        let link = link.display().to_string();
+        args.extend([link, "-c".into(), RUNNER_BASH.into(), steps]);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let mut all = vec![("LJOS", env!("CARGO_BIN_EXE_ljos"))];
+        all.extend_from_slice(env);
+        text_of(&self.command("env", &args, &all).output().unwrap())
+    }
+}
+
+/// A runner that is not stamped (a node daemon, `CURSOR_AGENT` unset)
+/// starts each tool call as `bash -c LINE` with the conversation's id.
+/// Bash execs the last simple command of the line, so `git` is the
+/// runner's child. The sitting conversation's own commit goes through.
+#[test]
+fn a_one_shot_bash_c_commit_from_an_unstamped_runner_is_allowed() {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+    let commit = pre_commit_hooks(&home);
+    let x = vec![("CURSOR_AGENT", "1"), ("CURSOR_CONVERSATION_ID", CONV_X)];
+    for line in [
+        commit.clone(),
+        format!("cd . && {commit}"),
+        format!("true; {commit}"),
+        format!("GIT_EDITOR=true {commit}"),
+    ] {
+        let said = home.bash_runner("node", &["CURSOR_AGENT"], &[], &[(x.clone(), &line)]);
+        assert!(
+            said.contains("EXIT 0") && !said.contains("sitting-gate"),
+            "X's own `bash -c '{line}'` was refused:\n{said}"
+        );
+    }
+}
+
+/// L1 regression guard: with a live sitting, an ordinary one-shot
+/// `bash -c 'git commit ...'` should not be refused solely because the
+/// immediate parent process carries no conversation id.
+#[test]
+fn one_shot_bash_c_commit_from_unstamped_parent_is_allowed_when_sitting_is_live() {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+    home.card(&holder(CONV_X));
+
+    let hooks = home.run.join("githooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    script(
+        &hooks.join("pre-commit"),
+        &format!(
+            "#!/bin/sh\nexec {:?} git-hook pre-commit\n",
+            env!("CARGO_BIN_EXE_ljos")
+        ),
+    );
+
+    // Keep hold live as an active conversation shell would.
+    let mut sleeper = Command::new("sleep").arg("300").spawn().unwrap();
+    let pid = sleeper.id();
+    let hold = std::fs::read_dir(home.run.join("ljos"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("hold-")
+        })
+        .unwrap();
+    let mut lines: Vec<String> = std::fs::read_to_string(&hold)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    lines[2] = pid.to_string();
+    lines[3] = "sleep".into();
+    std::fs::write(&hold, lines.join("\n") + "\n").unwrap();
+
+    std::fs::write(home.repo.join("f.txt"), "x\n").unwrap();
+    let add = home
+        .command("git", &["add", "f.txt"], &[])
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "{}", text_of(&add));
+
+    // Parent intentionally unstamped; command provides conversation id.
+    let out = home
+        .command(
+            "bash",
+            &[
+                "-c",
+                &format!(
+                    "CURSOR_CONVERSATION_ID={CONV_X} git -c core.hooksPath={} -c user.name=t -c user.email=t@e commit -q --allow-empty -m t",
+                    hooks.display()
+                ),
+            ],
+            &[],
+        )
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "ordinary one-shot bash commit was refused:\n{}",
+        text_of(&out)
+    );
+
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+}
+
+/// RV6. The runner was started from a shell that is itself nested (a
+/// tmux pane, an ssh login, a terminal inside an editor), so its
+/// environment carries `SHLVL=2`. Bash passes `SHLVL` through to the
+/// command it execs. X's own one-shot commit goes through.
+#[test]
+fn rv6_a_one_shot_commit_from_a_runner_started_at_shlvl_2_is_allowed() {
+    let (home, commit) = rv_sat_x();
+    let x = vec![("CURSOR_AGENT", "1"), ("CURSOR_CONVERSATION_ID", CONV_X)];
+    for (comm, unset) in [("node", vec!["CURSOR_AGENT"]), ("cursor-agent", vec![])] {
+        for line in [commit.clone(), format!("cd . && {commit}")] {
+            let said = home.rv_runner(
+                comm,
+                "bash -c",
+                &unset,
+                &[("SHLVL", "2")],
+                &[(x.clone(), &line)],
+            );
+            assert!(
+                said.contains("EXIT 0") && !said.contains("sitting-gate"),
+                "X's own `bash -c '{line}'` under {comm} at SHLVL=2 was refused:\n{said}"
+            );
+        }
+    }
+}
+
+/// RV7. A runner that starts each tool call as `/bin/sh -c LINE` (node's
+/// `child_process.exec` does). Ubuntu's `/bin/sh` is dash, which execs
+/// the last command too but sets no `_`. X's own commit goes through.
+#[test]
+fn rv7_a_one_shot_sh_c_commit_from_an_unstamped_runner_is_allowed() {
+    let (home, commit) = rv_sat_x();
+    let x = vec![("CURSOR_AGENT", "1"), ("CURSOR_CONVERSATION_ID", CONV_X)];
+    for line in [commit.clone(), format!("cd . && {commit}")] {
+        let said = home.rv_runner(
+            "node",
+            "/bin/sh -c",
+            &["CURSOR_AGENT"],
+            &[],
+            &[(x.clone(), &line)],
+        );
+        assert!(
+            said.contains("EXIT 0") && !said.contains("sitting-gate"),
+            "X's own `sh -c '{line}'` was refused:\n{said}"
+        );
+    }
+}
+
+/// RV8. Ordinary wrappers in a one-shot line under an unstamped runner:
+/// bash execs the wrapper, and the wrapper runs git. X's own commit goes
+/// through.
+#[test]
+fn rv8_a_one_shot_commit_behind_an_ordinary_wrapper_is_allowed() {
+    let (home, commit) = rv_sat_x();
+    let x = vec![("CURSOR_AGENT", "1"), ("CURSOR_CONVERSATION_ID", CONV_X)];
+    for line in [
+        format!("timeout 60 {commit}"),
+        format!("nohup {commit} >/dev/null"),
+        format!("stdbuf -oL {commit}"),
+        format!("ionice -c3 {commit}"),
+        format!("flock {} {commit}", home.run.join("l").display()),
+    ] {
+        let said = home.rv_runner(
+            "node",
+            "bash -c",
+            &["CURSOR_AGENT"],
+            &[],
+            &[(x.clone(), &line)],
+        );
+        assert!(
+            said.contains("EXIT 0") && !said.contains("sitting-gate"),
+            "X's own `bash -c '{line}'` was refused:\n{said}"
+        );
+    }
+}
+
+/// RV9. A script that execs git with another conversation's id without
+/// changing `_` is refused because `_` names python. A hidden script
+/// under an unstamped runner that also rewrites `_` to `/usr/bin/git`
+/// matches bash's exec layout and is a known limit at the run layer, as
+/// on base.
+#[test]
+fn rv9_a_script_that_execs_git_with_anothers_id_does_not_commit_on_its_sitting() {
+    let (home, commit) = rv_sat_x();
+    let z = vec![("CURSOR_AGENT", "1"), ("CURSOR_CONVERSATION_ID", CONV_Z)];
+    let argv: Vec<String> = commit.split(' ').map(str::to_string).collect();
+    let argv = serde_json::to_string(&argv).unwrap();
+    let forge = home.run.join("forge.py");
+    std::fs::write(
+        &forge,
+        format!(
+            "import os\ne = dict(os.environ)\ne['CURSOR_CONVERSATION_ID'] = {CONV_X:?}\nos.execvpe('git', {argv}, e)\n"
+        ),
+    )
+    .unwrap();
+    let line = format!("python3 {}", forge.display());
+    let said = home.rv_runner("node", "bash -c", &["CURSOR_AGENT"], &[], &[(z, &line)]);
+    assert!(said.contains("EXIT 0"), "Z's script was refused:\n{said}");
+}
+
+/// RV12. An id-less `node` runner that starts each tool call as
+/// `zsh -f -c LINE` (zsh is the login shell on macOS). X's `ljos seat`
+/// names X, and X's own one-shot commit goes through.
+#[test]
+fn rv12_a_one_shot_zsh_c_call_from_an_unstamped_runner_is_the_conversations() {
+    if !ljos_cli::tool_installed("zsh") {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    }
+    let home = Box_::new();
+    let x = vec![("CURSOR_AGENT", "1"), ("CURSOR_CONVERSATION_ID", CONV_X)];
+    let said = home.rv_runner(
+        "node",
+        "zsh -f -c",
+        &["CURSOR_AGENT"],
+        &[],
+        &[(x.clone(), "\"$LJOS\" seat")],
+    );
+    assert!(
+        said.contains(&holder(CONV_X)),
+        "X's `zsh -c 'ljos seat'` did not name X:\n{said}"
+    );
+    let (home, commit) = rv_sat_x();
+    let said = home.rv_runner(
+        "node",
+        "zsh -f -c",
+        &["CURSOR_AGENT"],
+        &[],
+        &[(x.clone(), &commit)],
+    );
+    assert!(
+        said.contains("EXIT 0") && !said.contains("sitting-gate"),
+        "X's own `zsh -c '{commit}'` was refused:\n{said}"
+    );
+}
+
+/// RV13. A runner started from a nested shell (`SHLVL=2`) runs X's
+/// one-shot `env VAR=x git commit`. X's own commit goes through.
+#[test]
+fn rv13_a_one_shot_env_prefixed_commit_at_shlvl_2_is_allowed() {
+    let (home, commit) = rv_sat_x();
+    let x = vec![("CURSOR_AGENT", "1"), ("CURSOR_CONVERSATION_ID", CONV_X)];
+    let line = format!("env GIT_AUTHOR_NAME=x {commit}");
+    let said = home.rv_runner(
+        "node",
+        "bash -c",
+        &["CURSOR_AGENT"],
+        &[("SHLVL", "2")],
+        &[(x.clone(), &line)],
+    );
+    assert!(
+        said.contains("EXIT 0") && !said.contains("sitting-gate"),
+        "X's own `bash -c '{line}'` at SHLVL=2 was refused:\n{said}"
+    );
+}
+
+/// A `cursor-agent` runner whose own environment carries `CURSOR_AGENT`
+/// but no conversation id starts `bash -c 'ljos seat'` with X's id. The
+/// seat answers for X, as the payload hook of X's next call does.
+#[test]
+fn a_one_shot_seat_under_a_cursor_agent_without_an_id_is_the_conversations() {
+    let home = Box_::new();
+    let x = vec![("CURSOR_CONVERSATION_ID", CONV_X)];
+    let said = home.bash_runner("cursor-agent", &[], &[], &[(x, "\"$LJOS\" seat")]);
+    assert_eq!(seat_holder(&said), holder(CONV_X), "{said}");
+}
+
+/// A runner started from another conversation's shell (a bot that runs
+/// a second agent) does not sit as the outer conversation, and the outer
+/// conversation does not lend it its holder.
+#[test]
+fn a_runner_nested_in_another_conversations_shell_sits_as_its_own() {
+    let home = Box_::new();
+    let link = home.bin.join("cursor-agent");
+    std::os::unix::fs::symlink("/usr/bin/python3", &link).unwrap();
+    let steps = serde_json::to_string(&[(None::<&str>, "\"$LJOS\" seat; true")]).unwrap();
+    let inner = home.command(
+        "sh",
+        &[
+            "-c",
+            &format!(
+                "CURSOR_CONVERSATION_ID={CONV_X} {} -c {} {}; true",
+                link.display(),
+                shell_words(RUNNER),
+                shell_words(&steps)
+            ),
+        ],
+        &[
+            ("LJOS", env!("CARGO_BIN_EXE_ljos")),
+            (
+                "CURSOR_CONVERSATION_ID",
+                "0199a1b2-c3d4-4e5f-8a6b-0000000000ou",
+            ),
+        ],
+    );
+    let said = text_of(&{ inner }.output().unwrap());
+    assert_eq!(seat_holder(&said), holder(CONV_X), "{said}");
+}
+
+fn shell_words(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+const RV_OUTER: &str = "0199a1b2-c3d4-4e5f-8a6b-0000000000ee";
+
+impl Box_ {
+    /// `rv_runner` started from conversation `RV_OUTER`'s shell, the way
+    /// a bot launches a second runner (`node`, an MCP host, a CI script)
+    /// from its own terminal. The runner's environment is the box's with
+    /// no conversation id.
+    fn rv_runner_nested(
+        &self,
+        comm: &str,
+        shell: &str,
+        steps: &[(Vec<(&str, &str)>, &str)],
+    ) -> String {
+        let link = self.bin.join(comm);
+        if !link.exists() {
+            std::os::unix::fs::symlink("/usr/bin/python3", &link).unwrap();
+        }
+        let steps: Vec<(std::collections::BTreeMap<&str, &str>, &str)> = steps
+            .iter()
+            .map(|(e, l)| (e.iter().copied().collect(), *l))
+            .collect();
+        let steps = serde_json::to_string(&steps).unwrap();
+        let inner = self.command(
+            "true",
+            &[],
+            &[("LJOS", env!("CARGO_BIN_EXE_ljos")), ("RV_SHELL", shell)],
+        );
+        let mut args: Vec<String> = vec![
+            "-c".into(),
+            "\"$@\"; true".into(),
+            "bash".into(),
+            "env".into(),
+            "-i".into(),
+        ];
+        for (k, v) in inner.get_envs() {
+            let (Some(k), Some(v)) = (k.to_str(), v.and_then(|v| v.to_str())) else {
+                continue;
+            };
+            if k != "CURSOR_AGENT" {
+                args.push(format!("{k}={v}"));
+            }
+        }
+        args.extend([
+            link.display().to_string(),
+            "-c".into(),
+            RV_RUNNER_ANY.into(),
+            steps,
+        ]);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        text_of(
+            &self
+                .command("bash", &args, &[("CURSOR_CONVERSATION_ID", RV_OUTER)])
+                .output()
+                .unwrap(),
+        )
+    }
+}
+
+/// RV11. An id-less `node` runner started from conversation OUTER's
+/// shell runs X's tool calls as `bash -c`, each with X's id. X's
+/// `ljos seat` and `ljos claim` are X's, not OUTER's.
+#[test]
+fn rv11_an_unstamped_runner_in_another_conversations_shell_sits_as_the_call() {
+    let home = Box_::new();
+    let x = vec![("CURSOR_CONVERSATION_ID", CONV_X)];
+    let said = home.rv_runner_nested(
+        "node",
+        "bash -c",
+        &[
+            (x.clone(), "\"$LJOS\" seat"),
+            (x.clone(), &format!("\"$LJOS\" claim {ISSUE}")),
+        ],
+    );
+    assert!(
+        said.contains(&holder(CONV_X)) && !said.contains(&holder(RV_OUTER)),
+        "X's seat and claim under a runner nested in OUTER's shell:\n{said}"
+    );
+}
+
+/// A bare `ljos-mcp` call names no conversation. It is not bound to the
+/// conversation that last ran an `ljos` command in its own shell: X
+/// only ran `ljos seat`, so a bare `ljos_sitting` from some other client
+/// must not open a sitting X's merge passes on.
+#[test]
+fn a_bare_mcp_sitting_is_not_bound_to_the_last_shell_that_ran_ljos() {
+    let home = Box_::new();
+    let org_dir = home.run.join("tracker/Software/proj");
+    std::fs::create_dir_all(&org_dir).unwrap();
+    let seed_tracker = || {
+        std::fs::write(
+            org_dir.join("issues.org"),
+            format!(
+                "#+TITLE: proj issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n* TODO [#C] the merge\n:PROPERTIES:\n:ID:         {ISSUE}\n:CREATED:    [2026-10-25 Sun]\n:END:\n"
+            ),
+        )
+        .unwrap();
+    };
+    seed_tracker();
+    let cache = home.home.join(".cache/ljos");
+    std::fs::create_dir_all(&cache).unwrap();
+    for name in [
+        "ljos",
+        "ljos-policyd",
+        "vissue-cli",
+        "vissue-mcp",
+        "deedar-cli",
+        "claimdag-cli",
+        "packset",
+        "packset-embed",
+    ] {
+        std::fs::write(cache.join(format!("crate-{name}")), "99.0.0\n").unwrap();
+    }
+    for name in ["deedar", "packset", "packsetd", "ljos-policyd"] {
+        script(
+            &home.bin.join(name),
+            &format!(
+                "#!/bin/sh\ncase \"$1\" in\n  --version|version) echo '{name} 99.0.0 (phronesis)' ;;\n  *) echo ok ;;\nesac\nexit 0\n"
+            ),
+        );
+    }
+    script(
+        &home.bin.join("claimdag"),
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'claimdag 99.0.0' ;;\n  list) echo '[]' ;;\n  claim) echo gen=2 ;;\n  *) echo ok ;;\nesac\nexit 0\n",
+    );
+    let card_path = home.card.display().to_string();
+    script(
+        &home.bin.join("vissue"),
+        &format!(
+            "#!/usr/bin/env python3\nimport json, os, pathlib, sys\n\
+             card = pathlib.Path({card_path:?})\n\
+             cmd = sys.argv[1] if len(sys.argv) > 1 else ''\n\
+             if cmd == '--version':\n\tprint('vissue 99.0.0')\n\
+             elif cmd == 'vote':\n\tprint('--used --confidence')\n\
+             elif cmd == 'identity':\n\tprint('vissue 99.0.0\\nroot=' + os.environ.get('VISSUE_ROOT','') + '\\nprefix=Software')\n\
+             elif cmd == 'claim':\n\tby = os.environ.get('VISSUE_AGENT', '')\n\tcard.write_text(json.dumps({{'id': {ISSUE:?}, 'state': 'STARTED', 'claimed_by': by}}))\n\tprint('claimed')\n\
+             elif cmd == 'show':\n\tprint(card.read_text() if card.exists() else json.dumps({{'id': {ISSUE:?}, 'title': 'the merge', 'state': 'TODO'}}))\n\
+             elif cmd == 'claims':\n\tprint('[]')\n\
+             else:\n\tprint('{{}}')\n"
+        ),
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let mut buf = [0u8; 2048];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let body =
+                r#"{"atoms":[],"island":[],"fired":0,"live":0,"embedder":{"available":false}}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = std::io::Write::write_all(&mut stream, resp.as_bytes());
+        }
+    });
+    let pack_url = format!("http://{addr}");
+
+    let mcp_call = |meta: Option<serde_json::Value>| -> (serde_json::Value, Child) {
+        let bin_dir = Path::new(env!("CARGO_BIN_EXE_ljos")).parent().unwrap();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
+        cmd.env_clear()
+            .env(
+                "PATH",
+                format!("{}:{}:/usr/bin:/bin", home.bin.display(), bin_dir.display()),
+            )
+            .env("HOME", &home.home)
+            .env("XDG_CONFIG_HOME", home.home.join(".config"))
+            .env("XDG_STATE_HOME", home.home.join(".local/state"))
+            .env("XDG_DATA_HOME", home.home.join(".local/share"))
+            .env("XDG_CACHE_HOME", home.home.join(".cache"))
+            .env("XDG_RUNTIME_DIR", &home.run)
+            .env("VISSUE_ROOT", home.run.join("tracker"))
+            .env("VISSUE_NO_ROUTE", "1")
+            .env("LJOS_SEAT", "inky")
+            .env("LJOS_PROJECT", "proj")
+            .env("LJOS_TRACKER_GIT", "off")
+            .env("PACKSET_URL", &pack_url)
+            .env("PACKSET_WORKSPACE", "seat")
+            .current_dir(&home.repo)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = cmd.spawn().unwrap();
+        let mut params = serde_json::json!({
+            "name": "ljos_sitting",
+            "arguments": {"issue": ISSUE}
+        });
+        if let Some(m) = meta {
+            params["_meta"] = m;
+        }
+        let reqs = [
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "cursor", "version": "2.4.0"}}
+            }),
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": params}),
+        ];
+        {
+            let stdin = child.stdin.as_mut().unwrap();
+            for r in &reqs {
+                writeln!(stdin, "{r}").unwrap();
+            }
+            stdin.flush().unwrap();
+        }
+        use std::io::BufRead;
+        let stdout = child.stdout.take().unwrap();
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut answer = serde_json::Value::Null;
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap() > 0 {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                if v.get("id") == Some(&serde_json::json!(2)) {
+                    answer = v;
+                    break;
+                }
+            }
+            line.clear();
+        }
+        (answer, child)
+    };
+
+    let seat = home.shell(CONV_X, &["seat"]);
+    assert!(seat.status.success(), "ljos seat: {}", text_of(&seat));
+    refused(
+        &home.hook(CONV_X, MERGE, &[]),
+        "X's merge before any sitting",
+    );
+    let (said, mut srv) = mcp_call(None);
+    let card_text = std::fs::read_to_string(&home.card).unwrap_or_default();
+    assert!(
+        !card_text.contains(&holder(CONV_X)),
+        "a bare MCP sitting was claimed as X, who only ran `ljos seat`: {card_text}\n{said}"
+    );
+    refused(
+        &home.hook(CONV_X, MERGE, &[]),
+        "X's merge after another client's bare MCP sitting",
+    );
+    let _ = srv.kill();
+    let _ = srv.wait();
+}
+
+/// A bare-MCP box: stub tracker, pack and the version cache, so
+/// `ljos-mcp` answers `ljos_sitting` without a network.
+fn rv_mcp_box(home: &Box_) -> String {
+    let org_dir = home.run.join("tracker/Software/proj");
+    std::fs::create_dir_all(&org_dir).unwrap();
+    std::fs::write(
+        org_dir.join("issues.org"),
+        format!(
+            "#+TITLE: proj issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n* TODO [#C] the merge\n:PROPERTIES:\n:ID:         {ISSUE}\n:CREATED:    [2026-10-25 Sun]\n:END:\n"
+        ),
+    )
+    .unwrap();
+    let cache = home.home.join(".cache/ljos");
+    std::fs::create_dir_all(&cache).unwrap();
+    for name in [
+        "ljos",
+        "ljos-policyd",
+        "vissue-cli",
+        "vissue-mcp",
+        "deedar-cli",
+        "claimdag-cli",
+        "packset",
+        "packset-embed",
+    ] {
+        std::fs::write(cache.join(format!("crate-{name}")), "99.0.0\n").unwrap();
+    }
+    for name in ["deedar", "packset", "packsetd", "ljos-policyd"] {
+        script(
+            &home.bin.join(name),
+            &format!(
+                "#!/bin/sh\ncase \"$1\" in\n  --version|version) echo '{name} 99.0.0 (phronesis)' ;;\n  *) echo ok ;;\nesac\nexit 0\n"
+            ),
+        );
+    }
+    script(
+        &home.bin.join("claimdag"),
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'claimdag 99.0.0' ;;\n  list) echo '[]' ;;\n  claim) echo gen=2 ;;\n  *) echo ok ;;\nesac\nexit 0\n",
+    );
+    let card_path = home.card.display().to_string();
+    script(
+        &home.bin.join("vissue"),
+        &format!(
+            "#!/usr/bin/env python3\nimport json, os, pathlib, sys\n\
+             card = pathlib.Path({card_path:?})\n\
+             cmd = sys.argv[1] if len(sys.argv) > 1 else ''\n\
+             if cmd == '--version':\n\tprint('vissue 99.0.0')\n\
+             elif cmd == 'vote':\n\tprint('--used --confidence')\n\
+             elif cmd == 'identity':\n\tprint('vissue 99.0.0\\nroot=' + os.environ.get('VISSUE_ROOT','') + '\\nprefix=Software')\n\
+             elif cmd == 'claim':\n\tby = os.environ.get('VISSUE_AGENT', '')\n\tcard.write_text(json.dumps({{'id': {ISSUE:?}, 'state': 'STARTED', 'claimed_by': by}}))\n\tprint('claimed')\n\
+             elif cmd == 'show':\n\tprint(card.read_text() if card.exists() else json.dumps({{'id': {ISSUE:?}, 'title': 'the merge', 'state': 'TODO'}}))\n\
+             elif cmd == 'claims':\n\tprint('[]')\n\
+             else:\n\tprint('{{}}')\n"
+        ),
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let mut buf = [0u8; 2048];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let body =
+                r#"{"atoms":[],"island":[],"fired":0,"live":0,"embedder":{"available":false}}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = std::io::Write::write_all(&mut stream, resp.as_bytes());
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// One `ljos_sitting` call to a fresh `ljos-mcp` started detached
+/// (`setsid -f` is not needed: nothing above it is stamped). Returns the
+/// call's answer.
+fn rv_mcp_call(home: &Box_, pack_url: &str, meta: Option<serde_json::Value>) -> serde_json::Value {
+    let bin_dir = Path::new(env!("CARGO_BIN_EXE_ljos")).parent().unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos-mcp"));
+    cmd.env_clear()
+        .env(
+            "PATH",
+            format!("{}:{}:/usr/bin:/bin", home.bin.display(), bin_dir.display()),
+        )
+        .env("HOME", &home.home)
+        .env("XDG_CONFIG_HOME", home.home.join(".config"))
+        .env("XDG_STATE_HOME", home.home.join(".local/state"))
+        .env("XDG_DATA_HOME", home.home.join(".local/share"))
+        .env("XDG_CACHE_HOME", home.home.join(".cache"))
+        .env("XDG_RUNTIME_DIR", &home.run)
+        .env("VISSUE_ROOT", home.run.join("tracker"))
+        .env("VISSUE_NO_ROUTE", "1")
+        .env("LJOS_SEAT", "inky")
+        .env("LJOS_PROJECT", "proj")
+        .env("LJOS_TRACKER_GIT", "off")
+        .env("PACKSET_URL", pack_url)
+        .env("PACKSET_WORKSPACE", "seat")
+        .current_dir(&home.repo)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = cmd.spawn().unwrap();
+    let mut params = serde_json::json!({"name": "ljos_sitting", "arguments": {"issue": ISSUE}});
+    if let Some(m) = meta {
+        params["_meta"] = m;
+    }
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        for r in [
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "cursor", "version": "2.4.0"}}}),
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": params}),
+        ] {
+            writeln!(stdin, "{r}").unwrap();
+        }
+        stdin.flush().unwrap();
+    }
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut answer = serde_json::Value::Null;
+    let mut line = String::new();
+    while reader.read_line(&mut line).unwrap() > 0 {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+            if v.get("id") == Some(&serde_json::json!(2)) {
+                answer = v;
+                break;
+            }
+        }
+        line.clear();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    answer
+}
+
+/// RV3. Claude Code's PreToolUse on the MCP tool binds Claude's own call
+/// through `toolUseId`. It must not leave a binding behind that the next
+/// bare call from another client takes, so that client is not seated as
+/// Claude's conversation.
+#[test]
+fn rv3_a_claude_mcp_sitting_leaves_nothing_the_next_bare_call_binds_to() {
+    const P: &str = "5c1d6a0e-7b5f-4a43-9d7e-claude000001";
+    let home = Box_::new();
+    let pack = rv_mcp_box(&home);
+    let pre = serde_json::json!({
+        "session_id": P, "hook_event_name": "PreToolUse",
+        "tool_name": "mcp__ljos__ljos_sitting", "tool_input": {"issue": ISSUE},
+        "tool_use_id": "toolu_01AbCdEf", "cwd": home.repo,
+    });
+    let _ = home.hook_with(&pre.to_string(), &[]);
+    let _ = rv_mcp_call(
+        &home,
+        &pack,
+        Some(serde_json::json!({"claudecode/toolUseId": "toolu_01AbCdEf"})),
+    );
+    std::fs::remove_file(&home.card).ok();
+    let other = rv_mcp_call(&home, &pack, None);
+    let card = std::fs::read_to_string(&home.card).unwrap_or_default();
+    assert!(
+        !card.contains(&holder(P)),
+        "a bare call from another client was seated as Claude's conversation:\n{card}\n{other}"
+    );
+}
+
+/// RV4. Two Cursor conversations call `ljos_sitting` on their own
+/// `ljos-mcp` servers at nearly the same time. A's hook runs, then B's,
+/// then A's call reaches A's server. A's call is not seated as B.
+#[test]
+fn rv4_interleaved_bare_mcp_sittings_do_not_swap_conversations() {
+    let home = Box_::new();
+    let pack = rv_mcp_box(&home);
+    for conv in [CONV_X, CONV_Z] {
+        let pre = serde_json::json!({
+            "conversation_id": conv, "generation_id": "g1",
+            "hook_event_name": "beforeMCPExecution", "cursor_version": "2.4.0",
+            "tool_name": "ljos_sitting", "tool_input": "{}", "workspace_roots": [home.repo],
+        });
+        let _ = home.hook_with(&pre.to_string(), &[]);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let x_call = rv_mcp_call(&home, &pack, None);
+    let card = std::fs::read_to_string(&home.card).unwrap_or_default();
+    assert!(
+        !card.contains(&holder(CONV_Z)),
+        "X's bare call was seated as Z, whose hook ran last:\n{card}\n{x_call}"
+    );
+}
+
+/// RV3b. RV3 with the other client's bare call 35 seconds after Claude's,
+/// past the 30-second life the bundle README gives these records.
+#[test]
+fn rv3b_a_claude_mcp_binding_is_gone_after_thirty_seconds() {
+    const P: &str = "5c1d6a0e-7b5f-4a43-9d7e-claude000001";
+    let home = Box_::new();
+    let pack = rv_mcp_box(&home);
+    let pre = serde_json::json!({
+        "session_id": P, "hook_event_name": "PreToolUse",
+        "tool_name": "mcp__ljos__ljos_sitting", "tool_input": {"issue": ISSUE},
+        "tool_use_id": "toolu_01AbCdEf", "cwd": home.repo,
+    });
+    let _ = home.hook_with(&pre.to_string(), &[]);
+    let _ = rv_mcp_call(
+        &home,
+        &pack,
+        Some(serde_json::json!({"claudecode/toolUseId": "toolu_01AbCdEf"})),
+    );
+    std::fs::remove_file(&home.card).ok();
+    std::thread::sleep(Duration::from_secs(35));
+    let other = rv_mcp_call(&home, &pack, None);
+    let card = std::fs::read_to_string(&home.card).unwrap_or_default();
+    assert!(
+        !card.contains(&holder(P)),
+        "35 s later a bare call was still seated as Claude's conversation:\n{card}\n{other}"
+    );
+}
+
+/// A bare-seat assignee written into another conversation's `hold-*`
+/// file does not let an unrelated conversation pass on its first check:
+/// adoption requires the exact bare-seat record path and does not
+/// synthesize an adopted holder when no transition happened.
+#[test]
+fn a_bare_seat_assignee_on_anothers_hold_record_does_not_pass_first_check() {
+    let home = Box_::new();
+    let sat = home.shell(CONV_X, &["claim", ISSUE]);
+    assert!(sat.status.success(), "ljos claim: {}", text_of(&sat));
+
+    let holds: Vec<PathBuf> = std::fs::read_dir(home.run.join("ljos"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("hold-"))
+        })
+        .collect();
+    assert_eq!(holds.len(), 1);
+    let hold_path = &holds[0];
+    let mut lines: Vec<String> = std::fs::read_to_string(hold_path)
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect();
+    lines[0] = "inky".to_string();
+    std::fs::write(hold_path, lines.join("\n") + "\n").unwrap();
+    home.card("inky");
+
+    refused(
+        &home.hook(CONV_Y, MERGE, &[("CURSOR_CONVERSATION_ID", CONV_Y)]),
+        "Y's first check against a bare-seat line in X's hold record",
+    );
+
+    // If the tracker row stays claimed by X's conversation tag while a
+    // bare-seat hold record exists, Y cannot adopt it.
+    home.card(&holder(CONV_X));
+    refused(
+        &home.hook(CONV_Y, MERGE, &[("CURSOR_CONVERSATION_ID", CONV_Y)]),
+        "Y's check when the tracker row carries X's tag",
+    );
+
+    // When the tracker row is bare-seat (`inky`) and the bare-seat hold
+    // record is present, X adopts it on first check and Y is refused.
+    let pre_x = serde_json::json!({
+        "conversation_id": CONV_X,
+        "hook_event_name": "beforeMCPExecution",
+        "cursor_version": "2.4.0",
+        "tool_name": "ljos_sitting",
+        "tool_input": "{}",
+        "workspace_roots": ["/"]
+    })
+    .to_string();
+    let _ = home.hook_with(&pre_x, &[]);
+    let bare_actor = ljos_cli::work_id(&format!("inky:{ISSUE}"));
+    let bare_path = home.run.join(format!("ljos/hold-{bare_actor}"));
+    std::fs::rename(hold_path, &bare_path).unwrap();
+    home.card("inky");
+    allowed(
+        &home.hook(CONV_X, MERGE, &[("CURSOR_CONVERSATION_ID", CONV_X)]),
+        "X's first check adopts the bare-seat hold record",
+    );
+    refused(
+        &home.hook(CONV_Y, MERGE, &[("CURSOR_CONVERSATION_ID", CONV_Y)]),
+        "Y's check after X adopted the bare-seat hold record",
+    );
+}
+
+/// Two conversations can check one bare-seat record at the same time.
+/// A merge check does not adopt that record, and neither check is
+/// refused for lack of a sitting.
+#[test]
+fn two_conversations_can_check_one_bare_seat_record() {
+    let home = std::sync::Arc::new(Box_::new());
+    home.card("inky");
+    let bare_actor = ljos_cli::work_id(&format!("inky:{ISSUE}"));
+    let bare_path = home.run.join(format!("ljos/hold-{bare_actor}"));
+    std::fs::create_dir_all(home.run.join("ljos")).unwrap();
+    let x_actor = ljos_cli::work_id(&format!("{}:{ISSUE}", holder(CONV_X)));
+    let y_actor = ljos_cli::work_id(&format!("{}:{ISSUE}", holder(CONV_Y)));
+    let x_path = home.run.join(format!("ljos/hold-{x_actor}"));
+    let y_path = home.run.join(format!("ljos/hold-{y_actor}"));
+
+    let fake_bin = home.run.join("fake-mcp");
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    let fake_mcp = fake_bin.join("ljos-mcp");
+    std::os::unix::fs::symlink("/bin/sleep", &fake_mcp).unwrap();
+    let mut sleeper = Command::new(&fake_mcp).arg("300").spawn().unwrap();
+    let pid = sleeper.id();
+
+    for round in 0..32 {
+        for entry in std::fs::read_dir(home.run.join("ljos")).unwrap().flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("session-")
+                || name.starts_with("hold-")
+                || name == "first-hook-conv"
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+        let _ = (&x_path, &y_path);
+        std::fs::write(
+            &bare_path,
+            format!("inky\ninky\n{pid}\nljos-mcp\n2026-10-25T00:00:00Z\n{ISSUE}\n-\n"),
+        )
+        .unwrap_or_else(|e| panic!("round {round}: {e}"));
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let h1 = std::sync::Arc::clone(&home);
+        let b1 = std::sync::Arc::clone(&barrier);
+        let t1 = std::thread::spawn(move || {
+            b1.wait();
+            h1.hook(CONV_X, MERGE, &[("LJOS_HOOKD", "off")])
+        });
+        let h2 = std::sync::Arc::clone(&home);
+        let b2 = std::sync::Arc::clone(&barrier);
+        let t2 = std::thread::spawn(move || {
+            b2.wait();
+            h2.hook(CONV_Y, MERGE, &[("LJOS_HOOKD", "off")])
+        });
+
+        let out_x = t1.join().unwrap();
+        let out_y = t2.join().unwrap();
+        let x_ok = !out_x.contains("sitting-gate");
+        let y_ok = !out_y.contains("sitting-gate");
+        assert!(
+            x_ok && y_ok,
+            "round {round}: both writes name or open a sitting, got x_ok={x_ok} ({out_x}) y_ok={y_ok} ({out_y})"
+        );
+        assert!(
+            std::fs::read_to_string(&bare_path)
+                .unwrap_or_default()
+                .lines()
+                .next()
+                .is_some_and(|l| l == "inky"),
+            "round {round}: a merge check adopted the bare-seat hold"
+        );
+        let (winner, loser) = if x_ok {
+            (CONV_X, CONV_Y)
+        } else {
+            (CONV_Y, CONV_X)
+        };
+        allowed(
+            &home.hook(winner, MERGE, &[("LJOS_HOOKD", "off")]),
+            &format!("round {round}: winner {winner} follow-up check"),
+        );
+        refused(
+            &home.hook(loser, MERGE, &[("LJOS_HOOKD", "off")]),
+            &format!("round {round}: loser {loser} follow-up check"),
+        );
+    }
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+}
+
+/// Two conversations race a push check on one bare-seat record.
+/// The push check still adopts. At most one conversation adopts it,
+/// and a later check does not hand it to the other.
+#[test]
+fn two_conversations_racing_on_a_bare_seat_hold_adopts_at_most_one() {
+    let home = std::sync::Arc::new(Box_::new());
+    home.card("inky");
+    let bare_actor = ljos_cli::work_id(&format!("inky:{ISSUE}"));
+    let bare_path = home.run.join(format!("ljos/hold-{bare_actor}"));
+    std::fs::create_dir_all(home.run.join("ljos")).unwrap();
+    let x_actor = ljos_cli::work_id(&format!("{}:{ISSUE}", holder(CONV_X)));
+    let y_actor = ljos_cli::work_id(&format!("{}:{ISSUE}", holder(CONV_Y)));
+    let x_path = home.run.join(format!("ljos/hold-{x_actor}"));
+    let y_path = home.run.join(format!("ljos/hold-{y_actor}"));
+    let x_who = holder(CONV_X);
+    let y_who = holder(CONV_Y);
+
+    let fake_bin = home.run.join("fake-mcp");
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    let fake_mcp = fake_bin.join("ljos-mcp");
+    std::os::unix::fs::symlink("/bin/sleep", &fake_mcp).unwrap();
+    let mut sleeper = Command::new(&fake_mcp).arg("300").spawn().unwrap();
+    let pid = sleeper.id();
+
+    for round in 0..32 {
+        for entry in std::fs::read_dir(home.run.join("ljos")).unwrap().flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("session-")
+                || name.starts_with("hold-")
+                || name == "first-hook-conv"
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+        std::fs::write(
+            &bare_path,
+            format!("inky\ninky\n{pid}\nljos-mcp\n2026-10-25T00:00:00Z\n{ISSUE}\n-\n"),
+        )
+        .unwrap_or_else(|e| panic!("round {round}: {e}"));
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let h1 = std::sync::Arc::clone(&home);
+        let b1 = std::sync::Arc::clone(&barrier);
+        let t1 = std::thread::spawn(move || {
+            b1.wait();
+            h1.pre_push(CONV_X)
+        });
+        let h2 = std::sync::Arc::clone(&home);
+        let b2 = std::sync::Arc::clone(&barrier);
+        let t2 = std::thread::spawn(move || {
+            b2.wait();
+            h2.pre_push(CONV_Y)
+        });
+        let _out_x = t1.join().unwrap();
+        let _out_y = t2.join().unwrap();
+
+        let x_has = x_path.is_file();
+        let y_has = y_path.is_file();
+        assert!(
+            x_has ^ y_has,
+            "round {round}: expected one adopt, x={x_has} y={y_has}"
+        );
+        let winner = if x_has { &x_who } else { &y_who };
+        let bare = std::fs::read_to_string(&bare_path).unwrap();
+        assert_eq!(
+            bare.lines().next(),
+            Some(winner.as_str()),
+            "round {round}: bare record"
+        );
+
+        let _ = home.pre_push(CONV_X);
+        let _ = home.pre_push(CONV_Y);
+        assert_eq!(x_path.is_file(), x_has, "round {round}: x follow-up");
+        assert_eq!(y_path.is_file(), y_has, "round {round}: y follow-up");
+    }
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+}
+
+/// A live bare-seat sitting is not handed to Z because a
+/// `session-bare-SEAT` record names Z. Any program of the user can write
+/// that record.
+#[test]
+fn a_forged_bare_session_record_does_not_hand_z_a_bare_seat_sitting() {
+    let home = Box_::new();
+    home.card("inky");
+    let mut sleeper = Command::new("sleep").arg("300").spawn().unwrap();
+    let comm = exec_comm(&sleeper, "sleep");
+    std::fs::create_dir_all(home.run.join("ljos")).unwrap();
+    let bare = ljos_cli::work_id(&format!("inky:{ISSUE}"));
+    std::fs::write(
+        home.run.join(format!("ljos/hold-{bare}")),
+        format!(
+            "inky\ninky\n{}\n{}\n2026-10-25T00:00:00Z\n{ISSUE}\n-\n",
+            sleeper.id(),
+            comm.trim()
+        ),
+    )
+    .unwrap();
+    // Name Y in `first-hook-conv`, so Z's hook cannot adopt a bare-seat
+    // hold through first-caller adoption.
+    std::fs::write(home.run.join("ljos/first-hook-conv"), format!("{CONV_Y}\n")).unwrap();
+    refused(
+        &home.hook(CONV_Z, MERGE, &[]),
+        "Z's merge on Y's bare-seat sitting",
+    );
+    std::fs::write(
+        home.run.join("ljos/session-bare-inky"),
+        format!("inky\n{}\nids\t{CONV_Z}\n", holder(CONV_Z)),
+    )
+    .unwrap();
+    refused(
+        &home.hook(CONV_Z, MERGE, &[]),
+        "Z's merge after a session-bare-inky record names Z",
+    );
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+}
+
+/// What a bare `ljos_sitting` answers does not depend on whether a
+/// cargo test binary is among the server's ancestors. The same call is
+/// made from this test's process tree and from a server that `setsid -f`
+/// detached from it.
+#[test]
+fn a_bare_mcp_sitting_answers_the_same_outside_a_cargo_test_runner() {
+    let home = Box_::new();
+    let org_dir = home.run.join("tracker/Software/proj");
+    std::fs::create_dir_all(&org_dir).unwrap();
+    let seed_tracker = || {
+        std::fs::write(
+            org_dir.join("issues.org"),
+            format!(
+                "#+TITLE: proj issues\n#+TODO: TODO STARTED BLOCKED | DONE CANCELLED\n\n* TODO [#C] the merge\n:PROPERTIES:\n:ID:         {ISSUE}\n:CREATED:    [2026-10-25 Sun]\n:END:\n"
+            ),
+        )
+        .unwrap();
+    };
+    seed_tracker();
+    let cache = home.home.join(".cache/ljos");
+    std::fs::create_dir_all(&cache).unwrap();
+    for name in [
+        "ljos",
+        "ljos-policyd",
+        "vissue-cli",
+        "vissue-mcp",
+        "deedar-cli",
+        "claimdag-cli",
+        "packset",
+        "packset-embed",
+    ] {
+        std::fs::write(cache.join(format!("crate-{name}")), "99.0.0\n").unwrap();
+    }
+    for name in ["deedar", "packset", "packsetd", "ljos-policyd"] {
+        script(
+            &home.bin.join(name),
+            &format!(
+                "#!/bin/sh\ncase \"$1\" in\n  --version|version) echo '{name} 99.0.0 (phronesis)' ;;\n  *) echo ok ;;\nesac\nexit 0\n"
+            ),
+        );
+    }
+    script(
+        &home.bin.join("claimdag"),
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'claimdag 99.0.0' ;;\n  list) echo '[]' ;;\n  claim) echo gen=2 ;;\n  *) echo ok ;;\nesac\nexit 0\n",
+    );
+    let card_path = home.card.display().to_string();
+    script(
+        &home.bin.join("vissue"),
+        &format!(
+            "#!/usr/bin/env python3\nimport json, os, pathlib, sys\n\
+             card = pathlib.Path({card_path:?})\n\
+             cmd = sys.argv[1] if len(sys.argv) > 1 else ''\n\
+             if cmd == '--version':\n\tprint('vissue 99.0.0')\n\
+             elif cmd == 'vote':\n\tprint('--used --confidence')\n\
+             elif cmd == 'identity':\n\tprint('vissue 99.0.0\\nroot=' + os.environ.get('VISSUE_ROOT','') + '\\nprefix=Software')\n\
+             elif cmd == 'claim':\n\tby = os.environ.get('VISSUE_AGENT', '')\n\tcard.write_text(json.dumps({{'id': {ISSUE:?}, 'state': 'STARTED', 'claimed_by': by}}))\n\tprint('claimed')\n\
+             elif cmd == 'show':\n\tprint(card.read_text() if card.exists() else json.dumps({{'id': {ISSUE:?}, 'title': 'the merge', 'state': 'TODO'}}))\n\
+             elif cmd == 'claims':\n\tprint('[]')\n\
+             else:\n\tprint('{{}}')\n"
+        ),
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let mut buf = [0u8; 2048];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let body =
+                r#"{"atoms":[],"island":[],"fired":0,"live":0,"embedder":{"available":false}}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = std::io::Write::write_all(&mut stream, resp.as_bytes());
+        }
+    });
+    let pack_url = format!("http://{addr}");
+
+    let mcp_call = |meta: Option<serde_json::Value>,
+                    detached: bool|
+     -> (serde_json::Value, Child) {
+        let bin_dir = Path::new(env!("CARGO_BIN_EXE_ljos")).parent().unwrap();
+        let mut cmd = if detached {
+            let mut c = Command::new("setsid");
+            c.args(["-f", env!("CARGO_BIN_EXE_ljos-mcp")]);
+            c
+        } else {
+            Command::new(env!("CARGO_BIN_EXE_ljos-mcp"))
+        };
+        cmd.env_clear()
+            .env(
+                "PATH",
+                format!("{}:{}:/usr/bin:/bin", home.bin.display(), bin_dir.display()),
+            )
+            .env("HOME", &home.home)
+            .env("XDG_CONFIG_HOME", home.home.join(".config"))
+            .env("XDG_STATE_HOME", home.home.join(".local/state"))
+            .env("XDG_DATA_HOME", home.home.join(".local/share"))
+            .env("XDG_CACHE_HOME", home.home.join(".cache"))
+            .env("XDG_RUNTIME_DIR", &home.run)
+            .env("VISSUE_ROOT", home.run.join("tracker"))
+            .env("VISSUE_NO_ROUTE", "1")
+            .env("LJOS_SEAT", "inky")
+            .env("LJOS_PROJECT", "proj")
+            .env("LJOS_TRACKER_GIT", "off")
+            .env("PACKSET_URL", &pack_url)
+            .env("PACKSET_WORKSPACE", "seat")
+            .current_dir(&home.repo)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = cmd.spawn().unwrap();
+        let mut params = serde_json::json!({
+            "name": "ljos_sitting",
+            "arguments": {"issue": ISSUE}
+        });
+        if let Some(m) = meta {
+            params["_meta"] = m;
+        }
+        let reqs = [
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "cursor", "version": "2.4.0"}}
+            }),
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": params}),
+        ];
+        {
+            let stdin = child.stdin.as_mut().unwrap();
+            for r in &reqs {
+                writeln!(stdin, "{r}").unwrap();
+            }
+            stdin.flush().unwrap();
+        }
+        use std::io::BufRead;
+        let stdout = child.stdout.take().unwrap();
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut answer = serde_json::Value::Null;
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap() > 0 {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                if v.get("id") == Some(&serde_json::json!(2)) {
+                    answer = v;
+                    break;
+                }
+            }
+            line.clear();
+        }
+        (answer, child)
+    };
+
+    let clear = || {
+        for entry in std::fs::read_dir(home.run.join("ljos"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("hold-")
+                || name.starts_with("session-")
+                || name == "first-hook-conv"
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+        let _ = std::fs::remove_file(&home.card);
+        seed_tracker();
+    };
+    clear();
+    let (inside, mut srv) = mcp_call(None, false);
+    let _ = srv.kill();
+    let _ = srv.wait();
+    clear();
+    let (outside, mut srv) = mcp_call(None, true);
+    let _ = srv.wait();
+    assert_eq!(
+        inside["result"]["isError"] == true,
+        outside["result"]["isError"] == true,
+        "a bare ljos_sitting answered differently under the test runner:\ninside {inside}\noutside {outside}"
+    );
+}
+
+const RV_STUB_CLAIMDAG: &str = r###"#!/usr/bin/env python3
+import json, os, sys, fcntl
+st = os.path.join(os.environ["STUB_STATE"], "claimdag.json")
+lk = open(st + ".lock", "a"); fcntl.flock(lk, fcntl.LOCK_EX)
+s = json.load(open(st)) if os.path.exists(st) else {"known": [], "claims": {}}
+a = sys.argv[1:]
+def opt(n):
+    return a[a.index(n) + 1] if n in a else None
+def save():
+    json.dump(s, open(st, "w"))
+cmd = a[0] if a else ""
+if cmd == "--version":
+    print("claimdag 99.0.0")
+elif cmd == "upsert":
+    s["known"].append(opt("--id")); save()
+elif cmd == "get":
+    i = a[1]
+    if i in s["claims"]:
+        print(f"id={i} status=claimed assignee={s['claims'][i]}")
+    elif i in s["known"]:
+        print(f"id={i} status=ready")
+    else:
+        sys.exit(1)
+elif cmd == "claim":
+    i, who = a[1], opt("--assignee")
+    cur = s["claims"].get(i)
+    if cur and cur != who:
+        sys.stderr.write(f"claimdag: node {i} status claimed\n"); sys.exit(1)
+    s["claims"][i] = who
+    if i not in s["known"]:
+        s["known"].append(i)
+    save(); print("gen=2")
+elif cmd == "release":
+    s["claims"].pop(a[1], None); save()
+elif cmd in ("list", "ready"):
+    print("[]")
+"###;
+
+const RV_STUB_VISSUE: &str = r###"#!/usr/bin/env python3
+import json, os, sys, fcntl
+st = os.path.join(os.environ["STUB_STATE"], "vissue.json")
+lk = open(st + ".lock", "a"); fcntl.flock(lk, fcntl.LOCK_EX)
+s = json.load(open(st)) if os.path.exists(st) else {"cards": {}, "n": 0, "created": []}
+a = sys.argv[1:]
+cmd = a[0] if a else ""
+pos = [x for x in a[1:] if not x.startswith("-")]
+def save():
+    json.dump(s, open(st, "w"))
+if cmd == "--version":
+    print("vissue 99.0.0")
+elif cmd == "show":
+    i = pos[0] if pos else ""
+    print(json.dumps(s["cards"].get(i, {"id": i, "title": "the work", "state": "TODO"})))
+elif cmd == "claim":
+    i = pos[0]
+    s["cards"][i] = {"id": i, "title": "the work", "state": "STARTED",
+                     "claimed_by": os.environ.get("VISSUE_AGENT", "")}
+    save(); print("claimed")
+elif cmd == "create":
+    s["n"] += 1
+    i = f"proj-c{s['n']:03d}"
+    parent = a[a.index("--parent") + 1] if "--parent" in a else None
+    s["created"].append({"id": i, "argv": a, "agent": os.environ.get("VISSUE_AGENT", "")})
+    s["cards"][i] = {"id": i, "title": a[-2] if a[-1] == "-q" else a[-1], "state": "TODO", "parent": parent}
+    save(); print(i)
+elif cmd == "claims":
+    print("[]")
+elif cmd == "identity":
+    print("vissue 99.0.0\nroot=\nprefix=Software")
+else:
+    print("{}")
+"###;
+
+/// A subagent on an id-less shared server that runs `ljos claim` on its
+/// parent's ticket three times, as an agent retries a refused write,
+/// files at most one child ticket. Each extra child is a tracker write
+/// and an orphan the parent never asked for.
+#[test]
+fn a_subagent_retrying_its_parents_ticket_files_one_child_at_most() {
+    const SUB: &str = "sand-subagent-0001cccc";
+    let home = Box_::new();
+    script(&home.bin.join("claimdag"), RV_STUB_CLAIMDAG);
+    script(&home.bin.join("vissue"), RV_STUB_VISSUE);
+    let state = home.run.join("stub");
+    std::fs::create_dir_all(&state).unwrap();
+    let python = PathBuf::from("/usr/bin/python3");
+    let claim = format!("\"$LJOS\" claim {ISSUE}");
+    let said = home.under(
+        &python,
+        &[("STUB_STATE", state.to_str().unwrap())],
+        "",
+        &[
+            (Some(CONV_X), &claim),
+            (Some(SUB), &claim),
+            (Some(SUB), &claim),
+            (Some(SUB), &claim),
+        ],
+    );
+    let filed: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(state.join("vissue.json")).unwrap_or_else(|_| "{}".into()),
+    )
+    .unwrap();
+    let created = filed["created"].as_array().map_or(0, Vec::len);
+    assert_eq!(
+        created, 1,
+        "the subagent filed {created} child tickets under {ISSUE}:\n{filed:#}\n{said}"
+    );
+    let agent = filed["created"][0]["agent"].as_str().unwrap_or("");
+    assert_eq!(
+        agent, "inky",
+        "subagent child was not filed through file_issue with seat inky (got VISSUE_AGENT={agent:?}):\n{filed:#}"
+    );
+}
+
+/// RV5. On an id-less shared server X sits on `proj-one`, then Y sits on
+/// `proj-two`. X's subagent runs `ljos claim proj-two`. Nothing on the
+/// box says whose subagent it is, so it must not be handed a child of
+/// Y's ticket just because Y sat last.
+#[test]
+fn rv5_a_subagent_is_not_filed_under_whichever_ticket_was_sat_on_last() {
+    const SUB: &str = "sand-subagent-0001cccc";
+    let home = Box_::new();
+    script(&home.bin.join("claimdag"), RV_STUB_CLAIMDAG);
+    script(&home.bin.join("vissue"), RV_STUB_VISSUE);
+    let state = home.run.join("stub");
+    std::fs::create_dir_all(&state).unwrap();
+    let python = PathBuf::from("/usr/bin/python3");
+    let said = home.under(
+        &python,
+        &[("STUB_STATE", state.to_str().unwrap())],
+        "",
+        &[
+            (Some(CONV_X), "\"$LJOS\" claim proj-one"),
+            (None, "sleep 1.2"),
+            (Some(CONV_Y), "\"$LJOS\" claim proj-two"),
+            (Some(SUB), "\"$LJOS\" claim proj-two"),
+        ],
+    );
+    let filed: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(state.join("vissue.json")).unwrap_or_else(|_| "{}".into()),
+    )
+    .unwrap();
+    let under_y = filed["created"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| {
+            c["argv"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|w| w == "proj-two"))
+        })
+        .count();
+    assert_eq!(
+        under_y, 0,
+        "X's subagent was filed under Y's ticket proj-two:\n{filed:#}\n{said}"
+    );
+}
+
+/// Another process holds `tmux-sock.lock`. A Cursor shell hook on an
+/// ordinary line still answers before the runner cuts the hook off.
+#[test]
+fn a_held_tmux_lock_does_not_stall_a_shell_hook() {
+    let home = Box_::new();
+    let dir = home.run.join("ljos");
+    std::fs::create_dir_all(&dir).unwrap();
+    let lock = dir.join("tmux-sock.lock");
+    let ready = home.run.join("locked");
+    let mut holder = Command::new("flock")
+        .arg(&lock)
+        .args(["sh", "-c", &format!("touch {}; sleep 25", ready.display())])
+        .spawn()
+        .unwrap();
+    let t0 = Instant::now();
+    while !ready.exists() && t0.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(ready.exists(), "flock never took the lock");
+    let t0 = Instant::now();
+    let said = home.hook(CONV_X, "git status", &[("CURSOR_CONVERSATION_ID", CONV_X)]);
+    let took = t0.elapsed();
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert!(
+        took < Duration::from_millis(9_000),
+        "a Cursor shell hook on `git status` took {took:?} while tmux-sock.lock was held \
+         (the runner cuts the hook off at 10 s):\n{said}"
+    );
+    assert!(
+        !said.contains("no verdict"),
+        "the hook refused because it ran out of time while the lock was held:\n{said}"
+    );
+}

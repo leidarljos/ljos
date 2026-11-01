@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""Run a command as this program's child.
+
+One shell does not cast a second seat's ballot. A vote started here is
+another run, so a second seat can vote in the same terminal picture.
+"""
+
+import os
+import sys
+
+if len(sys.argv) < 2:
+    sys.stderr.write("usage: other-seat COMMAND [ARG...]\n")
+    raise SystemExit(2)
+
+raise SystemExit(os.spawnvp(os.P_WAIT, sys.argv[1], sys.argv[1:]))

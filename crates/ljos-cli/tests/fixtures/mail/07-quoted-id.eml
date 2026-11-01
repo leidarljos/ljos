@@ -1,0 +1,18 @@
+From: Desk <desk@example.test>
+To: Owner <owner@example.test>
+Subject: Receipt with a quoted id
+Date: Mon, 19 Oct 2026 10:00:00 +0000
+Message-ID: <"quoted id"@example.test>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="b"
+
+--b
+Content-Type: text/plain; charset=utf-8
+
+Receipt attached.
+--b
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename="receipt.txt"
+
+Receipt 9
+--b--

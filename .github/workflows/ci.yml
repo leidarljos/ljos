@@ -1,0 +1,261 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/develop' && github.ref != 'refs/heads/main' }}
+
+jobs:
+  workflows:
+    name: workflow files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: python3 scripts/check-workflows.py
+      - name: server.json version
+        run: scripts/check-server-json.sh
+  # A push is before..sha. A new branch's before is all zeros, so the
+  # commits are the ones on no other remote branch. A pull request is
+  # base..head. Commits already on the base are outside the range.
+  identity:
+    name: commit identity
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Test the identity gate
+        run: scripts/identity-gate-test.sh
+      - name: Check commits new to this event
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -eu
+          EVENT_NAME=${EVENT_NAME-}
+          BEFORE=${BEFORE-}
+          SHA=${SHA-}
+          PR_BASE=${PR_BASE-}
+          PR_HEAD=${PR_HEAD-}
+          REF_NAME=${REF_NAME-}
+          zero=0000000000000000000000000000000000000000
+          if [ "$SHA" = "$zero" ]; then
+            echo "identity-gate: ref deletion has no commits to judge" >&2
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            if [ -z "$PR_BASE" ] || [ -z "$PR_HEAD" ]; then
+              echo "identity-gate: missing pull request range" >&2
+              exit 1
+            fi
+            scripts/identity-gate.sh "$PR_BASE..$PR_HEAD"
+          elif [ "$BEFORE" = "$zero" ]; then
+            if [ -z "$REF_NAME" ]; then
+              echo "identity-gate: missing ref name" >&2
+              exit 1
+            fi
+            git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
+            scripts/identity-gate.sh "$SHA" --not \
+              --exclude="origin/${REF_NAME}" \
+              --exclude="origin/HEAD" \
+              --remotes=origin
+          elif [ -n "$BEFORE" ]; then
+            scripts/identity-gate.sh "$BEFORE..$SHA"
+          else
+            echo "identity-gate: missing before" >&2
+            exit 1
+          fi
+  test:
+    name: cargo test
+    # CPU runner. The packset binary is built on its own; packset-embed is not.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: 1.97.1
+          components: clippy, rustfmt
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # Mail reader tests build a notmuch database. Detach tests need tmux.
+      # The identity gate tests start a one-shot runner under zsh -c.
+      # The hook queue test reads each call's peak RSS from GNU time.
+      - name: Install age, tmux, notmuch and time
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends age tmux notmuch time zsh
+      - name: Build packset from develop
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch develop https://github.com/leidarljos/packset.git "${{ runner.temp }}/packset"
+          cargo build --locked --manifest-path "${{ runner.temp }}/packset/Cargo.toml" -p packset --bin packset --bin packsetd
+          mkdir -p "${{ runner.temp }}/bin"
+          install -m 0755 "${{ runner.temp }}/packset/target/debug/packset" "${{ runner.temp }}/bin/packset"
+          install -m 0755 "${{ runner.temp }}/packset/target/debug/packsetd" "${{ runner.temp }}/bin/packsetd"
+          echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
+          export PATH="${{ runner.temp }}/bin:${PATH}"
+          command -v age-keygen
+          command -v packset
+          command -v packsetd
+      # Tracker tests need vissue 0.20. The same build as the other tools:
+      # a tag, --locked, the binary on PATH. Absent that binary the tests
+      # say so and return; this step is why CI does not take that path.
+      - name: Build vissue 0.20.0
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v0.20.0 https://github.com/leidarljos/vissue.git "${{ runner.temp }}/vissue"
+          cargo build --locked -p vissue-cli --bin vissue --manifest-path "${{ runner.temp }}/vissue/Cargo.toml"
+          mkdir -p "${{ runner.temp }}/bin"
+          install -m 0755 "${{ runner.temp }}/vissue/target/debug/vissue" "${{ runner.temp }}/bin/vissue"
+          echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
+          export PATH="${{ runner.temp }}/bin:${PATH}"
+          vissue --version | grep -q '0.20'
+      # deedar on main writes no bytes/ and no sources sidecar, so a
+      # carried deed made from one this bag does not carry cannot be
+      # imported. .github/deedar-pin names the commit that writes both.
+      # The import test reads that same file.
+      - name: Build deedar at the pinned commit
+        run: |
+          set -euo pipefail
+          sha=$(tr -d '[:space:]' < .github/deedar-pin)
+          printf '%s' "$sha" | grep -Eq '^[0-9a-f]{40}$'
+          dir="${{ runner.temp }}/deedar"
+          git init -q "$dir"
+          git -C "$dir" remote add origin https://github.com/leidarljos/deedar.git
+          git -C "$dir" fetch --depth 1 origin "$sha"
+          git -C "$dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$dir" rev-parse HEAD)" = "$sha"
+          cargo build --locked --manifest-path "$dir/Cargo.toml" -p deedar-cli --bin deedar
+          mkdir -p "${{ runner.temp }}/bin"
+          install -m 0755 "$dir/target/debug/deedar" "${{ runner.temp }}/bin/deedar"
+          echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
+          export PATH="${{ runner.temp }}/bin:${PATH}"
+          command -v deedar
+      # The guard tests ask the real ljos-policyd about a shell line, so
+      # they run the build a release ships: develop, phronesis linked.
+      - name: Build ljos-policyd from develop with phronesis
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends meson ninja-build capnproto pkg-config
+          git clone --depth 1 --branch v0.2.5 https://github.com/leidarljos/phronesis "${{ runner.temp }}/phronesis"
+          cd "${{ runner.temp }}/phronesis"
+          meson setup build --prefix="${{ runner.temp }}/phronesis-prefix" -Dtests=disabled
+          meson compile -C build
+          meson install -C build
+          cd "$GITHUB_WORKSPACE"
+          git clone --depth 1 --branch develop https://github.com/leidarljos/ljos-policyd.git "${{ runner.temp }}/ljos-policyd"
+          PHRONESIS_DIR="${{ runner.temp }}/phronesis-prefix" cargo build --locked --release --manifest-path "${{ runner.temp }}/ljos-policyd/Cargo.toml"
+          mkdir -p "${{ runner.temp }}/bin"
+          install -m 0755 "${{ runner.temp }}/ljos-policyd/target/release/ljos-policyd" "${{ runner.temp }}/bin/ljos-policyd"
+          echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
+          "${{ runner.temp }}/bin/ljos-policyd" version | grep -q '(phronesis)'
+      - name: Workspace tests
+        run: cargo test --workspace
+      - name: MCP tool list size
+        run: |
+          set -euo pipefail
+          python3 -m venv "${{ runner.temp }}/tok"
+          "${{ runner.temp }}/tok/bin/pip" install --disable-pip-version-check 'tiktoken==0.12.0'
+          PATH="${{ runner.temp }}/tok/bin:${PATH}" scripts/mcp-size.sh --check
+
+  # A push that passed the tests keeps a bookworm build for fourteen days.
+  # The cargo line is the linux line from release.yml. Debian 12 is the
+  # glibc baseline, so the binaries run where that release runs. Nothing
+  # here tags a commit or publishes a release.
+  linux-archive:
+    name: linux archive
+    needs: test
+    if: github.event_name == 'push' && (github.ref_name == 'develop' || github.ref_name == 'main')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build the bookworm archive
+        run: docker run --rm -v "$GITHUB_WORKSPACE:/src" -w /src debian:bookworm bash /src/scripts/bookworm-archive.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ljos-${{ github.sha }}-x86_64-linux
+          path: |
+            dist/ljos-${{ github.sha }}-x86_64-linux.tar.gz
+            dist/ljos-${{ github.sha }}-x86_64-linux.tar.gz.sha256
+          retention-days: 14
+          if-no-files-found: error
+
+  macos:
+    name: cargo check and test on macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: 1.97.1
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+          components: clippy
+      # The pin in rust-toolchain.toml is the compiler cargo runs.
+      # Targets on the action's toolchain do not reach that pin.
+      - name: The pinned cross target
+        run: |
+          set -eu
+          rustup target add x86_64-apple-darwin
+          rustup target list --installed | grep -qx x86_64-apple-darwin
+      - name: Check aarch64-apple-darwin
+        run: cargo check --locked --workspace --all-targets --target aarch64-apple-darwin
+      - name: Check x86_64-apple-darwin
+        run: cargo check --locked --workspace --all-targets --target x86_64-apple-darwin
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # The sync, rules and push tests seal with age, as on the Linux job.
+      - name: age
+        run: |
+          set -eu
+          brew install age
+          command -v age-keygen
+      - name: Unit tests
+        run: cargo test --locked --workspace --lib
+
+  # release.yml already builds on macos-latest. This job runs the
+  # parent-death and launcher tests there, which is the kqueue path.
+  # Those tests use a fake pack and do not need packsetd.
+  mcp-lifetime-macos:
+    name: mcp lifetime on macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: 1.97.1
+      - name: MCP lifetime
+        run: cargo test -p ljos --test mcp_lifetime
+
+  deny:
+    name: cargo deny check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: 1.89.0
+      # Built from source, so the job pulls no image from Docker Hub.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: deny
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: cargo-deny-0.20.2-${{ runner.os }}-${{ runner.arch }}
+      - name: Build cargo-deny 0.20.2 from source
+        if: steps.deny.outputs.cache-hit != 'true'
+        run: cargo install --locked cargo-deny --version 0.20.2
+      - name: cargo deny check
+        run: cargo deny check

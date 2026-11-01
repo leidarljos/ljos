@@ -1,0 +1,1430 @@
+//! ljos-0re8: a burst of tool calls queues for the seat's hook instead of
+//! stampeding it. Each call answers from its own process within a small,
+//! fixed budget; the book, the claim it files and the tracker commit are
+//! applied after the answer by one drainer.
+#![cfg(target_os = "linux")]
+
+ljos_test_boot::harness!();
+use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::io::AsRawFd;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+#[path = "common/seat_root.rs"]
+mod seat_root;
+
+/// Each tracker call of the shim sleeps this long, standing in for a
+/// tracker large enough that reading it takes a while.
+const TRACKER_READ: &str = "0.15";
+
+const VISSUE: &str = r#"#!/usr/bin/env python3
+import os, sys, time, pathlib, fcntl
+root = pathlib.Path(os.environ["VISSUE_ROOT"])
+args = sys.argv[1:]
+with (root / "vissue.log").open("a") as fh:
+    fh.write(" ".join(args) + "\n")
+cmd, rest = args[0], args[1:]
+time.sleep(float(os.environ.get("SHIM_TRACKER_READ", "0")))
+if cmd == "create":
+    lock = pathlib.Path(os.environ.get("XDG_RUNTIME_DIR", "/nonexistent")) / "ljos" / "book.lock"
+    state = "absent"
+    if lock.exists():
+        with lock.open("a") as fh:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fh, fcntl.LOCK_UN)
+                state = "free"
+            except BlockingIOError:
+                state = "held"
+    with (root / "book-lock.log").open("a") as fh:
+        fh.write(state + "\n")
+    proj = rest[rest.index("-p") + 1] if "-p" in rest else "probe"
+    title = [a for a in rest if not a.startswith("-") and a != proj][-1]
+    with (root / ".seq").open("a+") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        fh.seek(0)
+        n = len(fh.read()) + 1
+        fh.write("x")
+    iid = f"{proj}-{n:04x}"
+    dest = root / "Software" / proj
+    dest.mkdir(parents=True, exist_ok=True)
+    with (dest / "issues.org").open("a") as fh:
+        fh.write(f"* TODO [#C] {title}\n:PROPERTIES:\n:ID:         {iid}\n:END:\n")
+    print(iid)
+elif cmd == "claim":
+    with (root / "claims.log").open("a") as fh:
+        fh.write(rest[0] + " " + os.environ.get("VISSUE_AGENT", "") + "\n")
+    print("claimed")
+elif cmd == "claims":
+    print("[]")
+else:
+    print("{}")
+"#;
+
+struct Hab {
+    root: PathBuf,
+    tracker: PathBuf,
+    repo: PathBuf,
+    bin: PathBuf,
+    run: PathBuf,
+    home: PathBuf,
+}
+
+impl Drop for Hab {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn hab(name: &str) -> Hab {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    // Short: the server's socket lives under this root, and a socket path
+    // has at most 103 bytes.
+    let root = seat_root::seat_root(ljos_cli::bookkeep::path_is_temp).join(format!(
+        "hq-{name}-{}-{}",
+        std::process::id(),
+        nanos % 1_000_000_000
+    ));
+    let hab = Hab {
+        tracker: root.join("tracker"),
+        repo: root.join("repo"),
+        bin: root.join("bin"),
+        run: root.join("run"),
+        home: root.join("home"),
+        root,
+    };
+    for dir in [&hab.tracker, &hab.repo, &hab.bin, &hab.run, &hab.home] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hab.root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&hab.run, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    for dir in [&hab.tracker, &hab.repo] {
+        git(dir, &["init", "-q", "-b", "main"]);
+        git(dir, &["config", "user.name", "Rohit Goswami"]);
+        git(dir, &["config", "user.email", "rgoswami@ieee.org"]);
+        git(dir, &["config", "commit.gpgsign", "false"]);
+        git(dir, &["config", "core.hooksPath", "/dev/null"]);
+    }
+    std::fs::write(hab.repo.join("README.md"), "seed\n").unwrap();
+    git(&hab.repo, &["add", "README.md"]);
+    git(&hab.repo, &["commit", "-q", "-m", "seed"]);
+    std::fs::write(hab.tracker.join(".keep"), "").unwrap();
+    git(&hab.tracker, &["add", ".keep"]);
+    git(&hab.tracker, &["commit", "-q", "-m", "seed"]);
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let shim = hab.bin.join("vissue");
+        std::fs::write(&shim, VISSUE).unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    hab
+}
+
+fn ljos(hab: &Hab, args: &[&str]) -> Command {
+    ljos_under(hab, None, args)
+}
+
+/// `ljos ARGS`, run under `wrapper` (for `/usr/bin/time -v`) when given.
+fn ljos_under(hab: &Hab, wrapper: Option<&[&str]>, args: &[&str]) -> Command {
+    let mut cmd = match wrapper {
+        Some([program, rest @ ..]) => {
+            let mut cmd = Command::new(program);
+            cmd.args(rest).arg(env!("CARGO_BIN_EXE_ljos"));
+            cmd
+        }
+        _ => Command::new(env!("CARGO_BIN_EXE_ljos")),
+    };
+    cmd.args(args)
+        .env_clear()
+        .env("PATH", format!("{}:/usr/bin:/bin", hab.bin.display()))
+        .env("HOME", &hab.home)
+        .env("XDG_CONFIG_HOME", hab.home.join(".config"))
+        .env("XDG_DATA_HOME", hab.home.join(".local/share"))
+        .env("XDG_CACHE_HOME", hab.home.join(".cache"))
+        .env("XDG_STATE_HOME", hab.home.join(".local/state"))
+        .env("XDG_RUNTIME_DIR", &hab.run)
+        .env("VISSUE_ROOT", &hab.tracker)
+        .env("VISSUE_NO_ROUTE", "1")
+        .env("LJOS_TRACKER_GIT", "commit")
+        .env("LJOS_PROJECT", "probe")
+        .env("LJOS_SEAT", "probe-seat")
+        .env("PACKSET_URL", "off")
+        .env("SHIM_TRACKER_READ", TRACKER_READ)
+        .current_dir(&hab.repo)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd
+}
+
+fn feed(mut cmd: Command, payload: &str) -> std::process::Child {
+    let mut child = cmd.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    child
+}
+
+fn feed_measured(
+    mut cmd: Command,
+    payload: &str,
+) -> (std::process::Child, std::thread::JoinHandle<u64>) {
+    let mut child = cmd.spawn().unwrap();
+    let pid = child.id();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    let peak = std::thread::spawn(move || {
+        let path = format!("/proc/{pid}/status");
+        let mut peak = 0;
+        while let Ok(status) = std::fs::read_to_string(&path) {
+            if let Some(kb) = status.lines().find_map(|line| {
+                line.strip_prefix("VmHWM:")
+                    .and_then(|value| value.split_whitespace().next())
+                    .and_then(|value| value.parse::<u64>().ok())
+            }) {
+                peak = peak.max(kb);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        peak
+    });
+    (child, peak)
+}
+
+/// The child's output, or a panic naming `what` when it runs past `limit`.
+fn within(mut child: std::process::Child, limit: Duration, what: &str) -> Output {
+    let started = Instant::now();
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            return child.wait_with_output().unwrap();
+        }
+        if started.elapsed() > limit {
+            let _ = child.kill();
+            let out = child.wait_with_output().unwrap();
+            panic!(
+                "{what}: no answer in {limit:?}\nstderr:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn cursor_shell(hab: &Hab, conversation: &str, command: &str) -> String {
+    serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": conversation,
+        "hook_event_name": "beforeShellExecution",
+        "command": command,
+        "cwd": hab.repo,
+    })
+    .to_string()
+}
+
+fn claude_edit(hab: &Hab, session: &str) -> String {
+    serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": session,
+        "tool_name": "Edit",
+        "tool_input": {
+            "file_path": hab.repo.join("README.md"),
+            "old_string": "seed",
+            "new_string": "grown",
+        },
+        "cwd": hab.repo,
+    })
+    .to_string()
+}
+
+fn drain(hab: &Hab) {
+    let out = within(
+        feed(ljos(hab, &["hook", "--drain"]), ""),
+        Duration::from_secs(60),
+        "ljos hook --drain",
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn creates(hab: &Hab) -> usize {
+    std::fs::read_to_string(hab.tracker.join("vissue.log"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.starts_with("create "))
+        .count()
+}
+
+fn lock_file(path: &Path) -> std::fs::File {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap();
+    // SAFETY: flock on a descriptor `file` owns; it is let go on drop.
+    assert_eq!(
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    file
+}
+
+fn wait_for(path: &Path) {
+    let started = Instant::now();
+    while !path.exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{} never appeared",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Twenty tool calls at once, half of them the first write of a session.
+/// Each write used to file its claim inside the call, under the book lock,
+/// and the calls queued behind each other for seconds. Each call answers
+/// within 200 ms once it holds a slot, and within the admission budget
+/// end to end; how many run at once is the server's slot count, which
+/// follows the box's cores.
+#[test]
+fn twenty_calls_at_once_each_answer_inside_200_ms_and_30_mb() {
+    if !Path::new("/proc/self/status").is_file() {
+        eprintln!("skipped: /proc/self/status is not available");
+        return;
+    }
+    let hab = hab("twenty");
+    let warm = within(
+        feed(ljos(&hab, &["hook"]), &cursor_shell(&hab, "warm", "ls")),
+        Duration::from_secs(10),
+        "warm-up call",
+    );
+    assert!(warm.status.success());
+    wait_for(&hab.run.join("ljos/hookd.sock"));
+    drain(&hab);
+    let calls: Vec<_> = (0..20)
+        .map(|i| {
+            let payload = if i % 2 == 0 {
+                claude_edit(&hab, &format!("burst-{i}"))
+            } else {
+                cursor_shell(&hab, &format!("burst-{i}"), "ls -la")
+            };
+            let started = Instant::now();
+            let (child, peak) = feed_measured(ljos(&hab, &["hook"]), &payload);
+            (i, started, child, peak)
+        })
+        .collect();
+    let mut rows = Vec::new();
+    for (i, started, child, peak) in calls {
+        let out = within(child, Duration::from_secs(10), "a burst call");
+        let took = started.elapsed();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        assert!(out.status.success(), "call {i}: {stdout}\n{stderr}");
+        assert!(!stdout.contains("deny"), "call {i} was refused: {stdout}");
+        if i % 2 == 1 {
+            assert!(
+                stdout.contains("\"permission\":\"allow\""),
+                "call {i}: {stdout}"
+            );
+        }
+        rows.push((i, took, peak.join().unwrap()));
+    }
+    let report: Vec<String> = rows
+        .iter()
+        .map(|(i, took, kb)| format!("call {i}: {} ms, {kb} KB", took.as_millis()))
+        .collect();
+    eprintln!("{}", report.join("\n"));
+    for (i, took, kb) in &rows {
+        assert!(
+            *took < Duration::from_millis(ljos_cli::hookd::ADMIT_MS),
+            "call {i} took {took:?}, past the admission budget:\n{}",
+            report.join("\n")
+        );
+        assert!(*kb < 30 * 1024, "call {i} peaked at {kb} KB");
+    }
+    let times = std::fs::read_to_string(hab.run.join("ljos/hook-times.log")).unwrap();
+    let mut answered = 0;
+    for line in times.lines() {
+        let words: Vec<&str> = line.split(' ').collect();
+        if words.len() != 4 || words[0] != "hook" {
+            continue;
+        }
+        let took: u64 = words[2].parse().unwrap();
+        let waited: u64 = words[3].parse().unwrap();
+        assert!(
+            took.saturating_sub(waited) < 200,
+            "a call answered in {} ms past its {waited} ms slot wait:\n{times}",
+            took.saturating_sub(waited)
+        );
+        answered += 1;
+    }
+    assert!(
+        answered >= 21,
+        "{answered} hook timing lines for 21 calls:\n{times}"
+    );
+    drain(&hab);
+    assert_eq!(creates(&hab), 0, "a first write does not file a claim");
+    let times = std::fs::read_to_string(hab.run.join("ljos/hook-times.log")).unwrap();
+    let mut gates = 0;
+    for line in times.lines() {
+        let words: Vec<&str> = line.split(' ').collect();
+        assert!(
+            words.len() == 4
+                && ["hook", "refused", "book"].contains(&words[0])
+                && words[1..].iter().all(|w| w.parse::<u64>().is_ok()),
+            "a torn timing line {line:?} in:\n{times}"
+        );
+        gates += usize::from(words[0] == "hook");
+    }
+    assert_eq!(gates, 21, "one timing line per gate call:\n{times}");
+}
+
+/// A pack that accepts and never answers costs a gate one short wait, and
+/// the rules kept on disk still deny. The next call does not wait at all.
+#[test]
+fn a_hung_pack_costs_one_short_wait_and_the_kept_rules_still_deny() {
+    let hab = hab("hungpack");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for conn in listener.incoming().flatten() {
+            held.push(conn);
+        }
+    });
+    let rules = hab.home.join(".local/share/ljos/rules-probe.json");
+    std::fs::create_dir_all(rules.parent().unwrap()).unwrap();
+    std::fs::write(
+        &rules,
+        r#"[["curl*","deny","the person said no curl from this seat"]]"#,
+    )
+    .unwrap();
+    let url = format!("http://127.0.0.1:{port}");
+    let call = |conversation: &str, command: &str| {
+        let mut cmd = ljos(&hab, &["hook"]);
+        cmd.env("PACKSET_URL", &url)
+            .env("PACKSET_WORKSPACE", "probe");
+        let started = Instant::now();
+        let out = within(
+            feed(cmd, &cursor_shell(&hab, conversation, command)),
+            Duration::from_secs(10),
+            command,
+        );
+        (
+            started.elapsed(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+        )
+    };
+    let (first, said) = call("hung-1", "ls");
+    assert!(said.contains("\"permission\":\"allow\""), "{said}");
+    assert!(
+        first < Duration::from_millis(1000),
+        "the first gate waited {first:?} on a hung pack"
+    );
+    let (second, said) = call("hung-2", "ls");
+    assert!(said.contains("\"permission\":\"allow\""), "{said}");
+    assert!(
+        second < Duration::from_millis(300),
+        "the next gate waited {second:?} on a pack already marked slow"
+    );
+    let (third, said) = call("hung-3", "curl https://example.invalid");
+    assert!(said.contains("\"permission\":\"deny\""), "{said}");
+    assert!(said.contains("no curl"), "{said}");
+    assert!(
+        third < Duration::from_millis(300),
+        "a kept rule took {third:?} to deny"
+    );
+}
+
+/// A 2 MB read still exits 0 with one allow object. The body is not parsed.
+#[test]
+fn a_large_read_answers_without_waiting_on_the_body() {
+    let hab = hab("bigread");
+    let mut payload = String::from(
+        r#"{"cursor_version":"2.4.0","conversation_id":"c-big","hook_event_name":"beforeReadFile","file_path":"/tmp/big","content":""#,
+    );
+    payload.push_str(&"x".repeat(2 * 1024 * 1024));
+    payload.push_str(r#""}"#);
+    for hookd in ["off", "on"] {
+        let mut cmd = ljos(&hab, &["hook"]);
+        if hookd == "off" {
+            cmd.env("LJOS_HOOKD", "off");
+        }
+        let label = format!("2MB read LJOS_HOOKD={hookd}");
+        let (took, out) = finished(feed(cmd, &payload), Duration::from_millis(1500), &label);
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            took < Duration::from_millis(1500),
+            "{label} took {took:?}\n{stdout}\n{stderr}"
+        );
+        assert_eq!(out.status.code(), Some(0), "{label}: {stdout}\n{stderr}");
+        assert_eq!(stdout, ALLOW, "{label}");
+    }
+}
+
+/// A pack that accepts and never answers must not delay the two events
+/// answered before the pack search. `LJOS_HOOKD=off` is the direct path.
+/// The same calls with the queue left on answer there too.
+#[test]
+fn a_hung_pack_still_allows_mcp_and_read_with_the_queue_off() {
+    let hab = hab("hungside");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for conn in listener.incoming().flatten() {
+            held.push(conn);
+        }
+    });
+    let url = format!("http://127.0.0.1:{port}");
+    let token = "t".repeat(32);
+    for hookd in ["off", "on"] {
+        for (what, payload) in [
+            ("ljos_note", mcp_payload("ljos_note")),
+            ("read", read_payload()),
+        ] {
+            let mut cmd = ljos(&hab, &["hook"]);
+            cmd.env("PACKSET_URL", &url)
+                .env("PACKSET_TOKEN", &token)
+                .env("PACKSET_WORKSPACE", "probe");
+            if hookd == "off" {
+                cmd.env("LJOS_HOOKD", "off");
+            }
+            let label = format!("{what} LJOS_HOOKD={hookd}");
+            let (took, out) = finished(feed(cmd, &payload), Duration::from_millis(1500), &label);
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            assert!(
+                took < Duration::from_millis(1500),
+                "{label} took {took:?}\n{stdout}\n{stderr}"
+            );
+            assert_eq!(out.status.code(), Some(0), "{label}: {stdout}\n{stderr}");
+            assert_eq!(stdout, ALLOW, "{label}");
+            assert!(
+                stderr.trim().is_empty(),
+                "{label} wrote on stderr: {stderr}"
+            );
+        }
+    }
+}
+
+/// The server's queue is full: the gate is refused in the runner's JSON
+/// with the reason, and exits 2, rather than run another hook or allow.
+#[test]
+fn a_full_queue_refuses_the_gate_with_its_reason() {
+    let hab = hab("full");
+    let mut server = ljos(&hab, &["hookd"])
+        .env("LJOS_HOOK_SLOTS", "1")
+        .env("LJOS_HOOK_QUEUE", "1")
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let sock = hab.run.join("ljos/hookd.sock");
+    wait_for(&sock);
+    let ask = |ms: u64| {
+        let mut s = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+        writeln!(s, "wait {ms}").unwrap();
+        s
+    };
+    let holder = ask(5000);
+    let mut said = [0u8; 3];
+    std::io::Read::read_exact(&mut &holder, &mut said).unwrap();
+    assert_eq!(&said, b"go ");
+    let _waiting = ask(5000);
+    std::thread::sleep(Duration::from_millis(100));
+    let out = within(
+        feed(ljos(&hab, &["hook"]), &cursor_shell(&hab, "full", "ls")),
+        Duration::from_secs(5),
+        "a call to a full queue",
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
+    assert!(stdout.contains("\"permission\":\"allow\""), "{stdout}");
+    assert!(stderr.contains("already waiting for a slot"), "{stderr}");
+    assert!(stderr.contains("judged in this process"), "{stderr}");
+    let _ = server.kill();
+    let _ = server.wait();
+}
+
+/// The server dies while a call waits in its queue. The call goes to the
+/// single-flight lock with what is left of its budget; when that lock
+/// stays taken too, the gate is refused, not let through.
+#[test]
+fn a_server_killed_mid_wait_falls_back_and_fails_closed() {
+    let hab = hab("killed");
+    let mut server = ljos(&hab, &["hookd"])
+        .env("LJOS_HOOK_SLOTS", "1")
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let sock = hab.run.join("ljos/hookd.sock");
+    wait_for(&sock);
+    let holder = {
+        let mut s = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+        writeln!(s, "wait 5000").unwrap();
+        let mut said = [0u8; 3];
+        std::io::Read::read_exact(&mut &s, &mut said).unwrap();
+        s
+    };
+    let _starting = lock_file(&hab.run.join("ljos/hookd.start"));
+    let flight = lock_file(&hab.run.join("ljos/hookd.flight"));
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOK_ADMIT_MS", "1500");
+    let child = feed(cmd, &cursor_shell(&hab, "killed", "ls"));
+    std::thread::sleep(Duration::from_millis(300));
+    let _ = server.kill();
+    let _ = server.wait();
+    let out = within(child, Duration::from_secs(5), "a call whose server died");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
+    assert!(stdout.contains("\"permission\":\"allow\""), "{stdout}");
+    assert!(
+        stderr.contains("judged in this process") || stderr.contains("could not judge"),
+        "{stderr}"
+    );
+    drop(holder);
+    drop(flight);
+    let out = within(
+        feed(ljos(&hab, &["hook"]), &cursor_shell(&hab, "after", "ls")),
+        Duration::from_secs(5),
+        "a call with no server and a free lock",
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"permission\":\"allow\""), "{stdout}");
+}
+
+/// `ljos doctor` says how long gate calls took and how long they waited.
+#[test]
+fn doctor_reports_hook_p95_and_lock_waits() {
+    let hab = hab("doctor");
+    for i in 0..3 {
+        let out = within(
+            feed(
+                ljos(&hab, &["hook"]),
+                &cursor_shell(&hab, &format!("doc-{i}"), "ls"),
+            ),
+            Duration::from_secs(5),
+            "a call",
+        );
+        assert!(out.status.success());
+    }
+    drain(&hab);
+    let out = within(
+        feed(ljos(&hab, &["doctor", "--all"]), ""),
+        Duration::from_secs(60),
+        "ljos doctor",
+    );
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let line = said
+        .lines()
+        .find(|l| l.contains("hook latency"))
+        .unwrap_or_else(|| panic!("no hook latency line:\n{said}"));
+    assert!(line.contains("over 3 gate calls"), "{line}");
+    assert!(line.contains("queue wait p95"), "{line}");
+    assert!(line.contains("book lock wait p95"), "{line}");
+}
+
+/// A seat-tool shortcut must not trust only the tool name prefix.
+/// Another server can mint `mcp__SERVER__ljos_NAME` too.
+#[test]
+fn a_spoofed_mcp_seat_tool_name_from_github_is_not_auto_allowed() {
+    let hab = hab("spoof");
+    let cfg = hab.home.join(".config/ljos");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(cfg.join("user-rules.json"), "{bad json").unwrap();
+    let payload = serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": "spoof-1",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "mcp__github__ljos_note",
+        "tool_input": {"body": "cc @ocaisa"},
+        "session_id": "s-1",
+        "tool_use_id": "t-1"
+    })
+    .to_string();
+    let out = within(
+        feed(ljos(&hab, &["hook"]), &payload),
+        Duration::from_secs(5),
+        "spoofed seat tool",
+    );
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.contains("\"permission\":\"deny\""),
+        "a spoofed seat tool name was auto-allowed: {said}"
+    );
+}
+
+/// A fast allow on `beforeReadFile` must not break a writer with SIGPIPE.
+#[test]
+fn a_large_cursor_read_does_not_break_the_writer_pipe() {
+    let hab = hab("sigpipe");
+    let shell = format!(
+        concat!(
+            "python3 - <<'PY' | {bin} hook >/dev/null\n",
+            "import sys\n",
+            "sys.stdout.write('{{\\\"cursor_version\\\":\\\"2.4.0\\\",\\\"hook_event_name\\\":\\\"beforeReadFile\\\",\\\"file_path\\\":\\\"/tmp/big\\\",\\\"content\\\":\\\"')\n",
+            "sys.stdout.write('a'*(8*1024*1024))\n",
+            "sys.stdout.write('\\\\\"}}')\n",
+            "PY\n",
+            "echo writer:${{PIPESTATUS[0]}} hook:${{PIPESTATUS[1]}}\n",
+        ),
+        bin = env!("CARGO_BIN_EXE_ljos")
+    );
+    let out = Command::new("bash")
+        .arg("-lc")
+        .arg(shell)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &hab.home)
+        .env("XDG_CONFIG_HOME", hab.home.join(".config"))
+        .env("PACKSET_URL", "off")
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(said.contains("writer:0"), "writer was broken: {said}");
+}
+
+const ALLOW: &str = "{\"permission\":\"allow\"}\n";
+
+/// A server that accepts and then waits `delay` before it answers.
+/// The count is how many connections arrived.
+fn delaying_server(sock: &Path, delay: Duration) -> Arc<AtomicUsize> {
+    let _ = std::fs::remove_file(sock);
+    std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(sock).unwrap();
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&accepts);
+    std::thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            count.fetch_add(1, Ordering::SeqCst);
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                let mut conn = conn;
+                let _ = writeln!(conn, "late");
+                std::thread::sleep(Duration::from_secs(30));
+            });
+        }
+    });
+    accepts
+}
+
+fn mcp_payload(tool: &str) -> String {
+    serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": format!("c-{tool}"),
+        "hook_event_name": "beforeMCPExecution",
+        "tool_name": tool,
+        "tool_input": "{\"issue\":\"probe-1\",\"text\":\"note from the seat\"}",
+        "mcp_server_name": "ljos",
+        "command": "ljos-mcp",
+    })
+    .to_string()
+}
+
+fn read_payload() -> String {
+    serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": "c-read",
+        "hook_event_name": "beforeReadFile",
+        "file_path": "/tmp/readme",
+        "content": "seed",
+    })
+    .to_string()
+}
+
+fn github_comment_payload() -> String {
+    serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": "c-gh",
+        "hook_event_name": "beforeMCPExecution",
+        "tool_name": "add_issue_comment",
+        "mcp_server_name": "github",
+        "tool_input": {"body": "please ask @ocaisa", "owner": "org", "repo": "repo"},
+    })
+    .to_string()
+}
+
+fn write_mention_rule(hab: &Hab) {
+    let path = hab.home.join(".config/ljos/user-rules.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        r#"{"rules":[{"id":"ur-ocaisa","text":"never post or reply to Alan (ocaisa)","author":"rohit","reason":"he asked not to be pinged","deny_mention":{"handles":["ocaisa"],"names":["Alan"]},"deny_reply_to":{"handles":["ocaisa"],"names":["Alan"]},"written_at":"2026-10-25T00:00:00Z","updated_at":"2026-10-25T00:00:00Z","basis":"person"}]}"#,
+    )
+    .unwrap();
+}
+
+/// Wait until the child exits, or panic once `limit` has passed.
+fn finished(mut child: std::process::Child, limit: Duration, what: &str) -> (Duration, Output) {
+    let started = Instant::now();
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            let took = started.elapsed();
+            return (took, child.wait_with_output().unwrap());
+        }
+        if started.elapsed() > limit {
+            let _ = child.kill();
+            let out = child.wait_with_output().unwrap();
+            panic!(
+                "{what}: still running after {limit:?}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn assert_one_allow(out: &Output, took: Duration, accepts: &AtomicUsize, what: &str) {
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        took < Duration::from_millis(1500),
+        "{what} took {took:?}\n{stdout}\n{stderr}"
+    );
+    assert_eq!(out.status.code(), Some(0), "{what}: {stdout}\n{stderr}");
+    assert_eq!(stdout, ALLOW, "{what}");
+    assert!(stderr.trim().is_empty(), "{what} wrote on stderr: {stderr}");
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(value["permission"], "allow", "{what}");
+    assert_eq!(
+        accepts.load(Ordering::SeqCst),
+        0,
+        "{what} talked to the server"
+    );
+}
+
+/// A slow server used to print allow and exit 2. The call now answers
+/// before it talks to the server.
+#[test]
+fn a_slow_server_still_allows_mcp_and_read_calls() {
+    let hab = hab("slowmcp");
+    let sock = hab.run.join("ljos/hookd.sock");
+    let accepts = delaying_server(&sock, Duration::from_secs(8));
+    std::thread::sleep(Duration::from_millis(20));
+    for tool in ["ljos_note", "ljos_vote"] {
+        let mut cmd = ljos(&hab, &["hook"]);
+        cmd.env("LJOS_HOOK_ADMIT_MS", "4000");
+        let (took, out) = finished(feed(cmd, &mcp_payload(tool)), Duration::from_secs(6), tool);
+        assert_one_allow(&out, took, &accepts, tool);
+    }
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOK_ADMIT_MS", "4000");
+    let (took, out) = finished(feed(cmd, &read_payload()), Duration::from_secs(6), "read");
+    assert_one_allow(&out, took, &accepts, "read");
+}
+
+/// The server stays silent past the runner's hook budget. The call
+/// answers anyway, and does not load a seat to do it.
+#[test]
+fn a_silent_server_does_not_outrun_the_hook_budget() {
+    let hab = hab("loadmcp");
+    let sock = hab.run.join("ljos/hookd.sock");
+    let accepts = delaying_server(&sock, Duration::from_secs(30));
+    std::thread::sleep(Duration::from_millis(20));
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOK_ADMIT_MS", "20000");
+    let (took, out) = finished(
+        feed(cmd, &mcp_payload("ljos_note")),
+        Duration::from_secs(2),
+        "a call whose server stays silent",
+    );
+    assert_one_allow(&out, took, &accepts, "silent server");
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOK_ADMIT_MS", "20000");
+    let (took, out) = finished(
+        feed(cmd, &mcp_payload("ljos_vote")),
+        Duration::from_secs(2),
+        "a second call whose server stays silent",
+    );
+    assert_one_allow(&out, took, &accepts, "silent server vote");
+}
+
+/// A user-rule denial still refuses the MCP call when the server is slow.
+/// The deny is one JSON object and exits 0, so the runner shows the reason.
+/// A shell call that gets no slot is still refused.
+#[test]
+fn a_slow_server_still_refuses_a_real_denial_and_a_shell_call() {
+    let hab = hab("denymcp");
+    write_mention_rule(&hab);
+    let sock = hab.run.join("ljos/hookd.sock");
+    let accepts = delaying_server(&sock, Duration::from_secs(8));
+    std::thread::sleep(Duration::from_millis(20));
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOK_ADMIT_MS", "4000");
+    let (took, out) = finished(
+        feed(cmd, &github_comment_payload()),
+        Duration::from_secs(6),
+        "a mentioned comment",
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        took < Duration::from_millis(1500),
+        "denial took {took:?}\n{stdout}\n{stderr}"
+    );
+    assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    assert_eq!(value["permission"], "deny", "{stdout}");
+    assert!(
+        value["user_message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("ocaisa")
+            || value["user_message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Alan"),
+        "{stdout}"
+    );
+    assert_eq!(stdout.lines().filter(|l| !l.trim().is_empty()).count(), 1);
+    assert_eq!(
+        accepts.load(Ordering::SeqCst),
+        0,
+        "the denial waited on the server"
+    );
+
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOK_ADMIT_MS", "800");
+    let (took, out) = finished(
+        feed(cmd, &cursor_shell(&hab, "shell", "ls")),
+        Duration::from_secs(5),
+        "a shell call with no slot",
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
+    assert!(stdout.contains("\"permission\":\"allow\""), "{stdout}");
+    assert!(
+        stderr.contains("did not answer") || stderr.contains("judged in this process"),
+        "{stderr}"
+    );
+    assert!(took < Duration::from_secs(3), "shell answer took {took:?}");
+    assert!(
+        accepts.load(Ordering::SeqCst) >= 1,
+        "the shell call did not ask the server"
+    );
+}
+
+/// A rules file that cannot be parsed denies the GitHub write and still
+/// allows a seat tool. A FIFO must not stall either call.
+#[test]
+fn a_bad_rules_file_denies_the_github_write_from_the_hook() {
+    let hab = hab("badrules");
+    let path = hab.home.join(".config/ljos/user-rules.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "{\"rules\":[").unwrap();
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOKD", "off");
+    let (took, out) = finished(
+        feed(cmd, &github_comment_payload()),
+        Duration::from_millis(1500),
+        "malformed rules",
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        took < Duration::from_millis(1500),
+        "{took:?}\n{stdout}\n{stderr}"
+    );
+    assert_eq!(out.status.code(), Some(0), "{stdout}\n{stderr}");
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(value["permission"], "deny", "{stdout}");
+    assert!(
+        value["user_message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("user-rules.json"),
+        "{stdout}"
+    );
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOKD", "off");
+    let (took, out) = finished(
+        feed(cmd, &mcp_payload("ljos_note")),
+        Duration::from_millis(1500),
+        "note beside a bad rules file",
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), ALLOW);
+    assert!(took < Duration::from_millis(1500));
+
+    std::fs::remove_file(&path).unwrap();
+    assert!(std::process::Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .unwrap()
+        .success());
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOKD", "off");
+    let (took, out) = finished(
+        feed(cmd, &github_comment_payload()),
+        Duration::from_millis(1500),
+        "fifo rules",
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        took < Duration::from_millis(1500),
+        "fifo took {took:?}\n{stdout}"
+    );
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("\"permission\":\"deny\""), "{stdout}");
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOKD", "off");
+    let (took, out) = finished(
+        feed(cmd, &read_payload()),
+        Duration::from_millis(1500),
+        "fifo read",
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), ALLOW);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        took < Duration::from_millis(1500),
+        "fifo read took {took:?}"
+    );
+}
+
+/// Cursor names a seat tool `mcp__SERVER__ljos_NAME` on preToolUse.
+/// An empty answer blocks under a hand-set failClosed, so the hook prints allow.
+#[test]
+fn a_cursor_seat_tool_with_an_mcp_prefix_prints_allow() {
+    let hab = hab("mcpname");
+    for tool in ["mcp__ljos__ljos_note", "mcp__plugin_ljos_ljos__ljos_vote"] {
+        let mut cmd = ljos(&hab, &["hook"]);
+        cmd.env("LJOS_HOOKD", "off");
+        let payload = serde_json::json!({
+            "cursor_version": "2.4.0",
+            "conversation_id": "c-mcpname",
+            "hook_event_name": "preToolUse",
+            "tool_name": tool,
+            "tool_input": {"text": "x"},
+            "cwd": hab.repo,
+            "tool_use_id": "u-mcp",
+        })
+        .to_string();
+        let (took, out) = finished(feed(cmd, &payload), Duration::from_secs(2), tool);
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        assert_eq!(out.status.code(), Some(0), "{tool}: {stdout}\n{stderr}");
+        assert_eq!(stdout, ALLOW, "{tool}");
+        assert!(
+            took < Duration::from_millis(1500),
+            "{tool} took {took:?}\n{stderr}"
+        );
+    }
+}
+
+/// The two early answers show up in the trace when the marker is present,
+/// and nowhere when it is absent.
+#[test]
+fn mcp_and_read_answers_are_traced_when_the_marker_is_present() {
+    let hab = hab("trace");
+    let log = hab.run.join("ljos/hook-trace.jsonl");
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOKD", "off");
+    let (_took, out) = finished(
+        feed(cmd, &mcp_payload("ljos_note")),
+        Duration::from_secs(2),
+        "untraced",
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert!(!log.exists(), "a trace row was written with no marker");
+    let dir = hab.run.join("ljos");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("hook-trace"), "").unwrap();
+    for hookd in ["off", "on"] {
+        for (what, payload) in [
+            ("beforeMCPExecution", mcp_payload("ljos_note")),
+            ("beforeReadFile", read_payload()),
+        ] {
+            let mut cmd = ljos(&hab, &["hook"]);
+            if hookd == "off" {
+                cmd.env("LJOS_HOOKD", "off");
+            }
+            let label = format!("{what} {hookd}");
+            let (took, out) = finished(feed(cmd, &payload), Duration::from_secs(2), &label);
+            assert_eq!(
+                out.status.code(),
+                Some(0),
+                "{label}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(took < Duration::from_millis(1500), "{label} took {took:?}");
+        }
+    }
+    let text = std::fs::read_to_string(&log).unwrap_or_else(|err| panic!("{err}"));
+    for event in ["beforeMCPExecution", "beforeReadFile"] {
+        let rows = text
+            .lines()
+            .filter(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .ok()
+                    .is_some_and(|value| value["event"] == event)
+            })
+            .count();
+        assert!(rows >= 2, "{event} rows {rows} in {text}");
+    }
+}
+
+fn bad_rules(hab: &Hab) {
+    let cfg = hab.home.join(".config/ljos");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(cfg.join("user-rules.json"), "{bad json").unwrap();
+}
+
+fn write_cursor_mcp(hab: &Hab, body: &str) {
+    let path = hab.home.join(".cursor/mcp.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, body).unwrap();
+}
+
+fn pre_tool(tool: &str, server: Option<&str>) -> String {
+    let mut value = serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": "c-seat",
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool,
+        "tool_input": {"body": "cc @ocaisa"},
+        "session_id": "s-seat",
+        "tool_use_id": "t-seat",
+    });
+    if let Some(server) = server {
+        value["server"] = serde_json::json!(server);
+    }
+    value.to_string()
+}
+
+fn hook_stdout(hab: &Hab, payload: &str) -> String {
+    let mut cmd = ljos(hab, &["hook"]);
+    cmd.env("LJOS_HOOKD", "off");
+    let (took, out) = finished(feed(cmd, payload), Duration::from_secs(5), "seat tool");
+    assert!(
+        took < Duration::from_secs(5),
+        "took {took:?}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The configured server key is allowed. A different key, a different
+/// case, and a server field that disagrees are not.
+#[test]
+fn only_the_configured_seat_server_skips_the_rules_file() {
+    let hab = hab("seatkey");
+    bad_rules(&hab);
+    write_cursor_mcp(
+        &hab,
+        r#"{"mcpServers":{"ljos":{"command":"ljos-mcp"},"my__seat":{"command":"/bin/ljos-mcp"}}}"#,
+    );
+    let allow = hook_stdout(&hab, &pre_tool("mcp__ljos__ljos_note", None));
+    assert_eq!(allow, ALLOW, "{allow}");
+    let renamed = hook_stdout(&hab, &pre_tool("mcp__my__seat__ljos_note", None));
+    assert_eq!(renamed, ALLOW, "{renamed}");
+    let spoof = hook_stdout(&hab, &pre_tool("mcp__github__ljos_note", None));
+    assert!(spoof.contains("\"permission\":\"deny\""), "{spoof}");
+    let case = hook_stdout(&hab, &pre_tool("mcp__Ljos__ljos_note", None));
+    assert!(
+        !case.contains("\"permission\":\"deny\""),
+        "a case mismatch was treated as GitHub: {case}"
+    );
+    assert!(case.contains("\"permission\":\"allow\""), "{case}");
+    let disagree = hook_stdout(&hab, &pre_tool("mcp__ljos__ljos_note", Some("github")));
+    assert!(disagree.contains("\"permission\":\"deny\""), "{disagree}");
+    let plugin = hook_stdout(&hab, &pre_tool("mcp__plugin_ljos_ljos__ljos_vote", None));
+    assert!(plugin.contains("\"permission\":\"allow\""), "{plugin}");
+}
+
+/// A server key that is itself `github` and launches the seat is the seat.
+#[test]
+fn a_seat_server_named_github_is_not_a_foreign_write() {
+    let hab = hab("seatgh");
+    bad_rules(&hab);
+    write_cursor_mcp(
+        &hab,
+        r#"{"mcpServers":{"github":{"command":"ljos-mcp","args":[]}}}"#,
+    );
+    let said = hook_stdout(&hab, &pre_tool("mcp__github__ljos_note", Some("github")));
+    assert_eq!(said, ALLOW, "{said}");
+    let real = hook_stdout(
+        &hab,
+        &serde_json::json!({
+            "cursor_version": "2.4.0",
+            "conversation_id": "c-real",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "mcp__github__add_issue_comment",
+            "mcp_server_name": "github",
+            "tool_input": {"body": "hello"},
+            "session_id": "s-real",
+            "tool_use_id": "t-real",
+        })
+        .to_string(),
+    );
+    assert!(real.contains("\"permission\":\"deny\""), "{real}");
+}
+
+/// `beforeMCPExecution` names the server in a field. A GitHub field on a
+/// seat-shaped tool is still a GitHub write when the rules file cannot
+/// be read. The seat's own server is not.
+#[test]
+fn a_before_mcp_server_field_is_not_taken_from_the_tool_name() {
+    let hab = hab("mcpfield");
+    bad_rules(&hab);
+    let github = serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": "c-field",
+        "hook_event_name": "beforeMCPExecution",
+        "tool_name": "ljos_note",
+        "server": "github",
+        "tool_input": {"text": "x"},
+    })
+    .to_string();
+    let said = hook_stdout(&hab, &github);
+    assert!(said.contains("\"permission\":\"deny\""), "{said}");
+    let seat = serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": "c-field",
+        "hook_event_name": "beforeMCPExecution",
+        "tool_name": "ljos_note",
+        "server": "ljos",
+        "command": "ljos-mcp",
+        "tool_input": {"text": "x"},
+    })
+    .to_string();
+    assert_eq!(hook_stdout(&hab, &seat), ALLOW);
+}
+
+/// A watch for the close that follows a read of `path`.
+fn watch_rules_read(path: &Path) -> i32 {
+    // SAFETY: a new inotify descriptor, or -1. Nothing else is touched.
+    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+    assert!(fd >= 0, "inotify: {}", std::io::Error::last_os_error());
+    let mut name = path.as_os_str().as_bytes().to_vec();
+    name.push(0);
+    // SAFETY: `name` is NUL-terminated and lives until the call returns.
+    let wd = unsafe { libc::inotify_add_watch(fd, name.as_ptr().cast(), libc::IN_CLOSE_NOWRITE) };
+    assert!(
+        wd >= 0,
+        "inotify watch: {}",
+        std::io::Error::last_os_error()
+    );
+    fd
+}
+
+/// Block until the watch from [`watch_rules_read`] sees a read close.
+/// Five seconds with no close is a hang, and the test says so.
+fn wait_rules_read(fd: i32) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut buf = [0u8; 4096];
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !left.is_zero(),
+            "the hook did not close the rules file after reading it"
+        );
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ms = i32::try_from(left.as_millis().min(i32::MAX as u128)).unwrap_or(i32::MAX);
+        // SAFETY: one pollfd for the inotify descriptor this test owns.
+        let rc = unsafe { libc::poll(&mut pfd, 1, ms) };
+        if rc == 0 {
+            continue;
+        }
+        assert!(rc > 0, "inotify poll: {}", std::io::Error::last_os_error());
+        // SAFETY: `buf` is ours and `fd` is the inotify descriptor.
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if n > 0 {
+            break;
+        }
+        let err = std::io::Error::last_os_error();
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::Interrupted,
+            "inotify read: {err}"
+        );
+    }
+    // SAFETY: `fd` is the descriptor this test opened.
+    unsafe { libc::close(fd) };
+}
+
+/// Truncate-then-write of user-rules must not deny covered GitHub writes.
+/// A rewrite window is not a policy decision. The hook is restored once
+/// it has read the empty file, so the window is the state it saw.
+#[test]
+fn a_rules_rewrite_window_does_not_deny_github_writes() {
+    let hab = hab("rules-race");
+    let cfg = hab.home.join(".config/ljos");
+    std::fs::create_dir_all(&cfg).unwrap();
+    let path = cfg.join("user-rules.json");
+    let rules = "{\"rules\":[]}\n";
+    std::fs::write(&path, rules).unwrap();
+    let watch = watch_rules_read(&path);
+    std::fs::write(&path, "").unwrap();
+
+    let payload = github_comment_payload();
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOKD", "off");
+    let child = feed(cmd, &payload);
+    wait_rules_read(watch);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        b"",
+        "the hook did not read the empty rules file"
+    );
+    std::fs::write(&path, rules).unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\"permission\":\"allow\""),
+        "rewrite window denied the write: {stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// User rules that target MCP:<tool> names must fire on preToolUse.
+#[test]
+fn a_pretooluse_mcp_tool_name_reaches_user_rules() {
+    let hab = hab("mcp-name-rule");
+    let cfg = hab.home.join(".config/ljos");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(
+        cfg.join("user-rules.json"),
+        r#"{"rules":[{"id":"ur-1","text":"deny mcp tool","author":"t","reason":"r","pattern":"MCP:add_issue_comment*","verdict":"deny","deny_mention":{"handles":[],"names":[]},"deny_reply_to":{"handles":[],"names":[]},"written_at":"2026-10-26T00:00:00Z","updated_at":"2026-10-26T00:00:00Z"}]}"#,
+    )
+    .unwrap();
+
+    let payload = serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": "c-mcp-name",
+        "hook_event_name": "preToolUse",
+        "tool_name": "MCP:add_issue_comment",
+        "tool_input": {"owner":"o","repo":"r","issue_number":1,"body":"hello"}
+    })
+    .to_string();
+
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOKD", "off");
+    let (_took, out) = finished(feed(cmd, &payload), Duration::from_secs(3), "mcp-name");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"permission\":\"deny\""), "{stdout}");
+}
+
+/// A `command` key in the tool input is an argument of the tool. It does
+/// not replace `MCP:<tool>` in the cue the user rule matches.
+#[test]
+fn a_command_in_tool_input_does_not_replace_the_mcp_tool_name() {
+    let hab = hab("mcp-command");
+    let cfg = hab.home.join(".config/ljos");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(
+        cfg.join("user-rules.json"),
+        r#"{"rules":[{"id":"ur-1","text":"deny mcp tool","author":"t","reason":"r","pattern":"MCP:add_issue_comment*","verdict":"deny","deny_mention":{"handles":[],"names":[]},"deny_reply_to":{"handles":[],"names":[]},"written_at":"2026-10-26T00:00:00Z","updated_at":"2026-10-26T00:00:00Z"}]}"#,
+    )
+    .unwrap();
+
+    let payload = serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": "c-mcp-cmd",
+        "hook_event_name": "preToolUse",
+        "tool_name": "MCP:add_issue_comment",
+        "tool_input": {"command": "echo hi", "owner":"o","repo":"r","issue_number":1,"body":"hello"}
+    })
+    .to_string();
+
+    let mut cmd = ljos(&hab, &["hook"]);
+    cmd.env("LJOS_HOOKD", "off");
+    let (_took, out) = finished(feed(cmd, &payload), Duration::from_secs(3), "mcp-cmd");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\"permission\":\"deny\""),
+        "tool_input.command replaced the MCP cue: {stdout}"
+    );
+}
+
+/// Non-permission events should not wait seconds on a hung memory backend.
+#[test]
+fn ordinary_non_permission_events_do_not_stall_on_hung_pack() {
+    let hab = hab("hung-non-gate");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for conn in listener.incoming().flatten() {
+            held.push(conn);
+        }
+    });
+    let url = format!("http://127.0.0.1:{port}");
+    let events = [
+        (
+            "sessionStart",
+            r#"{"cursor_version":"2.4.0","conversation_id":"c","hook_event_name":"sessionStart"}"#,
+        ),
+        (
+            "stop",
+            r#"{"cursor_version":"2.4.0","conversation_id":"c","hook_event_name":"stop","status":"completed","loop_count":0}"#,
+        ),
+        (
+            "beforeSubmitPrompt",
+            r#"{"cursor_version":"2.4.0","conversation_id":"c","hook_event_name":"beforeSubmitPrompt","prompt":"hello"}"#,
+        ),
+        (
+            "postToolUseFailure",
+            r#"{"cursor_version":"2.4.0","conversation_id":"c","hook_event_name":"postToolUseFailure","tool_name":"Shell","tool_input":{"command":"ls"},"error_message":"exit 2"}"#,
+        ),
+    ];
+    for (name, payload) in events {
+        let mut cmd = ljos(&hab, &["hook"]);
+        cmd.env("PACKSET_URL", &url)
+            .env("PACKSET_WORKSPACE", "probe")
+            .env("LJOS_HOOKD", "off");
+        let (took, _out) = finished(feed(cmd, payload), Duration::from_secs(10), name);
+        assert!(took < Duration::from_millis(500), "{name} took {took:?}");
+    }
+}

@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# The tutorial's four loops on scratch stores, as a check: memory,
+# agreement, work and handover, then a persona panel's settle, then two
+# seats handing one ticket in sequence (distinct from the herd's concurrent
+# contention). Every store is under one temporary directory; nothing
+# touches the seat that runs it. Needs the seat binaries on PATH and a
+# pack writer it may start.
+set -euo pipefail
+# grep -q stops reading at its first match, so a verb that prints a later
+# line, such as the tracker commit after a claim, dies of SIGPIPE. Under
+# pipefail the check then fails even when the line was there. This grep
+# reads everything.
+grep() {
+  case "${1-}" in
+    -q) shift; command grep "$@" >/dev/null ;;
+    -q?*) local flags="-${1#-q}"; shift; command grep "$flags" "$@" >/dev/null ;;
+    *) command grep "$@" ;;
+  esac
+}
+here=$(cd "$(dirname "$0")" && pwd)
+# A seat the caller names would cast every scripted voter's ballot as
+# itself. A pane tool the caller names is dropped too, so the scratch
+# seat picks from whatever tools answer here.
+unset LJOS_SEAT LJOS_PANE_TOOL
+root="$(mktemp -d)"
+workspace="smoke:$(basename "$root")"
+# The writer is the seat's own, not a scratch store: each run drops its
+# workspace on the way out.
+trap 'packset forget "$workspace" >/dev/null 2>&1 || true; rm -rf "$root"' EXIT
+export VISSUE_ROOT="$root/tracker" DEEDAR_URL="file://$root/deeds" CLAIMDAG_DIR="$root/claims"
+export PACKSET_WORKSPACE="$workspace" VISSUE_AGENT=you
+export DEEDAR_HOST_SIGNING_KEY="$root/host.key"
+head -c 32 /dev/urandom > "$DEEDAR_HOST_SIGNING_KEY"
+mkdir -p "$VISSUE_ROOT" "$root/run" && git -C "$VISSUE_ROOT" init -q
+git -C "$VISSUE_ROOT" config user.email "seat@example.invalid"
+git -C "$VISSUE_ROOT" config user.name "seat"
+git -C "$VISSUE_ROOT" config core.hooksPath /dev/null
+export XDG_RUNTIME_DIR="$root/run"
+cd "$root"
+packset ensure >/dev/null
+fail() { echo "smoke: $1" >&2; exit 1; }
+
+doc=$(ljos doctor --all 2>&1 || true)
+echo "$doc" | grep -q '^ok	pack' || { echo "$doc"; fail "the pack does not answer"; }
+ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns." | grep -q lesson || fail remember
+ljos prefer "CombMNZ over RRF for fusing two ballots." | grep -q preference || fail prefer
+ljos search fuse | grep -q CombMNZ || fail search
+before=$(ljos search fuse --as-of 2000-01-01) || fail "an as-of search was refused"
+echo "$before" | grep -q CombMNZ && fail "an as-of read before the write found it"
+ljos due | grep -q 'scheduled' || fail due
+ljos habit smoke-score 0.5 --unit acc --every 7d --source first | grep -q '	habit	' || fail "a first reading"
+ljos habit smoke-score 0.6 --unit acc --every 7d --source second 2>&1 | grep -q 'was 0.5 acc' || fail "a second reading did not name the first"
+ljos habit | grep -q '^smoke-score	0.6 acc	+0.1 since 0.5' || fail "the habit list"
+ljos habit smoke-score | grep -c '^smoke-score' | grep -q '^1$' || fail "one live reading a habit"
+# A rewrite of the same claim closes the earlier one on arrival; the seat
+# says so, and a consolidation finds nothing left to close.
+ljos remember "The lexical default is BM25L. It beat BM25 by two points on turns." 2>&1 | grep -q 'revises 1 earlier' || fail "a rewrite did not close the earlier claim"
+ljos consolidate | grep -q '^0 of ' || fail "consolidate found pairs a write should have closed"
+if command -v landscape >/dev/null; then
+  ljos conflicts -n 2 | grep -qE 'passes between single memories|fewer than two memories' || fail conflicts
+else
+  out=$(ljos conflicts 2>&1 || true)
+  echo "$out" | grep -q 'not on PATH' || fail "conflicts without the habitat should say so"
+fi
+
+id=$(vissue create -p demo "Ship the fuse change?" -q | tail -1)
+VISSUE_AGENT=alice ljos vote "$id" --for ship --used none >/dev/null
+VISSUE_AGENT=bob ljos vote "$id" --for ship --used none >/dev/null
+VISSUE_AGENT=carol ljos vote "$id" --for hold --used none >/dev/null
+ljos consensus "$id" --json | grep -q '"engine": "degroot-fj"' || fail consensus
+ljos consensus "$id" | grep -q '^settle (DeGroot, 3 voters): ship 0.667, hold 0.333' || fail "consensus in words"
+learned=$(ljos learn "$id" --outcome hold 2>&1 || true)
+echo "$learned" | grep -q 'weighs' || { echo "$learned"; ljos seat; vissue vote "$id" 2>&1 | head -8; fail learn; }
+
+sit=$(ljos sitting "$id" --assignee you)
+echo "$sit" | grep -q '== playbook' || fail "sitting playbook section"
+echo "$sit" | grep -q 'gen=' || fail sitting
+gen=$(printf '%s\n' "$sit" | sed -n 's/.*gen=\([0-9][0-9]*\).*/\1/p' | tail -1)
+[ -n "$gen" ] || fail "sitting printed no gen"
+echo 'fn main() {}' > patch.rs
+acc=$(deedar create file --name "the fuse patch" --path patch.rs --agent you | grep -o 'deed-[a-z0-9-]*' | head -1)
+ljos deed "$id" --add "$acc" >/dev/null
+ljos finish "$id" --gen "$gen" --assignee you --lesson "The fuse patch shipped as one file. Nothing else moved." --outcome hold --close | grep -q 'completed the session node' || fail finish
+vissue show "$id" | grep -q 'State:    DONE' || fail "finish with status done did not close the ticket"
+ljos sitting "$id" --assignee you | grep -q 'reopened' || fail "reopen on a second sitting"
+ljos sitting "$id" --assignee you | grep -q 'the sitting resumes' || fail "a third sitting on a held node did not resume"
+ljos timeline "$id" | grep -q 'tracker	created' || fail timeline
+LJOS_SEAT=you ljos release "$id" | grep -q '^gen=' || fail "release under LJOS_SEAT"
+ljos seat | grep -q '^seat	' || fail "seat prints who is sitting"
+LJOS_SEAT=alice ljos seat | grep -q '^seat	alice$' || fail "LJOS_SEAT names the seat"
+
+# A harness seat occupies per issue: two sittings must both take, not
+# busy-and-release the first. Named `you` is a shared name.
+id_a=$(vissue create -p demo "First harness ticket" -q | tail -1)
+id_b=$(vissue create -p demo "Second harness ticket" -q | tail -1)
+sit_a=$(ljos sitting "$id_a" --assignee you)
+echo "$sit_a" | grep -q 'gen=' || fail "first harness sitting"
+sit_b=$(ljos sitting "$id_b" --assignee you)
+echo "$sit_b" | grep -q 'assignee busy' && fail "second harness sitting unseated the first"
+echo "$sit_b" | grep -q 'gen=' || fail "second harness sitting"
+
+ljos persona reviewer --anchor 0.2 --view "Reads for what breaks in production." --about docs >/dev/null
+ljos persona reader --anchor 0.8 --view "Reads as a first-time user." --about docs >/dev/null
+ljos personas | grep -q '^reviewer .*anchor 0.20 .*about docs' || fail "personas roster"
+id2=$(vissue create -p demo "Publish the docs site now?" -q | tail -1)
+ljos vote "$id2" --for hold --used none --as reviewer >/dev/null
+ljos vote "$id2" --for ship --used none --as reader >/dev/null
+ljos predict "$id2" --expect ship --as reviewer >/dev/null
+ljos predict "$id2" --expect '{"ship":0.6,"hold":0.4}' --as reader >/dev/null
+ljos trust reader reviewer 0.9 --about docs >/dev/null
+ljos consensus "$id2" | grep -q '"predictors": 2' || fail "surprisingly popular"
+ljos brief reviewer "$id2" | grep -q 'You are reviewer' || fail brief
+ljos brief reviewer "$id2" | grep -q "ljos vote $id2 --for" || fail "brief names the issue in its ballot line"
+ljos brief reviewer "$id2" | grep -q 'until your ballot is cast' || fail "brief says to cast before reading a tally"
+ljos brief reviewer "$id2" | grep -q 'reviewer voted' && fail "a brief carries another's ballot"
+if ljos panel "$id2" --out "$root/panel-unbound" >/dev/null 2>&1; then fail "panel unbound"; fi
+ljos playbook "$id2" sit | grep -q '^sit$' || fail playbook
+ljos brief reviewer "$id2" | grep -q 'split-fence' || fail "brief principles"
+ljos brief reviewer "$id2" | grep -q '== rubric' || fail "brief rubric"
+ljos panel "$id2" --out "$root/panel" | grep -q consensus || fail panel
+cal=$(ljos calibrate -p demo 2>&1 || true)
+echo "$cal" | grep -q weighs || { echo "$cal"; fail calibrate; }
+
+# Named outcomes: alice and bob always vote alike, dave errs on his own,
+# and carol errs once alone and once with them. Five more issues name an
+# outcome beside the one that closed on hold; the settle counts the pair
+# as one voice.
+for pattern in "a a a b" "a a b a" "b b a a" "a a a a" "b b b a"; do
+  set -- $pattern
+  x=$(vissue create -p demo "Named outcome $*" -q | tail -1)
+  VISSUE_AGENT=alice ljos vote "$x" --for "$1" --used none >/dev/null
+  VISSUE_AGENT=bob ljos vote "$x" --for "$2" --used none >/dev/null
+  VISSUE_AGENT=carol ljos vote "$x" --for "$3" --used none >/dev/null
+  VISSUE_AGENT=dave ljos vote "$x" --for "$4" --used none >/dev/null
+  ljos learn "$x" --outcome a >/dev/null || fail "learn on $x"
+done
+named=$(ljos consensus "$x")
+echo "$named" | grep -q 'correlation over 6 named outcomes' || { echo "$named" | head -5; fail "named outcomes"; }
+echo "$named" | grep -q 'alice 0.50, bob 0.50)' || fail "the clones count once"
+
+# A failed command brings back what the seat knows about that failure, and
+# an unrelated one brings back nothing.
+ljos prefer "Run cargo test with rustc 1.88 or newer; rustc 1.83 lacks edition2024." >/dev/null
+failed='{"hookEventName":"post_tool_use_failure","sessionId":"smoke-fail","toolInput":{"command":"cargo test"},"error":"feature edition2024 is required, rustc 1.83"}'
+printf '%s' "$failed" | ljos hook | grep -q 'Remembered about this failure' || fail "failure recall"
+other='{"hookEventName":"post_tool_use_failure","sessionId":"smoke-other","toolInput":{"command":"npm run build"},"error":"Module not found: react-dom"}'
+[ -z "$(printf '%s' "$other" | ljos hook)" ] || fail "an unrelated failure recalled a memory"
+
+# The session that resumes from a Claude Code compaction hears the issue
+# the conversation still holds.
+echo '{"hook_event_name":"PreCompact","session_id":"smoke-compact","trigger":"auto"}' | ljos hook >/dev/null
+resumed=$(echo '{"hook_event_name":"SessionStart","session_id":"smoke-compact","source":"compact"}' | ljos hook)
+echo "$resumed" | grep -q '"additionalContext":"The conversation was compacted' || { echo "$resumed"; fail "compaction note at SessionStart"; }
+fresh=$(echo '{"hook_event_name":"SessionStart","session_id":"smoke-fresh","source":"startup"}' | ljos hook)
+echo "$fresh" | grep -q '"additionalContext":"ljos is on: ' || { echo "$fresh"; fail "the ljos is on line at SessionStart"; }
+
+ljos rule '*--force*' --verdict deny --why "Never force push." >/dev/null
+echo '{"hook_event_name":"PreToolUse","tool_input":{"command":"git push --force"}}' | ljos hook | grep -q '"permissionDecision":"deny"' || fail "rule through the hook"
+# A tool call must not search the pack. The inject script exits empty.
+out=$(printf '%s' '{"hook_event_name":"PreToolUse","toolName":"read_file"}' | "$here/grok/ljos-inject.sh" || true)
+[ -z "$out" ] || fail "inject searched on PreToolUse"
+ljos policy -- git push --force | grep -q '^deny:' || fail "rule through policy"
+
+ljos handover --out "$root/bag" --issue "$id" | grep -q 'manifest-sha256.txt.sig' || fail "signed handover"
+got=$(ljos receive "$root/bag")
+echo "$got" | grep -q 'atoms enclosed' || fail receive
+echo "$got" | grep -q 'signed by ' || fail "receive did not name the accepted key"
+# Unsigned: drop the sig, import must refuse before POST.
+cp -a "$root/bag" "$root/unsigned"
+rtrash "$root/unsigned/manifest-sha256.txt.sig" 2>/dev/null || rm -f "$root/unsigned/manifest-sha256.txt.sig"
+if ljos receive "$root/unsigned" --import >/dev/null 2>&1; then fail "an unsigned bag was imported"; fi
+# Signed import lands atoms; doctor still answers.
+got=$(ljos receive "$root/bag" --import 2>&1 || true)
+echo "$got" | grep -q 'atoms imported' || { echo "$got"; fail "signed import"; }
+ljos doctor --all | grep -q '^ok	pack' || fail "doctor after receive"
+# A bag altered after sealing is refused: one byte of one atom changed,
+# and the receipt must fail on the manifest, not count the atoms.
+tampered=$(ls "$root/bag/data/atoms"/* | head -1)
+printf 'x' | dd of="$tampered" bs=1 seek=3 conv=notrunc status=none
+if ljos receive "$root/bag" >/dev/null 2>&1; then fail "a tampered bag was received"; fi
+echo "smoke: every loop ran"
+
+# Two seats, one ticket, sequential handoff on these scratch stores.
+# Distinct from the herd, which contends for one ticket in parallel.
+echo "smoke: two-seat sequential walk"
+for k in $(env | sed -n 's/^\([A-Za-z0-9_]*_\(SESSION\|THREAD\|CONVERSATION\)_ID\)=.*/\1/p'); do
+  unset "$k"
+done
+export LJOS_TRACKER_GIT=commit
+acme() { LJOS_SEAT=acme ACME_SESSION_ID=acme-sess-aaaaaa "$@"; }
+brio() { LJOS_SEAT=brio BRIO_SESSION_ID=brio-sess-bbbbbb "$@"; }
+tid=$(vissue create -p demo "Share one ticket end to end" -q | tail -1)
+[ -n "$tid" ] || fail "two-seat: no ticket"
+sit_a=$(acme ljos sitting "$tid")
+echo "$sit_a" | grep -q 'gen=' || { echo "$sit_a"; fail "two-seat: A sitting"; }
+echo "$sit_a" | grep 'gen=' | tail -1
+echo 'fn main() {}' > two.rs
+acc=$(deedar create file --name "the two-seat patch" --path two.rs --agent acme | grep -o 'deed-[a-z0-9-]*' | head -1)
+[ -n "$acc" ] || fail "two-seat: no deed accession"
+echo "two-seat: cited $acc"
+acme ljos deed "$tid" --add "$acc" >/dev/null
+hand=$(acme ljos handover --out "$root/two-bag" --issue "$tid")
+echo "$hand" | grep -q 'manifest-sha256.txt.sig' || { echo "$hand"; fail "two-seat: handover signature"; }
+echo "$hand" | grep 'manifest-sha256.txt.sig'
+got=$(brio ljos receive "$root/two-bag" --import 2>&1 || true)
+echo "$got" | grep -q 'atoms imported' || { echo "$got"; fail "two-seat: B import"; }
+echo "$got" | grep 'atoms imported'
+if brio ljos sitting "$tid" >/dev/null 2>&1; then fail "two-seat: B sat before A released"; fi
+rel=$(acme ljos release "$tid")
+echo "$rel" | grep -q '^gen=' || { echo "$rel"; fail "two-seat: A release"; }
+echo "two-seat: A released $rel"
+sit_b=$(brio ljos sitting "$tid")
+echo "$sit_b" | grep -q 'gen=' || { echo "$sit_b"; fail "two-seat: B sitting after release"; }
+echo "$sit_b" | grep -q 'assignee busy\|held by another' && { echo "$sit_b"; fail "two-seat: B refused after release"; }
+echo "$sit_b" | grep 'gen=' | tail -1
+brio ljos vote "$tid" --for ship --used none >/dev/null
+echo "two-seat: brio voted ship"
+acme ljos vote "$tid" --for ship --used none >/dev/null
+echo "two-seat: acme voted ship"
+cons=$(brio ljos consensus "$tid" --json)
+echo "$cons" | grep -q '"engine": "degroot-fj"' || fail "two-seat: consensus"
+echo "$cons" | grep '"engine"'
+fin=$(brio ljos finish "$tid" --lesson "Two seats handed one ticket. The tracker kept the line." --close)
+echo "$fin" | grep -q 'closed the ticket' || { echo "$fin"; fail "two-seat: finish close"; }
+echo "$fin" | grep -q 'tracker git: committed' || { echo "$fin"; fail "two-seat: tracker git did not report a commit"; }
+echo "$fin" | grep 'closed the ticket'
+echo "$fin" | grep 'tracker git:'
+vissue show "$tid" | grep -q 'State:    DONE' || fail "two-seat: ticket not DONE"
+echo "two-seat: State:    DONE"
+echo "smoke: two-seat walk ran"
+
+echo "smoke: running herd"
+"$here/herd.sh"
+echo "smoke: herd ran"

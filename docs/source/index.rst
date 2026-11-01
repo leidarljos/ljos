@@ -1,0 +1,103 @@
+:description: One seat over five habitats and argv law. It owns none of them. A seat is one agent, or one person, working a tracker. Five habitats answer five questions for it. Cards are what the human froze.
+:cover: https://leidarljos.github.io/ljos/_static/og.png
+
+.. raw:: html
+
+   <div class="vi-hero">
+     <div class="vi-hero-brand">
+       <img class="vi-hero-mark" src="_static/mark.svg" width="64" height="64" alt="" />
+       <div>
+         <p class="vi-hero-name">ljos</p>
+         <p class="vi-hero-tag">What does this seat do next?</p>
+       </div>
+     </div>
+     <p class="vi-hero-tagline">Remember, agree, hand over: memory for a working seat that a person can read on disk.</p>
+     <div class="vi-hero-pills">
+       <span>Model agnostic</span>
+       <span>Harness agnostic</span>
+       <span>CLI + MCP</span>
+     </div>
+     <div class="vi-hero-actions">
+       <a class="vi-btn vi-btn-gold" href="getting-started.html">Get started</a>
+       <a class="vi-btn vi-btn-ghost" href="reference.html">Reference</a>
+     </div>
+   </div>
+
+One seat over five habitats and argv law. It owns none of them.
+A seat is one agent, or one person, working a tracker. Five habitats
+answer five questions for it. Cards are what the human froze. The pack
+keeps what the seat has learned. The deed store records what the work
+produced. The tracker says what the work is and who agrees, and the
+claim graph shows who is working on what right now. The judging of
+shell commands is not a store: ``ljos-policyd`` refuses the dangerous
+ones before they run, seat rules refuse more, and ``ljos policy --
+COMMAND`` prints the answer for one command. ``ljos`` is the one command and the one Model
+Context Protocol (MCP) server over those habitats. It adds three loops
+the habitats do not have alone: memory that is reviewed and forgotten
+on a clock, agreement that weighs voters by who turned out right, and
+a handover another seat can check and import. Seats on one pack also
+write to each other with ``ljos send``; the atoms travel in the sealed sync log.
+
+Everything is a file a person can open: Org headings, JSON lines, a
+content-addressed store, a Cap'n Proto snapshot. No model is required to
+run any of it, and any model or agent runner that can call a command or an
+MCP tool can sit in the seat.
+
+.. image:: _static/seat.svg
+   :width: 100.0%
+
+Install
+=======
+
+.. code:: console
+
+   $ cargo binstall --locked ljos packset deedar-cli claimdag-cli vissue-cli vissue-mcp ljos-policyd ljos-consensus
+   $ packset ensure
+   $ ljos doctor
+   $ ljos onboard --harness json
+
+``ljos`` provides ``ljos`` and ``ljos-mcp``. ``packset`` provides ``packset`` and the
+writer ``packsetd``. ``packset-embed`` is the encoder for meaning-based search; without it ``packsetd`` matches words only. ``scripts/install.sh`` installs the same set and the encoder (``--no-embed`` leaves it out) with checksums and onboards each runner it finds. ``deedar-cli`` provides ``deedar``. ``claimdag-cli`` provides
+``claimdag``. ``vissue-cli`` provides ``vissue``, and ``vissue-mcp`` the tracker server. ``ljos-consensus`` provides
+``ljos-consensus``, which ``ljos consensus`` runs. ``ljos-policyd`` is the command
+check. Those are the binaries the tutorial calls. Each comes prebuilt from
+its GitHub release; ``cargo install`` takes the same names and builds from
+source with Rust 1.89 or newer. An older Rust fails on several crates and can
+install an ``ljos-policyd`` older than 0.5.0 without a word; ``ljos doctor`` marks
+that row ``no`` and names the fix.
+
+``doctor`` says whether ljos is ready and lists the habitats that need action;
+``doctor --all`` names each habitat and whether it answers. The seat works with the
+habitats it has; a missing one is reported, not guessed around. ``onboard``
+registers the server with an agent runner and installs the sitting protocol
+as its skill; ``ljos protocol`` prints that protocol for any other.
+
+First minute
+============
+
+.. code:: console
+
+   $ ljos remember "The lexical default is BM25+. It beat BM25 by two points on turns."
+   remembered (lesson): The lexical default is BM25+. It beat BM25 by two points on turns.
+     id 07be8829, next review 2026-09-26 23:27 +00:00
+   $ ljos search lexical default
+   1.0000  3/3 lesson  07be8829... today   The lexical default is BM25+. It beat BM25 by two points on turns.
+   $ ljos due
+   0 due; 1 scheduled, next at 2026-09-26T23:27:31.528Z
+
+The :doc:`tutorial <getting-started>` runs all three loops on a scratch
+tracker in about ten minutes.
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Guides
+   :hidden:
+
+   getting-started
+   howto
+   grok-build
+   integration
+   architecture
+   reference
+   explanation
+   seat

@@ -1,0 +1,453 @@
+//! Under an agent runner the guard refuses a raw `vissue` verb that writes
+//! and names the ljos verb to run in its place: the raw verb skips the
+//! seat check, the parent's project and the tracker commit. Reads stay
+//! allowed, and the `vissue` children ljos runs itself are not refused.
+
+ljos_test_boot::harness!();
+use std::io::Write;
+use std::os::unix::process::CommandExt;
+use std::path::Path;
+use std::process::{Command, Output, Stdio};
+
+/// `ljos ARGS` the way an agent runner's tool call runs it: a runner
+/// variable set and no controlling terminal, so no person is at it.
+fn as_agent(home: &Path, args: &[&str]) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ljos"));
+    cmd.args(args)
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CACHE_HOME", home.join(".cache"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("XDG_RUNTIME_DIR", home.join("run"))
+        .env("PACKSET_URL", "off")
+        .env("LJOS_ASK_PACK", "off")
+        .env("LJOS_GUARD", "on")
+        .env("LJOS_USER_RULES_SYNC", "off")
+        .env("CURSOR_AGENT", "1")
+        .env_remove("POLICYD_BIN")
+        .env_remove("POLICYD_REQUIRED")
+        .stdin(Stdio::null());
+    // SAFETY: setsid is async-signal-safe and the closure touches nothing
+    // of the parent's.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let _ = std::fs::create_dir_all(home.join("run"));
+    cmd
+}
+
+fn text(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr)
+}
+
+fn policy(home: &Path, line: &str) -> Output {
+    as_agent(home, &["policy", "--fail-on-deny", line])
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn a_raw_tracker_write_under_a_runner_is_refused_with_the_ljos_verb() {
+    let home = tempfile::tempdir().unwrap();
+    for (line, instead) in [
+        (
+            r#"cd ~/Software && vissue create --parent ljos-gkq2 "a child""#,
+            r#"ljos file "TITLE" --parent ljos-gkq2"#,
+        ),
+        (r#"vissue q -p ljos "a ticket""#, "ljos file"),
+        ("vissue close ljos-ab12", "ljos finish ljos-ab12"),
+        (
+            "vissue cancel ljos-ab12",
+            "ljos finish ljos-ab12 --status cancelled",
+        ),
+        ("vissue claim ljos-ab12", "ljos sitting ljos-ab12"),
+        ("vissue release ljos-ab12", "ljos release ljos-ab12"),
+        (r#"vissue note ljos-ab12 "halfway""#, "ljos note ljos-ab12"),
+        ("vissue append ljos-ab12 --file r.md", "ljos note ljos-ab12"),
+        (
+            "vissue vote ljos-ab12 --for ship --used none 2>&1",
+            "ljos vote ljos-ab12 --for ship --used none`",
+        ),
+        ("/usr/local/bin/vissue refile ljos-ab12 tools", "ljos file"),
+        (
+            "VISSUE_AGENT=saddle vissue update ljos-ab12 -s done",
+            "ljos finish ljos-ab12",
+        ),
+        (
+            "vissue update ljos-ab12 -s STARTED",
+            "ljos sitting ljos-ab12",
+        ),
+        ("vissue update ljos-ab12 -t urgent", "ljos note ljos-ab12"),
+    ] {
+        let out = policy(home.path(), line);
+        let said = text(&out);
+        assert!(!out.status.success(), "{line} was allowed:\n{said}");
+        assert!(said.contains("deny:"), "{line}:\n{said}");
+        assert!(
+            said.contains(&format!("Run `{instead}")),
+            "{line} did not name {instead}:\n{said}"
+        );
+        if instead.starts_with("ljos finish") {
+            assert!(
+                said.contains(&format!("Run `{instead}` instead.")),
+                "{line} still offers a close:\n{said}"
+            );
+            assert!(!said.contains("--close"), "{line}:\n{said}");
+        }
+    }
+}
+
+#[test]
+fn a_tracker_read_under_a_runner_stays_allowed() {
+    let home = tempfile::tempdir().unwrap();
+    for line in [
+        "vissue show ljos-ab12",
+        "vissue list -p ljos",
+        "vissue ready -p ljos",
+        "vissue tree ljos-gkq2",
+        "vissue whoami",
+        "vissue claims --by codex",
+        "vissue vote ljos-ab12",
+        "vissue vote ljos-ab12 --json",
+        "echo vissue close ljos-ab12",
+    ] {
+        let out = policy(home.path(), line);
+        let said = text(&out);
+        assert!(out.status.success(), "{line} was refused:\n{said}");
+        assert!(!said.contains("deny:"), "{line}:\n{said}");
+    }
+}
+
+#[test]
+fn the_runner_hook_refuses_a_raw_tracker_write() {
+    let home = tempfile::tempdir().unwrap();
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "raw-tracker-write-0001",
+        "cwd": home.path(),
+        "tool_name": "Bash",
+        "tool_input": {"command": "vissue close ljos-ab12"},
+    });
+    let mut hook = as_agent(home.path(), &["hook"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let out = hook.wait_with_output().unwrap();
+    let said = text(&out);
+    assert!(said.contains("deny"), "{said}");
+    assert!(
+        said.contains("Run `ljos finish ljos-ab12` instead."),
+        "{said}"
+    );
+    assert!(!said.contains("--close"), "{said}");
+}
+
+/// A runner must not reach a tracker close by naming something other than
+/// `vissue`: an interpreter, a substitution, a copied binary, or a write
+/// into `issues.org`.
+#[test]
+fn an_indirect_tracker_write_under_a_runner_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let lines = [
+        r#"python3 -c 'import subprocess; subprocess.run(["vissue","close","ljos-ab12"])'"#,
+        "perl -e 'system q(vissue close ljos-ab12)'",
+        r#"python3 -c 'open("issues.org","a").write("* x")'"#,
+        r#""$(command -v vissue)" close ljos-ab12"#,
+        "cp $(command -v vissue) /tmp/vi && /tmp/vi close ljos-ab12",
+        "sed -i 's/^\\* TODO/* DONE/' issues.org",
+        "perl -pi -e 's/^\\* TODO/* DONE/' issues.org",
+    ];
+    for line in lines {
+        let out = policy(home.path(), line);
+        let said = text(&out);
+        assert!(!out.status.success(), "{line} was allowed:\n{said}");
+        assert!(said.contains("deny:"), "{line}:\n{said}");
+        let reason = said.split("deny:").nth(1).unwrap_or("");
+        assert!(
+            !reason.contains("--close"),
+            "{line} still names the close flag:\n{said}"
+        );
+    }
+}
+
+/// `ljos finish ID --close` is finish's own close. The guard leaves it
+/// to finish, which refuses a close no grant covers. A raw `vissue close`
+/// stays refused above.
+#[test]
+fn a_finish_close_under_a_runner_is_left_to_finish() {
+    let home = tempfile::tempdir().unwrap();
+    for line in [
+        "ljos finish ljos-ab12 --close",
+        "LJOS_SEAT=s ljos finish ljos-ab12 --close",
+    ] {
+        let out = policy(home.path(), line);
+        let said = text(&out);
+        assert!(out.status.success(), "{line} was refused:\n{said}");
+        assert!(!said.contains("deny:"), "{line}:\n{said}");
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "finish-close-allow-0001",
+            "cwd": home.path(),
+            "tool_name": "Bash",
+            "tool_input": {"command": line},
+        });
+        let hooked = hook_payload(home.path(), payload);
+        let said = text(&hooked);
+        assert!(
+            hooked.status.success(),
+            "hook exited {:?} for {line}:\n{said}",
+            hooked.status
+        );
+        assert!(
+            !ljos_cli::answer_denies(&String::from_utf8_lossy(&hooked.stdout)),
+            "hook refused {line}:\n{said}"
+        );
+    }
+}
+
+#[test]
+fn an_ordinary_interpreter_under_a_runner_stays_allowed() {
+    let home = tempfile::tempdir().unwrap();
+    for line in [
+        r#"python3 -c 'print(1)'"#,
+        "perl -e 'print 1'",
+        "echo vissue close ljos-ab12",
+    ] {
+        let out = policy(home.path(), line);
+        let said = text(&out);
+        assert!(out.status.success(), "{line} was refused:\n{said}");
+        assert!(!said.contains("deny:"), "{line}:\n{said}");
+    }
+}
+
+/// ljos runs `vissue` itself for its own verbs, outside any runner's hook,
+/// so a runner that may not run `vissue note` still notes through ljos.
+#[test]
+fn the_vissue_children_ljos_runs_are_not_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let bin = home.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = home.path().join("vissue.log");
+    let stub = bin.join("vissue");
+    std::fs::write(
+        &stub,
+        format!("#!/bin/sh\necho \"vissue $*\" >> '{}'\n", log.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = as_agent(home.path(), &["note", "ljos-ab12", "halfway", "there"])
+        .env("PATH", path)
+        .env("LJOS_SEAT", "rohit")
+        .env("LJOS_TRACKER_GIT", "off")
+        .output()
+        .unwrap();
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        calls.contains("vissue note ljos-ab12 halfway there"),
+        "{calls}\n{said}"
+    );
+}
+
+fn hook_payload(home: &Path, payload: serde_json::Value) -> Output {
+    let mut hook = as_agent(home, &["hook"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    hook.wait_with_output().unwrap()
+}
+
+/// The seat hook's matcher names vissue write tools, so the runner
+/// sends those calls to the hook.
+#[test]
+fn the_seat_hook_matches_a_vissue_write_tool() {
+    let hooks = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks/hooks.json");
+    let text = std::fs::read_to_string(&hooks).unwrap();
+    assert!(
+        text.contains(
+            "vissue_(close|cancel|update|create|q|note|append|refile|claim|release|vote)"
+        ),
+        "{text}"
+    );
+    let grok = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/grok/ljos.json");
+    let grok_text = std::fs::read_to_string(&grok).unwrap();
+    assert!(
+        grok_text.contains(
+            "vissue_(close|cancel|update|create|q|note|append|refile|claim|release|vote)"
+        ),
+        "{}",
+        grok.display()
+    );
+}
+
+/// A vissue MCP write under a runner is the same refusal as the shell
+/// verb. A DONE state names `ljos finish` and does not name a close flag.
+#[test]
+fn a_vissue_mcp_write_under_a_runner_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let cases = [
+        (
+            serde_json::json!({"id": "ljos-ab12", "state": "DONE"}),
+            "mcp__vissue__vissue_update",
+            "ljos finish ljos-ab12",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12"}),
+            "mcp__plugin_vissue_vissue__vissue_close",
+            "ljos finish ljos-ab12",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12"}),
+            "mcp__vissue__vissue_cancel",
+            "ljos finish ljos-ab12 --status cancelled",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12"}),
+            "mcp__vissue__vissue_claim",
+            "ljos sitting ljos-ab12",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12", "text": "halfway"}),
+            "mcp__vissue__vissue_note",
+            "ljos note ljos-ab12",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12", "for": "yes"}),
+            "mcp__vissue__vissue_vote",
+            "ljos vote ljos-ab12",
+        ),
+        (
+            serde_json::json!({"id": "ljos-ab12", "parent": "ljos-gkq2"}),
+            "mcp__vissue__vissue_refile",
+            "ljos file",
+        ),
+        (
+            serde_json::json!({"parent": "ljos-gkq2", "title": "a child"}),
+            "mcp__vissue__vissue_create",
+            "ljos file",
+        ),
+    ];
+    for (input, tool, instead) in cases {
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "vissue-mcp-write-0001",
+            "cwd": home.path(),
+            "tool_name": tool,
+            "tool_input": input,
+        });
+        let out = hook_payload(home.path(), payload);
+        let said = text(&out);
+        assert!(said.contains("deny"), "{tool} was allowed:\n{said}");
+        assert!(
+            said.contains(instead),
+            "{tool} did not name {instead}:\n{said}"
+        );
+        if instead.starts_with("ljos finish") {
+            assert!(!said.contains("--close"), "{tool}:\n{said}");
+        }
+    }
+    let cursor = serde_json::json!({
+        "cursor_version": "2.4.0",
+        "conversation_id": "c-vissue",
+        "hook_event_name": "beforeMCPExecution",
+        "tool_name": "vissue_update",
+        "mcp_server_name": "vissue",
+        "tool_input": {"id": "ljos-ab12", "state": "DONE"},
+    });
+    let out = hook_payload(home.path(), cursor);
+    let said = text(&out);
+    assert!(said.contains("deny"), "cursor update was allowed:\n{said}");
+    assert!(said.contains("ljos finish ljos-ab12"), "{said}");
+    assert!(!said.contains("--close"), "{said}");
+}
+
+/// A vissue read, and a vote that only asks for the tally, stay allowed.
+#[test]
+fn a_vissue_mcp_read_under_a_runner_stays_allowed() {
+    let home = tempfile::tempdir().unwrap();
+    for (tool, input) in [
+        (
+            "mcp__vissue__vissue_show",
+            serde_json::json!({"id": "ljos-ab12"}),
+        ),
+        (
+            "mcp__vissue__vissue_vote",
+            serde_json::json!({"id": "ljos-ab12"}),
+        ),
+    ] {
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "vissue-mcp-read-0001",
+            "cwd": home.path(),
+            "tool_name": tool,
+            "tool_input": input,
+        });
+        let out = hook_payload(home.path(), payload);
+        let said = text(&out);
+        assert!(!said.contains("deny"), "{tool} was refused:\n{said}");
+    }
+}
+
+/// A Write or Edit of issues.org is a tracker write. Another file is not.
+#[test]
+fn a_file_tool_write_of_issues_org_under_a_runner_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    for (tool, path) in [
+        ("Write", "/tmp/tracker/Software/ljos/issues.org"),
+        ("Edit", "issues.org"),
+        ("MultiEdit", "/tmp/tracker/issues.org"),
+        ("apply_patch", "/tmp/tracker/issues.org"),
+    ] {
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "org-write-0001",
+            "cwd": home.path(),
+            "tool_name": tool,
+            "tool_input": {
+                "file_path": path,
+                "content": "* DONE x",
+                "new_string": "* DONE x",
+            },
+        });
+        let out = hook_payload(home.path(), payload);
+        let said = text(&out);
+        assert!(said.contains("deny"), "{tool} {path} was allowed:\n{said}");
+        assert!(said.contains("ljos finish"), "{tool}:\n{said}");
+        assert!(!said.contains("--close"), "{tool}:\n{said}");
+    }
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": "org-write-0002",
+        "cwd": home.path(),
+        "tool_name": "Write",
+        "tool_input": {"file_path": "/tmp/tracker/README.md", "content": "hello"},
+    });
+    let out = hook_payload(home.path(), payload);
+    let said = text(&out);
+    assert!(!said.contains("deny"), "README was refused:\n{said}");
+}

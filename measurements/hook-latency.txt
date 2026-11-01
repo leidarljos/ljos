@@ -1,0 +1,24 @@
+machine: 12-core x86_64 laptop, Linux 7.0, seat pack of about 2,500 atoms, packsetd and packset-embed local
+method: wall time of the installed `ljos hook` on a fixed PreToolUse and UserPromptSubmit input with a fresh session id, LJOS_HOOK_TIMING=1 for the stages; `curl -w %{time_total}` on the pack's own endpoints; perf record on the writer and the hook
+floors: trivial process 3 ms; `ljos` start 6 ms; `ljos-policyd check` alone 8 ms; pack /v1/status 1 ms; pack /v1/atoms listing 35 ms (787 KB)
+tool-hook.before: 52 ms (ljos 0.35.1)
+tool-hook.after: 34-48 ms (ljos 0.35.6), of which 6 ms process start, 8 ms policyd, and a cold gate reads two listings once per 3 s
+prompt-hook.before: 970 ms (ljos 0.35.1), 27 pack requests
+prompt-hook.after: 370-480 ms (ljos 0.35.6), 8 pack requests, of which pool_search 205-303 ms is one pack search and mail 16-25 ms
+pack-search.before: 95-230 ms per /v1/search (packset 0.16.1): MMR diversify 73-77% of the writer's search CPU (cubic Jaccard over hash sets), packset-embed query 31 ms median with a tail to 86 ms on twelve threads, packset-milli child process 10-16 ms
+pack-search.after: 44-54 ms median, 128 ms max, per /v1/search (packset 0.17.0): the writer's own CPU fell from 71% of the search samples to 1.4%, the encoder runs four threads, packset-milli child process 10-16 ms unchanged
+prompt-hook.pack-0170: 324-375 ms with ljos 0.35.6, of which pool_search 149-179 ms: the pack answers in about 50 ms and the rest is the hook's own lexical pass over the stored claims
+prompt-hook.0357: 263-273 ms (ljos 0.35.7 with packset 0.17.0, fresh session each run): pool_search 115-121 ms, mail 4-5 ms, due_nudge 60 ms which a real session pays once since the listing then stays memoised; the token sidecar beside the cached listing is 163 KB
+tool-hook.0357: 35-36 ms steady, 46 ms with a cold gate (one status read)
+doctor.before: 9.0 s warm (ljos 0.35.1)
+doctor.after: 2.1 s warm (ljos 0.35.6); strace put 1.7 s of it in `claude mcp get ljos`, the Claude harness's registered command, a Node runtime start
+doctor.0357: 0.79-0.82 s warm (ljos 0.35.7), the registered command's pass kept for an hour; what remains is `git status` of the tracker checkout at 0.25 s, the pack reads and the seat tools' own starts
+doctor.0357-installed: 6.4-8.4 s warm on this seat with a tracker commit unpushed: the push-log check read every /proc/*/stat once per leftover log, 717 logs, 34 s of read calls under strace
+doctor.0358: 0.97 s warm with the same 717 logs present (ljos 0.35.8), the process table read once per loop
+prompt-hook.0359: 247-303 ms (ljos 0.35.9, fresh session each run), interleaved with the kept 0.35.8 binary at 260-360 ms on the same payload: no change from the fail-open hook, the allow-on-fault answer or the person allow check (user_rules stage 0 ms); the first three calls after the upgrade read 604-734 ms while the listing memo and the token sidecar were rebuilt
+tool-hook.0359: 27-63 ms steady (ljos 0.35.9); the first call after the upgrade took 2.5 s, the hook server's cold start
+doctor.0359: 0.82-0.97 s warm (ljos 0.35.9)
+prompt-hook.03510: 191-221 ms (ljos 0.35.10, fresh session each run), interleaved with the kept 0.35.9 binary at 285-298 ms on the same payload: with Jev on, the judge now reads the hits of the one local search instead of running the same pack search beside it; judged_prompt 108-127 ms where 0.35.9 read 185-206 ms, pool_search 101-124 ms unchanged, pack_note 164-209 ms
+pack-search.0172: 20-28 ms per /v1/search on the seat workspace (859 atoms, packset 0.17.2) where 0.17.1 read 83-95 ms; a one-word miss 17 ms where it read 52: the lexical projection reindexed the whole pack through its child and searched again on every query that shared no word with it, and now does so once per atom set
+prompt-hook.0172: 206-231 ms (ljos 0.35.10 on packset 0.17.2, fresh session each run, seat workspace): pool_search 84 ms of which the pack 28, due_nudge 57 (the 787 KB lean listing and its 163 KB token sidecar parsed once per hook process), judged_prompt 87, pack_note 157; perf over the hook shows no symbol above 6%, the time is serde_json Value trees and index-map clones of the listing
+third-party: none measured; the figures above are against this seat's own floors and raw endpoints, not against another memory hook

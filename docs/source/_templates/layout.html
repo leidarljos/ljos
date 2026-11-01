@@ -1,0 +1,7 @@
+{%- extends "!layout.html" -%}
+
+{#- Search and the general index extend layout.html, not a document page. -#}
+{%- block extrahead -%}
+  {{ super() }}
+  {% include "components/meta-opengraph.html" %}
+{%- endblock -%}

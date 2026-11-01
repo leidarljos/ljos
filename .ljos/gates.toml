@@ -1,0 +1,4 @@
+# What the commit and push gates read. There is no `test` line: a test
+# record is opt-in. With one, a push whose tip has no passing
+# `ljos evidence record -- <test>` run still runs, with a warning.
+protected_branches = ["main", "master"]

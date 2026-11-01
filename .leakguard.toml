@@ -1,0 +1,19 @@
+# This crate names the tracker and the card files.
+# It is a seat for AI coding runners, so it names the runners and models it
+# drives, and the shipped runner shapes name where those runners keep
+# their config, and its crates.io keywords name the use. Instruction
+# files stay banned.
+allow = [
+    "vissue ",
+    "vissue:",
+    "claude",
+    "codex",
+    "gpt-",
+    "chatgpt",
+    "~/.codex/",
+    "~/.claude/",
+    "agent-memory",
+    # The npm package scopes the process tree recognises a runner by.
+    "anthropic",
+    "openai",
+]
