@@ -98,32 +98,45 @@ jobs:
       # The hook queue test reads each call's peak RSS from GNU time.
       - name: Install age, tmux, notmuch and time
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends age tmux notmuch time zsh
-      - name: Build packset from develop
+      - name: Build packset at the pinned commit
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch develop https://github.com/leidarljos/packset.git "${{ runner.temp }}/packset"
-          cargo build --locked --manifest-path "${{ runner.temp }}/packset/Cargo.toml" -p packset --bin packset --bin packsetd
+          sha=0fed66408b081a1749befac682304d92e7b29586
+          dir="${{ runner.temp }}/packset"
+          git init -q "$dir"
+          git -C "$dir" remote add origin https://github.com/leidarljos/packset.git
+          git -C "$dir" fetch --depth 1 origin "$sha"
+          git -C "$dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$dir" rev-parse HEAD)" = "$sha"
+          cargo build --locked --manifest-path "$dir/Cargo.toml" -p packset --bin packset --bin packsetd
           mkdir -p "${{ runner.temp }}/bin"
-          install -m 0755 "${{ runner.temp }}/packset/target/debug/packset" "${{ runner.temp }}/bin/packset"
-          install -m 0755 "${{ runner.temp }}/packset/target/debug/packsetd" "${{ runner.temp }}/bin/packsetd"
+          install -m 0755 "$dir/target/debug/packset" "${{ runner.temp }}/bin/packset"
+          install -m 0755 "$dir/target/debug/packsetd" "${{ runner.temp }}/bin/packsetd"
           echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
           export PATH="${{ runner.temp }}/bin:${PATH}"
           command -v age-keygen
           command -v packset
           command -v packsetd
-      # Tracker tests need vissue 0.20. The same build as the other tools:
-      # a tag, --locked, the binary on PATH. Absent that binary the tests
-      # say so and return; this step is why CI does not take that path.
-      - name: Build vissue 0.20.0
+      # Tracker tests need vissue. The same build as the other tools:
+      # a pinned commit, --locked, the binary on PATH. Absent that binary
+      # the tests say so and return; this step is why CI does not take
+      # that path. The pin prints 0.23.1.
+      - name: Build vissue at the pinned commit
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch v0.20.0 https://github.com/leidarljos/vissue.git "${{ runner.temp }}/vissue"
-          cargo build --locked -p vissue-cli --bin vissue --manifest-path "${{ runner.temp }}/vissue/Cargo.toml"
+          sha=bbed0146dc479856b638d76102ae307419caa390
+          dir="${{ runner.temp }}/vissue"
+          git init -q "$dir"
+          git -C "$dir" remote add origin https://github.com/leidarljos/vissue.git
+          git -C "$dir" fetch --depth 1 origin "$sha"
+          git -C "$dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$dir" rev-parse HEAD)" = "$sha"
+          cargo build --locked -p vissue-cli --bin vissue --manifest-path "$dir/Cargo.toml"
           mkdir -p "${{ runner.temp }}/bin"
-          install -m 0755 "${{ runner.temp }}/vissue/target/debug/vissue" "${{ runner.temp }}/bin/vissue"
+          install -m 0755 "$dir/target/debug/vissue" "${{ runner.temp }}/bin/vissue"
           echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
           export PATH="${{ runner.temp }}/bin:${PATH}"
-          vissue --version | grep -q '0.20'
+          vissue --version | grep -q '0.23.1'
       # deedar on main writes no bytes/ and no sources sidecar, so a
       # carried deed made from one this bag does not carry cannot be
       # imported. .github/deedar-pin names the commit that writes both.
