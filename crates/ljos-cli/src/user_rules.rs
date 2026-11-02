@@ -125,8 +125,9 @@ pub fn load() -> Result<Vec<UserRule>> {
 /// # Errors
 ///
 /// A dangling symlink, not a regular file of at most [`RULES_FILE_CAP`]
-/// bytes, or not readable. An empty or unreadable-as-JSON file is a
-/// rewrite in progress: the last whole copy is returned, or none.
+/// bytes, or not readable. An empty file or one that does not parse is
+/// a rewrite in progress: the last whole copy is returned. A file that
+/// has never parsed is an error.
 pub(crate) fn read_all() -> Result<Vec<UserRule>> {
     let Some(path) = rules_path() else {
         return Ok(Vec::new());
@@ -138,8 +139,8 @@ pub(crate) fn read_all() -> Result<Vec<UserRule>> {
     // The stamp is the length, the mtime, and a prefix of the bytes.
     // A stamp that stays the same for `RULES_STABLE`, or that keeps
     // moving until `RULES_HARD`, is a file that is not whole yet. The
-    // last copy that parsed stands until this one does. That is not a
-    // refused write.
+    // last copy that parsed stands until this one does. That read is
+    // not a refused write. With no such copy, the error stands.
     let started = std::time::Instant::now();
     let mut stable_since = std::time::Instant::now();
     let mut last_stamp: Option<RulesStamp> = None;
@@ -151,7 +152,7 @@ pub(crate) fn read_all() -> Result<Vec<UserRule>> {
                     remember_good(&path, &text);
                     return Ok(rules);
                 }
-                Err(_) => {
+                Err(err) => {
                     if rules_read_gave_up(
                         &path,
                         Some(text.as_bytes()),
@@ -159,13 +160,19 @@ pub(crate) fn read_all() -> Result<Vec<UserRule>> {
                         &mut stable_since,
                         started,
                     ) {
-                        return Ok(kept_good(&path));
+                        return held_or(
+                            &path,
+                            err.context(format!(
+                                "user rules: {} is not a user-rules file",
+                                path.display()
+                            )),
+                        );
                     }
                 }
             },
             Err(err) if rules_rewrite_symptom(&err) => {
                 if rules_read_gave_up(&path, None, &mut last_stamp, &mut stable_since, started) {
-                    return Ok(kept_good(&path));
+                    return held_or(&path, err);
                 }
             }
             Err(err) => return Err(err),
@@ -201,12 +208,13 @@ fn remember_good(path: &std::path::Path, text: &str) {
     }
 }
 
-/// The last whole document, or none when this seat has not read one.
-fn kept_good(path: &std::path::Path) -> Vec<UserRule> {
+/// The last whole document when this seat has read one. Otherwise `err`,
+/// which is what a file that was never valid still returns.
+fn held_or(path: &std::path::Path, err: anyhow::Error) -> Result<Vec<UserRule>> {
     let Ok(text) = std::fs::read_to_string(good_copy(path)) else {
-        return Vec::new();
+        return Err(err);
     };
-    parse_rules(&text).unwrap_or_default()
+    parse_rules(&text).map_err(|_| err)
 }
 
 /// How long an unchanged bad file is treated as corrupt. A rewrite is
@@ -2160,6 +2168,35 @@ mod tests {
         assert!(
             guard_payload(benign).is_none(),
             "an empty rule list denied a write"
+        );
+    }
+
+    /// A file that has parsed, then is emptied or cut off, is still the
+    /// last whole copy. A benign GitHub write is not refused.
+    #[test]
+    fn a_rules_file_caught_empty_keeps_the_last_good_copy() {
+        let (_lock, _dir) = isolated();
+        let path = rules_file();
+        let benign = r#"{"cursor_version":"2.4.0","conversation_id":"c-1","hook_event_name":"beforeMCPExecution","tool_name":"add_issue_comment","mcp_server_name":"github","tool_input":{"body":"tests passed"}}"#;
+        std::fs::write(&path, "{\"rules\":[]}\n").unwrap();
+        assert!(load().unwrap().is_empty());
+        std::fs::write(&path, "").unwrap();
+        assert!(
+            load().unwrap().is_empty(),
+            "an emptied file dropped the last copy"
+        );
+        assert!(
+            guard_payload(benign).is_none(),
+            "an emptied file denied a write"
+        );
+        std::fs::write(&path, "{\"rules\":[").unwrap();
+        assert!(
+            load().unwrap().is_empty(),
+            "a partial file dropped the last copy"
+        );
+        assert!(
+            guard_payload(benign).is_none(),
+            "a partial file denied a write"
         );
     }
 
