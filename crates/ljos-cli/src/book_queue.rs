@@ -277,7 +277,8 @@ pub fn catch_up() {
         return;
     }
     kick();
-    let until = Instant::now() + CATCH_UP;
+    let wait = crate::wall_left().map_or(CATCH_UP, |left| left.min(CATCH_UP));
+    let until = Instant::now() + wait;
     while ahead.iter().any(|job| job.exists()) && Instant::now() < until {
         std::thread::sleep(Duration::from_millis(20));
     }

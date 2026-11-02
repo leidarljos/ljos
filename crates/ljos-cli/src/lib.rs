@@ -3091,10 +3091,9 @@ fn pid_exists(pid: u32) -> bool {
 /// when `ps` named it.
 #[cfg(any(test, target_os = "macos"))]
 fn ps_parent_and_comm(ps: &Path, pid: u32) -> Result<Option<(u32, String)>, ()> {
-    let out = std::process::Command::new(ps)
-        .args(["-o", "ppid=,comm=", "-p", &pid.to_string()])
-        .output()
-        .map_err(|_| ())?;
+    let mut cmd = std::process::Command::new(ps);
+    cmd.args(["-o", "ppid=,comm=", "-p", &pid.to_string()]);
+    let out = bounded_output(&mut cmd).map_err(|_| ())?;
     if !out.status.success() {
         return if pid_exists(pid) { Err(()) } else { Ok(None) };
     }
@@ -3406,10 +3405,9 @@ fn responsible_comm() -> Option<String> {
     if unsafe { ask(std::process::id() as i32, &mut pid) } != 0 || pid <= 1 {
         return None;
     }
-    let out = std::process::Command::new(ps_bin())
-        .args(["-o", "comm=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
+    let mut cmd = std::process::Command::new(ps_bin());
+    cmd.args(["-o", "comm=", "-p", &pid.to_string()]);
+    let out = bounded_output(&mut cmd).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -12710,10 +12708,14 @@ impl Drop for WallGuard {
 /// the call. Dropping it clears the bound.
 #[must_use]
 pub fn arm_wall_budget() -> WallGuard {
+    arm_wall_budget_for(std::time::Duration::from_millis(HOOK_WALL_BUDGET_MS))
+}
+
+fn arm_wall_budget_for(total: std::time::Duration) -> WallGuard {
+    let wanted = std::time::Instant::now() + total;
     let previous = WALL_DEADLINE.with(|cell| {
-        cell.replace(Some(
-            std::time::Instant::now() + std::time::Duration::from_millis(HOOK_WALL_BUDGET_MS),
-        ))
+        let deadline = cell.get().map_or(wanted, |held| held.min(wanted));
+        cell.replace(Some(deadline))
     });
     WallGuard(previous)
 }
@@ -12725,8 +12727,7 @@ pub fn arm_wall_budget() -> WallGuard {
 pub fn arm_hook_wall_budget() -> WallGuard {
     let left = std::time::Duration::from_millis(HOOK_WALL_BUDGET_MS)
         .saturating_sub(hookd::started().elapsed());
-    let previous = WALL_DEADLINE.with(|cell| cell.replace(Some(std::time::Instant::now() + left)));
-    WallGuard(previous)
+    arm_wall_budget_for(left)
 }
 
 /// Time left in the armed wall budget. `None` when this call is not armed.
@@ -12735,6 +12736,47 @@ pub(crate) fn wall_left() -> Option<std::time::Duration> {
         cell.get()
             .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
     })
+}
+
+fn wall_deadline() -> Option<std::time::Instant> {
+    WALL_DEADLINE.with(std::cell::Cell::get)
+}
+
+/// The whole wait from a sitting's first line through its durable claim.
+///
+/// The documented caller wraps a sitting in `timeout -k 5 30`, so the work
+/// through its durable claim gets the first third of that 30-second window.
+/// The remaining 20 seconds cover the streamed sections: their five-second
+/// recall and island budget, plus 15 seconds for the rest.
+fn sitting_claim_wait() -> std::time::Duration {
+    let secs = std::env::var("LJOS_SITTING_CLAIM_WAIT")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(10);
+    std::time::Duration::from_secs(secs)
+}
+
+/// A sitting's wall budget before its claim is printed.
+pub struct SittingPreclaimBudget {
+    wall: Option<WallGuard>,
+    total: std::time::Duration,
+}
+
+impl SittingPreclaimBudget {
+    fn finish(mut self) {
+        drop(self.wall.take());
+    }
+}
+
+/// Start the bounded part of a sitting immediately after its first line.
+#[must_use]
+pub fn begin_sitting_preclaim() -> SittingPreclaimBudget {
+    let total = sitting_claim_wait();
+    SittingPreclaimBudget {
+        wall: Some(arm_wall_budget_for(total)),
+        total,
+    }
 }
 
 /// The pack timeout this thread asked for, when [`with_pack_timeout`] set one.
@@ -28572,7 +28614,7 @@ fn git_in(dir: &Path, args: &[&str]) -> Option<std::process::Output> {
     let mut cmd = git_at(dir);
     cmd.args(args).stdin(std::process::Stdio::null());
     git_hooks::hook_child_env(&mut cmd);
-    cmd.output().ok()
+    bounded_output(&mut cmd).ok()
 }
 
 fn git_ok_stdout(dir: &Path, args: &[&str]) -> Option<String> {
@@ -29659,8 +29701,8 @@ pub fn compact_sitting(full: &str, issue: &str) -> String {
 
 /// One sitting section, compact, the same lines [`compact_sitting`] keeps.
 /// Island memories are appended to `memories` for the caller to print at
-/// the end. A block that is not a section is kept when it is the tracker
-/// sync line, cut to its counts, or the words fallback.
+/// the end. A block that is not a section comes back unchanged when it is
+/// a tracker line, with drift cut to its counts, or the words fallback.
 #[must_use]
 pub fn compact_sitting_block(block: &str, memories: &mut Vec<String>) -> String {
     let mut lines = block.lines();
@@ -29678,7 +29720,10 @@ pub fn compact_sitting_block(block: &str, memories: &mut Vec<String>) -> String 
         compact_section(name, &body, &mut out, memories);
         return out;
     }
-    if first.starts_with("tracker:") || first.starts_with("ranked by words") {
+    if first.starts_with("tracker:")
+        || first.starts_with("tracker git:")
+        || first.starts_with("ranked by words")
+    {
         return compact_tracker_line(first);
     }
     String::new()
@@ -31616,7 +31661,17 @@ pub fn claim(node: &str, assignee: &str) -> Result<String> {
                                 && cursor_conversation().is_some_and(|c| subagent_id(&c))
                                 && is_sole_or_ancestor_parent_hold(node, &h.seat, h.pid) =>
                         {
-                            let _lock = CommitLock::acquire(&runtime_dir().join("claim.lock"));
+                            let lock_path = runtime_dir().join("claim.lock");
+                            let _lock = match wall_deadline() {
+                                Some(deadline) => CommitLock::acquire_by(&lock_path, deadline)
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!(
+                                            "claim: another writer held {} past the claim budget",
+                                            lock_path.display()
+                                        )
+                                    })?,
+                                None => CommitLock::acquire(&lock_path),
+                            };
                             let key = work_id(&format!("subchild:{assignee}:{node}"));
                             let map_path = runtime_dir().join(format!("subchild-{key}"));
                             let existing = std::fs::read_to_string(&map_path)
@@ -32432,7 +32487,7 @@ fn adopt_bare_seat_hold(dir: &Path, seat: &str, own: &str, graph: &str) {
         return;
     }
     let lock_path = dir.join("hold-adopt.lock");
-    let _lock = if in_push_check() {
+    let _lock = if in_push_check() || wall_deadline().is_some() {
         match CommitLock::acquire_by(&lock_path, std::time::Instant::now() + PUSH_LOCK_WAIT) {
             Some(lock) => lock,
             None => {
@@ -34155,10 +34210,32 @@ pub fn sitting_stream(
     cards_dir: &Path,
     anyway: bool,
     playbook: Option<&str>,
+    emit: impl FnMut(&str),
+) -> Result<String> {
+    sitting_stream_started(
+        issue,
+        assignee,
+        cards_dir,
+        anyway,
+        playbook,
+        begin_sitting_preclaim(),
+        emit,
+    )
+}
+
+/// [`sitting_stream`] with the pre-claim budget already started by the CLI.
+pub fn sitting_stream_started(
+    issue: &str,
+    assignee: &str,
+    cards_dir: &Path,
+    anyway: bool,
+    playbook: Option<&str>,
+    budget: SittingPreclaimBudget,
     mut emit: impl FnMut(&str),
 ) -> Result<String> {
     let mut out = String::new();
     let down = sitting_hard_down();
+    sitting_budget_left("the deed, tracker and claim-graph checks", budget.total)?;
     if !down.is_empty() {
         bail!(
             "sitting: {} does not answer; nothing was claimed",
@@ -34167,6 +34244,7 @@ pub fn sitting_stream(
     }
     let title = issue_title(issue).unwrap_or_else(|_| issue.to_string());
     let blockers = open_blockers(issue);
+    sitting_budget_left("the blocker check", budget.total)?;
     if !blockers.is_empty() && !anyway {
         bail!(
             "sitting: {issue} is blocked by {}; finish those first, or `ljos sitting {issue} --anyway` to sit on it regardless. Nothing was claimed",
@@ -34176,7 +34254,9 @@ pub fn sitting_stream(
     // The recipe name is bound before the claim. The body is copied after,
     // once the claim line is already out, because the pack copy is a read.
     let name = sitting_recipe(issue, &title, playbook)?;
+    wait_for_sitting_locks(issue, budget.total)?;
     bind_playbook(issue, &name)?;
+    sitting_budget_left("the playbook bind", budget.total)?;
 
     let mut sections = SectionCursor::new();
     let mut piece = String::new();
@@ -34193,10 +34273,20 @@ pub fn sitting_stream(
     sections.heading(&mut piece, "reclaim");
     piece.push_str(&reclaim_expired(lease_secs()));
     emit_piece(&mut out, &mut emit, &piece);
+    sitting_budget_left("the reclaim check", budget.total)?;
 
     let mut piece = String::new();
     sections.heading(&mut piece, "claim");
-    let claimed = claim(issue, assignee)?;
+    let claimed = match claim(issue, assignee) {
+        Ok(claimed) => claimed,
+        Err(err) if wall_left().is_some_and(|left| left.is_zero()) => {
+            return Err(err).context(format!(
+                "sitting: the claim did not finish inside the {}s claim budget",
+                budget.total.as_secs()
+            ));
+        }
+        Err(err) => return Err(err),
+    };
     let claimed_issue = claimed
         .lines()
         .find_map(|l| {
@@ -34206,13 +34296,16 @@ pub fn sitting_stream(
         .unwrap_or(issue)
         .to_string();
     piece.push_str(&claimed);
-    piece.push_str(&persist_tracker(&claimed_issue, "claimed"));
     // The project file was parsed to open this ticket. The lines are a
-    // walk of those headings, not another tracker read.
+    // quick walk of those headings, not another tracker read.
     piece.push_str(&quiet_claims::beside_sitting(issue, assignee));
+    // The tracker claim is already durable on disk. Flush it before its
+    // commit or any later read can hold the sitting's next line.
     emit_piece(&mut out, &mut emit, &piece);
-    // Read after the claim's commit, so the board this sitting just
-    // committed is not drift, and out before the pack is asked.
+    budget.finish();
+    let persisted = persist_tracker(&claimed_issue, "claimed");
+    emit_piece(&mut out, &mut emit, &persisted);
+    // The board this sitting just committed is not drift.
     if let Some(line) = tracker_sync::tracker_sync_line() {
         emit_piece(&mut out, &mut emit, &line);
     }
@@ -34351,6 +34444,55 @@ fn words_line(said: &mut bool) -> &'static str {
     }
     *said = true;
     SITTING_WORDS_LINE
+}
+
+fn sitting_budget_left(step: &str, total: std::time::Duration) -> Result<()> {
+    if wall_left().is_some_and(|left| left.is_zero()) {
+        bail!(
+            "sitting: {step} took the whole {}s claim budget; nothing was claimed",
+            total.as_secs()
+        );
+    }
+    Ok(())
+}
+
+fn wait_for_sitting_lock(path: &Path, what: &str, total: std::time::Duration) -> Result<()> {
+    let left = wall_left().unwrap_or(total);
+    let Some(held) = CommitLock::acquire_by(path, std::time::Instant::now() + left) else {
+        bail!(
+            "sitting: another tracker writer held the {what} at {} past the {}s claim budget; nothing was claimed",
+            path.display(),
+            total.as_secs()
+        );
+    };
+    drop(held);
+    Ok(())
+}
+
+fn issues_lock_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+/// Wait out the two locks that can put the sitting behind another tracker
+/// writer. Each is released before the next is taken: tracker persistence
+/// takes the commit lock and then the issue lock, so holding both here in
+/// the opposite order would deadlock it.
+fn wait_for_sitting_locks(issue: &str, total: std::time::Duration) -> Result<()> {
+    let issue_path = tracker_issue_path(issue)
+        .map_err(|why| anyhow::anyhow!("sitting: could not place {issue}: {why}"))?;
+    let issue_lock = issues_lock_path(&issue_path);
+    wait_for_sitting_lock(&issue_lock, "vissue lock", total)?;
+
+    let mode = std::env::var("LJOS_TRACKER_GIT").unwrap_or_default();
+    if !matches!(mode.as_str(), "off" | "0" | "false") {
+        let parent = issue_path.parent().unwrap_or_else(|| Path::new("."));
+        if let Some(commit_lock) = tracker_lock_path(parent) {
+            wait_for_sitting_lock(&commit_lock, "tracker git lock", total)?;
+        }
+    }
+    sitting_budget_left("the tracker lock checks", total)
 }
 
 /// Tracker, claim graph and deed store. A sitting cannot open without
@@ -35511,8 +35653,11 @@ impl CommitLock {
     /// [`CommitLock::acquire`], given up at `deadline`: `None` when another
     /// holder still has it then.
     #[must_use]
-    pub fn acquire_by(path: &std::path::Path, deadline: std::time::Instant) -> Option<Self> {
+    pub fn acquire_by(path: &std::path::Path, mut deadline: std::time::Instant) -> Option<Self> {
         use std::os::unix::io::AsRawFd;
+        if let Some(wall) = wall_deadline() {
+            deadline = deadline.min(wall);
+        }
         let Ok(file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -35520,6 +35665,10 @@ impl CommitLock {
         else {
             return Some(Self(None));
         };
+        // Ten milliseconds makes a short critical section visible quickly.
+        // The 100 ms ceiling keeps a two-second hook budget responsive.
+        let mut pause = std::time::Duration::from_millis(10);
+        const MAX_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
         loop {
             // SAFETY: flock on a descriptor this function owns.
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
@@ -35532,7 +35681,9 @@ impl CommitLock {
             if std::time::Instant::now() >= deadline {
                 return None;
             }
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            std::thread::sleep(pause.min(left));
+            pause = pause.saturating_mul(2).min(MAX_PAUSE);
         }
     }
 
@@ -35650,7 +35801,9 @@ fn tracker_lock_path(dir: &Path) -> Option<PathBuf> {
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     git_hooks::hook_child_env(&mut cmd);
-    let out = cmd.output().ok().filter(|o| o.status.success())?;
+    let out = bounded_output(&mut cmd)
+        .ok()
+        .filter(|o| o.status.success())?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut lines = text.lines().map(str::trim);
     let top = PathBuf::from(lines.next().filter(|l| !l.is_empty())?);
@@ -36014,7 +36167,7 @@ pub fn stamp_seat_logbook(path: &Path, issue: &str, verb: &str, seat: &str) -> b
         seat.trim(),
         chrono::Local::now().format("[%Y-%m-%d %a %H:%M]")
     );
-    vissue_core::store::with_issues_lock(path, || {
+    with_wall_bounded_issues_lock(path, || {
         let text = std::fs::read_to_string(path)?;
         let Some(next) = insert_logbook_line(&text, issue, &entry) else {
             return Ok(false);
@@ -36023,6 +36176,27 @@ pub fn stamp_seat_logbook(path: &Path, issue: &str, verb: &str, seat: &str) -> b
         Ok(true)
     })
     .unwrap_or(false)
+}
+
+/// Use vissue's blocking write lock normally, but honor an armed wall
+/// deadline. This closes the race between a sitting's lock probe and a
+/// later in-process tracker write.
+pub(crate) fn with_wall_bounded_issues_lock<R>(
+    path: &Path,
+    write: impl FnOnce() -> vissue_core::Result<R>,
+) -> vissue_core::Result<R> {
+    let Some(deadline) = wall_deadline() else {
+        return vissue_core::store::with_issues_lock(path, write);
+    };
+    let lock_path = issues_lock_path(path);
+    let Some(_held) = CommitLock::acquire_by(&lock_path, deadline) else {
+        return Err(anyhow::anyhow!(
+            "another tracker writer held {} past the active wall budget",
+            lock_path.display()
+        )
+        .into());
+    };
+    write()
 }
 
 /// `git log` subjects on the tracker that name a seat, optionally one seat.
@@ -36139,7 +36313,7 @@ fn commit_seat_pin(start: &Path, seat: &str) {
         .args(["check-ignore", "-q", "--", name])
         .stdin(std::process::Stdio::null());
     git_hooks::hook_child_env(&mut ignored_cmd);
-    let ignored = ignored_cmd.status().is_ok_and(|s| s.success());
+    let ignored = bounded_output(&mut ignored_cmd).is_ok_and(|out| out.status.success());
     if ignored {
         return;
     }
@@ -36249,7 +36423,7 @@ pub fn commit_paths(dir: &Path, paths: &[&str], message: &str) -> PathCommit {
         apply_git_command_env(&mut cmd);
         git_hooks::hook_child_env(&mut cmd);
         seat_git_child(&mut cmd);
-        cmd.output()
+        bounded_output(&mut cmd)
     };
     // `Err` is a busy index, with what git said.
     let attempt = || -> Result<PathCommit, String> {
@@ -36312,7 +36486,9 @@ pub fn orphaned_index_lock(dir: &Path) -> Option<String> {
         .stderr(std::process::Stdio::null());
     apply_git_command_env(&mut cmd);
     git_hooks::hook_child_env(&mut cmd);
-    let out = cmd.output().ok().filter(|o| o.status.success())?;
+    let out = bounded_output(&mut cmd)
+        .ok()
+        .filter(|o| o.status.success())?;
     let text = String::from_utf8_lossy(&out.stdout);
     let mut lines = text.lines().map(str::trim);
     let lock = Path::new(lines.next()?).join("index.lock");
@@ -36606,7 +36782,7 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
         let mut cmd = tracker_git_at(dir);
         cmd.args(args).stdin(std::process::Stdio::null());
         git_hooks::hook_child_env(&mut cmd);
-        cmd.output()
+        bounded_output(&mut cmd)
     };
     match git(&["rev-parse", "--is-inside-work-tree"]) {
         Ok(o) if o.status.success() => {}
@@ -36631,8 +36807,9 @@ fn persist_tracker_writes(path: &Path, writes: &[(String, String)], also: &[Stri
     // that another seat's commit is about to make stale. A git process
     // outside ljos that holds the index is waited out a few times before
     // the line says so.
-    let Some(held) = tracker_commit_lock_by(dir, std::time::Instant::now() + tracker_lock_wait())
-    else {
+    let lock_wait =
+        wall_left().map_or_else(tracker_lock_wait, |left| left.min(tracker_lock_wait()));
+    let Some(held) = tracker_commit_lock_by(dir, std::time::Instant::now() + lock_wait) else {
         return tracker_lock_busy(dir);
     };
     let mut live: Vec<&str> = Vec::new();
@@ -40277,10 +40454,13 @@ fn run_captured_within(
     bin: &str,
     args: &[impl AsRef<str>],
     identity: Option<&str>,
-    deadline: std::time::Duration,
+    mut deadline: std::time::Duration,
 ) -> Result<Said> {
     use std::io::Read as _;
     use std::process::{Command, Stdio};
+    if let Some(left) = wall_left() {
+        deadline = deadline.min(left).max(std::time::Duration::from_millis(1));
+    }
     let path = which::which(bin).with_context(|| format!("{bin} not on PATH"))?;
     let mut cmd = Command::new(&path);
     if let Some(who) = identity
@@ -41224,6 +41404,9 @@ pub(crate) fn git_cmd() -> std::process::Command {
 pub(crate) fn bounded_output(
     cmd: &mut std::process::Command,
 ) -> std::io::Result<std::process::Output> {
+    use std::io::Read as _;
+    use std::process::Stdio;
+
     let Some(left) = wall_left() else {
         return cmd.output();
     };
@@ -41233,28 +41416,65 @@ pub(crate) fn bounded_output(
             "hook budget spent",
         ));
     }
-    // [`Command::output`] pipes both streams. A child that inherits the
-    // hook's stdout would print into the runner's answer.
+    // A process group ensures a descendant cannot keep either pipe open
+    // after the budget kills the command that started it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.process_group(0);
+    }
     cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
+    let mut out_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("the child has no stdout"))?;
+    let mut err_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("the child has no stderr"))?;
+    let out_task = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = out_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let err_task = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = err_pipe.read_to_end(&mut buf);
+        buf
+    });
     let start = std::time::Instant::now();
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => return child.wait_with_output(),
+            Ok(Some(status)) => {
+                let stdout = take_output(out_task, &mut child);
+                let stderr = take_output(err_task, &mut child);
+                return Ok(std::process::Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
+            }
             Ok(None) if start.elapsed() < left => {
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
             Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                stop_output_group(&mut child);
+                let _ = join_soon(out_task);
+                let _ = join_soon(err_task);
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "hook budget spent",
                 ));
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                stop_output_group(&mut child);
+                let _ = join_soon(out_task);
+                let _ = join_soon(err_task);
+                return Err(err);
+            }
         }
     }
 }

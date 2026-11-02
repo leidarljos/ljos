@@ -3,10 +3,10 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    age_of, brief, bump_plan, calibrate, cards, claim, claim_next, cli_assignee,
-    compact_sitting_block, complete, conflicts, consensus_steps_for, copy_playbook, doctor,
-    due_report, finish, forecasts_from_json, format_bump_rows, format_consolidation, format_doctor,
-    format_doctor_short, format_findings, format_hits, format_hubs, format_island,
+    age_of, begin_sitting_preclaim, brief, bump_plan, calibrate, cards, claim, claim_next,
+    cli_assignee, compact_sitting_block, complete, conflicts, consensus_steps_for, copy_playbook,
+    doctor, due_report, finish, forecasts_from_json, format_bump_rows, format_consolidation,
+    format_doctor, format_doctor_short, format_findings, format_hits, format_hubs, format_island,
     format_playbooks, format_readings, format_remembered, format_seat_command, format_steps,
     format_write_ack, graded, habit, habits, handover_scoped, healthy, hook_note, island_entities,
     join, learn_anchors, learn_and_write, learn_reading, learn_shared, mark_seen, now_utc, on_path,
@@ -14,7 +14,7 @@ use ljos_cli::{
     packset_search_as_of, packset_write_as, panel, panel_steps, parse_every, personas_from_pack,
     playbooks_from_pack, policy_with_memory, post_hook_stdout, predictions_of, prompt_hook_stdout,
     protocol_text, read_campaign, receive, release, remember_findings, reopen, rows_about, run,
-    run_as, run_captured, settle_discount, sitting_close, sitting_stream, stop_hook_stdout,
+    run_as, run_captured, settle_discount, sitting_close, sitting_stream_started, stop_hook_stdout,
     timeline, topic_words, tracker_show_json, trim_num, trust_from_pack, uncite_deed,
     with_discount, write_outcome, write_persona_as, write_prediction, write_rule, write_trust,
     Persona, PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
@@ -1543,6 +1543,14 @@ fn run_command() -> Result<()> {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
     let cmd = Cli::parse().cmd;
+    let mut sitting_budget = match &cmd {
+        Cmd::Sitting { issue, .. } => {
+            println!("sitting {issue}: checking blockers");
+            std::io::Write::flush(&mut std::io::stdout())?;
+            Some(begin_sitting_preclaim())
+        }
+        _ => None,
+    };
     // The first run of a new version refreshes skills and runner env
     // files ljos wrote. Doctor stays read-only unless `--fix` is set, and
     // a record check, which CI runs, always stays read-only.
@@ -3902,12 +3910,15 @@ fn run_command() -> Result<()> {
             verbose,
         } => {
             let mut memories = Vec::new();
-            let printed = sitting_stream(
+            let printed = sitting_stream_started(
                 &issue,
                 &assignee_for("sitting", assignee.as_deref(), false)?,
                 &cards_dir,
                 anyway,
                 playbook.as_deref(),
+                sitting_budget
+                    .take()
+                    .expect("a sitting starts its claim budget before setup"),
                 |piece| {
                     if verbose {
                         print!("{piece}");
