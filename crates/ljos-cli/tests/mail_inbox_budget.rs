@@ -296,6 +296,55 @@ fn inbox_reads_mail_kinds_and_marks_them_for_that_seat() {
     assert_eq!(unfiltered.load(Ordering::SeqCst), 0);
 }
 
+/// The list is what the person asked for. A receipt write that sits on
+/// the embedder used to spend the command budget and answer `pack busy`
+/// with the mail already read.
+#[test]
+fn a_slow_receipt_does_not_hide_mail_the_pack_already_returned() {
+    let (port, _posts) = serve_slow_post();
+    let home = home();
+    let (inbox, took) = ljos(home.path(), port, "inky", &["inbox"]);
+    let said = text_of(&inbox);
+    assert!(inbox.status.success(), "{said}");
+    assert!(
+        took < Duration::from_secs(3),
+        "inbox waited {took:?} for a receipt"
+    );
+    assert!(said.contains("hello inky"), "{said}");
+    assert!(!said.contains("pack busy"), "{said}");
+}
+
+/// GET answers at once. POST accepts the connection and does not answer.
+fn serve_slow_post() -> (u16, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let posts = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&posts);
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut sock) = stream else { break };
+            let posts = Arc::clone(&seen);
+            thread::spawn(move || {
+                let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+                let req = read_http(&mut sock);
+                let line = req.lines().next().unwrap_or("");
+                if line.starts_with("POST") {
+                    posts.fetch_add(1, Ordering::SeqCst);
+                    thread::sleep(Duration::from_secs(5));
+                    return;
+                }
+                let body = if line.starts_with("GET /v1/atoms") && !line.contains("/v1/atoms/") {
+                    r#"{"atoms":[{"schema":"inside.atom/v1","kind":"message","level":"explicit","text":"msg msg-slow\nfrom saddle\nto inky\n\nhello inky","workspace":"seat","entities":["seat:saddle","from:saddle","to:inky","msg:msg-slow"]}]}"#
+                } else {
+                    r#"{"embedder":{"available":false}}"#
+                };
+                respond(&mut sock, 200, body);
+            });
+        }
+    });
+    (port, posts)
+}
+
 #[test]
 fn a_stalled_pack_returns_inside_the_budget() {
     let (port, _) = serve_stall();

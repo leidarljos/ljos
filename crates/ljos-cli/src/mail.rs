@@ -910,14 +910,24 @@ pub fn inbox_sync(all: bool, until: Option<&str>) -> Result<String> {
         }
     }
     // The fetch above is the tracker's. The pack budget starts after it,
-    // so a slow fetch does not eat the listing.
-    let _clock = super::arm_cmd_pack();
-    let atoms = load("inbox")?;
+    // so a slow fetch does not eat the listing. It ends before the
+    // receipts: a write the embedder sits on must not hide mail already
+    // read, which is what turned a fast list into `pack busy`.
+    let atoms = {
+        let _clock = super::arm_cmd_pack();
+        load("inbox")?
+    };
     let seat = super::seat_name();
     let seen = receipt_seen();
     let (text, keys) = render_inbox(&atoms, &seat, all, &seen);
     remember_receipts(&keys);
-    mark_shown(&atoms, &seat)?;
+    // The mail is already read. A receipt the embedder sits on is the
+    // same `pack busy` a silent pack prints, and it used to discard this.
+    if let Err(err) = mark_shown(&atoms, &seat) {
+        if !super::is_pack_busy(&err) {
+            return Err(err);
+        }
+    }
     Ok(text)
 }
 
@@ -928,6 +938,9 @@ fn mark_shown(atoms: &[Value], seat: &str) -> Result<()> {
     if letters.is_empty() {
         return Ok(());
     }
+    // A fresh budget, not whatever the listing left. The write is what
+    // 0.35.8 never did, and it must not spend the listing's time.
+    let _clock = super::arm_cmd_pack();
     let client = super::pack()?;
     let workspace = workspace_of(Some(&client.workspace()));
     let at = super::now_utc();
