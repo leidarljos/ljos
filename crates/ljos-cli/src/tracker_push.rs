@@ -126,7 +126,12 @@ pub(crate) fn publish_explicit(start: &Path, remote: &str, branch: &str) -> Resu
             if last.starts_with("fetch failed") {
                 continue;
             }
-            let _held = crate::tracker_commit_lock(dir);
+            let Some(_held) = crate::tracker_commit_lock_by(
+                dir,
+                std::time::Instant::now() + crate::tracker_lock_wait(),
+            ) else {
+                return Err(last);
+            };
             let _ = abort_rebase(dir);
             let _ = git(dir, &["merge", "--abort"]);
             return Err(last);
@@ -734,7 +739,7 @@ fn git(dir: &Path, args: &[&str]) -> Output {
         .stdin(std::process::Stdio::null());
     crate::git_hooks::hook_child_env(&mut cmd);
     crate::seat_git_child(&mut cmd);
-    cmd.output().unwrap_or_else(|e| Output {
+    crate::bounded_output(&mut cmd).unwrap_or_else(|e| Output {
         status: std::process::ExitStatus::from_raw(1),
         stdout: Vec::new(),
         stderr: e.to_string().into_bytes(),

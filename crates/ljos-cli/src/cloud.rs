@@ -3460,7 +3460,7 @@ fn release_started(id: &str, holder: &str) -> Result<Option<String>, String> {
     let Some((_, path, project)) = found else {
         return Ok(None);
     };
-    vissue_core::store::with_issues_lock(&path, || {
+    crate::with_wall_bounded_issues_lock(&path, || {
         let mut doc = vissue_core::IssueDoc::parse_file(&project, &path)?;
         let Some(heading) = doc.headings.iter_mut().find(|h| h.id == id) else {
             return Ok(None);
