@@ -5,6 +5,12 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.36.6 (2026-11-02)
+
+### Fixes
+
+- A rules file caught mid-rewrite no longer denies a benign write.
+
 ## 0.36.5 (2026-11-02)
 
 ### Fixes
