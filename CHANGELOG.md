@@ -5,6 +5,12 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.36.5 (2026-11-02)
+
+### Fixes
+
+- `ljos upgrade` leaves an install already at the release untouched, so the kept old binaries survive a second run.
+
 ## 0.36.4 (2026-11-02)
 
 ### Fixes
