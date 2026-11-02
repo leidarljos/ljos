@@ -86,31 +86,48 @@ runs, and each answers something the next one needs. A section that is left
 out when it has nothing to say says so; the others are printed on every
 sitting that gets that far.
 
-1. `== doctor`. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;
+1. `== blockers`. The issue's blockers, read from the tracker. An issue whose
+   blockers are still open is refused before anything is claimed, because the
+   graph says it is not workable; `--anyway` sits on it regardless and says so.
+2. `== reclaim`. Claims quiet longer than the lease (`LJOS_LEASE_SECS`, 900
+   seconds when unset; 0 turns the step off) go back to ready when their
+   conversation is gone, or when no hold record on this host names them. A
+   claim whose runner is still alive is kept. Printed before `== claim`.
+3. `== claim`. `ljos claim ISSUE --assignee NAME`. Occupancy is `{name}:{issue}`:
+   two conversations hold two tickets. The same issue is still one
+   holder. `busy` on a named worker means that name still has another
+   node (`ljos complete` or `ljos release`). The tracker moves to STARTED under the same name, so
+   `vissue claims` answers who has it; a tracker that refuses the name
+   refuses the sitting, and `ljos release` frees the claim graph.
+   A background worker you start sits under its own conversation's
+   name and the same seat. The conversation that started it can
+   complete, finish or release the worker's claim, and the worker can
+   finish a claim its parent took.
+   Another seat's claim is still refused, and the refusal names who
+   has it. The claim is taken and this section is printed before the
+   pack or recall is asked.
+4. `== doctor`. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;
    `packsetd` on a scratch port starts a pack writer. Do not proceed on a `no`.
    A `warn` on `host` means the kernel killed a process within a day. The
    sitting opens; run one build or test suite at a time.
-2. `== sync`, left out when the repository names no scope. The sitting pulls
+5. `== sync`, left out when the repository names no scope. The sitting pulls
    the other machines' logs for this scope and takes them before the island
    is walked. `ljos sync` runs the same pull and push by hand.
-3. `== cards`. `ljos cards`. What the human froze. Read, never write.
-4. `== due`. `ljos due`. What is due for review: the soonest eight and the total.
+6. `== cards`. `ljos cards`. What the human froze. Read, never write.
+7. `== due`. `ljos due`. What is due for review: the soonest eight and the total.
    The verb prints a page; it does not grade. Grade it after the sitting:
    check a shown claim against the work, then run `ljos graded ID`
    (`--lapsed` when it is no longer true). `graded` takes only a claim a due page showed in the
    last hour, so a saved list cannot be graded unread; `ljos due --all`
    lists everything to read and puts none of it up. The review clock
    moves only when you grade, and a backlog is left due, not drained.
-5. `== island`. `ljos island` on the issue's title. The sitting takes the strongest
+8. `== island`. `ljos island` on the issue's title. The sitting takes the strongest
    eight. The number on a row is the activation spread along links.
    `--as NAME` walks that persona's weights. `--fire` after the island
    was used rewrites those weights, and the next walk follows them. A
    weak island does not fire. `ljos search TOPIC` and a full
    `ljos island TASK` are during the work, not this opening.
-6. `== blockers`. The issue's blockers, read from the tracker. An issue whose
-   blockers are still open is refused before anything is claimed, because the
-   graph says it is not workable; `--anyway` sits on it regardless and says so.
-7. `== playbook`. `ljos playbook ISSUE NAME`, or `--playbook NAME` on the sitting. The
+9. `== playbook`. `ljos playbook ISSUE NAME`, or `--playbook NAME` on the sitting. The
    six built-in recipes are `sit`, `arena`, `land`, `company-panel`,
    `overnight`, `feature`. Kind `playbook`, weighed not recalled. Pack
    latest per name is the copy; built-in bodies seed only when the pack
@@ -131,31 +148,15 @@ sitting that gets that far.
    A blocking finding with a reason is one `fix:` child. The same objection
    is not filed again. A round count does not close the parent. The loop
    files the next round until the panel passes. A person closes the ticket.
-8. `== workflow`, left out when neither the issue nor its parent carries a
+10. `== workflow`, left out when neither the issue nor its parent carries a
    workflow. The stage and the next step, the same reading as `ljos workflow`.
-9. `== panel`, left out unless the issue is a decision. One brief per persona
+11. `== panel`, left out unless the issue is a decision. One brief per persona
    the issue speaks to. A session casts `ljos vote --as NAME` for each.
    Consensus records those ballots and counts one voice per session.
-10. `== recall`. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
+12. `== recall`. `ljos recall ISSUE`. The plan, the inputs' deeds, and what the issue has
    cited so far.
-11. `== timeline`. `ljos timeline ISSUE`. The last twelve dated events across the three
+13. `== timeline`. `ljos timeline ISSUE`. The last twelve dated events across the three
    stores; `ljos timeline` without a sitting prints them all.
-12. `== reclaim`. Claims quiet longer than the lease (`LJOS_LEASE_SECS`, 900
-   seconds when unset; 0 turns the step off) go back to ready when their
-   conversation is gone, or when no hold record on this host names them. A
-   claim whose runner is still alive is kept. Printed before `== claim`.
-13. `== claim`. `ljos claim ISSUE --assignee NAME`. Occupancy is `{name}:{issue}`:
-   two conversations hold two tickets. The same issue is still one
-   holder. `busy` on a named worker means that name still has another
-   node (`ljos complete` or `ljos release`). The tracker moves to STARTED under the same name, so
-   `vissue claims` answers who has it; a tracker that refuses the name
-   refuses the sitting, and `ljos release` frees the claim graph.
-   A background worker you start sits under its own conversation's
-   name and the same seat. The conversation that started it can
-   complete, finish or release the worker's claim, and the worker can
-   finish a claim its parent took.
-   Another seat's claim is still refused, and the refusal names who
-   has it.
 
 A decision is handed to the panel by the sitting. An issue tagged
 `decision`, typed `decision`, or with a body line opening `Options:`
