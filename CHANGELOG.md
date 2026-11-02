@@ -5,6 +5,20 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.36.0 (2026-11-02)
+
+### Fixes
+
+- `ljos inbox` reads mail, receipts and group membership, writes a receipt for each message it shows, and leaves the rest of the pack unread.
+- When the pack stays quiet, mail, inbox and recall print `pack busy, try again` and exit 75.
+  A hook that runs out of time prints nothing, exits 0, and is not tried again.
+- A hook returns inside two seconds.
+  It does not wait out a quiet pack, and session end reads the transcript tail in a detached process.
+- `ljos sitting` opens when `ljos-mcp` or `ljos-policyd` is missing or silent, and says so on one line.
+- `ljos search`, `ljos remember`, `ljos consensus` and `ljos sitting` return when the pack accepts and stays silent.
+  `ljos note` returns when claimdag or the tracker does not answer.
+- When `LJOS_SEAT` and this conversation's seat differ, ljos names both, keeps `LJOS_SEAT`, and does not stop.
+
 ## 0.35.10 (2026-11-01)
 
 ### Features
