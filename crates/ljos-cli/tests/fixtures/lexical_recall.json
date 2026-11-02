@@ -1,0 +1,162 @@
+{
+  "memories": [
+    {
+      "id": "oauth-callback",
+      "text": "Set auth.callback_url in the TOML file; OAuth callback validation rejects a mismatched redirect URI."
+    },
+    {
+      "id": "http-timeout",
+      "text": "The gateway HTTP server must set read_timeout_ms before accepting large uploads."
+    },
+    {
+      "id": "vite-env",
+      "text": "Vite preview reads VITE_API_URL only when the variable is present before npm run build."
+    },
+    {
+      "id": "nextest-oom",
+      "text": "Use cargo nextest --test-threads=2 on the shared builder to avoid OOM kills."
+    },
+    {
+      "id": "redis-session",
+      "text": "Invalidate the Redis session cache after changing a user's role; stale authorization otherwise lasts five minutes."
+    },
+    {
+      "id": "sqlx-path",
+      "text": "Run sqlx::migrate from the workspace root so relative migration paths resolve."
+    },
+    {
+      "id": "webhook-signature",
+      "text": "The webhook verifier must hash the raw request body before JSON parsing or signatures fail."
+    },
+    {
+      "id": "sentry-source-map",
+      "text": "The release job publishes source maps only when SENTRY_AUTH_TOKEN is available to the upload step."
+    },
+    {
+      "id": "windows-ignore",
+      "text": "Normalize Windows paths before matching ignore patterns; backslashes otherwise bypass src/** exclusions."
+    },
+    {
+      "id": "pagination-checkpoint",
+      "text": "Persist the pagination checkpoint only after the batch commit succeeds, so retries do not skip records."
+    },
+    {
+      "id": "oauth-secret",
+      "text": "Rotate the OAuth client secret in the deployment vault and restart the login workers."
+    },
+    {
+      "id": "callback-queue",
+      "text": "Retry failed payment callbacks from the queue with exponential backoff."
+    },
+    {
+      "id": "json-settings",
+      "text": "The settings loader accepts JSON configuration and reports unknown fields."
+    },
+    {
+      "id": "client-upload-timeout",
+      "text": "Increase the client upload timeout when the artifact proxy is under load."
+    },
+    {
+      "id": "http-cache",
+      "text": "Set immutable HTTP cache headers on fingerprinted browser assets."
+    },
+    {
+      "id": "vite-cache",
+      "text": "Clear the Vite transform cache after changing a plugin version."
+    },
+    {
+      "id": "cargo-build",
+      "text": "Cargo build scripts should not download tools during an offline build."
+    },
+    {
+      "id": "database-role",
+      "text": "Grant the reporting database role after all schema migrations finish."
+    },
+    {
+      "id": "redis-deploy",
+      "text": "Deploy Redis configuration changes one replica at a time."
+    },
+    {
+      "id": "webhook-log",
+      "text": "Redact credentials before logging a webhook request body."
+    },
+    {
+      "id": "local-source-map",
+      "text": "Disable source maps in local development to keep rebuilds fast."
+    },
+    {
+      "id": "windows-ci",
+      "text": "The Windows CI job installs the compiler under a path containing spaces."
+    },
+    {
+      "id": "batch-retry",
+      "text": "Retry a failed batch update after the service reports a transient error."
+    },
+    {
+      "id": "generic-fix",
+      "text": "Fix the update error by changing the shared configuration and rerunning the test."
+    }
+  ],
+  "tickets": [
+    {
+      "id": "settings-a1",
+      "title": "Read OAuthCallbackUrl from TOML",
+      "body": "Fix the settings loader. The callback value is ignored after a configuration change.",
+      "relevant": ["oauth-callback"]
+    },
+    {
+      "id": "gateway-b2",
+      "title": "Honor HTTPServer readTimeoutMs for uploads",
+      "body": "Update the gateway configuration and add a regression test for the reported error.",
+      "relevant": ["http-timeout"]
+    },
+    {
+      "id": "frontend-c3",
+      "title": "Keep VITE_API_URL in preview builds",
+      "body": "The deployment update should fix the preview configuration without changing production.",
+      "relevant": ["vite-env"]
+    },
+    {
+      "id": "runner-d4",
+      "title": "Limit nextest threads after an OOM",
+      "body": "The test job fails on the shared builder while the regular cargo build succeeds.",
+      "relevant": ["nextest-oom"]
+    },
+    {
+      "id": "auth-e5",
+      "title": "Fix session cache update error",
+      "body": "Changing a role leaves old authorization in place. Add a regression test and update the service configuration.",
+      "relevant": ["redis-session"]
+    },
+    {
+      "id": "database-f6",
+      "title": "Repair sqlx::migrate path resolution",
+      "body": "The command fails from a package directory but works at the workspace root.",
+      "relevant": ["sqlx-path"]
+    },
+    {
+      "id": "hooks-g7",
+      "title": "Verify webhook signatures from rawBody",
+      "body": "The JSON handler changes whitespace. Update the request test without logging credentials.",
+      "relevant": ["webhook-signature"]
+    },
+    {
+      "id": "release-h8",
+      "title": "Pass SENTRY_AUTH_TOKEN to source-map upload",
+      "body": "The release build succeeds but the upload step reports a missing credential.",
+      "relevant": ["sentry-source-map"]
+    },
+    {
+      "id": "files-i9",
+      "title": "Handle WindowsPath in the ignore matcher",
+      "body": "The same pattern works on Linux. Add a test for backslash-separated source paths.",
+      "relevant": ["windows-ignore"]
+    },
+    {
+      "id": "sync-j0",
+      "title": "Stop syncCheckpoint advancing before commit",
+      "body": "A failed batch retry skips records because pagination state is stored too early.",
+      "relevant": ["pagination-checkpoint"]
+    }
+  ]
+}

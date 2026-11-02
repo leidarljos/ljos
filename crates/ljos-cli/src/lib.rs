@@ -9545,7 +9545,8 @@ pub fn mark_seen(session: Option<&str>, ids: &[String]) {
 /// lessons, so a hit must also name a content word of the cue.
 pub const HOOK_SCORE_FLOOR: f64 = 0.6;
 
-/// Words that sit in almost every sentence and almost every lesson.
+/// Words that sit in almost every sentence and lesson, plus task verbs and
+/// nouns such as `fix`, `update`, `issue` and `work` that name no subject.
 /// A cue word on this list does not make a lesson about the prompt.
 const CUE_STOP: &[&str] = &[
     "about",
@@ -9557,18 +9558,24 @@ const CUE_STOP: &[&str] = &[
     "before",
     "being",
     "both",
+    "change",
+    "code",
     "could",
     "does",
     "doing",
     "each",
+    "error",
     "everything",
+    "fix",
     "from",
     "have",
     "having",
     "into",
+    "issue",
     "just",
     "like",
     "making",
+    "memory",
     "more",
     "most",
     "need",
@@ -9577,13 +9584,18 @@ const CUE_STOP: &[&str] = &[
     "other",
     "over",
     "please",
+    "process",
     "really",
+    "recall",
     "same",
     "should",
     "some",
     "something",
     "still",
     "such",
+    "support",
+    "task",
+    "test",
     "than",
     "that",
     "their",
@@ -9595,6 +9607,7 @@ const CUE_STOP: &[&str] = &[
     "this",
     "those",
     "through",
+    "update",
     "using",
     "very",
     "want",
@@ -9606,6 +9619,7 @@ const CUE_STOP: &[&str] = &[
     "while",
     "will",
     "with",
+    "work",
     "would",
     "your",
 ];
@@ -9664,13 +9678,67 @@ fn prompt_words(text: &str) -> Vec<String> {
     text_memo(&PROMPT_WORDS_MEMO, text, prompt_words_of)
 }
 
+/// The lowercase case-separated parts of one alphanumeric run.
+fn identifier_run_parts(run: &str) -> Vec<String> {
+    let chars: Vec<char> = run.chars().collect();
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    for index in 1..chars.len() {
+        let before = chars[index - 1];
+        let here = chars[index];
+        let after = chars.get(index + 1).copied();
+        let lower_to_upper = before.is_lowercase() && here.is_uppercase();
+        // At least two capitals make an acronym. The single leading
+        // capital in `OAuth` stays with the word; `HTTPServer` splits.
+        let acronym_to_word = index.saturating_sub(start) > 1
+            && before.is_uppercase()
+            && here.is_uppercase()
+            && after.is_some_and(char::is_lowercase);
+        if lower_to_upper || acronym_to_word {
+            parts.push(
+                chars[start..index]
+                    .iter()
+                    .collect::<String>()
+                    .to_lowercase(),
+            );
+            start = index;
+        }
+    }
+    parts.push(chars[start..].iter().collect::<String>().to_lowercase());
+    parts
+}
+
+/// Lowercase words in prose and code names. Punctuation, `_`, `-` and `::`
+/// are boundaries. A mixed-case name keeps its whole spelling and adds its
+/// parts, so lowercase `opencpmd` still meets `OpenCPMD`, while
+/// `oauthCallbackUrl` also meets `oauth callback url`.
+fn identifier_words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|run| !run.is_empty())
+        .flat_map(|run| {
+            let parts = identifier_run_parts(run);
+            let whole = (parts.len() > 1).then(|| run.to_lowercase());
+            whole.into_iter().chain(parts)
+        })
+        .collect()
+}
+
+/// [`identifier_words`] without the whole mixed-case spelling. Phrase
+/// abbreviation windows need only the words in written order.
+fn identifier_parts(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|run| !run.is_empty())
+        .flat_map(identifier_run_parts)
+        .collect()
+}
+
 fn prompt_words_of(text: &str) -> Vec<String> {
-    let mut words: Vec<String> = text
-        .split(|c: char| !c.is_alphanumeric())
+    let mut words: Vec<String> = identifier_words(text)
+        .into_iter()
         .filter(|w| w.len() >= 3)
-        .map(str::to_lowercase)
         .filter(|w| !stop_word(w))
-        .map(|w| singular(&w))
+        .map(|word| singular(&word))
+        .filter(|w| !stop_word(w))
         .collect();
     words.sort_unstable();
     words.dedup();
@@ -9919,11 +9987,7 @@ fn phrase_acronyms(text: &str) -> Vec<String> {
 }
 
 fn phrase_acronyms_of(text: &str) -> Vec<String> {
-    let words: Vec<String> = text
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .map(str::to_lowercase)
-        .collect();
+    let words = identifier_parts(text);
     let mut out = Vec::new();
     for start in 0..words.len() {
         if glue_word(&words[start]) {
@@ -9974,6 +10038,26 @@ fn match_tokens_of(text: &str) -> Vec<String> {
     words
 }
 
+/// [`match_tokens`] with repeated words retained for term frequency.
+/// Sorting keeps equal words together for [`document_frequency`].
+fn match_token_stream(text: &str) -> Vec<String> {
+    static MEMO: std::sync::LazyLock<TextMemo> = std::sync::LazyLock::new(TextMemo::default);
+    text_memo(&MEMO, text, match_token_stream_of)
+}
+
+fn match_token_stream_of(text: &str) -> Vec<String> {
+    let mut words: Vec<String> = identifier_words(text)
+        .into_iter()
+        .filter(|word| word.len() >= 3)
+        .filter(|word| !stop_word(word))
+        .map(|word| singular(&word))
+        .filter(|word| !stop_word(word))
+        .collect();
+    words.extend(phrase_acronyms(text));
+    words.sort_unstable();
+    words
+}
+
 /// The cue's phrase abbreviates a word of the claim, or the claim's
 /// phrase abbreviates a word of the cue.
 fn abbreviation_match(text: &str, cue: &str) -> bool {
@@ -9987,19 +10071,33 @@ fn abbreviation_match(text: &str, cue: &str) -> bool {
             .any(|token| want.binary_search(token).is_ok())
 }
 
-/// The query the pack is asked, with each phrase's abbreviation appended
-/// so a claim that only says the short form can still match.
+/// The query the pack is asked, with phrase abbreviations and identifier
+/// parts its tokenizer would otherwise keep joined. A claim can then match
+/// `oauthCallbackUrl` through `oauth callback url`, or a phrase through its
+/// short form.
 fn recall_query(cue: &str) -> String {
-    let have = prompt_words(cue);
-    let extra: Vec<String> = phrase_acronyms(cue)
-        .into_iter()
-        .filter(|token| have.binary_search(token).is_err())
-        .collect();
+    let have = pack_words(cue);
+    let mut extra = prompt_words(cue);
+    extra.extend(phrase_acronyms(cue));
+    extra.retain(|token| !have.contains(token));
+    extra.sort_unstable();
+    extra.dedup();
     if extra.is_empty() {
         cue.to_string()
     } else {
         format!("{cue} {}", extra.join(" "))
     }
+}
+
+/// Words as the pack's lexical scan sees them. Keeping `-` and `_` inside
+/// a token lets [`recall_query`] append only the identifier parts that the
+/// writer would otherwise miss.
+fn pack_words(text: &str) -> std::collections::HashSet<String> {
+    text.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
+        .map(str::to_lowercase)
+        .filter(|word| !is_lesson_filler(word))
+        .map(|word| singular(&word))
+        .collect()
 }
 
 /// Whether a claim names the cue's subject, which is the word test the
@@ -10399,9 +10497,9 @@ fn recall_body(atom: &Value) -> String {
     text
 }
 
-/// How many atoms contain each word, once per atom. Each doc is the
-/// sorted, duplicate-free token list [`match_tokens`] gives, so a word
-/// is counted once per doc by skipping the repeat of its neighbour.
+/// How many atoms contain each word, once per atom. Each document is the
+/// sorted token list [`match_token_stream`] gives, so repeated words are
+/// counted once per document by skipping equal neighbours.
 fn document_frequency(docs: &[Vec<String>]) -> std::collections::HashMap<String, usize> {
     let mut df: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for doc in docs {
@@ -10417,45 +10515,60 @@ fn document_frequency(docs: &[Vec<String>]) -> std::collections::HashMap<String,
     df
 }
 
-/// BM25 over the words of `cue` that are rare in `docs`, including an
-/// abbreviation standing in for a phrase.
+/// BM25 over `query`, with document frequency from this seat's own pack.
 ///
-/// A word in one atom always counts, including when the pack holds only
-/// that atom. A word in half the atoms or more does not: `test` then
-/// matches everything and ranks nothing. `k1` and `b` are the usual
-/// BM25 constants.
-fn bm25_distinctive(
+/// `k1 = 1.2` and `b = 0.75` are the textbook Okapi defaults. Query
+/// weights let a ticket title count more than its longer body without
+/// changing the corpus statistics.
+fn bm25_scores(
     docs: &[Vec<String>],
     df: &std::collections::HashMap<String, usize>,
-    index: usize,
-    cue: &str,
-) -> f64 {
-    let query = match_tokens(cue);
+    query: &[(String, f64)],
+) -> Vec<f64> {
     if query.is_empty() || docs.is_empty() {
-        return 0.0;
+        return vec![0.0; docs.len()];
     }
     let n = docs.len();
     let avgdl = docs.iter().map(Vec::len).sum::<usize>() as f64 / n as f64;
     let avgdl = avgdl.max(1.0);
-    let doc = &docs[index];
-    let dl = doc.len() as f64;
     const K1: f64 = 1.2;
     const B: f64 = 0.75;
-    let mut score = 0.0;
-    for term in &query {
-        let docs_with = df.get(term).copied().unwrap_or(0);
-        if docs_with == 0 || (docs_with != 1 && docs_with * 2 >= n) {
-            continue;
-        }
-        let freq = doc.iter().filter(|word| *word == term).count() as f64;
-        if freq == 0.0 {
-            continue;
-        }
-        let idf = ((n as f64 - docs_with as f64 + 0.5) / (docs_with as f64 + 0.5) + 1.0).ln();
-        let norm = freq * (K1 + 1.0) / (freq + K1 * (1.0 - B + B * dl / avgdl));
-        score += idf * norm;
-    }
-    score
+    docs.iter()
+        .map(|doc| {
+            let dl = doc.len() as f64;
+            query
+                .iter()
+                .filter(|(_, weight)| *weight > 0.0)
+                .map(|(term, weight)| {
+                    let docs_with = df.get(term).copied().unwrap_or(0);
+                    if docs_with == 0 {
+                        return 0.0;
+                    }
+                    let freq = doc.iter().filter(|word| *word == term).count() as f64;
+                    if freq == 0.0 {
+                        return 0.0;
+                    }
+                    let idf =
+                        ((n as f64 - docs_with as f64 + 0.5) / (docs_with as f64 + 0.5) + 1.0).ln();
+                    let norm = freq * (K1 + 1.0) / (freq + K1 * (1.0 - B + B * dl / avgdl));
+                    weight * idf * norm
+                })
+                .sum()
+        })
+        .collect()
+}
+
+/// Unweighted [`bm25_scores`] against `cue`.
+fn bm25_for_cue(
+    docs: &[Vec<String>],
+    df: &std::collections::HashMap<String, usize>,
+    cue: &str,
+) -> Vec<f64> {
+    let query: Vec<(String, f64)> = match_tokens(cue)
+        .into_iter()
+        .map(|term| (term, 1.0))
+        .collect();
+    bm25_scores(docs, df, &query)
 }
 
 /// Rank of each body against `cue` on [`lexical_match_scores`], highest
@@ -10503,8 +10616,9 @@ fn cue_coverage(text: &str, cue: &str) -> f64 {
 /// fused score adds recency on each ballot and then multiplies by
 /// retrievability, so this is the score that does not read the clock.
 fn lexical_match_scores(texts: &[&str], cue: &str) -> Vec<f64> {
-    let docs: Vec<Vec<String>> = texts.iter().map(|text| match_tokens(text)).collect();
+    let docs: Vec<Vec<String>> = texts.iter().map(|text| match_token_stream(text)).collect();
     let df = document_frequency(&docs);
+    let bm25 = bm25_for_cue(&docs, &df, cue);
     texts
         .iter()
         .enumerate()
@@ -10512,8 +10626,7 @@ fn lexical_match_scores(texts: &[&str], cue: &str) -> Vec<f64> {
             if names_the_subject(text, cue) {
                 0.5 + 0.5 * cue_coverage(text, cue)
             } else {
-                let bm25 = bm25_distinctive(&docs, &df, i, cue);
-                0.5 * bm25 / (1.0 + bm25)
+                0.5 * bm25[i] / (1.0 + bm25[i])
             }
         })
         .collect()
@@ -10530,16 +10643,14 @@ pub const POOL_PER_SHOWN: usize = 4;
 /// break an exact tie.
 fn relevance_order<H: std::borrow::Borrow<Hit>>(rows: &[H], cue: &str) -> Vec<usize> {
     let texts: Vec<&str> = rows.iter().map(|h| h.borrow().text.as_str()).collect();
-    let docs: Vec<Vec<String>> = texts.iter().map(|text| match_tokens(text)).collect();
+    let docs: Vec<Vec<String>> = texts.iter().map(|text| match_token_stream(text)).collect();
     let df = document_frequency(&docs);
+    let bm25 = bm25_for_cue(&docs, &df, cue);
     let lexical = lexical_match_scores(&texts, cue);
     let keys: Vec<(f64, f64, f64)> = rows
         .iter()
         .enumerate()
-        .map(|(i, h)| {
-            let bm25 = bm25_distinctive(&docs, &df, i, cue);
-            (lexical[i], bm25, h.borrow().score)
-        })
+        .map(|(i, h)| (lexical[i], bm25[i], h.borrow().score))
         .collect();
     let mut order: Vec<usize> = (0..rows.len()).collect();
     order.sort_by(|&a, &b| {
@@ -13619,13 +13730,6 @@ fn refuses_relevance(client: &PacksetClient, with_token: bool) {
 fn relevant_atoms(client: &PacksetClient, cue: &str, limit: usize) -> Vec<Value> {
     let Ok(atoms) = atoms_read(client, &client.workspace()) else {
         return Vec::new();
-    };
-    let pack_words = |text: &str| -> std::collections::HashSet<String> {
-        text.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
-            .map(str::to_lowercase)
-            .filter(|w| !is_lesson_filler(w))
-            .map(|w| singular(&w))
-            .collect()
     };
     let asked = pack_words(cue);
     let texts: Vec<&str> = atoms
@@ -33799,12 +33903,46 @@ fn process_note(atom: &Value) -> bool {
     kind == "note" || (kind != "lesson" && kind != "rule" && !person_stored(atom))
 }
 
+/// The non-lexical weight of a memory that a sitting may show. This seat's
+/// lessons and user rules outrank another seat's process notes, whose weight
+/// also fades. Tombstones, non-reviewable rows and notes about another ticket
+/// do not enter the lexical corpus.
+fn sitting_memory_weight(issue: &str, atom: &Value, now: &str, seat: &str) -> Option<f64> {
+    if atom["tombstone"] == Value::Bool(true) || !reviewable(atom) {
+        return None;
+    }
+    let text = atom["text"].as_str().unwrap_or("").trim();
+    if text.is_empty() || names_another_ticket(issue, text) {
+        return None;
+    }
+    let mut weight = 1.0;
+    let kind = atom["kind"].as_str().unwrap_or("");
+    let here = atom_seat(atom) == Some(seat);
+    let elsewhere = atom_seat(atom).is_some_and(|other| other != seat);
+    let rule = kind == "rule" || (kind == "preference" && person_stored(atom));
+    if junk_preference(kind, text) {
+        weight *= 0.45;
+    } else if here && (kind == "lesson" || rule) {
+        weight *= 1.15;
+    } else if elsewhere && process_note(atom) {
+        weight *= 0.45;
+    }
+    if process_note(atom) {
+        let days = days_of_stamp(Some(now))
+            .zip(days_of_stamp(written_at(atom).as_deref()))
+            .map(|(today, then)| today.saturating_sub(then).max(0))
+            .unwrap_or(0);
+        weight *= 0.5_f64.powf(days as f64 / 7.0);
+    }
+    Some(weight)
+}
+
 /// The recall overlap rule. `None` when the memory does not clear it.
 ///
 /// Overlap is with the ticket's own words, not with `ljos`, `seat`,
-/// `sitting`, `note` or `ticket`. This seat's lessons and user rules
-/// outrank another seat's agent notes. Old process notes fade. A note
-/// about some other ticket is left out. Nothing under the floor is kept.
+/// `sitting`, `note` or `ticket`. Nothing under the floor is kept. Due
+/// cards and timeline rows use this admission rule; the ranked sitting
+/// list uses BM25 over the whole eligible pack.
 fn sitting_memory_score(
     issue: &str,
     ticket: &str,
@@ -33813,13 +33951,11 @@ fn sitting_memory_score(
     seat: &str,
 ) -> Option<f64> {
     let terms = sitting_terms(ticket);
-    if terms.is_empty() || atom["tombstone"] == Value::Bool(true) || !reviewable(atom) {
+    if terms.is_empty() {
         return None;
     }
+    let weight = sitting_memory_weight(issue, atom, now, seat)?;
     let text = atom["text"].as_str().unwrap_or("").trim();
-    if text.is_empty() || names_another_ticket(issue, text) {
-        return None;
-    }
     let have = prompt_words(text);
     let shared = terms
         .iter()
@@ -33828,30 +33964,38 @@ fn sitting_memory_score(
     if shared == 0 {
         return None;
     }
-    let mut score = shared as f64 / terms.len() as f64;
-    let kind = atom["kind"].as_str().unwrap_or("");
-    let here = atom_seat(atom) == Some(seat);
-    let elsewhere = atom_seat(atom).is_some_and(|other| other != seat);
-    let rule = kind == "rule" || (kind == "preference" && person_stored(atom));
-    if junk_preference(kind, text) {
-        score *= 0.45;
-    } else if here && (kind == "lesson" || rule) {
-        score *= 1.15;
-    } else if elsewhere && process_note(atom) {
-        score *= 0.45;
-    }
-    if process_note(atom) {
-        let days = days_of_stamp(Some(now))
-            .zip(days_of_stamp(written_at(atom).as_deref()))
-            .map(|(today, then)| today.saturating_sub(then).max(0))
-            .unwrap_or(0);
-        score *= 0.5_f64.powf(days as f64 / 7.0);
-    }
+    let score = shared as f64 / terms.len() as f64 * weight;
     (score >= SITTING_RECALL_FLOOR).then_some(score)
 }
 
-/// Memories worth showing for a sitting, best first. The cut is
-/// [`sitting_memory_score`].
+/// A BM25 query from a ticket. The title is the person's short name for the
+/// work, while the body carries context and acceptance detail, so a title
+/// term has twice a body term's weight. Repeating a term in both fields keeps
+/// the title weight rather than counting the same evidence twice.
+fn sitting_query(ticket: &str) -> Vec<(String, f64)> {
+    const BODY_WEIGHT: f64 = 1.0;
+    const TITLE_WEIGHT: f64 = 2.0;
+    let (title, body) = ticket.split_once('\n').unwrap_or((ticket, ""));
+    let mut terms = std::collections::HashMap::new();
+    for term in match_tokens(body)
+        .into_iter()
+        .filter(|term| !sitting_wide(term))
+    {
+        terms.insert(term, BODY_WEIGHT);
+    }
+    for term in match_tokens(title)
+        .into_iter()
+        .filter(|term| !sitting_wide(term))
+    {
+        terms.insert(term, TITLE_WEIGHT);
+    }
+    let mut terms: Vec<(String, f64)> = terms.into_iter().collect();
+    terms.sort_by(|a, b| a.0.cmp(&b.0));
+    terms
+}
+
+/// Memories worth showing for a sitting, best first. BM25 uses term
+/// frequency, document length and IDF over this seat's eligible pack.
 pub(crate) fn rank_sitting_memories(
     issue: &str,
     ticket: &str,
@@ -33859,18 +34003,38 @@ pub(crate) fn rank_sitting_memories(
     now: &str,
     seat: &str,
 ) -> Vec<Value> {
-    let mut scored: Vec<(usize, f64, i64)> = atoms
+    let candidates: Vec<(usize, f64)> = atoms
         .iter()
         .enumerate()
         .filter_map(|(index, atom)| {
-            let score = sitting_memory_score(issue, ticket, atom, now, seat)?;
-            Some((
-                index,
-                score,
-                days_of_stamp(written_at(atom).as_deref()).unwrap_or(0),
-            ))
+            sitting_memory_weight(issue, atom, now, seat).map(|weight| (index, weight))
         })
         .collect();
+    let docs: Vec<Vec<String>> = candidates
+        .iter()
+        .map(|(index, _)| match_token_stream(atoms[*index]["text"].as_str().unwrap_or("")))
+        .collect();
+    let df = document_frequency(&docs);
+    let scores = bm25_scores(&docs, &df, &sitting_query(ticket));
+    let mut scored: Vec<(usize, f64, i64)> = candidates
+        .into_iter()
+        .zip(scores)
+        .filter(|(_, score)| *score > 0.0)
+        .map(|((index, weight), score)| {
+            (
+                index,
+                score * weight,
+                days_of_stamp(written_at(&atoms[index]).as_deref()).unwrap_or(0),
+            )
+        })
+        .collect();
+    // Use the hook's measured relevance floor against the strongest memory:
+    // a lone body word does not sit beside a memory that answers the ticket.
+    let best = scored
+        .iter()
+        .map(|(_, score, _)| *score)
+        .fold(0.0_f64, f64::max);
+    scored.retain(|(_, score, _)| *score >= best * HOOK_SCORE_FLOOR);
     scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(b.2.cmp(&a.2)).then(a.0.cmp(&b.0)));
     scored.truncate(SITTING_RECALL_CAP);
     scored
@@ -54164,6 +54328,82 @@ The body asks the recall to rank memories by the ticket, not by a process log.
         }
         let bare = super::rank_sitting_memories("sample-none", "Sitting note", &atoms, now, "ada");
         assert!(bare.is_empty(), "an empty ticket printed {bare:?}");
+    }
+
+    #[derive(serde::Deserialize)]
+    struct LexicalRecallFixture {
+        memories: Vec<LexicalMemory>,
+        tickets: Vec<LexicalTicket>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct LexicalMemory {
+        id: String,
+        text: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct LexicalTicket {
+        id: String,
+        title: String,
+        body: String,
+        relevant: Vec<String>,
+    }
+
+    /// A CPU-only pack with near-topic distractors measures the words path
+    /// directly. The ids are the five memory lines a sitting can observe.
+    #[test]
+    fn words_only_recall_ranks_realistic_lessons() {
+        let fixture: LexicalRecallFixture =
+            serde_json::from_str(include_str!("../tests/fixtures/lexical_recall.json")).unwrap();
+        let atoms: Vec<serde_json::Value> = fixture
+            .memories
+            .iter()
+            .map(|memory| {
+                serde_json::json!({
+                    "id": memory.id,
+                    "kind": "lesson",
+                    "text": memory.text,
+                    "ts": "2026-10-31T12:00:00Z",
+                    "origin": "user-declared",
+                    "source": {"seat": "ada", "basis": "person"},
+                    "entities": ["horizon:standing", "seat:ada"],
+                })
+            })
+            .collect();
+        let mut recalled = 0usize;
+        let mut reciprocal_rank = 0.0;
+        for ticket in &fixture.tickets {
+            let cue = format!("{}\n{}", ticket.title, ticket.body);
+            let rows = super::rank_sitting_memories(&ticket.id, &cue, &atoms, "2026-11-02", "ada");
+            let output = super::format_sitting_recall(&rows);
+            let ids: Vec<&str> = output
+                .lines()
+                .filter_map(|line| line.split('\t').nth(2))
+                .collect();
+            let rank = ids
+                .iter()
+                .position(|id| ticket.relevant.iter().any(|want| want == id));
+            assert_eq!(
+                rank,
+                Some(0),
+                "{} did not put its known memory first: {ids:?}",
+                ticket.id
+            );
+            if let Some(rank) = rank {
+                recalled += 1;
+                reciprocal_rank += 1.0 / (rank + 1) as f64;
+            }
+            eprintln!("{}\t{:?}\t{ids:?}", ticket.id, rank.map(|rank| rank + 1));
+        }
+        let count = fixture.tickets.len() as f64;
+        let recall_at_five = recalled as f64 / count;
+        let mean_reciprocal_rank = reciprocal_rank / count;
+        eprintln!(
+            "words-only recall@{}={recall_at_five:.3} MRR={mean_reciprocal_rank:.3}",
+            super::SITTING_RECALL_CAP
+        );
+        assert_eq!((recall_at_five, mean_reciprocal_rank), (1.0, 1.0));
     }
 
     fn recall_fixture(due_at: &str) -> (String, Vec<serde_json::Value>) {
