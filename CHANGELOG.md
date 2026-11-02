@@ -5,6 +5,12 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.36.2 (2026-11-02)
+
+### Fixes
+
+- A sitting opens on a commit-mode tracker whose remote cannot be reached.
+
 ## 0.36.1 (2026-11-02)
 
 ### Fixes
