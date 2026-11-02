@@ -5,6 +5,12 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.36.7 (2026-11-02)
+
+### Fixes
+
+- A sitting takes the claim first and prints each section as it is ready, so a slow encoder no longer leaves it silent.
+
 ## 0.36.6 (2026-11-02)
 
 ### Fixes
