@@ -28420,6 +28420,19 @@ pub fn tracker_state(identity: &str, source: &str) -> (String, bool) {
 /// What the tracker row says when issue files hold uncommitted edits.
 const UNCOMMITTED_EDITS: &str = "uncommitted issue edits";
 
+/// Whether a tracker row says more than its unpushed count and its
+/// uncommitted edits. The first part is the row's base (version, root,
+/// prefix); a push refusal, a split remote or a missing merge driver is
+/// more.
+fn tracker_row_beyond_drift(state: &str) -> bool {
+    state.split("; ").skip(1).any(|part| {
+        let count = part
+            .strip_suffix(" unpushed")
+            .is_some_and(|n| n.parse::<u64>().is_ok());
+        !count && !part.starts_with(UNCOMMITTED_EDITS) && !part.starts_with("commit them in ")
+    })
+}
+
 /// The issue files in the tracker checkout whose edits no commit holds: a
 /// raw `vissue` write, or a tracker commit that failed. No other host and
 /// no rebuilt one sees them. Under `LJOS_TRACKER_GIT=off` ljos leaves the
@@ -29065,31 +29078,45 @@ const OPTIONAL_ROWS: &[&str] = &[
 /// opened under it, so the word and the gate disagreed.
 const WARN_ROWS: &[&str] = &["host"];
 
-/// One line when a sitting opened without `ljos-mcp` or `ljos-policyd`.
+/// One line naming what a sitting opened without: `ljos-mcp` or
+/// `ljos-policyd` that do not answer, and MCP tools when the client's
+/// config names no `ljos-mcp` that is there. The sitting still claims,
+/// and the doctor rows say why.
 #[must_use]
-pub fn sitting_without_tools(rows: &[Habitat]) -> Option<String> {
-    let names: Vec<&str> = rows
+pub fn sitting_without(rows: &[Habitat]) -> Option<String> {
+    let mut names: Vec<&str> = rows
         .iter()
         .filter(|row| SITTING_SOFT.contains(&row.name) && !sitting_tool_answered(row))
         .map(|row| row.name)
         .collect();
+    if rows.iter().any(|row| row.name == "mcp" && !row.ok) {
+        names.push("MCP tools");
+    }
     if names.is_empty() {
         return None;
     }
-    Some(format!("sitting opened without {}\n", names.join(" and ")))
+    Some(format!(
+        "without: {} (`ljos doctor --all` for why)\n",
+        names.join(", ")
+    ))
 }
 
 fn sitting_tool_answered(row: &Habitat) -> bool {
     row.ok && !row.state.contains("  ?")
 }
 
-/// One line when the MCP client has no `ljos-mcp`: the config names a
-/// binary that is not there, or names none. The sitting still claims.
-#[must_use]
-pub fn sitting_without_mcp(rows: &[Habitat]) -> Option<String> {
-    rows.iter()
-        .any(|row| row.name == "mcp" && !row.ok)
-        .then(|| "sitting opened without MCP tools\n".to_string())
+/// Whether a compact sitting's doctor leaves the row out because another
+/// line of the sitting already says it: the `without:` line names a soft
+/// tool or the MCP client, the meaning line under the doctor names a host
+/// warning, and the tracker line counts the tracker's drift.
+fn said_elsewhere_in_sitting(word: &str, name: &str, state: &str) -> bool {
+    match (word, name) {
+        ("no", "mcp") => true,
+        ("no", name) => SITTING_SOFT.contains(&name),
+        ("warn", "tracker") => !tracker_row_beyond_drift(state),
+        ("warn", name) => WARN_ROWS.contains(&name),
+        _ => false,
+    }
 }
 
 /// The line a sitting prints under its doctor when a `warn` row failed:
@@ -29281,6 +29308,17 @@ fn and_list(names: &[&str]) -> String {
 /// whose log is in `damaged` is said once, as damaged. A damaged log
 /// whose row does not fail still keeps the line from saying ready.
 fn summary_line(down: &[&str], damaged: &[&str], working: &[&str], off: usize) -> String {
+    let mut line = summary_verdict(down, damaged, working);
+    if off > 0 {
+        line.push_str(" Optional extras: `ljos doctor --all`.\n");
+    } else {
+        line.push_str(" Every check: `ljos doctor --all`.\n");
+    }
+    line
+}
+
+/// [`summary_line`] without the pointer to `ljos doctor --all`.
+fn summary_verdict(down: &[&str], damaged: &[&str], working: &[&str]) -> String {
     let silent: Vec<&str> = down
         .iter()
         .copied()
@@ -29297,7 +29335,7 @@ fn summary_line(down: &[&str], damaged: &[&str], working: &[&str], off: usize) -
         why.push(format!("{} {verb} damaged", and_list(damaged)));
     }
     let why = why.join(", and ");
-    let mut line = if why.is_empty() {
+    if why.is_empty() {
         match working {
             [] => "ljos is ready.".to_string(),
             [one] => format!("ljos is ready: {one} works."),
@@ -29307,13 +29345,7 @@ fn summary_line(down: &[&str], damaged: &[&str], working: &[&str], off: usize) -
         format!("ljos runs, but {why}.")
     } else {
         format!("ljos is not ready: {why}.")
-    };
-    if off > 0 {
-        line.push_str(" Optional extras: `ljos doctor --all`.\n");
-    } else {
-        line.push_str(" Every check: `ljos doctor --all`.\n");
     }
-    line
 }
 
 /// A doctor row's name as the summary line says it: `pack` is the memory.
@@ -29354,7 +29386,6 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
     match name {
         "doctor" => {
             let mut down = Vec::new();
-            let mut off = 0;
             let mut words = Vec::new();
             let mut act = String::new();
             for l in lines {
@@ -29364,13 +29395,13 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                 }
                 match cols.as_slice() {
                     ["info", name, _] => {
-                        off += 1;
                         if shown_short("info", name) {
                             act.push_str(l);
                             act.push('\n');
                         }
                     }
                     ["ok", _, _] => {}
+                    [word, name, state] if said_elsewhere_in_sitting(word, name, state) => {}
                     [word @ ("no" | "warn"), name, _] => {
                         if *word == "no" && (REQUIRED.contains(name) || *name == "pack") {
                             down.push(*name);
@@ -29385,7 +29416,9 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                     _ => {}
                 }
             }
-            out.push_str(&summary_line(&down, &[], &working_parts(&words), off));
+            // The `without:` line carries the one pointer to the full rows.
+            out.push_str(&summary_verdict(&down, &[], &working_parts(&words)));
+            out.push('\n');
             out.push_str(&act);
         }
         "island" => {
@@ -29436,8 +29469,7 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
         "claim" => {
             for l in lines {
                 if !l.starts_with("gen=") && !l.trim().is_empty() {
-                    out.push_str(l);
-                    out.push('\n');
+                    out.push_str(&compact_tracker_line(l));
                 }
             }
         }
@@ -29454,8 +29486,7 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
         "" => {
             for l in lines {
                 if l.starts_with("tracker:") && !l.trim().is_empty() {
-                    out.push_str(l);
-                    out.push('\n');
+                    out.push_str(&compact_tracker_line(l));
                 }
             }
         }
@@ -29523,8 +29554,8 @@ pub fn compact_sitting(full: &str, issue: &str) -> String {
 
 /// One sitting section, compact, the same lines [`compact_sitting`] keeps.
 /// Island memories are appended to `memories` for the caller to print at
-/// the end. A block that is not a section comes back unchanged when it is
-/// the tracker sync line or the words fallback.
+/// the end. A block that is not a section is kept when it is the tracker
+/// sync line, cut to its counts, or the words fallback.
 #[must_use]
 pub fn compact_sitting_block(block: &str, memories: &mut Vec<String>) -> String {
     let mut lines = block.lines();
@@ -29543,11 +29574,20 @@ pub fn compact_sitting_block(block: &str, memories: &mut Vec<String>) -> String 
         return out;
     }
     if first.starts_with("tracker:") || first.starts_with("ranked by words") {
-        let mut out = String::from(first);
-        out.push('\n');
-        return out;
+        return compact_tracker_line(first);
     }
     String::new()
+}
+
+/// A tracker drift line as a compact sitting prints it: the counts alone.
+/// Its fix is a chain of git commands naming every uncommitted issue
+/// file, other seats' too; `--verbose` keeps it. Any other line comes
+/// back as it is.
+fn compact_tracker_line(line: &str) -> String {
+    match line.split_once(tracker_sync::FIX) {
+        Some((counts, _)) => format!("{counts}\n"),
+        None => format!("{line}\n"),
+    }
 }
 
 /// The line a compact sitting ends on.
@@ -34002,12 +34042,12 @@ pub fn sitting_stream(
     // The project file was parsed to open this ticket. The lines are a
     // walk of those headings, not another tracker read.
     piece.push_str(&quiet_claims::beside_sitting(issue, assignee));
-    // The board this sitting just committed is not drift. The line leads,
-    // and both lines are out before the pack is asked.
+    emit_piece(&mut out, &mut emit, &piece);
+    // Read after the claim's commit, so the board this sitting just
+    // committed is not drift, and out before the pack is asked.
     if let Some(line) = tracker_sync::tracker_sync_line() {
         emit_piece(&mut out, &mut emit, &line);
     }
-    emit_piece(&mut out, &mut emit, &piece);
 
     // One budget for every search and island read after the claim. A
     // writer reloading its encoder spends it once; the next read returns.
@@ -34019,10 +34059,7 @@ pub fn sitting_stream(
     let rows = doctor_seat();
     sections.heading(&mut piece, "doctor");
     piece.push_str(&format_doctor(&rows));
-    if let Some(line) = sitting_without_tools(&rows) {
-        piece.push_str(&line);
-    }
-    if let Some(line) = sitting_without_mcp(&rows) {
+    if let Some(line) = sitting_without(&rows) {
         piece.push_str(&line);
     }
     if rows
@@ -44443,8 +44480,8 @@ mod tests {
             .collect();
         assert!(hard.is_empty(), "{hard:?}");
         assert_eq!(
-            sitting_without_tools(&rows).as_deref(),
-            Some("sitting opened without ljos-mcp and ljos-policyd\n")
+            sitting_without(&rows).as_deref(),
+            Some("without: ljos-mcp, ljos-policyd (`ljos doctor --all` for why)\n")
         );
         let ready = [
             Habitat {
@@ -44458,7 +44495,7 @@ mod tests {
                 ok: true,
             },
         ];
-        assert_eq!(sitting_without_tools(&ready), None);
+        assert_eq!(sitting_without(&ready), None);
         let mut cmd = std::process::Command::new("sleep");
         cmd.arg("30");
         let started = std::time::Instant::now();
@@ -54007,7 +54044,7 @@ mod tests {
         let sat = compact_sitting(&full, "Software-x");
         assert!(
             sat.starts_with(
-                "ljos is ready: memory and command guard work. Optional extras: `ljos doctor --all`.\n\
+                "ljos is ready: memory and command guard work.\n\
                  info\ttracker\t`vissue identity` exited 1: not inside a tracker\n"
             ),
             "{sat}"
@@ -54057,7 +54094,7 @@ mod tests {
         let short = compact_sitting(full, "Software-x");
         assert_eq!(
             short,
-            "ljos is ready: memory, tracker and command guard work. Optional extras: `ljos doctor --all`.\n\
+            "ljos is ready: memory, tracker and command guard work.\n\
 encoder down: the pack ranks by words alone\n\
 2 due; the soonest: abc\n\
 claimed Software-x for ljos-bot@ux-fix\n\
@@ -54065,6 +54102,51 @@ What the seat remembers for this task:\n\
 - Prefer plain words in denials.\n\
 - Keep hooks under 8 s.\n\
 Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sitting; `ljos sitting Software-x --verbose` prints every section.\n"
+        );
+    }
+
+    /// The doctor of a sitting on a box that leaves `ljos-mcp` and
+    /// `ljos-policyd` out, has an OOM kill within a day, and a tracker with
+    /// unpushed commits and other seats' uncommitted edits.
+    #[test]
+    fn a_compact_sitting_says_each_doctor_fact_once() {
+        let full = "== claim\ntracker: ljos-a5q4 STARTED under ljosbot@2wbpt11jxn\n\
+tracker: 1509 unpushed, 7 uncommitted edits; fix: git -C '/t' add -u -- . && git -C '/t' add -- 'Software/v.7iq8/issues.org' && git -C '/t' commit -m 'tracker: commit issue edits'\n\
+== doctor\n\
+ok\tpack\tanswers\n\
+no\tljos-mcp\tnot on PATH; cargo install --locked ljos (crates.io 0.36.7)\n\
+no\tljos-policyd\tnot on PATH; cargo install --locked ljos-policyd (crates.io 0.6.4)\n\
+warn\thost\t6.12.94+; 361 OOM kills since boot, the last within a day (/proc/vmstat oom_kill); 0 ljos-mcp, 0 MB resident; the kernel is killing processes, read `journalctl -k -b` before the load\n\
+no\tmcp\tljos-mcp: /home/box/.cargo/bin/ljos-mcp does not exist (/home/box/.cursor/mcp.json), so the MCP client has no tools. Run `ljos cloud up`.\n\
+warn\ttracker\tvissue 0.22.0 root=/t prefix=Software from VISSUE_ROOT=/t; 1509 unpushed; uncommitted issue edits in Software/rgsaddle/issues.org and 6 more; commit them in /t or no other host sees them\n\
+without: ljos-mcp, ljos-policyd, MCP tools (`ljos doctor --all` for why)\n\
+host: the kernel killed a process within a day; the sitting opens, and one build or test suite at a time keeps it from killing the next\n";
+        assert_eq!(
+            compact_sitting(full, "ljos-a5q4"),
+            "tracker: ljos-a5q4 STARTED under ljosbot@2wbpt11jxn\n\
+tracker: 1509 unpushed, 7 uncommitted edits\n\
+ljos is ready: memory works.\n\
+without: ljos-mcp, ljos-policyd, MCP tools (`ljos doctor --all` for why)\n\
+host: the kernel killed a process within a day; the sitting opens, and one build or test suite at a time keeps it from killing the next\n\
+ljos-a5q4 is yours. `ljos finish ljos-a5q4 --lesson \"...\"` closes the sitting; `ljos sitting ljos-a5q4 --verbose` prints every section.\n"
+        );
+        let with_extras = format!("{full}info\thost key\tnone yet\n");
+        let short = compact_sitting(&with_extras, "ljos-a5q4");
+        let pointers: Vec<&str> = short
+            .lines()
+            .filter(|l| l.contains("ljos doctor --all"))
+            .collect();
+        assert_eq!(
+            pointers,
+            ["without: ljos-mcp, ljos-policyd, MCP tools (`ljos doctor --all` for why)"],
+            "{short}"
+        );
+
+        let refused = "== doctor\nok\tpack\tanswers\n\
+warn\ttracker\tvissue 0.22.0 root=/t prefix=Software; 3 unpushed; last push refused: no credential\n";
+        assert!(
+            compact_sitting(refused, "x").contains("last push refused: no credential"),
+            "a tracker row with more than its drift is kept"
         );
     }
 
@@ -62299,8 +62381,8 @@ The body asks the recall to rank memories by the ticket, not by a process log.
             "the mcp client row does not refuse a sitting"
         );
         assert_eq!(
-            super::sitting_without_mcp(&stopped).as_deref(),
-            Some("sitting opened without MCP tools\n")
+            super::sitting_without(&stopped).as_deref(),
+            Some("without: MCP tools (`ljos doctor --all` for why)\n")
         );
         let aged = Habitat {
             name: "tracker",

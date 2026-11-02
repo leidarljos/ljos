@@ -159,12 +159,75 @@ fn a_sitting_claims_when_mcp_json_names_a_missing_binary() {
         "sitting refused:\n{said}\ncalls:\n{}",
         host.calls()
     );
-    assert!(said.contains("sitting opened without MCP tools"), "{said}");
+    assert!(
+        said.contains("without: ljos-mcp, ljos-policyd, MCP tools"),
+        "{said}"
+    );
     assert!(!said.contains("nothing was claimed"), "{said}");
     assert!(
         host.calls().contains("claimdag claim"),
         "the issue was not claimed:\n{}",
         host.calls()
+    );
+}
+
+/// The seat has neither `ljos-mcp` nor `ljos-policyd` on its PATH, and its
+/// MCP config names a binary that is not there.
+#[test]
+fn a_default_sitting_names_the_missing_pieces_on_one_line() {
+    let host = Host::open(true);
+    std::fs::create_dir_all(host.root.path().join("run")).unwrap();
+    let out = host.ljos(&["sitting", &host.issue]);
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "{said}");
+    let lines: Vec<&str> = said.lines().collect();
+    let at = |prefix: &str| lines.iter().position(|l| l.starts_with(prefix));
+    let claimed = at(&format!("tracker: {} STARTED", host.issue)).expect(&said);
+    let summary = at("ljos is").expect(&said);
+    assert!(claimed < summary, "the claim is not first:\n{said}");
+    let missing: Vec<&&str> = lines
+        .iter()
+        .filter(|l| l.contains("ljos-mcp") || l.contains("ljos-policyd") || l.contains("MCP"))
+        .collect();
+    assert_eq!(
+        missing,
+        [&"without: ljos-mcp, ljos-policyd, MCP tools (`ljos doctor --all` for why)"],
+        "{said}"
+    );
+    assert_eq!(said.matches("ljos doctor --all").count(), 1, "{said}");
+    for line in &lines {
+        assert_eq!(
+            lines.iter().filter(|l| *l == line).count(),
+            1,
+            "printed twice: {line}\n{said}"
+        );
+    }
+    assert!(
+        lines
+            .last()
+            .unwrap()
+            .starts_with(&format!("{} is yours.", host.issue)),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_verbose_sitting_keeps_the_full_doctor_rows() {
+    let host = Host::open(true);
+    std::fs::create_dir_all(host.root.path().join("run")).unwrap();
+    let out = host.ljos(&["sitting", &host.issue, "--verbose"]);
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(out.status.success(), "{said}");
+    for row in [
+        "no\tljos-mcp\tnot on PATH",
+        "no\tljos-policyd\tnot on PATH",
+        "no\tmcp\t",
+    ] {
+        assert!(said.lines().any(|l| l.starts_with(row)), "{row}:\n{said}");
+    }
+    assert!(
+        said.contains("without: ljos-mcp, ljos-policyd, MCP tools (`ljos doctor --all` for why)\n"),
+        "{said}"
     );
 }
 

@@ -208,8 +208,12 @@ fn a_sitting_claims_when_the_tracker_remote_cannot_be_reached() {
         took < Duration::from_secs(15),
         "sitting waited {took:?} on the remote:\n{said}"
     );
-    assert!(said.contains("warn") && said.contains("unpushed"), "{said}");
-    assert!(said.contains("uncommitted issue edits"), "{said}");
+    assert!(
+        said.lines().any(|l| l.starts_with("tracker: ")
+            && l.contains(" unpushed, ")
+            && l.ends_with(" uncommitted edits")),
+        "{said}"
+    );
     assert!(!said.contains("nothing was claimed"), "{said}");
     assert!(!said.contains("does not answer"), "{said}");
     assert!(

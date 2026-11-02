@@ -6,6 +6,9 @@
 
 use std::path::Path;
 
+/// What parts [`tracker_sync_line`]'s counts from its fix.
+pub(crate) const FIX: &str = "; fix: ";
+
 /// The line a digest and a sitting print when the tracker has drifted.
 /// `None` when it is caught up, or when it is not a checkout.
 #[must_use]
@@ -19,7 +22,7 @@ pub fn tracker_sync_line() -> Option<String> {
     }
     let phrase = counts_phrase(unpushed, edits.count);
     let fix = fix_command(root, unpushed, &edits);
-    Some(format!("tracker: {phrase}; fix: {fix}\n"))
+    Some(format!("tracker: {phrase}{FIX}{fix}\n"))
 }
 
 /// Push tracker commits a finish did not already push.
@@ -328,13 +331,17 @@ mod tests {
         git(&root, &["push", "-q"]);
         assert!(super::tracker_sync_line().is_none());
 
-        let full =
-            "tracker: 1 unpushed; fix: git -C 'x' push\n== doctor\nok\tpack\tanswers\n".to_string();
-        let short = crate::compact_sitting(&full, "probe-a");
+        let full = "tracker: 1 unpushed, 2 uncommitted edits; fix: git -C 'x' add -u -- . && git -C 'x' add -- 'Software/other/issues.org' && git -C 'x' commit -m 'tracker: commit issue edits'\n\
+== doctor\nok\tpack\tanswers\n\
+warn\ttracker\tvissue 0.22.0 root=x prefix=Software; 1 unpushed; uncommitted issue edits in Software/other/issues.org and 1 more; commit them in x or no other host sees them\n";
+        let short = crate::compact_sitting(full, "probe-a");
         assert!(
-            short.starts_with("tracker: 1 unpushed; fix: git -C 'x' push\n"),
+            short.starts_with("tracker: 1 unpushed, 2 uncommitted edits\n"),
             "{short}"
         );
+        assert!(!short.contains("git -C"), "{short}");
+        assert!(!short.contains("Software/other"), "{short}");
+        assert_eq!(short.matches("unpushed").count(), 1, "{short}");
     }
 
     #[test]
