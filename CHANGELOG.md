@@ -5,6 +5,13 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.36.1 (2026-11-02)
+
+### Fixes
+
+- A sitting opens when mcp.json names an ljos-mcp that does not exist.
+- The inbox reads mail again from a pack that answers.
+
 ## 0.36.0 (2026-11-02)
 
 ### Fixes
