@@ -390,7 +390,14 @@ fn install_with_no_coding_tool_leaves_a_seat_a_sitting_opens_on() {
     let sitting = said(&sat);
     let logged = read(&calls);
     assert!(sat.status.success(), "{sitting}\ncalls:\n{logged}");
-    assert!(sitting.starts_with("ljos is ready:"), "{sitting}");
+    let claimed = sitting
+        .find("tracker: demo-0001 STARTED under demo")
+        .expect(&sitting);
+    let ready = sitting.find("ljos is ready:").expect(&sitting);
+    assert!(
+        claimed < ready,
+        "the claim is printed before the doctor summary:\n{sitting}"
+    );
     assert!(!sitting.contains("uncommitted edit"), "{sitting}");
     assert!(
         sitting.contains("tracker: demo-0001 STARTED under demo"),
