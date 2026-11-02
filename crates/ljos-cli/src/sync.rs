@@ -5572,10 +5572,8 @@ fn port_from_lsof_line(line: &str) -> Option<u16> {
     let fields: Vec<&str> = line.split_whitespace().collect();
     let name = if let Some(at) = fields.iter().position(|field| *field == "(LISTEN)") {
         *fields.get(at.checked_sub(1)?)?
-    } else if let Some(rest) = line.trim().strip_prefix('n') {
-        rest
     } else {
-        return None;
+        line.trim().strip_prefix('n')?
     };
     let port = name.rsplit_once(':')?.1;
     port.parse().ok().filter(|port: &u16| *port != 0)
