@@ -16,6 +16,17 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v6
+      - name: The tag is the crate version
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          crate=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          if [ "v$crate" != "$TAG" ]; then
+            echo "Cargo.toml says $crate and the tag says $TAG" >&2
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@stable
       - uses: rust-lang/crates-io-auth-action@v1.0.5
         id: auth

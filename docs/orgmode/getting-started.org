@@ -1,7 +1,9 @@
 #+title: Getting started
 #+options: toc:nil num:nil
 
-This page takes about ten minutes. It describes ljos 0.35.0.
+# [[[cog import ljos_version as v; v.lines("This page takes about ten minutes. It describes ljos {version}.")]]]
+This page takes about ten minutes. It describes ljos 0.36.7.
+# [[[end]]]
 
 By the end you will have remembered a lesson and put two seats on one ticket.
 They will have voted, noted and settled the vote. You will have asked
@@ -220,8 +222,8 @@ deny: rm-rf-outside-tmp: a recursive delete outside /tmp cannot be undone. ...
 #+end_src
 
 There are four answers. =allow= runs the command. =ask= shows the runner's permission
-prompt, and you answer it. =deny= stops the command and names the rule. =rewrite= is coming
-in 0.35.0. It replaces the command with a fixed one and lets that one run.
+prompt, and you answer it. =deny= stops the command and names the rule. =rewrite= replaces
+the command with a fixed one and lets that one run.
 The answer is =allow=, =rewrite= and the new command, separated by tabs.
 Each rewrite leaves a note and a row in =$XDG_DATA_HOME/ljos/rewrite.jsonl=. A repository's
 =rewrite = false= turns rewriting off there.

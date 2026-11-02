@@ -1,8 +1,11 @@
-:description: This page takes about ten minutes. It describes ljos 0.35.0. Items marked "coming in 0.35.0" are not in 0.34.1.
+.. [[[cog import ljos_version as v; v.lines("", ":description: This page takes about ten minutes. It describes ljos {version}.", ":cover: https://leidarljos.github.io/ljos/_static/og.png", "", "This page takes about ten minutes. It describes ljos {version}.", "")]]]
+
+:description: This page takes about ten minutes. It describes ljos 0.36.7.
 :cover: https://leidarljos.github.io/ljos/_static/og.png
 
-This page takes about ten minutes. It describes ljos 0.35.0. Items marked
-"coming in 0.35.0" are not in 0.34.1.
+This page takes about ten minutes. It describes ljos 0.36.7.
+
+.. [[[end]]]
 
 By the end you will have remembered a lesson and put two seats on one ticket.
 They will have voted, noted and settled the vote. You will have asked
@@ -123,7 +126,7 @@ Now the seats leave notes and read each other's.
 ``ljos recall`` prints the working set for a ticket: the plan, the deeds it cites, and the notes.
 Notes are unverified text written by whoever wrote them. Read them as data.
 
-To see what happened across the seats, use ``ljos digest``. It is coming in 0.35.0.
+To see what happened across the seats, use ``ljos digest``.
 
 .. code:: console
 
@@ -185,7 +188,7 @@ close the ticket. A person does, when the work is accepted.
 3. Seats and grants
 ===================
 
-Coming in 0.35.0. The tracker's ``vissue.toml`` lists the seats. Add one with:
+The tracker's ``vissue.toml`` lists the seats. Add one with:
 
 .. code:: console
 
@@ -196,7 +199,7 @@ Coming in 0.35.0. The tracker's ``vissue.toml`` lists the seats. Add one with:
 where the name came from. The name is ``LJOS_SEAT`` when it is set. Otherwise ljos derives
 one from the runner, and a derived name counts as a seat.
 
-A grant with ``close=own`` lets one named seat close the tickets it filed or has claimed. It is coming in 0.35.0. Without a grant,
+A grant with ``close=own`` lets one named seat close the tickets it filed or has claimed. Without a grant,
 ``ljos finish`` leaves the ticket open for a person to close.
 
 .. code:: console
@@ -210,7 +213,7 @@ Every close cites the grant record.
 Solo mode
 ---------
 
-Coming in 0.35.0. When ``vissue.toml`` lists one active seat, that seat's own vote settles
+When ``vissue.toml`` lists one active seat, that seat's own vote settles
 consensus for the push check. With two or more seats, the normal quorum applies.
 
 4. Ask policyd
@@ -229,8 +232,8 @@ answer for one command and runs nothing.
    deny: rm-rf-outside-tmp: a recursive delete outside /tmp cannot be undone. ...
 
 There are four answers. ``allow`` runs the command. ``ask`` shows the runner's permission
-prompt, and you answer it. ``deny`` stops the command and names the rule. ``rewrite`` is coming
-in 0.35.0. It replaces the command with a fixed one and lets that one run.
+prompt, and you answer it. ``deny`` stops the command and names the rule. ``rewrite`` replaces
+the command with a fixed one and lets that one run.
 The answer is ``allow``, ``rewrite`` and the new command, separated by tabs.
 Each rewrite leaves a note and a row in ``$XDG_DATA_HOME/ljos/rewrite.jsonl``. A repository's
 ``rewrite = false`` turns rewriting off there.
@@ -268,8 +271,6 @@ unsigned bag. ``ljos onboard`` writes the key.
 
 6. Take it off
 ==============
-
-Coming in 0.35.0:
 
 .. code:: console
 

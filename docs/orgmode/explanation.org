@@ -1,7 +1,9 @@
 #+title: Explanation
 #+options: toc:nil num:nil
 
-This page describes ljos 0.35.0.
+# [[[cog import ljos_version as v; v.lines("This page describes ljos {version}.")]]]
+This page describes ljos 0.36.7.
+# [[[end]]]
 
 * One seat over the habitats
 

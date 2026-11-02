@@ -209,7 +209,7 @@ a file tool that writes the tracker's files by hand.
 Second, ``ljos policy -- COMMAND`` prints the answer for one command without running it,
 so every integration is testable without the runner. ``scripts/smoke.sh`` does exactly that.
 
-policyd can also answer a command with a fixed one. This is coming in 0.35.0. The new line runs only
+policyd can also answer a command with a fixed one. The new line runs only
 when the guard also allows it. Claude Code, Codex, Grok Build and Cursor's ``preToolUse`` take it
 through the hook's updated input. Every other runner in the table gets a refusal that names the
 new command, so the old line never runs.

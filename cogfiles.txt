@@ -1,0 +1,7 @@
+Cargo.toml
+README.md
+docs/orgmode/getting-started.org
+docs/orgmode/explanation.org
+docs/source/getting-started.rst
+docs/source/explanation.rst
+scripts/ljos_version.py

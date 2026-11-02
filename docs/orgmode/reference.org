@@ -425,7 +425,7 @@ because only ljos knows the tracker and the sitting.
 | =allow= | the command runs |
 | =ask= | the runner's permission prompt, or =ljos approve= |
 | =deny= | the command does not run, and the reason says why |
-| =rewrite= | coming in 0.35.0: the command runs in a fixed form |
+| =rewrite= | the command runs in a fixed form |
 
 On the wire, a rewrite is one line of three tab-separated fields: =allow=, =rewrite= and the new command.
 The new line runs only when the guard also allows it. The hook hands it back as the updated input for
@@ -445,7 +445,7 @@ A ticket body that names a path or a command is never read as one.
 The push check asks, and never denies, on a push onto a protected branch when the ticket of
 the current sitting has no settled consensus. It covers =develop= and =main= unless
 =consensus_branches= in =ljos.toml= names others. With one active seat in =vissue.toml=, that seat's own vote
-settles it. This solo mode is coming in 0.35.0. With two or more seats, the normal quorum applies.
+settles it. This is solo mode. With two or more seats, the normal quorum applies.
 
 Every other push rule is policyd's.
 
@@ -570,7 +570,7 @@ own ballot each voter keeps. Above the settle, =consensus= prints what the
 seat ballots decide: the option every seat ballot names and the
 seat ballots it counted, or why it decides nothing, with the persona and
 judge ballots it left out. This is what the push check reads. With one active seat in =vissue.toml=, that
-seat's own vote settles it. This solo mode is coming in 0.35.0. The settle below is advice and decides no push.
+seat's own vote settles it. This is solo mode. The settle below is advice and decides no push.
 When trust rows exist, the standing beside the settle names the voters on
 this issue; the other names in the rows are counted, and =--json= lists
 them.

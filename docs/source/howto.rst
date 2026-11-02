@@ -115,7 +115,7 @@ reads the JSON sees no change. An ``ask`` still exits 0; the text says ``ask``.
 Add a seat, and let it close tickets
 ====================================
 
-Coming in 0.35.0. The tracker's ``vissue.toml`` lists the seats. ``ljos seat add NAME`` writes the row,
+The tracker's ``vissue.toml`` lists the seats. ``ljos seat add NAME`` writes the row,
 so nobody edits the file by hand.
 
 .. code:: console
@@ -300,7 +300,7 @@ A policy daemon does the same with the argv:
 Let policyd fix a command
 =========================
 
-Coming in 0.35.0. policyd can answer a command with a fixed one instead of a refusal.
+policyd can answer a command with a fixed one instead of a refusal.
 The answer is one line of three tab-separated fields: ``allow``, ``rewrite`` and the new command.
 The first rewrite runs a command through ``uv run``.
 
@@ -332,7 +332,7 @@ For that ask, ``main``, ``master`` and ``develop`` are always protected, and ``p
 Deleting a remote branch and rewriting published history ask or deny.
 
 With one active seat in ``vissue.toml``, that seat's own vote settles consensus for the check.
-This is solo mode, and it is coming in 0.35.0. With two or more seats, the normal quorum applies.
+This is solo mode. With two or more seats, the normal quorum applies.
 For a push that must never happen, protect the branch on the forge as well.
 
 Let Jev judge the prompt
