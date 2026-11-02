@@ -1,1 +1,0 @@
-A lesson from `ljos remember`, `ljos prefer` or `ljos finish --lesson` that says a live memory again in other words reinforces that memory and prints `reinforced ID instead of adding a copy`, so a sitting's recall shows other lessons, not copies.

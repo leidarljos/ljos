@@ -5,6 +5,28 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.37.0 (2026-11-02)
+
+### Features
+
+- A lesson from `ljos remember`, `ljos prefer` or `ljos finish --lesson` that says a live memory again in other words reinforces that memory and prints `reinforced ID instead of adding a copy`, so a sitting's recall shows other lessons, not copies.
+- Words-only recall splits code identifiers into words and ranks the seat's own pack with BM25.
+- `ljos sitting` and `ljos inbox` name this seat's claims that have had no note, deed or finish for a day.
+  `ljos claims --mine` lists every one of them.
+
+### Fixes
+
+- A sitting prints each fact once: missing ljos-mcp, ljos-policyd and MCP tools are one `without:` line, and the tracker line gives its counts without the long fix.
+- A sitting prints its blocker section and the claim before the slower sections run.
+  A tracker lock still held past the claim budget stops the sitting with exit code 1, names the lock, and leaves the ticket unclaimed.
+- Tests no longer write `core.hooksPath` into the checkout's git config.
+
+### Miscellaneous
+
+- The version is written by hand only in the workspace `Cargo.toml`.
+  cog writes every other copy from it, and CI fails when one differs.
+  The README and the docs no longer name an older release as the current one.
+
 ## 0.36.7 (2026-11-02)
 
 ### Fixes

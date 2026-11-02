@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/ljos-cli", "crates/ljos-hud", "crates/ljos-test-boot"]
 
 [workspace.package]
-version = "0.36.7"
+version = "0.37.0"
 edition = "2021"
 rust-version = "1.89"
 license = "MIT"
@@ -24,7 +24,7 @@ toml = "0.8"
 which = "7"
 vissue-core = "0.23"
 # [[[cog import ljos_version as v; v.lines('ljos = {{ path = "crates/ljos-cli", version = "{version}" }}')]]]
-ljos = { path = "crates/ljos-cli", version = "0.36.7" }
+ljos = { path = "crates/ljos-cli", version = "0.37.0" }
 # [[[end]]]
 
 # argon2id at the person-key cost (64 MiB, three passes, four lanes) runs
