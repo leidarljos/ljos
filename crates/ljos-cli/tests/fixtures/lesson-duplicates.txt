@@ -1,0 +1,167 @@
+# Lessons a seat writes again in other words, and near-topic lessons that
+# are not them. Blocks are separated by a blank line. In a block, every two
+# `=` lines say the same thing. Each `x` line shares the topic and says
+# something else: another object, the opposite, another number, or a
+# related fact. Each `x` line is a non-duplicate of every `=` line.
+
+= Run cargo fmt before committing, or CI fails the format check.
+= CI fails the format check unless cargo fmt runs before the commit.
+= Format with cargo fmt before every commit; the CI format check fails otherwise.
+= Always run cargo fmt before you commit because CI checks formatting.
+x Run cargo clippy before committing, or CI fails the lint job.
+x Do not run cargo fmt on vendored crates; CI skips them.
+x CI checks formatting with cargo fmt --check on every pull request.
+
+= Tag a release with git push origin TAG, because follow-tags leaves the v-tags behind.
+= Push release tags with git push origin TAG; git push --follow-tags skips the v-tags.
+= git push --follow-tags leaves v-tags behind, so push each release tag with git push origin TAG.
+x Tag a release only after CI on main is green.
+x Delete a wrong release tag with git push origin --delete TAG.
+x Push release branches with git push origin BRANCH, not the tag.
+
+= Use bun instead of yarn in this repository.
+= This repository uses bun, not yarn.
+= Install packages with bun rather than yarn here.
+x Use yarn instead of bun in this repository.
+x Use bun instead of npm in the docs site.
+x Run bun install before the docs build.
+
+= The integration tests need packsetd on PATH; CI builds it from packset develop.
+= packsetd must be on PATH for the integration tests, and CI builds it from packset develop.
+= Integration tests fail without packsetd on PATH, so CI builds packsetd from packset develop first.
+x The integration tests need vissue on PATH; CI builds it at a pinned commit.
+x packsetd listens on port 7077 by default.
+x The unit tests do not need packsetd.
+
+= Set PACKSET_TIMEOUT_MS to 5000 in the integration tests.
+= The integration tests set PACKSET_TIMEOUT_MS to 5000.
+= Give the integration tests a PACKSET_TIMEOUT_MS of 5000.
+x Set PACKSET_TIMEOUT_MS to 30000 in the integration tests.
+x Set PACKSET_TIMEOUT_MS to 5000 in the prompt hook.
+
+= Never force push to main.
+= Do not force-push the main branch.
+= Force pushing to main is not allowed.
+x Never force push to a release branch.
+x Force push to your own feature branch after a rebase.
+x Never push directly to main; open a pull request.
+
+= Claude Code reads hooks from .claude/settings.json in the home directory.
+= The hooks for Claude Code live in ~/.claude/settings.json.
+= Claude Code takes its hooks from the settings.json under ~/.claude.
+x Codex reads hooks from ~/.codex/hooks.json.
+x Claude Code reads MCP servers from ~/.claude.json, not settings.json.
+
+= The argon2 tests are slow in debug builds unless the hash crate is optimised.
+= Debug test builds run argon2 slowly, so the profile optimises argon2 alone.
+= argon2 hashing is slow unoptimised; the dev profile sets opt-level 3 for it.
+x The blake2 crate also gets opt-level 3 in the dev profile.
+x Release builds use LTO to shrink the binary.
+
+= A tracker push that is rejected needs a fetch and a rebase, never a force push.
+= When the tracker push is rejected, fetch and rebase; do not force push.
+= Rebase on the fetched tracker remote after a rejected push instead of forcing it.
+x A rejected tracker push means the token lacks write access.
+x Force push the tracker only after the person approves it.
+
+= The identity gate tests need zsh installed on the runner.
+= Install zsh on the CI runner, since the identity gate tests start a runner under zsh.
+= Without zsh on the runner the identity gate tests fail.
+x The detach tests need tmux installed on the runner.
+x The identity gate checks every commit's author and committer.
+x The identity gate tests fail with zsh on the runner.
+
+= Use uv run for Python scripts instead of pip install.
+= Run Python scripts with uv run rather than installing with pip.
+= Python scripts go through uv run, not pip.
+x Use pip install --user for the docs tooling.
+x Use uv sync before running the test suite.
+x Use uv run for Python scripts instead of pipx.
+
+= Store timestamps as RFC 3339 in UTC.
+= Write every timestamp in UTC as RFC 3339.
+= Timestamps are kept in RFC 3339, UTC.
+x Show timestamps to the person in local time.
+x Store dates as YYYY-MM-DD without a time.
+
+= A runner cannot edit or merge memories; the person runs ljos memories review.
+= Memory edits and merges are refused under a runner, so ask the person to run ljos memories review.
+= ljos memories review must be run by the person, because a runner cannot edit or merge.
+x A runner can keep or drop the unreviewed memories it wrote.
+x ljos memories prune names duplicates and never-recalled memories.
+
+= The encoder is optional; without packset-embed the pack ranks by words alone.
+= Without packset-embed the pack falls back to ranking by words.
+= packset-embed is not required: the pack ranks lexically when it is missing.
+x packset-embed needs ONNX Runtime at build time.
+x The encoder takes a few seconds to load after packsetd starts.
+
+= Every commit must be authored and committed by the same person.
+= Author and committer must match on each commit.
+= The identity gate wants the author and the committer of every commit to be one person.
+x Every commit must be signed with an SSH key.
+x Commit messages carry no trailers.
+
+= Open a sitting with ljos sitting ISSUE before working on a ticket.
+= Start work on a ticket by running ljos sitting ISSUE first.
+= Run ljos sitting ISSUE before touching a ticket's work.
+x Close a ticket with ljos finish ISSUE --close once the work is accepted.
+x Run ljos sitting ISSUE --anyway to sit on a blocked ticket.
+
+= Keep lessons to two sentences at most.
+= A lesson is two sentences or fewer.
+= Write each lesson in no more than two sentences.
+x Keep lessons to three sentences at most.
+x Keep preferences to one sentence.
+
+= The docs site builds with mdBook from the docs directory.
+= mdBook builds the docs site out of docs/.
+= Build the docs site with mdBook; the sources are in docs.
+x The docs site deploys from the gh-pages branch.
+x The changelog is built with towncrier from changelog.d.
+
+= Never write secrets into .env files that git tracks.
+= Do not put secrets in a tracked .env file.
+= Keep secrets out of any .env file under version control.
+x Never write secrets into the tracker notes.
+x Read secrets from the environment, not from .env files.
+x Never write secrets into .npmrc files that git tracks.
+
+= Clippy runs with -D warnings, so any new warning fails CI.
+= CI treats clippy warnings as errors.
+= A single clippy warning fails the CI run because of -D warnings.
+x Rustfmt runs with --check, so unformatted code fails CI.
+x Clippy allows too_many_arguments when a reason is given.
+
+= The hook must answer within two seconds or the runner drops it.
+= A hook slower than two seconds is dropped by the runner.
+= Runners drop a hook that takes longer than two seconds to answer.
+x The hook must answer within five seconds or the runner drops it.
+x The prompt hook reads the pack listing once per process.
+
+= Pin the Rust toolchain to 1.89.0 in rust-toolchain.toml.
+= rust-toolchain.toml pins Rust 1.89.0.
+= The repository builds with Rust 1.89.0, pinned in rust-toolchain.toml.
+x Pin the Rust toolchain to 1.97.1 in rust-toolchain.toml.
+x CI installs Rust 1.97.1 for the companion tools.
+
+= A sitting prints the claim before it reads the pack.
+= The claim line comes out before any pack read in a sitting.
+= Sittings print the claim first and only then ask the pack.
+x A sitting prints the doctor summary before the claim.
+x A sitting falls back to words when the pack search does not answer in time.
+x A sitting prints the claim after it reads the pack.
+x A sitting reads the pack before it prints the claim.
+
+= Mail never replaces mail: two letters with the same words stay two atoms.
+= A repeated letter is stored as a second atom, never merged with the first.
+= Letters are a log, so the same words sent twice are two records.
+x A later preference with the same words replaces the earlier one.
+x Mail atoms are read through the inbox, not through recall.
+
+= Run the database migrations before the server starts.
+= The database migrations run before the server starts.
+= Start the server only after the database migrations have run.
+x Run the database migrations after the server starts.
+x Run the old database migrations before the server starts.
+x Run the server before the database migrations start.

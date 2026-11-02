@@ -1663,7 +1663,11 @@ fn run_command() -> Result<()> {
                 };
                 println!("{}", write_ack(&body));
                 eprintln!("{}", ljos_cli::remember_note(&body));
-                if let Some(ids) = body["supersedes"].as_array().filter(|ids| !ids.is_empty()) {
+                if let Some(line) = ljos_cli::memories::reinforced_line(&body) {
+                    eprintln!("{line}");
+                } else if let Some(ids) =
+                    body["supersedes"].as_array().filter(|ids| !ids.is_empty())
+                {
                     eprintln!(
                         "revises {} earlier memor{}, now closed: {}",
                         ids.len(),
@@ -1830,6 +1834,9 @@ fn run_command() -> Result<()> {
             let basis = ljos_cli::Basis::of_rule();
             let body = ljos_cli::packset_prefer(&text, as_persona.as_deref())?;
             println!("{}", write_ack(&body));
+            if let Some(line) = ljos_cli::memories::reinforced_line(&body) {
+                eprintln!("{line}");
+            }
             for rule in &rules {
                 println!("{}", write_ack(&write_rule(rule, basis)?));
             }

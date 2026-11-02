@@ -65,6 +65,8 @@ pub struct Memory {
     pub recalls: u64,
     /// The last verdict on it, if any.
     pub verdict: Option<String>,
+    /// Later wordings of the same lesson that reinforced it.
+    pub aliases: Vec<String>,
 }
 
 fn s(v: &Value) -> String {
@@ -116,6 +118,7 @@ impl Memory {
             reason: src["reason"].as_str().map(str::to_string),
             recalls: atom["review"]["reps"].as_u64().unwrap_or(0),
             verdict: None,
+            aliases: aliases_of(atom).map(str::to_string).collect(),
         })
     }
 
@@ -472,6 +475,9 @@ pub fn describe(m: &Memory) -> String {
     if let Some(reason) = &m.reason {
         out.push_str(&format!("    why: {reason}\n"));
     }
+    for alias in &m.aliases {
+        out.push_str(&format!("    also written: {alias}\n"));
+    }
     out
 }
 
@@ -548,6 +554,168 @@ pub fn stale(all: &[Memory], days: i64, today: &str) -> Vec<Stale> {
         }
     }
     out
+}
+
+/// Two wordings of one lesson share a two-thirds supermajority of their
+/// content words, as [`crate::prompt_words`] reads them, counted over both
+/// together, so a match needs most of each wording's words. The fixture
+/// sweep in `measurements/lesson-duplicates.txt` shows no wrong merge
+/// anywhere from 0.60 to 0.90, so the result does not hinge on the exact
+/// value.
+const SAME_LESSON: f64 = 2.0 / 3.0;
+
+/// Cardinal words. `within two seconds` and `within five seconds` share
+/// every other word and are two lessons.
+const NUMBER_WORDS: &[&str] = &[
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "eleven", "twelve", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty",
+    "ninety", "hundred", "thousand", "million", "billion",
+];
+
+/// Words that set an order, a condition, a comparison, a version or a
+/// presence. [`crate::prompt_words`] drops most of them as stop words, so
+/// `after` for `before`, or `old` added, leaves the content words as they
+/// were and says something else.
+const RELATION_WORDS: &[&str] = &[
+    "before", "after", "until", "unless", "then", "since", "first", "last", "earlier", "later",
+    "with", "without", "new", "old", "only", "more", "less", "fewer", "most", "least", "over",
+    "under", "above", "below", "into", "from",
+];
+
+/// The relation words that order two steps: what stands ahead of one is
+/// the step that comes first.
+const ORDER_WORDS: &[&str] = &["before", "after", "until", "then"];
+
+fn content(text: &str) -> BTreeSet<String> {
+    crate::prompt_words(text).into_iter().collect()
+}
+
+fn overlap(a: &BTreeSet<String>, b: &BTreeSet<String>) -> f64 {
+    let union = a.union(b).count();
+    if union == 0 {
+        return 0.0;
+    }
+    a.intersection(b).count() as f64 / union as f64
+}
+
+/// What a rewording keeps: the numbers and relation words, and the
+/// content words ahead of the first order word.
+fn fixed_parts(text: &str) -> (BTreeSet<String>, Option<BTreeSet<String>>) {
+    let words: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    let fixed = words
+        .iter()
+        .filter(|w| {
+            w.chars().any(|c| c.is_ascii_digit())
+                || NUMBER_WORDS.contains(&w.as_str())
+                || RELATION_WORDS.contains(&w.as_str())
+        })
+        .cloned()
+        .collect();
+    let ahead = words
+        .iter()
+        .position(|w| ORDER_WORDS.contains(&w.as_str()))
+        .map(|at| content(&words[..at].join(" ")));
+    (fixed, ahead)
+}
+
+/// Whether `new` says what `held` says in other words: they share
+/// [`SAME_LESSON`] of their content words, keep the same
+/// [`fixed_parts`], forbid the same thing or nothing, and do not trade
+/// one content word for another, which is the same claim about another
+/// object. A miss leaves two memories; a wrong match loses a lesson, so
+/// each check refuses when unsure.
+#[must_use]
+pub fn same_lesson(new: &str, held: &str) -> bool {
+    let (a, b) = (content(new), content(held));
+    if overlap(&a, &b) < SAME_LESSON
+        || (a.difference(&b).count() == 1 && b.difference(&a).count() == 1)
+        || fixed_parts(new) != fixed_parts(held)
+    {
+        return false;
+    }
+    let forbids = |t: &str| crate::command_prefs::forbidden_part(t).map(|p| content(&p));
+    match (forbids(new), forbids(held)) {
+        (None, None) => true,
+        (Some(x), Some(y)) => overlap(&x, &y) >= SAME_LESSON,
+        _ => false,
+    }
+}
+
+fn aliases_of(atom: &Value) -> impl Iterator<Item = &str> {
+    atom["aliases"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+}
+
+/// The live memory `atom` says again, reinforced in its place: graded
+/// recalled, as `ljos graded` does, with the new wording kept in its
+/// `aliases`. Only a memory of the same kind and set counts, and not one
+/// the pack closes itself when `atom` is posted: a person's rewrite still
+/// revises. A person's words reinforce only a person's memory; folded
+/// into a derived one they would lose the `explicit` level they are filed
+/// at ([`crate::admit::admission_level`]). `None` sends the caller on to
+/// post `atom` as before, and so does a pack that does not answer, so the
+/// post says what went wrong.
+pub fn reinforce_held(client: &crate::pack_link::PacksetClient, atom: &Value) -> Option<Value> {
+    let text = atom["text"].as_str()?.trim();
+    let new = atom.as_object()?;
+    // An alias skips the pack's secret check on `text`; the post makes it.
+    packset_core::record::reject_unsafe(text).ok()?;
+    let ws = atom["workspace"]
+        .as_str()
+        .map_or_else(|| client.workspace(), str::to_string);
+    let kind = atom["kind"].as_str()?;
+    let (held, _) = crate::atoms_listed_of(client, &ws, true, Some(kind), None, false).ok()?;
+    let now = crate::now_utc();
+    let set = |a: &Value| a["set"].as_str().unwrap_or("").to_string();
+    let persons = |a: &Value| a["origin"].as_str() == Some(crate::admit::ORIGIN_USER);
+    let found = held.iter().find(|h| {
+        h["kind"] == atom["kind"]
+            && set(h) == set(atom)
+            && (persons(h) || !persons(atom))
+            && crate::live_now(h, &now)
+            && h.as_object()
+                .is_some_and(|old| !packset_core::record::replaces(new, old))
+            && std::iter::once(h["text"].as_str().unwrap_or(""))
+                .chain(aliases_of(h))
+                .any(|w| same_lesson(text, w))
+    })?;
+    let id = found["id"].as_str().filter(|id| !id.is_empty())?;
+    let mut out = client.grade(&ws, id, true).ok()?;
+    let said = std::iter::once(found["text"].as_str().unwrap_or(""))
+        .chain(aliases_of(found))
+        .any(|w| fold(w) == fold(text));
+    if !said {
+        let mut aliases: Vec<Value> = aliases_of(found).map(Value::from).collect();
+        aliases.push(Value::from(text));
+        if let Ok(updated) = client.update_atom(&ws, id, &serde_json::json!({"aliases": aliases})) {
+            out = updated;
+        }
+    }
+    out["reinforced"] = Value::Bool(true);
+    Some(out)
+}
+
+/// The line a write prints when it reinforced a memory instead of adding
+/// one. `None` for a write that added its own.
+#[must_use]
+pub fn reinforced_line(body: &Value) -> Option<String> {
+    if body["reinforced"] != Value::Bool(true) {
+        return None;
+    }
+    let id = s(&body["id"]);
+    Some(format!(
+        "reinforced {} instead of adding a copy, recalled {}x: {}",
+        id.get(..8).unwrap_or(&id),
+        body["review"]["reps"].as_u64().unwrap_or(0),
+        s(&body["text"]).trim()
+    ))
 }
 
 // ---- the terminal viewer -------------------------------------------------
@@ -1362,6 +1530,36 @@ mod tests {
             Some(v) => std::env::set_var("PACKSET_URL", v),
             None => std::env::remove_var("PACKSET_URL"),
         }
+    }
+
+    /// The measurement behind [`SAME_LESSON`]: no near-topic lesson on the
+    /// fixture is taken for another, and the duplicates found are the ones
+    /// `measurements/lesson-duplicates.txt` reports.
+    #[test]
+    fn the_fixture_merges_no_two_different_lessons() {
+        let text = include_str!("../tests/fixtures/lesson-duplicates.txt");
+        let (mut found, mut pairs, mut wrong) = (0, 0, Vec::new());
+        for block in text.split("\n\n") {
+            let same: Vec<&str> = block.lines().filter_map(|l| l.strip_prefix("= ")).collect();
+            let other: Vec<&str> = block.lines().filter_map(|l| l.strip_prefix("x ")).collect();
+            for (i, a) in same.iter().enumerate() {
+                for b in &same[i + 1..] {
+                    pairs += 1;
+                    found += usize::from(same_lesson(b, a));
+                }
+                for x in &other {
+                    if same_lesson(x, a) {
+                        wrong.push(format!("{x} | {a}"));
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+        assert_eq!(
+            (found, pairs),
+            (12, 78),
+            "update measurements/lesson-duplicates.txt"
+        );
     }
 
     #[test]

@@ -1122,6 +1122,17 @@ impl PacksetClient {
         self.json_ok("/v1/grade", answer)
     }
 
+    /// Merge `fields` into one current atom, under its id.
+    pub fn update_atom(&self, workspace: &str, id: &str, fields: &Value) -> Result<Value, Error> {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "workspace": workspace,
+            "id": id,
+            "fields": fields,
+        }))?;
+        let answer = self.tried("POST", "/v1/atoms/update", &[], Some(&bytes), budget())?;
+        self.json_ok("/v1/atoms/update", answer)
+    }
+
     pub fn activate_as(
         &self,
         workspace: &str,

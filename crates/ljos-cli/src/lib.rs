@@ -17273,12 +17273,18 @@ fn post_claim_horizon(
     let mut atom = atom_body(kind, trimmed, workspace);
     stamp_horizon(&mut atom, kind, trimmed, transient);
     admit::stamp_person(&mut atom);
-    let posted = with_writer(|| {
-        admit::post_kept(client, &atom)
-            .map_err(|e| with_post_failure(&format!("{label}: POST /v1/atoms failed"), e))
-    })?;
+    let posted = post_or_reinforce(client, &atom, &format!("{label}: POST /v1/atoms failed"))?;
     admit::satisfy_text(trimmed);
     Ok(posted)
+}
+
+/// Post a new lesson, or reinforce the live memory it says again
+/// ([`memories::reinforce_held`]).
+fn post_or_reinforce(client: &PacksetClient, atom: &Value, prefix: &str) -> Result<Value> {
+    if let Some(held) = memories::reinforce_held(client, atom) {
+        return Ok(held);
+    }
+    with_writer(|| admit::post_kept(client, atom).map_err(|e| with_post_failure(prefix, e)))
 }
 
 /// Write a claim an agent made, at once. No person approves it first: it
@@ -17310,6 +17316,9 @@ pub fn packset_write_agent(
     if let Some(name) = persona.map(str::trim).filter(|n| !n.is_empty()) {
         add_entities(&mut atom, [persona_entity(name)]);
         atom["set"] = Value::String(persona_set(name));
+    }
+    if let Some(held) = memories::reinforce_held(&client, &atom) {
+        return Ok(held);
     }
     store_agent_atom(&client, atom, &prefix)
 }
@@ -17458,10 +17467,7 @@ pub fn packset_write_mcp(
     let _ = atom_kind(label)?;
     let client = pack()?;
     let atom = mcp_claim_atom(label, text, &client.workspace(), persona, transient, basis)?;
-    let posted = with_writer(|| {
-        admit::post_kept(&client, &atom)
-            .map_err(|e| with_post_failure(&format!("{label}: POST /v1/atoms failed"), e))
-    })?;
+    let posted = post_or_reinforce(&client, &atom, &format!("{label}: POST /v1/atoms failed"))?;
     admit::satisfy_text(text.trim());
     Ok(posted)
 }
@@ -18268,10 +18274,7 @@ pub fn packset_write_as(
     // Its own tree: the persona's conclusions replace and duplicate among
     // themselves, not against the seat's or another persona's.
     atom["set"] = Value::String(persona_set(name));
-    let posted = with_writer(|| {
-        admit::post_kept(&client, &atom)
-            .map_err(|e| with_post_failure(&format!("{label}: POST /v1/atoms failed"), e))
-    })?;
+    let posted = post_or_reinforce(&client, &atom, &format!("{label}: POST /v1/atoms failed"))?;
     admit::satisfy_text(trimmed);
     Ok(posted)
 }
@@ -34967,10 +34970,11 @@ fn finish_lesson(issue: &str, text: &str) -> String {
             // Typed by the person in a terminal of their own: no
             // runner above it, so it needs no second review.
             admit::stamp_person(&mut atom);
-            let posted = with_writer(|| {
-                admit::post_kept(&client, &atom).map_err(|e| with_post_failure(prefix, e))
-            })?;
+            let posted = post_or_reinforce(&client, &atom, prefix)?;
             admit::satisfy_text(text);
+            if let Some(line) = memories::reinforced_line(&posted) {
+                return Ok(format!("{line}\n"));
+            }
             let id: String = posted["id"]
                 .as_str()
                 .unwrap_or("?")
@@ -34982,6 +34986,12 @@ fn finish_lesson(issue: &str, text: &str) -> String {
             ));
         }
         admit::stamp_origin(&mut atom, admit::ORIGIN_AGENT);
+        if let Some(line) = memories::reinforce_held(&client, &atom)
+            .as_ref()
+            .and_then(memories::reinforced_line)
+        {
+            return Ok(format!("{line}\n"));
+        }
         let filed = admit::propose_admission(&client, atom)?;
         Ok(format!(
             "proposed {} as agent-derived; `ljos accept {}` writes it\n",
@@ -65934,6 +65944,25 @@ The body asks the recall to rank memories by the ticket, not by a process log.
                 || said.contains("the lesson was not kept"),
             "{said}"
         );
+    }
+
+    /// A lesson another sitting already left, in other words, is
+    /// reinforced: nothing new is proposed or written.
+    #[test]
+    fn a_finish_lesson_said_before_reinforces_the_held_one() {
+        let held = r#"{"atoms":[{"id":"abcd1234ffff","kind":"lesson","text":"Run the database migrations before the server starts.","issue":"probe-othr","entities":["issue:probe-othr","horizon:standing"]}]}"#;
+        let said = run_finish_lesson(
+            held,
+            Some("Database migrations have to run before any server start."),
+            true,
+        )
+        .unwrap();
+        assert!(
+            said.contains("reinforced abcd1234 instead of adding a copy"),
+            "{said}"
+        );
+        assert!(!said.contains("proposed "), "{said}");
+        assert!(!said.contains("remembered your lesson"), "{said}");
     }
 
     #[test]

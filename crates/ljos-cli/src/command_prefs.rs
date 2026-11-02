@@ -75,7 +75,7 @@ const RUN_WORDS: &[&str] = &[
 
 /// The forbidden part of a preference: what follows its first cue, up to
 /// the end of that clause. `None` when it has no cue.
-fn forbidden_part(text: &str) -> Option<String> {
+pub(crate) fn forbidden_part(text: &str) -> Option<String> {
     let lower = format!(" {} ", text.to_lowercase());
     let (at, cue) = CUES
         .iter()
