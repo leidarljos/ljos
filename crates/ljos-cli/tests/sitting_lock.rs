@@ -1,7 +1,7 @@
 //! A sitting announces itself before another tracker writer can hold it.
-//! The issue stays TODO when that writer outlasts the claim budget, and
-//! moves to STARTED as soon as a writer that finishes inside the budget
-//! releases the issue lock.
+//! The issue stays TODO when an issue or tracker-git lock outlasts the
+//! claim budget, and moves to STARTED as soon as a writer that finishes
+//! inside the budget releases the issue lock.
 
 ljos_test_boot::harness!();
 
@@ -54,6 +54,13 @@ impl Board {
         std::fs::create_dir_all(layout.projects_dir()).unwrap();
         vissue_core::ops::create(&layout, "probe", "wait for the writer", Default::default())
             .unwrap();
+        let initialized = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["init", "-q", "-b", "main"])
+            .status()
+            .unwrap();
+        assert!(initialized.success());
         let issue =
             vissue_core::IssueDoc::parse_file("probe", &layout.project_issues_path("probe"))
                 .unwrap()
@@ -107,19 +114,35 @@ esac
         PathBuf::from(name)
     }
 
-    fn hold_issue_lock(&self) -> std::fs::File {
+    fn tracker_lock_path(&self) -> PathBuf {
+        self.root.join(ljos_cli::TRACKER_LOCK)
+    }
+
+    fn hold_lock(path: &Path) -> std::fs::File {
         let lock = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
             .append(true)
-            .open(self.lock_path())
+            .open(path)
             .unwrap();
         // SAFETY: the file stays open until the test drops it.
         assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
         lock
     }
 
+    fn hold_issue_lock(&self) -> std::fs::File {
+        Self::hold_lock(&self.lock_path())
+    }
+
+    fn hold_tracker_lock(&self) -> std::fs::File {
+        Self::hold_lock(&self.tracker_lock_path())
+    }
+
     fn sitting(&self, budget_secs: u64) -> Child {
+        self.sitting_with_tracker(budget_secs, "off")
+    }
+
+    fn sitting_with_tracker(&self, budget_secs: u64, tracker_git: &str) -> Child {
         Command::new(env!("CARGO_BIN_EXE_ljos"))
             .args(["sitting", &self.issue, "--verbose"])
             .current_dir(self._dir.path())
@@ -135,7 +158,7 @@ esac
             .env("VISSUE_ROOT", &self.root)
             .env("VISSUE_NO_ROUTE", "1")
             .env("LJOS_SEAT", "saddle")
-            .env("LJOS_TRACKER_GIT", "off")
+            .env("LJOS_TRACKER_GIT", tracker_git)
             .env("LJOS_HOOKD", "off")
             .env("LJOS_LEASE_SECS", "0")
             .env("LJOS_SITTING_CLAIM_WAIT", budget_secs.to_string())
@@ -228,7 +251,7 @@ fn a_held_vissue_lock_prints_at_once_and_exits_inside_the_budget() {
         stdout,
         HELD_LOCK_LIMIT.saturating_sub(started.elapsed()),
     );
-    assert!(!status.success(), "stdout:\n{out}\nstderr:\n{err}");
+    assert_eq!(status.code(), Some(1), "stdout:\n{out}\nstderr:\n{err}");
     assert!(
         started.elapsed() < HELD_LOCK_LIMIT,
         "held lock took {:?}",
@@ -240,6 +263,39 @@ fn a_held_vissue_lock_prints_at_once_and_exits_inside_the_budget() {
         "{err}"
     );
     assert!(err.contains("nothing was claimed"), "{err}");
+    assert!(!out.contains("== claim"), "{out}");
+    assert_eq!(board.state(), "TODO", "{out}\n{err}");
+}
+
+#[test]
+fn a_held_tracker_git_lock_exits_before_the_claim() {
+    let board = Board::new();
+    let _held = board.hold_tracker_lock();
+    let started = Instant::now();
+    let mut child = board.sitting_with_tracker(HELD_CLAIM_BUDGET_SECS, "commit");
+    let (line, stdout) = first_line(&mut child);
+    assert_eq!(
+        line,
+        format!("sitting {}: checking blockers\n", board.issue)
+    );
+    let (status, out, err) = finish(
+        child,
+        stdout,
+        HELD_LOCK_LIMIT.saturating_sub(started.elapsed()),
+    );
+    assert_eq!(status.code(), Some(1), "stdout:\n{out}\nstderr:\n{err}");
+    assert!(
+        started.elapsed() < HELD_LOCK_LIMIT,
+        "held lock took {:?}",
+        started.elapsed()
+    );
+    assert!(err.contains("tracker git lock"), "{err}");
+    assert!(
+        err.contains(&board.tracker_lock_path().display().to_string()),
+        "{err}"
+    );
+    assert!(err.contains("nothing was claimed"), "{err}");
+    assert!(!out.contains("== claim"), "{out}");
     assert_eq!(board.state(), "TODO", "{out}\n{err}");
 }
 
