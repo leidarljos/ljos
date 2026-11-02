@@ -5,6 +5,12 @@ Terms used below: Model Context Protocol (MCP), trusted computing base (TCB), he
 
 <!-- towncrier release notes start -->
 
+## 0.36.3 (2026-11-02)
+
+### Fixes
+
+- A sitting shows the memories that overlap its ticket, and none when nothing does.
+
 ## 0.36.2 (2026-11-02)
 
 ### Fixes
