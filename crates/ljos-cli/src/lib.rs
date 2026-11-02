@@ -4068,6 +4068,57 @@ fn named_var(key: &str) -> Option<String> {
         .filter(|v| !v.is_empty() && !omitted_actor_name(v))
 }
 
+/// The seat this conversation would be, with `LJOS_SEAT` out of the way:
+/// the client that connected, the record under a conversation id, a
+/// runner variable that names its own seat, or the seat an agy or
+/// opencode conversation id books as. The login user is not one of these.
+fn conversation_derived_seat() -> Option<String> {
+    if let Some(seat) = ANNOUNCED.get() {
+        return Some(seat.seat.clone());
+    }
+    if let Some(seat) = seat_from_session_records() {
+        return Some(seat.seat);
+    }
+    if let Some(seat) = seat_from_runner_env() {
+        return Some(seat.seat);
+    }
+    if stamped_id("ANTIGRAVITY_CONVERSATION_ID").is_some() {
+        return Some("antigravity".to_string());
+    }
+    if stamped_id("OPENCODE_SESSION_ID").is_some() {
+        return Some("opencode".to_string());
+    }
+    None
+}
+
+/// One line when `LJOS_SEAT` and the conversation's seat are both set and
+/// are not the same seat. `None` when either is missing or they agree.
+fn seat_disagreement_line() -> Option<String> {
+    let env_seat = named_var("LJOS_SEAT")?;
+    let derived = conversation_derived_seat()?;
+    let kept = canonical_seat_name(&seat_for_env(&env_seat));
+    let other = canonical_seat_name(&derived);
+    if kept.is_empty() || other.is_empty() || kept == other {
+        return None;
+    }
+    Some(format!(
+        "ljos: LJOS_SEAT is {kept} and this conversation's seat is {other}; writing as {kept}\n"
+    ))
+}
+
+/// Say [`seat_disagreement_line`] once. A later resolution in this process
+/// stays quiet. Nothing is refused and nothing waits.
+fn warn_seat_disagreement() {
+    static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Some(line) = seat_disagreement_line() else {
+        return;
+    };
+    if ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    eprint!("{line}");
+}
+
 /// Who is sitting, with nothing set. The seat: `LJOS_SEAT` or the
 /// tracker's `VISSUE_AGENT` when someone set one; else what the MCP client
 /// said at initialize; else a runner variable that names its own seat;
@@ -4080,6 +4131,10 @@ pub fn whoami() -> Seat {
     if let Ok(seat) = CALL_SEAT.try_with(Clone::clone) {
         return seat;
     }
+    // A helper that hardcodes LJOS_SEAT would otherwise book another
+    // conversation's writes under that name with no word said. The named
+    // seat still wins. The warning is one line and does not ask anyone.
+    warn_seat_disagreement();
     // Both variables are a person naming the seat: the seat's own, and the
     // tracker's name for the same thing. A legacy holder is the seat it
     // names (`inky-n9o` is `inky`). A subagent name is left as written so
@@ -5476,6 +5531,7 @@ fn seated_name(raw: &str) -> Option<String> {
 #[must_use]
 pub fn git_hook_seat() -> Option<String> {
     if let Some(name) = named_var("LJOS_SEAT") {
+        warn_seat_disagreement();
         if is_raw_subagent_name(&name) {
             return None;
         }
@@ -59660,6 +59716,40 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         };
         let r = redirect_seat_verb(Some(deny), "vissue claim demo-6c3z").unwrap();
         assert!(r.reason.ends_with("Run `ljos sitting demo-6c3z` instead."));
+    }
+
+    #[test]
+    fn a_set_seat_that_disagrees_with_the_conversation_is_kept() {
+        let _env = env_guard();
+        unsafe {
+            std::env::set_var("OPENCODE_SESSION_ID", "ses_opencode_note_0001");
+        }
+        let derived = super::conversation_derived_seat().expect("a conversation seat");
+        let kept = if super::canonical_seat_name(&derived) == "papers" {
+            "ink"
+        } else {
+            "papers"
+        };
+        unsafe { std::env::set_var("LJOS_SEAT", kept) };
+        let line = super::seat_disagreement_line().expect("one warning");
+        assert_eq!(line.lines().count(), 1, "{line}");
+        assert!(line.contains(kept), "{line}");
+        assert!(
+            line.contains(&super::canonical_seat_name(&derived)),
+            "{line}"
+        );
+        assert!(line.contains("writing as"), "{line}");
+        let who = super::whoami();
+        assert_eq!(
+            super::canonical_seat_name(&who.seat),
+            super::canonical_seat_name(kept),
+            "{who:?}"
+        );
+        unsafe { std::env::set_var("LJOS_SEAT", &derived) };
+        assert_eq!(super::seat_disagreement_line(), None);
+        unsafe { std::env::remove_var("OPENCODE_SESSION_ID") };
+        unsafe { std::env::remove_var("LJOS_SEAT") };
+        assert_eq!(super::seat_disagreement_line(), None);
     }
 
     #[test]
