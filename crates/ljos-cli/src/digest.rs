@@ -325,6 +325,7 @@ fn collect_introduced(
         "--unified=0",
         "--format=%x1e%H%x09%at%x09%ct%x09%s",
     ]);
+    bound_introduced_log(&mut cmd, root, window);
     cmd.stdin(std::process::Stdio::null());
     crate::git_hooks::hook_child_env(&mut cmd);
     let Ok(out) = cmd.output() else {
@@ -376,6 +377,37 @@ fn collect_introduced(
                 .is_some_and(|new| new.contains(&commit)),
         );
     }
+}
+
+/// Bound the introduced-issue patch log to the digest window.
+///
+/// That log is `git log -p` over every commit, which is the slow read on
+/// a long tracker. A day or a time passes `--since` at the window start.
+/// Git keeps a commit whose committer date is at or after that instant,
+/// the same cut `keeps` uses for a dated digest. `last` passes
+/// `marker..HEAD`, so a commit that landed after the marker is still read
+/// when its dates are older, and history already at the marker is not
+/// diffed again. A marker commit that is no longer in the checkout falls
+/// back to the marker time. `last` is exclusive, so a row at that exact
+/// second is dropped later by `keeps`; git's `--since` would have kept it.
+fn bound_introduced_log(cmd: &mut std::process::Command, root: &Path, window: &Window) {
+    if window.exclusive {
+        if let Some(range) = marker_range(root, window) {
+            cmd.arg(range);
+            return;
+        }
+    }
+    if let Some(start) = window.start {
+        cmd.arg(format!("--since=@{start}"));
+    }
+}
+
+/// `marker..HEAD` when `last` stored a commit that is still in the checkout.
+fn marker_range(root: &Path, window: &Window) -> Option<String> {
+    let head = window.head.as_deref().filter(|head| !head.is_empty())?;
+    let spec = format!("{head}^{{commit}}");
+    crate::git_ok_stdout(root, &["rev-parse", "--verify", "--quiet", &spec])?;
+    Some(format!("{head}..HEAD"))
 }
 
 fn added_issue_id(line: &str) -> Option<&str> {
@@ -2292,5 +2324,221 @@ mod tests {
         ];
         dedup(&mut rows);
         assert_eq!(rows.len(), 2);
+    }
+
+    /// First `:ID:` added by each commit, oldest first: `(id, committer, seat)`.
+    fn introductions(root: &Path, extra: &[&str]) -> Vec<(String, i64, String)> {
+        let mut cmd = crate::git_at(root);
+        cmd.args([
+            "log",
+            "--reverse",
+            "-p",
+            "--unified=0",
+            "--format=%x1e%ct%x09%s",
+        ]);
+        cmd.args(extra);
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let mut hits = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut at = 0_i64;
+        let mut seat = String::new();
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if let Some(rest) = line.strip_prefix('\u{1e}') {
+                let mut fields = rest.splitn(2, '\t');
+                at = fields.next().unwrap_or("0").trim().parse().unwrap_or(0);
+                let subject = fields.next().unwrap_or("");
+                seat = crate::parse_tracker_commit(subject)
+                    .map(|act| fold_seat(&act.seat))
+                    .unwrap_or_default();
+                continue;
+            }
+            if seat.is_empty() {
+                continue;
+            }
+            let Some(id) = added_issue_id(line) else {
+                continue;
+            };
+            if seen.insert(id.to_string()) {
+                hits.push((id.to_string(), at, seat.clone()));
+            }
+        }
+        hits
+    }
+
+    #[test]
+    fn digest_since_keeps_the_introduced_section_and_bounds_the_patch_log() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let root = tracker(dir.path());
+        let home = dir.path().join("home");
+        let start = stamp_unix("2026-06-01").unwrap();
+        // Committer dates increase along the history. `git log --since`
+        // stops walking once parents fall outside the window, so a
+        // backdated descendant would hide an older commit that is still
+        // inside it.
+        let early = chrono::DateTime::from_timestamp(start - 86_400, 0)
+            .unwrap()
+            .to_rfc3339();
+        let mid_out = chrono::DateTime::from_timestamp(start - 3_600, 0)
+            .unwrap()
+            .to_rfc3339();
+        let edge_out = chrono::DateTime::from_timestamp(start - 1, 0)
+            .unwrap()
+            .to_rfc3339();
+        let edge_in = chrono::DateTime::from_timestamp(start, 0)
+            .unwrap()
+            .to_rfc3339();
+        let later = chrono::DateTime::from_timestamp(start + 3_600, 0)
+            .unwrap()
+            .to_rfc3339();
+        let later_filed = chrono::DateTime::from_timestamp(start + 3_601, 0)
+            .unwrap()
+            .to_rfc3339();
+        // Dates increase with history. The subject filings sit between the
+        // introductions they are next to, still outside or inside the window.
+        let noted = [
+            (early.as_str(), "old-out", "ada", "noted"),
+            (mid_out.as_str(), "subj-out", "ada", "filed"),
+            (edge_out.as_str(), "edge-out", "ada", "noted"),
+            (edge_in.as_str(), "edge-in", "bob", "noted"),
+            (later.as_str(), "in-win", "carol", "noted"),
+            (later_filed.as_str(), "subj-in", "bob", "filed"),
+        ];
+        for (date, id, seat, verb) in noted {
+            let path = root.join("Software/probe/issues.org");
+            let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+            if text.is_empty() {
+                text.push_str("#+TITLE: probe\n#+TODO: TODO | DONE\n\n");
+            }
+            if verb == "noted" {
+                text.push_str(&format!(
+                    "* TODO [#C] {id}\n:PROPERTIES:\n:ID:         {id}\n:END:\n\n"
+                ));
+                std::fs::write(&path, text).unwrap();
+                git(&root, &["add", "Software/probe/issues.org"], date);
+            }
+            let message = format!("chore(issues): {id} {verb} by {seat}");
+            git(
+                &root,
+                &["commit", "-q", "--allow-empty", "-m", &message],
+                date,
+            );
+        }
+
+        let unbounded = introductions(&root, &[]);
+        let since_arg = format!("--since=@{start}");
+        let bounded = introductions(&root, &[since_arg.as_str()]);
+        let old_in_window: Vec<_> = unbounded
+            .iter()
+            .filter(|(_, at, _)| *at >= start)
+            .cloned()
+            .collect();
+        assert_eq!(
+            bounded, old_in_window,
+            "a windowed patch log dropped an introduction the old walk kept"
+        );
+        assert!(
+            unbounded.iter().any(|(id, _, _)| id == "old-out"),
+            "the fixture recorded no out-of-window introduction"
+        );
+        assert!(
+            bounded
+                .iter()
+                .all(|(id, _, _)| id != "old-out" && id != "edge-out"),
+            "{bounded:?}"
+        );
+
+        isolate(&root, &home, "/usr/bin:/bin");
+        unsafe { std::env::set_var("PACKSET_URL", "off") };
+        let trace = dir.path().join("git.trace");
+        unsafe { std::env::set_var("GIT_TRACE", &trace) };
+        let text = digest(Some("2026-06-01"), false).unwrap();
+        unsafe { std::env::remove_var("GIT_TRACE") };
+        for (id, _, seat) in &old_in_window {
+            let line = format!("filed {id}");
+            assert!(
+                seat_block(&text, seat).contains(&line),
+                "{seat} {line} missing:\n{text}"
+            );
+        }
+        for (id, at, _) in &unbounded {
+            if *at < start {
+                let line = format!("filed {id}");
+                assert!(!text.contains(&line), "{line} leaked:\n{text}");
+            }
+        }
+        assert!(text.contains("filed subj-in"), "{text}");
+        assert!(!text.contains("filed subj-out"), "{text}");
+        let traced = std::fs::read_to_string(&trace).unwrap();
+        let patch = traced
+            .lines()
+            .find(|line| line.contains("--unified=0"))
+            .unwrap_or("");
+        assert!(
+            patch.contains(&since_arg),
+            "patch log was not bounded:\n{patch}"
+        );
+    }
+
+    #[test]
+    fn last_bounds_the_introduced_patch_log_to_the_marker_range() {
+        let _lock = crate::test_env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let root = tracker(dir.path());
+        let home = dir.path().join("home");
+        let path = root.join("Software/probe/issues.org");
+        std::fs::write(
+            &path,
+            "* TODO [#C] Old\n:PROPERTIES:\n:ID:         old-out\n:END:\n",
+        )
+        .unwrap();
+        git(&root, &["add", "."], "2020-01-01T00:00:00Z");
+        git(
+            &root,
+            &["commit", "-q", "-m", "chore(issues): old-out noted by ada"],
+            "2020-01-01T00:00:00Z",
+        );
+        isolate(&root, &home, "/usr/bin:/bin");
+        unsafe { std::env::set_var("PACKSET_URL", "off") };
+        let first = digest(Some("last"), false).unwrap();
+        assert!(first.contains("filed old-out"), "{first}");
+        let state: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join("state/ljos/digest-last-state.json")).unwrap(),
+        )
+        .unwrap();
+        let head = state["head"].as_str().unwrap().to_string();
+        let mut org = std::fs::read_to_string(&path).unwrap();
+        org.push_str("\n* TODO [#C] Late\n:PROPERTIES:\n:ID:         late-old\n:END:\n");
+        std::fs::write(&path, org).unwrap();
+        git(&root, &["add", "."], "2020-02-01T00:00:00Z");
+        git(
+            &root,
+            &["commit", "-q", "-m", "chore(issues): late-old noted by bob"],
+            "2020-02-01T00:00:00Z",
+        );
+        let trace = dir.path().join("git.trace");
+        unsafe { std::env::set_var("GIT_TRACE", &trace) };
+        let second = digest(Some("last"), false).unwrap();
+        unsafe { std::env::remove_var("GIT_TRACE") };
+        assert!(second.contains("filed late-old"), "{second}");
+        assert!(!second.contains("filed old-out"), "{second}");
+        let traced = std::fs::read_to_string(&trace).unwrap();
+        let patch = traced
+            .lines()
+            .find(|line| line.contains("--unified=0"))
+            .unwrap_or("");
+        assert!(
+            patch.contains(&format!("{head}..HEAD")),
+            "patch log was not the marker range:\n{patch}"
+        );
+        assert!(
+            !patch.contains("--since"),
+            "last used a date cut and would miss a commit dated before the marker:\n{patch}"
+        );
     }
 }
