@@ -52,6 +52,58 @@ pub fn names_version(output: &str, binary: &str, version: &str) -> bool {
     output.lines().next().is_some_and(|l| l.trim() == want)
 }
 
+/// Every binary this install would replace already reports `version`.
+fn already_installed(dir: &Path, version: &str) -> bool {
+    let mut saw = false;
+    for name in BINARIES {
+        let installed = dir.join(name);
+        if *name == "ljos-hud" && !installed.exists() {
+            continue;
+        }
+        if !installed.is_file() {
+            return false;
+        }
+        let Ok(said) = run_ok(&installed.display().to_string(), &["--version"]) else {
+            return false;
+        };
+        if !names_version(&said, name, version) {
+            return false;
+        }
+        saw = true;
+    }
+    saw
+}
+
+/// Copy `installed` aside as `NAME.bak-pre-VERSION`, unless that file
+/// already holds some other version. That copy is the rollback, and a
+/// second install of the same release must not replace it with itself.
+fn keep_rollback(name: &str, installed: &Path, dir: &Path, version: &str) -> Result<()> {
+    if !installed.exists() {
+        return Ok(());
+    }
+    let keep = dir.join(format!("{name}.bak-pre-{version}"));
+    if keep.is_file() {
+        if let Ok(said) = run_ok(&keep.display().to_string(), &["--version"]) {
+            if !names_version(&said, name, version) {
+                return Ok(());
+            }
+        }
+    }
+    std::fs::copy(installed, &keep)?;
+    Ok(())
+}
+
+/// The published asset, from `LJOS_RELEASE_DIR` when a test or a mirror
+/// has the files on disk.
+fn obtain(name: &str, to: &Path, url: &str) -> Result<()> {
+    if let Some(dir) = std::env::var_os("LJOS_RELEASE_DIR").filter(|d| !d.is_empty()) {
+        let src = Path::new(&dir).join(name);
+        std::fs::copy(&src, to).with_context(|| format!("upgrade: copy {}", src.display()))?;
+        return Ok(());
+    }
+    fetch(url, to)
+}
+
 fn fetch(url: &str, to: &Path) -> Result<()> {
     let resp = ureq::get(url)
         .timeout(std::time::Duration::from_secs(120))
@@ -117,6 +169,12 @@ pub fn upgrade(version: Option<&str>, dir: Option<&Path>) -> Result<String> {
             .context("upgrade: the running ljos has no directory")?
             .to_path_buf(),
     };
+    if already_installed(&dir, &version) {
+        return Ok(format!(
+            "ljos {version} is already installed at {}\n",
+            dir.display()
+        ));
+    }
     let asset = asset_name(&version, target);
     let base = format!("https://github.com/{RELEASE_REPO}/releases/download/v{version}");
     // The cache directory, on the home filesystem: a temporary directory
@@ -132,8 +190,12 @@ pub fn upgrade(version: Option<&str>, dir: Option<&Path>) -> Result<String> {
     std::fs::create_dir_all(&work)?;
     let archive = work.join(&asset);
     let sum = work.join(format!("{asset}.sha256"));
-    fetch(&format!("{base}/{asset}"), &archive)?;
-    fetch(&format!("{base}/{asset}.sha256"), &sum)?;
+    obtain(&asset, &archive, &format!("{base}/{asset}"))?;
+    obtain(
+        &format!("{asset}.sha256"),
+        &sum,
+        &format!("{base}/{asset}.sha256"),
+    )?;
     let want = digest_of(&std::fs::read_to_string(&sum)?)
         .context("upgrade: the published checksum is not a sha256 line")?;
     let have = digest_of(&run_ok("sha256sum", &[&archive.display().to_string()])?)
@@ -182,10 +244,7 @@ pub fn upgrade(version: Option<&str>, dir: Option<&Path>) -> Result<String> {
     }
     let mut out = String::new();
     for (name, new, installed) in ready {
-        if installed.exists() {
-            let keep = dir.join(format!("{name}.bak-pre-{version}"));
-            std::fs::copy(&installed, &keep)?;
-        }
+        keep_rollback(name, &installed, &dir, &version)?;
         let staged = dir.join(format!("{name}.new"));
         std::fs::copy(&new, &staged)?;
         #[cfg(unix)]
