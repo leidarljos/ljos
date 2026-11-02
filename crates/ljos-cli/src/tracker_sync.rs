@@ -117,6 +117,12 @@ fn remote_default_branch(root: &Path, remote: &str) -> Option<String> {
             }
         }
     }
+    // Commit mode publishes nothing. The fallback asks the remote which
+    // branch HEAD names. A private remote with no credential then sits
+    // until the sitting reads it as a tracker that does not answer.
+    if std::env::var("LJOS_TRACKER_GIT").ok().as_deref() == Some("commit") {
+        return None;
+    }
     let out = crate::git_ok_stdout(root, &["ls-remote", "--symref", remote, "HEAD"])?;
     out.lines().find_map(|line| {
         let target = line.strip_prefix("ref: refs/heads/")?;

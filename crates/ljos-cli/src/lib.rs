@@ -29035,10 +29035,14 @@ const SEAT_ANSWER_BUDGET: std::time::Duration = std::time::Duration::from_millis
 const SITTING_NEEDS: &[&str] = &["tracker", "claim graph", "deed store"];
 
 /// The rows a sitting cannot open without, by name.
+///
+/// A `warn` tracker row answered. Unpushed commits and uncommitted edits
+/// are that warning. Commit mode does not publish them, and the sitting
+/// claims as `ljos claim` would.
 #[must_use]
 pub fn failing_for_sitting(rows: &[Habitat]) -> Vec<&str> {
     rows.iter()
-        .filter(|row| !row.ok && SITTING_NEEDS.contains(&row.name))
+        .filter(|row| !row.ok && SITTING_NEEDS.contains(&row.name) && doctor_word(row) != "warn")
         .map(|row| row.name)
         .collect()
 }
@@ -61607,6 +61611,16 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert_eq!(
             super::sitting_without_mcp(&stopped).as_deref(),
             Some("sitting opened without MCP tools\n")
+        );
+        let aged = Habitat {
+            name: "tracker",
+            state: "vissue 0.22.0 root=/t prefix=Software; 672 unpushed; uncommitted issue edits in a.org".into(),
+            ok: false,
+        };
+        assert_eq!(doctor_word(&aged), "warn");
+        assert!(
+            super::failing_for_sitting(std::slice::from_ref(&aged)).is_empty(),
+            "a warn tracker row refused the sitting"
         );
         assert_eq!(
             super::format_write_ack(&serde_json::json!({
