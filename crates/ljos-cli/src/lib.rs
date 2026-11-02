@@ -18712,7 +18712,7 @@ pub const RUBRIC: &str = "\
 const SIT_BODY: &str = "\
 A sitting on one issue. Name this recipe at open (`ljos sitting ISSUE --playbook sit` or `ljos playbook ISSUE sit`). The sitting prints this body before recall and holds the name until finish or release.
 
-1. Open with `ljos sitting ISSUE --playbook sit`. Read doctor, cards, due, island, blockers, this recipe, recall, timeline, reclaim, claim.
+1. Open with `ljos sitting ISSUE --playbook sit`. The claim is taken and printed first. Then doctor, cards, due, island, this recipe, recall and timeline.
 2. Grade due claims (`ljos graded ID`).
 3. Do the work on this claim only. Artefacts are deeds, then `ljos deed ISSUE --add ACCESSION`. Under a runner `ljos remember` is an unreviewed note that the person reviews; keep it to two sentences.
 4. One playbook step is the whole sitting. A subagent takes this recipe and this issue; it does not resume a later phase.
@@ -29392,7 +29392,7 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                 let cols: Vec<&str> = l.split('\t').collect();
                 if cols.len() == 5 && cols[0].parse::<f64>().is_ok() && memories.len() < 5 {
                     memories.push(cols[4].to_string());
-                } else if l.starts_with("weak island") {
+                } else if l.starts_with("weak island") || l.starts_with("ranked by words") {
                     out.push_str(l);
                     out.push('\n');
                 }
@@ -29458,7 +29458,15 @@ fn compact_section(name: &str, lines: &[&str], out: &mut String, memories: &mut 
                 }
             }
         }
-        // recall and timeline are for `--verbose`.
+        "recall" | "timeline" => {
+            for l in lines {
+                if l.starts_with("ranked by words") {
+                    out.push_str(l);
+                    out.push('\n');
+                }
+            }
+        }
+        // Anything else is for `--verbose`.
         _ => {}
     }
 }
@@ -29508,11 +29516,46 @@ pub fn compact_sitting(full: &str, issue: &str) -> String {
             out.push_str(&format!("- {m}\n"));
         }
     }
-    out.push_str(&format!(
+    out.push_str(&sitting_close(issue));
+    out
+}
+
+/// One sitting section, compact, the same lines [`compact_sitting`] keeps.
+/// Island memories are appended to `memories` for the caller to print at
+/// the end. A block that is not a section comes back unchanged when it is
+/// the tracker sync line or the words fallback.
+#[must_use]
+pub fn compact_sitting_block(block: &str, memories: &mut Vec<String>) -> String {
+    let mut lines = block.lines();
+    let Some(first) = lines.next() else {
+        return String::new();
+    };
+    if let Some(head) = first.strip_prefix("== ") {
+        let name = if head.starts_with("island") {
+            "island"
+        } else {
+            head.split(':').next().unwrap_or("").trim()
+        };
+        let body: Vec<&str> = lines.collect();
+        let mut out = String::new();
+        compact_section(name, &body, &mut out, memories);
+        return out;
+    }
+    if first.starts_with("tracker:") || first.starts_with("ranked by words") {
+        let mut out = String::from(first);
+        out.push('\n');
+        return out;
+    }
+    String::new()
+}
+
+/// The line a compact sitting ends on.
+#[must_use]
+pub fn sitting_close(issue: &str) -> String {
+    format!(
         "{issue} is yours. `ljos finish {issue} --lesson \"...\"` closes the sitting; \
          `ljos sitting {issue} --verbose` prints every section.\n"
-    ));
-    out
+    )
 }
 
 /// The accessions a satchel's description says it needs.
@@ -33270,6 +33313,38 @@ struct SittingSection {
 /// omitted when empty; the ones that print stay in this order.
 const SITTING_SECTIONS: &[SittingSection] = &[
     SittingSection {
+        name: "blockers",
+        optional: false,
+        step: "`== blockers`. The issue's blockers, read from the tracker. An issue whose\n   \
+blockers are still open is refused before anything is claimed, because the\n   \
+graph says it is not workable; `--anyway` sits on it regardless and says so.",
+    },
+    SittingSection {
+        name: "reclaim",
+        optional: false,
+        step: "`== reclaim`. Claims quiet longer than the lease (`LJOS_LEASE_SECS`, 900\n   \
+seconds when unset; 0 turns the step off) go back to ready when their\n   \
+conversation is gone, or when no hold record on this host names them. A\n   \
+claim whose runner is still alive is kept. Printed before `== claim`.",
+    },
+    SittingSection {
+        name: "claim",
+        optional: false,
+        step: "`== claim`. `ljos claim ISSUE --assignee NAME`. Occupancy is `{name}:{issue}`:\n   \
+two conversations hold two tickets. The same issue is still one\n   \
+holder. `busy` on a named worker means that name still has another\n   \
+node (`ljos complete` or `ljos release`). The tracker moves to STARTED under the same name, so\n   \
+`vissue claims` answers who has it; a tracker that refuses the name\n   \
+refuses the sitting, and `ljos release` frees the claim graph.\n   \
+A background worker you start sits under its own conversation's\n   \
+name and the same seat. The conversation that started it can\n   \
+complete, finish or release the worker's claim, and the worker can\n   \
+finish a claim its parent took.\n   \
+Another seat's claim is still refused, and the refusal names who\n   \
+has it. The claim is taken and this section is printed before the\n   \
+pack or recall is asked.",
+    },
+    SittingSection {
         name: "doctor",
         optional: false,
         step: "`== doctor`. `ljos doctor`. A `no` on `tracker`, `deed store` or `pack` is the answer;\n   \
@@ -33309,13 +33384,6 @@ eight. The number on a row is the activation spread along links.\n   \
 was used rewrites those weights, and the next walk follows them. A\n   \
 weak island does not fire. `ljos search TOPIC` and a full\n   \
 `ljos island TASK` are during the work, not this opening.",
-    },
-    SittingSection {
-        name: "blockers",
-        optional: false,
-        step: "`== blockers`. The issue's blockers, read from the tracker. An issue whose\n   \
-blockers are still open is refused before anything is claimed, because the\n   \
-graph says it is not workable; `--anyway` sits on it regardless and says so.",
     },
     SittingSection {
         name: "playbook",
@@ -33366,30 +33434,6 @@ cited so far.",
         optional: false,
         step: "`== timeline`. `ljos timeline ISSUE`. The last twelve dated events across the three\n   \
 stores; `ljos timeline` without a sitting prints them all.",
-    },
-    SittingSection {
-        name: "reclaim",
-        optional: false,
-        step: "`== reclaim`. Claims quiet longer than the lease (`LJOS_LEASE_SECS`, 900\n   \
-seconds when unset; 0 turns the step off) go back to ready when their\n   \
-conversation is gone, or when no hold record on this host names them. A\n   \
-claim whose runner is still alive is kept. Printed before `== claim`.",
-    },
-    SittingSection {
-        name: "claim",
-        optional: false,
-        step: "`== claim`. `ljos claim ISSUE --assignee NAME`. Occupancy is `{name}:{issue}`:\n   \
-two conversations hold two tickets. The same issue is still one\n   \
-holder. `busy` on a named worker means that name still has another\n   \
-node (`ljos complete` or `ljos release`). The tracker moves to STARTED under the same name, so\n   \
-`vissue claims` answers who has it; a tracker that refuses the name\n   \
-refuses the sitting, and `ljos release` frees the claim graph.\n   \
-A background worker you start sits under its own conversation's\n   \
-name and the same seat. The conversation that started it can\n   \
-complete, finish or release the worker's claim, and the worker can\n   \
-finish a claim its parent took.\n   \
-Another seat's claim is still refused, and the refusal names who\n   \
-has it.",
     },
 ];
 
@@ -33857,15 +33901,26 @@ fn format_sitting_recall(rows: &[Value]) -> String {
     out
 }
 
+/// How long the recall and the island search may take together. Past this
+/// the sitting ranks by words and says so, and it does not wait out a
+/// writer that is reloading its encoder.
+const SITTING_SEARCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+const SITTING_WORDS_LINE: &str = "ranked by words; the pack search did not answer in time\n";
+
 /// [`sitting`], and with `anyway` the claim goes through even when the
 /// issue's blockers are open. Without it a blocked issue is refused before
 /// anything is claimed: the tracker's graph says what is workable, and a
 /// seat that sits on blocked work sits on nothing it can finish.
-/// `playbook` names the recipe copied into `== playbook` before recall;
+/// `playbook` names the recipe copied into `== playbook`;
 /// absent, a name already bound, else a closed-set token in the title,
-/// else `sit`. A workflow parent takes its workflow's recipe. Sitting always
-/// binds one of the closed set before claim. Finish and release drop the
-/// sticky name; the workflow on a parent stays.
+/// else `sit`. A workflow parent takes its workflow's recipe. The name is
+/// bound before the claim. Finish and release drop the sticky name; the
+/// workflow on a parent stays.
+///
+/// The claim section is produced before any pack or recall call.
+/// [`sitting_stream`] hands each finished piece to the caller so it can
+/// be printed before the next read.
 pub fn sitting_gated(
     issue: &str,
     assignee: &str,
@@ -33873,121 +33928,62 @@ pub fn sitting_gated(
     anyway: bool,
     playbook: Option<&str>,
 ) -> Result<String> {
+    sitting_stream(issue, assignee, cards_dir, anyway, playbook, |_| {})
+}
+
+fn emit_piece(out: &mut String, emit: &mut impl FnMut(&str), piece: &str) {
+    out.push_str(piece);
+    emit(piece);
+}
+
+/// [`sitting_gated`], calling `emit` with each piece as soon as it is ready.
+pub fn sitting_stream(
+    issue: &str,
+    assignee: &str,
+    cards_dir: &Path,
+    anyway: bool,
+    playbook: Option<&str>,
+    mut emit: impl FnMut(&str),
+) -> Result<String> {
     let mut out = String::new();
-    let mut sections = SectionCursor::new();
-    let rows = doctor_seat();
-    sections.heading(&mut out, "doctor");
-    out.push_str(&format_doctor(&rows));
-    let down: Vec<&str> = failing_for_sitting(&rows)
-        .into_iter()
-        .filter(|name| !SITTING_SOFT.contains(name))
-        .collect();
+    let down = sitting_hard_down();
     if !down.is_empty() {
         bail!(
-            "{out}sitting: {} does not answer; nothing was claimed",
+            "sitting: {} does not answer; nothing was claimed",
             down.join(", ")
         );
     }
-    if let Some(line) = sitting_without_tools(&rows) {
-        out.push_str(&line);
-    }
-    if let Some(line) = sitting_without_mcp(&rows) {
-        out.push_str(&line);
-    }
-    if rows
-        .iter()
-        .any(|h| !h.ok && SITTING_DEGRADED.contains(&h.name))
-    {
-        out.push_str(
-            "encoder down: the pack ranks by words alone and a weak island is not fired\n",
+    let title = issue_title(issue).unwrap_or_else(|_| issue.to_string());
+    let blockers = open_blockers(issue);
+    if !blockers.is_empty() && !anyway {
+        bail!(
+            "sitting: {issue} is blocked by {}; finish those first, or `ljos sitting {issue} --anyway` to sit on it regardless. Nothing was claimed",
+            blockers.join(", ")
         );
     }
-    if let Some(line) = sitting_warn_line(&rows) {
-        out.push_str(&line);
-    }
-    // Other machines' memories of this scope arrive before the island is
-    // walked, or the sitting orients on half the seat.
-    // With no scope configured the section is left out: sync is opt-in.
-    let synced =
-        sync::sync_repo_in_passing(true, false).unwrap_or_else(|e| format!("sync: {e:#}\n"));
-    if !synced.is_empty() {
-        sections.heading(&mut out, "sync");
-        out.push_str(&synced);
-    }
-    sections.heading(&mut out, "cards");
-    out.push_str(&cards(cards_dir)?);
-    let title = issue_title(issue)?;
-    // The doctor already spent its own pack budget. The island and the
-    // due line share one more, so a quiet pack does not hold the claim.
-    let _pack_clock = arm_cmd_pack();
-    let _quiet_pack = pack_link::QuietPack::enter();
-    sections.heading(&mut out, "due");
-    let (due, atoms) = sitting_due_and_atoms(issue, &title)?;
-    out.push_str(&due);
-    sections.heading_titled(&mut out, "island", &title);
-    // The pack's island is activation along links, which is not what the
-    // ticket is about. The lines a sitting shows are the memories that
-    // share the ticket's own words.
-    let ticket = sitting_ticket_text(issue, &title);
-    let ranked = rank_sitting_memories(issue, &ticket, &atoms, &now_utc(), &seat_name());
-    out.push_str(&format_sitting_recall(&ranked));
-    sections.heading(&mut out, "blockers");
-    let blockers = open_blockers(issue);
+    // The recipe name is bound before the claim. The body is copied after,
+    // once the claim line is already out, because the pack copy is a read.
+    let name = sitting_recipe(issue, &title, playbook)?;
+    bind_playbook(issue, &name)?;
+
+    let mut sections = SectionCursor::new();
+    let mut piece = String::new();
+    sections.heading(&mut piece, "blockers");
     if blockers.is_empty() {
-        out.push_str("none open; the issue is workable\n");
+        piece.push_str("none open; the issue is workable\n");
     } else {
-        out.push_str(&format!("open: {}\n", blockers.join(", ")));
-        if !anyway {
-            bail!(
-                "{out}sitting: {issue} is blocked by {}; finish those first, or `ljos sitting {issue} --anyway` to sit on it regardless. Nothing was claimed",
-                blockers.join(", ")
-            );
-        }
-        out.push_str("sitting anyway, as asked\n");
+        piece.push_str(&format!("open: {}\n", blockers.join(", ")));
+        piece.push_str("sitting anyway, as asked\n");
     }
-    // A decision is handed to the panel by the sitting itself: agents ran
-    // only the verbs the loop put in front of them, never an optional
-    // `ljos panel`, so the sitting binds the panel recipe and writes the
-    // briefs.
-    let decision = tracker_show_json(issue).is_ok_and(|v| is_decision(&v));
-    // A workflow parent takes its workflow's recipe, so a sitting on it
-    // reads the whole loop rather than the plain sitting.
-    let name = match (playbook, decision) {
-        (None, true) if bound_playbook(issue).is_none() => "company-panel".to_string(),
-        (None, false) if bound_playbook(issue).is_none() => match workflow_on(issue) {
-            Some(w) => w,
-            None => resolve_sitting_playbook(issue, &title, playbook)?,
-        },
-        _ => resolve_sitting_playbook(issue, &title, playbook)?,
-    };
-    sections.heading(&mut out, "playbook");
-    out.push_str(&copy_playbook(issue, &name)?);
-    let workflow = workflow_sitting_block(issue);
-    if !workflow.is_empty() {
-        sections.block("workflow", &workflow);
-        out.push_str(&workflow);
-    }
-    if decision {
-        sections.heading(&mut out, "panel");
-        let dir = runtime_dir().join(format!("panel-{issue}"));
-        match panel(issue, &dir) {
-            Ok(said) => out.push_str(&format!(
-                "{issue} is a decision. Run the panel before the work: one subagent per brief, each casts its ballot, then `ljos consensus {issue}`. A close of a decision is refused with fewer than two ballots.\n{said}"
-            )),
-            Err(e) => out.push_str(&format!("{issue} is a decision, and the panel could not be written: {e:#}\n")),
-        }
-    }
-    sections.heading(&mut out, "recall");
-    out.push_str(&tracker_recall(issue)?.stdout);
-    // The last twelve dated events across the three stores; `ljos
-    // timeline` prints them all.
-    sections.heading(&mut out, "timeline");
-    out.push_str(&timeline(issue, SITTING_TIMELINE)?);
-    // A lease runs out only when somebody hands it back, and nothing else
-    // in the seat does, so the sitting does it before it takes work.
-    sections.heading(&mut out, "reclaim");
-    out.push_str(&reclaim_expired(lease_secs()));
-    sections.heading(&mut out, "claim");
+    emit_piece(&mut out, &mut emit, &piece);
+
+    let mut piece = String::new();
+    sections.heading(&mut piece, "reclaim");
+    piece.push_str(&reclaim_expired(lease_secs()));
+    emit_piece(&mut out, &mut emit, &piece);
+
+    let mut piece = String::new();
+    sections.heading(&mut piece, "claim");
     let claimed = claim(issue, assignee)?;
     let claimed_issue = claimed
         .lines()
@@ -33997,15 +33993,227 @@ pub fn sitting_gated(
         })
         .unwrap_or(issue)
         .to_string();
-    out.push_str(&claimed);
-    out.push_str(&persist_tracker(&claimed_issue, "claimed"));
-    // The board this sitting just committed is not drift. The line is
-    // the tree after that commit, and it leads the sitting.
+    piece.push_str(&claimed);
+    piece.push_str(&persist_tracker(&claimed_issue, "claimed"));
+    // The board this sitting just committed is not drift. The line leads,
+    // and both lines are out before the pack is asked.
     if let Some(line) = tracker_sync::tracker_sync_line() {
-        out.insert_str(0, &line);
+        emit_piece(&mut out, &mut emit, &line);
     }
+    emit_piece(&mut out, &mut emit, &piece);
+
+    // One budget for every search and island read after the claim. A
+    // writer reloading its encoder spends it once; the next read returns.
+    let _search_clock = pack_link::PackClock::enter(SITTING_SEARCH_BUDGET);
+    let _quiet_pack = pack_link::QuietPack::enter();
+    let mut fell_back = false;
+
+    let mut piece = String::new();
+    let rows = doctor_seat();
+    sections.heading(&mut piece, "doctor");
+    piece.push_str(&format_doctor(&rows));
+    if let Some(line) = sitting_without_tools(&rows) {
+        piece.push_str(&line);
+    }
+    if let Some(line) = sitting_without_mcp(&rows) {
+        piece.push_str(&line);
+    }
+    if rows
+        .iter()
+        .any(|h| !h.ok && SITTING_DEGRADED.contains(&h.name))
+    {
+        piece.push_str(
+            "encoder down: the pack ranks by words alone and a weak island is not fired\n",
+        );
+    }
+    if let Some(line) = sitting_warn_line(&rows) {
+        piece.push_str(&line);
+    }
+    // A habitat that died between the gate and here is named. The claim
+    // is already taken; refusing it now would be a lie.
+    let late: Vec<&str> = failing_for_sitting(&rows);
+    if !late.is_empty() {
+        piece.push_str(&format!("sitting: {} does not answer\n", late.join(", ")));
+    }
+    emit_piece(&mut out, &mut emit, &piece);
+
+    let synced =
+        sync::sync_repo_in_passing(true, false).unwrap_or_else(|e| format!("sync: {e:#}\n"));
+    if !synced.is_empty() {
+        let mut piece = String::new();
+        sections.heading(&mut piece, "sync");
+        piece.push_str(&synced);
+        emit_piece(&mut out, &mut emit, &piece);
+    }
+
+    let mut piece = String::new();
+    sections.heading(&mut piece, "cards");
+    piece.push_str(&cards(cards_dir).unwrap_or_else(|e| format!("cards: {e:#}\n")));
+    emit_piece(&mut out, &mut emit, &piece);
+
+    let mut piece = String::new();
+    sections.heading(&mut piece, "due");
+    let (due, atoms) = match sitting_due_and_atoms(issue, &title) {
+        Ok(pair) => pair,
+        Err(e) => (format!("due: {e:#}\n"), Vec::new()),
+    };
+    piece.push_str(&due);
+    emit_piece(&mut out, &mut emit, &piece);
+
+    let mut piece = String::new();
+    sections.heading_titled(&mut piece, "island", &title);
+    // The pack's island is activation along links, which is not what the
+    // ticket is about. The lines a sitting shows are the memories that
+    // share the ticket's own words. A search that does not answer in the
+    // budget leaves those lines as they are and says so once.
+    let ticket = sitting_ticket_text(issue, &title);
+    let ranked = rank_sitting_memories(issue, &ticket, &atoms, &now_utc(), &seat_name());
+    piece.push_str(&format_sitting_recall(&ranked));
+    piece.push_str(words_line(&mut fell_back));
+    emit_piece(&mut out, &mut emit, &piece);
+
+    let mut piece = String::new();
+    sections.heading(&mut piece, "playbook");
+    piece.push_str(&copy_playbook(issue, &name).unwrap_or_else(|e| format!("playbook: {e:#}\n")));
+    emit_piece(&mut out, &mut emit, &piece);
+    let workflow = workflow_sitting_block(issue);
+    if !workflow.is_empty() {
+        sections.block("workflow", &workflow);
+        emit_piece(&mut out, &mut emit, &workflow);
+    }
+    let decision = tracker_show_json(issue).is_ok_and(|v| is_decision(&v));
+    if decision {
+        let mut piece = String::new();
+        sections.heading(&mut piece, "panel");
+        let dir = runtime_dir().join(format!("panel-{issue}"));
+        match panel(issue, &dir) {
+            Ok(said) => piece.push_str(&format!(
+                "{issue} is a decision. Run the panel before the work: one subagent per brief, each casts its ballot, then `ljos consensus {issue}`. A close of a decision is refused with fewer than two ballots.\n{said}"
+            )),
+            Err(e) => piece.push_str(&format!(
+                "{issue} is a decision, and the panel could not be written: {e:#}\n"
+            )),
+        }
+        piece.push_str(words_line(&mut fell_back));
+        emit_piece(&mut out, &mut emit, &piece);
+    }
+
+    let mut piece = String::new();
+    sections.heading(&mut piece, "recall");
+    let left = pack_link::clock_left().unwrap_or(SITTING_SEARCH_BUDGET);
+    match run_captured_within(
+        "vissue",
+        &["recall", issue],
+        None,
+        left.max(std::time::Duration::from_millis(50)),
+    ) {
+        Ok(said) => piece.push_str(&fence_unverified(
+            &format!("tracker text for {issue}"),
+            &said.stdout,
+        )),
+        Err(e) if e.to_string().contains("did not answer in time") => {
+            piece.push_str(words_line(&mut fell_back));
+        }
+        Err(e) => piece.push_str(&format!("recall: {e:#}\n")),
+    }
+    piece.push_str(words_line(&mut fell_back));
+    emit_piece(&mut out, &mut emit, &piece);
+
+    let mut piece = String::new();
+    sections.heading(&mut piece, "timeline");
+    match timeline(issue, SITTING_TIMELINE) {
+        Ok(text) => piece.push_str(&text),
+        Err(e) => piece.push_str(&format!("timeline: {e:#}\n")),
+    }
+    piece.push_str(words_line(&mut fell_back));
+    emit_piece(&mut out, &mut emit, &piece);
     sections.finish();
     Ok(out)
+}
+
+/// The one line that says recall fell back to words. Empty once it has
+/// been said, and empty when the search budget is still unused.
+fn words_line(said: &mut bool) -> &'static str {
+    if *said || !pack_link::search_stalled() {
+        return "";
+    }
+    *said = true;
+    SITTING_WORDS_LINE
+}
+
+/// Tracker, claim graph and deed store. A sitting cannot open without
+/// them, and none of the three is a pack read. A `warn` tracker row
+/// answered: unpushed commits do not refuse the claim.
+fn sitting_hard_down() -> Vec<String> {
+    let mut rows = Vec::new();
+    for (name, bin, args) in [
+        ("deed store", "deedar", &["log", "head"][..]),
+        ("tracker", "vissue", &["identity"][..]),
+        ("claim graph", "claimdag", &["list"][..]),
+    ] {
+        rows.push(
+            match run_captured_within(bin, args, None, std::time::Duration::from_secs(2)) {
+                Ok(said) if name == "tracker" => {
+                    let (state, ok) = tracker_state(&said.stdout, &root_source());
+                    Habitat { name, state, ok }
+                }
+                Ok(said) => Habitat {
+                    name,
+                    state: said.stdout.lines().next().unwrap_or("").to_string(),
+                    ok: true,
+                },
+                Err(e) if name == "tracker" => {
+                    let mut state = e.to_string().lines().next().unwrap_or("").to_string();
+                    if let Some(root) = std::env::var_os("VISSUE_ROOT").filter(|v| !v.is_empty()) {
+                        if let Some((extra, _)) = tracker_git_drift(Path::new(&root)) {
+                            state = format!("{state}; {extra}");
+                        }
+                    }
+                    Habitat {
+                        name,
+                        state,
+                        ok: false,
+                    }
+                }
+                Err(e) if name == "claim graph" && claim_graph_absent(&e.to_string()).is_some() => {
+                    let dir = claim_graph_absent(&e.to_string()).unwrap_or_default();
+                    Habitat {
+                        name,
+                        state: format!("none yet; the first claim creates it at {dir}"),
+                        ok: true,
+                    }
+                }
+                Err(e) => Habitat {
+                    name,
+                    state: e.to_string().lines().next().unwrap_or("").to_string(),
+                    ok: false,
+                },
+            },
+        );
+    }
+    failing_for_sitting(&rows)
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Which recipe a sitting binds before it claims. The pack is not asked:
+/// an explicit name has to be one of the closed set, and the shipped body
+/// is what [`copy_playbook`] reads when the pack has no live copy.
+fn sitting_recipe(issue: &str, title: &str, asked: Option<&str>) -> Result<String> {
+    let asked = asked.map(str::trim).filter(|n| !n.is_empty());
+    let decision = tracker_show_json(issue).is_ok_and(|v| is_decision(&v));
+    match (asked, decision) {
+        (None, true) if bound_playbook(issue).is_none() => Ok("company-panel".to_string()),
+        (None, false) if bound_playbook(issue).is_none() => Ok(match workflow_on(issue) {
+            Some(name) => name,
+            None => playbook_from_title(title).to_string(),
+        }),
+        (Some(name), _) => Ok(playbook_among(name, &[])?.name),
+        (None, _) => {
+            Ok(bound_playbook(issue).unwrap_or_else(|| playbook_from_title(title).to_string()))
+        }
+    }
 }
 
 /// The lease a sitting applies before it claims: `LJOS_LEASE_SECS`, else

@@ -3,9 +3,9 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use ljos_cli::{
-    age_of, brief, bump_plan, calibrate, cards, claim, claim_next, cli_assignee, compact_sitting,
-    complete, conflicts, consensus_steps_for, copy_playbook, doctor, due_report, finish,
-    forecasts_from_json, format_bump_rows, format_consolidation, format_doctor,
+    age_of, brief, bump_plan, calibrate, cards, claim, claim_next, cli_assignee,
+    compact_sitting_block, complete, conflicts, consensus_steps_for, copy_playbook, doctor,
+    due_report, finish, forecasts_from_json, format_bump_rows, format_consolidation, format_doctor,
     format_doctor_short, format_findings, format_hits, format_hubs, format_island,
     format_playbooks, format_readings, format_remembered, format_seat_command, format_steps,
     format_write_ack, graded, habit, habits, handover_scoped, healthy, hook_note, island_entities,
@@ -14,10 +14,10 @@ use ljos_cli::{
     packset_search_as_of, packset_write_as, panel, panel_steps, parse_every, personas_from_pack,
     playbooks_from_pack, policy_with_memory, post_hook_stdout, predictions_of, prompt_hook_stdout,
     protocol_text, read_campaign, receive, release, remember_findings, reopen, rows_about, run,
-    run_as, run_captured, settle_discount, sitting_gated, stop_hook_stdout, timeline, topic_words,
-    tracker_show_json, trim_num, trust_from_pack, uncite_deed, with_discount, write_outcome,
-    write_persona_as, write_prediction, write_rule, write_trust, Persona, PersonaWrite, Reading,
-    Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
+    run_as, run_captured, settle_discount, sitting_close, sitting_stream, stop_hook_stdout,
+    timeline, topic_words, tracker_show_json, trim_num, trust_from_pack, uncite_deed,
+    with_discount, write_outcome, write_persona_as, write_prediction, write_rule, write_trust,
+    Persona, PersonaWrite, Reading, Rule, Trust, HARNESSES_EXAMPLE, LEARN_BETA,
 };
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -3896,25 +3896,37 @@ fn run_command() -> Result<()> {
             playbook,
             verbose,
         } => {
-            let full = match sitting_gated(
+            let mut memories = Vec::new();
+            let printed = sitting_stream(
                 &issue,
                 &assignee_for("sitting", assignee.as_deref(), false)?,
                 &cards_dir,
                 anyway,
                 playbook.as_deref(),
-            ) {
-                Ok(full) => full,
-                // A refused sitting used to fall through a gate path that
-                // exits 0. The refusal is the answer, and it is not success.
-                Err(e) => {
-                    eprintln!("{e:#}");
-                    std::process::exit(1);
+                |piece| {
+                    if verbose {
+                        print!("{piece}");
+                    } else {
+                        print!("{}", compact_sitting_block(piece, &mut memories));
+                    }
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                },
+            );
+            // A refused sitting used to fall through a gate path that
+            // exits 0. The refusal is the answer, and it is not success.
+            if let Err(e) = printed {
+                eprintln!("{e:#}");
+                std::process::exit(1);
+            }
+            if !verbose {
+                if !memories.is_empty() {
+                    println!("What the seat remembers for this task:");
+                    for memory in &memories {
+                        println!("- {memory}");
+                    }
                 }
-            };
-            if verbose {
-                print!("{full}");
-            } else {
-                print!("{}", compact_sitting(&full, &issue));
+                print!("{}", sitting_close(&issue));
+                let _ = std::io::Write::flush(&mut std::io::stdout());
             }
         }
         Cmd::Finish {

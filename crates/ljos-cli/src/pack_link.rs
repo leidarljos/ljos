@@ -235,6 +235,17 @@ pub(crate) fn clock_armed() -> bool {
     clock_deadline().is_some()
 }
 
+/// Time left on the armed pack clock. `None` when no clock is armed.
+pub(crate) fn clock_left() -> Option<Duration> {
+    clock_deadline().map(|deadline| deadline.saturating_duration_since(Instant::now()))
+}
+
+/// A search or island read in this clock already went quiet, or the clock
+/// is spent. Later reads must not wait it out again.
+pub(crate) fn search_stalled() -> bool {
+    pack_quiet() || clock_deadline().is_some_and(|deadline| Instant::now() >= deadline)
+}
+
 pub(crate) fn error_is_timeout(err: &Error) -> bool {
     match err {
         Error::Io(io) => io_is_quiet(io) || io.to_string().contains("the pack did not answer"),
