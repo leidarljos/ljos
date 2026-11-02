@@ -740,6 +740,7 @@ enum Cmd {
         json: bool,
     },
     /// Who holds what on the tracker: `vissue claims`, with its flags.
+    /// `--mine` lists this seat's claims that have had no note, deed or finish for a day.
     Claims {
         /// Passed to `vissue claims` as given (`--by NAME`, `--json`, `-p PROJECT`).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -2286,6 +2287,10 @@ fn run_command() -> Result<()> {
             print!("{}", ljos_cli::ready_view(project.as_deref(), json)?);
         }
         Cmd::Claims { args } => {
+            if args.iter().any(|arg| arg == "--mine") {
+                print!("{}", ljos_cli::quiet_claims::list_mine()?);
+                return Ok(());
+            }
             // vissue names the holder filter `--by`; `--agent` is ljos's word.
             let mapped: Vec<String> = args
                 .iter()

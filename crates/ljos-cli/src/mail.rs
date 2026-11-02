@@ -919,7 +919,8 @@ pub fn inbox_sync(all: bool, until: Option<&str>) -> Result<String> {
     };
     let seat = super::seat_name();
     let seen = receipt_seen();
-    let (text, keys) = render_inbox(&atoms, &seat, all, &seen);
+    let (mut text, keys) = render_inbox(&atoms, &seat, all, &seen);
+    text.push_str(&super::quiet_claims::beside_inbox(&seat));
     remember_receipts(&keys);
     // The mail is already read. A receipt the embedder sits on is the
     // same `pack busy` a silent pack prints, and it used to discard this.

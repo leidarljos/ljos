@@ -56,6 +56,7 @@ mod person_tty;
 pub mod persona_session;
 pub mod plugin;
 pub mod proc_tree;
+pub mod quiet_claims;
 pub mod quoted_yes;
 pub mod reap;
 pub mod recall_floor;
@@ -33342,7 +33343,10 @@ complete, finish or release the worker's claim, and the worker can\n   \
 finish a claim its parent took.\n   \
 Another seat's claim is still refused, and the refusal names who\n   \
 has it. The claim is taken and this section is printed before the\n   \
-pack or recall is asked.",
+pack or recall is asked. Claims this seat already holds in this\n   \
+project, with no note, deed or finish for a day, are named here,\n   \
+the oldest three, then `+N more (ljos claims --mine)` when more\n   \
+remain. Nothing is released.",
     },
     SittingSection {
         name: "doctor",
@@ -33995,6 +33999,9 @@ pub fn sitting_stream(
         .to_string();
     piece.push_str(&claimed);
     piece.push_str(&persist_tracker(&claimed_issue, "claimed"));
+    // The project file was parsed to open this ticket. The lines are a
+    // walk of those headings, not another tracker read.
+    piece.push_str(&quiet_claims::beside_sitting(issue, assignee));
     // The board this sitting just committed is not drift. The line leads,
     // and both lines are out before the pack is asked.
     if let Some(line) = tracker_sync::tracker_sync_line() {
@@ -48275,6 +48282,7 @@ mod tests {
     fn sitting_caps_are_the_protocol_numbers() {
         assert_eq!(SITTING_DUE, 8);
         assert_eq!(SITTING_TIMELINE, 12);
+        assert!(protocol_text().contains("+N more (ljos claims --mine)"));
     }
 
     /// `ljos protocol` numbers the sections `ljos sitting` prints, in that
