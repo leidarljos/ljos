@@ -206,8 +206,15 @@ jobs:
           install -m 0755 "${{ runner.temp }}/ljos-policyd/target/release/ljos-policyd" "${{ runner.temp }}/bin/ljos-policyd"
           echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
           "${{ runner.temp }}/bin/ljos-policyd" version | grep -q '(phronesis)'
+      # A test that runs git in this checkout writes its .git/config, and
+      # the next commit here runs hooks from a temp home that is gone.
       - name: Workspace tests
-        run: cargo test --workspace
+        run: |
+          set -euo pipefail
+          git config --local --list > "${{ runner.temp }}/git-config-before"
+          cargo test --workspace
+          git config --local --list > "${{ runner.temp }}/git-config-after"
+          diff -u "${{ runner.temp }}/git-config-before" "${{ runner.temp }}/git-config-after"
       - name: MCP tool list size
         run: |
           set -euo pipefail

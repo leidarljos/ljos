@@ -295,10 +295,25 @@ fn cloud_up_reruns_from_the_installed_ljos_with_a_release_dir() {
     let home = root.path().join("home");
     let rel = root.path().join("rel");
     let search = root.path().join("workspace");
+    let seat = root.path().join("seat");
     let bin = home.join(".local/bin");
-    for dir in [&home, &rel, &search] {
+    for dir in [&home, &rel, &search, &seat] {
         fs::create_dir_all(dir).unwrap();
     }
+    // `cloud up` points the hooks of the repository it runs in. Run from
+    // the test's cwd, that is this checkout, and its next commit runs
+    // hooks from a temp home that is gone.
+    let gitconfig = root.path().join("gitconfig");
+    fs::write(&gitconfig, b"").unwrap();
+    let init = Command::new("git")
+        .arg("-C")
+        .arg(&seat)
+        .args(["init", "-q"])
+        .env("GIT_CONFIG_GLOBAL", &gitconfig)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "{init:?}");
     fs::copy(env!("CARGO_BIN_EXE_ljos"), rel.join("ljos")).unwrap();
     executable(&rel.join("ljos-mcp"), "#!/bin/sh\nexit 0\n");
     executable(&rel.join("ljos-policyd"), "#!/bin/sh\nexit 0\n");
@@ -307,7 +322,10 @@ fn cloud_up_reruns_from_the_installed_ljos_with_a_release_dir() {
     let up = |ljos: &Path| {
         let out = Command::new(ljos)
             .args(["cloud", "up"])
+            .current_dir(&seat)
             .env_clear()
+            .env("GIT_CONFIG_GLOBAL", &gitconfig)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))
             .env("XDG_RUNTIME_DIR", root.path().join("run"))
