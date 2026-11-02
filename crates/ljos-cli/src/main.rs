@@ -3896,13 +3896,21 @@ fn run_command() -> Result<()> {
             playbook,
             verbose,
         } => {
-            let full = sitting_gated(
+            let full = match sitting_gated(
                 &issue,
                 &assignee_for("sitting", assignee.as_deref(), false)?,
                 &cards_dir,
                 anyway,
                 playbook.as_deref(),
-            )?;
+            ) {
+                Ok(full) => full,
+                // A refused sitting used to fall through a gate path that
+                // exits 0. The refusal is the answer, and it is not success.
+                Err(e) => {
+                    eprintln!("{e:#}");
+                    std::process::exit(1);
+                }
+            };
             if verbose {
                 print!("{full}");
             } else {

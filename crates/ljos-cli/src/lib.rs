@@ -29029,12 +29029,17 @@ const SITTING_SOFT: &[&str] = &["ljos-mcp", "ljos-policyd"];
 /// How long a sitting waits for `ljos-mcp` or `ljos-policyd` to answer.
 const SEAT_ANSWER_BUDGET: std::time::Duration = std::time::Duration::from_millis(400);
 
-/// The required rows a sitting cannot open without, by name.
+/// Rows a sitting cannot open without. A claim writes the tracker, takes a
+/// node in the claim graph, and cites the deed store. Every other doctor
+/// row is reported and does not refuse the sitting.
+const SITTING_NEEDS: &[&str] = &["tracker", "claim graph", "deed store"];
+
+/// The rows a sitting cannot open without, by name.
 #[must_use]
 pub fn failing_for_sitting(rows: &[Habitat]) -> Vec<&str> {
-    failing(rows)
-        .into_iter()
-        .filter(|name| !SITTING_DEGRADED.contains(name))
+    rows.iter()
+        .filter(|row| !row.ok && SITTING_NEEDS.contains(&row.name))
+        .map(|row| row.name)
         .collect()
 }
 
@@ -29071,6 +29076,15 @@ pub fn sitting_without_tools(rows: &[Habitat]) -> Option<String> {
 
 fn sitting_tool_answered(row: &Habitat) -> bool {
     row.ok && !row.state.contains("  ?")
+}
+
+/// One line when the MCP client has no `ljos-mcp`: the config names a
+/// binary that is not there, or names none. The sitting still claims.
+#[must_use]
+pub fn sitting_without_mcp(rows: &[Habitat]) -> Option<String> {
+    rows.iter()
+        .any(|row| row.name == "mcp" && !row.ok)
+        .then(|| "sitting opened without MCP tools\n".to_string())
 }
 
 /// The line a sitting prints under its doctor when a `warn` row failed:
@@ -33661,6 +33675,9 @@ pub fn sitting_gated(
     if let Some(line) = sitting_without_tools(&rows) {
         out.push_str(&line);
     }
+    if let Some(line) = sitting_without_mcp(&rows) {
+        out.push_str(&line);
+    }
     if rows
         .iter()
         .any(|h| !h.ok && SITTING_DEGRADED.contains(&h.name))
@@ -33684,6 +33701,10 @@ pub fn sitting_gated(
     sections.heading(&mut out, "cards");
     out.push_str(&cards(cards_dir)?);
     let title = issue_title(issue)?;
+    // The doctor already spent its own pack budget. The island and the
+    // due line share one more, so a quiet pack does not hold the claim.
+    let _pack_clock = arm_cmd_pack();
+    let _quiet_pack = pack_link::QuietPack::enter();
     let island = packset_island(&title, false)?;
     sections.heading(&mut out, "due");
     out.push_str(&sitting_due_report(&island)?);
@@ -61564,7 +61585,29 @@ Software-x is yours. `ljos finish Software-x --lesson \"...\"` closes the sittin
         assert!(super::failing_for_sitting(&lexical).is_empty());
         let mut stopped = lexical.clone();
         stopped.push(sick[0].clone());
-        assert_eq!(super::failing_for_sitting(&stopped), vec!["pack"]);
+        // A pack that does not answer is said. It does not refuse the
+        // sitting: the claim does not read it.
+        assert!(super::failing_for_sitting(&stopped).is_empty());
+        stopped.push(Habitat {
+            name: "tracker",
+            state: "does not answer".into(),
+            ok: false,
+        });
+        assert_eq!(super::failing_for_sitting(&stopped), vec!["tracker"]);
+        stopped.push(Habitat {
+            name: "mcp",
+            state: "ljos-mcp does not exist".into(),
+            ok: false,
+        });
+        assert_eq!(
+            super::failing_for_sitting(&stopped),
+            vec!["tracker"],
+            "the mcp client row does not refuse a sitting"
+        );
+        assert_eq!(
+            super::sitting_without_mcp(&stopped).as_deref(),
+            Some("sitting opened without MCP tools\n")
+        );
         assert_eq!(
             super::format_write_ack(&serde_json::json!({
                 "id": "ab",
